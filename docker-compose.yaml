@@ -1,0 +1,42 @@
+services:
+  ntp-server:
+    image: cturra/ntp:latest
+    container_name: ntp-server
+    network_mode: host
+    cap_add:
+      - SYS_TIME
+    environment:
+      - NTP_SERVERS=pool.ntp.org
+
+  dnsmasq:
+    build:
+      context: ./dnsmasq
+    container_name: dnsmasq
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./data:/data
+
+  httpd:
+    image: nginx:alpine
+    container_name: http
+    network_mode: host
+    ports:
+      - "10.0.0.1:80:80"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./data:/usr/share/nginx/html:ro
+
+  squid:
+    image: ubuntu/squid:latest
+    container_name: squid
+    network_mode: host
+    ports:
+      - "10.0.0.1:3128:3128"
+    volumes:
+      - ./config/squid.conf:/etc/squid/squid.conf:ro
+      - squid_cache:/var/spool/squid
+
+volumes:
+  squid_cache:
