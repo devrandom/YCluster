@@ -1,0 +1,88 @@
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: ceph-node
+    username: ubuntu
+    password: '$y$j9T$VeMbpOLaT99rQzvoSy7IC/$7nKvOFH3ui63TKFPPbhKOo5lbvXXnPBBlpKjIrF.aCB'
+  early-commands:
+    - echo 'Acquire::http::Proxy "http://10.0.0.1:3128";' > /etc/apt/apt.conf.d/00proxy
+    - echo 'Acquire::https::Proxy "http://10.0.0.1:3128";' >> /etc/apt/apt.conf.d/00proxy
+    - export http_proxy=http://10.0.0.1:3128
+    - export https_proxy=http://10.0.0.1:3128
+    - export HTTP_PROXY=http://10.0.0.1:3128
+    - export HTTPS_PROXY=http://10.0.0.1:3128
+    - systemctl set-environment http_proxy=http://10.0.0.1:3128
+    - systemctl set-environment https_proxy=http://10.0.0.1:3128
+  ssh:
+    install-server: true
+    authorized-keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1"
+  apt:
+    proxy: "http://10.0.0.1:3128"
+  storage:
+    config:
+      - type: disk
+        id: disk0
+        match:
+          size: largest
+        ptable: gpt
+        wipe: superblock
+      - type: partition
+        id: efi-partition
+        device: disk0
+        offset: 1048576
+        size: 512M
+        flag: boot
+        grub_device: true
+      - type: partition
+        id: root-partition
+        device: disk0
+        size: 100G
+      - type: partition
+        id: ceph-partition
+        device: disk0
+        size: -1
+      - type: format
+        id: efi-fs
+        volume: efi-partition
+        fstype: fat32
+      - type: format
+        id: root-fs
+        volume: root-partition
+        fstype: ext4
+      - type: mount
+        id: efi-mount
+        device: efi-fs
+        path: /boot/efi
+      - type: mount
+        id: root-mount
+        device: root-fs
+        path: /
+  packages:
+    - snapd
+    - curl
+  late-commands:
+    # Configure system to use proxy
+    - echo 'Acquire::http::Proxy "http://10.0.0.1:3128";' > /target/etc/apt/apt.conf.d/01proxy
+    - echo 'Acquire::https::Proxy "http://10.0.0.1:3128";' >> /target/etc/apt/apt.conf.d/01proxy
+    # Set environment proxy for snaps
+    - echo 'export http_proxy=http://10.0.0.1:3128' >> /target/etc/environment
+    - echo 'export https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
+    # Create a systemd service to configure snap proxy on first boot                      
+    - |                                                                                   
+      cat > /target/etc/systemd/system/configure-snap-proxy.service << 'EOF'              
+      [Unit]                                                                              
+      Description=Configure snap proxy settings                                           
+      After=snapd.service                                                                 
+      Wants=snapd.service                                                                 
+                                                                                          
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/bash -c 'snap set system proxy.http=http://10.0.0.1:3128 && snap set system proxy.https=http://10.0.0.1:3128'
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+    - curtin in-target --target=/target systemctl enable configure-snap-proxy.service
