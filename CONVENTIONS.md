@@ -1,0 +1,1 @@
+- do not use "feat: " and other such prefixes in commit messages
