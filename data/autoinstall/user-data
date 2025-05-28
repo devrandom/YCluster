@@ -28,25 +28,49 @@ autoinstall:
         flag: boot
         grub_device: true
       - type: partition
-        id: root-partition
+        id: boot-partition
         device: disk0
-        size: 100G
+        size: 4G
       - type: partition
-        id: ceph-partition
+        id: lvm-partition
         device: disk0
+        size: -1
+        flag: lvm
+      - type: lvm_volgroup
+        id: vg0
+        name: vg0
+        devices:
+          - lvm-partition
+      - type: lvm_partition
+        id: root-lv
+        name: root
+        volgroup: vg0
+        size: 100G
+      - type: lvm_partition
+        id: ceph-lv
+        name: ceph
+        volgroup: vg0
         size: -1
       - type: format
         id: efi-fs
         volume: efi-partition
         fstype: fat32
       - type: format
+        id: boot-fs
+        volume: boot-partition
+        fstype: ext4
+      - type: format
         id: root-fs
-        volume: root-partition
+        volume: root-lv
         fstype: ext4
       - type: mount
         id: efi-mount
         device: efi-fs
         path: /boot/efi
+      - type: mount
+        id: boot-mount
+        device: boot-fs
+        path: /boot
       - type: mount
         id: root-mount
         device: root-fs
