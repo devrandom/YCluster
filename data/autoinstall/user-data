@@ -2,9 +2,14 @@
 autoinstall:
   version: 1
   identity:
-    hostname: ceph-node
+    hostname: placeholder
     username: ubuntu
     password: '$y$j9T$VeMbpOLaT99rQzvoSy7IC/$7nKvOFH3ui63TKFPPbhKOo5lbvXXnPBBlpKjIrF.aCB'
+  early-commands:
+    - |
+      MAC=$(ip -j link | jq -r '.[] | select(.operstate == "UP" and .address) | .address' | head -1)
+      HOSTNAME=$(curl -s "http://10.0.0.1/api/allocate?mac=$MAC" | jq -r '.hostname')
+      sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
   ssh:
     install-server: true
     authorized-keys:
