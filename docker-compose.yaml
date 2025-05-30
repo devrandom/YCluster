@@ -2,6 +2,7 @@ services:
   ntp-server:
     image: cturra/ntp:latest
     container_name: ntp-server
+    restart: unless-stopped
     network_mode: host
     cap_add:
       - SYS_TIME
@@ -12,6 +13,7 @@ services:
     build:
       context: ./dnsmasq
     container_name: dnsmasq
+    restart: unless-stopped
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -22,6 +24,7 @@ services:
     build:
       context: ./httpd
     container_name: http
+    restart: unless-stopped
     network_mode: host
     ports:
       - "10.0.0.1:80:80"
@@ -33,6 +36,7 @@ services:
   squid:
     image: ubuntu/squid:latest
     container_name: squid
+    restart: unless-stopped
     network_mode: host
     ports:
       - "10.0.0.1:3128:3128"
