@@ -1,0 +1,120 @@
+---
+- name: Destroy Ceph pool and RBD (DESTRUCTIVE - requires --tags destroy)
+  hosts: all
+  gather_facts: false
+  vars:
+    pool_name: pool1
+    rbd_image_name: rbd1
+  tags:
+    - never
+    - destroy
+  tasks:
+    - name: Create symlinks for ceph config and keyring on storage nodes
+      file:
+        src: "{{ item.1.src }}"
+        dest: "{{ item.1.dest }}"
+        state: link
+        force: yes
+      delegate_to: "{{ item.0 }}"
+      loop: "{{ groups['storage'] | default([]) | product([
+        { 'src': '/var/snap/microceph/current/conf/ceph.conf', 'dest': '/etc/ceph/ceph.conf' },
+        { 'src': '/var/snap/microceph/current/conf/ceph.client.admin.keyring', 'dest': '/etc/ceph/ceph.client.admin.keyring' }
+      ]) | list }}"
+      failed_when: false
+      
+    - name: Get all storage nodes from inventory
+      set_fact:
+        storage_nodes: "{{ groups['storage'] | default([]) }}"
+      
+    - name: Stop PostgreSQL service on all storage nodes
+      systemd:
+        name: postgresql
+        state: stopped
+      delegate_to: "{{ item }}"
+      loop: "{{ storage_nodes }}"
+      failed_when: false
+      ignore_errors: true
+      
+    - name: Check microceph cluster status on storage nodes
+      shell: microceph cluster list
+      register: cluster_status
+      delegate_to: "{{ item }}"
+      loop: "{{ storage_nodes }}"
+      failed_when: false
+      changed_when: false
+      
+    - name: Parse cluster status and find active nodes
+      set_fact:
+        active_storage_nodes: >-
+          {{
+            active_storage_nodes | default([]) +
+            [item.item] if (
+              item.rc == 0 and
+              'ONLINE' in item.stdout
+            ) else active_storage_nodes | default([])
+          }}
+      loop: "{{ cluster_status.results }}"
+      when: item.item in storage_nodes
+      
+    - name: Fail if no active storage nodes found
+      fail:
+        msg: "No active storage nodes found in microceph cluster"
+      when: active_storage_nodes | default([]) | length == 0
+      
+    - name: Set first active storage node
+      set_fact:
+        target_node: "{{ active_storage_nodes[0] }}"
+        
+    - name: Check if RBD image exists
+      shell: rbd ls "{{ pool_name }}" | grep -w "{{ rbd_image_name }}"
+      register: rbd_image_exists
+      delegate_to: "{{ target_node }}"
+      failed_when: false
+      changed_when: false
+      
+    - name: Remove RBD image if it exists
+      shell: rbd rm "{{ pool_name }}/{{ rbd_image_name }}"
+      delegate_to: "{{ target_node }}"
+      when: rbd_image_exists.rc == 0
+      register: rbd_removal
+      
+    - name: Check if pool exists
+      shell: microceph.ceph osd pool ls | grep -w "{{ pool_name }}"
+      register: pool_exists
+      delegate_to: "{{ target_node }}"
+      failed_when: false
+      changed_when: false
+      
+    - name: Enable pool deletion in Ceph config
+      shell: microceph.ceph config set mon mon_allow_pool_delete true
+      delegate_to: "{{ target_node }}"
+      when: pool_exists.rc == 0
+      register: enable_pool_delete
+      
+    - name: Remove pool if it exists
+      shell: microceph.ceph osd pool delete "{{ pool_name }}" "{{ pool_name }}" --yes-i-really-really-mean-it
+      delegate_to: "{{ target_node }}"
+      when: pool_exists.rc == 0
+      register: pool_removal
+      
+    - name: Disable pool deletion in Ceph config
+      shell: microceph.ceph config set mon mon_allow_pool_delete false
+      delegate_to: "{{ target_node }}"
+      when: pool_exists.rc == 0
+      register: disable_pool_delete
+      failed_when: false
+      
+    - name: Display destruction result
+      debug:
+        msg: >-
+          PostgreSQL stopped on all storage nodes.
+          {% if rbd_image_exists.rc == 0 %}
+          RBD image '{{ rbd_image_name }}' removed from pool '{{ pool_name }}'.
+          {% else %}
+          RBD image '{{ rbd_image_name }}' did not exist.
+          {% endif %}
+          {% if pool_exists.rc == 0 %}
+          Pool '{{ pool_name }}' has been destroyed.
+          {% else %}
+          Pool '{{ pool_name }}' did not exist.
+          {% endif %}
