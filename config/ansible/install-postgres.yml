@@ -16,6 +16,142 @@
           - python3-psycopg2
         state: present
 
+    - name: Create PostgreSQL RBD manager script
+      copy:
+        dest: /usr/local/bin/postgres-rbd-manager.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+
+          POOL_NAME="pool1"
+          RBD_IMAGE="rbd1"
+          MOUNT_POINT="/rbd"
+          PG_DATA_DIR="/rbd/pg"
+          LOCK_FILE="/var/run/postgres-rbd.lock"
+
+          # Function to acquire RBD lock and mount
+          acquire_and_mount() {
+              # Try to map the RBD device
+              if ! RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive); then
+                  echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE}"
+                  return 1
+              fi
+              
+              echo "Successfully locked RBD device: $RBD_DEVICE"
+              
+              # Create mount point if it doesn't exist
+              mkdir -p "$MOUNT_POINT"
+              
+              # Mount the device
+              if ! mount "$RBD_DEVICE" "$MOUNT_POINT"; then
+                  echo "Failed to mount $RBD_DEVICE to $MOUNT_POINT"
+                  rbd unmap "$RBD_DEVICE"
+                  return 1
+              fi
+              
+              echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
+              
+              # Create PostgreSQL data directory
+              mkdir -p "$PG_DATA_DIR"
+              chown postgres:postgres "$PG_DATA_DIR"
+              chmod 700 "$PG_DATA_DIR"
+              
+              # Store device info for cleanup
+              echo "$RBD_DEVICE" > "$LOCK_FILE"
+              
+              return 0
+          }
+
+          # Function to unmount and release RBD
+          release_and_unmount() {
+              if [ -f "$LOCK_FILE" ]; then
+                  RBD_DEVICE=$(cat "$LOCK_FILE")
+                  
+                  # Stop PostgreSQL first
+                  systemctl stop postgresql || true
+                  
+                  # Unmount
+                  umount "$MOUNT_POINT" || true
+                  
+                  # Unmap RBD device
+                  rbd unmap "$RBD_DEVICE" || true
+                  
+                  # Remove lock file
+                  rm -f "$LOCK_FILE"
+                  
+                  echo "Released RBD device: $RBD_DEVICE"
+              fi
+          }
+
+          case "$1" in
+              start)
+                  while true; do
+                      if acquire_and_mount; then
+                          echo "RBD successfully acquired and mounted"
+                          exit 0
+                      else
+                          echo "Failed to acquire RBD lock, retrying in 60 seconds..."
+                          sleep 60
+                      fi
+                  done
+                  ;;
+              stop)
+                  release_and_unmount
+                  ;;
+              *)
+                  echo "Usage: $0 {start|stop}"
+                  exit 1
+                  ;;
+          esac
+
+    - name: Create postgres-rbd systemd service
+      copy:
+        dest: /etc/systemd/system/postgres-rbd.service
+        content: |
+          [Unit]
+          Description=PostgreSQL with RBD Storage
+          After=network.target
+          Before=postgresql.service
+          Wants=postgresql.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/postgres-rbd-manager.sh start
+          ExecStop=/usr/local/bin/postgres-rbd-manager.sh stop
+          TimeoutStartSec=0
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Create PostgreSQL service override directory
+      file:
+        path: /etc/systemd/system/postgresql.service.d
+        state: directory
+
+    - name: Create PostgreSQL RBD dependency override
+      copy:
+        dest: /etc/systemd/system/postgresql.service.d/rbd-dependency.conf
+        content: |
+          [Unit]
+          After=postgres-rbd.service
+          Requires=postgres-rbd.service
+          BindsTo=postgres-rbd.service
+
+          [Service]
+          Environment=PGDATA=/rbd/pg
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable postgres-rbd service
+      systemd:
+        name: postgres-rbd.service
+        enabled: yes
+
     - name: Ensure PostgreSQL service is started and enabled
       systemd:
         name: postgresql
