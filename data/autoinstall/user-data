@@ -87,3 +87,9 @@ autoinstall:
     # set proxy in environment
     - echo 'export http_proxy=http://10.0.0.1:3128' >> /target/etc/environment
     - echo 'export https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
+    # add ansible key to root authorized_keys
+    - mkdir -p /target/root/.ssh
+    - curl -s http://10.0.0.1/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys
+    - chown -R root:root /target/root/.ssh

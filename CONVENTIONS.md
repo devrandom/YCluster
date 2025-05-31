@@ -1,1 +1,2 @@
 - do not use "feat: " and other such prefixes in commit messages
+- we use `docker compose` (not `docker-compose`)

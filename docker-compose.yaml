@@ -19,6 +19,7 @@ services:
       - NET_ADMIN
     volumes:
       - ./data:/data
+      - ./data/dnsmasq.leases:/var/lib/misc/dnsmasq.leases
 
   httpd:
     build:
@@ -44,6 +45,20 @@ services:
       - ./config/squid.conf:/etc/squid/squid.conf:ro
       - squid_cache:/var/spool/squid
 
+  ansible:
+    image: quay.io/ansible/ansible-runner:latest
+    container_name: ansible
+    restart: unless-stopped
+    volumes:
+      - ansible_data:/runner
+      - ./data/ansible_ssh_key:/root/.ssh/id_ed25519:ro
+      - ./data/ansible_ssh_key.pub:/root/.ssh/id_ed25519.pub:ro
+      - ./config/ansible:/etc/ansible:ro
+      - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
+    working_dir: /runner
+    command: tail -f /dev/null
+
 volumes:
   squid_cache:
   hostname_db:
+  ansible_data:
