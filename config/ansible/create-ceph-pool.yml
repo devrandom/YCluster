@@ -106,6 +106,13 @@
       register: rbd_device_unmap
       failed_when: false
       
+    - name: Enable PostgreSQL-relevant features on existing RBD image
+      shell: rbd feature enable "{{ pool_name }}/{{ rbd_image_name }}" exclusive-lock,object-map,fast-diff,deep-flatten
+      delegate_to: "{{ target_node }}"
+      when: rbd_image_exists.rc == 0
+      register: rbd_feature_enable
+      failed_when: false
+      
     - name: Display result
       debug:
         msg: >-
