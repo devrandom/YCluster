@@ -1,0 +1,225 @@
+---
+- name: Install Qdrant on storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - wget
+        state: present
+
+    - name: Download Qdrant .deb package
+      get_url:
+        url: https://github.com/qdrant/qdrant/releases/download/v1.14.1/qdrant_1.14.1_amd64.deb
+        dest: /tmp/qdrant.deb
+        mode: '0644'
+
+    - name: Install Qdrant from .deb package
+      apt:
+        deb: /tmp/qdrant.deb
+        state: present
+
+    - name: Clean up downloaded .deb file
+      file:
+        path: /tmp/qdrant.deb
+        state: absent
+
+    - name: Create /rbd/qdrant directory
+      file:
+        path: /rbd/qdrant
+        state: directory
+        owner: qdrant
+        group: qdrant
+        mode: '0755'
+
+    - name: Create Qdrant configuration directory
+      file:
+        path: /etc/qdrant
+        state: directory
+        owner: qdrant
+        group: qdrant
+        mode: '0755'
+
+    - name: Create Qdrant configuration file
+      copy:
+        dest: /etc/qdrant/config.yaml
+        owner: qdrant
+        group: qdrant
+        mode: '0644'
+        content: |
+          storage:
+            storage_path: /rbd/qdrant/storage
+          service:
+            host: 0.0.0.0
+            http_port: 6333
+            grpc_port: 6334
+          cluster:
+            enabled: true
+            p2p:
+              port: 6335
+          log_level: INFO
+
+    - name: Create Qdrant RBD manager script
+      copy:
+        dest: /usr/local/bin/qdrant-rbd-manager.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+
+          POOL_NAME="pool1"
+          RBD_IMAGE="qdrant-rbd1"
+          MOUNT_POINT="/rbd"
+          QDRANT_DATA_DIR="/rbd/qdrant"
+          LOCK_FILE="/var/run/qdrant-rbd.lock"
+
+          # Function to acquire RBD lock and mount
+          acquire_and_mount() {
+              # Try to map the RBD device
+              if ! RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive); then
+                  echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE}"
+                  return 1
+              fi
+              
+              echo "Successfully locked RBD device: $RBD_DEVICE"
+              
+              # Create mount point if it doesn't exist
+              mkdir -p "$MOUNT_POINT"
+              
+              # Mount the device
+              if ! mount "$RBD_DEVICE" "$MOUNT_POINT"; then
+                  echo "Failed to mount $RBD_DEVICE to $MOUNT_POINT"
+                  rbd unmap "$RBD_DEVICE"
+                  return 1
+              fi
+              
+              echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
+              
+              # Create qdrant data directory with proper ownership
+              mkdir -p "$QDRANT_DATA_DIR/storage"
+              chown -R qdrant:qdrant "$QDRANT_DATA_DIR"
+              
+              # Store device info for cleanup
+              echo "$RBD_DEVICE" > "$LOCK_FILE"
+              
+              return 0
+          }
+
+          # Function to unmount and release RBD
+          release_and_unmount() {
+              if [ -f "$LOCK_FILE" ]; then
+                  RBD_DEVICE=$(cat "$LOCK_FILE")
+                  
+                  # Stop Qdrant first
+                  systemctl stop qdrant || true
+                  
+                  # Unmount
+                  umount "$MOUNT_POINT" || true
+                  
+                  # Unmap RBD device
+                  rbd unmap "$RBD_DEVICE" || true
+                  
+                  # Remove lock file
+                  rm -f "$LOCK_FILE"
+                  
+                  echo "Released RBD device: $RBD_DEVICE"
+              fi
+          }
+
+          case "$1" in
+              start)
+                  while true; do
+                      if acquire_and_mount; then
+                          echo "RBD successfully acquired and mounted"
+                          exit 0
+                      else
+                          echo "Failed to acquire RBD lock, retrying in 60 seconds..."
+                          sleep 60
+                      fi
+                  done
+                  ;;
+              stop)
+                  release_and_unmount
+                  ;;
+              *)
+                  echo "Usage: $0 {start|stop}"
+                  exit 1
+                  ;;
+          esac
+
+    - name: Create qdrant-rbd systemd service
+      copy:
+        dest: /etc/systemd/system/qdrant-rbd.service
+        content: |
+          [Unit]
+          Description=Qdrant with RBD Storage
+          After=network.target
+          Before=qdrant.service
+          Wants=qdrant.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/qdrant-rbd-manager.sh start
+          ExecStop=/usr/local/bin/qdrant-rbd-manager.sh stop
+          TimeoutStartSec=0
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Create Qdrant systemd service
+      copy:
+        dest: /etc/systemd/system/qdrant.service
+        content: |
+          [Unit]
+          Description=Qdrant Vector Database
+          After=network.target qdrant-rbd.service
+          Requires=qdrant-rbd.service
+          BindsTo=qdrant-rbd.service
+
+          [Service]
+          Type=simple
+          User=qdrant
+          Group=qdrant
+          ExecStart=/usr/local/bin/qdrant --config-path /etc/qdrant/config.yaml
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable qdrant-rbd service
+      systemd:
+        name: qdrant-rbd.service
+        enabled: yes
+
+    - name: Start qdrant-rbd service
+      systemd:
+        name: qdrant-rbd.service
+        state: started
+
+    - name: Enable and start Qdrant service
+      systemd:
+        name: qdrant
+        state: started
+        enabled: yes
+
+    - name: Wait for Qdrant to be ready
+      wait_for:
+        port: 6333
+        host: localhost
+        timeout: 60
+
