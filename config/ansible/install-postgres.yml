@@ -16,6 +16,25 @@
           - python3-psycopg2
         state: present
 
+    - name: Create /rbd/pg directory
+      file:
+        path: /rbd/pg
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
+
+    - name: Check if PostgreSQL cluster exists at /rbd/pg
+      stat:
+        path: /rbd/pg/PG_VERSION
+      register: cluster_exists
+
+    - name: Initialize PostgreSQL cluster at /rbd/pg
+      become_user: postgres
+      shell: |
+        /usr/lib/postgresql/*/bin/initdb -D /rbd/pg
+      when: not cluster_exists.stat.exists
+
     - name: Create PostgreSQL RBD manager script
       copy:
         dest: /usr/local/bin/postgres-rbd-manager.sh
@@ -51,11 +70,6 @@
               fi
               
               echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
-              
-              # Create PostgreSQL data directory
-              mkdir -p "$PG_DATA_DIR"
-              chown postgres:postgres "$PG_DATA_DIR"
-              chmod 700 "$PG_DATA_DIR"
               
               # Store device info for cleanup
               echo "$RBD_DEVICE" > "$LOCK_FILE"
@@ -131,6 +145,14 @@
         path: /etc/systemd/system/postgresql.service.d
         state: directory
 
+    - name: Update PostgreSQL data directory in config
+      lineinfile:
+        path: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^#?data_directory\s*='
+        line: "data_directory = '/rbd/pg'"
+        backup: yes
+      notify: restart postgresql
+
     - name: Create PostgreSQL RBD dependency override
       copy:
         dest: /etc/systemd/system/postgresql.service.d/rbd-dependency.conf
@@ -139,9 +161,6 @@
           After=postgres-rbd.service
           Requires=postgres-rbd.service
           BindsTo=postgres-rbd.service
-
-          [Service]
-          Environment=PGDATA=/rbd/pg
 
     - name: Reload systemd daemon
       systemd:
@@ -152,11 +171,23 @@
         name: postgres-rbd.service
         enabled: yes
 
+    - name: Start postgres-rbd service
+      systemd:
+        name: postgres-rbd.service
+        state: started
+
     - name: Ensure PostgreSQL service is started and enabled
       systemd:
         name: postgresql
         state: started
         enabled: yes
+
+
+    - name: Wait for PostgreSQL to be ready
+      wait_for:
+        port: 5432
+        host: localhost
+
 
   handlers:
     - name: restart postgresql
