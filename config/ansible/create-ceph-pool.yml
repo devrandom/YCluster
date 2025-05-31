@@ -1,0 +1,121 @@
+---
+- name: Create Ceph pool on first active storage node
+  hosts: all
+  gather_facts: false
+  vars:
+    pool_name: pool1
+    rbd_image_name: rbd1
+    rbd_image_size: 100G
+  tasks:
+    - name: Create symlinks for ceph config and keyring on storage nodes
+      file:
+        src: "{{ item.1.src }}"
+        dest: "{{ item.1.dest }}"
+        state: link
+        force: yes
+      delegate_to: "{{ item.0 }}"
+      loop: "{{ groups['storage'] | default([]) | product([
+        { 'src': '/var/snap/microceph/current/conf/ceph.conf', 'dest': '/etc/ceph/ceph.conf' },
+        { 'src': '/var/snap/microceph/current/conf/ceph.client.admin.keyring', 'dest': '/etc/ceph/ceph.client.admin.keyring' }
+      ]) | list }}"
+      failed_when: false
+      
+    - name: Get all storage nodes from inventory
+      set_fact:
+        storage_nodes: "{{ groups['storage'] | default([]) }}"
+      
+    - name: Check microceph cluster status on storage nodes
+      shell: microceph cluster list
+      register: cluster_status
+      delegate_to: "{{ item }}"
+      loop: "{{ storage_nodes }}"
+      failed_when: false
+      changed_when: false
+      
+    - name: Parse cluster status and find active nodes
+      set_fact:
+        active_storage_nodes: >-
+          {{
+            active_storage_nodes | default([]) +
+            [item.item] if (
+              item.rc == 0 and
+              'ONLINE' in item.stdout
+            ) else active_storage_nodes | default([])
+          }}
+      loop: "{{ cluster_status.results }}"
+      when: item.item in storage_nodes
+      
+    - name: Fail if no active storage nodes found
+      fail:
+        msg: "No active storage nodes found in microceph cluster"
+      when: active_storage_nodes | default([]) | length == 0
+      
+    - name: Set first active storage node
+      set_fact:
+        target_node: "{{ active_storage_nodes[0] }}"
+        
+    - name: Check if pool already exists
+      shell: microceph.ceph osd pool ls | grep -w "{{ pool_name }}"
+      register: pool_exists
+      delegate_to: "{{ target_node }}"
+      failed_when: false
+      changed_when: false
+      
+    - name: Create pool if it doesn't exist
+      shell: microceph.ceph osd pool create "{{ pool_name }}"
+      delegate_to: "{{ target_node }}"
+      when: pool_exists.rc != 0
+      register: pool_creation
+      
+    - name: Initialize RBD on the pool
+      shell: rbd pool init "{{ pool_name }}"
+      delegate_to: "{{ target_node }}"
+      when: pool_exists.rc != 0 or pool_creation is changed
+      register: rbd_init
+      failed_when: false
+      
+    - name: Check if RBD image already exists
+      shell: rbd ls "{{ pool_name }}" | grep -w "{{ rbd_image_name }}"
+      register: rbd_image_exists
+      delegate_to: "{{ target_node }}"
+      failed_when: false
+      changed_when: false
+      
+    - name: Create RBD image if it doesn't exist
+      shell: rbd create "{{ pool_name }}/{{ rbd_image_name }}" --size "{{ rbd_image_size }}" --image-feature exclusive-lock,object-map,fast-diff,deep-flatten
+      delegate_to: "{{ target_node }}"
+      when: rbd_image_exists.rc != 0
+      register: rbd_image_creation
+      
+    - name: Map RBD device for new image
+      shell: rbd map "{{ pool_name }}/{{ rbd_image_name }}"
+      delegate_to: "{{ target_node }}"
+      when: rbd_image_exists.rc != 0 and rbd_image_creation is succeeded
+      register: rbd_device_map
+      
+    - name: Create ext3 filesystem on new RBD device
+      shell: mkfs.ext3 "{{ rbd_device_map.stdout }}"
+      delegate_to: "{{ target_node }}"
+      when: rbd_image_exists.rc != 0 and rbd_device_map is succeeded
+      register: filesystem_creation
+      
+    - name: Unmap RBD device after filesystem creation
+      shell: rbd unmap "{{ rbd_device_map.stdout }}"
+      delegate_to: "{{ target_node }}"
+      when: rbd_image_exists.rc != 0 and rbd_device_map is succeeded
+      register: rbd_device_unmap
+      failed_when: false
+      
+    - name: Display result
+      debug:
+        msg: >-
+          {% if pool_exists.rc == 0 %}
+          Pool '{{ pool_name }}' already exists on {{ target_node }}. RBD initialization attempted.
+          {% else %}
+          Pool '{{ pool_name }}' created successfully on {{ target_node }}. RBD initialized.
+          {% endif %}
+          {% if rbd_image_exists.rc == 0 %}
+          RBD image '{{ rbd_image_name }}' already exists in pool '{{ pool_name }}'.
+          {% else %}
+          RBD image '{{ rbd_image_name }}' ({{ rbd_image_size }}) created successfully in pool '{{ pool_name }}' with ext3 filesystem.
+          {% endif %}
