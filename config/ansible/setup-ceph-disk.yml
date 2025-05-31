@@ -1,0 +1,37 @@
+---
+- name: Add Ceph disk to storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Check if /dev/mapper/vg0-ceph exists
+      stat:
+        path: /dev/mapper/vg0-ceph
+      register: ceph_disk
+
+    - name: Fail if Ceph disk doesn't exist
+      fail:
+        msg: "/dev/mapper/vg0-ceph does not exist"
+      when: not ceph_disk.stat.exists
+
+    - name: Check if MicroCeph is installed
+      command: snap list microceph
+      register: microceph_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if MicroCeph is not installed
+      fail:
+        msg: "MicroCeph is not installed"
+      when: microceph_check.rc != 0
+
+    - name: Add disk to MicroCeph
+      command: microceph disk add /dev/mapper/vg0-ceph
+      register: disk_add_result
+      failed_when: 
+        - disk_add_result.rc != 0
+        - "'already exists' not in disk_add_result.stderr"
+      changed_when: disk_add_result.rc == 0
+
+    - name: Display disk add result
+      debug:
+        msg: "{{ disk_add_result.stdout if disk_add_result.stdout else disk_add_result.stderr }}"
