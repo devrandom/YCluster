@@ -1,0 +1,65 @@
+- name: Setup Qdrant RBD image on storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Check if MicroCeph is installed
+      command: snap list microceph
+      register: microceph_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if MicroCeph is not installed
+      fail:
+        msg: "MicroCeph is not installed"
+      when: microceph_check.rc != 0
+
+    - name: Check if Qdrant RBD image exists
+      command: rbd info pool1/qdrant-rbd1
+      register: qdrant_rbd_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create Qdrant RBD image
+      command: rbd create pool1/qdrant-rbd1 --size 100G
+      when: qdrant_rbd_check.rc != 0
+      run_once: true
+
+    - name: Wait for RBD image to be available
+      command: rbd info pool1/qdrant-rbd1
+      register: rbd_info
+      until: rbd_info.rc == 0
+      retries: 10
+      delay: 5
+      when: qdrant_rbd_check.rc != 0
+
+    - name: Map RBD image temporarily for formatting
+      command: rbd map pool1/qdrant-rbd1
+      register: rbd_map_result
+      when: qdrant_rbd_check.rc != 0
+      run_once: true
+
+    - name: Format RBD image with ext4
+      filesystem:
+        fstype: ext4
+        dev: "{{ rbd_map_result.stdout }}"
+      when:
+        - qdrant_rbd_check.rc != 0
+        - rbd_map_result is defined
+      run_once: true
+
+    - name: Unmap RBD image after formatting
+      command: rbd unmap "{{ rbd_map_result.stdout }}"
+      when:
+        - qdrant_rbd_check.rc != 0
+        - rbd_map_result is defined
+      run_once: true
+
+    - name: Display RBD image info
+      command: rbd info pool1/qdrant-rbd1
+      register: final_rbd_info
+      run_once: true
+
+    - name: Show RBD image details
+      debug:
+        msg: "{{ final_rbd_info.stdout }}"
+      run_once: true
