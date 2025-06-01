@@ -1,3 +1,6 @@
 ---
-- import_playbook: install-postgres.yml
 - import_playbook: setup-ceph-disk.yml
+- import_playbook: create-ceph-pool.yml
+- import_playbook: install-postgres.yml
+- import_playbook: setup-qdrant-rbd.yml
+- import_playbook: install-qdrant.yml

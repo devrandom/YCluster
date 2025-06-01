@@ -39,9 +39,7 @@
       run_once: true
 
     - name: Format RBD image with ext4
-      filesystem:
-        fstype: ext4
-        dev: "{{ rbd_map_result.stdout }}"
+      command: mkfs.ext4 "{{ rbd_map_result.stdout }}"
       when:
         - qdrant_rbd_check.rc != 0
         - rbd_map_result is defined
