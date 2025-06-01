@@ -3,11 +3,6 @@
   hosts: storage
   become: yes
   tasks:
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-
     - name: Install required packages
       apt:
         name:
@@ -15,21 +10,30 @@
           - wget
         state: present
 
+    - name: Check if Qdrant is already installed
+      command: dpkg -l qdrant
+      register: qdrant_installed
+      failed_when: false
+      changed_when: false
+
     - name: Download Qdrant .deb package
       get_url:
         url: https://github.com/qdrant/qdrant/releases/download/v1.14.1/qdrant_1.14.1_amd64.deb
         dest: /tmp/qdrant.deb
         mode: '0644'
+      when: qdrant_installed.rc != 0
 
     - name: Install Qdrant from .deb package
       apt:
         deb: /tmp/qdrant.deb
         state: present
+      when: qdrant_installed.rc != 0
 
     - name: Clean up downloaded .deb file
       file:
         path: /tmp/qdrant.deb
         state: absent
+      when: qdrant_installed.rc != 0
 
     - name: Create /rbd/qdrant directory
       file:
