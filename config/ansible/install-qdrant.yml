@@ -11,29 +11,54 @@
         state: present
 
     - name: Check if Qdrant is already installed
-      command: dpkg -l qdrant
+      stat:
+        path: /opt/qdrant/qdrant
       register: qdrant_installed
-      failed_when: false
-      changed_when: false
 
-    - name: Download Qdrant .deb package
-      get_url:
-        url: https://github.com/qdrant/qdrant/releases/download/v1.14.1/qdrant_1.14.1_amd64.deb
-        dest: /tmp/qdrant.deb
-        mode: '0644'
-      when: qdrant_installed.rc != 0
+    - name: Download Qdrant tar.gz package
+      shell: |
+        wget -O /tmp/qdrant.tar.gz https://github.com/qdrant/qdrant/releases/download/v1.14.1/qdrant-x86_64-unknown-linux-gnu.tar.gz
+        chmod 644 /tmp/qdrant.tar.gz
+      when: not qdrant_installed.stat.exists
 
-    - name: Install Qdrant from .deb package
-      apt:
-        deb: /tmp/qdrant.deb
-        state: present
-      when: qdrant_installed.rc != 0
-
-    - name: Clean up downloaded .deb file
+    - name: Create Qdrant installation directory
       file:
-        path: /tmp/qdrant.deb
+        path: /opt/qdrant
+        state: directory
+        mode: '0755'
+      when: not qdrant_installed.stat.exists
+
+    - name: Extract Qdrant tar.gz package
+      unarchive:
+        src: /tmp/qdrant.tar.gz
+        dest: /opt/qdrant
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0755'
+      when: not qdrant_installed.stat.exists
+
+    - name: Create symlink for qdrant binary
+      file:
+        src: /opt/qdrant/qdrant
+        dest: /usr/bin/qdrant
+        state: link
+      when: not qdrant_installed.stat.exists
+
+    - name: Clean up downloaded tar.gz file
+      file:
+        path: /tmp/qdrant.tar.gz
         state: absent
-      when: qdrant_installed.rc != 0
+      when: not qdrant_installed.stat.exists
+
+    - name: Create qdrant user
+      user:
+        name: qdrant
+        uid: 1001
+        system: yes
+        shell: /bin/false
+        home: /var/lib/qdrant
+        create_home: yes
 
     - name: Create /rbd/qdrant directory
       file:
@@ -60,14 +85,12 @@
         content: |
           storage:
             storage_path: /rbd/qdrant/storage
+            snapshots_path: /rbd/qdrant/snapshots
           service:
             host: 0.0.0.0
             http_port: 6333
             grpc_port: 6334
-          cluster:
-            enabled: true
-            p2p:
-              port: 6335
+            static_content_dir: /opt/qdrant/static
           log_level: INFO
 
     - name: Create Qdrant RBD manager script
@@ -80,7 +103,7 @@
 
           POOL_NAME="pool1"
           RBD_IMAGE="qdrant-rbd1"
-          MOUNT_POINT="/rbd"
+          MOUNT_POINT="/rbd/qdrant"
           QDRANT_DATA_DIR="/rbd/qdrant"
           LOCK_FILE="/var/run/qdrant-rbd.lock"
 
@@ -108,6 +131,7 @@
               
               # Create qdrant data directory with proper ownership
               mkdir -p "$QDRANT_DATA_DIR/storage"
+              mkdir -p "$QDRANT_DATA_DIR/snapshots"
               chown -R qdrant:qdrant "$QDRANT_DATA_DIR"
               
               # Store device info for cleanup
@@ -193,7 +217,7 @@
           Type=simple
           User=qdrant
           Group=qdrant
-          ExecStart=/usr/local/bin/qdrant --config-path /etc/qdrant/config.yaml
+          ExecStart=/usr/bin/qdrant --config-path /etc/qdrant/config.yaml
           Restart=always
           RestartSec=5
           LimitNOFILE=65536
