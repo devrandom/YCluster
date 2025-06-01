@@ -3,11 +3,6 @@
   hosts: storage
   become: yes
   tasks:
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-
     - name: Install PostgreSQL packages
       apt:
         name:
@@ -15,25 +10,6 @@
           - postgresql-contrib
           - python3-psycopg2
         state: present
-
-    - name: Create /rbd/pg directory
-      file:
-        path: /rbd/pg
-        state: directory
-        owner: postgres
-        group: postgres
-        mode: '0700'
-
-    - name: Check if PostgreSQL cluster exists at /rbd/pg
-      stat:
-        path: /rbd/pg/PG_VERSION
-      register: cluster_exists
-
-    - name: Initialize PostgreSQL cluster at /rbd/pg
-      become_user: postgres
-      shell: |
-        /usr/lib/postgresql/*/bin/initdb -D /rbd/pg
-      when: not cluster_exists.stat.exists
 
     - name: Create PostgreSQL RBD manager script
       copy:
@@ -45,8 +21,8 @@
 
           POOL_NAME="pool1"
           RBD_IMAGE="rbd1"
-          MOUNT_POINT="/rbd"
-          PG_DATA_DIR="/rbd/pg"
+          MOUNT_POINT="/rbd/pg"
+          PG_DATA_DIR="/rbd/pg/data"
           LOCK_FILE="/var/run/postgres-rbd.lock"
 
           # Function to acquire RBD lock and mount
@@ -149,7 +125,7 @@
       lineinfile:
         path: /etc/postgresql/16/main/postgresql.conf
         regexp: '^#?data_directory\s*='
-        line: "data_directory = '/rbd/pg'"
+        line: "data_directory = '/rbd/pg/data'"
         backup: yes
       notify: restart postgresql
 
@@ -176,12 +152,30 @@
         name: postgres-rbd.service
         state: started
 
+    - name: Create PostgreSQL data directory
+      file:
+        path: /rbd/pg/data
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
+
+    - name: Check if PostgreSQL cluster exists at /rbd/pg/data
+      stat:
+        path: /rbd/pg/data/PG_VERSION
+      register: cluster_exists
+
+    - name: Initialize PostgreSQL cluster at /rbd/pg/data
+      become_user: postgres
+      shell: |
+        /usr/lib/postgresql/*/bin/initdb -D /rbd/pg/data
+      when: not cluster_exists.stat.exists
+
     - name: Ensure PostgreSQL service is started and enabled
       systemd:
         name: postgresql
         state: started
         enabled: yes
-
 
     - name: Wait for PostgreSQL to be ready
       wait_for:
