@@ -106,72 +106,90 @@
           MOUNT_POINT="/rbd/qdrant"
           QDRANT_DATA_DIR="/rbd/qdrant"
           LOCK_FILE="/var/run/qdrant-rbd.lock"
+          MAX_RETRIES=3
+          RETRY_DELAY=10
 
           # Function to acquire RBD lock and mount
           acquire_and_mount() {
-              # Try to map the RBD device
-              if ! RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive); then
-                  echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE}"
-                  return 1
-              fi
+              local retries=0
               
-              echo "Successfully locked RBD device: $RBD_DEVICE"
+              while [ $retries -lt $MAX_RETRIES ]; do
+                  # Try to map the RBD device with exclusive lock
+                  if RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive 2>/dev/null); then
+                      echo "Successfully locked RBD device: $RBD_DEVICE"
+                      
+                      # Create mount point if it doesn't exist
+                      mkdir -p "$MOUNT_POINT"
+                      
+                      # Mount the device
+                      if mount "$RBD_DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                          echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
+                          
+                          # Create qdrant data directory with proper ownership
+                          mkdir -p "$QDRANT_DATA_DIR/storage"
+                          mkdir -p "$QDRANT_DATA_DIR/snapshots"
+                          chown -R qdrant:qdrant "$QDRANT_DATA_DIR"
+                          
+                          # Store device info for cleanup
+                          echo "$RBD_DEVICE" > "$LOCK_FILE"
+                          
+                          # Start Qdrant
+                          systemctl start qdrant
+                          return 0
+                      else
+                          echo "Failed to mount $RBD_DEVICE to $MOUNT_POINT"
+                          rbd unmap "$RBD_DEVICE" 2>/dev/null || true
+                      fi
+                  else
+                      echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE} (attempt $((retries + 1))/$MAX_RETRIES)"
+                  fi
+                  
+                  retries=$((retries + 1))
+                  if [ $retries -lt $MAX_RETRIES ]; then
+                      echo "Retrying in $RETRY_DELAY seconds..."
+                      sleep $RETRY_DELAY
+                  fi
+              done
               
-              # Create mount point if it doesn't exist
-              mkdir -p "$MOUNT_POINT"
-              
-              # Mount the device
-              if ! mount "$RBD_DEVICE" "$MOUNT_POINT"; then
-                  echo "Failed to mount $RBD_DEVICE to $MOUNT_POINT"
-                  rbd unmap "$RBD_DEVICE"
-                  return 1
-              fi
-              
-              echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
-              
-              # Create qdrant data directory with proper ownership
-              mkdir -p "$QDRANT_DATA_DIR/storage"
-              mkdir -p "$QDRANT_DATA_DIR/snapshots"
-              chown -R qdrant:qdrant "$QDRANT_DATA_DIR"
-              
-              # Store device info for cleanup
-              echo "$RBD_DEVICE" > "$LOCK_FILE"
-              
-              return 0
+              echo "Failed to acquire RBD lock after $MAX_RETRIES attempts"
+              return 1
           }
 
           # Function to unmount and release RBD
           release_and_unmount() {
+              # Stop Qdrant first
+              echo "Stopping Qdrant service"
+              systemctl stop qdrant || true
+              
               if [ -f "$LOCK_FILE" ]; then
                   RBD_DEVICE=$(cat "$LOCK_FILE")
                   
-                  # Stop Qdrant first
-                  systemctl stop qdrant || true
+                  echo "Unmounting and releasing RBD device: $RBD_DEVICE"
                   
                   # Unmount
-                  umount "$MOUNT_POINT" || true
+                  umount "$MOUNT_POINT" 2>/dev/null || true
                   
                   # Unmap RBD device
-                  rbd unmap "$RBD_DEVICE" || true
+                  rbd unmap "$RBD_DEVICE" 2>/dev/null || true
                   
                   # Remove lock file
                   rm -f "$LOCK_FILE"
                   
                   echo "Released RBD device: $RBD_DEVICE"
+              else
+                  echo "No RBD lock file found, ensuring Qdrant is stopped"
               fi
           }
 
           case "$1" in
               start)
-                  while true; do
-                      if acquire_and_mount; then
-                          echo "RBD successfully acquired and mounted"
-                          exit 0
-                      else
-                          echo "Failed to acquire RBD lock, retrying in 60 seconds..."
-                          sleep 60
-                      fi
-                  done
+                  if acquire_and_mount; then
+                      echo "Qdrant RBD successfully acquired and mounted"
+                      exit 0
+                  else
+                      echo "Failed to acquire Qdrant RBD lock"
+                      exit 1
+                  fi
                   ;;
               stop)
                   release_and_unmount
@@ -189,15 +207,14 @@
           [Unit]
           Description=Qdrant with RBD Storage
           After=network.target
-          Before=qdrant.service
-          Wants=qdrant.service
 
           [Service]
           Type=oneshot
           RemainAfterExit=yes
           ExecStart=/usr/local/bin/qdrant-rbd-manager.sh start
           ExecStop=/usr/local/bin/qdrant-rbd-manager.sh stop
-          TimeoutStartSec=0
+          TimeoutStartSec=300
+          TimeoutStopSec=60
           User=root
 
           [Install]
@@ -209,17 +226,14 @@
         content: |
           [Unit]
           Description=Qdrant Vector Database
-          After=network.target qdrant-rbd.service
-          Requires=qdrant-rbd.service
-          BindsTo=qdrant-rbd.service
+          After=network.target
 
           [Service]
           Type=simple
           User=qdrant
           Group=qdrant
           ExecStart=/usr/bin/qdrant --config-path /etc/qdrant/config.yaml
-          Restart=always
-          RestartSec=5
+          Restart=no
           LimitNOFILE=65536
 
           [Install]
@@ -229,25 +243,14 @@
       systemd:
         daemon_reload: yes
 
-    - name: Enable qdrant-rbd service
+    - name: Disable qdrant-rbd service (managed by leader election)
       systemd:
         name: qdrant-rbd.service
-        enabled: yes
+        enabled: no
 
-    - name: Start qdrant-rbd service
-      systemd:
-        name: qdrant-rbd.service
-        state: started
-
-    - name: Enable and start Qdrant service
+    - name: Disable Qdrant service (managed by leader election)
       systemd:
         name: qdrant
-        state: started
-        enabled: yes
-
-    - name: Wait for Qdrant to be ready
-      wait_for:
-        port: 6333
-        host: localhost
-        timeout: 60
+        enabled: no
+        state: stopped
 
