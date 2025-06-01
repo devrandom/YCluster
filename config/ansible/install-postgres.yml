@@ -24,67 +24,89 @@
           MOUNT_POINT="/rbd/pg"
           PG_DATA_DIR="/rbd/pg/data"
           LOCK_FILE="/var/run/postgres-rbd.lock"
+          MAX_RETRIES=3
+          RETRY_DELAY=10
 
           # Function to acquire RBD lock and mount
           acquire_and_mount() {
-              # Try to map the RBD device
-              if ! RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive); then
-                  echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE}"
-                  return 1
-              fi
+              local retries=0
               
-              echo "Successfully locked RBD device: $RBD_DEVICE"
+              while [ $retries -lt $MAX_RETRIES ]; do
+                  # Try to map the RBD device with exclusive lock
+                  if RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive 2>/dev/null); then
+                      echo "Successfully locked RBD device: $RBD_DEVICE"
+                      
+                      # Create mount point if it doesn't exist
+                      mkdir -p "$MOUNT_POINT"
+                      
+                      # Mount the device
+                      if mount "$RBD_DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                          echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
+                          
+                          # Ensure proper ownership
+                          mkdir -p "$PG_DATA_DIR"
+                          chown -R postgres:postgres "$MOUNT_POINT"
+                          
+                          # Store device info for cleanup
+                          echo "$RBD_DEVICE" > "$LOCK_FILE"
+                          
+                          # Start PostgreSQL
+                          systemctl start postgresql@16-main
+                          return 0
+                      else
+                          echo "Failed to mount $RBD_DEVICE to $MOUNT_POINT"
+                          rbd unmap "$RBD_DEVICE" 2>/dev/null || true
+                      fi
+                  else
+                      echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE} (attempt $((retries + 1))/$MAX_RETRIES)"
+                  fi
+                  
+                  retries=$((retries + 1))
+                  if [ $retries -lt $MAX_RETRIES ]; then
+                      echo "Retrying in $RETRY_DELAY seconds..."
+                      sleep $RETRY_DELAY
+                  fi
+              done
               
-              # Create mount point if it doesn't exist
-              mkdir -p "$MOUNT_POINT"
-              
-              # Mount the device
-              if ! mount "$RBD_DEVICE" "$MOUNT_POINT"; then
-                  echo "Failed to mount $RBD_DEVICE to $MOUNT_POINT"
-                  rbd unmap "$RBD_DEVICE"
-                  return 1
-              fi
-              
-              echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
-              
-              # Store device info for cleanup
-              echo "$RBD_DEVICE" > "$LOCK_FILE"
-              
-              return 0
+              echo "Failed to acquire RBD lock after $MAX_RETRIES attempts"
+              return 1
           }
 
           # Function to unmount and release RBD
           release_and_unmount() {
+              # Stop PostgreSQL first
+              echo "Stopping PostgreSQL service"
+              systemctl stop postgresql@16-main || true
+              
               if [ -f "$LOCK_FILE" ]; then
                   RBD_DEVICE=$(cat "$LOCK_FILE")
                   
-                  # Stop PostgreSQL first
-                  systemctl stop postgresql || true
+                  echo "Unmounting and releasing RBD device: $RBD_DEVICE"
                   
                   # Unmount
-                  umount "$MOUNT_POINT" || true
+                  umount "$MOUNT_POINT" 2>/dev/null || true
                   
                   # Unmap RBD device
-                  rbd unmap "$RBD_DEVICE" || true
+                  rbd unmap "$RBD_DEVICE" 2>/dev/null || true
                   
                   # Remove lock file
                   rm -f "$LOCK_FILE"
                   
                   echo "Released RBD device: $RBD_DEVICE"
+              else
+                  echo "No RBD lock file found, ensuring PostgreSQL is stopped"
               fi
           }
 
           case "$1" in
               start)
-                  while true; do
-                      if acquire_and_mount; then
-                          echo "RBD successfully acquired and mounted"
-                          exit 0
-                      else
-                          echo "Failed to acquire RBD lock, retrying in 60 seconds..."
-                          sleep 60
-                      fi
-                  done
+                  if acquire_and_mount; then
+                      echo "PostgreSQL RBD successfully acquired and mounted"
+                      exit 0
+                  else
+                      echo "Failed to acquire PostgreSQL RBD lock"
+                      exit 1
+                  fi
                   ;;
               stop)
                   release_and_unmount
@@ -102,24 +124,18 @@
           [Unit]
           Description=PostgreSQL with RBD Storage
           After=network.target
-          Before=postgresql.service
-          Wants=postgresql.service
 
           [Service]
           Type=oneshot
           RemainAfterExit=yes
           ExecStart=/usr/local/bin/postgres-rbd-manager.sh start
           ExecStop=/usr/local/bin/postgres-rbd-manager.sh stop
-          TimeoutStartSec=0
+          TimeoutStartSec=300
+          TimeoutStopSec=60
           User=root
 
           [Install]
           WantedBy=multi-user.target
-
-    - name: Create PostgreSQL service override directory
-      file:
-        path: /etc/systemd/system/postgresql.service.d
-        state: directory
 
     - name: Update PostgreSQL data directory in config
       lineinfile:
@@ -127,64 +143,56 @@
         regexp: '^#?data_directory\s*='
         line: "data_directory = '/rbd/pg/data'"
         backup: yes
-      notify: restart postgresql
 
-    - name: Create PostgreSQL RBD dependency override
-      copy:
-        dest: /etc/systemd/system/postgresql.service.d/rbd-dependency.conf
-        content: |
-          [Unit]
-          After=postgres-rbd.service
-          Requires=postgres-rbd.service
-          BindsTo=postgres-rbd.service
+    - name: Disable PostgreSQL service (managed by leader election)
+      systemd:
+        name: postgresql
+        enabled: no
+        state: stopped
+
+    - name: Disable PostgreSQL@16-main service (managed by leader election)
+      systemd:
+        name: postgresql@16-main
+        enabled: no
+        state: stopped
 
     - name: Reload systemd daemon
       systemd:
         daemon_reload: yes
 
-    - name: Enable postgres-rbd service
+    - name: Enable postgres-rbd service (managed by leader election)
       systemd:
         name: postgres-rbd.service
-        enabled: yes
+        enabled: no
 
-    - name: Start postgres-rbd service
+    - name: Temporarily start postgres-rbd to initialize database
       systemd:
         name: postgres-rbd.service
         state: started
-
-    - name: Create PostgreSQL data directory
-      file:
-        path: /rbd/pg/data
-        state: directory
-        owner: postgres
-        group: postgres
-        mode: '0700'
+      register: temp_start
+      failed_when: false
 
     - name: Check if PostgreSQL cluster exists at /rbd/pg/data
       stat:
         path: /rbd/pg/data/PG_VERSION
       register: cluster_exists
+      when: temp_start.failed == false
 
     - name: Initialize PostgreSQL cluster at /rbd/pg/data
       become_user: postgres
       shell: |
-        /usr/lib/postgresql/*/bin/initdb -D /rbd/pg/data
-      when: not cluster_exists.stat.exists
+        /usr/lib/postgresql/16/bin/initdb -D /rbd/pg/data
+      when: temp_start.failed == false and not cluster_exists.stat.exists
 
-    - name: Ensure PostgreSQL service is started and enabled
+    - name: Stop temporary postgres-rbd service
       systemd:
-        name: postgresql
-        state: started
-        enabled: yes
-
-    - name: Wait for PostgreSQL to be ready
-      wait_for:
-        port: 5432
-        host: localhost
+        name: postgres-rbd.service
+        state: stopped
+      when: temp_start.failed == false
 
 
   handlers:
     - name: restart postgresql
       systemd:
-        name: postgresql
+        name: postgresql@16-main
         state: restarted
