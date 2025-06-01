@@ -1,0 +1,95 @@
+---
+- name: Install and configure etcd
+  hosts: all
+  become: yes
+  vars:
+    etcd_version: "3.5.9"
+    etcd_data_dir: "/var/lib/etcd"
+    etcd_listen_client_port: 2379
+    etcd_listen_peer_port: 2380
+    
+  tasks:
+    - name: Install etcd from apt
+      apt:
+        name: etcd-server
+        state: present
+        update_cache: yes
+
+    - name: Ensure etcd data directory has correct permissions
+      file:
+        path: "{{ etcd_data_dir }}"
+        state: directory
+        owner: etcd
+        group: etcd
+        mode: '0755'
+
+    - name: Determine cluster configuration
+      set_fact:
+        etcd_cluster_size: "{{ groups['all'] | length }}"
+        etcd_initial_cluster: "{{ groups['all'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['all'] | map('extract', hostvars, 'ansible_default_ipv4') | map(attribute='address')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
+
+    - name: Configure etcd for single node
+      copy:
+        dest: /etc/default/etcd
+        content: |
+          ETCD_NAME="{{ inventory_hostname }}"
+          ETCD_DATA_DIR="{{ etcd_data_dir }}"
+          ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_client_port }}"
+          ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_CLUSTER="{{ inventory_hostname }}=http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_CLUSTER_STATE="new"
+          ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+        owner: root
+        group: root
+        mode: '0644'
+      when: etcd_cluster_size | int == 1
+
+    - name: Configure etcd for multi-node cluster
+      copy:
+        dest: /etc/default/etcd
+        content: |
+          ETCD_NAME="{{ inventory_hostname }}"
+          ETCD_DATA_DIR="{{ etcd_data_dir }}"
+          ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_client_port }}"
+          ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_CLUSTER="{{ etcd_initial_cluster }}"
+          ETCD_INITIAL_CLUSTER_STATE="new"
+          ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+        owner: root
+        group: root
+        mode: '0644'
+      when: etcd_cluster_size | int > 1
+
+    - name: Enable and start etcd service
+      systemd:
+        name: etcd
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Wait for etcd to be ready
+      uri:
+        url: "http://localhost:{{ etcd_listen_client_port }}/health"
+        method: GET
+      register: etcd_health
+      until: etcd_health.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Verify etcd cluster status
+      uri:
+        url: "http://localhost:{{ etcd_listen_client_port }}/v2/stats/leader"
+        method: GET
+      register: etcd_leader
+      when: etcd_cluster_size | int > 1
+
+    - name: Display etcd cluster information
+      debug:
+        msg: |
+          etcd cluster configured with {{ etcd_cluster_size }} node(s)
+          Node: {{ inventory_hostname }}
+          Client URL: http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_client_port }}
