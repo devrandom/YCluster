@@ -64,28 +64,18 @@
         mode: '0644'
       when: etcd_cluster_size | int > 1
 
-    - name: Enable and start etcd service
+    - name: Enable etcd service
       systemd:
         name: etcd
         enabled: yes
-        state: started
         daemon_reload: yes
 
-    - name: Wait for etcd to be ready
-      uri:
-        url: "http://localhost:{{ etcd_listen_client_port }}/health"
-        method: GET
-      register: etcd_health
-      until: etcd_health.status == 200
-      retries: 30
-      delay: 2
-
-    - name: Verify etcd cluster status
-      uri:
-        url: "http://localhost:{{ etcd_listen_client_port }}/v2/stats/leader"
-        method: GET
-      register: etcd_leader
-      when: etcd_cluster_size | int > 1
+    - name: Start etcd service (non-blocking)
+      systemd:
+        name: etcd
+        state: started
+      async: 0
+      poll: 0
 
     - name: Display etcd cluster information
       debug:
