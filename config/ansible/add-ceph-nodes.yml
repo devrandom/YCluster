@@ -1,0 +1,87 @@
+---
+- name: Add new storage nodes to MicroCeph cluster
+  hosts: storage
+  gather_facts: yes
+  
+  tasks:
+    - name: Check if MicroCeph is already configured on each node
+      command: microceph status
+      register: microceph_status
+      failed_when: false
+      changed_when: false
+
+    - name: Identify nodes already in cluster
+      set_fact:
+        is_in_cluster: "{{ microceph_status.rc == 0 }}"
+
+    - name: Build cluster and new node lists
+      set_fact:
+        cluster_nodes: []
+        new_nodes: []
+      run_once: true
+
+    - name: Identify cluster nodes
+      set_fact:
+        cluster_nodes: "{{ cluster_nodes + [item] }}"
+      loop: "{{ ansible_play_hosts }}"
+      when: 
+        - hostvars[item]['is_in_cluster']
+        - inventory_hostname == ansible_play_hosts[0]
+      run_once: true
+
+    - name: Identify new nodes
+      set_fact:
+        new_nodes: "{{ new_nodes + [item] }}"
+      loop: "{{ ansible_play_hosts }}"
+      when: 
+        - not hostvars[item]['is_in_cluster']
+        - inventory_hostname == ansible_play_hosts[0]
+      run_once: true
+
+    - name: Set rendezvous node (first configured node)
+      set_fact:
+        rendezvous_node: "{{ cluster_nodes | first }}"
+      run_once: true
+      when: cluster_nodes | length > 0
+
+    - name: Fail if no existing cluster found
+      fail:
+        msg: "No existing MicroCeph cluster found. Please run setup-ceph-disk.yml first."
+      when: rendezvous_node is not defined
+      run_once: true
+
+    - name: Generate join tokens for new nodes
+      command: microceph cluster add {{ item }}
+      register: join_tokens
+      delegate_to: "{{ rendezvous_node }}"
+      loop: "{{ new_nodes }}"
+      when: inventory_hostname == rendezvous_node and new_nodes | length > 0
+
+    - name: Extract join token for this node
+      set_fact:
+        my_join_token: "{{ item.stdout }}"
+      loop: "{{ hostvars[rendezvous_node]['join_tokens']['results'] | default([]) }}"
+      when: 
+        - not is_in_cluster 
+        - rendezvous_node is defined
+        - item.item == inventory_hostname
+
+    - name: Join new nodes to cluster
+      command: microceph cluster join {{ my_join_token }}
+      when: not is_in_cluster and my_join_token is defined
+
+    - name: Wait for cluster to stabilize
+      pause:
+        seconds: 10
+      when: not is_in_cluster
+
+    - name: Verify node joined cluster
+      command: microceph status
+      register: final_status
+      when: not is_in_cluster
+      failed_when: final_status.rc != 0
+
+    - name: Display cluster status
+      debug:
+        msg: "Node {{ inventory_hostname }} successfully joined MicroCeph cluster"
+      when: not is_in_cluster and final_status.rc == 0
