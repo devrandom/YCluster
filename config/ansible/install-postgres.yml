@@ -160,7 +160,7 @@
       systemd:
         daemon_reload: yes
 
-    - name: Enable postgres-rbd service (managed by leader election)
+    - name: Disable postgres-rbd service (managed by leader election)
       systemd:
         name: postgres-rbd.service
         enabled: no
@@ -171,24 +171,36 @@
         state: started
       register: temp_start
       failed_when: false
+      tags:
+        - never
+        - init_db
 
     - name: Check if PostgreSQL cluster exists at /rbd/pg/data
       stat:
         path: /rbd/pg/data/PG_VERSION
       register: cluster_exists
       when: temp_start.failed == false
+      tags:
+        - never
+        - init_db
 
     - name: Initialize PostgreSQL cluster at /rbd/pg/data
       become_user: postgres
       shell: |
         /usr/lib/postgresql/16/bin/initdb -D /rbd/pg/data
       when: temp_start.failed == false and not cluster_exists.stat.exists
+      tags:
+        - never
+        - init_db
 
     - name: Stop temporary postgres-rbd service
       systemd:
         name: postgres-rbd.service
         state: stopped
       when: temp_start.failed == false
+      tags:
+        - never
+        - init_db
 
 
   handlers:
