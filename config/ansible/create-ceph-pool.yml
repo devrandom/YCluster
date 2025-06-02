@@ -7,19 +7,6 @@
     rbd_image_name: rbd1
     rbd_image_size: 100G
   tasks:
-    - name: Create symlinks for ceph config and keyring on storage nodes
-      file:
-        src: "{{ item.1.src }}"
-        dest: "{{ item.1.dest }}"
-        state: link
-        force: yes
-      delegate_to: "{{ item.0 }}"
-      loop: "{{ groups['storage'] | default([]) | product([
-        { 'src': '/var/snap/microceph/current/conf/ceph.conf', 'dest': '/etc/ceph/ceph.conf' },
-        { 'src': '/var/snap/microceph/current/conf/ceph.client.admin.keyring', 'dest': '/etc/ceph/ceph.client.admin.keyring' }
-      ]) | list }}"
-      failed_when: false
-      
     - name: Get all storage nodes from inventory
       set_fact:
         storage_nodes: "{{ groups['storage'] | default([]) }}"
