@@ -1,0 +1,52 @@
+---
+- name: Stop and wipe etcd cluster
+  hosts: all
+  become: yes
+  vars:
+    etcd_data_dir: "/var/lib/etcd"
+    
+  tasks:
+    - name: Stop cluster leader election service
+      systemd:
+        name: cluster-leader-election.service
+        state: stopped
+      ignore_errors: yes
+
+    - name: Stop etcd service
+      systemd:
+        name: etcd
+        state: stopped
+      ignore_errors: yes
+
+    - name: Wait for etcd to fully stop
+      wait_for:
+        port: 2379
+        host: localhost
+        state: stopped
+        timeout: 30
+      ignore_errors: yes
+
+    - name: Remove etcd data directory
+      file:
+        path: "{{ etcd_data_dir }}"
+        state: absent
+
+    - name: Recreate etcd data directory with correct permissions
+      file:
+        path: "{{ etcd_data_dir }}"
+        state: directory
+        owner: etcd
+        group: etcd
+        mode: '0755'
+
+    - name: Remove etcd configuration
+      file:
+        path: /etc/default/etcd
+        state: absent
+
+    - name: Display completion message
+      debug:
+        msg: |
+          etcd cluster has been wiped on {{ inventory_hostname }}
+          Data directory: {{ etcd_data_dir }}
+          You can now run install-etcd.yml to recreate the cluster

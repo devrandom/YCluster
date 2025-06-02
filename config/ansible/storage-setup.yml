@@ -3,6 +3,12 @@
   hosts: storage
   become: yes
   tasks:
+    - name: Install ceph-common package
+      apt:
+        name: ceph-common
+        state: present
+        update_cache: yes
+
     - name: Create /rbd directory
       file:
         path: /rbd
