@@ -1,0 +1,22 @@
+---
+- name: Setup storage mountpoints
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Create /rbd directory
+      file:
+        path: /rbd
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Verify /rbd mountpoint created
+      stat:
+        path: /rbd
+      register: rbd_mountpoint
+
+    - name: Display mountpoint status
+      debug:
+        msg: "/rbd mountpoint successfully created"
+      when: rbd_mountpoint.stat.exists and rbd_mountpoint.stat.isdir
