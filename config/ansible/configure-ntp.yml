@@ -1,0 +1,45 @@
+---
+- name: Configure NTP client to use local NTP server
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install ntpsec
+      package:
+        name: ntpsec
+        state: present
+
+    - name: Comment out existing pool lines in ntp.conf
+      replace:
+        path: /etc/ntpsec/ntp.conf
+        regexp: '^(pool .*)$'
+        replace: '# \1'
+        backup: yes
+      notify: restart ntpsec
+
+    - name: Comment out existing server lines in ntp.conf
+      replace:
+        path: /etc/ntpsec/ntp.conf
+        regexp: '^(server (?!10\.0\.0\.1).*)$'
+        replace: '# \1'
+        backup: yes
+      notify: restart ntpsec
+
+    - name: Configure ntpsec to use local NTP server
+      lineinfile:
+        path: /etc/ntpsec/ntp.conf
+        line: "server 10.0.0.1 iburst"
+        create: yes
+        backup: yes
+      notify: restart ntpsec
+
+    - name: Enable and start ntpsec service
+      systemd:
+        name: ntpsec
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: restart ntpsec
+      systemd:
+        name: ntpsec
+        state: restarted
