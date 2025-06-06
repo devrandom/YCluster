@@ -24,8 +24,8 @@
           MOUNT_POINT="/rbd/pg"
           PG_DATA_DIR="/rbd/pg/data"
           LOCK_FILE="/var/run/postgres-rbd.lock"
-          MAX_RETRIES=3
-          RETRY_DELAY=10
+          MAX_RETRIES=5
+          RETRY_DELAY=3
 
           # Function to acquire RBD lock and mount
           acquire_and_mount() {
@@ -59,6 +59,29 @@
                       fi
                   else
                       echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE} (attempt $((retries + 1))/$MAX_RETRIES)"
+                      
+                      # Check if current lock holder exists
+                      LOCK_INFO=$(rbd lock list "${POOL_NAME}/${RBD_IMAGE}" 2>/dev/null || true)
+                      if [ -n "$LOCK_INFO" ]; then
+                          echo "Current lock info: $LOCK_INFO"
+                          
+                          # Try to break stale locks if we're on retry 3 or higher
+                          if [ $retries -ge 2 ]; then
+                              echo "Attempting to break potentially stale locks..."
+                              # Get all lock info
+                              LOCK_LINES=$(rbd lock list "${POOL_NAME}/${RBD_IMAGE}" 2>/dev/null | grep -E "client\.[0-9]+" || true)
+                              if [ -n "$LOCK_LINES" ]; then
+                                  while IFS= read -r line; do
+                                      LOCK_ID=$(echo "$line" | awk '{print $1}')
+                                      LOCK_COOKIE=$(echo "$line" | awk '{print $2}')
+                                      if [ -n "$LOCK_ID" ] && [ -n "$LOCK_COOKIE" ]; then
+                                          echo "Attempting to remove lock: $LOCK_ID with cookie: $LOCK_COOKIE"
+                                          rbd lock remove "${POOL_NAME}/${RBD_IMAGE}" "$LOCK_ID" "$LOCK_COOKIE" 2>/dev/null || true
+                                      fi
+                                  done <<< "$LOCK_LINES"
+                              fi
+                          fi
+                      fi
                   fi
                   
                   retries=$((retries + 1))
