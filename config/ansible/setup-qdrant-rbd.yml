@@ -20,7 +20,7 @@
       changed_when: false
 
     - name: Create Qdrant RBD image
-      command: rbd create pool1/qdrant-rbd1 --size 100G
+      command: rbd create pool1/qdrant-rbd1 --size 100G --image-feature exclusive-lock,object-map,fast-diff
       when: qdrant_rbd_check.rc != 0
       run_once: true
 
