@@ -55,6 +55,7 @@ services:
       - ./data/ansible_ssh_key.pub:/root/.ssh/id_ed25519.pub:ro
       - ./config/ansible:/etc/ansible:ro
       - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
+      - ./data:/data:ro
     working_dir: /runner
     command: tail -f /dev/null
 

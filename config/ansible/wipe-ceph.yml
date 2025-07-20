@@ -9,9 +9,8 @@
         state: stopped
 
     - name: Remove MicroCeph completely
-      snap:
-        name: microceph
-        state: absent
+      shell: snap remove microceph --purge
+      ignore_errors: yes
 
     - name: Clean up any remaining MicroCeph data
       file:
@@ -21,10 +20,20 @@
         - /var/snap/microceph
         - /snap/microceph
 
+    - name: Check if /dev/mapper/vg0-ceph exists
+      stat:
+        path: /dev/mapper/vg0-ceph
+      register: ceph_lv
+
+    - name: Wipe Ceph logical volume
+      shell: |
+        wipefs -a /dev/mapper/vg0-ceph
+        dd if=/dev/zero of=/dev/mapper/vg0-ceph bs=1M count=100
+      when: ceph_lv.stat.exists
+      ignore_errors: yes
+
     - name: Install MicroCeph fresh
-      snap:
-        name: microceph
-        state: present
+      shell: snap install microceph
 
     - name: Wait for snap to settle
       pause:
@@ -35,6 +44,6 @@
         msg: |
           MicroCeph has been reinstalled on all nodes.
           Now run the following playbooks in order:
-          1. ansible-playbook setup-ceph-disk.yml
-          2. ansible-playbook add-ceph-nodes.yml
-          3. ansible-playbook create-ceph-pool.yml
+          ansible-playbook add-ceph-nodes.yml
+          ansible-playbook setup-ceph-disk.yml
+          ansible-playbook create-ceph-pool.yml

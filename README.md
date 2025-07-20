@@ -18,8 +18,17 @@ docker compose up --build -d
 ```sh
 docker compose exec ansible ansible-inventory
 docker compose exec ansible ansible-playbook /etc/ansible/site.yml
+
+# check etcd health
 docker compose exec ansible ansible storage -m shell -a "etcdctl endpoint health"
 docker compose exec ansible ansible storage -m shell -a "etcdctl member list"
+
+# check ceph health
+docker compose exec ansible ansible storage -m shell -a "microceph status"
+docker compose exec ansible ansible storage -m shell -a "microceph cluster list"
+
+# initialize the postgres database
+docker compose exec ansible ansible-playbook --tag init_db /etc/ansible/install-postgres.yml /etc/ansible/install-etcd-leader-election.yml
 ```
 
 ## SSH

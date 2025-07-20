@@ -1,0 +1,398 @@
+---
+- name: Setup admin services on storage nodes s1-s3
+  hosts: s1,s2,s3
+  become: yes
+  vars:
+    admin_services_dir: /opt/admin-services
+    
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - python3-pip
+          - python3-flask
+          - python3-etcd3
+          - python3-grpcio
+          - python3-protobuf
+          - dnsmasq
+          - nginx
+          - isc-dhcp-server
+        state: present
+        update_cache: yes
+
+    - name: Create admin services directory
+      file:
+        path: "{{ admin_services_dir }}"
+        state: directory
+        mode: '0755'
+
+
+    - name: Copy etcd-based allocation API
+      copy:
+        src: /etc/ansible/files/app_etcd.py
+        dest: "{{ admin_services_dir }}/app_etcd.py"
+        mode: '0644'
+      notify: restart allocation-api
+
+    - name: Copy etcd management scripts to /usr/local/bin
+      copy:
+        src: "/etc/ansible/files/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        mode: '0755'
+      loop:
+        - populate_local_node.py
+        - check_etcd_cluster.py
+
+    - name: Create systemd service for allocation API
+      copy:
+        dest: /etc/systemd/system/allocation-api.service
+        content: |
+          [Unit]
+          Description=Allocation API Service
+          After=network.target etcd.service
+          Wants=etcd.service
+
+          [Service]
+          Type=simple
+          Environment="ETCD_HOST={{ ansible_default_ipv4.address }}:2379"
+          ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app_etcd.py
+          Restart=always
+          RestartSec=5
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart allocation-api
+
+    - name: Configure nginx as reverse proxy
+      copy:
+        dest: /etc/nginx/sites-available/allocation-api
+        content: |
+          server {
+              listen 80;
+              server_name _;
+              
+              location /api/ {
+                  proxy_pass http://127.0.0.1:12723;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+              
+              location /ubuntu/ {
+                  alias /var/lib/tftpboot/ubuntu/;
+                  autoindex on;
+              }
+              
+              location /autoinstall/ {
+                  alias /var/www/html/autoinstall/;
+                  autoindex on;
+              }
+              
+              location / {
+                  root /var/www/html;
+                  index index.html;
+              }
+          }
+      notify: restart nginx
+
+    - name: Enable nginx site
+      file:
+        src: /etc/nginx/sites-available/allocation-api
+        dest: /etc/nginx/sites-enabled/allocation-api
+        state: link
+      notify: restart nginx
+
+    - name: Remove default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: restart nginx
+
+    - name: Flush handlers to restart nginx immediately
+      meta: flush_handlers
+
+    - name: Disable systemd-resolved to free port 53
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+
+    - name: Check if resolv.conf is a symlink
+      stat:
+        path: /etc/resolv.conf
+      register: resolv_stat
+
+    - name: Remove systemd-resolved symlink
+      file:
+        path: /etc/resolv.conf
+        state: absent
+      when: resolv_stat.stat.islnk is defined and resolv_stat.stat.islnk
+
+    - name: Create static resolv.conf
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 10.0.0.1
+          search xc
+        mode: '0644'
+
+    - name: Disable default dnsmasq configuration
+      lineinfile:
+        path: /etc/default/dnsmasq
+        regexp: '^ENABLED='
+        line: 'ENABLED=1'
+        create: yes
+
+    - name: Clear default dnsmasq.conf to avoid conflicts
+      copy:
+        dest: /etc/dnsmasq.conf
+        content: |
+          # Main dnsmasq configuration
+          # All configuration is in /etc/dnsmasq.d/
+          conf-dir=/etc/dnsmasq.d/,*.conf
+        backup: yes
+
+    - name: Configure dnsmasq for DHCP
+      copy:
+        dest: /etc/dnsmasq.d/dhcp.conf
+        content: |
+          # Bind to specific interface and address
+          interface={{ ansible_default_ipv4.interface }}
+          bind-interfaces
+          listen-address={{ ansible_default_ipv4.address }}
+          
+          # Enable DNS service
+          port=53
+          
+          # DHCP configuration
+          dhcp-range={{ ansible_default_ipv4.interface }},10.0.0.100,10.0.0.200,12h
+          dhcp-option=3,10.0.0.1
+          dhcp-option=6,10.0.0.1
+          
+          # Enable TFTP
+          enable-tftp
+          tftp-root=/var/lib/tftpboot
+          
+          # PXE boot options
+          dhcp-match=set:efibc,option:client-arch,7
+          dhcp-boot=tag:efibc,EFI/BOOT/grubx64.efi
+          
+          # Domain settings
+          local=/xc/
+          domain=xc
+          expand-hosts
+          
+          # Dynamic config reload
+          dhcp-hostsfile=/etc/dnsmasq.d/static-hosts.conf
+          
+          # Logging
+          log-dhcp
+          log-facility=/var/log/dnsmasq.log
+      notify: restart dnsmasq
+
+    - name: Create empty static hosts file for dnsmasq
+      copy:
+        dest: /etc/dnsmasq.d/static-hosts.conf
+        content: ""
+        force: no
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create TFTP directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /var/lib/tftpboot
+        - /var/lib/tftpboot/EFI
+        - /var/lib/tftpboot/EFI/BOOT
+        - /var/lib/tftpboot/grub
+        - /var/lib/tftpboot/ubuntu
+
+    - name: Check if Ubuntu ISO already exists
+      stat:
+        path: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+      register: iso_file
+
+    - name: Download Ubuntu ISO for netboot files
+      get_url:
+        url: http://10.0.0.1/ubuntu-24.04.2-live-server-amd64.iso
+        dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+        mode: '0644'
+      when: not iso_file.stat.exists
+
+    - name: Install required packages for EFI extraction
+      apt:
+        name:
+          - genisoimage
+        state: present
+
+    - name: Check if netboot files exist
+      stat:
+        path: "{{ item }}"
+      register: netboot_files
+      loop:
+        - /var/lib/tftpboot/ubuntu/vmlinuz
+        - /var/lib/tftpboot/ubuntu/initrd
+
+    - name: Extract netboot files from ISO
+      shell: |
+        isoinfo -R -x /casper/vmlinuz -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/vmlinuz
+        isoinfo -R -x /casper/initrd -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/initrd
+      when: netboot_files.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+
+    - name: Check if EFI files already exist
+      stat:
+        path: "{{ item }}"
+      register: efi_files
+      loop:
+        - /var/lib/tftpboot/EFI/BOOT/bootx64.efi
+        - /var/lib/tftpboot/EFI/BOOT/grubx64.efi
+
+    - name: Download and extract EFI boot files
+      shell: |
+        cd /tmp
+        apt-get download shim-signed grub-efi-amd64-signed
+        dpkg-deb --fsys-tarfile shim-signed*deb | tar x ./usr/lib/shim/shimx64.efi.signed.latest -O > /var/lib/tftpboot/EFI/BOOT/bootx64.efi
+        dpkg-deb --fsys-tarfile grub-efi-amd64-signed*deb | tar x ./usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed -O > /var/lib/tftpboot/EFI/BOOT/grubx64.efi
+        rm -f shim-signed*.deb grub-efi-amd64-signed*.deb
+      when: efi_files.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+
+    - name: Create grub configuration for PXE boot
+      copy:
+        dest: /var/lib/tftpboot/grub/grub.cfg
+        content: |
+          set default="0"
+          set timeout=5
+
+          set default="0"
+          set timeout=5
+
+          menuentry "Ubuntu 24.04 Server Autoinstall" {
+              linux /ubuntu/vmlinuz ip=dhcp url=http://{{ ansible_default_ipv4.address }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso autoinstall ds=nocloud-net;s=http://{{ ansible_default_ipv4.address }}/autoinstall/
+              initrd /ubuntu/initrd
+          }
+          
+          menuentry "Ubuntu 24.04 Server Manual Install" {
+              linux /ubuntu/vmlinuz ip=dhcp url=http://{{ ansible_default_ipv4.address }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+              initrd /ubuntu/initrd
+          }
+
+
+    - name: Create autoinstall directory
+      file:
+        path: /var/www/html/autoinstall
+        state: directory
+        mode: '0755'
+
+    - name: Copy autoinstall user-data
+      copy:
+        src: /data/autoinstall/user-data
+        dest: /var/www/html/autoinstall/user-data
+        mode: '0644'
+
+    - name: Copy autoinstall meta-data
+      copy:
+        src: /data/autoinstall/meta-data
+        dest: /var/www/html/autoinstall/meta-data
+        mode: '0644'
+
+    - name: Copy ansible SSH public key
+      copy:
+        src: /data/ansible_ssh_key.pub
+        dest: /var/www/html/ansible_ssh_key.pub
+        mode: '0644'
+
+    - name: Create static hosts update script
+      copy:
+        dest: /usr/local/bin/update-dhcp-hosts.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Update static DHCP hosts from etcd
+          
+          TEMP_FILE=$(mktemp)
+          
+          if curl -s http://localhost/api/dhcp-config > "$TEMP_FILE" 2>/dev/null; then
+              if [ -s "$TEMP_FILE" ]; then
+                  cp "$TEMP_FILE" /etc/dnsmasq.d/static-hosts.conf
+                  rm -f "$TEMP_FILE"
+                  systemctl reload dnsmasq
+              else
+                  rm -f "$TEMP_FILE"
+              fi
+          else
+              rm -f "$TEMP_FILE"
+          fi
+
+    - name: Create systemd timer for DHCP updates
+      copy:
+        dest: /etc/systemd/system/update-dhcp-hosts.timer
+        content: |
+          [Unit]
+          Description=Update DHCP hosts from etcd
+          
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec=30s
+          
+          [Install]
+          WantedBy=timers.target
+
+    - name: Create systemd service for DHCP updates
+      copy:
+        dest: /etc/systemd/system/update-dhcp-hosts.service
+        content: |
+          [Unit]
+          Description=Update DHCP hosts from etcd
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/update-dhcp-hosts.sh
+
+    - name: Enable and start services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      loop:
+        - allocation-api
+        - nginx
+        - dnsmasq
+        - update-dhcp-hosts.timer
+
+    - name: Wait for etcd to be ready
+      wait_for:
+        port: 2379
+        host: "{{ ansible_default_ipv4.address }}"
+        timeout: 30
+
+    - name: Populate local node in etcd
+      command: "/usr/local/bin/populate_local_node.py"
+      environment:
+        ETCD_HOST: "{{ ansible_default_ipv4.address }}:2379"
+      register: populate_result
+      changed_when: "'Added node' in populate_result.stdout"
+
+    - name: Display node registration result
+      debug:
+        var: populate_result.stdout_lines
+
+  handlers:
+    - name: restart allocation-api
+      systemd:
+        name: allocation-api
+        state: restarted
+
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: restart dnsmasq
+      systemd:
+        name: dnsmasq
+        state: restarted
