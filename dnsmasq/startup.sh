@@ -40,6 +40,9 @@ exec /usr/sbin/dnsmasq \
     --dhcp-range=10.0.0.100,10.0.0.200 \
     --enable-tftp \
     --tftp-root=/var/lib/tftpboot \
+    --local=/xc/ \
+    --domain=xc \
+    --domain-needed \
     -d \
     --log-dhcp \
     --log-queries \
