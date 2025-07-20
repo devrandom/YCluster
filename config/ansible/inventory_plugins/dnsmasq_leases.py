@@ -92,9 +92,7 @@ class InventoryModule(BaseInventoryPlugin):
                     
                     timestamp, mac_address, ip_address, hostname = parts[:4]
                     
-                    # Skip expired leases (timestamp of 0 means expired)
-                    if timestamp == '0':
-                        continue
+                    # Note: timestamp of 0 means infinite lease in dnsmasq
                     
                     # Skip if hostname is '*' (no hostname)
                     if hostname == '*':
