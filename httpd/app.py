@@ -12,6 +12,22 @@ DB_PATH = '/data/hostnames.db'
 # Thread lock for database operations
 db_lock = threading.Lock()
 
+def determine_ip_from_hostname(hostname):
+    """Generate deterministic IP based on hostname"""
+    if hostname.startswith('s'):
+        # Storage nodes: 10.0.0.10-29
+        num = int(hostname[1:])
+        return f"10.0.0.{10 + num}"  # s1 = .10, s2 = .11, etc.
+    elif hostname.startswith('c'):
+        # Compute nodes: 10.0.0.30-99
+        num = int(hostname[1:])
+        return f"10.0.0.{30 + num}"  # c1 = .30, c2 = .31, etc.
+    elif hostname.startswith('m'):
+        # MacOS nodes: 10.0.0.100-109
+        num = int(hostname[1:])
+        return f"10.0.0.{100 + num}"
+    return None
+
 def init_db():
     """Initialize the database with counters and allocations tables"""
     conn = sqlite3.connect(DB_PATH)
@@ -29,7 +45,6 @@ def init_db():
             allocated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    conn.commit()
     conn.close()
 
 def determine_type_from_mac(mac_address):
@@ -67,8 +82,11 @@ def allocate_hostname():
         
         if existing:
             hostname, machine_type = existing
+            # Compute IP deterministically from hostname
+            ip_address = determine_ip_from_hostname(hostname)
+            
             conn.close()
-            return jsonify({'hostname': hostname, 'type': machine_type, 'mac': mac_address, 'existing': True})
+            return jsonify({'hostname': hostname, 'type': machine_type, 'ip': ip_address, 'mac': mac_address, 'existing': True})
         
         # Determine machine type from MAC address
         machine_type = determine_type_from_mac(mac_address)
@@ -94,6 +112,9 @@ def allocate_hostname():
         
         hostname = f"{prefix}{count}"
         
+        # Generate deterministic IP
+        ip_address = determine_ip_from_hostname(hostname)
+        
         # Store the allocation
         conn.execute('INSERT INTO allocations (mac_address, hostname, type) VALUES (?, ?, ?)', 
                     (normalized_mac, hostname, machine_type))
@@ -101,7 +122,7 @@ def allocate_hostname():
         conn.commit()
         conn.close()
     
-    return jsonify({'hostname': hostname, 'type': machine_type, 'mac': mac_address, 'existing': False})
+    return jsonify({'hostname': hostname, 'type': machine_type, 'ip': ip_address, 'mac': mac_address, 'existing': False})
 
 @app.route('/api/status')
 def status():
@@ -112,14 +133,54 @@ def status():
     conn.close()
     return jsonify(counters)
 
+def generate_dhcp_config():
+    """Generate static DHCP configuration for dnsmasq"""
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute('SELECT mac_address, hostname FROM allocations ORDER BY hostname')
+        allocations = cursor.fetchall()
+        conn.close()
+    
+    # Generate dhcp-host entries
+    dhcp_config = []
+    for mac, hostname in allocations:
+        # Convert normalized MAC back to colon format
+        mac_formatted = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+        # Compute IP deterministically from hostname
+        ip = determine_ip_from_hostname(hostname)
+        if ip:
+            dhcp_config.append(f"dhcp-host={mac_formatted},{hostname},{ip},infinite")
+    
+    return '\n'.join(dhcp_config) + '\n' if dhcp_config else ''
+
 @app.route('/api/allocations')
 def allocations():
     """Get all current allocations"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.execute('SELECT mac_address, hostname, type, allocated_at FROM allocations ORDER BY allocated_at')
-    allocations = [{'mac': row[0], 'hostname': row[1], 'type': row[2], 'allocated_at': row[3]} for row in cursor.fetchall()]
+    allocations = []
+    for row in cursor.fetchall():
+        mac, hostname, machine_type, allocated_at = row
+        # Compute IP deterministically from hostname
+        ip = determine_ip_from_hostname(hostname)
+        allocations.append({
+            'mac': mac,
+            'hostname': hostname,
+            'type': machine_type,
+            'ip': ip,
+            'allocated_at': allocated_at
+        })
     conn.close()
     return jsonify(allocations)
+
+@app.route('/api/dhcp-config')
+def get_dhcp_config():
+    """Get current DHCP configuration"""
+    config = generate_dhcp_config()
+    if config:
+        return config, 200, {'Content-Type': 'text/plain'}
+    else:
+        return "No static hosts configured yet", 404
 
 if __name__ == '__main__':
     init_db()

@@ -29,9 +29,32 @@ fi
 echo "TFTP boot directory contents:"
 ls -la $BOOT
 
-# Start dnsmasq with the original arguments
+# Create directory for additional configs
+mkdir -p /etc/dnsmasq.d
+
+# Create log file for dhcp-script
+touch /var/log/dhcp-script.log
+
+# Pre-populate static hosts from existing allocations
+echo "Fetching existing DHCP allocations..."
+for i in {1..5}; do
+    if curl -s http://10.0.0.1/api/dhcp-config > /tmp/dhcp-config.tmp 2>/dev/null; then
+        if [ -s /tmp/dhcp-config.tmp ]; then
+            mv /tmp/dhcp-config.tmp /etc/dnsmasq.d/static-hosts.conf
+            echo "Loaded static DHCP configuration"
+	    cat /etc/dnsmasq.d/static-hosts.conf
+            break
+        fi
+    fi
+    echo "Waiting for httpd service... (attempt $i/5)"
+    sleep 2
+done
+
+# Start dnsmasq with the original arguments plus dhcp-script
 exec /usr/sbin/dnsmasq \
+    --conf-dir=/etc/dnsmasq.d \
     --dhcp-authoritative \
+    --dhcp-script=/usr/local/bin/dhcp-script.sh \
     --dhcp-match=set:efibc,option:client-arch,7 \
     --dhcp-boot=tag:efibc,EFI/BOOT/grubx64.efi \
     --dhcp-option=42,10.0.0.1 \
