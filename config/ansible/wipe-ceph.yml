@@ -1,0 +1,40 @@
+---
+- name: Fix Ceph cluster after IP changes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Stop MicroCeph service
+      systemd:
+        name: snap.microceph.daemon
+        state: stopped
+
+    - name: Remove MicroCeph completely
+      snap:
+        name: microceph
+        state: absent
+
+    - name: Clean up any remaining MicroCeph data
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/snap/microceph
+        - /snap/microceph
+
+    - name: Install MicroCeph fresh
+      snap:
+        name: microceph
+        state: present
+
+    - name: Wait for snap to settle
+      pause:
+        seconds: 5
+
+    - name: Display next steps
+      debug:
+        msg: |
+          MicroCeph has been reinstalled on all nodes.
+          Now run the following playbooks in order:
+          1. ansible-playbook setup-ceph-disk.yml
+          2. ansible-playbook add-ceph-nodes.yml
+          3. ansible-playbook create-ceph-pool.yml

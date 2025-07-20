@@ -4,12 +4,22 @@ Cluster management for small AI clusters.
 
 Uses Ceph, Qdrant, Postgres.
 
+# Getting Started
+
+```
+make
+docker compose up --build -d
+```
+
 # HOWTO
 
 ## Ansible
 
 ```sh
-docker exec -it ansible ansible-playbook /etc/ansible/site.yml
+docker compose exec ansible ansible-inventory
+docker compose exec ansible ansible-playbook /etc/ansible/site.yml
+docker compose exec ansible ansible storage -m shell -a "etcdctl endpoint health"
+docker compose exec ansible ansible storage -m shell -a "etcdctl member list"
 ```
 
 ## SSH
