@@ -5,11 +5,24 @@ autoinstall:
     hostname: placeholder
     username: ubuntu
     password: '$y$j9T$VeMbpOLaT99rQzvoSy7IC/$7nKvOFH3ui63TKFPPbhKOo5lbvXXnPBBlpKjIrF.aCB'
+  network:
+    version: 2
+    ethernets:
+      eth0:
+        dhcp4: false
+        addresses: [PLACEHOLDER_IP/24]
+        gateway4: 10.0.0.1
+        nameservers:
+          addresses: [10.0.0.1]
+          search: [xc]
   early-commands:
     - |
       MAC=$(ip -j link | jq -r '.[] | select(.operstate == "UP" and .address) | .address' | head -1)
-      HOSTNAME=$(curl -s "http://10.0.0.1/api/allocate?mac=$MAC" | jq -r '.hostname')
+      ALLOCATION=$(curl -s "http://10.0.0.1/api/allocate?mac=$MAC")
+      HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
+      IP=$(echo "$ALLOCATION" | jq -r '.ip')
       sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
+      sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
   ssh:
     install-server: true
     authorized-keys:
@@ -85,8 +98,8 @@ autoinstall:
     - curl
   late-commands:
     # set proxy in environment
-    - echo 'export http_proxy=http://10.0.0.1:3128' >> /target/etc/environment
-    - echo 'export https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
+    - echo 'http_proxy=http://10.0.0.1:3128' >> /target/etc/environment
+    - echo 'https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
     # add ansible key to root authorized_keys
     - mkdir -p /target/root/.ssh
     - curl -s http://10.0.0.1/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys

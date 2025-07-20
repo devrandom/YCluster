@@ -225,7 +225,6 @@
         - never
         - init_db
 
-
   handlers:
     - name: restart postgresql
       systemd:

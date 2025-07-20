@@ -1,0 +1,6 @@
+plugin: etcd_nodes
+etcd_hosts:
+  - 10.0.0.10:2379
+  - 10.0.0.11:2379
+  - 10.0.0.12:2379
+prefix: /cluster/nodes
