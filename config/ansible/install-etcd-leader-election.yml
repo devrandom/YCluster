@@ -52,6 +52,14 @@
         name: cluster-leader-election.service
         state: started
 
+    - name: Trigger restart for init_db
+      debug:
+        msg: "Triggering cluster leader election restart"
+      changed_when: true
+      notify: restart cluster leader election
+      tags:
+        - init_db
+
   handlers:
     - name: restart cluster leader election
       systemd:

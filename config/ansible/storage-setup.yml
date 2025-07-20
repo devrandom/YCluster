@@ -3,12 +3,6 @@
   hosts: storage
   become: yes
   tasks:
-    - name: Install ceph-common package
-      apt:
-        name: ceph-common
-        state: present
-        update_cache: yes
-
     - name: Create /rbd directory
       file:
         path: /rbd
@@ -26,17 +20,6 @@
       debug:
         msg: "/rbd mountpoint successfully created"
       when: rbd_mountpoint.stat.exists and rbd_mountpoint.stat.isdir
-
-    - name: Create symlinks for ceph config and keyring
-      file:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        state: link
-        force: yes
-      loop:
-        - { src: '/var/snap/microceph/current/conf/ceph.conf', dest: '/etc/ceph/ceph.conf' }
-        - { src: '/var/snap/microceph/current/conf/ceph.keyring', dest: '/etc/ceph/ceph.keyring' }
-      failed_when: false
 
     - name: Configure Ceph RBD client settings for faster failover
       block:

@@ -10,6 +10,25 @@
       failed_when: false
       changed_when: false
 
+    - name: Bootstrap cluster if not initialized
+      block:
+        - name: Bootstrap MicroCeph cluster on first node
+          command: microceph cluster bootstrap
+          when: inventory_hostname == ansible_play_hosts[0]
+          register: bootstrap_result
+
+        - name: Wait for bootstrap to complete
+          pause:
+            seconds: 5
+          when: inventory_hostname == ansible_play_hosts[0]
+      when: "'Database is not yet initialized' in microceph_status.stderr or microceph_status.rc != 0"
+
+    - name: Re-check if MicroCeph is already configured on each node
+      command: microceph status
+      register: microceph_status
+      failed_when: false
+      changed_when: false
+
     - name: Identify nodes already in cluster
       set_fact:
         is_in_cluster: "{{ microceph_status.rc == 0 }}"
@@ -80,6 +99,23 @@
       register: final_status
       when: not is_in_cluster
       failed_when: final_status.rc != 0
+
+    - name: Install ceph-common package
+      apt:
+        name: ceph-common
+        state: present
+        update_cache: yes
+
+    - name: Create symlinks for ceph config and keyring
+      file:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        state: link
+        force: yes
+      loop:
+        - { src: '/var/snap/microceph/current/conf/ceph.conf', dest: '/etc/ceph/ceph.conf' }
+        - { src: '/var/snap/microceph/current/conf/ceph.keyring', dest: '/etc/ceph/ceph.keyring' }
+      failed_when: false
 
     - name: Display cluster status
       debug:
