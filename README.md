@@ -6,6 +6,14 @@ Uses Ceph, Qdrant, Postgres.
 
 # HOWTO
 
+## Ansible
+
+```sh
+docker exec -it ansible ansible-playbook /etc/ansible/site.yml
+```
+
+## SSH
+
 SSH into cluster machines from the admin host.  Uses the dnsmasq lease file to look up cluster nodes.
 
 ```
