@@ -11,7 +11,9 @@
   tasks:
     - name: Install etcd from apt
       apt:
-        name: etcd-server
+        name: 
+          - etcd-server
+          - etcd-client
         state: present
         update_cache: yes
 
@@ -45,6 +47,7 @@
         group: root
         mode: '0644'
       when: etcd_cluster_size | int == 1
+      notify: restart etcd
 
     - name: Configure etcd for multi-node cluster
       copy:
@@ -63,6 +66,7 @@
         group: root
         mode: '0644'
       when: etcd_cluster_size | int > 1
+      notify: restart etcd
 
     - name: Enable etcd service
       systemd:
@@ -77,9 +81,21 @@
       async: 0
       poll: 0
 
+    - name: Wait for etcd to be ready
+      wait_for:
+        port: "{{ etcd_listen_client_port }}"
+        host: "{{ ansible_default_ipv4.address }}"
+        timeout: 30
+
     - name: Display etcd cluster information
       debug:
         msg: |
           etcd cluster configured with {{ etcd_cluster_size }} node(s)
           Node: {{ inventory_hostname }}
           Client URL: http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_client_port }}
+
+  handlers:
+    - name: restart etcd
+      systemd:
+        name: etcd
+        state: restarted

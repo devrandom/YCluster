@@ -1,0 +1,3 @@
+---
+- import_playbook: install-etcd.yml
+- import_playbook: setup-admin-services.yml

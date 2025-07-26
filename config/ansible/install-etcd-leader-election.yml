@@ -6,12 +6,6 @@
     etcd_client_port: 2379
     
   tasks:
-    - name: Install etcdctl if not present
-      apt:
-        name: etcd-client
-        state: present
-        update_cache: yes
-
     - name: Copy etcd leader election script
       copy:
         src: /etc/ansible/scripts/etcd-leader-election.sh
