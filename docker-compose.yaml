@@ -10,6 +10,7 @@ services:
       - NTP_SERVERS=pool.ntp.org
 
   dnsmasq:
+    profiles: ["bootstrap"]
     build:
       context: ./dnsmasq
     container_name: dnsmasq
@@ -22,6 +23,7 @@ services:
       - ./data/dnsmasq.leases:/var/lib/misc/dnsmasq.leases
 
   httpd:
+    profiles: ["bootstrap"]
     build:
       context: ./httpd
     container_name: http
@@ -45,6 +47,7 @@ services:
       - squid_cache:/var/spool/squid
 
   ansible:
+    profiles: ["bootstrap"]
     image: quay.io/ansible/ansible-runner:latest
     container_name: ansible
     restart: unless-stopped
