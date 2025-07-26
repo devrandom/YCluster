@@ -8,13 +8,16 @@ autoinstall:
   network:
     version: 2
     ethernets:
-      eth0:
+      primary:
+        match:
+          driver: "*"
         dhcp4: false
         addresses: [PLACEHOLDER_IP/24]
         gateway4: 10.0.0.1
         nameservers:
           addresses: [10.0.0.1]
           search: [xc]
+        optional: true
   early-commands:
     - |
       MAC=$(ip -j link | jq -r '.[] | select(.operstate == "UP" and .address) | .address' | head -1)

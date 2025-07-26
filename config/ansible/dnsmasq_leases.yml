@@ -1,2 +1,0 @@
-plugin: dnsmasq_leases
-leases_file: /data/dnsmasq.leases
