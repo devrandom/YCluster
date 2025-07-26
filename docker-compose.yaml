@@ -32,7 +32,6 @@ services:
     volumes:
       - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./data:/usr/share/nginx/html:ro
-      - hostname_db:/data
 
   squid:
     image: ubuntu/squid:latest
@@ -61,5 +60,4 @@ services:
 
 volumes:
   squid_cache:
-  hostname_db:
   ansible_data:
