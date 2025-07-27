@@ -84,12 +84,7 @@ def get_all_nodes(client):
     nodes = []
     try:
         # Get all keys with prefix
-        for value, metadata in client.get_prefix(ETCD_PREFIX):
-            key = metadata.key.decode('utf-8')
-            # Skip MAC mappings
-            if '/mac/' in key:
-                continue
-            
+        for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
             try:
                 node_data = json.loads(value)
                 nodes.append(node_data)

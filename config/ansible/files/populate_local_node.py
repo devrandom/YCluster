@@ -10,7 +10,7 @@ import sys
 import os
 import socket
 import subprocess
-from datetime import datetime
+from datetime import datetime, UTC
 
 # Get initial etcd host from environment or use localhost
 INITIAL_ETCD_HOST = os.environ.get('ETCD_HOST', 'localhost:2379')
@@ -92,10 +92,10 @@ def get_local_info():
     
     return {
         'hostname': hostname,
-        'mac': mac,
+        'mac': mac.lower().replace(':', ''),  # Normalize MAC address
         'ip': ip,
         'type': node_type,
-        'allocated_at': datetime.utcnow().isoformat()
+        'allocated_at': datetime.now(UTC).isoformat()
     }
 
 def populate_local_node():
@@ -105,7 +105,7 @@ def populate_local_node():
         node_info = get_local_info()
         
         # Node key
-        key = f"{ETCD_PREFIX}/{node_info['hostname']}"
+        key = f"{ETCD_PREFIX}/by-hostname/{node_info['hostname']}"
         value = json.dumps(node_info)
         
         # Check if entry already exists
@@ -120,8 +120,8 @@ def populate_local_node():
             print(f"Added node {node_info['hostname']} to etcd")
         
         # Always update the MAC to hostname mapping
-        mac_key = f"{ETCD_PREFIX}/mac/{node_info['mac']}"
-        client.put(mac_key, node_info['hostname'])
+        mac_key = f"{ETCD_PREFIX}/by-mac/{node_info['mac']}"
+        client.put(mac_key, json.dumps(node_info))
         print(f"Updated MAC mapping for {node_info['mac']} -> {node_info['hostname']}")
         
         print(f"\nNode info: {json.dumps(node_info, indent=2)}")
