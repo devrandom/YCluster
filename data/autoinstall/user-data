@@ -20,8 +20,10 @@ autoinstall:
         optional: true
   early-commands:
     - |
+      SERVER_IP=$(cat /proc/cmdline | grep -o 'ds=.*s=http://[^/]*' | sed 's/.*http:\/\/\([^\/]*\).*/\1/')
+      echo "$SERVER_IP" > /tmp/server_ip
       MAC=$(ip -j link | jq -r '.[] | select(.operstate == "UP" and .address) | .address' | head -1)
-      ALLOCATION=$(curl -s "http://10.0.0.1/api/allocate?mac=$MAC")
+      ALLOCATION=$(curl -s "http://$SERVER_IP/api/allocate?mac=$MAC")
       HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
       IP=$(echo "$ALLOCATION" | jq -r '.ip')
       sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
@@ -103,9 +105,11 @@ autoinstall:
     # set proxy in environment
     - echo 'http_proxy=http://10.0.0.1:3128' >> /target/etc/environment
     - echo 'https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
+    - echo 'no_proxy=localhost,127.0.0.1,10.0.0.0/24' >> /target/etc/environment
     # add ansible key to root authorized_keys
     - mkdir -p /target/root/.ssh
-    - curl -s http://10.0.0.1/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys
+    - SERVER_IP=$(cat /tmp/server_ip)
+    - curl -s http://$SERVER_IP/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys
     - chmod 700 /target/root/.ssh
     - chmod 600 /target/root/.ssh/authorized_keys
     - chown -R root:root /target/root/.ssh

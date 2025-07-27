@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify
 import os
 import threading
 import time
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -46,17 +47,14 @@ def get_etcd_client():
 def determine_ip_from_hostname(hostname):
     """Generate deterministic IP based on hostname"""
     if hostname.startswith('s'):
-        # Storage nodes: 10.0.0.10-29
         num = int(hostname[1:])
-        return f"10.0.0.{10 + num - 1}"  # s1 = .10, s2 = .11, etc.
+        return f"10.0.0.{10 + num}"  # s1 = .11, s2 = .12, etc.
     elif hostname.startswith('c'):
-        # Compute nodes: 10.0.0.30-99
         num = int(hostname[1:])
-        return f"10.0.0.{30 + num - 1}"  # c1 = .30, c2 = .31, etc.
+        return f"10.0.0.{30 + num}"  # c1 = .31, c2 = .32, etc.
     elif hostname.startswith('m'):
-        # MacOS nodes: 10.0.0.100-109
         num = int(hostname[1:])
-        return f"10.0.0.{100 + num - 1}"
+        return f"10.0.0.{50 + num}"
     return None
 
 def determine_type_from_mac(mac_address):
@@ -153,7 +151,7 @@ def allocate_hostname():
             'type': machine_type,
             'ip': ip_address,
             'mac': normalized_mac,
-            'allocated_at': time.time()
+            'allocated_at': datetime.now(datetime.UTC).isoformat()
         }
         
         # Store in etcd with both lookups
