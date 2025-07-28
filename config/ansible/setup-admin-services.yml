@@ -82,23 +82,24 @@
         dest: /opt/bootstrap-files/{{ item }}
         mode: preserve
       loop:
-        - autoinstall/
         - ansible_ssh_key
         - ansible_ssh_key.pub
       when: bootstrap_files_source != '/opt/bootstrap-files'
 
     - name: Copy etcd-based allocation API
       copy:
-        src: /etc/ansible/files/app_etcd.py
+        src: /opt/infrastructure/config/ansible/files/app_etcd.py
         dest: "{{ admin_services_dir }}/app_etcd.py"
         mode: '0644'
+        remote_src: yes
       notify: restart allocation-api
 
     - name: Copy etcd management scripts to /usr/local/bin
       copy:
-        src: "/etc/ansible/files/{{ item }}"
+        src: "/opt/infrastructure/config/ansible/files/{{ item }}"
         dest: "/usr/local/bin/{{ item }}"
         mode: '0755'
+        remote_src: yes
       loop:
         - populate_local_node.py
         - check_etcd_cluster.py
@@ -352,14 +353,14 @@
 
     - name: Copy autoinstall user-data
       copy:
-        src: /opt/bootstrap-files/autoinstall/user-data
+        src: /opt/infrastructure/data/autoinstall/user-data
         dest: /var/www/html/autoinstall/user-data
         mode: '0644'
         remote_src: yes
 
     - name: Copy autoinstall meta-data
       copy:
-        src: /opt/bootstrap-files/autoinstall/meta-data
+        src: /opt/infrastructure/data/autoinstall/meta-data
         dest: /var/www/html/autoinstall/meta-data
         mode: '0644'
         remote_src: yes
