@@ -17,6 +17,8 @@
           - dnsmasq
           - nginx
           - isc-dhcp-server
+          - ansible-core
+          - git
         state: present
         update_cache: yes
 
@@ -25,6 +27,37 @@
         path: "{{ admin_services_dir }}"
         state: directory
         mode: '0755'
+
+    - name: Clone infrastructure repository
+      git:
+        repo: "{{ ansible_repo_url | default('https://gitlab.com/devrandom01/xcluster.git') }}"
+        dest: /opt/infrastructure
+        version: "{{ ansible_repo_branch | default(omit) }}"
+        force: yes
+
+    - name: Check if /etc/ansible is already correct symlink
+      stat:
+        path: /etc/ansible
+      register: etc_ansible_stat
+
+    - name: Remove /etc/ansible if it's not the correct symlink
+      file:
+        path: /etc/ansible
+        state: absent
+      when: >
+        etc_ansible_stat.stat.exists and 
+        (not etc_ansible_stat.stat.islnk or 
+         etc_ansible_stat.stat.lnk_target != '/opt/infrastructure/config/ansible')
+
+    - name: Create symlink from /etc/ansible to infrastructure config
+      file:
+        src: /opt/infrastructure/config/ansible
+        dest: /etc/ansible
+        state: link
+      when: >
+        not etc_ansible_stat.stat.exists or
+        not etc_ansible_stat.stat.islnk or
+        etc_ansible_stat.stat.lnk_target != '/opt/infrastructure/config/ansible'
 
 
     - name: Copy etcd-based allocation API

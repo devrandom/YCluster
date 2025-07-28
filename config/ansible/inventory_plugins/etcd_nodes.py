@@ -22,10 +22,11 @@ DOCUMENTATION = '''
             default: '/cluster/nodes'
 '''
 
+REQUIREMENTS = ['etcd3']
+
 from ansible.plugins.inventory import BaseInventoryPlugin
 from ansible.errors import AnsibleError
 import json
-import etcd3
 
 
 class InventoryModule(BaseInventoryPlugin):
@@ -35,12 +36,17 @@ class InventoryModule(BaseInventoryPlugin):
         """Return true/false if this is possibly a valid file for this plugin to consume"""
         valid = False
         if super(InventoryModule, self).verify_file(path):
-            if path.endswith(('etcd_nodes.yml', 'etcd_nodes.yaml')):
+            if path.endswith(('_etcd.yml', '_etcd.yaml')):
                 valid = True
         return valid
 
     def parse(self, inventory, loader, path, cache=True):
         """Parse the inventory file and populate the inventory object"""
+        try:
+            import etcd3
+        except ImportError:
+            raise AnsibleError("etcd3 module is required for etcd_nodes inventory plugin")
+            
         super(InventoryModule, self).parse(inventory, loader, path, cache)
 
         # Read configuration
