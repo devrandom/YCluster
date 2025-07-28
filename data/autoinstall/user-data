@@ -23,11 +23,32 @@ autoinstall:
       SERVER_IP=$(cat /proc/cmdline | grep -o 'ds=.*s=http://[^/]*' | sed 's/.*http:\/\/\([^\/]*\).*/\1/')
       echo "$SERVER_IP" > /tmp/server_ip
       MAC=$(ip -j link | jq -r '.[] | select(.operstate == "UP" and .address) | .address' | head -1)
-      ALLOCATION=$(curl -s "http://$SERVER_IP/api/allocate?mac=$MAC")
+      
+      # Fetch allocation with error handling - fail fast if server is unreachable
+      if ! ALLOCATION=$(curl -f -s "http://$SERVER_IP/api/allocate?mac=$MAC"); then
+        echo "ERROR: Failed to get allocation from server $SERVER_IP" >&2
+        exit 1
+      fi
+      
+      # Parse allocation response
       HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
       IP=$(echo "$ALLOCATION" | jq -r '.ip')
+      
+      # Validate we got valid responses
+      if [ "$HOSTNAME" = "null" ] || [ "$IP" = "null" ] || [ -z "$HOSTNAME" ] || [ -z "$IP" ]; then
+        echo "ERROR: Invalid allocation response: $ALLOCATION" >&2
+        exit 1
+      fi
+      
+      # Update autoinstall configuration
       sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
       sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
+      
+      # Download SSH key with error handling
+      if ! curl -f -s "http://$SERVER_IP/ansible_ssh_key.pub" > /tmp/ansible_ssh_key.pub; then
+        echo "ERROR: Failed to download SSH key from server $SERVER_IP" >&2
+        exit 1
+      fi
   ssh:
     install-server: true
     authorized-keys:
@@ -109,8 +130,7 @@ autoinstall:
     # add ansible key to root authorized_keys
     - |
       mkdir -p /target/root/.ssh
-      SERVER_IP=$(cat /tmp/server_ip)
-      curl -s http://$SERVER_IP/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys
+      cat /tmp/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys
       chmod 700 /target/root/.ssh
       chmod 600 /target/root/.ssh/authorized_keys
       chown -R root:root /target/root/.ssh
