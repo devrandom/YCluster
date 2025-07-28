@@ -60,6 +60,33 @@
         etc_ansible_stat.stat.lnk_target != '/opt/infrastructure/config/ansible'
 
 
+    - name: Detect if running from docker container
+      stat:
+        path: /data
+      register: docker_data_dir
+      delegate_to: localhost
+
+    - name: Set file source paths based on environment
+      set_fact:
+        bootstrap_files_source: "{{ '/data' if docker_data_dir.stat.exists else '/opt/bootstrap-files' }}"
+
+    - name: Ensure bootstrap files directory exists
+      file:
+        path: /opt/bootstrap-files
+        state: directory
+        mode: '0755'
+
+    - name: Copy bootstrap files to target node
+      copy:
+        src: "{{ bootstrap_files_source }}/{{ item }}"
+        dest: /opt/bootstrap-files/{{ item }}
+        mode: preserve
+      loop:
+        - autoinstall/
+        - ansible_ssh_key
+        - ansible_ssh_key.pub
+      when: bootstrap_files_source != '/opt/bootstrap-files'
+
     - name: Copy etcd-based allocation API
       copy:
         src: /etc/ansible/files/app_etcd.py
@@ -325,21 +352,50 @@
 
     - name: Copy autoinstall user-data
       copy:
-        src: /data/autoinstall/user-data
+        src: /opt/bootstrap-files/autoinstall/user-data
         dest: /var/www/html/autoinstall/user-data
         mode: '0644'
+        remote_src: yes
 
     - name: Copy autoinstall meta-data
       copy:
-        src: /data/autoinstall/meta-data
+        src: /opt/bootstrap-files/autoinstall/meta-data
         dest: /var/www/html/autoinstall/meta-data
         mode: '0644'
+        remote_src: yes
 
     - name: Copy ansible SSH public key
       copy:
-        src: /data/ansible_ssh_key.pub
+        src: /opt/bootstrap-files/ansible_ssh_key.pub
         dest: /var/www/html/ansible_ssh_key.pub
         mode: '0644'
+        remote_src: yes
+
+    - name: Create .ssh directory for root
+      file:
+        path: /root/.ssh
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+
+    - name: Copy ansible SSH private key to s1
+      copy:
+        src: /opt/bootstrap-files/ansible_ssh_key
+        dest: /root/.ssh/id_ed25519
+        mode: '0600'
+        owner: root
+        group: root
+        remote_src: yes
+
+    - name: Copy ansible SSH public key to s1 .ssh directory
+      copy:
+        src: /opt/bootstrap-files/ansible_ssh_key.pub
+        dest: /root/.ssh/id_ed25519.pub
+        mode: '0644'
+        owner: root
+        group: root
+        remote_src: yes
 
     - name: Create static hosts update script
       copy:
