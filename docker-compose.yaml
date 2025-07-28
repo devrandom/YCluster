@@ -47,7 +47,7 @@ services:
       - squid_cache:/var/spool/squid
 
   ansible:
-    profiles: ["bootstrap"]
+    profiles: ["bootstrap", "ansible"]
     image: quay.io/ansible/ansible-runner:latest
     container_name: ansible
     restart: unless-stopped
