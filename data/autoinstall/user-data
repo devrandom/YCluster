@@ -107,9 +107,10 @@ autoinstall:
     - echo 'https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
     - echo 'no_proxy=localhost,127.0.0.1,10.0.0.0/24' >> /target/etc/environment
     # add ansible key to root authorized_keys
-    - mkdir -p /target/root/.ssh
-    - SERVER_IP=$(cat /tmp/server_ip)
-    - curl -s http://$SERVER_IP/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys
-    - chmod 700 /target/root/.ssh
-    - chmod 600 /target/root/.ssh/authorized_keys
-    - chown -R root:root /target/root/.ssh
+    - |
+      mkdir -p /target/root/.ssh
+      SERVER_IP=$(cat /tmp/server_ip)
+      curl -s http://$SERVER_IP/ansible_ssh_key.pub >> /target/root/.ssh/authorized_keys
+      chmod 700 /target/root/.ssh
+      chmod 600 /target/root/.ssh/authorized_keys
+      chown -R root:root /target/root/.ssh
