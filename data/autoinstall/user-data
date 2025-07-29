@@ -132,7 +132,7 @@ autoinstall:
     - echo 'https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
     - echo 'no_proxy=localhost,127.0.0.1,10.0.0.0/24' >> /target/etc/environment
     # configure grub command line
-    - sed -i 's/^GRUB_CMDLINE_LINUX=".*"/GRUB_CMDLINE_LINUX="text nomodeset i915.modeset=0 vga=0x0317"/' /target/etc/default/grub
+    - sed -i 's/^GRUB_CMDLINE_LINUX=".*"/GRUB_CMDLINE_LINUX="text nomodeset i915.modeset=0 vga=0x031A"/' /target/etc/default/grub
     - curtin in-target --target=/target -- update-grub
     # add ansible key to root authorized_keys
     - |
