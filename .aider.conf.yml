@@ -1,4 +1,5 @@
 read:
   - CONVENTIONS.md
+  - ARCHITECTURE.md
   - docker-compose.yaml
   - config/ansible/site.yml
