@@ -10,7 +10,7 @@ autoinstall:
     ethernets:
       primary:
         match:
-          driver: "*"
+          name: "PLACEHOLDER_INTERFACE"
         dhcp4: false
         addresses: [PLACEHOLDER_IP/24]
         gateway4: 10.0.0.1
@@ -23,6 +23,9 @@ autoinstall:
       SERVER_IP=$(cat /proc/cmdline | grep -o 'ds=.*s=http://[^/]*' | sed 's/.*http:\/\/\([^\/]*\).*/\1/')
       echo "$SERVER_IP" > /tmp/server_ip
       MAC=$(ip -j link | jq -r '.[] | select(.operstate == "UP" and .address) | .address' | head -1)
+      
+      # Get the interface name for the MAC address used for PXE boot
+      INTERFACE=$(ip -j link | jq -r ".[] | select(.address == \"$MAC\") | .ifname")
       
       # Fetch allocation with error handling - fail fast if server is unreachable
       if ! ALLOCATION=$(curl -f -s "http://$SERVER_IP/api/allocate?mac=$MAC"); then
@@ -43,6 +46,7 @@ autoinstall:
       # Update autoinstall configuration
       sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
       sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
+      sed -i "s/name: \"PLACEHOLDER_INTERFACE\"/name: \"$INTERFACE\"/" /autoinstall.yaml
       
       # Download SSH key with error handling
       if ! curl -f -s "http://$SERVER_IP/ansible_ssh_key.pub" > /tmp/ansible_ssh_key.pub; then
@@ -127,6 +131,9 @@ autoinstall:
     - echo 'http_proxy=http://10.0.0.1:3128' >> /target/etc/environment
     - echo 'https_proxy=http://10.0.0.1:3128' >> /target/etc/environment
     - echo 'no_proxy=localhost,127.0.0.1,10.0.0.0/24' >> /target/etc/environment
+    # configure grub command line
+    - sed -i 's/^GRUB_CMDLINE_LINUX=".*"/GRUB_CMDLINE_LINUX="text nomodeset i915.modeset=0 vga=0x0317"/' /target/etc/default/grub
+    - curtin in-target --target=/target -- update-grub
     # add ansible key to root authorized_keys
     - |
       mkdir -p /target/root/.ssh
