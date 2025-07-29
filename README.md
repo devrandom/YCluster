@@ -41,3 +41,16 @@ Host *.xc
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
+
+## AMT Setup
+
+- set the MEBx password (defaults to admin, but the new password needs 8 chars, digit, special char
+- user consent - None
+- network setup / FQDN - *a (i.e. append "a" to the hostname)
+- network setup / DHCP - enabled 
+- network access state - active
+
+Notes:
+
+- on some recent BIOSes, only TLS is supported - port 16993
+
