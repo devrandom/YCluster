@@ -1,0 +1,91 @@
+---
+- name: Install DHCP leader election
+  hosts: core
+  become: yes
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - dnsmasq
+          - python3-etcd3
+        state: present
+
+    - name: Copy DHCP leader election script
+      copy:
+        src: scripts/dhcp-leader-election.sh
+        dest: /usr/local/bin/dhcp-leader-election.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create DHCP leader election systemd service
+      copy:
+        dest: /etc/systemd/system/dhcp-leader-election.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=DHCP Leader Election via etcd
+          After=network.target etcd.service
+          Wants=etcd.service
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/dhcp-leader-election.sh "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_default_ipv4']['address'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          Restart=always
+          RestartSec=5
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Create dnsmasq configuration
+      copy:
+        dest: /etc/dnsmasq.d/dhcp.conf
+        mode: '0644'
+        content: |
+          # DHCP configuration
+          dhcp-authoritative
+          dhcp-range=10.0.0.100,10.0.0.200,12h
+          dhcp-option=3,10.0.0.1
+          dhcp-option=6,10.0.0.1
+          dhcp-option=42,10.0.0.1
+          
+          # DNS configuration
+          local=/xc/
+          domain=xc
+          domain-needed
+          
+          # PXE boot configuration
+          enable-tftp
+          tftp-root=/var/lib/tftpboot
+          dhcp-match=set:efibc,option:client-arch,7
+          dhcp-boot=tag:efibc,EFI/BOOT/grubx64.efi
+          
+          # Store leases in etcd via script
+          dhcp-script=/usr/local/bin/dhcp-lease-script.py
+
+    - name: Copy DHCP lease script for etcd integration
+      copy:
+        src: scripts/dhcp-lease-script.py
+        dest: /usr/local/bin/dhcp-lease-script.py
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Disable default dnsmasq service (will be managed by leader election)
+      systemd:
+        name: dnsmasq
+        enabled: no
+        state: stopped
+      ignore_errors: yes
+
+    - name: Enable DHCP leader election service
+      systemd:
+        name: dhcp-leader-election
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Start DHCP leader election service
+      systemd:
+        name: dhcp-leader-election
+        state: restarted

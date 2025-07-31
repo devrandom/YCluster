@@ -11,14 +11,14 @@ if [ -z "$ETCD_ENDPOINTS" ]; then
     exit 1
 fi
 
-LEADER_KEY="/cluster/leader/app"
+LEADER_KEY="/cluster/leader/dhcp"
 NODE_ID=$(hostname)
-LOCK_FILE="/var/run/etcd-leader.lock"
-LEASE_FILE="/var/run/etcd-lease.lease"
+LOCK_FILE="/var/run/dhcp-leader.lock"
+LEASE_FILE="/var/run/dhcp-lease.lease"
 
 # Function to cleanup on exit
 cleanup() {
-    echo "Cleaning up cluster leader election"
+    echo "Cleaning up DHCP leader election"
     if [ -f "$LEASE_FILE" ]; then
         LEASE_ID=$(cat "$LEASE_FILE")
         timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" lease revoke "$LEASE_ID" || true
@@ -26,8 +26,8 @@ cleanup() {
     fi
     rm -f "$LOCK_FILE"
     
-    # Stop all services if we were the leader
-    stop_all_services
+    # Stop dnsmasq if we were the leader
+    stop_dhcp_service
     exit 0
 }
 
@@ -48,14 +48,14 @@ attempt_leadership() {
     echo result: $res
     if [[ "$res" == "SUCCESS" ]];
     then
-        echo "Acquired cluster leadership"
+        echo "Acquired DHCP leadership"
         echo "$LEASE_ID" > "$LEASE_FILE"
         touch "$LOCK_FILE"
         return 0
     else
         # Failed to acquire, check who is the current leader
         CURRENT_LEADER=$(timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" get "$LEADER_KEY" --print-value-only 2>/dev/null || echo "unknown")
-        echo "Leadership held by $CURRENT_LEADER"
+        echo "DHCP leadership held by $CURRENT_LEADER"
         timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" lease revoke "$LEASE_ID"
         return 1
     fi
@@ -68,7 +68,7 @@ renew_lease() {
         if timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" lease keep-alive "$LEASE_ID" --once; then
             return 0
         else
-            echo "Failed to renew lease, lost leadership"
+            echo "Failed to renew lease, lost DHCP leadership"
             rm -f "$LEASE_FILE" "$LOCK_FILE"
             return 1
         fi
@@ -76,28 +76,32 @@ renew_lease() {
     return 1
 }
 
-# Function to start all services
-start_all_services() {
-    echo "Starting all services as cluster leader"
+# Function to restore DHCP leases from etcd
+restore_dhcp_leases() {
+    echo "Restoring DHCP leases from etcd"
     
-    # Start PostgreSQL
-    echo "Starting PostgreSQL..."
-    systemctl start postgres-rbd || {
-        echo "Failed to start postgres-rbd service"
-    }
+    # Use the Python script to restore leases
+    ETCD_HOSTS="${ETCD_ENDPOINTS//http:\/\//}" /usr/local/bin/dhcp-lease-script.py restore
+}
+
+# Function to start DHCP service
+start_dhcp_service() {
+    echo "Starting DHCP service as leader"
     
-    # Start Qdrant
-    echo "Starting Qdrant..."
-    systemctl start qdrant-rbd || {
-        echo "Failed to start qdrant-rbd service"
+    # Restore leases first
+    restore_dhcp_leases
+    
+    # Start dnsmasq
+    echo "Starting dnsmasq..."
+    systemctl start dnsmasq || {
+        echo "Failed to start dnsmasq service"
     }
 }
 
-# Function to stop all services
-stop_all_services() {
-    echo "Stopping all services, no longer cluster leader"
-    systemctl stop postgres-rbd || true
-    systemctl stop qdrant-rbd || true
+# Function to stop DHCP service
+stop_dhcp_service() {
+    echo "Stopping DHCP service, no longer leader"
+    systemctl stop dnsmasq || true
 }
 
 # Main loop
@@ -107,10 +111,10 @@ while true; do
         # Try to become leader
         if attempt_leadership; then
             IS_LEADER=true
-            start_all_services
+            start_dhcp_service
         else
-            # Not leader, ensure services are stopped
-            stop_all_services
+            # Not leader, ensure service is stopped
+            stop_dhcp_service
             sleep 5
             continue
         fi
@@ -118,7 +122,7 @@ while true; do
         # We are leader, try to renew lease
         if ! renew_lease; then
             IS_LEADER=false
-            stop_all_services
+            stop_dhcp_service
             continue
         fi
     fi
