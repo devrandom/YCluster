@@ -8,4 +8,5 @@
 - import_playbook: install-qdrant.yml
 - import_playbook: install-etcd.yml
 - import_playbook: install-etcd-leader-election.yml
+- import_playbook: setup-admin-services.yml
 - import_playbook: configure-ntp.yml

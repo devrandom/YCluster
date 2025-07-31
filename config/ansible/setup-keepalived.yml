@@ -72,11 +72,6 @@
               exit 1
           fi
           
-          # Check if dnsmasq is running
-          if ! systemctl is-active --quiet dnsmasq; then
-              exit 1
-          fi
-          
           exit 0
 
     - name: Create VIP notification script

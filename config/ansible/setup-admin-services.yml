@@ -1,4 +1,6 @@
 ---
+- import_playbook: install-dhcp-leader-election.yml
+
 - name: Setup admin services on storage nodes s1-s3
   hosts: s1,s2,s3
   become: yes
@@ -213,43 +215,8 @@
           conf-dir=/etc/dnsmasq.d/,*.conf
         backup: yes
 
-    - name: Configure dnsmasq for DHCP
-      copy:
-        dest: /etc/dnsmasq.d/dhcp.conf
-        content: |
-          # Bind to specific interface and address
-          interface={{ ansible_default_ipv4.interface }}
-          bind-interfaces
-          listen-address={{ ansible_default_ipv4.address }}
-          
-          # Enable DNS service
-          port=53
-          
-          # DHCP configuration
-          dhcp-range={{ ansible_default_ipv4.interface }},10.0.0.100,10.0.0.200,12h
-          dhcp-option=3,10.0.0.1
-          dhcp-option=6,10.0.0.1
-          
-          # Enable TFTP
-          enable-tftp
-          tftp-root=/var/lib/tftpboot
-          
-          # PXE boot options
-          dhcp-match=set:efibc,option:client-arch,7
-          dhcp-boot=tag:efibc,EFI/BOOT/grubx64.efi
-          
-          # Domain settings
-          local=/xc/
-          domain=xc
-          expand-hosts
-          
-          # Dynamic config reload
-          dhcp-hostsfile=/etc/dnsmasq.d/static-hosts.conf
-          
-          # Logging
-          log-dhcp
-          log-facility=/var/log/dnsmasq.log
-      notify: restart dnsmasq
+    # Note: dnsmasq configuration is handled by the DHCP leader election playbook
+    # The leader election service will manage dnsmasq lifecycle
 
     - name: Create empty static hosts file for dnsmasq
       copy:
@@ -407,12 +374,17 @@
           # Update static DHCP hosts from etcd
           
           TEMP_FILE=$(mktemp)
+          CONFIG_FILE="/etc/dnsmasq.d/static-hosts.conf"
           
           if curl -s http://localhost/api/dhcp-config > "$TEMP_FILE" 2>/dev/null; then
               if [ -s "$TEMP_FILE" ]; then
-                  cp "$TEMP_FILE" /etc/dnsmasq.d/static-hosts.conf
+                  # Only reload if the configuration has actually changed
+                  if ! cmp -s "$TEMP_FILE" "$CONFIG_FILE"; then
+                      echo "DHCP configuration changed, updating and reloading dnsmasq"
+                      cp "$TEMP_FILE" "$CONFIG_FILE"
+                      systemctl reload dnsmasq
+                  fi
                   rm -f "$TEMP_FILE"
-                  systemctl reload dnsmasq
               else
                   rm -f "$TEMP_FILE"
               fi
@@ -454,7 +426,6 @@
       loop:
         - allocation-api
         - nginx
-        - dnsmasq
         - update-dhcp-hosts.timer
 
     - name: Wait for etcd to be ready
@@ -483,9 +454,4 @@
     - name: restart nginx
       systemd:
         name: nginx
-        state: restarted
-
-    - name: restart dnsmasq
-      systemd:
-        name: dnsmasq
         state: restarted
