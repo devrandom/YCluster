@@ -4,3 +4,4 @@
 - there is no need to load the ansible inventory file, it's loaded by default
 - initial bootstrap is from an admin laptop of the s1 core node (autoinstall and ansible playbooks).  docker compose is used.
 - further bootstrap is from s1 to s2, s3 (autoinstall and ansible).  no docker is involved here.
+- keep scripts outside ansible playbooks - they should be in the scripts directory and installed by the playbook from there

@@ -11,7 +11,7 @@ if [ -z "$ETCD_ENDPOINTS" ]; then
     exit 1
 fi
 
-LEADER_KEY="/cluster/leader"
+LEADER_KEY="/cluster/leader/app"
 NODE_ID=$(hostname)
 LOCK_FILE="/var/run/etcd-leader.lock"
 LEASE_FILE="/var/run/etcd-lease.lease"
