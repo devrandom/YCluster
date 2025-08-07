@@ -23,7 +23,7 @@ services:
       - ./data/dnsmasq.leases:/var/lib/misc/dnsmasq.leases
 
   httpd:
-    profiles: ["bootstrap"]
+    profiles: ["bootstrap", "ansible"]
     build:
       context: ./httpd
     container_name: http
