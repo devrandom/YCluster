@@ -3,7 +3,6 @@
   hosts: all
   become: yes
   vars:
-    etcd_version: "3.5.9"
     etcd_data_dir: "/var/lib/etcd"
     etcd_listen_client_port: 2379
     etcd_listen_peer_port: 2380
@@ -23,12 +22,32 @@
         state: directory
         owner: etcd
         group: etcd
-        mode: '0755'
+        mode: '0700'
 
     - name: Determine cluster configuration
       set_fact:
         etcd_cluster_size: "{{ groups['all'] | length }}"
-        etcd_initial_cluster: "{{ groups['all'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['all'] | map('extract', hostvars, 'ansible_default_ipv4') | map(attribute='address')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
+        etcd_initial_cluster: "{{ groups['all'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['all'] | map('extract', hostvars, 'ansible_host')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
+        etcd_first_node: "{{ groups['all'][0] }}"
+
+    - name: Check if etcd data directory exists and has data
+      stat:
+        path: "{{ etcd_data_dir }}/member"
+      register: etcd_data_exists
+
+    - name: Check if any etcd cluster already exists using etcdctl
+      shell: |
+        ETCDCTL_ENDPOINTS="http://{{ hostvars[etcd_first_node]['ansible_host'] }}:2379" \
+        etcdctl member list --write-out=json
+      register: etcd_member_check
+      failed_when: false
+      changed_when: false
+      when: inventory_hostname != etcd_first_node
+
+    - name: Determine cluster state
+      set_fact:
+        etcd_cluster_state: "{{ 'existing' if (inventory_hostname != etcd_first_node and etcd_member_check.rc == 0) else 'new' }}"
+        etcd_initial_cluster_state: "{{ 'existing' if (inventory_hostname != etcd_first_node and etcd_member_check.rc == 0) else 'new' }}"
 
     - name: Configure etcd for single node
       copy:
@@ -37,36 +56,87 @@
           ETCD_NAME="{{ inventory_hostname }}"
           ETCD_DATA_DIR="{{ etcd_data_dir }}"
           ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
-          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_host }}:{{ etcd_listen_client_port }}"
           ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
-          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_peer_port }}"
-          ETCD_INITIAL_CLUSTER="{{ inventory_hostname }}=http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_CLUSTER="{{ inventory_hostname }}=http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
           ETCD_INITIAL_CLUSTER_STATE="new"
           ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
         owner: root
         group: root
         mode: '0644'
-      when: etcd_cluster_size | int == 1
+      when: etcd_cluster_size | int == 1 and not etcd_data_exists.stat.exists
       notify: restart etcd
 
-    - name: Configure etcd for multi-node cluster
+    - name: Configure etcd for multi-node cluster (new cluster)
       copy:
         dest: /etc/default/etcd
         content: |
           ETCD_NAME="{{ inventory_hostname }}"
           ETCD_DATA_DIR="{{ etcd_data_dir }}"
           ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
-          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_host }}:{{ etcd_listen_client_port }}"
           ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
-          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
           ETCD_INITIAL_CLUSTER="{{ etcd_initial_cluster }}"
           ETCD_INITIAL_CLUSTER_STATE="new"
           ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
         owner: root
         group: root
         mode: '0644'
-      when: etcd_cluster_size | int > 1
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'new' and not etcd_data_exists.stat.exists
       notify: restart etcd
+
+
+    - name: Get existing cluster members for joining node
+      shell: |
+        ETCDCTL_ENDPOINTS="http://{{ hostvars[etcd_first_node]['ansible_host'] }}:2379" \
+        etcdctl member list --write-out=json
+      register: existing_members_json
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+      delegate_to: "{{ etcd_first_node }}"
+
+    - name: Build initial cluster string for joining node
+      set_fact:
+        etcd_join_cluster: "{{ (existing_members_json.stdout | from_json).members | map(attribute='name') | zip((existing_members_json.stdout | from_json).members | map(attribute='peerURLs') | map('first')) | map('join', '=') | join(',') }},{{ inventory_hostname }}=http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+
+    - name: Configure etcd for joining existing cluster
+      copy:
+        dest: /etc/default/etcd
+        content: |
+          ETCD_NAME="{{ inventory_hostname }}"
+          ETCD_DATA_DIR="{{ etcd_data_dir }}"
+          ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_host }}:{{ etcd_listen_client_port }}"
+          ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_CLUSTER="{{ etcd_join_cluster }}"
+          ETCD_INITIAL_CLUSTER_STATE="existing"
+          ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+        owner: root
+        group: root
+        mode: '0644'
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+      notify: restart etcd
+
+    - name: Add member to existing etcd cluster using etcdctl
+      shell: |
+        ETCDCTL_ENDPOINTS="http://{{ hostvars[etcd_first_node]['ansible_host'] }}:2379" \
+        etcdctl member add "{{ inventory_hostname }}" \
+        --peer-urls="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+      register: add_member_result
+      failed_when: add_member_result.rc != 0
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+      delegate_to: "{{ etcd_first_node }}"
+
+    - name: Wait a moment after adding member
+      pause:
+        seconds: 2
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+
+    - name: Flush handlers to restart etcd immediately
+      meta: flush_handlers
 
     - name: Enable etcd service
       systemd:
@@ -84,7 +154,7 @@
     - name: Wait for etcd to be ready
       wait_for:
         port: "{{ etcd_listen_client_port }}"
-        host: "{{ ansible_default_ipv4.address }}"
+        host: "{{ ansible_host }}"
         timeout: 30
 
     - name: Display etcd cluster information
@@ -92,7 +162,7 @@
         msg: |
           etcd cluster configured with {{ etcd_cluster_size }} node(s)
           Node: {{ inventory_hostname }}
-          Client URL: http://{{ ansible_default_ipv4.address }}:{{ etcd_listen_client_port }}
+          Client URL: http://{{ ansible_host }}:{{ etcd_listen_client_port }}
 
   handlers:
     - name: restart etcd

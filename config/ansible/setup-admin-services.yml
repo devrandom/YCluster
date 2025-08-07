@@ -116,7 +116,7 @@
 
           [Service]
           Type=simple
-          Environment="ETCD_HOST={{ ansible_default_ipv4.address }}:2379"
+          Environment="ETCD_HOST={{ ansible_host }}:2379"
           ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app_etcd.py
           Restart=always
           RestartSec=5
@@ -243,12 +243,27 @@
         path: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
       register: iso_file
 
-    - name: Download Ubuntu ISO for netboot files
+    - name: Check if Ubuntu ISO exists on ansible host
+      stat:
+        path: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+      register: ansible_host_iso
+      delegate_to: localhost
+      when: not iso_file.stat.exists
+
+    - name: Copy Ubuntu ISO from ansible host
+      copy:
+        src: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+        dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+        mode: '0644'
+      when: not iso_file.stat.exists and ansible_host_iso.stat.exists
+      register: iso_copy_result
+
+    - name: Download Ubuntu ISO for netboot files (fallback)
       get_url:
         url: http://10.0.0.1/ubuntu-24.04.2-live-server-amd64.iso
         dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
         mode: '0644'
-      when: not iso_file.stat.exists
+      when: not iso_file.stat.exists and (not ansible_host_iso.stat.exists or iso_copy_result is failed)
 
     - name: Install required packages for EFI extraction
       apt:
@@ -301,12 +316,12 @@
           }
 
           menuentry "Ubuntu 24.04 Server Autoinstall" {
-              linux /ubuntu/vmlinuz vga=0x31A text nomodeset ip=dhcp url=http://{{ ansible_default_ipv4.address }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso autoinstall ds='nocloud-net;s=http://{{ ansible_default_ipv4.address }}/autoinstall/' cloud-config-url=/dev/null
+              linux /ubuntu/vmlinuz vga=0x31A text nomodeset ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso autoinstall ds='nocloud-net;s=http://{{ ansible_host }}/autoinstall/' cloud-config-url=/dev/null
               initrd /ubuntu/initrd
           }
           
           menuentry "Ubuntu 24.04 Server Manual Install" {
-              linux /ubuntu/vmlinuz vga=0x31A text nomodeset ip=dhcp url=http://{{ ansible_default_ipv4.address }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+              linux /ubuntu/vmlinuz vga=0x31A text nomodeset ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
               initrd /ubuntu/initrd
           }
 
@@ -430,13 +445,13 @@
     - name: Wait for etcd to be ready
       wait_for:
         port: 2379
-        host: "{{ ansible_default_ipv4.address }}"
+        host: "{{ ansible_host }}"
         timeout: 30
 
     - name: Populate local node in etcd
       command: "/usr/local/bin/populate_local_node.py"
       environment:
-        ETCD_HOST: "{{ ansible_default_ipv4.address }}:2379"
+        ETCD_HOST: "{{ ansible_host }}:2379"
       register: populate_result
       changed_when: "'Added node' in populate_result.stdout"
 
