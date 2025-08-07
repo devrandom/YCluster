@@ -18,6 +18,11 @@ autoinstall:
           addresses: [10.0.0.1]
           search: [xc]
         optional: true
+      other:
+        match:
+          name: "!PLACEHOLDER_INTERFACE"
+        dhcp4: true
+        optional: true
   early-commands:
     - |
       SERVER_IP=$(cat /proc/cmdline | grep -o 'ds=.*s=http://[^/]*' | sed 's/.*http:\/\/\([^\/]*\).*/\1/')
@@ -47,6 +52,7 @@ autoinstall:
       sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
       sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
       sed -i "s/name: \"PLACEHOLDER_INTERFACE\"/name: \"$INTERFACE\"/" /autoinstall.yaml
+      sed -i "s/name: \"\!PLACEHOLDER_INTERFACE\"/name: \"\!$INTERFACE\"/" /autoinstall.yaml
       
       # Download SSH key with error handling
       if ! curl -f -s "http://$SERVER_IP/ansible_ssh_key.pub" > /tmp/ansible_ssh_key.pub; then
