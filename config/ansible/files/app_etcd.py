@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 
 app = Flask(__name__)
 
@@ -151,7 +151,7 @@ def allocate_hostname():
             'type': machine_type,
             'ip': ip_address,
             'mac': normalized_mac,
-            'allocated_at': datetime.now(datetime.UTC).isoformat()
+            'allocated_at': datetime.now(UTC).isoformat()
         }
         
         # Store in etcd with both lookups
