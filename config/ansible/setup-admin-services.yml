@@ -86,7 +86,6 @@
       loop:
         - ansible_ssh_key
         - ansible_ssh_key.pub
-      when: bootstrap_files_source != '/opt/bootstrap-files'
 
     - name: Copy etcd-based allocation API
       copy:
