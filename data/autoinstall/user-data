@@ -51,9 +51,8 @@ autoinstall:
       # Update autoinstall configuration
       sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
       sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
-      sed -i "s/name: \"PLACEHOLDER_INTERFACE\"/name: \"$INTERFACE\"/" /autoinstall.yaml
-      sed -i "s/name: \"\!PLACEHOLDER_INTERFACE\"/name: \"\!$INTERFACE\"/" /autoinstall.yaml
-      
+      sed -i "s/PLACEHOLDER_INTERFACE/$INTERFACE/" /autoinstall.yaml
+
       # Download SSH key with error handling
       if ! curl -f -s "http://$SERVER_IP/ansible_ssh_key.pub" > /tmp/ansible_ssh_key.pub; then
         echo "ERROR: Failed to download SSH key from server $SERVER_IP" >&2
