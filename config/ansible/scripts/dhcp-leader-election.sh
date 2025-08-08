@@ -96,32 +96,21 @@ renew_lease() {
     return 1
 }
 
-# Function to restore DHCP leases from etcd
-restore_dhcp_leases() {
-    echo "Restoring DHCP leases from etcd"
-    
-    # Use the Python script to restore leases
-    ETCD_HOSTS="${ETCD_ENDPOINTS//http:\/\//}" /usr/local/bin/dhcp-lease-script.py restore
-}
-
 # Function to start DHCP service
 start_dhcp_service() {
     echo "Starting DHCP service as leader"
     
-    # Restore leases first
-    restore_dhcp_leases
-    
-    # Start dnsmasq
-    echo "Starting dnsmasq..."
-    systemctl start dnsmasq || {
-        echo "Failed to start dnsmasq service"
+    # Start scapy-based DHCP server
+    echo "Starting DHCP server..."
+    systemctl start dhcp-server || {
+        echo "Failed to start DHCP server service"
     }
 }
 
 # Function to stop DHCP service
 stop_dhcp_service() {
     echo "Stopping DHCP service, no longer leader"
-    systemctl stop dnsmasq || true
+    systemctl stop dhcp-server || true
 }
 
 # Main loop
