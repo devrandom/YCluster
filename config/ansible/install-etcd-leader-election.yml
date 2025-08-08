@@ -1,11 +1,17 @@
 ---
 - name: Install etcd leader election for PostgreSQL and Qdrant
-  hosts: storage
+  hosts: core
   become: yes
   vars:
     etcd_client_port: 2379
     
   tasks:
+    - name: Install etcd client
+      apt:
+        name: etcd-client
+        state: present
+        update_cache: yes
+
     - name: Copy etcd leader election script
       copy:
         src: /etc/ansible/scripts/etcd-leader-election.sh
@@ -19,12 +25,12 @@
         content: |
           [Unit]
           Description=Cluster Leader Election via etcd
-          After=network.target etcd.service
+          After=network-online.target etcd.service
           Wants=etcd.service
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/bin/etcd-leader-election.sh "{% for host in groups['storage'] %}http://{{ hostvars[host]['ansible_default_ipv4']['address'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          ExecStart=/usr/local/bin/etcd-leader-election.sh "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           Restart=always
           RestartSec=5
           User=root

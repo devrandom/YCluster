@@ -18,7 +18,6 @@
           - python3-protobuf
           - dnsmasq
           - nginx
-          - isc-dhcp-server
           - ansible-core
           - git
         state: present
@@ -116,7 +115,7 @@
 
           [Service]
           Type=simple
-          Environment="ETCD_HOST={{ ansible_host }}:2379"
+          Environment="ETCD_HOSTS={% for h in groups['core'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app_etcd.py
           Restart=always
           RestartSec=5

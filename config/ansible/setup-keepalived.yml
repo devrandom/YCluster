@@ -33,7 +33,7 @@
               state BACKUP
               interface {{ vip_interface }}
               virtual_router_id 51
-              priority {{ 100 - (groups['all'].index(inventory_hostname) * 10) }}
+              priority {{ {'s1':110,'s2':100,'s3':90}.get(inventory_hostname,80) }}
               advert_int 1
               
               authentication {

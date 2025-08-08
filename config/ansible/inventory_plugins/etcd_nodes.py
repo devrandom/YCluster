@@ -27,6 +27,7 @@ REQUIREMENTS = ['etcd3']
 from ansible.plugins.inventory import BaseInventoryPlugin
 from ansible.errors import AnsibleError
 import json
+import re
 
 
 class InventoryModule(BaseInventoryPlugin):
@@ -45,7 +46,8 @@ class InventoryModule(BaseInventoryPlugin):
         try:
             import etcd3
         except ImportError:
-            raise AnsibleError("etcd3 module is required for etcd_nodes inventory plugin")
+            self.display.warning("etcd3 module is required for etcd_nodes inventory plugin; skipping etcd inventory")
+            return
             
         super(InventoryModule, self).parse(inventory, loader, path, cache)
 
@@ -67,11 +69,13 @@ class InventoryModule(BaseInventoryPlugin):
                 continue
         
         if not etcd_client:
-            raise AnsibleError(f"Could not connect to any etcd host: {etcd_hosts}")
+            self.display.warning(f"Could not connect to any etcd host: {etcd_hosts}; skipping etcd inventory")
+            return
 
         # Create groups
         self.inventory.add_group('storage')
         self.inventory.add_group('compute')
+        self.inventory.add_group('core')
         self.inventory.add_group('all_nodes')
 
         # Read allocations from etcd
@@ -104,6 +108,9 @@ class InventoryModule(BaseInventoryPlugin):
                         if not self.inventory.get_group('other'):
                             self.inventory.add_group('other')
                         self.inventory.add_child('other', hostname)
-                        
+                    
+                    # Add to core group if matches core naming (s1-s3)
+                    if re.fullmatch(r's[1-3]', hostname):
+                        self.inventory.add_child('core', hostname)
                 except Exception as e:
                     self.display.warning(f"Failed to parse allocation: {e}")

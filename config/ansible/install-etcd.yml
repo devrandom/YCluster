@@ -1,6 +1,6 @@
 ---
 - name: Install and configure etcd
-  hosts: all
+  hosts: core
   become: yes
   vars:
     etcd_data_dir: "/var/lib/etcd"
@@ -26,9 +26,9 @@
 
     - name: Determine cluster configuration
       set_fact:
-        etcd_cluster_size: "{{ groups['all'] | length }}"
-        etcd_initial_cluster: "{{ groups['all'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['all'] | map('extract', hostvars, 'ansible_host')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
-        etcd_first_node: "{{ groups['all'][0] }}"
+        etcd_cluster_size: "{{ groups['core'] | length }}"
+        etcd_initial_cluster: "{{ groups['core'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['core'] | map('extract', hostvars, 'ansible_host')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
+        etcd_first_node: "{{ groups['core'][0] }}"
 
     - name: Check if etcd data directory exists and has data
       stat:

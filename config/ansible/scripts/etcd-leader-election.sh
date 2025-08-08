@@ -33,6 +33,26 @@ cleanup() {
 
 trap cleanup SIGTERM SIGINT EXIT
 
+# Wait for etcd endpoints to be reachable before attempting election
+wait_for_etcd() {
+    echo "Waiting for etcd endpoints to become reachable..."
+    local attempts=0
+    local max_attempts=12
+    local IFS=','
+
+    while [ $attempts -lt $max_attempts ]; do
+        for ep in $ETCD_ENDPOINTS; do
+            if timeout 3s etcdctl --endpoints="$ep" endpoint health >/dev/null 2>&1; then
+                echo "etcd endpoint $ep is healthy"
+                return 0
+            fi
+        done
+        attempts=$((attempts + 1))
+        sleep 2
+    done
+    echo "Proceeding despite etcd health check failure"
+}
+
 # Function to attempt leadership
 attempt_leadership() {
     # Create a lease
@@ -103,6 +123,7 @@ stop_all_services() {
 # Main loop
 IS_LEADER=false
 while true; do
+    wait_for_etcd
     if [ "$IS_LEADER" = "false" ]; then
         # Try to become leader
         if attempt_leadership; then
