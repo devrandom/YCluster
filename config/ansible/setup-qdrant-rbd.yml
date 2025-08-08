@@ -1,5 +1,5 @@
-- name: Setup Qdrant RBD image on storage nodes
-  hosts: storage
+- name: Setup Qdrant RBD image on core nodes
+  hosts: core
   become: yes
   tasks:
     - name: Check if MicroCeph is installed

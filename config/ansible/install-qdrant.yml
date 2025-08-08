@@ -1,6 +1,6 @@
 ---
-- name: Install Qdrant on storage nodes
-  hosts: storage
+- name: Install Qdrant on core nodes
+  hosts: core
   become: yes
   tasks:
     - name: Install required packages

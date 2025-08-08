@@ -128,7 +128,7 @@ def populate_local_node():
         existing = client.get(key)
         if existing[0] is not None:
             print(f"Node {node_info['hostname']} already exists in etcd")
-            existing_data = json.loads(existing[0])
+            existing_data = json.loads(existing[0].decode('utf-8'))
             print(f"Existing entry: {json.dumps(existing_data, indent=2)}")
         else:
             # Put the node data
