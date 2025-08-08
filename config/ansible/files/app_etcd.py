@@ -301,6 +301,33 @@ def get_dhcp_config():
     else:
         return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
 
+@app.route('/api/hosts')
+def get_hosts():
+    """Generate hosts file format from etcd allocations"""
+    try:
+        client = get_etcd_client()
+    except Exception as e:
+        return f"# etcd connection failed: {str(e)}\n", 503
+    
+    hosts_entries = []
+    
+    # Get all allocations
+    for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
+        if value:
+            try:
+                allocation = json.loads(value.decode())
+                hostname = allocation['hostname']
+                ip = allocation['ip']
+                
+                hosts_entries.append(f"{ip} {hostname} {hostname}.xc")
+            except:
+                pass
+    
+    if hosts_entries:
+        return '\n'.join(sorted(hosts_entries)) + '\n', 200, {'Content-Type': 'text/plain'}
+    else:
+        return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
+
 @app.route('/api/health')
 def health():
     """Health check endpoint"""

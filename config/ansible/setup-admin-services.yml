@@ -103,6 +103,7 @@
       loop:
         - populate_local_node.py
         - check_etcd_cluster.py
+        - lease-manager.py
 
     - name: Create systemd service for allocation API
       copy:
@@ -211,6 +212,8 @@
           # Main dnsmasq configuration
           # All configuration is in /etc/dnsmasq.d/
           conf-dir=/etc/dnsmasq.d/,*.conf
+          # Use additional hosts file for static DNS entries
+          addn-hosts=/etc/static-hosts
         backup: yes
 
     # Note: dnsmasq configuration is handled by the DHCP leader election playbook
@@ -218,7 +221,7 @@
 
     - name: Create empty static hosts file for dnsmasq
       copy:
-        dest: /etc/dnsmasq.d/static-hosts.conf
+        dest: /etc/static-hosts
         content: ""
         force: no
         owner: root
@@ -384,17 +387,17 @@
         mode: '0755'
         content: |
           #!/bin/bash
-          # Update static DHCP hosts from etcd
+          # Update static DNS hosts from etcd
           
           TEMP_FILE=$(mktemp)
-          CONFIG_FILE="/etc/dnsmasq.d/static-hosts.conf"
+          HOSTS_FILE="/etc/static-hosts"
           
-          if curl -s http://localhost/api/dhcp-config > "$TEMP_FILE" 2>/dev/null; then
+          if curl -s http://localhost/api/hosts > "$TEMP_FILE" 2>/dev/null; then
               if [ -s "$TEMP_FILE" ]; then
                   # Only reload if the configuration has actually changed
-                  if ! cmp -s "$TEMP_FILE" "$CONFIG_FILE"; then
-                      echo "DHCP configuration changed, updating and reloading dnsmasq"
-                      cp "$TEMP_FILE" "$CONFIG_FILE"
+                  if ! cmp -s "$TEMP_FILE" "$HOSTS_FILE"; then
+                      echo "DNS hosts configuration changed, updating and reloading dnsmasq"
+                      cp "$TEMP_FILE" "$HOSTS_FILE"
                       systemctl reload dnsmasq
                   fi
                   rm -f "$TEMP_FILE"
