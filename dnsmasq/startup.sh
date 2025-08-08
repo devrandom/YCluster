@@ -45,7 +45,7 @@ exec /usr/sbin/dnsmasq \
     --dhcp-option=42,10.0.0.1 \
     --listen-address=10.0.0.1 \
     --bind-interfaces \
-    --dhcp-range=10.0.0.100,10.0.0.200 \
+    --dhcp-range=10.0.0.200,10.0.0.249,12h \
     --enable-tftp \
     --tftp-root=/var/lib/tftpboot \
     --local=/xc/ \

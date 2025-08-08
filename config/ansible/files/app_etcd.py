@@ -44,18 +44,59 @@ def get_etcd_client():
     
     raise Exception("Could not connect to any etcd host")
 
+# IP allocation configuration (avoiding DHCP range 10.0.0.100-200)
+IP_RANGES = {
+    's': {'base': 10, 'max': 20},    # Storage: 10.0.0.31-50 (s1-s20)
+    'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
+    'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.71-90 (m1-m20)
+}
+
+# AMT IP offset from main IP (e.g., s1 = 10.0.0.31, s1a = 10.0.0.131)
+AMT_IP_OFFSET = 100
+
 def determine_ip_from_hostname(hostname):
     """Generate deterministic IP based on hostname"""
-    if hostname.startswith('s'):
-        num = int(hostname[1:])
-        return f"10.0.0.{10 + num}"  # s1 = .11, s2 = .12, etc.
-    elif hostname.startswith('c'):
-        num = int(hostname[1:])
-        return f"10.0.0.{30 + num}"  # c1 = .31, c2 = .32, etc.
-    elif hostname.startswith('m'):
-        num = int(hostname[1:])
-        return f"10.0.0.{50 + num}"
-    return None
+    if not hostname:
+        return None
+    
+    # Check if this is an AMT hostname (ends with 'a')
+    is_amt = hostname.endswith('a')
+
+    prefix = hostname[0]
+    if is_amt:
+        try:
+            num = int(hostname[1:-1])
+        except ValueError:
+            return None
+    else:
+        try:
+            num = int(hostname[1:])
+        except ValueError:
+            return None
+    
+    # Get IP range configuration for base node type
+    if prefix not in IP_RANGES:
+        return None
+    
+    config = IP_RANGES[prefix]
+    
+    # Validate number is within range
+    if num < 1 or num > config['max']:
+        raise ValueError(f"Node number {num} for prefix '{prefix}' exceeds range 1-{config['max']}")
+    
+    # Calculate base IP address
+    base_ip = config['base'] + num
+    
+    if is_amt:
+        # AMT interface: add offset within same subnet
+        amt_ip = base_ip + AMT_IP_OFFSET
+        # Ensure we stay within valid host range (1-254)
+        if amt_ip < 1 or amt_ip > 254:
+            raise ValueError(f"AMT IP offset {amt_ip} exceeds valid range 1-254")
+        return f"10.0.0.{amt_ip}"
+    else:
+        # Regular interface
+        return f"10.0.0.{base_ip}"
 
 def determine_type_from_mac(mac_address):
     """Determine machine type based on MAC address prefix"""
