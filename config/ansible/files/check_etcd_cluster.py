@@ -86,7 +86,7 @@ def get_all_nodes(client):
         # Get all keys with prefix
         for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
             try:
-                node_data = json.loads(value)
+                node_data = json.loads(value.decode('utf-8'))
                 nodes.append(node_data)
             except json.JSONDecodeError:
                 continue

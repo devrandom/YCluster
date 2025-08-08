@@ -1,6 +1,6 @@
 ---
-- name: Install PostgreSQL on storage nodes
-  hosts: storage
+- name: Install PostgreSQL on core nodes
+  hosts: core
   become: yes
   tasks:
     - name: Install PostgreSQL packages

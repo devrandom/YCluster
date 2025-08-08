@@ -8,6 +8,7 @@
         name:
           - dnsmasq
           - python3-etcd3
+          - etcd-client
         state: present
 
     - name: Copy DHCP leader election script
@@ -25,12 +26,12 @@
         content: |
           [Unit]
           Description=DHCP Leader Election via etcd
-          After=network.target etcd.service
-          Wants=etcd.service
+          After=network-online.target etcd.service
+          Wants=etcd.service network-online.target
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/bin/dhcp-leader-election.sh "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_default_ipv4']['address'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          ExecStart=/usr/local/bin/dhcp-leader-election.sh "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           Restart=always
           RestartSec=5
           User=root
@@ -49,6 +50,7 @@
           dhcp-option=3,10.0.0.1
           dhcp-option=6,10.0.0.1
           dhcp-option=42,10.0.0.1
+          dhcp-leasefile=/var/lib/dhcp/dnsmasq.leases
           
           # DNS configuration
           local=/xc/
