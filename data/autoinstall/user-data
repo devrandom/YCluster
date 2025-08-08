@@ -22,6 +22,9 @@ autoinstall:
         match:
           name: "!PLACEHOLDER_INTERFACE"
         dhcp4: true
+        dhcp4-overrides:
+          send-hostname: false
+          use-hostname: false
         optional: true
   early-commands:
     - |

@@ -8,8 +8,23 @@
         name:
           - dnsmasq
           - python3-etcd3
+          - python3-netifaces
           - etcd-client
         state: present
+
+    - name: Install python3-scapy without recommends
+      apt:
+        name: python3-scapy
+        state: present
+        install_recommends: no
+
+    - name: Copy DHCP server script
+      copy:
+        src: scripts/dhcp-server.py
+        dest: /usr/local/bin/dhcp-server.py
+        mode: '0755'
+        owner: root
+        group: root
 
     - name: Copy DHCP leader election script
       copy:
@@ -18,6 +33,27 @@
         mode: '0755'
         owner: root
         group: root
+
+    - name: Create DHCP server systemd service
+      copy:
+        dest: /etc/systemd/system/dhcp-server.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Scapy-based DHCP Server
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/dhcp-server.py
+          Restart=always
+          RestartSec=5
+          User=root
+          Environment=ETCD_HOSTS="{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+
+          [Install]
+          WantedBy=multi-user.target
 
     - name: Create DHCP leader election systemd service
       copy:
@@ -39,19 +75,11 @@
           [Install]
           WantedBy=multi-user.target
 
-    - name: Create dnsmasq configuration
+    - name: Create dnsmasq configuration (DNS and TFTP only)
       copy:
-        dest: /etc/dnsmasq.d/dhcp.conf
+        dest: /etc/dnsmasq.d/dns-tftp.conf
         mode: '0644'
         content: |
-          # DHCP configuration
-          dhcp-authoritative
-          dhcp-range=10.0.0.200,10.0.0.249,12h
-          dhcp-option=3,10.0.0.1
-          dhcp-option=6,10.0.0.1
-          dhcp-option=42,10.0.0.1
-          dhcp-leasefile=/var/lib/dhcp/dnsmasq.leases
-          
           # DNS configuration
           local=/xc/
           domain=xc
@@ -60,26 +88,30 @@
           # PXE boot configuration
           enable-tftp
           tftp-root=/var/lib/tftpboot
-          dhcp-match=set:efibc,option:client-arch,7
-          dhcp-boot=tag:efibc,EFI/BOOT/grubx64.efi
           
-          # Store leases in etcd via script
-          dhcp-script=/usr/local/bin/dhcp-lease-script.py
+          # Disable DHCP (handled by scapy-based server)
+          port=53
 
-    - name: Copy DHCP lease script for etcd integration
-      copy:
-        src: scripts/dhcp-lease-script.py
-        dest: /usr/local/bin/dhcp-lease-script.py
+    - name: Create TFTP root directory
+      file:
+        path: /var/lib/tftpboot
+        state: directory
         mode: '0755'
         owner: root
         group: root
 
-    - name: Disable default dnsmasq service (will be managed by leader election)
+    - name: Enable and start dnsmasq service (for DNS and TFTP)
       systemd:
         name: dnsmasq
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Create DHCP server service (disabled, controlled by leader election)
+      systemd:
+        name: dhcp-server
         enabled: no
-        state: stopped
-      ignore_errors: yes
+        daemon_reload: yes
 
     - name: Enable DHCP leader election service
       systemd:

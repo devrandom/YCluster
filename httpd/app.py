@@ -38,6 +38,11 @@ def get_dhcp_config():
     # The DHCP script will handle dynamic assignment
     return "", 200, {'Content-Type': 'text/plain'}
 
+@app.route('/api/hosts')
+def get_hosts():
+    """Get static hosts file format for s1"""
+    return "10.0.0.11 s1\n", 200, {'Content-Type': 'text/plain'}
+
 @app.route('/api/health')
 def health():
     """Health check endpoint"""
