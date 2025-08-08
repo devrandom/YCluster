@@ -83,12 +83,7 @@ def get_local_info():
         sys.exit(1)
     
     # Determine node type from hostname
-    if hostname.startswith('s'):
-        node_type = 'storage'
-    elif hostname.startswith('c'):
-        node_type = 'compute'
-    else:
-        node_type = 'unknown'
+    node_type = determine_node_type_from_hostname(hostname)
     
     return {
         'hostname': hostname,
@@ -97,6 +92,27 @@ def get_local_info():
         'type': node_type,
         'allocated_at': datetime.now(UTC).isoformat()
     }
+
+def determine_node_type_from_hostname(hostname):
+    """Determine node type from hostname using consistent logic"""
+    if not hostname:
+        return 'unknown'
+    
+    # Map prefixes to base types
+    type_map = {
+        's': 'storage',
+        'c': 'compute', 
+        'm': 'macos'
+    }
+    
+    prefix = hostname[0]
+    base_type = type_map.get(prefix, 'unknown')
+    
+    # Add AMT suffix if hostname ends with 'a'
+    if hostname.endswith('a') and base_type != 'unknown':
+        return f"{base_type}-amt"
+    
+    return base_type
 
 def populate_local_node():
     """Populate etcd with local node entry"""
