@@ -146,7 +146,7 @@ autoinstall:
     # add ansible key to root authorized_keys
     - |
       mkdir -p /target/root/.ssh
-      cat /tmp/ansible_ssh_key.pub /target/ubuntu/.ssh/authorized_keys >> /target/root/.ssh/authorized_keys
+      echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1" | cat /tmp/ansible_ssh_key.pub - >> /target/root/.ssh/authorized_keys
       chmod 700 /target/root/.ssh
       chmod 600 /target/root/.ssh/authorized_keys
       chown -R root:root /target/root/.ssh
