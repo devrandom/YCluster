@@ -25,6 +25,7 @@
         mode: '0755'
         owner: root
         group: root
+      notify: restart dhcp-leader-election
 
     - name: Copy DHCP leader election script
       copy:
@@ -33,6 +34,7 @@
         mode: '0755'
         owner: root
         group: root
+      notify: restart dhcp-leader-election
 
     - name: Create DHCP server systemd service
       copy:
@@ -120,6 +122,14 @@
         daemon_reload: yes
 
     - name: Start DHCP leader election service
+      systemd:
+        name: dhcp-leader-election
+        state: started
+      register: dhcp_election_start
+      changed_when: dhcp_election_start.changed and dhcp_election_start.state != "started"
+
+  handlers:
+    - name: restart dhcp-leader-election
       systemd:
         name: dhcp-leader-election
         state: restarted
