@@ -18,7 +18,7 @@ LEASE_FILE="/var/run/etcd-lease.lease"
 
 # Function to cleanup on exit
 cleanup() {
-    echo "Cleaning up cluster leader election"
+    echo "Cleaning up storage leader election"
     if [ -f "$LEASE_FILE" ]; then
         LEASE_ID=$(cat "$LEASE_FILE")
         timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" lease revoke "$LEASE_ID" || true
@@ -68,7 +68,7 @@ attempt_leadership() {
     echo result: $res
     if [[ "$res" == "SUCCESS" ]];
     then
-        echo "Acquired cluster leadership"
+        echo "Acquired storage leadership"
         echo "$LEASE_ID" > "$LEASE_FILE"
         touch "$LOCK_FILE"
         return 0
@@ -98,7 +98,7 @@ renew_lease() {
 
 # Function to start all services
 start_all_services() {
-    echo "Starting all services as cluster leader"
+    echo "Starting all services as storage leader"
     
     # Start PostgreSQL
     echo "Starting PostgreSQL..."
@@ -115,7 +115,7 @@ start_all_services() {
 
 # Function to stop all services
 stop_all_services() {
-    echo "Stopping all services, no longer cluster leader"
+    echo "Stopping all services, no longer storage leader"
     systemctl stop postgres-rbd || true
     systemctl stop qdrant-rbd || true
 }
