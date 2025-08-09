@@ -59,10 +59,14 @@ class InventoryModule(BaseInventoryPlugin):
         
         # Connect to etcd
         etcd_client = None
+        # Disable HTTP proxy for etcd3 client, since they are on this subnet.  grpcio version 1.51 does not
+        # support CIDR notation in the `no_proxy` environment variable.
+        grpc_options = [('grpc.enable_http_proxy', 0)]
+
         for host_port in etcd_hosts:
             try:
                 host, port = host_port.split(':')
-                etcd_client = etcd3.client(host=host, port=int(port))
+                etcd_client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options)
                 etcd_client.status()  # Test connection
                 break
             except:
