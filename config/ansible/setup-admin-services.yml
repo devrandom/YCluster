@@ -198,13 +198,6 @@
           search xc
         mode: '0644'
 
-    - name: Disable default dnsmasq configuration
-      lineinfile:
-        path: /etc/default/dnsmasq
-        regexp: '^ENABLED='
-        line: 'ENABLED=1'
-        create: yes
-
     - name: Clear default dnsmasq.conf to avoid conflicts
       copy:
         dest: /etc/dnsmasq.conf
@@ -407,6 +400,13 @@
           else
               rm -f "$TEMP_FILE"
           fi
+
+    - name: Enable and start dnsmasq service (for DNS and TFTP)
+      systemd:
+        name: dnsmasq
+        enabled: yes
+        state: started
+        daemon_reload: yes
 
     - name: Create systemd timer for DHCP updates
       copy:
