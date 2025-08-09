@@ -128,8 +128,6 @@ def populate_local_node():
         existing = client.get(key)
         if existing[0] is not None:
             print(f"Node {node_info['hostname']} already exists in etcd")
-            existing_data = json.loads(existing[0].decode('utf-8'))
-            print(f"Existing entry: {json.dumps(existing_data, indent=2)}")
         else:
             # Put the node data
             client.put(key, value)
@@ -138,9 +136,7 @@ def populate_local_node():
         # Always update the MAC to hostname mapping
         mac_key = f"{ETCD_PREFIX}/by-mac/{node_info['mac']}"
         client.put(mac_key, json.dumps(node_info))
-        print(f"Updated MAC mapping for {node_info['mac']} -> {node_info['hostname']}")
-        
-        print(f"\nNode info: {json.dumps(node_info, indent=2)}")
+        print(f"Updated MAC mapping: {node_info['hostname']} ({node_info['ip']})")
         
     except Exception as e:
         print(f"Error populating node: {e}")
