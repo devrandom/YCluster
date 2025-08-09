@@ -28,26 +28,29 @@
       set_fact:
         etcd_cluster_size: "{{ groups['core'] | length }}"
         etcd_initial_cluster: "{{ groups['core'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['core'] | map('extract', hostvars, 'ansible_host')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
-        etcd_first_node: "{{ groups['core'][0] }}"
 
     - name: Check if etcd data directory exists and has data
       stat:
         path: "{{ etcd_data_dir }}/member"
       register: etcd_data_exists
 
-    - name: Check if any etcd cluster already exists using etcdctl
+    - name: Check if ANY etcd node in cluster is already running
       shell: |
-        ETCDCTL_ENDPOINTS="http://{{ hostvars[etcd_first_node]['ansible_host'] }}:2379" \
-        etcdctl member list --write-out=json
-      register: etcd_member_check
+        ETCDCTL_ENDPOINTS="http://{{ item }}:2379" etcdctl member list --write-out=json
+      register: etcd_cluster_check
       failed_when: false
       changed_when: false
-      when: inventory_hostname != etcd_first_node
+      loop: "{{ groups['core'] | map('extract', hostvars, 'ansible_host') | list }}"
+      when: not etcd_data_exists.stat.exists
 
-    - name: Determine cluster state
+    - name: Determine if cluster already exists
       set_fact:
-        etcd_cluster_state: "{{ 'existing' if (inventory_hostname != etcd_first_node and etcd_member_check.rc == 0) else 'new' }}"
-        etcd_initial_cluster_state: "{{ 'existing' if (inventory_hostname != etcd_first_node and etcd_member_check.rc == 0) else 'new' }}"
+        cluster_exists: "{{ etcd_cluster_check.results | selectattr('rc', 'equalto', 0) | list | length > 0 }}"
+      when: not etcd_data_exists.stat.exists
+
+    - name: Set cluster state
+      set_fact:
+        etcd_initial_cluster_state: "{{ 'existing' if (cluster_exists | default(false)) else 'new' }}"
 
     - name: Configure etcd for single node
       copy:
@@ -90,11 +93,17 @@
 
     - name: Get existing cluster members for joining node
       shell: |
-        ETCDCTL_ENDPOINTS="http://{{ hostvars[etcd_first_node]['ansible_host'] }}:2379" \
+        ETCDCTL_ENDPOINTS="http://{{ item }}:2379" \
         etcdctl member list --write-out=json
-      register: existing_members_json
+      register: existing_members_result
+      failed_when: false
+      loop: "{{ groups['core'] | map('extract', hostvars, 'ansible_host') | list }}"
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
-      delegate_to: "{{ etcd_first_node }}"
+
+    - name: Extract successful member list
+      set_fact:
+        existing_members_json: "{{ existing_members_result.results | selectattr('rc', 'equalto', 0) | first }}"
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
 
     - name: Build initial cluster string for joining node
       set_fact:
@@ -120,15 +129,20 @@
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
       notify: restart etcd
 
+    - name: Find working etcd node for member operations
+      set_fact:
+        working_etcd_host: "{{ existing_members_result.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | first }}"
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+
     - name: Add member to existing etcd cluster using etcdctl
       shell: |
-        ETCDCTL_ENDPOINTS="http://{{ hostvars[etcd_first_node]['ansible_host'] }}:2379" \
+        ETCDCTL_ENDPOINTS="http://{{ working_etcd_host }}:2379" \
         etcdctl member add "{{ inventory_hostname }}" \
         --peer-urls="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
       register: add_member_result
       failed_when: add_member_result.rc != 0
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
-      delegate_to: "{{ etcd_first_node }}"
+      delegate_to: "{{ working_etcd_host }}"
 
     - name: Wait a moment after adding member
       pause:
