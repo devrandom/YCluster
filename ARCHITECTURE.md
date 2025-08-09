@@ -11,24 +11,34 @@ The bootstrap process begins from an admin laptop connected to the first core no
 
 - **NTP Server**: Provides time synchronization for the entire cluster
 - **DNSMASQ**: Handles DHCP, DNS, and PXE boot services for network provisioning
-- **HTTP Server**: Serves installation media, autoinstall configurations, and APIs
+- **HTTP Server**: Serves installation media, autoinstall configurations, and node allocation APIs
 - **Squid Proxy**: Caches packages and updates to reduce external bandwidth
 - **Ansible Container**: Executes infrastructure automation playbooks
+
+### Admin Services Layer
+Core nodes run admin services that provide:
+
+- **Node Allocation API**: Dynamic hostname and IP assignment based on MAC addresses
+- **DHCP Configuration API**: Dynamic DHCP lease management integrated with etcd
+- **Cluster Status API**: Health monitoring and node discovery endpoints
+- **Dynamic Inventory**: Ansible inventory plugin that reads node allocations from etcd
 
 ### Node Types
 
 #### Core Nodes (s1, s2, s3)
 Core nodes form the control plane and provide administrative services:
 - **etcd Cluster**: Distributed key-value store for cluster state and coordination
-- **Admin Services**: Node allocation API, DHCP management, and provisioning services
+- **Admin Services**: Flask APIs for node allocation, DHCP management, and cluster status
+- **DHCP Leader Election**: Ensures only one active DHCP server using etcd coordination
 - **Keepalived VIP**: High availability virtual IP for admin services
 - **Network Services**: DNS, DHCP, and PXE boot infrastructure
 
 #### Storage Nodes
 Storage nodes provide distributed block storage and run stateful services:
 - **MicroCeph**: Distributed storage cluster providing RBD (RADOS Block Device) volumes
-- **PostgreSQL**: Database service with RBD-backed storage and leader election
-- **Qdrant**: Vector database service with RBD-backed storage and leader election
+- **PostgreSQL**: Database service with RBD-backed storage and storage leader election
+- **Qdrant**: Vector database service with RBD-backed storage and storage leader election
+- **Storage Leader Election**: etcd-based coordination ensuring single active instance per service
 
 #### Compute Nodes
 Compute nodes provide processing capacity for workloads (architecture supports but not fully implemented in current playbooks).
@@ -37,8 +47,9 @@ Compute nodes provide processing capacity for workloads (architecture supports b
 
 #### Service Leadership
 Stateful services use etcd-based leader election to ensure only one active instance:
-- PostgreSQL runs on exactly one storage node at a time
-- Qdrant runs on exactly one storage node at a time
+- PostgreSQL runs on exactly one storage node at a time via storage leader election
+- Qdrant runs on exactly one storage node at a time via storage leader election
+- DHCP services use separate DHCP leader election for high availability
 - Leaders can migrate between nodes automatically on failure
 
 #### Storage Resilience
@@ -60,9 +71,11 @@ Stateful services use etcd-based leader election to ensure only one active insta
 4. Node registers itself in etcd cluster state
 
 #### Service Discovery
-- etcd maintains authoritative cluster membership
-- Dynamic inventory plugin reads node allocations from etcd
+- etcd maintains authoritative cluster membership and node allocations
+- Dynamic inventory plugin (etcd_nodes.py) reads node allocations from etcd for Ansible
+- Admin APIs provide real-time cluster status and node information
 - Services discover peers through etcd key-value store
+- MAC address-based node type detection enables automatic provisioning
 
 #### Storage Access
 - Applications request RBD volumes from Ceph cluster
@@ -87,15 +100,25 @@ Stateful services use etcd-based leader election to ensure only one active insta
 
 ### Initial Bootstrap
 1. Admin laptop connects to s1 via direct network
-2. Docker Compose starts bootstrap services
-3. s1 provisions itself and additional core nodes
+2. Docker Compose starts bootstrap services (NTP, DNSMASQ, HTTP, Squid, Ansible)
+3. s1 provisions itself and additional core nodes (s2, s3)
 4. Core nodes establish etcd cluster and admin services
+5. Deployment follows site.yml playbook sequence:
+   - Ceph disk setup and pool creation
+   - Storage infrastructure setup
+   - PostgreSQL installation with RBD backing
+   - Qdrant setup with RBD volumes
+   - etcd cluster establishment
+   - Storage leader election services
+   - Admin services and APIs
+   - NTP configuration
 
 ### Cluster Expansion
 1. New nodes PXE boot from existing infrastructure
-2. Automatic node type detection based on MAC address
-3. Ansible playbooks configure nodes based on type
-4. Services automatically discover and integrate new capacity
+2. Automatic node type detection based on MAC address patterns
+3. Dynamic hostname and IP allocation via admin APIs
+4. Ansible playbooks configure nodes based on detected type
+5. Services automatically discover and integrate new capacity through etcd
 
 ### Service Management
 - All services managed through systemd
