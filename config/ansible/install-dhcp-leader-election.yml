@@ -76,31 +76,6 @@
           [Install]
           WantedBy=multi-user.target
 
-    - name: Create dnsmasq configuration (DNS and TFTP only)
-      copy:
-        dest: /etc/dnsmasq.d/dns-tftp.conf
-        mode: '0644'
-        content: |
-          # DNS configuration
-          local=/xc/
-          domain=xc
-          domain-needed
-          
-          # PXE boot configuration
-          enable-tftp
-          tftp-root=/var/lib/tftpboot
-          
-          # Disable DHCP (handled by scapy-based server)
-          port=53
-
-    - name: Create TFTP root directory
-      file:
-        path: /var/lib/tftpboot
-        state: directory
-        mode: '0755'
-        owner: root
-        group: root
-
     - name: Create DHCP server service (disabled, controlled by leader election)
       systemd:
         name: dhcp-server
