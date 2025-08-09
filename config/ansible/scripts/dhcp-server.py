@@ -10,6 +10,8 @@ import json
 import socket
 import threading
 import logging
+import subprocess
+import yaml
 from datetime import datetime, timedelta
 import etcd3
 from scapy.all import *
@@ -87,19 +89,31 @@ class DHCPServer:
         return None
     
     def get_server_ip(self):
-        """Get the IP address of the DHCP server based on hostname"""
+        """Get the IP address of the DHCP server from netplan primary interface"""
+        try:
+            # Try to get primary interface from netplan
+            result = subprocess.run(['netplan', 'get', 'network.ethernets.primary'], 
+                                  capture_output=True, text=True, check=True)
+            primary_config = yaml.safe_load(result.stdout)
+            
+            if primary_config and 'addresses' in primary_config:
+                # Get first address and extract IP (remove CIDR notation)
+                first_addr = primary_config['addresses'][0]
+                ip = first_addr.split('/')[0]
+                logger.info(f"Using primary interface IP from netplan: {ip}")
+                return ip
+        except (subprocess.CalledProcessError, yaml.YAMLError, IndexError, KeyError) as e:
+            logger.warning(f"Could not get primary interface from netplan: {e}")
+        
+        # Fallback: check hostname-based allocation
         hostname = socket.gethostname()
         
         # Check if this is a known core node
         if hostname in CORE_NODE_IPS:
+            logger.info(f"Using core node IP for {hostname}: {CORE_NODE_IPS[hostname]}")
             return CORE_NODE_IPS[hostname]
         
-        # Fallback: try to determine from hostname using same logic as Flask app
-        ip = self.determine_ip_from_hostname(hostname)
-        if ip:
-            return ip
-
-        raise ValueError("non-cluster hostname not supported")
+        raise ValueError("Could not determine server IP from netplan primary interface or hostname")
 
     def determine_ip_from_hostname(self, hostname):
         """Generate deterministic IP based on hostname (same logic as Flask app)"""
