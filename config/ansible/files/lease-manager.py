@@ -121,7 +121,8 @@ def list_leases():
         hostname = lease.get('hostname', '')
         ip = lease.get('ip', 'unknown')
         
-        print(f"{mac:<17} {ip:<15} {hostname:<15} {expires_str:<19} {status}")
+        normalized_mac = mac.lower().replace(':', '').replace('-', '')
+        print(f"{normalized_mac:<17} {ip:<15} {hostname:<15} {expires_str:<19} {status}")
 
 def delete_by_hostname(hostname):
     """Delete all etcd entries related to a hostname"""
@@ -140,15 +141,16 @@ def delete_by_hostname(hostname):
     try:
         allocation = json.loads(allocation_data[0].decode())
         mac = allocation['mac']
+        # Normalize MAC to lowercase without separators for etcd keys
+        normalized_mac = mac.lower().replace(':', '').replace('-', '')
         ip = allocation['ip']
         
         print(f"Found allocation: {hostname} -> {ip} (MAC: {mac})")
         
-        # Delete all related entries
         keys_to_delete = [
             f"/cluster/nodes/by-hostname/{hostname}",
-            f"/cluster/nodes/by-mac/{mac.replace(':', '')}",
-            f"/cluster/dhcp/leases/{mac}"  # TODO normalize MAC format
+            f"/cluster/nodes/by-mac/{normalized_mac}",
+            f"/cluster/dhcp/leases/{normalized_mac}"
         ]
         
         deleted_count = 0
@@ -185,9 +187,9 @@ def delete_by_mac(mac):
     allocation_data = client.get(f"/cluster/nodes/by-mac/{normalized_mac}")
     if not allocation_data[0]:
         print(f"No allocation found for MAC: {mac}")
-        # Still try to delete lease entry
+        # Still try to delete lease entry using normalized MAC
         try:
-            result = client.delete(f"/cluster/dhcp/leases/{mac}")
+            result = client.delete(f"/cluster/dhcp/leases/{normalized_mac}")
             if result:
                 print(f"Deleted lease entry for MAC: {mac}")
                 return True
@@ -209,7 +211,7 @@ def delete_by_mac(mac):
         keys_to_delete = [
             f"/cluster/nodes/by-hostname/{hostname}",
             f"/cluster/nodes/by-mac/{normalized_mac}",
-            f"/cluster/dhcp/leases/{mac}"
+            f"/cluster/dhcp/leases/{normalized_mac}"
         ]
         
         deleted_count = 0
