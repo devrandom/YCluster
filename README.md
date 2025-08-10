@@ -4,31 +4,55 @@ Cluster management for small AI clusters.
 
 Uses Ceph, Qdrant, Postgres.
 
-# Getting Started
+# Bootstrap
 
+## Initial PXE Setup for s1
+
+On admin host, set up the PXE environment:
+
+```sh
+docker compose up --build --profile bootstrap -d
 ```
-make
+
+PXE boot the first node (s1) and wait for it to come up.  It will install the OS, and then reboot.
+
+## Initial Ansible
+
+Set up admin services on s1 from the admin host:
+
+```sh
+docker compose exec ansible ansible-playbook /etc/ansible/setup-admin-services.yml
+```
+
+## Switch the Admin Host to normal mode
+
+After the initial setup, switch the admin host to normal mode (providing HTTP proxy and NTP server):
+
+```sh
+docker compose down --profile bootstrap
 docker compose up --build -d
 ```
 
-# HOWTO
+## Further Nodes
 
-## Ansible
+For each additional node (s2, s3, etc.), PXE boot the node and wait for it to come up.  Then run on s1 (or other
+set-up nodes):
 
 ```sh
-docker compose exec ansible ansible-inventory
-docker compose exec ansible ansible-playbook /etc/ansible/site.yml
+cd /etc/ansible
+ansible-playbook --limit s2 setup-admin-services.yml
+```
 
-# check etcd health
-docker compose exec ansible ansible storage -m shell -a "etcdctl endpoint health"
-docker compose exec ansible ansible storage -m shell -a "etcdctl member list"
+# Check Cluster Status
 
-# check ceph health
-docker compose exec ansible ansible storage -m shell -a "microceph status"
-docker compose exec ansible ansible storage -m shell -a "microceph cluster list"
+On any node, run the following commands to check the status of the cluster:
+
+    check_etcd_cluster.py
 
 # initialize the postgres database
-docker compose exec ansible ansible-playbook --tag init_db /etc/ansible/install-postgres.yml /etc/ansible/install-etcd-leader-election.yml
+
+```sh
+ansible-playbook --tag init_db /etc/ansible/install-postgres.yml /etc/ansible/install-etcd-leader-election.yml
 ```
 
 ## SSH
@@ -41,6 +65,7 @@ Host *.xc
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
+```
 
 ## AMT Setup
 
@@ -54,3 +79,7 @@ Notes:
 
 - on some recent BIOSes, only TLS is supported - port 16993
 
+# Notes
+
+- IP addresses for storage nodes are 10 + node number (e.g., s1 is at 10.0.0.11)
+- IP addresses for AMT interfaces are 110 + main IP address (e.g., s1 is at 10.0.0.111)
