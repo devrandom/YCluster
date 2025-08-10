@@ -13,37 +13,6 @@
         msg: "/dev/mapper/vg0-ceph does not exist"
       when: not ceph_disk.stat.exists
 
-    - name: Check if MicroCeph is installed
-      command: snap list microceph
-      register: microceph_check
-      failed_when: false
-      changed_when: false
-
-    - name: Fail if MicroCeph is not installed
-      fail:
-        msg: "MicroCeph is not installed"
-      when: microceph_check.rc != 0
-
-    - name: Check if MicroCeph service is running
-      command: systemctl is-active snap.microceph.daemon
-      register: microceph_service_status
-      failed_when: false
-      changed_when: false
-
-    - name: Start MicroCeph service if not active
-      systemd:
-        name: snap.microceph.daemon
-        state: started
-        enabled: yes
-      when: microceph_service_status.stdout != "active"
-
-    - name: Wait for MicroCeph service to be ready
-      command: systemctl is-active snap.microceph.daemon
-      register: service_check
-      until: service_check.stdout == "active"
-      retries: 5
-      delay: 2
-      when: microceph_service_status.stdout != "active"
 
     - name: Add disk to MicroCeph
       command: microceph disk add /dev/mapper/vg0-ceph

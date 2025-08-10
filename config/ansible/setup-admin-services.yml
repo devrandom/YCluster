@@ -103,7 +103,7 @@
         remote_src: yes
       loop:
         - populate_local_node.py
-        - check_etcd_cluster.py
+        - check_cluster.py
         - lease-manager.py
 
     - name: Create systemd service for allocation API

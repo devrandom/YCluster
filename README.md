@@ -47,7 +47,7 @@ ansible-playbook --limit s2 setup-admin-services.yml
 
 On any node, run the following commands to check the status of the cluster:
 
-    check_etcd_cluster.py
+    check_cluster.py
 
 # initialize the postgres database
 
