@@ -4,11 +4,24 @@
   gather_facts: yes
   
   tasks:
+    - name: Fail if playbook is limited to a single node
+      fail:
+        msg: "This playbook requires multiple nodes to join an existing cluster. Current play limited to single node: {{ inventory_hostname }}. Use --tags single_node_ceph to override."
+      when: 
+        - ansible_play_hosts | length == 1
+        - "'single_node_ceph' not in ansible_run_tags"
+      run_once: true
+
     - name: Check if MicroCeph is already configured on each node
       command: microceph status
       register: microceph_status
       failed_when: false
       changed_when: false
+
+    - name: Check if any nodes are already in cluster  
+      set_fact:
+        cluster_exists: "{{ ansible_play_hosts | map('extract', hostvars, 'microceph_status') | selectattr('rc', 'equalto', 0) | list | length > 0 }}"
+      run_once: true
 
     - name: Bootstrap cluster if not initialized
       block:
@@ -21,7 +34,7 @@
           pause:
             seconds: 5
           when: inventory_hostname == ansible_play_hosts[0]
-      when: "'Database is not yet initialized' in microceph_status.stderr or microceph_status.rc != 0"
+      when: not cluster_exists
 
     - name: Re-check if MicroCeph is already configured on each node
       command: microceph status
