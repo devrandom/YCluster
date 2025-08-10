@@ -92,6 +92,10 @@ class InventoryModule(BaseInventoryPlugin):
                     node_type = allocation['type']
                     mac_address = allocation['mac']
                     
+                    # Skip AMT hosts (hostnames ending with 'a')
+                    if hostname.endswith('a'):
+                        continue
+                    
                     # Add host to inventory
                     self.inventory.add_host(hostname)
                     
