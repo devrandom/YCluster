@@ -316,4 +316,7 @@ def main():
     print("=" * 60)
 
 if __name__ == '__main__':
+    # disable proxies
+    del os.environ['http_proxy']
+    del os.environ['https_proxy']
     main()
