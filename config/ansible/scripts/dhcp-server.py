@@ -13,6 +13,7 @@ import logging
 import subprocess
 import yaml
 from datetime import datetime, timedelta
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import etcd3
 from scapy.all import *
 from scapy.layers.dhcp import DHCP, BOOTP
@@ -26,6 +27,7 @@ LEASE_TIME = 43200  # 12 hours
 GATEWAY = '10.0.0.1'
 DNS_SERVER = '10.0.0.1'
 NTP_SERVER = '10.0.0.1'
+HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 
 # IP allocation configuration (same as Flask app)
 IP_RANGES = {
@@ -49,6 +51,127 @@ CORE_NODE_IPS = {
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+class HealthHandler(BaseHTTPRequestHandler):
+    """HTTP handler for health monitoring"""
+    
+    def __init__(self, dhcp_server, *args, **kwargs):
+        self.dhcp_server = dhcp_server
+        super().__init__(*args, **kwargs)
+    
+    def do_GET(self):
+        """Handle GET requests for health checks"""
+        handlers = {
+            '/health': self._health_data,
+            '/status': self._status_data,
+            '/leases': self._leases_data
+        }
+        
+        if self.path in handlers:
+            self._send_json_response(handlers[self.path]())
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
+    
+    def _health_data(self):
+        """Get health check data"""
+        etcd_healthy = self.dhcp_server.get_etcd_client() is not None
+        
+        if self.dhcp_server.running and etcd_healthy:
+            return (200, {
+                'status': 'healthy',
+                'timestamp': datetime.now().isoformat(),
+                'etcd_connected': etcd_healthy,
+                'server_ip': self.dhcp_server.server_ip
+            })
+        else:
+            return (503, {
+                'status': 'unhealthy',
+                'timestamp': datetime.now().isoformat(),
+                'etcd_connected': etcd_healthy,
+                'dhcp_running': self.dhcp_server.running
+            })
+    
+    def _status_data(self):
+        """Get detailed status data"""
+        return (200, {
+            'status': 'running' if self.dhcp_server.running else 'stopped',
+            'timestamp': datetime.now().isoformat(),
+            'server_ip': self.dhcp_server.server_ip,
+            'lease_count': len(self.dhcp_server.leases),
+            'allocated_ips': len(self.dhcp_server.allocated_ips),
+            'etcd_hosts': ETCD_HOSTS,
+            'etcd_connected': self.dhcp_server.get_etcd_client() is not None
+        })
+    
+    def _leases_data(self):
+        """Get lease data"""
+        leases_data = {
+            mac: {
+                'ip': lease['ip'],
+                'hostname': lease.get('hostname', ''),
+                'expires': lease['expires'],
+                'allocated_at': lease.get('allocated_at', '')
+            }
+            for mac, lease in self.dhcp_server.leases.items()
+        }
+        
+        return (200, {
+            'leases': leases_data,
+            'count': len(leases_data),
+            'timestamp': datetime.now().isoformat()
+        })
+    
+    def _send_json_response(self, data):
+        """Send JSON response with error handling"""
+        try:
+            status_code, response_data = data
+            self.send_response(status_code)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response_data).encode())
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            response = {
+                'status': 'error',
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+            self.wfile.write(json.dumps(response).encode())
+    
+    def log_message(self, format, *args):
+        """Override to use our logger"""
+        logger.info(f"Health check: {format % args}")
+
+class HealthServer:
+    """HTTP server for health monitoring"""
+    
+    def __init__(self, dhcp_server, port=HEALTH_PORT):
+        self.dhcp_server = dhcp_server
+        self.port = port
+        self.server = None
+        self.thread = None
+    
+    def start(self):
+        """Start the health monitoring server"""
+        try:
+            handler_class = lambda *args, **kwargs: HealthHandler(self.dhcp_server, *args, **kwargs)
+            self.server = HTTPServer(('0.0.0.0', self.port), handler_class)
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.thread.start()
+            logger.info(f"Health monitoring server started on port {self.port}")
+        except Exception as e:
+            logger.error(f"Failed to start health monitoring server: {e}")
+    
+    def stop(self):
+        """Stop the health monitoring server"""
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+            logger.info("Health monitoring server stopped")
+
 class DHCPServer:
     def __init__(self):
         self.etcd_client = None
@@ -56,6 +179,7 @@ class DHCPServer:
         self.allocated_ips = set()
         self.server_ip = self.get_server_ip()
         self.running = False
+        self.health_server = None
         
     def get_etcd_client(self):
         """Get etcd client with failover"""
@@ -735,6 +859,10 @@ class DHCPServer:
         # Load existing leases
         self.load_leases_from_etcd()
         
+        # Start health monitoring server
+        self.health_server = HealthServer(self)
+        self.health_server.start()
+        
         # Start cleanup thread
         self.running = True
         cleanup_thread = threading.Thread(target=self.cleanup_expired_leases, daemon=True)
@@ -754,6 +882,8 @@ class DHCPServer:
         """Stop the DHCP server"""
         logger.info("Stopping DHCP server...")
         self.running = False
+        if self.health_server:
+            self.health_server.stop()
 
 def main():
     if os.geteuid() != 0:

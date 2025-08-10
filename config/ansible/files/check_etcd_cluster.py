@@ -7,12 +7,17 @@ import etcd3
 import json
 import sys
 import os
+import subprocess
+import socket
+import urllib.request
+import urllib.error
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Get initial etcd host from environment or use default
 INITIAL_ETCD_HOST = os.environ.get('ETCD_HOST', 'localhost:2379')
 ETCD_PREFIX = '/cluster/nodes'
+DHCP_HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 
 def get_cluster_members(initial_host):
     """Get all etcd cluster members using etcdctl"""
@@ -95,6 +100,91 @@ def get_all_nodes(client):
     
     return nodes
 
+def check_dhcp_service_on_host(host_ip):
+    """Check if DHCP server is running on a specific host using health monitoring endpoint"""
+    try:
+        url = f"http://{host_ip}:{DHCP_HEALTH_PORT}/health"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            health_data = json.loads(response.read().decode())
+            
+            if response.status == 200 and health_data.get('status') == 'healthy':
+                return {
+                    'host': host_ip, 'running': True, 'method': 'health_endpoint',
+                    'etcd_connected': health_data.get('etcd_connected', False),
+                    'server_ip': health_data.get('server_ip', host_ip)
+                }
+            else:
+                status = health_data.get('status', f'HTTP {response.status}')
+                return {
+                    'host': host_ip, 'running': False, 'method': 'health_endpoint',
+                    'error': f'DHCP server unhealthy: {status}'
+                }
+                
+    except urllib.error.HTTPError as e:
+        error = 'Health endpoint not found (DHCP server may not be running)' if e.code == 404 else f'HTTP error {e.code}: {e.reason}'
+        return {'host': host_ip, 'running': False, 'error': error, 'method': 'health_endpoint'}
+    except (urllib.error.URLError, socket.timeout, Exception) as e:
+        error_type = 'timeout' if isinstance(e, socket.timeout) else 'connection failed' if isinstance(e, urllib.error.URLError) else 'unexpected error'
+        error_msg = 'Health endpoint timeout' if isinstance(e, socket.timeout) else str(e.reason if hasattr(e, 'reason') else e)
+        return {'host': host_ip, 'running': False, 'error': f'{error_type.title()}: {error_msg}', 'method': 'health_endpoint'}
+
+def check_dnsmasq_service_on_host(host_ip, hostname):
+    """Check if DNS service is running on a specific host and can resolve hostname"""
+    try:
+        import dns.resolver
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = [host_ip]
+        resolver.timeout = 3
+        resolver.lifetime = 3
+        
+        # Try to resolve the hostname
+        try:
+            answer = resolver.resolve(hostname, 'A')
+            resolved_ip = str(answer[0])
+            return {
+                'host': host_ip,
+                'hostname': hostname,
+                'running': True,
+                'dns_working': True,
+                'resolved_ip': resolved_ip,
+                'method': 'dns_query'
+            }
+        except dns.resolver.NXDOMAIN:
+            return {
+                'host': host_ip,
+                'hostname': hostname,
+                'running': True,
+                'dns_working': False,
+                'dns_error': f'Hostname {hostname} not found in DNS',
+                'method': 'dns_query'
+            }
+        except dns.resolver.NoNameservers:
+            return {
+                'host': host_ip,
+                'hostname': hostname,
+                'running': False,
+                'error': 'DNS server not responding',
+                'method': 'dns_query'
+            }
+        except Exception as dns_e:
+            return {
+                'host': host_ip,
+                'hostname': hostname,
+                'running': False,
+                'error': f'DNS query failed: {dns_e}',
+                'method': 'dns_query'
+            }
+                
+    except ImportError:
+        return {
+            'host': host_ip, 
+            'hostname': hostname, 
+            'running': False, 
+            'error': 'dnspython not installed'
+        }
+    except Exception as e:
+        return {'host': host_ip, 'hostname': hostname, 'running': False, 'error': str(e)}
+
 def main():
     """Main function to check etcd cluster health"""
     print("=" * 60)
@@ -127,11 +217,7 @@ def main():
         else:
             print(f"✗ {result['host']}: Unhealthy - {result['error']}")
     
-    # Get nodes from first healthy host
-    print("\n" + "=" * 60)
-    print("Registered Nodes:")
-    print("-" * 60)
-    
+    # Get nodes from first healthy host for service checks
     client = None
     for host_port in etcd_hosts:
         try:
@@ -144,6 +230,64 @@ def main():
     
     if client:
         nodes = get_all_nodes(client)
+        
+        # Check DHCP service across cluster
+        print("\n" + "=" * 60)
+        print("DHCP Service Status:")
+        print("-" * 60)
+        
+        dhcp_running_nodes = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            dhcp_futures = {executor.submit(check_dhcp_service_on_host, node['ip']): node 
+                           for node in nodes if node.get('ip') and not node.get('hostname', '').endswith('a')}
+            
+            for future in as_completed(dhcp_futures):
+                result = future.result()
+                node = dhcp_futures[future]
+                if result['running']:
+                    dhcp_running_nodes.append(result['host'])
+                    method = result.get('method', 'unknown')
+                    etcd_status = "✓" if result.get('etcd_connected', False) else "✗"
+                    print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DHCP Running (via {method})")
+                    print(f"  etcd connection: {etcd_status}, server IP: {result.get('server_ip', 'unknown')}")
+                else:
+                    print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): DHCP Not running - {result['error']}")
+        
+        if len(dhcp_running_nodes) == 0:
+            print("⚠ WARNING: No DHCP servers running in cluster!")
+        elif len(dhcp_running_nodes) > 1:
+            print(f"⚠ WARNING: Multiple DHCP servers running: {', '.join(dhcp_running_nodes)}")
+        else:
+            print(f"✓ DHCP leader election working correctly - single server on {dhcp_running_nodes[0]}")
+        
+        # Check dnsmasq service across cluster
+        print("\n" + "=" * 60)
+        print("dnsmasq Service Status:")
+        print("-" * 60)
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            dnsmasq_futures = {executor.submit(check_dnsmasq_service_on_host, node['ip'], node.get('hostname', 'unknown')): node 
+                              for node in nodes if node.get('ip') and not node.get('hostname', '').endswith('a')}
+            
+            for future in as_completed(dnsmasq_futures):
+                result = future.result()
+                node = dnsmasq_futures[future]
+                if result['running']:
+                    method = result.get('method', 'unknown')
+                    if result.get('dns_working', False):
+                        print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DNS Running (via {method})")
+                        print(f"  DNS Resolution: {result['hostname']} -> {result['resolved_ip']}")
+                    else:
+                        print(f"⚠ {node.get('hostname', 'unknown')} ({result['host']}): DNS Running but resolution failed (via {method})")
+                        print(f"  DNS Error: {result.get('dns_error', 'Unknown error')}")
+                else:
+                    print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): DNS Not running - {result['error']}")
+    
+    print("\n" + "=" * 60)
+    print("Registered Nodes:")
+    print("-" * 60)
+    
+    if client:
         if nodes:
             # Sort by hostname
             nodes.sort(key=lambda x: x.get('hostname', ''))
