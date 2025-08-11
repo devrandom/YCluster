@@ -35,7 +35,6 @@ trap cleanup SIGTERM SIGINT EXIT
 
 # Wait for etcd endpoints to be reachable before attempting election
 wait_for_etcd() {
-    echo "Waiting for etcd endpoints to become reachable..."
     local attempts=0
     local max_attempts=12
     local IFS=','
@@ -43,14 +42,13 @@ wait_for_etcd() {
     while [ $attempts -lt $max_attempts ]; do
         for ep in $ETCD_ENDPOINTS; do
             if timeout 3s etcdctl --endpoints="$ep" endpoint health >/dev/null 2>&1; then
-                echo "etcd endpoint $ep is healthy"
                 return 0
             fi
         done
         attempts=$((attempts + 1))
         sleep 2
     done
-    echo "Proceeding despite etcd health check failure"
+    echo "Warning: etcd health check failed, proceeding anyway"
 }
 
 # Function to attempt leadership
@@ -65,7 +63,6 @@ attempt_leadership() {
     
     # Try to acquire leadership using txn with correct syntax
     res=`echo -e "create(\"$LEADER_KEY\") = \"0\"\n\nput \"$LEADER_KEY\" \"$NODE_ID\" --lease=$LEASE_ID\n\n" | timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" txn | head -1`
-    echo result: $res
     if [[ "$res" == "SUCCESS" ]];
     then
         echo "Acquired storage leadership"
@@ -73,10 +70,7 @@ attempt_leadership() {
         touch "$LOCK_FILE"
         return 0
     else
-        # Failed to acquire, check who is the current leader
-        CURRENT_LEADER=$(timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" get "$LEADER_KEY" --print-value-only 2>/dev/null || echo "unknown")
-        echo "Leadership held by $CURRENT_LEADER"
-        timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" lease revoke "$LEASE_ID"
+        timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" lease revoke "$LEASE_ID" >/dev/null 2>&1
         return 1
     fi
 }
@@ -88,7 +82,7 @@ renew_lease() {
         if timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" lease keep-alive "$LEASE_ID" --once; then
             return 0
         else
-            echo "Failed to renew lease, lost leadership"
+            echo "Failed to renew lease, lost storage leadership"
             rm -f "$LEASE_FILE" "$LOCK_FILE"
             return 1
         fi
@@ -101,13 +95,11 @@ start_all_services() {
     echo "Starting all services as storage leader"
     
     # Start PostgreSQL
-    echo "Starting PostgreSQL..."
     systemctl start postgres-rbd || {
         echo "Failed to start postgres-rbd service"
     }
     
     # Start Qdrant
-    echo "Starting Qdrant..."
     systemctl start qdrant-rbd || {
         echo "Failed to start qdrant-rbd service"
     }
@@ -116,22 +108,29 @@ start_all_services() {
 # Function to stop all services
 stop_all_services() {
     echo "Stopping all services, no longer storage leader"
-    systemctl stop postgres-rbd || true
-    systemctl stop qdrant-rbd || true
+    systemctl stop postgres-rbd >/dev/null 2>&1 || true
+    systemctl stop qdrant-rbd >/dev/null 2>&1 || true
 }
 
 # Main loop
 IS_LEADER=false
+SERVICES_RUNNING=false
 while true; do
     wait_for_etcd
     if [ "$IS_LEADER" = "false" ]; then
         # Try to become leader
         if attempt_leadership; then
             IS_LEADER=true
-            start_all_services
+            if [ "$SERVICES_RUNNING" = "false" ]; then
+                start_all_services
+                SERVICES_RUNNING=true
+            fi
         else
             # Not leader, ensure services are stopped
-            stop_all_services
+            if [ "$SERVICES_RUNNING" = "true" ]; then
+                stop_all_services
+                SERVICES_RUNNING=false
+            fi
             sleep 5
             continue
         fi
@@ -139,7 +138,10 @@ while true; do
         # We are leader, try to renew lease
         if ! renew_lease; then
             IS_LEADER=false
-            stop_all_services
+            if [ "$SERVICES_RUNNING" = "true" ]; then
+                stop_all_services
+                SERVICES_RUNNING=false
+            fi
             continue
         fi
     fi
