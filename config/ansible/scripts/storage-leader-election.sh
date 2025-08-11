@@ -94,55 +94,68 @@ renew_lease() {
 start_all_services() {
     echo "Starting all services as storage leader"
     
-    # Start PostgreSQL
-    systemctl start postgres-rbd || {
-        echo "Failed to start postgres-rbd service"
-    }
+    # Start PostgreSQL in background
+    systemctl start postgres-rbd &
+    PG_START_PID=$!
     
-    # Start Qdrant
-    systemctl start qdrant-rbd || {
-        echo "Failed to start qdrant-rbd service"
-    }
+    # Start Qdrant in background  
+    systemctl start qdrant-rbd &
+    QDRANT_START_PID=$!
+    
+    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID)"
 }
 
 # Function to stop all services
 stop_all_services() {
-    echo "Stopping all services, no longer storage leader"
-    systemctl stop postgres-rbd >/dev/null 2>&1 || true
-    systemctl stop qdrant-rbd >/dev/null 2>&1 || true
+    echo "Lost storage leadership - forcing aggressive cleanup"
+    
+    # Force kill processes immediately
+    echo "Force killing PostgreSQL processes"
+    pkill -9 postgres || true
+    
+    echo "Force killing Qdrant processes"
+    pkill -9 qdrant || true
+    
+    # Lazy unmount filesystems (in parallel)
+    echo "Lazy unmounting RBD filesystems"
+    umount -l /rbd/pg &
+    umount -l /rbd/qdrant &
+    wait
+    
+    # Force unmap RBDs (in parallel)
+    echo "Force unmapping RBD devices"
+    rbd unmap -o force /dev/rbd/pool1/rbd1 &
+    rbd unmap -o force /dev/rbd/pool1/qdrant-rbd1 &
+    wait
+    
+    # Clean up lock files
+    echo "Cleaning up lock files"
+    rm -f /var/run/postgres-rbd.lock || true
+    rm -f /var/run/qdrant-rbd.lock || true
+    
+    # Stop systemd services (in parallel, should be no-op after force kill)
+    systemctl stop postgres-rbd >/dev/null 2>&1 &
+    systemctl stop qdrant-rbd >/dev/null 2>&1 &
+    wait
+    
+    echo "Aggressive cleanup completed"
 }
 
 # Main loop
 IS_LEADER=false
-SERVICES_RUNNING=false
 while true; do
     wait_for_etcd
     if [ "$IS_LEADER" = "false" ]; then
         # Try to become leader
         if attempt_leadership; then
             IS_LEADER=true
-            if [ "$SERVICES_RUNNING" = "false" ]; then
-                start_all_services
-                SERVICES_RUNNING=true
-            fi
-        else
-            # Not leader, ensure services are stopped
-            if [ "$SERVICES_RUNNING" = "true" ]; then
-                stop_all_services
-                SERVICES_RUNNING=false
-            fi
-            sleep 5
-            continue
+            start_all_services
         fi
     else
         # We are leader, try to renew lease
         if ! renew_lease; then
             IS_LEADER=false
-            if [ "$SERVICES_RUNNING" = "true" ]; then
-                stop_all_services
-                SERVICES_RUNNING=false
-            fi
-            continue
+            stop_all_services
         fi
     fi
     
