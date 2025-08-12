@@ -194,6 +194,7 @@
         state: started
       register: temp_start
       failed_when: false
+      when: inventory_hostname == groups['core'][0]
       tags:
         - never
         - init_db
@@ -202,7 +203,7 @@
       stat:
         path: /rbd/pg/data/PG_VERSION
       register: cluster_exists
-      when: temp_start.failed == false
+      when: inventory_hostname == groups['core'][0] and temp_start.failed == false
       tags:
         - never
         - init_db
@@ -211,7 +212,7 @@
       become_user: postgres
       shell: |
         /usr/lib/postgresql/16/bin/initdb -D /rbd/pg/data
-      when: temp_start.failed == false and not cluster_exists.stat.exists
+      when: inventory_hostname == groups['core'][0] and temp_start.failed == false and not cluster_exists.stat.exists
       tags:
         - never
         - init_db
@@ -220,7 +221,7 @@
       systemd:
         name: postgres-rbd.service
         state: stopped
-      when: temp_start.failed == false
+      when: inventory_hostname == groups['core'][0] and temp_start.failed == false
       tags:
         - never
         - init_db
