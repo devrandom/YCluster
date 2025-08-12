@@ -1,20 +1,20 @@
-- name: Setup Qdrant RBD image on core nodes
+- name: Setup PostgreSQL RBD image on core nodes
   hosts: core
   become: yes
   vars:
     pool_name: rbd
-    rbd_image_name: qdrant
+    rbd_image_name: psql
     rbd_image_size: 100G
   tasks:
-    - name: Check if Qdrant RBD image exists
+    - name: Check if PostgreSQL RBD image exists
       command: rbd info "{{ pool_name }}/{{ rbd_image_name }}"
-      register: qdrant_rbd_check
+      register: postgres_rbd_check
       failed_when: false
       changed_when: false
 
-    - name: Create Qdrant RBD image
+    - name: Create PostgreSQL RBD image
       command: rbd create "{{ pool_name }}/{{ rbd_image_name }}" --size "{{ rbd_image_size }}" --image-feature exclusive-lock,object-map,fast-diff,deep-flatten
-      when: qdrant_rbd_check.rc != 0
+      when: postgres_rbd_check.rc != 0
       run_once: true
 
     - name: Wait for RBD image to be available
@@ -23,25 +23,25 @@
       until: rbd_info.rc == 0
       retries: 10
       delay: 5
-      when: qdrant_rbd_check.rc != 0
+      when: postgres_rbd_check.rc != 0
 
     - name: Map RBD image temporarily for formatting
       command: rbd map "{{ pool_name }}/{{ rbd_image_name }}" -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30
       register: rbd_map_result
-      when: qdrant_rbd_check.rc != 0
+      when: postgres_rbd_check.rc != 0
       run_once: true
 
     - name: Format RBD image with ext4
       command: mkfs.ext4 "{{ rbd_map_result.stdout }}"
       when:
-        - qdrant_rbd_check.rc != 0
+        - postgres_rbd_check.rc != 0
         - rbd_map_result is defined
       run_once: true
 
     - name: Unmap RBD image after formatting
       command: rbd unmap "{{ rbd_map_result.stdout }}"
       when:
-        - qdrant_rbd_check.rc != 0
+        - postgres_rbd_check.rc != 0
         - rbd_map_result is defined
       run_once: true
 

@@ -3,8 +3,8 @@
   hosts: all
   gather_facts: false
   vars:
-    pool_name: pool1
-    rbd_image_name: rbd1
+    pool_name: rbd
+    rbd_image_name: psql
   tags:
     - never
     - destroy
