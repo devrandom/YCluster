@@ -124,8 +124,8 @@ stop_all_services() {
     
     # Force unmap RBDs (in parallel)
     echo "Force unmapping RBD devices"
-    rbd unmap -o force /dev/rbd/pool1/rbd1 &
-    rbd unmap -o force /dev/rbd/pool1/qdrant-rbd1 &
+    rbd unmap -o force /dev/rbd/rbd/psql &
+    rbd unmap -o force /dev/rbd/rbd/qdrant &
     wait
     
     # Clean up lock files

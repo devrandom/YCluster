@@ -19,8 +19,8 @@
           #!/bin/bash
           set -e
 
-          POOL_NAME="pool1"
-          RBD_IMAGE="rbd1"
+          POOL_NAME="rbd"
+          RBD_IMAGE="psql"
           MOUNT_POINT="/rbd/pg"
           PG_DATA_DIR="/rbd/pg/data"
           LOCK_FILE="/var/run/postgres-rbd.lock"
