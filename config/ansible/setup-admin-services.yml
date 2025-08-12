@@ -89,8 +89,8 @@
 
     - name: Copy etcd-based allocation API
       copy:
-        src: /opt/infrastructure/config/ansible/files/app_etcd.py
-        dest: "{{ admin_services_dir }}/app_etcd.py"
+        src: /opt/infrastructure/config/ansible/files/app.py
+        dest: "{{ admin_services_dir }}/app.py"
         mode: '0644'
         remote_src: yes
       notify: restart allocation-api
@@ -118,7 +118,7 @@
           [Service]
           Type=simple
           Environment="ETCD_HOSTS={% for h in groups['core'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
-          ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app_etcd.py
+          ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app.py
           Restart=always
           RestartSec=5
           User=root
