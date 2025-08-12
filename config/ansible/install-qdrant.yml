@@ -101,8 +101,8 @@
           #!/bin/bash
           set -e
 
-          POOL_NAME="pool1"
-          RBD_IMAGE="qdrant-rbd1"
+          POOL_NAME="rbd"
+          RBD_IMAGE="qdrant"
           MOUNT_POINT="/rbd/qdrant"
           QDRANT_DATA_DIR="/rbd/qdrant"
           LOCK_FILE="/var/run/qdrant-rbd.lock"
