@@ -1,0 +1,40 @@
+- name: Stop storage leader election service
+  hosts: core
+  become: yes
+  tasks:
+    - name: Stop storage leader election systemd service
+      systemd:
+        name: storage-leader-election
+        state: stopped
+      ignore_errors: yes
+
+    - name: Check if storage leader election process is still running
+      command: pgrep -f "storage-leader-election.sh"
+      register: leader_election_process
+      failed_when: false
+      changed_when: false
+
+    - name: Force kill storage leader election process if still running
+      command: pkill -f "storage-leader-election.sh"
+      when: leader_election_process.rc == 0
+      ignore_errors: yes
+
+    - name: Remove leader election lock files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/run/etcd-leader.lock
+        - /var/run/etcd-lease.lease
+      ignore_errors: yes
+
+    - name: Verify service is stopped
+      systemd:
+        name: storage-leader-election
+      register: service_status
+      ignore_errors: yes
+
+    - name: Display service status
+      debug:
+        msg: "Storage leader election service status: {{ service_status.status.ActiveState | default('unknown') }}"
+      when: service_status is defined
