@@ -31,8 +31,8 @@
       when: qdrant_rbd_check.rc != 0
       run_once: true
 
-    - name: Format RBD image with ext4
-      command: mkfs.ext4 "{{ rbd_map_result.stdout }}"
+    - name: Format RBD image with XFS
+      command: mkfs.xfs -f -b size=4096 -d su=64k,sw=1,agcount=32 -l size=128m,lazy-count=1 -L "qdrant" "{{ rbd_map_result.stdout }}"
       when:
         - qdrant_rbd_check.rc != 0
         - rbd_map_result is defined
