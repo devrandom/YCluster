@@ -115,14 +115,14 @@
               
               while [ $retries -lt $MAX_RETRIES ]; do
                   # Try to map the RBD device with exclusive lock
-                  if RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30 2>/dev/null); then
+                  if RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30); then
                       echo "Successfully locked RBD device: $RBD_DEVICE"
                       
                       # Create mount point if it doesn't exist
                       mkdir -p "$MOUNT_POINT"
                       
-                      # Mount the device
-                      if mount "$RBD_DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                      # Mount the device with optimized XFS options for network storage
+                      if mount -t xfs -o noatime,nodiratime,inode64,allocsize=16M,logbufs=8,logbsize=256k,swalloc "$RBD_DEVICE" "$MOUNT_POINT" 2>/dev/null; then
                           echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
                           
                           # Create qdrant data directory with proper ownership
