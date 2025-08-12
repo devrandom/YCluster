@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cluster Status</title>
+    <meta http-equiv="refresh" content="30">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        h1 { color: #333; text-align: center; }
+        .refresh-info { text-align: center; color: #666; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; background-color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f8f9fa; font-weight: bold; }
+        tr:hover { background-color: #f8f9fa; }
+        .status-healthy { background-color: #d4edda; color: #155724; }
+        .status-unhealthy { background-color: #f8d7da; color: #721c24; }
+        .status-degraded { background-color: #fff3cd; color: #856404; }
+        .status-timeout { background-color: #e2e3e5; color: #383d41; }
+        .status-unreachable { background-color: #f8d7da; color: #721c24; }
+        .status-error { background-color: #f8d7da; color: #721c24; }
+        .status-not_required { background-color: #e7f3ff; color: #004085; }
+        .service-cell { font-size: 0.9em; }
+        .service-item { display: inline-block; margin: 2px 4px; padding: 2px 6px; border-radius: 3px; }
+        .type-storage { border-left: 4px solid #007bff; }
+        .type-compute { border-left: 4px solid #28a745; }
+        .type-macos { border-left: 4px solid #ffc107; }
+        .error-details { font-size: 0.8em; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>Cluster Status Dashboard</h1>
+    <div class="refresh-info">Auto-refreshes every 30 seconds | Last updated: {{ timestamp }}</div>
+    
+    <table>
+        <thead>
+            <tr>
+                <th>Host</th>
+                <th>Type</th>
+                <th>IP</th>
+                <th>Leadership</th>
+                <th>Overall</th>
+                <th>Services</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for host in hosts %}
+            <tr class="type-{{ host.type }}">
+                <td><strong>{{ host.hostname }}</strong></td>
+                <td>{{ host.type.title() }}</td>
+                <td>{{ host.ip }}</td>
+                <td>
+                    {% if leadership.get('storage_leader') == host.hostname %}
+                    <span class="service-item status-healthy">Storage</span>
+                    {% endif %}
+                    {% if leadership.get('dhcp_leader') == host.hostname %}
+                    <span class="service-item status-healthy">DHCP</span>
+                    {% endif %}
+                    {% if leadership.get('storage_leader') != host.hostname and leadership.get('dhcp_leader') != host.hostname %}
+                    <span style="color: #666;">-</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% set health = host_health.get(host.hostname, {}) %}
+                    <span class="status-{{ health.get('overall', 'error') }}">
+                        {{ health.get('overall', 'unknown').title() }}
+                    </span>
+                    {% if health.get('error') %}
+                    <div class="error-details">{{ health.error }}</div>
+                    {% endif %}
+                </td>
+                <td class="service-cell">
+                    {% set services = health.get('services', {}) %}
+                    {% for service_name, service_info in services.items() %}
+                    <span class="service-item status-{{ service_info.get('status', 'unknown') }}">
+                        {{ service_name }}
+                    </span>
+                    {% endfor %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    
+    {% if not hosts %}
+    <p style="text-align: center; color: #666; margin-top: 40px;">No hosts found in cluster inventory.</p>
+    {% endif %}
+</body>
+</html>
