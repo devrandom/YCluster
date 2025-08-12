@@ -1,12 +1,13 @@
 import json
 import etcd3
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import os
 import threading
 import time
 import subprocess
 import socket
 import platform
+import requests
 from datetime import datetime, UTC
 
 app = Flask(__name__)
@@ -334,24 +335,6 @@ def get_hosts():
 def check_service_status(service_name):
     """Check if a systemd service is active"""
     try:
-        # Check if systemd unit file exists first
-        unit_path = f"/etc/systemd/system/{service_name}.service"
-        if not os.path.exists(unit_path):
-            # Try system units
-            unit_path = f"/lib/systemd/system/{service_name}.service"
-            if not os.path.exists(unit_path):
-                return False
-        
-        # Read systemd status from proc filesystem if available
-        try:
-            with open(f"/sys/fs/cgroup/systemd/system.slice/{service_name}.service/cgroup.procs", 'r') as f:
-                # If we can read the cgroup procs, service is likely running
-                procs = f.read().strip()
-                return len(procs) > 0
-        except:
-            pass
-        
-        # Fallback to subprocess for systemctl
         result = subprocess.run(['systemctl', 'is-active', service_name], 
                               capture_output=True, text=True, timeout=5)
         return result.stdout.strip() == 'active'
@@ -389,12 +372,10 @@ def is_storage_leader():
     """Check if this node is the current storage leader"""
     try:
         client = get_etcd_client()
-        result = client.get('/cluster/storage/leader')
+        result = client.get('/cluster/leader/app')
         if result[0]:
-            leader_info = json.loads(result[0].decode())
-            # Get local hostname using platform module
-            local_hostname = platform.node()
-            return leader_info.get('hostname') == local_hostname
+            leader = result[0].decode()
+            return leader == platform.node()
         return False
     except:
         return False
@@ -403,12 +384,10 @@ def is_dhcp_leader():
     """Check if this node is the current DHCP leader"""
     try:
         client = get_etcd_client()
-        result = client.get('/cluster/dhcp/leader')
+        result = client.get('/cluster/leader/dhcp')
         if result[0]:
-            leader_info = json.loads(result[0].decode())
-            # Get local hostname using platform module
-            local_hostname = platform.node()
-            return leader_info.get('hostname') == local_hostname
+            leader = result[0].decode()
+            return leader == platform.node()
         return False
     except:
         return False
@@ -436,8 +415,8 @@ def health():
     if ceph_health['status'] not in ['healthy', 'degraded']:
         health_status['overall'] = 'unhealthy'
     
-    # Check PostgreSQL (only required if we are storage leader)
-    postgres_running = check_service_status('postgresql')
+    # Check PostgreSQL (always check, flag split-brain if running on non-leader)
+    postgres_running = check_service_status('postgresql@16-main')
     postgres_port = check_port_open('localhost', 5432)
     is_storage_lead = is_storage_leader()
     
@@ -455,17 +434,30 @@ def health():
         if not postgres_healthy:
             health_status['overall'] = 'unhealthy'
     else:
-        health_status['services']['postgresql'] = {
-            'status': 'not_required',
-            'details': {
-                'service_active': postgres_running,
-                'port_open': postgres_port,
-                'required': False,
-                'reason': 'not storage leader'
+        # Not leader but check for split-brain
+        if postgres_running or postgres_port:
+            health_status['services']['postgresql'] = {
+                'status': 'unhealthy',
+                'details': {
+                    'service_active': postgres_running,
+                    'port_open': postgres_port,
+                    'required': False,
+                    'reason': 'split-brain: running on non-leader'
+                }
             }
-        }
+            health_status['overall'] = 'unhealthy'
+        else:
+            health_status['services']['postgresql'] = {
+                'status': 'not_required',
+                'details': {
+                    'service_active': postgres_running,
+                    'port_open': postgres_port,
+                    'required': False,
+                    'reason': 'not storage leader'
+                }
+            }
     
-    # Check Qdrant (only required if we are storage leader)
+    # Check Qdrant (always check, flag split-brain if running on non-leader)
     qdrant_running = check_service_status('qdrant')
     qdrant_port = check_port_open('localhost', 6333)
     
@@ -483,15 +475,28 @@ def health():
         if not qdrant_healthy:
             health_status['overall'] = 'unhealthy'
     else:
-        health_status['services']['qdrant'] = {
-            'status': 'not_required',
-            'details': {
-                'service_active': qdrant_running,
-                'port_open': qdrant_port,
-                'required': False,
-                'reason': 'not storage leader'
+        # Not leader but check for split-brain
+        if qdrant_running or qdrant_port:
+            health_status['services']['qdrant'] = {
+                'status': 'unhealthy',
+                'details': {
+                    'service_active': qdrant_running,
+                    'port_open': qdrant_port,
+                    'required': False,
+                    'reason': 'split-brain: running on non-leader'
+                }
             }
-        }
+            health_status['overall'] = 'unhealthy'
+        else:
+            health_status['services']['qdrant'] = {
+                'status': 'not_required',
+                'details': {
+                    'service_active': qdrant_running,
+                    'port_open': qdrant_port,
+                    'required': False,
+                    'reason': 'not storage leader'
+                }
+            }
     
     # Check storage leader election
     storage_leader_running = check_service_status('storage-leader-election')
@@ -539,6 +544,92 @@ def health():
     # Return appropriate HTTP status code
     status_code = 200 if health_status['overall'] == 'healthy' else 503
     return jsonify(health_status), status_code
+
+def get_all_hosts():
+    """Get all hosts from etcd allocations"""
+    try:
+        client = get_etcd_client()
+        hosts = []
+        
+        # Get all allocations from by-hostname
+        for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
+            if value:
+                try:
+                    allocation = json.loads(value.decode())
+                    hostname = allocation['hostname']
+                    
+                    # Skip AMT interfaces (hostnames ending with 'a')
+                    if hostname.endswith('a'):
+                        continue
+                        
+                    hosts.append({
+                        'hostname': hostname,
+                        'ip': allocation['ip'],
+                        'type': allocation['type']
+                    })
+                except:
+                    pass
+        
+        # Sort by hostname
+        hosts.sort(key=lambda x: (x['type'], int(x['hostname'][1:]) if x['hostname'][1:].isdigit() else 0))
+        return hosts
+    except:
+        return []
+
+def get_host_health(host_ip, timeout=5):
+    """Get health status from a specific host"""
+    try:
+        response = requests.get(f"http://{host_ip}:12723/api/health", timeout=timeout)
+        if response.status_code in [200, 503]:
+            # Both 200 (healthy) and 503 (unhealthy) contain valid health data
+            return response.json()
+        else:
+            return {'overall': 'error', 'services': {}, 'error': f'HTTP {response.status_code}'}
+    except requests.exceptions.Timeout:
+        return {'overall': 'timeout', 'services': {}, 'error': 'Request timeout'}
+    except requests.exceptions.ConnectionError:
+        return {'overall': 'unreachable', 'services': {}, 'error': 'Connection failed'}
+    except Exception as e:
+        return {'overall': 'error', 'services': {}, 'error': str(e)}
+
+def get_leadership_status():
+    """Get current leadership status from etcd"""
+    try:
+        client = get_etcd_client()
+        leadership = {}
+        
+        # Get storage leader
+        result = client.get('/cluster/leader/app')
+        if result[0]:
+            storage_leader = result[0].decode()
+            leadership['storage_leader'] = storage_leader
+        
+        # Get DHCP leader
+        result = client.get('/cluster/leader/dhcp')
+        if result[0]:
+            dhcp_leader = result[0].decode()
+            leadership['dhcp_leader'] = dhcp_leader
+            
+        return leadership
+    except:
+        return {}
+
+@app.route('/status')
+def status_page():
+    """Web page showing cluster-wide health status"""
+    hosts = get_all_hosts()
+    host_health = {}
+    leadership = get_leadership_status()
+    
+    # Get health status for each host
+    for host in hosts:
+        host_health[host['hostname']] = get_host_health(host['ip'])
+    
+    return render_template('status.html', 
+                         hosts=hosts, 
+                         host_health=host_health,
+                         leadership=leadership,
+                         timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 if __name__ == '__main__':
     # Wait for etcd to be available
