@@ -116,10 +116,19 @@ stop_all_services() {
     echo "Force killing Qdrant processes"
     pkill -9 qdrant || true
     
-    # Lazy unmount filesystems (in parallel)
-    echo "Lazy unmounting RBD filesystems"
-    umount -l /rbd/pg &
-    umount -l /rbd/qdrant &
+    # Force XFS shutdown to abandon all I/O immediately (only if mounted)
+    echo "Force shutting down XFS filesystems"
+    if mountpoint -q /rbd/pg; then
+        xfs_io -x -c "shutdown" /rbd/pg 2>/dev/null || true
+    fi
+    if mountpoint -q /rbd/qdrant; then
+        xfs_io -x -c "shutdown" /rbd/qdrant 2>/dev/null || true
+    fi
+    
+    # Force unmount filesystems (in parallel)
+    echo "Force unmounting RBD filesystems"
+    umount -f -l /rbd/pg &
+    umount -f -l /rbd/qdrant &
     wait
     
     # Force unmap RBDs (in parallel)

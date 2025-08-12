@@ -4,8 +4,6 @@
   gather_facts: false
   vars:
     pool_name: rbd
-    rbd_image_name: psql
-    rbd_image_size: 100G
   tasks:
     - name: Get all storage nodes from inventory
       set_fact:
@@ -61,52 +59,6 @@
       register: rbd_init
       failed_when: false
       
-    - name: Check if RBD image already exists
-      shell: rbd ls "{{ pool_name }}" | grep -w "{{ rbd_image_name }}"
-      register: rbd_image_exists
-      delegate_to: "{{ target_node }}"
-      failed_when: false
-      changed_when: false
-      run_once: true
-      
-    - name: Create RBD image if it doesn't exist
-      shell: rbd create "{{ pool_name }}/{{ rbd_image_name }}" --size "{{ rbd_image_size }}" --image-feature exclusive-lock,object-map,fast-diff,deep-flatten
-      delegate_to: "{{ target_node }}"
-      when: rbd_image_exists.rc != 0
-      register: rbd_image_creation
-      run_once: true
-      failed_when: rbd_image_creation.rc != 0 and 'File exists' not in rbd_image_creation.stderr
-      
-    - name: Map RBD device for new image
-      shell: rbd map "{{ pool_name }}/{{ rbd_image_name }}"
-      delegate_to: "{{ target_node }}"
-      when: rbd_image_exists.rc != 0 and (rbd_image_creation is succeeded or (rbd_image_creation is failed and 'File exists' in rbd_image_creation.stderr))
-      register: rbd_device_map
-      run_once: true
-      
-    - name: Create ext3 filesystem on new RBD device
-      shell: mkfs.ext3 "{{ rbd_device_map.stdout }}"
-      delegate_to: "{{ target_node }}"
-      when: rbd_image_exists.rc != 0 and rbd_device_map is succeeded
-      register: filesystem_creation
-      run_once: true
-      
-    - name: Unmap RBD device after filesystem creation
-      shell: rbd unmap "{{ rbd_device_map.stdout }}"
-      delegate_to: "{{ target_node }}"
-      when: rbd_image_exists.rc != 0 and rbd_device_map is succeeded
-      register: rbd_device_unmap
-      run_once: true
-      failed_when: false
-      
-    - name: Enable PostgreSQL-relevant features on existing RBD image
-      shell: rbd feature enable "{{ pool_name }}/{{ rbd_image_name }}" exclusive-lock,object-map,fast-diff,deep-flatten
-      delegate_to: "{{ target_node }}"
-      when: rbd_image_exists.rc == 0
-      register: rbd_feature_enable
-      run_once: true
-      failed_when: false
-      
     - name: Display result
       debug:
         msg: >-
@@ -114,9 +66,4 @@
           Pool '{{ pool_name }}' already exists on {{ target_node }}. RBD initialization attempted.
           {% else %}
           Pool '{{ pool_name }}' created successfully on {{ target_node }}. RBD initialized.
-          {% endif %}
-          {% if rbd_image_exists.rc == 0 %}
-          RBD image '{{ rbd_image_name }}' already exists in pool '{{ pool_name }}'.
-          {% else %}
-          RBD image '{{ rbd_image_name }}' ({{ rbd_image_size }}) created successfully in pool '{{ pool_name }}' with ext3 filesystem.
           {% endif %}
