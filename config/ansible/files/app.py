@@ -4,6 +4,9 @@ from flask import Flask, request, jsonify
 import os
 import threading
 import time
+import subprocess
+import socket
+import platform
 from datetime import datetime, UTC
 
 app = Flask(__name__)
@@ -328,16 +331,214 @@ def get_hosts():
     else:
         return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
 
-@app.route('/api/health')
-def health():
-    """Health check endpoint"""
+def check_service_status(service_name):
+    """Check if a systemd service is active"""
+    try:
+        # Check if systemd unit file exists first
+        unit_path = f"/etc/systemd/system/{service_name}.service"
+        if not os.path.exists(unit_path):
+            # Try system units
+            unit_path = f"/lib/systemd/system/{service_name}.service"
+            if not os.path.exists(unit_path):
+                return False
+        
+        # Read systemd status from proc filesystem if available
+        try:
+            with open(f"/sys/fs/cgroup/systemd/system.slice/{service_name}.service/cgroup.procs", 'r') as f:
+                # If we can read the cgroup procs, service is likely running
+                procs = f.read().strip()
+                return len(procs) > 0
+        except:
+            pass
+        
+        # Fallback to subprocess for systemctl
+        result = subprocess.run(['systemctl', 'is-active', service_name], 
+                              capture_output=True, text=True, timeout=5)
+        return result.stdout.strip() == 'active'
+    except:
+        return False
+
+def check_port_open(host, port, timeout=3):
+    """Check if a port is open on a host"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
+def check_ceph_status():
+    """Check Ceph cluster health"""
+    try:
+        result = subprocess.run(['ceph', 'health'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            health_output = result.stdout.strip()
+            return {
+                'status': 'healthy' if 'HEALTH_OK' in health_output else 'degraded',
+                'details': health_output
+            }
+        else:
+            return {'status': 'error', 'details': result.stderr.strip()}
+    except:
+        return {'status': 'unavailable', 'details': 'ceph command failed'}
+
+def is_storage_leader():
+    """Check if this node is the current storage leader"""
     try:
         client = get_etcd_client()
-        # Try to read a key to verify connection
-        client.get('/test')
-        return jsonify({'status': 'healthy', 'etcd': 'connected'})
+        result = client.get('/cluster/storage/leader')
+        if result[0]:
+            leader_info = json.loads(result[0].decode())
+            # Get local hostname using platform module
+            local_hostname = platform.node()
+            return leader_info.get('hostname') == local_hostname
+        return False
     except:
-        return jsonify({'status': 'unhealthy', 'etcd': 'disconnected'}), 503
+        return False
+
+def is_dhcp_leader():
+    """Check if this node is the current DHCP leader"""
+    try:
+        client = get_etcd_client()
+        result = client.get('/cluster/dhcp/leader')
+        if result[0]:
+            leader_info = json.loads(result[0].decode())
+            # Get local hostname using platform module
+            local_hostname = platform.node()
+            return leader_info.get('hostname') == local_hostname
+        return False
+    except:
+        return False
+
+@app.route('/api/health')
+def health():
+    """Comprehensive health check endpoint for all services"""
+    health_status = {
+        'overall': 'healthy',
+        'services': {}
+    }
+    
+    # Check etcd
+    try:
+        client = get_etcd_client()
+        client.get('/test')
+        health_status['services']['etcd'] = {'status': 'healthy', 'details': 'connected'}
+    except Exception as e:
+        health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
+        health_status['overall'] = 'unhealthy'
+    
+    # Check Ceph storage
+    ceph_health = check_ceph_status()
+    health_status['services']['ceph'] = ceph_health
+    if ceph_health['status'] not in ['healthy', 'degraded']:
+        health_status['overall'] = 'unhealthy'
+    
+    # Check PostgreSQL (only required if we are storage leader)
+    postgres_running = check_service_status('postgresql')
+    postgres_port = check_port_open('localhost', 5432)
+    is_storage_lead = is_storage_leader()
+    
+    if is_storage_lead:
+        postgres_healthy = postgres_running and postgres_port
+        health_status['services']['postgresql'] = {
+            'status': 'healthy' if postgres_healthy else 'unhealthy',
+            'details': {
+                'service_active': postgres_running,
+                'port_open': postgres_port,
+                'required': True,
+                'reason': 'storage leader'
+            }
+        }
+        if not postgres_healthy:
+            health_status['overall'] = 'unhealthy'
+    else:
+        health_status['services']['postgresql'] = {
+            'status': 'not_required',
+            'details': {
+                'service_active': postgres_running,
+                'port_open': postgres_port,
+                'required': False,
+                'reason': 'not storage leader'
+            }
+        }
+    
+    # Check Qdrant (only required if we are storage leader)
+    qdrant_running = check_service_status('qdrant')
+    qdrant_port = check_port_open('localhost', 6333)
+    
+    if is_storage_lead:
+        qdrant_healthy = qdrant_running and qdrant_port
+        health_status['services']['qdrant'] = {
+            'status': 'healthy' if qdrant_healthy else 'unhealthy',
+            'details': {
+                'service_active': qdrant_running,
+                'port_open': qdrant_port,
+                'required': True,
+                'reason': 'storage leader'
+            }
+        }
+        if not qdrant_healthy:
+            health_status['overall'] = 'unhealthy'
+    else:
+        health_status['services']['qdrant'] = {
+            'status': 'not_required',
+            'details': {
+                'service_active': qdrant_running,
+                'port_open': qdrant_port,
+                'required': False,
+                'reason': 'not storage leader'
+            }
+        }
+    
+    # Check storage leader election
+    storage_leader_running = check_service_status('storage-leader-election')
+    health_status['services']['storage_leader_election'] = {
+        'status': 'healthy' if storage_leader_running else 'unhealthy',
+        'details': {'service_active': storage_leader_running}
+    }
+    if not storage_leader_running:
+        health_status['overall'] = 'unhealthy'
+    
+    # Check DHCP (only required if we are DHCP leader)
+    is_dhcp_lead = is_dhcp_leader()
+    dhcp_port = check_port_open('localhost', 8067)  # DHCP health port
+    
+    if is_dhcp_lead:
+        health_status['services']['dhcp'] = {
+            'status': 'healthy' if dhcp_port else 'unhealthy',
+            'details': {
+                'health_port_open': dhcp_port,
+                'required': True,
+                'reason': 'dhcp leader'
+            }
+        }
+        if not dhcp_port:
+            health_status['overall'] = 'unhealthy'
+    else:
+        health_status['services']['dhcp'] = {
+            'status': 'not_required',
+            'details': {
+                'health_port_open': dhcp_port,
+                'required': False,
+                'reason': 'not dhcp leader'
+            }
+        }
+    
+    # Check NTP
+    ntp_running = check_service_status('ntp') or check_service_status('chrony')
+    health_status['services']['ntp'] = {
+        'status': 'healthy' if ntp_running else 'unhealthy',
+        'details': {'service_active': ntp_running}
+    }
+    if not ntp_running:
+        health_status['overall'] = 'unhealthy'
+    
+    # Return appropriate HTTP status code
+    status_code = 200 if health_status['overall'] == 'healthy' else 503
+    return jsonify(health_status), status_code
 
 if __name__ == '__main__':
     # Wait for etcd to be available
