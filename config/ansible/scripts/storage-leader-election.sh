@@ -89,47 +89,55 @@ start_all_services() {
 
 # Function to stop all services
 stop_all_services() {
-    echo "Lost storage leadership - forcing aggressive cleanup"
+    echo "Lost storage leadership - attempting graceful shutdown first"
     
-    # Force kill processes immediately
-    echo "Force killing PostgreSQL processes"
-    pkill -9 postgres || true
-    
-    echo "Force killing Qdrant processes"
-    pkill -9 qdrant || true
-    
-    # Force XFS shutdown to abandon all I/O immediately (only if mounted)
-    echo "Force shutting down XFS filesystems"
-    if mountpoint -q /rbd/pg; then
-        xfs_io -x -c "shutdown" /rbd/pg 2>/dev/null || true
-    fi
-    if mountpoint -q /rbd/qdrant; then
-        xfs_io -x -c "shutdown" /rbd/qdrant 2>/dev/null || true
-    fi
-    
-    # Force unmount filesystems (in parallel)
-    echo "Force unmounting RBD filesystems"
-    umount -f -l /rbd/pg &
-    umount -f -l /rbd/qdrant &
+    # Try graceful shutdown first with timeout
+    echo "Attempting graceful service shutdown (5 second timeout)"
+    timeout 5s systemctl stop postgres-rbd &
+    timeout 5s systemctl stop qdrant-rbd &
     wait
     
-    # Force unmap RBDs (in parallel)
-    echo "Force unmapping RBD devices"
-    rbd unmap -o force /dev/rbd/rbd/psql &
-    rbd unmap -o force /dev/rbd/rbd/qdrant &
-    wait
+    # Check if services are still running and force cleanup if needed
+    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null; then
+        echo "Graceful shutdown failed or timed out - forcing aggressive cleanup"
+        
+        # Force kill processes immediately
+        echo "Force killing PostgreSQL processes"
+        pkill -9 postgres || true
+        
+        echo "Force killing Qdrant processes"
+        pkill -9 qdrant || true
+        
+        # Force XFS shutdown to abandon all I/O immediately (only if mounted)
+        echo "Force shutting down XFS filesystems"
+        if mountpoint -q /rbd/pg; then
+            xfs_io -x -c "shutdown" /rbd/pg 2>/dev/null || true
+        fi
+        if mountpoint -q /rbd/qdrant; then
+            xfs_io -x -c "shutdown" /rbd/qdrant 2>/dev/null || true
+        fi
+        
+        # Force unmount filesystems (in parallel)
+        echo "Force unmounting RBD filesystems"
+        umount -f -l /rbd/pg &
+        umount -f -l /rbd/qdrant &
+        wait
+        
+        # Force unmap RBDs (in parallel with timeout)
+        echo "Force unmapping RBD devices"
+        timeout 10s rbd unmap -o force /dev/rbd/rbd/psql &
+        timeout 10s rbd unmap -o force /dev/rbd/rbd/qdrant &
+        wait
+        
+        echo "Aggressive cleanup completed"
+    else
+        echo "Graceful shutdown successful"
+    fi
     
     # Clean up lock files
     echo "Cleaning up lock files"
     rm -f /var/run/postgres-rbd.lock || true
     rm -f /var/run/qdrant-rbd.lock || true
-    
-    # Stop systemd services (in parallel, should be no-op after force kill)
-    systemctl stop postgres-rbd >/dev/null 2>&1 &
-    systemctl stop qdrant-rbd >/dev/null 2>&1 &
-    wait
-    
-    echo "Aggressive cleanup completed"
 }
 
 # Main loop
