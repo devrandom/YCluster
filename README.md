@@ -45,6 +45,19 @@ ansible-playbook --limit s2 setup-admin-services.yml
 
 # Check Cluster Status
 
+## Web Status Dashboard
+
+View the cluster status dashboard at: http://10.0.0.1:12723/status
+
+The status page shows:
+- All cluster nodes with their types and IP addresses
+- Current leadership assignments (storage and DHCP leaders)
+- DNS health status for each node
+- Overall health status and individual service status
+- Auto-refreshes every 30 seconds
+
+## Command Line Status
+
 On any node, run the following commands to check the status of the cluster:
 
     check_cluster.py
