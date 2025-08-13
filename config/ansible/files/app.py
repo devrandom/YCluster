@@ -9,6 +9,7 @@ import socket
 import platform
 import requests
 from datetime import datetime, UTC
+import dns.resolver
 
 app = Flask(__name__)
 
@@ -368,6 +369,64 @@ def check_ceph_status():
     except:
         return {'status': 'unavailable', 'details': 'ceph command failed'}
 
+def check_dns_status():
+    """Check DNS (dnsmasq) service and functionality"""
+    try:
+        # Check if dnsmasq service is running
+        service_running = check_service_status('dnsmasq')
+        
+        # Test local DNS server directly using dnspython
+        dns_working = False
+        dns_details = "DNS query failed"
+        
+        try:
+            # Create a resolver that queries the local DNS server directly
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = ['127.0.0.1']
+            resolver.timeout = 3
+            resolver.lifetime = 5
+            
+            # Query local hostname A record
+            local_hostname = platform.node()
+            answer = resolver.resolve(local_hostname, 'A')
+            if answer:
+                resolved_ips = [str(rdata) for rdata in answer]
+                dns_working = True
+                dns_details = f"Local DNS server responding ({local_hostname} -> {', '.join(resolved_ips)})"
+            else:
+                dns_details = f"Local DNS query for {local_hostname} returned no results"
+                
+        except dns.resolver.Timeout:
+            dns_details = "Local DNS query timeout"
+        except dns.resolver.NXDOMAIN:
+            dns_details = "Local DNS query: domain not found"
+        except dns.resolver.NoAnswer:
+            dns_details = "Local DNS query: no answer"
+        except Exception as e:
+            dns_details = f"Local DNS query error: {str(e)}"
+        
+        # Overall status
+        if service_running and dns_working:
+            status = 'healthy'
+            details = f"Service active, {dns_details}"
+        elif service_running:
+            status = 'degraded'
+            details = f"Service active but {dns_details}"
+        else:
+            status = 'unhealthy'
+            details = f"Service inactive, {dns_details}"
+            
+        return {
+            'status': status,
+            'details': {
+                'service_active': service_running,
+                'dns_working': dns_working,
+                'message': details
+            }
+        }
+    except Exception as e:
+        return {'status': 'error', 'details': f'DNS check failed: {str(e)}'}
+
 def is_storage_leader():
     """Check if this node is the current storage leader"""
     try:
@@ -531,6 +590,12 @@ def health():
                 'reason': 'not dhcp leader'
             }
         }
+    
+    # Check DNS (dnsmasq)
+    dns_health = check_dns_status()
+    health_status['services']['dns'] = dns_health
+    if dns_health['status'] == 'unhealthy':
+        health_status['overall'] = 'unhealthy'
     
     # Check NTP
     ntp_running = check_service_status('ntp') or check_service_status('chrony')
