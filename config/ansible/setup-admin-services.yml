@@ -216,7 +216,7 @@
       copy:
         dest: /etc/resolv.conf
         content: |
-          nameserver 10.0.0.1
+          nameserver 127.0.0.1
           search xc
         mode: '0644'
 
@@ -229,6 +229,9 @@
           conf-dir=/etc/dnsmasq.d/,*.conf
           # Use additional hosts file for static DNS entries
           addn-hosts=/etc/static-hosts
+          server=208.67.222.222
+          server=8.8.8.8
+          server=1.1.1.1
         backup: yes
 
     # Note: dnsmasq configuration is handled by the DHCP leader election playbook
