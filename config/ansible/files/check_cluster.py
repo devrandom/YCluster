@@ -137,18 +137,37 @@ def check_dnsmasq_service_on_host(host_ip, hostname):
         resolver.timeout = 3
         resolver.lifetime = 3
         
-        # Try to resolve the hostname
+        # Try to resolve the hostname and its AMT counterpart
+        results = {'host': host_ip, 'hostname': hostname, 'running': True, 'dns_working': True, 'method': 'dns_query'}
+        
         try:
+            # Test main hostname
             answer = resolver.resolve(hostname, 'A')
             resolved_ip = str(answer[0])
-            return {
-                'host': host_ip,
-                'hostname': hostname,
-                'running': True,
-                'dns_working': True,
-                'resolved_ip': resolved_ip,
-                'method': 'dns_query'
-            }
+            results['resolved_ip'] = resolved_ip
+            
+            # Test AMT hostname if this is a regular node (not already AMT)
+            if not hostname.endswith('a'):
+                amt_hostname = f"{hostname}a"
+                try:
+                    amt_answer = resolver.resolve(amt_hostname, 'A')
+                    amt_resolved_ip = str(amt_answer[0])
+                    results['amt_hostname'] = amt_hostname
+                    results['amt_resolved_ip'] = amt_resolved_ip
+                    
+                    # Verify AMT IP is in correct subnet
+                    if not amt_resolved_ip.startswith('10.10.10.'):
+                        results['dns_working'] = False
+                        results['dns_error'] = f'AMT hostname {amt_hostname} resolved to wrong subnet: {amt_resolved_ip} (expected 10.10.10.x)'
+                except dns.resolver.NXDOMAIN:
+                    results['dns_working'] = False
+                    results['dns_error'] = f'AMT hostname {amt_hostname} not found in DNS'
+                except Exception as amt_e:
+                    results['dns_working'] = False
+                    results['dns_error'] = f'AMT DNS query failed: {amt_e}'
+            
+            return results
+            
         except dns.resolver.NXDOMAIN:
             return {
                 'host': host_ip,
@@ -277,6 +296,8 @@ def main():
                     if result.get('dns_working', False):
                         print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DNS Running (via {method})")
                         print(f"  DNS Resolution: {result['hostname']} -> {result['resolved_ip']}")
+                        if 'amt_hostname' in result:
+                            print(f"  AMT Resolution: {result['amt_hostname']} -> {result['amt_resolved_ip']}")
                     else:
                         print(f"⚠ {node.get('hostname', 'unknown')} ({result['host']}): DNS Running but resolution failed (via {method})")
                         print(f"  DNS Error: {result.get('dns_error', 'Unknown error')}")

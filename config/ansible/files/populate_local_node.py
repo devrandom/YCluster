@@ -108,10 +108,9 @@ def determine_node_type_from_hostname(hostname):
     prefix = hostname[0]
     base_type = type_map.get(prefix, 'unknown')
     
-    # Add AMT suffix if hostname ends with 'a'
-    if hostname.endswith('a') and base_type != 'unknown':
-        return f"{base_type}-amt"
-    
+    # AMT hostnames (ending with 'a') are not separate node types
+    # They are just alternate interfaces for the same physical node
+    # So we return the base type without AMT suffix
     return base_type
 
 def populate_local_node():
