@@ -30,6 +30,61 @@
     <h1>Cluster Status Dashboard</h1>
     <div class="refresh-info">Auto-refreshes every 30 seconds | Last updated: {{ timestamp }}</div>
     
+    <!-- VIP Status Section -->
+    <div style="margin-bottom: 20px;">
+        <h2>Virtual IP Status</h2>
+        <table style="margin-bottom: 10px;">
+            <thead>
+                <tr>
+                    <th>VIP</th>
+                    <th>Status</th>
+                    <th>Active On</th>
+                    <th>Interface</th>
+                    <th>Keepalived</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>{{ vip_status.gateway_vip.ip }}</strong></td>
+                    <td>
+                        {% if vip_status.gateway_vip.active %}
+                        <span class="status-healthy">Active</span>
+                        {% else %}
+                        <span class="status-unhealthy">Inactive</span>
+                        {% endif %}
+                        {% if vip_status.gateway_vip.error %}
+                        <div class="error-details">{{ vip_status.gateway_vip.error }}</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if vip_status.gateway_vip.master %}
+                        {{ vip_status.gateway_vip.master }}
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if vip_status.gateway_vip.interface %}
+                        {{ vip_status.gateway_vip.interface }}
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if vip_status.keepalived_service.active %}
+                        <span class="status-healthy">Running</span>
+                        {% else %}
+                        <span class="status-unhealthy">{{ vip_status.keepalived_service.status.title() }}</span>
+                        {% endif %}
+                        {% if vip_status.keepalived_service.error %}
+                        <div class="error-details">{{ vip_status.keepalived_service.error }}</div>
+                        {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    
     <table>
         <thead>
             <tr>

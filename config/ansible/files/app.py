@@ -667,6 +667,56 @@ def get_host_health(host_ip, timeout=5):
     except Exception as e:
         return {'overall': 'error', 'services': {}, 'error': str(e)}
 
+def check_vip_status():
+    """Check VIP status using keepalived and ip commands"""
+    vip_ip = '10.0.0.254'
+    vip_status = {
+        'gateway_vip': {
+            'ip': vip_ip,
+            'active': False,
+            'master': None,
+            'interface': None
+        }
+    }
+    
+    try:
+        # Use 'ip -j addr show to <vip>' to get JSON output for reliable parsing
+        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', vip_ip], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            # Parse JSON output - if there's any output, VIP is active on this node
+            interfaces = json.loads(result.stdout)
+            if interfaces:
+                # VIP is assigned to this node
+                vip_status['gateway_vip']['active'] = True
+                vip_status['gateway_vip']['master'] = platform.node()
+                # Get interface name from first interface in results
+                vip_status['gateway_vip']['interface'] = interfaces[0].get('ifname')
+        else:
+            # No output means VIP is not assigned to this node
+            vip_status['gateway_vip']['active'] = False
+            
+    except json.JSONDecodeError as e:
+        vip_status['gateway_vip']['error'] = f'JSON parse error: {str(e)}'
+    except Exception as e:
+        vip_status['gateway_vip']['error'] = str(e)
+    
+    # Check keepalived service status
+    try:
+        keepalived_running = check_service_status('keepalived')
+        vip_status['keepalived_service'] = {
+            'active': keepalived_running,
+            'status': 'running' if keepalived_running else 'stopped'
+        }
+    except Exception as e:
+        vip_status['keepalived_service'] = {
+            'active': False,
+            'status': 'error',
+            'error': str(e)
+        }
+    
+    return vip_status
+
 def get_leadership_status():
     """Get current leadership status from etcd"""
     try:
@@ -695,6 +745,7 @@ def status_page():
     hosts = get_all_hosts()
     host_health = {}
     leadership = get_leadership_status()
+    vip_status = check_vip_status()
     
     # Get health status for each host
     for host in hosts:
@@ -704,6 +755,7 @@ def status_page():
                          hosts=hosts, 
                          host_health=host_health,
                          leadership=leadership,
+                         vip_status=vip_status,
                          timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 if __name__ == '__main__':
