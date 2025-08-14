@@ -24,9 +24,9 @@ from scapy.layers.l2 import Ether
 ETCD_HOSTS = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
 ETCD_PREFIX = '/cluster/dhcp'
 LEASE_TIME = 43200  # 12 hours
-GATEWAY = '10.0.0.1'
-DNS_SERVER = '10.0.0.1'
-NTP_SERVER = '10.0.0.1'
+GATEWAY = '10.0.0.254'
+DNS_SERVER = '10.0.0.254'
+NTP_SERVER = '10.0.0.254'
 HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 
 # IP allocation configuration (same as Flask app)
