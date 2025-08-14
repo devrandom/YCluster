@@ -56,9 +56,6 @@ IP_RANGES = {
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.71-90 (m1-m20)
 }
 
-# AMT IP offset from main IP (e.g., s1 = 10.0.0.31, s1a = 10.0.0.131)
-AMT_IP_OFFSET = 100
-
 def determine_ip_from_hostname(hostname):
     """Generate deterministic IP based on hostname"""
     if not hostname:
@@ -93,12 +90,8 @@ def determine_ip_from_hostname(hostname):
     base_ip = config['base'] + num
     
     if is_amt:
-        # AMT interface: add offset within same subnet
-        amt_ip = base_ip + AMT_IP_OFFSET
-        # Ensure we stay within valid host range (1-254)
-        if amt_ip < 1 or amt_ip > 254:
-            raise ValueError(f"AMT IP offset {amt_ip} exceeds valid range 1-254")
-        return f"10.0.0.{amt_ip}"
+        # AMT interface: use separate 10.10.10.0/24 subnet
+        return f"10.10.10.{base_ip}"
     else:
         # Regular interface
         return f"10.0.0.{base_ip}"
@@ -324,7 +317,15 @@ def get_hosts():
                 hostname = allocation['hostname']
                 ip = allocation['ip']
                 
+                # Add main hostname entry
                 hosts_entries.append(f"{ip} {hostname} {hostname}.xc")
+                
+                # Add AMT hostname entry if this is a regular node (not already AMT)
+                if not hostname.endswith('a'):
+                    amt_hostname = f"{hostname}a"
+                    amt_ip = determine_ip_from_hostname(amt_hostname)
+                    if amt_ip:
+                        hosts_entries.append(f"{amt_ip} {amt_hostname} {amt_hostname}.xc")
             except:
                 pass
     

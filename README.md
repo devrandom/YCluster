@@ -80,13 +80,22 @@ Host *.xc
   UserKnownHostsFile /dev/null
 ```
 
+## Subnets
+
+- IP addresses for storage nodes are 10 + node number (e.g., s1 is at 10.0.0.11)
+- IP addresses for AMT interfaces are the same, but in the 10.10.10.0/24 subnet and the hostname is suffixed with an `a` (e.g., s1a is at 10.10.10.11)
+
 ## AMT Setup
 
 - set the MEBx password (defaults to admin, but the new password needs 8 chars, digit, special char
 - user consent - None
 - network setup / FQDN - *a (i.e. append "a" to the hostname)
-- network setup / DHCP - enabled 
+- network setup / DHCP - disabled, see IP addresses above
 - network access state - active
+
+For KVM, a dummy EDID HDMI plug is required for a headless setup.
+
+Disabling ASPM is recommended.
 
 Notes:
 
@@ -94,5 +103,3 @@ Notes:
 
 # Notes
 
-- IP addresses for storage nodes are 10 + node number (e.g., s1 is at 10.0.0.11)
-- IP addresses for AMT interfaces are 110 + main IP address (e.g., s1 is at 10.0.0.111)
