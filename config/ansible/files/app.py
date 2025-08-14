@@ -183,16 +183,18 @@ def allocate_hostname():
         
         # Generate deterministic IP
         ip_address = determine_ip_from_hostname(hostname)
-        
+        amt_ip_address = determine_ip_from_hostname(hostname + "a")
+
         # Create allocation record
         allocation = {
             'hostname': hostname,
             'type': machine_type,
             'ip': ip_address,
+            'amt_ip': amt_ip_address,
             'mac': normalized_mac,
             'allocated_at': datetime.now(UTC).isoformat()
         }
-        
+
         # Store in etcd with both lookups
         allocation_json = json.dumps(allocation)
         

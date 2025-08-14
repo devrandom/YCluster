@@ -2,7 +2,7 @@
 autoinstall:
   version: 1
   identity:
-    hostname: placeholder
+    hostname: PLACEHOLDER_HOST
     username: ubuntu
     password: '$y$j9T$VeMbpOLaT99rQzvoSy7IC/$7nKvOFH3ui63TKFPPbhKOo5lbvXXnPBBlpKjIrF.aCB'
   network:
@@ -10,22 +10,24 @@ autoinstall:
     ethernets:
       primary:
         match:
-          name: "PLACEHOLDER_INTERFACE"
+          name: "enp2s0f0np0"
         dhcp4: false
         addresses: [PLACEHOLDER_IP/24]
-        gateway4: 10.0.0.1
         nameservers:
           addresses: [10.0.0.1]
           search: [xc]
         optional: true
-      other:
-        match:
-          name: "!PLACEHOLDER_INTERFACE"
-        dhcp4: true
-        dhcp4-overrides:
-          send-hostname: false
-          use-hostname: false
-        optional: true
+        amt:
+          match:
+            name: "enp89s0"
+          optional: true
+          addresses:
+          - "PLACEHOLDER_AMT_IP/24"
+        uplink:
+          match:
+            name: "enp87s0"
+          optional: true
+          dhcp4: true
   early-commands:
     - |
       SERVER_IP=$(cat /proc/cmdline | grep -o 'ds=.*s=http://[^/]*' | sed 's/.*http:\/\/\([^\/]*\).*/\1/')
@@ -44,7 +46,8 @@ autoinstall:
       # Parse allocation response
       HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
       IP=$(echo "$ALLOCATION" | jq -r '.ip')
-      
+      IP=$(echo "$ALLOCATION" | jq -r '.amt_ip')
+
       # Validate we got valid responses
       if [ "$HOSTNAME" = "null" ] || [ "$IP" = "null" ] || [ -z "$HOSTNAME" ] || [ -z "$IP" ]; then
         echo "ERROR: Invalid allocation response: $ALLOCATION" >&2
@@ -52,9 +55,10 @@ autoinstall:
       fi
       
       # Update autoinstall configuration
-      sed -i "s/hostname: placeholder/hostname: $HOSTNAME/" /autoinstall.yaml
+      sed -i "s/hostname: PLACEHOLDER_HOST/hostname: $HOSTNAME/" /autoinstall.yaml
       sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
-      sed -i "s/PLACEHOLDER_INTERFACE/$INTERFACE/" /autoinstall.yaml
+      # We are using static interface names for now
+      #sed -i "s/PLACEHOLDER_INTERFACE/$INTERFACE/" /autoinstall.yaml
 
       # Download SSH key with error handling
       if ! curl -f -s "http://$SERVER_IP/ansible_ssh_key.pub" > /tmp/ansible_ssh_key.pub; then
