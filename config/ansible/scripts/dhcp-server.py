@@ -273,12 +273,8 @@ class DHCPServer:
         base_ip = config['base'] + num
         
         if is_amt:
-            # AMT interface: add offset within same subnet
-            amt_ip = base_ip + 100  # AMT_IP_OFFSET from Flask app
-            # Ensure we stay within valid host range (1-254)
-            if amt_ip < 1 or amt_ip > 254:
-                return None
-            return f"10.0.0.{amt_ip}"
+            # AMT interface: use separate 10.10.10.0/24 subnet
+            return f"10.10.10.{base_ip}"
         else:
             # Regular interface
             return f"10.0.0.{base_ip}"
@@ -402,6 +398,11 @@ class DHCPServer:
         """Allocate hostname and IP using same logic as Flask app"""
         # Normalize MAC address
         normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
+        
+        # Don't allocate AMT hostnames via DHCP - they are static only
+        if requested_hostname and requested_hostname.endswith('a'):
+            logger.info(f"Ignoring AMT hostname request {requested_hostname} - AMT interfaces use static configuration")
+            requested_hostname = None
         
         client = self.get_etcd_client()
         if not client:

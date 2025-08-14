@@ -119,6 +119,7 @@
         - populate_local_node.py
         - check_cluster.py
         - lease-manager.py
+        - update-dhcp-hosts.py
 
     - name: Create systemd service for allocation API
       copy:
@@ -395,32 +396,6 @@
         group: root
         remote_src: yes
 
-    - name: Create static hosts update script
-      copy:
-        dest: /usr/local/bin/update-dhcp-hosts.sh
-        mode: '0755'
-        content: |
-          #!/bin/bash
-          # Update static DNS hosts from etcd
-          
-          TEMP_FILE=$(mktemp)
-          HOSTS_FILE="/etc/static-hosts"
-          
-          # Fetch hosts data with timeout and proper error handling
-          if curl -s --max-time 10 --fail http://localhost/api/hosts > "$TEMP_FILE" 2>/dev/null; then
-              if [ -s "$TEMP_FILE" ]; then
-                  # Only reload if the configuration has actually changed
-                  if ! cmp -s "$TEMP_FILE" "$HOSTS_FILE"; then
-                      echo "DNS hosts configuration changed, updating and reloading dnsmasq"
-                      cp "$TEMP_FILE" "$HOSTS_FILE"
-                      systemctl reload dnsmasq
-                  fi
-              fi
-          else
-              echo "Warning: Failed to fetch hosts data from API (network partition or service down)"
-          fi
-          
-          rm -f "$TEMP_FILE"
 
     - name: Create dnsmasq configuration directory
       file:
@@ -477,7 +452,7 @@
           
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/update-dhcp-hosts.sh
+          ExecStart=/usr/local/bin/update-dhcp-hosts.py
 
     - name: Enable and start services
       systemd:
