@@ -629,6 +629,13 @@ def get_all_hosts():
                     # Skip AMT interfaces (hostnames ending with 'a')
                     if hostname.endswith('a'):
                         continue
+                    
+                    # Skip dynamic IP allocations (hostnames that don't match expected patterns)
+                    # Expected patterns: s1-s20, c1-c20, m1-m20
+                    if not (hostname.startswith(('s', 'c', 'm')) and 
+                            len(hostname) > 1 and 
+                            hostname[1:].isdigit()):
+                        continue
                         
                     hosts.append({
                         'hostname': hostname,
