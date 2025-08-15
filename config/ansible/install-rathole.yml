@@ -1,0 +1,133 @@
+---
+- name: Install rathole from source
+  hosts: all
+  become: yes
+  vars:
+    rathole_repo_url: "https://github.com/rathole-org/rathole.git"
+    rathole_build_dir: "/tmp/rathole"
+    rathole_binary_path: "/usr/local/bin/rathole"
+
+  tasks:
+    - name: Check if rathole binary already exists
+      stat:
+        path: "{{ rathole_binary_path }}"
+      register: rathole_binary
+
+    - name: Check if rathole binary exists on ansible host
+      stat:
+        path: /usr/local/bin/rathole
+      register: rathole_binary_ansible_host
+      delegate_to: localhost
+      when: not rathole_binary.stat.exists
+
+    - name: Copy rathole binary from ansible host
+      copy:
+        src: /usr/local/bin/rathole
+        dest: "{{ rathole_binary_path }}"
+        mode: '0755'
+        owner: root
+        group: root
+      when: not rathole_binary.stat.exists and rathole_binary_ansible_host.stat.exists
+
+    - name: Install build dependencies
+      apt:
+        name:
+          - rustc
+          - cargo
+          - git
+          - build-essential
+          - libssl-dev
+          - pkg-config
+        state: present
+        update_cache: yes
+      when: not rathole_binary.stat.exists and not rathole_binary_ansible_host.stat.exists
+
+    - name: Remove existing build directory
+      file:
+        path: "{{ rathole_build_dir }}"
+        state: absent
+      when: not rathole_binary.stat.exists and not rathole_binary_ansible_host.stat.exists
+
+    - name: Clone rathole repository
+      git:
+        repo: "{{ rathole_repo_url }}"
+        dest: "{{ rathole_build_dir }}"
+        version: main
+      when: not rathole_binary.stat.exists and not rathole_binary_ansible_host.stat.exists
+
+    - name: Build rathole binary
+      command: cargo build --release
+      args:
+        chdir: "{{ rathole_build_dir }}"
+      environment:
+        CARGO_TARGET_DIR: "{{ rathole_build_dir }}/target"
+      when: not rathole_binary.stat.exists and not rathole_binary_ansible_host.stat.exists
+
+    - name: Install rathole binary from build
+      copy:
+        src: "{{ rathole_build_dir }}/target/release/rathole"
+        dest: "{{ rathole_binary_path }}"
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: yes
+      when: not rathole_binary.stat.exists and not rathole_binary_ansible_host.stat.exists
+
+    - name: Clean up build directory
+      file:
+        path: "{{ rathole_build_dir }}"
+        state: absent
+      when: not rathole_binary.stat.exists and not rathole_binary_ansible_host.stat.exists
+
+    - name: Create rathole config directory
+      file:
+        path: /etc/rathole
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Install rathole config management script
+      copy:
+        src: rathole-config.py
+        dest: /usr/local/bin/rathole-config
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create rathole client configuration
+      template:
+        src: rathole-client.toml.j2
+        dest: /etc/rathole/client.toml
+        mode: '0644'
+        owner: root
+        group: root
+      notify: restart rathole
+
+    - name: Create rathole systemd service
+      copy:
+        src: rathole.service
+        dest: /etc/systemd/system/rathole.service
+        mode: '0644'
+        owner: root
+        group: root
+      notify:
+        - reload systemd
+        - restart rathole
+
+    - name: Enable and start rathole service
+      systemd:
+        name: rathole
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart rathole
+      systemd:
+        name: rathole
+        state: restarted

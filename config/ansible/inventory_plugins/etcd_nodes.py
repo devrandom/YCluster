@@ -81,6 +81,20 @@ class InventoryModule(BaseInventoryPlugin):
         self.inventory.add_group('compute')
         self.inventory.add_group('core')
         self.inventory.add_group('all_nodes')
+        
+        # Read rathole configuration from etcd if it exists
+        try:
+            rathole_config_key = f"{prefix}/rathole/config"
+            rathole_config_value, _ = etcd_client.get(rathole_config_key)
+            if rathole_config_value:
+                rathole_config = json.loads(rathole_config_value.decode())
+                # Set rathole variables for all hosts
+                if 'remote_addr' in rathole_config:
+                    self.inventory.set_variable('all', 'rathole_remote_addr', rathole_config['remote_addr'])
+                if 'token' in rathole_config:
+                    self.inventory.set_variable('all', 'rathole_token', rathole_config['token'])
+        except Exception as e:
+            self.display.vvv(f"No rathole config found in etcd or failed to parse: {e}")
 
         # Read allocations from etcd
         for value, metadata in etcd_client.get_prefix(f"{prefix}/by-hostname/"):

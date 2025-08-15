@@ -39,3 +39,19 @@
           Acquire::https::Proxy "http://proxy.xc:3128";
         backup: yes
       when: ansible_facts['os_family'] == "Debian"
+
+    - name: Get current snap proxy settings
+      command: snap get system proxy.http
+      register: snap_http_proxy
+      failed_when: false
+      changed_when: false
+
+    - name: Set snap proxy settings
+      command: "{{ item }}"
+      loop:
+        - "snap set system proxy.http=http://proxy.xc:3128"
+        - "snap set system proxy.https=http://proxy.xc:3128"
+      when: 
+        - ansible_facts['os_family'] == "Debian"
+        - snap_http_proxy.stdout != "http://proxy.xc:3128"
+      become: yes
