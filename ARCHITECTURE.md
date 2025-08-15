@@ -20,18 +20,20 @@ Core nodes run admin services that provide:
 
 - **Node Allocation API**: Dynamic hostname and IP assignment based on MAC addresses
 - **DHCP Configuration API**: Dynamic DHCP lease management integrated with etcd
-- **Cluster Status API**: Health monitoring and node discovery endpoints
-- **Dynamic Inventory**: Ansible inventory plugin that reads node allocations from etcd
+- **Cluster Status API**: Health monitoring and node discovery endpoints with comprehensive service health checks
+- **Dynamic Inventory**: Ansible inventory plugin that reads node allocations from etcd and excludes DHCP hosts
+- **Proxy Services**: Squid proxy with functional health testing and immediate restart on configuration changes
 
 ### Node Types
 
 #### Core Nodes (s1, s2, s3)
 Core nodes form the control plane and provide administrative services:
 - **etcd Cluster**: Distributed key-value store for cluster state and coordination
-- **Admin Services**: Flask APIs for node allocation, DHCP management, and cluster status
+- **Admin Services**: Flask APIs for node allocation, DHCP management, and cluster status with comprehensive health monitoring
 - **DHCP Leader Election**: Ensures only one active DHCP server using etcd coordination
 - **Keepalived VIP**: High availability virtual IP for admin services
 - **Network Services**: DNS, DHCP, and PXE boot infrastructure
+- **Proxy Services**: Squid proxy with automatic configuration updates and functional testing
 
 #### Storage Nodes
 Storage nodes provide distributed block storage and run stateful services:
@@ -66,14 +68,19 @@ Stateful services use etcd-based leader election to ensure only one active insta
 
 #### Node Provisioning
 1. New nodes PXE boot from core node services
-2. Autoinstall process configures base system
+2. Autoinstall process configures base system with proxy configuration
 3. Ansible playbooks install and configure services
 4. Node registers itself in etcd cluster state
+5. Dynamic inventory excludes administrative hosts (dhcp-* pattern) from cluster operations
 
 #### Service Discovery
 - etcd maintains authoritative cluster membership and node allocations
 - Dynamic inventory plugin (etcd_nodes.py) reads node allocations from etcd for Ansible
-- Admin APIs provide real-time cluster status and node information
+- Admin APIs provide real-time cluster status and comprehensive health monitoring including:
+  - Service status checks (etcd, Ceph, PostgreSQL, Qdrant, DNS, DHCP, Squid, NTP)
+  - Leadership status tracking (storage and DHCP leaders)
+  - Split-brain detection for database services
+  - Proxy functionality testing with local connectivity checks
 - Services discover peers through etcd key-value store
 - MAC address-based node type detection enables automatic provisioning
 
@@ -135,7 +142,7 @@ Stateful services use etcd-based leader election to ensure only one active insta
 
 ### Network Isolation
 - Cluster operates on isolated network segment
-- Proxy provides controlled external access
+- Squid proxy provides controlled external access
 - Internal services bind to cluster interfaces only
 
 ## Operational Characteristics
@@ -149,6 +156,12 @@ Stateful services use etcd-based leader election to ensure only one active insta
 - etcd provides cluster health and membership status
 - Service logs available through systemd journal
 - Ceph provides storage cluster health monitoring
+- Comprehensive health API endpoints provide:
+  - Real-time service status across all nodes
+  - Leadership tracking and split-brain detection
+  - Proxy functionality verification
+  - DNS resolution testing
+  - Web-based cluster status dashboard
 
 ### Maintenance Operations
 - Rolling updates through Ansible playbooks
