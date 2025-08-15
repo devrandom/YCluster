@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XCluster Admin</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 3rem;
+            max-width: 600px;
+            width: 90%;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 0.5rem;
+            font-size: 2.5rem;
+            font-weight: 300;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 2rem;
+            font-size: 1.1rem;
+        }
+        .links {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            margin: 2rem 0;
+        }
+        .link-card {
+            background: #f8f9fa;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-decoration: none;
+            color: #333;
+            transition: all 0.3s ease;
+            display: block;
+        }
+        .link-card:hover {
+            border-color: #667eea;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.15);
+        }
+        .link-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #333;
+        }
+        .link-description {
+            color: #666;
+            font-size: 0.95rem;
+        }
+        .footer {
+            margin-top: 2rem;
+            padding-top: 2rem;
+            border-top: 1px solid #e9ecef;
+            color: #666;
+            font-size: 0.9rem;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #28a745;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        @media (max-width: 600px) {
+            .container {
+                padding: 2rem;
+                margin: 1rem;
+            }
+            h1 {
+                font-size: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>XCluster</h1>
+        <p class="subtitle">Self-Bootstrapping Infrastructure Platform</p>
+        
+        <div class="links">
+            <a href="/status" class="link-card">
+                <div class="link-title">
+                    <span class="status-indicator"></span>
+                    Cluster Status
+                </div>
+                <div class="link-description">
+                    View real-time health monitoring, service status, and leadership information for all cluster nodes
+                </div>
+            </a>
+            
+            <a href="https://gitlab.com/devrandom01/xcluster" class="link-card" target="_blank">
+                <div class="link-title">
+                    📁 Source Repository
+                </div>
+                <div class="link-description">
+                    Access the complete infrastructure code, documentation, and deployment playbooks
+                </div>
+            </a>
+            
+            <a href="/api/allocations" class="link-card">
+                <div class="link-title">
+                    🔧 Node Allocations API
+                </div>
+                <div class="link-description">
+                    View current node allocations and MAC address mappings in JSON format
+                </div>
+            </a>
+            
+            <a href="/api/health" class="link-card">
+                <div class="link-title">
+                    ❤️ Health API
+                </div>
+                <div class="link-description">
+                    Raw health check data for monitoring and automation systems
+                </div>
+            </a>
+        </div>
+        
+        <div class="footer">
+            <p>XCluster provides automated provisioning, distributed storage, and service orchestration with built-in failover capabilities.</p>
+        </div>
+    </div>
+</body>
+</html>
