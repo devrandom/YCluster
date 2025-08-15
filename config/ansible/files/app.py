@@ -454,6 +454,11 @@ def is_dhcp_leader():
     except:
         return False
 
+@app.route('/api/ping')
+def ping():
+    """Simple ping endpoint for connectivity testing"""
+    return jsonify({'status': 'ok', 'timestamp': datetime.now(UTC).isoformat()})
+
 @app.route('/api/health')
 def health():
     """Comprehensive health check endpoint for all services"""
@@ -598,6 +603,45 @@ def health():
     dns_health = check_dns_status()
     health_status['services']['dns'] = dns_health
     if dns_health['status'] == 'unhealthy':
+        health_status['overall'] = 'unhealthy'
+    
+    # Check Squid proxy
+    squid_running = check_service_status('squid')
+    squid_port = check_port_open('localhost', 3128)
+    squid_functional = False
+    squid_error = None
+    
+    if squid_running and squid_port:
+        # Test actual proxy functionality using local ping endpoint
+        try:
+            # Test a simple HTTP request through the proxy to our own ping endpoint
+            proxy_response = requests.get(
+                'http://localhost:12723/api/ping',
+                proxies={'http': 'http://localhost:3128'},
+                timeout=5
+            )
+            if proxy_response.status_code in [200, 503]:
+                squid_functional = True
+            else:
+                squid_error = f'HTTP {proxy_response.status_code}'
+        except requests.exceptions.ProxyError as e:
+            squid_error = f'Proxy error: {str(e)}'
+        except requests.exceptions.Timeout:
+            squid_error = 'Proxy timeout'
+        except Exception as e:
+            squid_error = f'Proxy test failed: {str(e)}'
+    
+    squid_healthy = squid_running and squid_port and squid_functional
+    health_status['services']['squid'] = {
+        'status': 'healthy' if squid_healthy else 'unhealthy',
+        'details': {
+            'service_active': squid_running,
+            'port_open': squid_port,
+            'proxy_functional': squid_functional,
+            'error': squid_error
+        }
+    }
+    if not squid_healthy:
         health_status['overall'] = 'unhealthy'
     
     # Check NTP
