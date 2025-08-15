@@ -101,5 +101,61 @@ Notes:
 
 - on some recent BIOSes, only TLS is supported - port 16993
 
+# Rathole Configuration
+
+Rathole is a reverse proxy for NAT traversal that allows exposing cluster services to the internet through a remote server.
+
+## Setting Up Rathole
+
+1. **Configure rathole settings in etcd** (run from any cluster node):
+   ```bash
+   rathole-config set --remote-addr "your-server.com:2333" --token "your_secret_token"
+   ```
+
+2. **Verify configuration**:
+   ```bash
+   rathole-config get
+   ```
+
+3. **The configuration will be automatically applied** when running the site playbook or rathole playbook:
+   ```bash
+   ansible-playbook install-rathole.yml
+   ```
+
+## Server Configuration
+
+On your remote server with a public IP, create a `server.toml` file:
+
+```toml
+[server]
+bind_addr = "0.0.0.0:2333"  # Port for client connections
+
+[server.services.http]
+token = "your_secret_token"  # Must match client token
+bind_addr = "0.0.0.0:8080"  # Public port to expose cluster HTTP
+```
+
+Then run: `rathole server.toml`
+
+## Client Configuration
+
+The client configuration is automatically generated and includes:
+- Remote server address and port
+- Authentication token
+- Local service forwarding (cluster VIP HTTP on port 80)
+
+## Service Management
+
+- **View status**: `systemctl status rathole`
+- **View logs**: `journalctl -u rathole -f`
+- **Restart service**: `systemctl restart rathole`
+
+## Troubleshooting
+
+- Ensure tokens match exactly between client and server
+- Check that the server service name matches the client service name ("http")
+- Verify network connectivity between client and server
+- Check firewall rules on both client and server
+
 # Notes
 
