@@ -13,3 +13,4 @@
 - import_playbook: setup-admin-services.yml
 - import_playbook: setup-gateway-vip.yml
 - import_playbook: configure-ntp.yml
+- import_playbook: install-rathole.yml
