@@ -1,0 +1,39 @@
+---
+- name: Install TLS certificate management tools
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Install Python cryptography dependencies
+      apt:
+        name:
+          - python3-cryptography
+          - python3-etcd3
+        state: present
+        update_cache: yes
+
+    - name: Install TLS config management script
+      copy:
+        src: tls-config.py
+        dest: /usr/local/bin/tls-config
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Generate TLS certificate if it doesn't exist in etcd
+      shell: |
+        if ! /usr/local/bin/tls-config get >/dev/null 2>&1; then
+          /usr/local/bin/tls-config generate --common-name cluster.local --san 10.0.0.254 --san cluster.local --san localhost
+        else
+          echo "TLS certificate already exists in etcd"
+        fi
+      register: tls_generate_result
+      changed_when: "'TLS certificate and key stored in etcd' in tls_generate_result.stdout"
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Display TLS certificate generation result
+      debug:
+        var: tls_generate_result.stdout_lines
+      when: tls_generate_result is defined
+      run_once: true

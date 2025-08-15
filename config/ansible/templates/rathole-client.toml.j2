@@ -12,8 +12,12 @@ nodelay = true
 keepalive_secs = 20
 keepalive_interval = 8
 
-# Example service - customize as needed
 [client.services.http]
 token = "{{ rathole_token | default('change_me_secret_token') }}"
 local_addr = "10.0.0.254:80"
+type = "tcp"
+
+[client.services.https]
+token = "{{ rathole_token | default('change_me_secret_token') }}"
+local_addr = "10.0.0.254:443"
 type = "tcp"
