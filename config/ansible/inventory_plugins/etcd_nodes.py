@@ -96,6 +96,10 @@ class InventoryModule(BaseInventoryPlugin):
                     if hostname.endswith('a'):
                         continue
                     
+                    # Skip DHCP hosts (hostnames starting with 'dhcp-')
+                    if hostname.startswith('dhcp-'):
+                        continue
+                    
                     # Add host to inventory
                     self.inventory.add_host(hostname)
                     
