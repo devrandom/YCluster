@@ -30,3 +30,12 @@
           Acquire::http::Proxy "http://proxy.xc:3128";
           Acquire::https::Proxy "http://proxy.xc:3128";
         backup: yes
+
+    - name: Update old curtin proxy configuration
+      copy:
+        dest: /etc/apt/apt.conf.d/90curtin-aptproxy
+        content: |
+          Acquire::http::Proxy "http://proxy.xc:3128";
+          Acquire::https::Proxy "http://proxy.xc:3128";
+        backup: yes
+      when: ansible_facts['os_family'] == "Debian"
