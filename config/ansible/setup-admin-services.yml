@@ -436,6 +436,13 @@
         mode: '0644'
         remote_src: yes
 
+    - name: Copy index.html for web interface
+      copy:
+        src: /opt/infrastructure/config/ansible/files/index.html
+        dest: /var/www/html/index.html
+        mode: '0644'
+        remote_src: yes
+
     - name: Copy ansible SSH public key
       copy:
         src: /opt/bootstrap-files/ansible_ssh_key.pub
