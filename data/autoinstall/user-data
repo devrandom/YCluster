@@ -34,6 +34,28 @@ autoinstall:
       # Get the interface name for the MAC address used for PXE boot
       INTERFACE=$(ip -j link | jq -r ".[] | select(.address == \"$MAC\") | .ifname")
       
+      # Test which proxy is available and update autoinstall
+      if curl -s --connect-timeout 3 --proxy 10.0.0.254:3128 http://detectportal.firefox.com/success.txt >/dev/null 2>&1; then
+        PROXY_URL="http://10.0.0.254:3128"
+        echo "Using VIP proxy: $PROXY_URL"
+      elif curl -s --connect-timeout 3 --proxy 10.0.0.11:3128 http://detectportal.firefox.com/success.txt >/dev/null 2>&1; then
+        PROXY_URL="http://10.0.0.11:3128"
+        echo "Using s1 proxy: $PROXY_URL"
+      elif curl -s --connect-timeout 3 --proxy 10.0.0.1:3128 http://detectportal.firefox.com/success.txt >/dev/null 2>&1; then
+        PROXY_URL="http://10.0.0.1:3128"
+        echo "Using admin laptop proxy: $PROXY_URL"
+      else
+        PROXY_URL=""
+        echo "No proxy available, using direct connection"
+      fi
+      
+      # Update proxy setting in autoinstall
+      if [ -n "$PROXY_URL" ]; then
+        sed -i "s|proxy: \".*\"|proxy: \"$PROXY_URL\"|" /autoinstall.yaml
+      else
+        sed -i '/proxy:/d' /autoinstall.yaml
+      fi
+      
       # Fetch allocation with error handling - fail fast if server is unreachable
       if ! ALLOCATION=$(curl -f -s "http://$SERVER_IP/api/allocate?mac=$MAC"); then
         echo "ERROR: Failed to get allocation from server $SERVER_IP" >&2
@@ -43,7 +65,7 @@ autoinstall:
       # Parse allocation response
       HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
       IP=$(echo "$ALLOCATION" | jq -r '.ip')
-      IP=$(echo "$ALLOCATION" | jq -r '.amt_ip')
+      AMT_IP=$(echo "$ALLOCATION" | jq -r '.amt_ip')
 
       # Validate we got valid responses
       if [ "$HOSTNAME" = "null" ] || [ "$IP" = "null" ] || [ -z "$HOSTNAME" ] || [ -z "$IP" ]; then
@@ -54,6 +76,7 @@ autoinstall:
       # Update autoinstall configuration
       sed -i "s/hostname: PLACEHOLDER_HOST/hostname: $HOSTNAME/" /autoinstall.yaml
       sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
+      sed -i "s/PLACEHOLDER_AMT_IP/$AMT_IP/" /autoinstall.yaml
       # We are using static interface names for now
       #sed -i "s/PLACEHOLDER_INTERFACE/$INTERFACE/" /autoinstall.yaml
 
@@ -67,7 +90,6 @@ autoinstall:
     authorized-keys:
       - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1"
     allow-pw: false
-  # FIXME it should be the VIP if the boot server is not the admin laptop
   proxy: "http://10.0.0.1:3128"
   snaps:
     - name: microceph
@@ -141,6 +163,25 @@ autoinstall:
     # configure grub command line
     - sed -i 's/^GRUB_CMDLINE_LINUX=".*"/GRUB_CMDLINE_LINUX="text nomodeset i915.modeset=0 vga=0x031A"/' /target/etc/default/grub
     - curtin in-target --target=/target -- update-grub
+    # configure proxy hostname resolution
+    - |
+      cat >> /target/etc/hosts << 'EOF'
+      10.0.0.1 proxy.xc
+      10.0.0.254 proxy.xc
+      EOF
+    # configure proxy environment variables
+    - |
+      cat >> /target/etc/environment << 'EOF'
+      http_proxy=http://proxy.xc:3128
+      https_proxy=http://proxy.xc:3128
+      no_proxy=localhost,127.0.0.1,10.0.0.0/24,10.10.10.0/24
+      EOF
+    # configure apt proxy
+    - |
+      cat > /target/etc/apt/apt.conf.d/01proxy << 'EOF'
+      Acquire::http::Proxy "http://proxy.xc:3128";
+      Acquire::https::Proxy "http://proxy.xc:3128";
+      EOF
     # add ansible key to root authorized_keys
     - |
       mkdir -p /target/root/.ssh
