@@ -1,4 +1,5 @@
 ---
+- import_playbook: configure-proxy.yml
 #- import_playbook: add-ceph-nodes.yml
 - import_playbook: setup-ceph-disk.yml
 - import_playbook: create-ceph-pool.yml
