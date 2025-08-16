@@ -12,10 +12,18 @@
         state: present
         update_cache: yes
 
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
     - name: Copy storage leader election script
       copy:
         src: /etc/ansible/scripts/storage-leader-election.sh
-        dest: /usr/local/bin/storage-leader-election.sh
+        dest: /usr/local/lib/cluster/storage-leader-election
         mode: '0755'
       notify: restart storage leader election
 
@@ -30,7 +38,7 @@
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/bin/storage-leader-election.sh "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          ExecStart=/usr/local/lib/cluster/storage-leader-election "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           Restart=always
           RestartSec=5
           User=root
