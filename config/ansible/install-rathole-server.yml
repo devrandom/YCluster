@@ -1,0 +1,92 @@
+---
+- name: Install rathole server configuration
+  hosts: frontend
+  become: yes
+  vars:
+    rathole_binary_path: "/usr/local/bin/rathole"
+
+  tasks:
+    - name: Check if rathole binary exists on ansible host
+      stat:
+        path: /usr/local/bin/rathole
+      register: rathole_binary_ansible_host
+      delegate_to: localhost
+
+    - name: Fail if rathole binary not found
+      fail:
+        msg: "Rathole binary not found. Please run build-rathole.yml first."
+      when: not rathole_binary_ansible_host.stat.exists
+
+    - name: Copy rathole binary from ansible host
+      copy:
+        src: /usr/local/bin/rathole
+        dest: "{{ rathole_binary_path }}"
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create rathole config directory
+      file:
+        path: /etc/rathole
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Install rathole config management script
+      copy:
+        src: files/rathole-config.py
+        dest: /usr/local/bin/rathole-config
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create rathole server configuration
+      template:
+        src: rathole-server.toml.j2
+        dest: /etc/rathole/server.toml
+        mode: '0644'
+        owner: root
+        group: root
+      notify: restart rathole
+
+    - name: Create rathole systemd service for server
+      copy:
+        dest: /etc/systemd/system/rathole.service
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          [Unit]
+          Description=Rathole Server
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=root
+          ExecStart=/usr/local/bin/rathole /etc/rathole/server.toml
+          Restart=always
+          RestartSec=5
+          
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - reload systemd
+        - restart rathole
+
+    - name: Enable and start rathole service
+      systemd:
+        name: rathole
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart rathole
+      systemd:
+        name: rathole
+        state: restarted
