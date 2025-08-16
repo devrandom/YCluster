@@ -66,7 +66,10 @@
           # Save iptables rules
           iptables-save > /etc/iptables/rules.v4
           
-          echo "NAT configured for interface $UPLINK_IFACE"
+          # Start rathole client
+          systemctl start rathole
+          
+          echo "NAT configured for interface $UPLINK_IFACE and rathole started"
 
     - name: Create NAT cleanup script
       copy:
@@ -74,6 +77,9 @@
         mode: '0755'
         content: |
           #!/bin/bash
+          
+          # Stop rathole client
+          systemctl stop rathole
           
           # Remove NAT rules
           iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -o $(ip route get 8.8.8.8 | grep -oP 'dev \K\S+') -j MASQUERADE 2>/dev/null || true
@@ -85,7 +91,7 @@
           # Save iptables rules
           iptables-save > /etc/iptables/rules.v4
           
-          echo "NAT rules cleaned up"
+          echo "Rathole stopped and NAT rules cleaned up"
 
     - name: Enable IP forwarding permanently
       lineinfile:

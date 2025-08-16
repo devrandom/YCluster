@@ -115,11 +115,11 @@
         - reload systemd
         - restart rathole
 
-    - name: Enable and start rathole service
+    - name: Enable rathole service but don't start it (controlled by keepalived)
       systemd:
         name: rathole
-        enabled: yes
-        state: started
+        enabled: no
+        state: stopped
         daemon_reload: yes
 
   handlers:
