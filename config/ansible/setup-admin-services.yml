@@ -163,7 +163,7 @@
         dest: "{{ admin_services_dir }}/app.py"
         mode: '0644'
         remote_src: yes
-      notify: restart allocation-api
+      notify: restart admin-api
 
     - name: Create Flask templates directory
       file:
@@ -177,7 +177,7 @@
         dest: "{{ admin_services_dir }}/templates/status.html"
         mode: '0644'
         remote_src: yes
-      notify: restart allocation-api
+      notify: restart admin-api
 
     - name: Copy etcd management scripts to /usr/local/bin
       copy:
@@ -191,12 +191,12 @@
         - lease-manager.py
         - update-dhcp-hosts.py
 
-    - name: Create systemd service for allocation API
+    - name: Create systemd service for admin API
       copy:
-        dest: /etc/systemd/system/allocation-api.service
+        dest: /etc/systemd/system/admin-api.service
         content: |
           [Unit]
-          Description=Allocation API Service
+          Description=Admin API Service
           After=network.target etcd.service
           Wants=etcd.service
 
@@ -210,7 +210,7 @@
 
           [Install]
           WantedBy=multi-user.target
-      notify: restart allocation-api
+      notify: restart admin-api
 
     - name: Create SSL directory for nginx
       file:
@@ -237,13 +237,13 @@
     - name: Configure nginx with HTTPS support
       template:
         src: nginx-admin.conf.j2
-        dest: /etc/nginx/sites-available/allocation-api
+        dest: /etc/nginx/sites-available/admin-api
       notify: restart nginx
 
     - name: Enable nginx site
       file:
-        src: /etc/nginx/sites-available/allocation-api
-        dest: /etc/nginx/sites-enabled/allocation-api
+        src: /etc/nginx/sites-available/admin-api
+        dest: /etc/nginx/sites-enabled/admin-api
         state: link
       notify: restart nginx
 
@@ -591,7 +591,7 @@
         state: started
         daemon_reload: yes
       loop:
-        - allocation-api
+        - admin-api
         - nginx
         - squid
         - update-dhcp-hosts.timer
@@ -615,9 +615,9 @@
         var: populate_result.stdout_lines
 
   handlers:
-    - name: restart allocation-api
+    - name: restart admin-api
       systemd:
-        name: allocation-api
+        name: admin-api
         state: restarted
 
     - name: restart nginx

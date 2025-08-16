@@ -135,7 +135,7 @@ def update_nginx_config():
         return False
     
     primary_domain = config['domain']
-    nginx_config_path = Path('/etc/nginx/sites-available/allocation-api')
+    nginx_config_path = Path('/etc/nginx/sites-available/admin-api')
     
     # Check if config file exists
     if not nginx_config_path.exists():
