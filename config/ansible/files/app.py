@@ -10,6 +10,8 @@ import platform
 import requests
 from datetime import datetime, UTC
 import dns.resolver
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 
 app = Flask(__name__)
 
@@ -430,6 +432,69 @@ def check_dns_status():
     except Exception as e:
         return {'status': 'error', 'details': f'DNS check failed: {str(e)}'}
 
+def check_certificate_expiry():
+    """Check TLS certificate expiry from etcd"""
+    try:
+        client = get_etcd_client()
+        cert_value, _ = client.get('/cluster/tls/cert')
+        
+        if not cert_value:
+            return {
+                'status': 'not_configured',
+                'details': {
+                    'message': 'No certificate found in etcd',
+                    'days_until_expiry': None,
+                    'expires_at': None
+                }
+            }
+        
+        # Parse the certificate
+        cert_pem = cert_value.decode()
+        cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
+        
+        # Get expiry date
+        expires_at = cert.not_valid_after
+        now = datetime.now(UTC).replace(tzinfo=None)  # Remove timezone for comparison
+        
+        # Calculate days until expiry
+        time_until_expiry = expires_at - now
+        days_until_expiry = time_until_expiry.days
+        
+        # Determine status based on days remaining
+        if days_until_expiry < 0:
+            status = 'expired'
+            message = f'Certificate expired {abs(days_until_expiry)} days ago'
+        elif days_until_expiry <= 7:
+            status = 'critical'
+            message = f'Certificate expires in {days_until_expiry} days'
+        elif days_until_expiry <= 30:
+            status = 'warning'
+            message = f'Certificate expires in {days_until_expiry} days'
+        else:
+            status = 'healthy'
+            message = f'Certificate expires in {days_until_expiry} days'
+        
+        return {
+            'status': status,
+            'details': {
+                'message': message,
+                'days_until_expiry': days_until_expiry,
+                'expires_at': expires_at.isoformat(),
+                'subject': cert.subject.rfc4514_string(),
+                'issuer': cert.issuer.rfc4514_string()
+            }
+        }
+        
+    except Exception as e:
+        return {
+            'status': 'error',
+            'details': {
+                'message': f'Certificate check failed: {str(e)}',
+                'days_until_expiry': None,
+                'expires_at': None
+            }
+        }
+
 def is_storage_leader():
     """Check if this node is the current storage leader"""
     try:
@@ -653,6 +718,14 @@ def health():
     if not ntp_running:
         health_status['overall'] = 'unhealthy'
     
+    # Check TLS certificate expiry
+    cert_health = check_certificate_expiry()
+    health_status['services']['tls_certificate'] = cert_health
+    if cert_health['status'] in ['expired', 'critical']:
+        health_status['overall'] = 'unhealthy'
+    elif cert_health['status'] == 'warning' and health_status['overall'] == 'healthy':
+        health_status['overall'] = 'degraded'
+    
     # Return appropriate HTTP status code
     status_code = 200 if health_status['overall'] == 'healthy' else 503
     return jsonify(health_status), status_code
@@ -790,6 +863,7 @@ def status_page():
     host_health = {}
     leadership = get_leadership_status()
     vip_status = check_vip_status()
+    certificate_status = check_certificate_expiry()
     
     # Get health status for each host
     for host in hosts:
@@ -800,6 +874,7 @@ def status_page():
                          host_health=host_health,
                          leadership=leadership,
                          vip_status=vip_status,
+                         certificate_status=certificate_status,
                          timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 if __name__ == '__main__':

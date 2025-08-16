@@ -18,6 +18,10 @@
         .status-unreachable { background-color: #f8d7da; color: #721c24; }
         .status-error { background-color: #f8d7da; color: #721c24; }
         .status-not_required { background-color: #e7f3ff; color: #004085; }
+        .status-warning { background-color: #fff3cd; color: #856404; }
+        .status-critical { background-color: #f8d7da; color: #721c24; }
+        .status-expired { background-color: #f8d7da; color: #721c24; }
+        .status-not_configured { background-color: #e2e3e5; color: #383d41; }
         .service-cell { font-size: 0.9em; }
         .service-item { display: inline-block; margin: 2px 4px; padding: 2px 6px; border-radius: 3px; }
         .type-storage { border-left: 4px solid #007bff; }
@@ -85,6 +89,7 @@
         </table>
     </div>
     
+    <h2>Node Status</h2>
     <table>
         <thead>
             <tr>
@@ -138,5 +143,64 @@
     {% if not hosts %}
     <p style="text-align: center; color: #666; margin-top: 40px;">No hosts found in cluster inventory.</p>
     {% endif %}
+
+    <!-- Certificate Status Section -->
+    <div style="margin-bottom: 20px;">
+        <h2>TLS Certificate Status</h2>
+        <table style="margin-bottom: 10px;">
+            <thead>
+                <tr>
+                    <th>Certificate</th>
+                    <th>Status</th>
+                    <th>Days Until Expiry</th>
+                    <th>Expires At</th>
+                    <th>Subject</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Cluster Certificate</strong></td>
+                    <td>
+                        {% set cert_status = certificate_status.status %}
+                        {% if cert_status == 'healthy' %}
+                        <span class="status-healthy">Valid</span>
+                        {% elif cert_status == 'warning' %}
+                        <span class="status-degraded">Expires Soon</span>
+                        {% elif cert_status == 'critical' %}
+                        <span class="status-unhealthy">Critical</span>
+                        {% elif cert_status == 'expired' %}
+                        <span class="status-unhealthy">Expired</span>
+                        {% elif cert_status == 'not_configured' %}
+                        <span class="status-timeout">Not Configured</span>
+                        {% else %}
+                        <span class="status-error">Error</span>
+                        {% endif %}
+                        <div class="error-details">{{ certificate_status.details.message }}</div>
+                    </td>
+                    <td>
+                        {% if certificate_status.details.days_until_expiry is not none %}
+                        {{ certificate_status.details.days_until_expiry }}
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if certificate_status.details.expires_at %}
+                        {{ certificate_status.details.expires_at[:19] }}
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if certificate_status.details.subject %}
+                        <span style="font-size: 0.9em;">{{ certificate_status.details.subject }}</span>
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
 </body>
 </html>
