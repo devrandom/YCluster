@@ -1,0 +1,64 @@
+---
+- name: Build rathole from source
+  hosts: localhost
+  become: yes
+  vars:
+    rathole_repo_url: "https://github.com/rathole-org/rathole.git"
+    rathole_build_dir: "/tmp/rathole"
+    rathole_binary_path: "/usr/local/bin/rathole"
+
+  tasks:
+    - name: Check if rathole binary already exists
+      stat:
+        path: "{{ rathole_binary_path }}"
+      register: rathole_binary
+
+    - name: Install build dependencies
+      apt:
+        name:
+          - rustc
+          - cargo
+          - git
+          - build-essential
+          - libssl-dev
+          - pkg-config
+        state: present
+        update_cache: yes
+      when: not rathole_binary.stat.exists
+
+    - name: Remove existing build directory
+      file:
+        path: "{{ rathole_build_dir }}"
+        state: absent
+      when: not rathole_binary.stat.exists
+
+    - name: Clone rathole repository
+      git:
+        repo: "{{ rathole_repo_url }}"
+        dest: "{{ rathole_build_dir }}"
+        version: main
+      when: not rathole_binary.stat.exists
+
+    - name: Build rathole binary
+      command: cargo build --release
+      args:
+        chdir: "{{ rathole_build_dir }}"
+      environment:
+        CARGO_TARGET_DIR: "{{ rathole_build_dir }}/target"
+      when: not rathole_binary.stat.exists
+
+    - name: Install rathole binary
+      copy:
+        src: "{{ rathole_build_dir }}/target/release/rathole"
+        dest: "{{ rathole_binary_path }}"
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: yes
+      when: not rathole_binary.stat.exists
+
+    - name: Clean up build directory
+      file:
+        path: "{{ rathole_build_dir }}"
+        state: absent
+      when: not rathole_binary.stat.exists

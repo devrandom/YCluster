@@ -1,6 +1,6 @@
 ---
-- name: Install rathole configuration and service
-  hosts: core
+- name: Install rathole server configuration
+  hosts: frontend
   become: yes
   vars:
     rathole_binary_path: "/usr/local/bin/rathole"
@@ -35,37 +35,50 @@
 
     - name: Install rathole config management script
       copy:
-        src: rathole-config.py
+        src: files/rathole-config.py
         dest: /usr/local/bin/rathole-config
         mode: '0755'
         owner: root
         group: root
 
-    - name: Create rathole client configuration
+    - name: Create rathole server configuration
       template:
-        src: rathole-client.toml.j2
-        dest: /etc/rathole/client.toml
+        src: rathole-server.toml.j2
+        dest: /etc/rathole/server.toml
         mode: '0644'
         owner: root
         group: root
       notify: restart rathole
 
-    - name: Create rathole systemd service
+    - name: Create rathole systemd service for server
       copy:
-        src: rathole.service
         dest: /etc/systemd/system/rathole.service
         mode: '0644'
         owner: root
         group: root
+        content: |
+          [Unit]
+          Description=Rathole Server
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=root
+          ExecStart=/usr/local/bin/rathole /etc/rathole/server.toml
+          Restart=always
+          RestartSec=5
+          
+          [Install]
+          WantedBy=multi-user.target
       notify:
         - reload systemd
         - restart rathole
 
-    - name: Enable rathole service but don't start it (controlled by keepalived)
+    - name: Enable and start rathole service
       systemd:
         name: rathole
-        enabled: no
-        state: stopped
+        enabled: yes
+        state: started
         daemon_reload: yes
 
   handlers:
