@@ -253,6 +253,22 @@ def run_certbot_command(cmd, check=True):
         print(f"Command failed with exit code {e.returncode}")
         raise
 
+def stop_fetch_tls_timer():
+    """Stop the fetch-tls-certs timer to prevent race conditions"""
+    try:
+        subprocess.run(['systemctl', 'stop', 'fetch-tls-certs.timer'], check=False)
+        print("Stopped fetch-tls-certs timer")
+    except Exception as e:
+        print(f"Warning: Could not stop fetch-tls-certs timer: {e}")
+
+def start_fetch_tls_timer():
+    """Start the fetch-tls-certs timer"""
+    try:
+        subprocess.run(['systemctl', 'start', 'fetch-tls-certs.timer'], check=False)
+        print("Started fetch-tls-certs timer")
+    except Exception as e:
+        print(f"Warning: Could not start fetch-tls-certs timer: {e}")
+
 def obtain_certificate(test_cert=False, non_interactive=False):
     """Obtain a new certificate from Let's Encrypt using CSR mode"""
     config = get_https_config()
@@ -345,18 +361,25 @@ def obtain_certificate(test_cert=False, non_interactive=False):
         else:
             fullchain_content = cert_content
         
-        # Store certificate in etcd
-        client = get_etcd_client()
-        client.put('/cluster/tls/cert', fullchain_content)
-        print("Certificate stored in etcd")
+        # Stop the fetch-tls-certs timer to prevent race conditions during writes
+        stop_fetch_tls_timer()
         
-        # Write certificate to nginx
-        write_tls_key_to_nginx()
-        nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
-        nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
-        nginx_cert_path.write_text(fullchain_content)
-        nginx_cert_path.chmod(0o644)
-        print(f"Certificate written to nginx: {nginx_cert_path}")
+        try:
+            # Store certificate in etcd
+            client = get_etcd_client()
+            client.put('/cluster/tls/cert', fullchain_content)
+            print("Certificate stored in etcd")
+            
+            # Write certificate to nginx
+            write_tls_key_to_nginx()
+            nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
+            nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
+            nginx_cert_path.write_text(fullchain_content)
+            nginx_cert_path.chmod(0o644)
+            print(f"Certificate written to nginx: {nginx_cert_path}")
+        finally:
+            # Restart the fetch-tls-certs timer
+            start_fetch_tls_timer()
         
         # Update nginx config with correct domain
         update_nginx_config()
@@ -456,17 +479,24 @@ def renew_certificates(non_interactive=False):
                 else:
                     fullchain_content = cert_content
                 
-                # Store renewed certificate in etcd
-                client.put('/cluster/tls/cert', fullchain_content)
-                print("Renewed certificate stored in etcd")
+                # Stop the fetch-tls-certs timer to prevent race conditions during writes
+                stop_fetch_tls_timer()
                 
-                # Write certificate to nginx
-                write_tls_key_to_nginx()
-                nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
-                nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
-                nginx_cert_path.write_text(fullchain_content)
-                nginx_cert_path.chmod(0o644)
-                print(f"Renewed certificate written to nginx: {nginx_cert_path}")
+                try:
+                    # Store renewed certificate in etcd
+                    client.put('/cluster/tls/cert', fullchain_content)
+                    print("Renewed certificate stored in etcd")
+                    
+                    # Write certificate to nginx
+                    write_tls_key_to_nginx()
+                    nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
+                    nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
+                    nginx_cert_path.write_text(fullchain_content)
+                    nginx_cert_path.chmod(0o644)
+                    print(f"Renewed certificate written to nginx: {nginx_cert_path}")
+                finally:
+                    # Restart the fetch-tls-certs timer
+                    start_fetch_tls_timer()
                 
                 # Update nginx config with correct domain
                 update_nginx_config()
