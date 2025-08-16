@@ -41,11 +41,19 @@
         owner: root
         group: root
 
-    - name: Create rathole client configuration
-      template:
-        src: rathole-client.toml.j2
-        dest: /etc/rathole/client.toml
+    - name: Install rathole client config template
+      copy:
+        src: rathole-client-config.toml.j2
+        dest: /etc/rathole/client-config.toml.j2
         mode: '0644'
+        owner: root
+        group: root
+
+    - name: Create rathole client startup script
+      copy:
+        src: rathole-client-start
+        dest: /usr/local/bin/rathole-client-start
+        mode: '0755'
         owner: root
         group: root
 

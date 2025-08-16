@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Generate config from etcd
+if ! /usr/local/bin/rathole-config generate-client > /etc/rathole/client.toml; then
+    echo "Failed to generate rathole client config from etcd"
+    exit 1
+fi
+
+# Start rathole with generated config
+exec /usr/local/bin/rathole /etc/rathole/client.toml

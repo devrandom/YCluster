@@ -8,6 +8,7 @@ import sys
 import argparse
 import etcd3
 import os
+from jinja2 import Template
 
 def get_etcd_client():
     """Get etcd client with connection to available hosts"""
@@ -53,6 +54,45 @@ def get_rathole_config():
     else:
         print("No rathole configuration found in etcd")
 
+def generate_client_config():
+    """Generate client configuration from etcd and output to stdout"""
+    client = get_etcd_client()
+    key = '/cluster/nodes/rathole/config'
+    
+    value, _ = client.get(key)
+    if not value:
+        print("Error: No rathole configuration found in etcd", file=sys.stderr)
+        sys.exit(1)
+    
+    config = json.loads(value.decode())
+    remote_addr = config.get('remote_addr')
+    token = config.get('token')
+    
+    if not remote_addr:
+        print("Error: No remote_addr found in rathole configuration", file=sys.stderr)
+        sys.exit(1)
+    
+    if not token:
+        print("Error: No token found in rathole configuration", file=sys.stderr)
+        sys.exit(1)
+    
+    # Read template file and render with jinja2
+    template_path = '/etc/rathole/client-config.toml.j2'
+    try:
+        with open(template_path, 'r') as f:
+            template_content = f.read()
+        
+        template = Template(template_content)
+        client_config = template.render(remote_addr=remote_addr, token=token)
+        print(client_config)
+        
+    except FileNotFoundError:
+        print(f"Error: Template file {template_path} not found", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error rendering template: {e}", file=sys.stderr)
+        sys.exit(1)
+
 def delete_rathole_config():
     """Delete rathole configuration from etcd"""
     client = get_etcd_client()
@@ -76,6 +116,9 @@ def main():
     # Get command
     subparsers.add_parser('get', help='Get current rathole configuration')
     
+    # Generate client config command
+    subparsers.add_parser('generate-client', help='Generate client configuration from etcd')
+    
     # Delete command
     subparsers.add_parser('delete', help='Delete rathole configuration')
     
@@ -90,6 +133,8 @@ def main():
             set_rathole_config(args.remote_addr, args.token)
         elif args.command == 'get':
             get_rathole_config()
+        elif args.command == 'generate-client':
+            generate_client_config()
         elif args.command == 'delete':
             delete_rathole_config()
     except Exception as e:
