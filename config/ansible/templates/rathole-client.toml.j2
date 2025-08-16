@@ -1,6 +1,7 @@
 # rathole client configuration
 [client]
 remote_addr = "{{ rathole_remote_addr | default('example.com:2333') }}"
+default_token = "{{ rathole_token | default('change_me_secret_token') }}"
 heartbeat_timeout = 40
 retry_interval = 1
 
@@ -13,11 +14,9 @@ keepalive_secs = 20
 keepalive_interval = 8
 
 [client.services.http]
-token = "{{ rathole_token | default('change_me_secret_token') }}"
 local_addr = "10.0.0.254:80"
 type = "tcp"
 
 [client.services.https]
-token = "{{ rathole_token | default('change_me_secret_token') }}"
 local_addr = "10.0.0.254:443"
 type = "tcp"

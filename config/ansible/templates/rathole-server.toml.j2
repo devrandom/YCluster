@@ -1,0 +1,20 @@
+# rathole server configuration
+[server]
+bind_addr = "0.0.0.0:2333"
+default_token = "{{ rathole_token | default('change_me_secret_token') }}"
+
+[server.transport]
+type = "tcp"
+
+[server.transport.tcp]
+nodelay = true
+keepalive_secs = 20
+keepalive_interval = 8
+
+[server.services.http]
+bind_addr = "0.0.0.0:80"
+type = "tcp"
+
+[server.services.https]
+bind_addr = "0.0.0.0:443"
+type = "tcp"
