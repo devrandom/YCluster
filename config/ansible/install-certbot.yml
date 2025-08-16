@@ -1,0 +1,93 @@
+---
+- name: Install and configure certbot
+  hosts: core
+  become: yes
+  vars:
+    certbot_email: "{{ certbot_email_override | default('admin@cluster.local') }}"
+    
+  tasks:
+    - name: Install certbot and nginx plugin
+      apt:
+        name: 
+          - certbot
+          - python3-certbot-nginx
+          - python3-etcd3
+        state: present
+        update_cache: yes
+
+    - name: Copy HTTPS domain configuration script
+      copy:
+        src: https-config.py
+        dest: /usr/local/bin/https-config
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Copy certbot manager script
+      copy:
+        src: certbot-manager.py
+        dest: /usr/local/bin/certbot-manager
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create certbot configuration directory
+      file:
+        path: /etc/letsencrypt
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create systemd service for certbot renewal
+      copy:
+        dest: /etc/systemd/system/certbot-renew.service
+        content: |
+          [Unit]
+          Description=Renew Let's Encrypt certificates
+          After=network.target
+          
+          [Service]
+          Type=oneshot
+          Environment="ETCD_HOSTS={% for h in groups['core'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          Environment="CERTBOT_EMAIL={{ certbot_email }}"
+          ExecStart=/usr/local/bin/certbot-manager renew -n
+          ExecStartPost=/bin/systemctl reload nginx
+
+    - name: Create systemd timer for certbot renewal
+      copy:
+        dest: /etc/systemd/system/certbot-renew.timer
+        content: |
+          [Unit]
+          Description=Renew Let's Encrypt certificates twice daily
+          Requires=certbot-renew.service
+          
+          [Timer]
+          OnCalendar=*-*-* 00,12:00:00
+          RandomizedDelaySec=3600
+          Persistent=true
+          
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable certbot renewal timer
+      systemd:
+        name: certbot-renew.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Display certbot installation info
+      debug:
+        msg: |
+          Certbot installed successfully!
+          
+          To configure domains:
+          https-config set-domain your-domain.com
+          https-config add-alias alias.com
+          
+          To get initial certificate:
+          certbot-manager obtain
+          
+          To check status:
+          https-config get
