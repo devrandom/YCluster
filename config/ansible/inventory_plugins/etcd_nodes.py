@@ -80,6 +80,7 @@ class InventoryModule(BaseInventoryPlugin):
         self.inventory.add_group('storage')
         self.inventory.add_group('compute')
         self.inventory.add_group('core')
+        self.inventory.add_group('frontend')
         self.inventory.add_group('all_nodes')
         
         # Read rathole configuration from etcd if it exists
@@ -140,3 +141,31 @@ class InventoryModule(BaseInventoryPlugin):
                         self.inventory.add_child('core', hostname)
                 except Exception as e:
                     self.display.warning(f"Failed to parse allocation: {e}")
+
+        # Read frontend nodes from etcd
+        frontend_prefix = f"{prefix}/frontend"
+        for value, metadata in etcd_client.get_prefix(frontend_prefix):
+            if value:
+                try:
+                    frontend_node = json.loads(value.decode())
+                    name = frontend_node.get('name')
+                    address = frontend_node.get('ip') or frontend_node.get('hostname')
+                    
+                    if name and address:
+                        # Add host to inventory
+                        self.inventory.add_host(name)
+                        
+                        # Set host variables
+                        self.inventory.set_variable(name, 'ansible_host', address)
+                        self.inventory.set_variable(name, 'node_type', 'frontend')
+                        
+                        # Add any additional variables from etcd
+                        for key, val in frontend_node.items():
+                            if key not in ['name', 'ip', 'hostname']:
+                                self.inventory.set_variable(name, key, val)
+                        
+                        # Add to frontend group
+                        self.inventory.add_child('frontend', name)
+                        
+                except Exception as e:
+                    self.display.warning(f"Failed to parse frontend node: {e}")
