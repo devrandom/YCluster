@@ -16,7 +16,7 @@ def main():
     
     try:
         # Fetch hosts data with timeout and proper error handling
-        response = requests.get("http://localhost/api/hosts", timeout=10)
+        response = requests.get("http://localhost:12723/api/hosts", timeout=10)
         response.raise_for_status()
         
         if not response.text.strip():
