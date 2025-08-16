@@ -17,10 +17,18 @@
         state: present
         install_recommends: no
 
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
     - name: Copy DHCP server script
       copy:
         src: scripts/dhcp-server.py
-        dest: /usr/local/bin/dhcp-server.py
+        dest: /usr/local/lib/cluster/dhcp-server
         mode: '0755'
         owner: root
         group: root
@@ -29,7 +37,7 @@
     - name: Copy DHCP leader election script
       copy:
         src: scripts/dhcp-leader-election.sh
-        dest: /usr/local/bin/dhcp-leader-election.sh
+        dest: /usr/local/lib/cluster/dhcp-leader-election
         mode: '0755'
         owner: root
         group: root
@@ -47,7 +55,7 @@
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/bin/dhcp-server.py
+          ExecStart=/usr/local/lib/cluster/dhcp-server
           Restart=always
           RestartSec=5
           User=root
@@ -68,7 +76,7 @@
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/bin/dhcp-leader-election.sh "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          ExecStart=/usr/local/lib/cluster/dhcp-leader-election "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           Restart=always
           RestartSec=5
           User=root

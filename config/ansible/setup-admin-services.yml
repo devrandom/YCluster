@@ -179,17 +179,33 @@
         remote_src: yes
       notify: restart admin-api
 
-    - name: Copy etcd management scripts to /usr/local/bin
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Copy user-facing management scripts to /usr/local/bin
       copy:
-        src: "/opt/infrastructure/config/ansible/files/{{ item }}"
-        dest: "/usr/local/bin/{{ item }}"
+        src: "/opt/infrastructure/config/ansible/files/{{ item.src }}"
+        dest: "/usr/local/bin/{{ item.dest }}"
         mode: '0755'
         remote_src: yes
       loop:
-        - populate_local_node.py
-        - check_cluster.py
-        - lease-manager.py
-        - update-dhcp-hosts.py
+        - { src: "populate_local_node.py", dest: "populate-local-node" }
+        - { src: "check_cluster.py", dest: "check-cluster" }
+        - { src: "lease-manager.py", dest: "lease-manager" }
+
+    - name: Copy service scripts to /usr/local/lib/cluster
+      copy:
+        src: "/opt/infrastructure/config/ansible/files/{{ item.src }}"
+        dest: "/usr/local/lib/cluster/{{ item.dest }}"
+        mode: '0755'
+        remote_src: yes
+      loop:
+        - { src: "update-dhcp-hosts.py", dest: "update-dhcp-hosts" }
 
     - name: Create systemd service for admin API
       copy:
@@ -223,13 +239,13 @@
     - name: Install script to fetch TLS certificates from etcd
       copy:
         src: fetch-tls-certs.py
-        dest: /usr/local/bin/fetch-tls-certs
+        dest: /usr/local/lib/cluster/fetch-tls-certs
         mode: '0755'
         owner: root
         group: root
 
     - name: Fetch initial TLS certificates
-      command: /usr/local/bin/fetch-tls-certs
+      command: /usr/local/lib/cluster/fetch-tls-certs
       register: fetch_result
       failed_when: fetch_result.rc != 0
       changed_when: "'Certificates updated' in fetch_result.stdout"
@@ -554,7 +570,7 @@
           
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/update-dhcp-hosts.py
+          ExecStart=/usr/local/lib/cluster/update-dhcp-hosts
 
     - name: Create systemd timer for certificate refresh
       copy:
@@ -581,7 +597,7 @@
           
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/fetch-tls-certs
+          ExecStart=/usr/local/lib/cluster/fetch-tls-certs
           ExecStartPost=/bin/systemctl reload nginx
 
     - name: Enable and start services
@@ -604,7 +620,7 @@
         timeout: 30
 
     - name: Populate local node in etcd
-      command: "/usr/local/bin/populate_local_node.py"
+      command: "/usr/local/bin/populate-local-node"
       environment:
         ETCD_HOST: "{{ ansible_host }}:2379"
       register: populate_result
