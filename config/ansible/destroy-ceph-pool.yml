@@ -1,6 +1,6 @@
 ---
 - name: Destroy Ceph pool and RBD (DESTRUCTIVE - requires --tags destroy)
-  hosts: all
+  hosts: storage
   gather_facts: false
   vars:
     pool_name: rbd

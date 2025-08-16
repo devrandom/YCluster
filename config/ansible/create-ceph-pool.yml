@@ -1,6 +1,6 @@
 ---
 - name: Create Ceph pool on first active storage node
-  hosts: all
+  hosts: storage
   gather_facts: false
   vars:
     pool_name: rbd
