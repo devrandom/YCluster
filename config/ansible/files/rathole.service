@@ -4,8 +4,8 @@ After=network.target
 Wants=network.target
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/rathole /etc/rathole/client.toml
+Type=exec
+ExecStart=/usr/local/bin/rathole-client-start
 Restart=always
 RestartSec=5
 User=root
@@ -15,7 +15,7 @@ Group=root
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log
+ReadWritePaths=/var/log /etc/rathole
 
 [Install]
 WantedBy=multi-user.target
