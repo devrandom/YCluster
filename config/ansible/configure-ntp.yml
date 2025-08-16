@@ -1,6 +1,6 @@
 ---
 - name: Configure NTP client to use local NTP server
-  hosts: all
+  hosts: core
   become: yes
   tasks:
     - name: Install ntpsec

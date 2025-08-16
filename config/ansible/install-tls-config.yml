@@ -1,6 +1,6 @@
 ---
 - name: Install TLS certificate management tools
-  hosts: all
+  hosts: core
   become: yes
 
   tasks:
