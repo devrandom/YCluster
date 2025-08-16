@@ -73,7 +73,7 @@ def add_frontend_node(name, address, description=None):
             'type': 'frontend',
             'added': datetime.now().isoformat()
         }
-    except ipaddress.AddressValueError:
+    except (ipaddress.AddressValueError, ValueError):
         node_data = {
             'name': name,
             'hostname': address,
