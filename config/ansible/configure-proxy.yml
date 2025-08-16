@@ -1,6 +1,6 @@
 ---
 - name: Configure Proxy Settings
-  hosts: all
+  hosts: storage
   become: yes
   tasks:
     - name: Add proxy hostname entries to /etc/hosts
