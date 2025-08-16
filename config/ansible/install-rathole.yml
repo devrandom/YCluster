@@ -48,7 +48,6 @@
         mode: '0644'
         owner: root
         group: root
-      notify: restart rathole
 
     - name: Create rathole systemd service
       copy:
@@ -57,23 +56,15 @@
         mode: '0644'
         owner: root
         group: root
-      notify:
-        - reload systemd
-        - restart rathole
+      notify: reload systemd
 
-    - name: Enable rathole service but don't start it (controlled by keepalived)
+    - name: rathole service is controlled by keepalived
       systemd:
         name: rathole
         enabled: no
-        state: stopped
         daemon_reload: yes
 
   handlers:
     - name: reload systemd
       systemd:
         daemon_reload: yes
-
-    - name: restart rathole
-      systemd:
-        name: rathole
-        state: restarted
