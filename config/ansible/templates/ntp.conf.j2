@@ -1,0 +1,28 @@
+# Ansible managed ntp.conf for cluster nodes
+
+# Local NTP server (VIP) - primary time source
+server 10.0.0.254 iburst prefer
+
+# Fallback to standard pools in case VIP is unreachable
+pool pool.ntp.org iburst
+pool time.google.com iburst
+
+# Leap second file
+leapfile /usr/share/zoneinfo/leap-seconds.list
+
+# Drift file
+driftfile /var/lib/ntpsec/ntp.drift
+
+# Statistics path
+statsdir /var/log/ntpsec/
+
+# Logging
+logfile /var/log/ntpsec/ntp.log
+
+# Access control
+restrict default kod nomodify notrap nopeer noquery
+restrict 127.0.0.1
+restrict ::1
+
+# Local network access
+restrict 10.0.0.0 mask 255.255.255.0 nomodify notrap
