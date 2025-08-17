@@ -2,170 +2,132 @@
 
 ## Overview
 
-XCluster is a self-bootstrapping infrastructure platform that creates a highly available cluster from bare metal servers. The system provides automated provisioning, distributed storage, and service orchestration with built-in failover capabilities.
+XCluster is a self-bootstrapping infrastructure platform that creates highly available clusters from bare metal servers. It provides automated provisioning, distributed storage, and service orchestration with built-in failover.
 
-## Core Components
+## Key Design Principles
 
-### Bootstrap Layer
-The bootstrap process begins from an admin laptop connected to the first core node (s1). Docker Compose orchestrates the initial services needed for network booting and provisioning:
+1. **Self-Bootstrapping**: Minimal manual intervention required
+2. **High Availability**: No single points of failure
+3. **Auto-Discovery**: MAC-based node type detection
+4. **Declarative Configuration**: Ansible-driven infrastructure
+5. **Distributed State**: etcd as single source of truth
 
-- **NTP Server**: Provides time synchronization for the entire cluster
-- **DNSMASQ**: Handles DHCP, DNS, and PXE boot services for network provisioning
-- **HTTP Server**: Serves installation media, autoinstall configurations, and node allocation APIs
-- **Squid Proxy**: Caches packages and updates to reduce external bandwidth
-- **Ansible Container**: Executes infrastructure automation playbooks
+This architecture enables resilient, self-managing infrastructure that scales from small deployments to larger clusters while maintaining operational simplicity.
 
-### Admin Services Layer
-Core nodes run admin services that provide:
+## Operational Features
 
-- **Node Allocation API**: Dynamic hostname and IP assignment based on MAC addresses
-- **DHCP Configuration API**: Dynamic DHCP lease management integrated with etcd
-- **Cluster Status API**: Health monitoring and node discovery endpoints with comprehensive service health checks
-- **Dynamic Inventory**: Ansible inventory plugin that reads node allocations from etcd and excludes DHCP hosts
-- **Proxy Services**: Squid proxy with functional health testing and immediate restart on configuration changes
+**Self-Healing**
+- Automatic leader election on node failures
+- Ceph data rebalancing and recovery
+- Service auto-restart with systemd
+
+**Monitoring**
+- Comprehensive health APIs with service status
+- Web-based cluster status dashboard
+- Leadership tracking and split-brain detection
+
+**Security**
+- SSH key-based authentication
+- Isolated cluster network
+- Controlled external access via proxy
+
+**Maintenance**
+- Rolling updates through Ansible
+- Graceful service migration
+- Zero-downtime cluster expansion
+
+**Ceph Storage**
+- LVM-based disk management with MicroCeph
+- RBD images for PostgreSQL and Qdrant
+- Pool management and cluster maintenance
+
+**Network Services**
+- Scapy-based DHCP server with etcd integration
+- dnsmasq DNS/TFTP services
+- Squid proxy for package caching
+
+**Management Tools**
+- Cluster health checks and node management
+- Certificate and configuration management utilities
+
+## System Architecture
 
 ### Node Types
 
-#### Core Nodes (s1, s2, s3)
-Core nodes form the control plane and provide administrative services:
-- **etcd Cluster**: Distributed key-value store for cluster state and coordination
-- **Admin Services**: Flask APIs for node allocation, DHCP management, and cluster status with comprehensive health monitoring
-- **DHCP Leader Election**: Ensures only one active DHCP server using etcd coordination
-- **Keepalived VIP**: High availability virtual IP for admin services
-- **Network Services**: DNS, DHCP, and PXE boot infrastructure
-- **Proxy Services**: Squid proxy with automatic configuration updates and functional testing
+**Core Nodes (s1, s2, s3)**
+- Form the control plane with etcd cluster
+- Run admin services (node allocation, DHCP, cluster status APIs)
+- Provide network services (DNS, DHCP, PXE boot)
+- Host Keepalived VIP for high availability
+- Act as storage nodes
 
-#### Storage Nodes
-Storage nodes provide distributed block storage and run stateful services:
-- **MicroCeph**: Distributed storage cluster providing RBD (RADOS Block Device) volumes
-- **PostgreSQL**: Database service with RBD-backed storage and storage leader election
-- **Qdrant**: Vector database service with RBD-backed storage and storage leader election
-- **Storage Leader Election**: etcd-based coordination ensuring single active instance per service
+**Storage Nodes (s4, ...)**
+- Run MicroCeph for distributed block storage
+- Host stateful services (PostgreSQL, Qdrant) with leader election
+- Provide RBD volumes with exclusive locking
 
-#### Compute Nodes
-Compute nodes provide processing capacity for workloads (architecture supports but not fully implemented in current playbooks).
+**Compute Nodes (c\*)**
+- Provide processing capacity for workloads
 
-### High Availability Design
+**Frontend Nodes (f\*)**
+- Provide external access via Rathole reverse proxy
+- Registered in etcd for dynamic configuration
 
-#### Service Leadership
-Stateful services use etcd-based leader election to ensure only one active instance:
-- PostgreSQL runs on exactly one storage node at a time via storage leader election
-- Qdrant runs on exactly one storage node at a time via storage leader election
-- DHCP services use separate DHCP leader election for high availability
-- Leaders can migrate between nodes automatically on failure
+### Core Services
 
-#### Storage Resilience
-- Ceph provides distributed, replicated block storage
-- RBD volumes use exclusive locking to prevent split-brain scenarios
-- Automatic failover and recovery of storage services
+**Bootstrap Services** (Docker Compose on admin laptop)
+- NTP Server for time synchronization
+- DNSMASQ for DHCP/DNS/PXE boot
+- HTTP Server for installation media and APIs
+- Squid Proxy for package caching
+- Ansible Container for automation
 
-#### Network Resilience
-- Keepalived provides VIP failover for admin services
-- Multiple core nodes can serve admin functions
-- DNS and DHCP services remain available during node failures
+**Cluster Services**
+- **etcd**: Distributed key-value store for cluster state
+- **MicroCeph**: Distributed block storage with RBD
+- **Leader Election**: Ensures single active instance for stateful services
+- **Keepalived**: Virtual IP failover for singleton services, such as DHCP and routing gateway
 
-### Data Flow
+### Certificate Management
+- TLS infrastructure with self-signed certificates and Let's Encrypt integration
+- Certificate synchronization via etcd and nginx
+- Automated renewal and distribution
 
-#### Node Provisioning
-1. New nodes PXE boot from core node services
-2. Autoinstall process configures base system with proxy configuration
-3. Ansible playbooks install and configure services
-4. Node registers itself in etcd cluster state
-5. Dynamic inventory excludes administrative hosts (dhcp-* pattern) from cluster operations
+### High Availability
 
-#### Service Discovery
-- etcd maintains authoritative cluster membership and node allocations
-- Dynamic inventory plugin (etcd_nodes.py) reads node allocations from etcd for Ansible
-- Admin APIs provide real-time cluster status and comprehensive health monitoring including:
-  - Service status checks (etcd, Ceph, PostgreSQL, Qdrant, DNS, DHCP, Squid, NTP)
-  - Leadership status tracking (storage and DHCP leaders)
-  - Split-brain detection for database services
-  - Proxy functionality testing with local connectivity checks
-- Services discover peers through etcd key-value store
-- MAC address-based node type detection enables automatic provisioning
+**Service Resilience**
+- etcd-based leader election for stateful services (PostgreSQL, Qdrant, DHCP)
+- Automatic leader migration on node failure
+- Multiple core nodes provide redundant admin services
 
-#### Storage Access
-- Applications request RBD volumes from Ceph cluster
-- Exclusive locks prevent concurrent access
-- Leader election ensures single writer per volume
+**Storage Resilience**
+- Ceph replication across storage nodes
+- RBD exclusive locking prevents split-brain
+- Automatic data rebalancing on node changes
+
+**Network Resilience**
+- Virtual IP failover for admin services
+- Multiple DNS/DHCP servers with leader election
+- Redundant proxy services on core nodes
+
+## Bootstrap Process
+
+1. **Initial Setup**: Admin laptop runs Docker Compose to start bootstrap services on s1
+2. **Core Provisioning**: s1 provisions itself and peer core nodes (s2, s3)
+3. **Cluster Formation**: Core nodes establish etcd cluster and admin services
+4. **Service Deployment**: Ansible playbooks deploy storage, databases, and cluster services
+5. **Node Expansion**: New nodes PXE boot and auto-provision based on MAC address
 
 ## Network Architecture
 
-### IP Allocation
-- Core nodes use static IP assignments
-- Storage and compute nodes receive DHCP assignments
-- Admin services accessible via virtual IP
-- All nodes participate in cluster-wide DNS
+**IP Allocation**
+- Core nodes: first 3-5 storage nodes
+- Storage nodes: DHCP range 10.0.0.11-30
+- Compute nodes: DHCP range 10.0.0.51-70
+- Admin VIP: 10.0.0.254
 
-### Service Communication
-- etcd provides cluster coordination on standard ports
-- Ceph uses standard ports for storage communication
-- Admin APIs accessible through nginx reverse proxy
-- Internal services communicate over cluster network
+**Service Discovery**
+- etcd maintains cluster membership and configuration
+- Dynamic inventory plugin reads from etcd for Ansible
+- Services discover peers through etcd watches
 
-## Deployment Patterns
-
-### Initial Bootstrap
-1. Admin laptop connects to s1 via direct network
-2. Docker Compose starts bootstrap services (NTP, DNSMASQ, HTTP, Squid, Ansible)
-3. s1 provisions itself and additional core nodes (s2, s3)
-4. Core nodes establish etcd cluster and admin services
-5. Deployment follows site.yml playbook sequence:
-   - Ceph disk setup and pool creation
-   - Storage infrastructure setup
-   - PostgreSQL installation with RBD backing
-   - Qdrant setup with RBD volumes
-   - etcd cluster establishment
-   - Storage leader election services
-   - Admin services and APIs
-   - NTP configuration
-
-### Cluster Expansion
-1. New nodes PXE boot from existing infrastructure
-2. Automatic node type detection based on MAC address patterns
-3. Dynamic hostname and IP allocation via admin APIs
-4. Ansible playbooks configure nodes based on detected type
-5. Services automatically discover and integrate new capacity through etcd
-
-### Service Management
-- All services managed through systemd
-- Leader election services start/stop dependent services
-- Ansible playbooks provide declarative configuration
-- Rolling updates possible through playbook execution
-
-## Security Model
-
-### Access Control
-- SSH key-based authentication for all nodes
-- Ansible manages configuration through privileged access
-- Service-to-service communication over trusted network
-
-### Network Isolation
-- Cluster operates on isolated network segment
-- Squid proxy provides controlled external access
-- Internal services bind to cluster interfaces only
-
-## Operational Characteristics
-
-### Self-Healing
-- Leader election automatically recovers from node failures
-- Ceph rebalances data when nodes join/leave
-- Services restart automatically on transient failures
-
-### Monitoring and Observability
-- etcd provides cluster health and membership status
-- Service logs available through systemd journal
-- Ceph provides storage cluster health monitoring
-- Comprehensive health API endpoints provide:
-  - Real-time service status across all nodes
-  - Leadership tracking and split-brain detection
-  - Proxy functionality verification
-  - DNS resolution testing
-  - Web-based cluster status dashboard
-
-### Maintenance Operations
-- Rolling updates through Ansible playbooks
-- Graceful service migration during maintenance
-- Cluster can operate with reduced capacity during updates
-
-This architecture provides a foundation for building resilient, self-managing infrastructure that can scale from a few nodes to larger deployments while maintaining high availability and operational simplicity.
