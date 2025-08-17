@@ -443,6 +443,13 @@
         mode: '0644'
         remote_src: yes
 
+    - name: Copy all assets to web directory
+      copy:
+        src: /opt/infrastructure/config/ansible/files/assets/
+        dest: /var/www/html/assets/
+        mode: preserve
+        remote_src: yes
+
     - name: Copy index.html for web interface
       copy:
         src: /opt/infrastructure/config/ansible/files/index.html
