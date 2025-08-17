@@ -8,28 +8,13 @@
         name: ntpsec
         state: present
 
-    - name: Comment out existing pool lines in ntp.conf
-      replace:
-        path: /etc/ntpsec/ntp.conf
-        regexp: '^(pool .*)$'
-        replace: '# \1'
-        backup: yes
-      notify: restart ntpsec
-
-    - name: Comment out existing server lines in ntp.conf
-      replace:
-        path: /etc/ntpsec/ntp.conf
-        regexp: '^(server (?!10\.0\.0\.1).*)$'
-        replace: '# \1'
-        backup: yes
-      notify: restart ntpsec
-
-    - name: Configure ntpsec to use local NTP server
-      lineinfile:
-        path: /etc/ntpsec/ntp.conf
-        line: "server 10.0.0.1 iburst"
-        create: yes
-        backup: yes
+    - name: Create ntp.conf configuration
+      template:
+        src: ntp.conf.j2
+        dest: /etc/ntpsec/ntp.conf
+        owner: root
+        group: root
+        mode: '0644'
       notify: restart ntpsec
 
     - name: Enable and start ntpsec service
