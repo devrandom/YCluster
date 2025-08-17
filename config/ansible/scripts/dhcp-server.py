@@ -31,7 +31,7 @@ HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 
 # IP allocation configuration (same as Flask app)
 IP_RANGES = {
-    's': {'base': 10, 'max': 20},    # Storage: 10.0.0.31-50 (s1-s20)
+    's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.71-90 (m1-m20)
 }
