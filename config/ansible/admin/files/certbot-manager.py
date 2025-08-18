@@ -151,9 +151,16 @@ def update_nginx_config():
         # This assumes the template has a placeholder like {{ domain }} or similar
         updated_content = template_content.replace('{{ domain }}', primary_domain)
         
+        # Check if config already exists and is the same
+        if nginx_config_path.exists():
+            existing_content = nginx_config_path.read_text()
+            if existing_content == updated_content:
+                print("Nginx configuration is already up to date")
+                return True
+        
         # Write updated config
         nginx_config_path.write_text(updated_content)
-        print(f"Updated nginx configuration with server_name: {primary_domain}")
+        print(f"Nginx configuration updated with server_name: {primary_domain}")
         
         # Test nginx config
         result = subprocess.run(['nginx', '-t'], capture_output=True, text=True)
