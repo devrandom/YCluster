@@ -1,0 +1,225 @@
+---
+- name: Setup network services on storage nodes s1-s3
+  hosts: s1,s2,s3
+  become: yes
+    
+  tasks:
+    - name: Configure Squid proxy
+      copy:
+        dest: /etc/squid/squid.conf
+        content: |
+          # Basic Squid configuration for cluster proxy
+          http_port 3128
+          
+          # Shutdown timeout (faster restarts)
+          shutdown_lifetime 5 seconds
+          
+          # Allow access from cluster networks and common private ranges
+          acl localnet src 10.0.0.0/8
+          acl localnet src 172.16.0.0/12
+          acl localnet src 192.168.0.0/16
+          acl localnet src 127.0.0.0/8
+          
+          # Standard ports
+          acl SSL_ports port 443
+          acl Safe_ports port 80
+          acl Safe_ports port 21
+          acl Safe_ports port 443
+          acl Safe_ports port 70
+          acl Safe_ports port 210
+          acl Safe_ports port 1025-65535
+          acl Safe_ports port 280
+          acl Safe_ports port 488
+          acl Safe_ports port 591
+          acl Safe_ports port 777
+          acl CONNECT method CONNECT
+          
+          # Access rules
+          http_access deny !Safe_ports
+          http_access deny CONNECT !SSL_ports
+          http_access allow localhost manager
+          http_access deny manager
+          http_access allow localnet
+          http_access allow localhost
+          http_access deny all
+          
+          # Cache configuration
+          cache_dir ufs /var/spool/squid 1000 16 256
+          coredump_dir /var/spool/squid
+          
+          # Memory cache
+          cache_mem 256 MB
+          maximum_object_size_in_memory 512 KB
+          
+          # Disk cache
+          maximum_object_size 100 MB
+          
+          # Refresh patterns for package repositories
+          refresh_pattern ^ftp:           1440    20%     10080
+          refresh_pattern ^gopher:        1440    0%      1440
+          refresh_pattern -i (/cgi-bin/|\?) 0     0%      0
+          refresh_pattern \/(Packages|Sources)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+          refresh_pattern \/Release(|\.gpg)$ 0 0% 0 refresh-ims
+          refresh_pattern \/InRelease$ 0 0% 0 refresh-ims
+          refresh_pattern \/(Translation-.*)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+          refresh_pattern .               0       20%     4320
+          
+          # Logging
+          access_log /var/log/squid/access.log squid
+        backup: yes
+      notify: restart squid
+
+    - name: Flush handlers to restart squid immediately
+      meta: flush_handlers
+
+    - name: Disable systemd-resolved to free port 53
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+
+    - name: Check if resolv.conf is a symlink
+      stat:
+        path: /etc/resolv.conf
+      register: resolv_stat
+
+    - name: Remove systemd-resolved symlink
+      file:
+        path: /etc/resolv.conf
+        state: absent
+      when: resolv_stat.stat.islnk is defined and resolv_stat.stat.islnk
+
+    - name: Create static resolv.conf
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 127.0.0.1
+          search xc
+        mode: '0644'
+
+    - name: Clear default dnsmasq.conf to avoid conflicts
+      copy:
+        dest: /etc/dnsmasq.conf
+        content: |
+          # Main dnsmasq configuration
+          # All configuration is in /etc/dnsmasq.d/
+          conf-dir=/etc/dnsmasq.d/,*.conf
+          # Use additional hosts file for static DNS entries
+          addn-hosts=/etc/static-hosts
+          server=208.67.222.222
+          server=8.8.8.8
+          server=1.1.1.1
+        backup: yes
+
+    - name: Create empty static hosts file for dnsmasq
+      copy:
+        dest: /etc/static-hosts
+        content: ""
+        force: no
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create dnsmasq configuration directory
+      file:
+        path: /etc/dnsmasq.d
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create dnsmasq configuration (DNS and TFTP only)
+      copy:
+        dest: /etc/dnsmasq.d/dns-tftp.conf
+        mode: '0644'
+        content: |
+          # DNS configuration
+          local=/xc/
+          domain=xc
+          domain-needed
+          
+          # PXE boot configuration
+          enable-tftp
+          tftp-root=/var/lib/tftpboot
+          
+          # Disable DHCP (handled by scapy-based server)
+          port=53
+
+    - name: Create squid cache directory
+      file:
+        path: /var/spool/squid
+        state: directory
+        owner: proxy
+        group: proxy
+        mode: '0750'
+
+    - name: Check if squid cache is already initialized
+      stat:
+        path: /var/spool/squid/00
+      register: squid_cache_initialized
+
+    - name: Stop squid service for cache initialization
+      systemd:
+        name: squid
+        state: stopped
+      when: not squid_cache_initialized.stat.exists
+      ignore_errors: yes
+
+    - name: Initialize squid cache
+      command: squid -z
+      when: not squid_cache_initialized.stat.exists
+
+    - name: Enable and start squid service
+      systemd:
+        name: squid
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Enable and start dnsmasq service (for DNS and TFTP)
+      systemd:
+        name: dnsmasq
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Create systemd timer for DHCP updates
+      copy:
+        dest: /etc/systemd/system/update-dhcp-hosts.timer
+        content: |
+          [Unit]
+          Description=Update DHCP hosts from etcd
+          
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec=30s
+          
+          [Install]
+          WantedBy=timers.target
+
+    - name: Create systemd service for DHCP updates
+      copy:
+        dest: /etc/systemd/system/update-dhcp-hosts.service
+        content: |
+          [Unit]
+          Description=Update DHCP hosts from etcd
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/lib/cluster/update-dhcp-hosts
+
+    - name: Enable and start network services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      loop:
+        - squid
+        - update-dhcp-hosts.timer
+
+  handlers:
+    - name: restart squid
+      systemd:
+        name: squid
+        state: restarted
