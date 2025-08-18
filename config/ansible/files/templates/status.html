@@ -144,6 +144,41 @@
     <p style="text-align: center; color: #666; margin-top: 40px;">No hosts found in cluster inventory.</p>
     {% endif %}
 
+    <!-- Clock Skew Status Section -->
+    <div style="margin-bottom: 20px;">
+        <h2>Clock Synchronization</h2>
+        <table style="margin-bottom: 10px;">
+            <thead>
+                <tr>
+                    <th>Host</th>
+                    <th>Status</th>
+                    <th>Offset (ms)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for host in hosts %}
+                <tr class="type-{{ host.type }}">
+                    <td><strong>{{ host.hostname }}</strong></td>
+                    {% set health = host_health.get(host.hostname, {}) %}
+                    {% set clock_skew = health.get('services', {}).get('clock_skew', {}) %}
+                    <td>
+                        <span class="status-{{ clock_skew.get('status', 'error') }}">
+                            {{ clock_skew.get('status', 'unknown').title() }}
+                        </span>
+                    </td>
+                    <td>
+                        {% if clock_skew.get('details', {}).get('offset_ms') is not none %}
+                        {{ clock_skew.details.offset_ms }}
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
     <!-- Certificate Status Section -->
     <div style="margin-bottom: 20px;">
         <h2>TLS Certificate Status</h2>
