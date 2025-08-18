@@ -495,6 +495,65 @@ def check_certificate_expiry():
             }
         }
 
+def check_clock_skew():
+    """Check clock skew using NTP protocol to VIP"""
+
+    # NTP server to check against (VIP)
+    ntp_server = '10.0.0.254'
+
+    try:
+        import ntplib
+
+        # Create NTP client
+        client = ntplib.NTPClient()
+        
+        # Make NTP request (this is a lightweight UDP request)
+        response = client.request(ntp_server, version=3, timeout=2)
+        
+        # Get offset in milliseconds
+        offset_ms = response.offset * 1000
+        
+        # Determine status based on offset
+        if abs(offset_ms) > 1000:  # More than 1 second
+            status = 'critical'
+        elif abs(offset_ms) > 100:  # More than 100ms
+            status = 'warning'
+        else:
+            status = 'healthy'
+        
+        return {
+            'status': status,
+            'details': {
+                'offset_ms': round(offset_ms, 3),
+                'ntp_server': ntp_server,
+                'stratum': response.stratum,
+                'precision': response.precision,
+                'delay': response.delay,
+                'message': f'Clock offset: {round(offset_ms, 3)}ms'
+            }
+        }
+        
+    except ImportError:
+        return {
+            'status': 'error',
+            'details': 'ntplib not installed'
+        }
+    except ntplib.NTPException as e:
+        return {
+            'status': 'error',
+            'details': f'NTP request failed: {str(e)}'
+        }
+    except socket.gaierror:
+        return {
+            'status': 'error',
+            'details': f'Could not resolve NTP server {ntp_server}'
+        }
+    except Exception as e:
+        return {
+            'status': 'error',
+            'details': f'Clock skew check failed: {str(e)}'
+        }
+
 def is_storage_leader():
     """Check if this node is the current storage leader"""
     try:
@@ -523,6 +582,11 @@ def is_dhcp_leader():
 def ping():
     """Simple ping endpoint for connectivity testing"""
     return jsonify({'status': 'ok', 'timestamp': datetime.now(UTC).isoformat()})
+
+@app.route('/api/time')
+def get_time():
+    """Get current timestamp for clock synchronization checks"""
+    return jsonify({'timestamp': time.time()})
 
 @app.route('/api/health')
 def health():
@@ -726,6 +790,14 @@ def health():
     elif cert_health['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
+    # Check clock skew
+    clock_skew = check_clock_skew()
+    health_status['services']['clock_skew'] = clock_skew
+    if clock_skew['status'] in ['critical', 'error']:
+        health_status['overall'] = 'unhealthy'
+    elif clock_skew['status'] == 'warning' and health_status['overall'] == 'healthy':
+        health_status['overall'] = 'degraded'
+    
     # Return appropriate HTTP status code
     status_code = 200 if health_status['overall'] == 'healthy' else 503
     return jsonify(health_status), status_code
@@ -864,6 +936,7 @@ def status_page():
     leadership = get_leadership_status()
     vip_status = check_vip_status()
     certificate_status = check_certificate_expiry()
+    clock_skew_status = check_clock_skew()
     
     # Get health status for each host
     for host in hosts:
@@ -875,6 +948,7 @@ def status_page():
                          leadership=leadership,
                          vip_status=vip_status,
                          certificate_status=certificate_status,
+                         clock_skew_status=clock_skew_status,
                          timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 if __name__ == '__main__':
