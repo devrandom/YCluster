@@ -87,8 +87,8 @@
     - name: Update nginx configuration with certbot-manager
       command: /usr/local/bin/certbot-manager update-nginx
       register: nginx_update_result
-      changed_when: "'Nginx configuration updated' in nginx_update_result.stdout or 'server_name' in nginx_update_result.stdout"
-      ignore_errors: yes
+      changed_when: "'Nginx configuration updated' in nginx_update_result.stdout and 'already up to date' not in nginx_update_result.stdout"
+      failed_when: nginx_update_result.rc != 0
       notify: restart nginx
 
     - name: Enable nginx site
