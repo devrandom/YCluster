@@ -15,5 +15,4 @@
 - import_playbook: setup-gateway-vip.yml
 - import_playbook: configure-ntp.yml
 - import_playbook: install-rathole.yml
-- import_playbook: install-certbot.yml
 - import_playbook: install-frontend-manager.yml

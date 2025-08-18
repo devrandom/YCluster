@@ -3,4 +3,5 @@
 - import_playbook: admin/setup-base-infrastructure.yml
 - import_playbook: admin/setup-network-services.yml
 - import_playbook: admin/setup-pxe-boot.yml
+- import_playbook: admin/install-certbot.yml
 - import_playbook: admin/setup-web-services.yml
