@@ -948,7 +948,6 @@ def status_page():
                          leadership=leadership,
                          vip_status=vip_status,
                          certificate_status=certificate_status,
-                         clock_skew_status=clock_skew_status,
                          timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 if __name__ == '__main__':
