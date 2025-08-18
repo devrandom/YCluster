@@ -15,22 +15,6 @@
         state: present
         update_cache: yes
 
-    - name: Copy HTTPS domain configuration script
-      copy:
-        src: https-config.py
-        dest: /usr/local/bin/https-config
-        mode: '0755'
-        owner: root
-        group: root
-
-    - name: Copy certbot manager script
-      copy:
-        src: certbot-manager.py
-        dest: /usr/local/bin/certbot-manager
-        mode: '0755'
-        owner: root
-        group: root
-
     - name: Create certbot configuration directory
       file:
         path: /etc/letsencrypt
