@@ -1,0 +1,88 @@
+---
+- name: Setup base infrastructure on storage nodes s1-s3
+  hosts: s1,s2,s3
+  become: yes
+  vars:
+    admin_services_dir: /opt/admin-services
+    
+  tasks:
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-flask
+          - python3-etcd3
+          - python3-scapy
+          - python3-requests
+          - nginx
+          - squid
+          - dnsmasq
+          - genisoimage
+          - keepalived
+          - ntp
+          - curl
+          - wget
+          - git
+        state: present
+
+    - name: Create admin services directory
+      file:
+        path: "{{ admin_services_dir }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create cluster utilities directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create web root directory
+      file:
+        path: /var/www/html
+        state: directory
+        mode: '0755'
+        owner: www-data
+        group: www-data
+
+    - name: Clone infrastructure repository
+      git:
+        repo: /opt/infrastructure
+        dest: /opt/infrastructure
+        version: HEAD
+        force: yes
+      when: ansible_hostname != 's1'
+
+    - name: Install cluster utility scripts
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: '0755'
+        owner: root
+        group: root
+      loop:
+        - { src: 'populate_local_node.py', dest: '/usr/local/lib/cluster/populate-local-node' }
+        - { src: 'check_cluster.py', dest: '/usr/local/lib/cluster/check-cluster' }
+        - { src: 'lease-manager.py', dest: '/usr/local/bin/lease-manager' }
+        - { src: 'frontend-manager.py', dest: '/usr/local/bin/frontend-manager' }
+        - { src: 'tls-config.py', dest: '/usr/local/bin/tls-config' }
+        - { src: 'https-config.py', dest: '/usr/local/bin/https-config' }
+        - { src: 'rathole-config.py', dest: '/usr/local/bin/rathole-config' }
+        - { src: 'certbot-manager.py', dest: '/usr/local/bin/certbot-manager' }
+        - { src: 'update-dhcp-hosts.py', dest: '/usr/local/lib/cluster/update-dhcp-hosts' }
+
+    - name: Populate local node information in etcd
+      command: /usr/local/lib/cluster/populate-local-node
+      register: populate_result
+      changed_when: "'Node information updated' in populate_result.stdout"
+      failed_when: populate_result.rc != 0

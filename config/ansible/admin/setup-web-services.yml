@@ -1,0 +1,199 @@
+---
+- name: Setup web services on storage nodes s1-s3
+  hosts: s1,s2,s3
+  become: yes
+  vars:
+    admin_services_dir: /opt/admin-services
+    
+  tasks:
+    - name: Copy etcd-based allocation API
+      copy:
+        src: /opt/infrastructure/config/ansible/files/app.py
+        dest: "{{ admin_services_dir }}/app.py"
+        mode: '0644'
+        remote_src: yes
+      notify: restart admin-api
+
+    - name: Create Flask templates directory
+      file:
+        path: "{{ admin_services_dir }}/templates"
+        state: directory
+        mode: '0755'
+
+    - name: Copy status page template
+      copy:
+        src: /opt/infrastructure/config/ansible/files/templates/status.html
+        dest: "{{ admin_services_dir }}/templates/status.html"
+        mode: '0644'
+        remote_src: yes
+      notify: restart admin-api
+
+    - name: Create systemd service for admin API
+      copy:
+        dest: /etc/systemd/system/admin-api.service
+        content: |
+          [Unit]
+          Description=Admin API Service
+          After=network.target etcd.service
+          Wants=etcd.service
+
+          [Service]
+          Type=simple
+          Environment="ETCD_HOSTS={% for h in groups['core'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app.py
+          Restart=always
+          RestartSec=5
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart admin-api
+
+    - name: Create SSL directory for nginx
+      file:
+        path: /etc/nginx/ssl
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+
+    - name: Install script to fetch TLS certificates from etcd
+      copy:
+        src: fetch-tls-certs.py
+        dest: /usr/local/lib/cluster/fetch-tls-certs
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Fetch initial TLS certificates
+      command: /usr/local/lib/cluster/fetch-tls-certs
+      register: fetch_result
+      failed_when: fetch_result.rc != 0
+      changed_when: "'Certificates updated' in fetch_result.stdout"
+
+    - name: Create nginx template directory
+      file:
+        path: /etc/nginx/templates
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Configure nginx with HTTPS support (template only)
+      template:
+        src: nginx-admin.conf.j2
+        dest: /etc/nginx/templates/admin-api.conf.j2
+
+    - name: Update nginx configuration with certbot-manager
+      command: /usr/local/bin/certbot-manager update-nginx
+      register: nginx_update_result
+      changed_when: "'Nginx configuration updated' in nginx_update_result.stdout or 'server_name' in nginx_update_result.stdout"
+      ignore_errors: yes
+      notify: restart nginx
+
+    - name: Enable nginx site
+      file:
+        src: /etc/nginx/sites-available/admin-api
+        dest: /etc/nginx/sites-enabled/admin-api
+        state: link
+      notify: restart nginx
+
+    - name: Remove default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: restart nginx
+
+    - name: Flush handlers to restart nginx immediately
+      meta: flush_handlers
+
+    - name: Create autoinstall directory
+      file:
+        path: /var/www/html/autoinstall
+        state: directory
+        mode: '0755'
+
+    - name: Copy autoinstall user-data
+      copy:
+        src: /opt/infrastructure/data/autoinstall/user-data
+        dest: /var/www/html/autoinstall/user-data
+        mode: '0644'
+        remote_src: yes
+
+    - name: Copy autoinstall meta-data
+      copy:
+        src: /opt/infrastructure/data/autoinstall/meta-data
+        dest: /var/www/html/autoinstall/meta-data
+        mode: '0644'
+        remote_src: yes
+
+    - name: Copy all assets to web directory
+      copy:
+        src: /opt/infrastructure/config/ansible/files/assets/
+        dest: /var/www/html/assets/
+        mode: preserve
+        remote_src: yes
+
+    - name: Copy index.html for web interface
+      copy:
+        src: /opt/infrastructure/config/ansible/files/index.html
+        dest: /var/www/html/index.html
+        mode: '0644'
+        remote_src: yes
+
+    - name: Copy ansible SSH public key
+      copy:
+        src: /opt/bootstrap-files/ansible_ssh_key.pub
+        dest: /var/www/html/ansible_ssh_key.pub
+        mode: '0644'
+        remote_src: yes
+
+    - name: Create systemd timer for certificate refresh
+      copy:
+        dest: /etc/systemd/system/fetch-tls-certs.timer
+        content: |
+          [Unit]
+          Description=Fetch TLS certificates from etcd
+          Requires=fetch-tls-certs.service
+          
+          [Timer]
+          OnCalendar=hourly
+          Persistent=true
+          
+          [Install]
+          WantedBy=timers.target
+
+    - name: Create systemd service for certificate refresh
+      copy:
+        dest: /etc/systemd/system/fetch-tls-certs.service
+        content: |
+          [Unit]
+          Description=Fetch TLS certificates from etcd
+          After=network.target
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/lib/cluster/fetch-tls-certs
+          ExecStartPost=/bin/systemctl reload nginx
+
+    - name: Enable and start web services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      loop:
+        - admin-api
+        - nginx
+        - fetch-tls-certs.timer
+
+  handlers:
+    - name: restart admin-api
+      systemd:
+        name: admin-api
+        state: restarted
+
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
