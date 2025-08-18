@@ -251,10 +251,24 @@
       failed_when: fetch_result.rc != 0
       changed_when: "'Certificates updated' in fetch_result.stdout"
 
-    - name: Configure nginx with HTTPS support
+    - name: Create nginx template directory
+      file:
+        path: /etc/nginx/templates
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Configure nginx with HTTPS support (template only)
       template:
         src: nginx-admin.conf.j2
-        dest: /etc/nginx/sites-available/admin-api
+        dest: /etc/nginx/templates/admin-api.conf.j2
+
+    - name: Update nginx configuration with certbot-manager
+      command: /usr/local/bin/certbot-manager update-nginx
+      register: nginx_update_result
+      changed_when: "'Nginx configuration updated' in nginx_update_result.stdout or 'server_name' in nginx_update_result.stdout"
+      ignore_errors: yes
       notify: restart nginx
 
     - name: Enable nginx site

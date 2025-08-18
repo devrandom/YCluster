@@ -127,41 +127,33 @@ subjectAltName = @alt_names
         return None
 
 def update_nginx_config():
-    """Update nginx configuration with the primary domain from etcd"""
+    """Update nginx configuration with the primary domain from etcd using template"""
     config = get_https_config()
     
     if 'domain' not in config:
-        print("No primary domain configured - nginx config will use default server_name")
+        print("No primary domain configured - cannot generate nginx config")
         return False
     
     primary_domain = config['domain']
     nginx_config_path = Path('/etc/nginx/sites-available/admin-api')
+    nginx_template_path = Path('/etc/nginx/templates/admin-api.conf.j2')
     
-    # Check if config file exists
-    if not nginx_config_path.exists():
-        print(f"Nginx config file not found: {nginx_config_path}")
+    # Check if template file exists
+    if not nginx_template_path.exists():
+        print(f"Nginx template file not found: {nginx_template_path}")
         return False
     
     try:
-        # Read current config
-        config_content = nginx_config_path.read_text()
+        # Read template config
+        template_content = nginx_template_path.read_text()
         
-        # Replace server_name line
-        # Look for "server_name _;" or "server_name domain.com;" patterns
-        updated_content = re.sub(
-            r'(\s+)server_name\s+[^;]+;',
-            rf'\1server_name {primary_domain};',
-            config_content
-        )
-        
-        # Check if we made any changes
-        if updated_content == config_content:
-            print(f"Nginx config already has correct server_name: {primary_domain}")
-            return True
+        # Replace server_name placeholder with actual domain
+        # This assumes the template has a placeholder like {{ domain }} or similar
+        updated_content = template_content.replace('{{ domain }}', primary_domain)
         
         # Write updated config
         nginx_config_path.write_text(updated_content)
-        print(f"Updated nginx server_name to: {primary_domain}")
+        print(f"Updated nginx configuration with server_name: {primary_domain}")
         
         # Test nginx config
         result = subprocess.run(['nginx', '-t'], capture_output=True, text=True)
