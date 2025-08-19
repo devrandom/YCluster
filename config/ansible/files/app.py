@@ -798,6 +798,10 @@ def health():
     elif clock_skew['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
+    # Add leadership status for this node
+    health_status['storage_leader'] = is_storage_leader()
+    health_status['dhcp_leader'] = is_dhcp_leader()
+    
     # Return appropriate HTTP status code
     status_code = 200 if health_status['overall'] == 'healthy' else 503
     return jsonify(health_status), status_code
