@@ -75,9 +75,7 @@
         - { src: 'check_cluster.py', dest: '/usr/local/lib/cluster/check-cluster' }
         - { src: 'lease-manager.py', dest: '/usr/local/bin/lease-manager' }
         - { src: 'frontend-manager.py', dest: '/usr/local/bin/frontend-manager' }
-        - { src: 'tls-config.py', dest: '/usr/local/bin/tls-config' }
         - { src: 'https-config.py', dest: '/usr/local/bin/https-config' }
-        - { src: 'rathole-config.py', dest: '/usr/local/bin/rathole-config' }
         - { src: 'certbot-manager.py', dest: '/usr/local/bin/certbot-manager' }
         - { src: 'update-dhcp-hosts.py', dest: '/usr/local/lib/cluster/update-dhcp-hosts' }
 
