@@ -66,6 +66,7 @@
       changed_when: true
       notify: restart storage leader election
       tags:
+        - never
         - init_db
 
   handlers:
