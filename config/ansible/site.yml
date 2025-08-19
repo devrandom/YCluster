@@ -3,7 +3,7 @@
 - import_playbook: install-etcd.yml
 
 # Admin Services - Cluster management and coordination
-- import_playbook: setup-admin-services.yml
+- import_playbook: admin/setup-admin-services.yml
 
 # Network Services - Gateway, proxy and external connectivity
 - import_playbook: setup-gateway-vip.yml
@@ -14,17 +14,5 @@
 - import_playbook: install-tls-config.yml
 - import_playbook: install-rathole.yml
 
-# Storage Infrastructure - Ceph setup and configuration (order critical)
-#- import_playbook: add-ceph-nodes.yml
-- import_playbook: setup-ceph-disk.yml
-- import_playbook: create-ceph-pool.yml
-- import_playbook: storage-setup.yml
-
-# Database Services - RBD setup must precede service installation
-- import_playbook: setup-postgres-rbd.yml
-- import_playbook: setup-qdrant-rbd.yml
-- import_playbook: install-postgres.yml
-- import_playbook: install-qdrant.yml
-
-# Leader Election - Must come last to manage above database services
-- import_playbook: install-storage-leader-election.yml
+# Storage Infrastructure - Complete storage and database deployment
+- import_playbook: storage/setup-storage-infrastructure.yml

@@ -1,0 +1,18 @@
+---
+# Storage Infrastructure Setup - Complete storage and database deployment
+# This playbook orchestrates the entire storage infrastructure setup
+
+# Storage Infrastructure - Ceph setup and configuration (order critical)
+#- import_playbook: add-ceph-nodes.yml
+- import_playbook: setup-ceph-disk.yml
+- import_playbook: create-ceph-pool.yml
+- import_playbook: storage-setup.yml
+
+# Database Services - RBD setup must precede service installation
+- import_playbook: setup-postgres-rbd.yml
+- import_playbook: setup-qdrant-rbd.yml
+- import_playbook: install-postgres.yml
+- import_playbook: install-qdrant.yml
+
+# Leader Election - Must come last to manage above database services
+- import_playbook: install-storage-leader-election.yml
