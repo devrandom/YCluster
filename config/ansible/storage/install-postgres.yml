@@ -167,17 +167,44 @@
         line: "data_directory = '/rbd/pg/data'"
         backup: yes
 
-    - name: Disable PostgreSQL service (managed by leader election)
+    - name: Check if this node is the current storage leader
+      uri:
+        url: "http://{{ ansible_host }}:5000/api/health"
+        method: GET
+        timeout: 5
+      register: health_check
+      failed_when: false
+      changed_when: false
+
+    - name: Parse storage leader status
+      set_fact:
+        is_storage_leader: "{{ (health_check.json.storage_leader | default(false)) if health_check.status == 200 else false }}"
+
+    - name: Disable PostgreSQL service (managed by leader election) - non-leaders only
       systemd:
         name: postgresql
         enabled: no
         state: stopped
+      when: not is_storage_leader
 
-    - name: Disable PostgreSQL@16-main service (managed by leader election)
+    - name: Disable PostgreSQL@16-main service (managed by leader election) - non-leaders only
       systemd:
         name: postgresql@16-main
         enabled: no
         state: stopped
+      when: not is_storage_leader
+
+    - name: Disable PostgreSQL service for leader (but keep it running)
+      systemd:
+        name: postgresql
+        enabled: no
+      when: is_storage_leader
+
+    - name: Disable PostgreSQL@16-main service for leader (but keep it running)
+      systemd:
+        name: postgresql@16-main
+        enabled: no
+      when: is_storage_leader
 
     - name: Reload systemd daemon
       systemd:
