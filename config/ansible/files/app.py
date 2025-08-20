@@ -536,22 +536,22 @@ def check_clock_skew():
     except ImportError:
         return {
             'status': 'error',
-            'details': 'ntplib not installed'
+            'details': {'message': 'ntplib not installed'}
         }
     except ntplib.NTPException as e:
         return {
             'status': 'error',
-            'details': f'NTP request failed: {str(e)}'
+            'details': {'message': f'NTP request failed: {str(e)}'}
         }
     except socket.gaierror:
         return {
             'status': 'error',
-            'details': f'Could not resolve NTP server {ntp_server}'
+            'details': {'message': f'Could not resolve NTP server {ntp_server}'}
         }
     except Exception as e:
         return {
             'status': 'error',
-            'details': f'Clock skew check failed: {str(e)}'
+            'details': {'message': f'Clock skew check failed: {str(e)}'}
         }
 
 def is_storage_leader():

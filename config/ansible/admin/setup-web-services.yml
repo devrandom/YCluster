@@ -11,7 +11,6 @@
         src: /opt/infrastructure/config/ansible/files/app.py
         dest: "{{ admin_services_dir }}/app.py"
         mode: '0644'
-        remote_src: yes
       notify: restart admin-api
 
     - name: Create Flask templates directory
@@ -25,7 +24,6 @@
         src: /opt/infrastructure/config/ansible/files/templates/status.html
         dest: "{{ admin_services_dir }}/templates/status.html"
         mode: '0644'
-        remote_src: yes
       notify: restart admin-api
 
     - name: Create systemd service for admin API
@@ -123,35 +121,30 @@
         src: /opt/infrastructure/data/autoinstall/user-data
         dest: /var/www/html/autoinstall/user-data
         mode: '0644'
-        remote_src: yes
 
     - name: Copy autoinstall meta-data
       copy:
         src: /opt/infrastructure/data/autoinstall/meta-data
         dest: /var/www/html/autoinstall/meta-data
         mode: '0644'
-        remote_src: yes
 
     - name: Copy all assets to web directory
       copy:
         src: /opt/infrastructure/config/ansible/files/assets/
         dest: /var/www/html/assets/
         mode: preserve
-        remote_src: yes
 
     - name: Copy index.html for web interface
       copy:
         src: /opt/infrastructure/config/ansible/files/index.html
         dest: /var/www/html/index.html
         mode: '0644'
-        remote_src: yes
 
     - name: Copy ansible SSH public key
       copy:
         src: /opt/bootstrap-files/ansible_ssh_key.pub
         dest: /var/www/html/ansible_ssh_key.pub
         mode: '0644'
-        remote_src: yes
 
     - name: Create systemd timer for certificate refresh
       copy:
