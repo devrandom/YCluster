@@ -929,9 +929,23 @@ def get_cluster_vip_status(host_health):
         }
     }
     
+    # Get all hosts to ensure we include every node
+    all_hosts = get_all_hosts()
+    
     # Extract VIP status from existing health data
-    for hostname, health_data in host_health.items():
+    for host in all_hosts:
+        hostname = host['hostname']
+        host_ip = host['ip']
+        health_data = host_health.get(hostname, {})
+        
         if 'error' in health_data or 'services' not in health_data:
+            # Add node with error status
+            vip_info['gateway_vip']['keepalived_nodes'].append({
+                'hostname': hostname,
+                'ip': host_ip,
+                'keepalived_active': False,
+                'status': 'unreachable'
+            })
             continue
             
         vip_service = health_data.get('services', {}).get('vip', {})
@@ -941,22 +955,25 @@ def get_cluster_vip_status(host_health):
             # Check if this host has the VIP active
             gateway_vip = vip_details.get('gateway_vip', {})
             if gateway_vip.get('active', False):
-                # Find the host IP for this hostname
-                hosts = get_all_hosts()
-                host_ip = next((h['ip'] for h in hosts if h['hostname'] == hostname), None)
-                
                 vip_info['gateway_vip']['active_on'] = host_ip
                 vip_info['gateway_vip']['master_hostname'] = hostname
                 vip_info['gateway_vip']['interface'] = gateway_vip.get('interface')
             
             # Track keepalived service status on each node
             keepalived = vip_details.get('keepalived_service', {})
-            host_ip = next((h['ip'] for h in get_all_hosts() if h['hostname'] == hostname), None)
             vip_info['gateway_vip']['keepalived_nodes'].append({
                 'hostname': hostname,
                 'ip': host_ip,
                 'keepalived_active': keepalived.get('active', False),
                 'status': keepalived.get('status', 'unknown')
+            })
+        else:
+            # VIP details not available, add with no data status
+            vip_info['gateway_vip']['keepalived_nodes'].append({
+                'hostname': hostname,
+                'ip': host_ip,
+                'keepalived_active': False,
+                'status': 'no_vip_data'
             })
     
     return vip_info
