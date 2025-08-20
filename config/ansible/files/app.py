@@ -798,6 +798,13 @@ def health():
     elif clock_skew['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
+    # Check VIP status
+    vip_health = check_vip_status()
+    health_status['services']['vip'] = {
+        'status': 'healthy' if vip_health['gateway_vip']['active'] else 'not_active',
+        'details': vip_health
+    }
+    
     # Add leadership status for this node
     health_status['storage_leader'] = is_storage_leader()
     health_status['dhcp_leader'] = is_dhcp_leader()
@@ -910,6 +917,51 @@ def check_vip_status():
     
     return vip_status
 
+def get_cluster_vip_status(host_health):
+    """Get VIP status across all cluster nodes from existing health data"""
+    vip_info = {
+        'gateway_vip': {
+            'ip': '10.0.0.254',
+            'active_on': None,
+            'master_hostname': None,
+            'interface': None,
+            'keepalived_nodes': []
+        }
+    }
+    
+    # Extract VIP status from existing health data
+    for hostname, health_data in host_health.items():
+        if 'error' in health_data or 'services' not in health_data:
+            continue
+            
+        vip_service = health_data.get('services', {}).get('vip', {})
+        vip_details = vip_service.get('details', {})
+        
+        if vip_details:
+            # Check if this host has the VIP active
+            gateway_vip = vip_details.get('gateway_vip', {})
+            if gateway_vip.get('active', False):
+                # Find the host IP for this hostname
+                hosts = get_all_hosts()
+                host_ip = next((h['ip'] for h in hosts if h['hostname'] == hostname), None)
+                
+                vip_info['gateway_vip']['active_on'] = host_ip
+                vip_info['gateway_vip']['master_hostname'] = hostname
+                vip_info['gateway_vip']['interface'] = gateway_vip.get('interface')
+            
+            # Track keepalived service status on each node
+            keepalived = vip_details.get('keepalived_service', {})
+            host_ip = next((h['ip'] for h in get_all_hosts() if h['hostname'] == hostname), None)
+            vip_info['gateway_vip']['keepalived_nodes'].append({
+                'hostname': hostname,
+                'ip': host_ip,
+                'keepalived_active': keepalived.get('active', False),
+                'status': keepalived.get('status', 'unknown')
+            })
+    
+    return vip_info
+
+
 def get_leadership_status():
     """Get current leadership status from etcd"""
     try:
@@ -938,13 +990,14 @@ def status_page():
     hosts = get_all_hosts()
     host_health = {}
     leadership = get_leadership_status()
-    vip_status = check_vip_status()
     certificate_status = check_certificate_expiry()
-    clock_skew_status = check_clock_skew()
-    
+
     # Get health status for each host
     for host in hosts:
         host_health[host['hostname']] = get_host_health(host['ip'])
+    
+    # Extract VIP status from existing health data
+    vip_status = get_cluster_vip_status(host_health)
     
     return render_template('status.html', 
                          hosts=hosts, 
