@@ -10,7 +10,7 @@ import etcd3
 import os
 import subprocess
 import tempfile
-import re
+from jinja2 import Template
 from pathlib import Path
 
 def get_etcd_client():
@@ -143,43 +143,38 @@ def update_nginx_config():
         print(f"Nginx template file not found: {nginx_template_path}")
         return False
     
-    try:
-        # Read template config
-        template_content = nginx_template_path.read_text()
-        
-        # Replace server_name placeholder with actual domain
-        # This assumes the template has a placeholder like {{ domain }} or similar
-        updated_content = template_content.replace('{{ domain }}', primary_domain)
-        
-        # Check if config already exists and is the same
-        if nginx_config_path.exists():
-            existing_content = nginx_config_path.read_text()
-            if existing_content == updated_content:
-                print("Nginx configuration is already up to date")
-                return True
-        
-        # Write updated config
-        nginx_config_path.write_text(updated_content)
-        print(f"Nginx configuration updated with server_name: {primary_domain}")
-        
-        # Test nginx config
-        result = subprocess.run(['nginx', '-t'], capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"Nginx config test failed: {result.stderr}")
-            return False
-        
-        # Reload nginx
-        result = subprocess.run(['systemctl', 'reload', 'nginx'], capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"Failed to reload nginx: {result.stderr}")
-            return False
-        
-        print("Nginx configuration updated and reloaded successfully")
-        return True
-        
-    except Exception as e:
-        print(f"Error updating nginx config: {e}")
+    # Read template config
+    template_content = nginx_template_path.read_text()
+
+    # Render template with domain variable
+    template = Template(template_content)
+    updated_content = template.render(domain=primary_domain)
+
+    # Check if config already exists and is the same
+    if nginx_config_path.exists():
+        existing_content = nginx_config_path.read_text()
+        if existing_content == updated_content:
+            print("Nginx configuration is already up to date")
+            return True
+
+    # Write updated config
+    nginx_config_path.write_text(updated_content)
+    print(f"Nginx configuration updated with server_name: {primary_domain}")
+
+    # Test nginx config
+    result = subprocess.run(['nginx', '-t'], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Nginx config test failed: {result.stderr}")
         return False
+
+    # Reload nginx
+    result = subprocess.run(['systemctl', 'reload', 'nginx'], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Failed to reload nginx: {result.stderr}")
+        return False
+
+    print("Nginx configuration updated and reloaded successfully")
+    return True
 
 def ensure_nginx_cert_from_etcd():
     """Ensure nginx has a certificate from etcd (fallback for when no Let's Encrypt cert exists)"""

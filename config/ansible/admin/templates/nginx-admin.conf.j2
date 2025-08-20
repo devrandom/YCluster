@@ -3,25 +3,30 @@ server {
     listen 80;
     server_name _;
     
-    # Allow health checks on HTTP
-    location /api/health {
-        proxy_pass http://127.0.0.1:12723;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-    
-    # Redirect everything else to HTTPS
-    location / {
+    # Named location for HTTPS redirect
+    location @redirect_https {
         return 301 https://$http_host$request_uri;
     }
+    
+    # Allow full access from cluster subnet
+    location / {
+        # Restrict to cluster subnet
+        allow 10.0.0.0/24;
+        allow 127.0.0.0/8;
+        deny all;
+        
+        # Include shared location blocks
+        include /etc/nginx/nginx-admin-locations.conf;
+    }
+    
+    # Fallback: redirect external requests to HTTPS
+    error_page 403 = @redirect_https;
 }
 
 # HTTPS
 server {
     listen 443 ssl http2;
-    server_name _;
+    server_name {{ domain | default('_') }};
     
     # SSL configuration
     ssl_certificate /etc/nginx/ssl/cert.pem;
@@ -40,40 +45,6 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
     
-    location /api/ {
-        proxy_pass http://127.0.0.1:12723;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-    
-    location /status {
-        proxy_pass http://127.0.0.1:12723;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-    
-    location /ubuntu/ {
-        alias /var/lib/tftpboot/ubuntu/;
-        autoindex on;
-    }
-    
-    location /autoinstall/ {
-        alias /var/www/html/autoinstall/;
-        autoindex on;
-    }
-    
-    location /assets/ {
-        alias /var/www/html/assets/;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-    
-    location / {
-        root /var/www/html;
-        index index.html;
-    }
+    # Include shared location blocks
+    include /etc/nginx/nginx-admin-locations.conf;
 }
