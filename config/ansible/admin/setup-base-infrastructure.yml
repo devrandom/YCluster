@@ -57,11 +57,10 @@
 
     - name: Clone infrastructure repository
       git:
-        repo: /opt/infrastructure
+        repo: https://gitlab.com/devrandom01/xcluster.git
         dest: /opt/infrastructure
         version: HEAD
         force: yes
-      when: ansible_hostname != 's1'
 
     - name: Install cluster utility scripts
       copy:
