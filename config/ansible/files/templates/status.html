@@ -50,6 +50,7 @@
             <thead>
                 <tr>
                     <th>VIP</th>
+                    <th>Type</th>
                     <th>Status</th>
                     <th>Active On</th>
                     <th>Interface</th>
@@ -59,6 +60,7 @@
             <tbody>
                 <tr>
                     <td><strong>{{ vip_status.gateway_vip.ip }}</strong></td>
+                    <td>Gateway</td>
                     <td>
                         {% if vip_status.gateway_vip.active_on %}
                         <span class="status-healthy">Active</span>
@@ -91,6 +93,49 @@
                         {% endif %}
                         <div class="error-details">
                             {% for node in vip_status.gateway_vip.keepalived_nodes %}
+                            {{ node.hostname }}: {{ node.status }}{% if not loop.last %}, {% endif %}
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <span class="status-error">No keepalived data</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <td><strong>{{ vip_status.storage_vip.ip }}</strong></td>
+                    <td>Storage</td>
+                    <td>
+                        {% if vip_status.storage_vip.active_on %}
+                        <span class="status-healthy">Active</span>
+                        {% else %}
+                        <span class="status-unhealthy">Inactive</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if vip_status.storage_vip.master_hostname %}
+                        {{ vip_status.storage_vip.master_hostname }} ({{ vip_status.storage_vip.active_on }})
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if vip_status.storage_vip.interface %}
+                        {{ vip_status.storage_vip.interface }}
+                        {% else %}
+                        <span style="color: #666;">-</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if vip_status.storage_vip.keepalived_nodes %}
+                        {% set active_count = vip_status.storage_vip.keepalived_nodes | selectattr('keepalived_active') | list | length %}
+                        {% set total_count = vip_status.storage_vip.keepalived_nodes | length %}
+                        {% if active_count > 0 %}
+                        <span class="status-healthy">{{ active_count }}/{{ total_count }} Running</span>
+                        {% else %}
+                        <span class="status-unhealthy">{{ active_count }}/{{ total_count }} Running</span>
+                        {% endif %}
+                        <div class="error-details">
+                            {% for node in vip_status.storage_vip.keepalived_nodes %}
                             {{ node.hostname }}: {{ node.status }}{% if not loop.last %}, {% endif %}
                             {% endfor %}
                         </div>

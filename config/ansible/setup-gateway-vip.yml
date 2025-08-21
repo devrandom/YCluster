@@ -105,12 +105,20 @@
     - name: Apply sysctl changes
       command: sysctl -p
 
-    - name: Create keepalived configuration
+    - name: Ensure keepalived conf.d directory exists
+      file:
+        path: /etc/keepalived/conf.d
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create gateway VIP keepalived configuration
       copy:
-        dest: /etc/keepalived/keepalived.conf
+        dest: /etc/keepalived/conf.d/gateway-vip.conf
         content: |
           global_defs {
-              router_id {{ inventory_hostname }}
+              router_id {{ inventory_hostname }}_gateway
               script_user root
               enable_script_security
           }
@@ -143,6 +151,13 @@
               notify_backup "/usr/local/lib/cluster/cleanup-gateway-nat"
               notify_fault "/usr/local/lib/cluster/cleanup-gateway-nat"
           }
+      notify: restart keepalived
+
+    - name: Create main keepalived configuration
+      copy:
+        dest: /etc/keepalived/keepalived.conf
+        content: |
+          include /etc/keepalived/conf.d/*.conf
       notify: restart keepalived
 
     - name: Add backup gateway route to all nodes
