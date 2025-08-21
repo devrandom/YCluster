@@ -842,7 +842,7 @@ def health():
     # Check VIP status
     vip_health = check_vip_status()
     health_status['services']['vip'] = {
-        'status': 'healthy' if vip_health['gateway_vip']['active'] else 'not_active',
+        'status': 'healthy' if vip_health['gateway_vip']['active'] else 'not_required',
         'details': vip_health
     }
     
@@ -1063,6 +1063,7 @@ def status_page():
                          leadership=leadership,
                          vip_status=vip_status,
                          certificate_status=certificate_status,
+                         responding_hostname=platform.node(),
                          timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 if __name__ == '__main__':
