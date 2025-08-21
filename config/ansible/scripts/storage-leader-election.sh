@@ -84,7 +84,11 @@ start_all_services() {
     systemctl start qdrant-rbd &
     QDRANT_START_PID=$!
     
-    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID)"
+    # Start rathole client in background
+    systemctl start rathole &
+    RATHOLE_START_PID=$!
+    
+    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Rathole PID: $RATHOLE_START_PID)"
 }
 
 # Function to stop all services
@@ -95,10 +99,11 @@ stop_all_services() {
     echo "Attempting graceful service shutdown (5 second timeout)"
     timeout 5s systemctl stop postgres-rbd &
     timeout 5s systemctl stop qdrant-rbd &
+    timeout 5s systemctl stop rathole &
     wait
     
     # Check if services are still running and force cleanup if needed
-    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null; then
+    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null || pgrep -f rathole >/dev/null; then
         echo "Graceful shutdown failed or timed out - forcing aggressive cleanup"
         
         # Force kill processes immediately
@@ -107,6 +112,9 @@ stop_all_services() {
         
         echo "Force killing Qdrant processes"
         pkill -9 qdrant || true
+        
+        echo "Force killing rathole processes"
+        pkill -9 rathole || true
         
         # Force XFS shutdown to abandon all I/O immediately (only if mounted)
         echo "Force shutting down XFS filesystems"
