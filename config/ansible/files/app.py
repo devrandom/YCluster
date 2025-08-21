@@ -854,6 +854,15 @@ def health():
         'details': vip_health['storage_vip']
     }
     
+    # Check keepalived service (shared by both VIPs)
+    keepalived_running = check_service_status('keepalived')
+    health_status['services']['keepalived'] = {
+        'status': 'healthy' if keepalived_running else 'unhealthy',
+        'details': {'service_active': keepalived_running}
+    }
+    if not keepalived_running:
+        health_status['overall'] = 'unhealthy'
+    
     # Add leadership status for this node
     health_status['storage_leader'] = is_storage_leader()
     health_status['dhcp_leader'] = is_dhcp_leader()
@@ -999,16 +1008,15 @@ def get_cluster_vip_status(host_health):
             'ip': '10.0.0.254',
             'active_on': None,
             'master_hostname': None,
-            'interface': None,
-            'keepalived_nodes': []
+            'interface': None
         },
         'storage_vip': {
             'ip': '10.0.0.100',
             'active_on': None,
             'master_hostname': None,
-            'interface': None,
-            'keepalived_nodes': []
-        }
+            'interface': None
+        },
+        'keepalived_nodes': []  # Single list for keepalived status across all nodes
     }
     
     # Get all hosts to ensure we include every node
@@ -1022,7 +1030,7 @@ def get_cluster_vip_status(host_health):
         
         if 'error' in health_data or 'services' not in health_data:
             # Add node with error status
-            vip_info['gateway_vip']['keepalived_nodes'].append({
+            vip_info['keepalived_nodes'].append({
                 'hostname': hostname,
                 'ip': host_ip,
                 'keepalived_active': False,
@@ -1035,51 +1043,33 @@ def get_cluster_vip_status(host_health):
         
         # Process gateway VIP
         gateway_vip_details = gateway_vip_service.get('details', {})
-        if gateway_vip_details:
-            if gateway_vip_details.get('active', False):
-                vip_info['gateway_vip']['active_on'] = host_ip
-                vip_info['gateway_vip']['master_hostname'] = hostname
-                vip_info['gateway_vip']['interface'] = gateway_vip_details.get('interface')
+        if gateway_vip_details and gateway_vip_details.get('active', False):
+            vip_info['gateway_vip']['active_on'] = host_ip
+            vip_info['gateway_vip']['master_hostname'] = hostname
+            vip_info['gateway_vip']['interface'] = gateway_vip_details.get('interface')
         
         # Process storage VIP
         storage_vip_details = storage_vip_service.get('details', {})
-        if storage_vip_details:
-            if storage_vip_details.get('active', False):
-                vip_info['storage_vip']['active_on'] = host_ip
-                vip_info['storage_vip']['master_hostname'] = hostname
-                vip_info['storage_vip']['interface'] = storage_vip_details.get('interface')
+        if storage_vip_details and storage_vip_details.get('active', False):
+            vip_info['storage_vip']['active_on'] = host_ip
+            vip_info['storage_vip']['master_hostname'] = hostname
+            vip_info['storage_vip']['interface'] = storage_vip_details.get('interface')
         
-        # Track keepalived service status on each node (same for both VIPs)
-        if 'services' in health_data:
-            keepalived_active = False
-            keepalived_status = 'unknown'
-            
-            # Check if keepalived service info is available from VIP health check
-            vip_health = health_data.get('services', {}).get('vip', {})
-            if vip_health and 'details' in vip_health:
-                keepalived_info = vip_health['details'].get('keepalived_service', {})
-                keepalived_active = keepalived_info.get('active', False)
-                keepalived_status = keepalived_info.get('status', 'unknown')
-            
-            # Add to both VIP tracking
-            node_info = {
-                'hostname': hostname,
-                'ip': host_ip,
-                'keepalived_active': keepalived_active,
-                'status': keepalived_status
-            }
-            vip_info['gateway_vip']['keepalived_nodes'].append(node_info.copy())
-            vip_info['storage_vip']['keepalived_nodes'].append(node_info.copy())
+        # Track keepalived service status (one per node, not per VIP)
+        keepalived_service = health_data.get('services', {}).get('keepalived', {})
+        if keepalived_service:
+            keepalived_active = keepalived_service.get('details', {}).get('service_active', False)
+            keepalived_status = 'running' if keepalived_active else 'stopped'
         else:
-            # No service data available
-            node_info = {
-                'hostname': hostname,
-                'ip': host_ip,
-                'keepalived_active': False,
-                'status': 'no_service_data'
-            }
-            vip_info['gateway_vip']['keepalived_nodes'].append(node_info.copy())
-            vip_info['storage_vip']['keepalived_nodes'].append(node_info.copy())
+            keepalived_active = False
+            keepalived_status = 'no_data'
+        
+        vip_info['keepalived_nodes'].append({
+            'hostname': hostname,
+            'ip': host_ip,
+            'keepalived_active': keepalived_active,
+            'status': keepalived_status
+        })
     
     return vip_info
 
