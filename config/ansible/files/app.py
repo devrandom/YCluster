@@ -841,9 +841,17 @@ def health():
     
     # Check VIP status
     vip_health = check_vip_status()
-    health_status['services']['vip'] = {
-        'status': 'healthy' if vip_health['gateway_vip']['active'] else 'not_required',
-        'details': vip_health
+    gateway_vip_active = vip_health['gateway_vip']['active']
+    storage_vip_active = vip_health['storage_vip']['active']
+    
+    health_status['services']['gateway_vip'] = {
+        'status': 'healthy' if gateway_vip_active else 'not_required',
+        'details': vip_health['gateway_vip']
+    }
+    
+    health_status['services']['storage_vip'] = {
+        'status': 'healthy' if storage_vip_active else 'not_required',
+        'details': vip_health['storage_vip']
     }
     
     # Add leadership status for this node
@@ -910,19 +918,27 @@ def get_host_health(host_ip, timeout=5):
 
 def check_vip_status():
     """Check VIP status using keepalived and ip commands"""
-    vip_ip = '10.0.0.254'
+    gateway_vip_ip = '10.0.0.254'
+    storage_vip_ip = '10.0.0.100'
     vip_status = {
         'gateway_vip': {
-            'ip': vip_ip,
+            'ip': gateway_vip_ip,
+            'active': False,
+            'master': None,
+            'interface': None
+        },
+        'storage_vip': {
+            'ip': storage_vip_ip,
             'active': False,
             'master': None,
             'interface': None
         }
     }
     
+    # Check gateway VIP
     try:
         # Use 'ip -j addr show to <vip>' to get JSON output for reliable parsing
-        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', vip_ip], 
+        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', gateway_vip_ip], 
                               capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and result.stdout.strip():
             # Parse JSON output - if there's any output, VIP is active on this node
@@ -941,6 +957,24 @@ def check_vip_status():
         vip_status['gateway_vip']['error'] = f'JSON parse error: {str(e)}'
     except Exception as e:
         vip_status['gateway_vip']['error'] = str(e)
+    
+    # Check storage VIP
+    try:
+        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', storage_vip_ip], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            interfaces = json.loads(result.stdout)
+            if interfaces:
+                vip_status['storage_vip']['active'] = True
+                vip_status['storage_vip']['master'] = platform.node()
+                vip_status['storage_vip']['interface'] = interfaces[0].get('ifname')
+        else:
+            vip_status['storage_vip']['active'] = False
+            
+    except json.JSONDecodeError as e:
+        vip_status['storage_vip']['error'] = f'JSON parse error: {str(e)}'
+    except Exception as e:
+        vip_status['storage_vip']['error'] = str(e)
     
     # Check keepalived service status
     try:
@@ -967,6 +1001,13 @@ def get_cluster_vip_status(host_health):
             'master_hostname': None,
             'interface': None,
             'keepalived_nodes': []
+        },
+        'storage_vip': {
+            'ip': '10.0.0.100',
+            'active_on': None,
+            'master_hostname': None,
+            'interface': None,
+            'keepalived_nodes': []
         }
     }
     
@@ -989,33 +1030,56 @@ def get_cluster_vip_status(host_health):
             })
             continue
             
-        vip_service = health_data.get('services', {}).get('vip', {})
-        vip_details = vip_service.get('details', {})
+        gateway_vip_service = health_data.get('services', {}).get('gateway_vip', {})
+        storage_vip_service = health_data.get('services', {}).get('storage_vip', {})
         
-        if vip_details:
-            # Check if this host has the VIP active
-            gateway_vip = vip_details.get('gateway_vip', {})
-            if gateway_vip.get('active', False):
+        # Process gateway VIP
+        gateway_vip_details = gateway_vip_service.get('details', {})
+        if gateway_vip_details:
+            if gateway_vip_details.get('active', False):
                 vip_info['gateway_vip']['active_on'] = host_ip
                 vip_info['gateway_vip']['master_hostname'] = hostname
-                vip_info['gateway_vip']['interface'] = gateway_vip.get('interface')
+                vip_info['gateway_vip']['interface'] = gateway_vip_details.get('interface')
+        
+        # Process storage VIP
+        storage_vip_details = storage_vip_service.get('details', {})
+        if storage_vip_details:
+            if storage_vip_details.get('active', False):
+                vip_info['storage_vip']['active_on'] = host_ip
+                vip_info['storage_vip']['master_hostname'] = hostname
+                vip_info['storage_vip']['interface'] = storage_vip_details.get('interface')
+        
+        # Track keepalived service status on each node (same for both VIPs)
+        if 'services' in health_data:
+            keepalived_active = False
+            keepalived_status = 'unknown'
             
-            # Track keepalived service status on each node
-            keepalived = vip_details.get('keepalived_service', {})
-            vip_info['gateway_vip']['keepalived_nodes'].append({
+            # Check if keepalived service info is available from VIP health check
+            vip_health = health_data.get('services', {}).get('vip', {})
+            if vip_health and 'details' in vip_health:
+                keepalived_info = vip_health['details'].get('keepalived_service', {})
+                keepalived_active = keepalived_info.get('active', False)
+                keepalived_status = keepalived_info.get('status', 'unknown')
+            
+            # Add to both VIP tracking
+            node_info = {
                 'hostname': hostname,
                 'ip': host_ip,
-                'keepalived_active': keepalived.get('active', False),
-                'status': keepalived.get('status', 'unknown')
-            })
+                'keepalived_active': keepalived_active,
+                'status': keepalived_status
+            }
+            vip_info['gateway_vip']['keepalived_nodes'].append(node_info.copy())
+            vip_info['storage_vip']['keepalived_nodes'].append(node_info.copy())
         else:
-            # VIP details not available, add with no data status
-            vip_info['gateway_vip']['keepalived_nodes'].append({
+            # No service data available
+            node_info = {
                 'hostname': hostname,
                 'ip': host_ip,
                 'keepalived_active': False,
-                'status': 'no_vip_data'
-            })
+                'status': 'no_service_data'
+            }
+            vip_info['gateway_vip']['keepalived_nodes'].append(node_info.copy())
+            vip_info['storage_vip']['keepalived_nodes'].append(node_info.copy())
     
     return vip_info
 

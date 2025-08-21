@@ -1,0 +1,134 @@
+---
+- name: Setup Storage VIP with Keepalived
+  hosts: core
+  become: yes
+  vars:
+    storage_vip: "10.0.0.100"
+    gateway_interface: "enp87s0"  # Main cluster interface
+    
+  tasks:
+    - name: Install keepalived (if not already installed)
+      apt:
+        name: keepalived
+        state: present
+        update_cache: yes
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create storage VIP health check script
+      copy:
+        dest: /usr/local/lib/cluster/check-storage-vip-health
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          # Check if we are the current storage leader
+          CURRENT_LEADER=$(etcdctl --endpoints="http://localhost:2379" get /cluster/leader/app --print-value-only 2>/dev/null)
+          LOCAL_HOSTNAME=$(hostname)
+          
+          if [ "$CURRENT_LEADER" = "$LOCAL_HOSTNAME" ]; then
+              echo "Storage leader active"
+              exit 0
+          else
+              echo "Not storage leader (leader: $CURRENT_LEADER)"
+              exit 1
+          fi
+
+    - name: Create storage VIP master script
+      copy:
+        dest: /usr/local/lib/cluster/storage-vip-master
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          echo "Acquired storage VIP {{ storage_vip }}"
+          
+          # Future: Start storage services that should be accessible via VIP
+          # For now, just log the event
+          logger "Storage VIP master: {{ storage_vip }} active on $(hostname)"
+
+    - name: Create storage VIP backup script
+      copy:
+        dest: /usr/local/lib/cluster/storage-vip-backup
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          echo "Released storage VIP {{ storage_vip }}"
+          
+          # Future: Stop storage services that were accessible via VIP
+          # For now, just log the event
+          logger "Storage VIP backup: {{ storage_vip }} released from $(hostname)"
+
+    - name: Ensure keepalived conf.d directory exists
+      file:
+        path: /etc/keepalived/conf.d
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create storage VIP keepalived configuration
+      copy:
+        dest: /etc/keepalived/conf.d/storage-vip.conf
+        content: |
+          global_defs {
+              router_id {{ inventory_hostname }}_storage
+              script_user root
+              enable_script_security
+          }
+          
+          vrrp_script chk_storage_leader {
+              script "/usr/local/lib/cluster/check-storage-vip-health"
+              interval 5
+              weight -20
+              fall 2
+              rise 2
+          }
+          
+          vrrp_instance VI_STORAGE {
+              state BACKUP
+              interface {{ gateway_interface }}
+              virtual_router_id 100
+              priority {{ 90 + (inventory_hostname[-1] | int) }}
+              advert_int 1
+              authentication {
+                  auth_type PASS
+                  auth_pass {{ ansible_machine_id[:8] }}
+              }
+              virtual_ipaddress {
+                  {{ storage_vip }}/24
+              }
+              track_script {
+                  chk_storage_leader
+              }
+              notify_master "/usr/local/lib/cluster/storage-vip-master"
+              notify_backup "/usr/local/lib/cluster/storage-vip-backup"
+              notify_fault "/usr/local/lib/cluster/storage-vip-backup"
+          }
+      notify: restart keepalived
+
+    - name: Ensure main keepalived config includes conf.d
+      copy:
+        dest: /etc/keepalived/keepalived.conf
+        content: |
+          include /etc/keepalived/conf.d/*.conf
+        force: no
+
+    - name: Enable and start keepalived
+      systemd:
+        name: keepalived
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: restart keepalived
+      systemd:
+        name: keepalived
+        state: restarted
