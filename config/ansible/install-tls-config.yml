@@ -10,7 +10,6 @@
           - python3-cryptography
           - python3-etcd3
         state: present
-        update_cache: yes
 
     - name: Install TLS config management script
       copy:
