@@ -4,7 +4,7 @@
   become: yes
   vars:
     gateway_vip: "10.0.0.254"
-    gateway_interface: "enp87s0"  # Uplink interface - internet access
+    gateway_interface: "enp2s0f0np0"  # Main cluster interface
     vip_metric: 500  # Higher than DHCP default (100)
     
   tasks:
