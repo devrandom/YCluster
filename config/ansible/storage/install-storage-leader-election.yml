@@ -10,7 +10,6 @@
       apt:
         name: etcd-client
         state: present
-        update_cache: yes
 
     - name: Create cluster scripts directory
       file:

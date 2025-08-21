@@ -23,7 +23,6 @@
           - libssl-dev
           - pkg-config
         state: present
-        update_cache: yes
       when: not rathole_binary.stat.exists
 
     - name: Remove existing build directory
