@@ -28,11 +28,20 @@
         .type-compute { border-left: 4px solid #28a745; }
         .type-macos { border-left: 4px solid #ffc107; }
         .error-details { font-size: 0.8em; color: #666; }
+        .services-container { position: relative; }
+        .services-normal { display: none; }
+        .services-toggle { 
+            cursor: pointer; 
+            color: #007bff; 
+            text-decoration: underline; 
+            font-size: 0.8em; 
+            margin-left: 5px;
+        }
+        .services-toggle:hover { color: #0056b3; }
     </style>
 </head>
 <body>
     <h1>Cluster Status Dashboard</h1>
-    <div class="refresh-info">Auto-refreshes every 30 seconds | Last updated: {{ timestamp }}</div>
     
     <!-- VIP Status Section -->
     <div style="margin-bottom: 20px;">
@@ -134,11 +143,40 @@
                 </td>
                 <td class="service-cell">
                     {% set services = health.get('services', {}) %}
+                    {% set normal_services = [] %}
+                    {% set problem_services = [] %}
+                    
                     {% for service_name, service_info in services.items() %}
-                    <span class="service-item status-{{ service_info.get('status', 'unknown') }}">
-                        {{ service_name }}
-                    </span>
+                        {% set status = service_info.get('status', 'unknown') %}
+                        {% if status in ['healthy', 'not_required'] %}
+                            {% set _ = normal_services.append((service_name, service_info)) %}
+                        {% else %}
+                            {% set _ = problem_services.append((service_name, service_info)) %}
+                        {% endif %}
                     {% endfor %}
+                    
+                    <div class="services-container">
+                        <!-- Show problem services first (always visible) -->
+                        {% for service_name, service_info in problem_services %}
+                        <span class="service-item status-{{ service_info.get('status', 'unknown') }}">
+                            {{ service_name }}
+                        </span>
+                        {% endfor %}
+                        
+                        <!-- Show normal services in collapsible section -->
+                        {% if normal_services %}
+                        <span class="services-toggle" onclick="toggleServices(this)">
+                            +{{ normal_services|length }} normal
+                        </span>
+                        <div class="services-normal">
+                            {% for service_name, service_info in normal_services %}
+                            <span class="service-item status-{{ service_info.get('status', 'unknown') }}">
+                                {{ service_name }}
+                            </span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
                 </td>
             </tr>
             {% endfor %}
@@ -244,5 +282,20 @@
             </tbody>
         </table>
     </div>
+    
+    <div class="refresh-info">Auto-refreshes every 30 seconds | Last updated: {{ timestamp }} | Served by: {{ responding_hostname }}</div>
+    
+    <script>
+        function toggleServices(element) {
+            const servicesDiv = element.nextElementSibling;
+            if (servicesDiv.style.display === 'none' || servicesDiv.style.display === '') {
+                servicesDiv.style.display = 'inline';
+                element.textContent = element.textContent.replace('+', '-');
+            } else {
+                servicesDiv.style.display = 'none';
+                element.textContent = element.textContent.replace('-', '+');
+            }
+        }
+    </script>
 </body>
 </html>
