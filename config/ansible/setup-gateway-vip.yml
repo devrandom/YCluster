@@ -1,10 +1,10 @@
 ---
 - name: Setup Gateway VIP with Keepalived
-  hosts: storage
+  hosts: core
   become: yes
   vars:
     gateway_vip: "10.0.0.254"
-    gateway_interface: "enp87s0"  # Main cluster interface
+    gateway_interface: "enp87s0"  # Uplink interface - internet access
     vip_metric: 500  # Higher than DHCP default (100)
     
   tasks:
@@ -136,10 +136,11 @@
               interface {{ gateway_interface }}
               virtual_router_id 254
               priority {{ 100 + (inventory_hostname[-1] | int) }}
+              preempt
               advert_int 1
               authentication {
                   auth_type PASS
-                  auth_pass {{ ansible_machine_id[:8] }}
+                  auth_pass xcluster
               }
               virtual_ipaddress {
                   {{ gateway_vip }}/24

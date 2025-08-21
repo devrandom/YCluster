@@ -4,7 +4,7 @@
   become: yes
   vars:
     storage_vip: "10.0.0.100"
-    gateway_interface: "enp87s0"  # Main cluster interface
+    gateway_interface: "enp2s0f0np0"  # Main cluster interface
     
   tasks:
     - name: Install keepalived (if not already installed)
@@ -97,10 +97,11 @@
               interface {{ gateway_interface }}
               virtual_router_id 100
               priority {{ 90 + (inventory_hostname[-1] | int) }}
+              preempt
               advert_int 1
               authentication {
                   auth_type PASS
-                  auth_pass {{ ansible_machine_id[:8] }}
+                  auth_pass xcluster
               }
               virtual_ipaddress {
                   {{ storage_vip }}/24
