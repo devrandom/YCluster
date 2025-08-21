@@ -12,6 +12,8 @@
         name: keepalived
         state: present
         update_cache: yes
+      tags:
+        - packages
 
     - name: Create cluster scripts directory
       file:
