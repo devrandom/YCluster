@@ -790,6 +790,47 @@ def health():
     elif cert_health['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
+    # Check rathole (only required if we are storage leader)
+    rathole_running = check_service_status('rathole')
+    rathole_port = check_port_open('localhost', 2333)  # Default rathole client port
+    
+    if is_storage_lead:
+        rathole_healthy = rathole_running
+        health_status['services']['rathole'] = {
+            'status': 'healthy' if rathole_healthy else 'unhealthy',
+            'details': {
+                'service_active': rathole_running,
+                'port_open': rathole_port,
+                'required': True,
+                'reason': 'storage leader'
+            }
+        }
+        if not rathole_healthy:
+            health_status['overall'] = 'unhealthy'
+    else:
+        # Not leader but check for split-brain
+        if rathole_running:
+            health_status['services']['rathole'] = {
+                'status': 'unhealthy',
+                'details': {
+                    'service_active': rathole_running,
+                    'port_open': rathole_port,
+                    'required': False,
+                    'reason': 'split-brain: running on non-leader'
+                }
+            }
+            health_status['overall'] = 'unhealthy'
+        else:
+            health_status['services']['rathole'] = {
+                'status': 'not_required',
+                'details': {
+                    'service_active': rathole_running,
+                    'port_open': rathole_port,
+                    'required': False,
+                    'reason': 'not storage leader'
+                }
+            }
+    
     # Check clock skew
     clock_skew = check_clock_skew()
     health_status['services']['clock_skew'] = clock_skew
