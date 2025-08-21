@@ -15,4 +15,3 @@
       apt:
         name: python3-etcd3
         state: present
-        update_cache: yes
