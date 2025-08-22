@@ -11,8 +11,10 @@
 # Database Services - RBD setup must precede service installation
 - import_playbook: setup-postgres-rbd.yml
 - import_playbook: setup-qdrant-rbd.yml
+- import_playbook: setup-misc-rbd.yml
 - import_playbook: install-postgres.yml
 - import_playbook: install-qdrant.yml
+- import_playbook: install-misc-storage.yml
 
 # Leader Election - Must come last to manage above database services
 - import_playbook: install-storage-leader-election.yml
