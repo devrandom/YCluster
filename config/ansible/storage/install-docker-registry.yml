@@ -1,0 +1,201 @@
+---
+- name: Install Docker Registry on core nodes
+  hosts: core
+  become: yes
+  tasks:
+    - name: Install Docker
+      apt:
+        name:
+          - docker.io
+          - docker-compose-v2
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create registry user
+      user:
+        name: registry
+        uid: 1002
+        system: yes
+        shell: /bin/false
+        home: /var/lib/registry
+        create_home: yes
+
+    - name: Create registry configuration directory
+      file:
+        path: /etc/docker-registry
+        state: directory
+        owner: registry
+        group: registry
+        mode: '0755'
+
+    - name: Create registry configuration file
+      copy:
+        dest: /etc/docker-registry/config.yml
+        owner: registry
+        group: registry
+        mode: '0644'
+        content: |
+          version: 0.1
+          log:
+            level: info
+            formatter: json
+            fields:
+              service: registry
+          storage:
+            filesystem:
+              rootdirectory: /rbd/misc/docker-registry/data
+            delete:
+              enabled: true
+          proxy:
+            remoteurl: https://registry-1.docker.io
+          http:
+            addr: 0.0.0.0:5000
+            headers:
+              X-Content-Type-Options: [nosniff]
+          health:
+            storagedriver:
+              enabled: true
+              interval: 10s
+              threshold: 3
+
+    - name: Create Docker Compose file for registry
+      copy:
+        dest: /etc/docker-registry/docker-compose.yml
+        owner: registry
+        group: registry
+        mode: '0644'
+        content: |
+          services:
+            registry:
+              image: registry:2
+              container_name: docker-registry
+              restart: unless-stopped
+              ports:
+                - "10.0.0.100:5000:5000"
+              volumes:
+                - /etc/docker-registry/config.yml:/etc/docker/registry/config.yml:ro
+                - /rbd/misc/docker-registry/data:/var/lib/registry
+                - /rbd/misc/docker-registry/logs:/var/log
+              user: "1002:1002"  # registry user UID:GID
+              environment:
+                - REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY=/var/lib/registry
+
+    - name: Create Docker registry RBD manager script
+      copy:
+        dest: /usr/local/bin/docker-registry-manager.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+
+          REGISTRY_DATA_DIR="/rbd/misc/docker-registry"
+          COMPOSE_FILE="/etc/docker-registry/docker-compose.yml"
+          COMPOSE_PROJECT="docker-registry"
+
+          # Function to start registry
+          start_registry() {
+              # Ensure misc RBD is mounted
+              if ! mountpoint -q /rbd/misc; then
+                  echo "Misc RBD not mounted, cannot start registry"
+                  return 1
+              fi
+
+              # Create registry data directories with proper ownership
+              mkdir -p "$REGISTRY_DATA_DIR/data"
+              mkdir -p "$REGISTRY_DATA_DIR/logs"
+              chown -R registry:registry "$REGISTRY_DATA_DIR"
+
+              # Start registry using Docker Compose v2
+              cd /etc/docker-registry
+              docker compose -p "$COMPOSE_PROJECT" up
+
+              echo "Docker registry started successfully"
+              return 0
+          }
+
+          # Function to stop registry
+          stop_registry() {
+              echo "Stopping Docker registry"
+              
+              # Stop registry using Docker Compose v2
+              cd /etc/docker-registry
+              docker compose -p "$COMPOSE_PROJECT" down
+              
+              echo "Docker registry stopped"
+          }
+
+          case "$1" in
+              start)
+                  if start_registry; then
+                      echo "Docker registry successfully started"
+                      exit 0
+                  else
+                      echo "Failed to start Docker registry"
+                      exit 1
+                  fi
+                  ;;
+              stop)
+                  stop_registry
+                  ;;
+              *)
+                  echo "Usage: $0 {start|stop}"
+                  exit 1
+                  ;;
+          esac
+
+    - name: Create docker-registry systemd service
+      copy:
+        dest: /etc/systemd/system/docker-registry.service
+        content: |
+          [Unit]
+          Description=Docker Registry
+          After=network.target docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/bin/docker-registry-manager.sh start
+          ExecStop=/usr/local/bin/docker-registry-manager.sh stop
+          TimeoutStartSec=300
+          TimeoutStopSec=60
+          User=root
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Disable docker-registry service (managed by leader election)
+      systemd:
+        name: docker-registry.service
+        enabled: no
+
+    - name: Configure Docker daemon to use local registry
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "insecure-registries": ["registry.xc:5000"]
+          }
+        backup: yes
+      notify: restart docker
+
+    - name: Pull registry image on all nodes
+      docker_image:
+        name: registry:2
+        source: pull
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
