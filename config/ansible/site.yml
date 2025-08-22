@@ -18,5 +18,8 @@
 - import_playbook: install-tls-config.yml
 - import_playbook: install-rathole.yml
 
+# Docker Installation - Install official Docker with buildx support
+- import_playbook: app/install-docker-official.yml
+
 # Storage Infrastructure - Complete storage and database deployment
 - import_playbook: storage/setup-storage-infrastructure.yml
