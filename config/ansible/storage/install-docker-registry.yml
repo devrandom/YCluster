@@ -185,7 +185,7 @@
         content: |
           {
             "insecure-registries": ["registry.xc:5000", "10.0.0.100:5000"],
-            "registry-mirrors": ["http://registry.xc:5000"]
+            "registry-mirrors": ["http://10.0.0.100:5000"]
           }
         backup: yes
       notify: restart docker
