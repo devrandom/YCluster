@@ -3,12 +3,13 @@
   hosts: storage
   become: yes
   tasks:
-    - name: Add proxy hostname entries to /etc/hosts
+    - name: Add proxy and registry hostname entries to /etc/hosts
       blockinfile:
         path: /etc/hosts
         block: |
           10.0.0.1 proxy.xc
           10.0.0.254 proxy.xc
+          10.0.0.100 registry.xc
         marker: "# {mark} ANSIBLE MANAGED BLOCK - proxy.xc"
         backup: yes
 

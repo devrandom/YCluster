@@ -34,8 +34,14 @@
           LOCAL_HOSTNAME=$(hostname)
           
           if [ "$CURRENT_LEADER" = "$LOCAL_HOSTNAME" ]; then
-              echo "Storage leader active"
-              exit 0
+              # Additional check: verify registry is responding
+              if curl -f -s http://localhost:5000/v2/ >/dev/null 2>&1; then
+                  echo "Storage leader active with registry responding"
+                  exit 0
+              else
+                  echo "Storage leader active but registry not responding"
+                  exit 1
+              fi
           else
               echo "Not storage leader (leader: $CURRENT_LEADER)"
               exit 1
