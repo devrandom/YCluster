@@ -74,7 +74,7 @@
               container_name: docker-registry
               restart: unless-stopped
               ports:
-                - "10.0.0.100:5000:5000"
+                - "5000:5000"
               volumes:
                 - /etc/docker-registry/config.yml:/etc/docker/registry/config.yml:ro
                 - /rbd/misc/docker-registry/data:/var/lib/registry
