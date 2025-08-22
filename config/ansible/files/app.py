@@ -333,6 +333,9 @@ def get_hosts():
             except:
                 pass
     
+    # Add service aliases that point to storage VIP
+    hosts_entries.append("10.0.0.100 registry.xc")
+
     if hosts_entries:
         return '\n'.join(sorted(hosts_entries)) + '\n', 200, {'Content-Type': 'text/plain'}
     else:
