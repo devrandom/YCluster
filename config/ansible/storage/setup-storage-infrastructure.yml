@@ -15,6 +15,7 @@
 - import_playbook: install-postgres.yml
 - import_playbook: install-qdrant.yml
 - import_playbook: install-misc-storage.yml
+- import_playbook: install-docker-official.yml
 - import_playbook: install-docker-registry.yml
 
 # Leader Election - Must come last to manage above database services
