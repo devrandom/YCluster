@@ -26,6 +26,10 @@
         repo: "{{ webui_repo }}"
         dest: "{{ build_dir }}/open-webui"
 
+    - name: Create buildx builder if not exists
+      shell: docker buildx create --name mybuilder --use || docker buildx use mybuilder
+      ignore_errors: yes
+
     - name: Build and push with buildx using registry cache
       shell: |
         docker buildx build \

@@ -3,11 +3,13 @@
   hosts: core
   become: yes
   tasks:
-    - name: Install Docker
+    - name: Ensure Docker is installed (should be done by install-docker-official.yml)
       apt:
         name:
-          - docker.io
-          - docker-compose-v2
+          - docker-ce
+          - docker-ce-cli
+          - docker-buildx-plugin
+          - docker-compose-plugin
         state: present
 
     - name: Start and enable Docker service
