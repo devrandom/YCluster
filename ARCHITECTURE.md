@@ -14,57 +14,25 @@ XCluster is a self-bootstrapping infrastructure platform that creates highly ava
 
 This architecture enables resilient, self-managing infrastructure that scales from small deployments to larger clusters while maintaining operational simplicity.
 
-## Operational Features
+## Key Features
 
-**Self-Healing**
-- Automatic leader election on node failures
-- Ceph data rebalancing and recovery
-- Service auto-restart with systemd
-
-**Monitoring**
-- Comprehensive health APIs with service status
-- Web-based cluster status dashboard
-- Leadership tracking and split-brain detection
-
-**Security**
-- SSH key-based authentication
-- Isolated cluster network
-- Controlled external access via proxy
-
-**Maintenance**
-- Rolling updates through Ansible
-- Graceful service migration
-- Zero-downtime cluster expansion
-
-**Ceph Storage**
-- LVM-based disk management with MicroCeph
-- RBD images for PostgreSQL and Qdrant
-- Pool management and cluster maintenance
-
-**Network Services**
-- Scapy-based DHCP server with etcd integration
-- dnsmasq DNS/TFTP services
-- Squid proxy for package caching
-
-**Management Tools**
-- Cluster health checks and node management
-- Certificate and configuration management utilities
+- **Self-Healing**: Automatic leader election, Ceph rebalancing, service auto-restart
+- **Monitoring**: Health APIs, web dashboard, leadership tracking
+- **Security**: SSH keys, isolated network, controlled proxy access
+- **Zero-Downtime**: Rolling updates, graceful migration, cluster expansion
 
 ## System Architecture
 
 ### Node Types
 
 **Core Nodes (s1, s2, s3)**
-- Form the control plane with etcd cluster
-- Run admin services (node allocation, DHCP, cluster status APIs)
-- Provide network services (DNS, DHCP, PXE boot)
-- Host Keepalived VIP for high availability
-- Act as storage nodes
+- etcd cluster and admin services (DHCP, DNS, PXE boot, cluster APIs)
+- Keepalived VIP and MicroCeph storage
 
-**Storage Nodes (s4, ...)**
-- Run MicroCeph for distributed block storage
-- Host stateful services (PostgreSQL, Qdrant) with leader election
-- Provide RBD volumes with exclusive locking
+**Storage Nodes (s4+)**
+- MicroCeph with RBD volumes and exclusive locking
+- Stateful services (PostgreSQL, Qdrant, Docker registry) with leader election
+- Storage leader manages Rathole reverse proxy
 
 **Compute Nodes (c\*)**
 - Provide processing capacity for workloads
@@ -75,18 +43,12 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 
 ### Core Services
 
-**Bootstrap Services** (Docker Compose on admin laptop)
-- NTP Server for time synchronization
-- DNSMASQ for DHCP/DNS/PXE boot
-- HTTP Server for installation media and APIs
-- Squid Proxy for package caching
-- Ansible Container for automation
-
-**Cluster Services**
-- **etcd**: Distributed key-value store for cluster state
+**Core Services**
+- **etcd**: Cluster state and configuration
 - **MicroCeph**: Distributed block storage with RBD
-- **Leader Election**: Ensures single active instance for stateful services
-- **Keepalived**: Virtual IP failover for singleton services, such as DHCP and routing gateway
+- **Leader Election**: Single active instance for stateful services
+- **Keepalived**: VIP failover for admin and storage services
+- **Docker Registry**: Container images with RBD backend
 
 ### Certificate Management
 - TLS infrastructure with self-signed certificates and Let's Encrypt integration
@@ -95,20 +57,9 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 
 ### High Availability
 
-**Service Resilience**
-- etcd-based leader election for stateful services (PostgreSQL, Qdrant, DHCP)
-- Automatic leader migration on node failure
-- Multiple core nodes provide redundant admin services
-
-**Storage Resilience**
-- Ceph replication across storage nodes
-- RBD exclusive locking prevents split-brain
-- Automatic data rebalancing on node changes
-
-**Network Resilience**
-- Virtual IP failover for admin services
-- Multiple DNS/DHCP servers with leader election
-- Redundant proxy services on core nodes
+- **Leader Election**: etcd-based failover for PostgreSQL, Qdrant, DHCP
+- **Storage**: Ceph replication, RBD exclusive locking, automatic rebalancing
+- **Network**: VIP failover, redundant DNS/DHCP/proxy services
 
 ## Bootstrap Process
 
