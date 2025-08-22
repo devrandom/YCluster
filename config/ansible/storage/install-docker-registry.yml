@@ -48,11 +48,9 @@
               service: registry
           storage:
             filesystem:
-              rootdirectory: /rbd/misc/docker-registry/data
+              rootdirectory: /var/lib/registry
             delete:
               enabled: true
-          proxy:
-            remoteurl: https://registry-1.docker.io
           http:
             addr: 0.0.0.0:5000
             headers:
@@ -184,7 +182,8 @@
         dest: /etc/docker/daemon.json
         content: |
           {
-            "insecure-registries": ["registry.xc:5000"]
+            "insecure-registries": ["registry.xc:5000", "10.0.0.100:5000"],
+            "registry-mirrors": ["http://registry.xc:5000"]
           }
         backup: yes
       notify: restart docker
