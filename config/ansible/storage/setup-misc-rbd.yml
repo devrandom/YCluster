@@ -1,0 +1,56 @@
+- name: Setup Misc RBD image on core nodes
+  hosts: core
+  become: yes
+  vars:
+    pool_name: rbd
+    rbd_image_name: misc
+    rbd_image_size: 200G
+  tasks:
+    - name: Check if Misc RBD image exists
+      command: rbd info "{{ pool_name }}/{{ rbd_image_name }}"
+      register: misc_rbd_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create Misc RBD image
+      command: rbd create "{{ pool_name }}/{{ rbd_image_name }}" --size "{{ rbd_image_size }}" --image-feature exclusive-lock,object-map,fast-diff,deep-flatten
+      when: misc_rbd_check.rc != 0
+      run_once: true
+
+    - name: Wait for RBD image to be available
+      command: rbd info "{{ pool_name }}/{{ rbd_image_name }}"
+      register: rbd_info
+      until: rbd_info.rc == 0
+      retries: 10
+      delay: 5
+      when: misc_rbd_check.rc != 0
+
+    - name: Map RBD image temporarily for formatting
+      command: rbd map "{{ pool_name }}/{{ rbd_image_name }}" -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30
+      register: rbd_map_result
+      when: misc_rbd_check.rc != 0
+      run_once: true
+
+    - name: Format RBD image with XFS
+      command: mkfs.xfs -f -b size=4096 -d su=64k,sw=1,agcount=32 -l size=128m,lazy-count=1 -L "misc" "{{ rbd_map_result.stdout }}"
+      when:
+        - misc_rbd_check.rc != 0
+        - rbd_map_result is defined
+      run_once: true
+
+    - name: Unmap RBD image after formatting
+      command: rbd unmap "{{ rbd_map_result.stdout }}"
+      when:
+        - misc_rbd_check.rc != 0
+        - rbd_map_result is defined
+      run_once: true
+
+    - name: Display RBD image info
+      command: rbd info "{{ pool_name }}/{{ rbd_image_name }}"
+      register: final_rbd_info
+      run_once: true
+
+    - name: Show RBD image details
+      debug:
+        msg: "{{ final_rbd_info.stdout }}"
+      run_once: true

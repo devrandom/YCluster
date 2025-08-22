@@ -84,11 +84,15 @@ start_all_services() {
     systemctl start qdrant-rbd &
     QDRANT_START_PID=$!
     
+    # Start Misc storage in background
+    systemctl start misc-rbd &
+    MISC_START_PID=$!
+    
     # Start rathole client in background
     systemctl start rathole &
     RATHOLE_START_PID=$!
     
-    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Rathole PID: $RATHOLE_START_PID)"
+    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Misc PID: $MISC_START_PID, Rathole PID: $RATHOLE_START_PID)"
 }
 
 # Function to stop all services
@@ -99,6 +103,7 @@ stop_all_services() {
     echo "Attempting graceful service shutdown (5 second timeout)"
     timeout 5s systemctl stop postgres-rbd &
     timeout 5s systemctl stop qdrant-rbd &
+    timeout 5s systemctl stop misc-rbd &
     timeout 5s systemctl stop rathole &
     wait
     
@@ -124,17 +129,22 @@ stop_all_services() {
         if mountpoint -q /rbd/qdrant; then
             xfs_io -x -c "shutdown" /rbd/qdrant 2>/dev/null || true
         fi
+        if mountpoint -q /rbd/misc; then
+            xfs_io -x -c "shutdown" /rbd/misc 2>/dev/null || true
+        fi
         
         # Force unmount filesystems (in parallel)
         echo "Force unmounting RBD filesystems"
         umount -f -l /rbd/pg &
         umount -f -l /rbd/qdrant &
+        umount -f -l /rbd/misc &
         wait
         
         # Force unmap RBDs (in parallel with timeout)
         echo "Force unmapping RBD devices"
         timeout 10s rbd unmap -o force /dev/rbd/rbd/psql &
         timeout 10s rbd unmap -o force /dev/rbd/rbd/qdrant &
+        timeout 10s rbd unmap -o force /dev/rbd/rbd/misc &
         wait
         
         echo "Aggressive cleanup completed"
@@ -146,6 +156,7 @@ stop_all_services() {
     echo "Cleaning up lock files"
     rm -f /var/run/postgres-rbd.lock || true
     rm -f /var/run/qdrant-rbd.lock || true
+    rm -f /var/run/misc-rbd.lock || true
 }
 
 # Main loop

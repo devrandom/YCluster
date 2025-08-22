@@ -1,0 +1,162 @@
+---
+- name: Install Misc Storage on core nodes
+  hosts: core
+  become: yes
+  tasks:
+    - name: Create Misc RBD manager script
+      copy:
+        dest: /usr/local/bin/misc-rbd-manager.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+
+          POOL_NAME="rbd"
+          RBD_IMAGE="misc"
+          MOUNT_POINT="/rbd/misc"
+          LOCK_FILE="/var/run/misc-rbd.lock"
+          MAX_RETRIES=5
+          RETRY_DELAY=3
+
+          # Function to acquire RBD lock and mount
+          acquire_and_mount() {
+              local retries=0
+              
+              while [ $retries -lt $MAX_RETRIES ]; do
+                  # Try to map the RBD device with exclusive lock
+                  if RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30); then
+                      echo "Successfully locked RBD device: $RBD_DEVICE"
+                      
+                      # Create mount point if it doesn't exist
+                      mkdir -p "$MOUNT_POINT"
+                      
+                      # Mount the device with optimized XFS options for network storage
+                      if mount -t xfs -o noatime,nodiratime,inode64,allocsize=16M,logbufs=8,logbsize=256k,swalloc "$RBD_DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                          echo "Successfully mounted $RBD_DEVICE to $MOUNT_POINT"
+                          
+                          # Create subdirectories with proper ownership
+                          mkdir -p "$MOUNT_POINT/docker-registry"
+                          mkdir -p "$MOUNT_POINT/shared"
+                          mkdir -p "$MOUNT_POINT/backups"
+                          
+                          # Set appropriate permissions
+                          chmod 755 "$MOUNT_POINT/docker-registry"
+                          chmod 755 "$MOUNT_POINT/shared"
+                          chmod 700 "$MOUNT_POINT/backups"
+                          
+                          # Store device info for cleanup
+                          echo "$RBD_DEVICE" > "$LOCK_FILE"
+                          
+                          echo "Misc storage ready at $MOUNT_POINT"
+                          return 0
+                      else
+                          echo "Failed to mount $RBD_DEVICE to $MOUNT_POINT"
+                          rbd unmap "$RBD_DEVICE" 2>/dev/null || true
+                      fi
+                  else
+                      echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE} (attempt $((retries + 1))/$MAX_RETRIES)"
+                      
+                      # Check if current lock holder exists
+                      LOCK_INFO=$(rbd lock list "${POOL_NAME}/${RBD_IMAGE}" 2>/dev/null || true)
+                      if [ -n "$LOCK_INFO" ]; then
+                          echo "Current lock info: $LOCK_INFO"
+                          
+                          # Try to break stale locks if we're on retry 3 or higher
+                          if [ $retries -ge 2 ]; then
+                              echo "Attempting to break potentially stale locks..."
+                              # Get all lock info
+                              LOCK_LINES=$(rbd lock list "${POOL_NAME}/${RBD_IMAGE}" 2>/dev/null | grep -E "client\.[0-9]+" || true)
+                              if [ -n "$LOCK_LINES" ]; then
+                                  while IFS= read -r line; do
+                                      LOCK_ID=$(echo "$line" | awk '{print $1}')
+                                      LOCK_COOKIE=$(echo "$line" | awk '{print $2}')
+                                      if [ -n "$LOCK_ID" ] && [ -n "$LOCK_COOKIE" ]; then
+                                          echo "Attempting to remove lock: $LOCK_ID with cookie: $LOCK_COOKIE"
+                                          rbd lock remove "${POOL_NAME}/${RBD_IMAGE}" "$LOCK_ID" "$LOCK_COOKIE" 2>/dev/null || true
+                                      fi
+                                  done <<< "$LOCK_LINES"
+                              fi
+                          fi
+                      fi
+                  fi
+                  
+                  retries=$((retries + 1))
+                  if [ $retries -lt $MAX_RETRIES ]; then
+                      echo "Retrying in $RETRY_DELAY seconds..."
+                      sleep $RETRY_DELAY
+                  fi
+              done
+              
+              echo "Failed to acquire RBD lock after $MAX_RETRIES attempts"
+              return 1
+          }
+
+          # Function to unmount and release RBD
+          release_and_unmount() {
+              if [ -f "$LOCK_FILE" ]; then
+                  RBD_DEVICE=$(cat "$LOCK_FILE")
+                  
+                  echo "Unmounting and releasing RBD device: $RBD_DEVICE"
+                  
+                  # Unmount
+                  umount "$MOUNT_POINT" 2>/dev/null || true
+                  
+                  # Unmap RBD device
+                  rbd unmap "$RBD_DEVICE" 2>/dev/null || true
+                  
+                  # Remove lock file
+                  rm -f "$LOCK_FILE"
+                  
+                  echo "Released RBD device: $RBD_DEVICE"
+              else
+                  echo "No RBD lock file found"
+              fi
+          }
+
+          case "$1" in
+              start)
+                  if acquire_and_mount; then
+                      echo "Misc RBD successfully acquired and mounted"
+                      exit 0
+                  else
+                      echo "Failed to acquire Misc RBD lock"
+                      exit 1
+                  fi
+                  ;;
+              stop)
+                  release_and_unmount
+                  ;;
+              *)
+                  echo "Usage: $0 {start|stop}"
+                  exit 1
+                  ;;
+          esac
+
+    - name: Create misc-rbd systemd service
+      copy:
+        dest: /etc/systemd/system/misc-rbd.service
+        content: |
+          [Unit]
+          Description=Misc Storage with RBD
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/misc-rbd-manager.sh start
+          ExecStop=/usr/local/bin/misc-rbd-manager.sh stop
+          TimeoutStartSec=300
+          TimeoutStopSec=60
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Disable misc-rbd service (managed by leader election)
+      systemd:
+        name: misc-rbd.service
+        enabled: no
