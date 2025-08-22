@@ -1,0 +1,43 @@
+---
+- name: Build Open WebUI with plugins
+  hosts: localhost
+  gather_facts: false
+  vars:
+    build_dir: "/opt/src/open-webui-build"
+    plugins_repo: "https://github.com/devrandom/open-webui-plugins.git"
+    webui_repo: "https://github.com/devrandom/open-webui.git"
+    image_name: "registry.xc:5000/open-webui-with-plugins"
+    image_tag: "latest"
+
+  tasks:
+    - name: Create build directory
+      file:
+        path: "{{ build_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check out open-webui-plugins repository
+      git:
+        repo: "{{ plugins_repo }}"
+        dest: "{{ build_dir }}/open-webui-plugins"
+
+    - name: Check out open-webui repository
+      git:
+        repo: "{{ webui_repo }}"
+        dest: "{{ build_dir }}/open-webui"
+
+    - name: Build and push with buildx using registry cache
+      shell: |
+        docker buildx build \
+          --cache-from type=registry,ref={{ image_name }}:cache \
+          --cache-to type=registry,ref={{ image_name }}:cache,mode=max \
+          --build-context plugins=open-webui-plugins \
+          --tag {{ image_name }}:{{ image_tag }} \
+          --push \
+          ./open-webui
+      args:
+        chdir: "{{ build_dir }}"
+
+    - name: Display build completion message
+      debug:
+        msg: "Docker image {{ image_name }}:{{ image_tag }} built and pushed to registry successfully"
