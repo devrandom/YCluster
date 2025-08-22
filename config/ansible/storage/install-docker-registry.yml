@@ -185,10 +185,47 @@
         content: |
           {
             "insecure-registries": ["registry.xc:5000", "10.0.0.100:5000"],
-            "registry-mirrors": ["http://10.0.0.100:5000"]
+            "registry-mirrors": ["http://10.0.0.100:5000"],
+            "dns": ["10.0.0.254"]
           }
         backup: yes
       notify: restart docker
+
+    - name: Create buildkit configuration directory
+      file:
+        path: /etc/buildkit
+        state: directory
+        mode: '0755'
+
+    - name: Create buildkit configuration for insecure registries
+      copy:
+        dest: /etc/buildkit/buildkitd.toml
+        content: |
+          [registry."registry.xc:5000"]
+            http = true
+            insecure = true
+
+          [registry."10.0.0.100:5000"]
+            http = true
+            insecure = true
+        mode: '0644'
+
+    - name: Create insecure buildx builder
+      shell: |
+        # Remove existing builder if it exists
+        docker buildx rm insecure-builder 2>/dev/null || true
+        
+        # Create new insecure builder
+        docker buildx create --name insecure-builder \
+          --driver docker-container \
+          --driver-opt network=host \
+          --config /etc/buildkit/buildkitd.toml
+        
+        # Set as default builder
+        docker buildx use insecure-builder
+      register: buildx_result
+      changed_when: true
+      failed_when: buildx_result.rc != 0
 
     - name: Pull registry image on all nodes
       docker_image:

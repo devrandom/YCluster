@@ -26,13 +26,10 @@
         repo: "{{ webui_repo }}"
         dest: "{{ build_dir }}/open-webui"
 
-    - name: Create buildx builder if not exists
-      shell: docker buildx create --name mybuilder --use || docker buildx use mybuilder
-      ignore_errors: yes
-
     - name: Build and push with buildx using registry cache
       shell: |
         docker buildx build \
+          --build-arg http_proxy=http://10.0.0.254:3128 \
           --cache-from type=registry,ref={{ image_name }}:cache \
           --cache-to type=registry,ref={{ image_name }}:cache,mode=max \
           --build-context plugins=open-webui-plugins \
@@ -41,6 +38,7 @@
           ./open-webui
       args:
         chdir: "{{ build_dir }}"
+      no_log: false
 
     - name: Display build completion message
       debug:
