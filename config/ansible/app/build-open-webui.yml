@@ -10,6 +10,14 @@
     image_tag: "latest"
 
   tasks:
+    - name: Verify registry is ready for push operations
+      uri:
+        url: "http://10.0.0.100:5000/v2/_catalog"
+        method: GET
+        timeout: 10
+      register: registry_catalog
+      failed_when: registry_catalog.status != 200
+
     - name: Create build directory
       file:
         path: "{{ build_dir }}"
@@ -33,6 +41,7 @@
           --cache-from type=registry,ref={{ image_name }}:cache \
           --cache-to type=registry,ref={{ image_name }}:cache,mode=max \
           --build-context plugins=open-webui-plugins \
+          --progress plain \
           --tag {{ image_name }}:{{ image_tag }} \
           --push \
           ./open-webui
