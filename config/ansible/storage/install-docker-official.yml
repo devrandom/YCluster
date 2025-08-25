@@ -29,7 +29,7 @@
 
     - name: Add Docker GPG key (ASCII armored)
       copy:
-        src: files/docker.gpg
+        src: docker.gpg.asc
         dest: /tmp/docker.gpg.asc
         mode: '0644'
 

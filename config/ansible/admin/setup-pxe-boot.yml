@@ -1,6 +1,6 @@
 ---
 - name: Setup PXE boot infrastructure on storage nodes s1-s3
-  hosts: s1,s2,s3
+  hosts: core
   become: yes
     
   tasks:

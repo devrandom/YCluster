@@ -1,6 +1,6 @@
 ---
 - name: Setup base infrastructure on storage nodes s1-s3
-  hosts: s1,s2,s3
+  hosts: core
   become: yes
   vars:
     admin_services_dir: /opt/admin-services
