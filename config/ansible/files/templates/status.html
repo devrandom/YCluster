@@ -138,6 +138,7 @@
                 <th>Type</th>
                 <th>IP</th>
                 <th>Leadership</th>
+                <th>Drain</th>
                 <th>Overall</th>
                 <th>Services</th>
             </tr>
@@ -157,6 +158,21 @@
                     {% endif %}
                     {% if leadership.get('storage_leader') != host.hostname and leadership.get('dhcp_leader') != host.hostname %}
                     <span style="color: #666;">-</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% set health = host_health.get(host.hostname, {}) %}
+                    {% set is_drained = health.get('drained', false) %}
+                    {% if is_drained %}
+                    <span class="status-warning">Drained</span>
+                    <button onclick="toggleNodeDrain('{{ host.hostname }}', false)" style="background-color: #28a745; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 0.8em; margin-left: 5px;">
+                        Undrain
+                    </button>
+                    {% else %}
+                    <span class="status-healthy">Active</span>
+                    <button onclick="toggleNodeDrain('{{ host.hostname }}', true)" style="background-color: #ffc107; color: black; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 0.8em; margin-left: 5px;">
+                        Drain
+                    </button>
                     {% endif %}
                 </td>
                 <td>
@@ -209,7 +225,8 @@
             {% endfor %}
         </tbody>
     </table>
-    
+    <div id="drain-status" style="margin-bottom: 20px; font-size: 0.9em; color: #666;"></div>
+
     {% if not hosts %}
     <p style="text-align: center; color: #666; margin-top: 40px;">No hosts found in cluster inventory.</p>
     {% endif %}
@@ -322,6 +339,33 @@
                 servicesDiv.style.display = 'none';
                 element.textContent = element.textContent.replace('-', '+');
             }
+        }
+        
+        function toggleNodeDrain(hostname, shouldDrain) {
+            const statusDiv = document.getElementById('drain-status');
+            const action = shouldDrain ? 'Draining' : 'Undraining';
+            
+            statusDiv.innerHTML = `<span style="color: #007bff;">${action} ${hostname}...</span>`;
+            
+            // Use the current node's API with hostname parameter
+            const endpoint = shouldDrain ? `/api/drain/${hostname}` : `/api/undrain/${hostname}`;
+            
+            fetch(endpoint, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        statusDiv.innerHTML = `<span style="color: #dc3545;">Error: ${data.error}</span>`;
+                    } else {
+                        const status = data.status === 'drained' ? 'drained' : 'active';
+                        statusDiv.innerHTML = `<span style="color: #28a745;">${hostname} ${status} successfully. Page will refresh in 3 seconds...</span>`;
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 3000);
+                    }
+                })
+                .catch(error => {
+                    statusDiv.innerHTML = `<span style="color: #dc3545;">Network error: ${error.message}</span>`;
+                });
         }
     </script>
 </body>

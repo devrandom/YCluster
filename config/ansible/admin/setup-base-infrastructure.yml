@@ -58,8 +58,8 @@
       git:
         repo: https://gitlab.com/devrandom01/xcluster.git
         dest: /opt/infrastructure
-        version: HEAD
-        force: yes
+        force: no
+      ignore_errors: yes
 
     - name: Install cluster utility scripts
       copy:
