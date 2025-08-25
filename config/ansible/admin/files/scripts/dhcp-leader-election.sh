@@ -90,6 +90,13 @@ renew_lease() {
     return 1
 }
 
+# Function to check if node is drained
+is_node_drained() {
+    local hostname=$(hostname)
+    local drain_status=$(timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" get "/cluster/nodes/$hostname/drain" --print-value-only 2>/dev/null || echo "")
+    [ "$drain_status" = "true" ]
+}
+
 # Function to start DHCP service
 start_dhcp_service() {
     echo "Starting DHCP service as leader"
@@ -109,6 +116,22 @@ IS_LEADER=false
 SERVICE_RUNNING=false
 while true; do
     wait_for_etcd
+    
+    # Check if node is drained
+    if is_node_drained; then
+        if [ "$IS_LEADER" = "true" ]; then
+            echo "Node is drained - stepping down from DHCP leadership"
+            IS_LEADER=false
+            if [ "$SERVICE_RUNNING" = "true" ]; then
+                stop_dhcp_service
+                SERVICE_RUNNING=false
+            fi
+        fi
+        echo "Node is drained - skipping DHCP leadership attempt"
+        sleep $RENEW_INTERVAL
+        continue
+    fi
+    
     if [ "$IS_LEADER" = "false" ]; then
         # Try to become leader
         if attempt_leadership; then

@@ -721,6 +721,81 @@ def is_dhcp_leader():
     except:
         return False
 
+def is_node_drained():
+    """Check if this node is drained"""
+    try:
+        hostname = platform.node()
+        client = get_etcd_client()
+        result = client.get(f'/cluster/nodes/{hostname}/drain')
+        return result[0] is not None and result[0].decode() == 'true'
+    except:
+        return False
+
+@app.route('/api/drain', methods=['POST'])
+def drain_node():
+    """Drain this node - disable leader election"""
+    try:
+        hostname = platform.node()
+        client = get_etcd_client()
+        client.put(f'/cluster/nodes/{hostname}/drain', 'true')
+        return jsonify({'status': 'drained', 'hostname': hostname})
+    except Exception as e:
+        return jsonify({'error': f'Failed to drain node: {str(e)}'}), 500
+
+@app.route('/api/undrain', methods=['POST']) 
+def undrain_node():
+    """Undrain this node - re-enable leader election"""
+    try:
+        hostname = platform.node()
+        client = get_etcd_client()
+        client.delete(f'/cluster/nodes/{hostname}/drain')
+        return jsonify({'status': 'active', 'hostname': hostname})
+    except Exception as e:
+        return jsonify({'error': f'Failed to undrain node: {str(e)}'}), 500
+
+@app.route('/api/drain/<target_hostname>', methods=['POST'])
+def drain_target_node(target_hostname):
+    """Drain a specific node - disable leader election"""
+    try:
+        client = get_etcd_client()
+        client.put(f'/cluster/nodes/{target_hostname}/drain', 'true')
+        return jsonify({'status': 'drained', 'hostname': target_hostname})
+    except Exception as e:
+        return jsonify({'error': f'Failed to drain node {target_hostname}: {str(e)}'}), 500
+
+@app.route('/api/undrain/<target_hostname>', methods=['POST'])
+def undrain_target_node(target_hostname):
+    """Undrain a specific node - re-enable leader election"""
+    try:
+        client = get_etcd_client()
+        client.delete(f'/cluster/nodes/{target_hostname}/drain')
+        return jsonify({'status': 'active', 'hostname': target_hostname})
+    except Exception as e:
+        return jsonify({'error': f'Failed to undrain node {target_hostname}: {str(e)}'}), 500
+
+@app.route('/api/drain/status')
+def drain_status():
+    """Check drain status of this node"""
+    try:
+        hostname = platform.node()
+        client = get_etcd_client()
+        result = client.get(f'/cluster/nodes/{hostname}/drain')
+        is_drained = result[0] is not None and result[0].decode() == 'true'
+        return jsonify({'hostname': hostname, 'drained': is_drained})
+    except Exception as e:
+        return jsonify({'error': f'Failed to check drain status: {str(e)}'}), 500
+
+@app.route('/api/drain/status/<target_hostname>')
+def drain_status_target(target_hostname):
+    """Check drain status of a specific node"""
+    try:
+        client = get_etcd_client()
+        result = client.get(f'/cluster/nodes/{target_hostname}/drain')
+        is_drained = result[0] is not None and result[0].decode() == 'true'
+        return jsonify({'hostname': target_hostname, 'drained': is_drained})
+    except Exception as e:
+        return jsonify({'error': f'Failed to check drain status for {target_hostname}: {str(e)}'}), 500
+
 @app.route('/api/ping')
 def ping():
     """Simple ping endpoint for connectivity testing"""
@@ -1025,6 +1100,7 @@ def health():
     # Add leadership status for this node
     health_status['storage_leader'] = is_storage_leader()
     health_status['dhcp_leader'] = is_dhcp_leader()
+    health_status['drained'] = is_node_drained()
     
     # Return appropriate HTTP status code
     status_code = 200 if health_status['overall'] == 'healthy' else 503
@@ -1270,6 +1346,9 @@ def status_page():
     # Extract VIP status from existing health data
     vip_status = get_cluster_vip_status(host_health)
     
+    # Get drain status for this node
+    current_node_drained = is_node_drained()
+    
     return render_template('status.html', 
                          hosts=hosts, 
                          host_health=host_health,
@@ -1277,6 +1356,7 @@ def status_page():
                          vip_status=vip_status,
                          certificate_status=certificate_status,
                          responding_hostname=platform.node(),
+                         current_node_drained=current_node_drained,
                          timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 if __name__ == '__main__':

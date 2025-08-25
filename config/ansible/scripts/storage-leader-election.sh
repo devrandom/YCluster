@@ -72,6 +72,13 @@ renew_lease() {
     return 1
 }
 
+# Function to check if node is drained
+is_node_drained() {
+    local hostname=$(hostname)
+    local drain_status=$(timeout 5s etcdctl --endpoints="$ETCD_ENDPOINTS" get "/cluster/nodes/$hostname/drain" --print-value-only 2>/dev/null || echo "")
+    [ "$drain_status" = "true" ]
+}
+
 # Function to start all services
 start_all_services() {
     echo "Starting all services as storage leader"
@@ -168,6 +175,18 @@ stop_all_services() {
 # Main loop
 IS_LEADER=false
 while true; do
+    # Check if node is drained
+    if is_node_drained; then
+        if [ "$IS_LEADER" = "true" ]; then
+            echo "Node is drained - stepping down from storage leadership"
+            IS_LEADER=false
+            stop_all_services
+        fi
+        echo "Node is drained - skipping storage leadership attempt"
+        sleep $RENEW_INTERVAL
+        continue
+    fi
+    
     if [ "$IS_LEADER" = "false" ]; then
         # Try to become leader
         if attempt_leadership; then
