@@ -99,13 +99,8 @@
 
           # Function to start registry
           start_registry() {
-              # Ensure misc RBD is mounted
-              if ! mountpoint -q /rbd/misc; then
-                  echo "Misc RBD not mounted, cannot start registry"
-                  return 1
-              fi
-
               # Create registry data directories with proper ownership
+              # (misc-rbd.service dependency ensures /rbd/misc is mounted)
               mkdir -p "$REGISTRY_DATA_DIR/data"
               mkdir -p "$REGISTRY_DATA_DIR/logs"
               chown -R registry:registry "$REGISTRY_DATA_DIR"
@@ -154,8 +149,8 @@
         content: |
           [Unit]
           Description=Docker Registry
-          After=network.target docker.service
-          Requires=docker.service
+          After=network.target docker.service misc-rbd.service
+          Requires=docker.service misc-rbd.service
 
           [Service]
           Type=exec
