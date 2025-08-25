@@ -207,19 +207,20 @@
 
     - name: Create insecure buildx builder
       shell: |
-        # Remove existing builder if it exists
-        docker buildx rm insecure-builder 2>/dev/null || true
-        
-        # Create new insecure builder
-        docker buildx create --name insecure-builder \
-          --driver docker-container \
-          --driver-opt network=host \
-          --config /etc/buildkit/buildkitd.toml
-        
-        # Set as default builder
+        # Check if builder already exists
+        if docker buildx inspect insecure-builder >/dev/null 2>&1; then
+          echo "Builder insecure-builder already exists"
+          # Update configuration if needed
+        else
+          # Create new insecure builder
+          docker buildx create --name insecure-builder \
+            --driver docker-container \
+            --driver-opt network=host \
+            --config /etc/buildkit/buildkitd.toml
+        fi
         docker buildx use insecure-builder
       register: buildx_result
-      changed_when: true
+      changed_when: "'already exists' not in buildx_result.stdout"
       failed_when: buildx_result.rc != 0
 
     - name: Pull registry image on all nodes
