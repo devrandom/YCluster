@@ -76,23 +76,20 @@ renew_lease() {
 start_all_services() {
     echo "Starting all services as storage leader"
     
-    # Start PostgreSQL in background
+    # Start all services in parallel - systemd handles dependencies
     systemctl start postgres-rbd &
     PG_START_PID=$!
     
-    # Start Qdrant in background  
     systemctl start qdrant-rbd &
     QDRANT_START_PID=$!
     
-    # Start Misc storage in background
     systemctl start misc-rbd &
     MISC_START_PID=$!
     
-    # Start Docker registry in background
+    # Docker registry will wait for misc-rbd due to systemd dependency
     systemctl start docker-registry &
     REGISTRY_START_PID=$!
     
-    # Start rathole client in background
     systemctl start rathole &
     RATHOLE_START_PID=$!
     
