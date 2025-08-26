@@ -502,6 +502,62 @@ class DHCPServer:
             logger.error(f"Failed to store allocation in etcd: {e}")
             return None, None
     
+    def migrate_leases_to_normalized_mac(self):
+        """Migrate existing leases to use normalized MAC addresses as keys"""
+        client = self.get_etcd_client()
+        if not client:
+            return
+        
+        logger.info("Starting lease migration to normalized MAC addresses...")
+        migrated_count = 0
+        
+        try:
+            # Get all existing lease entries
+            for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/leases/"):
+                if not value:
+                    continue
+                    
+                try:
+                    lease_data = json.loads(value.decode('utf-8'))
+                    old_key = metadata.key.decode()
+                    old_mac_key = old_key.split('/')[-1]  # Extract MAC from key
+                    
+                    # Get MAC from lease data
+                    mac_in_data = lease_data.get('mac', '')
+                    if not mac_in_data:
+                        logger.warning(f"Lease {old_key} has no MAC in data, skipping")
+                        continue
+                    
+                    # Normalize the MAC address
+                    normalized_mac = mac_in_data.lower().replace(':', '').replace('-', '')
+                    new_key = f"{ETCD_PREFIX}/leases/{normalized_mac}"
+                    
+                    # Check if this lease needs migration
+                    if old_mac_key == normalized_mac:
+                        continue
+
+                    # Store lease with normalized MAC key
+                    client.put(new_key, json.dumps(lease_data))
+                    
+                    # Delete old entry if it's different from new key
+                    if old_key != new_key:
+                        client.delete(old_key)
+                        logger.info(f"Migrated lease: {old_key} -> {new_key}")
+                        migrated_count += 1
+                    
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse lease data for {metadata.key.decode()}: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to migrate lease {metadata.key.decode()}: {e}")
+            
+            if migrated_count > 0:
+                logger.info(f"Successfully migrated {migrated_count} leases to normalized MAC format")
+            else:
+                logger.info("No lease migration needed - all leases already use normalized MAC format")
+                
+        except Exception as e:
+            logger.error(f"Failed to migrate leases: {e}")
+
     def load_leases_from_etcd(self):
         """Load existing leases from etcd"""
         client = self.get_etcd_client()
@@ -532,13 +588,15 @@ class DHCPServer:
             logger.error(f"Failed to load leases from etcd: {e}")
 
     def save_lease_to_etcd(self, mac, lease_data):
-        """Save lease to etcd"""
+        """Save lease to etcd using normalized MAC as key"""
         client = self.get_etcd_client()
         if not client:
             return False
         
         try:
-            key = f"{ETCD_PREFIX}/leases/{mac}"
+            # Normalize MAC for etcd key
+            normalized_mac = mac.lower().replace(':', '').replace('-', '')
+            key = f"{ETCD_PREFIX}/leases/{normalized_mac}"
             client.put(key, json.dumps(lease_data))
             logger.info(f"Saved lease to etcd: {mac} -> {lease_data['ip']}")
             return True
@@ -856,6 +914,9 @@ class DHCPServer:
     def start(self):
         """Start the DHCP server"""
         logger.info("Starting DHCP server...")
+        
+        # Migrate existing leases to normalized MAC format
+        self.migrate_leases_to_normalized_mac()
         
         # Load existing leases
         self.load_leases_from_etcd()

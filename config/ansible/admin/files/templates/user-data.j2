@@ -6,7 +6,7 @@
 autoinstall:
   version: 1
   identity:
-    hostname: PLACEHOLDER_HOST
+    hostname: {{ hostname }}
     username: ubuntu
     password: '$y$j9T$VeMbpOLaT99rQzvoSy7IC/$7nKvOFH3ui63TKFPPbhKOo5lbvXXnPBBlpKjIrF.aCB'
   network:
@@ -16,85 +16,25 @@ autoinstall:
         match:
           name: "{{ cluster_interface }}"
         dhcp4: false
-        addresses: [PLACEHOLDER_IP/24]
+        addresses: [{{ ip_address }}/24]
         optional: true
         amt:
           match:
             name: "{{ amt_interface }}"
           optional: true
           addresses:
-          - "PLACEHOLDER_AMT_IP/24"
+          - "{{ amt_ip_address }}/24"
         uplink:
           match:
             name: "{{ uplink_interface }}"
           optional: true
           dhcp4: true
-  early-commands:
-    - |
-      SERVER_IP=$(cat /proc/cmdline | grep -o 'ds=.*s=http://[^/]*' | sed 's/.*http:\/\/\([^\/]*\).*/\1/')
-      echo "$SERVER_IP" > /tmp/server_ip
-      MAC=$(ip -j link | jq -r '.[] | select(.operstate == "UP" and .address) | .address' | head -1)
-      
-      # Get the interface name for the MAC address used for PXE boot
-      INTERFACE=$(ip -j link | jq -r ".[] | select(.address == \"$MAC\") | .ifname")
-      
-      # Test which proxy is available and update autoinstall
-      if curl -s --connect-timeout 3 --proxy 10.0.0.254:3128 http://detectportal.firefox.com/success.txt >/dev/null 2>&1; then
-        PROXY_URL="http://10.0.0.254:3128"
-        echo "Using VIP proxy: $PROXY_URL"
-      elif curl -s --connect-timeout 3 --proxy 10.0.0.11:3128 http://detectportal.firefox.com/success.txt >/dev/null 2>&1; then
-        PROXY_URL="http://10.0.0.11:3128"
-        echo "Using s1 proxy: $PROXY_URL"
-      elif curl -s --connect-timeout 3 --proxy 10.0.0.1:3128 http://detectportal.firefox.com/success.txt >/dev/null 2>&1; then
-        PROXY_URL="http://10.0.0.1:3128"
-        echo "Using admin laptop proxy: $PROXY_URL"
-      else
-        PROXY_URL=""
-        echo "No proxy available, using direct connection"
-      fi
-      
-      # Update proxy setting in autoinstall
-      if [ -n "$PROXY_URL" ]; then
-        sed -i "s|proxy: \".*\"|proxy: \"$PROXY_URL\"|" /autoinstall.yaml
-      else
-        sed -i '/proxy:/d' /autoinstall.yaml
-      fi
-      
-      # Fetch allocation with error handling - fail fast if server is unreachable
-      if ! ALLOCATION=$(curl -f -s "http://$SERVER_IP/api/allocate?mac=$MAC"); then
-        echo "ERROR: Failed to get allocation from server $SERVER_IP" >&2
-        exit 1
-      fi
-      
-      # Parse allocation response
-      HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
-      IP=$(echo "$ALLOCATION" | jq -r '.ip')
-      AMT_IP=$(echo "$ALLOCATION" | jq -r '.amt_ip')
-
-      # Validate we got valid responses
-      if [ "$HOSTNAME" = "null" ] || [ "$IP" = "null" ] || [ -z "$HOSTNAME" ] || [ -z "$IP" ]; then
-        echo "ERROR: Invalid allocation response: $ALLOCATION" >&2
-        exit 1
-      fi
-      
-      # Update autoinstall configuration
-      sed -i "s/hostname: PLACEHOLDER_HOST/hostname: $HOSTNAME/" /autoinstall.yaml
-      sed -i "s/PLACEHOLDER_IP/$IP/" /autoinstall.yaml
-      sed -i "s/PLACEHOLDER_AMT_IP/$AMT_IP/" /autoinstall.yaml
-      # We are using static interface names for now
-      #sed -i "s/PLACEHOLDER_INTERFACE/$INTERFACE/" /autoinstall.yaml
-
-      # Download SSH key with error handling
-      if ! curl -f -s "http://$SERVER_IP/ansible_ssh_key.pub" > /tmp/ansible_ssh_key.pub; then
-        echo "ERROR: Failed to download SSH key from server $SERVER_IP" >&2
-        exit 1
-      fi
   ssh:
     install-server: true
     authorized-keys:
       - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1"
     allow-pw: false
-  proxy: "http://10.0.0.1:3128"
+  {% if proxy_url %}proxy: "{{ proxy_url }}"{% endif %}
   snaps:
     - name: microceph
   storage:
@@ -189,7 +129,8 @@ autoinstall:
     # add ansible key to root authorized_keys
     - |
       mkdir -p /target/root/.ssh
-      echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1" | cat /tmp/ansible_ssh_key.pub - >> /target/root/.ssh/authorized_keys
+      {% if ssh_key_content %}echo "{{ ssh_key_content }}" >> /target/root/.ssh/authorized_keys{% endif %}
+      echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1" >> /target/root/.ssh/authorized_keys
       chmod 700 /target/root/.ssh
       chmod 600 /target/root/.ssh/authorized_keys
       chown -R root:root /target/root/.ssh

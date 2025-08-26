@@ -6,10 +6,22 @@
     admin_services_dir: /opt/admin-services
     
   tasks:
+    - name: Install net-tools package for arp command
+      apt:
+        name: net-tools
+        state: present
+
     - name: Copy etcd-based allocation API
       copy:
-        src: /opt/infrastructure/config/ansible/files/app.py
+        src: "files/app.py"
         dest: "{{ admin_services_dir }}/app.py"
+        mode: '0644'
+      notify: restart admin-api
+
+    - name: Copy user-data template
+      copy:
+        src: "templates/user-data.j2"
+        dest: "{{ admin_services_dir }}/templates/user-data.j2"
         mode: '0644'
       notify: restart admin-api
 
@@ -21,7 +33,7 @@
 
     - name: Copy status page template
       copy:
-        src: /opt/infrastructure/config/ansible/files/templates/status.html
+        src: "templates/status.html"
         dest: "{{ admin_services_dir }}/templates/status.html"
         mode: '0644'
       notify: restart admin-api
@@ -34,7 +46,7 @@
 
     - name: Copy Alpine.js static file
       copy:
-        src: /opt/infrastructure/config/ansible/files/static/alpine-3.14.1.min.js
+        src: "static/alpine-3.14.1.min.js"
         dest: "{{ admin_services_dir }}/static/alpine-3.14.1.min.js"
         mode: '0644'
       notify: restart admin-api
@@ -52,6 +64,8 @@
           Type=simple
           Environment="ETCD_HOSTS={% for h in groups['core'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app.py
+          StandardOutput=journal
+          StandardError=journal
           Restart=always
           RestartSec=5
           User=root
@@ -129,21 +143,16 @@
         state: directory
         mode: '0755'
 
-    - name: Copy autoinstall meta-data
-      copy:
-        src: /opt/infrastructure/data/autoinstall/meta-data
-        dest: /var/www/html/autoinstall/meta-data
-        mode: '0644'
 
     - name: Copy all assets to web directory
       copy:
-        src: /opt/infrastructure/config/ansible/files/assets/
+        src: "assets/"
         dest: /var/www/html/assets/
         mode: preserve
 
     - name: Copy index.html for web interface
       copy:
-        src: /opt/infrastructure/config/ansible/files/index.html
+        src: "index.html"
         dest: /var/www/html/index.html
         mode: '0644'
 
