@@ -1,0 +1,57 @@
+---
+- name: Generate autoinstall user-data for different node types
+  hosts: localhost
+  gather_facts: no
+  vars:
+    node_types:
+      storage:
+        cluster_interface: "enp2s0f0np0"
+        uplink_interface: "enp87s0"
+        amt_interface: "enp89s0"
+      compute:
+        cluster_interface: "enp1s0f0"
+        uplink_interface: "enp1s0f1"
+        amt_interface: "enp1s0f2"
+      # Add more node types as needed
+      # macos:
+      #   cluster_interface: "en0"
+      #   uplink_interface: "en1"
+      #   amt_interface: "en2"
+  
+  tasks:
+    - name: Ensure autoinstall directory exists
+      file:
+        path: "{{ playbook_dir }}/../data/autoinstall"
+        state: directory
+        mode: '0755'
+
+    - name: Generate user-data for each node type
+      template:
+        src: "user-data.j2"
+        dest: "/var/www/html/autoinstall/user-data-{{ item.key }}"
+        mode: '0644'
+        owner: www-data
+        group: www-data
+      loop: "{{ node_types | dict2items }}"
+      vars:
+        node_type: "{{ item.key }}"
+        cluster_interface: "{{ item.value.cluster_interface }}"
+        uplink_interface: "{{ item.value.uplink_interface }}"
+        amt_interface: "{{ item.value.amt_interface }}"
+
+    - name: Generate default user-data (using storage interfaces)
+      template:
+        src: "user-data.j2"
+        dest: "/var/www/html/autoinstall/user-data"
+        mode: '0644'
+        owner: www-data
+        group: www-data
+      vars:
+        node_type: "storage"
+        cluster_interface: "{{ node_types.storage.cluster_interface }}"
+        uplink_interface: "{{ node_types.storage.uplink_interface }}"
+        amt_interface: "{{ node_types.storage.amt_interface }}"
+
+    - name: Display generated files
+      debug:
+        msg: "Generated autoinstall files for node types: {{ node_types.keys() | list }}"

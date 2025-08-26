@@ -4,3 +4,7 @@ all:
       hosts:
         s1:
           ansible_host: 10.0.0.11
+      vars:
+        cluster_interface: "enp2s0f0np0"
+        uplink_interface: "enp87s0"
+        amt_interface: "enp89s0"

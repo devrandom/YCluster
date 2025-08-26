@@ -129,12 +129,6 @@
         state: directory
         mode: '0755'
 
-    - name: Copy autoinstall user-data
-      copy:
-        src: /opt/infrastructure/data/autoinstall/user-data
-        dest: /var/www/html/autoinstall/user-data
-        mode: '0644'
-
     - name: Copy autoinstall meta-data
       copy:
         src: /opt/infrastructure/data/autoinstall/meta-data
