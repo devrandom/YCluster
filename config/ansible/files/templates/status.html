@@ -21,6 +21,7 @@
         .status-critical { background-color: #f8d7da; color: #721c24; }
         .status-expired { background-color: #f8d7da; color: #721c24; }
         .status-not_configured { background-color: #e2e3e5; color: #383d41; }
+        .status-error-indicator { background-color: #f8d7da; color: #721c24; }
         .service-cell { font-size: 0.9em; }
         .service-item { display: inline-block; margin: 2px 4px; padding: 2px 6px; border-radius: 3px; }
         .type-storage { border-left: 4px solid #007bff; }
@@ -118,13 +119,33 @@
             background-color: #ffc107;
             color: black;
         }
+        .error-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background-color: #dc3545;
+            border-radius: 50%;
+            margin-left: 10px;
+            animation: pulse 2s infinite;
+            vertical-align: middle;
+        }
+        .error-message {
+            color: #dc3545;
+            font-size: 0.7em;
+            margin-left: 5px;
+            vertical-align: middle;
+        }
     </style>
     <script defer src="/static/alpine-3.14.1.min.js"></script>
 </head>
 <body x-data="clusterStatus()" x-init="init()">
     <h1>Cluster Status Dashboard 
         <span x-show="showUpdateIndicator" x-transition.duration.2000ms class="update-indicator"></span>
+        <span x-show="showErrorIndicator" x-transition.duration.2000ms class="error-indicator"></span>
     </h1>
+    <div x-show="lastError" class="error-message" style="text-align: center; margin-top: -10px; margin-bottom: 10px;">
+        <span x-text="lastError"></span>
+    </div>
     
     <div class="refresh-controls">
         <button @click="refreshNow()">Refresh Now</button>
@@ -392,6 +413,8 @@
                 lastUpdateTime: 'Never',
                 nextUpdateText: 'Calculating...',
                 showUpdateIndicator: false,
+                showErrorIndicator: false,
+                lastError: '',
                 servicesExpanded: {},
                 drainStatusMessage: '',
                 
@@ -405,11 +428,22 @@
                     try {
                         const response = await fetch('/api/cluster-status');
                         if (!response.ok) {
-                            throw new Error(`HTTP error! status: ${response.status}`);
+                            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                         }
                         return await response.json();
                     } catch (error) {
                         console.error('Error fetching status data:', error);
+                        
+                        // Show error indicator and message
+                        this.showErrorIndicator = true;
+                        this.lastError = `Refresh failed: ${error.message}`;
+                        
+                        // Hide error indicator after 5 seconds
+                        setTimeout(() => {
+                            this.showErrorIndicator = false;
+                            this.lastError = '';
+                        }, 5000);
+                        
                         return null;
                     }
                 },
@@ -420,6 +454,10 @@
                         console.error('Failed to fetch status data');
                         return;
                     }
+                    
+                    // Clear any previous errors on successful update
+                    this.showErrorIndicator = false;
+                    this.lastError = '';
                     
                     // Update all data
                     this.hosts = data.hosts || [];
@@ -545,6 +583,14 @@
                         }
                     } catch (error) {
                         this.drainStatusMessage = `<span style="color: #dc3545;">Network error: ${error.message}</span>`;
+                        
+                        // Also show error indicator in header
+                        this.showErrorIndicator = true;
+                        this.lastError = `Drain operation failed: ${error.message}`;
+                        setTimeout(() => {
+                            this.showErrorIndicator = false;
+                            this.lastError = '';
+                        }, 5000);
                     }
                 },
                 

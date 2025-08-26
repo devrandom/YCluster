@@ -1,4 +1,8 @@
 #cloud-config
+# Node type: {{ node_type }}
+# Cluster interface: {{ cluster_interface }}
+# AMT interface: {{ amt_interface }}
+# Uplink interface: {{ uplink_interface }}
 autoinstall:
   version: 1
   identity:
@@ -10,19 +14,19 @@ autoinstall:
     ethernets:
       primary:
         match:
-          name: "enp2s0f0np0"
+          name: "{{ cluster_interface }}"
         dhcp4: false
         addresses: [PLACEHOLDER_IP/24]
         optional: true
         amt:
           match:
-            name: "enp89s0"
+            name: "{{ amt_interface }}"
           optional: true
           addresses:
           - "PLACEHOLDER_AMT_IP/24"
         uplink:
           match:
-            name: "enp87s0"
+            name: "{{ uplink_interface }}"
           optional: true
           dhcp4: true
   early-commands:

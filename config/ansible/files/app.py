@@ -1,6 +1,6 @@
 import json
 import etcd3
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
 import os
 import threading
 import time
@@ -12,6 +12,8 @@ from datetime import datetime, UTC
 import dns.resolver
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
+
+AUTOINSTALL_USER_DATA = '/var/www/html/autoinstall/user-data'
 
 app = Flask(__name__)
 
@@ -805,6 +807,56 @@ def ping():
 def get_time():
     """Get current timestamp for clock synchronization checks"""
     return jsonify({'timestamp': time.time()})
+
+def get_mac_from_ip(client_ip):
+    """Look up MAC address from IP address using DHCP leases in etcd or ARP table"""
+    if not client_ip:
+        return None
+    
+    client = get_etcd_client()
+
+    # Look through DHCP leases in etcd
+    for value, metadata in client.get_prefix('/cluster/dhcp/leases/'):
+        if value:
+            try:
+                lease_data = json.loads(value.decode())
+                if lease_data.get('ip') == client_ip:
+                    mac = lease_data.get('mac')
+                    if mac:
+                        # Convert normalized MAC back to colon format
+                        return ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+            except:
+                pass
+
+    return None
+
+@app.route('/autoinstall/user-data')
+def serve_user_data():
+    """Serve the appropriate user-data file based on client MAC address"""
+    # Get client IP address
+    client_ip = request.environ.get('REMOTE_ADDR')
+    if not client_ip:
+        client_ip = request.remote_addr
+    
+    # Look up MAC address from IP
+    mac_address = get_mac_from_ip(client_ip)
+    
+    if mac_address:
+        # Determine node type from MAC
+        node_type = determine_type_from_mac(mac_address)
+        user_data_file = f'{AUTOINSTALL_USER_DATA}-{node_type}'
+        
+        # Check if type-specific file exists
+        if os.path.exists(user_data_file):
+            return send_file(user_data_file, mimetype='text/plain')
+    
+    # Fallback to default user-data file
+    default_file = AUTOINSTALL_USER_DATA
+    if os.path.exists(default_file):
+        return send_file(default_file, mimetype='text/plain')
+    
+    # If no files exist, return error
+    return "No user-data file available", 404
 
 @app.route('/api/health')
 def health():
