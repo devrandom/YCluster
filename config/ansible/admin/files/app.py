@@ -1,4 +1,40 @@
+"""
+XCluster Admin API Service
+
+etcd Schema Documentation:
+==========================
+
+Node Allocations:
+- /cluster/nodes/by-mac/{normalized_mac} -> allocation JSON
+  * normalized_mac: MAC address with colons/dashes removed, lowercase (e.g., "5847caabcdef")
+  * allocation JSON contains: hostname, type, ip, amt_ip, mac (normalized), allocated_at
+
+- /cluster/nodes/by-hostname/{normalized_mac} -> allocation JSON (same as above)
+  * hostname: node hostname like "s1", "c5", "m3"
+
+DHCP Leases:
+- /cluster/dhcp/leases/{lease_key} -> lease JSON
+  * lease JSON contains: ip, mac (non-normalized with colons, e.g., "58:47:ca:ab:cd:ef")
+
+Leadership:
+- /cluster/leader/app -> hostname of current storage leader
+- /cluster/leader/dhcp -> hostname of current DHCP leader
+
+Node Management:
+- /cluster/nodes/{hostname}/drain -> "true" if node is drained
+
+TLS Configuration:
+- /cluster/tls/cert -> PEM certificate data
+- /cluster/tls/key -> PEM private key data
+
+MAC Address Formats:
+- Normalized: lowercase, no separators (5847caabcdef) - used in etcd keys
+- Non-normalized: with colons (58:47:ca:ab:cd:ef) - used in DHCP leases and network tools
+"""
+
 import json
+import sys
+
 import etcd3
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
 import os
@@ -12,10 +48,30 @@ from datetime import datetime, UTC
 import dns.resolver
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
+from jinja2 import Template
 
-AUTOINSTALL_USER_DATA = '/var/www/html/autoinstall/user-data'
+AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
 
 app = Flask(__name__)
+
+# Node type interface configurations
+NODE_TYPE_INTERFACES = {
+    'storage': {
+        'cluster_interface': 'enp2s0f0np0',
+        'uplink_interface': 'enp87s0',
+        'amt_interface': 'enp89s0'
+    },
+    'compute': {
+        'cluster_interface': 'enp1s0f0',
+        'uplink_interface': 'enp1s0f1',
+        'amt_interface': 'enp1s0f2'
+    },
+    'macos': {
+        'cluster_interface': 'en0',
+        'uplink_interface': 'en1',
+        'amt_interface': 'en2'
+    }
+}
 
 # etcd configuration
 ETCD_HOSTS = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
@@ -150,47 +206,36 @@ def get_next_hostname(client, node_type):
     
     return f"{prefix}{next_num}"
 
-@app.route('/api/allocate')
-def allocate_hostname():
-    """Allocate a new hostname based on MAC address"""
-    mac_address = request.args.get('mac')
-    
-    if not mac_address:
-        return jsonify({'error': 'MAC address is required'}), 400
-    
-    # Normalize MAC address
+def get_or_create_allocation(mac_address):
+    """Get existing allocation or create new one for non-normalized MAC address"""
+    client = get_etcd_client()
     normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
     
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return jsonify({'error': f'etcd connection failed: {str(e)}'}), 503
+    # Check if allocation already exists
+    existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
+    if existing_data[0]:
+        data = json.loads(existing_data[0].decode())
+        # Some old entries may lack IP or amt_ip, fill them in
+        if 'amt_ip' not in data:
+            amt_ip_address = determine_ip_from_hostname(data['hostname'] + 'a')
+            data['amt_ip'] = amt_ip_address
+        return data
+
     
+    # Create new allocation
     with allocation_lock:
-        # Check if this MAC address already has an allocation
+        # Double-check after acquiring lock
         existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
         if existing_data[0]:
-            allocation = json.loads(existing_data[0].decode())
-            return jsonify({
-                'hostname': allocation['hostname'],
-                'type': allocation['type'],
-                'ip': allocation['ip'],
-                'mac': mac_address,
-                'existing': True
-            })
+            return json.loads(existing_data[0].decode())
         
-        # Determine machine type from MAC address
+        # Determine machine type and allocate hostname
         machine_type = determine_type_from_mac(mac_address)
-        
-        # Get next available hostname
         hostname = get_next_hostname(client, machine_type)
-        
-        # Generate deterministic IP
         ip_address = determine_ip_from_hostname(hostname)
         amt_ip_address = determine_ip_from_hostname(hostname + "a")
-
-        # Create allocation record
-        allocation = {
+        
+        allocation_data = {
             'hostname': hostname,
             'type': machine_type,
             'ip': ip_address,
@@ -198,11 +243,9 @@ def allocate_hostname():
             'mac': normalized_mac,
             'allocated_at': datetime.now(UTC).isoformat()
         }
-
-        # Store in etcd with both lookups
-        allocation_json = json.dumps(allocation)
         
-        # Use a transaction to ensure atomicity
+        # Store in etcd
+        allocation_json = json.dumps(allocation_data)
         client.transaction(
             compare=[
                 client.transactions.version(f"{ETCD_PREFIX}/by-mac/{normalized_mac}") == 0,
@@ -215,13 +258,29 @@ def allocate_hostname():
             failure=[]
         )
         
+        return allocation_data
+
+@app.route('/api/allocate')
+def allocate_hostname():
+    """Allocate a new hostname based on MAC address"""
+    mac_address = request.args.get('mac')
+    
+    if not mac_address:
+        return jsonify({'error': 'MAC address is required'}), 400
+    
+    try:
+        allocation = get_or_create_allocation(mac_address)
+        
         return jsonify({
-            'hostname': hostname,
-            'type': machine_type,
-            'ip': ip_address,
+            'hostname': allocation['hostname'],
+            'type': allocation['type'],
+            'ip': allocation['ip'],
+            'amt_ip': allocation['amt_ip'],
             'mac': mac_address,
-            'existing': False
+            'existing': True  # Always true since we return existing or newly created
         })
+    except Exception as e:
+        return jsonify({'error': f'Allocation failed: {str(e)}'}), 500
 
 @app.route('/api/status')
 def status():
@@ -809,7 +868,10 @@ def get_time():
     return jsonify({'timestamp': time.time()})
 
 def get_mac_from_ip(client_ip):
-    """Look up MAC address from IP address using DHCP leases in etcd or ARP table"""
+    """
+    Look up MAC address from IP address using DHCP leases in etcd or neighbor table.
+    Return value is non-normalized MAC address (xx:xx:xx:xx:xx:xx) or None if not found.
+    """
     if not client_ip:
         return None
     
@@ -821,42 +883,92 @@ def get_mac_from_ip(client_ip):
             try:
                 lease_data = json.loads(value.decode())
                 if lease_data.get('ip') == client_ip:
-                    mac = lease_data.get('mac')
-                    if mac:
-                        # Convert normalized MAC back to colon format
-                        return ':'.join(mac[i:i+2] for i in range(0, 12, 2))
-            except:
-                pass
+                    # Return non-normalized MAC (with colons) from lease data
+                    return lease_data.get('mac')
+            except json.JSONDecodeError:
+                # Skip non-JSON entries in the dhcp prefix
+                continue
+
+    print("fallback to neighbor table", client_ip, file=sys.stderr)
+
+    # Fallback to neighbor table lookup using ip --json neigh
+    result = None
+    try:
+        result = subprocess.run(['ip', '--json', 'neigh', 'show', client_ip], 
+                              capture_output=True, text=True, timeout=5)
+        neighbors = json.loads(result.stdout)
+        for i, neighbor in enumerate(neighbors):
+            print(f"neighbor {i}: {neighbor}", file=sys.stderr)
+            if neighbor.get('dst') == client_ip and 'lladdr' in neighbor:
+                mac = neighbor['lladdr']
+                # Validate MAC format (should be xx:xx:xx:xx:xx:xx)
+                if isinstance(mac, str) and len(mac) == 17 and mac.count(':') == 5:
+                    return mac
+                else:
+                    print(f"MAC validation failed", file=sys.stderr)
+    except json.JSONDecodeError as e:
+        print(f"neighbor table JSON parse error: {e}", file=sys.stderr)
+        print(f"Raw stdout was: {result.stdout}", file=sys.stderr)
+    except Exception as e:
+        print(f"neighbor table lookup failed for {client_ip}: {e}", file=sys.stderr)
 
     return None
 
+@app.route('/autoinstall/meta-data')
+def serve_meta_data():
+    """Serve empty meta-data for autoinstall"""
+    return "", 200, {'Content-Type': 'text/plain'}
+
 @app.route('/autoinstall/user-data')
 def serve_user_data():
-    """Serve the appropriate user-data file based on client MAC address"""
+    """Serve dynamically rendered user-data based on client MAC address"""
     # Get client IP address
-    client_ip = request.environ.get('REMOTE_ADDR')
-    if not client_ip:
-        client_ip = request.remote_addr
+    client_ip = request.environ.get('REMOTE_ADDR') or request.remote_addr
     
     # Look up MAC address from IP
     mac_address = get_mac_from_ip(client_ip)
+    if not mac_address:
+        return f"MAC address not found for client IP {client_ip}", 400
+
+    print(f"Client IP: {client_ip}, MAC: {mac_address}", file=sys.stderr)
     
-    if mac_address:
-        # Determine node type from MAC
-        node_type = determine_type_from_mac(mac_address)
-        user_data_file = f'{AUTOINSTALL_USER_DATA}-{node_type}'
-        
-        # Check if type-specific file exists
-        if os.path.exists(user_data_file):
-            return send_file(user_data_file, mimetype='text/plain')
+    # Get or create allocation for this MAC address
+    allocation_data = get_or_create_allocation(mac_address)
     
-    # Fallback to default user-data file
-    default_file = AUTOINSTALL_USER_DATA
-    if os.path.exists(default_file):
-        return send_file(default_file, mimetype='text/plain')
+    # Use allocation data
+    node_type = allocation_data['type']
+    hostname = allocation_data['hostname']
+    ip_address = allocation_data['ip']
+    amt_ip_address = allocation_data['amt_ip']
     
-    # If no files exist, return error
-    return "No user-data file available", 404
+    # Get interface configuration for this node type
+    interfaces = NODE_TYPE_INTERFACES[node_type]
+    
+    # Get SSH public key content
+    ssh_key_path = '/opt/bootstrap-files/ansible_ssh_key.pub'
+    with open(ssh_key_path, 'r') as f:
+        ssh_key_content = f.read().strip()
+
+    proxy_url = 'http://10.0.0.254:3128'
+    
+    # Read and render template
+    with open(AUTOINSTALL_USER_DATA_TEMPLATE, 'r') as f:
+        template_content = f.read()
+    
+    template = Template(template_content)
+    rendered_content = template.render(
+        node_type=node_type,
+        hostname=hostname,
+        ip_address=ip_address,
+        amt_ip_address=amt_ip_address,
+        cluster_interface=interfaces['cluster_interface'],
+        uplink_interface=interfaces['uplink_interface'],
+        amt_interface=interfaces['amt_interface'],
+        ssh_key_content=ssh_key_content,
+        proxy_url=proxy_url
+    )
+    
+    return rendered_content, 200, {'Content-Type': 'text/plain'}
 
 @app.route('/api/health')
 def health():
