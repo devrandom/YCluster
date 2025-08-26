@@ -2,7 +2,6 @@
 <html>
 <head>
     <title>Cluster Status</title>
-    <meta http-equiv="refresh" content="30">
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
         h1 { color: #333; text-align: center; }
@@ -30,6 +29,7 @@
         .error-details { font-size: 0.8em; color: #666; }
         .services-container { position: relative; }
         .services-normal { display: none; }
+        .services-normal.show { display: inline; }
         .services-toggle { 
             cursor: pointer; 
             color: #007bff; 
@@ -38,10 +38,109 @@
             margin-left: 5px;
         }
         .services-toggle:hover { color: #0056b3; }
+        .loading { opacity: 0.5; }
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .update-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background-color: #28a745;
+            border-radius: 50%;
+            margin-left: 10px;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        .fade-in {
+            animation: fadeIn 0.3s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        .refresh-controls {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .refresh-controls button {
+            margin: 0 5px;
+            padding: 5px 15px;
+            border: 1px solid #007bff;
+            background-color: white;
+            color: #007bff;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .refresh-controls button:hover {
+            background-color: #007bff;
+            color: white;
+        }
+        .refresh-controls button.active {
+            background-color: #007bff;
+            color: white;
+        }
+        .refresh-controls select {
+            margin-left: 10px;
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+        }
+        .drain-button {
+            padding: 2px 6px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.8em;
+            margin-left: 5px;
+            border: none;
+        }
+        .drain-button.undrain {
+            background-color: #28a745;
+            color: white;
+        }
+        .drain-button.drain {
+            background-color: #ffc107;
+            color: black;
+        }
     </style>
+    <script defer src="/static/alpine-3.14.1.min.js"></script>
 </head>
-<body>
-    <h1>Cluster Status Dashboard</h1>
+<body x-data="clusterStatus()" x-init="init()">
+    <h1>Cluster Status Dashboard 
+        <span x-show="showUpdateIndicator" x-transition.duration.2000ms class="update-indicator"></span>
+    </h1>
+    
+    <div class="refresh-controls">
+        <button @click="refreshNow()">Refresh Now</button>
+        <button :class="{ active: autoRefresh }" @click="toggleAutoRefresh()">
+            Auto-Refresh: <span x-text="autoRefresh ? 'ON' : 'OFF'"></span>
+        </button>
+        <label>Interval: 
+            <select x-model.number="refreshInterval" @change="updateRefreshInterval()">
+                <option value="5000">5 seconds</option>
+                <option value="10000">10 seconds</option>
+                <option value="30000">30 seconds</option>
+                <option value="60000">1 minute</option>
+                <option value="300000">5 minutes</option>
+            </select>
+        </label>
+    </div>
     
     <!-- VIP Status Section -->
     <div style="margin-bottom: 20px;">
@@ -58,74 +157,47 @@
                 </tr>
             </thead>
             <tbody>
-                <tr>
-                    <td><strong>{{ vip_status.gateway_vip.ip }}</strong></td>
-                    <td>Gateway</td>
-                    <td>
-                        {% if vip_status.gateway_vip.active_on %}
-                        <span class="status-healthy">Active</span>
-                        {% else %}
-                        <span class="status-unhealthy">Inactive</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if vip_status.gateway_vip.master_hostname %}
-                        {{ vip_status.gateway_vip.master_hostname }} ({{ vip_status.gateway_vip.active_on }})
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if vip_status.gateway_vip.interface %}
-                        {{ vip_status.gateway_vip.interface }}
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                    <td rowspan="2">
-                        {% if vip_status.keepalived_nodes %}
-                        {% set active_count = vip_status.keepalived_nodes | selectattr('keepalived_active') | list | length %}
-                        {% set total_count = vip_status.keepalived_nodes | length %}
-                        {% if active_count > 0 %}
-                        <span class="status-healthy">{{ active_count }}/{{ total_count }} Running</span>
-                        {% else %}
-                        <span class="status-unhealthy">{{ active_count }}/{{ total_count }} Running</span>
-                        {% endif %}
-                        <div class="error-details">
-                            {% for node in vip_status.keepalived_nodes %}
-                            {{ node.hostname }}: {{ node.status }}{% if not loop.last %}, {% endif %}
-                            {% endfor %}
-                        </div>
-                        {% else %}
-                        <span class="status-error">No keepalived data</span>
-                        {% endif %}
-                    </td>
-                </tr>
-                <tr>
-                    <td><strong>{{ vip_status.storage_vip.ip }}</strong></td>
-                    <td>Storage</td>
-                    <td>
-                        {% if vip_status.storage_vip.active_on %}
-                        <span class="status-healthy">Active</span>
-                        {% else %}
-                        <span class="status-unhealthy">Inactive</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if vip_status.storage_vip.master_hostname %}
-                        {{ vip_status.storage_vip.master_hostname }} ({{ vip_status.storage_vip.active_on }})
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if vip_status.storage_vip.interface %}
-                        {{ vip_status.storage_vip.interface }}
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                </tr>
+                <template x-if="!vipStatus || !vipStatus.gateway_vip">
+                    <tr><td colspan="6" style="text-align: center; color: #666;">No VIP data available</td></tr>
+                </template>
+                <template x-if="vipStatus && vipStatus.gateway_vip">
+                    <template x-for="(vip, index) in [
+                        { type: 'Gateway', data: vipStatus.gateway_vip },
+                        { type: 'Storage', data: vipStatus.storage_vip }
+                    ]" :key="index">
+                        <tr>
+                            <td><strong x-text="vip.data.ip || (vip.type === 'Gateway' ? '10.0.0.254' : '10.0.0.100')"></strong></td>
+                            <td x-text="vip.type"></td>
+                            <td>
+                                <span :class="vip.data.active_on ? 'status-healthy' : 'status-unhealthy'" 
+                                      x-text="vip.data.active_on ? 'Active' : 'Inactive'"></span>
+                            </td>
+                            <td>
+                                <template x-if="vip.data.master_hostname">
+                                    <span x-text="`${vip.data.master_hostname} (${vip.data.active_on})`"></span>
+                                </template>
+                                <template x-if="!vip.data.master_hostname">
+                                    <span style="color: #666;">-</span>
+                                </template>
+                            </td>
+                            <td>
+                                <span x-text="vip.data.interface || '-'" :style="!vip.data.interface ? 'color: #666;' : ''"></span>
+                            </td>
+                            <td x-show="index === 0" :rowspan="2">
+                                <template x-if="vipStatus.keepalived_nodes && vipStatus.keepalived_nodes.length > 0">
+                                    <div>
+                                        <span :class="keepalivedActiveCount() > 0 ? 'status-healthy' : 'status-unhealthy'"
+                                              x-text="`${keepalivedActiveCount()}/${vipStatus.keepalived_nodes.length} Running`"></span>
+                                        <div class="error-details" x-text="keepalivedNodeStatus()"></div>
+                                    </div>
+                                </template>
+                                <template x-if="!vipStatus.keepalived_nodes || vipStatus.keepalived_nodes.length === 0">
+                                    <span class="status-error">No keepalived data</span>
+                                </template>
+                            </td>
+                        </tr>
+                    </template>
+                </template>
             </tbody>
         </table>
     </div>
@@ -144,92 +216,82 @@
             </tr>
         </thead>
         <tbody>
-            {% for host in hosts %}
-            <tr class="type-{{ host.type }}">
-                <td><strong>{{ host.hostname }}</strong></td>
-                <td>{{ host.type.title() }}</td>
-                <td>{{ host.ip }}</td>
-                <td>
-                    {% if leadership.get('storage_leader') == host.hostname %}
-                    <span class="service-item status-healthy">Storage</span>
-                    {% endif %}
-                    {% if leadership.get('dhcp_leader') == host.hostname %}
-                    <span class="service-item status-healthy">DHCP</span>
-                    {% endif %}
-                    {% if leadership.get('storage_leader') != host.hostname and leadership.get('dhcp_leader') != host.hostname %}
-                    <span style="color: #666;">-</span>
-                    {% endif %}
-                </td>
-                <td>
-                    {% set health = host_health.get(host.hostname, {}) %}
-                    {% set is_drained = health.get('drained', false) %}
-                    {% if is_drained %}
-                    <span class="status-warning">Drained</span>
-                    <button onclick="toggleNodeDrain('{{ host.hostname }}', false)" style="background-color: #28a745; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 0.8em; margin-left: 5px;">
-                        Undrain
-                    </button>
-                    {% else %}
-                    <span class="status-healthy">Active</span>
-                    <button onclick="toggleNodeDrain('{{ host.hostname }}', true)" style="background-color: #ffc107; color: black; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 0.8em; margin-left: 5px;">
-                        Drain
-                    </button>
-                    {% endif %}
-                </td>
-                <td>
-                    {% set health = host_health.get(host.hostname, {}) %}
-                    <span class="status-{{ health.get('overall', 'error') }}">
-                        {{ health.get('overall', 'unknown').title() }}
-                    </span>
-                    {% if health.get('error') %}
-                    <div class="error-details">{{ health.error }}</div>
-                    {% endif %}
-                </td>
-                <td class="service-cell">
-                    {% set services = health.get('services', {}) %}
-                    {% set normal_services = [] %}
-                    {% set problem_services = [] %}
+            <template x-if="!hosts || hosts.length === 0">
+                <tr><td colspan="7" style="text-align: center; color: #666;">No hosts found in cluster inventory.</td></tr>
+            </template>
+            <template x-for="host in hosts" :key="host.hostname">
+                <tr :class="`type-${host.type} fade-in`">
+                    <td><strong x-text="host.hostname"></strong></td>
+                    <td x-text="host.type.charAt(0).toUpperCase() + host.type.slice(1)"></td>
+                    <td x-text="host.ip"></td>
                     
-                    {% for service_name, service_info in services.items() %}
-                        {% set status = service_info.get('status', 'unknown') %}
-                        {% if status in ['healthy', 'not_required'] %}
-                            {% set _ = normal_services.append((service_name, service_info)) %}
-                        {% else %}
-                            {% set _ = problem_services.append((service_name, service_info)) %}
-                        {% endif %}
-                    {% endfor %}
+                    <!-- Leadership -->
+                    <td>
+                        <template x-if="leadership.storage_leader === host.hostname">
+                            <span class="service-item status-healthy">Storage</span>
+                        </template>
+                        <template x-if="leadership.dhcp_leader === host.hostname">
+                            <span class="service-item status-healthy">DHCP</span>
+                        </template>
+                        <template x-if="leadership.storage_leader !== host.hostname && leadership.dhcp_leader !== host.hostname">
+                            <span style="color: #666;">-</span>
+                        </template>
+                    </td>
                     
-                    <div class="services-container">
-                        <!-- Show problem services first (always visible) -->
-                        {% for service_name, service_info in problem_services %}
-                        <span class="service-item status-{{ service_info.get('status', 'unknown') }}">
-                            {{ service_name }}
-                        </span>
-                        {% endfor %}
-                        
-                        <!-- Show normal services in collapsible section -->
-                        {% if normal_services %}
-                        <span class="services-toggle" onclick="toggleServices(this)">
-                            +{{ normal_services|length }} normal
-                        </span>
-                        <div class="services-normal">
-                            {% for service_name, service_info in normal_services %}
-                            <span class="service-item status-{{ service_info.get('status', 'unknown') }}">
-                                {{ service_name }}
-                            </span>
-                            {% endfor %}
+                    <!-- Drain status -->
+                    <td>
+                        <template x-if="hostHealth[host.hostname] && hostHealth[host.hostname].drained">
+                            <div>
+                                <span class="status-warning">Drained</span>
+                                <button @click="toggleNodeDrain(host.hostname, false)" class="drain-button undrain">Undrain</button>
+                            </div>
+                        </template>
+                        <template x-if="!hostHealth[host.hostname] || !hostHealth[host.hostname].drained">
+                            <div>
+                                <span class="status-healthy">Active</span>
+                                <button @click="toggleNodeDrain(host.hostname, true)" class="drain-button drain">Drain</button>
+                            </div>
+                        </template>
+                    </td>
+                    
+                    <!-- Overall status -->
+                    <td>
+                        <span :class="`status-${hostHealth[host.hostname]?.overall || 'error'}`" 
+                              x-text="(hostHealth[host.hostname]?.overall || 'error').charAt(0).toUpperCase() + (hostHealth[host.hostname]?.overall || 'error').slice(1)"></span>
+                        <template x-if="hostHealth[host.hostname]?.error">
+                            <div class="error-details" x-text="hostHealth[host.hostname].error"></div>
+                        </template>
+                    </td>
+                    
+                    <!-- Services -->
+                    <td class="service-cell">
+                        <div class="services-container">
+                            <!-- Problem services -->
+                            <template x-for="service in getProblemServices(host.hostname)" :key="service.name">
+                                <span :class="`service-item status-${service.status}`" x-text="service.name"></span>
+                            </template>
+                            
+                            <!-- Normal services toggle -->
+                            <template x-if="getNormalServices(host.hostname).length > 0">
+                                <span class="services-toggle" 
+                                      @click="toggleServices(host.hostname)"
+                                      x-text="servicesExpanded[host.hostname] ? `-${getNormalServices(host.hostname).length} normal` : `+${getNormalServices(host.hostname).length} normal`">
+                                </span>
+                            </template>
+                            
+                            <!-- Normal services (collapsible) -->
+                            <div :class="{ 'services-normal': true, 'show': servicesExpanded[host.hostname] }">
+                                <template x-for="service in getNormalServices(host.hostname)" :key="service.name">
+                                    <span :class="`service-item status-${service.status}`" x-text="service.name"></span>
+                                </template>
+                            </div>
                         </div>
-                        {% endif %}
-                    </div>
-                </td>
-            </tr>
-            {% endfor %}
+                    </td>
+                </tr>
+            </template>
         </tbody>
     </table>
-    <div id="drain-status" style="margin-bottom: 20px; font-size: 0.9em; color: #666;"></div>
-
-    {% if not hosts %}
-    <p style="text-align: center; color: #666; margin-top: 40px;">No hosts found in cluster inventory.</p>
-    {% endif %}
+    <div id="drain-status" style="margin-bottom: 20px; font-size: 0.9em; color: #666;" x-html="drainStatusMessage"></div>
 
     <!-- Clock Skew Status Section -->
     <div style="margin-bottom: 20px;">
@@ -243,27 +305,19 @@
                 </tr>
             </thead>
             <tbody>
-                {% for host in hosts %}
-                <tr class="type-{{ host.type }}">
-                    <td><strong>{{ host.hostname }}</strong></td>
-                    {% set health = host_health.get(host.hostname, {}) %}
-                    {% set clock_skew = health.get('services', {}).get('clock_skew', {}) %}
-                    <td>
-                        <span class="status-{{ clock_skew.get('status', 'error') }}">
-                            {{ clock_skew.get('status', 'unknown').title() }}
-                        </span>
-                    </td>
-                    <td>
-                        {% if clock_skew.get('details', {}).get('offset_ms') is not none %}
-                        {{ clock_skew.details.offset_ms }}
-                        {% elif clock_skew.get('details', {}).get('message') %}
-                        <span style="color: #666;">{{ clock_skew.details.message }}</span>
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
+                <template x-if="!hosts || hosts.length === 0">
+                    <tr><td colspan="3" style="text-align: center; color: #666;">No hosts available</td></tr>
+                </template>
+                <template x-for="host in hosts" :key="host.hostname">
+                    <tr :class="`type-${host.type}`">
+                        <td><strong x-text="host.hostname"></strong></td>
+                        <td>
+                            <span :class="`status-${getClockSkewStatus(host.hostname)}`" 
+                                  x-text="(getClockSkewStatus(host.hostname)).charAt(0).toUpperCase() + (getClockSkewStatus(host.hostname)).slice(1)"></span>
+                        </td>
+                        <td x-html="getClockSkewOffset(host.hostname)"></td>
+                    </tr>
+                </template>
             </tbody>
         </table>
     </div>
@@ -282,90 +336,316 @@
                 </tr>
             </thead>
             <tbody>
-                <tr>
-                    <td><strong>Cluster Certificate</strong></td>
-                    <td>
-                        {% set cert_status = certificate_status.status %}
-                        {% if cert_status == 'healthy' %}
-                        <span class="status-healthy">Valid</span>
-                        {% elif cert_status == 'warning' %}
-                        <span class="status-degraded">Expires Soon</span>
-                        {% elif cert_status == 'critical' %}
-                        <span class="status-unhealthy">Critical</span>
-                        {% elif cert_status == 'expired' %}
-                        <span class="status-unhealthy">Expired</span>
-                        {% elif cert_status == 'not_configured' %}
-                        <span class="status-timeout">Not Configured</span>
-                        {% else %}
-                        <span class="status-error">Error</span>
-                        {% endif %}
-                        <div class="error-details">{{ certificate_status.details.message }}</div>
-                    </td>
-                    <td>
-                        {% if certificate_status.details.days_until_expiry is not none %}
-                        {{ certificate_status.details.days_until_expiry }}
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if certificate_status.details.expires_at %}
-                        {{ certificate_status.details.expires_at[:19] }}
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if certificate_status.details.subject %}
-                        <span style="font-size: 0.9em;">{{ certificate_status.details.subject }}</span>
-                        {% else %}
-                        <span style="color: #666;">-</span>
-                        {% endif %}
-                    </td>
-                </tr>
+                <template x-if="!certificateStatus">
+                    <tr><td colspan="5" style="text-align: center; color: #666;">No certificate data available</td></tr>
+                </template>
+                <template x-if="certificateStatus">
+                    <tr>
+                        <td><strong>Cluster Certificate</strong></td>
+                        <td>
+                            <span :class="getCertStatusClass()" x-text="getCertStatusText()"></span>
+                            <template x-if="certificateStatus.details?.message">
+                                <div class="error-details" x-text="certificateStatus.details.message"></div>
+                            </template>
+                        </td>
+                        <td>
+                            <span x-text="certificateStatus.details?.days_until_expiry ?? '-'" 
+                                  :style="certificateStatus.details?.days_until_expiry === null ? 'color: #666;' : ''"></span>
+                        </td>
+                        <td>
+                            <span x-text="certificateStatus.details?.expires_at ? certificateStatus.details.expires_at.substring(0, 19) : '-'"
+                                  :style="!certificateStatus.details?.expires_at ? 'color: #666;' : ''"></span>
+                        </td>
+                        <td>
+                            <span x-text="certificateStatus.details?.subject || '-'" 
+                                  :style="!certificateStatus.details?.subject ? 'color: #666;' : 'font-size: 0.9em;'"></span>
+                        </td>
+                    </tr>
+                </template>
             </tbody>
         </table>
     </div>
     
-    <div class="refresh-info">Auto-refreshes every 30 seconds | Last updated: {{ timestamp }} | Served by: {{ responding_hostname }}</div>
+    <div class="refresh-info">
+        <span>Last updated: <span x-text="lastUpdateTime"></span></span> | 
+        <span>Served by: <span x-text="respondingNode"></span></span> | 
+        <span x-text="nextUpdateText"></span>
+    </div>
     
     <script>
-        function toggleServices(element) {
-            const servicesDiv = element.nextElementSibling;
-            if (servicesDiv.style.display === 'none' || servicesDiv.style.display === '') {
-                servicesDiv.style.display = 'inline';
-                element.textContent = element.textContent.replace('+', '-');
-            } else {
-                servicesDiv.style.display = 'none';
-                element.textContent = element.textContent.replace('-', '+');
-            }
-        }
-        
-        function toggleNodeDrain(hostname, shouldDrain) {
-            const statusDiv = document.getElementById('drain-status');
-            const action = shouldDrain ? 'Draining' : 'Undraining';
-            
-            statusDiv.innerHTML = `<span style="color: #007bff;">${action} ${hostname}...</span>`;
-            
-            // Use the current node's API with hostname parameter
-            const endpoint = shouldDrain ? `/api/drain/${hostname}` : `/api/undrain/${hostname}`;
-            
-            fetch(endpoint, { method: 'POST' })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.error) {
-                        statusDiv.innerHTML = `<span style="color: #dc3545;">Error: ${data.error}</span>`;
-                    } else {
-                        const status = data.status === 'drained' ? 'drained' : 'active';
-                        statusDiv.innerHTML = `<span style="color: #28a745;">${hostname} ${status} successfully. Page will refresh in 3 seconds...</span>`;
-                        setTimeout(() => {
-                            window.location.reload();
-                        }, 3000);
+        function clusterStatus() {
+            return {
+                // Data
+                hosts: [],
+                hostHealth: {},
+                leadership: {},
+                vipStatus: {},
+                certificateStatus: null,
+                respondingNode: 'Unknown',
+                
+                // UI State
+                autoRefresh: true,
+                refreshInterval: 10000,
+                refreshTimer: null,
+                countdownTimer: null,
+                nextUpdateTime: null,
+                lastUpdateTime: 'Never',
+                nextUpdateText: 'Calculating...',
+                showUpdateIndicator: false,
+                servicesExpanded: {},
+                drainStatusMessage: '',
+                
+                // Methods
+                async init() {
+                    await this.updateStatus();
+                    this.scheduleNextUpdate();
+                },
+                
+                async fetchStatusData() {
+                    try {
+                        const response = await fetch('/api/cluster-status');
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        return await response.json();
+                    } catch (error) {
+                        console.error('Error fetching status data:', error);
+                        return null;
                     }
-                })
-                .catch(error => {
-                    statusDiv.innerHTML = `<span style="color: #dc3545;">Network error: ${error.message}</span>`;
-                });
+                },
+                
+                async updateStatus() {
+                    const data = await this.fetchStatusData();
+                    if (!data) {
+                        console.error('Failed to fetch status data');
+                        return;
+                    }
+                    
+                    // Update all data
+                    this.hosts = data.hosts || [];
+                    this.hostHealth = data.hostHealth || {};
+                    this.leadership = data.leadership || {};
+                    this.vipStatus = data.vipStatus || {};
+                    this.certificateStatus = data.certificateStatus;
+                    this.respondingNode = data.respondingHostname || 'Unknown';
+                    
+                    // Update last update time
+                    const now = new Date();
+                    this.lastUpdateTime = `${now.toLocaleDateString()} ${now.toLocaleTimeString()}`;
+                    
+                    // Show update indicator
+                    this.showUpdateIndicator = true;
+                    setTimeout(() => {
+                        this.showUpdateIndicator = false;
+                    }, 2000);
+                },
+                
+                scheduleNextUpdate() {
+                    // Clear any existing timers
+                    if (this.refreshTimer) {
+                        clearTimeout(this.refreshTimer);
+                        this.refreshTimer = null;
+                    }
+                    if (this.countdownTimer) {
+                        clearInterval(this.countdownTimer);
+                        this.countdownTimer = null;
+                    }
+                    
+                    if (this.autoRefresh) {
+                        // Ensure refreshInterval is a valid number
+                        const interval = parseInt(this.refreshInterval);
+                        if (isNaN(interval) || interval <= 0) {
+                            console.error('Invalid refresh interval:', this.refreshInterval);
+                            this.refreshInterval = 10000; // Default to 10 seconds
+                        }
+                        
+                        this.nextUpdateTime = Date.now() + this.refreshInterval;
+                        
+                        this.refreshTimer = setTimeout(() => {
+                            this.updateStatus();
+                            this.scheduleNextUpdate();
+                        }, this.refreshInterval);
+                        
+                        // Update countdown every second
+                        this.countdownTimer = setInterval(() => this.updateNextUpdateTime(), 1000);
+                        this.updateNextUpdateTime();
+                    } else {
+                        this.nextUpdateTime = null;
+                        this.updateNextUpdateTime();
+                    }
+                },
+                
+                updateNextUpdateTime() {
+                    if (!this.autoRefresh || !this.nextUpdateTime) {
+                        this.nextUpdateText = 'Auto-refresh disabled';
+                        return;
+                    }
+                    
+                    const now = Date.now();
+                    const remaining = Math.max(0, Math.floor((this.nextUpdateTime - now) / 1000));
+                    
+                    // Sanity check - if remaining is unreasonably large, reset
+                    if (remaining > 86400) { // More than 24 hours
+                        console.error('Invalid countdown detected, resetting timer');
+                        this.scheduleNextUpdate();
+                        return;
+                    }
+                },
+                
+                refreshNow() {
+                    this.updateStatus();
+                    if (this.autoRefresh) {
+                        this.scheduleNextUpdate();
+                    }
+                },
+                
+                toggleAutoRefresh() {
+                    this.autoRefresh = !this.autoRefresh;
+                    this.scheduleNextUpdate();
+                },
+                
+                updateRefreshInterval() {
+                    // Ensure the new interval is properly parsed as a number
+                    this.refreshInterval = parseInt(this.refreshInterval);
+                    if (isNaN(this.refreshInterval) || this.refreshInterval <= 0) {
+                        this.refreshInterval = 10000; // Default to 10 seconds
+                    }
+                    
+                    // Reschedule with the new interval if auto-refresh is enabled
+                    if (this.autoRefresh) {
+                        this.scheduleNextUpdate();
+                    }
+                },
+                
+                toggleServices(hostname) {
+                    this.servicesExpanded[hostname] = !this.servicesExpanded[hostname];
+                },
+                
+                async toggleNodeDrain(hostname, shouldDrain) {
+                    const action = shouldDrain ? 'Draining' : 'Undraining';
+                    this.drainStatusMessage = `<span style="color: #007bff;">${action} ${hostname}...</span>`;
+                    
+                    const endpoint = shouldDrain ? `/api/drain/${hostname}` : `/api/undrain/${hostname}`;
+                    
+                    try {
+                        const response = await fetch(endpoint, { method: 'POST' });
+                        const data = await response.json();
+                        
+                        if (data.error) {
+                            this.drainStatusMessage = `<span style="color: #dc3545;">Error: ${data.error}</span>`;
+                        } else {
+                            const status = data.status === 'drained' ? 'drained' : 'active';
+                            this.drainStatusMessage = `<span style="color: #28a745;">${hostname} ${status} successfully.</span>`;
+                            
+                            // Refresh status immediately
+                            setTimeout(() => {
+                                this.updateStatus();
+                                this.drainStatusMessage = '';
+                            }, 2000);
+                        }
+                    } catch (error) {
+                        this.drainStatusMessage = `<span style="color: #dc3545;">Network error: ${error.message}</span>`;
+                    }
+                },
+                
+                // Helper methods for computed values
+                keepalivedActiveCount() {
+                    if (!this.vipStatus.keepalived_nodes) return 0;
+                    return this.vipStatus.keepalived_nodes.filter(n => n.keepalived_active).length;
+                },
+                
+                keepalivedNodeStatus() {
+                    if (!this.vipStatus.keepalived_nodes) return '';
+                    return this.vipStatus.keepalived_nodes
+                        .map(node => `${node.hostname}: ${node.status}`)
+                        .join(', ');
+                },
+                
+                getProblemServices(hostname) {
+                    const health = this.hostHealth[hostname];
+                    if (!health || !health.services) return [];
+                    
+                    return Object.entries(health.services)
+                        .filter(([_, serviceInfo]) => {
+                            const status = serviceInfo.status || 'unknown';
+                            return status !== 'healthy' && status !== 'not_required';
+                        })
+                        .map(([name, info]) => ({
+                            name,
+                            status: info.status || 'unknown'
+                        }));
+                },
+                
+                getNormalServices(hostname) {
+                    const health = this.hostHealth[hostname];
+                    if (!health || !health.services) return [];
+                    
+                    return Object.entries(health.services)
+                        .filter(([_, serviceInfo]) => {
+                            const status = serviceInfo.status || 'unknown';
+                            return status === 'healthy' || status === 'not_required';
+                        })
+                        .map(([name, info]) => ({
+                            name,
+                            status: info.status || 'unknown'
+                        }));
+                },
+                
+                getClockSkewStatus(hostname) {
+                    const health = this.hostHealth[hostname];
+                    if (!health || !health.services || !health.services.clock_skew) {
+                        return 'error';
+                    }
+                    return health.services.clock_skew.status || 'error';
+                },
+                
+                getClockSkewOffset(hostname) {
+                    const health = this.hostHealth[hostname];
+                    if (!health || !health.services || !health.services.clock_skew) {
+                        return '<span style="color: #666;">-</span>';
+                    }
+                    
+                    const clockSkew = health.services.clock_skew;
+                    if (clockSkew.details && clockSkew.details.offset_ms !== undefined) {
+                        return clockSkew.details.offset_ms;
+                    } else if (clockSkew.details && clockSkew.details.message) {
+                        return `<span style="color: #666;">${clockSkew.details.message}</span>`;
+                    }
+                    return '<span style="color: #666;">-</span>';
+                },
+                
+                getCertStatusClass() {
+                    if (!this.certificateStatus) return 'status-error';
+                    const status = this.certificateStatus.status || 'error';
+                    
+                    const statusMap = {
+                        'healthy': 'status-healthy',
+                        'warning': 'status-degraded',
+                        'critical': 'status-unhealthy',
+                        'expired': 'status-unhealthy',
+                        'not_configured': 'status-timeout',
+                        'error': 'status-error'
+                    };
+                    
+                    return statusMap[status] || 'status-error';
+                },
+                
+                getCertStatusText() {
+                    if (!this.certificateStatus) return 'Error';
+                    const status = this.certificateStatus.status || 'error';
+                    
+                    const textMap = {
+                        'healthy': 'Valid',
+                        'warning': 'Expires Soon',
+                        'critical': 'Critical',
+                        'expired': 'Expired',
+                        'not_configured': 'Not Configured',
+                        'error': 'Error'
+                    };
+                    
+                    return textMap[status] || 'Error';
+                }
+            }
         }
     </script>
 </body>

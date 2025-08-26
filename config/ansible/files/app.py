@@ -1,6 +1,6 @@
 import json
 import etcd3
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_from_directory
 import os
 import threading
 import time
@@ -921,6 +921,15 @@ def health():
     if not storage_leader_running:
         health_status['overall'] = 'unhealthy'
     
+    # Check DHCP leader election
+    dhcp_leader_running = check_service_status('dhcp-leader-election')
+    health_status['services']['dhcp_leader_election'] = {
+        'status': 'healthy' if dhcp_leader_running else 'unhealthy',
+        'details': {'service_active': dhcp_leader_running}
+    }
+    if not dhcp_leader_running:
+        health_status['overall'] = 'unhealthy'
+    
     # Check DHCP (only required if we are DHCP leader)
     is_dhcp_lead = is_dhcp_leader()
     dhcp_port = check_port_open('localhost', 8067)  # DHCP health port
@@ -1330,6 +1339,49 @@ def get_leadership_status():
         return leadership
     except:
         return {}
+
+@app.route('/api/cluster-status')
+def cluster_status_api():
+    """API endpoint returning cluster status as JSON"""
+    hosts = get_all_hosts()
+    host_health = {}
+    leadership = get_leadership_status()
+    certificate_status = check_certificate_expiry()
+
+    # Get health status for each host
+    for host in hosts:
+        host_health[host['hostname']] = get_host_health(host['ip'])
+    
+    # Extract VIP status from existing health data
+    vip_status = get_cluster_vip_status(host_health)
+    
+    return jsonify({
+        'hosts': hosts,
+        'hostHealth': host_health,
+        'leadership': leadership,
+        'vipStatus': vip_status,
+        'certificateStatus': certificate_status,
+        'respondingHostname': platform.node(),
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/static/<path:filename>')
+def static_files(filename):
+    """Serve static files"""
+    import os
+    from flask import Response
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    static_dir = os.path.join(script_dir, 'static')
+    
+    # Get the response first
+    response = send_from_directory(static_dir, filename)
+    
+    # Set correct MIME type for JavaScript files
+    if filename.endswith('.js'):
+        response.headers['Content-Type'] = 'application/javascript'
+    
+    return response
 
 @app.route('/status')
 def status_page():
