@@ -125,25 +125,36 @@
             height: 8px;
             background-color: #dc3545;
             border-radius: 50%;
-            margin-left: 10px;
             animation: pulse 2s infinite;
             vertical-align: middle;
         }
         .error-message {
             color: #dc3545;
             font-size: 0.7em;
-            margin-left: 5px;
             vertical-align: middle;
+        }
+        .status-indicators {
+            position: absolute;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+        .header-container {
+            position: relative;
+            text-align: center;
         }
     </style>
     <script defer src="/static/alpine-3.14.1.min.js"></script>
 </head>
 <body x-data="clusterStatus()" x-init="init()">
-    <h1>Cluster Status Dashboard 
-        <span x-show="showUpdateIndicator" x-transition.duration.2000ms class="update-indicator"></span>
-        <span x-show="showErrorIndicator" x-transition.duration.2000ms class="error-indicator"></span>
-    </h1>
-    <div x-show="lastError" class="error-message" style="text-align: center; margin-top: -10px; margin-bottom: 10px;">
+    <div class="header-container">
+        <h1>Cluster Status Dashboard</h1>
+        <div class="status-indicators">
+            <span x-show="showUpdateIndicator" x-transition.duration.2000ms class="update-indicator"></span>
+            <span x-show="showErrorIndicator" x-transition.duration.2000ms class="error-indicator"></span>
+        </div>
+    </div>
+    <div x-show="lastError" class="error-message" style="text-align: center; margin-bottom: 10px;">
         <span x-text="lastError"></span>
     </div>
     
@@ -389,8 +400,8 @@
     
     <div class="refresh-info">
         <span>Last updated: <span x-text="lastUpdateTime"></span></span> | 
-        <span>Served by: <span x-text="respondingNode"></span></span> | 
-        <span x-text="nextUpdateText"></span>
+        <span>Served by: <span x-text="respondingNode"></span></span>
+        <span x-show="nextUpdateText" x-text="nextUpdateText" style="margin-left: 10px;"></span>
     </div>
     
     <script>
@@ -411,7 +422,7 @@
                 countdownTimer: null,
                 nextUpdateTime: null,
                 lastUpdateTime: 'Never',
-                nextUpdateText: 'Calculating...',
+                nextUpdateText: '',
                 showUpdateIndicator: false,
                 showErrorIndicator: false,
                 lastError: '',
@@ -514,19 +525,10 @@
                 },
                 
                 updateNextUpdateTime() {
-                    if (!this.autoRefresh || !this.nextUpdateTime) {
+                    if (!this.autoRefresh) {
                         this.nextUpdateText = 'Auto-refresh disabled';
-                        return;
-                    }
-                    
-                    const now = Date.now();
-                    const remaining = Math.max(0, Math.floor((this.nextUpdateTime - now) / 1000));
-                    
-                    // Sanity check - if remaining is unreasonably large, reset
-                    if (remaining > 86400) { // More than 24 hours
-                        console.error('Invalid countdown detected, resetting timer');
-                        this.scheduleNextUpdate();
-                        return;
+                    } else {
+                        this.nextUpdateText = '';
                     }
                 },
                 
