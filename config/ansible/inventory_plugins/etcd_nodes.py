@@ -56,6 +56,7 @@ class InventoryModule(BaseInventoryPlugin):
         
         etcd_hosts = config.get('etcd_hosts', ['localhost:2379'])
         prefix = config.get('prefix', '/cluster/nodes')
+        compose_vars = config.get('compose', {})
         
         # Connect to etcd
         etcd_client = None
@@ -82,6 +83,10 @@ class InventoryModule(BaseInventoryPlugin):
         self.inventory.add_group('core')
         self.inventory.add_group('frontend')
         self.inventory.add_group('all_nodes')
+        
+        # Apply compose variables to storage group only
+        for var_name, var_value in compose_vars.items():
+            self.inventory.set_variable('storage', var_name, var_value)
         
         # Read rathole configuration from etcd if it exists
         try:

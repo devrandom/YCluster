@@ -4,7 +4,7 @@
   become: yes
   vars:
     gateway_vip: "10.0.0.254"
-    gateway_interface: "enp2s0f0np0"  # Main cluster interface
+    gateway_interface: "{{ cluster_interface }}"
     vip_metric: 500  # Higher than DHCP default (100)
     
   tasks:
@@ -37,12 +37,12 @@
           
           # Test internet connectivity by binding to the uplink interface
           # This will fail if interface doesn't exist, is down, or has no connectivity
-          if ! curl -s --connect-timeout 5 --max-time 10 --interface "enp87s0" http://detectportal.firefox.com/success.txt | grep -q "success"; then
-              echo "No internet connectivity via uplink interface enp87s0"
+          if ! curl -s --connect-timeout 5 --max-time 10 --interface "{{ uplink_interface }}" http://detectportal.firefox.com/success.txt | grep -q "success"; then
+              echo "No internet connectivity via uplink interface {{ uplink_interface }}"
               exit 1
           fi
           
-          echo "Gateway healthy - internet accessible via enp87s0"
+          echo "Gateway healthy - internet accessible via {{ uplink_interface }}"
           exit 0
 
     - name: Create NAT setup script

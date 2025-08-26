@@ -2,6 +2,7 @@
 - import_playbook: setup-base-infrastructure.yml
 - import_playbook: install-dhcp-leader-election.yml
 - import_playbook: setup-network-services.yml
+- import_playbook: generate-autoinstall.yml
 - import_playbook: setup-pxe-boot.yml
 - import_playbook: install-certbot.yml
 - import_playbook: setup-web-services.yml
