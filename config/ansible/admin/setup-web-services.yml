@@ -26,6 +26,19 @@
         mode: '0644'
       notify: restart admin-api
 
+    - name: Create static files directory
+      file:
+        path: "{{ admin_services_dir }}/static"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Alpine.js static file
+      copy:
+        src: /opt/infrastructure/config/ansible/files/static/alpine-3.14.1.min.js
+        dest: "{{ admin_services_dir }}/static/alpine-3.14.1.min.js"
+        mode: '0644'
+      notify: restart admin-api
+
     - name: Create systemd service for admin API
       copy:
         dest: /etc/systemd/system/admin-api.service
