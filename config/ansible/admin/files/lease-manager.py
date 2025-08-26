@@ -106,7 +106,7 @@ def list_leases():
     print("-" * 85)
     
     now = datetime.now()
-    for mac, lease in leases:
+    for mac_key, lease in leases:
         expires_str = lease.get('expires', 'Unknown')
         status = 'Unknown'
         
@@ -121,8 +121,9 @@ def list_leases():
         hostname = lease.get('hostname', '')
         ip = lease.get('ip', 'unknown')
         
-        normalized_mac = mac.lower().replace(':', '').replace('-', '')
-        print(f"{normalized_mac:<17} {ip:<15} {hostname:<15} {expires_str:<19} {status}")
+        # Display the MAC from lease data (with colons) if available, otherwise use key
+        display_mac = lease.get('mac', mac_key)
+        print(f"{display_mac:<17} {ip:<15} {hostname:<15} {expires_str:<19} {status}")
 
 def delete_by_hostname(hostname):
     """Delete all etcd entries related to a hostname"""
