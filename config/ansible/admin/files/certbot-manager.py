@@ -126,40 +126,76 @@ subjectAltName = @alt_names
             pass
         return None
 
-def update_nginx_config():
-    """Update nginx configuration with the primary domain from etcd using template"""
+def discover_nginx_templates():
+    """Discover all nginx template files in /etc/nginx/templates"""
+    templates_dir = Path('/etc/nginx/templates')
+    
+    if not templates_dir.exists():
+        print(f"Templates directory not found: {templates_dir}")
+        return []
+    
+    # Find all .j2 template files
+    template_files = list(templates_dir.glob('*.j2'))
+    
+    # Convert to site names (remove .conf.j2 suffix)
+    sites = []
+    for template_file in template_files:
+        site_name = template_file.stem
+        if site_name.endswith('.conf'):
+            site_name = site_name[:-5]  # Remove .conf suffix
+        sites.append((site_name, template_file))
+    
+    return sites
+
+def update_nginx_configs():
+    """Update all nginx configurations from templates with the primary domain from etcd"""
     config = get_https_config()
     
     if 'domain' not in config:
-        print("No primary domain configured - cannot generate nginx config")
+        print("No primary domain configured - cannot generate nginx configs")
         return False
     
     primary_domain = config['domain']
-    nginx_config_path = Path('/etc/nginx/sites-available/admin-api')
-    nginx_template_path = Path('/etc/nginx/templates/admin-api.conf.j2')
+    sites = discover_nginx_templates()
     
-    # Check if template file exists
-    if not nginx_template_path.exists():
-        print(f"Nginx template file not found: {nginx_template_path}")
+    if not sites:
+        print("No nginx templates found")
         return False
     
-    # Read template config
-    template_content = nginx_template_path.read_text()
+    updated_count = 0
+    
+    for site_name, template_path in sites:
+        nginx_config_path = Path(f'/etc/nginx/sites-available/{site_name}')
+        
+        print(f"Processing template: {template_path} -> {nginx_config_path}")
+        
+        try:
+            # Read template config
+            template_content = template_path.read_text()
 
-    # Render template with domain variable
-    template = Template(template_content)
-    updated_content = template.render(domain=primary_domain)
+            # Render template with domain variable
+            template = Template(template_content)
+            updated_content = template.render(domain=primary_domain)
 
-    # Check if config already exists and is the same
-    if nginx_config_path.exists():
-        existing_content = nginx_config_path.read_text()
-        if existing_content == updated_content:
-            print("Nginx configuration is already up to date")
-            return True
+            # Check if config already exists and is the same
+            if nginx_config_path.exists():
+                existing_content = nginx_config_path.read_text()
+                if existing_content == updated_content:
+                    print(f"  {site_name}: already up to date")
+                    continue
 
-    # Write updated config
-    nginx_config_path.write_text(updated_content)
-    print(f"Nginx configuration updated with server_name: {primary_domain}")
+            # Write updated config
+            nginx_config_path.write_text(updated_content)
+            print(f"  {site_name}: configuration updated")
+            updated_count += 1
+            
+        except Exception as e:
+            print(f"  {site_name}: error processing template - {e}")
+            continue
+    
+    if updated_count == 0:
+        print("All nginx configurations are already up to date")
+        return True
 
     # Test nginx config
     result = subprocess.run(['nginx', '-t'], capture_output=True, text=True)
@@ -173,7 +209,7 @@ def update_nginx_config():
         print(f"Failed to reload nginx: {result.stderr}")
         return False
 
-    print("Nginx configuration updated and reloaded successfully")
+    print(f"Updated {updated_count} nginx configurations and reloaded successfully")
     return True
 
 def ensure_nginx_cert_from_etcd():
@@ -379,8 +415,8 @@ def obtain_certificate(test_cert=False, non_interactive=False):
             # Restart the fetch-tls-certs timer
             start_fetch_tls_timer()
         
-        # Update nginx config with correct domain
-        update_nginx_config()
+        # Update nginx configs with correct domain
+        update_nginx_configs()
         
         return True
         
@@ -496,8 +532,8 @@ def renew_certificates(non_interactive=False):
                     # Restart the fetch-tls-certs timer
                     start_fetch_tls_timer()
                 
-                # Update nginx config with correct domain
-                update_nginx_config()
+                # Update nginx configs with correct domain
+                update_nginx_configs()
             
             return True
         else:
@@ -707,7 +743,7 @@ def main():
             success = delete_certificate(args.domain)
             sys.exit(0 if success else 1)
         elif args.command == 'update-nginx':
-            success = update_nginx_config()
+            success = update_nginx_configs()
             sys.exit(0 if success else 1)
         elif args.command == 'status':
             config = get_https_config()
