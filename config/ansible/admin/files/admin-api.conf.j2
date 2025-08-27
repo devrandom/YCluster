@@ -16,14 +16,40 @@ server {
         deny all;
         
         # Include shared location blocks
-        include /etc/nginx/nginx-admin-locations.conf;
+        include /etc/nginx/admin-api-locations.conf;
     }
     
     # Fallback: redirect external requests to HTTPS
     error_page 403 = @redirect_https;
 }
 
-# HTTPS
+# HTTPS - Admin subdomain
+server {
+    listen 443 ssl http2;
+    server_name admin.{{ domain | default('_') }};
+    
+    # SSL configuration
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    
+    # SSL security settings
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    
+    # Include shared location blocks
+    include /etc/nginx/admin-api-locations.conf;
+}
+
+# HTTPS - Main domain (placeholder for future main app)
 server {
     listen 443 ssl http2;
     server_name {{ domain | default('_') }};
@@ -45,6 +71,9 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
     
-    # Include shared location blocks
-    include /etc/nginx/nginx-admin-locations.conf;
+    # Placeholder for main application
+    location / {
+        return 503 "Main application not yet configured";
+        add_header Content-Type text/plain;
+    }
 }
