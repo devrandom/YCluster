@@ -167,6 +167,20 @@
         line: "data_directory = '/rbd/pg/data'"
         backup: yes
 
+    - name: Configure PostgreSQL to listen on all addresses
+      lineinfile:
+        path: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^#?listen_addresses\s*='
+        line: "listen_addresses = '*'"
+        backup: yes
+
+    - name: Configure PostgreSQL client authentication for Docker networks
+      lineinfile:
+        path: /etc/postgresql/16/main/pg_hba.conf
+        line: "host    all             all             172.0.0.0/8             scram-sha-256"
+        insertafter: "# IPv4 local connections:"
+        backup: yes
+
     - name: Check if this node is the current storage leader
       uri:
         url: "http://{{ ansible_host }}:5000/api/health"

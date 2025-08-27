@@ -1,0 +1,166 @@
+---
+- name: Install Open WebUI on storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Create openwebui user
+      user:
+        name: openwebui
+        uid: 1003
+        system: yes
+        shell: /bin/false
+        home: /var/lib/openwebui
+        create_home: yes
+
+    - name: Create Open WebUI configuration directory
+      file:
+        path: /etc/open-webui
+        state: directory
+        owner: openwebui
+        group: openwebui
+        mode: '0755'
+
+    - name: Copy Docker Compose file for Open WebUI
+      copy:
+        src: files/docker-compose.yaml
+        dest: /etc/open-webui/docker-compose.yml
+        owner: openwebui
+        group: openwebui
+        mode: '0644'
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
+    - name: Create Open WebUI RBD manager script
+      copy:
+        dest: /usr/local/lib/cluster/open-webui-manager
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+
+          OPENWEBUI_DATA_DIR="/rbd/misc/app"
+          COMPOSE_FILE="/etc/open-webui/docker-compose.yml"
+          COMPOSE_PROJECT="open-webui"
+
+          # Function to start Open WebUI
+          start_openwebui() {
+              # Create Open WebUI data directories with proper ownership
+              # (misc-rbd.service dependency ensures /rbd/misc is mounted)
+              mkdir -p "$OPENWEBUI_DATA_DIR/open-webui-data"
+              chown -R openwebui:openwebui "$OPENWEBUI_DATA_DIR"
+
+              # Start Open WebUI using Docker Compose v2
+              cd /etc/open-webui
+              docker compose -p "$COMPOSE_PROJECT" up
+              return 0
+          }
+
+          # Function to stop Open WebUI
+          stop_openwebui() {
+              echo "Stopping Open WebUI"
+              
+              # Stop Open WebUI using Docker Compose v2
+              cd /etc/open-webui
+              docker compose -p "$COMPOSE_PROJECT" down
+              
+              echo "Open WebUI stopped"
+          }
+
+          case "$1" in
+              start)
+                  if start_openwebui; then
+                      echo "Open WebUI successfully started"
+                      exit 0
+                  else
+                      echo "Failed to start Open WebUI"
+                      exit 1
+                  fi
+                  ;;
+              stop)
+                  stop_openwebui
+                  ;;
+              *)
+                  echo "Usage: $0 {start|stop}"
+                  exit 1
+                  ;;
+          esac
+
+    - name: Create open-webui systemd service
+      copy:
+        dest: /etc/systemd/system/open-webui.service
+        content: |
+          [Unit]
+          Description=Open WebUI
+          After=network.target docker.service misc-rbd.service
+          Requires=docker.service misc-rbd.service
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/lib/cluster/open-webui-manager start
+          ExecStop=/usr/local/lib/cluster/open-webui-manager stop
+          TimeoutStartSec=300
+          TimeoutStopSec=60
+          User=root
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Disable open-webui service (managed by leader election)
+      systemd:
+        name: open-webui.service
+        enabled: no
+
+    - name: Create PostgreSQL database and user for Open WebUI
+      postgresql_db:
+        name: openwebui
+        state: present
+      become_user: postgres
+      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
+      run_once: true
+
+    - name: Create PostgreSQL user for Open WebUI
+      postgresql_user:
+        name: openwebui
+        password: openwebui
+        db: openwebui
+        priv: ALL
+        state: present
+      become_user: postgres
+      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
+      run_once: true
+
+    - name: Grant schema permissions to openwebui user
+      postgresql_privs:
+        database: openwebui
+        state: present
+        privs: ALL
+        type: schema
+        objs: public
+        roles: openwebui
+      become_user: postgres
+      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
+      run_once: true
+
+    - name: Make openwebui owner of the database
+      postgresql_owner:
+        db: openwebui
+        new_owner: openwebui
+        obj_type: database
+      become_user: postgres
+      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
+      run_once: true
+
+    - name: Pull Open WebUI image from registry
+      docker_image:
+        name: registry.xc:5000/open-webui-with-plugins:latest
+        source: pull
