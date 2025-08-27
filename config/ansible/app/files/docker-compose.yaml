@@ -1,0 +1,21 @@
+services:
+  open-webui:
+    image: registry.xc:5000/open-webui-with-plugins:latest
+    container_name: open-webui
+    volumes:
+      - /rbd/misc/app/open-webui-data:/app/backend/data
+    ports:
+      - ${OPEN_WEBUI_PORT-8380}:8080
+    environment:
+      - 'DATABASE_URL=postgresql://openwebui:openwebui@host.docker.internal/openwebui'
+      - 'OLLAMA_BASE_URL=http://host.docker.internal:11434'
+      - 'WEBUI_SECRET_KEY='
+      - 'OPEN_WEBUI_PLUGINS=open_webui_plugins'
+      - 'MEM_QDRANT_URL=host.docker.internal'
+      - 'MEM_LLM_PROVIDER=ollama'
+      - 'MEM_EMBEDDER_PROVIDER=ollama'
+      - 'MEM_OLLAMA_LLM_MODEL=deepseek-r1:70b'
+      - 'MEM_VECTOR_STORE_QDRANT_DIMS=768'
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped

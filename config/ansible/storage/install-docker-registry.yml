@@ -85,9 +85,15 @@
               environment:
                 - REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY=/var/lib/registry
 
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
     - name: Create Docker registry RBD manager script
       copy:
-        dest: /usr/local/bin/docker-registry-manager.sh
+        dest: /usr/local/lib/cluster/docker-registry-manager
         mode: '0755'
         content: |
           #!/bin/bash
@@ -108,8 +114,6 @@
               # Start registry using Docker Compose v2
               cd /etc/docker-registry
               docker compose -p "$COMPOSE_PROJECT" up
-
-              echo "Docker registry started successfully"
               return 0
           }
 
@@ -154,8 +158,8 @@
 
           [Service]
           Type=exec
-          ExecStart=/usr/local/bin/docker-registry-manager.sh start
-          ExecStop=/usr/local/bin/docker-registry-manager.sh stop
+          ExecStart=/usr/local/lib/cluster/docker-registry-manager start
+          ExecStop=/usr/local/lib/cluster/docker-registry-manager stop
           TimeoutStartSec=300
           TimeoutStopSec=60
           User=root
