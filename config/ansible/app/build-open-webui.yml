@@ -6,13 +6,13 @@
     build_dir: "/opt/src/open-webui-build"
     plugins_repo: "https://github.com/devrandom/open-webui-plugins.git"
     webui_repo: "https://github.com/devrandom/open-webui.git"
-    image_name: "10.0.0.100:5000/open-webui-with-plugins"
+    image_name: "registry.xc:5000/open-webui-with-plugins"
     image_tag: "latest"
 
   tasks:
     - name: Verify registry is ready for push operations
       uri:
-        url: "http://10.0.0.100:5000/v2/_catalog"
+        url: "http://registry.xc:5000/v2/_catalog"
         method: GET
         timeout: 10
       register: registry_catalog
