@@ -105,14 +105,14 @@
         group: root
 
     - name: Configure nginx with HTTPS support (template only)
-      template:
-        src: nginx-admin.conf.j2
+      copy:
+        src: admin-api.conf.j2
         dest: /etc/nginx/templates/admin-api.conf.j2
 
     - name: Configure nginx shared locations (template only)
-      template:
-        src: nginx-admin-locations.conf.j2
-        dest: /etc/nginx/nginx-admin-locations.conf
+      copy:
+        src: admin-api-locations.conf.j2
+        dest: /etc/nginx/admin-api-locations.conf
 
     - name: Update nginx configuration with certbot-manager
       command: /usr/local/bin/certbot-manager update-nginx

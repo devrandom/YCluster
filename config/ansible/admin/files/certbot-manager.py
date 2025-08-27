@@ -227,11 +227,15 @@ def get_https_config():
     return config
 
 def get_all_domains(config):
-    """Get all domains (primary + aliases) as a list"""
+    """Get all domains (primary + aliases + admin subdomain) as a list"""
     domains = []
     
     if 'domain' in config:
-        domains.append(config['domain'])
+        primary_domain = config['domain']
+        domains.append(primary_domain)
+        # Always add admin subdomain
+        admin_domain = f"admin.{primary_domain}"
+        domains.append(admin_domain)
     
     domains.extend(config.get('aliases', []))
     return domains

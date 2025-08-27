@@ -1,4 +1,4 @@
-# Shared location blocks for admin services
+# Admin service location blocks
 # Common proxy settings for Flask app
 location ~ ^/(api/|status|static/) {
     proxy_pass http://127.0.0.1:12723;
