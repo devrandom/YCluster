@@ -17,7 +17,7 @@ PXE boot s1 and wait for OS installation to complete.
 
 From admin laptop:
 ```bash
-docker compose exec ansible ansible-playbook setup-admin-services.yml
+docker compose exec ansible ansible-playbook admin/setup-admin-services.yml
 ```
 
 Switch to normal mode:
@@ -33,14 +33,24 @@ PXE boot additional nodes (s2, s3, etc.). They will auto-provision based on MAC 
 ### 4. Initialize Database
 
 ```bash
-ansible-playbook --tags init_db install-postgres.yml install-storage-leader-election.yml
+ansible-playbook --tags init_db storage/install-postgres.yml storage/install-storage-leader-election.yml
 ```
 
 ## Monitoring
 
-- **Web Dashboard**: http://10.0.0.254/status
+- **Web Dashboard**: https://10.0.0.254/status (HTTPS with self-signed or Let's Encrypt certificates)
 - **Command Line**: `check-cluster` on any node
-- **Health API**: http://10.0.0.254/api/health
+- **Health API**: https://10.0.0.254/api/health
+- **Certificate Status**: Automatic monitoring of certificate expiry and renewal
+
+## Web Services
+
+XCluster provides two main web interfaces:
+
+- **Admin Interface**: Available at `https://admin.your-domain.com` - provides cluster management, monitoring, and administrative functions
+- **Application Interface**: Available at `https://your-domain.com` - serves application services like Open-WebUI for AI chat
+
+Both interfaces are automatically configured when you set up HTTPS certificates. The admin subdomain is always configured alongside your primary domain.  You just need to create a CNAME or ALIAS pointer from the admin subdomain to the main domain.
 
 ## Network Layout
 
@@ -53,11 +63,34 @@ ansible-playbook --tags init_db install-postgres.yml install-storage-leader-elec
 ## Key Features
 
 - **Self-bootstrapping** with MAC-based node detection
-- **High availability** with etcd-based leader election
-- **Distributed storage** using MicroCeph with RBD
+- **High availability** with etcd-based leader election and VIP failover
+- **Distributed storage** using MicroCeph with RBD and XFS
 - **Auto-discovery** and PXE provisioning
-- **TLS certificates** with Let's Encrypt integration
-- **Reverse proxy** support via Rathole
+- **TLS certificates** with self-signed and Let's Encrypt integration
+- **Reverse proxy** support via Rathole for external access
+- **Comprehensive monitoring** with health checks, certificate tracking, and clock skew detection
+
+## Certificate Management
+
+Configure HTTPS domain and email for Let's Encrypt:
+
+```bash
+# Set primary domain and email
+https-config set-domain your-domain.com
+https-config set-email your-email@example.com
+
+# Add additional domain aliases
+https-config add-alias www.your-domain.com
+
+# Obtain certificates (test mode first)
+certbot-manager obtain --test-cert
+
+# Production certificates
+certbot-manager obtain
+
+# Check certificate status
+certbot-manager list
+```
 
 ## External Access
 
@@ -73,6 +106,15 @@ ansible-playbook install-rathole-server.yml --limit frontend
 # Configure cluster nodes to connect to the frontend server
 rathole-config set --remote-addr "your-server.com:2333" --token "your_secret_token"
 ```
+
+## Management Commands
+
+- **Cluster Health**: `check-cluster` - comprehensive cluster status
+- **Node Management**: `lease-manager` - manage DHCP allocations
+- **Certificate Management**: `certbot-manager` - SSL certificate operations
+- **Frontend Nodes**: `frontend-manager` - manage external access points
+- **HTTPS Configuration**: `https-config` - domain and certificate settings
+- **Rathole Configuration**: `rathole-config` - reverse proxy settings
 
 ## SSH Access
 
