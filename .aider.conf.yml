@@ -3,3 +3,4 @@ read:
   - ARCHITECTURE.md
   - docker-compose.yaml
   - config/ansible/site.yml
+  - .aider-rules.md

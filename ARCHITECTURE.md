@@ -50,10 +50,16 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - **Keepalived**: VIP failover for admin and storage services
 - **Docker Registry**: Container images with RBD backend
 
+**Application Services**
+- **Open-WebUI**: AI chat interface behind nginx reverse proxy
+
 ### Certificate Management
 - TLS infrastructure with self-signed certificates and Let's Encrypt integration
 - Certificate synchronization via etcd and nginx
 - Automated renewal and distribution
+
+### Web Services Architecture
+- Application-specific reverse proxy configurations
 
 ### High Availability
 
