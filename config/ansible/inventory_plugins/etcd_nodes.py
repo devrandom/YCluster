@@ -136,8 +136,12 @@ class InventoryModule(BaseInventoryPlugin):
                         self.inventory.add_child('storage', hostname)
                     elif node_type == 'compute':
                         self.inventory.add_child('compute', hostname)
+                    elif node_type == 'macos':
+                        if not self.inventory.groups.get('macos'):
+                            self.inventory.add_group('macos')
+                        self.inventory.add_child('macos', hostname)
                     else:
-                        if not self.inventory.get_group('other'):
+                        if not self.inventory.groups.get('other'):
                             self.inventory.add_group('other')
                         self.inventory.add_child('other', hostname)
                     
