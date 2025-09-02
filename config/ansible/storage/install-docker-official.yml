@@ -1,6 +1,6 @@
 ---
 - name: Install Docker from official Docker repository
-  hosts: all
+  hosts: storage
   become: yes
   tasks:
     - name: Remove old Docker packages

@@ -1,0 +1,251 @@
+---
+- name: Setup macOS nodes
+  hosts: macos
+  become: yes
+  vars:
+    ntp_server: "10.0.0.254"
+    dns_server: "10.0.0.254"
+    health_service_dir: "/usr/local/xcluster"
+  
+  tasks:
+    - name: Create dev user
+      user:
+        name: dev
+        group: admin
+        shell: /bin/zsh
+        create_home: yes
+        home: /Users/dev
+      become: yes
+    
+    - name: Check if Homebrew is installed
+      stat:
+        path: /opt/homebrew/bin/brew
+      register: homebrew_check
+      become: no
+    
+    - name: Clone Homebrew repository
+      git:
+        repo: https://github.com/Homebrew/brew
+        dest: /opt/homebrew
+        version: 9da27e1ac280ce720dfcbe6d5dac0dab2dcfc508
+      become: yes
+      when: not homebrew_check.stat.exists
+    
+    - name: Set Homebrew ownership to dev user
+      file:
+        path: /opt/homebrew
+        owner: dev
+        group: admin
+        recurse: yes
+      become: yes
+      when: not homebrew_check.stat.exists
+    
+    - name: Create Homebrew directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+      become: yes
+      loop:
+        - /opt/homebrew/var/homebrew
+        - /opt/homebrew/var/homebrew/linked
+      when: not homebrew_check.stat.exists
+    
+    - name: Add Homebrew to PATH for dev user
+      lineinfile:
+        path: /Users/dev/.zprofile
+        line: 'eval "$(/opt/homebrew/bin/brew shellenv)"'
+        create: yes
+        owner: dev
+        group: admin
+      become: yes
+      when: not homebrew_check.stat.exists
+    
+    - name: Install Ollama via Homebrew
+      homebrew:
+        name: ollama
+        state: present
+      become: yes
+      become_user: dev
+      environment:
+        PATH: "/opt/homebrew/bin:{{ ansible_env.PATH }}"
+    
+    - name: Create Homebrew log directory
+      file:
+        path: /opt/homebrew/var/log
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+      become: yes
+    
+    - name: Create LaunchAgents directory for dev user
+      file:
+        path: /Users/dev/Library/LaunchAgents
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+      become: yes
+    
+    - name: Create Ollama launchd plist for dev user
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          	<key>KeepAlive</key>
+          	<true/>
+          	<key>Label</key>
+          	<string>homebrew.mxcl.ollama</string>
+          	<key>LimitLoadToSessionType</key>
+          	<array>
+          		<string>Aqua</string>
+          		<string>Background</string>
+          		<string>LoginWindow</string>
+          		<string>StandardIO</string>
+          		<string>System</string>
+          	</array>
+          	<key>ProgramArguments</key>
+          	<array>
+          		<string>/opt/homebrew/opt/ollama/bin/ollama</string>
+          		<string>serve</string>
+          	</array>
+                  <key>EnvironmentVariables</key>
+          	<dict>
+          		<key>OLLAMA_HOST</key>
+          		<string>0.0.0.0</string>
+                  </dict>
+          	<key>RunAtLoad</key>
+          	<true/>
+          	<key>StandardErrorPath</key>
+          	<string>/opt/homebrew/var/log/ollama.log</string>
+          	<key>StandardOutPath</key>
+          	<string>/opt/homebrew/var/log/ollama.log</string>
+          	<key>WorkingDirectory</key>
+          	<string>/opt/homebrew/var</string>
+          </dict>
+          </plist>
+        dest: /Users/dev/Library/LaunchAgents/homebrew.mxcl.ollama.plist
+        owner: dev
+        group: admin
+        mode: '0644'
+      become: yes
+      notify: restart ollama service
+    
+    - name: Configure NTP server
+      command: systemsetup -setnetworktimeserver {{ ntp_server }}
+      become: yes
+      
+    - name: Enable automatic time setting
+      command: systemsetup -setusingnetworktime on
+      become: yes
+      
+    - name: Force NTP sync
+      command: sntp -sS {{ ntp_server }}
+      become: yes
+      ignore_errors: yes
+      
+    - name: Configure DNS server for Ethernet
+      command: networksetup -setdnsservers "Ethernet" {{ dns_server }}
+      become: yes
+      ignore_errors: yes
+      
+    - name: Verify NTP configuration
+      command: systemsetup -getnetworktimeserver
+      register: ntp_config
+      
+    - name: Display NTP configuration
+      debug:
+        msg: "NTP server configured: {{ ntp_config.stdout }}"
+    
+    - name: Create XCluster service directory
+      file:
+        path: "{{ health_service_dir }}"
+        state: directory
+        mode: '0755'
+      become: yes
+    
+    - name: Install macOS health service
+      copy:
+        src: files/health-service.py
+        dest: "{{ health_service_dir }}/health-service.py"
+        mode: '0755'
+      become: yes
+      notify: restart health service
+    
+    - name: Create Python virtual environment
+      command: python3 -m venv {{ health_service_dir }}/venv
+      args:
+        creates: "{{ health_service_dir }}/venv/bin/python"
+      become: yes
+    
+    - name: Install Flask in virtual environment
+      pip:
+        name: flask
+        virtualenv: "{{ health_service_dir }}/venv"
+      become: yes
+    
+    - name: Install requests in virtual environment
+      pip:
+        name: requests
+        virtualenv: "{{ health_service_dir }}/venv"
+      become: yes
+    
+    - name: Install ntplib in virtual environment
+      pip:
+        name: ntplib
+        virtualenv: "{{ health_service_dir }}/venv"
+      become: yes
+    
+    - name: Create launchd plist for health service
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>Label</key>
+              <string>com.xcluster.health</string>
+              <key>ProgramArguments</key>
+              <array>
+                  <string>{{ health_service_dir }}/venv/bin/python</string>
+                  <string>{{ health_service_dir }}/health-service.py</string>
+              </array>
+              <key>RunAtLoad</key>
+              <true/>
+              <key>KeepAlive</key>
+              <true/>
+              <key>StandardOutPath</key>
+              <string>/var/log/xcluster-health.log</string>
+              <key>StandardErrorPath</key>
+              <string>/var/log/xcluster-health.log</string>
+              <key>WorkingDirectory</key>
+              <string>{{ health_service_dir }}</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.xcluster.health.plist
+        mode: '0644'
+      become: yes
+      notify: restart health service
+    
+  handlers:
+    - name: restart health service
+      shell: |
+        launchctl stop com.xcluster.health || true
+        launchctl unload /Library/LaunchDaemons/com.xcluster.health.plist || true
+        launchctl load /Library/LaunchDaemons/com.xcluster.health.plist
+        launchctl start com.xcluster.health
+      become: yes
+    
+    - name: restart ollama service
+      shell: |
+        launchctl stop homebrew.mxcl.ollama || true
+        launchctl unload /Users/dev/Library/LaunchAgents/homebrew.mxcl.ollama.plist || true
+        launchctl load /Users/dev/Library/LaunchAgents/homebrew.mxcl.ollama.plist
+        launchctl start homebrew.mxcl.ollama
+      become: yes
+      become_user: dev

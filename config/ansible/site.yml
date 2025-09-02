@@ -20,3 +20,6 @@
 
 # Storage Infrastructure - Complete storage and database deployment
 - import_playbook: storage/setup-storage-infrastructure.yml
+
+# macOS Node Configuration - Client node setup and health monitoring
+- import_playbook: macos/setup-macos.yml

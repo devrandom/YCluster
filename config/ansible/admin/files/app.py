@@ -37,6 +37,7 @@ import sys
 
 import etcd3
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
+import ntplib
 import os
 import threading
 import time
@@ -566,8 +567,6 @@ def check_clock_skew():
     ntp_server = '10.0.0.254'
 
     try:
-        import ntplib
-
         # Create NTP client
         client = ntplib.NTPClient()
         
@@ -597,11 +596,6 @@ def check_clock_skew():
             }
         }
         
-    except ImportError:
-        return {
-            'status': 'error',
-            'details': {'message': 'ntplib not installed'}
-        }
     except ntplib.NTPException as e:
         return {
             'status': 'error',
