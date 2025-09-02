@@ -1,4 +1,10 @@
 # Admin service location blocks
+# Serve static files from /var/www/html
+location / {
+    root /var/www/html;
+    try_files $uri $uri/ =404;
+}
+
 # Common proxy settings for Flask app
 location ~ ^/(api/|status|static/) {
     proxy_pass http://127.0.0.1:12723;
@@ -32,7 +38,3 @@ location /assets/ {
     add_header Cache-Control "public, immutable";
 }
 
-location = / {
-    root /var/www/html;
-    index index.html;
-}
