@@ -7,3 +7,6 @@
 - keep scripts outside ansible playbooks - they should be in the scripts directory and installed by the playbook from there
 - be concise
 - prefer python libs, if they are in mainstream use, over subprocess
+- ensure that playbooks are idempotent
+- handle errors in scripts and playbooks
+- do not swallow errors / stderr output

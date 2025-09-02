@@ -312,9 +312,7 @@ class DHCPServer:
     def get_next_dynamic_ip(self):
         """Get the next available IP from the dynamic range 200-249"""
         client = self.get_etcd_client()
-        if not client:
-            return f"10.0.0.{DYNAMIC_IP_START}"  # Fallback
-        
+
         # Get all allocated IPs from etcd nodes
         allocated_ips = set()
         for value, metadata in client.get_prefix(f"/cluster/nodes/by-hostname/"):
