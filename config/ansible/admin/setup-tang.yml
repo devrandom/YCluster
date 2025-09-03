@@ -1,0 +1,114 @@
+---
+- name: Setup Tang server for network-bound disk encryption
+  hosts: storage
+  become: yes
+  vars:
+    tang_keys_dir: "/secrets/tang"
+    tang_cache_dir: "/var/cache/tang"
+    tang_systemd_dir: "/etc/systemd/system"
+  
+  tasks:
+    - name: Install Tang server
+      apt:
+        name: tang
+        state: present
+
+    - name: Ensure /secrets is mounted
+      command: mountpoint /secrets
+      register: secrets_mounted
+      failed_when: secrets_mounted.rc != 0
+      changed_when: false
+
+    - name: Create Tang keys directory on encrypted volume
+      file:
+        path: "{{ tang_keys_dir }}"
+        state: directory
+        mode: '0700'
+        owner: _tang
+        group: _tang
+
+    - name: Check if Tang keys exist
+      find:
+        paths: "{{ tang_keys_dir }}"
+        patterns: "*.jwk"
+      register: existing_keys
+
+    - name: Generate Tang keys if none exist
+      command: /usr/libexec/tangd-keygen {{ tang_keys_dir }}
+      become_user: _tang
+      when: existing_keys.matched == 0
+
+    - name: Create Tang cache directory
+      file:
+        path: "{{ tang_cache_dir }}"
+        state: directory
+        mode: '0755'
+        owner: _tang
+        group: _tang
+
+    - name: Create Tang systemd service override directory
+      file:
+        path: "{{ tang_systemd_dir }}/tangd.socket.d"
+        state: directory
+        mode: '0755'
+
+    - name: Configure Tang socket to use custom port and keys directory
+      copy:
+        dest: "{{ tang_systemd_dir }}/tangd.socket.d/override.conf"
+        content: |
+          [Socket]
+          ListenStream=
+          ListenStream={{ tang_port }}
+          ExecStartPre=
+          ExecStartPre=/bin/bash -c 'if [ ! -d {{ tang_keys_dir }} ]; then echo "Tang keys directory not found"; exit 1; fi'
+        mode: '0644'
+
+    - name: Create Tang systemd service override directory
+      file:
+        path: "{{ tang_systemd_dir }}/tangd@.service.d"
+        state: directory
+        mode: '0755'
+
+    - name: Configure Tang service to use custom keys directory
+      copy:
+        dest: "{{ tang_systemd_dir }}/tangd@.service.d/override.conf"
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/libexec/tangd {{ tang_keys_dir }}
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start Tang socket
+      systemd:
+        name: tangd.socket
+        enabled: yes
+        state: started
+
+    - name: Check Tang service status
+      command: systemctl is-active tangd.socket
+      register: tang_status
+      changed_when: false
+
+    - name: Display Tang server information
+      debug:
+        msg: |
+          Tang server is {{ tang_status.stdout }}
+          Keys directory: {{ tang_keys_dir }}
+          To get the Tang server advertisement:
+          curl http://{{ ansible_default_ipv4.address }}:{{ tang_port }}/adv
+
+    - name: Show Tang keys for client configuration
+      command: tang-show-keys {{ tang_port }}
+      register: tang_keys_output
+      changed_when: false
+      failed_when: false
+
+    - name: Display Tang keys
+      debug:
+        msg: |
+          Tang server keys:
+          {{ tang_keys_output.stdout if tang_keys_output.rc == 0 else 'Keys generated but tang-show-keys failed. Use: curl http://' + ansible_default_ipv4.address + ':' + tang_port|string + '/adv' }}

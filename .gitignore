@@ -6,3 +6,4 @@ data/*_key
 data/*_key.pub
 data/SHA256SUMS
 data/dnsmasq.leases
+**/vault*.yml
