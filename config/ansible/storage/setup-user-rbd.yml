@@ -1,0 +1,177 @@
+---
+- name: Setup encrypted user RBD volume with Tang and backup password
+  hosts: storage
+  become: yes
+  vars:
+    rbd_pool: "rbd"
+    rbd_volume_name: "user"
+    rbd_volume_size: "100G"
+    rbd_device_path: "/dev/rbd/{{ rbd_pool }}/{{ rbd_volume_name }}"
+    luks_mapper_name: "{{ rbd_volume_name }}"
+    luks_mapper_path: "/dev/mapper/{{ luks_mapper_name }}"
+    mount_point: "/rbd/user"
+    tang_servers:
+      - "10.0.0.11:{{ tang_port }}"
+      - "10.0.0.12:{{ tang_port }}"
+      - "10.0.0.13:{{ tang_port }}"
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - clevis
+          - clevis-luks
+          - cryptsetup
+        state: present
+
+    - name: Check if mount point is already mounted
+      command: mountpoint -q "{{ mount_point }}"
+      register: mount_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create mount point directory
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+      when: mount_check.rc != 0
+
+    - name: Check if RBD volume exists
+      command: rbd info {{ rbd_pool }}/{{ rbd_volume_name }}
+      register: rbd_check
+      failed_when: false
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Create RBD volume
+      command: rbd create {{ rbd_pool }}/{{ rbd_volume_name }} --size {{ rbd_volume_size }}
+      when: rbd_check.rc != 0
+      run_once: true
+
+    - name: Check if RBD volume is already mapped
+      stat:
+        path: "{{ rbd_device_path }}"
+      register: rbd_device_check
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Map RBD volume
+      command: rbd map {{ rbd_pool }}/{{ rbd_volume_name }}
+      register: rbd_map
+      changed_when: rbd_map.rc == 0
+      when: not rbd_device_check.stat.exists
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Wait for RBD device to be available
+      wait_for:
+        path: "{{ rbd_device_path }}"
+        timeout: 30
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Check if device is already LUKS formatted
+      command: cryptsetup isLuks {{ rbd_device_path }}
+      register: luks_check
+      failed_when: false
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Get Tang server advertisements
+      uri:
+        url: "http://{{ item }}/adv"
+        method: GET
+        return_content: yes
+      register: tang_advs
+      loop: "{{ tang_servers }}"
+      when: luks_check.rc != 0
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Create temporary password file
+      copy:
+        content: "{{ vault_user_volume_key }}"
+        dest: /dev/shm/user_luks_password
+        mode: '0600'
+      when: luks_check.rc != 0
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+      no_log: true
+
+    - name: Format device with LUKS encryption using backup password
+      command: cryptsetup luksFormat --batch-mode --key-file /dev/shm/user_luks_password {{ rbd_device_path }}
+      when: luks_check.rc != 0
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+      no_log: true
+
+    - name: Bind LUKS device to Clevis policy
+      shell: |
+        clevis luks bind -d {{ rbd_device_path }} -k /dev/shm/user_luks_password -y sss '{"t":2,"pins":{"tang":[{"url":"http://{{ tang_servers[0] }}"},{"url":"http://{{ tang_servers[1] }}"},{"url":"http://{{ tang_servers[2] }}"}]}}'
+      when: luks_check.rc != 0
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Remove temporary password file
+      file:
+        path: /dev/shm/user_luks_password
+        state: absent
+      when: luks_check.rc != 0
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Check if LUKS device is already open
+      stat:
+        path: "{{ luks_mapper_path }}"
+      register: mapper_check
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Open LUKS device with Clevis
+      command: clevis luks unlock -d {{ rbd_device_path }} -n {{ luks_mapper_name }}
+      when: not mapper_check.stat.exists
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Check if filesystem exists on mapper device
+      command: blkid {{ luks_mapper_path }}
+      register: fs_check
+      failed_when: false
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Create XFS filesystem on encrypted device
+      command: mkfs.xfs -f -b size=4096 -d su=64k,sw=1,agcount=32 -l size=128m,lazy-count=1 -L "user" "{{ luks_mapper_path }}"
+      when: fs_check.rc != 0
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Display volume information
+      debug:
+        msg: |
+          User RBD volume created and encrypted:
+          - RBD: {{ rbd_pool }}/{{ rbd_volume_name }} ({{ rbd_volume_size }})
+          - Device: {{ rbd_device_path }}
+          - Mapper: {{ luks_mapper_path }}
+          - Mount: {{ mount_point }}
+          - Encryption: 2-of-3 Tang servers + backup password
+          - Tang servers: {{ tang_servers | join(', ') }}
+      run_once: true
+
+    - name: Close LUKS mapper device
+      command: cryptsetup luksClose {{ luks_mapper_name }}
+      when: not mapper_check.stat.exists
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Unmap RBD device
+      command: rbd unmap {{ rbd_device_path }}
+      when: not rbd_device_check.stat.exists
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
