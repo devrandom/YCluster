@@ -324,3 +324,35 @@ Virtual IPs automatically fail over between nodes using keepalived. The dashboar
 - **SSH keys**: Automatically deployed during node provisioning
 - **Service isolation**: Services run with appropriate user privileges
 - **Network segmentation**: Separate networks for different traffic types
+
+### Ansible Vault
+
+Create a vault password:
+
+```shell
+set -C
+touch /run/shm/.vault-pass
+chmod 600 /run/shm/.vault-pass
+openssl rand -base64 30 > /run/shm/.vault-pass
+export ANSIBLE_VAULT_PASSWORD_FILE=/run/shm/.vault-pass
+```
+
+BACKUP THE PASSWORD FILE `/run/shm/.vault-pass` in a secure place!
+
+```shell
+ansible-vault create group_vars/all/vault.yml
+# or later
+ansible-vault edit group_vars/all/vault.yml
+```
+
+Put something like this in the vault file:
+
+```yaml
+vault_secrets_volume_key: "XXX"
+```
+
+where XXX can be generated with something like:
+
+```shell
+openssl rand -base64 30
+```
