@@ -40,7 +40,7 @@
       when: mount_check.rc != 0
 
     - name: Check if RBD volume exists
-      command: rbd info {{ rbd_pool }}/{{ rbd_volume_name }}
+      command: rbd info {{ rbd_pool }}/{{ rbd_volume_name }} --format json
       register: rbd_check
       failed_when: false
       changed_when: false
@@ -152,6 +152,41 @@
       run_once: true
       delegate_to: "{{ groups['storage'][0] }}"
 
+    - name: Install User RBD manager script
+      copy:
+        src: scripts/user-rbd-manager
+        dest: /usr/local/bin/user-rbd-manager
+        mode: '0755'
+
+    - name: Create user-rbd systemd service
+      copy:
+        dest: /etc/systemd/system/user-rbd.service
+        content: |
+          [Unit]
+          Description=User RBD with LUKS Encryption
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/bin/user-rbd-manager start
+          ExecStop=/usr/local/bin/user-rbd-manager stop
+          TimeoutStartSec=300
+          TimeoutStopSec=60
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Disable user-rbd service (managed by leader election)
+      systemd:
+        name: user-rbd.service
+        enabled: no
+
     - name: Display volume information
       debug:
         msg: |
@@ -162,6 +197,7 @@
           - Mount: {{ mount_point }}
           - Encryption: 2-of-3 Tang servers + backup password
           - Tang servers: {{ tang_servers | join(', ') }}
+          - Service: user-rbd.service (managed by storage leader election)
       run_once: true
 
     - name: Close LUKS mapper device
