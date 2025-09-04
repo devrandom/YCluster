@@ -89,7 +89,7 @@ backup_qdrant() {
     sleep 2
     
     # Find the snapshot file in Qdrant's snapshots directory
-    local qdrant_snapshot_dir="/rbd/qdrant/snapshots"
+    local qdrant_snapshot_dir="/rbd/user/qdrant/snapshots"
     local snapshot_file="$qdrant_snapshot_dir/$snapshot_name"
     
     if [ ! -f "$snapshot_file" ]; then

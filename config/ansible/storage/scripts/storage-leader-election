@@ -83,18 +83,19 @@ is_node_drained() {
 start_all_services() {
     echo "Starting all services as storage leader"
     
-    # Start all services in parallel - systemd handles dependencies
-    systemctl start postgres-rbd &
+    # Start user RBD first - other services depend on it
+    systemctl start user-rbd
+    
+    # Start database services that use user RBD
+    systemctl start postgresql@16-main &
     PG_START_PID=$!
     
-    systemctl start qdrant-rbd &
+    systemctl start qdrant &
     QDRANT_START_PID=$!
     
+    # Start misc-rbd for docker registry
     systemctl start misc-rbd &
     MISC_START_PID=$!
-    
-    systemctl start user-rbd &
-    USER_START_PID=$!
     
     # Docker registry will wait for misc-rbd due to systemd dependency
     systemctl start docker-registry &
@@ -103,7 +104,7 @@ start_all_services() {
     systemctl start rathole &
     RATHOLE_START_PID=$!
     
-    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Misc PID: $MISC_START_PID, User PID: $USER_START_PID, Registry PID: $REGISTRY_START_PID, Rathole PID: $RATHOLE_START_PID)"
+    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Misc PID: $MISC_START_PID, Registry PID: $REGISTRY_START_PID, Rathole PID: $RATHOLE_START_PID)"
 }
 
 # Function to stop all services
@@ -112,8 +113,6 @@ stop_all_services() {
     
     # Try graceful shutdown first with timeout
     echo "Attempting graceful service shutdown (5 second timeout)"
-    timeout 5s systemctl stop postgres-rbd &
-    timeout 5s systemctl stop qdrant-rbd &
     timeout 5s systemctl stop misc-rbd &
     timeout 5s systemctl stop user-rbd &
     timeout 5s systemctl stop docker-registry &
@@ -140,12 +139,6 @@ stop_all_services() {
         
         # Force XFS shutdown to abandon all I/O immediately (only if mounted)
         echo "Force shutting down XFS filesystems"
-        if mountpoint -q /rbd/pg; then
-            xfs_io -x -c "shutdown" /rbd/pg || true
-        fi
-        if mountpoint -q /rbd/qdrant; then
-            xfs_io -x -c "shutdown" /rbd/qdrant || true
-        fi
         if mountpoint -q /rbd/misc; then
             xfs_io -x -c "shutdown" /rbd/misc || true
         fi
@@ -155,16 +148,13 @@ stop_all_services() {
         
         # Force unmount filesystems (in parallel)
         echo "Force unmounting RBD filesystems"
-        umount -f -l /rbd/pg &
-        umount -f -l /rbd/qdrant &
         umount -f -l /rbd/misc &
         umount -f -l /rbd/user &
         wait
         
         # Force close LUKS devices and unmap RBDs (in parallel with timeout)
         echo "Force closing LUKS devices and unmapping RBD devices"
-        timeout 10s rbd unmap -o force /dev/rbd/rbd/psql &
-        timeout 10s rbd unmap -o force /dev/rbd/rbd/qdrant &
+        timeout 10s rbd unmap -o force /dev/rbd/rbd/user &
         timeout 10s rbd unmap -o force /dev/rbd/rbd/misc &
         
         # Force close LUKS device with aggressive methods
@@ -187,8 +177,6 @@ stop_all_services() {
     
     # Clean up lock files
     echo "Cleaning up lock files"
-    rm -f /var/run/postgres-rbd.lock || true
-    rm -f /var/run/qdrant-rbd.lock || true
     rm -f /var/run/misc-rbd.lock || true
     rm -f /var/run/user-rbd.lock || true
 }
