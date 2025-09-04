@@ -47,6 +47,17 @@ unlock_and_mount() {
         
         if mount_filesystem "$LUKS_MAPPER_PATH"; then
             echo "$rbd_device" > "$LOCK_FILE"
+            
+            # Create necessary directories for services
+            mkdir -p "$MOUNT_POINT/postgres"
+            mkdir -p "$MOUNT_POINT/qdrant/storage"
+            mkdir -p "$MOUNT_POINT/qdrant/snapshots"
+            mkdir -p "$MOUNT_POINT/backups"
+            
+            # Set proper ownership
+            chown -R postgres:postgres "$MOUNT_POINT/postgres" || true
+            chown -R qdrant:qdrant "$MOUNT_POINT/qdrant" || true
+            
             return 0
         else
             cryptsetup luksClose "$LUKS_MAPPER_NAME" || true
@@ -137,6 +148,13 @@ release_and_unmount() {
         RBD_DEVICE=$(cat "$LOCK_FILE")
         
         echo "Unmounting and releasing RBD device: $RBD_DEVICE"
+        
+        # Stop services that depend on user RBD
+        echo "Stopping PostgreSQL service"
+        systemctl stop postgresql@16-main || true
+        
+        echo "Stopping Qdrant service"
+        systemctl stop qdrant || true
         
         # Unmount
         umount "$MOUNT_POINT" || true
