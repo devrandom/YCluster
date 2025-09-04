@@ -1,0 +1,236 @@
+#!/bin/bash
+set -e
+
+POOL_NAME="rbd"
+RBD_IMAGE="user"
+MOUNT_POINT="/rbd/user"
+LOCK_FILE="/var/run/user-rbd.lock"
+LUKS_MAPPER_NAME="user"
+LUKS_MAPPER_PATH="/dev/mapper/${LUKS_MAPPER_NAME}"
+MAX_RETRIES=5
+RETRY_DELAY=3
+
+# Helper function to get existing RBD device
+get_existing_rbd_device() {
+    rbd showmapped --format json | jq -r ".[] | select(.name == \"${RBD_IMAGE}\" and .pool == \"${POOL_NAME}\") | .device" 2>/dev/null || true
+}
+
+# Helper function to ensure lockfile exists
+ensure_lockfile() {
+    if [ ! -f "$LOCK_FILE" ]; then
+        local existing_device=$(get_existing_rbd_device)
+        if [ -n "$existing_device" ]; then
+            echo "$existing_device" > "$LOCK_FILE"
+        fi
+    fi
+}
+
+# Helper function to mount filesystem
+mount_filesystem() {
+    local device="$1"
+    mkdir -p "$MOUNT_POINT"
+    if mount -t xfs -o noatime,nodiratime,inode64,allocsize=16M,logbufs=8,logbsize=256k,swalloc "$device" "$MOUNT_POINT"; then
+        echo "Successfully mounted $device to $MOUNT_POINT"
+        return 0
+    else
+        echo "Failed to mount $device to $MOUNT_POINT"
+        return 1
+    fi
+}
+
+# Helper function to unlock and mount LUKS device
+unlock_and_mount() {
+    local rbd_device="$1"
+    
+    if clevis luks unlock -d "$rbd_device" -n "$LUKS_MAPPER_NAME"; then
+        echo "Successfully decrypted LUKS device: $LUKS_MAPPER_PATH"
+        
+        if mount_filesystem "$LUKS_MAPPER_PATH"; then
+            echo "$rbd_device" > "$LOCK_FILE"
+            return 0
+        else
+            cryptsetup luksClose "$LUKS_MAPPER_NAME" || true
+            return 1
+        fi
+    else
+        echo "Failed to unlock LUKS device on $rbd_device"
+        return 1
+    fi
+}
+
+# Function to acquire RBD lock and mount
+acquire_and_mount() {
+    local retries=0
+    
+    # Check if already mounted
+    if mountpoint -q "$MOUNT_POINT"; then
+        echo "Already mounted at $MOUNT_POINT"
+        ensure_lockfile
+        return 0
+    fi
+    
+    # Check if LUKS device is already open
+    if [ -e "$LUKS_MAPPER_PATH" ]; then
+        echo "LUKS device already open at $LUKS_MAPPER_PATH"
+        
+        if mount_filesystem "$LUKS_MAPPER_PATH"; then
+            ensure_lockfile
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    # Check if RBD is already mapped
+    EXISTING_RBD_DEVICE=$(get_existing_rbd_device)
+    if [ -n "$EXISTING_RBD_DEVICE" ]; then
+        echo "RBD already mapped at $EXISTING_RBD_DEVICE"
+        return unlock_and_mount "$EXISTING_RBD_DEVICE"
+    fi
+    
+    while [ $retries -lt $MAX_RETRIES ]; do
+        # Try to map the RBD device with exclusive lock
+        if RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30); then
+            echo "Successfully locked RBD device: $RBD_DEVICE"
+            
+            if unlock_and_mount "$RBD_DEVICE"; then
+                return 0
+            else
+                rbd unmap "$RBD_DEVICE" || true
+            fi
+        else
+            echo "Failed to acquire exclusive lock on RBD ${POOL_NAME}/${RBD_IMAGE} (attempt $((retries + 1))/$MAX_RETRIES)"
+            
+            # Check if current lock holder exists
+            LOCK_INFO=$(rbd lock list "${POOL_NAME}/${RBD_IMAGE}" --format json 2>/dev/null || echo "[]")
+            if [ "$LOCK_INFO" != "[]" ] && [ -n "$LOCK_INFO" ]; then
+                echo "Current lock info: $LOCK_INFO"
+                
+                # Try to break stale locks if we're on retry 3 or higher
+                if [ $retries -ge 2 ]; then
+                    echo "Attempting to break potentially stale locks..."
+                    # Parse JSON lock info and remove locks
+                    echo "$LOCK_INFO" | jq -r '.[] | "\(.locker) \(.cookie)"' | while read -r lock_id lock_cookie; do
+                        if [ -n "$lock_id" ] && [ -n "$lock_cookie" ]; then
+                            echo "Attempting to remove lock: $lock_id with cookie: $lock_cookie"
+                            rbd lock remove "${POOL_NAME}/${RBD_IMAGE}" "$lock_id" "$lock_cookie" || true
+                        fi
+                    done
+                fi
+            fi
+        fi
+        
+        retries=$((retries + 1))
+        if [ $retries -lt $MAX_RETRIES ]; then
+            echo "Retrying in $RETRY_DELAY seconds..."
+            sleep $RETRY_DELAY
+        fi
+    done
+    
+    echo "Failed to acquire RBD lock after $MAX_RETRIES attempts"
+    return 1
+}
+
+# Function to unmount and release RBD
+release_and_unmount() {
+    if [ -f "$LOCK_FILE" ]; then
+        RBD_DEVICE=$(cat "$LOCK_FILE")
+        
+        echo "Unmounting and releasing RBD device: $RBD_DEVICE"
+        
+        # Unmount
+        umount "$MOUNT_POINT" || true
+        
+        # Close LUKS device
+        cryptsetup luksClose "$LUKS_MAPPER_NAME" || true
+        
+        # Unmap RBD device
+        rbd unmap "$RBD_DEVICE" || true
+        
+        # Remove lock file
+        rm -f "$LOCK_FILE"
+        
+        echo "Released RBD device: $RBD_DEVICE"
+    else
+        echo "No RBD lock file found"
+    fi
+}
+
+# Function to show status
+show_status() {
+    echo "=== User RBD Status ==="
+    
+    # Check mount status
+    if mountpoint -q "$MOUNT_POINT"; then
+        echo "Mount: MOUNTED at $MOUNT_POINT"
+        df -h "$MOUNT_POINT" | tail -1 | awk '{print "  Usage: " $3 "/" $2 " (" $5 " used)"}'
+    else
+        echo "Mount: NOT MOUNTED"
+    fi
+    
+    # Check LUKS status
+    if [ -e "$LUKS_MAPPER_PATH" ]; then
+        echo "LUKS: OPEN at $LUKS_MAPPER_PATH"
+    else
+        echo "LUKS: CLOSED"
+    fi
+    
+    # Check RBD mapping status
+    local existing_device=$(get_existing_rbd_device)
+    if [ -n "$existing_device" ]; then
+        echo "RBD: MAPPED at $existing_device"
+        
+        # Show lock information
+        local lock_info=$(rbd lock list "${POOL_NAME}/${RBD_IMAGE}" --format json 2>/dev/null || echo "[]")
+        if [ "$lock_info" != "[]" ] && [ -n "$lock_info" ]; then
+            echo "  Locks:"
+            echo "$lock_info" | jq -r '.[] | "    " + .locker + " (cookie: " + .cookie + ")"'
+        else
+            echo "  Locks: none"
+        fi
+    else
+        echo "RBD: NOT MAPPED"
+    fi
+    
+    # Check lock file
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_device=$(cat "$LOCK_FILE")
+        echo "Lock file: EXISTS ($lock_device)"
+    else
+        echo "Lock file: NOT FOUND"
+    fi
+    
+    # Check RBD volume info
+    local rbd_info=$(rbd info "${POOL_NAME}/${RBD_IMAGE}" --format json 2>/dev/null || echo "{}")
+    if [ "$rbd_info" != "{}" ]; then
+        local size=$(echo "$rbd_info" | jq -r '.size // "unknown"')
+        local features=$(echo "$rbd_info" | jq -r '.features // [] | join(", ")')
+        echo "RBD Volume: EXISTS"
+        echo "  Size: $size bytes"
+        echo "  Features: $features"
+    else
+        echo "RBD Volume: NOT FOUND"
+    fi
+}
+
+case "$1" in
+    start)
+        if acquire_and_mount; then
+            echo "User RBD successfully acquired and mounted"
+            exit 0
+        else
+            echo "Failed to acquire User RBD lock"
+            exit 1
+        fi
+        ;;
+    stop)
+        release_and_unmount
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac
