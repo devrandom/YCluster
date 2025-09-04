@@ -11,37 +11,11 @@
           - python3-psycopg2
         state: present
 
-    - name: Install PostgreSQL RBD manager script
-      copy:
-        src: scripts/postgres-rbd-manager
-        dest: /usr/local/bin/postgres-rbd-manager
-        mode: '0755'
-
-    - name: Create postgres-rbd systemd service
-      copy:
-        dest: /etc/systemd/system/postgres-rbd.service
-        content: |
-          [Unit]
-          Description=PostgreSQL with RBD Storage
-          After=network.target
-
-          [Service]
-          Type=oneshot
-          RemainAfterExit=yes
-          ExecStart=/usr/local/bin/postgres-rbd-manager start
-          ExecStop=/usr/local/bin/postgres-rbd-manager stop
-          TimeoutStartSec=300
-          TimeoutStopSec=60
-          User=root
-
-          [Install]
-          WantedBy=multi-user.target
-
     - name: Update PostgreSQL data directory in config
       lineinfile:
         path: /etc/postgresql/16/main/postgresql.conf
         regexp: '^#?data_directory\s*='
-        line: "data_directory = '/rbd/pg/data'"
+        line: "data_directory = '/rbd/user/postgres'"
         backup: yes
 
     - name: Configure PostgreSQL to listen on all addresses
@@ -101,45 +75,21 @@
       systemd:
         daemon_reload: yes
 
-    - name: Disable postgres-rbd service (managed by leader election)
-      systemd:
-        name: postgres-rbd.service
-        enabled: no
 
-    - name: Temporarily start postgres-rbd to initialize database
-      systemd:
-        name: postgres-rbd.service
-        state: started
-      register: temp_start
-      failed_when: false
-      when: inventory_hostname == groups['core'][0]
-      tags:
-        - never
-        - init_db
-
-    - name: Check if PostgreSQL cluster exists at /rbd/pg/data
+    - name: Check if PostgreSQL cluster exists
       stat:
-        path: /rbd/pg/data/PG_VERSION
+        path: /rbd/user/postgres/PG_VERSION
       register: cluster_exists
-      when: inventory_hostname == groups['core'][0] and temp_start.failed == false
+      when: is_storage_leader
       tags:
         - never
         - init_db
 
-    - name: Initialize PostgreSQL cluster at /rbd/pg/data
+    - name: Initialize PostgreSQL cluster
       become_user: postgres
       shell: |
-        /usr/lib/postgresql/16/bin/initdb -D /rbd/pg/data
-      when: inventory_hostname == groups['core'][0] and temp_start.failed == false and not cluster_exists.stat.exists
-      tags:
-        - never
-        - init_db
-
-    - name: Stop temporary postgres-rbd service
-      systemd:
-        name: postgres-rbd.service
-        state: stopped
-      when: inventory_hostname == groups['core'][0] and temp_start.failed == false
+        /usr/lib/postgresql/16/bin/initdb -D /rbd/user/postgres
+      when: is_storage_leader and not cluster_exists.stat.exists
       tags:
         - never
         - init_db
