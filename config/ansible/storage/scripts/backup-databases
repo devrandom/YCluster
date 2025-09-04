@@ -1,0 +1,244 @@
+#!/bin/bash
+set -e
+
+BACKUP_DIR="/rbd/user/backups"
+POSTGRES_BACKUP_DIR="$BACKUP_DIR/postgres"
+QDRANT_BACKUP_DIR="$BACKUP_DIR/qdrant"
+RETENTION_DAYS=30
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+# Create backup directories
+create_backup_dirs() {
+    log "Creating backup directories..."
+    mkdir -p "$POSTGRES_BACKUP_DIR"
+    mkdir -p "$QDRANT_BACKUP_DIR"
+}
+
+# Backup PostgreSQL
+backup_postgres() {
+    log "Starting PostgreSQL backup..."
+    
+    # Check if PostgreSQL is running
+    if ! systemctl is-active --quiet postgresql@16-main; then
+        log "PostgreSQL is not running, skipping backup"
+        return 0
+    fi
+    
+    local backup_file="$POSTGRES_BACKUP_DIR/postgres_${TIMESTAMP}.sql.gz"
+    
+    # Create database dump
+    if sudo -u postgres pg_dumpall | gzip > "$backup_file"; then
+        log "PostgreSQL backup completed: $backup_file"
+        
+        # Verify backup file
+        if [ -s "$backup_file" ]; then
+            log "PostgreSQL backup verified (size: $(du -h "$backup_file" | cut -f1))"
+        else
+            log "ERROR: PostgreSQL backup file is empty"
+            rm -f "$backup_file"
+            return 1
+        fi
+    else
+        log "ERROR: PostgreSQL backup failed"
+        rm -f "$backup_file"
+        return 1
+    fi
+}
+
+# Backup Qdrant
+backup_qdrant() {
+    log "Starting Qdrant backup..."
+    
+    # Check if Qdrant is running
+    if ! systemctl is-active --quiet qdrant; then
+        log "Qdrant is not running, skipping backup"
+        return 0
+    fi
+    
+    # Check if Qdrant is responding
+    if ! curl -s http://localhost:6333/health >/dev/null 2>&1; then
+        log "Qdrant is not responding, skipping backup"
+        return 0
+    fi
+    
+    local backup_file="$QDRANT_BACKUP_DIR/qdrant_${TIMESTAMP}.snapshot"
+    
+    # Create full database snapshot using Qdrant API
+    log "Creating Qdrant snapshot via API..."
+    local snapshot_response=$(curl -s -X POST "http://localhost:6333/snapshots" \
+        -H "Content-Type: application/json" \
+        -d '{}' || echo '{"status":"error"}')
+    
+    # Parse snapshot name from response
+    local snapshot_name=$(echo "$snapshot_response" | jq -r '.result.name // empty' 2>/dev/null)
+    
+    if [ -z "$snapshot_name" ]; then
+        log "ERROR: Failed to create Qdrant snapshot"
+        log "Response: $snapshot_response"
+        return 1
+    fi
+    
+    log "Qdrant snapshot created: $snapshot_name"
+    
+    # Wait a moment for snapshot to be written
+    sleep 2
+    
+    # Find the snapshot file in Qdrant's snapshots directory
+    local qdrant_snapshot_dir="/rbd/qdrant/snapshots"
+    local snapshot_file="$qdrant_snapshot_dir/$snapshot_name"
+    
+    if [ ! -f "$snapshot_file" ]; then
+        log "ERROR: Snapshot file not found: $snapshot_file"
+        return 1
+    fi
+    
+    # Copy snapshot to backup directory
+    if cp "$snapshot_file" "$backup_file"; then
+        log "Qdrant backup completed: $backup_file"
+        
+        # Verify backup file
+        if [ -s "$backup_file" ]; then
+            log "Qdrant backup verified (size: $(du -h "$backup_file" | cut -f1))"
+        else
+            log "ERROR: Qdrant backup file is empty"
+            rm -f "$backup_file"
+            return 1
+        fi
+        
+        # Clean up the original snapshot file to save space
+        rm -f "$snapshot_file"
+        log "Cleaned up original snapshot file"
+        
+    else
+        log "ERROR: Failed to copy Qdrant snapshot"
+        return 1
+    fi
+}
+
+# Clean old backups
+cleanup_old_backups() {
+    log "Cleaning up backups older than $RETENTION_DAYS days..."
+    
+    # Clean PostgreSQL backups
+    if [ -d "$POSTGRES_BACKUP_DIR" ]; then
+        find "$POSTGRES_BACKUP_DIR" -name "postgres_*.sql.gz" -mtime +$RETENTION_DAYS -delete
+        local pg_count=$(find "$POSTGRES_BACKUP_DIR" -name "postgres_*.sql.gz" | wc -l)
+        log "PostgreSQL backups remaining: $pg_count"
+    fi
+    
+    # Clean Qdrant backups
+    if [ -d "$QDRANT_BACKUP_DIR" ]; then
+        find "$QDRANT_BACKUP_DIR" -name "qdrant_*.snapshot" -mtime +$RETENTION_DAYS -delete
+        local qdrant_count=$(find "$QDRANT_BACKUP_DIR" -name "qdrant_*.snapshot" | wc -l)
+        log "Qdrant backups remaining: $qdrant_count"
+    fi
+}
+
+# Show backup status
+show_status() {
+    log "=== Backup Status ==="
+    
+    if [ -d "$POSTGRES_BACKUP_DIR" ]; then
+        local pg_count=$(find "$POSTGRES_BACKUP_DIR" -name "postgres_*.sql.gz" | wc -l)
+        local pg_size=$(du -sh "$POSTGRES_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "0")
+        log "PostgreSQL backups: $pg_count files, $pg_size total"
+        
+        if [ $pg_count -gt 0 ]; then
+            local latest_pg=$(find "$POSTGRES_BACKUP_DIR" -name "postgres_*.sql.gz" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+            local latest_pg_date=$(stat -c %y "$latest_pg" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
+            log "  Latest: $(basename "$latest_pg") ($latest_pg_date)"
+        fi
+    fi
+    
+    if [ -d "$QDRANT_BACKUP_DIR" ]; then
+        local qdrant_count=$(find "$QDRANT_BACKUP_DIR" -name "qdrant_*.snapshot" | wc -l)
+        local qdrant_size=$(du -sh "$QDRANT_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "0")
+        log "Qdrant backups: $qdrant_count files, $qdrant_size total"
+        
+        if [ $qdrant_count -gt 0 ]; then
+            local latest_qdrant=$(find "$QDRANT_BACKUP_DIR" -name "qdrant_*.snapshot" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+            local latest_qdrant_date=$(stat -c %y "$latest_qdrant" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
+            log "  Latest: $(basename "$latest_qdrant") ($latest_qdrant_date)"
+        fi
+    fi
+    
+    local total_size=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1 || echo "0")
+    log "Total backup size: $total_size"
+}
+
+# Main function
+main() {
+    case "$1" in
+        backup)
+            local databases="${2:-both}"
+            log "Starting database backup process for: $databases"
+            create_backup_dirs
+            
+            local postgres_result=0
+            local qdrant_result=0
+            
+            case "$databases" in
+                postgres|postgresql)
+                    backup_postgres || postgres_result=$?
+                    qdrant_result=0  # Skip Qdrant, mark as success
+                    ;;
+                qdrant)
+                    backup_qdrant || qdrant_result=$?
+                    postgres_result=0  # Skip PostgreSQL, mark as success
+                    ;;
+                both|all|*)
+                    backup_postgres || postgres_result=$?
+                    backup_qdrant || qdrant_result=$?
+                    ;;
+            esac
+            
+            cleanup_old_backups
+            show_status
+            
+            if [ $postgres_result -eq 0 ] && [ $qdrant_result -eq 0 ]; then
+                log "Backup process completed successfully"
+                exit 0
+            else
+                log "Backup process completed with errors"
+                exit 1
+            fi
+            ;;
+        status)
+            show_status
+            ;;
+        cleanup)
+            log "Running cleanup only..."
+            cleanup_old_backups
+            show_status
+            ;;
+        *)
+            echo "Usage: $0 {backup [postgres|qdrant|both]|status|cleanup}"
+            echo "  backup [db] - Create backups (default: both databases)"
+            echo "    postgres  - Backup PostgreSQL only"
+            echo "    qdrant    - Backup Qdrant only"
+            echo "    both      - Backup both databases (default)"
+            echo "  status      - Show current backup status"
+            echo "  cleanup     - Clean up old backups only"
+            exit 1
+            ;;
+    esac
+}
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    echo "This script must be run as root"
+    exit 1
+fi
+
+# Check if backup destination is available
+if [ ! -d "/rbd/user" ]; then
+    log "ERROR: /rbd/user is not available. Ensure user RBD volume is mounted."
+    exit 1
+fi
+
+main "$@"

@@ -158,6 +158,12 @@
         dest: /usr/local/bin/user-rbd-manager
         mode: '0755'
 
+    - name: Install database backup script
+      copy:
+        src: scripts/backup-databases
+        dest: /usr/local/bin/backup-databases
+        mode: '0755'
+
     - name: Create user-rbd systemd service
       copy:
         dest: /etc/systemd/system/user-rbd.service
@@ -178,6 +184,36 @@
           [Install]
           WantedBy=multi-user.target
 
+    - name: Create database backup systemd service
+      copy:
+        dest: /etc/systemd/system/backup-databases.service
+        content: |
+          [Unit]
+          Description=Database Backup Service
+          After=user-rbd.service
+          Requires=user-rbd.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/backup-databases backup
+          User=root
+
+    - name: Create database backup systemd timer
+      copy:
+        dest: /etc/systemd/system/backup-databases.timer
+        content: |
+          [Unit]
+          Description=Database Backup Timer
+          Requires=backup-databases.service
+
+          [Timer]
+          OnCalendar=daily
+          RandomizedDelaySec=1h
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
     - name: Reload systemd daemon
       systemd:
         daemon_reload: yes
@@ -186,6 +222,12 @@
       systemd:
         name: user-rbd.service
         enabled: no
+
+    - name: Enable database backup timer
+      systemd:
+        name: backup-databases.timer
+        enabled: yes
+        state: started
 
     - name: Display volume information
       debug:
