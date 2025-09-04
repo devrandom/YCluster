@@ -21,7 +21,7 @@
 
     - name: Copy storage leader election script
       copy:
-        src: /etc/ansible/scripts/storage-leader-election.sh
+        src: scripts/storage-leader-election
         dest: /usr/local/lib/cluster/storage-leader-election
         mode: '0755'
       notify: restart storage leader election
