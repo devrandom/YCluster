@@ -38,13 +38,34 @@ mount_filesystem() {
     fi
 }
 
-# Helper function to unlock and mount LUKS device
-unlock_and_mount() {
+# Helper function to decrypt LUKS device (shared logic)
+decrypt_luks_device() {
     local rbd_device="$1"
+    local use_passphrase="$2"
+    local test_mode="$3"
+    local mapper_name="$4"
     
-    if clevis luks unlock -d "$rbd_device" -n "$LUKS_MAPPER_NAME"; then
-        echo "Successfully decrypted LUKS device: $LUKS_MAPPER_PATH"
-        
+    if [ "$use_passphrase" = "true" ]; then
+        if [ "$test_mode" = "true" ]; then
+            cryptsetup luksOpen --test-passphrase "$rbd_device"
+        else
+            cryptsetup luksOpen "$rbd_device" "$mapper_name"
+        fi
+    else
+        if [ "$test_mode" = "true" ]; then
+            clevis luks unlock -d "$rbd_device" -o "--test-passphrase"
+        else
+            clevis luks unlock -d "$rbd_device" -n "$mapper_name"
+        fi
+    fi
+}
+
+# Helper function to decrypt and mount LUKS device
+decrypt_and_mount() {
+    local rbd_device="$1"
+    local use_passphrase="$2"
+    
+    if decrypt_luks_device "$rbd_device" "$use_passphrase" "false" "$LUKS_MAPPER_NAME"; then
         if mount_filesystem "$LUKS_MAPPER_PATH"; then
             echo "$rbd_device" > "$LOCK_FILE"
             
@@ -64,13 +85,13 @@ unlock_and_mount() {
             return 1
         fi
     else
-        echo "Failed to unlock LUKS device on $rbd_device"
         return 1
     fi
 }
 
 # Function to acquire RBD lock and mount
 acquire_and_mount() {
+    local use_passphrase="$1"
     local retries=0
     
     # Check if already mounted
@@ -96,7 +117,7 @@ acquire_and_mount() {
     EXISTING_RBD_DEVICE=$(get_existing_rbd_device)
     if [ -n "$EXISTING_RBD_DEVICE" ]; then
         echo "RBD already mapped at $EXISTING_RBD_DEVICE"
-        return unlock_and_mount "$EXISTING_RBD_DEVICE"
+        return decrypt_and_mount "$EXISTING_RBD_DEVICE" "$use_passphrase"
     fi
     
     while [ $retries -lt $MAX_RETRIES ]; do
@@ -104,7 +125,7 @@ acquire_and_mount() {
         if RBD_DEVICE=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30); then
             echo "Successfully locked RBD device: $RBD_DEVICE"
             
-            if unlock_and_mount "$RBD_DEVICE"; then
+            if decrypt_and_mount "$RBD_DEVICE" "$use_passphrase"; then
                 return 0
             else
                 rbd unmap "$RBD_DEVICE" || true
@@ -174,6 +195,75 @@ release_and_unmount() {
     fi
 }
 
+# Function to test if volume can be decrypted without disturbing current state
+test_decrypt() {
+    local use_passphrase="$1"
+    echo "=== Testing User RBD Decrypt Capability ==="
+    
+    local rbd_info=$(rbd info "${POOL_NAME}/${RBD_IMAGE}" --format json 2>/dev/null || echo "{}")
+    if [ "$rbd_info" = "{}" ]; then
+        echo "ERROR: RBD volume ${POOL_NAME}/${RBD_IMAGE} does not exist"
+        return 1
+    fi
+    
+    echo "RBD volume exists: ${POOL_NAME}/${RBD_IMAGE}"
+    
+    # Check if RBD is already mapped
+    local existing_device=$(get_existing_rbd_device)
+    local test_device=""
+    local mapped_by_us=false
+    
+    if [ -n "$existing_device" ]; then
+        echo "RBD already mapped at $existing_device"
+        test_device="$existing_device"
+    else
+        echo "Attempting to map RBD volume for testing..."
+        if test_device=$(rbd map "${POOL_NAME}/${RBD_IMAGE}" --exclusive -o osdkeepalive=6,osd_idle_ttl=10,osd_request_timeout=30); then
+            echo "Successfully mapped RBD device: $test_device"
+            mapped_by_us=true
+        else
+            echo "ERROR: Failed to map RBD device (may be exclusively locked by another node)"
+            return 1
+        fi
+    fi
+    
+    # Check if device is LUKS formatted
+    if ! cryptsetup isLuks "$test_device"; then
+        echo "ERROR: Device $test_device is not LUKS formatted"
+        if [ "$mapped_by_us" = "true" ]; then
+            rbd unmap "$test_device"
+        fi
+        return 1
+    fi
+    
+    echo "Device is LUKS formatted"
+    
+    # Test decrypt capability
+    local decrypt_success=false
+    
+    echo "Testing decrypt capability..."
+    if decrypt_luks_device "$test_device" "$use_passphrase" "true"; then
+        echo "SUCCESS: Volume can be decrypted"
+        decrypt_success=true
+    else
+        echo "ERROR: Failed to decrypt volume"
+    fi
+    
+    # Clean up: unmap RBD if we mapped it
+    if [ "$mapped_by_us" = "true" ]; then
+        echo "Cleaning up test mapping..."
+        rbd unmap "$test_device"
+    fi
+    
+    if [ "$decrypt_success" = "true" ]; then
+        echo "Test completed successfully - volume is decryptable"
+        return 0
+    else
+        echo "Test failed - volume cannot be decrypted"
+        return 1
+    fi
+}
+
 # Function to show status
 show_status() {
     echo "=== User RBD Status ==="
@@ -231,9 +321,42 @@ show_status() {
     fi
 }
 
-case "$1" in
+# Parse command line arguments
+USE_PASSPHRASE=false
+COMMAND=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --passphrase|-p)
+            USE_PASSPHRASE=true
+            shift
+            ;;
+        start|stop|status|check)
+            COMMAND="$1"
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$COMMAND" ]; then
+    echo "Usage: $0 [--passphrase|-p] {start|stop|status|check}"
+    echo "  start       - Acquire RBD lock and mount volume"
+    echo "  stop        - Unmount volume and release RBD lock"
+    echo "  status      - Show current volume status"
+    echo "  check       - Test if volume can be decrypted (OK to run on mounted volume)"
+    echo ""
+    echo "Options:"
+    echo "  --passphrase, -p  - Use LUKS passphrase instead of Clevis (for start and check commands)"
+    exit 1
+fi
+
+case "$COMMAND" in
     start)
-        if acquire_and_mount; then
+        if acquire_and_mount "$USE_PASSPHRASE"; then
             echo "User RBD successfully acquired and mounted"
             exit 0
         else
@@ -247,8 +370,11 @@ case "$1" in
     status)
         show_status
         ;;
-    *)
-        echo "Usage: $0 {start|stop|status}"
-        exit 1
+    check)
+        if test_decrypt "$USE_PASSPHRASE"; then
+            exit 0
+        else
+            exit 1
+        fi
         ;;
 esac
