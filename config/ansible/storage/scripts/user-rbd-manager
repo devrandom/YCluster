@@ -38,6 +38,86 @@ mount_filesystem() {
     fi
 }
 
+# Helper function to get Tang servers for Clevis policy
+get_tang_servers() {
+    echo "s1:8777 s2:8777 s3:8777"
+}
+
+# Helper function to generate Clevis policy JSON
+generate_clevis_policy() {
+    local tang_servers=$(get_tang_servers)
+    local tang_array=""
+    
+    for server in $tang_servers; do
+        if [ -z "$tang_array" ]; then
+            tang_array="{\"url\":\"http://$server\"}"
+        else
+            tang_array="$tang_array,{\"url\":\"http://$server\"}"
+        fi
+    done
+    
+    echo "{\"t\":2,\"pins\":{\"tang\":[$tang_array]}}"
+}
+
+# Helper function to check and bind Clevis policy
+ensure_clevis_binding() {
+    local device="$1"
+    local passphrase_file="$2"
+    
+    # Verify that the passphrase can open slot 0
+    if ! cryptsetup luksOpen --test-passphrase --key-slot 0 -d "$passphrase_file" "$device"; then
+        echo "ERROR: Passphrase cannot open LUKS slot 0"
+        return 1
+    fi
+    
+    # Check existing bindings
+    local existing_bindings=$(clevis luks list -d "$device" 2>/dev/null || echo "")
+    local expected_policy=$(generate_clevis_policy)
+    
+    if [ -n "$existing_bindings" ]; then
+        # Check if any existing binding matches our expected policy
+        local policy_matches=false
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^([0-9]+):\ sss\ \'(.*)\'$ ]]; then
+                local slot="${BASH_REMATCH[1]}"
+                local existing_policy="${BASH_REMATCH[2]}"
+                if [ "$existing_policy" = "$expected_policy" ]; then
+                    echo "Clevis binding already correct in slot $slot"
+                    policy_matches=true
+                elif [ "$slot" = "0" ]; then
+                    echo "FATAL ERROR: Slot 0 should not have Clevis binding: $existing_policy"
+                    return 1
+                else
+                    echo "Removing incorrect binding in slot $slot: $existing_policy"
+                    if ! clevis luks unbind -d "$device" -s "$slot" -f; then
+                        echo "ERROR: Failed to unbind slot $slot"
+                        return 1
+                    fi
+                fi
+            fi
+        done <<< "$existing_bindings"
+        
+        if [ "$policy_matches" = "true" ]; then
+            return 0
+        fi
+        
+        echo "Clevis binding needs update"
+        echo "Expected: $expected_policy"
+    else
+        echo "No existing Clevis bindings found"
+    fi
+    
+    # Bind to Clevis policy
+    echo "Binding LUKS device to Clevis policy..."
+    if clevis luks bind -d "$device" -k "$passphrase_file" -y sss "$expected_policy"; then
+        echo "Successfully bound LUKS device to Clevis"
+        return 0
+    else
+        echo "Failed to bind LUKS device to Clevis"
+        return 1
+    fi
+}
+
 # Helper function to decrypt LUKS device (shared logic)
 decrypt_luks_device() {
     local rbd_device="$1"
@@ -324,16 +404,21 @@ show_status() {
 # Parse command line arguments
 USE_PASSPHRASE=false
 COMMAND=""
+PASSPHRASE_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --passphrase|-p)
+        -K)
             USE_PASSPHRASE=true
             shift
             ;;
-        start|stop|status|check)
+        start|stop|status|check|bind)
             COMMAND="$1"
             shift
+            ;;
+        -k)
+            PASSPHRASE_FILE="$2"
+            shift 2
             ;;
         *)
             echo "Unknown option: $1"
@@ -343,14 +428,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$COMMAND" ]; then
-    echo "Usage: $0 [--passphrase|-p] {start|stop|status|check}"
+    echo "Usage: $0 [-K] [-k FILE] {start|stop|status|check|bind}"
     echo "  start       - Acquire RBD lock and mount volume"
     echo "  stop        - Unmount volume and release RBD lock"
     echo "  status      - Show current volume status"
     echo "  check       - Test if volume can be decrypted (OK to run on mounted volume)"
+    echo "  bind        - Ensure Clevis binding is correct (requires -k)"
     echo ""
     echo "Options:"
-    echo "  --passphrase, -p  - Use LUKS passphrase instead of Clevis (for start and check commands)"
+    echo "  -K          - Use LUKS passphrase instead of Clevis (for start and check commands)"
+    echo "  -k FILE     - Passphrase file for bind command"
     exit 1
 fi
 
@@ -374,6 +461,35 @@ case "$COMMAND" in
         if test_decrypt "$USE_PASSPHRASE"; then
             exit 0
         else
+            exit 1
+        fi
+        ;;
+    bind)
+        # Check if passphrase file is provided
+        if [ -z "$PASSPHRASE_FILE" ]; then
+            echo "ERROR: -k is required for bind command"
+            exit 1
+        fi
+        
+        if [ ! -f "$PASSPHRASE_FILE" ]; then
+            echo "ERROR: Passphrase file $PASSPHRASE_FILE does not exist"
+            exit 1
+        fi
+        
+        # Check if RBD is already mapped
+        EXISTING_RBD_DEVICE=$(get_existing_rbd_device)
+        if [ -z "$EXISTING_RBD_DEVICE" ]; then
+          echo "Map the rbd device first"
+          exit 1
+        else
+            RBD_DEVICE="$EXISTING_RBD_DEVICE"
+        fi
+        
+        # Ensure Clevis binding
+        if ensure_clevis_binding "$RBD_DEVICE" "$PASSPHRASE_FILE"; then
+            echo "Clevis binding completed successfully"
+        else
+            echo "Clevis binding failed"
             exit 1
         fi
         ;;
