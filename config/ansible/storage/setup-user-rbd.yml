@@ -14,6 +14,7 @@
       - "10.0.0.11:{{ tang_port }}"
       - "10.0.0.12:{{ tang_port }}"
       - "10.0.0.13:{{ tang_port }}"
+    clevis_policy: '{"t":2,"pins":{"tang":[{"url":"http://{{ tang_servers[0] }}"},{"url":"http://{{ tang_servers[1] }}"},{"url":"http://{{ tang_servers[2] }}"}]}}'
 
   tasks:
     - name: Install required packages
@@ -110,10 +111,27 @@
       delegate_to: "{{ groups['storage'][0] }}"
       no_log: true
 
+    - name: Check existing Clevis bindings
+      command: clevis luks list -d {{ rbd_device_path }}
+      register: clevis_bindings
+      failed_when: false
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Parse existing Clevis policy
+      set_fact:
+        expected_policy: "{{ clevis_policy }}"
+        existing_policy: "{{ clevis_bindings.stdout | regex_search(\"sss '(.+)'\", '\\1') | first | default('') }}"
+      when: clevis_bindings.rc == 0 and clevis_bindings.stdout | length > 0
+      run_once: true
+      delegate_to: "{{ groups['storage'][0] }}"
+
     - name: Bind LUKS device to Clevis policy
       shell: |
-        clevis luks bind -d {{ rbd_device_path }} -k /dev/shm/user_luks_password -y sss '{"t":2,"pins":{"tang":[{"url":"http://{{ tang_servers[0] }}"},{"url":"http://{{ tang_servers[1] }}"},{"url":"http://{{ tang_servers[2] }}"}]}}'
-      when: luks_check.rc != 0
+        clevis luks bind -d {{ rbd_device_path }} -k /dev/shm/user_luks_password -y sss '{{ clevis_policy }}'
+      when: 
+        - luks_check.rc != 0 or (clevis_bindings.rc == 0 and existing_policy != expected_policy)
       run_once: true
       delegate_to: "{{ groups['storage'][0] }}"
 
