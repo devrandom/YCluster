@@ -10,11 +10,6 @@
     luks_mapper_name: "{{ rbd_volume_name }}"
     luks_mapper_path: "/dev/mapper/{{ luks_mapper_name }}"
     mount_point: "/rbd/user"
-    tang_servers:
-      - "10.0.0.11:{{ tang_port }}"
-      - "10.0.0.12:{{ tang_port }}"
-      - "10.0.0.13:{{ tang_port }}"
-    clevis_policy: '{"t":2,"pins":{"tang":[{"url":"http://{{ tang_servers[0] }}"},{"url":"http://{{ tang_servers[1] }}"},{"url":"http://{{ tang_servers[2] }}"}]}}'
 
   tasks:
     - name: Install required packages
@@ -24,6 +19,12 @@
           - clevis-luks
           - cryptsetup
         state: present
+
+    - name: Install User RBD manager script
+      copy:
+        src: scripts/user-rbd-manager
+        dest: /usr/local/bin/user-rbd-manager
+        mode: '0755'
 
     - name: Check if mount point is already mounted
       command: mountpoint -q "{{ mount_point }}"
@@ -89,59 +90,45 @@
         method: GET
         return_content: yes
       register: tang_advs
-      loop: "{{ tang_servers }}"
+      loop:
+        - "s1:8777"
+        - "s2:8777"
+        - "s3:8777"
       when: luks_check.rc != 0
       run_once: true
       delegate_to: "{{ groups['storage'][0] }}"
 
-    - name: Create temporary password file
-      copy:
-        content: "{{ vault_user_volume_key }}"
-        dest: /dev/shm/user_luks_password
-        mode: '0600'
-      when: luks_check.rc != 0
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-      no_log: true
+    - block:
+        - name: Create temporary passphrase file
+          copy:
+            content: "{{ vault_user_volume_key }}"
+            dest: /dev/shm/user_luks_passphrase
+            mode: '0600'
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
+          no_log: true
 
-    - name: Format device with LUKS encryption using backup password
-      command: cryptsetup luksFormat --batch-mode --key-file /dev/shm/user_luks_password {{ rbd_device_path }}
-      when: luks_check.rc != 0
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-      no_log: true
+        - name: Format device with LUKS encryption using backup passphrase
+          command: cryptsetup luksFormat --batch-mode --key-file /dev/shm/user_luks_passphrase {{ rbd_device_path }}
+          when: luks_check.rc != 0
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
+          no_log: true
 
-    - name: Check existing Clevis bindings
-      command: clevis luks list -d {{ rbd_device_path }}
-      register: clevis_bindings
-      failed_when: false
-      changed_when: false
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
+        - name: Bind LUKS device to Clevis policy
+          shell: |
+            /usr/local/bin/user-rbd-manager bind -k /dev/shm/user_luks_passphrase
+          when: luks_check.rc != 0
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
 
-    - name: Parse existing Clevis policy
-      set_fact:
-        expected_policy: "{{ clevis_policy }}"
-        existing_policy: "{{ clevis_bindings.stdout | regex_search(\"sss '(.+)'\", '\\1') | first | default('') }}"
-      when: clevis_bindings.rc == 0 and clevis_bindings.stdout | length > 0
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Bind LUKS device to Clevis policy
-      shell: |
-        clevis luks bind -d {{ rbd_device_path }} -k /dev/shm/user_luks_password -y sss '{{ clevis_policy }}'
-      when: 
-        - luks_check.rc != 0 or (clevis_bindings.rc == 0 and existing_policy != expected_policy)
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Remove temporary password file
-      file:
-        path: /dev/shm/user_luks_password
-        state: absent
-      when: luks_check.rc != 0
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
+      always:
+        - name: Remove temporary passphrase file
+          file:
+            path: /dev/shm/user_luks_passphrase
+            state: absent
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
 
     - name: Check if LUKS device is already open
       stat:
@@ -169,12 +156,6 @@
       when: fs_check.rc != 0
       run_once: true
       delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Install User RBD manager script
-      copy:
-        src: scripts/user-rbd-manager
-        dest: /usr/local/bin/user-rbd-manager
-        mode: '0755'
 
     - name: Install database backup script
       copy:
@@ -255,8 +236,8 @@
           - Device: {{ rbd_device_path }}
           - Mapper: {{ luks_mapper_path }}
           - Mount: {{ mount_point }}
-          - Encryption: 2-of-3 Tang servers + backup password
-          - Tang servers: {{ tang_servers | join(', ') }}
+          - Encryption: 2-of-3 Tang servers + backup passphrase
+          - Tang servers: s1:8777, s2:8777, s3:8777
           - Service: user-rbd.service (managed by storage leader election)
       run_once: true
 
