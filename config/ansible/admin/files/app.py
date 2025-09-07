@@ -78,6 +78,9 @@ NODE_TYPE_INTERFACES = {
 ETCD_HOSTS = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
 ETCD_PREFIX = '/cluster/nodes'
 
+# Core nodes configuration
+CORE_NODES = ['s1', 's2', 's3']
+
 # Thread lock for allocation operations
 allocation_lock = threading.Lock()
 
@@ -752,6 +755,217 @@ def check_docker_registry():
             'details': {'message': f'Registry check failed: {str(e)}'}
         }
 
+def check_tang_service():
+    """Check Tang server status and functionality"""
+    try:
+        # Check if Tang service is running
+        tang_service_running = check_service_status('tangd.socket')
+        
+        # Check if Tang port is open
+        tang_port_open = check_port_open('localhost', 8777)
+        
+        # Test Tang advertisement endpoint
+        tang_healthy = False
+        tang_error = None
+        tang_keys = None
+        
+        if tang_port_open:
+            try:
+                adv_response = requests.get('http://localhost:8777/adv', timeout=5)
+                if adv_response.status_code == 200:
+                    tang_healthy = True
+                    # Try to parse the advertisement to count keys
+                    try:
+                        adv_data = adv_response.json()
+                        if isinstance(adv_data, dict) and 'keys' in adv_data:
+                            tang_keys = len(adv_data['keys'])
+                        else:
+                            tang_keys = 'unknown'
+                    except:
+                        tang_keys = 'unknown'
+                else:
+                    tang_error = f'Tang advertisement returned HTTP {adv_response.status_code}'
+            except requests.exceptions.Timeout:
+                tang_error = 'Tang advertisement timeout'
+            except requests.exceptions.ConnectionError:
+                tang_error = 'Tang connection failed'
+            except Exception as e:
+                tang_error = f'Tang advertisement failed: {str(e)}'
+        
+        # Determine overall status
+        if tang_service_running and tang_port_open and tang_healthy:
+            status = 'healthy'
+            message = f'Tang server running and healthy ({tang_keys} keys)'
+        elif tang_service_running and tang_port_open:
+            status = 'degraded'
+            message = f'Tang service running but advertisement failed: {tang_error}'
+        elif tang_service_running:
+            status = 'unhealthy'
+            message = f'Tang service running but port not accessible: {tang_error}'
+        else:
+            status = 'unhealthy'
+            message = 'Tang service not running'
+        
+        return {
+            'status': status,
+            'details': {
+                'service_active': tang_service_running,
+                'port_open': tang_port_open,
+                'advertisement_working': tang_healthy,
+                'key_count': tang_keys,
+                'message': message,
+                'error': tang_error
+            }
+        }
+        
+    except Exception as e:
+        return {
+            'status': 'error',
+            'details': {'message': f'Tang check failed: {str(e)}'}
+        }
+
+def check_secrets_mount():
+    """Check if /secrets is mounted"""
+    try:
+        # Check if /secrets is mounted
+        result = subprocess.run(['mountpoint', '-q', '/secrets'], 
+                              capture_output=True, text=True, timeout=5)
+        is_mounted = result.returncode == 0
+        
+        # Get mount details if mounted
+        mount_details = None
+        if is_mounted:
+            try:
+                mount_result = subprocess.run(['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS', '/secrets'], 
+                                            capture_output=True, text=True, timeout=5)
+                if mount_result.returncode == 0:
+                    mount_details = mount_result.stdout.strip()
+            except:
+                pass
+        
+        # Check if secrets directory exists and is accessible
+        secrets_accessible = False
+        secrets_error = None
+        try:
+            if os.path.exists('/secrets') and os.path.isdir('/secrets'):
+                # Try to list the directory to verify access
+                os.listdir('/secrets')
+                secrets_accessible = True
+            else:
+                secrets_error = '/secrets directory does not exist'
+        except PermissionError:
+            secrets_error = 'Permission denied accessing /secrets'
+        except Exception as e:
+            secrets_error = f'Error accessing /secrets: {str(e)}'
+        
+        # Determine overall status
+        if is_mounted and secrets_accessible:
+            status = 'healthy'
+            message = f'Secrets volume mounted and accessible'
+        elif is_mounted:
+            status = 'degraded'
+            message = f'Secrets volume mounted but not accessible: {secrets_error}'
+        else:
+            status = 'unhealthy'
+            message = 'Secrets volume not mounted'
+        
+        return {
+            'status': status,
+            'details': {
+                'mounted': is_mounted,
+                'accessible': secrets_accessible,
+                'mount_details': mount_details,
+                'message': message,
+                'error': secrets_error
+            }
+        }
+        
+    except Exception as e:
+        return {
+            'status': 'error',
+            'details': {'message': f'Secrets mount check failed: {str(e)}'}
+        }
+
+def check_open_webui():
+    """Check Open-WebUI service status and functionality"""
+    try:
+        # Check if Open-WebUI service is running
+        webui_service_running = check_service_status('open-webui')
+        
+        # Check if Open-WebUI port is open
+        webui_port_open = check_port_open('localhost', 8380)
+        
+        # Test Open-WebUI health endpoint
+        webui_healthy = False
+        webui_error = None
+        webui_version = None
+        
+        if webui_port_open:
+            try:
+                # Try health check endpoint
+                health_response = requests.get('http://localhost:8380/health', timeout=5)
+                if health_response.status_code == 200:
+                    webui_healthy = True
+                    try:
+                        health_data = health_response.json()
+                        webui_version = health_data.get('version', 'unknown')
+                    except:
+                        webui_version = 'unknown'
+                else:
+                    webui_error = f'Open-WebUI health check returned HTTP {health_response.status_code}'
+            except requests.exceptions.Timeout:
+                webui_error = 'Open-WebUI health check timeout'
+            except requests.exceptions.ConnectionError:
+                webui_error = 'Open-WebUI connection failed'
+            except Exception as e:
+                webui_error = f'Open-WebUI health check failed: {str(e)}'
+        
+        # Check if this node should be running Open-WebUI (storage leader)
+        is_storage_lead = is_storage_leader()
+        
+        # Determine overall status
+        if is_storage_lead:
+            if webui_service_running and webui_port_open and webui_healthy:
+                status = 'healthy'
+                message = f'Open-WebUI running and healthy (version {webui_version})'
+            elif webui_service_running and webui_port_open:
+                status = 'degraded'
+                message = f'Open-WebUI running but health check failed: {webui_error}'
+            elif webui_service_running:
+                status = 'unhealthy'
+                message = f'Open-WebUI service running but port not accessible: {webui_error}'
+            else:
+                status = 'unhealthy'
+                message = 'Open-WebUI service not running'
+        else:
+            # Not storage leader - Open-WebUI should not be running
+            if webui_service_running or webui_port_open:
+                status = 'unhealthy'
+                message = 'Split-brain: Open-WebUI running on non-leader'
+            else:
+                status = 'not_required'
+                message = 'Open-WebUI not required (not storage leader)'
+        
+        return {
+            'status': status,
+            'details': {
+                'service_active': webui_service_running,
+                'port_open': webui_port_open,
+                'health_check_passed': webui_healthy,
+                'version': webui_version,
+                'required': is_storage_lead,
+                'reason': 'storage leader' if is_storage_lead else 'not storage leader',
+                'message': message,
+                'error': webui_error
+            }
+        }
+        
+    except Exception as e:
+        return {
+            'status': 'error',
+            'details': {'message': f'Open-WebUI check failed: {str(e)}'}
+        }
+
 def is_storage_leader():
     """Check if this node is the current storage leader"""
     try:
@@ -1240,6 +1454,30 @@ def health():
     elif docker_registry['status'] == 'degraded' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
+    # Check Tang service
+    tang_service = check_tang_service()
+    health_status['services']['tang'] = tang_service
+    if tang_service['status'] in ['unhealthy', 'error']:
+        health_status['overall'] = 'unhealthy'
+    elif tang_service['status'] == 'degraded' and health_status['overall'] == 'healthy':
+        health_status['overall'] = 'degraded'
+    
+    # Check secrets mount
+    secrets_mount = check_secrets_mount()
+    health_status['services']['secrets_mount'] = secrets_mount
+    if secrets_mount['status'] in ['unhealthy', 'error']:
+        health_status['overall'] = 'unhealthy'
+    elif secrets_mount['status'] == 'degraded' and health_status['overall'] == 'healthy':
+        health_status['overall'] = 'degraded'
+    
+    # Check Open-WebUI
+    open_webui = check_open_webui()
+    health_status['services']['open_webui'] = open_webui
+    if open_webui['status'] in ['unhealthy', 'error']:
+        health_status['overall'] = 'unhealthy'
+    elif open_webui['status'] == 'degraded' and health_status['overall'] == 'healthy':
+        health_status['overall'] = 'degraded'
+    
     # Check VIP status
     vip_health = check_vip_status()
     gateway_vip_active = vip_health['gateway_vip']['active']
@@ -1255,14 +1493,26 @@ def health():
         'details': vip_health['storage_vip']
     }
     
-    # Check keepalived service (shared by both VIPs)
-    keepalived_running = check_service_status('keepalived')
-    health_status['services']['keepalived'] = {
-        'status': 'healthy' if keepalived_running else 'unhealthy',
-        'details': {'service_active': keepalived_running}
-    }
-    if not keepalived_running:
-        health_status['overall'] = 'unhealthy'
+    # Check keepalived service (only on core nodes)
+    current_hostname = platform.node()
+    if current_hostname in CORE_NODES:
+        keepalived_running = check_service_status('keepalived')
+        health_status['services']['keepalived'] = {
+            'status': 'healthy' if keepalived_running else 'unhealthy',
+            'details': {'service_active': keepalived_running}
+        }
+        if not keepalived_running:
+            health_status['overall'] = 'unhealthy'
+    else:
+        # Not a core node - keepalived should not be running
+        keepalived_running = check_service_status('keepalived')
+        health_status['services']['keepalived'] = {
+            'status': 'not_required',
+            'details': {
+                'service_active': keepalived_running,
+                'reason': 'not a core node'
+            }
+        }
     
     # Add leadership status for this node
     health_status['storage_leader'] = is_storage_leader()
@@ -1421,25 +1671,37 @@ def get_cluster_vip_status(host_health):
         'keepalived_nodes': []  # Single list for keepalived status across all nodes
     }
     
-    # Get all hosts to ensure we include every node
+    # Get all hosts to find core nodes
     all_hosts = get_all_hosts()
     
-    # Extract VIP status from existing health data
-    for host in all_hosts:
-        hostname = host['hostname']
-        host_ip = host['ip']
-        health_data = host_health.get(hostname, {})
+    # Process only core nodes (where keepalived runs and VIPs can be active)
+    for core_node in CORE_NODES:
+        # Find the core node in all_hosts to get its IP
+        core_host = next((host for host in all_hosts if host['hostname'] == core_node), None)
+        if not core_host:
+            # Core node not found in allocations - add as missing
+            vip_info['keepalived_nodes'].append({
+                'hostname': core_node,
+                'ip': 'unknown',
+                'keepalived_active': False,
+                'status': 'not_allocated'
+            })
+            continue
+        
+        hostname = core_host['hostname']
+        host_ip = core_host['ip']
+        health_data = host_health.get(core_node, {})
         
         if 'error' in health_data or 'services' not in health_data:
-            # Add node with error status
             vip_info['keepalived_nodes'].append({
-                'hostname': hostname,
+                'hostname': core_node,
                 'ip': host_ip,
                 'keepalived_active': False,
                 'status': 'unreachable'
             })
             continue
-            
+        
+        # Process VIP status
         gateway_vip_service = health_data.get('services', {}).get('gateway_vip', {})
         storage_vip_service = health_data.get('services', {}).get('storage_vip', {})
         
@@ -1457,7 +1719,7 @@ def get_cluster_vip_status(host_health):
             vip_info['storage_vip']['master_hostname'] = hostname
             vip_info['storage_vip']['interface'] = storage_vip_details.get('interface')
         
-        # Track keepalived service status (one per node, not per VIP)
+        # Process keepalived service status
         keepalived_service = health_data.get('services', {}).get('keepalived', {})
         if keepalived_service:
             keepalived_active = keepalived_service.get('details', {}).get('service_active', False)
@@ -1467,7 +1729,7 @@ def get_cluster_vip_status(host_health):
             keepalived_status = 'no_data'
         
         vip_info['keepalived_nodes'].append({
-            'hostname': hostname,
+            'hostname': core_node,
             'ip': host_ip,
             'keepalived_active': keepalived_active,
             'status': keepalived_status
