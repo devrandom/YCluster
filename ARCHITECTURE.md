@@ -33,6 +33,11 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - MicroCeph with RBD volumes and exclusive locking
 - Stateful services (PostgreSQL, Qdrant, Docker registry) with leader election
 - Storage leader manages Rathole reverse proxy
+- Encrypted user RBD volumes with Tang-based key management
+
+**macOS Nodes (m\*)**
+- Client nodes providing additional compute capacity
+- Health monitoring and network connectivity checks
 
 **Compute Nodes (c\*)**
 - Provide processing capacity for workloads
@@ -51,12 +56,20 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - **Docker Registry**: Container images with RBD backend
 
 **Application Services**
-- **Open-WebUI**: AI chat interface behind nginx reverse proxy
+- **Open-WebUI**: AI chat interface behind nginx reverse proxy (slim build)
+- **Tang**: Network-bound encryption key server for RBD volume encryption
+- **Secrets Volume**: Encrypted storage for sensitive cluster data
 
-### Certificate Management
-- TLS infrastructure with self-signed certificates and Let's Encrypt integration
-- Certificate synchronization via etcd and nginx
-- Automated renewal and distribution
+### Security & Secrets Management
+- **TLS Infrastructure**: Self-signed certificates and Let's Encrypt integration
+- **Certificate Management**: Synchronization via etcd and nginx with automated renewal
+- **Secrets Volume**: Encrypted RBD volume for sensitive data storage
+- **Tang Server**: Network-bound encryption for automatic RBD volume unlocking
+- **Clevis Integration**: Automated decryption of encrypted volumes on boot
+
+### Storage Management
+- **Backup System**: Automated database backups to encrypted storage
+- **Volume Encryption**: At-rest encryption for all user data volumes
 
 ### Web Services Architecture
 - Application-specific reverse proxy configurations
@@ -66,6 +79,8 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - **Leader Election**: etcd-based failover for PostgreSQL, Qdrant, DHCP
 - **Storage**: Ceph replication, RBD exclusive locking, automatic rebalancing
 - **Network**: VIP failover, redundant DNS/DHCP/proxy services
+- **Monitoring**: Health checks, cluster status monitoring, service health APIs
+- **Backup & Recovery**: Automated database backups with encrypted storage
 
 ## Bootstrap Process
 
@@ -81,10 +96,17 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - Core nodes: first 3-5 storage nodes
 - Storage nodes: DHCP range 10.0.0.11-30
 - Compute nodes: DHCP range 10.0.0.51-70
+- macOS nodes: DHCP range 10.0.0.71-90
 - Admin VIP: 10.0.0.254
 
 **Service Discovery**
 - etcd maintains cluster membership and configuration
 - Dynamic inventory plugin reads from etcd for Ansible
 - Services discover peers through etcd watches
+
+**Monitoring & Health**
+- Comprehensive health APIs across all node types
+- Cluster status monitoring with leadership tracking
+- Service health checks (Ceph, DNS, certificates, Docker, Tang)
+- Web dashboard for cluster visualization and management
 
