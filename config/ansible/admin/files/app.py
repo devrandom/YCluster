@@ -1157,6 +1157,21 @@ def serve_user_data():
     with open(ssh_key_path, 'r') as f:
         ssh_key_content = f.read().strip()
 
+    # Get crypted password for ubuntu user
+    ubuntu_password = None
+    try:
+        with open('/etc/shadow', 'r') as f:
+            for line in f:
+                fields = line.strip().split(':')
+                if fields[0] == 'ubuntu' and len(fields) > 1:
+                    ubuntu_password = fields[1]
+                    break
+    except (PermissionError, FileNotFoundError):
+        raise Exception("Cannot read ubuntu password from /etc/shadow - check permissions")
+    
+    if not ubuntu_password:
+        raise Exception("Ubuntu user not found in /etc/shadow")
+
     proxy_url = 'http://10.0.0.254:3128'
     
     # Read and render template
@@ -1173,6 +1188,7 @@ def serve_user_data():
         uplink_interface=interfaces['uplink_interface'],
         amt_interface=interfaces['amt_interface'],
         ssh_key_content=ssh_key_content,
+        ubuntu_password=ubuntu_password,
         proxy_url=proxy_url
     )
     

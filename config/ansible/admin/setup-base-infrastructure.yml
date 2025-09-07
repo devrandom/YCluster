@@ -77,6 +77,12 @@
         - { src: 'certbot-manager.py', dest: '/usr/local/bin/certbot-manager' }
         - { src: 'update-dhcp-hosts.py', dest: '/usr/local/lib/cluster/update-dhcp-hosts' }
 
+    - name: Set ubuntu user password
+      user:
+        name: ubuntu
+        password: "{{ vault_ubuntu_password | password_hash('sha512') }}"
+        update_password: always
+
     - name: Populate local node information in etcd
       command: /usr/local/lib/cluster/populate-local-node
       register: populate_result
