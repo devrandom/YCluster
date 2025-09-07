@@ -300,7 +300,9 @@
                         <div class="services-container">
                             <!-- Problem services -->
                             <template x-for="service in getProblemServices(host.hostname)" :key="service.name">
-                                <span :class="`service-item status-${service.status}`" x-text="service.name"></span>
+                                <span :class="`service-item status-${service.status}`" 
+                                      x-text="service.name"
+                                      :title="getServiceTooltip(service)"></span>
                             </template>
                             
                             <!-- Normal services toggle -->
@@ -314,7 +316,9 @@
                             <!-- Normal services (collapsible) -->
                             <div :class="{ 'services-normal': true, 'show': servicesExpanded[host.hostname] }">
                                 <template x-for="service in getNormalServices(host.hostname)" :key="service.name">
-                                    <span :class="`service-item status-${service.status}`" x-text="service.name"></span>
+                                    <span :class="`service-item status-${service.status}`" 
+                                          x-text="service.name"
+                                          :title="getServiceTooltip(service)"></span>
                                 </template>
                             </div>
                         </div>
@@ -620,7 +624,8 @@
                         })
                         .map(([name, info]) => ({
                             name,
-                            status: info.status || 'unknown'
+                            status: info.status || 'unknown',
+                            details: info.details || {}
                         }));
                 },
                 
@@ -635,7 +640,8 @@
                         })
                         .map(([name, info]) => ({
                             name,
-                            status: info.status || 'unknown'
+                            status: info.status || 'unknown',
+                            details: info.details || {}
                         }));
                 },
                 
@@ -692,6 +698,39 @@
                     };
                     
                     return textMap[status] || 'Error';
+                },
+                
+                getServiceTooltip(service) {
+                    if (!service.details) return `${service.name}: ${service.status}`;
+                    
+                    let tooltip = `${service.name}: ${service.status}`;
+                    
+                    if (service.details.message) {
+                        tooltip += `\n${service.details.message}`;
+                    }
+                    
+                    if (service.details.error) {
+                        tooltip += `\nError: ${service.details.error}`;
+                    }
+                    
+                    if (service.details.reason) {
+                        tooltip += `\nReason: ${service.details.reason}`;
+                    }
+                    
+                    // Add specific details based on service type
+                    if (service.details.service_active !== undefined) {
+                        tooltip += `\nService Active: ${service.details.service_active}`;
+                    }
+                    
+                    if (service.details.port_open !== undefined) {
+                        tooltip += `\nPort Open: ${service.details.port_open}`;
+                    }
+                    
+                    if (service.details.health_check_passed !== undefined) {
+                        tooltip += `\nHealth Check: ${service.details.health_check_passed}`;
+                    }
+                    
+                    return tooltip;
                 }
             }
         }
