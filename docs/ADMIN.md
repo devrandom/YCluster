@@ -168,9 +168,6 @@ rathole-config set --remote-addr "your-server.com:2333" --token "secret_token"
 # Show current configuration
 rathole-config show
 
-# Generate client configuration
-rathole-config generate-client
-
 # Delete configuration
 rathole-config delete
 ```
