@@ -1,0 +1,18 @@
+# rathole SSH-only client configuration (generated from etcd)
+[client]
+remote_addr = "{{ remote_addr }}"
+default_token = "{{ token }}"
+heartbeat_timeout = 40
+retry_interval = 1
+
+[client.transport]
+type = "tcp"
+
+[client.transport.tcp]
+nodelay = true
+keepalive_secs = 20
+keepalive_interval = 8
+
+[client.services.ssh{{ idx }}]
+local_addr = "127.0.0.1:22"
+type = "tcp"

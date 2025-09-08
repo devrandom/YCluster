@@ -49,10 +49,26 @@
         owner: root
         group: root
 
+    - name: Install rathole SSH client config template
+      copy:
+        src: rathole-ssh-client-config.toml.j2
+        dest: /etc/rathole/ssh-client-config.toml.j2
+        mode: '0644'
+        owner: root
+        group: root
+
     - name: Create rathole client startup script
       copy:
         src: rathole-client-start
         dest: /usr/local/bin/rathole-client-start
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create rathole SSH client startup script
+      copy:
+        src: rathole-ssh-client-start
+        dest: /usr/local/bin/rathole-ssh-client-start
         mode: '0755'
         owner: root
         group: root
@@ -66,10 +82,26 @@
         group: root
       notify: reload systemd
 
+    - name: Create rathole SSH systemd service
+      copy:
+        src: rathole-ssh.service
+        dest: /etc/systemd/system/rathole-ssh.service
+        mode: '0644'
+        owner: root
+        group: root
+      notify: reload systemd
+
     - name: rathole service is controlled by storage leader election
       systemd:
         name: rathole
         enabled: no
+        daemon_reload: yes
+
+    - name: Enable and start rathole SSH service
+      systemd:
+        name: rathole-ssh
+        enabled: yes
+        state: started
         daemon_reload: yes
 
   handlers:

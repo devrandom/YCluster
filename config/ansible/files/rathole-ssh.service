@@ -1,0 +1,21 @@
+[Unit]
+Description=rathole SSH client - A lightweight reverse proxy for SSH NAT traversal
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/rathole-ssh-client-start
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log /etc/rathole
+
+[Install]
+WantedBy=multi-user.target
