@@ -108,7 +108,7 @@
               advert_int 1
               authentication {
                   auth_type PASS
-                  auth_pass xcluster
+                  auth_pass ycluster
               }
               virtual_ipaddress {
                   {{ storage_vip }}/24

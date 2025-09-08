@@ -1,5 +1,5 @@
 """
-XCluster Admin API Service
+YCluster Admin API Service
 
 etcd Schema Documentation:
 ==========================
