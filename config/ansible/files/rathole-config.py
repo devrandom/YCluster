@@ -8,6 +8,8 @@ import sys
 import argparse
 import etcd3
 import os
+import socket
+import re
 from jinja2 import Template
 
 def get_etcd_client():
@@ -27,19 +29,51 @@ def get_etcd_client():
     
     raise Exception(f"Could not connect to any etcd host: {etcd_hosts}")
 
+def validate_host_port(remote_addr):
+    """Validate that remote_addr is in host:port format"""
+    if ':' not in remote_addr:
+        raise ValueError(f"Invalid format: '{remote_addr}'. Must be host:port")
+    
+    host, port_str = remote_addr.rsplit(':', 1)
+    if not host:
+        raise ValueError(f"Invalid format: '{remote_addr}'. Host cannot be empty")
+    
+    try:
+        port = int(port_str)
+        if not (1 <= port <= 65535):
+            raise ValueError(f"Invalid port: {port}. Must be 1-65535")
+    except ValueError as e:
+        if "invalid literal" in str(e):
+            raise ValueError(f"Invalid port: '{port_str}'. Must be a number")
+        raise
+
 def set_rathole_config(remote_addr, token):
     """Set rathole configuration in etcd"""
+    if remote_addr:
+        validate_host_port(remote_addr)
+    
     client = get_etcd_client()
-    config = {
-        'remote_addr': remote_addr,
-        'token': token
-    }
-    
     key = '/cluster/nodes/rathole/config'
-    value = json.dumps(config)
     
+    # Get existing config if updating partially
+    config = {}
+    if not (remote_addr and token):
+        value, _ = client.get(key)
+        if value:
+            config = json.loads(value.decode())
+    
+    if remote_addr:
+        config['remote_addr'] = remote_addr
+    if token:
+        config['token'] = token
+    
+    if not config.get('remote_addr') or not config.get('token'):
+        print("Error: Both remote_addr and token must be set", file=sys.stderr)
+        sys.exit(1)
+    
+    value = json.dumps(config)
     client.put(key, value)
-    print(f"Set rathole config: remote_addr={remote_addr}, token=***")
+    print(f"Set rathole config: remote_addr={config['remote_addr']}, token=***")
 
 def get_rathole_config():
     """Get rathole configuration from etcd"""
@@ -76,6 +110,15 @@ def generate_client_config():
         print("Error: No token found in rathole configuration", file=sys.stderr)
         sys.exit(1)
     
+    # Determine core node index from hostname using regex
+    hostname = socket.gethostname()
+    match = re.match(r'^s([123])$', hostname)
+    if not match:
+        print(f"Error: Not a core node. Hostname '{hostname}' must be s1-s3", file=sys.stderr)
+        sys.exit(1)
+    
+    idx = int(match.group(1))
+    
     # Read template file and render with jinja2
     template_path = '/etc/rathole/client-config.toml.j2'
     try:
@@ -83,7 +126,7 @@ def generate_client_config():
             template_content = f.read()
         
         template = Template(template_content)
-        client_config = template.render(remote_addr=remote_addr, token=token)
+        client_config = template.render(remote_addr=remote_addr, token=token, idx=idx)
         print(client_config)
         
     except FileNotFoundError:
@@ -110,8 +153,8 @@ def main():
     
     # Set command
     set_parser = subparsers.add_parser('set', help='Set rathole configuration')
-    set_parser.add_argument('--remote-addr', required=True, help='Remote server address (e.g., server.com:2333)')
-    set_parser.add_argument('--token', required=True, help='Authentication token')
+    set_parser.add_argument('--remote-addr', help='Remote server address (e.g., server.com:2333)')
+    set_parser.add_argument('--token', help='Authentication token')
     
     # Get command
     subparsers.add_parser('get', help='Get current rathole configuration')
