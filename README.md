@@ -1,4 +1,4 @@
-# XCluster
+# YCluster
 
 Self-bootstrapping infrastructure platform for small AI clusters using Ceph, PostgreSQL, and Qdrant.
 
@@ -45,7 +45,7 @@ ansible-playbook --tags init_db storage/install-postgres.yml storage/install-sto
 
 ## Web Services
 
-XCluster provides two main web interfaces:
+YCluster provides two main web interfaces:
 
 - **Admin Interface**: Available at `https://admin.your-domain.com` - provides cluster management, monitoring, and administrative functions
 - **Application Interface**: Available at `https://your-domain.com` - serves application services like Open-WebUI for AI chat

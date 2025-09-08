@@ -56,7 +56,7 @@
 
     - name: Clone infrastructure repository
       git:
-        repo: https://gitlab.com/devrandom01/xcluster.git
+        repo: https://gitlab.com/devrandom01/ycluster.git
         dest: /opt/infrastructure
         force: no
       ignore_errors: yes

@@ -3,7 +3,7 @@
 macOS Health Service
 
 A lightweight health reporting service for macOS nodes that's compatible
-with the XCluster health monitoring system.
+with the YCluster health monitoring system.
 """
 
 import subprocess
