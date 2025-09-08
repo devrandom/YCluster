@@ -13,6 +13,45 @@
         name: tang
         state: present
 
+    - name: Create Tang systemd service override directory
+      file:
+        path: "{{ tang_systemd_dir }}/tangd.socket.d"
+        state: directory
+        mode: '0755'
+
+    - name: Configure Tang socket to use custom port and keys directory
+      copy:
+        dest: "{{ tang_systemd_dir }}/tangd.socket.d/override.conf"
+        content: |
+          [Unit]
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Install]
+          WantedBy=network-online.target
+          
+          [Socket]
+          ListenStream=
+          ListenStream={{ tang_port }}
+          ExecStartPre=
+          ExecStartPre=/usr/local/bin/secrets-volume-manager start
+        mode: '0644'
+
+    - name: Create Tang systemd service override directory
+      file:
+        path: "{{ tang_systemd_dir }}/tangd@.service.d"
+        state: directory
+        mode: '0755'
+
+    - name: Configure Tang service to use custom keys directory
+      copy:
+        dest: "{{ tang_systemd_dir }}/tangd@.service.d/override.conf"
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/libexec/tangd {{ tang_keys_dir }}
+        mode: '0644'
+
     - name: Ensure /secrets is mounted
       command: mountpoint /secrets
       register: secrets_mounted
@@ -45,38 +84,6 @@
         mode: '0755'
         owner: _tang
         group: _tang
-
-    - name: Create Tang systemd service override directory
-      file:
-        path: "{{ tang_systemd_dir }}/tangd.socket.d"
-        state: directory
-        mode: '0755'
-
-    - name: Configure Tang socket to use custom port and keys directory
-      copy:
-        dest: "{{ tang_systemd_dir }}/tangd.socket.d/override.conf"
-        content: |
-          [Socket]
-          ListenStream=
-          ListenStream={{ tang_port }}
-          ExecStartPre=
-          ExecStartPre=/bin/bash -c 'if [ ! -d {{ tang_keys_dir }} ]; then echo "Tang keys directory not found"; exit 1; fi'
-        mode: '0644'
-
-    - name: Create Tang systemd service override directory
-      file:
-        path: "{{ tang_systemd_dir }}/tangd@.service.d"
-        state: directory
-        mode: '0755'
-
-    - name: Configure Tang service to use custom keys directory
-      copy:
-        dest: "{{ tang_systemd_dir }}/tangd@.service.d/override.conf"
-        content: |
-          [Service]
-          ExecStart=
-          ExecStart=/usr/libexec/tangd {{ tang_keys_dir }}
-        mode: '0644'
 
     - name: Reload systemd daemon
       systemd:
