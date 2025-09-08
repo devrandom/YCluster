@@ -197,7 +197,8 @@ acquire_and_mount() {
     EXISTING_RBD_DEVICE=$(get_existing_rbd_device)
     if [ -n "$EXISTING_RBD_DEVICE" ]; then
         echo "RBD already mapped at $EXISTING_RBD_DEVICE"
-        return decrypt_and_mount "$EXISTING_RBD_DEVICE" "$use_passphrase"
+        decrypt_and_mount "$EXISTING_RBD_DEVICE" "$use_passphrase"
+        return $?
     fi
     
     while [ $retries -lt $MAX_RETRIES ]; do
