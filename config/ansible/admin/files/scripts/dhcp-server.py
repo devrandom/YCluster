@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scapy-based DHCP server with etcd integration for XCluster
+Scapy-based DHCP server with etcd integration for YCluster
 """
 
 import os

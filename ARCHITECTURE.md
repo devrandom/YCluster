@@ -1,8 +1,8 @@
-# XCluster Architecture
+# YCluster Architecture
 
 ## Overview
 
-XCluster is a self-bootstrapping infrastructure platform that creates highly available clusters from bare metal servers. It provides automated provisioning, distributed storage, and service orchestration with built-in failover.
+YCluster is a self-bootstrapping infrastructure platform that creates highly available clusters from bare metal servers. It provides automated provisioning, distributed storage, and service orchestration with built-in failover.
 
 ## Key Design Principles
 

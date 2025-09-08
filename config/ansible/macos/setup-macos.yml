@@ -5,7 +5,7 @@
   vars:
     ntp_server: "10.0.0.254"
     dns_server: "10.0.0.254"
-    health_service_dir: "/usr/local/xcluster"
+    health_service_dir: "/usr/local/ycluster"
   
   tasks:
     - name: Create dev user
@@ -162,7 +162,20 @@
       debug:
         msg: "NTP server configured: {{ ntp_config.stdout }}"
     
-    - name: Create XCluster service directory
+    - name: Stop and unload old xcluster health service
+      shell: |
+        launchctl stop com.xcluster.health || true
+        launchctl unload /Library/LaunchDaemons/com.xcluster.health.plist || true
+      become: yes
+      ignore_errors: yes
+    
+    - name: Remove old xcluster launch daemon plist
+      file:
+        path: /Library/LaunchDaemons/com.xcluster.health.plist
+        state: absent
+      become: yes
+    
+    - name: Create YCluster service directory
       file:
         path: "{{ health_service_dir }}"
         state: directory
@@ -209,7 +222,7 @@
           <plist version="1.0">
           <dict>
               <key>Label</key>
-              <string>com.xcluster.health</string>
+              <string>com.ycluster.health</string>
               <key>ProgramArguments</key>
               <array>
                   <string>{{ health_service_dir }}/venv/bin/python</string>
@@ -220,14 +233,14 @@
               <key>KeepAlive</key>
               <true/>
               <key>StandardOutPath</key>
-              <string>/var/log/xcluster-health.log</string>
+              <string>/var/log/ycluster-health.log</string>
               <key>StandardErrorPath</key>
-              <string>/var/log/xcluster-health.log</string>
+              <string>/var/log/ycluster-health.log</string>
               <key>WorkingDirectory</key>
               <string>{{ health_service_dir }}</string>
           </dict>
           </plist>
-        dest: /Library/LaunchDaemons/com.xcluster.health.plist
+        dest: /Library/LaunchDaemons/com.ycluster.health.plist
         mode: '0644'
       become: yes
       notify: restart health service
@@ -235,10 +248,10 @@
   handlers:
     - name: restart health service
       shell: |
-        launchctl stop com.xcluster.health || true
-        launchctl unload /Library/LaunchDaemons/com.xcluster.health.plist || true
-        launchctl load /Library/LaunchDaemons/com.xcluster.health.plist
-        launchctl start com.xcluster.health
+        launchctl stop com.ycluster.health || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.health.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.health.plist
+        launchctl start com.ycluster.health
       become: yes
     
     - name: restart ollama service

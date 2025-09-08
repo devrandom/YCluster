@@ -1,6 +1,6 @@
-# XCluster Admin Interface
+# YCluster Admin Interface
 
-The XCluster admin interface provides comprehensive cluster management, monitoring, and operational tools through both web and command-line interfaces.
+The YCluster admin interface provides comprehensive cluster management, monitoring, and operational tools through both web and command-line interfaces.
 
 ## Web Dashboard
 
