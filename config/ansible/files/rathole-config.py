@@ -90,6 +90,14 @@ def get_rathole_config():
 
 def generate_client_config():
     """Generate client configuration from etcd and output to stdout"""
+    _generate_config('/etc/rathole/client-config.toml.j2')
+
+def generate_ssh_client_config():
+    """Generate SSH-only client configuration from etcd and output to stdout"""
+    _generate_config('/etc/rathole/ssh-client-config.toml.j2')
+
+def _generate_config(template_path):
+    """Generate rathole configuration from etcd template"""
     client = get_etcd_client()
     key = '/cluster/nodes/rathole/config'
     
@@ -120,7 +128,6 @@ def generate_client_config():
     idx = int(match.group(1))
     
     # Read template file and render with jinja2
-    template_path = '/etc/rathole/client-config.toml.j2'
     try:
         with open(template_path, 'r') as f:
             template_content = f.read()
@@ -162,6 +169,9 @@ def main():
     # Generate client config command
     subparsers.add_parser('generate-client', help='Generate client configuration from etcd')
     
+    # Generate SSH-only client config command
+    subparsers.add_parser('generate-ssh-client', help='Generate SSH-only client configuration from etcd')
+    
     # Delete command
     subparsers.add_parser('delete', help='Delete rathole configuration')
     
@@ -178,6 +188,8 @@ def main():
             get_rathole_config()
         elif args.command == 'generate-client':
             generate_client_config()
+        elif args.command == 'generate-ssh-client':
+            generate_ssh_client_config()
         elif args.command == 'delete':
             delete_rathole_config()
     except Exception as e:

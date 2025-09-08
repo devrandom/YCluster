@@ -107,6 +107,30 @@ ansible-playbook install-rathole-server.yml --limit frontend
 rathole-config set --remote-addr "your-server.com:2333" --token "your_secret_token"
 ```
 
+The rathole configuration provides two separate services:
+
+- **Main rathole service**: Runs only on the storage leader and provides HTTP/HTTPS tunnels for web services
+- **SSH rathole service**: Runs on all core nodes (s1, s2, s3) and provides individual SSH access tunnels
+
+Each core node gets its own SSH tunnel endpoint on the rathole server. The SSH services bind to localhost on the rathole server, so access them by first SSH'ing into your frontend server, then connecting to the specific node:
+
+Add this SSH config to your `~/.ssh/config` for easy access:
+
+```
+Host s?.rat
+    HostName localhost
+    User root
+    ProxyJump your-frontend.net
+Host s1.rat
+    Port 2201
+Host s2.rat
+    Port 2202
+Host s3.rat
+    Port 2203
+```
+
+Then use direct access - `ssh s1.rat`.
+
 ## Management Commands
 
 - **Cluster Health**: `check-cluster` - comprehensive cluster status
