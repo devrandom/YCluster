@@ -67,7 +67,7 @@ ensure_clevis_binding() {
     # Verify that the passphrase can open slot 0
     if ! cryptsetup luksOpen --test-passphrase --key-slot 0 -d "$passphrase_file" "$device"; then
         echo "ERROR: Passphrase cannot open LUKS slot 0"
-        return 1
+        return 2
     fi
     
     # Check existing bindings
@@ -86,19 +86,19 @@ ensure_clevis_binding() {
                     policy_matches=true
                 elif [ "$slot" = "0" ]; then
                     echo "FATAL ERROR: Slot 0 should not have Clevis binding: $existing_policy"
-                    return 1
+                    return 2
                 else
                     echo "Removing incorrect binding in slot $slot: $existing_policy"
                     if ! clevis luks unbind -d "$device" -s "$slot" -f; then
                         echo "ERROR: Failed to unbind slot $slot"
-                        return 1
+                        return 2
                     fi
                 fi
             fi
         done <<< "$existing_bindings"
         
         if [ "$policy_matches" = "true" ]; then
-            return 0
+            return 0  # No change needed
         fi
         
         echo "Clevis binding needs update"
@@ -111,10 +111,10 @@ ensure_clevis_binding() {
     echo "Binding LUKS device to Clevis policy..."
     if clevis luks bind -d "$device" -k "$passphrase_file" -y sss "$expected_policy"; then
         echo "Successfully bound LUKS device to Clevis"
-        return 0
+        return 1  # Change made
     else
         echo "Failed to bind LUKS device to Clevis"
-        return 1
+        return 2  # Error
     fi
 }
 
@@ -488,10 +488,20 @@ case "$COMMAND" in
         
         # Ensure Clevis binding
         if ensure_clevis_binding "$RBD_DEVICE" "$PASSPHRASE_FILE"; then
-            echo "Clevis binding completed successfully"
+            exit_code=$?
+            if [ $exit_code -eq 0 ]; then
+                echo "Clevis binding already correct"
+                exit 0
+            elif [ $exit_code -eq 1 ]; then
+                echo "Clevis binding updated successfully"
+                exit 1
+            else
+                echo "Clevis binding failed"
+                exit 2
+            fi
         else
             echo "Clevis binding failed"
-            exit 1
+            exit 2
         fi
         ;;
 esac
