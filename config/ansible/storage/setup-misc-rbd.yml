@@ -49,6 +49,7 @@
       command: rbd info "{{ pool_name }}/{{ rbd_image_name }}"
       register: final_rbd_info
       run_once: true
+      changed_when: false
 
     - name: Show RBD image details
       debug:

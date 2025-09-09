@@ -32,18 +32,15 @@
         insertafter: "# IPv4 local connections:"
         backup: yes
 
-    - name: Check if this node is the current storage leader
-      uri:
-        url: "http://{{ ansible_host }}:5000/api/health"
-        method: GET
-        timeout: 5
-      register: health_check
+    - name: Check if /rbd/user is mounted (indicates storage leader)
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
       failed_when: false
       changed_when: false
 
-    - name: Parse storage leader status
+    - name: Set storage leader status based on mount
       set_fact:
-        is_storage_leader: "{{ (health_check.json.storage_leader | default(false)) if health_check.status == 200 else false }}"
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
 
     - name: Disable PostgreSQL service (managed by leader election) - non-leaders only
       systemd:
@@ -52,12 +49,12 @@
         state: stopped
       when: not is_storage_leader
 
-    - name: Disable PostgreSQL@16-main service (managed by leader election) - non-leaders only
-      systemd:
-        name: postgresql@16-main
-        enabled: no
-        state: stopped
-      when: not is_storage_leader
+#    - name: Disable PostgreSQL@16-main service (managed by leader election) - non-leaders only
+#      systemd:
+#        name: postgresql@16-main
+#        enabled: no
+#        state: stopped
+#      when: not is_storage_leader
 
     - name: Disable PostgreSQL service for leader (but keep it running)
       systemd:
@@ -65,11 +62,11 @@
         enabled: no
       when: is_storage_leader
 
-    - name: Disable PostgreSQL@16-main service for leader (but keep it running)
-      systemd:
-        name: postgresql@16-main
-        enabled: no
-      when: is_storage_leader
+#    - name: Disable PostgreSQL@16-main service for leader (but keep it running)
+#      systemd:
+#        name: postgresql@16-main
+#        enabled: no
+#      when: is_storage_leader
 
     - name: Reload systemd daemon
       systemd:
