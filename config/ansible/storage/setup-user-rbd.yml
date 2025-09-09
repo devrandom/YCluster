@@ -107,6 +107,7 @@
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
           no_log: true
+          changed_when: false
 
         - name: Format device with LUKS encryption using backup passphrase
           command: cryptsetup luksFormat --batch-mode --key-file /dev/shm/user_luks_passphrase {{ rbd_device_path }}
@@ -118,6 +119,9 @@
         - name: Bind LUKS device to Clevis policy
           shell: |
             /usr/local/bin/user-rbd-manager bind -k /dev/shm/user_luks_passphrase
+          register: bind_result
+          changed_when: bind_result.rc == 1
+          failed_when: bind_result.rc > 1
           when: luks_check.rc != 0
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
@@ -129,6 +133,7 @@
             state: absent
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
+          changed_when: false
 
     - name: Check if LUKS device is already open
       stat:

@@ -94,15 +94,12 @@
           
           echo "NAT rules cleaned up"
 
-    - name: Enable IP forwarding permanently
-      lineinfile:
-        path: /etc/sysctl.conf
-        line: 'net.ipv4.ip_forward=1'
-        regexp: '^#?net\.ipv4\.ip_forward'
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
         state: present
-
-    - name: Apply sysctl changes
-      command: sysctl -p
+        reload: yes
 
     - name: Ensure keepalived conf.d directory exists
       file:
@@ -160,9 +157,15 @@
           include /etc/keepalived/conf.d/*.conf
       notify: restart keepalived
 
+    - name: Check if backup gateway route exists
+      shell: ip -j route show default | jq -r '.[] | select(.gateway == "{{ gateway_vip }}" and .metric == {{ vip_metric }}) | .gateway'
+      register: route_check
+      failed_when: false
+      changed_when: false
+
     - name: Add backup gateway route to all nodes
       command: ip route add default via {{ gateway_vip }} metric {{ vip_metric }}
-      ignore_errors: yes  # May already exist
+      when: route_check.stdout != gateway_vip
       
     - name: Make backup gateway route persistent
       lineinfile:

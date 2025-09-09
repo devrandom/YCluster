@@ -10,7 +10,7 @@
 - import_playbook: configure-ntp.yml
 - import_playbook: configure-proxy.yml
 
-# TODO we have this here because we don't have a proxy before this on first run.  But it's in convenient
+# TODO we have this here because we don't have a proxy before this on first run.  But it's not ideal
 # to do it so late, if the proxy has been already installed.
 - import_playbook: update-apt-cache.yml
 
