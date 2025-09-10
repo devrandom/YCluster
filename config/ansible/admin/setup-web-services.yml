@@ -18,6 +18,13 @@
         mode: '0644'
       notify: restart admin-api
 
+    - name: Link shared Python utilities for admin API
+      file:
+        src: /usr/local/lib/cluster/common
+        dest: "{{ admin_services_dir }}/common"
+        state: link
+      notify: restart admin-api
+
     - name: Copy user-data template
       copy:
         src: "templates/user-data.j2"
