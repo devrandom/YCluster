@@ -2,30 +2,12 @@
 
 import argparse
 import json
-import os
 import sys
-import etcd3
 from datetime import datetime
 
-ETCD_HOSTS = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
-ETCD_PREFIX = '/cluster/nodes/frontend'
+from common.etcd_utils import get_etcd_client
 
-def get_etcd_client():
-    """Get etcd client connection"""
-    grpc_options = [('grpc.enable_http_proxy', 0)]
-    
-    for etcd_host in ETCD_HOSTS:
-        try:
-            host, port = etcd_host.split(':')
-            client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options)
-            # Test connection
-            client.status()
-            return client
-        except Exception:
-            continue
-    
-    print(f"Error: Could not connect to any etcd host: {ETCD_HOSTS}")
-    sys.exit(1)
+ETCD_PREFIX = '/cluster/nodes/frontend'
 
 def list_frontend_nodes():
     """List all frontend nodes"""
