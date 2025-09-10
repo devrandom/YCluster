@@ -175,26 +175,18 @@ class HealthServer:
 
 class DHCPServer:
     def __init__(self):
-        self.etcd_client = None
         self.leases = {}  # mac -> lease_info
         self.allocated_ips = set()
         self.server_ip = self.get_server_ip()
         self.running = False
         self.health_server = None
-        
+
     def get_etcd_client(self):
         """Get etcd client with failover"""
-        if self.etcd_client:
-            try:
-                self.etcd_client.status()
-                return self.etcd_client
-            except Exception:
-                self.etcd_client = None
-
         try:
-            self.etcd_client = get_etcd_client()
+            client = get_etcd_client()
             logger.info("Connected to etcd")
-            return self.etcd_client
+            return client
         except Exception as e:
             logger.error(f"Could not connect to any etcd host: {e}")
             return None

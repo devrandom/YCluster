@@ -50,7 +50,7 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
 
-from common.etcd_utils import get_etcd_client as build_etcd_client
+from common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
 
@@ -84,22 +84,7 @@ CORE_NODES = ['s1', 's2', 's3']
 # Thread lock for allocation operations
 allocation_lock = threading.Lock()
 
-# Global etcd client
-etcd_client = None
-
-def get_etcd_client():
-    """Get or create etcd client with failover support"""
-    global etcd_client
-    
-    if etcd_client:
-        try:
-            etcd_client.status()
-            return etcd_client
-        except Exception:
-            etcd_client = None
-
-    etcd_client = build_etcd_client()
-    return etcd_client
+# Global etcd client handled by common.etcd_utils
 
 # IP allocation configuration (avoiding DHCP range 10.0.0.100-200)
 IP_RANGES = {

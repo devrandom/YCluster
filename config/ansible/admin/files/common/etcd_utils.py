@@ -36,7 +36,21 @@ def connect_with_retry(hosts, max_retries=3, retry_delay=1, grpc_options=None):
     raise ConnectionError(f"Could not connect to any etcd host: {hosts}")
 
 
+_CACHED_CLIENT = None
+
+
 def get_etcd_client(hosts=None, max_retries=3, retry_delay=1, grpc_options=None):
-    """Build an etcd client using environment host list with retries."""
+    """Return a cached etcd client, creating it with retries if needed."""
+    global _CACHED_CLIENT
+    if _CACHED_CLIENT:
+        try:
+            _CACHED_CLIENT.status()
+            return _CACHED_CLIENT
+        except Exception:
+            _CACHED_CLIENT = None
+
     hosts = hosts or get_etcd_hosts()
-    return connect_with_retry(hosts, max_retries=max_retries, retry_delay=retry_delay, grpc_options=grpc_options)
+    _CACHED_CLIENT = connect_with_retry(
+        hosts, max_retries=max_retries, retry_delay=retry_delay, grpc_options=grpc_options
+    )
+    return _CACHED_CLIENT
