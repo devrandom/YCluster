@@ -78,6 +78,22 @@
         - { src: 'certbot-manager.py', dest: '/usr/local/bin/certbot-manager' }
         - { src: 'update-dhcp-hosts.py', dest: '/usr/local/lib/cluster/update-dhcp-hosts' }
 
+    - name: Install shared Python utilities
+      copy:
+        src: common/
+        dest: /usr/local/lib/cluster/common/
+        owner: root
+        group: root
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: Symlink shared utilities into /usr/local/bin
+      file:
+        src: /usr/local/lib/cluster/common
+        dest: /usr/local/bin/common
+        state: link
+        force: yes
+
     - name: Set ubuntu user password
       user:
         name: ubuntu

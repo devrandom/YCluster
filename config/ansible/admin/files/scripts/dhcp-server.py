@@ -14,14 +14,15 @@ import subprocess
 import yaml
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import etcd3
 from scapy.all import *
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import Ether
 
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from common.etcd_utils import get_etcd_client, get_etcd_hosts
+
 # Configuration
-ETCD_HOSTS = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
 ETCD_PREFIX = '/cluster/dhcp'
 LEASE_TIME = 43200  # 12 hours
 GATEWAY = '10.0.0.254'
@@ -100,7 +101,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             'server_ip': self.dhcp_server.server_ip,
             'lease_count': len(self.dhcp_server.leases),
             'allocated_ips': len(self.dhcp_server.allocated_ips),
-            'etcd_hosts': ETCD_HOSTS,
+            'etcd_hosts': get_etcd_hosts(),
             'etcd_connected': self.dhcp_server.get_etcd_client() is not None
         })
     
@@ -185,32 +186,18 @@ class DHCPServer:
         """Get etcd client with failover"""
         if self.etcd_client:
             try:
-                # Test connection
                 self.etcd_client.status()
                 return self.etcd_client
-            except:
+            except Exception:
                 self.etcd_client = None
-        
-        for host in ETCD_HOSTS:
-            try:
-                host_port = host.replace('http://', '').replace('https://', '')
-                if ':' in host_port:
-                    host_ip, port = host_port.split(':')
-                    port = int(port)
-                else:
-                    host_ip, port = host_port, 2379
-                
-                client = etcd3.client(host=host_ip, port=port)
-                client.status()  # Test connection
-                self.etcd_client = client
-                logger.info(f"Connected to etcd at {host}")
-                return client
-            except Exception as e:
-                logger.warning(f"Failed to connect to etcd at {host}: {e}")
-                continue
-        
-        logger.error("Could not connect to any etcd host")
-        return None
+
+        try:
+            self.etcd_client = get_etcd_client()
+            logger.info("Connected to etcd")
+            return self.etcd_client
+        except Exception as e:
+            logger.error(f"Could not connect to any etcd host: {e}")
+            return None
     
     def get_server_ip(self):
         """Get the IP address of the DHCP server from netplan primary interface"""

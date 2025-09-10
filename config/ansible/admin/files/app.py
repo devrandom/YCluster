@@ -35,7 +35,6 @@ MAC Address Formats:
 import json
 import sys
 
-import etcd3
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
 import ntplib
 import os
@@ -50,6 +49,8 @@ import dns.resolver
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
+
+from common.etcd_utils import get_etcd_client as build_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
 
@@ -75,7 +76,6 @@ NODE_TYPE_INTERFACES = {
 }
 
 # etcd configuration
-ETCD_HOSTS = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
 ETCD_PREFIX = '/cluster/nodes'
 
 # Core nodes configuration
@@ -93,25 +93,13 @@ def get_etcd_client():
     
     if etcd_client:
         try:
-            # Test if connection is alive
             etcd_client.status()
             return etcd_client
-        except:
+        except Exception:
             etcd_client = None
-    
-    # Try each host in order
-    for host_port in ETCD_HOSTS:
-        try:
-            host, port = host_port.split(':')
-            client = etcd3.client(host=host, port=int(port))
-            # Test connection
-            client.status()
-            etcd_client = client
-            return client
-        except:
-            continue
-    
-    raise Exception("Could not connect to any etcd host")
+
+    etcd_client = build_etcd_client()
+    return etcd_client
 
 # IP allocation configuration (avoiding DHCP range 10.0.0.100-200)
 IP_RANGES = {
