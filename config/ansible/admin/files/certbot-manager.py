@@ -12,7 +12,7 @@ import tempfile
 from jinja2 import Template
 from pathlib import Path
 
-from common.etcd_utils import get_etcd_client
+from common.etcd_utils import get_etcd_client, get_etcd_client_or_none
 
 def write_tls_key_to_temp():
     """Write TLS private key from etcd to temporary file for CSR generation"""
@@ -545,20 +545,23 @@ def renew_certificates(non_interactive=False):
 
 def store_cert_info(primary_domain, domains):
     """Store certificate information in etcd"""
+    client = get_etcd_client_or_none()
+    if not client:
+        print("Warning: Could not store certificate info in etcd: connection failed")
+        return
+
+    cert_info = {
+        'primary_domain': primary_domain,
+        'domains': domains,
+        'cert_path': f'/etc/letsencrypt/live/{primary_domain}/fullchain.pem',
+        'key_path': f'/etc/letsencrypt/live/{primary_domain}/privkey.pem',
+        'nginx_cert_path': '/etc/nginx/ssl/cert.pem',
+        'nginx_key_path': '/etc/nginx/ssl/key.pem',
+        'updated_at': subprocess.run(['date', '-Iseconds'], capture_output=True, text=True).stdout.strip()
+    }
+
+    key = '/cluster/https/certificate_info'
     try:
-        client = get_etcd_client()
-        
-        cert_info = {
-            'primary_domain': primary_domain,
-            'domains': domains,
-            'cert_path': f'/etc/letsencrypt/live/{primary_domain}/fullchain.pem',
-            'key_path': f'/etc/letsencrypt/live/{primary_domain}/privkey.pem',
-            'nginx_cert_path': '/etc/nginx/ssl/cert.pem',
-            'nginx_key_path': '/etc/nginx/ssl/key.pem',
-            'updated_at': subprocess.run(['date', '-Iseconds'], capture_output=True, text=True).stdout.strip()
-        }
-        
-        key = '/cluster/https/certificate_info'
         client.put(key, json.dumps(cert_info))
         print("Certificate information stored in etcd")
     except Exception as e:
@@ -612,62 +615,67 @@ def list_certificates():
 def revoke_certificate(domain):
     """Revoke a certificate using the certificate from etcd"""
     print(f"Revoking certificate for {domain}...")
-    
+
+    client = get_etcd_client_or_none()
+    if not client:
+        print("Could not connect to etcd")
+        return False
+
+    cert_value, _ = client.get('/cluster/tls/cert')
+
+    if not cert_value:
+        print("No certificate found in etcd")
+        return False
+
+    # Write certificate to temporary file for revocation
+    temp_cert = tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False)
+    temp_cert.write(cert_value.decode())
+    temp_cert.close()
+
+    cmd = ['certbot', 'revoke', '--cert-path', temp_cert.name]
+
     try:
-        client = get_etcd_client()
-        cert_value, _ = client.get('/cluster/tls/cert')
-        
-        if not cert_value:
-            print("No certificate found in etcd")
-            return False
-        
-        # Write certificate to temporary file for revocation
-        temp_cert = tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False)
-        temp_cert.write(cert_value.decode())
-        temp_cert.close()
-        
-        cmd = ['certbot', 'revoke', '--cert-path', temp_cert.name]
-        
-        try:
-            run_certbot_command(cmd)
-            print("Certificate revoked successfully!")
-            
-            # Remove from etcd
-            client.delete('/cluster/tls/cert')
-            print("Certificate removed from etcd")
-            
-            return True
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(temp_cert.name)
-            except:
-                pass
-                
+        run_certbot_command(cmd)
+        print("Certificate revoked successfully!")
+
+        # Remove from etcd
+        client.delete('/cluster/tls/cert')
+        print("Certificate removed from etcd")
+
+        return True
     except subprocess.CalledProcessError:
         print("Failed to revoke certificate")
         return False
     except Exception as e:
         print(f"Error during revocation: {e}")
         return False
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(temp_cert.name)
+        except:
+            pass
 
 def delete_certificate(domain):
     """Delete certificate from etcd and nginx"""
     print(f"Deleting certificate for {domain}...")
     
+    client = get_etcd_client_or_none()
+    if not client:
+        print("Could not connect to etcd")
+        return False
+
     try:
-        client = get_etcd_client()
-        
         # Remove certificate from etcd (keep the key)
         client.delete('/cluster/tls/cert')
         print("Certificate removed from etcd")
-        
+
         # Remove nginx certificate file
         nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
         if nginx_cert_path.exists():
             nginx_cert_path.unlink()
             print("Certificate removed from nginx")
-        
+
         print("Certificate deleted successfully!")
         return True
     except Exception as e:
@@ -744,8 +752,8 @@ def main():
                 print("Email: Not configured (will use --register-unsafely-without-email)")
             
             # Check if TLS materials exist
-            try:
-                client = get_etcd_client()
+            client = get_etcd_client_or_none()
+            if client:
                 key_value, _ = client.get('/cluster/tls/key')
                 cert_value, _ = client.get('/cluster/tls/cert')
                 
@@ -766,15 +774,15 @@ def main():
                     print("TLS certificate: Present in etcd, key missing")
                 else:
                     print("TLS materials: Not found (generate with 'tls-config generate')")
-            except Exception as e:
-                print(f"TLS materials: Error checking ({e})")
+            else:
+                print("TLS materials: Error connecting to etcd")
             
             if domains:
                 print(f"All domains: {', '.join(domains)}")
                 
                 # Check if certificates exist in etcd
-                try:
-                    client = get_etcd_client()
+                client = get_etcd_client_or_none()
+                if client:
                     cert_value, _ = client.get('/cluster/tls/cert')
                     if cert_value:
                         print("Let's Encrypt certificate: Present in etcd")
@@ -790,8 +798,8 @@ def main():
                             pass
                     else:
                         print("Let's Encrypt certificate: Not found")
-                except Exception as e:
-                    print(f"Certificate check error: {e}")
+                else:
+                    print("Certificate check error: could not connect to etcd")
             else:
                 print("No domains configured")
     except Exception as e:

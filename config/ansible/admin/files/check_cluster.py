@@ -14,7 +14,7 @@ import urllib.error
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from common.etcd_utils import get_etcd_client, get_etcd_hosts
+from common.etcd_utils import get_etcd_client_or_none, get_etcd_hosts
 
 # Get initial etcd host from environment or use default
 INITIAL_ETCD_HOST = get_etcd_hosts()[0]
@@ -239,10 +239,7 @@ def main():
             print(f"✗ {result['host']}: Unhealthy - {result['error']}")
     
     # Get nodes from first healthy host for service checks
-    try:
-        client = get_etcd_client(etcd_hosts)
-    except Exception:
-        client = None
+    client = get_etcd_client_or_none(etcd_hosts)
 
     if client:
         nodes = get_all_nodes(client)

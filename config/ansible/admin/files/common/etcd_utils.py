@@ -54,3 +54,13 @@ def get_etcd_client(hosts=None, max_retries=3, retry_delay=1, grpc_options=None)
         hosts, max_retries=max_retries, retry_delay=retry_delay, grpc_options=grpc_options
     )
     return _CACHED_CLIENT
+
+
+def get_etcd_client_or_none(hosts=None, max_retries=3, retry_delay=1, grpc_options=None):
+    """Return etcd client or None if connection fails."""
+    try:
+        return get_etcd_client(
+            hosts, max_retries=max_retries, retry_delay=retry_delay, grpc_options=grpc_options
+        )
+    except Exception:
+        return None

@@ -50,7 +50,7 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
 
-from common.etcd_utils import get_etcd_client
+from common.etcd_utils import get_etcd_client, get_etcd_client_or_none
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
 
@@ -262,10 +262,9 @@ def allocate_hostname():
 @app.route('/api/status')
 def status():
     """Get current allocation counts by type"""
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return jsonify({'error': f'etcd connection failed: {str(e)}'}), 503
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': 'etcd connection failed'}), 503
     
     counts = {'storage': 0, 'compute': 0, 'macos': 0}
     
@@ -284,10 +283,9 @@ def status():
 @app.route('/api/allocations')
 def allocations():
     """Get all current allocations"""
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return jsonify({'error': f'etcd connection failed: {str(e)}'}), 503
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': 'etcd connection failed'}), 503
     
     allocations = []
     
@@ -314,10 +312,9 @@ def allocations():
 @app.route('/api/dhcp-config')
 def get_dhcp_config():
     """Generate DHCP configuration from etcd allocations"""
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return f"# etcd connection failed: {str(e)}\n", 503
+    client = get_etcd_client_or_none()
+    if not client:
+        return "# etcd connection failed\n", 503
     
     dhcp_config = []
     
@@ -344,10 +341,9 @@ def get_dhcp_config():
 @app.route('/api/hosts')
 def get_hosts():
     """Generate hosts file format from etcd allocations"""
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return f"# etcd connection failed: {str(e)}\n", 503
+    client = get_etcd_client_or_none()
+    if not client:
+        return "# etcd connection failed\n", 503
     
     hosts_entries = []
     
@@ -475,10 +471,20 @@ def check_dns_status():
 
 def check_certificate_expiry():
     """Check TLS certificate expiry from etcd"""
+    client = get_etcd_client_or_none()
+    if not client:
+        return {
+            'status': 'error',
+            'details': {
+                'message': 'etcd connection failed',
+                'days_until_expiry': None,
+                'expires_at': None
+            }
+        }
+
     try:
-        client = get_etcd_client()
         cert_value, _ = client.get('/cluster/tls/cert')
-        
+
         if not cert_value:
             return {
                 'status': 'not_configured',
@@ -941,44 +947,43 @@ def check_open_webui():
 
 def is_storage_leader():
     """Check if this node is the current storage leader"""
-    try:
-        client = get_etcd_client()
-        result = client.get('/cluster/leader/app')
-        if result[0]:
-            leader = result[0].decode()
-            return leader == platform.node()
+    client = get_etcd_client_or_none()
+    if not client:
         return False
-    except:
-        return False
+    result = client.get('/cluster/leader/app')
+    if result[0]:
+        leader = result[0].decode()
+        return leader == platform.node()
+    return False
 
 def is_dhcp_leader():
     """Check if this node is the current DHCP leader"""
-    try:
-        client = get_etcd_client()
-        result = client.get('/cluster/leader/dhcp')
-        if result[0]:
-            leader = result[0].decode()
-            return leader == platform.node()
+    client = get_etcd_client_or_none()
+    if not client:
         return False
-    except:
-        return False
+    result = client.get('/cluster/leader/dhcp')
+    if result[0]:
+        leader = result[0].decode()
+        return leader == platform.node()
+    return False
 
 def is_node_drained():
     """Check if this node is drained"""
-    try:
-        hostname = platform.node()
-        client = get_etcd_client()
-        result = client.get(f'/cluster/nodes/{hostname}/drain')
-        return result[0] is not None and result[0].decode() == 'true'
-    except:
+    hostname = platform.node()
+    client = get_etcd_client_or_none()
+    if not client:
         return False
+    result = client.get(f'/cluster/nodes/{hostname}/drain')
+    return result[0] is not None and result[0].decode() == 'true'
 
 @app.route('/api/drain', methods=['POST'])
 def drain_node():
     """Drain this node - disable leader election"""
+    hostname = platform.node()
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': 'Failed to drain node: etcd connection failed'}), 500
     try:
-        hostname = platform.node()
-        client = get_etcd_client()
         client.put(f'/cluster/nodes/{hostname}/drain', 'true')
         return jsonify({'status': 'drained', 'hostname': hostname})
     except Exception as e:
@@ -987,9 +992,11 @@ def drain_node():
 @app.route('/api/undrain', methods=['POST']) 
 def undrain_node():
     """Undrain this node - re-enable leader election"""
+    hostname = platform.node()
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': 'Failed to undrain node: etcd connection failed'}), 500
     try:
-        hostname = platform.node()
-        client = get_etcd_client()
         client.delete(f'/cluster/nodes/{hostname}/drain')
         return jsonify({'status': 'active', 'hostname': hostname})
     except Exception as e:
@@ -998,8 +1005,10 @@ def undrain_node():
 @app.route('/api/drain/<target_hostname>', methods=['POST'])
 def drain_target_node(target_hostname):
     """Drain a specific node - disable leader election"""
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': f'Failed to drain node {target_hostname}: etcd connection failed'}), 500
     try:
-        client = get_etcd_client()
         client.put(f'/cluster/nodes/{target_hostname}/drain', 'true')
         return jsonify({'status': 'drained', 'hostname': target_hostname})
     except Exception as e:
@@ -1008,8 +1017,10 @@ def drain_target_node(target_hostname):
 @app.route('/api/undrain/<target_hostname>', methods=['POST'])
 def undrain_target_node(target_hostname):
     """Undrain a specific node - re-enable leader election"""
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': f'Failed to undrain node {target_hostname}: etcd connection failed'}), 500
     try:
-        client = get_etcd_client()
         client.delete(f'/cluster/nodes/{target_hostname}/drain')
         return jsonify({'status': 'active', 'hostname': target_hostname})
     except Exception as e:
@@ -1018,9 +1029,11 @@ def undrain_target_node(target_hostname):
 @app.route('/api/drain/status')
 def drain_status():
     """Check drain status of this node"""
+    hostname = platform.node()
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': 'Failed to check drain status: etcd connection failed'}), 500
     try:
-        hostname = platform.node()
-        client = get_etcd_client()
         result = client.get(f'/cluster/nodes/{hostname}/drain')
         is_drained = result[0] is not None and result[0].decode() == 'true'
         return jsonify({'hostname': hostname, 'drained': is_drained})
@@ -1030,8 +1043,10 @@ def drain_status():
 @app.route('/api/drain/status/<target_hostname>')
 def drain_status_target(target_hostname):
     """Check drain status of a specific node"""
+    client = get_etcd_client_or_none()
+    if not client:
+        return jsonify({'error': f'Failed to check drain status for {target_hostname}: etcd connection failed'}), 500
     try:
-        client = get_etcd_client()
         result = client.get(f'/cluster/nodes/{target_hostname}/drain')
         is_drained = result[0] is not None and result[0].decode() == 'true'
         return jsonify({'hostname': target_hostname, 'drained': is_drained})
@@ -1176,12 +1191,16 @@ def health():
     }
     
     # Check etcd
-    try:
-        client = get_etcd_client()
-        client.get('/test')
-        health_status['services']['etcd'] = {'status': 'healthy', 'details': 'connected'}
-    except Exception as e:
-        health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
+    client = get_etcd_client_or_none()
+    if client:
+        try:
+            client.get('/test')
+            health_status['services']['etcd'] = {'status': 'healthy', 'details': 'connected'}
+        except Exception as e:
+            health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
+            health_status['overall'] = 'unhealthy'
+    else:
+        health_status['services']['etcd'] = {'status': 'unhealthy', 'details': 'connection failed'}
         health_status['overall'] = 'unhealthy'
     
     # Check Ceph storage
@@ -1514,28 +1533,29 @@ def health():
 
 def get_all_hosts():
     """Get all hosts from etcd allocations"""
+    client = get_etcd_client_or_none()
+    if not client:
+        return []
+    hosts = []
     try:
-        client = get_etcd_client()
-        hosts = []
-        
         # Get all allocations from by-hostname
         for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
             if value:
                 try:
                     allocation = json.loads(value.decode())
                     hostname = allocation['hostname']
-                    
+
                     # Skip AMT interfaces (hostnames ending with 'a')
                     if hostname.endswith('a'):
                         continue
-                    
+
                     # Skip dynamic IP allocations (hostnames that don't match expected patterns)
                     # Expected patterns: s1-s20, c1-c20, m1-m20
-                    if not (hostname.startswith(('s', 'c', 'm')) and 
-                            len(hostname) > 1 and 
+                    if not (hostname.startswith(('s', 'c', 'm')) and
+                            len(hostname) > 1 and
                             hostname[1:].isdigit()):
                         continue
-                        
+
                     hosts.append({
                         'hostname': hostname,
                         'ip': allocation['ip'],
@@ -1543,11 +1563,11 @@ def get_all_hosts():
                     })
                 except:
                     pass
-        
+
         # Sort by hostname
         hosts.sort(key=lambda x: (x['type'], int(x['hostname'][1:]) if x['hostname'][1:].isdigit() else 0))
         return hosts
-    except:
+    except Exception:
         return []
 
 def get_host_health(host_ip, timeout=5):
@@ -1729,24 +1749,26 @@ def get_cluster_vip_status(host_health):
 
 def get_leadership_status():
     """Get current leadership status from etcd"""
+    client = get_etcd_client_or_none()
+    if not client:
+        return {}
     try:
-        client = get_etcd_client()
         leadership = {}
-        
+
         # Get storage leader
         result = client.get('/cluster/leader/app')
         if result[0]:
             storage_leader = result[0].decode()
             leadership['storage_leader'] = storage_leader
-        
+
         # Get DHCP leader
         result = client.get('/cluster/leader/dhcp')
         if result[0]:
             dhcp_leader = result[0].decode()
             leadership['dhcp_leader'] = dhcp_leader
-            
+
         return leadership
-    except:
+    except Exception:
         return {}
 
 @app.route('/api/cluster-status')
@@ -1823,12 +1845,11 @@ def status_page():
 if __name__ == '__main__':
     # Wait for etcd to be available
     while True:
-        try:
-            client = get_etcd_client()
+        client = get_etcd_client_or_none()
+        if client:
             print("Connected to etcd successfully")
             break
-        except Exception as e:
-            print(f"Waiting for etcd: {e}")
-            time.sleep(5)
+        print("Waiting for etcd")
+        time.sleep(5)
     
     app.run(host='0.0.0.0', port=12723)

@@ -5,13 +5,12 @@ Script to fetch TLS certificates from etcd and write them to nginx SSL directory
 
 import sys
 
-from common.etcd_utils import get_etcd_client
+from common.etcd_utils import get_etcd_client_or_none
 
 def main():
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        print(f'Could not connect to etcd: {e}')
+    client = get_etcd_client_or_none()
+    if not client:
+        print('Could not connect to etcd')
         sys.exit(1)
     
     cert_value, _ = client.get('/cluster/tls/cert')

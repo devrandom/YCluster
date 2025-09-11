@@ -20,7 +20,7 @@ from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import Ether
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from common.etcd_utils import get_etcd_client, get_etcd_hosts
+from common.etcd_utils import get_etcd_client_or_none, get_etcd_hosts
 
 # Configuration
 ETCD_PREFIX = '/cluster/dhcp'
@@ -183,13 +183,12 @@ class DHCPServer:
 
     def get_etcd_client(self):
         """Get etcd client with failover"""
-        try:
-            client = get_etcd_client()
+        client = get_etcd_client_or_none()
+        if client:
             logger.info("Connected to etcd")
-            return client
-        except Exception as e:
-            logger.error(f"Could not connect to any etcd host: {e}")
-            return None
+        else:
+            logger.error("Could not connect to any etcd host")
+        return client
     
     def get_server_ip(self):
         """Get the IP address of the DHCP server from netplan primary interface"""
