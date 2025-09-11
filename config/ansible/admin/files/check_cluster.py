@@ -14,8 +14,10 @@ import urllib.error
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from common.etcd_utils import get_etcd_client_or_none, get_etcd_hosts
+
 # Get initial etcd host from environment or use default
-INITIAL_ETCD_HOST = os.environ.get('ETCD_HOST', 'localhost:2379')
+INITIAL_ETCD_HOST = get_etcd_hosts()[0]
 ETCD_PREFIX = '/cluster/nodes'
 DHCP_HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 
@@ -237,16 +239,8 @@ def main():
             print(f"✗ {result['host']}: Unhealthy - {result['error']}")
     
     # Get nodes from first healthy host for service checks
-    client = None
-    for host_port in etcd_hosts:
-        try:
-            host, port = host_port.split(':')
-            client = etcd3.client(host=host, port=int(port))
-            client.status()  # Test connection
-            break
-        except:
-            continue
-    
+    client = get_etcd_client_or_none(etcd_hosts)
+
     if client:
         nodes = get_all_nodes(client)
         

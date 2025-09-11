@@ -7,38 +7,15 @@ import os
 import sys
 import json
 import argparse
-import etcd3
 from datetime import datetime
 
-# Configuration
-ETCD_HOSTS = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
-
-def get_etcd_client():
-    """Get etcd client with failover"""
-    for host in ETCD_HOSTS:
-        try:
-            host_port = host.replace('http://', '').replace('https://', '')
-            if ':' in host_port:
-                host_ip, port = host_port.split(':')
-                port = int(port)
-            else:
-                host_ip, port = host_port, 2379
-            
-            client = etcd3.client(host=host_ip, port=port, timeout=5)
-            client.status()  # Test connection
-            print(f"Connected to etcd at {host}")
-            return client
-        except Exception as e:
-            print(f"Failed to connect to etcd at {host}: {e}")
-            continue
-    
-    print("ERROR: Could not connect to any etcd host")
-    return None
+from common.etcd_utils import get_etcd_client_or_none
 
 def list_allocations():
     """List all node allocations from etcd"""
-    client = get_etcd_client()
+    client = get_etcd_client_or_none()
     if not client:
+        print('Could not connect to etcd')
         return
     
     print("\n=== Node Allocations ===")
@@ -78,8 +55,9 @@ def list_allocations():
 
 def list_leases():
     """List all DHCP leases from etcd"""
-    client = get_etcd_client()
+    client = get_etcd_client_or_none()
     if not client:
+        print('Could not connect to etcd')
         return
     
     print("\n=== DHCP Leases ===")
@@ -127,8 +105,9 @@ def list_leases():
 
 def delete_by_hostname(hostname):
     """Delete all etcd entries related to a hostname"""
-    client = get_etcd_client()
+    client = get_etcd_client_or_none()
     if not client:
+        print('Could not connect to etcd')
         return False
     
     print(f"Deleting all entries for hostname: {hostname}")
@@ -175,8 +154,9 @@ def delete_by_hostname(hostname):
 
 def delete_by_mac(mac):
     """Delete all etcd entries related to a MAC address"""
-    client = get_etcd_client()
+    client = get_etcd_client_or_none()
     if not client:
+        print('Could not connect to etcd')
         return False
     
     # Normalize MAC address

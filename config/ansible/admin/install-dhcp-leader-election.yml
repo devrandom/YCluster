@@ -25,6 +25,15 @@
         owner: root
         group: root
 
+    - name: Install shared Python utilities
+      copy:
+        src: common/
+        dest: /usr/local/lib/cluster/common/
+        owner: root
+        group: root
+        mode: '0644'
+        directory_mode: '0755'
+
     - name: Copy DHCP server script
       copy:
         src: scripts/dhcp-server.py
