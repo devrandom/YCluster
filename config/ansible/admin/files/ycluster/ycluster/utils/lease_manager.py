@@ -9,7 +9,7 @@ import json
 import argparse
 from datetime import datetime
 
-from common.etcd_utils import get_etcd_client
+from ..common.etcd_utils import get_etcd_client
 
 def list_allocations():
     """List all node allocations from etcd"""

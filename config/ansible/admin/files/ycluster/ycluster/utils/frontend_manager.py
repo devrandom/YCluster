@@ -2,10 +2,9 @@
 
 import argparse
 import json
-import sys
 from datetime import datetime
 
-from common.etcd_utils import get_etcd_client
+from ..common.etcd_utils import get_etcd_client
 
 ETCD_PREFIX = '/cluster/nodes/frontend'
 

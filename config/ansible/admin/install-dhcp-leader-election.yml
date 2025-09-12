@@ -25,23 +25,6 @@
         owner: root
         group: root
 
-    - name: Install shared Python utilities
-      copy:
-        src: common/
-        dest: /usr/local/lib/cluster/common/
-        owner: root
-        group: root
-        mode: '0644'
-        directory_mode: '0755'
-
-    - name: Copy DHCP server script
-      copy:
-        src: scripts/dhcp-server.py
-        dest: /usr/local/lib/cluster/dhcp-server
-        mode: '0755'
-        owner: root
-        group: root
-      notify: restart dhcp-leader-election
 
     - name: Copy DHCP leader election script
       copy:
@@ -64,7 +47,7 @@
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/lib/cluster/dhcp-server
+          ExecStart=/usr/local/bin/yc-dhcp-server
           Restart=always
           RestartSec=5
           User=root

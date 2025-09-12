@@ -62,37 +62,26 @@
         force: no
       ignore_errors: yes
 
-    - name: Install cluster utility scripts
+    - name: Create minimal wrapper scripts for legacy compatibility
       copy:
-        src: "{{ item.src }}"
         dest: "{{ item.dest }}"
         mode: '0755'
         owner: root
         group: root
+        content: "{{ item.content }}"
       loop:
-        - { src: 'populate_local_node.py', dest: '/usr/local/lib/cluster/populate-local-node' }
-        - { src: 'check_cluster.py', dest: '/usr/local/lib/cluster/check-cluster' }
-        - { src: 'lease-manager.py', dest: '/usr/local/bin/lease-manager' }
-        - { src: 'frontend-manager.py', dest: '/usr/local/bin/frontend-manager' }
-        - { src: 'https-config.py', dest: '/usr/local/bin/https-config' }
-        - { src: 'certbot-manager.py', dest: '/usr/local/bin/certbot-manager' }
-        - { src: 'update-dhcp-hosts.py', dest: '/usr/local/lib/cluster/update-dhcp-hosts' }
-
-    - name: Install shared Python utilities
-      copy:
-        src: common/
-        dest: /usr/local/lib/cluster/common/
-        owner: root
-        group: root
-        mode: '0644'
-        directory_mode: '0755'
-
-    - name: Symlink shared utilities into /usr/local/bin
-      file:
-        src: /usr/local/lib/cluster/common
-        dest: /usr/local/bin/common
-        state: link
-        force: yes
+        - dest: '/usr/local/lib/cluster/populate-local-node'
+          content: |
+            #!/bin/bash
+            exec ycluster cluster populate-local-node "$@"
+        - dest: '/usr/local/lib/cluster/check-cluster'
+          content: |
+            #!/bin/bash
+            exec ycluster cluster status "$@"
+        - dest: '/usr/local/lib/cluster/update-dhcp-hosts'
+          content: |
+            #!/bin/bash
+            exec ycluster dhcp update-hosts "$@"
 
     - name: Set ubuntu user password
       user:
