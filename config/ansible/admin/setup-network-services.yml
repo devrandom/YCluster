@@ -77,6 +77,12 @@
     - name: Flush handlers to restart squid immediately
       meta: flush_handlers
 
+    - name: Remove ubuntu-fan package (conflicts with bind-dynamic)
+      apt:
+        name: ubuntu-fan
+        state: absent
+        purge: yes
+
     - name: Disable systemd-resolved to free port 53
       systemd:
         name: systemd-resolved
@@ -115,6 +121,7 @@
           server=8.8.8.8
           server=1.1.1.1
         backup: yes
+      notify: restart dnsmasq
 
     - name: Create empty static hosts file for dnsmasq
       copy:
@@ -143,12 +150,16 @@
           domain=xc
           domain-needed
           
+          # Dynamic binding for VIP support
+          bind-dynamic
+          
           # PXE boot configuration
           enable-tftp
           tftp-root=/var/lib/tftpboot
           
           # Disable DHCP (handled by scapy-based server)
           port=53
+      notify: restart dnsmasq
 
     - name: Create squid cache directory
       file:
@@ -227,4 +238,9 @@
     - name: restart squid
       systemd:
         name: squid
+        state: restarted
+
+    - name: restart dnsmasq
+      systemd:
+        name: dnsmasq
         state: restarted

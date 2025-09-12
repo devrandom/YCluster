@@ -22,7 +22,7 @@ def check_service_status(service_name):
     try:
         # Use launchctl to check service status
         result = subprocess.run(['launchctl', 'list', service_name], 
-                              capture_output=True, text=True, timeout=5)
+                              capture_output=True, text=True, timeout=3)
         return result.returncode == 0 and service_name in result.stdout
     except:
         return False
@@ -43,11 +43,11 @@ def check_ntp_status():
     try:
         # Check NTP server configuration
         ntp_server_result = subprocess.run(['systemsetup', '-getnetworktimeserver'], 
-                                         capture_output=True, text=True, timeout=10)
+                                         capture_output=True, text=True, timeout=2)
         
         # Check if automatic time setting is enabled
         auto_time_result = subprocess.run(['systemsetup', '-getusingnetworktime'], 
-                                        capture_output=True, text=True, timeout=10)
+                                        capture_output=True, text=True, timeout=2)
         
         ntp_server_configured = ntp_server_result.returncode == 0
         auto_time_enabled = auto_time_result.returncode == 0 and 'On' in auto_time_result.stdout
@@ -69,7 +69,7 @@ def check_ntp_status():
         if ntp_server and ntp_server != 'unknown':
             try:
                 sync_result = subprocess.run(['sntp', ntp_server],
-                                           capture_output=True, text=True, timeout=10)
+                                           capture_output=True, text=True, timeout=2)
                 ntp_sync_working = sync_result.returncode == 0
                 if not ntp_sync_working:
                     ntp_sync_error = sync_result.stderr.strip()
@@ -109,7 +109,7 @@ def check_dns_status():
     try:
         # Get DNS servers for Ethernet interface (if available)
         ethernet_dns_result = subprocess.run(['networksetup', '-getdnsservers', 'Ethernet'], 
-                                           capture_output=True, text=True, timeout=10)
+                                           capture_output=True, text=True, timeout=2)
         
         ethernet_dns_configured = ethernet_dns_result.returncode == 0
         
@@ -127,7 +127,7 @@ def check_dns_status():
         try:
             # Test DNS resolution using nslookup
             dns_test_result = subprocess.run(['nslookup', 's1.xc'],
-                                           capture_output=True, text=True, timeout=5)
+                                           capture_output=True, text=True, timeout=2)
             dns_working = dns_test_result.returncode == 0 and 's1.xc' in dns_test_result.stdout
             if not dns_working:
                 dns_error = 'DNS resolution test failed'
@@ -177,7 +177,7 @@ def check_network_connectivity():
     overall_healthy = True
     
     for service_name, (host, port) in cluster_services.items():
-        is_reachable = check_port_open(host, port, timeout=3)
+        is_reachable = check_port_open(host, port, timeout=2)
         connectivity_status[service_name] = {
             'host': host,
             'port': port,
@@ -199,7 +199,7 @@ def check_disk_space():
     try:
         # Use df to get disk usage for root filesystem
         result = subprocess.run(['df', '-h', '/'], 
-                              capture_output=True, text=True, timeout=5)
+                              capture_output=True, text=True, timeout=2)
         
         if result.returncode == 0:
             lines = result.stdout.strip().split('\n')

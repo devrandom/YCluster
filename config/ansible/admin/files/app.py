@@ -1550,7 +1550,7 @@ def get_all_hosts():
     except:
         return []
 
-def get_host_health(host_ip, timeout=5):
+def get_host_health(host_ip, timeout=10):
     """Get health status from a specific host"""
     try:
         response = requests.get(f"http://{host_ip}:12723/api/health", timeout=timeout)
