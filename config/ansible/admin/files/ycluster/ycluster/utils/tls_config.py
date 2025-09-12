@@ -8,11 +8,11 @@ import sys
 import argparse
 import etcd3
 import os
+import datetime
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-import datetime
 
 def get_etcd_client():
     """Get etcd client with connection to available hosts"""

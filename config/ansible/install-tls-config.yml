@@ -11,14 +11,6 @@
           - python3-etcd3
         state: present
 
-    - name: Install TLS config management script
-      copy:
-        src: tls-config.py
-        dest: /usr/local/bin/tls-config
-        mode: '0755'
-        owner: root
-        group: root
-
     - name: Generate TLS certificate if it doesn't exist in etcd
       shell: |
         if ! /usr/local/bin/tls-config get >/dev/null 2>&1; then

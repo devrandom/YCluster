@@ -18,12 +18,8 @@
         mode: '0644'
       notify: restart admin-api
 
-    - name: Link shared Python utilities for admin API
-      file:
-        src: /usr/local/lib/cluster/common
-        dest: "{{ admin_services_dir }}/common"
-        state: link
-      notify: restart admin-api
+    # Admin API now uses the YCluster package directly
+    # No need to link common utilities
 
     - name: Copy user-data template
       copy:
@@ -89,13 +85,15 @@
         owner: root
         group: root
 
-    - name: Install script to fetch TLS certificates from etcd
+    - name: Create TLS certificate fetch wrapper script
       copy:
-        src: fetch-tls-certs.py
         dest: /usr/local/lib/cluster/fetch-tls-certs
         mode: '0755'
         owner: root
         group: root
+        content: |
+          #!/bin/bash
+          exec ycluster tls fetch-certs "$@"
 
     - name: Fetch initial TLS certificates
       command: /usr/local/lib/cluster/fetch-tls-certs

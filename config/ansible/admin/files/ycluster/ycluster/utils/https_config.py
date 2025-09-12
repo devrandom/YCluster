@@ -7,7 +7,7 @@ import json
 import sys
 import argparse
 
-from common.etcd_utils import get_etcd_client
+from ..common.etcd_utils import get_etcd_client
 
 def get_https_config():
     """Get HTTPS configuration from etcd"""

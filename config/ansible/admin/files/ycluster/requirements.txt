@@ -1,0 +1,10 @@
+etcd3>=0.12.0
+flask>=2.0.0
+requests>=2.25.0
+dnspython>=2.1.0
+cryptography>=3.4.0
+jinja2>=3.0.0
+scapy>=2.4.0
+ntplib>=0.3.0
+netifaces>=0.11.0
+pyyaml>=5.4.0
