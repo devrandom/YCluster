@@ -14,7 +14,7 @@ import urllib.error
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from common.etcd_utils import get_etcd_client, get_etcd_hosts
+from ..common.etcd_utils import get_etcd_client, get_etcd_hosts
 
 # Get initial etcd host from environment or use default
 INITIAL_ETCD_HOST = get_etcd_hosts()[0]

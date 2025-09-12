@@ -1,4 +1,5 @@
 ---
+- import_playbook: install-ycluster-package.yml
 - import_playbook: setup-base-infrastructure.yml
 - import_playbook: install-dhcp-leader-election.yml
 - import_playbook: setup-network-services.yml

@@ -12,7 +12,7 @@ import tempfile
 from jinja2 import Template
 from pathlib import Path
 
-from common.etcd_utils import get_etcd_client
+from ..common.etcd_utils import get_etcd_client
 
 def write_tls_key_to_temp():
     """Write TLS private key from etcd to temporary file for CSR generation"""

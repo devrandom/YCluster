@@ -1,0 +1,65 @@
+---
+- name: Install YCluster Python package
+  hosts: storage
+  become: yes
+  vars:
+    ycluster_package_dir: /opt/ycluster
+    
+  tasks:
+    - name: Install Python package management tools
+      apt:
+        name:
+          - python3-pip
+          - python3-setuptools
+          - python3-wheel
+        state: present
+
+    - name: Ensure YCluster package directory exists
+      file:
+        path: "{{ ycluster_package_dir }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Copy YCluster package files
+      synchronize:
+        src: files/ycluster/
+        dest: "{{ ycluster_package_dir }}/"
+        delete: yes
+        recursive: yes
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+
+    - name: Install YCluster package in development mode
+      pip:
+        name: "{{ ycluster_package_dir }}"
+        editable: no
+        state: present
+        extra_args: "--break-system-packages"
+
+    - name: Create backward compatibility wrapper scripts
+      copy:
+        dest: "/usr/local/bin/{{ item.script }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Backward compatibility wrapper for {{ item.script }}
+          exec ycluster {{ item.command }} "$@"
+      loop:
+        - { script: 'lease-manager', command: 'dhcp' }
+        - { script: 'https-config', command: 'https' }
+        - { script: 'certbot-manager', command: 'certbot' }
+        - { script: 'frontend-manager', command: 'frontend' }
+        - { script: 'tls-config', command: 'tls' }
+        - { script: 'rathole-config', command: 'rathole' }
+
+    - name: Verify YCluster installation
+      command: ycluster --version
+      register: ycluster_version
+      changed_when: false
+
+    - name: Display YCluster version
+      debug:
+        msg: "YCluster installed successfully: {{ ycluster_version.stdout }}"

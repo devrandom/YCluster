@@ -20,7 +20,7 @@ from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import Ether
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from common.etcd_utils import get_etcd_client, get_etcd_hosts
+from ..common.etcd_utils import get_etcd_client, get_etcd_hosts
 
 # Configuration
 ETCD_PREFIX = '/cluster/dhcp'
