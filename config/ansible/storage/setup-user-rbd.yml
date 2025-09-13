@@ -41,126 +41,153 @@
         group: root
       when: mount_check.rc != 0
 
-    - name: Check if RBD volume exists
-      command: rbd info {{ rbd_pool }}/{{ rbd_volume_name }} --format json
-      register: rbd_check
-      failed_when: false
-      changed_when: false
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Create RBD volume
-      command: rbd create {{ rbd_pool }}/{{ rbd_volume_name }} --size {{ rbd_volume_size }}
-      when: rbd_check.rc != 0
-      run_once: true
-
-    - name: Check if RBD volume is already mapped
-      stat:
-        path: "{{ rbd_device_path }}"
-      register: rbd_device_check
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Map RBD volume
-      command: rbd map {{ rbd_pool }}/{{ rbd_volume_name }}
-      register: rbd_map
-      changed_when: rbd_map.rc == 0
-      when: not rbd_device_check.stat.exists
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Wait for RBD device to be available
-      wait_for:
-        path: "{{ rbd_device_path }}"
-        timeout: 30
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Check if device is already LUKS formatted
-      command: cryptsetup isLuks {{ rbd_device_path }}
-      register: luks_check
-      failed_when: false
-      changed_when: false
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Get Tang server advertisements
-      uri:
-        url: "http://{{ item }}/adv"
-        method: GET
-        return_content: yes
-      register: tang_advs
-      loop:
-        - "s1:8777"
-        - "s2:8777"
-        - "s3:8777"
-      when: luks_check.rc != 0
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
     - block:
-        - name: Create temporary passphrase file
-          copy:
-            content: "{{ vault_user_volume_key }}"
-            dest: /dev/shm/user_luks_passphrase
-            mode: '0600'
+        - name: Check if RBD volume exists
+          command: rbd info {{ rbd_pool }}/{{ rbd_volume_name }} --format json
+          register: rbd_check
+          failed_when: false
+          changed_when: false
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
-          no_log: true
-          changed_when: false
 
-        - name: Format device with LUKS encryption using backup passphrase
-          command: cryptsetup luksFormat --batch-mode --key-file /dev/shm/user_luks_passphrase {{ rbd_device_path }}
+        - name: Create RBD volume
+          command: rbd create {{ rbd_pool }}/{{ rbd_volume_name }} --size {{ rbd_volume_size }}
+          when: rbd_check.rc != 0
+          run_once: true
+
+        - name: Check if RBD volume is already mapped
+          stat:
+            path: "{{ rbd_device_path }}"
+          register: rbd_device_check
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
+
+        - name: Map RBD volume
+          command: rbd map {{ rbd_pool }}/{{ rbd_volume_name }}
+          register: rbd_map
+          changed_when: rbd_map.rc == 0
+          when: not rbd_device_check.stat.exists
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
+
+        - name: Wait for RBD device to be available
+          wait_for:
+            path: "{{ rbd_device_path }}"
+            timeout: 30
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
+
+        - name: Check if device is already LUKS formatted
+          command: cryptsetup isLuks {{ rbd_device_path }}
+          register: luks_check
+          failed_when: false
+          changed_when: false
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
+
+        - name: Get Tang server advertisements
+          uri:
+            url: "http://{{ item }}/adv"
+            method: GET
+            return_content: yes
+          register: tang_advs
+          loop:
+            - "s1:8777"
+            - "s2:8777"
+            - "s3:8777"
           when: luks_check.rc != 0
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
-          no_log: true
 
-        - name: Bind LUKS device to Clevis policy
-          shell: |
-            /usr/local/bin/user-rbd-manager bind -k /dev/shm/user_luks_passphrase
-          register: bind_result
-          changed_when: bind_result.rc == 1
-          failed_when: bind_result.rc > 1
-          when: luks_check.rc != 0
+        - block:
+            - name: Create temporary passphrase file
+              copy:
+                content: "{{ vault_user_volume_key }}"
+                dest: /dev/shm/user_luks_passphrase
+                mode: '0600'
+              run_once: true
+              delegate_to: "{{ groups['storage'][0] }}"
+              no_log: true
+              changed_when: false
+
+            - name: Format device with LUKS encryption using backup passphrase
+              command: cryptsetup luksFormat --batch-mode --key-file /dev/shm/user_luks_passphrase {{ rbd_device_path }}
+              when: luks_check.rc != 0
+              run_once: true
+              delegate_to: "{{ groups['storage'][0] }}"
+              no_log: true
+
+            - name: Bind LUKS device to Clevis policy
+              shell: |
+                /usr/local/bin/user-rbd-manager bind -k /dev/shm/user_luks_passphrase
+              register: bind_result
+              changed_when: bind_result.rc == 1
+              failed_when: bind_result.rc > 1
+              when: luks_check.rc != 0
+              run_once: true
+              delegate_to: "{{ groups['storage'][0] }}"
+
+          always:
+            - name: Remove temporary passphrase file
+              file:
+                path: /dev/shm/user_luks_passphrase
+                state: absent
+              run_once: true
+              delegate_to: "{{ groups['storage'][0] }}"
+              changed_when: false
+
+        - name: Check if LUKS device is already open
+          stat:
+            path: "{{ luks_mapper_path }}"
+          register: mapper_check
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
 
-      always:
-        - name: Remove temporary passphrase file
-          file:
-            path: /dev/shm/user_luks_passphrase
-            state: absent
+        - name: Open LUKS device with Clevis
+          command: clevis luks unlock -d {{ rbd_device_path }} -n {{ luks_mapper_name }}
+          when: not mapper_check.stat.exists
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
+
+        - name: Check if filesystem exists on mapper device
+          command: blkid {{ luks_mapper_path }}
+          register: fs_check
+          failed_when: false
           changed_when: false
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
 
-    - name: Check if LUKS device is already open
-      stat:
-        path: "{{ luks_mapper_path }}"
-      register: mapper_check
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
+        - name: Create XFS filesystem on encrypted device
+          command: mkfs.xfs -f -b size=4096 -d su=64k,sw=1,agcount=32 -l size=128m,lazy-count=1 -L "user" "{{ luks_mapper_path }}"
+          when: fs_check.rc != 0
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
 
-    - name: Open LUKS device with Clevis
-      command: clevis luks unlock -d {{ rbd_device_path }} -n {{ luks_mapper_name }}
-      when: not mapper_check.stat.exists
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
+        - name: Display volume information
+          debug:
+            msg: |
+              User RBD volume created and encrypted:
+              - RBD: {{ rbd_pool }}/{{ rbd_volume_name }} ({{ rbd_volume_size }})
+              - Device: {{ rbd_device_path }}
+              - Mapper: {{ luks_mapper_path }}
+              - Mount: {{ mount_point }}
+              - Encryption: 2-of-3 Tang servers + backup passphrase
+              - Tang servers: s1:8777, s2:8777, s3:8777
+              - Service: user-rbd.service (managed by storage leader election)
+          run_once: true
 
-    - name: Check if filesystem exists on mapper device
-      command: blkid {{ luks_mapper_path }}
-      register: fs_check
-      failed_when: false
-      changed_when: false
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
+        - name: Close LUKS mapper device
+          command: cryptsetup luksClose {{ luks_mapper_name }}
+          when: not mapper_check.stat.exists
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
 
-    - name: Create XFS filesystem on encrypted device
-      command: mkfs.xfs -f -b size=4096 -d su=64k,sw=1,agcount=32 -l size=128m,lazy-count=1 -L "user" "{{ luks_mapper_path }}"
-      when: fs_check.rc != 0
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
+        - name: Unmap RBD device
+          command: rbd unmap {{ rbd_device_path }}
+          when: not rbd_device_check.stat.exists
+          run_once: true
+          delegate_to: "{{ groups['storage'][0] }}"
+      tags: setup-volumes,never
 
     - name: Install database backup script
       copy:
@@ -232,28 +259,3 @@
         name: backup-databases.timer
         enabled: yes
         state: started
-
-    - name: Display volume information
-      debug:
-        msg: |
-          User RBD volume created and encrypted:
-          - RBD: {{ rbd_pool }}/{{ rbd_volume_name }} ({{ rbd_volume_size }})
-          - Device: {{ rbd_device_path }}
-          - Mapper: {{ luks_mapper_path }}
-          - Mount: {{ mount_point }}
-          - Encryption: 2-of-3 Tang servers + backup passphrase
-          - Tang servers: s1:8777, s2:8777, s3:8777
-          - Service: user-rbd.service (managed by storage leader election)
-      run_once: true
-
-    - name: Close LUKS mapper device
-      command: cryptsetup luksClose {{ luks_mapper_name }}
-      when: not mapper_check.stat.exists
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
-
-    - name: Unmap RBD device
-      command: rbd unmap {{ rbd_device_path }}
-      when: not rbd_device_check.stat.exists
-      run_once: true
-      delegate_to: "{{ groups['storage'][0] }}"
