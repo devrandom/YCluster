@@ -55,6 +55,14 @@
         - { script: 'tls-config', command: 'tls' }
         - { script: 'rathole-config', command: 'rathole' }
 
+    - name: Ensure bash completion directory exists
+      file:
+        path: /etc/bash_completion.d
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
     - name: Verify YCluster installation
       command: ycluster --version
       register: ycluster_version
@@ -63,3 +71,8 @@
     - name: Display YCluster version
       debug:
         msg: "YCluster installed successfully: {{ ycluster_version.stdout }}"
+
+    - name: Generate bash completion script
+      shell: ycluster --completion > /etc/bash_completion.d/ycluster-completion.bash
+      args:
+        creates: /etc/bash_completion.d/ycluster-completion.bash
