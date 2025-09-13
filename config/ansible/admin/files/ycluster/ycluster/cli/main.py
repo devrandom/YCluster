@@ -42,6 +42,7 @@ def create_parser():
     from .certbot import register_certbot_commands
     from .rathole import register_rathole_commands
     from .frontend import register_frontend_commands
+    from .backup import register_backup_commands
 
     register_cluster_commands(subparsers)
     register_dhcp_commands(subparsers)
@@ -50,6 +51,7 @@ def create_parser():
     register_certbot_commands(subparsers)
     register_rathole_commands(subparsers)
     register_frontend_commands(subparsers)
+    register_backup_commands(subparsers)
 
     return parser
 
@@ -158,6 +160,39 @@ def generate_completion_script():
         script_lines.append(f'                {cmd_name})')
         sub_completion = generate_bash_completion_from_structure(cmd_structure, [cmd_name])
         script_lines.extend(['                ' + line for line in sub_completion])
+    
+    script_lines.extend([
+        '            esac',
+        '            return 0',
+        '            ;;',
+        '        3)',
+        '            # Complete third-level commands',
+        '            case "${COMP_WORDS[1]}" in'
+    ])
+    
+    # Add third-level completions for commands that have them
+    for cmd_name, cmd_structure in structure['commands'].items():
+        if cmd_structure['commands']:
+            script_lines.append(f'                {cmd_name})')
+            script_lines.append(f'                    case "${{COMP_WORDS[2]}}" in')
+            
+            for sub_cmd_name, sub_cmd_structure in cmd_structure['commands'].items():
+                if sub_cmd_structure['commands']:
+                    script_lines.append(f'                        {sub_cmd_name})')
+                    third_level_commands = list(sub_cmd_structure['commands'].keys())
+                    if third_level_commands:
+                        script_lines.append(f'                            COMPREPLY=($(compgen -W "{" ".join(third_level_commands)}" -- ${{cur}}))')
+                    else:
+                        script_lines.append('                            COMPREPLY=()')
+                    script_lines.append('                            ;;')
+            
+            script_lines.extend([
+                '                        *)',
+                '                            COMPREPLY=()',
+                '                            ;;',
+                '                    esac',
+                '                    ;;'
+            ])
     
     script_lines.extend([
         '            esac',

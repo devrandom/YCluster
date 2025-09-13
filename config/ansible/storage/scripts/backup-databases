@@ -2,6 +2,7 @@
 set -e
 
 BACKUP_DIR="/rbd/user/backups"
+ENCRYPTED_BACKUP_DIR="/rbd/user/backups/encrypted"
 POSTGRES_BACKUP_DIR="$BACKUP_DIR/postgres"
 QDRANT_BACKUP_DIR="$BACKUP_DIR/qdrant"
 RETENTION_DAYS=30
@@ -17,6 +18,7 @@ create_backup_dirs() {
     log "Creating backup directories..."
     mkdir -p "$POSTGRES_BACKUP_DIR"
     mkdir -p "$QDRANT_BACKUP_DIR"
+    mkdir -p "$ENCRYPTED_BACKUP_DIR"
 }
 
 # Backup PostgreSQL
@@ -38,6 +40,15 @@ backup_postgres() {
         # Verify backup file
         if [ -s "$backup_file" ]; then
             log "PostgreSQL backup verified (size: $(du -h "$backup_file" | cut -f1))"
+            
+            # Encrypt backup
+            local encrypted_file="$ENCRYPTED_BACKUP_DIR/postgres_${TIMESTAMP}.sql.gz.age"
+            if encrypt_backup "$backup_file" "$encrypted_file"; then
+                log "PostgreSQL backup encrypted successfully"
+            else
+                log "ERROR: PostgreSQL backup encryption failed"
+                return 1
+            fi
         else
             log "ERROR: PostgreSQL backup file is empty"
             rm -f "$backup_file"
@@ -104,6 +115,15 @@ backup_qdrant() {
         # Verify backup file
         if [ -s "$backup_file" ]; then
             log "Qdrant backup verified (size: $(du -h "$backup_file" | cut -f1))"
+            
+            # Encrypt backup
+            local encrypted_file="$ENCRYPTED_BACKUP_DIR/qdrant_${TIMESTAMP}.snapshot.age"
+            if encrypt_backup "$backup_file" "$encrypted_file"; then
+                log "Qdrant backup encrypted successfully"
+            else
+                log "ERROR: Qdrant backup encryption failed"
+                return 1
+            fi
         else
             log "ERROR: Qdrant backup file is empty"
             rm -f "$backup_file"
@@ -116,6 +136,69 @@ backup_qdrant() {
         
     else
         log "ERROR: Failed to copy Qdrant snapshot"
+        return 1
+    fi
+}
+
+# Get backup encryption recipients from etcd
+get_age_recipients() {
+    local recipients_file="/tmp/age_recipients_${TIMESTAMP}"
+    
+    # Use ycluster CLI to get recipients
+    if command -v ycluster >/dev/null 2>&1; then
+        # Get recipients from etcd using JSON output and extract public keys
+        ycluster backup recipients list --json 2>/dev/null | jq -r '.[].public_key // empty' 2>/dev/null | grep -v '^$' > "$recipients_file" 2>/dev/null || true
+        
+        if [ -s "$recipients_file" ]; then
+            echo "$recipients_file"
+            return 0
+        fi
+    fi
+
+    rm -f "$recipients_file"
+    return 1
+}
+
+# Encrypt backup file with age
+encrypt_backup() {
+    local source_file="$1"
+    local encrypted_file="$2"
+    
+    log "Encrypting backup: $(basename "$source_file")"
+    
+    # Get recipients
+    local recipients_file
+    if ! recipients_file=$(get_age_recipients); then
+        log "WARNING: No age recipients found, skipping encryption"
+        return 1
+    fi
+    
+    local recipient_count=$(wc -l < "$recipients_file")
+    if [ "$recipient_count" -eq 0 ]; then
+        log "WARNING: No valid age recipients found, skipping encryption"
+        rm -f "$recipients_file"
+        return 1
+    fi
+    
+    log "Encrypting for $recipient_count recipients"
+    
+    # Build age command with recipients
+    local age_cmd="age"
+    while IFS= read -r recipient; do
+        if [ -n "$recipient" ]; then
+            age_cmd="$age_cmd -r $recipient"
+        fi
+    done < "$recipients_file"
+    
+    # Encrypt the file
+    if eval "$age_cmd" < "$source_file" > "$encrypted_file"; then
+        log "Encryption completed: $(basename "$encrypted_file")"
+        log "Encrypted file size: $(du -h "$encrypted_file" | cut -f1)"
+        rm -f "$recipients_file"
+        return 0
+    else
+        log "ERROR: Encryption failed"
+        rm -f "$recipients_file" "$encrypted_file"
         return 1
     fi
 }
@@ -136,6 +219,13 @@ cleanup_old_backups() {
         find "$QDRANT_BACKUP_DIR" -name "qdrant_*.snapshot" -mtime +$RETENTION_DAYS -delete
         local qdrant_count=$(find "$QDRANT_BACKUP_DIR" -name "qdrant_*.snapshot" | wc -l)
         log "Qdrant backups remaining: $qdrant_count"
+    fi
+    
+    # Clean encrypted backups
+    if [ -d "$ENCRYPTED_BACKUP_DIR" ]; then
+        find "$ENCRYPTED_BACKUP_DIR" -name "*.age" -mtime +$RETENTION_DAYS -delete
+        local encrypted_count=$(find "$ENCRYPTED_BACKUP_DIR" -name "*.age" | wc -l)
+        log "Encrypted backups remaining: $encrypted_count"
     fi
 }
 
@@ -164,6 +254,18 @@ show_status() {
             local latest_qdrant=$(find "$QDRANT_BACKUP_DIR" -name "qdrant_*.snapshot" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
             local latest_qdrant_date=$(stat -c %y "$latest_qdrant" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
             log "  Latest: $(basename "$latest_qdrant") ($latest_qdrant_date)"
+        fi
+    fi
+    
+    if [ -d "$ENCRYPTED_BACKUP_DIR" ]; then
+        local encrypted_count=$(find "$ENCRYPTED_BACKUP_DIR" -name "*.age" | wc -l)
+        local encrypted_size=$(du -sh "$ENCRYPTED_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "0")
+        log "Encrypted backups: $encrypted_count files, $encrypted_size total"
+        
+        if [ $encrypted_count -gt 0 ]; then
+            local latest_encrypted=$(find "$ENCRYPTED_BACKUP_DIR" -name "*.age" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+            local latest_encrypted_date=$(stat -c %y "$latest_encrypted" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
+            log "  Latest: $(basename "$latest_encrypted") ($latest_encrypted_date)"
         fi
     fi
     
