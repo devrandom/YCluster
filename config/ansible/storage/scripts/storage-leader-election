@@ -103,8 +103,12 @@ start_all_services() {
     
     systemctl start rathole &
     RATHOLE_START_PID=$!
-    
-    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Misc PID: $MISC_START_PID, Registry PID: $REGISTRY_START_PID, Rathole PID: $RATHOLE_START_PID)"
+
+    # Start all storage applications via the target
+    systemctl start ycluster-apps.target &
+    APPS_START_PID=$!
+
+    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Misc PID: $MISC_START_PID, Registry PID: $REGISTRY_START_PID, Rathole PID: $RATHOLE_START_PID, Apps PID: $APPS_START_PID)"
 }
 
 # Function to stop all services
@@ -113,10 +117,11 @@ stop_all_services() {
     
     # Try graceful shutdown first with timeout
     echo "Attempting graceful service shutdown (5 second timeout)"
-    timeout 5s systemctl stop misc-rbd &
-    timeout 5s systemctl stop user-rbd &
+    timeout 5s systemctl stop ycluster-apps.target &
     timeout 5s systemctl stop docker-registry &
     timeout 5s systemctl stop rathole &
+    timeout 5s systemctl stop misc-rbd &
+    timeout 5s systemctl stop user-rbd &
     wait
     
     # Check if services are still running and force cleanup if needed
@@ -137,6 +142,70 @@ stop_all_services() {
         docker stop docker-registry || true
         docker rm -f docker-registry || true
         
+        # Force XFS shutdown to abandon all I/O immediately (only if mounted)
+        echo "Force shutting down XFS filesystems"
+        if mountpoint -q /rbd/misc; then
+            xfs_io -x -c "shutdown" /rbd/misc || true
+        fi
+        if mountpoint -q /rbd/user; then
+            xfs_io -x -c "shutdown" /rbd/user || true
+        fi
+        
+        # Force unmount filesystems (in parallel)
+        echo "Force unmounting RBD filesystems"
+        umount -f -l /rbd/misc &
+        umount -f -l /rbd/user &
+        wait
+        
+        # Force close LUKS devices and unmap RBDs (in parallel with timeout)
+        echo "Force closing LUKS devices and unmapping RBD devices"
+        timeout 10s rbd unmap -o force /dev/rbd/rbd/user &
+        timeout 10s rbd unmap -o force /dev/rbd/rbd/misc &
+        
+        # Force close LUKS device with aggressive methods
+        (
+            # Try cryptsetup close first
+            timeout 5s cryptsetup close user || \
+            # If that fails, use dmsetup with wipe_table for maximum aggression
+            (dmsetup wipe_table --force user || \
+             dmsetup remove --force --retry --wipe_table user || \
+             echo "Failed to remove LUKS mapper user")
+        ) &
+        
+        timeout 10s rbd unmap -o force /dev/rbd/rbd/user &
+        wait
+        
+        echo "Aggressive cleanup completed"
+    else
+        echo "Graceful shutdown successful"
+    fi
+    
+    # Clean up lock files
+    echo "Cleaning up lock files"
+    rm -f /var/run/misc-rbd.lock || true
+    rm -f /var/run/user-rbd.lock || true
+    
+    # Check if services are still running and force cleanup if needed
+    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null || pgrep -f rathole >/dev/null || docker ps -q --filter "name=docker-registry" | grep -q .; then
+        echo "Graceful shutdown failed or timed out - forcing aggressive cleanup"
+        
+        # Force kill processes immediately
+        echo "Force killing PostgreSQL processes"
+        pkill -9 postgres || true
+        
+        echo "Force killing Qdrant processes"
+        pkill -9 qdrant || true
+        
+        echo "Force killing rathole processes"
+        pkill -9 rathole || true
+        
+        echo "Force stopping Docker registry container"
+        docker stop docker-registry || true
+        docker rm -f docker-registry || true
+
+        echo "Force stopping open-webui"
+        /usr/local/lib/cluster/open-webui-manager stop || true
+
         # Force XFS shutdown to abandon all I/O immediately (only if mounted)
         echo "Force shutting down XFS filesystems"
         if mountpoint -q /rbd/misc; then

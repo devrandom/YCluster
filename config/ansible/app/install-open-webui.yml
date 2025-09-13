@@ -97,6 +97,7 @@
           Description=Open WebUI
           After=network.target docker.service misc-rbd.service
           Requires=docker.service misc-rbd.service
+          PartOf=ycluster-apps.target
 
           [Service]
           Type=exec
@@ -109,16 +110,19 @@
           RestartSec=10
 
           [Install]
-          WantedBy=multi-user.target
+          WantedBy=ycluster-apps.target
 
     - name: Reload systemd daemon
       systemd:
         daemon_reload: yes
 
-    - name: Disable open-webui service (managed by leader election)
+    - name: Enable open-webui service (part of storage-apps target)
       systemd:
         name: open-webui.service
-        enabled: no
+        enabled: yes
+    # NOTE: If service was previously enabled for a different target,
+    # this won't update the symlinks. Do this manually:
+    # `systemctl daemon-reload && systemctl reenable open-webui.service`
 
     - name: Create PostgreSQL database and user for Open WebUI
       postgresql_db:

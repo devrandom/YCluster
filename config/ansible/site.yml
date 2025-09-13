@@ -14,9 +14,12 @@
 # to do it so late, if the proxy has been already installed.
 - import_playbook: update-apt-cache.yml
 
-# Application Services - TLS and external connectivity
+# Application Services - TLS, external connectivity
 - import_playbook: install-tls-config.yml
 - import_playbook: install-rathole.yml
+
+# Applications
+- import_playbook: app/setup-app.yml
 
 # Storage Infrastructure - Complete storage and database deployment
 - import_playbook: storage/setup-storage-infrastructure.yml

@@ -19,6 +19,12 @@
         owner: root
         group: root
 
+    - name: Install storage-apps systemd target
+      copy:
+        src: files/ycluster-apps.target
+        dest: /etc/systemd/system/ycluster-apps.target
+        mode: '0644'
+
     - name: Copy storage leader election script
       copy:
         src: scripts/storage-leader-election
