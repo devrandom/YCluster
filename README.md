@@ -32,8 +32,16 @@ PXE boot additional nodes (s2, s3, etc.). They will auto-provision based on MAC 
 
 ### 4. Initialize Database
 
+On s1:
+
 ```bash
-ansible-playbook --tags init_db storage/install-postgres.yml storage/install-storage-leader-election.yml
+ansible-playbook --tags setup-volumes,init-db site.yml storage/setup-storage-infrastructure.yml
+```
+
+and run the entire site playbook:
+
+```bash
+ansible-playbook site.yml
 ```
 
 ## Monitoring
@@ -76,20 +84,20 @@ Configure HTTPS domain and email for Let's Encrypt:
 
 ```bash
 # Set primary domain and email
-https-config set-domain your-domain.com
-https-config set-email your-email@example.com
+ycluster https set-domain your-domain.com
+ycluster https set-email your-email@example.com
 
 # Add additional domain aliases
-https-config add-alias www.your-domain.com
+ycluster https add-alias www.your-domain.com
 
 # Obtain certificates (test mode first)
-certbot-manager obtain --test-cert
+ycluster certbot obtain --test
 
 # Production certificates
-certbot-manager obtain
+ycluster certbot obtain
 
 # Check certificate status
-certbot-manager list
+ycluster certbot status
 ```
 
 ## External Access
@@ -98,13 +106,13 @@ Register an external server as a frontend node and deploy rathole server:
 
 ```bash
 # Register the frontend server
-frontend-manager add f1 your-server.com --description "External rathole server"
+ycluster frontend add f1 your-server.com --description "External rathole server"
 
 # Deploy rathole server to the frontend node
-ansible-playbook install-rathole-server.yml --limit frontend
+ansible-playbook install-rathole-server.yml
 
 # Configure cluster nodes to connect to the frontend server
-rathole-config set --remote-addr "your-server.com:2333" --token "your_secret_token"
+ycluster rathole set --remote-addr "your-server.com:2333" --token "your_secret_token"
 ```
 
 The rathole configuration provides two separate services:
@@ -133,12 +141,34 @@ Then use direct access - `ssh s1.rat`.
 
 ## Management Commands
 
-- **Cluster Health**: `check-cluster` - comprehensive cluster status
-- **Node Management**: `lease-manager` - manage DHCP allocations
-- **Certificate Management**: `certbot-manager` - SSL certificate operations
-- **Frontend Nodes**: `frontend-manager` - manage external access points
-- **HTTPS Configuration**: `https-config` - domain and certificate settings
-- **Rathole Configuration**: `rathole-config` - reverse proxy settings
+All cluster management is now consolidated under the `ycluster` CLI:
+
+- **Cluster Health**: `ycluster cluster status` - comprehensive cluster status
+- **Node Management**: `ycluster dhcp` - manage DHCP allocations and leases
+- **TLS Certificates**: `ycluster tls` - self-signed certificate management
+- **HTTPS Configuration**: `ycluster https` - domain and certificate settings
+- **Let's Encrypt**: `ycluster certbot` - SSL certificate operations
+- **Frontend Nodes**: `ycluster frontend` - manage external access points
+- **Rathole Configuration**: `ycluster rathole` - reverse proxy settings
+- **Storage Management**: `ycluster storage` - RBD volume operations
+
+### Getting Started with ycluster
+
+Tab completions are available for bash.
+
+```bash
+# Show all available commands
+ycluster --help
+
+# Check cluster health
+ycluster cluster status
+
+# List DHCP allocations and leases
+ycluster dhcp list all
+
+# Generate self-signed certificates
+ycluster tls generate --common-name your-domain.com
+```
 
 ## SSH Access
 
@@ -149,4 +179,3 @@ Host *.xc
   User root
   StrictHostKeyChecking no
 ```
-

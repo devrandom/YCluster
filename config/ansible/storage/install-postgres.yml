@@ -78,18 +78,14 @@
         path: /rbd/user/postgres/PG_VERSION
       register: cluster_exists
       when: is_storage_leader
-      tags:
-        - never
-        - init_db
+      tags: init-db,never
 
     - name: Initialize PostgreSQL cluster
       become_user: postgres
       shell: |
         /usr/lib/postgresql/16/bin/initdb -D /rbd/user/postgres
       when: is_storage_leader and not cluster_exists.stat.exists
-      tags:
-        - never
-        - init_db
+      tags: init-db,never
 
   handlers:
     - name: restart postgresql

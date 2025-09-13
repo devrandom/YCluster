@@ -82,11 +82,29 @@ The admin service provides REST APIs for programmatic access:
 
 ## Command Line Tools
 
-### Cluster Health
+The YCluster management tools are consolidated under the `ycluster` CLI, which provides a unified interface for all cluster operations.
+
+### Getting Started
 ```bash
-check-cluster
+# Show all available commands
+ycluster --help
 ```
-Comprehensive cluster health check showing:
+
+Tab completion for bash is installed automatically by the ansible playbooks.
+
+### Cluster Health and Status
+```bash
+# Comprehensive cluster health check
+ycluster cluster status
+
+# Alternative health check command
+ycluster cluster health
+
+# Populate local node information in etcd
+ycluster cluster populate-local-node
+```
+
+The cluster status check shows:
 - Node status and reachability
 - Service health across all nodes
 - Leadership status
@@ -94,82 +112,160 @@ Comprehensive cluster health check showing:
 - Certificate expiry
 - Clock synchronization
 
-### Node Management
+### DHCP and Node Management
 ```bash
-# List all DHCP allocations
-lease-manager list
+# List all node allocations
+ycluster dhcp list allocations
 
-# Delete allocation by hostname
-lease-manager delete-hostname <hostname>
+# List DHCP leases
+ycluster dhcp list leases
 
-# Delete allocation by MAC address
-lease-manager delete-mac <mac>
+# List both allocations and leases
+ycluster dhcp list all
+
+# Delete allocation by hostname or MAC address
+ycluster dhcp delete <hostname_or_mac>
+
+# Update static DNS hosts from etcd
+ycluster dhcp update-hosts
 ```
 
-### Certificate Management
+### TLS Certificate Management
 ```bash
-# Check certificate status
-certbot-manager status
+# Generate self-signed certificate
+ycluster tls generate --common-name cluster.local --san 10.0.0.254 --san localhost
 
-# Obtain new certificate (test mode)
-certbot-manager obtain --test-cert
+# Set common name for future certificate generation
+ycluster tls set-common-name your-domain.com
 
-# Obtain production certificate
-certbot-manager obtain
+# Get current common name
+ycluster tls get-common-name
 
-# Renew existing certificates
-certbot-manager renew
+# Set certificate from files
+ycluster tls set --cert-file cert.pem --key-file key.pem
 
-# List certificate details
-certbot-manager list
+# Get current certificate information
+ycluster tls get
 
-# Update nginx configuration
-certbot-manager update-nginx
+# Delete certificate
+ycluster tls delete
+
+# Fetch certificates from etcd to nginx
+ycluster tls fetch-certs
 ```
 
-### HTTPS Configuration
+### HTTPS Domain Configuration
 ```bash
 # Set primary domain
-https-config set-domain your-domain.com
-
-# Set email for Let's Encrypt
-https-config set-email your-email@example.com
+ycluster https set-domain your-domain.com
 
 # Add domain alias
-https-config add-alias www.your-domain.com
+ycluster https add-alias www.your-domain.com
 
 # Remove domain alias
-https-config remove-alias www.your-domain.com
+ycluster https remove-alias www.your-domain.com
+
+# Set email for Let's Encrypt
+ycluster https set-email your-email@example.com
 
 # Show current configuration
-https-config show
+ycluster https get
+
+# List all configured domains
+ycluster https list-domains
+
+# Delete HTTPS configuration
+ycluster https delete
+```
+
+### Let's Encrypt Certificate Management
+```bash
+# Check certificate status and configuration
+ycluster certbot status
+
+# Obtain new certificate (test mode)
+ycluster certbot obtain --test
+
+# Obtain production certificate
+ycluster certbot obtain
+
+# Obtain certificate non-interactively
+ycluster certbot obtain --non-interactive
+
+# Renew existing certificates
+ycluster certbot renew
+
+# Renew certificates non-interactively
+ycluster certbot renew --non-interactive
+
+# List certificate details
+ycluster certbot list
+
+# Revoke certificate
+ycluster certbot revoke <domain>
+
+# Delete certificate
+ycluster certbot delete <domain>
+
+# Update nginx configuration with domain from etcd
+ycluster certbot update-nginx
+```
+
+### Rathole Tunnel Configuration
+```bash
+# Set rathole server configuration
+ycluster rathole set --remote-addr "your-server.com:2333" --token "secret_token"
+
+# Show current configuration
+ycluster rathole get
+
+# Generate client configuration from etcd
+ycluster rathole generate-client
+
+# Generate SSH-only client configuration
+ycluster rathole generate-ssh-client
+
+# Delete configuration
+ycluster rathole delete
 ```
 
 ### Frontend Node Management
 ```bash
 # List frontend nodes
-frontend-manager list
+ycluster frontend list
 
 # Add frontend node
-frontend-manager add f1 your-server.com --description "External server"
+ycluster frontend add f1 your-server.com --description "External server"
 
-# Remove frontend node
-frontend-manager delete f1
+# Delete frontend node
+ycluster frontend delete f1
 
 # Show frontend node details
-frontend-manager show f1
+ycluster frontend show f1
 ```
 
-### Rathole Configuration
+### Storage Management
 ```bash
-# Set rathole server configuration
-rathole-config set --remote-addr "your-server.com:2333" --token "secret_token"
+# Start user RBD volume (acquire lock and mount)
+ycluster storage rbd start
 
-# Show current configuration
-rathole-config show
+# Start with LUKS passphrase instead of Clevis
+ycluster storage rbd start -K
 
-# Delete configuration
-rathole-config delete
+# Stop user RBD volume (unmount and release lock)
+ycluster storage rbd stop
+
+# Show current volume status
+ycluster storage rbd status
+
+# Test if volume can be decrypted
+ycluster storage rbd check
+
+# Test decryption with LUKS passphrase
+ycluster storage rbd check -K
+
+# Ensure Clevis binding is correct
+ycluster storage rbd bind -k /path/to/passphrase/file
 ```
 
 ## Node Types and IP Allocation
@@ -301,7 +397,7 @@ Virtual IPs automatically fail over between nodes using keepalived. The dashboar
 
 ### Log Locations
 - **Admin API**: Check systemd journal for admin-api service
-- **DHCP Server**: `/var/log/dhcp-server.log`
+- **DHCP Server**: Check systemd journal for dhcp-server service or health endpoint
 - **Leader Election**: Check systemd journal for leader election services
 - **Certificate Management**: Check systemd journal for certbot services
 
@@ -321,6 +417,10 @@ Virtual IPs automatically fail over between nodes using keepalived. The dashboar
 - **SSH keys**: Automatically deployed during node provisioning
 - **Service isolation**: Services run with appropriate user privileges
 - **Network segmentation**: Separate networks for different traffic types
+
+## CLI Command Reference
+
+The `ycluster` command provides comprehensive tab completion.
 
 ### Ansible Vault
 
@@ -346,9 +446,10 @@ Put something like this in the vault file:
 
 ```yaml
 vault_secrets_volume_key: "XXX"
+vault_user_volume_key: "YYY"
 ```
 
-where XXX can be generated with something like:
+where XXX and YYY can be generated with something like:
 
 ```shell
 openssl rand -base64 30

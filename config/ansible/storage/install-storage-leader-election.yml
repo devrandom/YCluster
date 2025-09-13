@@ -59,14 +59,12 @@
         name: storage-leader-election.service
         state: started
 
-    - name: Trigger restart for init_db
+    - name: Trigger restart for init-db
       debug:
         msg: "Triggering storage leader election restart"
       changed_when: true
       notify: restart storage leader election
-      tags:
-        - never
-        - init_db
+      tags: init-db,never
 
   handlers:
     - name: restart storage leader election
