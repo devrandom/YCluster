@@ -18,6 +18,8 @@
           - clevis
           - clevis-luks
           - cryptsetup
+          - age
+          - jq
         state: present
 
     - name: Install User RBD manager script
