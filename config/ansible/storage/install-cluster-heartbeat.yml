@@ -1,0 +1,31 @@
+---
+- name: Install cluster heartbeat for healthchecks.io
+  hosts: core
+  become: yes
+  vars:
+    healthchecks_url: "{{ cluster_healthchecks_url | default('') }}"
+    healthchecks_enabled: "{{ cluster_healthchecks_enabled | default('false') }}"
+    
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - python3-requests
+        state: present
+
+    - name: Copy cluster heartbeat script
+      copy:
+        src: ../admin/files/scripts/cluster-heartbeat.py
+        dest: /usr/local/lib/cluster/cluster-heartbeat
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create healthchecks.io environment file
+      copy:
+        dest: /etc/default/cluster-heartbeat
+        mode: '0644'
+        content: |
+          # Healthchecks.io configuration
+          HEALTHCHECKS_URL={{ healthchecks_url }}
+          HEALTHCHECKS_ENABLED={{ healthchecks_enabled }}
