@@ -47,6 +47,7 @@
           Restart=always
           RestartSec=5
           User=root
+          EnvironmentFile=-/etc/default/cluster-heartbeat
 
           [Install]
           WantedBy=multi-user.target
