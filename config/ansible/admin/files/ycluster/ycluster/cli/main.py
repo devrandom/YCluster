@@ -43,6 +43,7 @@ def create_parser():
     from .rathole import register_rathole_commands
     from .frontend import register_frontend_commands
     from .backup import register_backup_commands
+    from .healthchecks import register_healthchecks_commands
 
     register_cluster_commands(subparsers)
     register_dhcp_commands(subparsers)
@@ -52,6 +53,7 @@ def create_parser():
     register_rathole_commands(subparsers)
     register_frontend_commands(subparsers)
     register_backup_commands(subparsers)
+    register_healthchecks_commands(subparsers)
 
     return parser
 
@@ -204,7 +206,7 @@ def generate_completion_script():
         '                --cert-file|--key-file|-k)',
         '                    COMPREPLY=($(compgen -f -- ${cur}))',
         '                    ;;',
-        '                --common-name|--remote-addr|--token|--description)',
+        '                --common-name|--remote-addr|--token|--description|url)',
         '                    # These expect string values, no completion',
         '                    COMPREPLY=()',
         '                    ;;',

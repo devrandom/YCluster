@@ -1,7 +1,4 @@
 ---
-# Storage Infrastructure Setup - Complete storage and database deployment
-# This playbook orchestrates the entire storage infrastructure setup
-
 # Storage Infrastructure - Ceph setup and configuration (order critical)
 #- import_playbook: add-ceph-nodes.yml
 - import_playbook: setup-ceph-disk.yml
@@ -19,3 +16,4 @@
 
 # Leader Election - Must come last to manage above database services
 - import_playbook: install-storage-leader-election.yml
+- import_playbook: install-cluster-heartbeat.yml
