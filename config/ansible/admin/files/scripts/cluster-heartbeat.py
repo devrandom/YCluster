@@ -11,9 +11,6 @@ import socket
 import requests
 from datetime import datetime
 
-# Add ycluster module to path
-sys.path.insert(0, '/usr/local/lib/python3/dist-packages')
-
 from ycluster.common.etcd_utils import get_etcd_client
 
 # etcd key for healthchecks URL
