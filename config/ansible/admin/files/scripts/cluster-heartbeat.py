@@ -28,6 +28,70 @@ def get_healthchecks_url():
         print(f"Failed to get healthchecks URL from etcd: {str(e)}")
         return None
 
+def check_https_domain():
+    """Check if the main HTTPS domain is accessible and serving Open WebUI"""
+    try:
+        client = get_etcd_client()
+        
+        # Get the primary domain from etcd
+        domain_result = client.get('/cluster/https/domain')
+        if not domain_result[0]:
+            return {
+                'status': 'not_configured',
+                'message': 'No HTTPS domain configured'
+            }
+        
+        domain = domain_result[0].decode().strip()
+        
+        # Make HTTPS request to the domain
+        url = f"https://{domain}"
+        response = requests.get(url, timeout=15, verify=True)
+        
+        # Check if response contains Open WebUI title
+        if response.status_code == 200:
+            if '<title>Open WebUI</title>' in response.text:
+                return {
+                    'status': 'healthy',
+                    'domain': domain,
+                    'message': f'Open WebUI accessible at {url}'
+                }
+            else:
+                return {
+                    'status': 'unhealthy',
+                    'domain': domain,
+                    'message': f'Site accessible but not showing Open WebUI (wrong content)'
+                }
+        else:
+            return {
+                'status': 'unhealthy',
+                'domain': domain,
+                'message': f'Site returned HTTP {response.status_code}'
+            }
+            
+    except requests.exceptions.SSLError as e:
+        return {
+            'status': 'unhealthy',
+            'domain': domain if 'domain' in locals() else 'unknown',
+            'message': f'SSL certificate error: {str(e)}'
+        }
+    except requests.exceptions.Timeout:
+        return {
+            'status': 'unhealthy',
+            'domain': domain if 'domain' in locals() else 'unknown',
+            'message': 'Request timeout'
+        }
+    except requests.exceptions.ConnectionError as e:
+        return {
+            'status': 'unhealthy',
+            'domain': domain if 'domain' in locals() else 'unknown',
+            'message': f'Connection failed: {str(e)}'
+        }
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': f'HTTPS check failed: {str(e)}'
+        }
+
 def get_cluster_health():
     """Get comprehensive cluster health status"""
     health_data = {
@@ -93,6 +157,10 @@ def get_cluster_health():
     except Exception as e:
         health_data['cluster_error'] = f"Failed to get cluster status: {str(e)}"
     
+    # Check HTTPS domain accessibility
+    https_check = check_https_domain()
+    health_data['https_domain'] = https_check
+    
     return health_data
 
 def determine_health_status(health_data):
@@ -105,7 +173,8 @@ def determine_health_status(health_data):
         'etcd' in health_data.get('services', {}) and 
             health_data['services']['etcd'].get('status') == 'unhealthy',
         'ceph' in health_data.get('services', {}) and 
-            health_data['services']['ceph'].get('status') == 'unhealthy'
+            health_data['services']['ceph'].get('status') == 'unhealthy',
+        health_data.get('https_domain', {}).get('status') == 'unhealthy'
     ]
     
     # Warning conditions (exit code 1)
@@ -161,6 +230,17 @@ def format_health_message(health_data, status):
     cert = health_data.get('certificate', {})
     if cert and cert.get('days_until_expiry') is not None:
         lines.append(f"\nCertificate expires in {cert['days_until_expiry']} days")
+    
+    # HTTPS domain status
+    https_domain = health_data.get('https_domain', {})
+    if https_domain:
+        if https_domain.get('status') == 'not_configured':
+            lines.append(f"\nHTTPS Domain: Not configured")
+        elif https_domain.get('domain'):
+            status_text = https_domain.get('status', 'unknown').upper()
+            lines.append(f"\nHTTPS Domain: {https_domain['domain']} ({status_text})")
+            if https_domain.get('message'):
+                lines.append(f"  {https_domain['message']}")
     
     # Critical service issues
     services = health_data.get('services', {})
