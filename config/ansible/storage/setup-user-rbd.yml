@@ -223,8 +223,6 @@
         content: |
           [Unit]
           Description=Database Backup Service
-          After=user-rbd.service
-          Requires=user-rbd.service
 
           [Service]
           Type=oneshot
