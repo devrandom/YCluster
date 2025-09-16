@@ -273,12 +273,22 @@ show_status() {
     log "Total backup size: $total_size"
 }
 
+# Check if this node is the storage leader
+check_storage_leader() {
+    # Check if user RBD is mounted (only storage leader should have this)
+    if ! mountpoint -q "/rbd/user"; then
+        log "User RBD not mounted, not storage leader, skipping backup"
+        exit 0
+    fi
+}
+
 # Main function
 main() {
     case "$1" in
         backup)
             local databases="${2:-both}"
             log "Starting database backup process for: $databases"
+            check_storage_leader
             create_backup_dirs
             
             local postgres_result=0
@@ -337,10 +347,5 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Check if backup destination is available
-if [ ! -d "/rbd/user" ]; then
-    log "ERROR: /rbd/user is not available. Ensure user RBD volume is mounted."
-    exit 1
-fi
 
 main "$@"

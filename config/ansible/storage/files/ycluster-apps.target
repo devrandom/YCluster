@@ -1,6 +1,5 @@
 [Unit]
 Description=Storage Leader Applications
-Requires=user-rbd.service
 After=user-rbd.service
 
 # No [Install] section - target won't auto-start during boot
