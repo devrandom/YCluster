@@ -159,6 +159,78 @@ get_age_recipients() {
     return 1
 }
 
+# Get backup destinations from etcd
+get_backup_destinations() {
+    if command -v ycluster >/dev/null 2>&1; then
+        # Get enabled destinations from etcd using JSON output
+        ycluster backup destinations list --json 2>/dev/null | jq -r '.[] | select(.enabled == true) | .name + " " + .url' 2>/dev/null || true
+    fi
+}
+
+# Sync encrypted backups to remote destinations
+sync_backups() {
+    log "Starting backup sync to remote destinations..."
+    
+    if [ ! -d "$ENCRYPTED_BACKUP_DIR" ]; then
+        log "No encrypted backup directory found, nothing to sync"
+        return 0
+    fi
+    
+    local encrypted_count=$(find "$ENCRYPTED_BACKUP_DIR" -name "*.age" | wc -l)
+    if [ $encrypted_count -eq 0 ]; then
+        log "No encrypted backups found, nothing to sync"
+        return 0
+    fi
+    
+    # Get destinations from etcd
+    local destinations=$(get_backup_destinations)
+    if [ -z "$destinations" ]; then
+        log "No enabled backup destinations configured"
+        return 0
+    fi
+    
+    local sync_failures=0
+    local sync_successes=0
+    local total_destinations=0
+    
+    # Process each destination
+    while IFS= read -r destination_line; do
+        if [ -z "$destination_line" ]; then
+            continue
+        fi
+        
+        total_destinations=$((total_destinations + 1))
+        local dest_name=$(echo "$destination_line" | cut -d' ' -f1)
+        local dest_url=$(echo "$destination_line" | cut -d' ' -f2-)
+        
+        log "Syncing to destination: $dest_name ($dest_url)"
+        
+        # Add trailing slash to source directory to sync contents
+        local source_dir="${ENCRYPTED_BACKUP_DIR}/"
+        
+        if rsync -av --timeout=300 -e 'ssh -o StrictHostKeyChecking=accept-new' "$source_dir" "$dest_url" 2>&1 | while IFS= read -r line; do
+            log "  rsync: $line"
+        done; then
+            log "Successfully synced to $dest_name"
+            sync_successes=$((sync_successes + 1))
+        else
+            log "ERROR: Failed to sync to $dest_name"
+            sync_failures=$((sync_failures + 1))
+        fi
+        
+    done <<< "$destinations"
+    
+    log "Sync summary: $sync_successes/$total_destinations destinations successful"
+    
+    if [ $sync_failures -gt 0 ]; then
+        log "ERROR: $sync_failures destination(s) failed"
+        return 1
+    else
+        log "All destinations synced successfully"
+        return 0
+    fi
+}
+
 # Encrypt backup file with age
 encrypt_backup() {
     local source_file="$1"
@@ -263,9 +335,19 @@ show_status() {
         log "Encrypted backups: $encrypted_count files, $encrypted_size total"
         
         if [ $encrypted_count -gt 0 ]; then
-            local latest_encrypted=$(find "$ENCRYPTED_BACKUP_DIR" -name "*.age" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
-            local latest_encrypted_date=$(stat -c %y "$latest_encrypted" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
-            log "  Latest: $(basename "$latest_encrypted") ($latest_encrypted_date)"
+            # Show latest PostgreSQL encrypted backup
+            local latest_pg_encrypted=$(find "$ENCRYPTED_BACKUP_DIR" -name "postgres_*.age" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            if [ -n "$latest_pg_encrypted" ]; then
+                local latest_pg_encrypted_date=$(stat -c %y "$latest_pg_encrypted" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
+                log "  Latest PostgreSQL: $(basename "$latest_pg_encrypted") ($latest_pg_encrypted_date)"
+            fi
+            
+            # Show latest Qdrant encrypted backup
+            local latest_qdrant_encrypted=$(find "$ENCRYPTED_BACKUP_DIR" -name "qdrant_*.age" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            if [ -n "$latest_qdrant_encrypted" ]; then
+                local latest_qdrant_encrypted_date=$(stat -c %y "$latest_qdrant_encrypted" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
+                log "  Latest Qdrant: $(basename "$latest_qdrant_encrypted") ($latest_qdrant_encrypted_date)"
+            fi
         fi
     fi
     
@@ -303,20 +385,42 @@ main() {
                     backup_qdrant || qdrant_result=$?
                     postgres_result=0  # Skip PostgreSQL, mark as success
                     ;;
-                both|all|*)
+                both|all)
                     backup_postgres || postgres_result=$?
                     backup_qdrant || qdrant_result=$?
                     ;;
             esac
             
             cleanup_old_backups
+            
+            # Sync backups to remote destinations
+            local sync_result=0
+            if sync_backups; then
+                log "Backup sync completed successfully"
+            else
+                log "Backup sync completed with errors"
+                sync_result=1
+            fi
+            
             show_status
             
-            if [ $postgres_result -eq 0 ] && [ $qdrant_result -eq 0 ]; then
+            if [ $postgres_result -eq 0 ] && [ $qdrant_result -eq 0 ] && [ $sync_result -eq 0 ]; then
                 log "Backup process completed successfully"
                 exit 0
             else
                 log "Backup process completed with errors"
+                exit 1
+            fi
+            ;;
+        sync)
+            log "Starting backup sync process"
+            check_storage_leader
+            
+            if sync_backups; then
+                log "Backup sync completed successfully"
+                exit 0
+            else
+                log "Backup sync completed with errors"
                 exit 1
             fi
             ;;
@@ -329,11 +433,12 @@ main() {
             show_status
             ;;
         *)
-            echo "Usage: $0 {backup [postgres|qdrant|both]|status|cleanup}"
+            echo "Usage: $0 {backup [postgres|qdrant|both]|sync|status|cleanup}"
             echo "  backup [db] - Create backups (default: both databases)"
             echo "    postgres  - Backup PostgreSQL only"
             echo "    qdrant    - Backup Qdrant only"
             echo "    both      - Backup both databases (default)"
+            echo "  sync        - Sync encrypted backups to remote destinations"
             echo "  status      - Show current backup status"
             echo "  cleanup     - Clean up old backups only"
             exit 1
