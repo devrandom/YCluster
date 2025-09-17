@@ -5,6 +5,7 @@ BACKUP_DIR="/rbd/user/backups"
 ENCRYPTED_BACKUP_DIR="/rbd/user/backups/encrypted"
 POSTGRES_BACKUP_DIR="$BACKUP_DIR/postgres"
 QDRANT_BACKUP_DIR="$BACKUP_DIR/qdrant"
+ETCD_BACKUP_DIR="$BACKUP_DIR/etcd"
 RETENTION_DAYS=30
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -18,7 +19,10 @@ create_backup_dirs() {
     log "Creating backup directories..."
     mkdir -p "$POSTGRES_BACKUP_DIR"
     mkdir -p "$QDRANT_BACKUP_DIR"
-    mkdir -p "$ENCRYPTED_BACKUP_DIR"
+    mkdir -p "$ETCD_BACKUP_DIR"
+    mkdir -p "$ENCRYPTED_BACKUP_DIR/postgres"
+    mkdir -p "$ENCRYPTED_BACKUP_DIR/qdrant"
+    mkdir -p "$ENCRYPTED_BACKUP_DIR/etcd"
 }
 
 # Backup PostgreSQL
@@ -42,7 +46,7 @@ backup_postgres() {
             log "PostgreSQL backup verified (size: $(du -h "$backup_file" | cut -f1))"
             
             # Encrypt backup
-            local encrypted_file="$ENCRYPTED_BACKUP_DIR/postgres_${TIMESTAMP}.sql.gz.age"
+            local encrypted_file="$ENCRYPTED_BACKUP_DIR/postgres/${TIMESTAMP}.sql.gz.age"
             if encrypt_backup "$backup_file" "$encrypted_file"; then
                 log "PostgreSQL backup encrypted successfully"
             else
@@ -117,7 +121,7 @@ backup_qdrant() {
             log "Qdrant backup verified (size: $(du -h "$backup_file" | cut -f1))"
             
             # Encrypt backup
-            local encrypted_file="$ENCRYPTED_BACKUP_DIR/qdrant_${TIMESTAMP}.snapshot.age"
+            local encrypted_file="$ENCRYPTED_BACKUP_DIR/qdrant/${TIMESTAMP}.snapshot.age"
             if encrypt_backup "$backup_file" "$encrypted_file"; then
                 log "Qdrant backup encrypted successfully"
             else
@@ -136,6 +140,55 @@ backup_qdrant() {
         
     else
         log "ERROR: Failed to copy Qdrant snapshot"
+        return 1
+    fi
+}
+
+# Backup etcd
+backup_etcd() {
+    log "Starting etcd backup..."
+    
+    # Check if etcd is running
+    if ! systemctl is-active --quiet etcd; then
+        log "etcd is not running, skipping backup"
+        return 0
+    fi
+    
+    local backup_file="$ETCD_BACKUP_DIR/${TIMESTAMP}.db"
+    
+    # Create etcd snapshot
+    if etcdctl snapshot save "$backup_file" --endpoints=localhost:2379; then
+        log "etcd backup completed: $backup_file"
+        
+        # Verify backup file
+        if [ -s "$backup_file" ]; then
+            log "etcd backup verified (size: $(du -h "$backup_file" | cut -f1))"
+            
+            # Verify snapshot integrity
+            if etcdctl snapshot status "$backup_file" --write-out=json >/dev/null 2>&1; then
+                log "etcd snapshot integrity verified"
+                
+                # Encrypt backup
+                local encrypted_file="$ENCRYPTED_BACKUP_DIR/etcd/${TIMESTAMP}.db.age"
+                if encrypt_backup "$backup_file" "$encrypted_file"; then
+                    log "etcd backup encrypted successfully"
+                else
+                    log "ERROR: etcd backup encryption failed"
+                    return 1
+                fi
+            else
+                log "ERROR: etcd snapshot integrity check failed"
+                rm -f "$backup_file"
+                return 1
+            fi
+        else
+            log "ERROR: etcd backup file is empty"
+            rm -f "$backup_file"
+            return 1
+        fi
+    else
+        log "ERROR: etcd backup failed"
+        rm -f "$backup_file"
         return 1
     fi
 }
@@ -293,6 +346,13 @@ cleanup_old_backups() {
         log "Qdrant backups remaining: $qdrant_count"
     fi
     
+    # Clean etcd backups
+    if [ -d "$ETCD_BACKUP_DIR" ]; then
+        find "$ETCD_BACKUP_DIR" -name "*.db" -mtime +$RETENTION_DAYS -delete
+        local etcd_count=$(find "$ETCD_BACKUP_DIR" -name "*.db" | wc -l)
+        log "etcd backups remaining: $etcd_count"
+    fi
+    
     # Clean encrypted backups
     if [ -d "$ENCRYPTED_BACKUP_DIR" ]; then
         find "$ENCRYPTED_BACKUP_DIR" -name "*.age" -mtime +$RETENTION_DAYS -delete
@@ -329,6 +389,18 @@ show_status() {
         fi
     fi
     
+    if [ -d "$ETCD_BACKUP_DIR" ]; then
+        local etcd_count=$(find "$ETCD_BACKUP_DIR" -name "*.db" | wc -l)
+        local etcd_size=$(du -sh "$ETCD_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "0")
+        log "etcd backups: $etcd_count files, $etcd_size total"
+        
+        if [ $etcd_count -gt 0 ]; then
+            local latest_etcd=$(find "$ETCD_BACKUP_DIR" -name "*.db" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+            local latest_etcd_date=$(stat -c %y "$latest_etcd" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
+            log "  Latest: $(basename "$latest_etcd") ($latest_etcd_date)"
+        fi
+    fi
+    
     if [ -d "$ENCRYPTED_BACKUP_DIR" ]; then
         local encrypted_count=$(find "$ENCRYPTED_BACKUP_DIR" -name "*.age" | wc -l)
         local encrypted_size=$(du -sh "$ENCRYPTED_BACKUP_DIR" 2>/dev/null | cut -f1 || echo "0")
@@ -336,17 +408,24 @@ show_status() {
         
         if [ $encrypted_count -gt 0 ]; then
             # Show latest PostgreSQL encrypted backup
-            local latest_pg_encrypted=$(find "$ENCRYPTED_BACKUP_DIR" -name "postgres_*.age" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            local latest_pg_encrypted=$(find "$ENCRYPTED_BACKUP_DIR/postgres" -name "*.age" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
             if [ -n "$latest_pg_encrypted" ]; then
                 local latest_pg_encrypted_date=$(stat -c %y "$latest_pg_encrypted" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
                 log "  Latest PostgreSQL: $(basename "$latest_pg_encrypted") ($latest_pg_encrypted_date)"
             fi
             
             # Show latest Qdrant encrypted backup
-            local latest_qdrant_encrypted=$(find "$ENCRYPTED_BACKUP_DIR" -name "qdrant_*.age" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            local latest_qdrant_encrypted=$(find "$ENCRYPTED_BACKUP_DIR/qdrant" -name "*.age" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
             if [ -n "$latest_qdrant_encrypted" ]; then
                 local latest_qdrant_encrypted_date=$(stat -c %y "$latest_qdrant_encrypted" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
                 log "  Latest Qdrant: $(basename "$latest_qdrant_encrypted") ($latest_qdrant_encrypted_date)"
+            fi
+            
+            # Show latest etcd encrypted backup
+            local latest_etcd_encrypted=$(find "$ENCRYPTED_BACKUP_DIR/etcd" -name "*.age" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            if [ -n "$latest_etcd_encrypted" ]; then
+                local latest_etcd_encrypted_date=$(stat -c %y "$latest_etcd_encrypted" 2>/dev/null | cut -d' ' -f1,2 | cut -d'.' -f1 || echo "unknown")
+                log "  Latest etcd: $(basename "$latest_etcd_encrypted") ($latest_etcd_encrypted_date)"
             fi
         fi
     fi
@@ -368,26 +447,35 @@ check_storage_leader() {
 main() {
     case "$1" in
         backup)
-            local databases="${2:-both}"
+            local databases="${2:-all}"
             log "Starting database backup process for: $databases"
             check_storage_leader
             create_backup_dirs
             
             local postgres_result=0
             local qdrant_result=0
+            local etcd_result=0
             
             case "$databases" in
                 postgres|postgresql)
                     backup_postgres || postgres_result=$?
                     qdrant_result=0  # Skip Qdrant, mark as success
+                    etcd_result=0    # Skip etcd, mark as success
                     ;;
                 qdrant)
                     backup_qdrant || qdrant_result=$?
                     postgres_result=0  # Skip PostgreSQL, mark as success
+                    etcd_result=0      # Skip etcd, mark as success
                     ;;
-                both|all)
+                etcd)
+                    backup_etcd || etcd_result=$?
+                    postgres_result=0  # Skip PostgreSQL, mark as success
+                    qdrant_result=0    # Skip Qdrant, mark as success
+                    ;;
+                all)
                     backup_postgres || postgres_result=$?
                     backup_qdrant || qdrant_result=$?
+                    backup_etcd || etcd_result=$?
                     ;;
             esac
             
@@ -404,7 +492,7 @@ main() {
             
             show_status
             
-            if [ $postgres_result -eq 0 ] && [ $qdrant_result -eq 0 ] && [ $sync_result -eq 0 ]; then
+            if [ $postgres_result -eq 0 ] && [ $qdrant_result -eq 0 ] && [ $etcd_result -eq 0 ] && [ $sync_result -eq 0 ]; then
                 log "Backup process completed successfully"
                 exit 0
             else
@@ -433,11 +521,12 @@ main() {
             show_status
             ;;
         *)
-            echo "Usage: $0 {backup [postgres|qdrant|both]|sync|status|cleanup}"
-            echo "  backup [db] - Create backups (default: both databases)"
+            echo "Usage: $0 {backup [postgres|qdrant|etcd|all]|sync|status|cleanup}"
+            echo "  backup [db] - Create backups (default: all databases)"
             echo "    postgres  - Backup PostgreSQL only"
             echo "    qdrant    - Backup Qdrant only"
-            echo "    both      - Backup both databases (default)"
+            echo "    etcd      - Backup etcd only"
+            echo "    all       - Backup all databases (default)"
             echo "  sync        - Sync encrypted backups to remote destinations"
             echo "  status      - Show current backup status"
             echo "  cleanup     - Clean up old backups only"
