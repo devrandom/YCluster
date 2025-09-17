@@ -3,7 +3,7 @@
 #- import_playbook: add-ceph-nodes.yml
 - import_playbook: setup-ceph-disk.yml
 - import_playbook: create-ceph-pool.yml
-- import_playbook: storage-setup.yml
+- import_playbook: create-mountpoint.yml
 
 # Database Services - RBD setup must precede service installation
 - import_playbook: setup-user-rbd.yml
