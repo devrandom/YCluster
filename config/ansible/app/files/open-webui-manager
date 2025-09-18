@@ -1,0 +1,49 @@
+#!/bin/bash
+set -e
+
+OPENWEBUI_DATA_DIR="/rbd/misc/app"
+COMPOSE_FILE="/etc/open-webui/docker-compose.yml"
+COMPOSE_PROJECT="open-webui"
+
+# Function to start Open WebUI
+start_openwebui() {
+    # Create Open WebUI data directories with proper ownership
+    # (misc-rbd.service dependency ensures /rbd/misc is mounted)
+    mkdir -p "$OPENWEBUI_DATA_DIR/open-webui-data"
+    chown -R openwebui:openwebui "$OPENWEBUI_DATA_DIR"
+
+    # Start Open WebUI using Docker Compose v2
+    cd /etc/open-webui
+    docker compose -p "$COMPOSE_PROJECT" up --pull=always
+    return 0
+}
+
+# Function to stop Open WebUI
+stop_openwebui() {
+    echo "Stopping Open WebUI"
+    
+    # Stop Open WebUI using Docker Compose v2
+    cd /etc/open-webui
+    docker compose -p "$COMPOSE_PROJECT" down
+    
+    echo "Open WebUI stopped"
+}
+
+case "$1" in
+    start)
+        if start_openwebui; then
+            echo "Open WebUI successfully started"
+            exit 0
+        else
+            echo "Failed to start Open WebUI"
+            exit 1
+        fi
+        ;;
+    stop)
+        stop_openwebui
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
