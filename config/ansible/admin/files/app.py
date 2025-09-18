@@ -730,7 +730,7 @@ def check_tang_service():
     """Check Tang server status and functionality"""
     try:
         # Check if Tang service is running
-        tang_service_running = check_service_status('tangd.socket')
+        tang_service_running = check_service_status('tang-server.service')
         
         # Check if Tang port is open
         tang_port_open = check_port_open('localhost', 8777)
