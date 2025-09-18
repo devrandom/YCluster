@@ -13,43 +13,33 @@
         name: tang
         state: present
 
-    - name: Create Tang systemd service override directory
-      file:
-        path: "{{ tang_systemd_dir }}/tangd.socket.d"
-        state: directory
-        mode: '0755'
+    - name: Disable Tang socket completely
+      systemd:
+        name: tangd.socket
+        enabled: no
+        state: stopped
 
-    - name: Configure Tang socket to use custom port and keys directory
+    - name: Create custom Tang service
       copy:
-        dest: "{{ tang_systemd_dir }}/tangd.socket.d/override.conf"
+        dest: "{{ tang_systemd_dir }}/tang-server.service"
         content: |
           [Unit]
+          Description=Tang Server (Custom)
           After=network-online.target
           Wants=network-online.target
           
-          [Install]
-          WantedBy=network-online.target
-          
-          [Socket]
-          ListenStream=
-          ListenStream={{ tang_port }}
-          ExecStartPre=
-          ExecStartPre=/usr/local/bin/secrets-volume-manager start
-        mode: '0644'
-
-    - name: Create Tang systemd service override directory
-      file:
-        path: "{{ tang_systemd_dir }}/tangd@.service.d"
-        state: directory
-        mode: '0755'
-
-    - name: Configure Tang service to use custom keys directory
-      copy:
-        dest: "{{ tang_systemd_dir }}/tangd@.service.d/override.conf"
-        content: |
           [Service]
-          ExecStart=
-          ExecStart=/usr/libexec/tangd {{ tang_keys_dir }}
+          Type=simple
+          User=_tang
+          Group=_tang
+          ExecStartPre=+/usr/local/bin/secrets-volume-manager start
+          ExecStart=/usr/libexec/tangd -l -p 8777 {{ tang_keys_dir }}
+          Restart=always
+          StandardOutput=journal
+          StandardError=journal
+          
+          [Install]
+          WantedBy=multi-user.target
         mode: '0644'
 
     - name: Ensure /secrets is mounted
@@ -89,14 +79,15 @@
       systemd:
         daemon_reload: yes
 
-    - name: Enable and start Tang socket
+    - name: Enable and start custom Tang service
       systemd:
-        name: tangd.socket
+        name: tang-server.service
         enabled: yes
         state: started
+        daemon_reload: yes
 
     - name: Check Tang service status
-      command: systemctl is-active tangd.socket
+      command: systemctl is-active tang-server.service
       register: tang_status
       changed_when: false
 
@@ -105,6 +96,7 @@
         msg: |
           Tang server is {{ tang_status.stdout }}
           Keys directory: {{ tang_keys_dir }}
+          Service: tang-server.service
           To get the Tang server advertisement:
           curl http://{{ ansible_default_ipv4.address }}:{{ tang_port }}/adv
 
