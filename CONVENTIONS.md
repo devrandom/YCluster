@@ -1,6 +1,4 @@
 - do not use "feat: " and other such prefixes in commit messages
-- we use `docker compose` (not `docker-compose`)
-- all operations are performed using docker compose commands (e.g. ansible)
 - there is no need to load the ansible inventory file, it's loaded by default
 - initial bootstrap is from an admin laptop of the s1 core node (autoinstall and ansible playbooks).  docker compose is used.
 - further bootstrap is from s1 to s2, s3 (autoinstall and ansible).  no docker is involved here.
