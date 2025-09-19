@@ -2,8 +2,37 @@
 set -e
 
 OPENWEBUI_DATA_DIR="/rbd/misc/app"
-COMPOSE_FILE="/etc/open-webui/docker-compose.yml"
 COMPOSE_PROJECT="open-webui"
+
+# Function to get or generate Open WebUI secret key from etcd
+get_or_generate_secret_key() {
+    local etcd_key="/cluster/config/open-webui/secret-key"
+    
+    # Try to get existing key from etcd
+    local existing_key=$(etcdctl get "$etcd_key" --print-value-only 2>/dev/null || true)
+    
+    if [ -n "$existing_key" ]; then
+        echo "$existing_key"
+        return 0
+    fi
+    
+    # Generate new 63-bit secret key (8 bytes, base64 encoded)
+    local new_key=$(openssl rand 8 | base64 -w 0)
+    
+    # Atomically store in etcd only if key doesn't exist (version == 0)
+    local txn=$(cat <<EOF
+version("$etcd_key") = "0"
+
+put "$etcd_key" "$new_key"
+
+get "$etcd_key" --print-value-only
+EOF
+)
+    # need to echo trailing newlines because here-doc strips them
+    echo -e "$txn\n\n" | etcdctl txn > /dev/null
+    
+    etcdctl get $etcd_key --print-value-only
+}
 
 # Function to start Open WebUI
 start_openwebui() {
@@ -12,9 +41,17 @@ start_openwebui() {
     mkdir -p "$OPENWEBUI_DATA_DIR/open-webui-data"
     chown -R openwebui:openwebui "$OPENWEBUI_DATA_DIR"
 
-    # Start Open WebUI using Docker Compose v2
+    # Get or generate secret key from etcd and write to temp file in ramdisk
+    local secret_key=$(get_or_generate_secret_key)
+    local env_file=$(mktemp --tmpdir=/dev/shm)
+    echo "OPEN_WEBUI_SECRET_KEY=$secret_key" > "$env_file"
+    
+    # Ensure temp file is cleaned up on exit
+    trap "rm -f '$env_file'" EXIT
+
+    # Start Open WebUI using Docker Compose v2 with env file
     cd /etc/open-webui
-    docker compose -p "$COMPOSE_PROJECT" up --pull=always
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up --pull=always
     return 0
 }
 

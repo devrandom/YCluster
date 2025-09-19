@@ -9,7 +9,7 @@ services:
     environment:
       - 'DATABASE_URL=postgresql://openwebui:openwebui@host.docker.internal/openwebui'
       # - 'OLLAMA_BASE_URL=http://host.docker.internal:11434'
-      - 'WEBUI_SECRET_KEY='
+      - 'WEBUI_SECRET_KEY=${OPEN_WEBUI_SECRET_KEY}'
       - 'OPEN_WEBUI_PLUGINS=open_webui_plugins'
       - 'MEM_QDRANT_URL=host.docker.internal'
       - 'MEM_LLM_PROVIDER=ollama'
