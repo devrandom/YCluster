@@ -109,6 +109,10 @@ start_all_services() {
     systemctl start rathole &
     RATHOLE_START_PID=$!
 
+    # apps need the registry, so give it a moment to start
+    # TODO improve this with proper systemd dependencies
+    sleep 10
+
     # Start all storage applications via the target
     systemctl start ycluster-apps.target &
     APPS_START_PID=$!
@@ -127,6 +131,7 @@ stop_all_services() {
     timeout 5s systemctl stop rathole &
     timeout 5s systemctl stop misc-rbd &
     timeout 5s systemctl stop user-rbd &
+    sleep 5
     wait
     
     # Check if services are still running an force cleanup if needed
