@@ -81,16 +81,7 @@
         mode: '0755'
       become: yes
     
-    - name: Create LaunchAgents directory for dev user
-      file:
-        path: /Users/dev/Library/LaunchAgents
-        state: directory
-        owner: dev
-        group: admin
-        mode: '0755'
-      become: yes
-    
-    - name: Create Ollama launchd plist for dev user
+    - name: Create Ollama LaunchDaemon plist
       copy:
         content: |
           <?xml version="1.0" encoding="UTF-8"?>
@@ -100,25 +91,25 @@
           	<key>KeepAlive</key>
           	<true/>
           	<key>Label</key>
-          	<string>homebrew.mxcl.ollama</string>
-          	<key>LimitLoadToSessionType</key>
-          	<array>
-          		<string>Aqua</string>
-          		<string>Background</string>
-          		<string>LoginWindow</string>
-          		<string>StandardIO</string>
-          		<string>System</string>
-          	</array>
+          	<string>com.ycluster.ollama</string>
           	<key>ProgramArguments</key>
           	<array>
           		<string>/opt/homebrew/opt/ollama/bin/ollama</string>
           		<string>serve</string>
           	</array>
-                  <key>EnvironmentVariables</key>
+          	<key>UserName</key>
+          	<string>dev</string>
+          	<key>GroupName</key>
+          	<string>admin</string>
+            <key>EnvironmentVariables</key>
           	<dict>
           		<key>OLLAMA_HOST</key>
           		<string>0.0.0.0</string>
-                  </dict>
+                <key>OLLAMA_KEEP_ALIVE</key>
+                <string>144h</string>
+                <key>HOME</key>
+                <string>/Users/dev</string>
+            </dict>
           	<key>RunAtLoad</key>
           	<true/>
           	<key>StandardErrorPath</key>
@@ -129,9 +120,7 @@
           	<string>/opt/homebrew/var</string>
           </dict>
           </plist>
-        dest: /Users/dev/Library/LaunchAgents/homebrew.mxcl.ollama.plist
-        owner: dev
-        group: admin
+        dest: /Library/LaunchDaemons/com.ycluster.ollama.plist
         mode: '0644'
       become: yes
       notify: restart ollama service
@@ -267,9 +256,7 @@
     
     - name: restart ollama service
       shell: |
-        launchctl stop homebrew.mxcl.ollama || true
-        launchctl unload /Users/dev/Library/LaunchAgents/homebrew.mxcl.ollama.plist || true
-        launchctl load /Users/dev/Library/LaunchAgents/homebrew.mxcl.ollama.plist
-        launchctl start homebrew.mxcl.ollama
+        launchctl stop com.ycluster.ollama || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.ollama.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.ollama.plist
       become: yes
-      become_user: dev
