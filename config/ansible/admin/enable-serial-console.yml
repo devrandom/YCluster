@@ -1,0 +1,10 @@
+---
+- name: Enable serial console on storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Enable serial-getty@ttyS4.service
+      systemd:
+        name: serial-getty@ttyS4.service
+        enabled: yes
+        state: started
