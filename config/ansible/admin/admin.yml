@@ -9,3 +9,4 @@
 - import_playbook: setup-secrets-volume.yml
 - import_playbook: setup-tang.yml
 - import_playbook: enable-serial-console.yml
+- import_playbook: install-amtterm.yml
