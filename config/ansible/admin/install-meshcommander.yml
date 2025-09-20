@@ -1,0 +1,60 @@
+---
+- name: Install MeshCommander on storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Create MeshCommander directory
+      file:
+        path: /opt/meshcommander
+        state: directory
+        mode: '0755'
+
+    - name: Create MeshCommander Dockerfile
+      copy:
+        content: |
+          FROM node:16-alpine
+          RUN npm install -g meshcommander@latest
+          EXPOSE 3000
+          CMD ["meshcommander", "--any"]
+        dest: /opt/meshcommander/Dockerfile
+        mode: '0644'
+
+    - name: Build MeshCommander Docker image
+      docker_image:
+        name: meshcommander
+        build:
+          path: /opt/meshcommander
+        source: build
+        state: present
+
+    - name: Create MeshCommander systemd service
+      copy:
+        content: |
+          [Unit]
+          Description=MeshCommander Web Interface
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=simple
+          Restart=always
+          RestartSec=5
+          ExecStartPre=-/usr/bin/docker stop meshcommander
+          ExecStartPre=-/usr/bin/docker rm meshcommander
+          ExecStart=/usr/bin/docker run --rm --name meshcommander -p 3000:3000 meshcommander
+          ExecStop=/usr/bin/docker stop meshcommander
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/meshcommander.service
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start MeshCommander service
+      systemd:
+        name: meshcommander.service
+        enabled: yes
+        state: started

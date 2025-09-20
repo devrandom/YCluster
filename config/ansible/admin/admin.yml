@@ -10,3 +10,5 @@
 - import_playbook: setup-tang.yml
 - import_playbook: enable-serial-console.yml
 - import_playbook: install-amtterm.yml
+- import_playbook: install-docker-official.yml
+- import_playbook: install-meshcommander.yml
