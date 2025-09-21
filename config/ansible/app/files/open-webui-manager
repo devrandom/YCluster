@@ -1,12 +1,24 @@
 #!/bin/bash
 set -e
 
-OPENWEBUI_DATA_DIR="/rbd/misc/app"
-COMPOSE_PROJECT="open-webui"
+# Get instance name from environment or default to empty
+INSTANCE="${OPENWEBUI_INSTANCE:-}"
+
+# Set suffix based on instance
+if [ -n "$INSTANCE" ]; then
+    SUFFIX="-${INSTANCE}"
+else
+    SUFFIX=""
+fi
+
+# Set paths and names using suffix
+OPENWEBUI_DATA_DIR="/rbd/misc/app${SUFFIX}"
+COMPOSE_PROJECT="open-webui${SUFFIX}"
+ETCD_KEY_PREFIX="/cluster/config/open-webui${SUFFIX}"
 
 # Function to get or generate Open WebUI secret key from etcd
 get_or_generate_secret_key() {
-    local etcd_key="/cluster/config/open-webui/secret-key"
+    local etcd_key="${ETCD_KEY_PREFIX}/secret-key"
     
     # Try to get existing key from etcd
     local existing_key=$(etcdctl get "$etcd_key" --print-value-only 2>/dev/null || true)
@@ -44,13 +56,24 @@ start_openwebui() {
     # Get or generate secret key from etcd and write to temp file in ramdisk
     local secret_key=$(get_or_generate_secret_key)
     local env_file=$(mktemp --tmpdir=/dev/shm)
+    
+    # Set environment variables for docker-compose
     echo "OPEN_WEBUI_SECRET_KEY=$secret_key" > "$env_file"
+    echo "OPENWEBUI_INSTANCE=$INSTANCE" >> "$env_file"
+    echo "OPENWEBUI_DATA_DIR=$OPENWEBUI_DATA_DIR" >> "$env_file"
+    echo "OPEN_WEBUI_PORT=${OPENWEBUI_PORT:-8380}" >> "$env_file"
+    
+    
+    # Set database connection variables
+    echo "OPENWEBUI_DB_USER=openwebui${SUFFIX}" >> "$env_file"
+    echo "OPENWEBUI_DB_PASS=openwebui${SUFFIX}" >> "$env_file"
+    echo "OPENWEBUI_DB_NAME=openwebui${SUFFIX}" >> "$env_file"
     
     # Ensure temp file is cleaned up on exit
     trap "rm -f '$env_file'" EXIT
 
     # Start Open WebUI using Docker Compose v2 with env file
-    cd /etc/open-webui
+    cd "/etc/open-webui${SUFFIX}"
     docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up --pull=always
     return 0
 }
@@ -60,7 +83,7 @@ stop_openwebui() {
     echo "Stopping Open WebUI"
     
     # Stop Open WebUI using Docker Compose v2
-    cd /etc/open-webui
+    cd "/etc/open-webui${SUFFIX}"
     docker compose -p "$COMPOSE_PROJECT" down
     
     echo "Open WebUI stopped"

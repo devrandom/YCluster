@@ -3,11 +3,13 @@
   hosts: localhost
   gather_facts: false
   vars:
-    build_dir: "/opt/src/open-webui-build"
+    instance: "{{ openwebui_instance | default('') }}"
+    instance_suffix: "{{ '-' + instance if instance else '' }}"
+    build_dir: "/opt/src/open-webui-build{{ instance_suffix }}"
     plugins_repo: "https://github.com/devrandom/open-webui-plugins.git"
     webui_repo: "https://github.com/devrandom/open-webui.git"
     image_name: "registry.xc:5000/open-webui-with-plugins"
-    image_tag: "latest"
+    image_tag: "{{ instance if instance else 'latest' }}"
 
   tasks:
     - name: Verify registry is ready for push operations
@@ -45,7 +47,7 @@
           --progress plain \
           --tag {{ image_name }}:{{ image_tag }} \
           --push \
-          ./open-webui
+          ./open-webui | tee /tmp/build-open-webui.log 2>&1
       args:
         chdir: "{{ build_dir }}"
       no_log: false

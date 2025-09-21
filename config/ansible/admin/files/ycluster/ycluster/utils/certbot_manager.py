@@ -110,6 +110,22 @@ subjectAltName = @alt_names
             pass
         return None
 
+def discover_nginx_instance_subdomains():
+    """Discover instance subdomains from nginx template files"""
+    sites = discover_nginx_templates()
+    
+    # Extract instance names from template files that have underscores
+    instances = []
+    for site_name, _ in sites:
+        # Check if this is an instance template (has an underscore in the name)
+        if '_' in site_name:
+            # Extract instance name (everything after the last underscore)
+            instance = site_name.split('_')[-1]
+            if instance not in instances:
+                instances.append(instance)
+    
+    return instances
+
 def discover_nginx_templates():
     """Discover all nginx template files in /etc/nginx/templates"""
     templates_dir = Path('/etc/nginx/templates')
@@ -119,20 +135,18 @@ def discover_nginx_templates():
         return []
     
     # Find all .j2 template files
-    template_files = list(templates_dir.glob('*.j2'))
+    template_files = list(templates_dir.glob('*.conf.j2'))
     
     # Convert to site names (remove .conf.j2 suffix)
     sites = []
     for template_file in template_files:
-        site_name = template_file.stem
-        if site_name.endswith('.conf'):
-            site_name = site_name[:-5]  # Remove .conf suffix
+        site_name = template_file.name.removesuffix('.conf.j2')
         sites.append((site_name, template_file))
     
     return sites
 
 def update_nginx_configs():
-    """Update all nginx configurations from templates with the primary domain from etcd"""
+    """Update nginx configurations from templates with the primary domain from etcd"""
     config = get_https_config()
     
     if 'domain' not in config:
@@ -157,9 +171,18 @@ def update_nginx_configs():
             # Read template config
             template_content = template_path.read_text()
 
+            # Determine domain for this site by extracting instance from site name
+            if '_' in site_name:
+                # Instance-specific site gets subdomain (extract instance after last underscore)
+                instance = site_name.split('_')[-1]
+                site_domain = f"{instance}.{primary_domain}"
+            else:
+                # Production site gets primary domain
+                site_domain = primary_domain
+
             # Render template with domain variable
             template = Template(template_content)
-            updated_content = template.render(domain=primary_domain)
+            updated_content = template.render(domain=site_domain)
 
             # Check if config already exists and is the same
             if nginx_config_path.exists():
@@ -170,7 +193,7 @@ def update_nginx_configs():
 
             # Write updated config
             nginx_config_path.write_text(updated_content)
-            print(f"  {site_name}: configuration updated")
+            print(f"  {site_name}: configuration updated (domain: {site_domain})")
             updated_count += 1
             
         except Exception as e:
@@ -247,7 +270,7 @@ def get_https_config():
     return config
 
 def get_all_domains(config):
-    """Get all domains (primary + aliases + admin subdomain) as a list"""
+    """Get all domains (primary + aliases + admin subdomain + instance subdomains) as a list"""
     domains = []
     
     if 'domain' in config:
@@ -256,6 +279,13 @@ def get_all_domains(config):
         # Always add admin subdomain
         admin_domain = f"admin.{primary_domain}"
         domains.append(admin_domain)
+        
+        # Add subdomains for any nginx templates that have instance suffixes
+        instances = discover_nginx_instance_subdomains()
+        for instance in instances:
+            instance_domain = f"{instance}.{primary_domain}"
+            if instance_domain not in domains:
+                domains.append(instance_domain)
     
     domains.extend(config.get('aliases', []))
     return domains
@@ -699,8 +729,8 @@ def main():
     delete_parser.add_argument('domain', help='Domain to delete certificate for')
     
     # Update nginx command
-    subparsers.add_parser('update-nginx', help='Update nginx configuration with domain from etcd')
-    
+    update_nginx_parser = subparsers.add_parser('update-nginx', help='Update nginx configuration with domain from etcd')
+
     # Status command
     subparsers.add_parser('status', help='Show certificate status and configuration')
     

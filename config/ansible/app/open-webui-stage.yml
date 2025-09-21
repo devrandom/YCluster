@@ -1,0 +1,12 @@
+---
+- name: Build Open WebUI stage instance
+  import_playbook: build-open-webui.yml
+  vars:
+    openwebui_instance: stage
+  tags: [build, never]
+
+- name: Install Open WebUI stage instance
+  import_playbook: install-open-webui.yml
+  vars:
+    openwebui_instance: stage
+    openwebui_port: 8381

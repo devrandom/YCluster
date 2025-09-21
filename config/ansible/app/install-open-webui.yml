@@ -2,7 +2,16 @@
 - name: Install Open WebUI on storage nodes
   hosts: storage
   become: yes
+  vars:
+    instance: "{{ openwebui_instance | default('') }}"
+    instance_suffix: "{{ ('-' + instance) if instance else '' }}"
+    config_suffix: "{{ ('_' + instance) if instance else '' }}"
+    local_port: "{{ openwebui_port | default('8380') }}"
   tasks:
+    - name: Display config
+      debug:
+        msg: "Installing Open WebUI instance '{{ instance }}' on port {{ local_port }}, suffix '{{ instance_suffix }}'"
+
     - name: Create openwebui user
       user:
         name: openwebui
@@ -14,7 +23,7 @@
 
     - name: Create Open WebUI configuration directory
       file:
-        path: /etc/open-webui
+        path: "/etc/open-webui{{ instance_suffix }}"
         state: directory
         owner: openwebui
         group: openwebui
@@ -23,7 +32,7 @@
     - name: Copy Docker Compose file for Open WebUI
       copy:
         src: files/docker-compose.yaml
-        dest: /etc/open-webui/docker-compose.yml
+        dest: "/etc/open-webui{{ instance_suffix }}/docker-compose.yml"
         owner: openwebui
         group: openwebui
         mode: '0644'
@@ -42,10 +51,10 @@
 
     - name: Create open-webui systemd service
       copy:
-        dest: /etc/systemd/system/open-webui.service
+        dest: "/etc/systemd/system/open-webui{{ instance_suffix }}.service"
         content: |
           [Unit]
-          Description=Open WebUI
+          Description=Open WebUI{{ instance_suffix }}
           After=network.target docker.service misc-rbd.service
           Requires=docker.service misc-rbd.service
           PartOf=ycluster-apps.target
@@ -59,6 +68,8 @@
           User=root
           Restart=on-failure
           RestartSec=10
+          Environment=OPENWEBUI_INSTANCE={{ instance }}
+          Environment=OPENWEBUI_PORT={{ local_port }}
 
           [Install]
           WantedBy=ycluster-apps.target
@@ -69,15 +80,15 @@
 
     - name: Enable open-webui service (part of storage-apps target)
       systemd:
-        name: open-webui.service
+        name: "open-webui{{ instance_suffix }}.service"
         enabled: yes
     # NOTE: If service was previously enabled for a different target,
     # this won't update the symlinks. Do this manually:
-    # `systemctl daemon-reload && systemctl reenable open-webui.service`
+    # `systemctl daemon-reload && systemctl enable open-webui.service`
 
     - name: Create PostgreSQL database and user for Open WebUI
       postgresql_db:
-        name: openwebui
+        name: "openwebui{{ instance_suffix }}"
         state: present
       become_user: postgres
       delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
@@ -85,9 +96,9 @@
 
     - name: Create PostgreSQL user for Open WebUI
       postgresql_user:
-        name: openwebui
-        password: openwebui
-        db: openwebui
+        name: "openwebui{{ instance_suffix }}"
+        password: "openwebui{{ instance_suffix }}"
+        db: "openwebui{{ instance_suffix }}"
         priv: ALL
         state: present
       become_user: postgres
@@ -96,20 +107,20 @@
 
     - name: Grant schema permissions to openwebui user
       postgresql_privs:
-        database: openwebui
+        database: "openwebui{{ instance_suffix }}"
         state: present
         privs: ALL
         type: schema
         objs: public
-        roles: openwebui
+        roles: "openwebui{{ instance_suffix }}"
       become_user: postgres
       delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
       run_once: true
 
     - name: Make openwebui owner of the database
       postgresql_owner:
-        db: openwebui
-        new_owner: openwebui
+        db: "openwebui{{ instance_suffix }}"
+        new_owner: "openwebui{{ instance_suffix }}"
         obj_type: database
       become_user: postgres
       delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
@@ -121,22 +132,21 @@
         source: pull
 
     - name: Install Open WebUI nginx template
-      copy:
+      template:
         src: files/open-webui.conf.j2
-        dest: /etc/nginx/templates/open-webui.conf.j2
+        dest: "/etc/nginx/templates/open-webui{{ config_suffix }}.conf.j2"
         mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+      vars:
+        port: "{{ local_port }}"
 
     - name: Generate Open WebUI nginx configuration from template
       command: /usr/local/bin/certbot-manager update-nginx
       register: nginx_update_result
+      changed_when: "'Nginx configuration updated' in nginx_update_result.stdout and 'already up to date' not in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
-
-    - name: Enable Open WebUI nginx site
-      file:
-        src: /etc/nginx/sites-available/open-webui
-        dest: /etc/nginx/sites-enabled/open-webui
-        state: link
-      notify: reload nginx
+      notify: restart nginx
 
   handlers:
     - name: reload nginx

@@ -1,13 +1,13 @@
 services:
   open-webui:
-    image: registry.xc:5000/open-webui-with-plugins:latest
-    container_name: open-webui
+    image: registry.xc:5000/open-webui-with-plugins:${OPENWEBUI_INSTANCE:-latest}
+    container_name: open-webui${OPENWEBUI_INSTANCE:+-${OPENWEBUI_INSTANCE}}
     volumes:
-      - /rbd/misc/app/open-webui-data:/app/backend/data
+      - ${OPENWEBUI_DATA_DIR:-/rbd/misc/app}/open-webui-data:/app/backend/data
     ports:
       - ${OPEN_WEBUI_PORT-8380}:8080
     environment:
-      - 'DATABASE_URL=postgresql://openwebui:openwebui@host.docker.internal/openwebui'
+      - 'DATABASE_URL=postgresql://${OPENWEBUI_DB_USER:-openwebui}:${OPENWEBUI_DB_PASS:-openwebui}@host.docker.internal/${OPENWEBUI_DB_NAME:-openwebui}'
       # - 'OLLAMA_BASE_URL=http://host.docker.internal:11434'
       - 'WEBUI_SECRET_KEY=${OPEN_WEBUI_SECRET_KEY}'
       - 'OPEN_WEBUI_PLUGINS=open_webui_plugins'
