@@ -1,0 +1,243 @@
+---
+- name: Install Prometheus monitoring stack
+  hosts: core
+  become: yes
+  vars:
+    prometheus_retention_time: "48h"
+    prometheus_retention_size: "10GB"
+    
+  tasks:
+    - name: Create Grafana data directory
+      file:
+        path: /var/lib/grafana-docker
+        state: directory
+        owner: "472"
+        group: "472"
+        mode: '0755'
+
+    - name: Install Prometheus stack
+      apt:
+        name:
+          - prometheus
+          - prometheus-node-exporter
+          - prometheus-alertmanager
+        state: present
+        update_cache: yes
+
+    - name: Create Prometheus configuration directory
+      file:
+        path: /etc/prometheus/rules
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Configure Prometheus for local storage
+      template:
+        src: prometheus-local.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: restart prometheus
+
+    - name: Configure Prometheus alert rules
+      template:
+        src: ycluster-alerts.yml.j2
+        dest: /etc/prometheus/rules/ycluster-alerts.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+        variable_start_string: '[%'
+        variable_end_string: '%]'
+      notify: restart prometheus
+
+    - name: Configure Alertmanager
+      template:
+        src: alertmanager.yml.j2
+        dest: /etc/prometheus/alertmanager.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: restart alertmanager
+
+    - name: Create systemd override directory
+      file:
+        path: /etc/systemd/system/prometheus.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure Prometheus systemd override for local storage
+      copy:
+        dest: /etc/systemd/system/prometheus.service.d/override.conf
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/bin/prometheus \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --storage.tsdb.path=/var/lib/prometheus/metrics2/ \
+            --storage.tsdb.retention.time={{ prometheus_retention_time }} \
+            --storage.tsdb.retention.size={{ prometheus_retention_size }} \
+            --web.console.templates=/etc/prometheus/consoles \
+            --web.console.libraries=/etc/prometheus/console_libraries \
+            --web.enable-lifecycle \
+            --web.external-url=http://host.docker.internal:9090/
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart prometheus
+
+    - name: Enable and start Prometheus services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      loop:
+        - prometheus
+        - prometheus-node-exporter
+        - prometheus-alertmanager
+
+    - name: Create Grafana provisioning directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "472"
+        group: "472"
+        mode: '0755'
+      loop:
+        - /etc/grafana-docker/provisioning/datasources
+        - /etc/grafana-docker/provisioning/dashboards
+        - /var/lib/grafana-docker/dashboards
+
+    - name: Configure Grafana datasources for Docker
+      template:
+        src: grafana-datasources-docker.yml.j2
+        dest: /etc/grafana-docker/provisioning/datasources/datasources.yml
+        owner: "472"
+        group: "472"
+        mode: '0644'
+      notify: restart grafana
+
+    - name: Configure Grafana dashboard providers
+      copy:
+        src: grafana-dashboards.yml
+        dest: /etc/grafana-docker/provisioning/dashboards/dashboards.yml
+        owner: "472"
+        group: "472"
+        mode: '0644'
+      notify: restart grafana
+
+    - name: Check if dashboard already exists
+      stat:
+        path: /var/lib/grafana-docker/dashboards/node-exporter-full.json
+      register: dashboard_exists
+
+    - name: Install Node Exporter dashboard
+      block:
+        - name: Create temporary file for dashboard
+          tempfile:
+            state: file
+            suffix: .json
+          register: dashboard_temp_file
+
+        - name: Download Node Exporter Full dashboard to temp file
+          uri:
+            url: https://grafana.com/api/dashboards/1860/revisions/41/download
+            method: GET
+            dest: "{{ dashboard_temp_file.path }}"
+
+        - name: Read dashboard content for verification
+          command: cat "{{ dashboard_temp_file.path }}"
+          register: dashboard_content
+          changed_when: false
+
+        - name: Verify dashboard content SHA256
+          assert:
+            that:
+              - dashboard_content.stdout | hash('sha256') == '132c20c446b28f0348183bd2980fd2e7a2dde3daab4d26c8605a5e117049953b'
+            fail_msg: "Downloaded dashboard content SHA256 does not match expected hash"
+            success_msg: "Dashboard content SHA256 verified successfully"
+
+        - name: Configure Node Exporter dashboard for local Prometheus
+          shell: |
+            jq '
+              . as $dashboard |
+              # Remove inputs and requires sections
+              del(.__inputs, .__requires) |
+              # Update datasource references to use local Prometheus
+              walk(if type == "object" and has("datasource") then
+                .datasource = {
+                  "type": "prometheus",
+                  "uid": "prometheus-local"
+                }
+              else . end)
+            ' "{{ dashboard_temp_file.path }}" > /var/lib/grafana-docker/dashboards/node-exporter-full.json
+          notify: restart grafana
+
+        - name: Clean up temporary file
+          file:
+            path: "{{ dashboard_temp_file.path }}"
+            state: absent
+
+      when: not dashboard_exists.stat.exists
+
+    - name: Set dashboard file ownership
+      file:
+        path: /var/lib/grafana-docker/dashboards/node-exporter-full.json
+        owner: "472"
+        group: "472"
+        mode: '0644'
+
+    - name: Create Docker network for Grafana
+      docker_network:
+        name: grafana-net
+        driver: bridge
+
+    - name: Run Grafana Docker container
+      docker_container:
+        name: grafana
+        image: grafana/grafana:latest
+        state: started
+        restart_policy: unless-stopped
+        networks:
+          - name: grafana-net
+        ports:
+          - "3030:3000"
+        volumes:
+          - /var/lib/grafana-docker:/var/lib/grafana
+          - /etc/grafana-docker/provisioning:/etc/grafana/provisioning:ro
+        etc_hosts:
+          host.docker.internal: host-gateway
+        env:
+          GF_ANALYTICS_REPORTING_ENABLED: "false"
+          GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+          GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+          GF_PLUGINS_PREINSTALL_DISABLED: "true"
+          GF_SECURITY_ADMIN_USER: "admin"
+          GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password | default('admin') }}"
+          GF_SECURITY_SECRET_KEY: "{{ grafana_secret_key | default('SW2YcwTIb9zpOOhoPsMm') }}"
+          GF_USERS_ALLOW_SIGN_UP: "false"
+          GF_USERS_ALLOW_ORG_CREATE: "false"
+          GF_AUTH_ANONYMOUS_ENABLED: "false"
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart prometheus
+      systemd:
+        name: prometheus
+        state: restarted
+
+    - name: restart alertmanager
+      systemd:
+        name: prometheus-alertmanager
+        state: restarted
+
+    - name: restart grafana
+      docker_container:
+        name: grafana
+        state: started
+        restart: yes

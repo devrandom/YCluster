@@ -30,15 +30,17 @@
       git:
         repo: "{{ plugins_repo }}"
         dest: "{{ build_dir }}/open-webui-plugins"
+        update: "{{ instance == '' }}"
 
     - name: Check out open-webui repository
       git:
         repo: "{{ webui_repo }}"
         dest: "{{ build_dir }}/open-webui"
+        update: "{{ instance == '' }}"
 
     - name: Build and push with buildx using registry cache
       shell: |
-        docker buildx build \
+        stdbuf -oL -eL docker buildx build \
           --build-arg http_proxy=http://10.0.0.254:3128 \
           --build-arg USE_SLIM=true \
           --cache-from type=registry,ref={{ image_name }}:cache \
