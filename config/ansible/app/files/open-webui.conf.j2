@@ -1,4 +1,4 @@
-# HTTPS - Main domain for Open WebUI
+# HTTPS - Open WebUI
 server {
     listen 443 ssl http2;
     server_name {{ domain | default('_') }};
@@ -22,7 +22,7 @@ server {
     
     # Proxy to Open WebUI
     location / {
-        proxy_pass http://127.0.0.1:8380;
+        proxy_pass http://127.0.0.1:(( port ))/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
