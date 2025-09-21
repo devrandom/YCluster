@@ -1165,9 +1165,67 @@ def serve_user_data():
     
     return rendered_content, 200, {'Content-Type': 'text/plain'}
 
-@app.route('/api/health')
-def health():
-    """Comprehensive health check endpoint for all services"""
+@app.route('/metrics')
+def prometheus_metrics():
+    """Prometheus metrics endpoint"""
+    try:
+        # Get health data
+        health_data = get_comprehensive_health()
+        
+        metrics = []
+        
+        # Overall health metric
+        overall_value = 1 if health_data['overall'] == 'healthy' else 0
+        metrics.append(f'ycluster_node_healthy{{node="{platform.node()}"}} {overall_value}')
+        
+        # Service health metrics
+        for service, details in health_data.get('services', {}).items():
+            service_value = 1 if details.get('status') == 'healthy' else 0
+            metrics.append(f'ycluster_service_health{{node="{platform.node()}",service="{service}"}} {service_value}')
+            
+            # Service-specific metrics
+            if service == 'ceph' and isinstance(details.get('details'), dict):
+                # Ceph status could be healthy/degraded/unhealthy
+                ceph_status = details['details']
+                if ceph_status == 'HEALTH_OK':
+                    metrics.append(f'ycluster_ceph_health{{node="{platform.node()}"}} 1')
+                else:
+                    metrics.append(f'ycluster_ceph_health{{node="{platform.node()}"}} 0')
+        
+        # Leadership metrics
+        storage_leader = 1 if health_data.get('storage_leader', False) else 0
+        dhcp_leader = 1 if health_data.get('dhcp_leader', False) else 0
+        metrics.append(f'ycluster_storage_leader{{node="{platform.node()}"}} {storage_leader}')
+        metrics.append(f'ycluster_dhcp_leader{{node="{platform.node()}"}} {dhcp_leader}')
+        
+        # VIP metrics
+        vip_status = check_vip_status()
+        gateway_vip_active = 1 if vip_status['gateway_vip']['active'] else 0
+        storage_vip_active = 1 if vip_status['storage_vip']['active'] else 0
+        metrics.append(f'ycluster_vip_active{{node="{platform.node()}",vip="gateway"}} {gateway_vip_active}')
+        metrics.append(f'ycluster_vip_active{{node="{platform.node()}",vip="storage"}} {storage_vip_active}')
+        
+        # Certificate expiry metrics
+        cert_status = check_certificate_expiry()
+        if cert_status.get('details', {}).get('days_until_expiry') is not None:
+            days_until_expiry = cert_status['details']['days_until_expiry']
+            metrics.append(f'ycluster_certificate_days_until_expiry{{node="{platform.node()}"}} {days_until_expiry}')
+        
+        # Node drain status
+        drained = 1 if health_data.get('drained', False) else 0
+        metrics.append(f'ycluster_node_drained{{node="{platform.node()}"}} {drained}')
+        
+        # Return metrics in Prometheus format
+        response = '\n'.join(metrics) + '\n'
+        return response, 200, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
+        
+    except Exception as e:
+        # Return error metric
+        error_response = f'ycluster_metrics_error{{node="{platform.node()}"}} 1\n'
+        return error_response, 500, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
+
+def get_comprehensive_health():
+    """Get comprehensive health data (extracted from health() function)"""
     health_status = {
         'overall': 'healthy',
         'services': {}
@@ -1506,9 +1564,39 @@ def health():
     health_status['dhcp_leader'] = is_dhcp_leader()
     health_status['drained'] = is_node_drained()
     
+    return health_status
+
+@app.route('/api/health')
+def health():
+    """Comprehensive health check endpoint for all services"""
+    health_status = get_comprehensive_health()
+
     # Return appropriate HTTP status code
     status_code = 200 if health_status['overall'] == 'healthy' else 503
     return jsonify(health_status), status_code
+
+@app.route('/api/alert-webhook', methods=['POST'])
+def alert_webhook():
+    """Webhook endpoint for Alertmanager notifications"""
+    try:
+        alert_data = request.get_json()
+        
+        # Log the alert
+        for alert in alert_data.get('alerts', []):
+            status = alert.get('status', 'unknown')
+            alertname = alert.get('labels', {}).get('alertname', 'unknown')
+            severity = alert.get('labels', {}).get('severity', 'unknown')
+            node = alert.get('labels', {}).get('node', 'unknown')
+            
+            print(f"Alert {status}: {alertname} (severity: {severity}, node: {node})")
+        
+        # Here you could integrate with external notification systems
+        # For now, just acknowledge receipt
+        return jsonify({'status': 'received'}), 200
+        
+    except Exception as e:
+        print(f"Error processing alert webhook: {e}")
+        return jsonify({'error': str(e)}), 500
 
 def get_all_hosts():
     """Get all hosts from etcd allocations"""

@@ -1,0 +1,49 @@
+# Central Prometheus configuration for long-term storage
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: 'ycluster'
+    prometheus: 'central'
+
+rule_files:
+  - "/etc/prometheus/rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+{% for host in groups['core'] %}
+          - {{ hostvars[host]['ansible_host'] }}:9093
+{% endfor %}
+
+scrape_configs:
+  # Federation from local Prometheus instances
+  - job_name: 'prometheus-federation'
+    scrape_interval: 30s
+    honor_labels: true
+    metrics_path: '/federate'
+    params:
+      'match[]':
+        - '{job=~"ycluster-.*"}'
+        - '{job="node-exporter"}'
+        - '{job="prometheus"}'
+        - '{__name__=~"up|prometheus_.*|node_.*|ycluster_.*"}'
+    static_configs:
+{% for host in groups['core'] %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:9090']
+        labels:
+          federated_from: '{{ host }}'
+{% endfor %}
+
+  # Direct scraping of critical services (backup)
+  - job_name: 'ycluster-health-central'
+    metrics_path: '/metrics'
+    scrape_interval: 60s
+    static_configs:
+{% for host in groups['core'] %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:12723']
+        labels:
+          node: '{{ host }}'
+          node_type: 'core'
+{% endfor %}

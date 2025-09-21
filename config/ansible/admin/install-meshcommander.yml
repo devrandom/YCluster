@@ -41,7 +41,7 @@
           RestartSec=5
           ExecStartPre=-/usr/bin/docker stop meshcommander
           ExecStartPre=-/usr/bin/docker rm meshcommander
-          ExecStart=/usr/bin/docker run --rm --name meshcommander -p 3000:3000 meshcommander
+          ExecStart=/usr/bin/docker run --rm --name meshcommander -p 3333:3000 meshcommander
           ExecStop=/usr/bin/docker stop meshcommander
 
           [Install]

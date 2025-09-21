@@ -1,0 +1,72 @@
+---
+- name: Install central Prometheus with misc volume storage
+  hosts: storage
+  become: yes
+  
+  tasks:
+    - name: Create central Prometheus data directory on misc volume
+      file:
+        path: /rbd/misc/metrics
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Configure central Prometheus
+      template:
+        src: prometheus-central.yml.j2
+        dest: /etc/prometheus/prometheus-central.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: restart central prometheus
+
+    - name: Create central Prometheus systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus-central.service
+        content: |
+          [Unit]
+          Description=Prometheus Central (Long-term storage)
+          After=network.target
+          Wants=network.target
+
+          [Service]
+          Type=simple
+          User=prometheus
+          Group=prometheus
+          ExecStart=/usr/bin/prometheus \
+            --config.file=/etc/prometheus/prometheus-central.yml \
+            --storage.tsdb.path=/rbd/misc/metrics \
+            --storage.tsdb.retention.time=90d \
+            --storage.tsdb.retention.size=40GB \
+            --web.console.templates=/etc/prometheus/consoles \
+            --web.console.libraries=/etc/prometheus/console_libraries \
+            --web.enable-lifecycle \
+            --web.listen-address=0.0.0.0:9091 \
+            --web.external-url=http://{{ ansible_default_ipv4.address }}:9091/
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart central prometheus
+
+    - name: Disable central Prometheus service (managed by leader election)
+      systemd:
+        name: prometheus-central
+        enabled: no
+        state: stopped
+        daemon_reload: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart central prometheus
+      systemd:
+        name: prometheus-central
+        state: restarted

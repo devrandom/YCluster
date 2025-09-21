@@ -1,0 +1,49 @@
+global:
+  # No SMTP configuration - using webhooks only
+
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 5s
+      repeat_interval: 30m
+    - match:
+        severity: warning
+      receiver: 'warning-alerts'
+      repeat_interval: 2h
+
+receivers:
+  - name: 'default'
+    # Default receiver - can be configured later
+
+  - name: 'critical-alerts'
+    # Critical alerts - immediate notification
+    # Add webhook, email, or other notification methods here
+    webhook_configs:
+      - url: 'http://localhost:12723/api/alert-webhook'
+        send_resolved: true
+
+  - name: 'warning-alerts'
+    # Warning alerts - less frequent notifications
+    webhook_configs:
+      - url: 'http://localhost:12723/api/alert-webhook'
+        send_resolved: true
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'node']
+
+  - source_match:
+      alertname: 'NodeDown'
+    target_match_re:
+      alertname: '.*'
+    equal: ['node']

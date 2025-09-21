@@ -1,0 +1,164 @@
+groups:
+  - name: ycluster-core
+    rules:
+      # Node availability
+      - alert: NodeDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.node }} is down"
+          description: "Node {{ $labels.node }} has been down for more than 1 minute"
+
+      # YCluster health API
+      - alert: YClusterHealthAPIDown
+        expr: up{job="ycluster-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "YCluster health API down on {{ $labels.node }}"
+          description: "YCluster health API on {{ $labels.node }} has been down for more than 2 minutes"
+
+      # DHCP service
+      - alert: DHCPServiceDown
+        expr: up{job="ycluster-dhcp"} == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DHCP service down on {{ $labels.node }}"
+          description: "DHCP service on {{ $labels.node }} is not responding"
+
+      # Multiple DHCP servers (split brain)
+      - alert: MultipleDHCPServers
+        expr: count(up{job="ycluster-dhcp"} == 1) > 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple DHCP servers detected"
+          description: "{{ $value }} DHCP servers are running - possible split brain condition"
+
+      # No DHCP servers
+      - alert: NoDHCPServers
+        expr: count(up{job="ycluster-dhcp"} == 1) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No DHCP servers running"
+          description: "No DHCP servers are responding in the cluster"
+
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(node) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.node }}"
+          description: "CPU usage on {{ $labels.node }} is above 80% for more than 5 minutes"
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.node }}"
+          description: "Memory usage on {{ $labels.node }} is above 85% for more than 5 minutes"
+
+      # Low disk space
+      - alert: LowDiskSpace
+        expr: (1 - (node_filesystem_avail_bytes{fstype!="tmpfs",fstype!="overlay"} / node_filesystem_size_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ $labels.node }}"
+          description: "Disk usage on {{ $labels.node }} mountpoint {{ $labels.mountpoint }} is above 85%"
+
+      # Critical disk space
+      - alert: CriticalDiskSpace
+        expr: (1 - (node_filesystem_avail_bytes{fstype!="tmpfs",fstype!="overlay"} / node_filesystem_size_bytes)) * 100 > 95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk space on {{ $labels.node }}"
+          description: "Disk usage on {{ $labels.node }} mountpoint {{ $labels.mountpoint }} is above 95%"
+
+      # Load average
+      - alert: HighLoadAverage
+        expr: node_load15 / count by(node) (node_cpu_seconds_total{mode="idle"}) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High load average on {{ $labels.node }}"
+          description: "Load average on {{ $labels.node }} is {{ $value }} (normalized by CPU count) for more than 10 minutes"
+
+  - name: ycluster-services
+    rules:
+      # etcd cluster health (would need custom metrics from health API)
+      - alert: EtcdClusterUnhealthy
+        expr: ycluster_service_health{service="etcd"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "etcd cluster unhealthy on {{ $labels.node }}"
+          description: "etcd cluster is reporting unhealthy status on {{ $labels.node }}"
+
+      # Ceph cluster health
+      - alert: CephClusterUnhealthy
+        expr: ycluster_service_health{service="ceph"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ceph cluster unhealthy on {{ $labels.node }}"
+          description: "Ceph cluster is reporting unhealthy status on {{ $labels.node }}"
+
+      # Certificate expiry warning
+      - alert: CertificateExpiringWarning
+        expr: ycluster_certificate_days_until_expiry < 30 and ycluster_certificate_days_until_expiry > 7
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expiring soon"
+          description: "TLS certificate will expire in {{ $value }} days"
+
+      # Certificate expiry critical
+      - alert: CertificateExpiringCritical
+        expr: ycluster_certificate_days_until_expiry <= 7
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS certificate expiring very soon"
+          description: "TLS certificate will expire in {{ $value }} days"
+
+      # VIP not active anywhere
+      - alert: VIPNotActive
+        expr: max(ycluster_vip_active) by (vip) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "VIP {{ $labels.vip }} not active anywhere"
+          description: "Virtual IP {{ $labels.vip }} is not active on any node"
+
+      # Multiple VIP masters (split brain)
+      - alert: MultipleVIPMasters
+        expr: sum(ycluster_vip_active) by (vip) > 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple masters for VIP {{ $labels.vip }}"
+          description: "VIP {{ $labels.vip }} is active on multiple nodes - possible split brain"

@@ -1,0 +1,83 @@
+---
+- import_playbook: install-prometheus.yml
+- import_playbook: install-central-prometheus.yml
+
+- name: Configure monitoring endpoints
+  hosts: core:storage
+  become: yes
+  tasks:
+    - name: Ensure health API metrics endpoint is accessible
+      uri:
+        url: "http://localhost:12723/metrics"
+        method: GET
+        status_code: [200, 404]
+      register: metrics_check
+      failed_when: false
+
+    - name: Display metrics endpoint status
+      debug:
+        msg: "Metrics endpoint on {{ inventory_hostname }}: {{ 'Available' if metrics_check.status == 200 else 'Not available' }}"
+
+- name: Verify monitoring stack deployment
+  hosts: core
+  become: yes
+  tasks:
+    - name: Check Prometheus local service
+      systemd:
+        name: prometheus
+        state: started
+      register: prometheus_status
+
+    - name: Check Grafana Docker container
+      docker_container_info:
+        name: grafana
+      register: grafana_status
+
+    - name: Check Alertmanager service
+      systemd:
+        name: prometheus-alertmanager
+        state: started
+      register: alertmanager_status
+
+    - name: Display service status
+      debug:
+        msg: |
+          Monitoring services on {{ inventory_hostname }}:
+          - Prometheus: {{ 'Running' if prometheus_status.status.ActiveState == 'active' else 'Not running' }}
+          - Grafana: {{ 'Running' if grafana_status.exists and grafana_status.container.State.Status == 'running' else 'Not running' }}
+          - Alertmanager: {{ 'Running' if alertmanager_status.status.ActiveState == 'active' else 'Not running' }}
+
+- name: Verify central Prometheus deployment
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Check central Prometheus service
+      systemd:
+        name: prometheus-central
+      register: central_prometheus_status
+      failed_when: false
+
+    - name: Display central Prometheus status
+      debug:
+        msg: |
+          Central Prometheus on {{ inventory_hostname }}: {{ 'Running' if central_prometheus_status.status.ActiveState == 'active' else 'Stopped (managed by leader election)' }}
+
+- name: Display monitoring access information
+  hosts: core[0]
+  gather_facts: yes
+  tasks:
+    - name: Show monitoring URLs
+      debug:
+        msg: |
+          YCluster Monitoring Stack deployed successfully!
+          
+          Access URLs:
+          - Prometheus (local): http://{{ ansible_default_ipv4.address }}:9090
+          - Prometheus (central): http://{{ hostvars[groups['storage'][0]]['ansible_host'] }}:9091
+          - Grafana: http://{{ ansible_default_ipv4.address }}:3030 (admin/admin)
+          - Alertmanager: http://{{ ansible_default_ipv4.address }}:9093
+          
+          Health APIs:
+          - YCluster Health: http://{{ ansible_default_ipv4.address }}:12723/api/health
+          - Node Metrics: http://{{ ansible_default_ipv4.address }}:9100/metrics
+          - DHCP Health: http://{{ ansible_default_ipv4.address }}:8067/health
