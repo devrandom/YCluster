@@ -61,14 +61,14 @@ class HealthHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         """Handle GET requests for health checks"""
-        handlers = {
-            '/health': self._health_data,
-            '/status': self._status_data,
-            '/leases': self._leases_data
-        }
-        
-        if self.path in handlers:
-            self._send_json_response(handlers[self.path]())
+        if self.path == '/metrics':
+            self._send_metrics_response()
+        elif self.path == '/health':
+            self._send_json_response(self._health_data())
+        elif self.path == '/status':
+            self._send_json_response(self._status_data())
+        elif self.path == '/leases':
+            self._send_json_response(self._leases_data())
         else:
             self.send_response(404)
             self.end_headers()
@@ -122,6 +122,56 @@ class HealthHandler(BaseHTTPRequestHandler):
             'count': len(leases_data),
             'timestamp': datetime.now().isoformat()
         })
+    
+    def _send_metrics_response(self):
+        """Send Prometheus metrics response"""
+        try:
+            metrics = self._generate_prometheus_metrics()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(metrics.encode('utf-8'))
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            error_metrics = f'# Error generating metrics: {str(e)}\n'
+            self.wfile.write(error_metrics.encode('utf-8'))
+    
+    def _generate_prometheus_metrics(self):
+        """Generate Prometheus format metrics"""
+        etcd_healthy = self.dhcp_server.get_etcd_client() is not None
+        server_running = self.dhcp_server.running
+        
+        metrics = []
+        
+        # DHCP server status
+        metrics.append('# HELP dhcp_server_up DHCP server running status')
+        metrics.append('# TYPE dhcp_server_up gauge')
+        metrics.append(f'dhcp_server_up{{server_ip="{self.dhcp_server.server_ip}"}} {1 if server_running else 0}')
+        
+        # etcd connection status
+        metrics.append('# HELP dhcp_server_etcd_connected DHCP server etcd connection status')
+        metrics.append('# TYPE dhcp_server_etcd_connected gauge')
+        metrics.append(f'dhcp_server_etcd_connected{{server_ip="{self.dhcp_server.server_ip}"}} {1 if etcd_healthy else 0}')
+        
+        # Lease statistics
+        metrics.append('# HELP dhcp_server_leases_total Total number of DHCP leases')
+        metrics.append('# TYPE dhcp_server_leases_total gauge')
+        metrics.append(f'dhcp_server_leases_total{{server_ip="{self.dhcp_server.server_ip}"}} {len(self.dhcp_server.leases)}')
+        
+        # Allocated IPs
+        metrics.append('# HELP dhcp_server_allocated_ips_total Total number of allocated IP addresses')
+        metrics.append('# TYPE dhcp_server_allocated_ips_total gauge')
+        metrics.append(f'dhcp_server_allocated_ips_total{{server_ip="{self.dhcp_server.server_ip}"}} {len(self.dhcp_server.allocated_ips)}')
+        
+        # Overall health status (for compatibility with existing alerts)
+        overall_healthy = server_running and etcd_healthy
+        metrics.append('# HELP dhcp_server_healthy Overall DHCP server health status')
+        metrics.append('# TYPE dhcp_server_healthy gauge')
+        metrics.append(f'dhcp_server_healthy{{server_ip="{self.dhcp_server.server_ip}"}} {1 if overall_healthy else 0}')
+        
+        return '\n'.join(metrics) + '\n'
     
     def _send_json_response(self, data):
         """Send JSON response with error handling"""
