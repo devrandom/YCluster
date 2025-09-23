@@ -23,15 +23,18 @@ receivers:
     # Default receiver - can be configured later
 
   - name: 'critical-alerts'
-    # Critical alerts - immediate notification
-    # Add webhook, email, or other notification methods here
+    # Critical alerts - immediate notification via ntfy webhook handler
     webhook_configs:
+      - url: 'http://localhost:9095/webhook'
+        send_resolved: true
       - url: 'http://localhost:12723/api/alert-webhook'
         send_resolved: true
 
   - name: 'warning-alerts'
-    # Warning alerts - less frequent notifications
+    # Warning alerts - less frequent notifications via ntfy webhook handler
     webhook_configs:
+      - url: 'http://localhost:9095/webhook'
+        send_resolved: true
       - url: 'http://localhost:12723/api/alert-webhook'
         send_resolved: true
 
