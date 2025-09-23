@@ -21,15 +21,6 @@ groups:
           summary: "YCluster health API down on {{ $labels.node }}"
           description: "YCluster health API on {{ $labels.node }} has been down for more than 2 minutes"
 
-      # DHCP service
-      - alert: DHCPServiceDown
-        expr: up{job="ycluster-dhcp"} == 0
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "DHCP service down on {{ $labels.node }}"
-          description: "DHCP service on {{ $labels.node }} is not responding"
 
       # Multiple DHCP servers (split brain)
       - alert: MultipleDHCPServers

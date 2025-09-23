@@ -87,6 +87,45 @@
         - reload systemd
         - restart prometheus
 
+    - name: Install Python dependencies for ntfy webhook
+      apt:
+        name:
+          - python3-flask
+          - python3-requests
+        state: present
+
+    - name: Copy ntfy webhook handler
+      copy:
+        src: ntfy-webhook.py
+        dest: /usr/local/bin/ntfy-webhook.py
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create ntfy webhook systemd service
+      copy:
+        dest: /etc/systemd/system/ntfy-webhook.service
+        content: |
+          [Unit]
+          Description=Ntfy Webhook Handler for Alertmanager
+          After=network.target
+          Wants=network.target
+
+          [Service]
+          Type=simple
+          User=nobody
+          Group=nogroup
+          ExecStart=/usr/bin/python3 /usr/local/bin/ntfy-webhook.py
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart ntfy webhook
+
     - name: Enable and start Prometheus services
       systemd:
         name: "{{ item }}"
@@ -97,6 +136,7 @@
         - prometheus
         - prometheus-node-exporter
         - prometheus-alertmanager
+        - ntfy-webhook
 
     - name: Create Grafana provisioning directories
       file:
@@ -241,3 +281,8 @@
         name: grafana
         state: started
         restart: yes
+
+    - name: restart ntfy webhook
+      systemd:
+        name: ntfy-webhook
+        state: restarted
