@@ -1,0 +1,12 @@
+[Service]
+ExecStart=
+ExecStart=/usr/bin/prometheus-alertmanager \
+  --config.file=/etc/prometheus/alertmanager.yml \
+  --storage.path=/var/lib/prometheus/alertmanager \
+  --cluster.listen-address={{ ansible_host }}:9094 \
+{% for host in groups['core'] %}
+{% if host != inventory_hostname %}
+  --cluster.peer={{ hostvars[host]['ansible_host'] }}:9094 \
+{% endif %}
+{% endfor %}
+  --cluster.settle-timeout=30s

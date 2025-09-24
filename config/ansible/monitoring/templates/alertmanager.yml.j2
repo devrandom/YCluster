@@ -21,6 +21,9 @@ route:
 receivers:
   - name: 'default'
     # Default receiver - can be configured later
+    webhook_configs:
+      - url: 'http://localhost:9095/webhook'
+        send_resolved: true
 
   - name: 'critical-alerts'
     # Critical alerts - immediate notification via ntfy webhook handler
