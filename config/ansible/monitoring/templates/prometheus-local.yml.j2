@@ -4,7 +4,6 @@ global:
   evaluation_interval: 15s
   external_labels:
     cluster: 'ycluster'
-    node: '{{ ansible_hostname }}'
 
 rule_files:
   - "/etc/prometheus/rules/*.yml"

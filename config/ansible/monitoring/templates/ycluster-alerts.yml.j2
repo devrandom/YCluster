@@ -27,7 +27,7 @@ groups:
         expr: count(up{job="ycluster-dhcp"} == 1) > 1
         for: 30s
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: "Multiple DHCP servers detected"
           description: "{{ $value }} DHCP servers are running - possible split brain condition"
@@ -35,9 +35,9 @@ groups:
       # No DHCP servers (handles missing metrics)
       - alert: NoDHCPServers
         expr: absent(up{job="ycluster-dhcp"} == 1) or count(up{job="ycluster-dhcp"} == 1) == 0
-        for: 2m
+        for: 1m
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: "No DHCP servers running"
           description: "No DHCP servers are responding in the cluster"
@@ -136,23 +136,23 @@ groups:
     rules:
       # etcd cluster health (would need custom metrics from health API)
       - alert: EtcdClusterUnhealthy
-        expr: ycluster_service_health{service="etcd"} == 0
+        expr: count(ycluster_service_health{service="etcd"} == 0) >= 2
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "etcd cluster unhealthy on {{ $labels.node }}"
-          description: "etcd cluster is reporting unhealthy status on {{ $labels.node }}"
+          summary: "etcd cluster unhealthy"
+          description: "etcd cluster is reporting unhealthy status on {{ $value }} nodes"
 
       # Ceph cluster health
       - alert: CephClusterUnhealthy
-        expr: ycluster_service_health{service="ceph"} == 0
+        expr: count(ycluster_service_health{service="ceph"} == 0) >= 2
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "Ceph cluster unhealthy on {{ $labels.node }}"
-          description: "Ceph cluster is reporting unhealthy status on {{ $labels.node }}"
+          summary: "Ceph cluster unhealthy"
+          description: "Ceph cluster is reporting unhealthy status on {{ $value }} nodes"
 
       # Certificate expiry warning
       - alert: CertificateExpiringWarning
