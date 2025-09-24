@@ -92,6 +92,46 @@ groups:
           summary: "High load average on {{ $labels.node }}"
           description: "Load average on {{ $labels.node }} is {{ $value }} (normalized by CPU count) for more than 10 minutes"
 
+      # High external network ingress bandwidth (10GB/hr = ~22.2 Mbps)
+      - alert: HighNetworkIngress
+        expr: rate(node_network_receive_bytes_total{device="enp87s0"}[5m]) * 8 > 22222222
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High external network ingress on {{ $labels.node }}"
+          description: "External network ingress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps (>10GB/hr) for more than 2 minutes"
+
+      # High external network egress bandwidth (1GB/hr = ~2.2 Mbps)
+      - alert: HighNetworkEgress
+        expr: rate(node_network_transmit_bytes_total{device="enp87s0"}[5m]) * 8 > 2222222
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High external network egress on {{ $labels.node }}"
+          description: "External network egress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps (>1GB/hr) for more than 2 minutes"
+
+      # Critical external network ingress bandwidth
+      - alert: CriticalNetworkIngress
+        expr: rate(node_network_receive_bytes_total{device="enp87s0"}[5m]) * 8 > 800000000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical external network ingress on {{ $labels.node }}"
+          description: "External network ingress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps - approaching gigabit limit"
+
+      # Critical external network egress bandwidth
+      - alert: CriticalNetworkEgress
+        expr: rate(node_network_transmit_bytes_total{device="enp87s0"}[5m]) * 8 > 800000000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical external network egress on {{ $labels.node }}"
+          description: "External network egress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps - approaching gigabit limit"
+
   - name: ycluster-services
     rules:
       # etcd cluster health (would need custom metrics from health API)
