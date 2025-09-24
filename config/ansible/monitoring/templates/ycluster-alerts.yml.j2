@@ -32,9 +32,9 @@ groups:
           summary: "Multiple DHCP servers detected"
           description: "{{ $value }} DHCP servers are running - possible split brain condition"
 
-      # No DHCP servers
+      # No DHCP servers (handles missing metrics)
       - alert: NoDHCPServers
-        expr: count(up{job="ycluster-dhcp"} == 1) == 0
+        expr: absent(up{job="ycluster-dhcp"} == 1) or count(up{job="ycluster-dhcp"} == 1) == 0
         for: 2m
         labels:
           severity: critical
