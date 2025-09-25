@@ -72,12 +72,12 @@
           YCluster Monitoring Stack deployed successfully!
           
           Access URLs:
-          - Prometheus (local): http://{{ ansible_default_ipv4.address }}:9090
+          - Prometheus (local): http://{{ ansible_host }}:9090
           - Prometheus (central): http://{{ hostvars[groups['storage'][0]]['ansible_host'] }}:9091
-          - Grafana: http://{{ ansible_default_ipv4.address }}:3030 (admin/admin)
-          - Alertmanager: http://{{ ansible_default_ipv4.address }}:9093
+          - Grafana: http://{{ ansible_host }}:3030 (admin/admin)
+          - Alertmanager: http://{{ ansible_host }}:9093
           
           Health APIs:
-          - YCluster Health: http://{{ ansible_default_ipv4.address }}:12723/api/health
-          - Node Metrics: http://{{ ansible_default_ipv4.address }}:9100/metrics
-          - DHCP Health: http://{{ ansible_default_ipv4.address }}:8067/health
+          - YCluster Health: http://{{ ansible_host }}:12723/api/health
+          - Node Metrics: http://{{ ansible_host }}:9100/metrics
+          - DHCP Health: http://{{ ansible_host }}:8067/health
