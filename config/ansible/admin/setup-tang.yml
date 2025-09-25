@@ -98,7 +98,7 @@
           Keys directory: {{ tang_keys_dir }}
           Service: tang-server.service
           To get the Tang server advertisement:
-          curl http://{{ ansible_default_ipv4.address }}:{{ tang_port }}/adv
+          curl http://{{ ansible_host }}:{{ tang_port }}/adv
 
     - name: Show Tang keys for client configuration
       command: tang-show-keys {{ tang_port }}
@@ -110,4 +110,4 @@
       debug:
         msg: |
           Tang server keys:
-          {{ tang_keys_output.stdout if tang_keys_output.rc == 0 else 'Keys generated but tang-show-keys failed. Use: curl http://' + ansible_default_ipv4.address + ':' + tang_port|string + '/adv' }}
+          {{ tang_keys_output.stdout if tang_keys_output.rc == 0 else 'Keys generated but tang-show-keys failed. Use: curl http://' + ansible_host + ':' + tang_port|string + '/adv' }}

@@ -95,7 +95,7 @@
             --web.console.templates=/etc/prometheus/consoles \
             --web.console.libraries=/etc/prometheus/console_libraries \
             --web.enable-lifecycle \
-            --web.external-url=http://host.docker.internal:9090/
+            --web.external-url=http://{{ ansible_host }}:9090/
         mode: '0644'
       notify:
         - reload systemd
