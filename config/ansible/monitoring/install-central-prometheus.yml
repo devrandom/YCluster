@@ -4,14 +4,15 @@
   become: yes
   
   tasks:
-    - name: Create central Prometheus data directory on misc volume
-      file:
-        path: /rbd/misc/metrics
-        state: directory
-        owner: prometheus
-        group: prometheus
-        mode: '0755'
-
+# do this on storage leader
+#    - name: Create central Prometheus data directory on misc volume
+#      file:
+#        path: /rbd/misc/metrics
+#        state: directory
+#        owner: prometheus
+#        group: prometheus
+#        mode: '0755'
+#
     - name: Configure central Prometheus
       template:
         src: prometheus-central.yml.j2
@@ -19,7 +20,7 @@
         owner: prometheus
         group: prometheus
         mode: '0644'
-      notify: restart central prometheus
+      notify: restart central prometheus if running
 
     - name: Create central Prometheus systemd service
       copy:
@@ -43,16 +44,14 @@
             --web.console.libraries=/etc/prometheus/console_libraries \
             --web.enable-lifecycle \
             --web.listen-address=0.0.0.0:9091 \
-            --web.external-url=http://{{ ansible_default_ipv4.address }}:9091/
+            --web.external-url=http://{{ ansible_host }}:9091/
           Restart=always
           RestartSec=5
 
           [Install]
-          WantedBy=multi-user.target
+          WantedBy=ycluster-apps.target
         mode: '0644'
-      notify:
-        - reload systemd
-        - restart central prometheus
+      notify: reload systemd
 
     - name: Disable central Prometheus service (managed by leader election)
       systemd:
@@ -66,7 +65,9 @@
       systemd:
         daemon_reload: yes
 
-    - name: restart central prometheus
+    - name: restart central prometheus if running
       systemd:
         name: prometheus-central
         state: restarted
+      when: ansible_facts.services['prometheus-central.service'].state == 'running'
+      failed_when: false

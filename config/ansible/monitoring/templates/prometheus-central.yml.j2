@@ -7,7 +7,7 @@ global:
     prometheus: 'central'
 
 rule_files:
-  - "/etc/prometheus/rules/*.yml"
+  - "/etc/prometheus/rules/ycluster-federated-alerts.yml"
 
 alerting:
   alertmanagers:
@@ -25,10 +25,12 @@ scrape_configs:
     metrics_path: '/federate'
     params:
       'match[]':
+        - '{__name__=~"node_(load1|load5|load15|memory_.*|disk_.*|network_.*|filesystem_.*)"}'
+        - '{__name__=~"up|prometheus_.*|ycluster_.*"}'
+        - 'prometheus_tsdb_head_samples_appended_total'
+        - 'prometheus_tsdb_compaction_duration_seconds'
+        - 'prometheus_http_requests_total'
         - '{job=~"ycluster-.*"}'
-        - '{job="node-exporter"}'
-        - '{job="prometheus"}'
-        - '{__name__=~"up|prometheus_.*|node_.*|ycluster_.*"}'
     static_configs:
 {% for host in groups['core'] %}
       - targets: ['{{ hostvars[host]['ansible_host'] }}:9090']
