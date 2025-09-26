@@ -31,6 +31,14 @@ scrape_configs:
         - 'prometheus_tsdb_compaction_duration_seconds'
         - 'prometheus_http_requests_total'
         - '{job=~"ycluster-.*"}'
+        - '{__name__=~"ceph_cluster_.*"}'
+        - '{__name__=~"ceph_health_.*"}'
+        - '{__name__=~"ceph_mon_.*"}'
+        - '{__name__=~"ceph_osd_.*"}'
+        - '{__name__=~"ceph_pool_.*"}'
+        - '{__name__=~"ceph_pg_.*"}'
+        - '{__name__=~"ceph_rbd_.*"}'
+        - '{__name__=~"ceph_mgr_.*"}'
     static_configs:
 {% for host in groups['core'] %}
       - targets: ['{{ hostvars[host]['ansible_host'] }}:9090']

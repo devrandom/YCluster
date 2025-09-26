@@ -182,66 +182,22 @@
         mode: '0644'
       notify: restart grafana
 
-    - name: Check if dashboard already exists
-      stat:
-        path: /var/lib/grafana-docker/dashboards/node-exporter-full.json
-      register: dashboard_exists
-
-    - name: Install Node Exporter dashboard
-      block:
-        - name: Create temporary file for dashboard
-          tempfile:
-            state: file
-            suffix: .json
-          register: dashboard_temp_file
-
-        - name: Download Node Exporter Full dashboard to temp file
-          uri:
-            url: https://grafana.com/api/dashboards/1860/revisions/41/download
-            method: GET
-            dest: "{{ dashboard_temp_file.path }}"
-
-        - name: Read dashboard content for verification
-          command: cat "{{ dashboard_temp_file.path }}"
-          register: dashboard_content
-          changed_when: false
-
-        - name: Verify dashboard content SHA256
-          assert:
-            that:
-              - dashboard_content.stdout | hash('sha256') == '132c20c446b28f0348183bd2980fd2e7a2dde3daab4d26c8605a5e117049953b'
-            fail_msg: "Downloaded dashboard content SHA256 does not match expected hash"
-            success_msg: "Dashboard content SHA256 verified successfully"
-
-        - name: Configure Node Exporter dashboard for local Prometheus
-          shell: |
-            jq '
-              . as $dashboard |
-              # Remove inputs and requires sections
-              del(.__inputs, .__requires) |
-              # Update datasource references to use local Prometheus
-              walk(if type == "object" and has("datasource") then
-                .datasource = {
-                  "type": "prometheus",
-                  "uid": "prometheus-local"
-                }
-              else . end)
-            ' "{{ dashboard_temp_file.path }}" > /var/lib/grafana-docker/dashboards/node-exporter-full.json
-          notify: restart grafana
-
-        - name: Clean up temporary file
-          file:
-            path: "{{ dashboard_temp_file.path }}"
-            state: absent
-
-      when: not dashboard_exists.stat.exists
-
-    - name: Set dashboard file ownership
-      file:
-        path: /var/lib/grafana-docker/dashboards/node-exporter-full.json
-        owner: "472"
-        group: "472"
-        mode: '0644'
+    - name: Install Grafana dashboards
+      include_tasks: install_dashboard.yml
+      vars:
+        dashboard_name: "{{ item.name }}"
+        dashboard_url: "{{ item.url }}"
+        dashboard_sha256: "{{ item.sha256 }}"
+        dashboard_filename: "{{ item.filename }}"
+      loop:
+        - name: "Node Exporter Full"
+          url: "https://grafana.com/api/dashboards/1860/revisions/41/download"
+          sha256: "132c20c446b28f0348183bd2980fd2e7a2dde3daab4d26c8605a5e117049953b"
+          filename: "node-exporter-full.json"
+        - name: "Ceph - Cluster"
+          url: "https://grafana.com/api/dashboards/2842/revisions/18/download"
+          sha256: "3e12f352c7ed91d3b9440c78ea8cb0549215caa6e2da8b78df741322a4da3402"
+          filename: "ceph-cluster.json"
 
     - name: Create Docker network for Grafana
       docker_network:

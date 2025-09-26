@@ -1,0 +1,31 @@
+---
+- name: Configure Ceph monitoring
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Enable Ceph Prometheus module
+      command: ceph mgr module enable prometheus
+      register: ceph_prometheus_result
+      changed_when: "'already enabled' not in ceph_prometheus_result.stderr"
+      failed_when: 
+        - ceph_prometheus_result.rc != 0
+        - "'already enabled' not in ceph_prometheus_result.stderr"
+
+    - name: Verify Ceph Prometheus module is enabled
+      command: ceph mgr module ls
+      register: ceph_modules
+      changed_when: false
+
+    - name: Display Ceph Prometheus module status
+      debug:
+        msg: "Ceph Prometheus module: {{ 'Enabled' if 'prometheus' in ceph_modules.stdout else 'Not enabled' }}"
+
+    - name: Get Ceph Prometheus endpoint
+      command: ceph mgr services
+      register: ceph_services
+      changed_when: false
+
+    - name: Display Ceph Prometheus endpoint
+      debug:
+        msg: "Ceph Prometheus metrics available at: {{ ceph_services.stdout | from_json | json_query('prometheus') | default('Not available') }}"
+      when: ceph_services.stdout | from_json | json_query('prometheus') is defined
