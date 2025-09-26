@@ -78,3 +78,13 @@ scrape_configs:
           node: '{{ host }}'
 {% endfor %}
 
+  # Scrape Ceph Prometheus exporter
+  - job_name: 'ceph-exporter'
+    static_configs:
+{% for host in groups['storage'] %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:9283']
+        labels:
+          node: '{{ host }}'
+          node_type: 'storage'
+{% endfor %}
+
