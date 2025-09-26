@@ -1,0 +1,61 @@
+---
+- name: Check if {{ dashboard_name }} dashboard already exists
+  stat:
+    path: /var/lib/grafana-docker/dashboards/{{ dashboard_filename }}
+  register: dashboard_exists
+
+- name: Install {{ dashboard_name }} dashboard
+  block:
+    - name: Create temporary file for {{ dashboard_name }} dashboard
+      tempfile:
+        state: file
+        suffix: .json
+      register: dashboard_temp_file
+
+    - name: Download {{ dashboard_name }} dashboard to temp file
+      uri:
+        url: "{{ dashboard_url }}"
+        method: GET
+        dest: "{{ dashboard_temp_file.path }}"
+
+    - name: Read {{ dashboard_name }} dashboard content for verification
+      command: cat "{{ dashboard_temp_file.path }}"
+      register: dashboard_content
+      changed_when: false
+
+    - name: Verify {{ dashboard_name }} dashboard content SHA256
+      assert:
+        that:
+          - dashboard_content.stdout | hash('sha256') == dashboard_sha256
+        fail_msg: "Downloaded {{ dashboard_name }} dashboard content SHA256 does not match expected hash. Expected: {{ dashboard_sha256 }}, Got: {{ dashboard_content.stdout | hash('sha256') }}"
+        success_msg: "{{ dashboard_name }} dashboard content SHA256 verified successfully"
+
+    - name: Configure {{ dashboard_name }} dashboard for local Prometheus
+      shell: |
+        jq '
+          . as $dashboard |
+          # Remove inputs and requires sections
+          del(.__inputs, .__requires) |
+          # Update datasource references to use local Prometheus
+          walk(if type == "object" and has("datasource") then
+            .datasource = {
+              "type": "prometheus",
+              "uid": "prometheus-local"
+            }
+          else . end)
+        ' "{{ dashboard_temp_file.path }}" > /var/lib/grafana-docker/dashboards/{{ dashboard_filename }}
+      notify: restart grafana
+
+    - name: Clean up temporary file for {{ dashboard_name }}
+      file:
+        path: "{{ dashboard_temp_file.path }}"
+        state: absent
+
+  when: not dashboard_exists.stat.exists
+
+- name: Set {{ dashboard_name }} dashboard file ownership
+  file:
+    path: /var/lib/grafana-docker/dashboards/{{ dashboard_filename }}
+    owner: "472"
+    group: "472"
+    mode: '0644'

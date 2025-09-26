@@ -1,6 +1,7 @@
 ---
 - import_playbook: install-prometheus.yml
 - import_playbook: install-central-prometheus.yml
+- import_playbook: ceph.yml
 
 - name: Configure monitoring endpoints
   hosts: core:storage
