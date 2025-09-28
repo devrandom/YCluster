@@ -193,3 +193,65 @@ groups:
         annotations:
           summary: "Multiple masters for VIP {{ $labels.vip }}"
           description: "VIP {{ $labels.vip }} is active on multiple nodes - possible split brain"
+
+  - name: ycluster-external
+    rules:
+      # No uplink available (informational)
+      - alert: NoInternetUplink
+        expr: max(ycluster_uplink_status) == 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "No internet uplink available"
+          description: "No nodes in the cluster have internet connectivity"
+
+      # HTTPS domain accessibility
+      - alert: HTTPSDomainDown
+        expr: probe_success{job="https-domain"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTPS domain {{ $labels.instance }} is down"
+          description: "HTTPS domain {{ $labels.instance }} has been unreachable for more than 2 minutes"
+
+      # HTTPS certificate expiry (from blackbox)
+      - alert: HTTPSCertificateExpiring
+        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTPS certificate expiring soon"
+          description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+
+      # HTTPS certificate expiry critical
+      - alert: HTTPSCertificateExpiringCritical
+        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 7
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTPS certificate expiring very soon"
+          description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
+
+      # HTTPS bad status codes (502, 503, 404, etc.)
+      - alert: HTTPSBadStatusCode
+        expr: probe_success{job="https-domain"} == 1 and probe_http_status_code{job="https-domain"} >= 400
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTPS domain {{ $labels.instance }} returning error status"
+          description: "HTTPS domain {{ $labels.instance }} is returning HTTP status code {{ $value }} for more than 2 minutes"
+
+      # HTTPS response time
+      - alert: HTTPSSlowResponse
+        expr: probe_duration_seconds{job="https-domain"} > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTPS domain {{ $labels.instance }} slow response"
+          description: "HTTPS domain {{ $labels.instance }} response time is {{ $value }}s (>10s) for more than 5 minutes"

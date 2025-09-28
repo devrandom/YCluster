@@ -88,3 +88,25 @@ scrape_configs:
           node_type: 'storage'
 {% endfor %}
 
+  # Blackbox exporter for HTTPS domain monitoring
+  - job_name: 'https-domain'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    file_sd_configs:
+      - files:
+        - '/etc/prometheus/blackbox-targets.json'
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9115  # Blackbox exporter address
+
+  # Blackbox exporter itself
+  - job_name: 'blackbox-exporter'
+    static_configs:
+      - targets: ['localhost:9115']
+
