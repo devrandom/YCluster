@@ -21,7 +21,25 @@
           - prometheus
           - prometheus-node-exporter
           - prometheus-alertmanager
+          - prometheus-blackbox-exporter
         state: present
+
+    - name: Configure node exporter with textfile collector
+      copy:
+        dest: /etc/default/prometheus-node-exporter
+        content: |
+          # Arguments for prometheus-node-exporter
+          ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter"
+        mode: '0644'
+      notify: restart node exporter
+
+    - name: Create textfile directory for node exporter
+      file:
+        path: /var/lib/prometheus/node-exporter
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
 
     - name: Create Prometheus configuration directory
       file:
@@ -116,6 +134,31 @@
         group: root
         mode: '0755'
 
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy blackbox targets updater
+      copy:
+        src: update-blackbox-targets.py
+        dest: /usr/local/lib/cluster/update-blackbox-targets
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create initial blackbox targets file
+      copy:
+        dest: /etc/prometheus/blackbox-targets.json
+        content: '[]'
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+        force: no
+
     - name: Create ntfy webhook systemd service
       copy:
         dest: /etc/systemd/system/ntfy-webhook.service
@@ -140,6 +183,39 @@
         - reload systemd
         - restart ntfy webhook
 
+    - name: Create blackbox targets updater systemd service
+      copy:
+        dest: /etc/systemd/system/update-blackbox-targets.service
+        content: |
+          [Unit]
+          Description=Update Blackbox Exporter Targets from etcd
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          User=root
+          ExecStart=/usr/bin/python3 /usr/local/lib/cluster/update-blackbox-targets
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create blackbox targets updater systemd timer
+      copy:
+        dest: /etc/systemd/system/update-blackbox-targets.timer
+        content: |
+          [Unit]
+          Description=Update Blackbox Exporter Targets every 5 minutes
+          Requires=update-blackbox-targets.service
+
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=5min
+          AccuracySec=30s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
     - name: Enable and start Prometheus services
       systemd:
         name: "{{ item }}"
@@ -150,7 +226,9 @@
         - prometheus
         - prometheus-node-exporter
         - prometheus-alertmanager
+        - prometheus-blackbox-exporter
         - ntfy-webhook
+        - update-blackbox-targets.timer
 
     - name: Create Grafana provisioning directories
       file:
@@ -198,6 +276,10 @@
           url: "https://grafana.com/api/dashboards/2842/revisions/18/download"
           sha256: "3e12f352c7ed91d3b9440c78ea8cb0549215caa6e2da8b78df741322a4da3402"
           filename: "ceph-cluster.json"
+        - name: "Blackbox Exporter"
+          url: "https://grafana.com/api/dashboards/7587/revisions/3/download"
+          sha256: "ce403bb878e22dd250775b7aa8521913e6201741177ca954fa7a4fb1dd898fac"
+          filename: "blackbox-exporter.json"
 
     - name: Create Docker network for Grafana
       docker_network:
@@ -255,4 +337,9 @@
     - name: restart ntfy webhook
       systemd:
         name: ntfy-webhook
+        state: restarted
+
+    - name: restart node exporter
+      systemd:
+        name: prometheus-node-exporter
         state: restarted

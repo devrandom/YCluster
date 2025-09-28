@@ -39,6 +39,8 @@ scrape_configs:
         - '{__name__=~"ceph_pg_.*"}'
         - '{__name__=~"ceph_rbd_.*"}'
         - '{__name__=~"ceph_mgr_.*"}'
+        - '{__name__=~"probe_.*"}'
+        - '{job="https-domain"}'
     static_configs:
 {% for host in groups['core'] %}
       - targets: ['{{ hostvars[host]['ansible_host'] }}:9090']
