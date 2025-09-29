@@ -159,6 +159,14 @@
         mode: '0644'
         force: no
 
+    - name: Create ntfy-webhook user
+      user:
+        name: ntfy-webhook
+        system: yes
+        shell: /usr/sbin/nologin
+        home: /var/lib/ntfy-webhook
+        create_home: no
+
     - name: Create ntfy webhook systemd service
       copy:
         dest: /etc/systemd/system/ntfy-webhook.service
@@ -170,8 +178,8 @@
 
           [Service]
           Type=simple
-          User=nobody
-          Group=nogroup
+          User=ntfy-webhook
+          Group=ntfy-webhook
           ExecStart=/usr/bin/python3 /usr/local/bin/ntfy-webhook.py
           Restart=always
           RestartSec=5
