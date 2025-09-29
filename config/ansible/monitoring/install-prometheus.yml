@@ -21,7 +21,6 @@
           - prometheus
           - prometheus-node-exporter
           - prometheus-alertmanager
-          - prometheus-blackbox-exporter
         state: present
 
     - name: Configure node exporter with textfile collector
@@ -234,7 +233,6 @@
         - prometheus
         - prometheus-node-exporter
         - prometheus-alertmanager
-        - prometheus-blackbox-exporter
         - ntfy-webhook
         - update-blackbox-targets.timer
 
