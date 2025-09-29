@@ -61,11 +61,11 @@ def write_uplink_metrics():
         
         metrics_content = f"""# HELP ycluster_uplink_status Internet uplink availability (1=available, 0=unavailable)
 # TYPE ycluster_uplink_status gauge
-ycluster_uplink_status {uplink_status}
+ycluster_uplink_status{{node="{os.uname().nodename}"}} {uplink_status}
 
 # HELP ycluster_blackbox_targets_count Number of blackbox targets configured
 # TYPE ycluster_blackbox_targets_count gauge
-ycluster_blackbox_targets_count {targets_count}
+ycluster_blackbox_targets_count{{node="{os.uname().nodename}"}} {targets_count}
 """
         
         # Write atomically using temp file
@@ -75,6 +75,11 @@ ycluster_blackbox_targets_count {targets_count}
             tmp_path = tmp.name
         
         shutil.move(tmp_path, METRICS_FILE)
+        
+        # Set correct ownership and permissions
+        shutil.chown(METRICS_FILE, user='prometheus', group='prometheus')
+        os.chmod(METRICS_FILE, 0o644)
+        
         print(f"Updated uplink metrics: uplink={uplink_status}, targets={targets_count}")
         
     except Exception as e:
