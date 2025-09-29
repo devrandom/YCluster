@@ -38,3 +38,26 @@ location /assets/ {
     add_header Cache-Control "public, immutable";
 }
 
+# Grafana dashboard (read-only)
+location /grafana/ {
+    proxy_pass http://localhost:3030/grafana/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    
+    # Prevent redirect loops
+    proxy_redirect http://localhost:3030/grafana/ /grafana/;
+    proxy_redirect http://localhost:3030/ /grafana/;
+    
+    # Allow embedding and remove edit capabilities
+    proxy_hide_header X-Frame-Options;
+    add_header X-Frame-Options SAMEORIGIN;
+    
+    # WebSocket support for live updates
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+
