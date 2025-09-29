@@ -90,6 +90,12 @@ scrape_configs:
 
   # Blackbox exporter for HTTPS domain monitoring
   - job_name: 'https-domain'
+    scheme: https
+    tls_config:
+      ca_file: /etc/blackbox_exporter/tls/ca.crt
+      cert_file: /etc/blackbox_exporter/tls/server.crt
+      key_file: /etc/blackbox_exporter/tls/server.key
+      insecure_skip_verify: false
     metrics_path: /probe
     params:
       module: [http_2xx]
@@ -97,16 +103,55 @@ scrape_configs:
       - files:
         - '/etc/prometheus/blackbox-targets.json'
         refresh_interval: 30s
+    static_configs:
+      - targets: ['localhost:9115']
+        labels:
+          blackbox_node: '{{ inventory_hostname }}'
+          node_type: 'core'
+{% if groups['frontend'] is defined and groups['frontend'] | length > 0 %}
+{% for host in groups['frontend'] %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:9115']
+        labels:
+          blackbox_node: '{{ host }}'
+          node_type: 'frontend'
+{% endfor %}
+{% endif %}
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
       - source_labels: [__param_target]
         target_label: instance
       - target_label: __address__
-        replacement: localhost:9115  # Blackbox exporter address
+        replacement: localhost:9115  # Default to localhost
+      # Override address for frontend nodes
+      - source_labels: [node_type, __address__]
+        regex: 'frontend;(.+):9115'
+        target_label: __address__
+        replacement: '${1}:9115'
 
-  # Blackbox exporter itself
+  # Blackbox exporter itself with TLS
   - job_name: 'blackbox-exporter'
+    scheme: https
+    tls_config:
+      ca_file: /etc/blackbox_exporter/tls/ca.crt
+      cert_file: /etc/blackbox_exporter/tls/server.crt
+      key_file: /etc/blackbox_exporter/tls/server.key
+      insecure_skip_verify: false
     static_configs:
       - targets: ['localhost:9115']
+{% for host in groups['core'] %}
+{% if host != inventory_hostname %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:9115']
+        labels:
+          node: '{{ host }}'
+{% endif %}
+{% endfor %}
+{% if groups['frontend'] is defined %}
+{% for host in groups['frontend'] %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:9115']
+        labels:
+          node: '{{ host }}'
+          node_type: 'frontend'
+{% endfor %}
+{% endif %}
 
