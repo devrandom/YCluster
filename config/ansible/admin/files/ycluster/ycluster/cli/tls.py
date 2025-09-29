@@ -43,6 +43,34 @@ def register_tls_commands(subparsers):
     # Fetch certs command
     fetch_parser = tls_subparsers.add_parser('fetch-certs', help='Fetch TLS certificates from etcd to nginx')
     fetch_parser.set_defaults(func=tls_fetch_certs)
+    
+    # CA management commands
+    ca_parser = tls_subparsers.add_parser('ca', help='Certificate Authority management')
+    ca_parser.set_defaults(func=lambda args: args.parser.print_help(), parser=ca_parser)
+    ca_subparsers = ca_parser.add_subparsers(dest='ca_command', help='CA commands')
+    
+    # CA generate command
+    ca_gen_parser = ca_subparsers.add_parser('generate', help='Generate a new Certificate Authority')
+    ca_gen_parser.set_defaults(func=ca_generate)
+    
+    # CA info command
+    ca_info_parser = ca_subparsers.add_parser('info', help='Show CA certificate information')
+    ca_info_parser.set_defaults(func=ca_info)
+    
+    # CA generate server cert command
+    ca_server_parser = ca_subparsers.add_parser('generate-server', help='Generate a server certificate signed by CA')
+    ca_server_parser.add_argument('hostname', help='Hostname for the certificate')
+    ca_server_parser.add_argument('--san', action='append', help='Subject Alternative Name (can be used multiple times)')
+    ca_server_parser.set_defaults(func=ca_generate_server)
+    
+    # CA list certificates command
+    ca_list_parser = ca_subparsers.add_parser('list', help='List all generated certificates')
+    ca_list_parser.set_defaults(func=ca_list)
+    
+    # CA revoke certificate command
+    ca_revoke_parser = ca_subparsers.add_parser('revoke', help='Revoke a certificate')
+    ca_revoke_parser.add_argument('hostname', help='Hostname of certificate to revoke')
+    ca_revoke_parser.set_defaults(func=ca_revoke)
 
 
 def tls_generate(args):
@@ -89,3 +117,46 @@ def tls_fetch_certs(args):
     """Fetch TLS certificates from etcd to nginx"""
     from ..utils import fetch_tls_certs
     fetch_tls_certs.main()
+
+
+def ca_generate(args):
+    """Generate CA certificate"""
+    from ..utils import ca_manager
+    try:
+        ca_manager.generate_ca()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def ca_info(args):
+    """Show CA information"""
+    from ..utils import ca_manager
+    if not ca_manager.get_ca_info():
+        sys.exit(1)
+
+
+def ca_generate_server(args):
+    """Generate server certificate"""
+    from ..utils import ca_manager
+    try:
+        ca_manager.generate_server_cert(args.hostname, args.san)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def ca_list(args):
+    """List certificates"""
+    from ..utils import ca_manager
+    ca_manager.list_certificates()
+
+
+def ca_revoke(args):
+    """Revoke certificate"""
+    from ..utils import ca_manager
+    try:
+        ca_manager.revoke_certificate(args.hostname)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)

@@ -87,7 +87,17 @@ class InventoryModule(BaseInventoryPlugin):
         # Apply compose variables to storage group only
         for var_name, var_value in compose_vars.items():
             self.inventory.set_variable('storage', var_name, var_value)
-        
+
+        # Read storage leader from etcd
+        leader_key = '/cluster/leader/app'
+        leader_value, _ = etcd_client.get(leader_key)
+        if leader_value:
+            leader_hostname = leader_value.decode().strip()
+            self.display.vvv(f"Storage leader found: {leader_hostname}")
+        else:
+            leader_hostname = None
+            self.display.vvv("No storage leader found in etcd")
+
         # Read rathole configuration from etcd if it exists
         try:
             rathole_config_key = f"{prefix}/rathole/config"
@@ -127,6 +137,12 @@ class InventoryModule(BaseInventoryPlugin):
                     self.inventory.set_variable(hostname, 'ansible_host', ip_address)
                     self.inventory.set_variable(hostname, 'mac_address', mac_address)
                     self.inventory.set_variable(hostname, 'node_type', node_type)
+                    
+                    # Set storage leader flag
+                    if hostname == leader_hostname:
+                        self.inventory.set_variable(hostname, 'storage_leader', True)
+                    else:
+                        self.inventory.set_variable(hostname, 'storage_leader', False)
                     
                     # Add to all_nodes group
                     self.inventory.add_child('all_nodes', hostname)
@@ -172,6 +188,9 @@ class InventoryModule(BaseInventoryPlugin):
                         for key, val in frontend_node.items():
                             if key not in ['name', 'ip', 'hostname']:
                                 self.inventory.set_variable(name, key, val)
+                        
+                        # Set storage leader flag
+                        self.inventory.set_variable(name, 'storage_leader', False)
                         
                         # Add to frontend group
                         self.inventory.add_child('frontend', name)
