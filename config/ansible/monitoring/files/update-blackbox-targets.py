@@ -97,9 +97,48 @@ def get_https_domain():
         print(f"Failed to get HTTPS domain from etcd: {e}")
         return None
 
+def get_blackbox_exporters():
+    """Get list of available blackbox exporters from etcd"""
+    exporters = []
+    
+    # Always include localhost (current node)
+    current_hostname = os.uname().nodename
+    exporters.append({
+        "address": "localhost:9115",
+        "blackbox_node": current_hostname,
+        "node_type": "core"
+    })
+    
+    try:
+        client = get_etcd_client()
+        
+        # Get frontend nodes from etcd
+        frontend_prefix = '/cluster/nodes/frontend'
+        for value, metadata in client.get_prefix(frontend_prefix):
+            if value:
+                try:
+                    frontend_node = json.loads(value.decode())
+                    name = frontend_node.get('name')
+                    address = frontend_node.get('ip') or frontend_node.get('hostname')
+                    
+                    if name and address:
+                        exporters.append({
+                            "address": f"{address}:9115",
+                            "blackbox_node": name,
+                            "node_type": "frontend"
+                        })
+                except Exception as e:
+                    print(f"Failed to parse frontend node: {e}")
+                    
+    except Exception as e:
+        print(f"Failed to get frontend nodes from etcd: {e}")
+    
+    return exporters
+
 def update_blackbox_targets():
-    """Update Blackbox targets file"""
+    """Update Blackbox targets file with complete target matrix"""
     domain = get_https_domain()
+    exporters = get_blackbox_exporters()
 
     # Only create targets if we have internet connectivity
     if not has_internet_uplink():
@@ -107,13 +146,21 @@ def update_blackbox_targets():
         targets = []
     else:
         if domain:
-            targets = [{
-                "targets": [f"https://{domain}"],
-                "labels": {
-                    "job": "https-domain",
-                    "domain": domain
-                }
-            }]
+            # Generate target for each blackbox exporter
+            targets = []
+            probe_url = f"https://{domain}"
+            
+            for exporter in exporters:
+                targets.append({
+                    "targets": [exporter["address"]],
+                    "labels": {
+                        "job": "https-domain",
+                        "domain": domain,
+                        "blackbox_node": exporter["blackbox_node"],
+                        "node_type": exporter["node_type"],
+                        "__param_target": probe_url
+                    }
+                })
         else:
             targets = []
     
@@ -134,7 +181,7 @@ def update_blackbox_targets():
         if not has_internet_uplink():
             print("Blackbox targets cleared (no internet uplink)")
         elif domain:
-            print(f"Updated blackbox targets for domain: {domain}")
+            print(f"Updated blackbox targets for domain: {domain} with {len(targets)} exporters")
         else:
             print("Cleared blackbox targets (no domain configured)")
         
