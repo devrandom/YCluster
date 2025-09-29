@@ -1339,7 +1339,7 @@
           },
           "editorMode": "code",
           "expr": "probe_success{job=\"https-domain\"}",
-          "legendFormat": "HTTPS Domain - {{instance}}",
+          "legendFormat": "HTTPS Domain - {{instance}} ({{blackbox_node}})",
           "range": true,
           "refId": "A"
         },
@@ -1351,7 +1351,7 @@
           "editorMode": "code",
           "expr": "probe_duration_seconds{job=\"https-domain\"}",
           "hide": false,
-          "legendFormat": "Response Time - {{instance}}",
+          "legendFormat": "Response Time - {{instance}} ({{blackbox_node}})",
           "range": true,
           "refId": "B"
         }
