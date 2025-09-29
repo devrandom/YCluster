@@ -112,6 +112,8 @@
             --web.console.templates=/etc/prometheus/consoles \
             --web.console.libraries=/etc/prometheus/console_libraries \
             --web.enable-lifecycle \
+            --web.enable-admin-api \
+            --web.listen-address=0.0.0.0:9090 \
             --web.external-url=http://{{ ansible_host }}:9090/
         mode: '0644'
       notify:
