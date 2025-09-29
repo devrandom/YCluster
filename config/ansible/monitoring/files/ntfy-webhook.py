@@ -51,7 +51,7 @@ def format_alert_message(alert):
         if severity == 'critical':
             title = f"CRITICAL: {summary}"
             priority = "urgent"
-            tags = "rotating_light,skull"
+            tags = "rotating_light"
         elif severity == 'warning':
             title = f"WARNING: {summary}"
             priority = "default"
