@@ -702,7 +702,7 @@ def check_docker_registry():
                 status = 'unhealthy'
                 message = 'Split-brain: Registry running on non-leader'
             else:
-                status = 'not_required'
+                status = 'standby'
                 message = 'Registry not required (not storage leader)'
         
         return {
@@ -914,7 +914,7 @@ def check_open_webui():
                 status = 'unhealthy'
                 message = 'Split-brain: Open-WebUI running on non-leader'
             else:
-                status = 'not_required'
+                status = 'standby'
                 message = 'Open-WebUI not required (not storage leader)'
         
         return {
@@ -1180,7 +1180,13 @@ def prometheus_metrics():
         
         # Service health metrics
         for service, details in health_data.get('services', {}).items():
-            service_value = 1 if details.get('status') == 'healthy' else 0
+            status = details.get('status')
+            if status == 'healthy':
+                service_value = 1
+            elif status == 'standby':
+                service_value = 2
+            else:
+                service_value = 0
             metrics.append(f'ycluster_service_health{{node="{platform.node()}",service="{service}"}} {service_value}')
             
             # Service-specific metrics
@@ -1279,7 +1285,7 @@ def get_comprehensive_health():
             health_status['overall'] = 'unhealthy'
         else:
             health_status['services']['postgresql'] = {
-                'status': 'not_required',
+                'status': 'standby',
                 'details': {
                     'service_active': postgres_running,
                     'port_open': postgres_port,
@@ -1320,7 +1326,7 @@ def get_comprehensive_health():
             health_status['overall'] = 'unhealthy'
         else:
             health_status['services']['qdrant'] = {
-                'status': 'not_required',
+                'status': 'standby',
                 'details': {
                     'service_active': qdrant_running,
                     'port_open': qdrant_port,
@@ -1363,14 +1369,26 @@ def get_comprehensive_health():
         if not dhcp_port:
             health_status['overall'] = 'unhealthy'
     else:
-        health_status['services']['dhcp'] = {
-            'status': 'not_required',
-            'details': {
-                'health_port_open': dhcp_port,
-                'required': False,
-                'reason': 'not dhcp leader'
+        # Check for split-brain condition
+        if dhcp_port:
+            health_status['services']['dhcp'] = {
+                'status': 'unhealthy',
+                'details': {
+                    'health_port_open': dhcp_port,
+                    'required': False,
+                    'reason': 'split-brain: dhcp running on non-leader'
+                }
             }
-        }
+            health_status['overall'] = 'unhealthy'
+        else:
+            health_status['services']['dhcp'] = {
+                'status': 'standby',
+                'details': {
+                    'health_port_open': dhcp_port,
+                    'required': False,
+                    'reason': 'not dhcp leader'
+                }
+            }
     
     # Check DNS (dnsmasq)
     dns_health = check_dns_status()
@@ -1466,7 +1484,7 @@ def get_comprehensive_health():
             health_status['overall'] = 'unhealthy'
         else:
             health_status['services']['rathole'] = {
-                'status': 'not_required',
+                'status': 'standby',
                 'details': {
                     'service_active': rathole_running,
                     'port_open': rathole_port,
@@ -1529,12 +1547,12 @@ def get_comprehensive_health():
     storage_vip_active = vip_health['storage_vip']['active']
     
     health_status['services']['gateway_vip'] = {
-        'status': 'healthy' if gateway_vip_active else 'not_required',
+        'status': 'healthy' if gateway_vip_active else 'standby',
         'details': vip_health['gateway_vip']
     }
     
     health_status['services']['storage_vip'] = {
-        'status': 'healthy' if storage_vip_active else 'not_required',
+        'status': 'healthy' if storage_vip_active else 'standby',
         'details': vip_health['storage_vip']
     }
     
@@ -1551,13 +1569,23 @@ def get_comprehensive_health():
     else:
         # Not a core node - keepalived should not be running
         keepalived_running = check_service_status('keepalived')
-        health_status['services']['keepalived'] = {
-            'status': 'not_required',
-            'details': {
-                'service_active': keepalived_running,
-                'reason': 'not a core node'
+        if keepalived_running:
+            health_status['services']['keepalived'] = {
+                'status': 'unhealthy',
+                'details': {
+                    'service_active': keepalived_running,
+                    'reason': 'split-brain: keepalived running on non-core node'
+                }
             }
-        }
+            health_status['overall'] = 'unhealthy'
+        else:
+            health_status['services']['keepalived'] = {
+                'status': 'standby',
+                'details': {
+                    'service_active': keepalived_running,
+                    'reason': 'not a core node'
+                }
+            }
     
     # Add leadership status for this node
     health_status['storage_leader'] = is_storage_leader()
