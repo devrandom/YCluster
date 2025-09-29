@@ -154,6 +154,43 @@ groups:
           summary: "Ceph cluster unhealthy"
           description: "Ceph cluster is reporting unhealthy status on {{ $value }} nodes"
 
+      # Leadership alerts
+      - alert: NoStorageLeader
+        expr: sum(ycluster_storage_leader) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No storage leader elected"
+          description: "No node is currently the storage leader"
+
+      - alert: MultipleStorageLeaders
+        expr: sum(ycluster_storage_leader) > 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple storage leaders detected"
+          description: "{{ $value }} nodes claim to be storage leader - possible split brain"
+
+      - alert: NoDHCPLeader
+        expr: sum(ycluster_dhcp_leader) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No DHCP leader elected"
+          description: "No node is currently the DHCP leader"
+
+      - alert: MultipleDHCPLeaders
+        expr: sum(ycluster_dhcp_leader) > 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Multiple DHCP leaders detected"
+          description: "{{ $value }} nodes claim to be DHCP leader - possible split brain"
+
       # Certificate expiry warning
       - alert: CertificateExpiringWarning
         expr: ycluster_certificate_days_until_expiry < 30 and ycluster_certificate_days_until_expiry > 7
@@ -206,9 +243,9 @@ groups:
           summary: "No internet uplink available"
           description: "No nodes in the cluster have internet connectivity"
 
-      # HTTPS domain accessibility
+      # HTTPS domain accessibility (only alert when uplink is available)
       - alert: HTTPSDomainDown
-        expr: probe_success{job="https-domain"} == 0
+        expr: probe_success{job="https-domain"} == 0 and max(ycluster_uplink_status) == 1
         for: 2m
         labels:
           severity: critical
@@ -216,9 +253,9 @@ groups:
           summary: "HTTPS domain {{ $labels.instance }} is down"
           description: "HTTPS domain {{ $labels.instance }} has been unreachable for more than 2 minutes"
 
-      # HTTPS certificate expiry (from blackbox)
+      # HTTPS certificate expiry (from blackbox) - only alert when uplink is available
       - alert: HTTPSCertificateExpiring
-        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 30
+        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 30 and max(ycluster_uplink_status) == 1
         for: 1h
         labels:
           severity: warning
@@ -226,9 +263,9 @@ groups:
           summary: "HTTPS certificate expiring soon"
           description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
 
-      # HTTPS certificate expiry critical
+      # HTTPS certificate expiry critical - only alert when uplink is available
       - alert: HTTPSCertificateExpiringCritical
-        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 7
+        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 7 and max(ycluster_uplink_status) == 1
         for: 5m
         labels:
           severity: critical
@@ -236,9 +273,9 @@ groups:
           summary: "HTTPS certificate expiring very soon"
           description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
 
-      # HTTPS bad status codes (502, 503, 404, etc.)
+      # HTTPS bad status codes (502, 503, 404, etc.) - only alert when uplink is available
       - alert: HTTPSBadStatusCode
-        expr: probe_success{job="https-domain"} == 1 and probe_http_status_code{job="https-domain"} >= 400
+        expr: probe_success{job="https-domain"} == 1 and probe_http_status_code{job="https-domain"} >= 400 and max(ycluster_uplink_status) == 1
         for: 2m
         labels:
           severity: warning
@@ -246,9 +283,9 @@ groups:
           summary: "HTTPS domain {{ $labels.instance }} returning error status"
           description: "HTTPS domain {{ $labels.instance }} is returning HTTP status code {{ $value }} for more than 2 minutes"
 
-      # HTTPS response time
+      # HTTPS response time - only alert when uplink is available
       - alert: HTTPSSlowResponse
-        expr: probe_duration_seconds{job="https-domain"} > 10
+        expr: probe_duration_seconds{job="https-domain"} > 10 and max(ycluster_uplink_status) == 1
         for: 5m
         labels:
           severity: warning
