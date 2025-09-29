@@ -135,34 +135,27 @@ def format_health_message(health_data, status):
     # Node status
     nodes = health_data.get('nodes', {})
     if nodes:
-        lines.append(f"\nNodes: {nodes.get('healthy', 0)}/{nodes.get('total', 0)} healthy")
-        if nodes.get('unhealthy', 0) > 0:
-            lines.append(f"  Unhealthy: {nodes['unhealthy']}")
+        lines.append(f"Nodes: {nodes.get('healthy', 0)}/{nodes.get('total', 0)} healthy")
         if nodes.get('unreachable', 0) > 0:
             lines.append(f"  Unreachable: {nodes['unreachable']}")
     
     # Leadership
     leadership = health_data.get('leadership', {})
     if leadership:
-        lines.append(f"\nLeadership:")
-        lines.append(f"  Storage: {leadership.get('storage_leader', 'none')}")
-        lines.append(f"  DHCP: {leadership.get('dhcp_leader', 'none')}")
-    
+        lines.append(f"Leadership: Storage: {leadership.get('storage_leader', 'none')} DHCP: {leadership.get('dhcp_leader', 'none')}")
+
     # VIP status
     vip_status = health_data.get('vip_status', {})
     if vip_status:
         gateway_vip = vip_status.get('gateway_vip', {})
         storage_vip = vip_status.get('storage_vip', {})
-        if gateway_vip.get('master_hostname'):
-            lines.append(f"\nVIPs:")
-            lines.append(f"  Gateway (10.0.0.254): {gateway_vip['master_hostname']}")
-        if storage_vip.get('master_hostname'):
-            lines.append(f"  Storage (10.0.0.100): {storage_vip['master_hostname']}")
-    
+        lines.append(
+            f"VIPs: Gateway: {gateway_vip.get('master_hostname')}  Storage: {storage_vip.get('master_hostname')}")
+
     # Certificate
     cert = health_data.get('certificate', {})
     if cert and cert.get('days_until_expiry') is not None:
-        lines.append(f"\nCertificate expires in {cert['days_until_expiry']} days")
+        lines.append(f"Certificate expires in {cert['days_until_expiry']} days")
     
     # Critical service issues
     services = health_data.get('services', {})
@@ -172,7 +165,7 @@ def format_health_message(health_data, status):
             unhealthy_services.append(service)
     
     if unhealthy_services:
-        lines.append(f"\nUnhealthy Services: {', '.join(unhealthy_services)}")
+        lines.append(f"Unhealthy Services: {', '.join(unhealthy_services)}")
     
     # Errors
     if 'error' in health_data:
