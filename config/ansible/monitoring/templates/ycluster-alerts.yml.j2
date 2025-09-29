@@ -245,7 +245,7 @@ groups:
 
       # HTTPS domain accessibility (only alert when uplink is available)
       - alert: HTTPSDomainDown
-        expr: probe_success{job="https-domain"} == 0 and max(ycluster_uplink_status) == 1
+        expr: probe_success{job="https-domain"} == 0
         for: 2m
         labels:
           severity: critical
@@ -255,7 +255,7 @@ groups:
 
       # HTTPS certificate expiry (from blackbox) - only alert when uplink is available
       - alert: HTTPSCertificateExpiring
-        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 30 and max(ycluster_uplink_status) == 1
+        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 30
         for: 1h
         labels:
           severity: warning
@@ -265,7 +265,7 @@ groups:
 
       # HTTPS certificate expiry critical - only alert when uplink is available
       - alert: HTTPSCertificateExpiringCritical
-        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 7 and max(ycluster_uplink_status) == 1
+        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 7
         for: 5m
         labels:
           severity: critical
@@ -275,7 +275,7 @@ groups:
 
       # HTTPS bad status codes (502, 503, 404, etc.) - only alert when uplink is available
       - alert: HTTPSBadStatusCode
-        expr: probe_success{job="https-domain"} == 1 and probe_http_status_code{job="https-domain"} >= 400 and max(ycluster_uplink_status) == 1
+        expr: probe_success{job="https-domain"} == 1 and probe_http_status_code{job="https-domain"} >= 400
         for: 2m
         labels:
           severity: warning
@@ -285,7 +285,7 @@ groups:
 
       # HTTPS response time - only alert when uplink is available
       - alert: HTTPSSlowResponse
-        expr: probe_duration_seconds{job="https-domain"} > 10 and max(ycluster_uplink_status) == 1
+        expr: probe_duration_seconds{job="https-domain"} > 10
         for: 5m
         labels:
           severity: warning
