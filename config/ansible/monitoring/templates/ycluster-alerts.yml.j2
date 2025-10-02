@@ -255,6 +255,18 @@ groups:
           summary: "HTTPS domain {{ $labels.instance }} is down"
           description: "HTTPS domain {{ $labels.instance }} has been unreachable for more than 2 minutes"
 
+      # HTTPS domain availability below 99% over 8 hours
+      - alert: HTTPSDomainLowAvailability
+        expr: avg_over_time(probe_success{job="https-domain"}[8h]) < 0.99
+        for: 5m
+        labels:
+          severity: warning
+          domain: '{{ $labels.domain }}'
+          instance: '{{ $labels.instance }}'
+        annotations:
+          summary: "HTTPS domain {{ $labels.instance }} availability below 99%"
+          description: "HTTPS domain {{ $labels.instance }} has {{ $value | humanizePercentage }} availability over the past 8 hours (threshold: 99%)"
+
       # HTTPS certificate expiry (from blackbox) - only alert when uplink is available
       - alert: HTTPSCertificateExpiring
         expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 30
