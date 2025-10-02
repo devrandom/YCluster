@@ -14,7 +14,7 @@ groups:
       # YCluster health API
       - alert: YClusterHealthAPIDown
         expr: up{job="ycluster-health"} == 0
-        for: 2m
+        for: 1m
         labels:
           severity: critical
         annotations:
@@ -95,7 +95,7 @@ groups:
       # High external network ingress bandwidth (10GB/hr = ~22.2 Mbps)
       - alert: HighNetworkIngress
         expr: rate(node_network_receive_bytes_total{device="enp87s0"}[5m]) * 8 > 22222222
-        for: 2m
+        for: 1m
         labels:
           severity: warning
         annotations:
@@ -105,7 +105,7 @@ groups:
       # High external network egress bandwidth (1GB/hr = ~2.2 Mbps)
       - alert: HighNetworkEgress
         expr: rate(node_network_transmit_bytes_total{device="enp87s0"}[5m]) * 8 > 2222222
-        for: 2m
+        for: 1m
         labels:
           severity: warning
         annotations:
@@ -147,7 +147,7 @@ groups:
       # Ceph cluster health
       - alert: CephClusterUnhealthy
         expr: count(ycluster_service_health{service="ceph"} == 0) >= 2
-        for: 2m
+        for: 1m
         labels:
           severity: critical
         annotations:
@@ -244,9 +244,11 @@ groups:
           description: "No nodes in the cluster have internet connectivity"
 
       # HTTPS domain accessibility (only alert when uplink is available)
+      # The funny expression is because `probe_success{job="https-domain"} == 0` produces no data
+      # points for some reason.
       - alert: HTTPSDomainDown
-        expr: probe_success{job="https-domain"} == 0
-        for: 2m
+        expr: 1 - probe_success{job="https-domain"} == 1
+        for: 1m
         labels:
           severity: critical
         annotations:
@@ -275,8 +277,8 @@ groups:
 
       # HTTPS bad status codes (502, 503, 404, etc.) - only alert when uplink is available
       - alert: HTTPSBadStatusCode
-        expr: probe_success{job="https-domain"} == 1 and probe_http_status_code{job="https-domain"} >= 400
-        for: 2m
+        expr: probe_http_status_code{job="https-domain"} >= 400
+        for: 1m
         labels:
           severity: warning
         annotations:

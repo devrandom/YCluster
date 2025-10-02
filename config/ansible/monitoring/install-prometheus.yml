@@ -134,6 +134,7 @@
         owner: root
         group: root
         mode: '0755'
+      notify: restart ntfy webhook
 
     - name: Create cluster scripts directory
       file:
