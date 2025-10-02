@@ -2,7 +2,7 @@ global:
   # No SMTP configuration - using webhooks only
 
 route:
-  group_by: ['alertname', 'cluster', 'service']
+  group_by: ['alertname', 'instance', 'domain']
   group_wait: 10s
   group_interval: 10s
   repeat_interval: 1h
