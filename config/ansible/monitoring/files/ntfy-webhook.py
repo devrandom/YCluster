@@ -99,11 +99,12 @@ def webhook():
             return jsonify({'error': 'No JSON data received'}), 400
         
         logger.info(f"Received webhook with {len(data.get('alerts', []))} alerts")
-        
+
         alerts = data.get('alerts', [])
         success_count = 0
         
         for alert in alerts:
+            logger.info(f"- Processing alert: {json.dumps(alert, indent=2)}")
             try:
                 formatted = format_alert_message(alert)
                 if send_to_ntfy(
@@ -116,6 +117,16 @@ def webhook():
             except Exception as e:
                 logger.error(f"Error processing alert: {e}")
         
+        # Return error if we couldn't send any notifications
+        if len(alerts) > 0 and success_count == 0:
+            return jsonify({
+                'error': 'Failed to send any notifications',
+                'processed': len(alerts),
+                'sent': 0
+            }), 503  # Service Unavailable - triggers Alertmanager retry
+
+        # TODO consider if it's correct to return 200 if some alerts failed
+
         return jsonify({
             'status': 'success',
             'processed': len(alerts),
