@@ -98,13 +98,12 @@ def webhook():
         if not data:
             return jsonify({'error': 'No JSON data received'}), 400
         
-        logger.info(f"Received webhook with {len(data.get('alerts', []))} alerts")
+        logger.info(f"Received webhook with data: {json.dumps(data)}")
 
         alerts = data.get('alerts', [])
         success_count = 0
         
         for alert in alerts:
-            logger.info(f"- Processing alert: {json.dumps(alert, indent=2)}")
             try:
                 formatted = format_alert_message(alert)
                 if send_to_ntfy(
