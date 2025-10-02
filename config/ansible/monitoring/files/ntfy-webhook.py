@@ -17,6 +17,32 @@ logger = logging.getLogger(__name__)
 # Configuration
 NTFY_TOPIC = "cf0d6065-2357-493e-a7a8-06666dd660eb"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+PROMETHEUS_URL = "http://localhost:9090"
+
+def query_blackbox_nodes(domain, instance):
+    """Query Prometheus for blackbox_node labels for a given domain/instance."""
+    try:
+        # Query for all blackbox nodes that have probed this target
+        query = f'probe_success{{job="https-domain",domain="{domain}",instance="{instance}"}}'
+        response = requests.get(
+            f"{PROMETHEUS_URL}/api/v1/query",
+            params={'query': query},
+            timeout=5
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        if data.get('status') == 'success' and data.get('data', {}).get('result'):
+            blackbox_nodes = []
+            for result in data['data']['result']:
+                blackbox_node = result.get('metric', {}).get('blackbox_node')
+                if blackbox_node:
+                    blackbox_nodes.append(blackbox_node)
+            return blackbox_nodes
+        return []
+    except Exception as e:
+        logger.error(f"Failed to query Prometheus for blackbox nodes: {e}")
+        return []
 
 def format_alert_message(alert):
     """Format a single alert for ntfy."""
@@ -26,42 +52,68 @@ def format_alert_message(alert):
     
     alertname = labels.get('alertname', 'Unknown Alert')
     severity = labels.get('severity', 'info')
-    node = labels.get('node', 'unknown')
+    node = labels.get('node') or None
     
-    summary = annotations.get('summary', f'{alertname} on {node}')
+    summary = annotations.get('summary', f'{alertname}' + (f' on {node}' if node else ''))
     description = annotations.get('description', 'No description available')
     
-    # Format timestamp
-    starts_at = alert.get('startsAt', '')
-    if starts_at:
+    # Format timestamp - use endsAt for resolved, startsAt for firing
+    if status == 'resolved':
+        timestamp_field = alert.get('endsAt', '')
+    else:
+        timestamp_field = alert.get('startsAt', '')
+    
+    if timestamp_field:
         try:
-            dt = datetime.fromisoformat(starts_at.replace('Z', '+00:00'))
+            dt = datetime.fromisoformat(timestamp_field.replace('Z', '+00:00'))
             timestamp = dt.strftime('%Y-%m-%d %H:%M:%S UTC')
         except:
-            timestamp = starts_at
+            timestamp = timestamp_field
     else:
         timestamp = 'Unknown time'
     
+    # Check if this alert has domain/instance labels (indicates blackbox monitoring)
+    domain = labels.get('domain')
+    instance = labels.get('instance')
+    blackbox_info = ""
+    
+    if domain and instance:
+        blackbox_nodes = query_blackbox_nodes(domain, instance)
+        if blackbox_nodes:
+            blackbox_info = f"\nBlackbox nodes: {', '.join(blackbox_nodes)}"
+        else:
+            blackbox_info = "\nBlackbox nodes: (query failed or no data)"
+    
     if status == 'resolved':
-        title = f"RESOLVED: {summary}"
-        message = f"Alert resolved at {timestamp}\n\n{description}"
+        title = f"[RESOLVED] {summary}"
+        message = f"Alert resolved at {timestamp}\n\n{description}{blackbox_info}"
         priority = "default"
         tags = "white_check_mark"
     else:
         if severity == 'critical':
-            title = f"CRITICAL: {summary}"
+            title = f"[CRITICAL] {summary}"
             priority = "urgent"
             tags = "rotating_light"
         elif severity == 'warning':
-            title = f"WARNING: {summary}"
+            title = f"[WARNING] {summary}"
             priority = "default"
             tags = "warning"
         else:
-            title = f"INFO: {summary}"
+            title = f"[INFO] {summary}"
             priority = "low"
             tags = "information_source"
         
-        message = f"Alert started at {timestamp}\nNode: {node}\nSeverity: {severity}\n\n{description}"
+        # Build message with optional node line
+        message_parts = [f"Alert started at {timestamp}"]
+        if node is not None:
+            message_parts.append(f"Node: {node}")
+        message_parts.append(f"Severity: {severity}")
+        message_parts.append("")
+        message_parts.append(description)
+        if blackbox_info:
+            message_parts.append(blackbox_info)
+        
+        message = "\n".join(message_parts)
     
     return {
         'title': title,
@@ -98,7 +150,7 @@ def webhook():
         if not data:
             return jsonify({'error': 'No JSON data received'}), 400
         
-        logger.info(f"Received webhook with data: {json.dumps(data)}")
+        logger.info(f"Received webhook with data: {json.dumps(data, indent=2)}")
 
         alerts = data.get('alerts', [])
         success_count = 0
