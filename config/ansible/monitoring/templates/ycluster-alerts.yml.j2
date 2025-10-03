@@ -134,7 +134,7 @@ groups:
 
   - name: ycluster-services
     rules:
-      # etcd cluster health (would need custom metrics from health API)
+      # etcd cluster health - grouped by service to show cluster-wide status
       - alert: EtcdClusterUnhealthy
         expr: count(ycluster_service_health{service="etcd"} == 0) >= 2
         for: 1m
@@ -144,7 +144,7 @@ groups:
           summary: "etcd cluster unhealthy"
           description: "etcd cluster is reporting unhealthy status on {{ $value }} nodes"
 
-      # Ceph cluster health
+      # Ceph cluster health - grouped by service to show cluster-wide status
       - alert: CephClusterUnhealthy
         expr: count(ycluster_service_health{service="ceph"} == 0) >= 2
         for: 1m
@@ -191,25 +191,25 @@ groups:
           summary: "Multiple DHCP leaders detected"
           description: "{{ $value }} nodes claim to be DHCP leader - possible split brain"
 
-      # Certificate expiry warning
+      # Certificate expiry warning - grouped by node
       - alert: CertificateExpiringWarning
-        expr: ycluster_certificate_days_until_expiry < 30 and ycluster_certificate_days_until_expiry > 7
+        expr: min(ycluster_certificate_days_until_expiry) by (node) < 30 and min(ycluster_certificate_days_until_expiry) by (node) > 7
         for: 1h
         labels:
           severity: warning
         annotations:
-          summary: "TLS certificate expiring soon"
-          description: "TLS certificate will expire in {{ $value }} days"
+          summary: "TLS certificate expiring soon on {{ $labels.node }}"
+          description: "TLS certificate on {{ $labels.node }} will expire in {{ $value }} days"
 
-      # Certificate expiry critical
+      # Certificate expiry critical - grouped by node
       - alert: CertificateExpiringCritical
-        expr: ycluster_certificate_days_until_expiry <= 7
+        expr: min(ycluster_certificate_days_until_expiry) by (node) <= 7
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "TLS certificate expiring very soon"
-          description: "TLS certificate will expire in {{ $value }} days"
+          summary: "TLS certificate expiring very soon on {{ $labels.node }}"
+          description: "TLS certificate on {{ $labels.node }} will expire in {{ $value }} days"
 
       # VIP not active anywhere
       - alert: VIPNotActive
@@ -257,7 +257,7 @@ groups:
 
       # HTTPS domain availability below 99% over 8 hours
       - alert: HTTPSDomainLowAvailability
-        expr: avg_over_time(probe_success{job="https-domain"}[8h]) < 0.99
+        expr: avg(avg_over_time(probe_success{job="https-domain"}[8h])) by (domain, instance) < 0.99
         for: 5m
         labels:
           severity: warning
@@ -269,7 +269,7 @@ groups:
 
       # HTTPS certificate expiry (from blackbox) - only alert when uplink is available
       - alert: HTTPSCertificateExpiring
-        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 30
+        expr: min((probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400) by (domain, instance) < 30
         for: 1h
         labels:
           severity: warning
@@ -278,11 +278,10 @@ groups:
         annotations:
           summary: "HTTPS certificate expiring soon"
           description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
-          blackbox_node: "{{ $labels.blackbox_node }}"
 
       # HTTPS certificate expiry critical - only alert when uplink is available
       - alert: HTTPSCertificateExpiringCritical
-        expr: (probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400 < 7
+        expr: min((probe_ssl_earliest_cert_expiry{job="https-domain"} - time()) / 86400) by (domain, instance) < 7
         for: 5m
         labels:
           severity: critical
@@ -291,12 +290,11 @@ groups:
         annotations:
           summary: "HTTPS certificate expiring very soon"
           description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
-          blackbox_node: "{{ $labels.blackbox_node }}"
 
       # HTTPS bad status codes (502, 503, 404, etc.) - only alert when uplink is available
       # This is just defense in depth, because normally probe_success would be 0 for these too
       - alert: HTTPSBadStatusCode
-        expr: probe_http_status_code{job="https-domain"} >= 400 and probe_success{job="https-domain"} != 0
+        expr: max(probe_http_status_code{job="https-domain"}) by (domain, instance) >= 400 and min(probe_success{job="https-domain"}) by (domain, instance) != 0
         for: 1m
         labels:
           severity: warning
@@ -305,11 +303,10 @@ groups:
         annotations:
           summary: "HTTPS domain {{ $labels.instance }} returning error status"
           description: "HTTPS domain {{ $labels.instance }} is returning HTTP status code {{ $value }} for more than 2 minutes"
-          blackbox_node: "{{ $labels.blackbox_node }}"
 
       # HTTPS response time - only alert when uplink is available
       - alert: HTTPSSlowResponse
-        expr: probe_duration_seconds{job="https-domain"} > 10
+        expr: max(probe_duration_seconds{job="https-domain"}) by (domain, instance) > 10
         for: 5m
         labels:
           severity: warning
@@ -318,4 +315,3 @@ groups:
         annotations:
           summary: "HTTPS domain {{ $labels.instance }} slow response"
           description: "HTTPS domain {{ $labels.instance }} response time is {{ $value }}s (>10s) for more than 5 minutes"
-          blackbox_node: "{{ $labels.blackbox_node }}"
