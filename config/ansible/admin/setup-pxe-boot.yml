@@ -88,11 +88,11 @@
           }
 
           menuentry "Ubuntu 24.04 Server Autoinstall" {
-              linux /ubuntu/vmlinuz vga=0x31A text nomodeset ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso autoinstall ds='nocloud-net;s=http://{{ ansible_host }}/autoinstall/' cloud-config-url=/dev/null
+              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso autoinstall ds='nocloud-net;s=http://{{ ansible_host }}/autoinstall/' cloud-config-url=/dev/null
               initrd /ubuntu/initrd
           }
           
           menuentry "Ubuntu 24.04 Server Manual Install" {
-              linux /ubuntu/vmlinuz vga=0x31A text nomodeset ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
               initrd /ubuntu/initrd
           }

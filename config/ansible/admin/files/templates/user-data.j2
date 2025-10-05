@@ -105,7 +105,7 @@ autoinstall:
     - curl
   late-commands:
     # configure grub command line
-    - sed -i 's/^GRUB_CMDLINE_LINUX=".*"/GRUB_CMDLINE_LINUX="text nomodeset i915.modeset=0 vga=0x031A"/' /target/etc/default/grub
+    - sed -i 's/^GRUB_CMDLINE_LINUX=".*"/GRUB_CMDLINE_LINUX="text video=HDMI-A-1:1024x768@60e"/' /target/etc/default/grub
     - curtin in-target --target=/target -- update-grub
     # configure proxy hostname resolution
     - |
