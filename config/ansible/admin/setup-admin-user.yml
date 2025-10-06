@@ -1,0 +1,207 @@
+---
+- name: Setup admin user with TOTP authentication
+  hosts: storage
+  become: yes
+  vars:
+    admin_user: admin
+    admin_uid: 2000
+    admin_home: /home/admin
+    
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - libpam-google-authenticator
+          - python3-qrcode
+          - qrencode
+        state: present
+
+    - name: Create admin user with specific UID
+      user:
+        name: "{{ admin_user }}"
+        uid: "{{ admin_uid }}"
+        shell: /bin/bash
+        home: "{{ admin_home }}"
+        create_home: yes
+        password: "{{ vault_admin_password | password_hash('sha512') }}"
+        state: present
+
+    - name: Add admin user to sudo group
+      user:
+        name: "{{ admin_user }}"
+        groups: sudo
+        append: yes
+
+    - name: Configure sudoers for admin user (NOPASSWD)
+      copy:
+        dest: /etc/sudoers.d/admin
+        content: |
+          # Admin user sudo access
+          admin ALL=(ALL) NOPASSWD:ALL
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    - name: Check if TOTP is already configured on first node
+      stat:
+        path: "{{ admin_home }}/.google_authenticator"
+      register: totp_configured_first
+      run_once: yes
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Generate TOTP secret on first storage node only
+      shell: |
+        sudo -u {{ admin_user }} google-authenticator -t -d -f -r 3 -R 30 -w 3 -q -Q UTF8
+      args:
+        creates: "{{ admin_home }}/.google_authenticator"
+      when: not totp_configured_first.stat.exists
+      run_once: yes
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Read TOTP configuration from first node
+      slurp:
+        src: "{{ admin_home }}/.google_authenticator"
+      register: totp_file_first
+      run_once: yes
+      delegate_to: "{{ groups['storage'][0] }}"
+
+    - name: Create SSH directory for admin user
+      file:
+        path: "{{ admin_home }}/.ssh"
+        state: directory
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: '0700'
+
+    - name: Copy TOTP configuration to all storage nodes
+      copy:
+        content: "{{ totp_file_first.content | b64decode }}"
+        dest: "{{ admin_home }}/.google_authenticator"
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: '0600'
+
+    - name: Configure PAM for TOTP on console login
+      lineinfile:
+        path: /etc/pam.d/login
+        line: "auth required pam_google_authenticator.so nullok"
+        insertafter: "^@include common-auth"
+        state: present
+
+    - name: Comment out common-auth include in sshd PAM
+      lineinfile:
+        path: /etc/pam.d/sshd
+        regexp: '^(@include common-auth)$'
+        line: '# \1  # Disabled - using inline auth below'
+        backrefs: yes
+      notify: restart ssh
+
+    - name: Configure PAM for SSH - replace common-auth with inline password check
+      blockinfile:
+        path: /etc/pam.d/sshd
+        marker: "# {mark} ANSIBLE MANAGED - Password and TOTP"
+        insertafter: "^# @include common-auth  # Disabled"
+        block: |
+          # Check password first, then TOTP in single keyboard-interactive session
+          auth required pam_unix.so nullok
+          auth required pam_google_authenticator.so nullok echo_verification_code
+      notify: restart ssh
+
+    - name: Remove cloud-init SSH password restriction
+      file:
+        path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+        state: absent
+      notify: restart ssh
+
+    - name: Configure SSH to allow publickey OR keyboard-interactive for admin, disable password for root
+      blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} ANSIBLE MANAGED - TOTP Configuration"
+        block: |
+          # Disable password authentication for root
+          Match User root
+              PasswordAuthentication no
+          # Allow either publickey alone OR keyboard-interactive (password+TOTP) for admin user
+          Match User admin
+              AuthenticationMethods publickey keyboard-interactive
+          Match all
+        validate: '/usr/sbin/sshd -t -f %s'
+      notify: restart ssh
+
+    - name: Enable challenge-response authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?KbdInteractiveAuthentication'
+        line: 'KbdInteractiveAuthentication yes'
+        validate: '/usr/sbin/sshd -t -f %s'
+      notify: restart ssh
+
+    - name: Enable password authentication globally
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication yes'
+        validate: '/usr/sbin/sshd -t -f %s'
+      notify: restart ssh
+
+    - name: Enable PAM for SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?UsePAM'
+        line: 'UsePAM yes'
+        validate: '/usr/sbin/sshd -t -f %s'
+      notify: restart ssh
+
+    - name: Copy ansible SSH public key for admin user
+      copy:
+        src: /opt/bootstrap-files/ansible_ssh_key.pub
+        dest: "{{ admin_home }}/.ssh/authorized_keys"
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: '0600'
+
+    - name: Install show-admin-totp utility
+      copy:
+        src: files/scripts/show-admin-totp
+        dest: /usr/local/bin/show-admin-totp
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Extract TOTP secret
+      set_fact:
+        totp_secret: "{{ (totp_file_first.content | b64decode).split('\n')[0] }}"
+      run_once: yes
+
+    - name: Display TOTP enrollment information
+      debug:
+        msg: |
+          ========================================
+          Admin User TOTP Configuration
+          ========================================
+          Username: admin
+          Password: (set from vault_admin_password)
+          TOTP Secret: {{ totp_secret }}
+          
+          To display QR code on any storage node, run:
+            show-admin-totp
+          
+          SSH Access (either method):
+            1. SSH key only: ssh -i <key> admin@<node>
+            2. Password + TOTP: ssh admin@<node>
+               - Enter password when prompted
+               - Enter TOTP code when prompted
+          
+          Console Access:
+            - Username: admin
+            - Password + TOTP code
+          
+          Root SSH Access:
+            - SSH key only (password disabled)
+          ========================================
+      run_once: yes
+
+  handlers:
+    - name: restart ssh
+      systemd:
+        name: ssh
+        state: restarted

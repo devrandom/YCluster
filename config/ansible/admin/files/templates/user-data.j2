@@ -33,7 +33,7 @@ autoinstall:
     install-server: true
     authorized-keys:
       - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1"
-    allow-pw: false
+    allow-pw: true
   {% if proxy_url %}proxy: "{{ proxy_url }}"{% endif %}
   snaps:
     - name: microceph
