@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""
+Display admin user TOTP QR code for enrollment
+"""
+import sys
+import os
+
+def get_totp_secret():
+    """Read TOTP secret from admin's google-authenticator file"""
+    ga_file = '/home/admin/.google_authenticator'
+    
+    if not os.path.exists(ga_file):
+        print("Error: Admin TOTP not configured", file=sys.stderr)
+        print(f"File not found: {ga_file}", file=sys.stderr)
+        return None
+    
+    try:
+        with open(ga_file, 'r') as f:
+            # First line is the secret
+            secret = f.readline().strip()
+            return secret
+    except Exception as e:
+        print(f"Error reading TOTP secret: {e}", file=sys.stderr)
+        return None
+
+def display_qr(secret):
+    """Display QR code for TOTP enrollment"""
+    import qrcode
+    
+    # Create otpauth URL
+    otpauth_url = f"otpauth://totp/admin@ycluster?secret={secret}&issuer=YCluster"
+    
+    # Generate QR code
+    qr = qrcode.QRCode()
+    qr.add_data(otpauth_url)
+    qr.make()
+    
+    # Print to terminal
+    qr.print_ascii(invert=False)
+    
+    print()
+    print("=" * 60)
+    print("Admin TOTP Configuration")
+    print("=" * 60)
+    print(f"Secret: {secret}")
+    print(f"URL: {otpauth_url}")
+    print()
+    print("Scan the QR code above with your authenticator app")
+    print("or manually enter the secret key.")
+    print("=" * 60)
+
+def main():
+    # Check if running as root
+    if os.geteuid() != 0:
+        print("Error: This script must be run as root", file=sys.stderr)
+        sys.exit(1)
+    
+    secret = get_totp_secret()
+    if not secret:
+        sys.exit(1)
+    
+    try:
+        display_qr(secret)
+    except ImportError:
+        print("Error: qrcode module not installed", file=sys.stderr)
+        print("Install with: pip3 install qrcode[pil]", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
