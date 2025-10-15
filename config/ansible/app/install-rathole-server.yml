@@ -33,14 +33,6 @@
         owner: root
         group: root
 
-    - name: Install rathole config management script
-      copy:
-        src: files/rathole-config.py
-        dest: /usr/local/bin/rathole-config
-        mode: '0755'
-        owner: root
-        group: root
-
     - name: Create rathole server configuration
       template:
         src: rathole-server.toml.j2
