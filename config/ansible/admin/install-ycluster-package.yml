@@ -1,6 +1,6 @@
 ---
 - name: Install YCluster Python package
-  hosts: storage
+  hosts: storage:compute
   become: yes
   vars:
     ycluster_package_dir: /opt/ycluster
@@ -12,6 +12,7 @@
           - python3-pip
           - python3-setuptools
           - python3-wheel
+          - rsync
         state: present
 
     - name: Ensure YCluster package directory exists
