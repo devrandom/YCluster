@@ -1,6 +1,6 @@
 ---
 - name: Setup base infrastructure on storage nodes s1-s3
-  hosts: core
+  hosts: storage:compute
   become: yes
   vars:
     admin_services_dir: /opt/admin-services
@@ -83,28 +83,19 @@
             #!/bin/bash
             exec ycluster dhcp update-hosts "$@"
 
+- name: Storage specific setup
+  hosts: storage
+  become: yes
+
+  tasks:
     - name: Set ubuntu user password
       user:
         name: ubuntu
         password: "{{ vault_ubuntu_password | password_hash('sha512') }}"
         update_password: always
 
-    - name: Update GRUB command line for video mode
-      lineinfile:
-        path: /etc/default/grub
-        regexp: '^GRUB_CMDLINE_LINUX='
-        line: 'GRUB_CMDLINE_LINUX="text video=HDMI-A-1:1024x768@60e"'
-        backup: yes
-      register: grub_config_updated
-      notify: update grub
-
     - name: Populate local node information in etcd
       command: /usr/local/lib/cluster/populate-local-node
       register: populate_result
       changed_when: "'Node information updated' in populate_result.stdout"
       failed_when: populate_result.rc != 0
-
-  handlers:
-    - name: update grub
-      command: update-grub
-      when: grub_config_updated.changed

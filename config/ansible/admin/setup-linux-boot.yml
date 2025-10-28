@@ -1,0 +1,19 @@
+---
+- name: Setup boot configuration for storage nodes
+  hosts: storage
+  become: yes
+
+  tasks:
+    - name: Update GRUB command line for video mode
+      lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX='
+        line: 'GRUB_CMDLINE_LINUX="text video=HDMI-A-1:1024x768@60e"'
+        backup: yes
+      register: grub_config_updated
+      notify: update grub
+
+  handlers:
+    - name: update grub
+      command: update-grub
+      when: grub_config_updated.changed
