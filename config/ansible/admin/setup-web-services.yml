@@ -1,6 +1,6 @@
 ---
-- name: Setup web services on storage nodes s1-s3
-  hosts: core
+- name: Setup web services on storage and compute nodes
+  hosts: storage:compute
   become: yes
   vars:
     admin_services_dir: /opt/admin-services
@@ -21,18 +21,18 @@
     # Admin API now uses the YCluster package directly
     # No need to link common utilities
 
+    - name: Create Flask templates directory
+      file:
+        path: "{{ admin_services_dir }}/templates"
+        state: directory
+        mode: '0755'
+
     - name: Copy user-data template
       copy:
         src: "templates/user-data.j2"
         dest: "{{ admin_services_dir }}/templates/user-data.j2"
         mode: '0644'
       notify: restart admin-api
-
-    - name: Create Flask templates directory
-      file:
-        path: "{{ admin_services_dir }}/templates"
-        state: directory
-        mode: '0755'
 
     - name: Copy status page template
       copy:
@@ -95,12 +95,6 @@
           #!/bin/bash
           exec ycluster tls fetch-certs "$@"
 
-    - name: Fetch initial TLS certificates
-      command: /usr/local/lib/cluster/fetch-tls-certs
-      register: fetch_result
-      failed_when: fetch_result.rc != 0
-      changed_when: "'Certificates updated' in fetch_result.stdout"
-
     - name: Create nginx template directory
       file:
         path: /etc/nginx/templates
@@ -148,7 +142,6 @@
         state: directory
         mode: '0755'
 
-
     - name: Copy all assets to web directory
       copy:
         src: "assets/"
@@ -166,6 +159,38 @@
         src: /opt/bootstrap-files/ansible_ssh_key.pub
         dest: /var/www/html/ansible_ssh_key.pub
         mode: '0644'
+
+    - name: Enable and start web services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      loop:
+        - admin-api
+        - nginx
+        - fetch-tls-certs.timer
+
+  handlers:
+    - name: restart admin-api
+      systemd:
+        name: admin-api
+        state: restarted
+
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+- name: Storage web services
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Fetch initial TLS certificates
+      command: /usr/local/lib/cluster/fetch-tls-certs
+      register: fetch_result
+      failed_when: fetch_result.rc != 0
+      changed_when: "'Certificates updated' in fetch_result.stdout"
 
     - name: Create systemd timer for certificate refresh
       copy:
@@ -195,24 +220,3 @@
           ExecStart=/usr/local/lib/cluster/fetch-tls-certs
           ExecStartPost=/bin/systemctl reload nginx
 
-    - name: Enable and start web services
-      systemd:
-        name: "{{ item }}"
-        enabled: yes
-        state: started
-        daemon_reload: yes
-      loop:
-        - admin-api
-        - nginx
-        - fetch-tls-certs.timer
-
-  handlers:
-    - name: restart admin-api
-      systemd:
-        name: admin-api
-        state: restarted
-
-    - name: restart nginx
-      systemd:
-        name: nginx
-        state: restarted

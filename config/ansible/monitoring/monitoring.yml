@@ -5,7 +5,7 @@
 - import_playbook: ceph.yml
 
 - name: Configure monitoring endpoints
-  hosts: core:storage
+  hosts: storage
   become: yes
   tasks:
     - name: Ensure health API metrics endpoint is accessible
