@@ -1,10 +1,15 @@
-# HTTPS - Open WebUI
+# HTTPS/HTTP - Open WebUI
 server {
+    {% if use_tls %}
     listen 443 ssl http2;
+    {% else %}
+    listen 80;
+    {% endif %}
     server_name {{ domain | default('_') }};
 
     client_max_body_size 20M;
 
+    {% if use_tls %}
     # SSL configuration
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
@@ -18,6 +23,7 @@ server {
     
     # Security headers
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
     add_header X-Frame-Options SAMEORIGIN always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;

@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Script to manage Let's Encrypt certificates using certbot with domains from etcd
+Library to manage Let's Encrypt certificates using certbot with domains from etcd
 """
 
 import json
-import sys
-import argparse
 import os
 import subprocess
 import tempfile
@@ -145,15 +143,24 @@ def discover_nginx_templates():
     
     return sites
 
-def update_nginx_configs():
-    """Update nginx configurations from templates with the primary domain from etcd"""
-    config = get_https_config()
+def update_nginx_configs(local_mode=False):
+    """Update nginx configurations from templates with the primary domain from etcd or localhost"""
+    if local_mode:
+        # Local mode: use localhost and skip etcd
+        primary_domain = "localhost"
+        use_tls = False
+        print("Using local mode - domain: localhost, TLS: disabled")
+    else:
+        # Normal mode: get config from etcd
+        config = get_https_config()
+        
+        if 'domain' not in config:
+            print("No primary domain configured - cannot generate nginx configs")
+            return False
+        
+        primary_domain = config['domain']
+        use_tls = True
     
-    if 'domain' not in config:
-        print("No primary domain configured - cannot generate nginx configs")
-        return False
-    
-    primary_domain = config['domain']
     sites = discover_nginx_templates()
     
     if not sites:
@@ -180,9 +187,9 @@ def update_nginx_configs():
                 # Production site gets primary domain
                 site_domain = primary_domain
 
-            # Render template with domain variable
+            # Render template with domain and use_tls variables
             template = Template(template_content)
-            updated_content = template.render(domain=site_domain)
+            updated_content = template.render(domain=site_domain, use_tls=use_tls)
 
             # Check if config already exists and is the same
             if nginx_config_path.exists():
@@ -703,130 +710,3 @@ def delete_certificate(domain):
     except Exception as e:
         print(f"Error deleting certificate: {e}")
         return False
-
-def main():
-    parser = argparse.ArgumentParser(description='Manage Let\'s Encrypt certificates with certbot')
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # Obtain command
-    obtain_parser = subparsers.add_parser('obtain', help='Obtain a new certificate')
-    obtain_parser.add_argument('--test', action='store_true', help='Use staging server (test certificate)')
-    obtain_parser.add_argument('-n', '--non-interactive', action='store_true', help='Run in non-interactive mode')
-    
-    # Renew command
-    renew_parser = subparsers.add_parser('renew', help='Renew existing certificates')
-    renew_parser.add_argument('-n', '--non-interactive', action='store_true', help='Run in non-interactive mode')
-    
-    # List command
-    subparsers.add_parser('list', help='List existing certificates')
-    
-    # Revoke command
-    revoke_parser = subparsers.add_parser('revoke', help='Revoke a certificate')
-    revoke_parser.add_argument('domain', help='Domain to revoke certificate for')
-    
-    # Delete command
-    delete_parser = subparsers.add_parser('delete', help='Delete a certificate')
-    delete_parser.add_argument('domain', help='Domain to delete certificate for')
-    
-    # Update nginx command
-    update_nginx_parser = subparsers.add_parser('update-nginx', help='Update nginx configuration with domain from etcd')
-
-    # Status command
-    subparsers.add_parser('status', help='Show certificate status and configuration')
-    
-    args = parser.parse_args()
-    
-    if not args.command:
-        parser.print_help()
-        return
-    
-    try:
-        if args.command == 'obtain':
-            success = obtain_certificate(test_cert=args.test, non_interactive=args.non_interactive)
-            sys.exit(0 if success else 1)
-        elif args.command == 'renew':
-            success = renew_certificates(non_interactive=args.non_interactive)
-            sys.exit(0 if success else 1)
-        elif args.command == 'list':
-            success = list_certificates()
-            sys.exit(0 if success else 1)
-        elif args.command == 'revoke':
-            success = revoke_certificate(args.domain)
-            sys.exit(0 if success else 1)
-        elif args.command == 'delete':
-            success = delete_certificate(args.domain)
-            sys.exit(0 if success else 1)
-        elif args.command == 'update-nginx':
-            success = update_nginx_configs()
-            sys.exit(0 if success else 1)
-        elif args.command == 'status':
-            config = get_https_config()
-            domains = get_all_domains(config)
-            
-            print("HTTPS Configuration:")
-            if 'domain' in config:
-                print(f"Primary domain: {config['domain']}")
-            if config.get('aliases'):
-                print(f"Aliases: {', '.join(config['aliases'])}")
-            if config.get('email'):
-                print(f"Email: {config['email']}")
-            else:
-                print("Email: Not configured (will use --register-unsafely-without-email)")
-            
-            # Check if TLS materials exist
-            try:
-                client = get_etcd_client()
-                key_value, _ = client.get('/cluster/tls/key')
-                cert_value, _ = client.get('/cluster/tls/cert')
-                
-                if key_value and cert_value:
-                    print("TLS materials: Present in etcd")
-                    
-                    # Check nginx paths
-                    nginx_key = Path('/etc/nginx/ssl/key.pem')
-                    nginx_cert = Path('/etc/nginx/ssl/cert.pem')
-                    
-                    if nginx_key.exists() and nginx_cert.exists():
-                        print("Nginx TLS files: Present")
-                    else:
-                        print("Nginx TLS files: Missing (will be created when needed)")
-                elif key_value:
-                    print("TLS private key: Present in etcd, certificate missing")
-                elif cert_value:
-                    print("TLS certificate: Present in etcd, key missing")
-                else:
-                    print("TLS materials: Not found (generate with 'tls-config generate')")
-            except Exception as e:
-                print(f"TLS materials: Error checking ({e})")
-            
-            if domains:
-                print(f"All domains: {', '.join(domains)}")
-                
-                # Check if certificates exist in etcd
-                try:
-                    client = get_etcd_client()
-                    cert_value, _ = client.get('/cluster/tls/cert')
-                    if cert_value:
-                        print("Let's Encrypt certificate: Present in etcd")
-                    
-                        # Try to get certificate expiry
-                        try:
-                            result = subprocess.run(['openssl', 'x509', '-noout', '-enddate'], 
-                                                  input=cert_value.decode(), text=True, 
-                                                  capture_output=True)
-                            if result.returncode == 0:
-                                print(f"Certificate {result.stdout.strip()}")
-                        except:
-                            pass
-                    else:
-                        print("Let's Encrypt certificate: Not found")
-                except Exception as e:
-                    print(f"Certificate check error: {e}")
-            else:
-                print("No domains configured")
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-if __name__ == '__main__':
-    main()

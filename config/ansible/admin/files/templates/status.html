@@ -613,36 +613,45 @@
                         .join(', ');
                 },
                 
+                // Define what statuses are considered "normal" (non-problematic)
+                isNormalStatus(status) {
+                    const normalStatuses = ['healthy', 'standby', 'not_applicable'];
+                    return normalStatuses.includes(status);
+                },
+                
+                // Helper to extract and format service info
+                extractServiceInfo(entries) {
+                    return entries.map(([name, info]) => ({
+                        name,
+                        status: info.status || 'unknown',
+                        details: info.details || {}
+                    }));
+                },
+                
                 getProblemServices(hostname) {
                     const health = this.hostHealth[hostname];
                     if (!health || !health.services) return [];
                     
-                    return Object.entries(health.services)
-                        .filter(([_, serviceInfo]) => {
-                            const status = serviceInfo.status || 'unknown';
-                            return status !== 'healthy' && status !== 'not_required';
-                        })
-                        .map(([name, info]) => ({
-                            name,
-                            status: info.status || 'unknown',
-                            details: info.details || {}
-                        }));
+                    return this.extractServiceInfo(
+                        Object.entries(health.services)
+                            .filter(([_, serviceInfo]) => {
+                                const status = serviceInfo.status || 'unknown';
+                                return !this.isNormalStatus(status);
+                            })
+                    );
                 },
                 
                 getNormalServices(hostname) {
                     const health = this.hostHealth[hostname];
                     if (!health || !health.services) return [];
                     
-                    return Object.entries(health.services)
-                        .filter(([_, serviceInfo]) => {
-                            const status = serviceInfo.status || 'unknown';
-                            return status === 'healthy' || status === 'not_required';
-                        })
-                        .map(([name, info]) => ({
-                            name,
-                            status: info.status || 'unknown',
-                            details: info.details || {}
-                        }));
+                    return this.extractServiceInfo(
+                        Object.entries(health.services)
+                            .filter(([_, serviceInfo]) => {
+                                const status = serviceInfo.status || 'unknown';
+                                return this.isNormalStatus(status);
+                            })
+                    );
                 },
                 
                 getClockSkewStatus(hostname) {
