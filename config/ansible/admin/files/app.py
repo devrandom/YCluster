@@ -971,6 +971,46 @@ def is_node_drained():
     except:
         return False
 
+def get_current_node_type():
+    """Determine the current node type based on hostname prefix"""
+    hostname = platform.node()
+    if hostname and len(hostname) > 0:
+        prefix = hostname[0]
+        if prefix == 's':
+            return 'storage'
+        elif prefix == 'c':
+            return 'compute'
+        elif prefix == 'm':
+            return 'macos'
+    return 'unknown'
+
+def check_service_conditionally(health_status, service_name, check_func, required_on_storage_only=True):
+    """
+    Helper function to conditionally check a service based on node type.
+    
+    Args:
+        health_status: The health status dict to update
+        service_name: Name of the service being checked
+        check_func: Function to call to check the service (should return a dict with 'status' key)
+        required_on_storage_only: If True, service is only checked on storage nodes
+    """
+    is_storage_node = get_current_node_type() == 'storage'
+    
+    if not required_on_storage_only or is_storage_node:
+        service_result = check_func()
+        health_status['services'][service_name] = service_result
+        
+        # Update overall health based on service status
+        if service_result['status'] in ['unhealthy', 'error']:
+            health_status['overall'] = 'unhealthy'
+        elif service_result['status'] == 'degraded' and health_status['overall'] == 'healthy':
+            health_status['overall'] = 'degraded'
+    else:
+        health_status['services'][service_name] = {
+            'status': 'not_applicable',
+            'details': {'reason': 'not required on compute nodes'}
+        }
+
 @app.route('/api/drain', methods=['POST'])
 def drain_node():
     """Drain this node - disable leader election"""
@@ -1246,11 +1286,21 @@ def get_comprehensive_health():
         health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
         health_status['overall'] = 'unhealthy'
     
-    # Check Ceph storage
-    ceph_health = check_ceph_status()
-    health_status['services']['ceph'] = ceph_health
-    if ceph_health['status'] not in ['healthy', 'degraded']:
-        health_status['overall'] = 'unhealthy'
+    # Determine current node type
+    current_node_type = get_current_node_type()
+    is_storage_node = current_node_type == 'storage'
+    
+    # Check Ceph storage (only on storage nodes)
+    if is_storage_node:
+        ceph_health = check_ceph_status()
+        health_status['services']['ceph'] = ceph_health
+        if ceph_health['status'] not in ['healthy', 'degraded']:
+            health_status['overall'] = 'unhealthy'
+    else:
+        health_status['services']['ceph'] = {
+            'status': 'not_applicable',
+            'details': {'reason': 'not required on compute nodes'}
+        }
     
     # Check PostgreSQL (always check, flag split-brain if running on non-leader)
     postgres_running = check_service_status('postgresql@16-main')
@@ -1335,23 +1385,24 @@ def get_comprehensive_health():
                 }
             }
     
-    # Check storage leader election
-    storage_leader_running = check_service_status('storage-leader-election')
-    health_status['services']['storage_leader_election'] = {
-        'status': 'healthy' if storage_leader_running else 'unhealthy',
-        'details': {'service_active': storage_leader_running}
-    }
-    if not storage_leader_running:
-        health_status['overall'] = 'unhealthy'
-    
-    # Check DHCP leader election
-    dhcp_leader_running = check_service_status('dhcp-leader-election')
-    health_status['services']['dhcp_leader_election'] = {
-        'status': 'healthy' if dhcp_leader_running else 'unhealthy',
-        'details': {'service_active': dhcp_leader_running}
-    }
-    if not dhcp_leader_running:
-        health_status['overall'] = 'unhealthy'
+    # Check storage-only services (storage_leader_election, dhcp_leader_election)
+    for service_name, systemd_name in [
+        ('storage_leader_election', 'storage-leader-election'),
+        ('dhcp_leader_election', 'dhcp-leader-election')
+    ]:
+        if is_storage_node:
+            service_running = check_service_status(systemd_name)
+            health_status['services'][service_name] = {
+                'status': 'healthy' if service_running else 'unhealthy',
+                'details': {'service_active': service_running}
+            }
+            if not service_running:
+                health_status['overall'] = 'unhealthy'
+        else:
+            health_status['services'][service_name] = {
+                'status': 'not_applicable',
+                'details': {'reason': 'not required on compute nodes'}
+            }
     
     # Check DHCP (only required if we are DHCP leader)
     is_dhcp_lead = is_dhcp_leader()
@@ -1501,13 +1552,19 @@ def get_comprehensive_health():
     elif clock_skew['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
-    # Check Docker daemon
-    docker_daemon = check_docker_daemon()
-    health_status['services']['docker_daemon'] = docker_daemon
-    if docker_daemon['status'] in ['unhealthy', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif docker_daemon['status'] == 'degraded' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
+    # Check Docker daemon (only on storage nodes)
+    if is_storage_node:
+        docker_daemon = check_docker_daemon()
+        health_status['services']['docker_daemon'] = docker_daemon
+        if docker_daemon['status'] in ['unhealthy', 'error']:
+            health_status['overall'] = 'unhealthy'
+        elif docker_daemon['status'] == 'degraded' and health_status['overall'] == 'healthy':
+            health_status['overall'] = 'degraded'
+    else:
+        health_status['services']['docker_daemon'] = {
+            'status': 'not_applicable',
+            'details': {'reason': 'not required on compute nodes'}
+        }
     
     # Check Docker registry
     docker_registry = check_docker_registry()
@@ -1517,21 +1574,23 @@ def get_comprehensive_health():
     elif docker_registry['status'] == 'degraded' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
-    # Check Tang service
-    tang_service = check_tang_service()
-    health_status['services']['tang'] = tang_service
-    if tang_service['status'] in ['unhealthy', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif tang_service['status'] == 'degraded' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check secrets mount
-    secrets_mount = check_secrets_mount()
-    health_status['services']['secrets_mount'] = secrets_mount
-    if secrets_mount['status'] in ['unhealthy', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif secrets_mount['status'] == 'degraded' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
+    # Check storage-only services with complex health checks (tang, secrets_mount)
+    for service_name, check_func in [
+        ('tang', check_tang_service),
+        ('secrets_mount', check_secrets_mount)
+    ]:
+        if is_storage_node:
+            service_result = check_func()
+            health_status['services'][service_name] = service_result
+            if service_result['status'] in ['unhealthy', 'error']:
+                health_status['overall'] = 'unhealthy'
+            elif service_result['status'] == 'degraded' and health_status['overall'] == 'healthy':
+                health_status['overall'] = 'degraded'
+        else:
+            health_status['services'][service_name] = {
+                'status': 'not_applicable',
+                'details': {'reason': 'not required on compute nodes'}
+            }
     
     # Check Open-WebUI
     open_webui = check_open_webui()

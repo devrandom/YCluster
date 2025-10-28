@@ -114,7 +114,7 @@
         dest: /etc/nginx/admin-api-locations.conf
 
     - name: Update nginx configuration with certbot-manager
-      command: /usr/local/bin/certbot-manager update-nginx
+      command: "/usr/local/bin/certbot-manager update-nginx{% if 'storage' not in group_names %} --local{% endif %}"
       register: nginx_update_result
       changed_when: "'Nginx configuration updated' in nginx_update_result.stdout and 'already up to date' not in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
@@ -160,7 +160,7 @@
         dest: /var/www/html/ansible_ssh_key.pub
         mode: '0644'
 
-    - name: Enable and start web services
+    - name: Enable and start common web services
       systemd:
         name: "{{ item }}"
         enabled: yes
@@ -169,7 +169,14 @@
       loop:
         - admin-api
         - nginx
-        - fetch-tls-certs.timer
+
+    - name: Enable and start TLS fetch timer (storage only)
+      systemd:
+        name: fetch-tls-certs.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      when: "'storage' in group_names"
 
   handlers:
     - name: restart admin-api
@@ -219,4 +226,3 @@
           Type=oneshot
           ExecStart=/usr/local/lib/cluster/fetch-tls-certs
           ExecStartPost=/bin/systemctl reload nginx
-

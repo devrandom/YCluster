@@ -42,6 +42,7 @@ def register_certbot_commands(subparsers):
     
     # Update nginx command
     update_parser = certbot_subparsers.add_parser('update-nginx', help='Update nginx configuration with domain from etcd')
+    update_parser.add_argument('--local', action='store_true', help='Use local mode (localhost domain, no TLS, no etcd)')
     update_parser.set_defaults(func=certbot_update_nginx)
     
     # Status command
@@ -81,7 +82,7 @@ def certbot_delete(args):
 
 def certbot_update_nginx(args):
     """Update nginx configuration"""
-    success = certbot_manager.update_nginx_configs()
+    success = certbot_manager.update_nginx_configs(local_mode=getattr(args, 'local', False))
     sys.exit(0 if success else 1)
 
 
