@@ -138,6 +138,8 @@
         mode: '0644'
         variable_start_string: '(('
         variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
       vars:
         port: "{{ local_port }}"
 
