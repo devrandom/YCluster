@@ -1,0 +1,8 @@
+# macOS installer apps (12-15GB each)
+Install macOS*.app
+
+# Bootstrap packages
+*.pkg
+
+# macOS artifacts
+.DS_Store

@@ -1,0 +1,70 @@
+#!/bin/bash
+# Bootstrap postinstall script - runs after macOS installation
+# Configured by create-bootstrap.sh
+
+set -euo pipefail
+
+LOG="/var/log/ycluster-bootstrap.log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "=== YCluster Bootstrap $(date) ==="
+
+# These variables are replaced by create-bootstrap.sh
+ADMIN_USER="__ADMIN_USER__"
+ADMIN_PASS="__ADMIN_PASS__"
+SSH_KEY="__SSH_KEY__"
+HOSTNAME="__HOSTNAME__"
+
+# Create admin user
+echo "Creating admin user: $ADMIN_USER"
+
+if ! dscl . -read /Users/"$ADMIN_USER" &>/dev/null; then
+    sysadminctl -addUser "$ADMIN_USER" \
+        -password "$ADMIN_PASS" \
+        -admin \
+        -shell /bin/bash
+    echo "User $ADMIN_USER created"
+else
+    echo "User $ADMIN_USER already exists"
+fi
+
+# Set up SSH key
+if [[ -n "$SSH_KEY" ]]; then
+    USER_HOME=$(dscl . -read /Users/"$ADMIN_USER" NFSHomeDirectory | awk '{print $2}')
+    SSH_DIR="$USER_HOME/.ssh"
+
+    mkdir -p "$SSH_DIR"
+    echo "$SSH_KEY" >> "$SSH_DIR/authorized_keys"
+
+    chown -R "$ADMIN_USER":staff "$SSH_DIR"
+    chmod 700 "$SSH_DIR"
+    chmod 600 "$SSH_DIR/authorized_keys"
+
+    echo "SSH key installed for $ADMIN_USER"
+fi
+
+# Set hostname
+if [[ -n "$HOSTNAME" ]]; then
+    echo "Setting hostname to: $HOSTNAME"
+    scutil --set ComputerName "$HOSTNAME"
+    scutil --set LocalHostName "$HOSTNAME"
+    scutil --set HostName "$HOSTNAME"
+fi
+
+# Enable SSH (Remote Login)
+echo "Enabling Remote Login (SSH)..."
+systemsetup -setremotelogin on
+
+## Disable password authentication if SSH key was provided
+#if [[ -n "$SSH_KEY" ]]; then
+#    echo "Disabling SSH password authentication..."
+#    SSHD_CONFIG="/etc/ssh/sshd_config"
+#
+#    cp "$SSHD_CONFIG" "$SSHD_CONFIG.bak" 2>/dev/null || true
+#
+#    sed -i '' 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CONFIG"
+#    sed -i '' 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$SSHD_CONFIG"
+#    sed -i '' 's/^#*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' "$SSHD_CONFIG"
+#fi
+
+echo "=== Bootstrap complete ==="
