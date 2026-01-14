@@ -1238,9 +1238,6 @@ def serve_macos_bootstrap():
     with open(ssh_key_path, 'r') as f:
         ssh_key_content = f.read().strip()
 
-    # Admin password (should be changed after bootstrap)
-    admin_password = 'changeme123'
-
     # Read and render template
     with open(MACOS_BOOTSTRAP_TEMPLATE, 'r') as f:
         template_content = f.read()
@@ -1248,8 +1245,7 @@ def serve_macos_bootstrap():
     template = Template(template_content)
     rendered_content = template.render(
         api_server=api_server,
-        ssh_key_content=ssh_key_content,
-        admin_password=admin_password
+        ssh_key_content=ssh_key_content
     )
 
     return rendered_content, 200, {'Content-Type': 'text/plain'}

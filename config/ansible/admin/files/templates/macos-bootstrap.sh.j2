@@ -35,19 +35,26 @@ echo "Hostname: $HOSTNAME"
 echo "IP: $IP_ADDRESS"
 
 ADMIN_USER="admin"
-ADMIN_PASSWORD="{{ admin_password }}"
 
 # Create admin user if not exists
 if ! dscl . -read /Users/"$ADMIN_USER" &>/dev/null; then
     echo "Creating admin user: $ADMIN_USER"
+    # Create with temporary password, then disable it
     sysadminctl -addUser "$ADMIN_USER" \
-        -password "$ADMIN_PASSWORD" \
+        -password "$(uuidgen)" \
         -admin \
         -shell /bin/bash
-    echo "User $ADMIN_USER created"
+    # Disable password (SSH key only)
+    dscl . -create /Users/"$ADMIN_USER" Password '*'
+    echo "User $ADMIN_USER created (password disabled)"
 else
     echo "User $ADMIN_USER already exists"
 fi
+
+# Configure passwordless sudo
+echo "Configuring passwordless sudo for $ADMIN_USER..."
+echo "$ADMIN_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"$ADMIN_USER"
+chmod 440 /etc/sudoers.d/"$ADMIN_USER"
 
 # Set up SSH key
 USER_HOME=$(dscl . -read /Users/"$ADMIN_USER" NFSHomeDirectory | awk '{print $2}')
@@ -92,3 +99,6 @@ pmset -a autopoweroff 0
 
 echo "=== Bootstrap complete ==="
 echo "SSH should now be available at $IP_ADDRESS"
+echo ""
+echo "Admin users:"
+dscl . -read /Groups/admin GroupMembership | sed 's/GroupMembership: /  /'
