@@ -53,6 +53,7 @@ from jinja2 import Template
 from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
+MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'macos-bootstrap.sh.j2')
 
 app = Flask(__name__)
 
@@ -132,17 +133,21 @@ def determine_ip_from_hostname(hostname):
         return f"10.0.0.{base_ip}"
 
 def determine_type_from_mac(mac_address):
-    """Determine machine type based on MAC address prefix"""
+    """Determine machine type based on MAC address prefix.
+
+    Used for PXE boot allocation. macOS nodes use explicit type parameter
+    via /macos/bootstrap endpoint.
+    """
     if not mac_address:
         return 'compute'
-    
+
     # Normalize MAC address to lowercase and remove separators
     normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
-    
+
     # Check for storage prefix (58:47:ca becomes 5847ca)
     if normalized_mac.startswith('5847ca'):
         return 'storage'
-    
+
     # Default to compute
     return 'compute'
 
@@ -181,11 +186,17 @@ def get_next_hostname(client, node_type):
     
     return f"{prefix}{next_num}"
 
-def get_or_create_allocation(mac_address):
-    """Get existing allocation or create new one for non-normalized MAC address"""
+def get_or_create_allocation(mac_address, node_type=None):
+    """Get existing allocation or create new one for non-normalized MAC address.
+
+    Args:
+        mac_address: MAC address (any format)
+        node_type: Optional type override ('storage', 'compute', 'macos').
+                   If not provided, type is detected from MAC address.
+    """
     client = get_etcd_client()
     normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
-    
+
     # Check if allocation already exists
     existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
     if existing_data[0]:
@@ -196,16 +207,16 @@ def get_or_create_allocation(mac_address):
             data['amt_ip'] = amt_ip_address
         return data
 
-    
+
     # Create new allocation
     with allocation_lock:
         # Double-check after acquiring lock
         existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
         if existing_data[0]:
             return json.loads(existing_data[0].decode())
-        
+
         # Determine machine type and allocate hostname
-        machine_type = determine_type_from_mac(mac_address)
+        machine_type = node_type or determine_type_from_mac(mac_address)
         hostname = get_next_hostname(client, machine_type)
         ip_address = determine_ip_from_hostname(hostname)
         amt_ip_address = determine_ip_from_hostname(hostname + "a")
@@ -237,15 +248,24 @@ def get_or_create_allocation(mac_address):
 
 @app.route('/api/allocate')
 def allocate_hostname():
-    """Allocate a new hostname based on MAC address"""
+    """Allocate a new hostname based on MAC address.
+
+    Query parameters:
+        mac: MAC address (required)
+        type: Optional type override ('storage', 'compute', 'macos')
+    """
     mac_address = request.args.get('mac')
-    
+    node_type = request.args.get('type')
+
     if not mac_address:
         return jsonify({'error': 'MAC address is required'}), 400
-    
+
+    if node_type and node_type not in ('storage', 'compute', 'macos'):
+        return jsonify({'error': f'Invalid type: {node_type}'}), 400
+
     try:
-        allocation = get_or_create_allocation(mac_address)
-        
+        allocation = get_or_create_allocation(mac_address, node_type=node_type)
+
         return jsonify({
             'hostname': allocation['hostname'],
             'type': allocation['type'],
@@ -1204,6 +1224,35 @@ def serve_user_data():
     )
     
     return rendered_content, 200, {'Content-Type': 'text/plain'}
+
+
+@app.route('/macos/bootstrap')
+def serve_macos_bootstrap():
+    """Serve macOS bootstrap script that fetches its own allocation"""
+    # Determine the API server URL from the request
+    api_server = f"http://{request.host}"
+
+    # Get SSH public key content
+    ssh_key_path = '/opt/bootstrap-files/ansible_ssh_key.pub'
+    with open(ssh_key_path, 'r') as f:
+        ssh_key_content = f.read().strip()
+
+    # Admin password (should be changed after bootstrap)
+    admin_password = 'changeme123'
+
+    # Read and render template
+    with open(MACOS_BOOTSTRAP_TEMPLATE, 'r') as f:
+        template_content = f.read()
+
+    template = Template(template_content)
+    rendered_content = template.render(
+        api_server=api_server,
+        ssh_key_content=ssh_key_content,
+        admin_password=admin_password
+    )
+
+    return rendered_content, 200, {'Content-Type': 'text/plain'}
+
 
 @app.route('/metrics')
 def prometheus_metrics():

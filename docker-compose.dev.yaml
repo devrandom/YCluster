@@ -1,0 +1,52 @@
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: etcd-dev
+    command:
+      - /usr/local/bin/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    ports:
+      - "2379:2379"
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  etcd-init:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: etcd-init
+    depends_on:
+      etcd:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      - ETCDCTL_ENDPOINTS=http://etcd:2379
+    entrypoint: [""]
+    command:
+      - etcdctl
+      - put
+      - /cluster/dhcp/leases/docker-bridge
+      - '{"ip": "172.18.0.1", "mac": "f4:d4:88:de:v0:01"}'
+
+  admin-api:
+    build:
+      context: .
+      dockerfile: dev/admin-api/Dockerfile
+    container_name: admin-api-dev
+    ports:
+      - "12723:12723"
+    environment:
+      - ETCD_HOST=etcd:2379
+    depends_on:
+      etcd:
+        condition: service_healthy
+    volumes:
+      # Mount source for live reload during development
+      - ./config/ansible/admin/files/app.py:/app/app.py:ro
+      - ./config/ansible/admin/files/ycluster:/app/ycluster:ro
+      - ./config/ansible/admin/files/templates:/app/templates:ro
+      - ./config/ansible/admin/static:/app/static:ro
+      # Bootstrap files
+      - ./data/ansible_ssh_key.pub:/opt/bootstrap-files/ansible_ssh_key.pub:ro

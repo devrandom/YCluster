@@ -1,0 +1,94 @@
+#!/bin/bash
+# YCluster macOS Bootstrap Script
+
+set -euo pipefail
+
+LOG="/var/log/ycluster-bootstrap.log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "=== YCluster macOS Bootstrap $(date) ==="
+
+# API server that served this script
+API_SERVER="{{ api_server }}"
+
+# Get MAC address of primary interface (en0)
+MAC_ADDRESS=$(/sbin/ifconfig en0 | /usr/bin/awk '/ether/{print $2}')
+if [[ -z "$MAC_ADDRESS" ]]; then
+    echo "ERROR: Could not determine MAC address for en0"
+    exit 1
+fi
+echo "MAC Address: $MAC_ADDRESS"
+
+# Call allocation API to get hostname and IP
+echo "Fetching allocation from $API_SERVER..."
+ALLOCATION=$(/usr/bin/curl -sf "$API_SERVER/api/allocate?mac=$MAC_ADDRESS&type=macos")
+if [[ -z "$ALLOCATION" ]]; then
+    echo "ERROR: Failed to get allocation from API"
+    exit 1
+fi
+
+# Parse JSON response
+HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
+IP_ADDRESS=$(echo "$ALLOCATION" | jq -r '.ip')
+
+echo "Hostname: $HOSTNAME"
+echo "IP: $IP_ADDRESS"
+
+ADMIN_USER="admin"
+ADMIN_PASSWORD="{{ admin_password }}"
+
+# Create admin user if not exists
+if ! dscl . -read /Users/"$ADMIN_USER" &>/dev/null; then
+    echo "Creating admin user: $ADMIN_USER"
+    sysadminctl -addUser "$ADMIN_USER" \
+        -password "$ADMIN_PASSWORD" \
+        -admin \
+        -shell /bin/bash
+    echo "User $ADMIN_USER created"
+else
+    echo "User $ADMIN_USER already exists"
+fi
+
+# Set up SSH key
+USER_HOME=$(dscl . -read /Users/"$ADMIN_USER" NFSHomeDirectory | awk '{print $2}')
+SSH_DIR="$USER_HOME/.ssh"
+
+mkdir -p "$SSH_DIR"
+cat >> "$SSH_DIR/authorized_keys" <<'SSHKEY'
+{{ ssh_key_content }}
+SSHKEY
+
+chown -R "$ADMIN_USER":staff "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+chmod 600 "$SSH_DIR/authorized_keys"
+echo "SSH key installed for $ADMIN_USER"
+
+# Set hostname
+echo "Setting hostname to: $HOSTNAME"
+scutil --set ComputerName "$HOSTNAME"
+scutil --set LocalHostName "$HOSTNAME"
+scutil --set HostName "$HOSTNAME"
+
+# Enable SSH (Remote Login)
+echo "Enabling Remote Login (SSH)..."
+systemsetup -setremotelogin on
+
+# Disable password authentication (key-only)
+echo "Disabling SSH password authentication..."
+/usr/bin/sed -i '' 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+/usr/bin/sed -i '' 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+launchctl stop com.openssh.sshd 2>/dev/null || true
+launchctl start com.openssh.sshd 2>/dev/null || true
+
+# Disable sleep and power management
+echo "Disabling sleep..."
+pmset -a sleep 0
+pmset -a disksleep 0
+pmset -a displaysleep 0
+pmset -a hibernatemode 0
+pmset -a powernap 0
+pmset -a standby 0
+pmset -a autopoweroff 0
+
+echo "=== Bootstrap complete ==="
+echo "SSH should now be available at $IP_ADDRESS"
