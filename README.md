@@ -179,3 +179,42 @@ Host *.xc
   User root
   StrictHostKeyChecking no
 ```
+
+## Development
+
+### Setup
+
+Install dependencies with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync
+```
+
+Start the dev etcd container:
+
+```bash
+docker compose -f docker-compose.dev.yaml up -d etcd
+```
+
+### Running Ansible
+
+Run ansible from the `dev/ansible/` directory:
+
+```bash
+cd dev/ansible
+../../.venv/bin/ansible-inventory --list
+../../.venv/bin/ansible-playbook ../../config/ansible/site.yml --check
+```
+
+The dev ansible.cfg uses `localhost:2379` for etcd inventory.
+
+### Dev Services
+
+Start the full dev stack (etcd + admin API):
+
+```bash
+docker compose -f docker-compose.dev.yaml up -d
+```
+
+- **etcd**: localhost:2379
+- **Admin API**: localhost:12723
