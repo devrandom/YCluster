@@ -1,10 +1,14 @@
 __pycache__
 .idea
 .aider*
+.venv/
+venv/
+.vault_pass
 data/*.iso
 data/*_key
 data/*_key.pub
 data/SHA256SUMS
 data/dnsmasq.leases
-**/vault*.yml
 **/*.egg-info
+**/vault*.yml
+/config/ansible/vault/
