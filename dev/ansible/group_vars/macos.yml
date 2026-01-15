@@ -1,0 +1,2 @@
+dns_server_override: "8.8.8.8"
+ntp_server_override: "time.apple.com"

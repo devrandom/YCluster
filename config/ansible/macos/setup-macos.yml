@@ -3,8 +3,8 @@
   hosts: macos
   become: yes
   vars:
-    ntp_server: "10.0.0.254"
-    dns_server: "10.0.0.254"
+    ntp_server: "{{ ntp_server_override | default('10.0.0.254') }}"
+    dns_server: "{{ dns_server_override | default('10.0.0.254') }}"
     health_service_dir: "/usr/local/ycluster"
   
   tasks:
@@ -125,52 +125,52 @@
       become: yes
       notify: restart ollama service
     
-    - name: Check current NTP server
-      command: systemsetup -getnetworktimeserver
-      register: current_ntp_server
-      become: yes
-      changed_when: false
-      
-    - name: Configure NTP server
-      command: systemsetup -setnetworktimeserver {{ ntp_server }}
-      become: yes
-      when: ntp_server not in current_ntp_server.stdout
-      
-    - name: Check if network time is enabled
-      command: systemsetup -getusingnetworktime
-      register: network_time_status
-      become: yes
-      changed_when: false
-      
-    - name: Enable automatic time setting
-      command: systemsetup -setusingnetworktime on
-      become: yes
-      when: "'Network Time: On' not in network_time_status.stdout"
-      
-    - name: Force NTP sync
-      command: sntp -sS {{ ntp_server }}
-      become: yes
-      ignore_errors: yes
-      changed_when: false
-      
     - name: Check current DNS servers for Ethernet
       command: networksetup -getdnsservers "Ethernet"
       register: current_dns_servers
       become: yes
       ignore_errors: yes
       changed_when: false
-      
+
     - name: Configure DNS server for Ethernet
       command: networksetup -setdnsservers "Ethernet" {{ dns_server }}
       become: yes
       ignore_errors: yes
       when: current_dns_servers.rc == 0 and dns_server not in current_dns_servers.stdout
-      
+
+    - name: Check current NTP server
+      command: systemsetup -getnetworktimeserver
+      register: current_ntp_server
+      become: yes
+      changed_when: false
+
+    - name: Configure NTP server
+      command: systemsetup -setnetworktimeserver {{ ntp_server }}
+      become: yes
+      when: ntp_server not in current_ntp_server.stdout
+
+    - name: Check if network time is enabled
+      command: systemsetup -getusingnetworktime
+      register: network_time_status
+      become: yes
+      changed_when: false
+
+    - name: Enable automatic time setting
+      command: systemsetup -setusingnetworktime on
+      become: yes
+      when: "'Network Time: On' not in network_time_status.stdout"
+
+    - name: Force NTP sync
+      command: sntp -sS {{ ntp_server }}
+      become: yes
+      ignore_errors: yes
+      changed_when: false
+
     - name: Verify NTP configuration
       command: systemsetup -getnetworktimeserver
       register: ntp_config
       changed_when: false
-      
+
     - name: Display NTP configuration
       debug:
         msg: "NTP server configured: {{ ntp_config.stdout }}"
