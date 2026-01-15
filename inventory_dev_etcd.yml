@@ -1,0 +1,8 @@
+plugin: etcd_nodes
+etcd_hosts:
+  - localhost:2379
+prefix: /cluster/nodes
+compose:
+  cluster_interface: "enp2s0f0np0"
+  uplink_interface: "enp87s0"
+  amt_interface: "enp89s0"
