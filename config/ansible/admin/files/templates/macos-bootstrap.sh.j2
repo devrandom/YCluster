@@ -87,6 +87,26 @@ echo "Disabling SSH password authentication..."
 launchctl stop com.openssh.sshd 2>/dev/null || true
 launchctl start com.openssh.sshd 2>/dev/null || true
 
+# Install Xcode Command Line Tools (required for Python/Ansible)
+if ! xcode-select -p &>/dev/null; then
+    echo "Installing Xcode Command Line Tools..."
+    # This marker file makes softwareupdate list the CLT
+    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    # Extract the label (e.g., "Command Line Tools for Xcode 26.2-26.2")
+    # Must use Label line, not Title, as softwareupdate -i needs the exact label
+    PROD=$(softwareupdate -l 2>&1 | grep "^\* Label:" | grep -o "Command Line Tools.*" | head -1)
+    if [[ -n "$PROD" ]]; then
+        echo "Installing: $PROD"
+        softwareupdate -i "$PROD" --verbose || echo "Warning: softwareupdate failed, may need manual install"
+    else
+        echo "Warning: Command Line Tools not found in software updates"
+        echo "Try running 'xcode-select --install' manually"
+    fi
+    rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+else
+    echo "Xcode Command Line Tools already installed at $(xcode-select -p)"
+fi
+
 # Disable sleep and power management
 echo "Disabling sleep..."
 pmset -a sleep 0
