@@ -12,3 +12,4 @@ data/dnsmasq.leases
 **/*.egg-info
 **/vault*.yml
 /config/ansible/vault/
+dev/ansible/host_vars/

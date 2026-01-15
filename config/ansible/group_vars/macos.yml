@@ -1,0 +1,2 @@
+ansible_user: admin
+ansible_become_flags: "-H -i"
