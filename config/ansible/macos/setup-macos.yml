@@ -70,7 +70,25 @@
       become_user: dev
       environment:
         PATH: "/opt/homebrew/bin:{{ ansible_facts['env']['PATH'] }}"
-    
+
+    - name: Install llama.cpp via Homebrew
+      homebrew:
+        name: llama.cpp
+        state: present
+      become: yes
+      become_user: dev
+      environment:
+        PATH: "/opt/homebrew/bin:{{ ansible_facts['env']['PATH'] }}"
+
+    - name: Create models directory for dev user
+      file:
+        path: /Users/dev/models
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+      become: yes
+
     - name: Create Homebrew log directory
       file:
         path: /opt/homebrew/var/log
@@ -123,7 +141,50 @@
         mode: '0644'
       become: yes
       notify: restart ollama service
-    
+
+    - name: Create llama-server LaunchDaemon plist
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          	<key>KeepAlive</key>
+          	<true/>
+          	<key>Label</key>
+          	<string>com.ycluster.llama-server</string>
+          	<key>ProgramArguments</key>
+          	<array>
+          		<string>/opt/homebrew/bin/llama-server</string>
+          		<string>--models-dir</string>
+          		<string>/Users/dev/models</string>
+          		<string>--host</string>
+          		<string>0.0.0.0</string>
+          	</array>
+          	<key>UserName</key>
+          	<string>dev</string>
+          	<key>GroupName</key>
+          	<string>admin</string>
+          	<key>EnvironmentVariables</key>
+          	<dict>
+          		<key>HOME</key>
+          		<string>/Users/dev</string>
+          	</dict>
+          	<key>RunAtLoad</key>
+          	<true/>
+          	<key>StandardErrorPath</key>
+          	<string>/opt/homebrew/var/log/llama-server.log</string>
+          	<key>StandardOutPath</key>
+          	<string>/opt/homebrew/var/log/llama-server.log</string>
+          	<key>WorkingDirectory</key>
+          	<string>/Users/dev</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.ycluster.llama-server.plist
+        mode: '0644'
+      become: yes
+      notify: restart llama-server service
+
     - name: Check current DNS servers for Ethernet
       command: networksetup -getdnsservers "Ethernet"
       register: current_dns_servers
@@ -258,4 +319,11 @@
         launchctl stop com.ycluster.ollama || true
         launchctl unload /Library/LaunchDaemons/com.ycluster.ollama.plist || true
         launchctl load /Library/LaunchDaemons/com.ycluster.ollama.plist
+      become: yes
+
+    - name: restart llama-server service
+      shell: |
+        launchctl stop com.ycluster.llama-server || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.llama-server.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.llama-server.plist
       become: yes
