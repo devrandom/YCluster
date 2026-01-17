@@ -1,0 +1,15 @@
+#!/bin/bash
+# Custom Ansible fact for GPU detection
+# Outputs JSON for ansible_local.gpu
+
+# GPU PCI classes: 0300=VGA, 0302=3D, 0380=Display controller
+has_amd_gpu=false
+if lspci -n 2>/dev/null | grep -qE "^[0-9a-f:.]+\s+(0300|0302|0380):\s+1002:"; then
+    has_amd_gpu=true
+fi
+
+cat <<EOF
+{
+    "has_amd_gpu": $has_amd_gpu
+}
+EOF
