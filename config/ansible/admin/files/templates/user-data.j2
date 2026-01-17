@@ -5,6 +5,9 @@
 # Uplink interface: {{ uplink_interface }}
 autoinstall:
   version: 1
+  early-commands:
+    # Sync time from HTTP server (apt rejects future-dated release files)
+    - date -s "$(curl -sI http://10.0.0.254/ | grep -i '^date:' | cut -d' ' -f2-)" || true
   identity:
     hostname: {{ hostname }}
     username: ubuntu
@@ -18,23 +21,37 @@ autoinstall:
         dhcp4: false
         addresses: [{{ ip_address }}/24]
         optional: true
-        amt:
-          match:
-            name: "{{ amt_interface }}"
-          optional: true
-          addresses:
+{% if amt_interface %}
+      amt:
+        match:
+          name: "{{ amt_interface }}"
+        optional: true
+        addresses:
           - "{{ amt_ip_address }}/24"
-        uplink:
-          match:
-            name: "{{ uplink_interface }}"
-          optional: true
-          dhcp4: true
+{% endif %}
+{% if uplink_interface %}
+      uplink:
+        match:
+          name: "{{ uplink_interface }}"
+        optional: true
+        dhcp4: true
+{% endif %}
   ssh:
     install-server: true
     authorized-keys:
-      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1"
+      - "{{ ssh_key_content | default('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1') }}"
     allow-pw: true
-  {% if proxy_url %}proxy: "{{ proxy_url }}"{% endif %}
+{% if proxy_url %}
+  proxy: "{{ proxy_url }}"
+  apt:
+    preserve_sources_list: false
+    primary:
+      - arches: [amd64]
+        uri: http://archive.ubuntu.com/ubuntu
+    proxy: "{{ proxy_url }}"
+{% endif %}
+  kernel:
+    package: linux-generic
   snaps:
     - name: microceph
   storage:
@@ -104,33 +121,35 @@ autoinstall:
     - snapd
     - curl
   late-commands:
-    # configure grub command line
+    # Install HWE kernel for newer hardware (RTL8125, etc)
+    - curtin in-target -- apt-get update
+    - curtin in-target -- apt-get install -y linux-generic-hwe-24.04
+    # Configure grub command line
     - sed -i 's/^GRUB_CMDLINE_LINUX=".*"/GRUB_CMDLINE_LINUX="text video=HDMI-A-1:1024x768@60e"/' /target/etc/default/grub
-    - curtin in-target --target=/target -- update-grub
-    # configure proxy hostname resolution
+    - curtin in-target -- update-grub
+    # Configure proxy hostname resolution
     - |
       cat >> /target/etc/hosts << 'EOF'
       10.0.0.1 proxy.xc
       10.0.0.254 proxy.xc
       EOF
-    # configure proxy environment variables
+    # Configure proxy environment variables
     - |
       cat >> /target/etc/environment << 'EOF'
       http_proxy=http://proxy.xc:3128
       https_proxy=http://proxy.xc:3128
       no_proxy=localhost,127.0.0.1,10.0.0.0/24,10.10.10.0/24
       EOF
-    # configure apt proxy
+    # Configure apt proxy
     - |
       cat > /target/etc/apt/apt.conf.d/01proxy << 'EOF'
       Acquire::http::Proxy "http://proxy.xc:3128";
       Acquire::https::Proxy "http://proxy.xc:3128";
       EOF
-    # add ansible key to root authorized_keys
+    # Add ansible key to root authorized_keys
     - |
       mkdir -p /target/root/.ssh
-      {% if ssh_key_content %}echo "{{ ssh_key_content }}" >> /target/root/.ssh/authorized_keys{% endif %}
-      echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1" >> /target/root/.ssh/authorized_keys
+      echo "{{ ssh_key_content | default('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1') }}" >> /target/root/.ssh/authorized_keys
       chmod 700 /target/root/.ssh
       chmod 600 /target/root/.ssh/authorized_keys
       chown -R root:root /target/root/.ssh
