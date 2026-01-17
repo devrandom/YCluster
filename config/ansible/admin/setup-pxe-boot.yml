@@ -51,10 +51,11 @@
         - /var/lib/tftpboot/ubuntu/vmlinuz
         - /var/lib/tftpboot/ubuntu/initrd
 
-    - name: Extract netboot files from ISO
+    - name: Extract HWE netboot files from ISO
       shell: |
-        isoinfo -R -x /casper/vmlinuz -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/vmlinuz
-        isoinfo -R -x /casper/initrd -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/initrd
+        xorriso -osirrox on -indev /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso \
+          -extract /casper/hwe-vmlinuz /var/lib/tftpboot/ubuntu/vmlinuz \
+          -extract /casper/hwe-initrd /var/lib/tftpboot/ubuntu/initrd
       when: netboot_files.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
 
     - name: Check if EFI files already exist
@@ -79,20 +80,19 @@
         dest: /var/lib/tftpboot/grub/grub.cfg
         content: |
           set timeout=30
-          set default=0
+          set default=autoinstall
 
-          menuentry "Boot from First Hard Disk (EFI)" {
-              # set root=(hd0,1)
+          menuentry "Boot from First Hard Disk (EFI)" --id local {
               search --set=root --file /efi/ubuntu/grub.cfg
               configfile /efi/ubuntu/grub.cfg
           }
 
-          menuentry "Ubuntu 24.04 Server Autoinstall" {
-              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.3-live-server-amd64.iso autoinstall ds='nocloud-net;s=http://{{ ansible_host }}/autoinstall/' cloud-config-url=/dev/null
-              initrd /ubuntu/initrd
+          menuentry "Ubuntu 24.04 Server Autoinstall" --id autoinstall {
+              linux (http,10.0.0.254)/ubuntu/vmlinuz ip=dhcp url=http://10.0.0.254/ubuntu/ubuntu-24.04.3-live-server-amd64.iso autoinstall cloud-config-url=http://10.0.0.254/autoinstall/user-data
+              initrd (http,10.0.0.254)/ubuntu/initrd
           }
-          
-          menuentry "Ubuntu 24.04 Server Manual Install" {
-              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
-              initrd /ubuntu/initrd
+
+          menuentry "Ubuntu 24.04 Server Manual Install" --id manual {
+              linux (http,10.0.0.254)/ubuntu/vmlinuz ip=dhcp url=http://10.0.0.254/ubuntu/ubuntu-24.04.3-live-server-amd64.iso cloud-init=disabled
+              initrd (http,10.0.0.254)/ubuntu/initrd
           }
