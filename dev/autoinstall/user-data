@@ -1,0 +1,39 @@
+#cloud-config
+autoinstall:
+  version: 1
+  proxy: http://10.0.0.254:3128
+  early-commands:
+    - date -s "$(curl -sI http://10.0.0.254:9080/ | grep -i '^date:' | cut -d' ' -f2-)" || true
+    - mkdir -p /root/.ssh
+    - echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1" > /root/.ssh/authorized_keys
+    - systemctl start ssh
+  identity:
+    hostname: test-node
+    username: ubuntu
+    password: '$6$rounds=4096$xyz$PLACEHOLDER'
+  ssh:
+    install-server: true
+    authorized-keys:
+      - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE1pS94ylBxptsLlfhOcVs6qwicSZhFFqee+3xkN98cv dev@desk1"
+    allow-pw: true
+  apt:
+    preserve_sources_list: false
+    primary:
+      - arches: [amd64]
+        uri: http://archive.ubuntu.com/ubuntu
+    proxy: http://10.0.0.254:3128
+  kernel:
+    package: linux-generic
+  network:
+    version: 2
+    ethernets:
+      all-en:
+        match:
+          name: "en*"
+        dhcp4: true
+  storage:
+    layout:
+      name: lvm
+  late-commands:
+    - curtin in-target -- apt-get update
+    - curtin in-target -- apt-get install -y linux-generic-hwe-24.04

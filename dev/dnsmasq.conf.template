@@ -1,0 +1,32 @@
+# YCluster dev dnsmasq configuration
+# Generated from dnsmasq.conf.template - do not edit directly
+
+# Interface binding - change to your dedicated cluster interface
+interface=${DEV_INTERFACE}
+bind-interfaces
+listen-address=10.0.0.254
+
+# DHCP
+dhcp-range=10.0.0.200,10.0.0.249,12h
+dhcp-authoritative
+dhcp-option=42,10.0.0.254
+dhcp-option=66,10.0.0.254
+dhcp-leasefile=${PROJECT_ROOT}/dev/dnsmasq.leases
+
+# PXE boot (UEFI) - boot GRUB directly using UEFI network stack
+dhcp-match=set:efibc,option:client-arch,7
+dhcp-boot=tag:efibc,EFI/BOOT/grubx64.efi,10.0.0.254,10.0.0.254
+
+# TFTP
+enable-tftp
+tftp-root=${PROJECT_ROOT}/dev/tftpboot
+
+# DNS
+local=/xc/
+domain=xc
+domain-needed
+
+# Logging
+log-dhcp
+log-queries
+log-facility=-

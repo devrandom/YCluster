@@ -32,7 +32,7 @@ services:
 
   admin-api:
     build:
-      context: .
+      context: ..
       dockerfile: dev/admin-api/Dockerfile
     container_name: admin-api-dev
     ports:
@@ -44,9 +44,27 @@ services:
         condition: service_healthy
     volumes:
       # Mount source for live reload during development
-      - ./config/ansible/admin/files/app.py:/app/app.py:ro
-      - ./config/ansible/admin/files/ycluster:/app/ycluster:ro
-      - ./config/ansible/admin/files/templates:/app/templates:ro
-      - ./config/ansible/admin/static:/app/static:ro
+      - ../config/ansible/admin/files/app.py:/app/app.py:ro
+      - ../config/ansible/admin/files/ycluster:/app/ycluster:ro
+      - ../config/ansible/admin/files/templates:/app/templates:ro
+      - ../config/ansible/admin/static:/app/static:ro
       # Bootstrap files
-      - ./data/ansible_ssh_key.pub:/opt/bootstrap-files/ansible_ssh_key.pub:ro
+      - ../data/ansible_ssh_key.pub:/opt/bootstrap-files/ansible_ssh_key.pub:ro
+
+  http:
+    image: nginx:alpine
+    container_name: http-dev
+    ports:
+      - "10.0.0.254:9080:80"
+    volumes:
+      - ./tftpboot/ubuntu:/usr/share/nginx/html/ubuntu:ro
+      - ./autoinstall:/usr/share/nginx/html/autoinstall:ro
+      - ./tftpboot/grub:/usr/share/nginx/html/grub:ro
+    restart: unless-stopped
+
+  squid:
+    image: ubuntu/squid:latest
+    container_name: squid-dev
+    ports:
+      - "10.0.0.254:3128:3128"
+    restart: unless-stopped

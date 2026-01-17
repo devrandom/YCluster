@@ -18,28 +18,28 @@
 
     - name: Check if Ubuntu ISO already exists
       stat:
-        path: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+        path: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
       register: iso_file
 
     - name: Check if Ubuntu ISO exists on ansible host
       stat:
-        path: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+        path: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
       register: ansible_host_iso
       delegate_to: localhost
       when: not iso_file.stat.exists
 
     - name: Copy Ubuntu ISO from ansible host
       copy:
-        src: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
-        dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+        src: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
+        dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         mode: '0644'
       when: not iso_file.stat.exists and ansible_host_iso.stat.exists
       register: iso_copy_result
 
     - name: Download Ubuntu ISO for netboot files (fallback)
       get_url:
-        url: http://10.0.0.1/ubuntu-24.04.2-live-server-amd64.iso
-        dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+        url: http://10.0.0.1/ubuntu-24.04.3-live-server-amd64.iso
+        dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         mode: '0644'
       when: not iso_file.stat.exists and (not ansible_host_iso.stat.exists or iso_copy_result is failed)
 
@@ -53,8 +53,8 @@
 
     - name: Extract netboot files from ISO
       shell: |
-        isoinfo -R -x /casper/vmlinuz -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/vmlinuz
-        isoinfo -R -x /casper/initrd -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.2-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/initrd
+        isoinfo -R -x /casper/vmlinuz -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/vmlinuz
+        isoinfo -R -x /casper/initrd -i /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso > /var/lib/tftpboot/ubuntu/initrd
       when: netboot_files.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
 
     - name: Check if EFI files already exist
@@ -88,11 +88,11 @@
           }
 
           menuentry "Ubuntu 24.04 Server Autoinstall" {
-              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso autoinstall ds='nocloud-net;s=http://{{ ansible_host }}/autoinstall/' cloud-config-url=/dev/null
+              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.3-live-server-amd64.iso autoinstall ds='nocloud-net;s=http://{{ ansible_host }}/autoinstall/' cloud-config-url=/dev/null
               initrd /ubuntu/initrd
           }
           
           menuentry "Ubuntu 24.04 Server Manual Install" {
-              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.2-live-server-amd64.iso
+              linux /ubuntu/vmlinuz text video=HDMI-A-1:1024x768@60e ip=dhcp url=http://{{ ansible_host }}/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
               initrd /ubuntu/initrd
           }
