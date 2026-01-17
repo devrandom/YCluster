@@ -1,0 +1,16 @@
+---
+- name: Setup custom Ansible local facts
+  hosts: compute
+  become: yes
+  tasks:
+    - name: Create facts.d directory
+      file:
+        path: /etc/ansible/facts.d
+        state: directory
+        mode: '0755'
+
+    - name: Install GPU detection fact
+      copy:
+        src: scripts/gpu.fact
+        dest: /etc/ansible/facts.d/gpu.fact
+        mode: '0755'
