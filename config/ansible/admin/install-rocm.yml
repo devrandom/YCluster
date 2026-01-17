@@ -1,0 +1,117 @@
+---
+- name: Install ROCm on AMD GPU nodes
+  hosts: compute
+  become: yes
+  vars:
+    rocm_version: "6.4.4"
+  tasks:
+    - name: Display AMD GPU status
+      debug:
+        msg: "AMD GPU detected: {{ ansible_local.gpu.has_amd_gpu | default(false) }}"
+
+    - name: End play for nodes without AMD GPU
+      meta: end_host
+      when: not (ansible_local.gpu.has_amd_gpu | default(false))
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - curl
+          - gnupg
+          - build-essential
+          - dkms
+          - linux-headers-{{ ansible_kernel }}
+        state: present
+        update_cache: yes
+
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Copy ROCm GPG key
+      copy:
+        src: rocm.gpg.key
+        dest: /tmp/rocm.gpg.key
+        mode: '0644'
+      changed_when: false
+
+    - name: Import and dearmor ROCm GPG key
+      shell: gpg --dearmor < /tmp/rocm.gpg.key > /etc/apt/keyrings/rocm.gpg
+      args:
+        creates: /etc/apt/keyrings/rocm.gpg
+
+    - name: Set proper permissions on GPG key
+      file:
+        path: /etc/apt/keyrings/rocm.gpg
+        mode: '0644'
+
+    - name: Clean up temporary GPG file
+      file:
+        path: /tmp/rocm.gpg.key
+        state: absent
+      changed_when: false
+
+    - name: Add ROCm repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/{{ rocm_version }} noble main"
+        state: present
+        filename: rocm
+
+    - name: Add amdgpu repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/amdgpu/{{ rocm_version }}/ubuntu noble main"
+        state: present
+        filename: amdgpu
+
+    - name: Set ROCm package pinning preference
+      copy:
+        dest: /etc/apt/preferences.d/rocm-pin-600
+        content: |
+          Package: *
+          Pin: release o=repo.radeon.com
+          Pin-Priority: 600
+        mode: '0644'
+
+    - name: Update apt cache after adding ROCm repos
+      apt:
+        update_cache: yes
+
+    - name: Install amdgpu-dkms driver
+      apt:
+        name: amdgpu-dkms
+        state: present
+      register: amdgpu_install
+
+    - name: Install ROCm packages
+      apt:
+        name:
+          - rocm
+        state: present
+
+    - name: Add users to render and video groups
+      user:
+        name: "{{ item }}"
+        groups:
+          - render
+          - video
+        append: yes
+      loop:
+        - "{{ ansible_user | default('ubuntu') }}"
+
+    - name: Verify ROCm installation
+      command: /opt/rocm/bin/rocminfo
+      register: rocminfo_output
+      changed_when: false
+      failed_when: false
+
+    - name: Display ROCm info
+      debug:
+        msg: "{{ rocminfo_output.stdout_lines[:20] }}"
+      when: rocminfo_output.rc == 0
+
+    - name: Reboot required notice
+      debug:
+        msg: "NOTICE: A reboot is required to load the new amdgpu driver"
+      when: amdgpu_install.changed
