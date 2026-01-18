@@ -40,7 +40,7 @@ dev-tftpboot: ./dev/tftpboot/ubuntu/vmlinuz ./dev/tftpboot/EFI/BOOT/grubx64.efi 
 	xorriso -osirrox on -indev ./data/ubuntu-24.04.3-live-server-amd64.iso \
 		-extract /casper/hwe-vmlinuz ./dev/tftpboot/ubuntu/vmlinuz \
 		-extract /casper/hwe-initrd ./dev/tftpboot/ubuntu/initrd
-	ln ./data/ubuntu-24.04.3-live-server-amd64.iso ./dev/tftpboot/ubuntu/ 2>/dev/null || cp ./data/ubuntu-24.04.3-live-server-amd64.iso ./dev/tftpboot/ubuntu/
+	ln -f ./data/ubuntu-24.04.3-live-server-amd64.iso ./dev/tftpboot/ubuntu/ 2>/dev/null
 
 ./dev/tftpboot/EFI/BOOT/grubx64.efi:
 	mkdir -p ./dev/tftpboot/EFI/BOOT

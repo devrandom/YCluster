@@ -12,6 +12,8 @@ dhcp-authoritative
 dhcp-option=42,10.0.0.254
 dhcp-option=66,10.0.0.254
 dhcp-leasefile=${PROJECT_ROOT}/dev/dnsmasq.leases
+dhcp-hostsfile=${PROJECT_ROOT}/dev/dhcp-hosts
+dhcp-script=${PROJECT_ROOT}/dev/dhcp-script.sh
 
 # PXE boot (UEFI) - boot GRUB directly using UEFI network stack
 dhcp-match=set:efibc,option:client-arch,7
