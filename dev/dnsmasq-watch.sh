@@ -1,6 +1,9 @@
 #!/bin/bash
 # Auto-restart dnsmasq on file changes
-# Run as root: sudo ./dev/dnsmasq-watch.sh
+#
+# NOTE: This script must run as ROOT (dnsmasq needs root for DHCP port 67).
+# Run with: sudo ./dev/dnsmasq-watch.sh
+# Uses SUDO_USER to run make as the original user for file ownership.
 
 set -e
 
