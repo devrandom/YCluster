@@ -25,7 +25,7 @@
           - dnsmasq
           - genisoimage
           - keepalived
-          - ntpsec
+          - chrony
           - curl
           - wget
           - git

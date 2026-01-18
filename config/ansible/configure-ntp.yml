@@ -3,12 +3,10 @@
   hosts: storage:compute
   become: yes
   tasks:
-    - name: Stop and disable ntpsec if present
-      systemd:
+    - name: Remove ntpsec if installed
+      apt:
         name: ntpsec
-        state: stopped
-        enabled: no
-      failed_when: false
+        state: absent
 
     - name: Install chrony
       package:
