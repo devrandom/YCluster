@@ -29,6 +29,9 @@
           - curl
           - wget
           - git
+          - cmake
+          - clang
+          - libcurl4-openssl-dev
         state: present
 
     - name: Create admin services directory
