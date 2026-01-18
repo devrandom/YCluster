@@ -1,0 +1,101 @@
+---
+- name: Install llama.cpp on AMD GPU nodes
+  hosts: compute
+  become: yes
+  gather_facts: no
+  vars:
+    llama_cpp_version: "b7770"
+    llama_cpp_dir: /opt/src/llama.cpp
+    gpu_target: "gfx1151"
+  tasks:
+    - name: Gather facts including local
+      setup:
+
+    - name: Check for AMD GPU
+      debug:
+        msg: "AMD GPU detected: {{ ansible_local.gpu.has_amd_gpu | default(false) }}"
+
+    - name: End play for nodes without AMD GPU
+      meta: end_host
+      when: not (ansible_local.gpu.has_amd_gpu | default(false))
+
+    - name: Install build dependencies
+      apt:
+        name:
+          - git
+          - build-essential
+          - cmake
+          - libssl-dev
+          - libcurl4-openssl-dev
+        state: present
+
+    - name: Clone llama.cpp repository
+      git:
+        repo: https://github.com/ggerganov/llama.cpp.git
+        dest: "{{ llama_cpp_dir }}"
+        version: "{{ llama_cpp_version }}"
+        force: no
+      register: llama_clone
+
+    - name: Get HIP compiler path
+      command: hipconfig -l
+      register: hip_lib_path
+      changed_when: false
+
+    - name: Get HIP install path
+      command: hipconfig -R
+      register: hip_root_path
+      changed_when: false
+
+    - name: Check if llama.cpp build exists
+      stat:
+        path: "{{ llama_cpp_dir }}/build/bin/llama-cli"
+      register: llama_build_exists
+
+    - name: Configure llama.cpp with HIP support
+      command: >
+        cmake -S . -B build
+        -DGGML_HIP=ON
+        -DGPU_TARGETS={{ gpu_target }}
+        -DCMAKE_BUILD_TYPE=Release
+      args:
+        chdir: "{{ llama_cpp_dir }}"
+      environment:
+        HIPCXX: "{{ hip_lib_path.stdout }}/clang"
+        HIP_PATH: "{{ hip_root_path.stdout }}"
+      when: llama_clone.changed or not llama_build_exists.stat.exists
+
+    - name: Build llama.cpp
+      command: cmake --build build --config Release -- -j {{ ansible_facts['processor_vcpus'] | default(8) }}
+      args:
+        chdir: "{{ llama_cpp_dir }}"
+      environment:
+        HIPCXX: "{{ hip_lib_path.stdout }}/clang"
+        HIP_PATH: "{{ hip_root_path.stdout }}"
+      when: llama_clone.changed or not llama_build_exists.stat.exists
+
+    - name: Create symlinks to llama.cpp binaries
+      file:
+        src: "{{ llama_cpp_dir }}/build/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+      loop:
+        - llama-cli
+        - llama-server
+        - llama-bench
+        - llama-quantize
+        - llama-perplexity
+        - llama-embedding
+        - llama-speculative
+      failed_when: false
+
+    - name: Verify llama.cpp installation
+      command: llama-cli --version
+      register: llama_version
+      changed_when: false
+      failed_when: false
+
+    - name: Display llama.cpp version
+      debug:
+        msg: "llama.cpp installed: {{ llama_version.stdout | default('build complete') }}"
+      when: llama_version.rc == 0

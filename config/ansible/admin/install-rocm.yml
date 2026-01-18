@@ -7,11 +7,11 @@
   tasks:
     - name: Display AMD GPU status
       debug:
-        msg: "AMD GPU detected: {{ ansible_facts['local']['gpu']['has_amd_gpu'] | default(false) }}"
+        msg: "AMD GPU detected: {{ ansible_local.gpu.has_amd_gpu | default(false) }}"
 
     - name: End play for nodes without AMD GPU
       meta: end_host
-      when: not (ansible_facts['local']['gpu']['has_amd_gpu'] | default(false))
+      when: not (ansible_local.gpu.has_amd_gpu | default(false))
 
     - name: Install prerequisites
       apt:
