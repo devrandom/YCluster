@@ -1,2 +1,5 @@
 # Network-bound disk encryption
 tang_port: 8777
+
+# Bootstrap files location (ansible SSH key, etc.)
+bootstrap_files_dir: /opt/bootstrap-files
