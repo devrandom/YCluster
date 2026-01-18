@@ -99,3 +99,47 @@
       debug:
         msg: "llama.cpp installed: {{ llama_version.stdout | default('build complete') }}"
       when: llama_version.rc == 0
+
+    - name: Create models directory for ubuntu user
+      file:
+        path: /home/ubuntu/models
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create llama-server systemd service
+      copy:
+        dest: /etc/systemd/system/llama-server.service
+        content: |
+          [Unit]
+          Description=llama.cpp Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          Group=ubuntu
+          WorkingDirectory=/home/ubuntu
+          ExecStart=/usr/local/bin/llama-server --host 0.0.0.0 --port 8080 --models-dir /home/ubuntu/models
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: restart llama-server
+
+    - name: Enable and start llama-server service
+      systemd:
+        name: llama-server
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart llama-server
+      systemd:
+        name: llama-server
+        state: restarted
+        daemon_reload: yes
