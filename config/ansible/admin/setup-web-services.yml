@@ -156,7 +156,7 @@
 
     - name: Copy ansible SSH public key
       copy:
-        src: /opt/bootstrap-files/ansible_ssh_key.pub
+        src: "{{ bootstrap_files_dir }}/ansible_ssh_key.pub"
         dest: /var/www/html/ansible_ssh_key.pub
         mode: '0644'
 
