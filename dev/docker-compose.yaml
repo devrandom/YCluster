@@ -38,7 +38,11 @@ services:
     ports:
       - "12723:12723"
     environment:
-      - ETCD_HOST=etcd:2379
+      ETCD_HOST: "etcd:2379"
+      # Password hash for "ubuntu" (generate with: python3 -c "import crypt; print(crypt.crypt('yourpass', crypt.mksalt(crypt.METHOD_SHA512)))")
+      UBUNTU_PASSWORD_HASH: "$$6$$XjXHemqElD7whrdq$$fSEcun41b0/TJ8bDRyCst0sa5WJS317xWRs.TaUQZdnt4jY4Q303t.Tg9noKryQQr7oINOHgackKs11yYpGoJ."
+      # Interface override for dev: use wildcard to match all ethernet interfaces
+      NODE_INTERFACES_COMPUTE: "en*::"
     depends_on:
       etcd:
         condition: service_healthy
@@ -57,9 +61,11 @@ services:
     ports:
       - "10.0.0.254:9080:80"
     volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./tftpboot/ubuntu:/usr/share/nginx/html/ubuntu:ro
-      - ./autoinstall:/usr/share/nginx/html/autoinstall:ro
       - ./tftpboot/grub:/usr/share/nginx/html/grub:ro
+    depends_on:
+      - admin-api
     restart: unless-stopped
 
   squid:
