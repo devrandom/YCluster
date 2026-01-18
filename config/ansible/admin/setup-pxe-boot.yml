@@ -38,7 +38,7 @@
 
     - name: Download Ubuntu ISO for netboot files (fallback)
       get_url:
-        url: http://10.0.0.1/ubuntu-24.04.3-live-server-amd64.iso
+        url: http://10.0.0.254/ubuntu-24.04.3-live-server-amd64.iso
         dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         mode: '0644'
       when: not iso_file.stat.exists and (not ansible_host_iso.stat.exists or iso_copy_result is failed)
