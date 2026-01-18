@@ -1,30 +1,37 @@
 ---
 - name: Configure NTP client to use local NTP server
-  hosts: core
+  hosts: storage:compute
   become: yes
   tasks:
-    - name: Install ntpsec
-      package:
+    - name: Stop and disable ntpsec if present
+      systemd:
         name: ntpsec
+        state: stopped
+        enabled: no
+      failed_when: false
+
+    - name: Install chrony
+      package:
+        name: chrony
         state: present
 
-    - name: Create ntp.conf configuration
+    - name: Create chrony.conf configuration
       template:
-        src: ntp.conf.j2
-        dest: /etc/ntpsec/ntp.conf
+        src: chrony.conf.j2
+        dest: /etc/chrony/chrony.conf
         owner: root
         group: root
         mode: '0644'
-      notify: restart ntpsec
+      notify: restart chrony
 
-    - name: Enable and start ntpsec service
+    - name: Enable and start chrony service
       systemd:
-        name: ntpsec
+        name: chrony
         enabled: yes
         state: started
 
   handlers:
-    - name: restart ntpsec
+    - name: restart chrony
       systemd:
-        name: ntpsec
+        name: chrony
         state: restarted

@@ -74,3 +74,13 @@ services:
     ports:
       - "10.0.0.254:3128:3128"
     restart: unless-stopped
+
+  chrony:
+    image: cturra/ntp
+    container_name: chrony-dev
+    ports:
+      - "10.0.0.254:1123:123/udp"
+    environment:
+      - NTP_SERVERS=pool.ntp.org
+      - LOG_LEVEL=0
+    restart: unless-stopped

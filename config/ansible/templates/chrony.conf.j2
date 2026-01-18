@@ -1,0 +1,22 @@
+# Ansible managed chrony.conf for cluster nodes
+
+# Local NTP server - primary time source
+server {{ ntp_server | default('10.0.0.254') }}{% if ntp_port | default(123) != 123 %} port {{ ntp_port }}{% endif %} iburst prefer
+
+{% if ntp_fallback | default(true) %}
+# Fallback to standard pools in case local server is unreachable
+pool pool.ntp.org iburst
+pool time.google.com iburst
+{% endif %}
+
+# Record the rate at which the system clock gains/losses time
+driftfile /var/lib/chrony/drift
+
+# Allow stepping the clock for large offsets at startup
+makestep 1.0 3
+
+# Enable kernel synchronization of the real-time clock (RTC)
+rtcsync
+
+# Log files location
+logdir /var/log/chrony

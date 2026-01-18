@@ -1,11 +1,13 @@
 # Ansible managed ntp.conf for cluster nodes
 
-# Local NTP server (VIP) - primary time source
-server 10.0.0.254 iburst prefer
+# Local NTP server - primary time source
+server {{ ntp_server | default('10.0.0.254') }}{% if ntp_port | default(123) != 123 %} port {{ ntp_port }}{% endif %} iburst prefer
 
-# Fallback to standard pools in case VIP is unreachable
+{% if ntp_fallback | default(true) %}
+# Fallback to standard pools in case local server is unreachable
 pool pool.ntp.org iburst
 pool time.google.com iburst
+{% endif %}
 
 # Leap second file
 leapfile /usr/share/zoneinfo/leap-seconds.list

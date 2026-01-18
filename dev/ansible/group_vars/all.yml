@@ -1,2 +1,7 @@
 # Dev environment overrides
 bootstrap_files_dir: /data/home/dev/proj/ycluster/data
+
+# NTP server (non-standard port for rootless Docker)
+ntp_server: 10.0.0.254
+ntp_port: 1123
+ntp_fallback: false  # dev nodes are isolated, no internet access
