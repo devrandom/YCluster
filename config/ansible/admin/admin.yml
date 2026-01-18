@@ -16,3 +16,4 @@
 - import_playbook: install-docker-official.yml
 - import_playbook: install-meshcommander.yml
 - import_playbook: install-rocm.yml
+- import_playbook: install-llama-cpp-rocm.yml
