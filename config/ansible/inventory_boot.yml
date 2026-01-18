@@ -8,3 +8,5 @@ all:
         cluster_interface: "enp2s0f0np0"
         uplink_interface: "enp87s0"
         amt_interface: "enp89s0"
+    macos:
+      hosts: {}
