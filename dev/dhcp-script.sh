@@ -12,6 +12,7 @@ IP="$3"
 HOSTNAME="${4:-}"
 
 ADMIN_API="http://localhost:12723"
+ETCD_ENDPOINT="http://localhost:2379"
 LOG_TAG="dhcp-script"
 
 log() {
@@ -33,7 +34,18 @@ case "$ACTION" in
             esac
         fi
 
-        # Call admin API to register
+        # Write DHCP lease to etcd (for IP→MAC lookup by admin-api)
+        LEASE_KEY="/cluster/dhcp/leases/${MAC//:/}"
+        LEASE_VALUE="{\"ip\": \"${IP}\", \"mac\": \"${MAC}\"}"
+        KEY_B64=$(echo -n "$LEASE_KEY" | base64 -w0)
+        VALUE_B64=$(echo -n "$LEASE_VALUE" | base64 -w0)
+        curl -sf "${ETCD_ENDPOINT}/v3/kv/put" \
+            -X POST \
+            -d "{\"key\": \"${KEY_B64}\", \"value\": \"${VALUE_B64}\"}" >/dev/null 2>&1 && \
+            log "Wrote lease to etcd: $LEASE_KEY" || \
+            log "Failed to write lease to etcd"
+
+        # Call admin API to register node allocation
         RESPONSE=$(curl -sf "${ADMIN_API}/api/allocate?mac=${MAC}${TYPE_PARAM}" 2>&1)
         if [[ $? -eq 0 ]]; then
             log "Registration successful: $RESPONSE"

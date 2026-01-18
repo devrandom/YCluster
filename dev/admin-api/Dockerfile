@@ -2,11 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies for scapy and netifaces
+# Install system dependencies for scapy, netifaces, and ip command
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
     libc6-dev \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

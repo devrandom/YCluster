@@ -52,8 +52,11 @@ autoinstall:
 {% endif %}
   kernel:
     package: linux-generic
+{% if node_type == 'storage' %}
   snaps:
     - name: microceph
+{% endif %}
+{% if node_type == 'storage' %}
   storage:
     config:
       - type: disk
@@ -117,6 +120,11 @@ autoinstall:
         id: root-mount
         device: root-fs
         path: /
+{% else %}
+  storage:
+    layout:
+      name: lvm
+{% endif %}
   packages:
     - snapd
     - curl

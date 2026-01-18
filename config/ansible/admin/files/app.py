@@ -57,7 +57,8 @@ MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 
 
 app = Flask(__name__)
 
-# Node type interface configurations
+# Node type interface configurations (can be overridden via env vars)
+# Env var format: NODE_INTERFACES_<TYPE>=cluster:uplink:amt (e.g. NODE_INTERFACES_COMPUTE=en*::)
 NODE_TYPE_INTERFACES = {
     'storage': {
         'cluster_interface': 'enp2s0f0np0',
@@ -73,8 +74,25 @@ NODE_TYPE_INTERFACES = {
         'cluster_interface': 'en0',
         'uplink_interface': 'en1',
         'amt_interface': 'en2'
+    },
+    'unknown': {
+        'cluster_interface': 'en*',
+        'uplink_interface': '',
+        'amt_interface': ''
     }
 }
+
+# Override interfaces from env vars
+for node_type in list(NODE_TYPE_INTERFACES.keys()):
+    env_key = f'NODE_INTERFACES_{node_type.upper()}'
+    env_val = os.environ.get(env_key)
+    if env_val:
+        parts = env_val.split(':')
+        NODE_TYPE_INTERFACES[node_type] = {
+            'cluster_interface': parts[0] if len(parts) > 0 else '',
+            'uplink_interface': parts[1] if len(parts) > 1 else '',
+            'amt_interface': parts[2] if len(parts) > 2 else ''
+        }
 
 # etcd configuration
 ETCD_PREFIX = '/cluster/nodes'
@@ -1162,15 +1180,20 @@ def serve_meta_data():
 @app.route('/autoinstall/user-data')
 def serve_user_data():
     """Serve dynamically rendered user-data based on client MAC address"""
-    # Get client IP address
+    # Get MAC from query param (for Docker/dev) or look up from client IP (prod)
+    mac_address = request.args.get('mac')
     client_ip = request.environ.get('REMOTE_ADDR') or request.remote_addr
-    
-    # Look up MAC address from IP
-    mac_address = get_mac_from_ip(client_ip)
-    if not mac_address:
-        return f"MAC address not found for client IP {client_ip}", 400
 
-    print(f"Client IP: {client_ip}, MAC: {mac_address}", file=sys.stderr)
+    if mac_address:
+        # Normalize MAC format (GRUB uses xx:xx:xx:xx:xx:xx)
+        mac_address = mac_address.lower().replace('-', ':')
+        print(f"MAC from query param: {mac_address}", file=sys.stderr)
+    else:
+        # Fall back to IP lookup
+        mac_address = get_mac_from_ip(client_ip)
+        if not mac_address:
+            return f"MAC address not found for client IP {client_ip}", 400
+        print(f"MAC from IP lookup: {client_ip} -> {mac_address}", file=sys.stderr)
     
     # Get or create allocation for this MAC address
     allocation_data = get_or_create_allocation(mac_address)
@@ -1181,35 +1204,47 @@ def serve_user_data():
     ip_address = allocation_data['ip']
     amt_ip_address = allocation_data['amt_ip']
     
-    # Get interface configuration for this node type
-    interfaces = NODE_TYPE_INTERFACES[node_type]
+    # Get interface configuration for this node type (fallback to 'unknown')
+    interfaces = NODE_TYPE_INTERFACES.get(node_type, NODE_TYPE_INTERFACES['unknown'])
     
     # Get SSH public key content
     ssh_key_path = '/opt/bootstrap-files/ansible_ssh_key.pub'
     with open(ssh_key_path, 'r') as f:
         ssh_key_content = f.read().strip()
 
-    # Get crypted password for ubuntu user
-    ubuntu_password = None
-    try:
-        with open('/etc/shadow', 'r') as f:
-            for line in f:
-                fields = line.strip().split(':')
-                if fields[0] == 'ubuntu' and len(fields) > 1:
-                    ubuntu_password = fields[1]
-                    break
-    except (PermissionError, FileNotFoundError):
-        raise Exception("Cannot read ubuntu password from /etc/shadow - check permissions")
-    
+    # Get crypted password for ubuntu user (env var takes precedence for dev)
+    ubuntu_password = os.environ.get('UBUNTU_PASSWORD_HASH')
     if not ubuntu_password:
-        raise Exception("Ubuntu user not found in /etc/shadow")
+        try:
+            with open('/etc/shadow', 'r') as f:
+                for line in f:
+                    fields = line.strip().split(':')
+                    if fields[0] == 'ubuntu' and len(fields) > 1:
+                        ubuntu_password = fields[1]
+                        break
+        except (PermissionError, FileNotFoundError):
+            raise Exception("Cannot read ubuntu password from /etc/shadow - set UBUNTU_PASSWORD_HASH env var or check permissions")
+
+        if not ubuntu_password:
+            raise Exception("Ubuntu user not found in /etc/shadow - set UBUNTU_PASSWORD_HASH env var")
 
     proxy_url = 'http://10.0.0.254:3128'
-    
+
+    # Log template variables
+    print(f"Generating user-data for {hostname}:", file=sys.stderr)
+    print(f"  node_type: {node_type}", file=sys.stderr)
+    print(f"  ip_address: {ip_address}", file=sys.stderr)
+    print(f"  amt_ip_address: {amt_ip_address}", file=sys.stderr)
+    print(f"  cluster_interface: {interfaces['cluster_interface']}", file=sys.stderr)
+    print(f"  uplink_interface: {interfaces['uplink_interface']}", file=sys.stderr)
+    print(f"  amt_interface: {interfaces['amt_interface']}", file=sys.stderr)
+    print(f"  proxy_url: {proxy_url}", file=sys.stderr)
+    print(f"  ubuntu_password: {'(from env)' if os.environ.get('UBUNTU_PASSWORD_HASH') else '(from shadow)'}", file=sys.stderr)
+
     # Read and render template
     with open(AUTOINSTALL_USER_DATA_TEMPLATE, 'r') as f:
         template_content = f.read()
-    
+
     template = Template(template_content)
     rendered_content = template.render(
         node_type=node_type,
