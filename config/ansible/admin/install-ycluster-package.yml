@@ -15,13 +15,11 @@
           - rsync
         state: present
 
-    - name: Ensure YCluster package directory exists
-      file:
-        path: "{{ ycluster_package_dir }}"
-        state: directory
-        mode: '0755'
-        owner: root
-        group: root
+    - name: Check if YCluster package is installed
+      command: python3 -c "import ycluster"
+      register: ycluster_check
+      changed_when: false
+      failed_when: false
 
     - name: Copy YCluster package files
       synchronize:
@@ -30,8 +28,15 @@
         delete: yes
         recursive: yes
         rsync_opts:
+          - "--checksum"
+          - "--no-owner"
+          - "--no-group"
+          - "--chmod=D0755,F0644"
           - "--exclude=__pycache__"
           - "--exclude=*.pyc"
+          - "--exclude=build"
+          - "--exclude=*.egg-info"
+      register: ycluster_sync
 
     - name: Install YCluster package in development mode
       pip:
@@ -39,6 +44,7 @@
         editable: no
         state: present
         extra_args: "--break-system-packages --ignore-installed"
+      when: ycluster_check.rc != 0 or ycluster_sync.changed
 
     - name: Create backward compatibility wrapper scripts
       copy:
