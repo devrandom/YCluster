@@ -88,6 +88,7 @@
       apt:
         name:
           - rocm
+          - rocm-validation-suite
         state: present
 
     - name: Add users to render and video groups
