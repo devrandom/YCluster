@@ -1,5 +1,5 @@
 ---
-- name: Setup base infrastructure on storage nodes s1-s3
+- name: Setup base infrastructure on storage and compute nodes
   hosts: storage:compute
   become: yes
   vars:
