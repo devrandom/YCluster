@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""
+Check if this node should hold the uplink service IP.
+
+Returns 0 (healthy) only if:
+  1. This node is the storage leader
+  2. The uplink interface has an IP in the service subnet
+
+Managed by Ansible - admin/configure-uplink-service.yml
+"""
+
+import ipaddress
+import json
+import socket
+import subprocess
+import sys
+
+from ycluster.common.etcd_utils import get_etcd_client
+
+SERVICE_SUBNET = "{{ uplink_service_ip }}/{{ uplink_service_prefix }}"
+UPLINK_INTERFACE = "{{ uplink_interface }}"
+
+
+def get_storage_leader():
+    """Get the current storage leader from etcd."""
+    try:
+        client = get_etcd_client()
+        value, _ = client.get('/cluster/leader/app')
+        if value:
+            return value.decode().strip()
+    except Exception:
+        pass
+    return None
+
+
+def is_storage_leader():
+    """Check if this node is the storage leader."""
+    leader = get_storage_leader()
+    hostname = socket.gethostname()
+    return leader == hostname
+
+
+def interface_has_ip_in_subnet(interface, subnet):
+    """Check if interface has an IP address in the given subnet."""
+    network = ipaddress.ip_network(subnet, strict=False)
+    
+    try:
+        result = subprocess.run(
+            ['ip', '-j', 'addr', 'show', 'dev', interface],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return False
+        
+        data = json.loads(result.stdout)
+        for iface in data:
+            for addr_info in iface.get('addr_info', []):
+                if addr_info.get('family') == 'inet':
+                    ip = ipaddress.ip_address(addr_info['local'])
+                    if ip in network:
+                        return True
+    except Exception:
+        pass
+    
+    return False
+
+
+def main():
+    # Check if we're the storage leader
+    if not is_storage_leader():
+        sys.exit(1)
+    
+    # Check if uplink interface has an IP in the service subnet
+    if not interface_has_ip_in_subnet(UPLINK_INTERFACE, SERVICE_SUBNET):
+        sys.exit(1)
+    
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()
