@@ -1,0 +1,35 @@
+# Managed by Ansible - admin/configure-netplan.yml
+# Do not edit manually
+network:
+  version: 2
+  ethernets:
+    primary:
+      match:
+        name: "{{ cluster_interface }}"
+      dhcp4: false
+      addresses: ["{{ ansible_host }}/24"]
+      optional: true
+{% if amt_interface %}
+    amt:
+      match:
+        name: "{{ amt_interface }}"
+      addresses: ["{{ amt_ip_address }}/24"]
+      optional: true
+{% endif %}
+{% if uplink_interface %}
+    uplink:
+      match:
+        name: "{{ uplink_interface }}"
+      optional: true
+{% if uplink_dhcp | default(true) %}
+      dhcp4: true
+{% else %}
+      dhcp4: false
+      addresses: ["{{ uplink_address }}"]
+      routes:
+        - to: default
+          via: "{{ uplink_gateway }}"
+      nameservers:
+        addresses: {{ uplink_dns | default(['8.8.8.8', '8.8.4.4']) | to_json }}
+{% endif %}
+{% endif %}

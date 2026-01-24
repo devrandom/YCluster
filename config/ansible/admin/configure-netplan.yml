@@ -1,0 +1,36 @@
+---
+- name: Configure network interfaces via netplan
+  hosts: core
+  become: yes
+
+  tasks:
+    - name: Validate static uplink configuration
+      assert:
+        that:
+          - uplink_address is defined
+          - uplink_gateway is defined
+        fail_msg: "Static uplink requires uplink_address and uplink_gateway to be defined"
+      when: not (uplink_dhcp | default(true))
+
+    - name: Determine AMT IP address from hostname
+      set_fact:
+        amt_ip_address: "10.10.10.{{ ansible_host.split('.')[-1] }}"
+      when: amt_interface is defined and amt_interface
+
+    - name: Remove cloud-init generated netplan config
+      file:
+        path: /etc/netplan/50-cloud-init.yaml
+        state: absent
+      register: cloud_init_removed
+
+    - name: Deploy netplan configuration
+      template:
+        src: templates/netplan-cluster.yaml.j2
+        dest: /etc/netplan/50-ycluster.yaml
+        mode: '0600'
+        backup: yes
+      register: netplan_config
+
+    - name: Apply netplan configuration
+      command: netplan apply
+      when: netplan_config.changed or cloud_init_removed.changed
