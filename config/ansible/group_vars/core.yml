@@ -1,0 +1,39 @@
+# Core Node Configuration (s1-s3)
+# ================================
+# Core nodes run etcd, VIPs, and gateway services.
+
+# Network Interfaces
+# ------------------
+cluster_interface: "enp2s0f0np0"
+uplink_interface: "enp87s0"
+amt_interface: "enp89s0"
+
+# Uplink Network Configuration
+# ============================
+# Core nodes have an uplink interface for external connectivity.
+# By default, the uplink uses DHCP. To configure static IP:
+#
+# 1. Set uplink_dhcp: false (either here for all nodes, or per-host)
+# 2. Define uplink_address, uplink_gateway, and optionally uplink_dns
+#
+# Per-host configuration:
+#   Each core node can have independent uplink settings (different subnets,
+#   gateways, DNS servers). Create host_vars/<hostname>.yml to override.
+#
+#   Example host_vars/s1.yml:
+#     uplink_dhcp: false
+#     uplink_address: "192.168.1.11/24"
+#     uplink_gateway: "192.168.1.1"
+#     uplink_dns: ["192.168.1.1", "8.8.8.8"]
+#
+# The netplan configuration is applied by admin/configure-netplan.yml
+
+# DHCP by default
+uplink_dhcp: true
+
+# Static IP settings (only used when uplink_dhcp: false)
+# uplink_address: ""      # Required - CIDR notation, e.g., "192.168.1.10/24"
+# uplink_gateway: ""      # Required - gateway IP, e.g., "192.168.1.1"
+# uplink_dns:             # Optional - defaults to ["8.8.8.8", "8.8.4.4"]
+#   - "8.8.8.8"
+#   - "8.8.4.4"
