@@ -7,6 +7,7 @@
 
 # Network Services - Gateway, proxy and external connectivity
 - import_playbook: setup-gateway-vip.yml
+- import_playbook: admin/configure-uplink-service.yml
 - import_playbook: configure-ntp.yml
 - import_playbook: configure-proxy.yml
 

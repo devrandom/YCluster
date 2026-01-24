@@ -37,3 +37,33 @@ uplink_dhcp: true
 # uplink_dns:             # Optional - defaults to ["8.8.8.8", "8.8.4.4"]
 #   - "8.8.8.8"
 #   - "8.8.4.4"
+
+# Uplink Service IP Configuration
+# ================================
+# A shared VIP on an uplink subnet for incoming connections (HTTP, etc).
+# The IP is served by the current storage leader via keepalived.
+#
+# Only nodes with uplink_service_participant: true will participate.
+# These nodes must have their uplink on the same subnet as the service IP.
+# Nodes on different uplink subnets should not participate (set to false or omit).
+#
+# Configuration:
+#   1. Set uplink_service_ip and uplink_service_prefix here (group level)
+#   2. Set uplink_service_participant: true in host_vars for nodes on that subnet
+#
+# Example:
+#   # group_vars/core.yml
+#   uplink_service_ip: "192.168.1.100"
+#   uplink_service_prefix: 24
+#
+#   # host_vars/s1.yml (on 192.168.1.0/24 subnet)
+#   uplink_service_participant: true
+#
+#   # host_vars/s3.yml (on different subnet - omit or set false)
+#   uplink_service_participant: false
+#
+# The service IP configuration is applied by admin/configure-uplink-service.yml
+
+# uplink_service_ip: ""         # The service IP (no CIDR suffix)
+# uplink_service_prefix: 24     # CIDR prefix length
+uplink_service_participant: false

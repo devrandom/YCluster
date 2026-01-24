@@ -35,6 +35,7 @@ The dashboard monitors these services across all nodes:
 #### Virtual IP (VIP) Management
 - **Gateway VIP** (10.0.0.254): Cluster services and external access
 - **Storage VIP** (10.0.0.100): Storage services like Docker registry
+- **Uplink Service VIP**: Configurable external IP for incoming HTTP (follows storage leader)
 - **Keepalived Status**: Service status across all nodes
 - **Failover Monitoring**: Active node tracking and interface status
 
@@ -321,6 +322,45 @@ Each node type has predefined network interface mappings:
 - Cluster: `en0`
 - Uplink: `en1`
 - AMT: `en2`
+
+### Uplink Network Configuration
+
+Core nodes (s1-s3) can be configured with either DHCP or static IP for their uplink interface. Each node can have independent settings (different subnets, gateways, DNS).
+
+Configuration is in `group_vars/core.yml` (defaults) and `host_vars/<hostname>.yml` (per-node overrides):
+
+```yaml
+# group_vars/core.yml - defaults
+uplink_dhcp: true  # Use DHCP by default
+
+# host_vars/s1.yml - static IP example
+uplink_dhcp: false
+uplink_address: "192.168.1.11/24"
+uplink_gateway: "192.168.1.1"
+uplink_dns: ["8.8.8.8", "8.8.4.4"]
+```
+
+### Uplink Service VIP
+
+A shared VIP can be configured on the uplink subnet for incoming HTTP connections. This VIP is served by the current storage leader via keepalived.
+
+Configuration:
+1. Set `uplink_service_ip` and `uplink_service_prefix` in `group_vars/core.yml`
+2. Set `uplink_service_participant: true` in `host_vars` for nodes on that subnet
+
+```yaml
+# group_vars/core.yml
+uplink_service_ip: "192.168.1.100"
+uplink_service_prefix: 24
+
+# host_vars/s1.yml (on 192.168.1.0/24 subnet)
+uplink_service_participant: true
+
+# host_vars/s3.yml (different subnet - don't participate)
+uplink_service_participant: false
+```
+
+Only nodes whose uplink is on the same subnet as the service IP should participate. The VIP automatically moves to the new storage leader during failover.
 
 ## Leadership and High Availability
 

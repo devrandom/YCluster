@@ -79,6 +79,7 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - **Leader Election**: etcd-based failover for PostgreSQL, Qdrant, DHCP
 - **Storage**: Ceph replication, RBD exclusive locking, automatic rebalancing
 - **Network**: VIP failover, redundant DNS/DHCP/proxy services
+- **Uplink Service VIP**: Shared external IP that follows storage leader for incoming connections
 - **Monitoring**: Health checks, cluster status monitoring, service health APIs
 - **Backup & Recovery**: Automated database backups with encrypted storage
 
@@ -97,7 +98,9 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - Storage nodes: DHCP range 10.0.0.11-30
 - Compute nodes: DHCP range 10.0.0.51-70
 - macOS nodes: DHCP range 10.0.0.71-90
-- Admin VIP: 10.0.0.254
+- Gateway VIP: 10.0.0.254 (cluster services)
+- Storage VIP: 10.0.0.100 (storage services)
+- Uplink Service VIP: Configurable per-deployment (incoming HTTP)
 
 **Service Discovery**
 - etcd maintains cluster membership and configuration

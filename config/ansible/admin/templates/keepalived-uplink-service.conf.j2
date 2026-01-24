@@ -1,0 +1,29 @@
+# Uplink Service VIP - follows storage leader
+# Managed by Ansible - admin/configure-uplink-service.yml
+
+vrrp_script chk_uplink_service {
+    script "/usr/local/lib/cluster/check-uplink-service"
+    interval 2
+    weight 50
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_UPLINK_SERVICE {
+    state BACKUP
+    interface {{ uplink_interface }}
+    virtual_router_id 253
+    priority {{ 100 + (inventory_hostname[-1] | int) }}
+    preempt
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass ycluster
+    }
+    virtual_ipaddress {
+        {{ uplink_service_ip }}/{{ uplink_service_prefix }}
+    }
+    track_script {
+        chk_uplink_service
+    }
+}
