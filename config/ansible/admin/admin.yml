@@ -1,5 +1,6 @@
 ---
 - import_playbook: setup-local-facts.yml
+- import_playbook: configure-netplan.yml
 - import_playbook: install-ycluster-package.yml
 - import_playbook: setup-base-infrastructure.yml
 - import_playbook: setup-linux-boot.yml
