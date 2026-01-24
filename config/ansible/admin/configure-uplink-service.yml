@@ -1,0 +1,64 @@
+---
+- name: Configure uplink service VIP
+  hosts: core
+  become: yes
+
+  tasks:
+    - name: Skip if uplink service IP not configured
+      meta: end_host
+      when: uplink_service_ip is not defined or uplink_service_ip == ""
+
+    - name: Skip if not a participant
+      meta: end_host
+      when: not (uplink_service_participant | default(false))
+
+    - name: Validate uplink service configuration
+      assert:
+        that:
+          - uplink_service_prefix is defined
+          - uplink_interface is defined
+        fail_msg: "uplink_service_prefix and uplink_interface must be defined"
+
+    - name: Verify ycluster package is installed
+      command: python3 -c "import ycluster"
+      changed_when: false
+
+    - name: Ensure cluster scripts directory exists
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Deploy uplink service health check script
+      template:
+        src: templates/check-uplink-service.py.j2
+        dest: /usr/local/lib/cluster/check-uplink-service
+        mode: '0755'
+        owner: root
+        group: root
+      notify: restart keepalived
+
+    - name: Ensure keepalived conf.d directory exists
+      file:
+        path: /etc/keepalived/conf.d
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Deploy uplink service keepalived configuration
+      template:
+        src: templates/keepalived-uplink-service.conf.j2
+        dest: /etc/keepalived/conf.d/uplink-service.conf
+        mode: '0644'
+        owner: root
+        group: root
+      notify: restart keepalived
+
+  handlers:
+    - name: restart keepalived
+      systemd:
+        name: keepalived
+        state: restarted
