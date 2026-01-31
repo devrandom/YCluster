@@ -73,18 +73,20 @@
 
           [Install]
           WantedBy=ycluster-apps.target
+      register: open_webui_unit
 
     - name: Reload systemd daemon
       systemd:
         daemon_reload: yes
 
-    - name: Enable open-webui service (part of storage-apps target)
+    - name: Reenable open-webui service to update target symlinks
+      command: systemctl reenable "open-webui{{ instance_suffix }}.service"
+      when: open_webui_unit.changed
+
+    - name: Enable open-webui service (part of ycluster-apps target)
       systemd:
         name: "open-webui{{ instance_suffix }}.service"
         enabled: yes
-    # NOTE: If service was previously enabled for a different target,
-    # this won't update the symlinks. Do this manually:
-    # `systemctl daemon-reload && systemctl enable open-webui.service`
 
     - name: Create PostgreSQL database and user for Open WebUI
       postgresql_db:
