@@ -55,6 +55,34 @@ def get_etcd_client():
     
     raise Exception("Could not connect to any etcd host")
 
+def get_primary_interface():
+    """Determine the primary network interface using multiple fallback methods"""
+    # Method 1: Try to get the default interface from routing table
+    result = subprocess.run(['ip', 'route', 'show', 'default'], 
+                          capture_output=True, text=True)
+    if result.stdout.strip():
+        # Parse output looking for "dev <interface>"
+        parts = result.stdout.split()
+        if 'dev' in parts:
+            dev_idx = parts.index('dev')
+            if dev_idx + 1 < len(parts):
+                return parts[dev_idx + 1]
+    
+    # Method 2: Find first interface with an IPv4 address in 10.0.0.0/8 (cluster network)
+    result = subprocess.run(['ip', '-4', '-o', 'addr', 'show'], 
+                          capture_output=True, text=True)
+    for line in result.stdout.split('\n'):
+        if '10.' in line:
+            # Format: "2: eth0    inet 10.0.0.1/24 ..."
+            parts = line.split()
+            if len(parts) >= 2:
+                iface = parts[1].rstrip(':')
+                if iface != 'lo':
+                    return iface
+    
+    return None
+
+
 def get_local_info():
     """Get local node information"""
     # Get hostname
@@ -62,22 +90,25 @@ def get_local_info():
     
     # Get primary network interface and MAC
     try:
-        # Get the default interface
-        result = subprocess.run(['ip', 'route', 'show', 'default'], 
-                              capture_output=True, text=True)
-        default_iface = result.stdout.split()[4]
+        default_iface = get_primary_interface()
+        if not default_iface:
+            raise Exception("Could not determine network interface")
         
         # Get MAC address
         with open(f'/sys/class/net/{default_iface}/address', 'r') as f:
             mac = f.read().strip()
         
         # Get IP address
+        ip = None
         result = subprocess.run(['ip', '-4', 'addr', 'show', default_iface], 
                               capture_output=True, text=True)
         for line in result.stdout.split('\n'):
             if 'inet ' in line:
                 ip = line.split()[1].split('/')[0]
                 break
+        
+        if not ip:
+            raise Exception(f"Could not get IP address for interface {default_iface}")
     except Exception as e:
         print(f"Error getting network info: {e}")
         sys.exit(1)
