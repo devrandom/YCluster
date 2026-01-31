@@ -28,8 +28,10 @@
         content: |
           [Unit]
           Description=Prometheus Central (Long-term storage)
-          After=network.target
+          After=network.target misc-rbd.service
           Wants=network.target
+          Requires=misc-rbd.service
+          PartOf=ycluster-apps.target
 
           [Service]
           Type=simple
@@ -52,20 +54,22 @@
           [Install]
           WantedBy=ycluster-apps.target
         mode: '0644'
-      notify: reload systemd
+      register: prometheus_central_service_file
 
-    - name: Disable central Prometheus service (managed by leader election)
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Re-enable prometheus-central service to update symlinks
+      command: systemctl reenable prometheus-central.service
+      when: prometheus_central_service_file.changed
+
+    - name: Enable central Prometheus service (part of ycluster-apps target)
       systemd:
         name: prometheus-central
-        enabled: no
-        state: stopped
-        daemon_reload: yes
+        enabled: yes
 
   handlers:
-    - name: reload systemd
-      systemd:
-        daemon_reload: yes
-
     - name: restart central prometheus if running
       systemd:
         name: prometheus-central
