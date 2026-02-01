@@ -211,6 +211,7 @@ def get_or_create_allocation(mac_address, node_type=None):
         mac_address: MAC address (any format)
         node_type: Optional type override ('storage', 'compute', 'macos').
                    If not provided, type is detected from MAC address.
+                   If provided and different from existing, the allocation is updated.
     """
     client = get_etcd_client()
     normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
@@ -223,6 +224,28 @@ def get_or_create_allocation(mac_address, node_type=None):
         if 'amt_ip' not in data:
             amt_ip_address = determine_ip_from_hostname(data['hostname'] + 'a')
             data['amt_ip'] = amt_ip_address
+        
+        # Update type if explicitly requested and different
+        if node_type and data.get('type') != node_type:
+            old_hostname = data['hostname']
+            # Allocate new hostname for the new type
+            new_hostname = get_next_hostname(client, node_type)
+            new_ip = determine_ip_from_hostname(new_hostname)
+            new_amt_ip = determine_ip_from_hostname(new_hostname + "a")
+            
+            # Update allocation data
+            data['hostname'] = new_hostname
+            data['type'] = node_type
+            data['ip'] = new_ip
+            data['amt_ip'] = new_amt_ip
+            data['updated_at'] = datetime.now(UTC).isoformat()
+            
+            # Update in etcd (delete old hostname entry, create new one)
+            allocation_json = json.dumps(data)
+            client.delete(f"{ETCD_PREFIX}/by-hostname/{old_hostname}")
+            client.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json)
+            client.put(f"{ETCD_PREFIX}/by-hostname/{new_hostname}", allocation_json)
+        
         return data
 
 
