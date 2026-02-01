@@ -41,6 +41,13 @@
         mode: '0644'
       notify: restart admin-api
 
+    - name: Copy macOS bootstrap template
+      copy:
+        src: "templates/macos-bootstrap.sh.j2"
+        dest: "{{ admin_services_dir }}/templates/macos-bootstrap.sh.j2"
+        mode: '0644'
+      notify: restart admin-api
+
     - name: Create static files directory
       file:
         path: "{{ admin_services_dir }}/static"
@@ -107,16 +114,19 @@
       copy:
         src: admin-api.conf.j2
         dest: /etc/nginx/templates/admin-api.conf.j2
+      register: nginx_template_changed
 
-    - name: Configure nginx shared locations (template only)
+    - name: Configure nginx shared locations
       copy:
-        src: admin-api-locations.conf.j2
+        src: admin-api-locations.conf
         dest: /etc/nginx/admin-api-locations.conf
+      register: nginx_locations_changed
+      notify: restart nginx
 
     - name: Update nginx configuration with certbot-manager
       command: "/usr/local/bin/certbot-manager update-nginx{% if 'storage' not in group_names %} --local{% endif %}"
       register: nginx_update_result
-      changed_when: "'Nginx configuration updated' in nginx_update_result.stdout and 'already up to date' not in nginx_update_result.stdout"
+      changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
       notify: restart nginx
 
