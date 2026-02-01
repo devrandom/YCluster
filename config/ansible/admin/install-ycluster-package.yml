@@ -43,7 +43,7 @@
         name: "{{ ycluster_package_dir }}"
         editable: no
         state: present
-        extra_args: "--break-system-packages --ignore-installed"
+        extra_args: "--break-system-packages"
       when: ycluster_check.rc != 0 or ycluster_sync.changed
 
     - name: Create backward compatibility wrapper scripts

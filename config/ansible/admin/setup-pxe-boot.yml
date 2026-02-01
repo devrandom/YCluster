@@ -36,12 +36,21 @@
       when: not iso_file.stat.exists and ansible_host_iso.stat.exists
       register: iso_copy_result
 
-    - name: Download Ubuntu ISO for netboot files (fallback)
+    - name: Download Ubuntu ISO from local server (fallback)
       get_url:
-        url: http://10.0.0.254/ubuntu-24.04.3-live-server-amd64.iso
+        url: http://10.0.0.254/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         mode: '0644'
+      register: local_iso_download
+      ignore_errors: yes
       when: not iso_file.stat.exists and (not ansible_host_iso.stat.exists or iso_copy_result is failed)
+
+    - name: Download Ubuntu ISO from Ubuntu servers (final fallback)
+      get_url:
+        url: https://releases.ubuntu.com/24.04.3/ubuntu-24.04.3-live-server-amd64.iso
+        dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
+        mode: '0644'
+      when: not iso_file.stat.exists and (local_iso_download is failed or local_iso_download is skipped)
 
     - name: Check if netboot files exist
       stat:
