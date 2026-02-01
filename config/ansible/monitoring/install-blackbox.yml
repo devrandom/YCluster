@@ -17,93 +17,115 @@
         owner: prometheus
         group: prometheus
 
-    - name: Check if CA exists
+    - name: Check if /rbd/misc is mounted (indicates storage leader)
+      shell: mountpoint -q /rbd/misc
+      register: rbd_misc_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader status based on mount
+      set_fact:
+        storage_leader: "{{ rbd_misc_mounted.rc == 0 }}"
+
+    - name: Generate and fetch certificates (storage leader only)
+      when: storage_leader
+      block:
+        - name: Check if CA exists
+          stat:
+            path: /rbd/misc/ca/ca.crt
+          register: ca_exists
+
+        - name: Generate CA if not exists
+          command: /usr/local/bin/ycluster tls ca generate
+          when: not ca_exists.stat.exists
+
+        - name: Generate server certificates for each blackbox host
+          command: /usr/local/bin/ycluster tls ca generate-server {{ item }} --san {{ hostvars[item]['ansible_host'] }} --san localhost --san 127.0.0.1
+          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
+          register: gen_cert_result
+          failed_when: gen_cert_result.rc != 0 and 'already exists' not in gen_cert_result.stderr
+
+        - name: Fetch CA certificate to control machine
+          fetch:
+            src: /rbd/misc/ca/ca.crt
+            dest: /tmp/blackbox-ca.crt
+            flat: yes
+
+        - name: Fetch server certificates to control machine
+          fetch:
+            src: /rbd/misc/ca/certs/{{ item }}.crt
+            dest: /tmp/blackbox-{{ item }}.crt
+            flat: yes
+          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
+
+        - name: Fetch server keys to control machine
+          fetch:
+            src: /rbd/misc/ca/certs/{{ item }}.key
+            dest: /tmp/blackbox-{{ item }}.key
+            flat: yes
+          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
+
+    - name: Check if CA certificate was fetched
+      delegate_to: localhost
       stat:
-        path: /rbd/misc/ca/ca.crt
-      register: ca_exists
-      when: storage_leader
+        path: /tmp/blackbox-ca.crt
+      register: ca_cert_fetched
+      become: no
 
-    - name: Generate CA if not exists (storage leader only)
-      command: /usr/local/bin/ycluster tls ca generate
-      when: 
-        - storage_leader
-        - not ca_exists.stat.exists
+    - name: Distribute certificates to all hosts
+      when: ca_cert_fetched.stat.exists
+      block:
+        - name: Copy CA certificate to all blackbox hosts
+          copy:
+            src: /tmp/blackbox-ca.crt
+            dest: /etc/blackbox_exporter/tls/ca.crt
+            owner: prometheus
+            group: prometheus
+            mode: '0644'
 
-    - name: Generate server certificates for each blackbox host
-      command: /usr/local/bin/ycluster tls ca generate-server {{ item }} --san {{ hostvars[item]['ansible_host'] }} --san localhost --san 127.0.0.1
-      loop: "{{ groups['core'] + groups['frontend'] }}"
-      when: storage_leader
-      ignore_errors: yes  # Certificate might already exist
+        - name: Copy server certificate to all blackbox hosts
+          copy:
+            src: /tmp/blackbox-{{ inventory_hostname }}.crt
+            dest: /etc/blackbox_exporter/tls/server.crt
+            owner: prometheus
+            group: prometheus
+            mode: '0644'
 
-    - name: Fetch CA certificate from storage leader to control machine
-      fetch:
-        src: /rbd/misc/ca/ca.crt
-        dest: /tmp/blackbox-ca.crt
-        flat: yes
-      when: storage_leader
+        - name: Copy server private key to all blackbox hosts
+          copy:
+            src: /tmp/blackbox-{{ inventory_hostname }}.key
+            dest: /etc/blackbox_exporter/tls/server.key
+            owner: prometheus
+            group: prometheus
+            mode: '0600'
 
-    - name: Fetch server certificates from storage leader to control machine
-      fetch:
-        src: /rbd/misc/ca/certs/{{ item }}.crt
-        dest: /tmp/blackbox-{{ item }}.crt
-        flat: yes
-      loop: "{{ groups['core'] + groups['frontend'] }}"
-      when: storage_leader
+        - name: Create blackbox exporter web config for TLS
+          copy:
+            content: |
+              tls_server_config:
+                cert_file: /etc/blackbox_exporter/tls/server.crt
+                key_file: /etc/blackbox_exporter/tls/server.key
+                client_ca_file: /etc/blackbox_exporter/tls/ca.crt
+                client_auth_type: RequireAndVerifyClientCert
+            dest: /etc/blackbox_exporter/web-config.yml
+            owner: prometheus
+            group: prometheus
+            mode: '0644'
+          notify: restart blackbox exporter
 
-    - name: Fetch server keys from storage leader to control machine
-      fetch:
-        src: /rbd/misc/ca/certs/{{ item }}.key
-        dest: /tmp/blackbox-{{ item }}.key
-        flat: yes
-      loop: "{{ groups['core'] + groups['frontend'] }}"
-      when: storage_leader
+        - name: Configure blackbox exporter default args for TLS
+          copy:
+            content: |
+              # Arguments for blackbox exporter
+              ARGS="--config.file=/etc/prometheus/blackbox.yml --web.config.file=/etc/blackbox_exporter/web-config.yml --web.listen-address=:9115"
+            dest: /etc/default/prometheus-blackbox-exporter
+            mode: '0644'
+          notify: restart blackbox exporter
 
-    - name: Copy CA certificate to all blackbox hosts
-      copy:
-        src: /tmp/blackbox-ca.crt
-        dest: /etc/blackbox_exporter/tls/ca.crt
-        owner: prometheus
-        group: prometheus
-        mode: '0644'
-
-    - name: Copy server certificate to all blackbox hosts
-      copy:
-        src: /tmp/blackbox-{{ inventory_hostname }}.crt
-        dest: /etc/blackbox_exporter/tls/server.crt
-        owner: prometheus
-        group: prometheus
-        mode: '0644'
-
-    - name: Copy server private key to all blackbox hosts
-      copy:
-        src: /tmp/blackbox-{{ inventory_hostname }}.key
-        dest: /etc/blackbox_exporter/tls/server.key
-        owner: prometheus
-        group: prometheus
-        mode: '0600'
-
-    - name: Create blackbox exporter web config for TLS
-      copy:
-        content: |
-          tls_server_config:
-            cert_file: /etc/blackbox_exporter/tls/server.crt
-            key_file: /etc/blackbox_exporter/tls/server.key
-            client_ca_file: /etc/blackbox_exporter/tls/ca.crt
-            client_auth_type: RequireAndVerifyClientCert
-        dest: /etc/blackbox_exporter/web-config.yml
-        owner: prometheus
-        group: prometheus
-        mode: '0644'
-      notify: restart blackbox exporter
-
-    - name: Configure blackbox exporter default args for TLS
-      copy:
-        content: |
-          # Arguments for blackbox exporter
-          ARGS="--config.file=/etc/prometheus/blackbox.yml --web.config.file=/etc/blackbox_exporter/web-config.yml --web.listen-address=:9115"
-        dest: /etc/default/prometheus-blackbox-exporter
-        mode: '0644'
-      notify: restart blackbox exporter
+    - name: Warn if no storage leader available
+      debug:
+        msg: "WARNING: No storage leader available - TLS certificates not configured. Run playbook again when storage leader is available."
+      when: not ca_cert_fetched.stat.exists
 
     - name: Enable and start Blackbox Exporter
       systemd:
