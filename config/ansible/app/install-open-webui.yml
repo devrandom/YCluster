@@ -8,9 +8,19 @@
     config_suffix: "{{ ('_' + instance) if instance else '' }}"
     local_port: "{{ openwebui_port | default('8380') }}"
   tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
     - name: Display config
       debug:
-        msg: "Installing Open WebUI instance '{{ instance }}' on port {{ local_port }}, suffix '{{ instance_suffix }}'"
+        msg: "Installing Open WebUI instance '{{ instance }}' on port {{ local_port }}, is_storage_leader: {{ is_storage_leader }}"
 
     - name: Create openwebui user
       user:
@@ -88,45 +98,40 @@
         name: "open-webui{{ instance_suffix }}.service"
         enabled: yes
 
-    - name: Create PostgreSQL database and user for Open WebUI
-      postgresql_db:
-        name: "openwebui{{ instance_suffix }}"
-        state: present
-      become_user: postgres
-      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
-      run_once: true
+    - name: Configure PostgreSQL for Open WebUI
+      when: is_storage_leader
+      block:
+        - name: Create PostgreSQL database for Open WebUI
+          postgresql_db:
+            name: "openwebui{{ instance_suffix }}"
+            state: present
+          become_user: postgres
 
-    - name: Create PostgreSQL user for Open WebUI
-      postgresql_user:
-        name: "openwebui{{ instance_suffix }}"
-        password: "openwebui{{ instance_suffix }}"
-        db: "openwebui{{ instance_suffix }}"
-        priv: ALL
-        state: present
-      become_user: postgres
-      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
-      run_once: true
+        - name: Create PostgreSQL user for Open WebUI
+          postgresql_user:
+            name: "openwebui{{ instance_suffix }}"
+            password: "openwebui{{ instance_suffix }}"
+            db: "openwebui{{ instance_suffix }}"
+            priv: ALL
+            state: present
+          become_user: postgres
 
-    - name: Grant schema permissions to openwebui user
-      postgresql_privs:
-        database: "openwebui{{ instance_suffix }}"
-        state: present
-        privs: ALL
-        type: schema
-        objs: public
-        roles: "openwebui{{ instance_suffix }}"
-      become_user: postgres
-      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
-      run_once: true
+        - name: Grant schema permissions to openwebui user
+          postgresql_privs:
+            database: "openwebui{{ instance_suffix }}"
+            state: present
+            privs: ALL
+            type: schema
+            objs: public
+            roles: "openwebui{{ instance_suffix }}"
+          become_user: postgres
 
-    - name: Make openwebui owner of the database
-      postgresql_owner:
-        db: "openwebui{{ instance_suffix }}"
-        new_owner: "openwebui{{ instance_suffix }}"
-        obj_type: database
-      become_user: postgres
-      delegate_to: "{{ groups['storage'] | select('match', inventory_hostname) | first }}"
-      run_once: true
+        - name: Make openwebui owner of the database
+          postgresql_owner:
+            db: "openwebui{{ instance_suffix }}"
+            new_owner: "openwebui{{ instance_suffix }}"
+            obj_type: database
+          become_user: postgres
 
     - name: Pull Open WebUI image from registry
       docker_image:
