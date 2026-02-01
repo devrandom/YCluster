@@ -1,0 +1,11 @@
+---
+- name: Install vault password setup script
+  hosts: storage
+  become: yes
+
+  tasks:
+    - name: Install vault-pass-setup script
+      copy:
+        src: files/scripts/vault-pass-setup
+        dest: /usr/local/bin/vault-pass-setup
+        mode: '0755'
