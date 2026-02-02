@@ -177,7 +177,7 @@
           	<key>StandardOutPath</key>
           	<string>/opt/homebrew/var/log/llama-server.log</string>
           	<key>WorkingDirectory</key>
-          	<string>/Users/dev</string>
+          	<string>/tmp</string>
           </dict>
           </plist>
         dest: /Library/LaunchDaemons/com.ycluster.llama-server.plist
