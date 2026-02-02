@@ -1,4 +1,5 @@
 .aider*
+AGENTS.local.md
 /config/ansible/vault/
 data/dnsmasq.leases
 data/*.iso
