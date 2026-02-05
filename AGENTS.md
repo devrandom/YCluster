@@ -23,6 +23,7 @@ docker compose exec ansible ansible-playbook <playbook>.yml --limit s2  # target
 
 From a core node (s1-s3):
 ```bash
+source /etc/ansible/env.sh  # Required for vault password
 ansible-playbook site.yml
 ansible-playbook storage/storage.yml --tags setup-volumes
 ```
@@ -44,6 +45,7 @@ ycluster certbot obtain --test
 - **Compute nodes (c1+)**: Processing workloads
 - **macOS nodes (m1+)**: macOS compute nodes, bootstrapped via `/macos/bootstrap` endpoint
 - **Frontend nodes (f1+)**: External access via Rathole reverse proxy
+- **Adhoc nodes (x1-x49)**: Ad-hoc nodes that join by setting hostname before DHCP (no Ansible required)
 
 ### Key Services
 - **etcd**: Cluster state and configuration (single source of truth)
@@ -55,6 +57,12 @@ ycluster certbot obtain --test
 - **Gateway VIP (10.0.0.254)**: Routing, DHCP, DNS - may move to non-storage nodes
 - **Storage VIP (10.0.0.100)**: Admin API, Docker registry - tied to storage nodes (needs etcd)
 - **DNS suffix**: `.xc` for cluster hostnames (e.g., `admin.xc`, `registry.xc`, `s1.xc`)
+- **IP ranges by node type**:
+  - Storage (s1-s20): 10.0.0.11-30
+  - Compute (c1-c20): 10.0.0.51-70
+  - macOS (m1-m20): 10.0.0.91-110
+  - Adhoc (x1-x49): 10.0.0.151-199
+  - Dynamic (dhcp-NNN): 10.0.0.200-249
 
 ### Directory Structure
 - `config/ansible/` - All Ansible playbooks and configuration
