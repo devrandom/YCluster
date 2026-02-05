@@ -16,6 +16,26 @@ OPENWEBUI_DATA_DIR="/rbd/misc/app${SUFFIX}"
 COMPOSE_PROJECT="open-webui${SUFFIX}"
 ETCD_KEY_PREFIX="/cluster/config/open-webui${SUFFIX}"
 
+# Function to wait for the Docker registry to be available
+# This handles the race condition during storage leader failover
+wait_for_registry() {
+    local max_attempts=12  # 12 attempts
+    local delay=5          # 5 seconds between attempts = 60s total
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://registry.xc:5000/v2/" > /dev/null 2>&1; then
+            return 0
+        fi
+        echo "Waiting for registry (attempt $attempt/$max_attempts)..."
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Registry not available after $((max_attempts * delay)) seconds"
+    return 1
+}
+
 # Function to get or generate Open WebUI secret key from etcd
 get_or_generate_secret_key() {
     local etcd_key="${ETCD_KEY_PREFIX}/secret-key"
@@ -71,6 +91,12 @@ start_openwebui() {
     
     # Ensure temp file is cleaned up on exit
     trap "rm -f '$env_file'" EXIT
+
+    # Wait for registry to be available (handles storage leader failover)
+    if ! wait_for_registry; then
+        echo "Failed to connect to registry, aborting startup"
+        return 1
+    fi
 
     # Start Open WebUI using Docker Compose v2 with env file
     cd "/etc/open-webui${SUFFIX}"
