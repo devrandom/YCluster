@@ -1,0 +1,96 @@
+---
+# Setup Samba file sharing on NAS nodes
+#
+# Usage:
+#   ansible-playbook app/setup-nas.yml
+#
+# Prerequisites:
+#   - NAS node bootstrapped and registered in etcd
+#   - vault_samba_secret defined in vault
+
+- name: Setup Samba on NAS nodes
+  hosts: nas
+  become: yes
+  vars:
+    samba_user: cluster
+    samba_share_name: near1
+    samba_share_path: /near1
+
+  tasks:
+    - name: Install Samba packages
+      apt:
+        name:
+          - samba
+          - samba-common-bin
+        state: present
+        update_cache: yes
+
+    - name: Ensure share directory exists
+      file:
+        path: "{{ samba_share_path }}"
+        state: directory
+        mode: '0775'
+
+    - name: Configure Samba
+      copy:
+        dest: /etc/samba/smb.conf
+        content: |
+          [global]
+          workgroup = YCLUSTER
+          server string = YCluster NAS
+          security = user
+          map to guest = never
+          log file = /var/log/samba/log.%m
+          max log size = 1000
+          logging = file
+          panic action = /usr/share/samba/panic-action %d
+          server role = standalone server
+          obey pam restrictions = yes
+          unix password sync = yes
+          passwd program = /usr/bin/passwd %u
+          passwd chat = *Enter\snew\s*\spassword:* %n\n *Retype\snew\s*\spassword:* %n\n *password\supdated\ssuccessfully* .
+          pam password change = yes
+
+          [{{ samba_share_name }}]
+          path = {{ samba_share_path }}
+          browseable = yes
+          read only = no
+          valid users = {{ samba_user }}
+          create mask = 0664
+          directory mask = 0775
+          force user = root
+          force group = root
+        mode: '0644'
+      notify: restart smbd
+
+    - name: Create system user for Samba
+      user:
+        name: "{{ samba_user }}"
+        system: yes
+        create_home: no
+        shell: /usr/sbin/nologin
+
+    - name: Set Samba password
+      shell: |
+        printf '%s\n%s\n' '{{ vault_samba_secret }}' '{{ vault_samba_secret }}' | smbpasswd -a -s {{ samba_user }}
+      changed_when: true
+      no_log: true
+
+    - name: Enable Samba user
+      command: smbpasswd -e {{ samba_user }}
+      changed_when: true
+
+    - name: Enable and start Samba services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - smbd
+        - nmbd
+
+  handlers:
+    - name: restart smbd
+      systemd:
+        name: smbd
+        state: restarted
