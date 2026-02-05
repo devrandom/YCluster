@@ -1,0 +1,86 @@
+---
+- name: Setup base configuration for compute nodes
+  hosts: compute
+  become: yes
+
+  handlers:
+    - name: restart dnsmasq
+      systemd:
+        name: dnsmasq
+        state: restarted
+
+  tasks:
+    - name: Disable systemd-resolved to free port 53
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+
+    - name: Check if resolv.conf is a symlink
+      stat:
+        path: /etc/resolv.conf
+      register: resolv_stat
+
+    - name: Remove systemd-resolved symlink
+      file:
+        path: /etc/resolv.conf
+        state: absent
+      when: resolv_stat.stat.islnk is defined and resolv_stat.stat.islnk
+
+    - name: Create static resolv.conf
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 127.0.0.1
+          search xc
+        mode: '0644'
+
+    - name: Clear default dnsmasq.conf to avoid conflicts
+      copy:
+        dest: /etc/dnsmasq.conf
+        content: |
+          # Main dnsmasq configuration
+          # All configuration is in /etc/dnsmasq.d/
+          conf-dir=/etc/dnsmasq.d/,*.conf
+          # Use additional hosts file for static DNS entries
+          addn-hosts=/etc/static-hosts
+          server=208.67.222.222
+          server=8.8.8.8
+          server=1.1.1.1
+        backup: yes
+      notify: restart dnsmasq
+
+    - name: Create empty static hosts file for dnsmasq
+      copy:
+        dest: /etc/static-hosts
+        content: ""
+        force: no
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create dnsmasq configuration directory
+      file:
+        path: /etc/dnsmasq.d
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create dnsmasq configuration (DNS only)
+      copy:
+        dest: /etc/dnsmasq.d/dns.conf
+        mode: '0644'
+        content: |
+          # DNS configuration
+          # Forward .xc queries to gateway VIP
+          server=/xc/10.0.0.254
+          domain=xc
+          domain-needed
+
+          # Dynamic binding for VIP support
+          bind-dynamic
+
+          # DNS only, no DHCP
+          port=53
+      notify: restart dnsmasq
