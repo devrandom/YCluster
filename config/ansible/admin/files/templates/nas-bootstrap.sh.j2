@@ -1,0 +1,105 @@
+#!/bin/bash
+# YCluster NAS Bootstrap Script (Ubuntu)
+
+set -euo pipefail
+
+LOG="/var/log/ycluster-bootstrap.log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "=== YCluster NAS Bootstrap $(date) ==="
+
+# API server that served this script
+API_SERVER="{{ api_server }}"
+
+# Get MAC address of primary interface
+# Try common interface names
+for iface in eth0 enp0s25 eno1 enp1s0; do
+    if ip link show "$iface" &>/dev/null; then
+        MAC_ADDRESS=$(ip link show "$iface" | awk '/ether/{print $2}')
+        if [[ -n "$MAC_ADDRESS" ]]; then
+            echo "Found interface: $iface"
+            break
+        fi
+    fi
+done
+
+if [[ -z "${MAC_ADDRESS:-}" ]]; then
+    echo "ERROR: Could not determine MAC address"
+    echo "Available interfaces:"
+    ip link show
+    exit 1
+fi
+echo "MAC Address: $MAC_ADDRESS"
+
+# Call allocation API to get hostname and IP
+echo "Fetching allocation from $API_SERVER..."
+ALLOCATION=$(curl -sf "$API_SERVER/api/allocate?mac=$MAC_ADDRESS&type=nas")
+if [[ -z "$ALLOCATION" ]]; then
+    echo "ERROR: Failed to get allocation from API"
+    exit 1
+fi
+
+# Parse JSON response
+HOSTNAME=$(echo "$ALLOCATION" | jq -r '.hostname')
+IP_ADDRESS=$(echo "$ALLOCATION" | jq -r '.ip')
+
+echo "Hostname: $HOSTNAME"
+echo "IP: $IP_ADDRESS"
+
+ADMIN_USER="admin"
+
+# Create admin user if not exists
+if ! id "$ADMIN_USER" &>/dev/null; then
+    echo "Creating admin user: $ADMIN_USER"
+    useradd -m -s /bin/bash -G sudo "$ADMIN_USER"
+    # Lock password (SSH key only)
+    passwd -l "$ADMIN_USER"
+    echo "User $ADMIN_USER created (password disabled)"
+else
+    echo "User $ADMIN_USER already exists"
+    # Ensure user is in sudo group
+    usermod -aG sudo "$ADMIN_USER"
+fi
+
+# Configure passwordless sudo
+echo "Configuring passwordless sudo for $ADMIN_USER..."
+echo "$ADMIN_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"$ADMIN_USER"
+chmod 440 /etc/sudoers.d/"$ADMIN_USER"
+
+# Set up SSH key
+USER_HOME=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
+SSH_DIR="$USER_HOME/.ssh"
+
+mkdir -p "$SSH_DIR"
+cat >> "$SSH_DIR/authorized_keys" <<'SSHKEY'
+{{ ssh_key_content }}
+SSHKEY
+
+chown -R "$ADMIN_USER":"$ADMIN_USER" "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+chmod 600 "$SSH_DIR/authorized_keys"
+echo "SSH key installed for $ADMIN_USER"
+
+# Set hostname
+echo "Setting hostname to: $HOSTNAME"
+hostnamectl set-hostname "$HOSTNAME"
+
+# Update /etc/hosts
+if ! grep -q "127.0.1.1.*$HOSTNAME" /etc/hosts; then
+    echo "127.0.1.1 $HOSTNAME" >> /etc/hosts
+fi
+
+# Ensure SSH is enabled and started
+echo "Enabling SSH..."
+systemctl enable ssh
+systemctl start ssh
+
+# Disable password authentication (key-only)
+echo "Disabling SSH password authentication..."
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+systemctl reload ssh
+
+echo "=== Bootstrap complete ==="
+echo "SSH should now be available at $HOSTNAME (current IP: $(hostname -I | awk '{print $1}'))"
+echo "Run Ansible playbooks to complete NAS configuration (Samba, etc.)"

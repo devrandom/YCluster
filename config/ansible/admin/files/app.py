@@ -54,6 +54,7 @@ from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
 MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'macos-bootstrap.sh.j2')
+NAS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nas-bootstrap.sh.j2')
 
 app = Flask(__name__)
 
@@ -107,7 +108,8 @@ allocation_lock = threading.Lock()
 IP_RANGES = {
     's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
-    'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.71-90 (m1-m20)
+    'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
+    'nas': {'base': 130, 'max': 10}, # NAS: 10.0.0.131-140 (nas1-nas10)
 }
 
 def determine_ip_from_hostname(hostname):
@@ -117,21 +119,22 @@ def determine_ip_from_hostname(hostname):
     
     # Check if this is an AMT hostname (ends with 'a')
     is_amt = hostname.endswith('a')
-
-    prefix = hostname[0]
     if is_amt:
-        try:
-            num = int(hostname[1:-1])
-        except ValueError:
-            return None
-    else:
-        try:
-            num = int(hostname[1:])
-        except ValueError:
-            return None
+        hostname = hostname[:-1]  # Strip trailing 'a' for parsing
+
+    # Try multi-char prefixes first (e.g., 'nas'), then single-char
+    prefix = None
+    num = None
+    for p in IP_RANGES:
+        if hostname.startswith(p):
+            try:
+                num = int(hostname[len(p):])
+                prefix = p
+                break
+            except ValueError:
+                continue
     
-    # Get IP range configuration for base node type
-    if prefix not in IP_RANGES:
+    if prefix is None:
         return None
     
     config = IP_RANGES[prefix]
@@ -174,7 +177,8 @@ def get_next_hostname(client, node_type):
     prefixes = {
         'storage': 's',
         'compute': 'c',
-        'macos': 'm'
+        'macos': 'm',
+        'nas': 'nas'
     }
     
     prefix = prefixes.get(node_type, 'c')
@@ -301,7 +305,7 @@ def allocate_hostname():
     if not mac_address:
         return jsonify({'error': 'MAC address is required'}), 400
 
-    if node_type and node_type not in ('storage', 'compute', 'macos'):
+    if node_type and node_type not in ('storage', 'compute', 'macos', 'nas'):
         return jsonify({'error': f'Invalid type: {node_type}'}), 400
 
     try:
@@ -1285,9 +1289,37 @@ def serve_user_data():
     return rendered_content, 200, {'Content-Type': 'text/plain'}
 
 
-@app.route('/macos/bootstrap')
-def serve_macos_bootstrap():
-    """Serve macOS bootstrap script that fetches its own allocation"""
+BOOTSTRAP_TEMPLATES = {
+    'macos': MACOS_BOOTSTRAP_TEMPLATE,
+    'nas': NAS_BOOTSTRAP_TEMPLATE,
+}
+
+@app.route('/bootstrap/')
+def serve_bootstrap_index():
+    """Serve bootstrap usage hints"""
+    api_server = f"http://{request.host}"
+    text = f"""YCluster Bootstrap
+
+Available types:
+  macos  - macOS compute nodes
+  nas    - Ubuntu-based NAS devices
+
+Usage:
+  curl {api_server}/bootstrap/<type> | sudo bash
+
+Examples:
+  curl {api_server}/bootstrap/macos | sudo bash
+  curl {api_server}/bootstrap/nas | sudo bash
+"""
+    return text, 200, {'Content-Type': 'text/plain'}
+
+
+@app.route('/bootstrap/<node_type>')
+def serve_bootstrap(node_type):
+    """Serve bootstrap script for a given node type"""
+    if node_type not in BOOTSTRAP_TEMPLATES:
+        return jsonify({'error': f'Unknown bootstrap type: {node_type}', 'available': list(BOOTSTRAP_TEMPLATES.keys())}), 404
+
     # Determine the API server URL from the request
     api_server = f"http://{request.host}"
 
@@ -1297,7 +1329,7 @@ def serve_macos_bootstrap():
         ssh_key_content = f.read().strip()
 
     # Read and render template
-    with open(MACOS_BOOTSTRAP_TEMPLATE, 'r') as f:
+    with open(BOOTSTRAP_TEMPLATES[node_type], 'r') as f:
         template_content = f.read()
 
     template = Template(template_content)
@@ -1305,6 +1337,10 @@ def serve_macos_bootstrap():
         api_server=api_server,
         ssh_key_content=ssh_key_content
     )
+
+    # Ensure trailing newline
+    if not rendered_content.endswith('\n'):
+        rendered_content += '\n'
 
     return rendered_content, 200, {'Content-Type': 'text/plain'}
 
