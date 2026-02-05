@@ -35,6 +35,7 @@ IP_RANGES = {
     's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
+    'nas': {'base': 130, 'max': 10}, # NAS: 10.0.0.131-140 (nas1-nas10)
     'x': {'base': 150, 'max': 49},   # Adhoc: 10.0.0.151-199 (x1-x49)
 }
 
@@ -276,21 +277,22 @@ class DHCPServer:
         
         # Check if this is an AMT hostname (ends with 'a')
         is_amt = hostname.endswith('a')
-
-        prefix = hostname[0]
         if is_amt:
-            try:
-                num = int(hostname[1:-1])
-            except ValueError:
-                return None
-        else:
-            try:
-                num = int(hostname[1:])
-            except ValueError:
-                return None
+            hostname = hostname[:-1]  # Strip trailing 'a' for parsing
+
+        # Try multi-char prefixes first (e.g., 'nas'), then single-char
+        prefix = None
+        num = None
+        for p in IP_RANGES:
+            if hostname.startswith(p):
+                try:
+                    num = int(hostname[len(p):])
+                    prefix = p
+                    break
+                except ValueError:
+                    continue
         
-        # Get IP range configuration for base node type
-        if prefix not in IP_RANGES:
+        if prefix is None:
             return None
         
         config = IP_RANGES[prefix]
@@ -328,6 +330,10 @@ class DHCPServer:
         """Determine machine type from hostname prefix"""
         if not hostname:
             return 'compute'
+        
+        # Check multi-char prefixes first
+        if hostname.startswith('nas'):
+            return 'nas'
         
         prefix = hostname[0].lower()
         if prefix == 's':
@@ -380,6 +386,7 @@ class DHCPServer:
             'storage': 's',
             'compute': 'c',
             'macos': 'm',
+            'nas': 'nas',
             'adhoc': 'x'
         }
         
