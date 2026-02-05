@@ -1,0 +1,227 @@
+---
+# Mount NAS share on cluster nodes
+#
+# Usage:
+#   ansible-playbook app/mount-nas-share.yml
+#   ansible-playbook app/mount-nas-share.yml --limit core
+#   ansible-playbook app/mount-nas-share.yml --limit macos
+#
+# Prerequisites:
+#   - NAS node running with Samba configured (see setup-nas.yml)
+#   - vault_samba_secret defined in vault
+
+- name: Mount NAS share on Linux nodes
+  hosts: core:compute
+  become: yes
+  vars:
+    samba_user: cluster
+    samba_share_name: near1
+    nas_host: nas1.xc
+    mount_point: /near1
+    mount_uid: 1000
+    mount_gid: 1000
+
+  tasks:
+    - name: Install CIFS utilities
+      apt:
+        name: cifs-utils
+        state: present
+        update_cache: yes
+
+    - name: Create mount point
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create credentials directory
+      file:
+        path: /etc/samba
+        state: directory
+        mode: '0755'
+
+    - name: Create credentials file
+      copy:
+        dest: /etc/samba/nas-credentials
+        content: |
+          username={{ samba_user }}
+          password={{ vault_samba_secret }}
+        mode: '0600'
+      no_log: true
+
+    - name: Create systemd mount unit
+      copy:
+        dest: /etc/systemd/system/near1.mount
+        content: |
+          [Unit]
+          Description=NAS Share {{ samba_share_name }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Mount]
+          What=//{{ nas_host }}/{{ samba_share_name }}
+          Where={{ mount_point }}
+          Type=cifs
+          Options=credentials=/etc/samba/nas-credentials,uid={{ mount_uid }},gid={{ mount_gid }},file_mode=0664,dir_mode=0775,_netdev,x-systemd.automount
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd automount unit
+      copy:
+        dest: /etc/systemd/system/near1.automount
+        content: |
+          [Unit]
+          Description=Automount NAS Share {{ samba_share_name }}
+          After=network-online.target
+          Wants=network-online.target
+
+          [Automount]
+          Where={{ mount_point }}
+          TimeoutIdleSec=0
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Flush handlers
+      meta: flush_handlers
+
+    - name: Enable and start automount
+      systemd:
+        name: near1.automount
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+
+- name: Mount NAS share on macOS nodes
+  hosts: macos
+  become: yes
+  vars:
+    samba_user: cluster
+    samba_share_name: near1
+    nas_host: nas1.xc
+    mount_point: /Volumes/near1
+    mount_user: dev
+    mount_group: staff
+
+  tasks:
+    - name: Create mount point
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+        owner: "{{ mount_user }}"
+        group: "{{ mount_group }}"
+        mode: '0755'
+
+    - name: Create credentials file
+      copy:
+        dest: /etc/nas-credentials
+        content: |
+          username={{ samba_user }}
+          password={{ vault_samba_secret }}
+        owner: "{{ mount_user }}"
+        group: wheel
+        mode: '0600'
+      no_log: true
+
+
+
+    - name: Create /usr/local/bin directory
+      file:
+        path: /usr/local/bin
+        state: directory
+        mode: '0755'
+
+    - name: Create mount script
+      copy:
+        dest: /usr/local/bin/mount-near1.sh
+        content: |
+          #!/bin/bash
+          # Mount NAS share (launchd handles retries via KeepAlive)
+
+          MOUNT_POINT="{{ mount_point }}"
+          NAS_HOST="{{ nas_host }}"
+          SHARE_NAME="{{ samba_share_name }}"
+          CREDS_FILE="/etc/nas-credentials"
+
+          # Read credentials
+          USERNAME=$(grep '^username=' "$CREDS_FILE" | cut -d= -f2)
+          PASSWORD=$(grep '^password=' "$CREDS_FILE" | cut -d= -f2)
+
+          # Check if already mounted
+          if mount | grep -q "$MOUNT_POINT"; then
+              echo "$(date): Already mounted"
+              exit 0
+          fi
+
+          # Ensure mount point exists
+          # Note: /Volumes is world-writable on macOS, so no sudo needed
+          mkdir -p "$MOUNT_POINT"
+
+          echo "$(date): Mounting //$NAS_HOST/$SHARE_NAME to $MOUNT_POINT"
+
+          # Mount as current user (dev) - no sudo needed, files will be owned by dev
+          if /sbin/mount_smbfs -f 0664 -d 0775 "//$USERNAME:$PASSWORD@$NAS_HOST/$SHARE_NAME" "$MOUNT_POINT"; then
+              echo "$(date): Mount successful"
+              exit 0
+          else
+              echo "$(date): Mount failed, launchd will retry"
+              exit 1
+          fi
+        mode: '0755'
+
+    - name: Create LaunchDaemon for auto-mount
+      copy:
+        dest: /Library/LaunchDaemons/com.ycluster.mount-near1.plist
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>Label</key>
+              <string>com.ycluster.mount-near1</string>
+              <key>ProgramArguments</key>
+              <array>
+                  <string>/usr/local/bin/mount-near1.sh</string>
+              </array>
+              <key>UserName</key>
+              <string>dev</string>
+              <key>RunAtLoad</key>
+              <true/>
+              <key>KeepAlive</key>
+              <dict>
+                  <key>SuccessfulExit</key>
+                  <false/>
+              </dict>
+              <key>ThrottleInterval</key>
+              <integer>30</integer>
+              <key>StandardOutPath</key>
+              <string>/tmp/mount-near1.log</string>
+              <key>StandardErrorPath</key>
+              <string>/tmp/mount-near1.log</string>
+          </dict>
+          </plist>
+        mode: '0644'
+      notify: load launchdaemon
+
+    - name: Mount now (if not already mounted)
+      shell: |
+        if ! mount | grep -q "{{ mount_point }}"; then
+          /usr/local/bin/mount-near1.sh &
+        fi
+      changed_when: false
+
+  handlers:
+    - name: load launchdaemon
+      shell: |
+        launchctl unload /Library/LaunchDaemons/com.ycluster.mount-near1.plist 2>/dev/null || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.mount-near1.plist
