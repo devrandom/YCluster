@@ -34,7 +34,8 @@ HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 IP_RANGES = {
     's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
-    'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.71-90 (m1-m20)
+    'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
+    'x': {'base': 150, 'max': 49},   # Adhoc: 10.0.0.151-199 (x1-x49)
 }
 
 # Dynamic IP allocation range for auto-assigned hostnames
@@ -335,6 +336,8 @@ class DHCPServer:
             return 'compute'
         elif prefix == 'm':
             return 'macos'
+        elif prefix == 'x':
+            return 'adhoc'
         else:
             return 'compute'
     
@@ -376,7 +379,8 @@ class DHCPServer:
         prefixes = {
             'storage': 's',
             'compute': 'c',
-            'macos': 'm'
+            'macos': 'm',
+            'adhoc': 'x'
         }
         
         prefix = prefixes.get(node_type, 'c')
