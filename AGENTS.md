@@ -43,7 +43,8 @@ ycluster certbot obtain --test
 - **Core nodes (s1-s3)**: etcd cluster, admin services (DHCP, DNS, PXE), MicroCeph storage
 - **Storage nodes (s4+)**: Additional Ceph storage, run stateful services via leader election
 - **Compute nodes (c1+)**: Processing workloads
-- **macOS nodes (m1+)**: macOS compute nodes, bootstrapped via `/macos/bootstrap` endpoint
+- **macOS nodes (m1+)**: macOS compute nodes, bootstrapped via `/bootstrap/macos` endpoint
+- **NAS nodes (nas1+)**: Ubuntu-based NAS devices, bootstrapped via `/bootstrap/nas` endpoint (dynamic IP)
 - **Frontend nodes (f1+)**: External access via Rathole reverse proxy
 - **Adhoc nodes (x1-x49)**: Ad-hoc nodes that join by setting hostname before DHCP (no Ansible required)
 
@@ -61,6 +62,7 @@ ycluster certbot obtain --test
   - Storage (s1-s20): 10.0.0.11-30
   - Compute (c1-c20): 10.0.0.51-70
   - macOS (m1-m20): 10.0.0.91-110
+  - NAS (nas1-nas10): 10.0.0.131-140
   - Adhoc (x1-x49): 10.0.0.151-199
   - Dynamic (dhcp-NNN): 10.0.0.200-249
 
