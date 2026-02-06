@@ -196,7 +196,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     
     def log_message(self, format, *args):
         """Override to use our logger"""
-        logger.info(f"Health check: {format % args}")
+        logger.debug(f"Health check: {format % args}")
 
 class HealthServer:
     """HTTP server for health monitoring"""
@@ -237,7 +237,7 @@ class DHCPServer:
         """Get etcd client with failover"""
         try:
             client = get_etcd_client()
-            logger.info("Connected to etcd")
+            logger.debug("Connected to etcd")
             return client
         except Exception as e:
             logger.error(f"Could not connect to any etcd host: {e}")
