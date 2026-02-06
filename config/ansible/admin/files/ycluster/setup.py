@@ -29,7 +29,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "etcd3>=0.12.0",
-        "protobuf>=3.20.0,<4",  # etcd3 requires older protobuf
+        "protobuf>=3.20.0",  # apt's 3.21.12 (internally reports as 4.21.12) works fine with etcd3
         "flask>=2.0.0",
         "requests>=2.25.0",
         "dnspython>=2.1.0",

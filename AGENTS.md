@@ -114,7 +114,7 @@ Tasks that need to run only on the storage leader (e.g., PostgreSQL operations) 
 ```
 
 ### Python Package Installation
-The `ycluster` package is installed via pip with `--break-system-packages` but NOT `--ignore-installed`. Dependencies should come from apt packages (e.g., `python3-requests`, `python3-flask`) to avoid version conflicts. Only `protobuf<4` is pinned via pip for etcd3 compatibility.
+The `ycluster` package is installed via pip with `--break-system-packages --no-deps`. All dependencies come from apt packages (e.g., `python3-requests`, `python3-flask`, `python3-etcd3`, `python3-protobuf`). The install playbook removes any pip-installed packages that shadow apt versions. Never install Python dependencies via pip - add them to the apt list in `install-ycluster-package.yml`.
 
 ## Troubleshooting
 

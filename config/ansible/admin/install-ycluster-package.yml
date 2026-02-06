@@ -6,14 +6,45 @@
     ycluster_package_dir: /opt/ycluster
     
   tasks:
-    - name: Install Python package management tools
+    - name: Install Python dependencies and package tools
       apt:
         name:
           - python3-pip
           - python3-setuptools
           - python3-wheel
           - rsync
+          # ycluster dependencies (prefer apt over pip)
+          - python3-etcd3
+          - python3-flask
+          - python3-scapy
+          - python3-requests
+          - python3-dnspython
+          - python3-cryptography
+          - python3-jinja2
+          - python3-netifaces
+          - python3-yaml
+          - python3-ntplib
+          - python3-protobuf
+          - python3-grpcio
         state: present
+
+    - name: Remove pip-installed packages that shadow apt versions
+      pip:
+        name:
+          - dnspython
+          - grpcio
+          - itsdangerous
+          - ntplib
+          - protobuf
+          - scapy
+          - tenacity
+          - typing_extensions
+          - werkzeug
+          - blinker
+          - flask
+        state: absent
+        extra_args: "--break-system-packages"
+      failed_when: false
 
     - name: Check if YCluster package is installed
       command: python3 -c "import ycluster"
@@ -38,12 +69,12 @@
           - "--exclude=*.egg-info"
       register: ycluster_sync
 
-    - name: Install YCluster package in development mode
+    - name: Install YCluster package (no deps - all dependencies from apt)
       pip:
         name: "{{ ycluster_package_dir }}"
         editable: no
         state: present
-        extra_args: "--break-system-packages"
+        extra_args: "--break-system-packages --no-deps"
       when: ycluster_check.rc != 0 or ycluster_sync.changed
 
     - name: Create backward compatibility wrapper scripts
