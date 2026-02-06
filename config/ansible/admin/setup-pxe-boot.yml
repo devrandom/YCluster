@@ -60,12 +60,45 @@
         - /var/lib/tftpboot/ubuntu/vmlinuz
         - /var/lib/tftpboot/ubuntu/initrd
 
+    - name: Get checksum of vmlinuz from ISO
+      shell: |
+        mount -o loop,ro /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso /mnt && \
+        sha256sum /mnt/casper/hwe-vmlinuz | cut -d' ' -f1 && \
+        umount /mnt
+      register: iso_vmlinuz_checksum
+      changed_when: false
+
+    - name: Get checksum of extracted vmlinuz
+      shell: sha256sum /var/lib/tftpboot/ubuntu/vmlinuz | cut -d' ' -f1
+      register: extracted_vmlinuz_checksum
+      changed_when: false
+      when: netboot_files.results[0].stat.exists
+
+    - name: Check if netboot files need update
+      set_fact:
+        netboot_needs_update: >-
+          {{
+            (netboot_files.results | selectattr('stat.exists', 'equalto', false) | list | length > 0)
+            or
+            (extracted_vmlinuz_checksum.stdout | default('') != iso_vmlinuz_checksum.stdout)
+          }}
+
     - name: Extract HWE netboot files from ISO
       shell: |
-        xorriso -osirrox on -indev /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso \
-          -extract /casper/hwe-vmlinuz /var/lib/tftpboot/ubuntu/vmlinuz \
-          -extract /casper/hwe-initrd /var/lib/tftpboot/ubuntu/initrd
-      when: netboot_files.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+        mount -o loop,ro /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso /mnt && \
+        cp /mnt/casper/hwe-vmlinuz /var/lib/tftpboot/ubuntu/vmlinuz && \
+        cp /mnt/casper/hwe-initrd /var/lib/tftpboot/ubuntu/initrd && \
+        umount /mnt
+      when: netboot_needs_update
+
+    - name: Get PXE kernel version
+      shell: file /var/lib/tftpboot/ubuntu/vmlinuz | grep -oP 'version \K[^ ]+'
+      register: pxe_kernel_version
+      changed_when: false
+
+    - name: Display PXE kernel version
+      debug:
+        msg: "PXE kernel version: {{ pxe_kernel_version.stdout }}"
 
     - name: Check if EFI files already exist
       stat:
