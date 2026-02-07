@@ -744,6 +744,12 @@ class DHCPServer:
                     elif option[0] == 'server_id':
                         server_id = option[1]
         
+        # If no requested_addr option, fall back to ciaddr (used in renewals per RFC 2131)
+        if not requested_ip and packet.haslayer(BOOTP):
+            ciaddr = packet[BOOTP].ciaddr
+            if ciaddr and ciaddr != '0.0.0.0':
+                requested_ip = ciaddr
+        
         # Log with client-provided details
         client_details = []
         if requested_hostname:
@@ -801,7 +807,13 @@ class DHCPServer:
             nak = self.create_dhcp_nak(packet)
             interface = self.get_interface_for_ip(self.server_ip)
             sendp(nak, iface=interface, verbose=0)
-            logger.info(f"Sent DHCP NAK to {mac}")
+            if mac not in self.leases:
+                reason = "no lease found"
+            elif requested_ip is None:
+                reason = "no requested IP in options or ciaddr"
+            else:
+                reason = f"lease IP {self.leases[mac]['ip']} != requested {requested_ip}"
+            logger.info(f"Sent DHCP NAK to {mac}: {reason}")
     
     def get_interface_for_ip(self, ip):
         """Get the network interface for a given IP address"""
