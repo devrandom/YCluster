@@ -4,6 +4,9 @@
   become: yes
   vars:
     rocm_version: "6.4.4"
+    # Pin kernel version compatible with amdgpu DKMS
+    # HWE kernels (6.17+) break amdgpu DKMS builds
+    rocm_kernel_version: "6.14.0-37-generic"
   tasks:
     - name: Display AMD GPU status
       debug:
@@ -13,6 +16,46 @@
       meta: end_host
       when: not (ansible_local.gpu.has_amd_gpu | default(false))
 
+    # Kernel pinning: use a known-good kernel for amdgpu DKMS
+    - name: Remove HWE kernel meta-package (prevents incompatible kernel upgrades)
+      apt:
+        name:
+          - linux-image-generic-hwe-24.04
+          - linux-headers-generic-hwe-24.04
+        state: absent
+      register: hwe_removed
+
+    - name: Install pinned kernel
+      apt:
+        name:
+          - "linux-image-{{ rocm_kernel_version }}"
+          - "linux-headers-{{ rocm_kernel_version }}"
+        state: present
+        update_cache: yes
+
+    - name: Find incompatible kernels to remove
+      shell: >
+        dpkg -l linux-image-*-generic linux-headers-*-generic 2>/dev/null |
+        awk '/^ii/{print $2}' |
+        grep -v '{{ rocm_kernel_version }}' |
+        grep -v '6.8.0' |
+        grep -v linux-image-generic |
+        tr '\n' ' '
+      register: incompatible_kernels
+      changed_when: false
+
+    - name: Remove incompatible kernels (keep pinned and GA)
+      apt:
+        name: "{{ incompatible_kernels.stdout.split() }}"
+        state: absent
+        purge: yes
+      when: incompatible_kernels.stdout.strip() != ""
+      register: kernels_removed
+
+    - name: Update GRUB
+      command: update-grub
+      when: kernels_removed is changed
+
     - name: Install prerequisites
       apt:
         name:
@@ -20,9 +63,8 @@
           - gnupg
           - build-essential
           - dkms
-          - linux-headers-{{ ansible_facts['kernel'] }}
+          - "linux-headers-{{ rocm_kernel_version }}"
         state: present
-        update_cache: yes
 
     - name: Create keyrings directory
       file:
@@ -84,6 +126,22 @@
         state: present
       register: amdgpu_install
 
+    - name: Check if amdgpu DKMS is built for current kernel
+      shell: dkms status amdgpu | grep "{{ rocm_kernel_version }}.*installed"
+      register: dkms_status
+      changed_when: false
+      failed_when: false
+
+    - name: Get amdgpu DKMS version
+      shell: dkms status amdgpu | head -1 | cut -d',' -f1 | sed 's/amdgpu\///'
+      register: dkms_version
+      changed_when: false
+      when: dkms_status.rc != 0
+
+    - name: Build amdgpu DKMS for current kernel
+      command: dkms install amdgpu/{{ dkms_version.stdout }} -k {{ rocm_kernel_version }}
+      when: dkms_status.rc != 0
+
     - name: Install ROCm packages
       apt:
         name:
@@ -114,5 +172,5 @@
 
     - name: Reboot required notice
       debug:
-        msg: "NOTICE: A reboot is required to load the new amdgpu driver"
-      when: amdgpu_install.changed
+        msg: "NOTICE: Reboot required to run kernel {{ rocm_kernel_version }} (currently {{ ansible_facts['kernel'] }})"
+      when: ansible_facts['kernel'] != rocm_kernel_version or amdgpu_install.changed
