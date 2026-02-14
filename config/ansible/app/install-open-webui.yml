@@ -153,9 +153,9 @@
     - name: Generate Open WebUI nginx configuration from template
       command: /usr/local/bin/certbot-manager update-nginx
       register: nginx_update_result
-      changed_when: "'Nginx configuration updated' in nginx_update_result.stdout and 'already up to date' not in nginx_update_result.stdout"
+      changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
-      notify: restart nginx
+      notify: reload nginx
 
   handlers:
     - name: reload nginx
