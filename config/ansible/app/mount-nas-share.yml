@@ -114,6 +114,11 @@
     mount_group: staff
 
   tasks:
+    - name: Check if already mounted
+      command: mount
+      register: mount_check
+      changed_when: false
+
     - name: Create mount point
       file:
         path: "{{ mount_point }}"
@@ -121,6 +126,7 @@
         owner: "{{ mount_user }}"
         group: "{{ mount_group }}"
         mode: '0755'
+      when: mount_point not in mount_check.stdout
 
     - name: Create credentials file
       copy:
@@ -146,7 +152,7 @@
         dest: /usr/local/bin/mount-near1.sh
         content: |
           #!/bin/bash
-          # Mount NAS share (launchd handles retries via KeepAlive)
+          # Mount NAS share (launchd runs this periodically via StartInterval)
 
           MOUNT_POINT="{{ mount_point }}"
           NAS_HOST="{{ nas_host }}"
@@ -157,24 +163,44 @@
           USERNAME=$(grep '^username=' "$CREDS_FILE" | cut -d= -f2)
           PASSWORD=$(grep '^password=' "$CREDS_FILE" | cut -d= -f2)
 
-          # Check if already mounted
+          # Check if mounted and healthy
           if mount | grep -q "$MOUNT_POINT"; then
-              echo "$(date): Already mounted"
-              exit 0
+              # Test if the mount is actually responsive (2s timeout)
+              if stat -f %T "$MOUNT_POINT" >/dev/null 2>&1 & STAT_PID=$!; then
+                  sleep 2
+                  if kill -0 "$STAT_PID" 2>/dev/null; then
+                      # stat is hung — mount is stale
+                      kill "$STAT_PID" 2>/dev/null
+                      wait "$STAT_PID" 2>/dev/null
+                      echo "$(date): Stale mount detected, force unmounting"
+                      diskutil unmount force "$MOUNT_POINT" 2>/dev/null || umount -f "$MOUNT_POINT" 2>/dev/null
+                      sleep 1
+                  else
+                      wait "$STAT_PID"
+                      if [ $? -eq 0 ]; then
+                          # Mount is healthy
+                          exit 0
+                      else
+                          echo "$(date): Mount check failed, force unmounting"
+                          diskutil unmount force "$MOUNT_POINT" 2>/dev/null || umount -f "$MOUNT_POINT" 2>/dev/null
+                          sleep 1
+                      fi
+                  fi
+              fi
           fi
 
-          # Ensure mount point exists
-          # Note: /Volumes is world-writable on macOS, so no sudo needed
+          # Ensure mount point exists (script runs as root via launchd)
           mkdir -p "$MOUNT_POINT"
+          chown {{ mount_user }}:{{ mount_group }} "$MOUNT_POINT"
 
           echo "$(date): Mounting //$NAS_HOST/$SHARE_NAME to $MOUNT_POINT"
 
-          # Mount as current user (dev) - no sudo needed, files will be owned by dev
-          if /sbin/mount_smbfs -f 0664 -d 0775 "//$USERNAME:$PASSWORD@$NAS_HOST/$SHARE_NAME" "$MOUNT_POINT"; then
+          # Mount as dev so files are owned by dev
+          if su -l {{ mount_user }} -c "/sbin/mount_smbfs -f 0664 -d 0775 '//$USERNAME:$PASSWORD@$NAS_HOST/$SHARE_NAME' '$MOUNT_POINT'"; then
               echo "$(date): Mount successful"
               exit 0
           else
-              echo "$(date): Mount failed, launchd will retry"
+              echo "$(date): Mount failed, will retry next interval"
               exit 1
           fi
         mode: '0755'
@@ -193,17 +219,10 @@
               <array>
                   <string>/usr/local/bin/mount-near1.sh</string>
               </array>
-              <key>UserName</key>
-              <string>dev</string>
               <key>RunAtLoad</key>
               <true/>
-              <key>KeepAlive</key>
-              <dict>
-                  <key>SuccessfulExit</key>
-                  <false/>
-              </dict>
-              <key>ThrottleInterval</key>
-              <integer>30</integer>
+              <key>StartInterval</key>
+              <integer>60</integer>
               <key>StandardOutPath</key>
               <string>/tmp/mount-near1.log</string>
               <key>StandardErrorPath</key>
