@@ -40,7 +40,7 @@
 
     - name: Build and push with buildx using registry cache
       shell: |
-        stdbuf -oL -eL docker buildx build \
+        docker buildx build \
           --build-arg http_proxy=http://10.0.0.254:3128 \
           --build-arg USE_SLIM=true \
           --cache-from type=registry,ref={{ image_name }}:cache \
