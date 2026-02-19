@@ -82,6 +82,7 @@ start_openwebui() {
     echo "OPENWEBUI_INSTANCE=$INSTANCE" >> "$env_file"
     echo "OPENWEBUI_DATA_DIR=$OPENWEBUI_DATA_DIR" >> "$env_file"
     echo "OPEN_WEBUI_PORT=${OPENWEBUI_PORT:-8380}" >> "$env_file"
+    echo "GLOBAL_LOG_LEVEL=${GLOBAL_LOG_LEVEL:-INFO}" >> "$env_file"
     
     
     # Set database connection variables
