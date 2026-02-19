@@ -16,6 +16,7 @@
 - if you don't yet have inference nodes:
   - add a cloud connection *Settings -> Connections* tabs
   - change some models to public visibility in the *Settings -> Models* tab
+- most modern models support "native" tools calls - enable this in "Advanced Params -> Function Calling" under the model configuration.
 
 ## Building and Upgrading
 
@@ -70,6 +71,34 @@ Restart staging on the leader:
 
 ```bash
 systemctl restart open-webui-stage.service
+```
+
+## Troubleshooting
+
+To enable DEBUG logging, create a systemd override on the storage leader:
+
+```bash
+systemctl edit open-webui.service
+```
+
+Add:
+
+```ini
+[Service]
+Environment=GLOBAL_LOG_LEVEL=DEBUG
+```
+
+Then restart:
+
+```bash
+systemctl restart open-webui.service
+```
+
+Remove the override to go back to INFO:
+
+```bash
+systemctl revert open-webui.service
+systemctl restart open-webui.service
 ```
 
 ## Storage
