@@ -97,6 +97,7 @@ Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.y
 ## Coding Conventions
 
 - No commit message prefixes (no "feat:", "fix:", etc.)
+- Do not create commits unless explicitly asked by the user
 - Keep scripts in `config/ansible/scripts/` directory, installed by playbooks
 - Prefer Python libraries over subprocess for mainstream tasks
 - Playbooks must be idempotent
