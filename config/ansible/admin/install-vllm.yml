@@ -1,0 +1,34 @@
+---
+- name: Install vLLM on Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    vllm_venv: /opt/vllm
+  tasks:
+    - name: End play for nodes without NVIDIA GPU
+      meta: end_host
+      when: not (ansible_local.gpu.has_nvidia_gpu | default(false))
+
+    - name: Install uv
+      shell: curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+      args:
+        creates: /usr/local/bin/uv
+
+    - name: Create vLLM venv
+      command: uv venv {{ vllm_venv }} --python python3
+      args:
+        creates: "{{ vllm_venv }}/bin/activate"
+
+    - name: Install vLLM (latest)
+      command: uv pip install vllm --python {{ vllm_venv }}/bin/python
+      register: vllm_install
+      changed_when: "'Installed' in vllm_install.stdout"
+
+    - name: Verify vLLM installation
+      command: "{{ vllm_venv }}/bin/python -c 'import vllm; print(vllm.__version__)'"
+      register: vllm_version
+      changed_when: false
+
+    - name: Display vLLM version
+      debug:
+        msg: "vLLM {{ vllm_version.stdout }} installed at {{ vllm_venv }}"

@@ -85,6 +85,9 @@ class InventoryModule(BaseInventoryPlugin):
         self.inventory.add_group('nvidia')
         self.inventory.add_group('all_nodes')
 
+        # nvidia is a subgroup of compute
+        self.inventory.add_child('compute', 'nvidia')
+
         # Read storage leader from etcd
         leader_key = '/cluster/leader/app'
         leader_value, _ = etcd_client.get(leader_key)
