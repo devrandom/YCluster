@@ -55,6 +55,7 @@ from ycluster.common.etcd_utils import get_etcd_client
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
 MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'macos-bootstrap.sh.j2')
 NAS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nas-bootstrap.sh.j2')
+NVIDIA_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nvidia-bootstrap.sh.j2')
 
 app = Flask(__name__)
 
@@ -109,6 +110,7 @@ IP_RANGES = {
     's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
+    'nv': {'base': 110, 'max': 20},  # Nvidia: 10.0.0.111-130 (nv1-nv20)
     'nas': {'base': 130, 'max': 10}, # NAS: 10.0.0.131-140 (nas1-nas10)
 }
 
@@ -178,6 +180,7 @@ def get_next_hostname(client, node_type):
         'storage': 's',
         'compute': 'c',
         'macos': 'm',
+        'nvidia': 'nv',
         'nas': 'nas'
     }
     
@@ -189,7 +192,7 @@ def get_next_hostname(client, node_type):
         if value:
             hostname = metadata.key.decode().split('/')[-1]
             try:
-                num = int(hostname[1:])
+                num = int(hostname[len(prefix):])
                 existing_numbers.append(num)
             except:
                 pass
@@ -305,7 +308,7 @@ def allocate_hostname():
     if not mac_address:
         return jsonify({'error': 'MAC address is required'}), 400
 
-    if node_type and node_type not in ('storage', 'compute', 'macos', 'nas'):
+    if node_type and node_type not in ('storage', 'compute', 'macos', 'nas', 'nvidia'):
         return jsonify({'error': f'Invalid type: {node_type}'}), 400
 
     try:
@@ -1292,6 +1295,7 @@ def serve_user_data():
 BOOTSTRAP_TEMPLATES = {
     'macos': MACOS_BOOTSTRAP_TEMPLATE,
     'nas': NAS_BOOTSTRAP_TEMPLATE,
+    'nvidia': NVIDIA_BOOTSTRAP_TEMPLATE,
 }
 
 @app.route('/bootstrap/')
@@ -1303,6 +1307,7 @@ def serve_bootstrap_index():
 Available types:
   macos  - macOS compute nodes
   nas    - Ubuntu-based NAS devices
+  nvidia - Ubuntu-based Nvidia GPU servers
 
 Usage:
   curl {api_server}/bootstrap/<type> | sudo bash
@@ -1310,6 +1315,7 @@ Usage:
 Examples:
   curl {api_server}/bootstrap/macos | sudo bash
   curl {api_server}/bootstrap/nas | sudo bash
+  curl {api_server}/bootstrap/nvidia | sudo bash
 """
     return text, 200, {'Content-Type': 'text/plain'}
 

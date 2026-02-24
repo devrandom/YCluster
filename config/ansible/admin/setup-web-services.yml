@@ -55,6 +55,13 @@
         mode: '0644'
       notify: restart admin-api
 
+    - name: Copy Nvidia bootstrap template
+      copy:
+        src: "templates/nvidia-bootstrap.sh.j2"
+        dest: "{{ admin_services_dir }}/templates/nvidia-bootstrap.sh.j2"
+        mode: '0644'
+      notify: restart admin-api
+
     - name: Create static files directory
       file:
         path: "{{ admin_services_dir }}/static"

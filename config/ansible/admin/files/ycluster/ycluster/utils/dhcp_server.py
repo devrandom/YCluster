@@ -35,6 +35,7 @@ IP_RANGES = {
     's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
+    'nv': {'base': 110, 'max': 20},  # Nvidia: 10.0.0.111-130 (nv1-nv20)
     'nas': {'base': 130, 'max': 10}, # NAS: 10.0.0.131-140 (nas1-nas10)
     'x': {'base': 150, 'max': 49},   # Adhoc: 10.0.0.151-199 (x1-x49)
 }
@@ -334,6 +335,8 @@ class DHCPServer:
         # Check multi-char prefixes first
         if hostname.startswith('nas'):
             return 'nas'
+        if hostname.startswith('nv'):
+            return 'nvidia'
         
         prefix = hostname[0].lower()
         if prefix == 's':
@@ -386,6 +389,7 @@ class DHCPServer:
             'storage': 's',
             'compute': 'c',
             'macos': 'm',
+            'nvidia': 'nv',
             'nas': 'nas',
             'adhoc': 'x'
         }
@@ -402,7 +406,7 @@ class DHCPServer:
             if value:
                 hostname = metadata.key.decode().split('/')[-1]
                 try:
-                    num = int(hostname[1:])
+                    num = int(hostname[len(prefix):])
                     existing_numbers.append(num)
                 except:
                     pass
