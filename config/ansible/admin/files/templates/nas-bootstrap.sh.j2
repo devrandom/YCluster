@@ -11,22 +11,19 @@ echo "=== YCluster NAS Bootstrap $(date) ==="
 # API server that served this script
 API_SERVER="{{ api_server }}"
 
-# Get MAC address of primary interface
-# Try common interface names
-for iface in eth0 enp0s25 eno1 enp1s0; do
-    if ip link show "$iface" &>/dev/null; then
-        MAC_ADDRESS=$(ip link show "$iface" | awk '/ether/{print $2}')
-        if [[ -n "$MAC_ADDRESS" ]]; then
-            echo "Found interface: $iface"
-            break
-        fi
-    fi
-done
+# Get MAC address from the interface used for the default route
+IFACE=$(ip route get 1.1.1.1 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+if [[ -z "$IFACE" ]]; then
+    echo "ERROR: Could not determine default route interface"
+    ip route show
+    exit 1
+fi
+echo "Default route interface: $IFACE"
 
-if [[ -z "${MAC_ADDRESS:-}" ]]; then
-    echo "ERROR: Could not determine MAC address"
-    echo "Available interfaces:"
-    ip link show
+MAC_ADDRESS=$(ip link show "$IFACE" | awk '/ether/{print $2}')
+if [[ -z "$MAC_ADDRESS" ]]; then
+    echo "ERROR: Could not determine MAC address for $IFACE"
+    ip link show "$IFACE"
     exit 1
 fi
 echo "MAC Address: $MAC_ADDRESS"
