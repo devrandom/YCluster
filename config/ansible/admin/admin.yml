@@ -1,5 +1,6 @@
 ---
 - import_playbook: setup-local-facts.yml
+- import_playbook: setup-base-compute.yml
 - import_playbook: configure-netplan.yml
 - import_playbook: install-vault-pass-setup.yml
 - import_playbook: install-ycluster-package.yml
