@@ -82,6 +82,7 @@ class InventoryModule(BaseInventoryPlugin):
         self.inventory.add_group('core')
         self.inventory.add_group('frontend')
         self.inventory.add_group('nas')
+        self.inventory.add_group('nvidia')
         self.inventory.add_group('all_nodes')
 
         # Read storage leader from etcd
@@ -154,6 +155,8 @@ class InventoryModule(BaseInventoryPlugin):
                         self.inventory.add_child('macos', hostname)
                     elif node_type == 'nas':
                         self.inventory.add_child('nas', hostname)
+                    elif node_type == 'nvidia':
+                        self.inventory.add_child('nvidia', hostname)
                     else:
                         if not self.inventory.groups.get('other'):
                             self.inventory.add_group('other')

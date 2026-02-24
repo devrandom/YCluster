@@ -15,18 +15,31 @@ docker compose exec ansible ansible-playbook admin/setup-admin-services.yml
 ```
 
 ### Running Ansible Playbooks
-From admin laptop:
+From a core node (s1-s3) via SSH — preferred for development:
 ```bash
-docker compose exec ansible ansible-playbook <playbook>.yml
-docker compose exec ansible ansible-playbook <playbook>.yml --limit s2  # target specific host
+# /etc/ansible is a symlink to /opt/infrastructure/config/ansible
+# run-playbook.sh sources /etc/ansible/env.sh (sets LC_ALL and ANSIBLE_VAULT_PASSWORD_FILE)
+ssh s2.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml"
+ssh s2.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit s2"
 ```
 
-From a core node (s1-s3):
+From a core node directly:
 ```bash
-source /etc/ansible/env.sh  # Required for vault password
+source /etc/ansible/env.sh  # sets LC_ALL=C.UTF-8 and ANSIBLE_VAULT_PASSWORD_FILE=/run/shm/.vault-pass
 ansible-playbook site.yml
 ansible-playbook storage/storage.yml --tags setup-volumes
 ```
+
+### Dev Workflow (syncing local changes to cluster)
+`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s2.yc:/opt/infrastructure/`:
+```bash
+bash dev-sync.sh  # runs initial sync then watches for changes
+```
+After making changes, either wait for watchman to sync or run manually:
+```bash
+rsync -rvl --exclude-from .syncignore ./ s2.yc:/opt/infrastructure/
+```
+Then run the playbook via SSH as above.
 
 ### Cluster Management
 The `ycluster` CLI is installed on core nodes:
@@ -44,6 +57,7 @@ ycluster certbot obtain --test
 - **Storage nodes (s4+)**: Additional Ceph storage, run stateful services via leader election
 - **Compute nodes (c1+)**: Processing workloads
 - **macOS nodes (m1+)**: macOS compute nodes, bootstrapped via `/bootstrap/macos` endpoint
+- **Nvidia nodes (nv1+)**: Ubuntu-based Nvidia GPU servers, bootstrapped via `/bootstrap/nvidia` endpoint
 - **NAS nodes (nas1+)**: Ubuntu-based NAS devices, bootstrapped via `/bootstrap/nas` endpoint (dynamic IP)
 - **Frontend nodes (f1+)**: External access via Rathole reverse proxy
 - **Adhoc nodes (x1-x49)**: Ad-hoc nodes that join by setting hostname before DHCP (no Ansible required)
@@ -62,6 +76,7 @@ ycluster certbot obtain --test
   - Storage (s1-s20): 10.0.0.11-30
   - Compute (c1-c20): 10.0.0.51-70
   - macOS (m1-m20): 10.0.0.91-110
+  - Nvidia (nv1-nv20): 10.0.0.111-130
   - NAS (nas1-nas10): 10.0.0.131-140
   - Adhoc (x1-x49): 10.0.0.151-199
   - Dynamic (dhcp-NNN): 10.0.0.200-249

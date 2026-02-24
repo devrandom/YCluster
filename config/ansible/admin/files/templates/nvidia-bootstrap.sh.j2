@@ -1,12 +1,12 @@
 #!/bin/bash
-# YCluster NAS Bootstrap Script (Ubuntu)
+# YCluster Nvidia Bootstrap Script (Ubuntu)
 
 set -euo pipefail
 
 LOG="/var/log/ycluster-bootstrap.log"
 exec > >(tee -a "$LOG") 2>&1
 
-echo "=== YCluster NAS Bootstrap $(date) ==="
+echo "=== YCluster Nvidia Bootstrap $(date) ==="
 
 # API server that served this script
 API_SERVER="{{ api_server }}"
@@ -30,7 +30,7 @@ echo "MAC Address: $MAC_ADDRESS"
 
 # Call allocation API to get hostname and IP
 echo "Fetching allocation from $API_SERVER..."
-ALLOCATION=$(curl -sf "$API_SERVER/api/allocate?mac=$MAC_ADDRESS&type=nas")
+ALLOCATION=$(curl -sf "$API_SERVER/api/allocate?mac=$MAC_ADDRESS&type=nvidia")
 if [[ -z "$ALLOCATION" ]]; then
     echo "ERROR: Failed to get allocation from API"
     exit 1
@@ -99,4 +99,4 @@ systemctl reload ssh
 
 echo "=== Bootstrap complete ==="
 echo "SSH should now be available at $HOSTNAME (current IP: $(hostname -I | awk '{print $1}'))"
-echo "Run Ansible playbooks to complete NAS configuration (Samba, etc.)"
+echo "Run Ansible playbooks to complete Nvidia configuration (drivers, CUDA, etc.)"

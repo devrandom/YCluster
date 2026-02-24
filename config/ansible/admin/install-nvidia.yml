@@ -1,0 +1,101 @@
+---
+- name: Install NVIDIA driver and CUDA on Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    cuda_version: "12-8"
+    # Blackwell GPUs require open kernel modules - proprietary driver unsupported
+    nvidia_driver_package: "nvidia-open"
+  tasks:
+    - name: Display NVIDIA GPU status
+      debug:
+        msg: "NVIDIA GPU detected: {{ ansible_local.gpu.has_nvidia_gpu | default(false) }}"
+
+    - name: End play for nodes without NVIDIA GPU
+      meta: end_host
+      when: not (ansible_local.gpu.has_nvidia_gpu | default(false))
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - build-essential
+          - dkms
+          - linux-headers-{{ ansible_facts['kernel'] }}
+          - pkg-config
+          - libglvnd-dev
+        state: present
+        update_cache: yes
+
+    - name: Download CUDA keyring package
+      get_url:
+        url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+        dest: /tmp/cuda-keyring_1.1-1_all.deb
+        mode: '0644'
+
+    - name: Install CUDA keyring package
+      apt:
+        deb: /tmp/cuda-keyring_1.1-1_all.deb
+        state: present
+
+    - name: Clean up keyring deb
+      file:
+        path: /tmp/cuda-keyring_1.1-1_all.deb
+        state: absent
+
+    - name: Update apt cache after adding CUDA repo
+      apt:
+        update_cache: yes
+
+    - name: Install CUDA toolkit
+      apt:
+        name: cuda-toolkit-{{ cuda_version }}
+        state: present
+      register: cuda_install
+
+    - name: Install NVIDIA open kernel modules
+      apt:
+        name: "{{ nvidia_driver_package }}"
+        state: present
+      register: driver_install
+
+    - name: Install NVIDIA container toolkit
+      apt:
+        name: nvidia-container-toolkit
+        state: present
+
+    - name: Configure CUDA PATH for all users
+      copy:
+        dest: /etc/profile.d/cuda.sh
+        mode: '0644'
+        content: |
+          export PATH=/usr/local/cuda/bin:$PATH
+          export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+    - name: Enable NVIDIA persistence daemon
+      systemd:
+        name: nvidia-persistenced
+        enabled: yes
+        state: started
+      failed_when: false
+
+    - name: Restart Docker to pick up container toolkit
+      systemd:
+        name: docker
+        state: restarted
+      failed_when: false
+
+    - name: Verify NVIDIA driver loaded
+      command: nvidia-smi
+      register: nvidia_smi
+      changed_when: false
+      failed_when: false
+
+    - name: Display nvidia-smi output
+      debug:
+        msg: "{{ nvidia_smi.stdout_lines }}"
+      when: nvidia_smi.rc == 0
+
+    - name: Reboot required notice
+      debug:
+        msg: "NOTICE: Reboot required to load NVIDIA kernel modules"
+      when: driver_install.changed or cuda_install.changed

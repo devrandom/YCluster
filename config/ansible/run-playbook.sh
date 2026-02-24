@@ -3,15 +3,10 @@
 # Usage: ./run-playbook.sh site.yml [additional args...]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VAULT_PASS_FILE="${SCRIPT_DIR}/../../.vault_pass"
 
-if [[ ! -f "$VAULT_PASS_FILE" ]]; then
-    echo "Error: Vault password file not found at $VAULT_PASS_FILE" >&2
-    echo "Create it with: echo 'your-password' > .vault_pass" >&2
-    exit 1
-fi
+# Source env.sh to set LC_ALL and ANSIBLE_VAULT_PASSWORD_FILE
+source /etc/ansible/env.sh
 
 ansible-playbook "$@" \
-    -e @vault/all.yml \
-    -e @vault/storage.yml \
-    --vault-password-file "$VAULT_PASS_FILE"
+    -e @"${SCRIPT_DIR}/vault/all.yml" \
+    -e @"${SCRIPT_DIR}/vault/storage.yml"
