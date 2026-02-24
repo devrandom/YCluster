@@ -35,9 +35,9 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 ```bash
 bash dev-sync.sh  # runs initial sync then watches for changes
 ```
-After making changes, either wait for watchman to sync or run manually:
+For ad-hoc syncing, run `dev-sync.sh` directly (watchman runs in the background):
 ```bash
-rsync -rvl --exclude-from .syncignore ./ s2.yc:/opt/infrastructure/
+bash dev-sync.sh
 ```
 Then run the playbook via SSH as above.
 
