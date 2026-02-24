@@ -1,6 +1,6 @@
 ---
 - name: Setup custom Ansible local facts
-  hosts: compute:nvidia
+  hosts: compute
   become: yes
   tasks:
     - name: Create facts.d directory
