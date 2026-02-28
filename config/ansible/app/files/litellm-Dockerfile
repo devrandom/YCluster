@@ -1,0 +1,2 @@
+FROM ghcr.io/berriai/litellm-database:main-latest
+RUN pip install --no-cache-dir asyncpg

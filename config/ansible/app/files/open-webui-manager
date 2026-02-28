@@ -75,6 +75,13 @@ start_openwebui() {
 
     # Get or generate secret key from etcd and write to temp file in ramdisk
     local secret_key=$(get_or_generate_secret_key)
+
+    # Read LiteLLM master key from etcd so Open-WebUI can use LiteLLM as backend.
+    # If LiteLLM isn't deployed yet the key won't exist and Open-WebUI simply
+    # won't have an OpenAI-compatible backend configured — that is acceptable.
+    local litellm_master_key
+    litellm_master_key=$(etcdctl get "/cluster/config/litellm/master-key" --print-value-only 2>/dev/null || true)
+
     local env_file=$(mktemp --tmpdir=/dev/shm)
     
     # Set environment variables for docker-compose
@@ -83,8 +90,8 @@ start_openwebui() {
     echo "OPENWEBUI_DATA_DIR=$OPENWEBUI_DATA_DIR" >> "$env_file"
     echo "OPEN_WEBUI_PORT=${OPENWEBUI_PORT:-8380}" >> "$env_file"
     echo "GLOBAL_LOG_LEVEL=${GLOBAL_LOG_LEVEL:-INFO}" >> "$env_file"
-    
-    
+    echo "LITELLM_MASTER_KEY=${litellm_master_key}" >> "$env_file"
+
     # Set database connection variables
     echo "OPENWEBUI_DB_USER=openwebui${SUFFIX}" >> "$env_file"
     echo "OPENWEBUI_DB_PASS=openwebui${SUFFIX}" >> "$env_file"

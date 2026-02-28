@@ -86,7 +86,11 @@
         group: admin
       become: yes
     
-    - name: Install Ollama via Homebrew
+    # DEPRECATED: Ollama is no longer used. llama-server (llama.cpp) is used
+    # directly instead, as it is more efficient and has a cleaner API surface.
+    # Ollama is kept installed to avoid breaking existing state, but the service
+    # is stopped and disabled. Remove this block once all nodes are confirmed clean.
+    - name: Install Ollama via Homebrew (deprecated, kept for idempotency)
       homebrew:
         name: ollama
         state: present
@@ -122,7 +126,9 @@
         mode: '0755'
       become: yes
     
-    - name: Create Ollama LaunchDaemon plist
+    # DEPRECATED: Ollama service is disabled. The plist is kept so the playbook
+    # remains idempotent on nodes where it was previously deployed.
+    - name: Create Ollama LaunchDaemon plist (deprecated — service kept stopped)
       copy:
         content: |
           <?xml version="1.0" encoding="UTF-8"?>
@@ -164,7 +170,13 @@
         dest: /Library/LaunchDaemons/com.ycluster.ollama.plist
         mode: '0644'
       become: yes
-      notify: restart ollama service
+
+    - name: Stop and disable Ollama LaunchDaemon (deprecated)
+      shell: |
+        launchctl stop com.ycluster.ollama || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.ollama.plist || true
+      become: yes
+      changed_when: false
 
     - name: Create llama-server LaunchDaemon plist
       copy:
@@ -338,13 +350,6 @@
         launchctl start com.ycluster.health
       become: yes
     
-    - name: restart ollama service
-      shell: |
-        launchctl stop com.ycluster.ollama || true
-        launchctl unload /Library/LaunchDaemons/com.ycluster.ollama.plist || true
-        launchctl load /Library/LaunchDaemons/com.ycluster.ollama.plist
-      become: yes
-
     - name: restart llama-server service
       shell: |
         launchctl stop com.ycluster.llama-server || true
