@@ -1,0 +1,27 @@
+# LiteLLM Model List
+#
+# This file lives on Ceph at /rbd/misc/litellm/models.yaml and can be edited
+# directly on any core node. After editing, reload with:
+#   ycluster inference reload
+#
+# To add a same-model replica (load balancing), repeat the model_name with a
+# different api_base — LiteLLM will distribute requests across all entries.
+#
+# Example:
+#   - model_name: llama-3.1-8b
+#     litellm_params:
+#       model: openai/llama-3.1-8b
+#       api_base: http://m1.xc:8080/v1
+#       api_key: "none"
+#   - model_name: llama-3.1-8b
+#     litellm_params:
+#       model: openai/llama-3.1-8b
+#       api_base: http://m2.xc:8080/v1
+#       api_key: "none"
+
+model_list:
+  - model_name: qwen3-30b
+    litellm_params:
+      model: openai/qwen3-30b
+      api_base: http://m1.xc:8000/v1
+      api_key: "none"

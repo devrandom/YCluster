@@ -1,0 +1,146 @@
+#!/bin/bash
+set -e
+
+COMPOSE_DIR="/etc/litellm"
+COMPOSE_PROJECT="litellm"
+
+# Function to wait for the Docker registry to be available
+# This handles the race condition during storage leader failover
+wait_for_registry() {
+    local max_attempts=12  # 12 attempts
+    local delay=5          # 5 seconds between attempts = 60s total
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://registry.xc:5000/v2/" > /dev/null 2>&1; then
+            return 0
+        fi
+        echo "Waiting for registry (attempt $attempt/$max_attempts)..."
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Registry not available after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+# Atomically get or generate a secret stored in etcd.
+# Usage: get_or_generate_secret <etcd_key> <generator_cmd>
+# The generator_cmd is a bash command string that prints the new value to stdout.
+get_or_generate_secret() {
+    local etcd_key="$1"
+    local generator_cmd="$2"
+
+    # Try to get existing value
+    local existing
+    existing=$(etcdctl get "$etcd_key" --print-value-only 2>/dev/null || true)
+
+    if [ -n "$existing" ]; then
+        echo "$existing"
+        return 0
+    fi
+
+    # Generate new value
+    local new_value
+    new_value=$(eval "$generator_cmd")
+
+    # Atomically store only if key doesn't exist (version == 0)
+    echo -e "version(\"$etcd_key\") = \"0\"\n\nput \"$etcd_key\" \"$new_value\"\n\n" \
+        | etcdctl txn > /dev/null
+
+    etcdctl get "$etcd_key" --print-value-only
+}
+
+MODELS_DIR="/rbd/misc/litellm"
+MODELS_FILE="${MODELS_DIR}/models.yaml"
+SEED_MODELS_FILE="/etc/litellm/models-seed.yaml"
+
+start_litellm() {
+    # Ensure config directory is readable
+    mkdir -p "$COMPOSE_DIR"
+
+    # Ensure models directory exists on Ceph and seed if empty
+    mkdir -p "$MODELS_DIR"
+    if [ ! -f "$MODELS_FILE" ]; then
+        echo "Seeding initial models.yaml from ${SEED_MODELS_FILE}"
+        cp "$SEED_MODELS_FILE" "$MODELS_FILE"
+    fi
+
+    # Get or generate secrets from etcd
+    local master_key
+    master_key=$(get_or_generate_secret \
+        "/cluster/config/litellm/master-key" \
+        "echo \"sk-\$(openssl rand 24 | base64 -w 0 | tr -d '=+/' | head -c 32)\"")
+
+    local salt_key
+    salt_key=$(get_or_generate_secret \
+        "/cluster/config/litellm/salt-key" \
+        "openssl rand 24 | base64 -w 0")
+
+    local db_password
+    db_password=$(get_or_generate_secret \
+        "/cluster/config/litellm/db-password" \
+        "openssl rand 24 | base64 -w 0 | tr -d '=+/' | head -c 24")
+
+    # URL-encode password for use in DATABASE_URL (handles legacy passwords
+    # that may contain +, /, = from earlier base64 generation)
+    local db_password_encoded
+    db_password_encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$db_password', safe=''))")
+
+    # Get Open-WebUI DB password for the custom auth hook
+    # (open-webui uses a static password matching its username)
+    local openwebui_db_pass="openwebui"
+
+    # Ensure the litellm PostgreSQL user has the correct password.
+    # The Ansible playbook creates the user with an empty password; we set
+    # the real password here so it is always in sync with what's in etcd.
+    sudo -u postgres psql -c "ALTER ROLE litellm WITH PASSWORD '${db_password}';" 2>/dev/null || true
+
+    # Write secrets to ramdisk env file
+    local env_file
+    env_file=$(mktemp --tmpdir=/dev/shm litellm-env.XXXXXX)
+    trap "rm -f '$env_file'" EXIT
+
+    cat > "$env_file" <<EOF
+LITELLM_MASTER_KEY=${master_key}
+LITELLM_SALT_KEY=${salt_key}
+DATABASE_URL=postgresql://litellm:${db_password_encoded}@host.docker.internal/litellm
+OPENWEBUI_DATABASE_URL=postgresql://openwebui:${openwebui_db_pass}@host.docker.internal/openwebui
+LITELLM_LOCAL_MODEL_COST_MAP=True
+EOF
+
+    # Wait for registry to be available
+    if ! wait_for_registry; then
+        echo "Failed to connect to registry, aborting startup"
+        return 1
+    fi
+
+    cd "$COMPOSE_DIR"
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up --pull=always
+}
+
+stop_litellm() {
+    echo "Stopping LiteLLM"
+    cd "$COMPOSE_DIR"
+    docker compose -p "$COMPOSE_PROJECT" down
+    echo "LiteLLM stopped"
+}
+
+case "$1" in
+    start)
+        if start_litellm; then
+            echo "LiteLLM successfully started"
+            exit 0
+        else
+            echo "Failed to start LiteLLM"
+            exit 1
+        fi
+        ;;
+    stop)
+        stop_litellm
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac

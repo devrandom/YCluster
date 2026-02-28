@@ -1,0 +1,20 @@
+services:
+  litellm:
+    image: registry.xc:5000/litellm-database:latest
+    container_name: litellm
+    volumes:
+      - /etc/litellm/config.yaml:/app/config.yaml:ro
+      - /etc/litellm/litellm_custom_auth.py:/app/litellm_custom_auth.py:ro
+      - /rbd/misc/litellm:/data/litellm:ro
+    ports:
+      - "4000:4000"
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - OPENWEBUI_DATABASE_URL=${OPENWEBUI_DATABASE_URL}
+      - LITELLM_LOCAL_MODEL_COST_MAP=True
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    restart: unless-stopped

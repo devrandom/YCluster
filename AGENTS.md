@@ -67,11 +67,12 @@ ycluster certbot obtain --test
 - **MicroCeph**: Distributed block storage with RBD
 - **Leader election**: etcd-based single-instance coordination for PostgreSQL, Qdrant, DHCP
 - **Keepalived**: VIP failover for gateway (10.0.0.254) and storage (10.0.0.100)
+- **LiteLLM**: Inference gateway at `inference.xc` (port 4000), routing to vLLM/llama-server backends
 
 ### Network
 - **Gateway VIP (10.0.0.254)**: Routing, DHCP, DNS - may move to non-storage nodes
 - **Storage VIP (10.0.0.100)**: Admin API, Docker registry - tied to storage nodes (needs etcd)
-- **DNS suffix**: `.xc` for cluster hostnames (e.g., `admin.xc`, `registry.xc`, `s1.xc`)
+- **DNS suffix**: `.xc` for cluster hostnames (e.g., `admin.xc`, `registry.xc`, `inference.xc`, `s1.xc`, `nv1.xc`)
 - **IP ranges by node type**:
   - Storage (s1-s20): 10.0.0.11-30
   - Compute (c1-c20): 10.0.0.51-70
@@ -90,6 +91,7 @@ ycluster certbot obtain --test
   - `monitoring/` - Prometheus, Grafana, alerting
   - `inventory_plugins/etcd_nodes.py` - Dynamic inventory from etcd
 - `config/ansible/admin/files/ycluster/` - Python CLI tool source
+  - `app/` - Application deployments (Open-WebUI, LiteLLM, Rathole)
 
 ### Inventory
 Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.yml`. The etcd_nodes inventory plugin dynamically discovers nodes.
@@ -146,7 +148,57 @@ sudo systemctl restart snap.microceph.daemon.service
 ## Etcd Paths
 - `/cluster/nodes/by-hostname/<name>` - Node registration
 - `/cluster/config/` - Cluster configuration
+- `/cluster/config/litellm/master-key` - LiteLLM admin key (generated on first start, starts with `sk-`)
+- `/cluster/config/litellm/salt-key` - LiteLLM encryption salt (immutable after first model is added)
+- `/cluster/config/litellm/db-password` - LiteLLM PostgreSQL password
 - `/cluster/services/` - Service state and leader election
+
+## Inference Gateway (LiteLLM)
+
+LiteLLM runs on the storage leader as `litellm.service` (part of `ycluster-apps.target`).
+
+- **Endpoint**: `http://inference.xc/v1/` (cluster-internal), `https://<domain>/v1/` (external, shared with Open-WebUI)
+- **Port**: 4000 (proxied by nginx — `/v1/` path on the main domain, `inference.xc` for cluster-internal)
+- **Auth**: OpenAI-style Bearer token (`Authorization: Bearer sk-...`)
+- **Models**: Configured in `/rbd/misc/litellm/models.yaml` (Ceph-backed, editable at runtime)
+
+### Adding a new inference backend
+```bash
+ycluster inference add my-model http://nodeN.xc:8000/v1
+ycluster inference reload
+```
+Or edit `/rbd/misc/litellm/models.yaml` directly and run `ycluster inference reload`.
+
+### Load balancing
+Repeat the same `model_name` with different `api_base` values — LiteLLM distributes requests across all entries for that model:
+```bash
+ycluster inference add llama-3.1-8b http://m1.xc:8080/v1
+ycluster inference add llama-3.1-8b http://m2.xc:8080/v1
+ycluster inference reload
+```
+
+### Managing models
+```bash
+ycluster inference models                           # list all configured models
+ycluster inference add <name> <api-base>            # add a backend
+ycluster inference remove <name>                    # remove all backends for a model
+ycluster inference remove <name> --api-base <url>   # remove a specific backend
+ycluster inference reload                           # restart LiteLLM to apply changes
+```
+
+### Per-user API keys (for OpenCode / direct access)
+User API keys are managed in Open-WebUI. Users go to **Account Settings → API Key → Generate** to get their `sk-...` key. The same key works directly against `inference.xc` because LiteLLM's custom auth hook (`litellm-custom-auth.py`) validates keys against Open-WebUI's `api_key` PostgreSQL table.
+
+Users configure OpenCode with:
+```bash
+export OPENAI_API_KEY=sk-<their-openwebui-key>
+export OPENAI_BASE_URL=http://inference.xc/v1   # or https://<domain>/v1
+```
+
+For Open-WebUI API keys to be available, `ENABLE_API_KEYS=True` must be set (it is, in docker-compose.yaml). Users also need the `features.api_keys` permission enabled in the Open-WebUI admin panel (Workspace → Users → Permissions).
+
+### Deprecated: Ollama
+Ollama was previously deployed on macOS nodes but is no longer used. `llama-server` (llama.cpp) is used directly instead. The Ollama LaunchDaemon is kept installed on macOS nodes but stopped/disabled.
 
 ## Dev PXE Environment
 
