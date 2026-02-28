@@ -12,17 +12,17 @@ def register_inference_commands(subparsers):
     sub = parser.add_subparsers(dest='inference_command', help='Inference commands')
 
     # ycluster inference models
-    models_parser = sub.add_parser('models', help='List configured models (from config file)')
+    models_parser = sub.add_parser('models', help='List configured models with backends')
     models_parser.set_defaults(func=inference_models)
 
     # ycluster inference ls
     ls_parser = sub.add_parser('ls', help='List live models from the LiteLLM backend')
     ls_parser.set_defaults(func=inference_ls)
 
-    # ycluster inference add <model-name> <api-base> [--backend-model <name>]
-    add_parser = sub.add_parser('add', help='Add a model backend')
-    add_parser.add_argument('model_name', help='User-facing model name (e.g. qwen3-32b)')
+    # ycluster inference add <api-base> [model-name] [--backend-model <name>]
+    add_parser = sub.add_parser('add', help='Add model(s) from a backend')
     add_parser.add_argument('api_base', help='Backend URL — shorthand allowed (e.g. nv1.xc -> http://nv1.xc:8000/v1)')
+    add_parser.add_argument('model_name', nargs='?', default=None, help='Model name (omit to auto-discover all models from backend)')
     add_parser.add_argument('--backend-model', help='Backend model identifier (default: openai/<model-name>)')
     add_parser.set_defaults(func=inference_add)
 
@@ -33,7 +33,7 @@ def register_inference_commands(subparsers):
     remove_parser.set_defaults(func=inference_remove)
 
     # ycluster inference reload
-    reload_parser = sub.add_parser('reload', help='Reload LiteLLM configuration')
+    reload_parser = sub.add_parser('reload', help='Restart LiteLLM (for config.yaml changes only; model add/remove is instant)')
     reload_parser.set_defaults(func=inference_reload)
 
 

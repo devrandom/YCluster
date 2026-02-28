@@ -1,13 +1,10 @@
 # LiteLLM Inference Gateway Configuration (static settings)
 #
-# Model list is managed separately at /rbd/misc/litellm/models.yaml
-# and included below. Edit models there, then run:
-#   ycluster inference reload
+# Models are stored in the LiteLLM database (STORE_MODEL_IN_DB=True).
+# Use 'ycluster inference add/remove' to manage models — changes are instant.
 #
-# This file is Ansible-managed. Changes here require re-running the playbook.
-
-include:
-  - /data/litellm/models.yaml
+# This file is Ansible-managed. Changes here require re-running the playbook
+# and 'ycluster inference reload'.
 
 router_settings:
   routing_strategy: simple-shuffle
