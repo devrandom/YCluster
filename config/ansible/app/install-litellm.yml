@@ -1,0 +1,211 @@
+---
+- name: Install LiteLLM Inference Gateway on storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Display config
+      debug:
+        msg: "Installing LiteLLM, is_storage_leader: {{ is_storage_leader }}"
+
+    - name: Create litellm user
+      user:
+        name: litellm
+        uid: 1005
+        system: yes
+        shell: /bin/false
+        home: /var/lib/litellm
+        create_home: yes
+
+    - name: Create LiteLLM configuration directory
+      file:
+        path: /etc/litellm
+        state: directory
+        owner: litellm
+        group: litellm
+        mode: '0755'
+
+    - name: Copy Docker Compose file for LiteLLM
+      copy:
+        src: files/litellm-docker-compose.yml
+        dest: /etc/litellm/docker-compose.yml
+        owner: litellm
+        group: litellm
+        mode: '0644'
+
+    - name: Copy LiteLLM config.yaml
+      copy:
+        src: files/litellm-config.yaml
+        dest: /etc/litellm/config.yaml
+        owner: litellm
+        group: litellm
+        mode: '0644'
+
+    - name: Copy LiteLLM models seed file (initial model list for first deploy)
+      copy:
+        src: files/litellm-models.yaml
+        dest: /etc/litellm/models-seed.yaml
+        owner: litellm
+        group: litellm
+        mode: '0644'
+
+    - name: Copy LiteLLM custom auth hook
+      copy:
+        src: files/litellm-custom-auth.py
+        dest: /etc/litellm/litellm_custom_auth.py
+        owner: litellm
+        group: litellm
+        mode: '0644'
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
+    - name: Install LiteLLM manager script
+      copy:
+        src: files/litellm-manager
+        dest: /usr/local/lib/cluster/litellm-manager
+        mode: '0755'
+
+    - name: Create litellm systemd service
+      copy:
+        dest: /etc/systemd/system/litellm.service
+        content: |
+          [Unit]
+          Description=LiteLLM Inference Gateway
+          After=network.target docker.service misc-rbd.service
+          Requires=docker.service misc-rbd.service
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/lib/cluster/litellm-manager start
+          ExecStop=/usr/local/lib/cluster/litellm-manager stop
+          TimeoutStartSec=300
+          TimeoutStopSec=60
+          User=root
+          Restart=on-failure
+          RestartSec=10
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: litellm_service_file
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Re-enable litellm service to update symlinks
+      command: systemctl reenable litellm.service
+      when: litellm_service_file.changed
+
+    - name: Enable litellm service (part of storage-apps target)
+      systemd:
+        name: litellm.service
+        enabled: yes
+
+    - name: Configure PostgreSQL for LiteLLM
+      when: is_storage_leader
+      block:
+        - name: Create PostgreSQL database for LiteLLM
+          postgresql_db:
+            name: litellm
+            state: present
+          become_user: postgres
+
+        - name: Create PostgreSQL user for LiteLLM (password managed by litellm-manager)
+          postgresql_user:
+            name: litellm
+            # Password is intentionally empty here; litellm-manager sets the
+            # real password (from etcd) on every start via ALTER ROLE.
+            password: ""
+            db: litellm
+            priv: ALL
+            state: present
+          become_user: postgres
+
+        - name: Grant schema permissions to litellm user
+          postgresql_privs:
+            database: litellm
+            state: present
+            privs: ALL
+            type: schema
+            objs: public
+            roles: litellm
+          become_user: postgres
+
+        - name: Make litellm owner of the database
+          postgresql_owner:
+            db: litellm
+            new_owner: litellm
+            obj_type: database
+          become_user: postgres
+
+    - name: Copy LiteLLM Dockerfile
+      copy:
+        src: files/litellm-Dockerfile
+        dest: /etc/litellm/Dockerfile
+        owner: litellm
+        group: litellm
+        mode: '0644'
+
+    - name: Check if LiteLLM custom image exists
+      docker_image_info:
+        name: registry.xc:5000/litellm-database:latest
+      register: litellm_image_info
+      when: is_storage_leader
+
+    - name: Build LiteLLM custom image (adds asyncpg for Open-WebUI auth hook)
+      docker_image:
+        name: registry.xc:5000/litellm-database:latest
+        source: build
+        build:
+          path: /etc/litellm
+          dockerfile: Dockerfile
+        force_source: yes
+      when: is_storage_leader and litellm_image_info.images | length == 0
+      register: litellm_image_built
+
+    - name: Push LiteLLM custom image to registry
+      docker_image:
+        name: registry.xc:5000/litellm-database:latest
+        push: yes
+        source: local
+      when: is_storage_leader and (litellm_image_built is changed)
+
+    - name: Pull LiteLLM custom image from registry
+      docker_image:
+        name: registry.xc:5000/litellm-database:latest
+        source: pull
+      when: not is_storage_leader
+
+    - name: Install LiteLLM internal nginx config (inference.xc)
+      copy:
+        src: files/litellm-internal.conf
+        dest: /etc/nginx/sites-available/litellm-internal
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable LiteLLM internal nginx config
+      file:
+        src: /etc/nginx/sites-available/litellm-internal
+        dest: /etc/nginx/sites-enabled/litellm-internal
+        state: link
+      notify: reload nginx
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded

@@ -8,4 +8,5 @@
 
 - import_playbook: mount-nas-share.yml
 # - import_playbook: build-open-webui.yml
+- import_playbook: install-litellm.yml
 - import_playbook: install-open-webui.yml

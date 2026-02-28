@@ -8,11 +8,20 @@ services:
       - ${OPEN_WEBUI_PORT-8380}:8080
     environment:
       - 'DATABASE_URL=postgresql://${OPENWEBUI_DB_USER:-openwebui}:${OPENWEBUI_DB_PASS:-openwebui}@host.docker.internal/${OPENWEBUI_DB_NAME:-openwebui}'
-      # - 'OLLAMA_BASE_URL=http://host.docker.internal:11434'
       - 'WEBUI_SECRET_KEY=${OPEN_WEBUI_SECRET_KEY}'
       - 'GLOBAL_LOG_LEVEL=${GLOBAL_LOG_LEVEL:-INFO}'
+      # LiteLLM inference gateway — all models routed through LiteLLM.
+      # NOTE: These env vars only take effect on first boot. Open-WebUI persists
+      # connection settings in its DB, which takes precedence on subsequent starts.
+      # For existing deployments, update via Admin Panel -> Settings -> Connections.
+      - 'OPENAI_API_BASE_URLS=http://host.docker.internal:4000/v1'
+      - 'OPENAI_API_KEYS=${LITELLM_MASTER_KEY}'
+      # Enable per-user API keys so users can access inference directly
+      - 'ENABLE_API_KEYS=True'
       - 'OPEN_WEBUI_PLUGINS=open_webui_plugins'
       - 'MEM_QDRANT_URL=host.docker.internal'
+      # mem0 plugin: keep ollama provider for now until a suitable model is
+      # configured in LiteLLM for memory operations and embeddings.
       - 'MEM_LLM_PROVIDER=ollama'
       - 'MEM_EMBEDDER_PROVIDER=ollama'
       - 'MEM_OLLAMA_LLM_MODEL=deepseek-r1:70b'

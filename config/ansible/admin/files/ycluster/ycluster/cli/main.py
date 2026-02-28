@@ -44,6 +44,7 @@ def create_parser():
     from .frontend import register_frontend_commands
     from .backup import register_backup_commands
     from .healthchecks import register_healthchecks_commands
+    from .inference import register_inference_commands
 
     register_cluster_commands(subparsers)
     register_dhcp_commands(subparsers)
@@ -54,6 +55,7 @@ def create_parser():
     register_frontend_commands(subparsers)
     register_backup_commands(subparsers)
     register_healthchecks_commands(subparsers)
+    register_inference_commands(subparsers)
 
     return parser
 
