@@ -5,7 +5,6 @@ services:
     volumes:
       - /etc/litellm/config.yaml:/app/config.yaml:ro
       - /etc/litellm/litellm_custom_auth.py:/app/litellm_custom_auth.py:ro
-      - /rbd/misc/litellm:/data/litellm:ro
     ports:
       - "4000:4000"
     environment:
@@ -14,6 +13,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - OPENWEBUI_DATABASE_URL=${OPENWEBUI_DATABASE_URL}
       - LITELLM_LOCAL_MODEL_COST_MAP=True
+      - STORE_MODEL_IN_DB=True
     extra_hosts:
       - host.docker.internal:host-gateway
     command: ["--config", "/app/config.yaml", "--port", "4000"]
