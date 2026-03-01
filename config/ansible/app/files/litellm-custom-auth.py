@@ -128,6 +128,7 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
         api_key=api_key,
         user_id=row["user_id"],
         user_email=row["email"],
+        key_alias=row["email"],
         # Map Open-WebUI roles to LiteLLM roles
         user_role="proxy_admin" if row["role"] == "admin" else "internal_user",
     )
