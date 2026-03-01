@@ -32,13 +32,17 @@ def register_inference_commands(subparsers):
     remove_parser.add_argument('--api-base', help='Remove only this specific backend (default: remove all)')
     remove_parser.set_defaults(func=inference_remove)
 
+    # ycluster inference key
+    key_parser = sub.add_parser('key', help='Print the LiteLLM master API key')
+    key_parser.set_defaults(func=inference_key)
+
     # ycluster inference reload
     reload_parser = sub.add_parser('reload', help='Restart LiteLLM (for config.yaml changes only; model add/remove is instant)')
     reload_parser.set_defaults(func=inference_reload)
 
 
 def inference_models(args):
-    """List configured models from config file"""
+    """List configured models"""
     inference_manager.list_models()
 
 
@@ -55,6 +59,11 @@ def inference_add(args):
 def inference_remove(args):
     """Remove a model"""
     inference_manager.remove_model(args.model_name, args.api_base)
+
+
+def inference_key(args):
+    """Print the LiteLLM master API key"""
+    inference_manager.print_master_key()
 
 
 def inference_reload(args):

@@ -31,6 +31,11 @@ def _get_master_key():
     return value.decode()
 
 
+def print_master_key():
+    """Print the LiteLLM master API key."""
+    print(_get_master_key())
+
+
 def _litellm_headers():
     """Return auth headers for LiteLLM API calls."""
     return {"Authorization": f"Bearer {_get_master_key()}"}
