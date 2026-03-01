@@ -18,6 +18,8 @@ services:
       - 'OPENAI_API_KEYS=${LITELLM_MASTER_KEY}'
       # Enable per-user API keys so users can access inference directly
       - 'ENABLE_API_KEYS=True'
+      # Forward user identity headers to LiteLLM for per-user spend tracking
+      - 'ENABLE_FORWARD_USER_INFO_HEADERS=True'
       - 'OPEN_WEBUI_PLUGINS=open_webui_plugins'
       - 'MEM_QDRANT_URL=host.docker.internal'
       # mem0 plugin: keep ollama provider for now until a suitable model is

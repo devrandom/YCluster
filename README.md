@@ -62,9 +62,10 @@ Both interfaces are automatically configured when you set up HTTPS certificates.
 
 ## Network Layout
 
-- **Core nodes**: s1-s3 (10.0.0.11-13) - etcd, admin services, storage
-- **Storage nodes**: s4+ (10.0.0.14+) - additional storage capacity  
+- **Core nodes**: s1-s3 (10.0.0.11-13) - [etcd](docs/operations/etcd.md), admin services, [Ceph storage](docs/operations/ceph.md)
+- **Storage nodes**: s4+ (10.0.0.14+) - additional Ceph storage capacity
 - **Compute nodes**: c1+ (10.0.0.51+) - processing workloads
+- **[macOS nodes](docs/operations/macos.md)**: m1+ (10.0.0.91+) - macOS compute nodes
 - **AMT interfaces**: 10.10.10.x subnet (hostname + 'a' suffix)
 - **VIP**: 10.0.0.254 - cluster gateway and services
 
@@ -139,6 +140,12 @@ Host s3.rat
 
 Then use direct access - `ssh s1.rat`.
 
+## Inference Gateway
+
+LiteLLM inference gateway provides a single OpenAI-compatible API at `http://inference.xc/v1/` (cluster-internal) and `https://your-domain.com/v1/` (external). Manage models with `ycluster inference add/remove`. Users share their Open-WebUI API keys for direct access.
+
+**WARNING**: Do not add external LLM providers directly to Open-WebUI — user emails will leak in HTTP headers. Always add backends through LiteLLM. See [docs/operations/inference.md](docs/operations/inference.md) for details.
+
 ## Management Commands
 
 All cluster management is now consolidated under the `ycluster` CLI:
@@ -151,6 +158,7 @@ All cluster management is now consolidated under the `ycluster` CLI:
 - **Frontend Nodes**: `ycluster frontend` - manage external access points
 - **Rathole Configuration**: `ycluster rathole` - reverse proxy settings
 - **Storage Management**: `ycluster storage` - RBD volume operations
+- **Inference Gateway**: `ycluster inference` - manage LiteLLM models and backends
 
 ### Getting Started with ycluster
 

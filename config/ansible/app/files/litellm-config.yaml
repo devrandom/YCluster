@@ -19,6 +19,9 @@ general_settings:
   # Custom auth validates sk- keys against Open-WebUI's api_key table.
   # The master key is always accepted by LiteLLM before reaching this hook.
   custom_auth: litellm_custom_auth.user_api_key_auth
+  # Map Open-WebUI's user email header to LiteLLM's end_user for spend tracking.
+  # Requires ENABLE_FORWARD_USER_INFO_HEADERS=True in Open-WebUI.
+  user_header_name: X-OpenWebUI-User-Email
   background_health_checks: true
   health_check_interval: 60
 
