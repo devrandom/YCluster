@@ -1,4 +1,4 @@
-.git/
+#.git/
 node_modules/
 __pycache__/
 *.pyc
