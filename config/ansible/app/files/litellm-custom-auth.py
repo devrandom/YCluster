@@ -127,6 +127,7 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     return UserAPIKeyAuth(
         api_key=api_key,
         user_id=row["user_id"],
+        end_user_id=row["email"],
         user_email=row["email"],
         key_alias=row["email"],
         # Map Open-WebUI roles to LiteLLM roles
