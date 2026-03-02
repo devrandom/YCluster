@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 import requests
 
-LITELLM_URL = "http://localhost:4000"
+LITELLM_URL = "http://inference.xc"
 
 
 def _get_master_key():
