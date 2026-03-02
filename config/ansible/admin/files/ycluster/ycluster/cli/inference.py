@@ -15,9 +15,9 @@ def register_inference_commands(subparsers):
     models_parser = sub.add_parser('models', help='List configured models with backends')
     models_parser.set_defaults(func=inference_models)
 
-    # ycluster inference ls
-    ls_parser = sub.add_parser('ls', help='List live models from the LiteLLM backend')
-    ls_parser.set_defaults(func=inference_ls)
+    # ycluster inference ls (alias for models)
+    ls_parser = sub.add_parser('ls', help='List configured models with backends (alias for models)')
+    ls_parser.set_defaults(func=inference_models)
 
     # ycluster inference add <api-base> [model-name] [--backend-model <name>]
     add_parser = sub.add_parser('add', help='Add model(s) from a backend')
@@ -45,10 +45,6 @@ def inference_models(args):
     """List configured models"""
     inference_manager.list_models()
 
-
-def inference_ls(args):
-    """List live models from the LiteLLM backend"""
-    inference_manager.list_live_models()
 
 
 def inference_add(args):
