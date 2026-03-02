@@ -88,8 +88,8 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     Called for every request including master key requests. We must explicitly
     allow the master key through, then validate user keys against Open-WebUI.
 
-    The LiteLLM UI authenticates with JWT tokens after login — these don't
-    start with "sk-" and must be allowed through as admin.
+    JWT tokens from the LiteLLM UI are NOT handled here — they must be validated
+    by LiteLLM's built-in JWT validation before reaching this hook.
     """
     if not api_key:
         raise Exception("Missing API key")
@@ -97,14 +97,6 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     # Allow master key through — LiteLLM does NOT skip custom auth for it
     master_key = os.environ.get("LITELLM_MASTER_KEY", "")
     if master_key and api_key == master_key:
-        return UserAPIKeyAuth(
-            api_key=api_key,
-            user_role="proxy_admin",
-        )
-
-    # Non-sk- tokens (e.g. JWT) — let them through as admin.
-    # The LiteLLM UI uses JWTs after /v2/login.
-    if not api_key.startswith("sk-"):
         return UserAPIKeyAuth(
             api_key=api_key,
             user_role="proxy_admin",
