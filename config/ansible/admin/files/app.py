@@ -474,8 +474,14 @@ def check_ceph_status():
                               capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             health_output = result.stdout.strip()
+            if 'HEALTH_OK' in health_output:
+                status = 'healthy'
+            elif 'HEALTH_ERR' in health_output:
+                status = 'unhealthy'
+            else:
+                status = 'degraded'
             return {
-                'status': 'healthy' if 'HEALTH_OK' in health_output else 'degraded',
+                'status': status,
                 'details': health_output
             }
         else:
@@ -1369,11 +1375,15 @@ def prometheus_metrics():
         for service, details in health_data.get('services', {}).items():
             status = details.get('status')
             if status == 'healthy':
-                service_value = 1
-            elif status == 'standby':
-                service_value = 2
-            else:
                 service_value = 0
+            elif status == 'degraded':
+                service_value = 1
+            elif status == 'unhealthy':
+                service_value = 2
+            elif status == 'standby':
+                service_value = 3
+            else:
+                service_value = 2
             metrics.append(f'ycluster_service_health{{node="{platform.node()}",service="{service}"}} {service_value}')
             
             # Service-specific metrics
