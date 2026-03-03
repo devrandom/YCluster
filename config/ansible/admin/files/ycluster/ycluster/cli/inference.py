@@ -2,6 +2,8 @@
 Inference gateway management commands (LiteLLM)
 """
 
+import sys
+
 from ..utils import inference_manager
 
 
@@ -19,11 +21,12 @@ def register_inference_commands(subparsers):
     ls_parser = sub.add_parser('ls', help='List configured models with backends (alias for models)')
     ls_parser.set_defaults(func=inference_models)
 
-    # ycluster inference add <api-base> [model-name] [--backend-model <name>]
+    # ycluster inference add <api-base> [model-name] [--backend-model <name>] [key=value ...]
     add_parser = sub.add_parser('add', help='Add model(s) from a backend')
     add_parser.add_argument('api_base', help='Backend URL — shorthand allowed (e.g. nv1.xc -> http://nv1.xc:8000/v1)')
     add_parser.add_argument('model_name', nargs='?', default=None, help='Model name (omit to auto-discover all models from backend)')
     add_parser.add_argument('--backend-model', help='Backend model identifier (default: openai/<model-name>)')
+    add_parser.add_argument('extra_params', nargs='*', default=[], help='Extra litellm_params as key=value (e.g. max_parallel_requests=64)')
     add_parser.set_defaults(func=inference_add)
 
     # ycluster inference remove <model-name> [--api-base <url>]
@@ -47,9 +50,30 @@ def inference_models(args):
 
 
 
+def _parse_extra_params(extra_params):
+    """Parse key=value pairs into a dict, auto-converting numeric values."""
+    params = {}
+    for item in extra_params:
+        if '=' not in item:
+            print(f"Invalid parameter (expected key=value): {item}")
+            sys.exit(1)
+        key, value = item.split('=', 1)
+        # Auto-convert numeric values
+        try:
+            value = int(value)
+        except ValueError:
+            try:
+                value = float(value)
+            except ValueError:
+                pass
+        params[key] = value
+    return params
+
+
 def inference_add(args):
     """Add a model backend"""
-    inference_manager.add_model(args.model_name, args.api_base, args.backend_model)
+    extra = _parse_extra_params(args.extra_params)
+    inference_manager.add_model(args.model_name, args.api_base, args.backend_model, extra)
 
 
 def inference_remove(args):

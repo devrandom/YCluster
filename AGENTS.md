@@ -108,6 +108,7 @@ Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.y
 - Use JSON format for command output when available (e.g., `rbd --format json`)
 - Add JSON output format to custom scripts used by other scripts
 - **NEVER run `rm -rf` on mount points or paths that could contain user data without confirming with the user first** - use `rmdir` for empty directories or verify unmounted state first
+- `research/`, `bench-results/`, `go-bench`, and `env.sh` are local/personal files — do not commit them
 
 ## Ansible Patterns
 
