@@ -22,8 +22,8 @@ general_settings:
   # Map Open-WebUI's user email header to LiteLLM's end_user for spend tracking.
   # Requires ENABLE_FORWARD_USER_INFO_HEADERS=True in Open-WebUI.
   user_header_name: X-OpenWebUI-User-Email
-  background_health_checks: true
-  health_check_interval: 60
+  background_health_checks: false
+  # health_check_interval: 60
 
 litellm_settings:
   # Silently drop unsupported params (e.g. llama.cpp extras sent to vLLM)
