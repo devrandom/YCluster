@@ -136,7 +136,7 @@ groups:
     rules:
       # etcd cluster health - grouped by service to show cluster-wide status
       - alert: EtcdClusterUnhealthy
-        expr: count(ycluster_service_health{service="etcd"} == 0) >= 2
+        expr: count(ycluster_service_health{service="etcd"} >= 2) >= 2
         for: 1m
         labels:
           severity: critical
@@ -145,8 +145,17 @@ groups:
           description: "etcd cluster is reporting unhealthy status on {{ $value }} nodes"
 
       # Ceph cluster health - grouped by service to show cluster-wide status
+      - alert: CephClusterDegraded
+        expr: count(ycluster_service_health{service="ceph"} >= 1) >= 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ceph cluster degraded"
+          description: "Ceph cluster is reporting degraded status on {{ $value }} nodes"
+
       - alert: CephClusterUnhealthy
-        expr: count(ycluster_service_health{service="ceph"} == 0) >= 2
+        expr: count(ycluster_service_health{service="ceph"} >= 2) >= 2
         for: 1m
         labels:
           severity: critical
