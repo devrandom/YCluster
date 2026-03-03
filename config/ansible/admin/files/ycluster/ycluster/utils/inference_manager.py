@@ -159,18 +159,21 @@ def _get_existing_pairs():
     }
 
 
-def _api_add_model(model_name, api_base, backend_model):
+def _api_add_model(model_name, api_base, backend_model, extra_params=None):
     """Add a single model via the LiteLLM /model/new API."""
+    litellm_params = {
+        "model": backend_model,
+        "api_base": api_base,
+        "api_key": "none",
+    }
+    if extra_params:
+        litellm_params.update(extra_params)
     resp = _litellm_request(
         "post",
         "/model/new",
         json={
             "model_name": model_name,
-            "litellm_params": {
-                "model": backend_model,
-                "api_base": api_base,
-                "api_key": "none",
-            },
+            "litellm_params": litellm_params,
         },
     )
     if resp.status_code != 200:
@@ -181,11 +184,14 @@ def _api_add_model(model_name, api_base, backend_model):
     return True
 
 
-def add_model(model_name, api_base, backend_model=None):
+def add_model(model_name, api_base, backend_model=None, extra_params=None):
     """Add model(s) via the LiteLLM API (immediate, no restart needed).
 
     If model_name is None, auto-discover all models served by the backend.
     Otherwise add a single named model.
+
+    extra_params is an optional dict of additional litellm_params (e.g.
+    max_parallel_requests, tpm, rpm) merged into the deployment config.
     """
     api_base = normalize_api_base(api_base)
 
@@ -194,15 +200,19 @@ def add_model(model_name, api_base, backend_model=None):
         if not backend_models:
             print(f"No models found at {api_base}")
             sys.exit(1)
-        _add_multiple(backend_models, api_base)
+        _add_multiple(backend_models, api_base, extra_params)
     else:
         if backend_model is None:
             backend_model = f"openai/{model_name}"
-        if _api_add_model(model_name, api_base, backend_model):
-            print(f"Added: {model_name} -> {api_base} ({backend_model})")
+        if _api_add_model(model_name, api_base, backend_model, extra_params):
+            msg = f"Added: {model_name} -> {api_base} ({backend_model})"
+            if extra_params:
+                extras = ", ".join(f"{k}={v}" for k, v in extra_params.items())
+                msg += f" [{extras}]"
+            print(msg)
 
 
-def _add_multiple(backend_models, api_base):
+def _add_multiple(backend_models, api_base, extra_params=None):
     """Add multiple auto-discovered models, skipping duplicates."""
     existing = _get_existing_pairs()
 
@@ -214,7 +224,7 @@ def _add_multiple(backend_models, api_base):
             skipped += 1
             continue
 
-        if _api_add_model(model_id, api_base, f"openai/{model_id}"):
+        if _api_add_model(model_id, api_base, f"openai/{model_id}", extra_params):
             print(f"  added: {model_id} -> {api_base}")
             added += 1
 
