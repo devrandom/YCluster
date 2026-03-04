@@ -84,3 +84,10 @@
           # DNS only, no DHCP
           port=53
       notify: restart dnsmasq
+
+    - name: Enable and start dnsmasq service
+      systemd:
+        name: dnsmasq
+        enabled: yes
+        state: started
+        daemon_reload: yes
