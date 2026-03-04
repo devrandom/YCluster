@@ -22,6 +22,8 @@
         .status-expired { background-color: #f8d7da; color: #721c24; }
         .status-not_configured { background-color: #e2e3e5; color: #383d41; }
         .status-error-indicator { background-color: #f8d7da; color: #721c24; }
+        .status-disabled { background-color: #e2e3e5; color: #6c757d; }
+        .host-disabled { opacity: 0.6; background-color: #f8f9fa; }
         .service-cell { font-size: 0.9em; }
         .service-item { display: inline-block; margin: 2px 4px; padding: 2px 6px; border-radius: 3px; }
         .type-storage { border-left: 4px solid #007bff; }
@@ -252,8 +254,8 @@
                 <tr><td colspan="7" style="text-align: center; color: #666;">No hosts found in cluster inventory.</td></tr>
             </template>
             <template x-for="host in hosts" :key="host.hostname">
-                <tr :class="`type-${host.type} fade-in`">
-                    <td><strong x-text="host.hostname"></strong></td>
+                <tr :class="`type-${host.type} fade-in ${host.disabled ? 'host-disabled' : ''}`">
+                    <td><strong x-text="host.hostname"></strong><template x-if="host.disabled"><span class="status-disabled" style="margin-left: 5px; padding: 2px 4px; font-size: 0.7em;">Disabled</span></template></td>
                     <td x-text="host.type.charAt(0).toUpperCase() + host.type.slice(1)"></td>
                     <td x-text="host.ip"></td>
                     
@@ -344,7 +346,7 @@
                 <template x-if="!hosts || hosts.length === 0">
                     <tr><td colspan="3" style="text-align: center; color: #666;">No hosts available</td></tr>
                 </template>
-                <template x-for="host in hosts" :key="host.hostname">
+                <template x-for="host in hosts.filter(h => !h.disabled)" :key="host.hostname">
                     <tr :class="`type-${host.type}`">
                         <td><strong x-text="host.hostname"></strong></td>
                         <td>

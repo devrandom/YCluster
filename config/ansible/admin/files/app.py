@@ -367,7 +367,8 @@ def allocations():
                     'hostname': allocation['hostname'],
                     'type': allocation['type'],
                     'ip': allocation['ip'],
-                    'allocated_at': allocation.get('allocated_at', 0)
+                    'allocated_at': allocation.get('allocated_at', 0),
+                    'disabled': allocation.get('disabled', False)
                 })
             except:
                 pass
@@ -376,6 +377,55 @@ def allocations():
     allocations.sort(key=lambda x: (x['type'], int(x['hostname'][1:]) if x['hostname'][1:].isdigit() else 0))
     
     return jsonify(allocations)
+
+
+@app.route('/api/host/<hostname>/disable', methods=['POST'])
+def disable_host(hostname):
+    """Disable a host so it doesn't appear in status page"""
+    try:
+        client = get_etcd_client()
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {str(e)}'}), 503
+
+    try:
+        result = client.get(f"{ETCD_PREFIX}/by-hostname/{hostname}")
+        if not result[0]:
+            return jsonify({'error': 'Host not found'}), 404
+
+        allocation = json.loads(result[0].decode())
+        allocation['disabled'] = True
+
+        client.put(f"{ETCD_PREFIX}/by-hostname/{hostname}", json.dumps(allocation))
+        client.put(f"{ETCD_PREFIX}/by-mac/{allocation['mac']}", json.dumps(allocation))
+
+        return jsonify({'status': 'ok', 'hostname': hostname, 'disabled': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/host/<hostname>/enable', methods=['POST'])
+def enable_host(hostname):
+    """Re-enable a host so it appears in status page"""
+    try:
+        client = get_etcd_client()
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {str(e)}'}), 503
+
+    try:
+        result = client.get(f"{ETCD_PREFIX}/by-hostname/{hostname}")
+        if not result[0]:
+            return jsonify({'error': 'Host not found'}), 404
+
+        allocation = json.loads(result[0].decode())
+        allocation['disabled'] = False
+
+        client.put(f"{ETCD_PREFIX}/by-hostname/{hostname}", json.dumps(allocation))
+        client.put(f"{ETCD_PREFIX}/by-mac/{allocation['mac']}", json.dumps(allocation))
+
+        return jsonify({'status': 'ok', 'hostname': hostname, 'disabled': False})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/dhcp-config')
 def get_dhcp_config():
@@ -1865,11 +1915,12 @@ def get_all_hosts():
                             len(hostname) > 1 and 
                             hostname[1:].isdigit()):
                         continue
-                        
+
                     hosts.append({
                         'hostname': hostname,
                         'ip': allocation['ip'],
-                        'type': allocation['type']
+                        'type': allocation['type'],
+                        'disabled': allocation.get('disabled', False)
                     })
                 except:
                     pass
@@ -2087,9 +2138,12 @@ def cluster_status_api():
     leadership = get_leadership_status()
     certificate_status = check_certificate_expiry()
 
-    # Get health status for each host
+    # Get health status for each host (skip disabled hosts)
     for host in hosts:
-        host_health[host['hostname']] = get_host_health(host['ip'])
+        if host.get('disabled', False):
+            host_health[host['hostname']] = {'status': 'disabled', 'services': []}
+        else:
+            host_health[host['hostname']] = get_host_health(host['ip'])
     
     # Extract VIP status from existing health data
     vip_status = get_cluster_vip_status(host_health)
@@ -2130,9 +2184,12 @@ def status_page():
     leadership = get_leadership_status()
     certificate_status = check_certificate_expiry()
 
-    # Get health status for each host
+    # Get health status for each host (skip disabled hosts)
     for host in hosts:
-        host_health[host['hostname']] = get_host_health(host['ip'])
+        if host.get('disabled', False):
+            host_health[host['hostname']] = {'status': 'disabled', 'services': []}
+        else:
+            host_health[host['hostname']] = get_host_health(host['ip'])
     
     # Extract VIP status from existing health data
     vip_status = get_cluster_vip_status(host_health)
