@@ -127,9 +127,9 @@
         - name: Create PostgreSQL user for LiteLLM (password managed by litellm-manager)
           postgresql_user:
             name: litellm
-            # Password is intentionally empty here; litellm-manager sets the
-            # real password (from etcd) on every start via ALTER ROLE.
-            password: ""
+            # Password is managed by litellm-manager via ALTER ROLE on every
+            # start. no_password_changes prevents Ansible from resetting it.
+            no_password_changes: true
             db: litellm
             priv: ALL
             state: present
