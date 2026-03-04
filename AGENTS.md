@@ -8,12 +8,6 @@ YCluster is a self-bootstrapping infrastructure platform for small AI clusters. 
 
 ## Common Commands
 
-### Bootstrap (from admin laptop)
-```bash
-docker compose up --build --profile bootstrap -d
-docker compose exec ansible ansible-playbook admin/setup-admin-services.yml
-```
-
 ### Running Ansible Playbooks
 From a core node (s1-s3) via SSH — preferred for development:
 ```bash
@@ -22,6 +16,8 @@ From a core node (s1-s3) via SSH — preferred for development:
 ssh s2.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml"
 ssh s2.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit s2"
 ```
+
+Always use ansible instead of ad-hoc copying files to the cluster.
 
 From a core node directly:
 ```bash
@@ -156,50 +152,9 @@ sudo systemctl restart snap.microceph.daemon.service
 
 ## Inference Gateway (LiteLLM)
 
-LiteLLM runs on the storage leader as `litellm.service` (part of `ycluster-apps.target`).
+LiteLLM runs on the storage leader as `litellm.service` (part of `ycluster-apps.target`). Endpoint is `http://inference.xc/v1/` (port 4000, proxied by nginx). Auth uses OpenAI-style Bearer tokens validated by a custom auth hook (`litellm-custom-auth.py`) that checks the master key, LiteLLM internal tokens, and Open-WebUI's `api_key` PostgreSQL table.
 
-- **Endpoint**: `http://inference.xc/v1/` (cluster-internal), `https://<domain>/v1/` (external, shared with Open-WebUI)
-- **Port**: 4000 (proxied by nginx — `/v1/` path on the main domain, `inference.xc` for cluster-internal)
-- **Auth**: OpenAI-style Bearer token (`Authorization: Bearer sk-...`)
-- **Models**: Configured in `/rbd/misc/litellm/models.yaml` (Ceph-backed, editable at runtime)
-
-### Adding a new inference backend
-```bash
-ycluster inference add my-model http://nodeN.xc:8000/v1
-ycluster inference reload
-```
-Or edit `/rbd/misc/litellm/models.yaml` directly and run `ycluster inference reload`.
-
-### Load balancing
-Repeat the same `model_name` with different `api_base` values — LiteLLM distributes requests across all entries for that model:
-```bash
-ycluster inference add llama-3.1-8b http://m1.xc:8080/v1
-ycluster inference add llama-3.1-8b http://m2.xc:8080/v1
-ycluster inference reload
-```
-
-### Managing models
-```bash
-ycluster inference models                           # list all configured models
-ycluster inference add <name> <api-base>            # add a backend
-ycluster inference remove <name>                    # remove all backends for a model
-ycluster inference remove <name> --api-base <url>   # remove a specific backend
-ycluster inference reload                           # restart LiteLLM to apply changes
-```
-
-### Per-user API keys (for OpenCode / direct access)
-User API keys are managed in Open-WebUI. Users go to **Account Settings → API Key → Generate** to get their `sk-...` key. The same key works directly against `inference.xc` because LiteLLM's custom auth hook (`litellm-custom-auth.py`) validates keys against Open-WebUI's `api_key` PostgreSQL table.
-
-Users configure OpenCode with:
-```bash
-export OPENAI_API_KEY=sk-<their-openwebui-key>
-export OPENAI_BASE_URL=http://inference.xc/v1   # or https://<domain>/v1
-```
-
-For Open-WebUI API keys to be available, `ENABLE_API_KEYS=True` must be set (it is, in docker-compose.yaml). Users also need the `features.api_keys` permission enabled in the Open-WebUI admin panel (Workspace → Users → Permissions).
-
-### Deprecated: Ollama
-Ollama was previously deployed on macOS nodes but is no longer used. `llama-server` (llama.cpp) is used directly instead. The Ollama LaunchDaemon is kept installed on macOS nodes but stopped/disabled.
+For usage and operations (adding models, API keys, etc.), see `docs/operations/inference.md`.
 
 ## Dev PXE Environment
 
