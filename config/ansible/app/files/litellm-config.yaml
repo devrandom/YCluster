@@ -12,10 +12,8 @@ router_settings:
   timeout: 300
   allowed_fails: 3
   cooldown_time: 10
-  # Limit each backend to 1 concurrent request. llama.cpp's scheduler starves
-  # decode when prefill runs concurrently (no chunked prefill). LiteLLM queues
-  # additional requests until the in-flight one completes.
-  default_max_parallel_requests: 1
+  # Limit each backend to 2 concurrent requests.
+  default_max_parallel_requests: 2
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
