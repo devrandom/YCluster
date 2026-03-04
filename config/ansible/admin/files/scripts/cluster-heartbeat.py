@@ -62,21 +62,51 @@ def get_cluster_health():
             healthy_nodes = 0
             unhealthy_nodes = 0
             unreachable_nodes = 0
+            unhealthy_node_names = []
+            unreachable_node_names = []
             
             for hostname, node_health in cluster_status.get('hostHealth', {}).items():
-                if node_health.get('overall') == 'healthy':
+                node_status = node_health.get('overall') or node_health.get('status', '')
+                if node_status == 'disabled':
+                    continue
+                if node_status == 'healthy':
                     healthy_nodes += 1
-                elif node_health.get('overall') in ['timeout', 'unreachable']:
+                elif node_status in ['timeout', 'unreachable']:
                     unreachable_nodes += 1
+                    unreachable_node_names.append(hostname)
                 else:
                     unhealthy_nodes += 1
+                    unhealthy_node_names.append(hostname)
             
             health_data['nodes'] = {
                 'healthy': healthy_nodes,
                 'unhealthy': unhealthy_nodes,
                 'unreachable': unreachable_nodes,
-                'total': healthy_nodes + unhealthy_nodes + unreachable_nodes
+                'total': healthy_nodes + unhealthy_nodes + unreachable_nodes,
+                'unhealthy_names': unhealthy_node_names,
+                'unreachable_names': unreachable_node_names
             }
+            
+            # Collect service details from unhealthy nodes
+            unhealthy_services_by_node = {}
+            for hostname in unhealthy_node_names + unreachable_node_names:
+                node_health = cluster_status.get('hostHealth', {}).get(hostname, {})
+                services = node_health.get('services', {})
+                failed = []
+                for svc, details in services.items():
+                    if isinstance(details, dict):
+                        status = details.get('status', '')
+                        if status in ['unhealthy', 'error', 'degraded']:
+                            failed.append(f"{svc}({status})")
+                if failed:
+                    unhealthy_services_by_node[hostname] = failed
+            
+            if unhealthy_services_by_node:
+                health_data['unhealthy_services_by_node'] = unhealthy_services_by_node
+            
+            # Local services
+            local_health = cluster_status.get('hostHealth', {}).get(socket.gethostname(), {})
+            health_data['local_services'] = local_health.get('services', {})
             
             # Add leadership info
             health_data['leadership'] = cluster_status.get('leadership', {})
@@ -136,8 +166,16 @@ def format_health_message(health_data, status):
     nodes = health_data.get('nodes', {})
     if nodes:
         lines.append(f"Nodes: {nodes.get('healthy', 0)}/{nodes.get('total', 0)} healthy")
-        if nodes.get('unreachable', 0) > 0:
-            lines.append(f"  Unreachable: {nodes['unreachable']}")
+        if nodes.get('unhealthy_names'):
+            lines.append(f"  Unhealthy: {', '.join(nodes['unhealthy_names'])}")
+        if nodes.get('unreachable_names'):
+            lines.append(f"  Unreachable: {', '.join(nodes['unreachable_names'])}")
+    
+    # Unhealthy services by node
+    unhealthy_by_node = health_data.get('unhealthy_services_by_node', {})
+    if unhealthy_by_node:
+        for hostname, services in unhealthy_by_node.items():
+            lines.append(f"  {hostname}: {', '.join(services)}")
     
     # Leadership
     leadership = health_data.get('leadership', {})
@@ -167,6 +205,20 @@ def format_health_message(health_data, status):
     if unhealthy_services:
         lines.append(f"Unhealthy Services: {', '.join(unhealthy_services)}")
     
+    # Local service details
+    local_services = health_data.get('local_services', {})
+    if local_services:
+        failed_services = []
+        for service, details in local_services.items():
+            if isinstance(details, dict):
+                svc_status = details.get('status', '')
+                if svc_status in ['unhealthy', 'error']:
+                    failed_services.append(f"{service}({svc_status})")
+                elif svc_status == 'degraded':
+                    failed_services.append(f"{service}(degraded)")
+        if failed_services:
+            lines.append(f"  Failed: {', '.join(failed_services)}")
+    
     # Errors
     if 'error' in health_data:
         lines.append(f"\nError: {health_data['error']}")
@@ -192,6 +244,7 @@ def send_heartbeat():
         
         # Format message
         message = format_health_message(health_data, status)
+        print(message)
         
         # Send appropriate ping
         if exit_code == 0:
