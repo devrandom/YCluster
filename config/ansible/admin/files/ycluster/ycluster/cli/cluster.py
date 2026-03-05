@@ -12,13 +12,17 @@ def register_cluster_commands(subparsers):
     cluster_parser.set_defaults(func=lambda args: args.parser.print_help(), parser=cluster_parser)
     cluster_subparsers = cluster_parser.add_subparsers(dest='cluster_command', help='Cluster commands')
 
-    # Status command
-    status_parser = cluster_subparsers.add_parser('status', help='Check cluster health and status')
-    status_parser.set_defaults(func=cluster_status)
+    # Status command (verbose by default for backward compat)
+    status_parser = cluster_subparsers.add_parser('status', help='Detailed cluster status (verbose)')
+    status_parser.set_defaults(func=cluster_status_verbose)
 
-    # Health command (alias for status)
-    health_parser = cluster_subparsers.add_parser('health', help='Check cluster health (alias for status)')
-    health_parser.set_defaults(func=cluster_status)
+    # Health command (compact by default)
+    health_parser = cluster_subparsers.add_parser('health', help='Compact cluster health summary')
+    health_parser.add_argument('-v', '--verbose', action='store_true', help='Show full detailed output')
+    health_parser.set_defaults(func=cluster_health)
+
+    # Top-level health alias is registered in register_health_alias()
+    
 
     # Populate local node command
     populate_parser = cluster_subparsers.add_parser('populate-local-node', help='Populate local node information in etcd')
@@ -35,9 +39,21 @@ def register_cluster_commands(subparsers):
     enable_parser.set_defaults(func=cluster_enable_host)
 
 
-def cluster_status(args):
-    """Execute cluster status check"""
-    check_cluster.main()
+def register_health_alias(subparsers):
+    """Register top-level 'health' command as alias for 'cluster health'"""
+    health_parser = subparsers.add_parser('health', help='Compact cluster health summary')
+    health_parser.add_argument('-v', '--verbose', action='store_true', help='Show full detailed output')
+    health_parser.set_defaults(func=cluster_health)
+
+
+def cluster_health(args):
+    """Execute compact cluster health check"""
+    check_cluster.main(verbose=getattr(args, 'verbose', False))
+
+
+def cluster_status_verbose(args):
+    """Execute verbose cluster status check"""
+    check_cluster.main(verbose=True)
 
 
 def cluster_populate_local_node(args):
