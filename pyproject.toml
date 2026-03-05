@@ -26,4 +26,12 @@ dependencies = [
 [tool.uv]
 dev-dependencies = [
     "ansible-lint>=6.0.0",
+    # Type stubs for LSP support
+    "types-requests",
+    "types-PyYAML",
+    "types-protobuf",
+    "types-netifaces",
 ]
+
+# Also run once for ycluster import resolution:
+#   uv pip install -e config/ansible/admin/files/ycluster/

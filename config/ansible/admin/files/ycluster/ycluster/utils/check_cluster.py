@@ -3,7 +3,7 @@
 Check etcd health across all cluster nodes and list stored node entries.
 """
 
-import etcd3  # type: ignore[import-untyped]
+import etcd3
 import json
 import re
 import sys
