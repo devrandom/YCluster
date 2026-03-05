@@ -475,6 +475,11 @@ def get_hosts():
                 hostname = allocation['hostname']
                 ip = allocation['ip']
                 
+                # Skip AMT hostnames registered as nodes - they get correct
+                # entries auto-generated from the base node below
+                if hostname.endswith('a') and determine_ip_from_hostname(hostname):
+                    continue
+                
                 # Add main hostname entry
                 hosts_entries.append(f"{ip} {hostname} {hostname}.xc")
                 
