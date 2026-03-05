@@ -1,0 +1,15 @@
+---
+- name: Configure locale on all managed nodes
+  hosts: storage:compute
+  become: yes
+  tasks:
+    - name: Ensure locale C.UTF-8 is available
+      locale_gen:
+        name: C.UTF-8
+        state: present
+
+    - name: Set LC_ALL in /etc/environment
+      lineinfile:
+        path: /etc/environment
+        regexp: '^LC_ALL='
+        line: 'LC_ALL=C.UTF-8'
