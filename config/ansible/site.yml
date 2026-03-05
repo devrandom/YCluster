@@ -1,6 +1,7 @@
 ---
 # Core Infrastructure - Foundation services and cluster coordination
 - import_playbook: install-etcd.yml
+- import_playbook: configure-locale.yml
 
 # Admin Services - Cluster management and coordination
 - import_playbook: admin/admin.yml
