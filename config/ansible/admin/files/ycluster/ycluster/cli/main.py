@@ -35,7 +35,7 @@ def create_parser():
     )
     
     # Import and register subcommands
-    from .cluster import register_cluster_commands
+    from .cluster import register_cluster_commands, register_health_alias
     from .dhcp import register_dhcp_commands
     from .tls import register_tls_commands
     from .https import register_https_commands
@@ -47,6 +47,7 @@ def create_parser():
     from .inference import register_inference_commands
 
     register_cluster_commands(subparsers)
+    register_health_alias(subparsers)
     register_dhcp_commands(subparsers)
     register_tls_commands(subparsers)
     register_https_commands(subparsers)
