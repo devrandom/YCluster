@@ -1,0 +1,69 @@
+---
+# Manually upgrade packages that are held from unattended-upgrades.
+#
+# These packages are held because automatic upgrades can restart services
+# managed by leader election (e.g. PostgreSQL), causing outages.
+#
+# Usage:
+#   cd /etc/ansible && ./run-playbook.sh storage/upgrade-held-packages.yml
+#
+# The playbook will:
+#   1. Unhold the packages
+#   2. Upgrade them
+#   3. Re-hold them
+#   4. Restart services if they were upgraded (on the storage leader only)
+#   5. Record the upgrade timestamp for monitoring
+#
+- name: Upgrade held packages on core nodes
+  hosts: core
+  become: yes
+  serial: 1
+  vars:
+    held_packages:
+      - postgresql-16
+      - postgresql-client-16
+    textfile_dir: /var/lib/prometheus/node-exporter
+  tasks:
+    - name: Unhold packages for upgrade
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: install
+      loop: "{{ held_packages }}"
+
+    - name: Upgrade packages
+      apt:
+        name: "{{ held_packages }}"
+        state: latest
+        update_cache: yes
+      register: apt_result
+
+    - name: Re-hold packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: "{{ held_packages }}"
+
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Restart PostgreSQL on storage leader if it was upgraded
+      systemd:
+        name: postgresql@16-main
+        state: restarted
+      when:
+        - rbd_mounted.rc == 0
+        - apt_result.changed
+
+    - name: Record upgrade timestamp for monitoring
+      copy:
+        dest: "{{ textfile_dir }}/held_packages.prom"
+        content: |
+          # HELP ycluster_held_packages_last_upgrade_timestamp_seconds Unix timestamp of last manual held-package upgrade
+          # TYPE ycluster_held_packages_last_upgrade_timestamp_seconds gauge
+          ycluster_held_packages_last_upgrade_timestamp_seconds {{ ansible_date_time.epoch }}
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
