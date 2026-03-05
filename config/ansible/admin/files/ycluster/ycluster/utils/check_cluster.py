@@ -3,8 +3,9 @@
 Check etcd health across all cluster nodes and list stored node entries.
 """
 
-import etcd3
+import etcd3  # type: ignore[import-untyped]
 import json
+import re
 import sys
 import os
 import subprocess
@@ -12,6 +13,7 @@ import socket
 import urllib.request
 import urllib.error
 from datetime import datetime
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..common.etcd_utils import get_etcd_client, get_etcd_hosts
@@ -23,6 +25,8 @@ GRPC_OPTIONS = [('grpc.enable_http_proxy', 0)]
 INITIAL_ETCD_HOST = get_etcd_hosts()[0]
 ETCD_PREFIX = '/cluster/nodes'
 DHCP_HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
+STORAGE_VIP = '10.0.0.100'
+ADMIN_API_PORT = 12723
 
 def get_cluster_members(initial_host):
     """Get all etcd cluster members using etcdctl"""
@@ -128,10 +132,12 @@ def check_dhcp_service_on_host(host_ip):
     except urllib.error.HTTPError as e:
         error = 'Health endpoint not found (DHCP server may not be running)' if e.code == 404 else f'HTTP error {e.code}: {e.reason}'
         return {'host': host_ip, 'running': False, 'error': error, 'method': 'health_endpoint'}
-    except (urllib.error.URLError, socket.timeout, Exception) as e:
-        error_type = 'timeout' if isinstance(e, socket.timeout) else 'connection failed' if isinstance(e, urllib.error.URLError) else 'unexpected error'
-        error_msg = 'Health endpoint timeout' if isinstance(e, socket.timeout) else str(e.reason if hasattr(e, 'reason') else e)
-        return {'host': host_ip, 'running': False, 'error': f'{error_type.title()}: {error_msg}', 'method': 'health_endpoint'}
+    except urllib.error.URLError as e:
+        return {'host': host_ip, 'running': False, 'error': f'Connection failed: {e.reason}', 'method': 'health_endpoint'}
+    except socket.timeout:
+        return {'host': host_ip, 'running': False, 'error': 'Health endpoint timeout', 'method': 'health_endpoint'}
+    except Exception as e:
+        return {'host': host_ip, 'running': False, 'error': f'Unexpected error: {e}', 'method': 'health_endpoint'}
 
 def check_dnsmasq_service_on_host(host_ip, hostname):
     """Check if DNS service is running on a specific host and can resolve hostname"""
@@ -209,110 +215,188 @@ def check_dnsmasq_service_on_host(host_ip, hostname):
     except Exception as e:
         return {'host': host_ip, 'hostname': hostname, 'running': False, 'error': str(e)}
 
-def _gather_health_data():
-    """Gather all cluster health data and return structured results."""
-    os.environ.pop('http_proxy', None)
-    os.environ.pop('https_proxy', None)
 
-    data = {
-        'etcd_hosts': [],
-        'etcd_results': [],
-        'nodes': [],
-        'dhcp_results': [],
-        'dhcp_running': [],
-        'dns_results': [],
-        'client': None,
-    }
-
-    data['etcd_hosts'] = get_cluster_members(INITIAL_ETCD_HOST)
-
-    with ThreadPoolExecutor(max_workers=len(data['etcd_hosts'])) as executor:
-        futures = {executor.submit(check_etcd_host, h): h for h in data['etcd_hosts']}
-        for future in as_completed(futures):
-            data['etcd_results'].append(future.result())
-
+def fetch_cluster_status() -> dict[str, Any]:
+    """Fetch aggregated cluster status from the storage VIP admin API."""
     try:
-        data['client'] = get_etcd_client(data['etcd_hosts'])
-    except Exception:
-        pass
+        url = f"http://{STORAGE_VIP}:{ADMIN_API_PORT}/api/cluster-status"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            data: dict[str, Any] = json.loads(response.read().decode())
+            return data
+    except Exception as e:
+        return {'_error': str(e)}
 
-    if data['client']:
-        data['nodes'] = get_all_nodes(data['client'])
-        non_amt_nodes = [n for n in data['nodes'] if n.get('ip') and not n.get('hostname', '').endswith('a')]
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            dhcp_futures = {executor.submit(check_dhcp_service_on_host, n['ip']): n for n in non_amt_nodes}
-            for future in as_completed(dhcp_futures):
-                result = future.result()
-                node = dhcp_futures[future]
-                result['_node'] = node
-                data['dhcp_results'].append(result)
-                if result['running']:
-                    data['dhcp_running'].append(result)
+def _svc_status_str(details: Any) -> str:
+    """Extract a human-readable string from a service details field."""
+    if isinstance(details, dict):
+        if 'message' in details:
+            return details['message']
+        # Construct summary from common service detail fields
+        parts = []
+        if details.get('service_active'):
+            parts.append('active')
+        if details.get('port_open'):
+            parts.append('port open')
+        if parts:
+            return ', '.join(parts)
+        return str(details)
+    return str(details) if details else ''
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            dns_futures = {executor.submit(check_dnsmasq_service_on_host, n['ip'], n.get('hostname', 'unknown')): n for n in non_amt_nodes}
-            for future in as_completed(dns_futures):
-                result = future.result()
-                node = dns_futures[future]
-                result['_node'] = node
-                data['dns_results'].append(result)
 
-    return data
+def _d(val: Any) -> dict[str, Any]:
+    """Ensure a value from JSON is treated as a dict (for type checker)."""
+    return val if isinstance(val, dict) else {}
 
 
 def main(verbose=False):
-    """Main function to check cluster health.
-
-    When verbose=False (default), prints a compact summary showing only
-    problems.  When verbose=True, prints the full detailed output.
-    """
-    data = _gather_health_data()
+    """Main entry point.  Prints results as they are collected."""
+    os.environ.pop('http_proxy', None)
+    os.environ.pop('https_proxy', None)
 
     if verbose:
-        _print_verbose(data)
+        _run_verbose()
     else:
-        _print_compact(data)
+        _run_compact()
 
 
-def _print_compact(data):
-    """Print a compact health summary -- only problems are detailed."""
+# ---------------------------------------------------------------------------
+# Compact output -- streams one line per subsystem, problems at the end
+# ---------------------------------------------------------------------------
+
+def _run_compact():
     problems = []
+    print("Cluster Health")
 
-    # -- etcd --
-    etcd_healthy = [r for r in data['etcd_results'] if r['healthy']]
-    etcd_unhealthy = [r for r in data['etcd_results'] if not r['healthy']]
-    total = len(data['etcd_results'])
-    if etcd_unhealthy:
-        for r in etcd_unhealthy:
+    # -- etcd (blocking, fast) --
+    etcd_hosts = get_cluster_members(INITIAL_ETCD_HOST)
+    etcd_results = []
+    with ThreadPoolExecutor(max_workers=len(etcd_hosts)) as executor:
+        for result in executor.map(check_etcd_host, etcd_hosts):
+            etcd_results.append(result)
+
+    healthy = [r for r in etcd_results if r['healthy']]
+    unhealthy = [r for r in etcd_results if not r['healthy']]
+    total = len(etcd_results)
+    if unhealthy:
+        for r in unhealthy:
             problems.append(f"  etcd {r['host']}: {r['error']}")
-        etcd_line = f"etcd           {len(etcd_healthy)}/{total} healthy"
+        print(f"  etcd           {len(healthy)}/{total} healthy")
     else:
-        leader = next((r['host'] for r in etcd_healthy if r.get('is_leader')), '?')
-        etcd_line = f"etcd           {total}/{total} healthy, leader {leader}"
+        leader = next((r['host'] for r in healthy if r.get('is_leader')), '?')
+        print(f"  etcd           {total}/{total} healthy, leader {leader}")
 
-    # -- dhcp --
-    n_dhcp = len(data['dhcp_running'])
+    # -- connect to etcd for node list --
+    try:
+        client = get_etcd_client(etcd_hosts)
+    except Exception:
+        client = None
+
+    # -- cluster-status (kick off early, read result later) --
+    bg = ThreadPoolExecutor(max_workers=1)
+    cs_future = bg.submit(fetch_cluster_status)
+
+    if client:
+        nodes = get_all_nodes(client)
+        non_amt_nodes = [n for n in nodes if n.get('ip') and not n.get('hostname', '').endswith('a')]
+    else:
+        nodes = []
+        non_amt_nodes = []
+
+    # -- VIP + ceph + storage (from cluster-status) --
+    cs = cs_future.result()
+    bg.shutdown(wait=False)
+    cs_error = cs.get('_error')
+
+    vip_info = _d(cs.get('vipStatus'))
+    if cs_error:
+        print(f"  vip            unknown (storage VIP unreachable)")
+        problems.append(f"  vip: storage VIP ({STORAGE_VIP}) unreachable: {cs_error}")
+    else:
+        gw = _d(vip_info.get('gateway_vip'))
+        sv = _d(vip_info.get('storage_vip'))
+        gw_host = gw.get('master_hostname', '?')
+        sv_host = sv.get('master_hostname', '?')
+        print(f"  vip            gateway {gw_host} ({gw.get('ip', '?')}), storage {sv_host} ({sv.get('ip', '?')})")
+        if gw_host == '?':
+            problems.append("  vip: gateway VIP has no master")
+        if sv_host == '?':
+            problems.append("  vip: storage VIP has no master")
+
+    leadership = _d(cs.get('leadership'))
+    storage_leader = leadership.get('storage_leader')
+    leader_services = _d(_d(_d(cs.get('hostHealth')).get(storage_leader)).get('services')) if storage_leader else {}
+
+    if cs_error:
+        print(f"  ceph           unknown (storage VIP unreachable)")
+        print(f"  storage        unknown (storage VIP unreachable)")
+    elif not storage_leader:
+        print(f"  ceph           unknown (no storage leader)")
+        print(f"  storage        no leader")
+        problems.append("  storage: no storage leader detected")
+    else:
+        # Ceph
+        ceph_svc = _d(leader_services.get('ceph'))
+        ceph_st = ceph_svc.get('status', 'unknown')
+        ceph_detail = _svc_status_str(ceph_svc.get('details', ''))
+        if ceph_st == 'healthy':
+            print(f"  ceph           {ceph_detail}")
+        else:
+            print(f"  ceph           {ceph_st}: {ceph_detail}")
+            problems.append(f"  ceph: {ceph_st} - {ceph_detail}")
+
+        # Storage services
+        svc_parts = []
+        for svc_name, label in [('postgresql', 'pg'), ('qdrant', 'qdrant'), ('docker_registry', 'registry')]:
+            svc = _d(leader_services.get(svc_name))
+            st = svc.get('status', 'unknown')
+            if st == 'healthy':
+                svc_parts.append(f"{label} ok")
+            else:
+                svc_parts.append(f"{label} {st}")
+                detail = _svc_status_str(svc.get('details', ''))
+                problems.append(f"  storage: {svc_name} {st} on {storage_leader}" + (f" - {detail}" if detail else ""))
+        print(f"  storage        leader {storage_leader}, {', '.join(svc_parts)}")
+
+    # -- dhcp + dns (parallel per-node checks) --
+    dhcp_results = []
+    dhcp_running = []
+    dns_results = []
+
+    if non_amt_nodes:
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            dhcp_futures = {executor.submit(check_dhcp_service_on_host, n['ip']): n for n in non_amt_nodes}
+            dns_futures = {executor.submit(check_dnsmasq_service_on_host, n['ip'], n.get('hostname', 'unknown')): n for n in non_amt_nodes}
+
+            for future in as_completed(dhcp_futures):
+                result = future.result()
+                result['_node'] = dhcp_futures[future]
+                dhcp_results.append(result)
+                if result['running']:
+                    dhcp_running.append(result)
+
+            for future in as_completed(dns_futures):
+                result = future.result()
+                result['_node'] = dns_futures[future]
+                dns_results.append(result)
+
+    n_dhcp = len(dhcp_running)
     if n_dhcp == 0:
-        dhcp_line = "dhcp           no servers running"
+        print("  dhcp           no servers running")
         problems.append("  dhcp: no DHCP servers running in cluster")
     elif n_dhcp == 1:
-        leader_ip = data['dhcp_running'][0]['host']
-        leader_name = data['dhcp_running'][0]['_node'].get('hostname', leader_ip)
-        dhcp_line = f"dhcp           ok, leader {leader_name} ({leader_ip})"
+        leader_ip = dhcp_running[0]['host']
+        leader_name = dhcp_running[0]['_node'].get('hostname', leader_ip)
+        print(f"  dhcp           ok, leader {leader_name} ({leader_ip})")
     else:
-        ips = ', '.join(r['host'] for r in data['dhcp_running'])
-        dhcp_line = f"dhcp           {n_dhcp} servers running (split brain?)"
+        ips = ', '.join(r['host'] for r in dhcp_running)
+        print(f"  dhcp           {n_dhcp} servers running (split brain?)")
         problems.append(f"  dhcp: multiple servers running: {ips}")
 
-    # -- dns --
-    # Only consider core nodes (s1-s3) for DNS health summary
-    import re
     dns_ok = []
     dns_warn = []
-    for r in data['dns_results']:
-        node = r['_node']
-        hostname = node.get('hostname', '?')
+    for r in dns_results:
+        hostname = r['_node'].get('hostname', '?')
         if not re.match(r'^s\d+$', hostname):
             continue
         if r.get('running') and r.get('dns_working'):
@@ -323,43 +407,44 @@ def _print_compact(data):
             dns_warn.append(f"  dns {hostname}: not running")
 
     n_dns_total = len(dns_ok) + len(dns_warn)
+    print(f"  dns            {len(dns_ok)}/{n_dns_total} core nodes ok")
     if dns_warn:
-        dns_line = f"dns            {len(dns_ok)}/{n_dns_total} core nodes ok"
         problems.extend(dns_warn)
-    else:
-        dns_line = f"dns            {len(dns_ok)}/{n_dns_total} core nodes ok"
 
     # -- nodes --
-    nodes = [n for n in data['nodes'] if not n.get('hostname', '').endswith('a')]
-    nodes_line = f"nodes          {len(nodes)} registered"
+    visible_nodes = [n for n in nodes if not n.get('hostname', '').endswith('a')]
+    print(f"  nodes          {len(visible_nodes)} registered")
 
-    # -- print --
-    print(f"{'Cluster Health':}")
-    print(f"  {etcd_line}")
-    print(f"  {dhcp_line}")
-    print(f"  {dns_line}")
-    print(f"  {nodes_line}")
-
+    # -- problems --
     if problems:
-        print(f"\nProblems:")
+        print("\nProblems:")
         for p in problems:
             print(p)
     else:
-        print(f"\nNo problems detected.")
+        print("\nNo problems detected.")
 
 
-def _print_verbose(data):
-    """Print the full verbose health output."""
+# ---------------------------------------------------------------------------
+# Verbose output -- detailed per-host information, printed as collected
+# ---------------------------------------------------------------------------
+
+def _run_verbose():
     print("=" * 60)
     print("ETCD Cluster Health Check")
     print("=" * 60)
 
-    print(f"Discovered cluster members: {', '.join(data['etcd_hosts'])}")
+    etcd_hosts = get_cluster_members(INITIAL_ETCD_HOST)
+    print(f"Discovered cluster members: {', '.join(etcd_hosts)}")
     print()
+
+    etcd_results = []
+    with ThreadPoolExecutor(max_workers=len(etcd_hosts)) as executor:
+        for result in executor.map(check_etcd_host, etcd_hosts):
+            etcd_results.append(result)
 
     print("Host Health Status:")
     print("-" * 60)
-    for result in sorted(data['etcd_results'], key=lambda x: x['host']):
+    for result in sorted(etcd_results, key=lambda x: x['host']):
         if result['healthy']:
             leader_str = " (LEADER)" if result.get('is_leader') else ""
             print(f"✓ {result['host']}: Healthy{leader_str}")
@@ -367,37 +452,68 @@ def _print_verbose(data):
         else:
             print(f"✗ {result['host']}: Unhealthy - {result['error']}")
 
-    if data['client']:
-        # DHCP
+    try:
+        client = get_etcd_client(etcd_hosts)
+    except Exception:
+        client = None
+
+    # kick off cluster-status fetch in background
+    bg = ThreadPoolExecutor(max_workers=1)
+    cs_future = bg.submit(fetch_cluster_status)
+
+    if client:
+        nodes = get_all_nodes(client)
+        non_amt_nodes = [n for n in nodes if n.get('ip') and not n.get('hostname', '').endswith('a')]
+
+        # DHCP + DNS checks in parallel
+        dhcp_results = []
+        dhcp_running = []
+        dns_results = []
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            dhcp_futures = {executor.submit(check_dhcp_service_on_host, n['ip']): n for n in non_amt_nodes}
+            dns_futures = {executor.submit(check_dnsmasq_service_on_host, n['ip'], n.get('hostname', 'unknown')): n for n in non_amt_nodes}
+
+            for future in as_completed(dhcp_futures):
+                result = future.result()
+                result['_node'] = dhcp_futures[future]
+                dhcp_results.append(result)
+                if result['running']:
+                    dhcp_running.append(result)
+
+            for future in as_completed(dns_futures):
+                result = future.result()
+                result['_node'] = dns_futures[future]
+                dns_results.append(result)
+
+        # Print DHCP
         print("\n" + "=" * 60)
         print("DHCP Service Status:")
         print("-" * 60)
-
-        for result in data['dhcp_results']:
+        for result in dhcp_results:
             node = result['_node']
             if result['running']:
                 method = result.get('method', 'unknown')
-                etcd_status = "✓" if result.get('etcd_connected', False) else "✗"
+                etcd_st = "✓" if result.get('etcd_connected', False) else "✗"
                 print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DHCP Running (via {method})")
-                print(f"  etcd connection: {etcd_status}, server IP: {result.get('server_ip', 'unknown')}")
+                print(f"  etcd connection: {etcd_st}, server IP: {result.get('server_ip', 'unknown')}")
             else:
                 print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): DHCP Not running - {result['error']}")
 
-        n_dhcp = len(data['dhcp_running'])
+        n_dhcp = len(dhcp_running)
         if n_dhcp == 0:
             print("⚠ WARNING: No DHCP servers running in cluster!")
         elif n_dhcp > 1:
-            ips = ', '.join(r['host'] for r in data['dhcp_running'])
+            ips = ', '.join(r['host'] for r in dhcp_running)
             print(f"⚠ WARNING: Multiple DHCP servers running: {ips}")
         else:
-            print(f"✓ DHCP leader election working correctly - single server on {data['dhcp_running'][0]['host']}")
+            print(f"✓ DHCP leader election working correctly - single server on {dhcp_running[0]['host']}")
 
-        # DNS
+        # Print DNS
         print("\n" + "=" * 60)
         print("dnsmasq Service Status:")
         print("-" * 60)
-
-        for result in data['dns_results']:
+        for result in dns_results:
             node = result['_node']
             if result.get('running'):
                 method = result.get('method', 'unknown')
@@ -411,17 +527,69 @@ def _print_verbose(data):
                     print(f"  DNS Error: {result.get('dns_error', 'Unknown error')}")
             else:
                 print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): DNS Not running - {result['error']}")
+    else:
+        nodes = []
+
+    # Storage health from cluster-status API
+    cs = cs_future.result()
+    bg.shutdown(wait=False)
+    cs_error = cs.get('_error')
+
+    print("\n" + "=" * 60)
+    print("Storage & VIP Status:")
+    print("-" * 60)
+
+    if cs_error:
+        print(f"✗ Storage VIP ({STORAGE_VIP}) unreachable: {cs_error}")
+    else:
+        vip_info = _d(cs.get('vipStatus'))
+        for vip_name, vip_key in [('Gateway', 'gateway_vip'), ('Storage', 'storage_vip')]:
+            vip = _d(vip_info.get(vip_key))
+            master = vip.get('master_hostname', 'none')
+            ip = vip.get('ip', '?')
+            iface = vip.get('interface', '?')
+            if master and master != 'none':
+                print(f"✓ {vip_name} VIP ({ip}): active on {master} ({iface})")
+            else:
+                print(f"✗ {vip_name} VIP ({ip}): no master")
+
+        kn = vip_info.get('keepalived_nodes', [])
+        if kn:
+            running = [n['hostname'] for n in kn if n.get('keepalived_active')]
+            stopped = [n['hostname'] for n in kn if not n.get('keepalived_active')]
+            print(f"  Keepalived: running on {', '.join(running)}" + (f", stopped on {', '.join(stopped)}" if stopped else ""))
+
+        leadership = _d(cs.get('leadership'))
+        storage_leader = leadership.get('storage_leader', 'none')
+        dhcp_leader = leadership.get('dhcp_leader', 'none')
+        print(f"  Leaders: storage={storage_leader}, dhcp={dhcp_leader}")
+
+        leader_services = _d(_d(_d(cs.get('hostHealth')).get(storage_leader)).get('services'))
+        if leader_services:
+            print(f"\n  Storage Leader Services ({storage_leader}):")
+            for svc_name in ['ceph', 'postgresql', 'qdrant', 'docker_registry', 'rathole', 'open_webui']:
+                svc = _d(leader_services.get(svc_name))
+                st = svc.get('status', 'unknown')
+                details = _svc_status_str(svc.get('details', ''))
+                symbol = "✓" if st == 'healthy' else "⚠" if st in ('degraded', 'standby') else "✗"
+                detail_str = f" - {details}" if details else ""
+                print(f"  {symbol} {svc_name}: {st}{detail_str}")
+
+        cert = _d(cs.get('certificateStatus'))
+        cert_details = _d(cert.get('details'))
+        days = cert_details.get('days_until_expiry', '?')
+        subject = cert_details.get('subject', '?')
+        symbol = "✓" if cert.get('status') == 'healthy' else "⚠"
+        print(f"\n  {symbol} TLS certificate ({subject}): expires in {days} days")
 
     # Nodes table
     print("\n" + "=" * 60)
     print("Registered Nodes:")
     print("-" * 60)
 
-    nodes = data['nodes']
-    if data['client']:
+    if client:
         if nodes:
             nodes.sort(key=lambda x: x.get('hostname', ''))
-
             print(f"{'Hostname':<10} {'Type':<10} {'IP':<15} {'MAC':<20} {'Allocated'}")
             print("-" * 80)
             for node in nodes:
@@ -432,7 +600,6 @@ def _print_verbose(data):
                         allocated = dt.strftime('%Y-%m-%d %H:%M')
                     except:
                         pass
-
                 print(f"{node.get('hostname', 'N/A'):<10} "
                       f"{node.get('type', 'N/A'):<10} "
                       f"{node.get('ip', 'N/A'):<15} "
