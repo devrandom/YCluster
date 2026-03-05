@@ -72,6 +72,14 @@
       systemd:
         daemon_reload: yes
 
+    - name: Hold postgresql packages to prevent unattended-upgrades from restarting the service
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - postgresql-16
+        - postgresql-client-16
+
 
     - name: Check if PostgreSQL cluster exists
       stat:

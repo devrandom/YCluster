@@ -240,6 +240,16 @@ groups:
           summary: "Multiple masters for VIP {{ $labels.vip }}"
           description: "VIP {{ $labels.vip }} is active on multiple nodes - possible split brain"
 
+      # Held packages not upgraded for over 30 days
+      - alert: HeldPackagesStale
+        expr: (time() - ycluster_held_packages_last_upgrade_timestamp_seconds) > 30 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Held packages on {{ $labels.node }} not upgraded in over 30 days"
+          description: "Run: cd /etc/ansible && ./run-playbook.sh storage/upgrade-held-packages.yml"
+
   - name: ycluster-external
     rules:
       # No uplink available (informational)

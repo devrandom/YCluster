@@ -84,6 +84,20 @@ send_heartbeat() {
     /usr/local/lib/cluster/cluster-heartbeat
 }
 
+# Function to check and restart critical services if they died unexpectedly
+check_critical_services() {
+    if mountpoint -q /rbd/user; then
+        if ! systemctl is-active --quiet postgresql@16-main; then
+            echo "WARNING: postgresql@16-main died while we are leader, restarting..."
+            systemctl start postgresql@16-main || echo "ERROR: failed to restart postgresql@16-main"
+        fi
+        if ! systemctl is-active --quiet qdrant; then
+            echo "WARNING: qdrant died while we are leader, restarting..."
+            systemctl start qdrant || echo "ERROR: failed to restart qdrant"
+        fi
+    fi
+}
+
 # Function to start all services
 start_all_services() {
     echo "Starting all services as storage leader"
@@ -291,6 +305,9 @@ while true; do
             IS_LEADER=false
             stop_all_services
         else
+            # Check and restart critical services if they died unexpectedly
+            check_critical_services
+
             # Send heartbeat periodically while we're leader
             HEARTBEAT_COUNTER=$((HEARTBEAT_COUNTER + RENEW_INTERVAL))
             if [ $HEARTBEAT_COUNTER -ge $HEARTBEAT_INTERVAL ]; then
