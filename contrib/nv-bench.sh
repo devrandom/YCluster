@@ -71,7 +71,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-BENCH_CMD="${BENCH_CMD:-mixtral}"
+BENCH_CMD="${BENCH_CMD:-kimi-k25}"
 
 NUM_GPUS=$(( BENCH_DP * BENCH_TP ))
 
@@ -83,6 +83,10 @@ fi
 # Build CUDA_VISIBLE_DEVICES as 0,1,...,N-1
 GPU_LIST=$(seq -s, 0 $(( NUM_GPUS - 1 )))
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$GPU_LIST}"
+# CUDA headers for flashinfer JIT compilation (nvrtc.h etc.)
+if [ -d "/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/include" ]; then
+    export CPLUS_INCLUDE_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/include:${CPLUS_INCLUDE_PATH:-}"
+fi
 
 echo "Config: DP=$BENCH_DP  TP=$BENCH_TP  GPUs=$NUM_GPUS/${DETECTED_GPU_COUNT} available  CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
@@ -160,7 +164,7 @@ run_bench() {
 
     # Wait for server
     echo "Waiting for server to be ready..."
-    for i in $(seq 1 600); do
+    for i in $(seq 1 900); do
         if curl -s http://127.0.0.1:8192/health > /dev/null 2>&1; then
             echo "Server ready after ${i}s"
             break
@@ -174,7 +178,7 @@ run_bench() {
     done
 
     if ! curl -s http://127.0.0.1:8192/health > /dev/null 2>&1; then
-        echo "ERROR: Server failed to start after 600s"
+        echo "ERROR: Server failed to start after 900s"
         kill $SERVER_PID 2>/dev/null || true
         return 1
     fi
