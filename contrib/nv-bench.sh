@@ -8,13 +8,18 @@
 # first-principles throughput model used for Kimi K2.5.
 #
 # Usage:
-#   ./vllm-bench.sh [mixtral|mixtral-tp|kimi-k25|kimi-k25-ep|all|analyze] [--dp N] [--tp N] [--eager] [--batch "1 4 8 16"]
+#   ./nv-bench.sh [mixtral|mixtral-tp|kimi-k25|kimi-k25-ep|all|analyze] [--engine vllm|sglang] [--dp N] [--tp N] [--eager] [--batch "1 4 8 16"]
 #
-# Defaults: DP=<num GPUs detected>, TP=1, EP=DP (auto), batch="1 4 8 16".
+# Defaults: engine=vllm, DP=<num GPUs detected>, TP=1, EP=DP (auto), batch="1 4 8 16".
 # CUDA_VISIBLE_DEVICES is set to match DP×TP GPUs (0..N-1).
 #
+# Engine support:
+#   --engine vllm   (default) Uses vLLM serve + vllm bench client
+#   --engine sglang  Uses SGLang launch_server + vllm bench client (OpenAI-compatible)
+#
 # Prerequisites:
-#   pip install vllm --break-system-packages
+#   pip install vllm            # always needed (bench client)
+#   pip install "sglang[all]"   # if using --engine sglang
 
 set -euo pipefail
 
@@ -50,6 +55,7 @@ BENCH_TP=1
 BENCH_EAGER=0
 BENCH_AGENTIC=0
 BENCH_PREFIX=0
+BENCH_ENGINE="vllm"
 BENCH_CMD=""
 
 while [[ $# -gt 0 ]]; do
@@ -60,6 +66,14 @@ while [[ $# -gt 0 ]]; do
         --agentic) BENCH_AGENTIC=1; shift ;;
         --prefix-test) BENCH_PREFIX=1; shift ;;
         --batch) BENCH_BATCHES="$2"; shift 2 ;;
+        --engine)
+            BENCH_ENGINE="$2"
+            if [[ "$BENCH_ENGINE" != "vllm" && "$BENCH_ENGINE" != "sglang" ]]; then
+                echo "ERROR: --engine must be 'vllm' or 'sglang', got '$BENCH_ENGINE'" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
         *)
             if [ -z "$BENCH_CMD" ]; then
                 BENCH_CMD="$1"
@@ -84,15 +98,43 @@ fi
 GPU_LIST=$(seq -s, 0 $(( NUM_GPUS - 1 )))
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$GPU_LIST}"
 # CUDA headers for flashinfer JIT compilation (nvrtc.h etc.)
-if [ -d "/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/include" ]; then
-    export CPLUS_INCLUDE_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/include:${CPLUS_INCLUDE_PATH:-}"
+# Check both system and venv site-packages for the nvrtc headers.
+for _nvrtc_dir in \
+    /usr/local/lib/python3.12/dist-packages/nvidia/cuda_nvrtc/include \
+    "${SGLANG_VENV:-/workspace/venv-sglang}/lib/python3.12/site-packages/nvidia/cuda_nvrtc/include" \
+    "${VLLM_VENV:-/workspace/venv-vllm}/lib/python3.12/site-packages/nvidia/cuda_nvrtc/include"; do
+    if [ -d "$_nvrtc_dir" ]; then
+        export CPLUS_INCLUDE_PATH="$_nvrtc_dir:${CPLUS_INCLUDE_PATH:-}"
+        break
+    fi
+done
+
+BENCH_PORT=8192
+if [ "$BENCH_ENGINE" = "sglang" ]; then
+    BENCH_PORT=30000
 fi
 
-echo "Config: DP=$BENCH_DP  TP=$BENCH_TP  GPUs=$NUM_GPUS/${DETECTED_GPU_COUNT} available  CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+# Prepend venv bin dirs to PATH if they exist. This lets vllm and sglang
+# coexist with incompatible deps (different torch versions etc.).
+# Override paths with VLLM_VENV / SGLANG_VENV env vars if needed.
+# The active engine's venv goes first so its python/libs take priority;
+# the other venv is added after so its CLI (e.g. vllm bench) is still found.
+VLLM_VENV="${VLLM_VENV:-/workspace/venv-vllm}"
+SGLANG_VENV="${SGLANG_VENV:-/workspace/venv-sglang}"
+if [ "$BENCH_ENGINE" = "sglang" ]; then
+    [ -d "$SGLANG_VENV/bin" ] && export PATH="$SGLANG_VENV/bin:$PATH"
+    [ -d "$VLLM_VENV/bin" ]   && export PATH="$PATH:$VLLM_VENV/bin"
+else
+    [ -d "$VLLM_VENV/bin" ]   && export PATH="$VLLM_VENV/bin:$PATH"
+    [ -d "$SGLANG_VENV/bin" ] && export PATH="$PATH:$SGLANG_VENV/bin"
+fi
 
-# Kill any leftover vLLM servers
-# Kill any leftover vllm processes (but not this script)
-pgrep -f vllm | grep -v $$ | xargs -r kill 2>/dev/null || true
+echo "Config: engine=$BENCH_ENGINE  DP=$BENCH_DP  TP=$BENCH_TP  GPUs=$NUM_GPUS/${DETECTED_GPU_COUNT} available  CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "  vllm:   $(command -v vllm 2>/dev/null || echo 'not found')"
+echo "  sglang: $(command -v sglang 2>/dev/null || echo 'not found')"
+
+# Kill any leftover server processes (but not this script)
+pgrep -f 'vllm|sglang' | grep -v $$ | xargs -r kill 2>/dev/null || true
 sleep 2
 
 RESULTS_DIR="./validation-results"
@@ -124,6 +166,30 @@ fi
 
 # ─── Helper ──────────────────────────────────────────────────────────────────
 
+# Engine-aware argument helpers. Flags that differ between vLLM and SGLang
+# are translated here so model configs stay DRY.
+
+# Print the engine-appropriate flag for max context length.
+engine_ctx_len() {
+    local len="$1"
+    if [ "$BENCH_ENGINE" = "sglang" ]; then
+        echo "--context-length $len"
+    else
+        echo "--max-model-len $len"
+    fi
+}
+
+# Print the engine-appropriate flag for eager/no-graph mode (if enabled).
+engine_eager() {
+    if [ "$BENCH_EAGER" -eq 1 ]; then
+        if [ "$BENCH_ENGINE" = "sglang" ]; then
+            echo "--disable-cuda-graph"
+        else
+            echo "--enforce-eager"
+        fi
+    fi
+}
+
 run_bench() {
     local label="$1"
     if [ "$BENCH_PREFIX" -eq 1 ]; then
@@ -131,41 +197,65 @@ run_bench() {
     elif [ "$BENCH_AGENTIC" -eq 1 ]; then
         label="${label}-agentic"
     fi
+    # Prepend engine name to label so results are distinguishable
+    label="${BENCH_ENGINE}-${label}"
     local model_arg="$2"
     local tp="$3"
     local dp="${4:-1}"
     local ep="${5:-false}"
     local extra_args="${6:-}"
     local output_file="${RESULTS_DIR}/${label}.json"
+    local port="$BENCH_PORT"
 
     echo ""
     echo "========================================"
-    echo "Benchmark: $label"
+    echo "Benchmark: $label  (engine=$BENCH_ENGINE)"
     echo "  TP=$tp  DP=$dp  EP=$ep"
     echo "========================================"
 
-    # Build serve command
-    local serve_cmd="vllm serve $model_arg \
-        --tensor-parallel-size $tp \
-        --gpu-memory-utilization 0.90 \
-        --host 127.0.0.1 --port 8192 \
-        $extra_args"
+    # Build serve command based on engine
+    local serve_cmd=""
+    if [ "$BENCH_ENGINE" = "sglang" ]; then
+        serve_cmd="sglang serve \
+            --model-path $model_arg \
+            --tp-size $tp \
+            --mem-fraction-static 0.90 \
+            --host 127.0.0.1 --port $port \
+            $extra_args"
 
-    if [ "$dp" -gt 1 ]; then
-        serve_cmd="$serve_cmd --data-parallel-size $dp"
-    fi
-    if [ "$ep" = "true" ]; then
-        serve_cmd="$serve_cmd --enable-expert-parallel"
+        if [ "$dp" -gt 1 ]; then
+            serve_cmd="$serve_cmd --dp-size $dp"
+        fi
+        if [ "$ep" = "true" ]; then
+            # SGLang uses explicit ep-size; with EP, experts are sharded
+            # across dp*tp ranks, same as vLLM's --enable-expert-parallel.
+            local ep_size=$(( dp * tp ))
+            serve_cmd="$serve_cmd --ep-size $ep_size"
+        fi
+    else
+        serve_cmd="vllm serve $model_arg \
+            --tensor-parallel-size $tp \
+            --gpu-memory-utilization 0.90 \
+            --host 127.0.0.1 --port $port \
+            $extra_args"
+
+        if [ "$dp" -gt 1 ]; then
+            serve_cmd="$serve_cmd --data-parallel-size $dp"
+        fi
+        if [ "$ep" = "true" ]; then
+            serve_cmd="$serve_cmd --enable-expert-parallel"
+        fi
     fi
 
-    echo "Starting vLLM server..."
+    echo "Starting $BENCH_ENGINE server..."
+    echo "  $serve_cmd"
     eval "$serve_cmd" &
     SERVER_PID=$!
 
     # Wait for server
     echo "Waiting for server to be ready..."
-    for i in $(seq 1 900); do
-        if curl -s http://127.0.0.1:8192/health > /dev/null 2>&1; then
+    for i in $(seq 1 1800); do
+        if curl -s "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
             echo "Server ready after ${i}s"
             break
         fi
@@ -177,8 +267,8 @@ run_bench() {
         sleep 1
     done
 
-    if ! curl -s http://127.0.0.1:8192/health > /dev/null 2>&1; then
-        echo "ERROR: Server failed to start after 900s"
+    if ! curl -s "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
+        echo "ERROR: Server failed to start after 1800s"
         kill $SERVER_PID 2>/dev/null || true
         return 1
     fi
@@ -189,7 +279,7 @@ run_bench() {
     echo "--- Warmup (4 prompts, not counted) ---"
     vllm bench serve \
         --backend openai-chat \
-        --base-url http://127.0.0.1:8192 \
+        --base-url "http://127.0.0.1:${port}" \
         --model "$model_arg" \
         --trust-remote-code \
         --dataset-name random \
@@ -219,7 +309,7 @@ run_bench() {
         if [ "$BENCH_PREFIX" -eq 1 ]; then
             vllm bench serve \
                 --backend openai-chat \
-                --base-url http://127.0.0.1:8192 \
+                --base-url "http://127.0.0.1:${port}" \
                 --model "$model_arg" \
                 --trust-remote-code \
                 --dataset-name prefix-repetition \
@@ -238,7 +328,7 @@ run_bench() {
         else
             vllm bench serve \
                 --backend openai-chat \
-                --base-url http://127.0.0.1:8192 \
+                --base-url "http://127.0.0.1:${port}" \
                 --model "$model_arg" \
                 --trust-remote-code \
                 --dataset-name random \
@@ -256,7 +346,7 @@ run_bench() {
     done
 
     # Shutdown
-    echo "Stopping server..."
+    echo "Stopping $BENCH_ENGINE server..."
     kill $SERVER_PID 2>/dev/null || true
     wait $SERVER_PID 2>/dev/null || true
     sleep 5
@@ -282,10 +372,7 @@ run_mixtral() {
     local MODEL="MaziyarPanahi/Mixtral-8x22B-Instruct-v0.1-AWQ"
     local LABEL="mixtral-8x22b-dp${dp}-ep${ep}-tp${tp}"
 
-    local EXTRA_ARGS="--max-model-len 4096 --quantization awq_marlin"
-    if [ "$BENCH_EAGER" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --enforce-eager"
-    fi
+    local EXTRA_ARGS="$(engine_ctx_len 4096) --quantization awq_marlin $(engine_eager)"
 
     run_bench "$LABEL" \
         "$MODEL" \
@@ -319,10 +406,7 @@ run_mixtral_tp() {
     local MODEL="MaziyarPanahi/Mixtral-8x22B-Instruct-v0.1-AWQ"
     local LABEL="mixtral-8x22b-tp${tp}"
 
-    local EXTRA_ARGS="--max-model-len 4096 --quantization awq_marlin"
-    if [ "$BENCH_EAGER" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --enforce-eager"
-    fi
+    local EXTRA_ARGS="$(engine_ctx_len 4096) --quantization awq_marlin $(engine_eager)"
 
     run_bench "$LABEL" \
         "$MODEL" \
@@ -380,11 +464,13 @@ run_kimi_k25() {
         LABEL="kimi-k25-tp${tp}"
     fi
 
-    local EXTRA_ARGS="--max-model-len 4096 --trust-remote-code --enable-chunked-prefill --enable-prefix-caching"
+    local EXTRA_ARGS="$(engine_ctx_len 4096) --trust-remote-code"
     EXTRA_ARGS="$EXTRA_ARGS --tool-call-parser kimi_k2 --reasoning-parser kimi_k2"
-    if [ "$BENCH_EAGER" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --enforce-eager"
+    # vLLM needs these explicitly; SGLang enables them by default
+    if [ "$BENCH_ENGINE" != "sglang" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --enable-chunked-prefill --enable-prefix-caching"
     fi
+    EXTRA_ARGS="$EXTRA_ARGS $(engine_eager)"
 
     local use_ep="false"
     if [ "$dp" -gt 1 ]; then
@@ -440,11 +526,12 @@ run_kimi_k25_ep() {
     local MODEL="moonshotai/Kimi-K2.5"
     local LABEL="kimi-k25-dp${dp}-ep${ep}-tp${tp}"
 
-    local EXTRA_ARGS="--max-model-len 4096 --trust-remote-code --enable-chunked-prefill --enable-prefix-caching"
+    local EXTRA_ARGS="$(engine_ctx_len 4096) --trust-remote-code"
     EXTRA_ARGS="$EXTRA_ARGS --tool-call-parser kimi_k2 --reasoning-parser kimi_k2"
-    if [ "$BENCH_EAGER" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --enforce-eager"
+    if [ "$BENCH_ENGINE" != "sglang" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --enable-chunked-prefill --enable-prefix-caching"
     fi
+    EXTRA_ARGS="$EXTRA_ARGS $(engine_eager)"
 
     run_bench "$LABEL" \
         "$MODEL" \
@@ -482,11 +569,11 @@ def parse_results(filepath):
 def main():
     results_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./validation-results")
 
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 100)
     print("BENCHMARK RESULTS")
-    print("=" * 90)
-    print(f"{'Config':<40} {'Batch':>5} {'Out tok/s':>10} {'TPOT ms':>10} {'TTFT ms':>10}")
-    print("-" * 90)
+    print("=" * 100)
+    print(f"{'Config':<50} {'Batch':>5} {'Out tok/s':>10} {'TPOT ms':>10} {'TTFT ms':>10}")
+    print("-" * 100)
 
     rows = []
     for result_file in results_dir.glob("*-batch*.json"):
@@ -511,7 +598,7 @@ def main():
         tpot = f"{data['mean_tpot_ms']:.1f}" if data.get("mean_tpot_ms") else "—"
         ttft = f"{data['mean_ttft_ms']:.1f}" if data.get("mean_ttft_ms") else "—"
 
-        print(f"{config:<40} {batch_num:>5} {out_tok:>10} {tpot:>10} {ttft:>10}")
+        print(f"{config:<50} {batch_num:>5} {out_tok:>10} {tpot:>10} {ttft:>10}")
 
     print()
 
@@ -550,7 +637,7 @@ case "$BENCH_CMD" in
         exit 0
         ;;
     *)
-        echo "Usage: $0 [mixtral|mixtral-tp|kimi-k25|kimi-k25-ep|all|analyze] [--dp N] [--tp N] [--eager] [--agentic] [--prefix-test] [--batch \"1 4 8\"]"
+        echo "Usage: $0 [mixtral|mixtral-tp|kimi-k25|kimi-k25-ep|all|analyze] [--engine vllm|sglang] [--dp N] [--tp N] [--eager] [--agentic] [--prefix-test] [--batch \"1 4 8\"]"
         exit 1
         ;;
 esac
