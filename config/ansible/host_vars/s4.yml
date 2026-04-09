@@ -1,0 +1,5 @@
+# Protectli VP2440 - different PCI topology from MS01 (s1-s3)
+# See docs/hardware/VP2440.md for details
+cluster_interface: "enp1s0f0np0"
+uplink_interface: "enp3s0"
+amt_interface: "enp2s0"

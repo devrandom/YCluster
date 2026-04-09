@@ -1,6 +1,6 @@
 ---
 - name: Install and configure etcd
-  hosts: core
+  hosts: etcd
   become: yes
   vars:
     etcd_data_dir: "/var/lib/etcd"
@@ -25,8 +25,8 @@
 
     - name: Determine cluster configuration
       set_fact:
-        etcd_cluster_size: "{{ groups['core'] | length }}"
-        etcd_initial_cluster: "{{ groups['core'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['core'] | map('extract', hostvars, 'ansible_host')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
+        etcd_cluster_size: "{{ groups['etcd'] | length }}"
+        etcd_initial_cluster: "{{ groups['etcd'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['etcd'] | map('extract', hostvars, 'ansible_host')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
 
     - name: Check if etcd data directory exists and has data
       stat:
@@ -39,7 +39,7 @@
       register: etcd_cluster_check
       failed_when: false
       changed_when: false
-      loop: "{{ groups['core'] | map('extract', hostvars, 'ansible_host') | list }}"
+      loop: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | list }}"
       when: not etcd_data_exists.stat.exists
 
     - name: Determine if cluster already exists
@@ -96,7 +96,7 @@
         etcdctl member list --write-out=json
       register: existing_members_result
       failed_when: false
-      loop: "{{ groups['core'] | map('extract', hostvars, 'ansible_host') | list }}"
+      loop: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | list }}"
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
 
     - name: Extract successful member list

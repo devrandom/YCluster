@@ -4,7 +4,6 @@ Populate etcd with the local node's entry for recovery purposes.
 This runs on each node and registers itself in etcd.
 """
 
-import etcd3
 import json
 import sys
 import os
@@ -12,48 +11,13 @@ import socket
 import subprocess
 from datetime import datetime, UTC
 
-# Get initial etcd host from environment or use localhost
-INITIAL_ETCD_HOST = os.environ.get('ETCD_HOST', 'localhost:2379')
+from ycluster.common.etcd_utils import get_etcd_client as _get_etcd_client
+
 ETCD_PREFIX = '/cluster/nodes'
 
 def get_etcd_client():
-    """Create etcd client, trying local first then discovering cluster members"""
-    # First try localhost (if etcd is running locally)
-    try:
-        client = etcd3.client(host='localhost', port=2379)
-        client.status()
-        return client
-    except:
-        pass
-    
-    # Try the initial host
-    try:
-        host, port = INITIAL_ETCD_HOST.split(':')
-        client = etcd3.client(host=host, port=int(port))
-        client.status()
-        return client
-    except:
-        pass
-    
-    # Try to discover cluster members from initial host
-    try:
-        host, port = INITIAL_ETCD_HOST.split(':')
-        client = etcd3.client(host=host, port=int(port))
-        
-        for member in client.members:
-            for url in member.client_urls:
-                if url.startswith('http://'):
-                    member_host = url.replace('http://', '').split(':')[0]
-                    try:
-                        test_client = etcd3.client(host=member_host, port=2379)
-                        test_client.status()
-                        return test_client
-                    except:
-                        continue
-    except:
-        pass
-    
-    raise Exception("Could not connect to any etcd host")
+    """Create etcd client using shared etcd_utils (respects ETCD_HOSTS env var)"""
+    return _get_etcd_client()
 
 def get_primary_interface():
     """Determine the primary network interface using multiple fallback methods"""

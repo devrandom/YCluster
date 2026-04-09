@@ -30,7 +30,8 @@
           #!/bin/bash
           
           # Check if we are the current storage leader
-          CURRENT_LEADER=$(etcdctl --endpoints="http://localhost:2379" get /cluster/leader/app --print-value-only 2>/dev/null)
+          ETCD_ENDPOINTS="{% for host in groups['etcd'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          CURRENT_LEADER=$(etcdctl --endpoints="$ETCD_ENDPOINTS" get /cluster/leader/app --print-value-only 2>/dev/null)
           LOCAL_HOSTNAME=$(hostname)
           
           if [ "$CURRENT_LEADER" = "$LOCAL_HOSTNAME" ]; then

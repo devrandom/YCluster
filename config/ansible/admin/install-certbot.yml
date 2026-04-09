@@ -32,7 +32,7 @@
           
           [Service]
           Type=oneshot
-          Environment="ETCD_HOSTS={% for h in groups['core'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           Environment="CERTBOT_EMAIL={{ certbot_email }}"
           ExecStart=/usr/local/bin/certbot-manager renew -n
           ExecStartPost=/bin/systemctl reload nginx

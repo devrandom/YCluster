@@ -43,7 +43,7 @@
 
           [Service]
           Type=simple
-          ExecStart=/usr/local/lib/cluster/storage-leader-election "{% for host in groups['core'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          ExecStart=/usr/local/lib/cluster/storage-leader-election "{% for host in groups['etcd'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           Restart=always
           RestartSec=5
           User=root

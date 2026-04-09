@@ -86,7 +86,7 @@
 
           [Service]
           Type=simple
-          Environment="ETCD_HOSTS={% for h in groups['core'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app.py
           StandardOutput=journal
           StandardError=journal
@@ -248,5 +248,6 @@
           
           [Service]
           Type=oneshot
+          Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           ExecStart=/usr/local/lib/cluster/fetch-tls-certs
           ExecStartPost=/bin/systemctl reload nginx
