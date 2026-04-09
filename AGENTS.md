@@ -13,8 +13,8 @@ From a core node (s1-s3) via SSH — preferred for development:
 ```bash
 # /etc/ansible is a symlink to /opt/infrastructure/config/ansible
 # run-playbook.sh sources /etc/ansible/env.sh (sets LC_ALL and ANSIBLE_VAULT_PASSWORD_FILE)
-ssh s2.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml"
-ssh s2.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit s2"
+ssh s3.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml"
+ssh s3.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit s3"
 ```
 
 Always use ansible instead of ad-hoc copying files to the cluster.
@@ -27,7 +27,7 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 ```
 
 ### Dev Workflow (syncing local changes to cluster)
-`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s2.yc:/opt/infrastructure/`:
+`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s3.yc:/opt/infrastructure/`:
 ```bash
 bash dev-sync.sh  # runs initial sync then watches for changes
 ```

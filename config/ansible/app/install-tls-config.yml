@@ -18,6 +18,8 @@
         else
           echo "TLS certificate already exists in etcd"
         fi
+      environment:
+        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
       register: tls_generate_result
       changed_when: "'TLS certificate and key stored in etcd' in tls_generate_result.stdout"
       run_once: true
