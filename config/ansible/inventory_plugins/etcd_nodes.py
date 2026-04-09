@@ -80,6 +80,7 @@ class InventoryModule(BaseInventoryPlugin):
         self.inventory.add_group('storage')
         self.inventory.add_group('compute')
         self.inventory.add_group('core')
+        self.inventory.add_group('etcd')
         self.inventory.add_group('frontend')
         self.inventory.add_group('nas')
         self.inventory.add_group('nvidia')
@@ -87,6 +88,18 @@ class InventoryModule(BaseInventoryPlugin):
 
         # nvidia is a subgroup of compute
         self.inventory.add_child('compute', 'nvidia')
+
+        # Discover actual etcd members from the cluster
+        etcd_members = set()
+        try:
+            members = etcd_client.members
+            for member in members:
+                # Extract hostname from peer URL (e.g. http://10.0.0.11:2380 -> resolve via inventory later)
+                for url in member.peer_urls:
+                    host = url.split('://')[1].split(':')[0]
+                    etcd_members.add(host)
+        except Exception as e:
+            self.display.warning(f"Failed to enumerate etcd members: {e}")
 
         # Read storage leader from etcd
         leader_key = '/cluster/leader/app'
@@ -165,9 +178,13 @@ class InventoryModule(BaseInventoryPlugin):
                             self.inventory.add_group('other')
                         self.inventory.add_child('other', hostname)
                     
-                    # Add to core group if matches core naming (s1-s3)
-                    if re.fullmatch(r's[1-3]', hostname):
+                    # Add to core group if matches storage naming (s1+)
+                    if re.fullmatch(r's\d+', hostname):
                         self.inventory.add_child('core', hostname)
+                    
+                    # Add to etcd group if this host is an actual etcd member
+                    if ip_address in etcd_members:
+                        self.inventory.add_child('etcd', hostname)
                 except Exception as e:
                     self.display.warning(f"Failed to parse allocation: {e}")
 
