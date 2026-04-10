@@ -10,6 +10,11 @@
         state: restarted
 
   tasks:
+    - name: Install dnsmasq
+      apt:
+        name: dnsmasq
+        state: present
+
     - name: Disable systemd-resolved to free port 53
       systemd:
         name: systemd-resolved
@@ -27,10 +32,11 @@
         state: absent
       when: resolv_stat.stat.islnk is defined and resolv_stat.stat.islnk
 
-    - name: Create static resolv.conf
+    - name: Create static resolv.conf (use gateway until local dnsmasq is running)
       copy:
         dest: /etc/resolv.conf
         content: |
+          nameserver 10.0.0.254
           nameserver 127.0.0.1
           search xc
         mode: '0644'
