@@ -62,10 +62,17 @@
         mode: '0644'
       notify: restart admin-api
 
-    - name: Copy WireGuard bootstrap template
+    - name: Copy WireGuard bootstrap template (Linux)
       copy:
         src: "templates/wg-bootstrap.sh.j2"
         dest: "{{ admin_services_dir }}/templates/wg-bootstrap.sh.j2"
+        mode: '0644'
+      notify: restart admin-api
+
+    - name: Copy WireGuard bootstrap template (macOS)
+      copy:
+        src: "templates/wg-bootstrap-macos.sh.j2"
+        dest: "{{ admin_services_dir }}/templates/wg-bootstrap-macos.sh.j2"
         mode: '0644'
       notify: restart admin-api
 

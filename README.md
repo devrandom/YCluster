@@ -145,13 +145,19 @@ Then use direct access - `ssh s1.rat`.
 
 Remote machines on the public internet can join the cluster via a WireGuard overlay. The cluster's public admin endpoint exposes a small whitelist (`/bootstrap/wg`, `/api/wg/register`, `/api/wg/poll/*`, plus the read-only status dashboard) — everything else under `/api` is cluster-subnet only.
 
-On a fresh remote box:
+On a fresh remote Linux box:
 
 ```bash
 curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --type compute
 ```
 
-Use `--dev` on an existing dev VM to skip host-level mutations (hostname / admin user / SSH hardening) and drop the peer into the `dev` type (`d1..d30`, `10.0.1.201-230`).
+On a remote macOS host (requires Homebrew installed for the invoking user):
+
+```bash
+curl https://admin.your-domain.com/bootstrap/wg-macos | sudo bash
+```
+
+Use `--dev` on an existing dev VM/mac to skip host-level mutations (hostname / admin user / SSH hardening) and drop the peer into the `dev` type (`d1..d30`, `10.0.1.201-230`). Both endpoints accept the same `--type` / `--dev` flags.
 
 The script allocates a cluster hostname+IP (in `10.0.1.0/24` for wg peers), generates a keypair, registers with the admin API, and blocks on approval. On a core node:
 
