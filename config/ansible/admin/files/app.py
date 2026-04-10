@@ -56,6 +56,7 @@ AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templa
 MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'macos-bootstrap.sh.j2')
 NAS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nas-bootstrap.sh.j2')
 NVIDIA_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nvidia-bootstrap.sh.j2')
+WG_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'wg-bootstrap.sh.j2')
 
 app = Flask(__name__)
 
@@ -112,13 +113,19 @@ IP_RANGES = {
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
     'nv': {'base': 110, 'max': 20},  # Nvidia: 10.0.0.111-130 (nv1-nv20)
     'nas': {'base': 130, 'max': 10}, # NAS: 10.0.0.131-140 (nas1-nas10)
+    'd': {'base': 200, 'max': 30},   # Dev (remote wg scratch): 10.0.1.201-230 (wg peers only)
 }
 
-def determine_ip_from_hostname(hostname):
-    """Generate deterministic IP based on hostname"""
+def determine_ip_from_hostname(hostname, via_wg=False):
+    """Generate deterministic IP based on hostname.
+
+    via_wg=True puts the IP in the wg peer subnet (10.0.1.0/24) while
+    preserving the per-type hostname numbering. A physical compute c3
+    lands at 10.0.0.53; a wg-bootstrapped compute c3 lands at 10.0.1.53.
+    """
     if not hostname:
         return None
-    
+
     # Check if this is an AMT hostname (ends with 'a')
     is_amt = hostname.endswith('a')
     if is_amt:
@@ -135,22 +142,26 @@ def determine_ip_from_hostname(hostname):
                 break
             except ValueError:
                 continue
-    
+
     if prefix is None:
         return None
-    
+
     config = IP_RANGES[prefix]
-    
+
     # Validate number is within range
     if num < 1 or num > config['max']:
         raise ValueError(f"Node number {num} for prefix '{prefix}' exceeds range 1-{config['max']}")
-    
+
     # Calculate base IP address
     base_ip = config['base'] + num
-    
+
     if is_amt:
         # AMT interface: use separate 10.10.10.0/24 subnet
         return f"10.10.10.{base_ip}"
+    elif via_wg:
+        # WG-bootstrapped peers live on a separate /24 so the wg server
+        # gets a clean connected route instead of per-peer /32s.
+        return f"10.0.1.{base_ip}"
     else:
         # Regular interface
         return f"10.0.0.{base_ip}"
@@ -181,7 +192,8 @@ def get_next_hostname(client, node_type):
         'compute': 'c',
         'macos': 'm',
         'nvidia': 'nv',
-        'nas': 'nas'
+        'nas': 'nas',
+        'dev': 'd',
     }
     
     prefix = prefixes.get(node_type, 'c')
@@ -211,7 +223,7 @@ def get_next_hostname(client, node_type):
     
     return f"{prefix}{next_num}"
 
-def get_or_create_allocation(mac_address, node_type=None):
+def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
     """Get existing allocation or create new one for non-normalized MAC address.
 
     Args:
@@ -219,6 +231,9 @@ def get_or_create_allocation(mac_address, node_type=None):
         node_type: Optional type override ('storage', 'compute', 'macos').
                    If not provided, type is detected from MAC address.
                    If provided and different from existing, the allocation is updated.
+        via_wg:    Transport marker — WG-bootstrapped nodes get their IP
+                   from 10.0.1.0/24 instead of 10.0.0.0/24. Preserved in
+                   the allocation record so list/lookup stays consistent.
     """
     client = get_etcd_client()
     normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
@@ -227,32 +242,33 @@ def get_or_create_allocation(mac_address, node_type=None):
     existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
     if existing_data[0]:
         data = json.loads(existing_data[0].decode())
+        existing_via_wg = bool(data.get('via_wg', False))
         # Some old entries may lack IP or amt_ip, fill them in
         if 'amt_ip' not in data:
             amt_ip_address = determine_ip_from_hostname(data['hostname'] + 'a')
             data['amt_ip'] = amt_ip_address
-        
+
         # Update type if explicitly requested and different
         if node_type and data.get('type') != node_type:
             old_hostname = data['hostname']
             # Allocate new hostname for the new type
             new_hostname = get_next_hostname(client, node_type)
-            new_ip = determine_ip_from_hostname(new_hostname)
+            new_ip = determine_ip_from_hostname(new_hostname, via_wg=existing_via_wg)
             new_amt_ip = determine_ip_from_hostname(new_hostname + "a")
-            
+
             # Update allocation data
             data['hostname'] = new_hostname
             data['type'] = node_type
             data['ip'] = new_ip
             data['amt_ip'] = new_amt_ip
             data['updated_at'] = datetime.now(UTC).isoformat()
-            
+
             # Update in etcd (delete old hostname entry, create new one)
             allocation_json = json.dumps(data)
             client.delete(f"{ETCD_PREFIX}/by-hostname/{old_hostname}")
             client.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json)
             client.put(f"{ETCD_PREFIX}/by-hostname/{new_hostname}", allocation_json)
-        
+
         return data
 
 
@@ -266,15 +282,16 @@ def get_or_create_allocation(mac_address, node_type=None):
         # Determine machine type and allocate hostname
         machine_type = node_type or determine_type_from_mac(mac_address)
         hostname = get_next_hostname(client, machine_type)
-        ip_address = determine_ip_from_hostname(hostname)
+        ip_address = determine_ip_from_hostname(hostname, via_wg=via_wg)
         amt_ip_address = determine_ip_from_hostname(hostname + "a")
-        
+
         allocation_data = {
             'hostname': hostname,
             'type': machine_type,
             'ip': ip_address,
             'amt_ip': amt_ip_address,
             'mac': normalized_mac,
+            'via_wg': via_wg,
             'allocated_at': datetime.now(UTC).isoformat()
         }
         
@@ -308,7 +325,7 @@ def allocate_hostname():
     if not mac_address:
         return jsonify({'error': 'MAC address is required'}), 400
 
-    if node_type and node_type not in ('storage', 'compute', 'macos', 'nas', 'nvidia'):
+    if node_type and node_type not in ('storage', 'compute', 'macos', 'nas', 'nvidia', 'dev'):
         return jsonify({'error': f'Invalid type: {node_type}'}), 400
 
     try:
@@ -324,6 +341,87 @@ def allocate_hostname():
         })
     except Exception as e:
         return jsonify({'error': f'Allocation failed: {str(e)}'}), 500
+
+@app.route('/api/wg/register', methods=['POST'])
+def wg_register():
+    """Allocate a hostname+IP (as a cluster node of the requested type)
+    and register a WireGuard peer pubkey for it in one atomic call.
+
+    This endpoint is public (exposed via the admin-api reverse proxy for
+    remote-node onboarding), so it validates input carefully and does not
+    leak details of unrelated allocations.
+
+    Body (JSON): {mac, type, pubkey}
+      mac:    client MAC (any format)
+      type:   one of storage|compute|macos|nas|nvidia (default: compute)
+      pubkey: base64-encoded 32-byte WireGuard public key
+    Returns: {hostname, ip, status, pubkey_sha256}
+    """
+    import base64
+    from ycluster.utils import wg_config
+
+    data = request.get_json(silent=True) or {}
+    mac = data.get('mac')
+    node_type = data.get('type') or 'compute'
+    pubkey = data.get('pubkey')
+
+    if not mac or not pubkey:
+        return jsonify({'error': 'mac and pubkey are required'}), 400
+    if node_type not in ('storage', 'compute', 'macos', 'nas', 'nvidia', 'dev'):
+        return jsonify({'error': f'invalid type: {node_type}'}), 400
+
+    # Sanity-check the pubkey shape before touching etcd
+    try:
+        decoded = base64.b64decode(pubkey, validate=True)
+        if len(decoded) != 32:
+            raise ValueError('wrong length')
+    except Exception:
+        return jsonify({'error': 'invalid pubkey (expected base64 32-byte key)'}), 400
+
+    try:
+        allocation = get_or_create_allocation(mac, node_type=node_type, via_wg=True)
+    except Exception as e:
+        return jsonify({'error': f'allocation failed: {e}'}), 500
+
+    try:
+        peer = wg_config.register_peer(allocation['hostname'], pubkey)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'registration failed: {e}'}), 500
+
+    return jsonify({
+        'hostname': allocation['hostname'],
+        'ip': allocation['ip'],
+        'status': peer['status'],
+        'pubkey_sha256': peer['pubkey_sha256'],
+    })
+
+
+@app.route('/api/wg/poll/<hostname>')
+def wg_poll(hostname):
+    """Poll for approval status. Requires fp query param (pubkey_sha256)
+    to prevent unauthenticated enumeration of peer configs."""
+    from ycluster.utils import wg_config
+
+    fp = request.args.get('fp')
+    if not fp:
+        return jsonify({'error': 'fp query parameter is required'}), 400
+
+    peer = wg_config.get_peer(hostname)
+    if not peer:
+        return jsonify({'error': 'no such peer'}), 404
+    if peer.get('pubkey_sha256') != fp:
+        return jsonify({'error': 'fingerprint mismatch'}), 403
+
+    resp = {'status': peer['status']}
+    if peer['status'] == 'approved':
+        try:
+            resp['config'] = wg_config.render_client_config(hostname)
+        except Exception as e:
+            return jsonify({'error': f'render failed: {e}'}), 500
+    return jsonify(resp)
+
 
 @app.route('/api/status')
 def status():
@@ -1358,6 +1456,7 @@ BOOTSTRAP_TEMPLATES = {
     'macos': MACOS_BOOTSTRAP_TEMPLATE,
     'nas': NAS_BOOTSTRAP_TEMPLATE,
     'nvidia': NVIDIA_BOOTSTRAP_TEMPLATE,
+    'wg': WG_BOOTSTRAP_TEMPLATE,
 }
 
 @app.route('/bootstrap/')
@@ -1370,6 +1469,7 @@ Available types:
   macos  - macOS compute nodes
   nas    - Ubuntu-based NAS devices
   nvidia - Ubuntu-based Nvidia GPU servers
+  wg     - WireGuard overlay client (remote node joining over the internet)
 
 Usage:
   curl {api_server}/bootstrap/<type> | sudo bash
@@ -1378,6 +1478,8 @@ Examples:
   curl {api_server}/bootstrap/macos | sudo bash
   curl {api_server}/bootstrap/nas | sudo bash
   curl {api_server}/bootstrap/nvidia | sudo bash
+  curl {api_server}/bootstrap/wg | sudo bash -s -- --type compute
+  curl {api_server}/bootstrap/wg | sudo bash -s -- --dev
 """
     return text, 200, {'Content-Type': 'text/plain'}
 
@@ -1388,8 +1490,25 @@ def serve_bootstrap(node_type):
     if node_type not in BOOTSTRAP_TEMPLATES:
         return jsonify({'error': f'Unknown bootstrap type: {node_type}', 'available': list(BOOTSTRAP_TEMPLATES.keys())}), 404
 
-    # Determine the API server URL from the request
-    api_server = f"http://{request.host}"
+    # Determine the API server URL. Remote (wg) bootstrap must use the
+    # public admin subdomain (reverse proxy exposes only a whitelist of
+    # paths there). The WG tunnel endpoint is separate and rendered into
+    # the client wg config itself. Local node bootstraps (macos/nas/nvidia)
+    # keep using the host header.
+    if node_type == 'wg':
+        try:
+            etcd = get_etcd_client()
+            domain_value, _ = etcd.get('/cluster/https/domain')
+        except Exception as e:
+            return jsonify({'error': f'etcd lookup failed: {e}'}), 503
+        if not domain_value:
+            return jsonify({
+                'error': 'wg bootstrap requires /cluster/https/domain to be set '
+                         '(run `ycluster https set-domain <domain>`)'
+            }), 503
+        api_server = f"https://admin.{domain_value.decode().strip()}"
+    else:
+        api_server = f"http://{request.host}"
 
     # Get SSH public key content
     ssh_key_path = '/opt/bootstrap-files/ansible_ssh_key.pub'

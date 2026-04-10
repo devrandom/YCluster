@@ -59,6 +59,12 @@ The admin service provides REST APIs for programmatic access:
 - `GET /api/status` - Get allocation counts by node type
 - `POST /api/allocate?mac=<mac>` - Allocate hostname for MAC address
 
+### WireGuard Remote-Node Bootstrap
+The following endpoints are exposed on the public reverse proxy (`https://admin.<domain>/`) so remote boxes can join over the internet. Everything else under `/api` stays cluster-subnet only. See ARCHITECTURE.md for the transport design.
+- `GET /bootstrap/wg` - Render the remote-node bootstrap script (curl | sudo bash)
+- `POST /api/wg/register` - Allocate hostname+IP and register a wg pubkey as pending. Body: `{mac, type, pubkey}`. Returns `{hostname, ip, status, pubkey_sha256}`.
+- `GET /api/wg/poll/<hostname>?fp=<pubkey_sha256>` - Capability-gated status poll. Returns `{status}` while pending, `{status: "approved", config}` once approved. The `fp` query param must match the fingerprint returned by `register`.
+
 ### Health Monitoring
 - `GET /api/health` - Comprehensive health check for current node
 - `GET /api/cluster-status` - Cluster-wide health status (JSON)
@@ -230,6 +236,49 @@ ycluster rathole generate-ssh-client
 ycluster rathole delete
 ```
 
+### WireGuard Overlay (Remote Nodes)
+```bash
+# One-time: configure server keypair and public endpoint(s)
+# Port defaults to 51820 if omitted. Multiple endpoints may be given;
+# only the first is used by clients today (failover is a TODO).
+ycluster wg init vpn.your-domain.com:51820
+
+# Show current server state (privkey redacted)
+ycluster wg show
+
+# List peers (optionally filtered)
+ycluster wg list
+ycluster wg list --pending
+ycluster wg list --approved
+
+# Approve a pending peer — triggers wg syncconf on this core node
+ycluster wg approve <hostname>
+
+# Revoke without forgetting the node allocation
+ycluster wg revoke <hostname>
+
+# Delete the peer AND its underlying hostname/IP allocation
+ycluster wg delete <hostname>
+
+# Apply etcd state to live wg0 (normally driven by the VIP-aware timer)
+ycluster wg reconcile
+ycluster wg reconcile --up     # wg-quick up if not running, then sync
+ycluster wg reconcile --down   # wg-quick down
+
+# Print rendered config for debugging
+ycluster wg render                     # server wg0.conf
+ycluster wg render --client <hostname> # client wg0.conf (w/ __PRIVATE_KEY__ placeholder)
+```
+
+On the remote box being onboarded, run:
+```bash
+# Normal remote node (installs admin user + SSH key so Ansible can reach it)
+curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --type compute
+
+# Dev VM (skip hostname/admin-user/SSH changes; type defaults to `dev`)
+curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --dev
+```
+
 ### Frontend Node Management
 ```bash
 # List frontend nodes
@@ -283,6 +332,23 @@ Allocate a hostname.  On a core node, run `lease-manager all` and select a new h
 
 Copy the SSH public key from a core node to the macOS node to allow SSH access.
 
+#### Remote (WireGuard)
+
+Remote machines on the public internet join via the wg overlay. On the remote host:
+
+```bash
+curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --type compute
+```
+
+This allocates a cluster hostname+IP in `10.0.1.0/24`, generates a wg keypair, registers it as pending, and polls for approval. On a core node:
+
+```bash
+ycluster wg list --pending
+ycluster wg approve <hostname>
+```
+
+Once approved the remote host brings up `wg0`, installs the admin SSH key (unless `--dev`), and is reachable from the rest of the cluster like any physical node. Prereqs: `ycluster wg init <endpoint>` must have been run, `/cluster/https/domain` set, and inbound UDP/51820 must reach the current gateway-VIP holder. See the WireGuard Overlay section in `ARCHITECTURE.md` for the design.
+
 ```bash
 cat /var/www/html/ansible_ssh_key.pub # FIXME use curl after fixing web service
 ssh user@m1
@@ -298,12 +364,16 @@ Nodes are automatically classified based on MAC address prefixes:
 - **Storage nodes** (s1-s20): MAC addresses starting with `58:47:ca`
 - **Compute nodes** (c1-c20): All other MAC addresses
 - **macOS nodes** (m1-m20): Manual classification available
+- **Dev nodes** (d1-d30): Only via the WireGuard bootstrap flow (`--dev`); used for remote scratch VMs that should not receive the hostname/admin-user/SSH mutations a real remote node gets.
 
 ### IP Address Ranges
 - **Storage**: 10.0.0.11-30 (s1-s20)
 - **Compute**: 10.0.0.51-70 (c1-c20)
 - **macOS**: 10.0.0.71-90 (m1-m20)
+- **Nvidia**: 10.0.0.111-130 (nv1-nv20)
+- **NAS**: 10.0.0.131-140 (nas1-nas10)
 - **AMT interfaces**: 10.10.10.x (hostname + 'a' suffix)
+- **WireGuard peer subnet**: 10.0.1.0/24 — any node onboarded via the wg bootstrap keeps its type-prefixed hostname but lives in this /24 (e.g. a wg-bootstrapped compute `c5` sits at `10.0.1.55` instead of `10.0.0.55`). Dev nodes (`d1..d30`) are wg-only and occupy `10.0.1.201-230`.
 
 ### Interface Configuration
 Each node type has predefined network interface mappings:

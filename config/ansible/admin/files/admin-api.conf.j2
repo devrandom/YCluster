@@ -1,29 +1,33 @@
-# HTTP
+# HTTP - cluster-subnet only (external traffic arrives on 127.0.0.2:80 below)
 server {
     listen 80;
     server_name _;
-    
+
     # Named location for HTTPS redirect
     location @redirect_https {
         return 301 https://$http_host$request_uri;
     }
-    
+
     # Allow full access from cluster subnet
     location / {
         # Restrict to cluster subnet
         allow 10.0.0.0/24;
         allow 127.0.0.0/8;
         deny all;
-        
+
         # Include shared location blocks
         include /etc/nginx/admin-api-locations.conf;
     }
-    
+
     # Fallback: redirect external requests to HTTPS
     error_page 403 = @redirect_https;
 }
 
-# HTTPS/HTTP - Admin subdomain
+# HTTPS/HTTP - Admin subdomain, cluster-internal.
+# External traffic does NOT reach this block — rathole forwards remote
+# clients to 127.0.0.2:443 (see the public vhost below), so the listen
+# address here is only reachable from the cluster network (or via local
+# health checks on 127.0.0.1:443).
 server {
     {% if use_tls %}
     listen 443 ssl http2;
@@ -31,26 +35,88 @@ server {
     listen 80;
     {% endif %}
     server_name admin.{{ domain | default('_') }};
-    
+
     {% if use_tls %}
     # SSL configuration
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
-    
+
     # SSL security settings
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
     ssl_prefer_server_ciphers off;
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
-    
+
     # Security headers
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     {% endif %}
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
-    
-    # Include shared location blocks
-    include /etc/nginx/admin-api-locations.conf;
+
+    # Defense in depth — even though this listen address is not publicly
+    # reachable, enforce the cluster-subnet ACL so accidental exposure
+    # (misconfigured firewall, bridged network, etc.) still blocks.
+    location / {
+        allow 10.0.0.0/24;
+        allow 127.0.0.0/8;
+        deny all;
+
+        include /etc/nginx/admin-api-locations.conf;
+    }
 }
+
+# HTTPS - PUBLIC whitelist (rathole tunnel endpoint on 127.0.0.2).
+# Rathole-client forwards externally-originated traffic here. Only the
+# paths in admin-api-public-locations.conf are served; everything else
+# returns 404. Real client IPs are NOT preserved (rathole 0.5.0 has no
+# PROXY protocol support) — all requests appear to come from 127.0.0.1,
+# so rate limits act as global buckets rather than per-client. See
+# TODO.md for the rathole rebuild follow-up.
+server {
+    {% if use_tls %}
+    listen 127.0.0.2:443 ssl http2;
+    {% else %}
+    listen 127.0.0.2:80;
+    {% endif %}
+    server_name _;
+
+    {% if use_tls %}
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    # Return a clean 429 instead of nginx's default HTML page when rate-limited
+    limit_req_status 429;
+
+    # Public whitelist (wg bootstrap flow + read-only status dashboard).
+    include /etc/nginx/admin-api-public-locations.conf;
+
+    # Anything not in the whitelist is not exposed.
+    location / {
+        return 404;
+    }
+}
+
+{% if use_tls %}
+# HTTP - PUBLIC (rathole tunnel endpoint on 127.0.0.2:80) — redirect to HTTPS.
+# Only installed when TLS is enabled, otherwise the public block above
+# already listens on 127.0.0.2:80 itself.
+server {
+    listen 127.0.0.2:80;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+{% endif %}
