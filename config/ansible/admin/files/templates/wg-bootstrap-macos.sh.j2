@@ -1,0 +1,261 @@
+#!/bin/bash
+# YCluster WireGuard bootstrap (macOS)
+# Remote macOS host joins the cluster via WireGuard.
+# Allocates a cluster hostname+IP (as the chosen --type), generates a
+# keypair, registers with the admin API, and waits for approval via
+# `ycluster wg approve <hostname>`.
+#
+# Usage (on the macOS host):
+#   curl <api>/bootstrap/wg-macos | sudo bash -s -- [--type TYPE] [--dev]
+#
+#   --type TYPE   node type: storage|compute|macos|nas|nvidia|dev
+#                 (default: macos; or dev when --dev is passed)
+#   --dev         skip host-level mutations (hostname, admin user, SSH).
+#                 Only the wg tunnel is brought up. Useful on a personal
+#                 mac that should not be reconfigured.
+#
+# Prerequisites:
+#   - Homebrew installed (script will bail if missing)
+#   - Run with sudo (the script writes /etc/wireguard/wg0.conf and a
+#     LaunchDaemon plist, both of which need root)
+
+set -euo pipefail
+
+LOG="/var/log/ycluster-bootstrap.log"
+exec > >(tee -a "$LOG") 2>&1
+
+echo "=== YCluster wg bootstrap (macOS) $(date) ==="
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "ERROR: this script is for macOS; use /bootstrap/wg on Linux"
+    exit 1
+fi
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "ERROR: must run as root (sudo bash -s -- ...)"
+    exit 1
+fi
+
+API_SERVER="{{ api_server }}"
+POLL_INTERVAL="${POLL_INTERVAL:-5}"
+POLL_TIMEOUT="${POLL_TIMEOUT:-3600}"
+ADMIN_USER="admin"
+
+# --- arg parsing ----------------------------------------------------------
+NODE_TYPE=""
+DEV=0
+while (( $# > 0 )); do
+    case "$1" in
+        --type)   NODE_TYPE="$2"; shift 2 ;;
+        --type=*) NODE_TYPE="${1#*=}"; shift ;;
+        --dev)    DEV=1; shift ;;
+        -h|--help)
+            sed -n '2,20p' "$0" 2>/dev/null || true
+            echo "curl ... | sudo bash -s -- [--type TYPE] [--dev]"
+            exit 0
+            ;;
+        *) echo "ERROR: unknown arg '$1'"; exit 1 ;;
+    esac
+done
+
+if [[ -z "$NODE_TYPE" ]]; then
+    if (( DEV == 1 )); then
+        NODE_TYPE="dev"
+    else
+        NODE_TYPE="macos"
+    fi
+fi
+
+case "$NODE_TYPE" in
+    storage|compute|macos|nas|nvidia|dev) ;;
+    *) echo "ERROR: invalid --type '$NODE_TYPE' (must be storage|compute|macos|nas|nvidia|dev)"; exit 1 ;;
+esac
+echo "node_type=$NODE_TYPE dev=$DEV"
+
+# --- prereqs: Homebrew + wireguard-tools ----------------------------------
+# Homebrew refuses to run as root, so we drop privileges to the invoking
+# user for any brew calls. $SUDO_USER is set by sudo.
+BREW_USER="${SUDO_USER:-}"
+if [[ -z "$BREW_USER" || "$BREW_USER" == "root" ]]; then
+    echo "ERROR: could not determine non-root SUDO_USER for brew. Run:"
+    echo "  curl $API_SERVER/bootstrap/wg-macos | sudo bash -s -- $*"
+    echo "from a regular user shell, not as root directly."
+    exit 1
+fi
+
+as_brew_user() { sudo -u "$BREW_USER" -H "$@"; }
+
+if ! as_brew_user command -v brew >/dev/null 2>&1; then
+    cat <<EOF
+ERROR: Homebrew is required but not installed for user '$BREW_USER'.
+Install it first from https://brew.sh and re-run:
+  /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+EOF
+    exit 1
+fi
+
+BREW_PREFIX="$(as_brew_user brew --prefix)"
+echo "brew prefix: $BREW_PREFIX"
+
+if ! as_brew_user brew list --versions wireguard-tools >/dev/null 2>&1; then
+    echo "Installing wireguard-tools via brew..."
+    as_brew_user brew install wireguard-tools
+fi
+
+WG="$BREW_PREFIX/bin/wg"
+WG_QUICK="$BREW_PREFIX/bin/wg-quick"
+if [[ ! -x "$WG" || ! -x "$WG_QUICK" ]]; then
+    echo "ERROR: wg/wg-quick not found under $BREW_PREFIX/bin"
+    exit 1
+fi
+
+# --- allocate + register --------------------------------------------------
+MAC=$(/sbin/ifconfig en0 2>/dev/null | /usr/bin/awk '/ether/{print $2; exit}')
+if [[ -z "$MAC" ]]; then
+    echo "ERROR: could not determine MAC of en0"
+    /sbin/ifconfig
+    exit 1
+fi
+echo "mac=$MAC"
+
+mkdir -p /etc/wireguard
+chmod 700 /etc/wireguard
+
+umask 077
+PRIVKEY=$("$WG" genkey)
+PUBKEY=$(echo "$PRIVKEY" | "$WG" pubkey)
+echo "pubkey=$PUBKEY"
+
+# Atomic: allocate cluster hostname+IP AND record wg pubkey as pending peer
+REG=$(/usr/bin/curl -sfL -X POST \
+    -H "Content-Type: application/json" \
+    -d "$(/usr/bin/python3 -c "import json,sys; print(json.dumps({'mac':'$MAC','type':'$NODE_TYPE','pubkey':'$PUBKEY'}))")" \
+    "$API_SERVER/api/wg/register")
+if [[ -z "$REG" ]]; then
+    echo "ERROR: register call failed"; exit 1
+fi
+NEW_HOSTNAME=$(echo "$REG" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["hostname"])')
+IP_ADDRESS=$(echo "$REG" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["ip"])')
+FP=$(echo "$REG" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["pubkey_sha256"])')
+echo "allocated hostname=$NEW_HOSTNAME ip=$IP_ADDRESS fingerprint=$FP"
+echo ""
+echo "Waiting for approval. On the admin host run:"
+echo "    ycluster wg approve $NEW_HOSTNAME"
+echo ""
+
+# --- poll for approval ----------------------------------------------------
+DEADLINE=$(( $(date +%s) + POLL_TIMEOUT ))
+CONFIG=""
+while (( $(date +%s) < DEADLINE )); do
+    POLL=$(/usr/bin/curl -sfL "$API_SERVER/api/wg/poll/$NEW_HOSTNAME?fp=$FP" || true)
+    if [[ -n "$POLL" ]]; then
+        STATUS=$(echo "$POLL" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status",""))')
+        case "$STATUS" in
+            approved)
+                CONFIG=$(echo "$POLL" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("config",""))')
+                break
+                ;;
+            revoked)
+                echo "ERROR: registration was revoked"; exit 1 ;;
+            pending|"")
+                ;;
+            *)
+                echo "WARN: unexpected status='$STATUS'" ;;
+        esac
+    fi
+    sleep "$POLL_INTERVAL"
+done
+
+if [[ -z "$CONFIG" ]]; then
+    echo "ERROR: timed out waiting for approval after ${POLL_TIMEOUT}s"
+    exit 1
+fi
+
+# --- write wg0.conf with private key substituted in -----------------------
+echo "$CONFIG" | /usr/bin/sed "s|__PRIVATE_KEY__|$PRIVKEY|" > /etc/wireguard/wg0.conf
+chmod 600 /etc/wireguard/wg0.conf
+echo "wrote /etc/wireguard/wg0.conf"
+
+# --- host setup (skipped in --dev mode) -----------------------------------
+if (( DEV == 0 )); then
+    echo "Setting hostname to $NEW_HOSTNAME"
+    /usr/sbin/scutil --set HostName "$NEW_HOSTNAME"
+    /usr/sbin/scutil --set LocalHostName "$NEW_HOSTNAME"
+    /usr/sbin/scutil --set ComputerName "$NEW_HOSTNAME"
+
+    # Admin user via dscl (matches macos-bootstrap.sh.j2 pattern)
+    if ! /usr/bin/dscl . -read /Users/"$ADMIN_USER" >/dev/null 2>&1; then
+        echo "Creating admin user: $ADMIN_USER"
+        NEXT_UID=$(($(/usr/bin/dscl . -list /Users UniqueID | /usr/bin/awk '{print $2}' | /usr/bin/sort -n | /usr/bin/tail -1) + 1))
+        /usr/bin/dscl . -create /Users/"$ADMIN_USER"
+        /usr/bin/dscl . -create /Users/"$ADMIN_USER" UserShell /bin/bash
+        /usr/bin/dscl . -create /Users/"$ADMIN_USER" RealName "Admin"
+        /usr/bin/dscl . -create /Users/"$ADMIN_USER" UniqueID "$NEXT_UID"
+        /usr/bin/dscl . -create /Users/"$ADMIN_USER" PrimaryGroupID 20
+        /usr/bin/dscl . -create /Users/"$ADMIN_USER" NFSHomeDirectory "/Users/$ADMIN_USER"
+        /usr/bin/dscl . -append /Groups/admin GroupMembership "$ADMIN_USER"
+        mkdir -p "/Users/$ADMIN_USER"
+        chown "$ADMIN_USER:admin" "/Users/$ADMIN_USER"
+    fi
+
+    echo "$ADMIN_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"$ADMIN_USER"
+    chmod 440 /etc/sudoers.d/"$ADMIN_USER"
+
+    SSH_DIR="/Users/$ADMIN_USER/.ssh"
+    mkdir -p "$SSH_DIR"
+    cat >> "$SSH_DIR/authorized_keys" <<'SSHKEY'
+{{ ssh_key_content }}
+SSHKEY
+    chown -R "$ADMIN_USER":admin "$SSH_DIR"
+    chmod 700 "$SSH_DIR"
+    chmod 600 "$SSH_DIR/authorized_keys"
+
+    echo "Enabling Remote Login (SSH)"
+    /usr/sbin/systemsetup -setremotelogin on >/dev/null 2>&1 || true
+else
+    echo "dev mode: skipping hostname / admin user / SSH hardening"
+fi
+
+# --- LaunchDaemon for persistence across reboot ---------------------------
+LAUNCH_PLIST="/Library/LaunchDaemons/xc.ycluster.wg.plist"
+
+# Tear down anything already running from a previous bootstrap
+/bin/launchctl unload "$LAUNCH_PLIST" 2>/dev/null || true
+"$WG_QUICK" down wg0 2>/dev/null || true
+
+cat > "$LAUNCH_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>xc.ycluster.wg</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$WG_QUICK</string>
+        <string>up</string>
+        <string>wg0</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/ycluster-wg.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/ycluster-wg.log</string>
+</dict>
+</plist>
+PLIST
+chown root:wheel "$LAUNCH_PLIST"
+chmod 644 "$LAUNCH_PLIST"
+
+# Load with -w to persist across reboots; RunAtLoad brings wg0 up immediately
+/bin/launchctl load -w "$LAUNCH_PLIST"
+
+echo ""
+echo "=== wg bootstrap complete ==="
+echo "Hostname:    $NEW_HOSTNAME"
+echo "Cluster IP:  $IP_ADDRESS (on wg0)"
+echo "Launch plist: $LAUNCH_PLIST"
+echo ""
+echo "Verify with:  sudo $WG show wg0"
+echo "Stop with:    sudo launchctl unload $LAUNCH_PLIST"
+echo "Restart with: sudo launchctl unload $LAUNCH_PLIST && sudo launchctl load -w $LAUNCH_PLIST"

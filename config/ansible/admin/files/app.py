@@ -57,6 +57,7 @@ MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 
 NAS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nas-bootstrap.sh.j2')
 NVIDIA_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nvidia-bootstrap.sh.j2')
 WG_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'wg-bootstrap.sh.j2')
+WG_MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'wg-bootstrap-macos.sh.j2')
 
 app = Flask(__name__)
 
@@ -1457,7 +1458,13 @@ BOOTSTRAP_TEMPLATES = {
     'nas': NAS_BOOTSTRAP_TEMPLATE,
     'nvidia': NVIDIA_BOOTSTRAP_TEMPLATE,
     'wg': WG_BOOTSTRAP_TEMPLATE,
+    'wg-macos': WG_MACOS_BOOTSTRAP_TEMPLATE,
 }
+
+# Bootstrap types whose rendered api_server must be the public admin
+# subdomain (reverse proxy) rather than the request host. Remote flows
+# only — local node types keep using request.host.
+PUBLIC_BOOTSTRAP_TYPES = {'wg', 'wg-macos'}
 
 @app.route('/bootstrap/')
 def serve_bootstrap_index():
@@ -1466,10 +1473,11 @@ def serve_bootstrap_index():
     text = f"""YCluster Bootstrap
 
 Available types:
-  macos  - macOS compute nodes
-  nas    - Ubuntu-based NAS devices
-  nvidia - Ubuntu-based Nvidia GPU servers
-  wg     - WireGuard overlay client (remote node joining over the internet)
+  macos    - macOS compute nodes (local cluster network)
+  nas      - Ubuntu-based NAS devices
+  nvidia   - Ubuntu-based Nvidia GPU servers
+  wg       - WireGuard overlay client, Linux (remote node joining over the internet)
+  wg-macos - WireGuard overlay client, macOS (remote node joining over the internet)
 
 Usage:
   curl {api_server}/bootstrap/<type> | sudo bash
@@ -1480,6 +1488,8 @@ Examples:
   curl {api_server}/bootstrap/nvidia | sudo bash
   curl {api_server}/bootstrap/wg | sudo bash -s -- --type compute
   curl {api_server}/bootstrap/wg | sudo bash -s -- --dev
+  curl {api_server}/bootstrap/wg-macos | sudo bash
+  curl {api_server}/bootstrap/wg-macos | sudo bash -s -- --dev
 """
     return text, 200, {'Content-Type': 'text/plain'}
 
@@ -1490,12 +1500,12 @@ def serve_bootstrap(node_type):
     if node_type not in BOOTSTRAP_TEMPLATES:
         return jsonify({'error': f'Unknown bootstrap type: {node_type}', 'available': list(BOOTSTRAP_TEMPLATES.keys())}), 404
 
-    # Determine the API server URL. Remote (wg) bootstrap must use the
-    # public admin subdomain (reverse proxy exposes only a whitelist of
-    # paths there). The WG tunnel endpoint is separate and rendered into
-    # the client wg config itself. Local node bootstraps (macos/nas/nvidia)
-    # keep using the host header.
-    if node_type == 'wg':
+    # Determine the API server URL. Public (wg) bootstrap flows must use
+    # the public admin subdomain (reverse proxy exposes only a whitelist
+    # of paths there). The WG tunnel endpoint is separate and rendered
+    # into the client wg config itself. Local node bootstraps (macos/
+    # nas/nvidia) keep using the host header.
+    if node_type in PUBLIC_BOOTSTRAP_TYPES:
         try:
             etcd = get_etcd_client()
             domain_value, _ = etcd.get('/cluster/https/domain')
@@ -1503,8 +1513,8 @@ def serve_bootstrap(node_type):
             return jsonify({'error': f'etcd lookup failed: {e}'}), 503
         if not domain_value:
             return jsonify({
-                'error': 'wg bootstrap requires /cluster/https/domain to be set '
-                         '(run `ycluster https set-domain <domain>`)'
+                'error': f'{node_type} bootstrap requires /cluster/https/domain '
+                         'to be set (run `ycluster https set-domain <domain>`)'
             }), 503
         api_server = f"https://admin.{domain_value.decode().strip()}"
     else:

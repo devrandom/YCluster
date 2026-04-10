@@ -61,7 +61,8 @@ The admin service provides REST APIs for programmatic access:
 
 ### WireGuard Remote-Node Bootstrap
 The following endpoints are exposed on the public reverse proxy (`https://admin.<domain>/`) so remote boxes can join over the internet. Everything else under `/api` stays cluster-subnet only. See ARCHITECTURE.md for the transport design.
-- `GET /bootstrap/wg` - Render the remote-node bootstrap script (curl | sudo bash)
+- `GET /bootstrap/wg` - Render the remote-node bootstrap script for Linux (curl | sudo bash)
+- `GET /bootstrap/wg-macos` - Render the remote-node bootstrap script for macOS (curl | sudo bash)
 - `POST /api/wg/register` - Allocate hostname+IP and register a wg pubkey as pending. Body: `{mac, type, pubkey}`. Returns `{hostname, ip, status, pubkey_sha256}`.
 - `GET /api/wg/poll/<hostname>?fp=<pubkey_sha256>` - Capability-gated status poll. Returns `{status}` while pending, `{status: "approved", config}` once approved. The `fp` query param must match the fingerprint returned by `register`.
 
@@ -272,11 +273,17 @@ ycluster wg render --client <hostname> # client wg0.conf (w/ __PRIVATE_KEY__ pla
 
 On the remote box being onboarded, run:
 ```bash
-# Normal remote node (installs admin user + SSH key so Ansible can reach it)
+# Normal remote Linux node (installs admin user + SSH key so Ansible can reach it)
 curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --type compute
 
-# Dev VM (skip hostname/admin-user/SSH changes; type defaults to `dev`)
+# Linux dev VM (skip hostname/admin-user/SSH changes; type defaults to `dev`)
 curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --dev
+
+# Remote macOS node (requires Homebrew; installs LaunchDaemon for persistence)
+curl https://admin.your-domain.com/bootstrap/wg-macos | sudo bash
+
+# macOS dev host
+curl https://admin.your-domain.com/bootstrap/wg-macos | sudo bash -s -- --dev
 ```
 
 ### Frontend Node Management
@@ -337,17 +344,21 @@ Copy the SSH public key from a core node to the macOS node to allow SSH access.
 Remote machines on the public internet join via the wg overlay. On the remote host:
 
 ```bash
+# Linux
 curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --type compute
+
+# macOS (requires Homebrew for the invoking user)
+curl https://admin.your-domain.com/bootstrap/wg-macos | sudo bash
 ```
 
-This allocates a cluster hostname+IP in `10.0.1.0/24`, generates a wg keypair, registers it as pending, and polls for approval. On a core node:
+Both scripts allocate a cluster hostname+IP in `10.0.1.0/24`, generate a wg keypair, register it as pending, and poll for approval. On a core node:
 
 ```bash
 ycluster wg list --pending
 ycluster wg approve <hostname>
 ```
 
-Once approved the remote host brings up `wg0`, installs the admin SSH key (unless `--dev`), and is reachable from the rest of the cluster like any physical node. Prereqs: `ycluster wg init <endpoint>` must have been run, `/cluster/https/domain` set, and inbound UDP/51820 must reach the current gateway-VIP holder. See the WireGuard Overlay section in `ARCHITECTURE.md` for the design.
+Once approved the remote host brings up `wg0` (Linux: `wg-quick@wg0` systemd unit; macOS: LaunchDaemon at `/Library/LaunchDaemons/xc.ycluster.wg.plist`), installs the admin SSH key (unless `--dev`), and is reachable from the rest of the cluster like any physical node. Prereqs: `ycluster wg init <endpoint>` must have been run, `/cluster/https/domain` set, and inbound UDP/51820 must reach the current gateway-VIP holder. See the WireGuard Overlay section in `ARCHITECTURE.md` for the design.
 
 ```bash
 cat /var/www/html/ansible_ssh_key.pub # FIXME use curl after fixing web service
