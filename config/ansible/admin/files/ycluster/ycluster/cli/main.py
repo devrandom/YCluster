@@ -45,6 +45,7 @@ def create_parser():
     from .backup import register_backup_commands
     from .healthchecks import register_healthchecks_commands
     from .inference import register_inference_commands
+    from .wg import register_wg_commands
 
     register_cluster_commands(subparsers)
     register_health_alias(subparsers)
@@ -57,6 +58,7 @@ def create_parser():
     register_backup_commands(subparsers)
     register_healthchecks_commands(subparsers)
     register_inference_commands(subparsers)
+    register_wg_commands(subparsers)
 
     return parser
 

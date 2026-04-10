@@ -89,7 +89,8 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 2. **Core Provisioning**: s1 provisions itself and peer core nodes (s2, s3)
 3. **Cluster Formation**: Core nodes establish etcd cluster and admin services
 4. **Service Deployment**: Ansible playbooks deploy storage, databases, and cluster services
-5. **Node Expansion**: New nodes PXE boot and auto-provision based on MAC address
+5. **Local Node Expansion**: New nodes PXE boot and auto-provision based on MAC address
+6. **Remote Node Expansion**: Remote boxes on the public internet run `curl https://admin.<domain>/bootstrap/wg | sudo bash -s -- --type <type>`, which allocates a cluster hostname+IP in the WG peer subnet, registers a pubkey, and waits for `ycluster wg approve <hostname>` on a core node. See the WG overlay section below.
 
 ## Network Architecture
 
@@ -98,7 +99,8 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - Storage nodes: DHCP range 10.0.0.11-30
 - Compute nodes: DHCP range 10.0.0.51-70
 - macOS nodes: DHCP range 10.0.0.71-90
-- Gateway VIP: 10.0.0.254 (cluster services)
+- WireGuard peer subnet: 10.0.1.0/24 (remote nodes onboarded via wg overlay keep their type prefix but live in this /24)
+- Gateway VIP: 10.0.0.254 (cluster services, also the wg server VIP)
 - Storage VIP: 10.0.0.100 (storage services)
 - Uplink Service VIP: Configurable per-deployment (incoming HTTP)
 
@@ -112,4 +114,13 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - Cluster status monitoring with leadership tracking
 - Service health checks (Ceph, DNS, certificates, Docker, Tang)
 - Web dashboard for cluster visualization and management
+
+### WireGuard Overlay
+
+The WG overlay is the cluster's remote-node onboarding mechanism. It is strictly a *transport* layer — a wg-bootstrapped node is still classified by its normal type (compute, nvidia, macos, nas, dev) with the matching hostname prefix, only its IP lives in the `10.0.1.0/24` peer subnet instead of the cluster's `10.0.0.0/24`.
+
+- **Server**: the active gateway-VIP holder runs `wg0` with address `10.0.1.1/24`. A 30s systemd timer (`ycluster-wg-reconcile.timer`) on every core node checks VIP ownership and brings `wg0` up or down accordingly, so the wg server follows VIP failover without coupling to the keepalived config.
+- **Routing**: every cluster node gets a static `10.0.1.0/24 via 10.0.0.254 metric 1024` route. The lower-metric connected route on the wg server wins locally; everywhere else the VIP route sends peer traffic through whichever core node currently holds the server.
+- **Public surface**: nginx serves a dedicated vhost on `127.0.0.2:443/80` with an explicit whitelist (`/bootstrap/wg`, `/api/wg/register`, `/api/wg/poll/*`, read-only status endpoints). Rathole is configured to forward external traffic to `127.0.0.2`, isolating public requests from the cluster-only `127.0.0.1`/`10.0.0.x` listeners. Everything outside the whitelist returns 404 to the public internet.
+- **Approval**: `/api/wg/register` stores the peer as pending in etcd; an operator runs `ycluster wg approve <hostname>` on a core node, which updates etcd and triggers `wg syncconf wg0` to bring the peer online.
 
