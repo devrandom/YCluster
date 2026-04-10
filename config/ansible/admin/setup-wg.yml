@@ -1,0 +1,132 @@
+---
+- name: Setup WireGuard overlay on gateway VIP holders
+  hosts: core
+  become: yes
+  vars:
+    gateway_vip: "10.0.0.254"
+    wg_reconcile_interval: "30s"
+
+  tasks:
+    - name: Install wireguard
+      apt:
+        name:
+          - wireguard
+          - wireguard-tools
+        state: present
+      tags: packages
+
+    - name: Ensure /etc/wireguard exists
+      file:
+        path: /etc/wireguard
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    # Reconcile is driven by a systemd timer rather than keepalived hooks so
+    # this playbook stays independent of setup-gateway-vip.yml. The wrapper
+    # checks whether this host currently owns the gateway VIP — if so it
+    # applies the server wg0 config from etcd, otherwise it tears wg0 down.
+    - name: Install wg reconcile wrapper script
+      copy:
+        dest: /usr/local/lib/cluster/wg-reconcile
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Bring wg0 up iff this host currently owns the gateway VIP.
+          set -euo pipefail
+          VIP="{{ gateway_vip }}"
+          if ip -4 -o addr show | awk '{print $4}' | grep -q "^${VIP}/"; then
+              exec ycluster wg reconcile --up
+          else
+              exec ycluster wg reconcile --down
+          fi
+
+    - name: Install wg-reconcile systemd service
+      copy:
+        dest: /etc/systemd/system/ycluster-wg-reconcile.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=YCluster WireGuard reconcile (VIP-aware)
+          After=network-online.target keepalived.service
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/lib/cluster/wg-reconcile
+
+    - name: Install wg-reconcile systemd timer
+      copy:
+        dest: /etc/systemd/system/ycluster-wg-reconcile.timer
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Periodic WireGuard reconcile
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec={{ wg_reconcile_interval }}
+          AccuracySec=1s
+
+          [Install]
+          WantedBy=timers.target
+      notify: reload systemd
+
+    - name: Enable and start wg-reconcile timer
+      systemd:
+        name: ycluster-wg-reconcile.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+# Cluster-side: every node needs a route for the wg peer subnet pointing
+# at the gateway VIP (whoever owns it holds the active wg server and has
+# 10.0.1.0/24 connected via wg0). On the wg server itself the connected
+# route via wg0 has a lower metric than this static route, so it wins —
+# the two rules coexist safely on all cluster nodes.
+- name: Install wg peer subnet route on all cluster nodes
+  hosts: storage:compute
+  become: yes
+  vars:
+    wg_peer_subnet: "10.0.1.0/24"
+    gateway_vip: "10.0.0.254"
+    wg_route_metric: 1024
+  tasks:
+    - name: Check for existing wg peer route via gateway VIP
+      shell: "ip -4 route show {{ wg_peer_subnet }} via {{ gateway_vip }} | grep -q ."
+      register: wg_route_check
+      failed_when: false
+      changed_when: false
+
+    - name: Add wg peer route at runtime (metric keeps connected wg0 first)
+      command: "ip -4 route add {{ wg_peer_subnet }} via {{ gateway_vip }} metric {{ wg_route_metric }}"
+      when: wg_route_check.rc != 0
+
+    - name: Make wg peer route persistent via rc.local
+      lineinfile:
+        path: /etc/rc.local
+        line: 'ip -4 route add {{ wg_peer_subnet }} via {{ gateway_vip }} metric {{ wg_route_metric }} 2>/dev/null || true'
+        insertbefore: 'exit 0'
+        create: yes
+        mode: '0755'
+
+    - name: Ensure rc.local has shebang
+      lineinfile:
+        path: /etc/rc.local
+        line: '#!/bin/bash'
+        insertbefore: BOF
+        create: yes
+        mode: '0755'
+
+    - name: Ensure rc.local ends with exit 0
+      lineinfile:
+        path: /etc/rc.local
+        line: 'exit 0'
+        create: yes
+        mode: '0755'

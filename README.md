@@ -67,6 +67,7 @@ Both interfaces are automatically configured when you set up HTTPS certificates.
 - **Compute nodes**: c1+ (10.0.0.51+) - processing workloads
 - **[macOS nodes](docs/operations/macos.md)**: m1+ (10.0.0.91+) - macOS compute nodes
 - **AMT interfaces**: 10.10.10.x subnet (hostname + 'a' suffix)
+- **WireGuard peers**: 10.0.1.x subnet - remote nodes joining via wg overlay
 - **VIP**: 10.0.0.254 - cluster gateway and services
 
 ## Key Features
@@ -140,6 +141,32 @@ Host s3.rat
 
 Then use direct access - `ssh s1.rat`.
 
+## Remote Nodes (WireGuard)
+
+Remote machines on the public internet can join the cluster via a WireGuard overlay. The cluster's public admin endpoint exposes a small whitelist (`/bootstrap/wg`, `/api/wg/register`, `/api/wg/poll/*`, plus the read-only status dashboard) — everything else under `/api` is cluster-subnet only.
+
+On a fresh remote box:
+
+```bash
+curl https://admin.your-domain.com/bootstrap/wg | sudo bash -s -- --type compute
+```
+
+Use `--dev` on an existing dev VM to skip host-level mutations (hostname / admin user / SSH hardening) and drop the peer into the `dev` type (`d1..d30`, `10.0.1.201-230`).
+
+The script allocates a cluster hostname+IP (in `10.0.1.0/24` for wg peers), generates a keypair, registers with the admin API, and blocks on approval. On a core node:
+
+```bash
+ycluster wg list --pending
+ycluster wg approve <hostname>
+```
+
+WG is orthogonal to node type — a wg-bootstrapped `compute` node is still a compute node with hostname `cN`, just with its IP in the wg peer subnet so the server's `wg0` can use a clean `/24` connected route. Peers reach cluster nodes through a static `10.0.1.0/24 via 10.0.0.254` route installed on every cluster host by `admin/setup-wg.yml`.
+
+**Prerequisites:**
+1. `ycluster wg init <public-endpoint>` on a core node (sets the externally-reachable wg endpoint, e.g. `vpn.your-domain.com:51820`)
+2. The gateway VIP (`10.0.0.254`) reachable on UDP/51820 from the public side (typically a DNAT on your upstream router)
+3. `/cluster/https/domain` set (used to render the `admin.<domain>` API URL in the bootstrap script)
+
 ## Inference Gateway
 
 LiteLLM inference gateway provides a single OpenAI-compatible API at `http://inference.xc/v1/` (cluster-internal) and `https://your-domain.com/v1/` (external). Manage models with `ycluster inference add/remove`. Users share their Open-WebUI API keys for direct access.
@@ -157,6 +184,7 @@ All cluster management is now consolidated under the `ycluster` CLI:
 - **Let's Encrypt**: `ycluster certbot` - SSL certificate operations
 - **Frontend Nodes**: `ycluster frontend` - manage external access points
 - **Rathole Configuration**: `ycluster rathole` - reverse proxy settings
+- **WireGuard Overlay**: `ycluster wg` - remote-node onboarding and peer management
 - **Storage Management**: `ycluster storage` - RBD volume operations
 - **Inference Gateway**: `ycluster inference` - manage LiteLLM models and backends
 
