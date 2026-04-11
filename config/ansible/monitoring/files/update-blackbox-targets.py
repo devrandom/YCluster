@@ -135,6 +135,35 @@ def get_blackbox_exporters():
     
     return exporters
 
+def get_probe_specs(domain):
+    """Return the list of (url, module, name) tuples to probe for a domain.
+
+    The `module` must match a stanza in /etc/prometheus/blackbox.yml (see
+    install-blackbox.yml). Each entry becomes one Prometheus scrape target
+    per blackbox exporter.
+    """
+    return [
+        {
+            "url": f"https://{domain}",
+            "module": "http_2xx",
+            "probe_name": "root",
+        },
+        {
+            # LiteLLM inference gateway served by the open-webui vhost.
+            # Returns 401 Missing API key when probed without credentials;
+            # the http_401 module treats that as healthy.
+            "url": f"https://{domain}/v1/models",
+            "module": "http_401",
+            "probe_name": "litellm-models",
+        },
+        {
+            # Admin-api public whitelist read-only status page.
+            "url": f"https://admin.{domain}/status",
+            "module": "http_2xx",
+            "probe_name": "admin-status",
+        },
+    ]
+
 def update_blackbox_targets():
     """Update Blackbox targets file with complete target matrix"""
     domain = get_https_domain()
@@ -144,13 +173,11 @@ def update_blackbox_targets():
     if not has_internet_uplink():
         print("No internet uplink detected, clearing blackbox targets")
         targets = []
-    else:
-        if domain:
-            # Generate target for each blackbox exporter
-            targets = []
-            probe_url = f"https://{domain}"
-            
-            for exporter in exporters:
+    elif domain:
+        # Fan out: one scrape target per (exporter × probe spec).
+        targets = []
+        for exporter in exporters:
+            for spec in get_probe_specs(domain):
                 targets.append({
                     "targets": [exporter["address"]],
                     "labels": {
@@ -158,11 +185,13 @@ def update_blackbox_targets():
                         "domain": domain,
                         "blackbox_node": exporter["blackbox_node"],
                         "node_type": exporter["node_type"],
-                        "__param_target": probe_url
+                        "module": spec["module"],
+                        "probe_name": spec["probe_name"],
+                        "__param_target": spec["url"],
                     }
                 })
-        else:
-            targets = []
+    else:
+        targets = []
     
     try:
         # Write to temp file first

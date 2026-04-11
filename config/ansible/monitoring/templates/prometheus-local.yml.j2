@@ -88,7 +88,8 @@ scrape_configs:
           node_type: 'storage'
 {% endfor %}
 
-  # Blackbox exporter for HTTPS domain monitoring
+  # Blackbox exporter for HTTPS domain monitoring.
+  # Per-target module is set via file_sd labels (see update-blackbox-targets.py).
   - job_name: 'https-domain'
     scheme: https
     tls_config:
@@ -97,8 +98,6 @@ scrape_configs:
       key_file: /etc/blackbox_exporter/tls/server.key
       insecure_skip_verify: false
     metrics_path: /probe
-    params:
-      module: [http_2xx]
     file_sd_configs:
       - files:
         - '/etc/prometheus/blackbox-targets.json'
@@ -106,6 +105,8 @@ scrape_configs:
     relabel_configs:
       - source_labels: [__param_target]
         target_label: instance
+      - source_labels: [module]
+        target_label: __param_module
 
   # Blackbox exporter itself with TLS
   - job_name: 'blackbox-exporter'
