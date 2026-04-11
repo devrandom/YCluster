@@ -1,9 +1,18 @@
 # HTTPS/HTTP - Open WebUI
+#
+# Listens on both the wildcard address (cluster-internal access) and
+# 127.0.0.2 (rathole public tunnel endpoint). The admin-api public vhost
+# has its own explicit `listen 127.0.0.2:443` with server_name `_` as a
+# 404 fallback; since open-webui sets an explicit server_name below,
+# nginx routes main-domain traffic here and admin.* traffic to the
+# admin-api public vhost on the same address.
 server {
     {% if use_tls %}
     listen 443 ssl http2;
+    listen 127.0.0.2:443 ssl http2;
     {% else %}
     listen 80;
+    listen 127.0.0.2:80;
     {% endif %}
     server_name {{ domain | default('_') }};
 
