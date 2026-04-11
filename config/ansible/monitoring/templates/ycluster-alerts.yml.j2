@@ -310,10 +310,12 @@ groups:
           summary: "HTTPS certificate expiring very soon"
           description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
 
-      # HTTPS bad status codes (502, 503, 404, etc.) - only alert when uplink is available
-      # This is just defense in depth, because normally probe_success would be 0 for these too
+      # HTTPS bad status codes (502, 503, 404, etc.) - only alert when uplink is available.
+      # Scoped to http_2xx-module probes; http_401 probes legitimately see 401 as healthy
+      # and their failure is already covered by HTTPSDomainDown via probe_success.
+      # This is just defense in depth, because normally probe_success would be 0 for these too.
       - alert: HTTPSBadStatusCode
-        expr: max(probe_http_status_code{job="https-domain"}) by (domain, instance) >= 400 and min(probe_success{job="https-domain"}) by (domain, instance) != 0
+        expr: max(probe_http_status_code{job="https-domain",module="http_2xx"}) by (domain, instance) >= 400 and min(probe_success{job="https-domain",module="http_2xx"}) by (domain, instance) != 0
         for: 1m
         labels:
           severity: warning
