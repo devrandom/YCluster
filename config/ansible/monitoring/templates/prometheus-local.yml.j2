@@ -27,66 +27,34 @@ scrape_configs:
         labels:
           node: '{{ ansible_hostname }}'
 
-  # Scrape node exporter on all core nodes
-  - job_name: 'node-exporter'
-    static_configs:
-{% for host in groups['core'] %}
-      - targets: ['{{ hostvars[host]['ansible_host'] }}:9100']
-        labels:
-          node: '{{ host }}'
-          node_type: 'core'
-{% endfor %}
-{% if groups['storage'] is defined %}
-{% for host in groups['storage'] %}
-{% if host not in groups['core'] %}
-      - targets: ['{{ hostvars[host]['ansible_host'] }}:9100']
-        labels:
-          node: '{{ host }}'
-          node_type: 'storage'
-{% endif %}
-{% endfor %}
-{% endif %}
+  # Dynamic scrape targets via the local admin API.
+  #
+  # /api/prometheus/targets/<job> returns Prometheus http_sd format and
+  # filters out hosts marked disabled in etcd (via `ycluster cluster
+  # disable <host>`). Disabling a host takes effect on the next refresh
+  # (refresh_interval below) — no ansible re-run required.
 
-  # Scrape YCluster health APIs
+  - job_name: 'node-exporter'
+    http_sd_configs:
+      - url: 'http://127.0.0.1:12723/api/prometheus/targets/node-exporter'
+        refresh_interval: 30s
+
   - job_name: 'ycluster-health'
     metrics_path: '/metrics'
-    static_configs:
-{% for host in groups['core'] %}
-      - targets: ['{{ hostvars[host]['ansible_host'] }}:12723']
-        labels:
-          node: '{{ host }}'
-          node_type: 'core'
-{% endfor %}
-{% if groups['storage'] is defined %}
-{% for host in groups['storage'] %}
-{% if host not in groups['core'] %}
-      - targets: ['{{ hostvars[host]['ansible_host'] }}:12723']
-        labels:
-          node: '{{ host }}'
-          node_type: 'storage'
-{% endif %}
-{% endfor %}
-{% endif %}
+    http_sd_configs:
+      - url: 'http://127.0.0.1:12723/api/prometheus/targets/ycluster-health'
+        refresh_interval: 30s
 
-  # Scrape DHCP health endpoint
   - job_name: 'ycluster-dhcp'
     metrics_path: '/metrics'
-    static_configs:
-{% for host in groups['core'] %}
-      - targets: ['{{ hostvars[host]['ansible_host'] }}:8067']
-        labels:
-          node: '{{ host }}'
-{% endfor %}
+    http_sd_configs:
+      - url: 'http://127.0.0.1:12723/api/prometheus/targets/ycluster-dhcp'
+        refresh_interval: 30s
 
-  # Scrape Ceph Prometheus exporter
   - job_name: 'ceph-exporter'
-    static_configs:
-{% for host in groups['storage'] %}
-      - targets: ['{{ hostvars[host]['ansible_host'] }}:9283']
-        labels:
-          node: '{{ host }}'
-          node_type: 'storage'
-{% endfor %}
+    http_sd_configs:
+      - url: 'http://127.0.0.1:12723/api/prometheus/targets/ceph-exporter'
+        refresh_interval: 30s
 
   # Blackbox exporter for HTTPS domain monitoring.
   # Per-target module is set via file_sd labels (see update-blackbox-targets.py).
