@@ -2264,6 +2264,56 @@ def get_leadership_status():
     except:
         return {}
 
+# Prometheus http_sd_configs target definitions.
+#
+# Each job maps to a port and a predicate (applied to get_all_hosts() output)
+# that decides which hosts should be scraped. The admin API is scraped by
+# Prometheus itself, so this endpoint can answer target queries dynamically
+# on every scrape interval — disabling a host via `ycluster cluster disable`
+# immediately removes it from the target list without re-running ansible.
+PROMETHEUS_JOB_SPECS = {
+    'node-exporter': {
+        'port': 9100,
+        'predicate': lambda h: h['type'] == 'storage',
+    },
+    'ycluster-health': {
+        'port': 12723,
+        'predicate': lambda h: h['type'] == 'storage',
+    },
+    'ycluster-dhcp': {
+        'port': 8067,
+        'predicate': lambda h: h['type'] == 'storage',
+    },
+    'ceph-exporter': {
+        'port': 9283,
+        'predicate': lambda h: h['type'] == 'storage',
+    },
+}
+
+
+@app.route('/api/prometheus/targets/<job>')
+def prometheus_targets(job):
+    """Return Prometheus http_sd target list for a job, minus disabled hosts."""
+    spec = PROMETHEUS_JOB_SPECS.get(job)
+    if not spec:
+        return jsonify({'error': f'unknown job: {job}'}), 404
+
+    targets = []
+    for host in get_all_hosts():
+        if host.get('disabled'):
+            continue
+        if not spec['predicate'](host):
+            continue
+        targets.append({
+            'targets': [f"{host['ip']}:{spec['port']}"],
+            'labels': {
+                'node': host['hostname'],
+                'node_type': host['type'],
+            },
+        })
+    return jsonify(targets)
+
+
 @app.route('/api/cluster-status')
 def cluster_status_api():
     """API endpoint returning cluster status as JSON"""
