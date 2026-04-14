@@ -30,6 +30,9 @@
         name:
           - "linux-image-{{ rocm_kernel_version }}"
           - "linux-headers-{{ rocm_kernel_version }}"
+          # modules-extra carries the less-common NIC drivers (e.g. r8169
+          # for RTL8125). Without it the box boots with no Ethernet.
+          - "linux-modules-extra-{{ rocm_kernel_version }}"
         state: present
         update_cache: yes
 
