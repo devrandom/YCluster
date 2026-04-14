@@ -157,6 +157,12 @@
         dest: /etc/nginx/admin-api-public-locations.conf
       notify: restart nginx
 
+    - name: Install shared grafana proxy snippet
+      copy:
+        src: admin-api-grafana-proxy.conf
+        dest: /etc/nginx/admin-api-grafana-proxy.conf
+      notify: restart nginx
+
     - name: Install nginx rate-limit zones for public paths
       copy:
         src: admin-api-ratelimit.conf
