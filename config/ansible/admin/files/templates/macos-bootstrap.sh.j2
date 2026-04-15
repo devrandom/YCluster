@@ -116,6 +116,9 @@ pmset -a hibernatemode 0
 pmset -a powernap 0
 pmset -a standby 0
 pmset -a autopoweroff 0
+# Auto-reboot after a power failure — a macOS node that sits dark after
+# a brownout is effectively offline until someone walks over to it.
+pmset -a autorestart 1
 
 echo "=== Bootstrap complete ==="
 echo "SSH should now be available at $IP_ADDRESS"

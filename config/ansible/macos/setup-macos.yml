@@ -221,6 +221,13 @@
       become: yes
       notify: restart llama-server service
 
+    - name: Enable auto-restart after power failure
+      # macOS bootstrap sets this for new nodes; this task catches up
+      # existing nodes (e.g. m2, which stayed dark after an AC blip).
+      command: pmset -a autorestart 1
+      become: yes
+      changed_when: false
+
     - name: Check current DNS servers for Ethernet
       command: networksetup -getdnsservers "Ethernet"
       register: current_dns_servers
