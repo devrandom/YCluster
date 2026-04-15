@@ -249,6 +249,23 @@ def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
             amt_ip_address = determine_ip_from_hostname(data['hostname'] + 'a')
             data['amt_ip'] = amt_ip_address
 
+        # Transport changed (LAN <-> WG): IP is derived from hostname+via_wg,
+        # so recompute and rewrite. Otherwise a node bootstrapped over WG after
+        # a prior LAN allocation keeps its 10.0.0.x address, which collides
+        # with the LAN subnet on the WG server and silently breaks the tunnel.
+        if via_wg != existing_via_wg:
+            new_ip = determine_ip_from_hostname(data['hostname'], via_wg=via_wg)
+            print(f"allocation {data['hostname']} ({normalized_mac}): transport "
+                  f"{'LAN->WG' if via_wg else 'WG->LAN'}, ip {data['ip']} -> {new_ip}",
+                  file=sys.stderr)
+            data['ip'] = new_ip
+            data['via_wg'] = via_wg
+            data['updated_at'] = datetime.now(UTC).isoformat()
+            existing_via_wg = via_wg
+            allocation_json = json.dumps(data)
+            client.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json)
+            client.put(f"{ETCD_PREFIX}/by-hostname/{data['hostname']}", allocation_json)
+
         # Update type if explicitly requested and different
         if node_type and data.get('type') != node_type:
             old_hostname = data['hostname']
