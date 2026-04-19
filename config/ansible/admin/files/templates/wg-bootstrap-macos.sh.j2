@@ -121,7 +121,31 @@ mkdir -p /etc/wireguard
 chmod 700 /etc/wireguard
 
 umask 077
-PRIVKEY=$("$WG" genkey)
+# Reuse any existing privkey so restarts (after a timed-out approval) and
+# reconfigures (new server endpoint, subnet, etc.) keep the same pubkey.
+# Re-registering with a new key against an already-approved peer is rejected
+# by the server, which would strand the node.
+#   1. wg0.key  — restart-recovery copy written before we poll
+#   2. wg0.conf — steady-state location (PrivateKey = ...)
+#   3. otherwise, generate fresh
+KEY_FILE=/etc/wireguard/wg0.key
+PRIVKEY=""
+if [[ -s "$KEY_FILE" ]]; then
+    PRIVKEY=$(cat "$KEY_FILE")
+    echo "reusing private key from $KEY_FILE"
+elif [[ -s /etc/wireguard/wg0.conf ]]; then
+    PRIVKEY=$(/usr/bin/awk -F' *= *' '/^PrivateKey/{print $2; exit}' /etc/wireguard/wg0.conf)
+    if [[ -n "$PRIVKEY" ]]; then
+        echo "reusing private key from /etc/wireguard/wg0.conf"
+        printf '%s\n' "$PRIVKEY" > "$KEY_FILE"
+        chmod 600 "$KEY_FILE"
+    fi
+fi
+if [[ -z "$PRIVKEY" ]]; then
+    PRIVKEY=$("$WG" genkey)
+    printf '%s\n' "$PRIVKEY" > "$KEY_FILE"
+    chmod 600 "$KEY_FILE"
+fi
 PUBKEY=$(echo "$PRIVKEY" | "$WG" pubkey)
 echo "pubkey=$PUBKEY"
 
@@ -174,6 +198,8 @@ fi
 echo "$CONFIG" | /usr/bin/sed "s|__PRIVATE_KEY__|$PRIVKEY|" > /etc/wireguard/wg0.conf
 chmod 600 /etc/wireguard/wg0.conf
 echo "wrote /etc/wireguard/wg0.conf"
+# Key now lives in wg0.conf; drop the restart-recovery copy.
+rm -f "$KEY_FILE"
 
 # --- host setup (skipped in --dev mode) -----------------------------------
 if (( DEV == 0 )); then
