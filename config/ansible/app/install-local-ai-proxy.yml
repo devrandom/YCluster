@@ -1,0 +1,138 @@
+---
+# Install local-ai-proxy alongside LiteLLM.
+# Listens on :4001 and forwards to a single vLLM/llama-server backend.
+# Not in the hot path yet — intended for side-by-side cancellation
+# validation vs. LiteLLM on :4000 before we swap them over.
+#
+# Override backend per run:
+#   ansible-playbook install-local-ai-proxy.yml --limit s3 \
+#     -e backend_url=http://nv1.xc:8000
+#
+# The proxy forwards the full client path (including /v1/...) to the
+# backend, so backend_url is host-only — no /v1 suffix.
+#
+# Requires a locally-built binary at
+# /opt/infrastructure/local-ai-proxy/bin/local-ai-proxy (produced by
+# `make -C local-ai-proxy build` on the dev host; dev-sync copies it
+# to the control node).
+
+- name: Install local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    backend_url: "http://nv1.xc:8000"
+    proxy_listen: ":4001"
+    proxy_bin_src: /opt/infrastructure/local-ai-proxy/bin/local-ai-proxy
+    proxy_bin_dst: /usr/local/bin/local-ai-proxy
+  tasks:
+    - name: Create local-ai-proxy system user
+      user:
+        name: local-ai-proxy
+        system: yes
+        shell: /usr/sbin/nologin
+        home: /var/lib/local-ai-proxy
+        create_home: no
+
+    - name: Create local-ai-proxy config directory
+      file:
+        path: /etc/local-ai-proxy
+        state: directory
+        owner: local-ai-proxy
+        group: local-ai-proxy
+        mode: '0755'
+
+    - name: Verify local-ai-proxy binary exists on control node
+      stat:
+        path: "{{ proxy_bin_src }}"
+      register: proxy_bin_stat
+      delegate_to: localhost
+      become: no
+      run_once: yes
+      failed_when: not proxy_bin_stat.stat.exists
+
+    - name: Install local-ai-proxy binary
+      copy:
+        src: "{{ proxy_bin_src }}"
+        remote_src: yes
+        dest: "{{ proxy_bin_dst }}"
+        owner: root
+        group: root
+        mode: '0755'
+      notify: restart local-ai-proxy
+
+    - name: Render local-ai-proxy config
+      template:
+        src: local-ai-proxy.yaml.j2
+        dest: /etc/local-ai-proxy/config.yaml
+        owner: local-ai-proxy
+        group: local-ai-proxy
+        mode: '0644'
+      notify: restart local-ai-proxy
+
+    - name: Install local-ai-proxy systemd unit
+      copy:
+        dest: /etc/systemd/system/local-ai-proxy.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=local-ai-proxy
+          After=network.target
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart={{ proxy_bin_dst }} --config /etc/local-ai-proxy/config.yaml
+          User=local-ai-proxy
+          Group=local-ai-proxy
+          Restart=on-failure
+          RestartSec=5
+          NoNewPrivileges=yes
+          ProtectSystem=strict
+          ProtectHome=yes
+          PrivateTmp=yes
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: service_unit
+      notify: restart local-ai-proxy
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+      when: service_unit.changed
+
+    - name: Enable and start local-ai-proxy
+      systemd:
+        name: local-ai-proxy.service
+        enabled: yes
+        state: started
+
+    - name: Apply any pending service restarts before smoke check
+      meta: flush_handlers
+
+    - name: Smoke check /v1/models through local-ai-proxy
+      uri:
+        url: "http://127.0.0.1:4001/v1/models"
+        return_content: no
+        status_code: [200, 401, 404]
+      register: smoke
+      failed_when: false
+      retries: 5
+      delay: 1
+      until: smoke.status is defined
+
+    - name: Report smoke check
+      debug:
+        msg: >-
+          local-ai-proxy on {{ inventory_hostname }}:4001 replied
+          {{ smoke.status | default('unreachable') }}
+          (backend={{ backend_url }})
+
+  handlers:
+    - name: restart local-ai-proxy
+      systemd:
+        name: local-ai-proxy.service
+        state: restarted
+        daemon_reload: yes
