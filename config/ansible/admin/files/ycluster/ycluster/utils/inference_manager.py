@@ -9,6 +9,7 @@ A seed models.yaml is loaded on first boot via the config.yaml `include`
 directive, but all subsequent changes go through the API.
 """
 
+import json
 import subprocess
 import sys
 from urllib.parse import urlparse
@@ -16,6 +17,8 @@ from urllib.parse import urlparse
 import requests
 
 LITELLM_URL = "http://inference.xc"
+LOCAL_AI_PROXY_URL = "http://localhost:4001"
+DISABLED_ETCD_PREFIX = "/cluster/config/inference/disabled/"
 
 
 def _get_master_key():
@@ -117,6 +120,127 @@ def list_models():
             for b in backends:
                 src = "db" if b["db"] else "config"
                 print(f"    - {b['api_base']}  ({src})")
+
+
+def show_status(proxy_url=LOCAL_AI_PROXY_URL):
+    """Print local-ai-proxy backend + model health from its /healthz."""
+    try:
+        resp = requests.get(f"{proxy_url}/healthz", timeout=5)
+    except requests.ConnectionError as e:
+        print(f"Cannot reach local-ai-proxy at {proxy_url}: {e}")
+        print("Is the local-ai-proxy service running on this node?")
+        sys.exit(1)
+
+    if resp.status_code != 200:
+        print(f"{proxy_url}/healthz returned HTTP {resp.status_code}: {resp.text}")
+        sys.exit(1)
+
+    data = resp.json()
+    status = data.get("status", "?")
+    healthy = data.get("healthy", 0)
+    down = data.get("down", 0)
+    disabled = data.get("disabled", 0)
+    backends = data.get("backends", [])
+    models = data.get("models", [])
+
+    if not backends:
+        print(f"status: {status}")
+        print(data.get("message", "no backends configured"))
+        return
+
+    use_color = sys.stdout.isatty()
+
+    def colored(s, code):
+        return f"\033[{code}m{s}\033[0m" if use_color else s
+
+    status_color = {
+        "ok": "32",        # green
+        "degraded": "33",  # yellow
+        "down": "31",      # red
+        "unknown": "90",   # gray
+    }.get(status, "0")
+    state_color = {
+        "healthy":     "32",
+        "down":        "31",
+        "disabled":    "90",
+        "unavailable": "31",
+        "unknown":     "90",
+    }
+
+    summary = f"{healthy} healthy / {down} down"
+    if disabled:
+        summary += f" / {disabled} disabled"
+    print(f"status: {colored(status, status_color)}  ({summary})")
+
+    # Backends section
+    print()
+    print("backends:")
+    max_url = max(len(b.get("url", "")) for b in backends)
+    for b in backends:
+        url = b.get("url", "?")
+        state = b.get("state", "?")
+        line = f"  {url.ljust(max_url)}  {colored(state, state_color.get(state, '0'))}"
+        if b.get("err"):
+            err = b["err"]
+            if len(err) > 70:
+                err = err[:67] + "..."
+            line += f"  {err}"
+        print(line)
+
+    # Models section
+    if models:
+        print()
+        print("models:")
+        max_name = max(len(m.get("name", "")) for m in models)
+        for m in models:
+            name = m.get("name", "?")
+            state = m.get("state", "?")
+            line = f"  {name.ljust(max_name)}  {colored(state, state_color.get(state, '0'))}"
+            if len(m.get("backends", [])) > 1:
+                line += f"  ({len(m['backends'])} backends)"
+            print(line)
+
+
+def disable_backend(url, reason=None):
+    """Mark a backend URL as known-down in etcd (proxy skips it, no alerts)."""
+    from ..common.etcd_utils import get_etcd_client
+
+    url = _normalize_backend_url(url)
+    client = get_etcd_client()
+    key = f"{DISABLED_ETCD_PREFIX}{url}"
+    value = json.dumps({"reason": reason, "at": _now_iso()}) if reason else ""
+    client.put(key, value)
+    print(f"Disabled: {url}")
+    if reason:
+        print(f"  reason: {reason}")
+    print("(take effect at next health-check cycle, ~30s)")
+
+
+def enable_backend(url):
+    """Remove a backend URL from the disabled set."""
+    from ..common.etcd_utils import get_etcd_client
+
+    url = _normalize_backend_url(url)
+    client = get_etcd_client()
+    key = f"{DISABLED_ETCD_PREFIX}{url}"
+    existed = client.delete(key)
+    if not existed:
+        print(f"Was not disabled: {url}")
+        return
+    print(f"Enabled: {url}")
+    print("(take effect at next health-check cycle, ~30s)")
+
+
+def _normalize_backend_url(url):
+    """Accept bare host/host:port too; strip trailing slash."""
+    if "://" not in url:
+        url = "http://" + url
+    return url.rstrip("/")
+
+
+def _now_iso():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def list_live_models():

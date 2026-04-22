@@ -35,6 +35,22 @@ def register_inference_commands(subparsers):
     remove_parser.add_argument('--api-base', help='Remove only this specific backend (default: remove all)')
     remove_parser.set_defaults(func=inference_remove)
 
+    # ycluster inference status
+    status_parser = sub.add_parser('status', help='Show local-ai-proxy backend + model health')
+    status_parser.add_argument('--proxy-url', default=None, help='Override proxy URL (default: http://localhost:4001)')
+    status_parser.set_defaults(func=inference_status)
+
+    # ycluster inference disable <url> [--reason ...]
+    disable_parser = sub.add_parser('disable', help='Mark a backend URL as known-down (no alerts, no health polling)')
+    disable_parser.add_argument('url', help='Backend URL, e.g. http://x1.xc:8080')
+    disable_parser.add_argument('--reason', default=None, help='Human-readable reason (stored as metadata)')
+    disable_parser.set_defaults(func=inference_disable)
+
+    # ycluster inference enable <url>
+    enable_parser = sub.add_parser('enable', help='Remove a backend URL from the disabled set')
+    enable_parser.add_argument('url', help='Backend URL, e.g. http://x1.xc:8080')
+    enable_parser.set_defaults(func=inference_enable)
+
     # ycluster inference key
     key_parser = sub.add_parser('key', help='Print the LiteLLM master API key')
     key_parser.set_defaults(func=inference_key)
@@ -79,6 +95,24 @@ def inference_add(args):
 def inference_remove(args):
     """Remove a model"""
     inference_manager.remove_model(args.model_name, args.api_base)
+
+
+def inference_status(args):
+    """Show local-ai-proxy backend health."""
+    if args.proxy_url:
+        inference_manager.show_status(args.proxy_url)
+    else:
+        inference_manager.show_status()
+
+
+def inference_disable(args):
+    """Mark a backend URL as known-down."""
+    inference_manager.disable_backend(args.url, args.reason)
+
+
+def inference_enable(args):
+    """Remove a backend URL from the disabled set."""
+    inference_manager.enable_backend(args.url)
 
 
 def inference_key(args):
