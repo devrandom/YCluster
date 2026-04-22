@@ -32,7 +32,17 @@ type Config struct {
 	// /v1/models endpoint. Zero disables health checks. Default 30s.
 	// Only meaningful in model-routed modes (backends or etcd).
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
+
+	// TrustedProxies lists CIDRs whose requests may set X-User-Id
+	// (used by downstream logging and, eventually, per-user routing).
+	// Requests from any other address get their X-User-Id stripped so
+	// clients can't forge identity. Empty/unset defaults to loopback
+	// only ("127.0.0.1/32", "::1/128").
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 }
+
+// DefaultTrustedProxies applies when trusted_proxies is unset in YAML.
+var DefaultTrustedProxies = []string{"127.0.0.1/32", "::1/128"}
 
 type Backend struct {
 	URL string `yaml:"url"`

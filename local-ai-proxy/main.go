@@ -85,9 +85,20 @@ func main() {
 
 	h := NewHandler(router)
 	h.Health = health
+
+	// Outer middleware chain: TrustedHeaders strips X-User-Id for
+	// requests from outside the trusted proxy CIDRs, so nothing
+	// downstream (logging, handler, upstream backend) sees a forged
+	// identity.
+	var chained http.Handler = LoggingMiddleware(logger, h)
+	chained, err = TrustedHeadersMiddleware(cfg.TrustedProxies, chained)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	srv := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: LoggingMiddleware(logger, h),
+		Handler: chained,
 	}
 
 	shutdownDone := make(chan struct{})
