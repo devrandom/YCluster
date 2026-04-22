@@ -57,9 +57,20 @@ using `net/http` for native `context.Context` propagation.
   or error). Auto-remove from rotation when down, auto-restore when
   healthy.
 
-- **Bearer token auth** — validate API keys. Simple token table
-  (file, SQLite, or PostgreSQL). Pluggable so users can validate against
-  external sources (e.g. Open-WebUI's api_key table).
+- **Identity from a trusted upstream gateway** — the proxy does not
+  validate bearer tokens itself. It expects a reverse proxy (nginx
+  `auth_request`, Envoy `ext_authz`, Traefik ForwardAuth, etc.) to have
+  already authenticated the request and injected `X-User-Id`. The proxy
+  uses this identity for per-user in-flight tracking, usage logging, and
+  future quotas. Binding to localhost or a trusted subnet keeps header
+  spoofing out of scope. This lets arbitrary auth backends (Open-WebUI's
+  `api_key` PG table, LDAP, OIDC, static file) be wired in at the gateway
+  without the proxy linking any of them.
+
+- **Static-token fallback** — for standalone or dev use without a fronting
+  gateway, a YAML `token → user_id` map validates bearer tokens in the
+  proxy. No DB, no callouts. Anyone who needs richer auth puts a gateway
+  in front.
 
 - **Streaming SSE passthrough** — proxy Server-Sent Events with minimal
   buffering. Detect write failures to trigger upstream cancellation.
@@ -115,8 +126,11 @@ Each request carries a `context.Context` that is cancelled when the
 client disconnects. This is the foundation — everything downstream
 inherits this context.
 
-**Auth middleware**: Extracts Bearer token, validates against token
-store. Attaches user identity to context for logging/billing.
+**Auth middleware**: In trusted-gateway mode (default), reads `X-User-Id`
+from the incoming request and attaches it to the context. In
+static-token mode, extracts the Bearer token, looks it up in a
+YAML-configured map, and attaches the resolved identity. Either way,
+downstream code sees the same `ctx.Value(userKey)`.
 
 **Router**: Looks up model name → list of backends. Selects a backend
 based on: health state, current in-flight count, weight, concurrency
@@ -169,7 +183,9 @@ backends:
 ### Request flow
 
 1. Client sends `POST /v1/chat/completions` with `model: "chat"`.
-2. Auth middleware validates Bearer token.
+2. Auth middleware reads `X-User-Id` from the request (trusted-gateway
+   mode) or looks up the Bearer token in the static map. Identity is
+   attached to the request context.
 3. Router resolves "chat" → backends `[mac-llama, mac2-llama]`.
 4. Router picks the backend with lowest in-flight count that is healthy
    and under its concurrency limit.
@@ -195,7 +211,8 @@ backends:
 - Streaming SSE passthrough with write-error detection
 - In-flight tracking per backend
 - Concurrency limits per backend
-- Simple bearer token auth (static token list or file)
+- Trusted-gateway auth (read `X-User-Id`) with static-token YAML
+  fallback
 - Health checks (periodic GET /v1/models)
 - Admin API: add/remove backend, list backends with status
 
@@ -203,8 +220,7 @@ backends:
 
 - Model aliasing
 - Weighted routing
-- Usage logging (tokens per request)
-- Auth against external DB (e.g. Open-WebUI api_key table)
+- Usage logging (tokens per request, keyed by `X-User-Id`)
 - Stuck request detection
 - Prometheus metrics endpoint
 - Graceful shutdown (drain in-flight requests)
@@ -212,8 +228,8 @@ backends:
 ### Phase 3: Community features
 
 - Config hot-reload (watch file or SIGHUP)
-- SQLite/PostgreSQL token store with quotas
-- Per-user spend tracking
+- Per-user spend tracking and quota enforcement (indexed by
+  `X-User-Id`; token storage stays at the gateway)
 - Backend auto-discovery (query /v1/models on new backend, register
   all models automatically)
 - Request queuing with timeout (instead of 503 when at capacity)
@@ -226,10 +242,31 @@ backends:
 | Bifrost | 285k | Go (fasthttp) | streaming only (no context in fasthttp) | cloud APIs |
 | one-api | 22k | Go (gin/net/http) | broken (http.NewRequest, one-line fix) | cloud APIs |
 | Portkey | med | TypeScript | undocumented | cloud APIs |
+| llama-swap | ~8k | Go (net/http) | broken (no ctx threading in ProxyRequest; panic-recover instead) | local hot-swap |
+| GPUStack | med | Python | not audited | local orchestration |
+| KubeAI | med | Go | expects cluster-level auth; proxy layer not audited | K8s operator |
+| vLLM production-stack router | med | Python (FastAPI) | inconsistent (httpx) | homogeneous vLLM on K8s |
 
-All existing proxies are cloud-first. None correctly handle the
-disconnect→cancel chain for self-hosted backends. The local inference
-use case is underserved.
+Cloud-first proxies all miss the disconnect→cancel chain. Among
+local-first proxies, llama-swap is the closest structural fit:
+idiomatic Go, per-backend concurrency semaphores that map cleanly onto
+"max 1 for llama-server, max 16 for vLLM," and a small, readable
+codebase. It falls short in three ways that matter here:
+
+- **No same-model replica fan-out.** `Models` is a
+  `map[string]ModelConfig` (`proxy/config/config.go`); peer routing
+  explicitly drops duplicate model mappings. Replicating one model
+  across nv1+nv2 and picking least-loaded would require reshaping the
+  core data model.
+- **Static-list auth only.** `apiKeys []string` with `==` comparison.
+  No hook, no webhook, no gateway-delegation path.
+- **Client-disconnect cancellation is missing** — the original
+  motivation.
+
+The cancellation fix is small (~50 lines) and worth upstreaming as a
+good-citizen PR regardless of what we build. Replica fan-out is a much
+larger surgery and effectively rules out adopting llama-swap as-is for
+this cluster.
 
 ## Open questions
 
