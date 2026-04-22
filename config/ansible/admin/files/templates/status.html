@@ -403,7 +403,63 @@
             </tbody>
         </table>
     </div>
-    
+
+    <div x-show="inferenceStatus">
+        <h2>Inference Gateway
+            <span style="font-weight: normal; font-size: 0.75em;">
+                (<span :class="getInferenceStatusClass()" x-text="inferenceStatus?.status || '?'"></span>,
+                <span x-text="inferenceStatus?.healthy ?? 0"></span> healthy /
+                <span x-text="inferenceStatus?.down ?? 0"></span> down<template x-if="inferenceStatus?.disabled">
+                    / <span x-text="inferenceStatus.disabled"></span> disabled</template>)
+            </span>
+        </h2>
+        <table style="margin-bottom: 20px;">
+            <thead>
+                <tr>
+                    <th>Backend</th>
+                    <th>State</th>
+                    <th>Last Check</th>
+                    <th>Detail</th>
+                </tr>
+            </thead>
+            <tbody>
+                <template x-if="(inferenceStatus?.backends || []).length === 0">
+                    <tr><td colspan="4" style="text-align: center; color: #666;">No backends configured</td></tr>
+                </template>
+                <template x-for="b in (inferenceStatus?.backends || [])" :key="b.url">
+                    <tr>
+                        <td style="font-family: monospace;" x-text="b.url"></td>
+                        <td><span :class="getBackendStateClass(b.state)" x-text="b.state"></span></td>
+                        <td x-text="b.last_check ? b.last_check.substring(0, 19) : '-'" style="font-size: 0.85em; color: #666;"></td>
+                        <td style="font-size: 0.85em; color: #666;" x-text="b.err || ''"></td>
+                    </tr>
+                </template>
+            </tbody>
+        </table>
+
+        <table style="margin-bottom: 10px;">
+            <thead>
+                <tr>
+                    <th>Model</th>
+                    <th>State</th>
+                    <th>Backends</th>
+                </tr>
+            </thead>
+            <tbody>
+                <template x-if="(inferenceStatus?.models || []).length === 0">
+                    <tr><td colspan="3" style="text-align: center; color: #666;">No models</td></tr>
+                </template>
+                <template x-for="m in (inferenceStatus?.models || [])" :key="m.name">
+                    <tr>
+                        <td x-text="m.name"></td>
+                        <td><span :class="getBackendStateClass(m.state)" x-text="m.state"></span></td>
+                        <td style="font-family: monospace; font-size: 0.85em; color: #666;" x-text="(m.backends || []).join(', ')"></td>
+                    </tr>
+                </template>
+            </tbody>
+        </table>
+    </div>
+
     <div class="refresh-info">
         <span>Last updated: <span x-text="lastUpdateTime"></span></span> | 
         <span>Served by: <span x-text="respondingNode"></span></span>
@@ -419,6 +475,7 @@
                 leadership: {},
                 vipStatus: {},
                 certificateStatus: null,
+                inferenceStatus: null,
                 respondingNode: 'Unknown',
                 
                 // UI State
@@ -482,6 +539,7 @@
                     this.leadership = data.leadership || {};
                     this.vipStatus = data.vipStatus || {};
                     this.certificateStatus = data.certificateStatus;
+                    this.inferenceStatus = data.inferenceStatus || null;
                     this.respondingNode = data.respondingHostname || 'Unknown';
                     
                     // Update last update time
@@ -679,6 +737,27 @@
                     return '<span style="color: #666;">-</span>';
                 },
                 
+                getBackendStateClass(state) {
+                    const map = {
+                        'healthy':     'status-healthy',
+                        'down':        'status-unhealthy',
+                        'unavailable': 'status-unhealthy',
+                        'disabled':    'status-disabled',
+                        'unknown':     'status-timeout',
+                    };
+                    return map[state] || 'status-error';
+                },
+
+                getInferenceStatusClass() {
+                    const map = {
+                        'ok':       'status-healthy',
+                        'degraded': 'status-degraded',
+                        'down':     'status-unhealthy',
+                        'unknown':  'status-timeout',
+                    };
+                    return map[this.inferenceStatus?.status] || 'status-error';
+                },
+
                 getCertStatusClass() {
                     if (!this.certificateStatus) return 'status-error';
                     const status = this.certificateStatus.status || 'error';
