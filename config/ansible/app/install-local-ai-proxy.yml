@@ -188,20 +188,33 @@
         enabled: yes
         state: started
 
-    # ---- nginx vhost: auth_request + proxy to local-ai-proxy ----
+    # ---- nginx vhost: inference.xc with /v1 (new) and /old/v1 (LiteLLM) ----
+    # This playbook now owns the inference.xc nginx config; install-litellm.yml
+    # no longer touches nginx.
 
-    - name: Install local-ai-proxy nginx config (local-ai-proxy.xc)
+    - name: Install inference.xc nginx config
       copy:
-        src: files/local-ai-proxy-internal.conf
-        dest: /etc/nginx/sites-available/local-ai-proxy-internal
+        src: files/inference-internal.conf
+        dest: /etc/nginx/sites-available/inference-internal
         mode: '0644'
       notify: reload nginx
 
-    - name: Enable local-ai-proxy nginx config
+    - name: Enable inference.xc nginx config
       file:
-        src: /etc/nginx/sites-available/local-ai-proxy-internal
-        dest: /etc/nginx/sites-enabled/local-ai-proxy-internal
+        src: /etc/nginx/sites-available/inference-internal
+        dest: /etc/nginx/sites-enabled/inference-internal
         state: link
+      notify: reload nginx
+
+    - name: Remove obsolete nginx configs (replaced by inference-internal)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/sites-enabled/litellm-internal
+        - /etc/nginx/sites-available/litellm-internal
+        - /etc/nginx/sites-enabled/local-ai-proxy-internal
+        - /etc/nginx/sites-available/local-ai-proxy-internal
       notify: reload nginx
 
     - name: Apply any pending service restarts before smoke check
