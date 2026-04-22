@@ -325,10 +325,20 @@ informative than M2.5.
 Exo is operational but shelved for non-trivial experiments until one
 of the below is needed:
 
+- **Kimi-K2.5 dual-mac status (2026-04-22)**: v1.0.70 (April 17)
+  fixes the model load timeout that killed K2.5 loads mid-mmap
+  ([#1826](https://github.com/exo-explore/exo/issues/1826),
+  [#1889](https://github.com/exo-explore/exo/pull/1889)). However,
+  TP warmup still hangs on multi-node clusters
+  ([#1853](https://github.com/exo-explore/exo/issues/1853)) — a
+  deeper MLX `METAL_FAST_SYNCH` synchronization issue, not
+  K2.5-specific. PP works but offers no batch=1 latency benefit
+  (strictly slower than single-mac mmap). **TP on K2.5 across two
+  Macs is blocked on #1853.**
 - LaunchDaemon to auto-start `run-exo.sh` on boot (paralleling
   `com.ycluster.llama-server.plist`). Until then, run manually.
 - Bench a bandwidth-bound model to validate the regime claim above.
-  Candidates: Kimi-K2 at 3.6-4 bit (~450-500 GB, ~32 B active),
+  Candidates: Kimi-K2.5 at 3.6-4 bit (~450-500 GB, ~32 B active),
   MiniMax-M2.7-bf16, or DeepSeek-V3-class. These are models where
   active-weight bytes/token approach a single Ultra's memory ceiling.
 - Plan for disk pressure when staging these — TP needs the weights
