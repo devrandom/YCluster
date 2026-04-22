@@ -10,6 +10,9 @@ import (
 )
 
 // hopByHop headers must not be forwarded by a proxy (RFC 7230 §6.1).
+// Content-Length is also skipped: Go's http client sets it from
+// req.ContentLength, and copying the client's header causes duplicate
+// or conflicting values when we've substituted the body.
 var hopByHop = map[string]struct{}{
 	"Connection":          {},
 	"Keep-Alive":          {},
@@ -19,6 +22,7 @@ var hopByHop = map[string]struct{}{
 	"Trailer":             {},
 	"Transfer-Encoding":   {},
 	"Upgrade":             {},
+	"Content-Length":      {},
 }
 
 // Handler forwards requests to the backend chosen by Router. The inbound
@@ -31,9 +35,18 @@ type Handler struct {
 }
 
 func NewHandler(router Router) *Handler {
+	// Disable HTTP keep-alives to upstream. LLM requests are long
+	// (100ms–minutes) so the ~1ms saved by connection reuse is
+	// negligible, while the default pool causes occasional POST
+	// failures with "EOF" when a backend silently closes an idle
+	// connection (Go's Transport can't retry non-idempotent POSTs).
+	// Observed against mlx-server and llama.cpp setups.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableKeepAlives = true
 	return &Handler{
 		router: router,
 		client: &http.Client{
+			Transport: transport,
 			// No Timeout — cancellation is driven by request context.
 		},
 		logger: slog.Default(),
@@ -71,16 +84,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bodyReader := r.Body
+	// Use the substitute body (if ModelRouter consumed the original)
+	// directly — not NopCloser-wrapped — so Go's http client detects
+	// *bytes.Reader and sets req.ContentLength. Without this, the
+	// body goes out chunked, which some backends reject with EOF.
+	var upstreamBody io.Reader
 	if substituteBody != nil {
-		bodyReader = io.NopCloser(substituteBody)
+		upstreamBody = substituteBody
+	} else {
+		upstreamBody = r.Body
 	}
 
 	target := *backend
 	target.Path = joinPath(target.Path, r.URL.Path)
 	target.RawQuery = r.URL.RawQuery
 
-	upstream, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bodyReader)
+	upstream, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), upstreamBody)
 	if err != nil {
 		h.logger.Warn("build upstream request failed", "err", err.Error())
 		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "failed to build upstream request")
