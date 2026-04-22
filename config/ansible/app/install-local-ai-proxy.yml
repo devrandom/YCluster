@@ -20,10 +20,10 @@
 #    definitions and routes by the request's "model" field.
 #    Override the prefix with -e etcd_prefix=...
 #
-# Requires a locally-built binary at
-# /opt/infrastructure/local-ai-proxy/bin/local-ai-proxy (produced by
-# `make -C local-ai-proxy build` on the dev host; dev-sync copies it
-# to the control node).
+# The playbook builds the Go binary once on the control node (where
+# /opt/infrastructure/local-ai-proxy/ already has the source via
+# dev-sync) and then pushes it to each target. Requires Go at
+# /usr/lib/go-1.24/bin/go on the control node (`apt install golang-1.24`).
 
 - name: Install local-ai-proxy
   hosts: storage
@@ -31,8 +31,10 @@
   vars:
     backend_url: "http://nv1.xc:8000"
     proxy_listen: ":4001"
+    proxy_src_dir: /opt/infrastructure/local-ai-proxy
     proxy_bin_src: /opt/infrastructure/local-ai-proxy/bin/local-ai-proxy
     proxy_bin_dst: /usr/local/bin/local-ai-proxy
+    go_bin: /usr/lib/go-1.24/bin/go
   tasks:
     - name: Create local-ai-proxy system user
       user:
@@ -50,19 +52,27 @@
         group: local-ai-proxy
         mode: '0755'
 
-    - name: Verify local-ai-proxy binary exists on control node
-      stat:
-        path: "{{ proxy_bin_src }}"
-      register: proxy_bin_stat
+    - name: Install Go toolchain on control node
+      apt:
+        name: golang-1.24
+        state: present
+      delegate_to: localhost
+      become: yes
+      run_once: yes
+
+    - name: Build local-ai-proxy binary on control node
+      make:
+        chdir: "{{ proxy_src_dir }}"
+        target: build
+      environment:
+        GO: "{{ go_bin }}"
       delegate_to: localhost
       become: no
       run_once: yes
-      failed_when: not proxy_bin_stat.stat.exists
 
-    - name: Install local-ai-proxy binary
+    - name: Install local-ai-proxy binary on targets
       copy:
         src: "{{ proxy_bin_src }}"
-        remote_src: yes
         dest: "{{ proxy_bin_dst }}"
         owner: root
         group: root
