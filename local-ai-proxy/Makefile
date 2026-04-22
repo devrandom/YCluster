@@ -4,7 +4,7 @@ PKG := ./...
 .PHONY: build test test-race vet fmt tidy run clean
 
 build:
-	$(GO) build -o bin/proxy .
+	$(GO) build -o bin/local-ai-proxy .
 
 test:
 	$(GO) test $(PKG)
@@ -26,7 +26,7 @@ tidy:
 	$(GO) mod tidy
 
 run: build
-	./bin/proxy
+	./bin/local-ai-proxy
 
 clean:
 	rm -rf bin/ coverage.*

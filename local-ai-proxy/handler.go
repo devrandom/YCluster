@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,7 @@ var hopByHop = map[string]struct{}{
 type Handler struct {
 	backend *url.URL
 	client  *http.Client
+	logger  *slog.Logger
 }
 
 func NewHandler(backend *url.URL) *Handler {
@@ -34,6 +36,7 @@ func NewHandler(backend *url.URL) *Handler {
 		client: &http.Client{
 			// No Timeout — cancellation is driven by request context.
 		},
+		logger: slog.Default(),
 	}
 }
 
@@ -44,7 +47,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	upstream, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), r.Body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		h.logger.Warn("build upstream request failed", "err", err.Error())
+		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "failed to build upstream request")
 		return
 	}
 	copyHeaders(upstream.Header, r.Header)
@@ -55,7 +59,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Client went away; nothing useful to say back.
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		h.logger.Warn("upstream request failed", "err", err.Error(), "backend", h.backend.String())
+		writeOpenAIError(w, http.StatusBadGateway, "api_error", "upstream backend unreachable")
 		return
 	}
 	defer resp.Body.Close()

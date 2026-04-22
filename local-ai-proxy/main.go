@@ -49,7 +49,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	logger.Info("starting", "listen", cfg.Listen, "backend", b.String())
+	logger.Info("local-ai-proxy starting", "listen", cfg.Listen, "backend", b.String())
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
