@@ -37,10 +37,27 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
     
-    # LiteLLM inference gateway — OpenAI-compatible API
-    # Users access this at https://<domain>/v1/ with their Open-WebUI API key
+    # Internal auth subrequest: validates the client's Authorization
+    # against master key + Open-WebUI api_key table, returns X-User-Id.
+    location = /__auth {
+        internal;
+        proxy_pass http://127.0.0.1:4002/auth;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Authorization $http_authorization;
+    }
+
+    # OpenAI-compatible inference API via local-ai-proxy.
+    # Users access this at https://<domain>/v1/ with their Open-WebUI API key.
     location /v1/ {
-        proxy_pass http://127.0.0.1:4000/v1/;
+        auth_request /__auth;
+        auth_request_set $user_id $upstream_http_x_user_id;
+
+        # Strip client bearer; local-ai-proxy trusts X-User-Id from us.
+        proxy_set_header Authorization "";
+        proxy_set_header X-User-Id $user_id;
+
+        proxy_pass http://127.0.0.1:4001/v1/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -58,6 +75,28 @@ server {
         proxy_read_timeout 10m;
 
         # Allow large inputs (embeddings, long prompts)
+        client_max_body_size 50M;
+    }
+
+    # Transitional fallback to LiteLLM for clients that pin the old path.
+    # LiteLLM enforces its own bearer-token auth; no auth_request here.
+    location /old/v1/ {
+        rewrite ^/old(/.*)$ $1 break;
+        proxy_pass http://127.0.0.1:4000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+
+        proxy_connect_timeout 10m;
+        proxy_send_timeout 10m;
+        proxy_read_timeout 10m;
+
         client_max_body_size 50M;
     }
 
