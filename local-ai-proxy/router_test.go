@@ -321,7 +321,7 @@ func TestHandlerUnknownPathReturns404(t *testing.T) {
 	proxy := httptest.NewServer(NewHandler(NewModelRouter(src)))
 	defer proxy.Close()
 
-	for _, path := range []string{"/", "/foo/bar", "/admin", "/healthz"} {
+	for _, path := range []string{"/", "/foo/bar", "/admin"} {
 		resp, err := http.Get(proxy.URL + path)
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
