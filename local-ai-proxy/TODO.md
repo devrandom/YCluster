@@ -1,6 +1,6 @@
-# proxy — TODO
+# local-ai-proxy — TODO
 
-See `docs/inference-proxy.md` for the design rationale.
+See `docs/local-ai-proxy.md` for the design rationale.
 
 ## Done
 
@@ -71,7 +71,7 @@ See `docs/inference-proxy.md` for the design rationale.
 
 ## Open questions
 
-- [ ] Project name (once it externalizes from `ycluster.local/proxy`)
+- [ ] Project repo URL (once externalized from `ycluster.local/local-ai-proxy`)
 - [ ] Config format: YAML only / API only / both (YAML seed + admin API
       for runtime edits is the current assumption)
 - [ ] Repo location once externalized (separate GitHub repo, not in

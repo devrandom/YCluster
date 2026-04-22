@@ -270,7 +270,7 @@ this cluster.
 
 ## Open questions
 
-- **Name?** Needs a short, memorable project name.
+- ~~**Name?**~~ — `local-ai-proxy`.
 - **Config format?** YAML file vs. API-only vs. both.
 - **Where to host?** Separate GitHub repo (not in ycluster).
 - **Minimum Go version?** 1.22+ for enhanced routing in net/http.
