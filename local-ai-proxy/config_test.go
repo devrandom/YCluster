@@ -76,9 +76,67 @@ func TestValidateMissingListen(t *testing.T) {
 	}
 }
 
-func TestValidateMissingBackendURL(t *testing.T) {
+func TestValidateNoSourceSet(t *testing.T) {
 	err := Config{Listen: ":4000"}.Validate()
-	if err == nil || !strings.Contains(err.Error(), "backend.url") {
-		t.Errorf("want backend.url error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "one of") {
+		t.Errorf("want no-source error, got %v", err)
+	}
+}
+
+func TestValidateMultipleSources(t *testing.T) {
+	cfg := Config{
+		Listen:   ":4000",
+		Backend:  Backend{URL: "http://x"},
+		Backends: []Mapping{{Model: "m", APIBase: "http://y"}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "only one of") {
+		t.Errorf("want multi-source error, got %v", err)
+	}
+}
+
+func TestValidateEtcdMissingPrefix(t *testing.T) {
+	cfg := Config{
+		Listen: ":4000",
+		Etcd:   &EtcdConfig{Endpoints: []string{"http://localhost:2379"}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "etcd.prefix") {
+		t.Errorf("want etcd.prefix error, got %v", err)
+	}
+}
+
+func TestValidateAcceptsBackends(t *testing.T) {
+	cfg := Config{
+		Listen:   ":4000",
+		Backends: []Mapping{{Model: "m", APIBase: "http://y"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestValidateAcceptsEtcd(t *testing.T) {
+	cfg := Config{
+		Listen: ":4000",
+		Etcd: &EtcdConfig{
+			Endpoints: []string{"http://localhost:2379"},
+			Prefix:    "/models/",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+func TestValidateEtcdWithoutEndpoints(t *testing.T) {
+	// Endpoints is defaulted at source construction; validate only
+	// requires prefix.
+	cfg := Config{
+		Listen: ":4000",
+		Etcd:   &EtcdConfig{Prefix: "/models/"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
 	}
 }

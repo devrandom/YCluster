@@ -35,7 +35,7 @@ func TestClientDisconnectCancelsUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxySrv := httptest.NewServer(NewHandler(backendURL))
+	proxySrv := httptest.NewServer(NewHandler(NewPassthroughRouter(backendURL)))
 	defer proxySrv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,7 +87,7 @@ func TestProxiesResponse(t *testing.T) {
 	defer upstream.Close()
 
 	backendURL, _ := url.Parse(upstream.URL)
-	proxySrv := httptest.NewServer(NewHandler(backendURL))
+	proxySrv := httptest.NewServer(NewHandler(NewPassthroughRouter(backendURL)))
 	defer proxySrv.Close()
 
 	resp, err := http.Get(proxySrv.URL + "/v1/models")
@@ -121,7 +121,7 @@ func TestHopByHopHeadersStripped(t *testing.T) {
 	defer upstream.Close()
 
 	backendURL, _ := url.Parse(upstream.URL)
-	proxySrv := httptest.NewServer(NewHandler(backendURL))
+	proxySrv := httptest.NewServer(NewHandler(NewPassthroughRouter(backendURL)))
 	defer proxySrv.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, proxySrv.URL+"/", nil)
@@ -166,7 +166,7 @@ func TestStreamingIsNotBuffered(t *testing.T) {
 	defer upstream.Close()
 
 	backendURL, _ := url.Parse(upstream.URL)
-	proxySrv := httptest.NewServer(NewHandler(backendURL))
+	proxySrv := httptest.NewServer(NewHandler(NewPassthroughRouter(backendURL)))
 	defer proxySrv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -212,7 +212,7 @@ func TestClientDisconnectCancelsStreamingUpstream(t *testing.T) {
 	defer upstream.Close()
 
 	backendURL, _ := url.Parse(upstream.URL)
-	proxySrv := httptest.NewServer(NewHandler(backendURL))
+	proxySrv := httptest.NewServer(NewHandler(NewPassthroughRouter(backendURL)))
 	defer proxySrv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())

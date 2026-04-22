@@ -1,7 +1,35 @@
 # Listen address for the proxy.
 listen: ":4000"
 
-# Single upstream backend (milestone schema). When multi-backend routing
-# lands this becomes `backends: - name: ... url: ...`.
+# Exactly one of `backend`, `backends`, or `etcd` must be set.
+
+# --- Option 1: single-backend passthrough ---
+# All requests are forwarded to one upstream regardless of model. The
+# proxy does not inspect request bodies. Useful when one vLLM/llama.cpp
+# instance serves every model you need.
 backend:
   url: "http://localhost:8080"
+
+# --- Option 2: static YAML list of model -> backend mappings ---
+# The proxy reads the "model" field from each JSON request body and
+# routes to the matching backend. Unknown models get a 400 in OpenAI
+# error shape. Synthesizes GET /v1/models from these entries.
+# Multiple entries with the same `model:` accumulate (schema is
+# fan-out-ready; today the router uses only the first api_base).
+# backends:
+#   - model: "Kimi-K2.5-Q3_K_S"
+#     api_base: "http://m1.xc:8080"
+#   - model: "MiniMaxAI/MiniMax-M2.7"
+#     api_base: "http://nv1.xc:8000"
+#   - model: "qwen3-30b"
+#     api_base: "http://c1.xc:8080"
+#   - model: "qwen3-30b"        # same model, second backend (fan-out later)
+#     api_base: "http://m2.xc:8080"
+
+# --- Option 3: etcd-backed mappings (hot-reloading) ---
+# The proxy watches the etcd prefix; each key under it is a model name
+# and the JSON value is {"backends":[{"api_base":"..."},...]}. Edits to
+# etcd propagate to the proxy without restart. endpoints defaults to
+# ["http://localhost:2379"] so only prefix is strictly required.
+# etcd:
+#   prefix: "/cluster/config/inference/models/"

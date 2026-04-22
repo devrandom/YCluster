@@ -16,7 +16,7 @@ func TestErrorResponseOnUnreachableBackend(t *testing.T) {
 	dead.Close()
 	backendURL, _ := url.Parse(dead.URL)
 
-	proxySrv := httptest.NewServer(NewHandler(backendURL))
+	proxySrv := httptest.NewServer(NewHandler(NewPassthroughRouter(backendURL)))
 	defer proxySrv.Close()
 
 	resp, err := http.Get(proxySrv.URL + "/v1/models")

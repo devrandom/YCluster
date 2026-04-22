@@ -1,4 +1,5 @@
 bin/
+/local-ai-proxy
 *.test
 *.out
 coverage.*
