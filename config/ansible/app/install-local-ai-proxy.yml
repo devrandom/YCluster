@@ -128,6 +128,82 @@
         enabled: yes
         state: started
 
+    # ---- Auth validator: small Flask service for nginx auth_request ----
+
+    - name: Install auth-validator apt deps
+      apt:
+        name:
+          - python3-flask
+          - python3-psycopg2
+          - python3-etcd3
+        state: present
+
+    - name: Install auth-validator script
+      copy:
+        src: files/local-ai-proxy-auth.py
+        dest: /usr/local/bin/local-ai-proxy-auth
+        owner: root
+        group: root
+        mode: '0755'
+      notify: restart local-ai-proxy-auth
+
+    - name: Install auth-validator systemd unit
+      copy:
+        dest: /etc/systemd/system/local-ai-proxy-auth.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=local-ai-proxy auth validator (nginx auth_request backend)
+          After=network.target postgresql.service
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/bin/local-ai-proxy-auth
+          User=local-ai-proxy
+          Group=local-ai-proxy
+          Environment=LISTEN_ADDR=127.0.0.1:4002
+          Restart=on-failure
+          RestartSec=5
+          NoNewPrivileges=yes
+          ProtectSystem=strict
+          ProtectHome=yes
+          PrivateTmp=yes
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: auth_unit
+      notify: restart local-ai-proxy-auth
+
+    - name: Reload systemd (auth-validator)
+      systemd:
+        daemon_reload: yes
+      when: auth_unit.changed
+
+    - name: Enable and start auth-validator
+      systemd:
+        name: local-ai-proxy-auth.service
+        enabled: yes
+        state: started
+
+    # ---- nginx vhost: auth_request + proxy to local-ai-proxy ----
+
+    - name: Install local-ai-proxy nginx config (local-ai-proxy.xc)
+      copy:
+        src: files/local-ai-proxy-internal.conf
+        dest: /etc/nginx/sites-available/local-ai-proxy-internal
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable local-ai-proxy nginx config
+      file:
+        src: /etc/nginx/sites-available/local-ai-proxy-internal
+        dest: /etc/nginx/sites-enabled/local-ai-proxy-internal
+        state: link
+      notify: reload nginx
+
     - name: Apply any pending service restarts before smoke check
       meta: flush_handlers
 
@@ -155,3 +231,14 @@
         name: local-ai-proxy.service
         state: restarted
         daemon_reload: yes
+
+    - name: restart local-ai-proxy-auth
+      systemd:
+        name: local-ai-proxy-auth.service
+        state: restarted
+        daemon_reload: yes
+
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
