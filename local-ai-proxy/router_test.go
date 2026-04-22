@@ -342,6 +342,47 @@ func TestHandlerUnknownPathReturns404(t *testing.T) {
 	}
 }
 
+// TestHandlerSendsContentLengthNotChunked verifies that when
+// ModelRouter consumes and substitutes the body, the upstream request
+// goes out with Content-Length set rather than Transfer-Encoding:
+// chunked. Picky backends (mlx-server, some llama.cpp builds) reject
+// chunked POSTs with EOF.
+func TestHandlerSendsContentLengthNotChunked(t *testing.T) {
+	var seenCL, seenTE string
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenCL = r.Header.Get("Content-Length")
+		seenTE = r.Header.Get("Transfer-Encoding")
+		seenBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, upstream.URL)},
+	}}
+	proxy := httptest.NewServer(NewHandler(NewModelRouter(src)))
+	defer proxy.Close()
+
+	body := `{"model":"alpha","messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(proxy.URL+"/v1/chat/completions",
+		"application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if seenTE == "chunked" {
+		t.Errorf("upstream received Transfer-Encoding: chunked; want Content-Length")
+	}
+	if seenCL == "" {
+		t.Errorf("upstream received no Content-Length header")
+	}
+	if string(seenBody) != body {
+		t.Errorf("upstream body mismatch:\n got: %s\nwant: %s", seenBody, body)
+	}
+}
+
 // TestHandlerV1PathsAreForwarded verifies we don't 404 on /v1/*
 // endpoints the proxy doesn't explicitly know about — the backend
 // decides whether the endpoint exists.
