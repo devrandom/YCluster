@@ -76,6 +76,49 @@ See `docs/local-ai-proxy.md` for the design rationale.
       models automatically)
 - [ ] Weighted routing (prefer faster backends)
 
+## Hardening (deferred — not critical while loopback-only behind nginx)
+
+Runtime:
+
+- [ ] `DynamicUser=yes` in the systemd unit (drop the explicit user-create
+      task; transient UID per start). Requires config file readable by
+      non-owner — flip to `root:root 0644` or a group.
+- [ ] Expand systemd sandbox: `PrivateDevices=yes`,
+      `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
+      `ProtectControlGroups=yes`,
+      `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`,
+      `RestrictNamespaces=yes`, `LockPersonality=yes`,
+      `MemoryDenyWriteExecute=yes`,
+      `SystemCallFilter=@system-service`, `CapabilityBoundingSet=` (empty).
+- [ ] `LimitNOFILE=` sized to expected concurrent streams.
+
+HTTP server:
+
+- [ ] `ReadHeaderTimeout` + `IdleTimeout` on `http.Server` (Slowloris
+      defense; nginx fronts us today but this is cheap).
+- [ ] Explicit `MaxHeaderBytes`.
+- [ ] Global `http.MaxBytesReader` guard for non-`ModelRouter` paths
+      (ModelRouter already caps at 8 MiB).
+
+Observability / testing:
+
+- [ ] Prom `/metrics` endpoint (loopback-only), with request-rate and
+      backend-state gauges — enough to alert on.
+- [ ] Integration test asserting `TrustedHeadersMiddleware` strips
+      `X-User-Id` from untrusted peers.
+- [ ] Log-rate-limit flapping backends so health-checker noise stays
+      bounded.
+- [ ] Go native `fuzz` targets for the model-name parser and config
+      loader.
+
+Supply chain (done):
+
+- [x] `go mod verify` on every build; `-trimpath -buildvcs=false`
+- [x] `go 1.25.9` (stdlib CVE fixes; govulncheck clean)
+- [x] `vulncheck` / `check` Makefile targets (opt-in govulncheck)
+- [x] `.syncignore` excludes `bin/` so deploys never ship a stale local
+      artifact
+
 ## Good-citizen: upstream cancellation fix to llama-swap
 
 - [ ] Open PR on `mostlygeek/llama-swap` threading `r.Context()` through
