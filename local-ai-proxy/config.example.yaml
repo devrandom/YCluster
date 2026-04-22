@@ -26,6 +26,12 @@ backend:
 #   - model: "qwen3-30b"        # same model, second backend (fan-out later)
 #     api_base: "http://m2.xc:8080"
 
+# Health check interval (how often each unique backend URL gets a
+# GET /v1/models probe). Logs state transitions at INFO/WARN. Zero
+# disables; omit to default to 30s. Only meaningful with `backends`
+# or `etcd`.
+# health_check_interval: 30s
+
 # --- Option 3: etcd-backed mappings (hot-reloading) ---
 # The proxy watches the etcd prefix; each key under it is a model name
 # and the JSON value is {"backends":[{"api_base":"..."},...]}. Edits to

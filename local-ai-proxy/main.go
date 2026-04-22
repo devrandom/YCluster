@@ -55,9 +55,39 @@ func main() {
 		defer source.Close()
 	}
 
+	// Health checker: only runs in model-routed modes (source != nil)
+	// and when interval > 0. Exposes /healthz; not yet wired into
+	// routing decisions.
+	var health *HealthChecker
+	if source != nil {
+		interval := cfg.HealthCheckInterval
+		if interval == 0 {
+			interval = DefaultHealthCheckInterval
+		}
+		if interval > 0 {
+			health = NewHealthChecker(source, interval, logger)
+			// Wire the disabled-backends feature when the Source is
+			// etcd-backed: we reuse its client, and default the prefix
+			// to /cluster/config/inference/disabled/.
+			if es, ok := source.(*EtcdSource); ok && cfg.Etcd != nil {
+				dp := cfg.Etcd.DisabledPrefix
+				if dp == "" {
+					dp = DefaultDisabledPrefix
+				}
+				health.Disabled = NewEtcdDisabledBackends(es.Client(), dp, logger)
+				logger.Info("disabled-backends tracker enabled", "prefix", dp)
+			}
+			health.Start(context.Background())
+			defer health.Close()
+			logger.Info("health checker started", "interval", interval.String())
+		}
+	}
+
+	h := NewHandler(router)
+	h.Health = health
 	srv := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: LoggingMiddleware(logger, NewHandler(router)),
+		Handler: LoggingMiddleware(logger, h),
 	}
 
 	shutdownDone := make(chan struct{})

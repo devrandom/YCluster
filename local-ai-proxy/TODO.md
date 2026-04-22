@@ -43,8 +43,11 @@ See `docs/local-ai-proxy.md` for the design rationale.
 
 ## Multi-backend — the fuller differentiator
 
-- [ ] Multiple backends per model (fan-out) with least-loaded selection
-      (schema already supports it — just router changes)
+- [x] Periodic health checks per unique backend URL (`GET /v1/models`,
+      default 30s, logs state transitions; not yet wired into routing)
+- [ ] Multiple backends per model (fan-out) with least-loaded selection,
+      consulting health state to skip down backends
+      (schema and health checker are ready — just router changes)
 - [ ] In-flight counter per backend
 - [ ] Per-backend `max_concurrent` concurrency cap
 - [ ] Periodic health checks (`GET /v1/models` or configurable endpoint)

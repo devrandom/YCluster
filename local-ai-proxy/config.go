@@ -3,9 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultHealthCheckInterval is used when health_check_interval is unset.
+const DefaultHealthCheckInterval = 30 * time.Second
 
 // Config is the top-level YAML schema. Exactly one of backend, backends,
 // or etcd must be set.
@@ -23,6 +27,11 @@ type Config struct {
 	// Etcd: watch an etcd prefix for model → backend mappings. Each key
 	// under the prefix is a model name; the JSON value is etcdValue.
 	Etcd *EtcdConfig `yaml:"etcd"`
+
+	// HealthCheckInterval is how often the proxy polls each backend's
+	// /v1/models endpoint. Zero disables health checks. Default 30s.
+	// Only meaningful in model-routed modes (backends or etcd).
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
 }
 
 type Backend struct {
@@ -39,6 +48,10 @@ type EtcdConfig struct {
 	Prefix    string   `yaml:"prefix"`
 	Username  string   `yaml:"username,omitempty"`
 	Password  string   `yaml:"password,omitempty"`
+	// DisabledPrefix is the etcd prefix under which each key is the
+	// URL of a backend the operator has marked as known-down. Defaults
+	// to DefaultDisabledPrefix. Set empty to disable the feature.
+	DisabledPrefix string `yaml:"disabled_prefix,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {
