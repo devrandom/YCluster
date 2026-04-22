@@ -159,6 +159,14 @@ def _get_existing_pairs():
     }
 
 
+def _default_max_parallel(api_base):
+    """Return default max_parallel_requests based on backend hostname."""
+    hostname = urlparse(api_base).hostname or ""
+    if hostname.startswith("nv"):
+        return 16
+    return None
+
+
 def _api_add_model(model_name, api_base, backend_model, extra_params=None):
     """Add a single model via the LiteLLM /model/new API."""
     litellm_params = {
@@ -166,6 +174,9 @@ def _api_add_model(model_name, api_base, backend_model, extra_params=None):
         "api_base": api_base,
         "api_key": "none",
     }
+    default_mpr = _default_max_parallel(api_base)
+    if default_mpr and not (extra_params and "max_parallel_requests" in extra_params):
+        litellm_params["max_parallel_requests"] = default_mpr
     if extra_params:
         litellm_params.update(extra_params)
     resp = _litellm_request(
