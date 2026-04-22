@@ -190,22 +190,6 @@
         source: pull
       when: not is_storage_leader
 
-    - name: Install LiteLLM internal nginx config (inference.xc)
-      copy:
-        src: files/litellm-internal.conf
-        dest: /etc/nginx/sites-available/litellm-internal
-        mode: '0644'
-      notify: reload nginx
+    # inference.xc nginx config now lives in install-local-ai-proxy.yml
+    # (it serves both / → local-ai-proxy and /old/v1/ → LiteLLM).
 
-    - name: Enable LiteLLM internal nginx config
-      file:
-        src: /etc/nginx/sites-available/litellm-internal
-        dest: /etc/nginx/sites-enabled/litellm-internal
-        state: link
-      notify: reload nginx
-
-  handlers:
-    - name: reload nginx
-      systemd:
-        name: nginx
-        state: reloaded
