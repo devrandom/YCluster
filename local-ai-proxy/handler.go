@@ -81,7 +81,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Passthrough (Models()==nil) falls through to proxy the upstream.
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
 		if modelRouted {
-			writeModelsList(w, h.router.Models())
+			writeModelsList(w, h.servableModels())
 			return
 		}
 	}
@@ -208,37 +208,16 @@ func writeHealthz(w http.ResponseWriter, snap map[string]BackendHealth, models m
 	for _, name := range modelNames {
 		urls := models[name]
 		urlStrs := make([]string, 0, len(urls))
-		anyHealthy := false
-		allDisabled := len(urls) > 0
-		anyState := false
 		for _, u := range urls {
-			s := u.String()
-			urlStrs = append(urlStrs, s)
-			bh, seen := snap[s]
-			if !seen {
-				allDisabled = false
-				continue
-			}
-			anyState = true
-			if bh.State != StateDisabled {
-				allDisabled = false
-			}
-			if bh.State == StateHealthy {
-				anyHealthy = true
-			}
+			urlStrs = append(urlStrs, u.String())
 		}
-		state := "unknown"
-		switch {
-		case !anyState:
-			state = "unknown"
-		case anyHealthy:
-			state = "healthy"
+		state := modelStateFromBackends(urls, snap)
+		switch state {
+		case "healthy":
 			modelHealthy++
-		case allDisabled:
-			state = "disabled"
+		case "disabled":
 			modelDisabled++
-		default:
-			state = "unavailable"
+		case "unavailable":
 			modelUnavailable++
 		}
 		modelEntries = append(modelEntries, modelEntry{
@@ -282,6 +261,66 @@ func writeHealthzNoop(w http.ResponseWriter, ) {
 		"status":  "ok",
 		"message": "health checks disabled",
 	})
+}
+
+// servableModels returns the model names that should appear in
+// /v1/models: those with at least one healthy backend, plus those
+// whose state is still unknown (no check completed yet). Models that
+// are operator-disabled or unavailable (no healthy backend) are
+// excluded so clients don't pick a dead route.
+func (h *Handler) servableModels() []string {
+	all := h.router.Models()
+	if h.Health == nil || h.Health.source == nil {
+		return all
+	}
+	models := h.Health.source.Snapshot()
+	snap := h.Health.Snapshot()
+	out := make([]string, 0, len(all))
+	for _, name := range all {
+		if modelStateFromBackends(models[name], snap) == "healthy" {
+			out = append(out, name)
+			continue
+		}
+		// Also include unknown — we lack signal, let the client try.
+		if modelStateFromBackends(models[name], snap) == "unknown" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// modelStateFromBackends classifies a model's rollup state from its
+// backends' health. Matches the categories used by /healthz:
+// healthy, unavailable, disabled, unknown.
+func modelStateFromBackends(urls []*url.URL, snap map[string]BackendHealth) string {
+	if len(urls) == 0 {
+		return "unknown"
+	}
+	anyHealthy, anyState, allDisabled := false, false, true
+	for _, u := range urls {
+		bh, seen := snap[u.String()]
+		if !seen {
+			allDisabled = false
+			continue
+		}
+		anyState = true
+		if bh.State != StateDisabled {
+			allDisabled = false
+		}
+		if bh.State == StateHealthy {
+			anyHealthy = true
+		}
+	}
+	switch {
+	case !anyState:
+		return "unknown"
+	case anyHealthy:
+		return "healthy"
+	case allDisabled:
+		return "disabled"
+	default:
+		return "unavailable"
+	}
 }
 
 // writeModelsList emits an OpenAI-compatible /v1/models response built
