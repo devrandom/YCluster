@@ -16,8 +16,8 @@ import (
 
 func main() {
 	addr := flag.String("addr", "", "listen address (overrides config)")
-	backendURL := flag.String("backend", "", "backend URL (overrides config)")
-	configPath := flag.String("config", "", "path to YAML config (optional; flags override loaded values)")
+	backendURL := flag.String("backend", "", "single backend URL (overrides config; implies passthrough mode)")
+	configPath := flag.String("config", "", "path to YAML config")
 	flag.Parse()
 
 	cfg := Config{
@@ -35,25 +35,29 @@ func main() {
 		cfg.Listen = *addr
 	}
 	if *backendURL != "" {
+		// --backend overrides to passthrough mode: clear multi-source fields.
 		cfg.Backend.URL = *backendURL
+		cfg.Backends = nil
+		cfg.Etcd = nil
 	}
 	if err := cfg.Validate(); err != nil {
 		log.Fatal(err)
 	}
 
-	b, err := url.Parse(cfg.Backend.URL)
-	if err != nil {
-		log.Fatalf("backend url: %v", err)
-	}
-
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	logger.Info("local-ai-proxy starting", "listen", cfg.Listen, "backend", b.String())
+	router, source, err := buildRouter(cfg, logger)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if source != nil {
+		defer source.Close()
+	}
 
 	srv := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: LoggingMiddleware(logger, NewHandler(b)),
+		Handler: LoggingMiddleware(logger, NewHandler(router)),
 	}
 
 	shutdownDone := make(chan struct{})
@@ -77,4 +81,47 @@ func main() {
 	}
 	<-shutdownDone
 	logger.Info("stopped")
+}
+
+// buildRouter selects the routing mode from config and returns a router
+// plus an optional Source whose lifecycle the caller must close on
+// shutdown. Validate is expected to have already enforced exactly one
+// source being set.
+func buildRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
+	switch {
+	case cfg.Backend.URL != "":
+		b, err := url.Parse(cfg.Backend.URL)
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.Info("local-ai-proxy starting", "mode", "passthrough", "listen", cfg.Listen, "backend", b.String())
+		return NewPassthroughRouter(b), nil, nil
+
+	case len(cfg.Backends) > 0:
+		src, err := NewYAMLSource(cfg.Backends)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := src.Start(context.Background()); err != nil {
+			return nil, nil, err
+		}
+		logger.Info("local-ai-proxy starting", "mode", "yaml", "listen", cfg.Listen, "models", len(cfg.Backends))
+		return NewModelRouter(src), src, nil
+
+	case cfg.Etcd != nil && cfg.Etcd.Prefix != "":
+		src, err := NewEtcdSource(*cfg.Etcd, logger)
+		if err != nil {
+			return nil, nil, err
+		}
+		startCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := src.Start(startCtx); err != nil {
+			_ = src.Close()
+			return nil, nil, err
+		}
+		logger.Info("local-ai-proxy starting", "mode", "etcd", "listen", cfg.Listen, "endpoints", cfg.Etcd.Endpoints, "prefix", cfg.Etcd.Prefix)
+		return NewModelRouter(src), src, nil
+	}
+
+	return nil, nil, errors.New("no routing source configured (this is a bug; Validate should have caught it)")
 }
