@@ -1,0 +1,7 @@
+# Listen address for the proxy.
+listen: ":4000"
+
+# Single upstream backend (milestone schema). When multi-backend routing
+# lands this becomes `backends: - name: ... url: ...`.
+backend:
+  url: "http://localhost:8080"
