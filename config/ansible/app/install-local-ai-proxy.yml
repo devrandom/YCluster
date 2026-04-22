@@ -4,12 +4,21 @@
 # Not in the hot path yet — intended for side-by-side cancellation
 # validation vs. LiteLLM on :4000 before we swap them over.
 #
-# Override backend per run:
-#   ansible-playbook install-local-ai-proxy.yml --limit s3 \
-#     -e backend_url=http://nv1.xc:8000
+# Two deploy modes:
 #
-# The proxy forwards the full client path (including /v1/...) to the
-# backend, so backend_url is host-only — no /v1 suffix.
+# 1) Passthrough to a single backend (default):
+#    ansible-playbook install-local-ai-proxy.yml --limit s3 \
+#      -e backend_url=http://nv1.xc:8000
+#    The proxy forwards the full client path (including /v1/...) to
+#    the backend, so backend_url is host-only — no /v1 suffix.
+#
+# 2) Etcd-sourced model routing (after running
+#    scripts/migrate-litellm-to-etcd.py):
+#    ansible-playbook install-local-ai-proxy.yml --limit s3 \
+#      -e use_etcd=true
+#    The proxy watches /cluster/config/inference/models/ for model
+#    definitions and routes by the request's "model" field.
+#    Override the prefix with -e etcd_prefix=...
 #
 # Requires a locally-built binary at
 # /opt/infrastructure/local-ai-proxy/bin/local-ai-proxy (produced by
@@ -128,7 +137,7 @@
         msg: >-
           local-ai-proxy on {{ inventory_hostname }}:4001 replied
           {{ smoke.status | default('unreachable') }}
-          (backend={{ backend_url }})
+          ({% if use_etcd | default(false) | bool %}source=etcd:{{ etcd_prefix | default('/cluster/config/inference/models/') }}{% else %}backend={{ backend_url }}{% endif %})
 
   handlers:
     - name: restart local-ai-proxy
