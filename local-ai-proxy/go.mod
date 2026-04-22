@@ -1,4 +1,4 @@
-module ycluster.local/proxy
+module ycluster.local/local-ai-proxy
 
 go 1.24
 
