@@ -214,3 +214,7 @@ func (s *EtcdSource) Close() error {
 	}
 	return s.client.Close()
 }
+
+// Client exposes the underlying etcd client so adjacent components
+// (e.g., EtcdDisabledBackends) can share it without reopening.
+func (s *EtcdSource) Client() *clientv3.Client { return s.client }
