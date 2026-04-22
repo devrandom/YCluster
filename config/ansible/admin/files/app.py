@@ -2331,6 +2331,19 @@ def prometheus_targets(job):
     return jsonify(targets)
 
 
+def get_inference_status():
+    """Fetch local-ai-proxy /healthz from this node's localhost. Returns
+    a dict (per-backend + per-model health) or None if the proxy is not
+    running here."""
+    try:
+        resp = requests.get('http://127.0.0.1:4001/healthz', timeout=3)
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except requests.RequestException:
+        return None
+
+
 @app.route('/api/cluster-status')
 def cluster_status_api():
     """API endpoint returning cluster status as JSON"""
@@ -2345,16 +2358,17 @@ def cluster_status_api():
             host_health[host['hostname']] = {'status': 'disabled', 'services': []}
         else:
             host_health[host['hostname']] = get_host_health(host['ip'])
-    
+
     # Extract VIP status from existing health data
     vip_status = get_cluster_vip_status(host_health)
-    
+
     return jsonify({
         'hosts': hosts,
         'hostHealth': host_health,
         'leadership': leadership,
         'vipStatus': vip_status,
         'certificateStatus': certificate_status,
+        'inferenceStatus': get_inference_status(),
         'respondingHostname': platform.node(),
         'timestamp': datetime.now().isoformat()
     })
@@ -2398,12 +2412,13 @@ def status_page():
     # Get drain status for this node
     current_node_drained = is_node_drained()
     
-    return render_template('status.html', 
-                         hosts=hosts, 
+    return render_template('status.html',
+                         hosts=hosts,
                          host_health=host_health,
                          leadership=leadership,
                          vip_status=vip_status,
                          certificate_status=certificate_status,
+                         inference_status=get_inference_status(),
                          responding_hostname=platform.node(),
                          current_node_drained=current_node_drained,
                          timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
