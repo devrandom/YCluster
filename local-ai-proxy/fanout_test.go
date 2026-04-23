@@ -38,11 +38,11 @@ func TestModelRouterPicksLeastLoaded(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"m"}`))
-	candidates, _, err := r.Route(req)
+	res, err := r.Route(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := PickBackend(candidates, lc)
+	got := PickBackend(res.Candidates, lc)
 	if got.String() != b.String() {
 		t.Errorf("picked %s; want %s (least-loaded)", got, b)
 	}
@@ -60,12 +60,12 @@ func TestModelRouterSkipsUnhealthy(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"m"}`))
-	candidates, _, err := r.Route(req)
+	res, err := r.Route(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 1 || candidates[0].String() != good.String() {
-		t.Errorf("candidates = %v; want [%s]", candidates, good)
+	if len(res.Candidates) != 1 || res.Candidates[0].String() != good.String() {
+		t.Errorf("candidates = %v; want [%s]", res.Candidates, good)
 	}
 }
 
@@ -81,7 +81,7 @@ func TestModelRouterAllUnhealthyReturnsSentinel(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"m"}`))
-	_, _, err := r.Route(req)
+	_, err := r.Route(req)
 	if !errors.Is(err, ErrNoHealthyBackend) {
 		t.Errorf("err = %v; want ErrNoHealthyBackend", err)
 	}
