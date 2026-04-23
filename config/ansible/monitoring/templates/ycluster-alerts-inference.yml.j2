@@ -1,0 +1,27 @@
+groups:
+  - name: ycluster-inference
+    rules:
+      # Sustained retry rate is the quiet-degradation canary. In steady
+      # state the proxy shouldn't retry — a non-zero rate over 10 minutes
+      # means a backend is flapping or has drifted from its peers. Labeled
+      # by backend so the alert points at the culprit.
+      - alert: InferenceBackendRetries
+        expr: sum by (backend) (rate(local_ai_proxy_retries_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference backend {{ $labels.backend }} retrying"
+          description: "local-ai-proxy has been failing over from {{ $labels.backend }} at {{ $value | printf \"%.2f\" }} req/s for 10m. Usually config drift, flaky upstream, or a saturated replica."
+
+      # vLLM KV cache >90% means preemption is imminent — incoming
+      # requests start getting kicked out of the running batch and
+      # restarted, which trashes TTFT. Alert before it starts, not after.
+      - alert: InferenceKVCachePressure
+        expr: vllm:kv_cache_usage_perc > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV cache >90% on {{ $labels.backend }} ({{ $labels.model }})"
+          description: "vLLM KV cache at {{ $value | humanizePercentage }} on {{ $labels.backend }} for 5m. Expect preemption and TTFT degradation. Cap concurrency, shorten contexts, or scale out."
