@@ -342,7 +342,7 @@
   "time": {"from": "now-1h", "to": "now"},
   "timepicker": {},
   "timezone": "",
-  "title": "Inference — local-ai-proxy",
+  "title": "YCluster Inference",
   "uid": "ycluster-inference",
   "version": 1,
   "weekStart": ""
