@@ -16,6 +16,12 @@ Written in Go, `net/http`, no framework.
 - **Transparent passthrough.** Reasoning fields, token IDs, logprobs,
   vendor-specific params — all flow through unchanged, so new backend
   features work without waiting for a schema update.
+- **Fan-out with least-loaded routing.** Multiple backends per model
+  are load-balanced by current in-flight count (tie-break: random).
+  A failure against one backend (transport error or any 4xx/5xx) is
+  transparently retried against a peer; only the last attempt's
+  response is returned. Each retry also fires an out-of-band health
+  probe so transient glitches don't strand traffic for a full tick.
 - **Per-backend health checks.** Periodic `GET /v1/models` probe with
   state (healthy/down/disabled); transitions log at INFO/WARN. The
   synthesized `/v1/models` hides disabled and unavailable models so
@@ -59,7 +65,8 @@ backend:
   url: "http://localhost:8080"
 
 # Option 2: static YAML list. Multiple entries with the same model:
-# accumulate (schema is fan-out-ready; today the router picks the first).
+# accumulate — the router fan-outs across them, picking the least-loaded
+# healthy backend and retrying failures against peers.
 backends:
   - model: "llama-3.1-70b"
     api_base: "http://gpu1:8000"

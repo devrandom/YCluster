@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,6 +40,10 @@ type Handler struct {
 	// Health is optional. When set, GET /healthz returns a JSON summary
 	// of per-backend state.
 	Health *HealthChecker
+
+	// Load, if set, is incremented around each upstream call so the
+	// router can pick the least-loaded backend.
+	Load LoadTracker
 }
 
 func NewHandler(router Router) *Handler {
@@ -98,20 +103,65 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	backend, substituteBody, err := h.router.Route(r)
+	candidates, bodyBytes, err := h.router.Route(r)
 	if err != nil {
+		if errors.Is(err, ErrNoHealthyBackend) {
+			h.logger.Warn("no healthy backend", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
+			writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", err.Error())
+			return
+		}
 		h.logger.Info("route rejected", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 
-	// Use the substitute body (if ModelRouter consumed the original)
-	// directly — not NopCloser-wrapped — so Go's http client detects
-	// *bytes.Reader and sets req.ContentLength. Without this, the
-	// body goes out chunked, which some backends reject with EOF.
+	h.dispatch(w, r, candidates, bodyBytes)
+}
+
+// dispatch tries each eligible backend in load-aware order. On the
+// last remaining candidate (or when the body isn't replayable — i.e.
+// passthrough single-backend mode), whatever response comes back is
+// committed to the client verbatim. Earlier attempts can be retried
+// if they transport-error or return any 4xx/5xx: we treat fan-out
+// backends as interchangeable, so a 4xx from one backend (config
+// drift: missing model, stricter template, per-backend auth misconfig)
+// shouldn't reach the client if a peer would serve it.
+//
+// Every retryable failure fires a Probe at that backend so the health
+// checker re-verifies out-of-band. A 4xx is a "the backend answered";
+// the probe decides if that backend stays routable.
+func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, candidates []*url.URL, bodyBytes []byte) {
+	remaining := candidates
+	for len(remaining) > 0 {
+		if r.Context().Err() != nil {
+			return
+		}
+		backend := PickBackend(remaining, h.loadRead())
+		remaining = removeURL(remaining, backend)
+		lastTry := len(remaining) == 0 || bodyBytes == nil
+
+		if done := h.tryOnce(w, r, backend, bodyBytes, lastTry); done {
+			return
+		}
+	}
+}
+
+// tryOnce issues one upstream request. Returns done=true if the
+// response was committed to the client or if we emitted a terminal
+// error; done=false signals "try the next candidate". When lastTry
+// is true the response (success or failure) is committed verbatim.
+func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, backend *url.URL, bodyBytes []byte, lastTry bool) bool {
+	if h.Load != nil {
+		h.Load.Inc(backend.String())
+		defer h.Load.Dec(backend.String())
+	}
+
+	// Use *bytes.Reader (not NopCloser) so Go's http client detects the
+	// type and sets req.ContentLength. Without this, the body goes out
+	// chunked, which some backends reject with EOF.
 	var upstreamBody io.Reader
-	if substituteBody != nil {
-		upstreamBody = substituteBody
+	if bodyBytes != nil {
+		upstreamBody = bytes.NewReader(bodyBytes)
 	} else {
 		upstreamBody = r.Body
 	}
@@ -124,25 +174,63 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Warn("build upstream request failed", "err", err.Error())
 		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "failed to build upstream request")
-		return
+		return true
 	}
 	copyHeaders(upstream.Header, r.Header)
 
 	resp, err := h.client.Do(upstream)
 	if err != nil {
 		if r.Context().Err() != nil {
-			// Client went away; nothing useful to say back.
-			return
+			return true // client went away
 		}
-		h.logger.Warn("upstream request failed", "err", err.Error(), "backend", backend.String())
-		writeOpenAIError(w, http.StatusBadGateway, "api_error", "upstream backend unreachable")
-		return
+		h.probe(backend)
+		if lastTry {
+			h.logger.Warn("upstream transport error", "err", err.Error(), "backend", backend.String())
+			writeOpenAIError(w, http.StatusBadGateway, "api_error", "upstream backend unreachable")
+			return true
+		}
+		h.logger.Info("upstream transport error, retrying", "err", err.Error(), "backend", backend.String())
+		return false
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && !lastTry {
+		h.probe(backend)
+		h.logger.Info("upstream error status, retrying", "status", resp.StatusCode, "backend", backend.String())
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+		return false
+	}
 
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_ = streamBody(w, resp.Body)
+	return true
+}
+
+func (h *Handler) probe(backend *url.URL) {
+	if h.Health != nil {
+		h.Health.Probe(backend)
+	}
+}
+
+// loadRead exposes h.Load as the read-only Load interface for router
+// re-picks during retry; returns nil if no tracker is wired up.
+func (h *Handler) loadRead() Load {
+	if h.Load == nil {
+		return nil
+	}
+	return h.Load
+}
+
+// removeURL returns s with the first occurrence of u removed. Used by
+// dispatch to narrow the retry set as attempts fail.
+func removeURL(s []*url.URL, u *url.URL) []*url.URL {
+	for i, x := range s {
+		if x == u || x.String() == u.String() {
+			return append(s[:i:i], s[i+1:]...)
+		}
+	}
+	return s
 }
 
 // writeHealthz writes a JSON summary of per-backend and per-model state.
