@@ -56,6 +56,34 @@ scrape_configs:
       - url: 'http://127.0.0.1:12723/api/prometheus/targets/ceph-exporter'
         refresh_interval: 30s
 
+  # vLLM backends expose Prometheus metrics natively on the same port
+  # as /v1/. Scrape them so dashboards can join with local-ai-proxy
+  # metrics on the `model` label (vLLM calls it `model_name` — we
+  # relabel), and correlate proxy-side TTFT against vLLM's own.
+  # Static list because backend types aren't tagged in etcd; add a
+  # target here when a new vLLM replica comes online.
+  - job_name: 'vllm'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+        - 'nv1.xc:8000'
+        - 'nv2.xc:8000'
+    relabel_configs:
+      # Produce a `backend` label matching the URL form used by
+      # local_ai_proxy_* metrics (`http://host:port`), so
+      # cross-metric joins work without extra relabeling.
+      - source_labels: [__address__]
+        regex: '(.+)'
+        replacement: 'http://$1'
+        target_label: backend
+    metric_relabel_configs:
+      # Rename model_name -> model so joins with proxy metrics work.
+      - source_labels: [model_name]
+        target_label: model
+      - regex: 'model_name'
+        action: labeldrop
+
   # local-ai-proxy (inference gateway). Deployed on every storage node
   # but only the storage leader actually runs the service; standbys
   # report up=0, which is itself a useful signal. When the VIP fails
