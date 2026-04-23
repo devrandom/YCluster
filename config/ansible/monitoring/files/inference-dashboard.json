@@ -146,12 +146,12 @@
       ]
     },
     {
-      "title": "Time-to-first-token p95 (streaming) by model",
+      "title": "TTFT p95 — proxy vs backend (streaming)",
       "type": "timeseries",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 4},
       "id": 5,
-      "description": "Latency from handler entry to the first body byte from upstream, for requests with stream=true. This is the real responsiveness signal — independent of output length. Non-streaming requests are filtered out since their TTFT degenerates to full duration.",
+      "description": "Solid lines: TTFT as the proxy saw it (handler entry -> first body byte). Dashed lines: vLLM's own ttft from its /metrics. The gap between them is proxy + network overhead. If it's growing, investigate the proxy host; if both are growing together, it's a backend (queue depth, compute) issue. vLLM-only — other backend types don't expose a native ttft metric.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -165,11 +165,26 @@
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (model, le) (rate(local_ai_proxy_ttft_seconds_bucket{stream=\"true\"}[5m])))",
-          "legendFormat": "{{model}}",
+          "legendFormat": "proxy {{model}}",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (model, le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))",
+          "legendFormat": "vllm {{model}}",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never"}
+        },
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": "^vllm "}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [5, 5]}}]}
+        ]
+      }
     },
     {
       "title": "Full request duration p95 by model",
@@ -300,6 +315,122 @@
           "renameByName": {"backend": "Backend", "state": "State", "node": "Host"},
           "indexByName": {"backend": 0, "state": 1, "node": 2}
         }}
+      ]
+    },
+    {
+      "title": "Generation tokens/sec (vLLM)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 0, "y": 31},
+      "id": 11,
+      "description": "Output tokens/sec per backend — steady-state decode throughput. Drops under queue contention; should match single-request tok/s when only one request is in flight.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never"}
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(vllm:generation_tokens_total[5m]))",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
+    },
+    {
+      "title": "Prompt tokens/sec (vLLM)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 6, "y": 31},
+      "id": 12,
+      "description": "Input tokens/sec per backend — prompt-processing throughput. Dominated by context length; useful to see how much of the GPU is spent on prefill vs decode.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never"}
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(vllm:prompt_tokens_total[5m]))",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
+    },
+    {
+      "title": "KV cache pressure (vLLM)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 12, "y": 31},
+      "id": 13,
+      "description": "Fraction of the KV cache in use. Climbs with concurrent requests and long contexts. Sustained >0.9 means the backend is about to start preempting; shorten contexts, cap concurrency, or scale out.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 15, "showPoints": "never"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.75},
+              {"color": "red", "value": 0.9}
+            ]
+          }
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "vllm:kv_cache_usage_perc",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
+    },
+    {
+      "title": "Prefix cache hit rate (vLLM)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 18, "y": 31},
+      "id": 14,
+      "description": "Fraction of queried prompt tokens served from the prefix cache over the last 5m. High = clients are reusing prompts (system prompts, multi-turn chats) and vLLM is amortizing prefill. Near zero = every request pays full prefill cost; check client prompt hygiene or raise --enable-prefix-caching if it's not already on.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never"}
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(vllm:prefix_cache_hits_total[5m])) / clamp_min(sum by (backend) (rate(vllm:prefix_cache_queries_total[5m])), 1)",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
       ]
     },
     {
