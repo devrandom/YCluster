@@ -33,6 +33,7 @@ MAC Address Formats:
 """
 
 import json
+import re
 import sys
 
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
@@ -2043,43 +2044,53 @@ def alert_webhook():
         print(f"Error processing alert webhook: {e}")
         return jsonify({'error': str(e)}), 500
 
+_STATIC_HOSTNAME_RE = re.compile(r'^([a-z]{1,3})(\d+)$')
+
+
 def get_all_hosts():
     """Get all hosts from etcd allocations"""
     try:
         client = get_etcd_client()
         hosts = []
-        
+
         # Get all allocations from by-hostname
         for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
-            if value:
-                try:
-                    allocation = json.loads(value.decode())
-                    hostname = allocation['hostname']
-                    
-                    # Skip AMT interfaces (hostnames ending with 'a')
-                    if hostname.endswith('a'):
-                        continue
-                    
-                    # Skip dynamic IP allocations (hostnames that don't match expected patterns)
-                    # Expected patterns: s1-s20, c1-c20, m1-m20
-                    if not (hostname.startswith(('s', 'c', 'm')) and 
-                            len(hostname) > 1 and 
-                            hostname[1:].isdigit()):
-                        continue
+            if not value:
+                continue
+            try:
+                allocation = json.loads(value.decode())
+                hostname = allocation['hostname']
 
-                    hosts.append({
-                        'hostname': hostname,
-                        'ip': allocation['ip'],
-                        'type': allocation['type'],
-                        'disabled': allocation.get('disabled', False)
-                    })
-                except:
-                    pass
-        
-        # Sort by hostname
-        hosts.sort(key=lambda x: (x['type'], int(x['hostname'][1:]) if x['hostname'][1:].isdigit() else 0))
+                # Skip AMT interfaces (hostnames ending with 'a').
+                if hostname.endswith('a'):
+                    continue
+
+                # Keep only static-prefix allocations: letters followed
+                # by digits (e.g. s3, c1, m2, nv1, nas1). Dynamic-IP
+                # allocations (dhcp-NNN, etc.) don't match and are
+                # excluded.
+                if not _STATIC_HOSTNAME_RE.match(hostname):
+                    continue
+
+                hosts.append({
+                    'hostname': hostname,
+                    'ip': allocation['ip'],
+                    'type': allocation['type'],
+                    'disabled': allocation.get('disabled', False)
+                })
+            except Exception:
+                pass
+
+        # Sort by (type, numeric suffix). Prefix length varies (s, nv,
+        # nas), so parse the number via the regex instead of assuming
+        # hostname[1:].
+        def _sort_key(h):
+            m = _STATIC_HOSTNAME_RE.match(h['hostname'])
+            return (h['type'], int(m.group(2)) if m else 0)
+
+        hosts.sort(key=_sort_key)
         return hosts
-    except:
+    except Exception:
         return []
 
 def get_host_health(host_ip, timeout=10):
