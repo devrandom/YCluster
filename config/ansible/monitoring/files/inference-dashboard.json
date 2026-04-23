@@ -64,7 +64,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(local_ai_proxy_requests_total{status=~\"4..|5..|transport_error\"}[5m])) / clamp_min(sum(rate(local_ai_proxy_requests_total[5m])), 1)",
+          "expr": "(sum(rate(local_ai_proxy_requests_total{status=~\"4..|5..|transport_error\"}[5m])) or vector(0)) / (sum(rate(local_ai_proxy_requests_total[5m])) or vector(1))",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
         }
@@ -139,7 +139,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(local_ai_proxy_retries_total[5m]))",
+          "expr": "sum(rate(local_ai_proxy_retries_total[5m])) or vector(0)",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
         }
@@ -252,25 +252,33 @@
       ]
     },
     {
-      "title": "Backend health (1=up, 0=down)",
+      "title": "Backend health",
       "type": "table",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 22},
       "id": 8,
+      "description": "One row per backend, showing its current state (healthy / down / disabled / unknown).",
       "fieldConfig": {
         "defaults": {
           "custom": {"align": "auto", "cellOptions": {"type": "color-background"}},
           "mappings": [
-            {"type": "value", "options": {"0": {"color": "red", "text": "down"}, "1": {"color": "green", "text": "up"}}}
-          ],
-          "thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "green", "value": 1}]}
-        }
+            {"type": "value", "options": {
+              "healthy":  {"color": "green",      "text": "healthy",  "index": 0},
+              "down":     {"color": "red",        "text": "down",     "index": 1},
+              "disabled": {"color": "dark-gray",  "text": "disabled", "index": 2},
+              "unknown":  {"color": "light-gray", "text": "unknown",  "index": 3}
+            }}
+          ]
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "Value"}, "properties": [{"id": "custom.hidden", "value": true}]}
+        ]
       },
-      "options": {"showHeader": true, "footer": {"show": false}},
+      "options": {"showHeader": true, "footer": {"show": false}, "sortBy": [{"displayName": "State", "desc": false}]},
       "pluginVersion": "10",
       "targets": [
         {
-          "expr": "local_ai_proxy_backend_healthy",
+          "expr": "local_ai_proxy_backend_state == 1",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -279,8 +287,9 @@
       ],
       "transformations": [
         {"id": "organize", "options": {
-          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "cluster": true},
-          "renameByName": {"backend": "Backend", "Value": "State", "node": "Host"}
+          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "cluster": true, "node": false},
+          "renameByName": {"backend": "Backend", "state": "State", "node": "Host"},
+          "indexByName": {"backend": 0, "state": 1, "node": 2}
         }}
       ]
     },
