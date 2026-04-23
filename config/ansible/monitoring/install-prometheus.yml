@@ -68,6 +68,17 @@
         variable_end_string: '%]'
       notify: restart prometheus
 
+    - name: Configure Prometheus inference alert rules
+      template:
+        src: ycluster-alerts-inference.yml.j2
+        dest: /etc/prometheus/rules/ycluster-alerts-inference.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+        variable_start_string: '[%'
+        variable_end_string: '%]'
+      notify: restart prometheus
+
     - name: Configure Alertmanager
       template:
         src: alertmanager.yml.j2
