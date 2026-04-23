@@ -348,15 +348,39 @@
                 <template x-if="!hosts || hosts.length === 0">
                     <tr><td colspan="3" style="text-align: center; color: #666;">No hosts available</td></tr>
                 </template>
-                <template x-for="host in hosts.filter(h => !h.disabled)" :key="host.hostname">
+                <!-- Hosts that aren't synced (error/warning/unknown): always visible -->
+                <template x-for="host in clockProblemHosts()" :key="host.hostname">
                     <tr :class="`type-${host.type}`">
                         <td><strong x-text="host.hostname"></strong></td>
                         <td>
-                            <span :class="`status-${getClockSkewStatus(host.hostname)}`" 
+                            <span :class="`status-${getClockSkewStatus(host.hostname)}`"
                                   x-text="(getClockSkewStatus(host.hostname)).charAt(0).toUpperCase() + (getClockSkewStatus(host.hostname)).slice(1)"></span>
                         </td>
                         <td x-html="getClockSkewOffset(host.hostname)"></td>
                     </tr>
+                </template>
+                <!-- Synced hosts: collapsed by default, one-click expand -->
+                <template x-if="clockSyncedHosts().length > 0">
+                    <tr>
+                        <td colspan="3" style="text-align: center;">
+                            <a href="#"
+                               @click.prevent="clockSyncedExpanded = !clockSyncedExpanded"
+                               style="color: #007bff; text-decoration: none;"
+                               x-text="clockSyncedExpanded ? `-${clockSyncedHosts().length} synced` : `+${clockSyncedHosts().length} synced`"></a>
+                        </td>
+                    </tr>
+                </template>
+                <template x-if="clockSyncedExpanded">
+                    <template x-for="host in clockSyncedHosts()" :key="host.hostname">
+                        <tr :class="`type-${host.type}`">
+                            <td><strong x-text="host.hostname"></strong></td>
+                            <td>
+                                <span :class="`status-${getClockSkewStatus(host.hostname)}`"
+                                      x-text="(getClockSkewStatus(host.hostname)).charAt(0).toUpperCase() + (getClockSkewStatus(host.hostname)).slice(1)"></span>
+                            </td>
+                            <td x-html="getClockSkewOffset(host.hostname)"></td>
+                        </tr>
+                    </template>
                 </template>
             </tbody>
         </table>
@@ -492,6 +516,7 @@
                 showErrorIndicator: false,
                 lastError: '',
                 servicesExpanded: {},
+                clockSyncedExpanded: false,
                 drainStatusMessage: '',
                 
                 // Methods
@@ -724,6 +749,19 @@
                     return health.services.clock_skew.status || 'error';
                 },
                 
+                // Hosts whose clock is synced (status is healthy / standby /
+                // not_applicable). These are the boring case and hide by
+                // default — the user called out they want to see the
+                // exceptions, not a wall of greens.
+                clockSyncedHosts() {
+                    return this.hosts.filter(h => !h.disabled &&
+                        this.isNormalStatus(this.getClockSkewStatus(h.hostname)));
+                },
+                clockProblemHosts() {
+                    return this.hosts.filter(h => !h.disabled &&
+                        !this.isNormalStatus(this.getClockSkewStatus(h.hostname)));
+                },
+
                 getClockSkewOffset(hostname) {
                     const health = this.hostHealth[hostname];
                     if (!health || !health.services || !health.services.clock_skew) {

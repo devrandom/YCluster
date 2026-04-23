@@ -19,8 +19,11 @@ makestep 1.0 3
 rtcsync
 
 # Allow NTP queries from the local network
-# This enables nodes to check clock skew against the VIP
+# This enables nodes to check clock skew against the VIP.
+# 10.0.0.0/24 is the physical cluster LAN; 10.0.1.0/24 is the
+# WireGuard subnet remote nodes (nv*, etc.) source packets from.
 allow 10.0.0.0/24
+allow 10.0.1.0/24
 
 # Log files location
 logdir /var/log/chrony
