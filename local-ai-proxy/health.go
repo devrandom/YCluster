@@ -117,6 +117,43 @@ func (hc *HealthChecker) Close() error {
 	return nil
 }
 
+// Probe runs an out-of-band health check on u in a goroutine and
+// returns immediately. Used by the request handler to nudge the
+// checker after a retry: the checker is the single writer to the
+// state map, and an immediate re-probe means a transient backend
+// glitch doesn't strand traffic until the next tick.
+//
+// Disabled backends are skipped. If the checker is shutting down
+// the probe is a no-op.
+func (hc *HealthChecker) Probe(u *url.URL) {
+	if hc == nil || u == nil {
+		return
+	}
+	if hc.Disabled != nil && hc.Disabled.IsDisabled(u.String()) {
+		return
+	}
+	ctx := context.Background()
+	if hc.done != nil {
+		select {
+		case <-hc.done:
+			return
+		default:
+		}
+	}
+	go hc.checkOne(ctx, u)
+}
+
+// IsHealthy reports whether the given backend URL was observed as
+// StateHealthy on the most recent check. Backends that are Unknown
+// (e.g. added between ticks), Down, or Disabled return false — the
+// router should exclude them.
+func (hc *HealthChecker) IsHealthy(urlStr string) bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	bh, ok := hc.states[urlStr]
+	return ok && bh.State == StateHealthy
+}
+
 // Snapshot returns a copy of the current per-backend states.
 func (hc *HealthChecker) Snapshot() map[string]BackendHealth {
 	hc.mu.RLock()

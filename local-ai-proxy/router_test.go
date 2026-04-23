@@ -36,15 +36,15 @@ func TestPassthroughRouterAlwaysReturnsBackend(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"whatever","messages":[]}`))
-	got, body, err := r.Route(req)
+	candidates, body, err := r.Route(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != u {
-		t.Errorf("got %v; want %v", got, u)
+	if len(candidates) != 1 || candidates[0] != u {
+		t.Errorf("got %v; want [%v]", candidates, u)
 	}
 	if body != nil {
-		t.Errorf("passthrough should not substitute body")
+		t.Errorf("passthrough should not buffer body")
 	}
 	if r.Models() != nil {
 		t.Errorf("passthrough Models() should be nil (signals unknown)")
@@ -60,19 +60,18 @@ func TestModelRouterRoutesByModel(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"beta","messages":[]}`))
-	target, body, err := r.Route(req)
+	candidates, body, err := r.Route(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target.String() != "http://b.example:8000" {
-		t.Errorf("target = %s; want http://b.example:8000", target)
+	if len(candidates) != 1 || candidates[0].String() != "http://b.example:8000" {
+		t.Errorf("candidates = %v; want [http://b.example:8000]", candidates)
 	}
 	if body == nil {
-		t.Fatal("ModelRouter must return substituted body so caller can reuse it")
+		t.Fatal("ModelRouter must buffer body so caller can retry")
 	}
-	got, _ := io.ReadAll(body)
-	if !strings.Contains(string(got), `"model":"beta"`) {
-		t.Errorf("substituted body = %q; missing model field", got)
+	if !strings.Contains(string(body), `"model":"beta"`) {
+		t.Errorf("buffered body = %q; missing model field", body)
 	}
 }
 

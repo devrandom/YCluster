@@ -83,8 +83,22 @@ func main() {
 		}
 	}
 
+	// Fan-out: the LoadCounter is shared between handler (inc/dec around
+	// upstream calls) and router (reads counts to pick least-loaded).
+	// Passthrough mode skips it — a single backend has nothing to balance.
+	loadCounter := NewLoadCounter()
+	if mr, ok := router.(*ModelRouter); ok {
+		if health != nil {
+			mr.Healthy = health
+		}
+		mr.Load = loadCounter
+	}
+
 	h := NewHandler(router)
 	h.Health = health
+	if _, ok := router.(*ModelRouter); ok {
+		h.Load = loadCounter
+	}
 
 	// Outer middleware chain: TrustedHeaders strips X-User-Id for
 	// requests from outside the trusted proxy CIDRs, so nothing

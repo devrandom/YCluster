@@ -45,17 +45,19 @@ See `docs/local-ai-proxy.md` for the design rationale.
 
 - [x] Periodic health checks per unique backend URL (`GET /v1/models`,
       default 30s, logs state transitions; not yet wired into routing)
-- [ ] Multiple backends per model (fan-out) with least-loaded selection,
+- [x] Multiple backends per model (fan-out) with least-loaded selection,
       consulting health state to skip down backends
-      (schema and health checker are ready — just router changes)
-- [ ] In-flight counter per backend
+- [x] In-flight counter per backend (`LoadCounter`, atomic,
+      handler-managed around each upstream call)
+- [x] Transparent retry on transport error or 4xx/5xx from a backend —
+      try each healthy peer at most once; last attempt commits
+      whatever it returns. Each failure nudges the health checker to
+      re-verify out of band (`HealthChecker.Probe`), so a transient
+      glitch doesn't strand traffic waiting for the next tick.
 - [ ] Per-backend `max_concurrent` concurrency cap
-- [ ] Periodic health checks (`GET /v1/models` or configurable endpoint)
-- [ ] Track backend state: healthy / degraded / down
 - [ ] Model aliasing (friendly name → backend model ID, rewrite request
       body)
-- [ ] Tests: least-loaded wins; full backend skipped; 503 when all full;
-      concurrency cap honored under parallel load
+- [ ] Tests: concurrency cap honored under parallel load
 
 ## Production features
 
