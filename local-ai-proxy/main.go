@@ -47,6 +47,8 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	metrics := NewMetrics()
+
 	router, source, err := buildRouter(cfg, logger)
 	if err != nil {
 		log.Fatal(err)
@@ -66,6 +68,7 @@ func main() {
 		}
 		if interval > 0 {
 			health = NewHealthChecker(source, interval, logger)
+			health.Metrics = metrics
 			// Wire the disabled-backends feature when the Source is
 			// etcd-backed: we reuse its client, and default the prefix
 			// to /cluster/config/inference/disabled/.
@@ -96,6 +99,7 @@ func main() {
 
 	h := NewHandler(router)
 	h.Health = health
+	h.Metrics = metrics
 	if _, ok := router.(*ModelRouter); ok {
 		h.Load = loadCounter
 	}
@@ -110,9 +114,16 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// /metrics bypasses the proxy handler; everything else goes through
+	// the middleware chain. Metrics are plain Prometheus text and don't
+	// need logging or X-User-Id stripping.
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+	mux.Handle("/", chained)
+
 	srv := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: chained,
+		Handler: mux,
 	}
 
 	shutdownDone := make(chan struct{})

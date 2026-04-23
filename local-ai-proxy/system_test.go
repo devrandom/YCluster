@@ -335,6 +335,107 @@ func TestSystemAllBackendsFail(t *testing.T) {
 	t.Logf("all-fail: a=%d hits, b=%d hits (total %d for 1 request + 2 startup probes)", ha, hb, total)
 }
 
+// TestSystemMetricsEndpoint — after driving some traffic through a
+// fan-out pool, /metrics should expose per-backend counters, gauges,
+// and retries in Prometheus text format.
+func TestSystemMetricsEndpoint(t *testing.T) {
+	good := newFakeBackend(okModels(`{"ok":true}`))
+	defer good.close()
+	// flaky: passes health probe (GET /v1/models) so it stays in the
+	// routable set, but 503s on real traffic — forces the retry path.
+	flaky := newFakeBackend(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	defer flaky.close()
+
+	cfg := fmt.Sprintf(`backends:
+  - model: m
+    api_base: %q
+  - model: m
+    api_base: %q
+health_check_interval: 1h
+`, good.server.URL, flaky.server.URL)
+	base := startProxy(t, cfg)
+
+	// Drive a handful of requests to populate metrics. Every request
+	// that lands on `flaky` retries to `good`, so we should see 5xx
+	// retries in the counter. (After the first retry, the handler's
+	// Probe call marks flaky Down, so subsequent requests go straight
+	// to good — one retry is enough to populate the metric.)
+	const n = 12
+	for i := 0; i < n; i++ {
+		resp, err := http.Post(base+"/v1/chat/completions", "application/json",
+			strings.NewReader(`{"model":"m"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	// One request with an unknown model — populates route_errors.
+	resp, _ := http.Post(base+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"ghost"}`))
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("/metrics status = %d", resp.StatusCode)
+	}
+	text := string(body)
+
+	// Check every metric family we expose is present with at least
+	// one sample. We don't assert exact values — schedule / timing
+	// affect which backend each request lands on first.
+	for _, want := range []string{
+		"local_ai_proxy_requests_total",
+		"local_ai_proxy_request_duration_seconds_bucket",
+		"local_ai_proxy_retries_total",
+		"local_ai_proxy_inflight",
+		"local_ai_proxy_backend_healthy",
+		"local_ai_proxy_route_errors_total",
+		`local_ai_proxy_route_errors_total{reason="unknown_model"} 1`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+
+	// Good backend is healthy (1). Flaky one: startup probe saw a
+	// 200 on /v1/models so it started as 1, but the Probe fired on
+	// retry will have re-checked and still found 200 — so it stays 1.
+	// (Demonstrates that Probe is a health-level concern, not a
+	// request-level penalty.)
+	goodGauge := fmt.Sprintf(`local_ai_proxy_backend_healthy{backend="%s"} 1`, good.server.URL)
+	if !strings.Contains(text, goodGauge) {
+		t.Errorf("/metrics missing %q", goodGauge)
+	}
+
+	// Retries should have fired on 503s; count not asserted precisely
+	// but should exist.
+	if !strings.Contains(text, `reason="http_5xx"`) {
+		t.Errorf("/metrics missing retry label reason=http_5xx")
+	}
+
+	// Standard Go/process collectors should also be present.
+	for _, want := range []string{"go_goroutines", "process_resident_memory_bytes"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("/metrics missing standard metric %q", want)
+		}
+	}
+}
+
 // TestSystemHealthzReflectsState — after one initial health pass,
 // /healthz should show the live backend as healthy and the dead one
 // as down.
