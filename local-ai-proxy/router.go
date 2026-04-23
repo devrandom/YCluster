@@ -35,10 +35,13 @@ const maxRoutingBodyBytes = 8 << 20 // 8 MiB
 // picks one (typically least-loaded) and may retry through the rest
 // on failure. Body is the buffered request body that fan-out retries
 // replay; nil means "use r.Body" (single-attempt only, passthrough).
+// Stream mirrors the request body's "stream" field — used as a
+// metric label so TTFT can be interpreted correctly.
 type RouteResult struct {
 	Model      string
 	Candidates []*url.URL
 	Body       []byte
+	Stream     bool
 }
 
 // Router decides which backends are eligible to serve a request.
@@ -98,7 +101,8 @@ func (m *ModelRouter) Route(r *http.Request) (*RouteResult, error) {
 	}
 
 	var env struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("request body is not valid JSON: %w", err)
@@ -126,7 +130,7 @@ func (m *ModelRouter) Route(r *http.Request) (*RouteResult, error) {
 		candidates = filtered
 	}
 
-	return &RouteResult{Model: env.Model, Candidates: candidates, Body: body}, nil
+	return &RouteResult{Model: env.Model, Candidates: candidates, Body: body, Stream: env.Stream}, nil
 }
 
 // PickBackend selects one URL from candidates. With a Load, picks the
