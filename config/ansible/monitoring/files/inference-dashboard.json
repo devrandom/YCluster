@@ -146,7 +146,7 @@
       ]
     },
     {
-      "title": "Time-to-first-token (streaming) by model",
+      "title": "Time-to-first-token p95 (streaming) by model",
       "type": "timeseries",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 4},
@@ -164,27 +164,15 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (model, le) (rate(local_ai_proxy_ttft_seconds_bucket{stream=\"true\"}[5m])))",
-          "legendFormat": "p50 {{model}}",
-          "refId": "A",
-          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
-        },
-        {
           "expr": "histogram_quantile(0.95, sum by (model, le) (rate(local_ai_proxy_ttft_seconds_bucket{stream=\"true\"}[5m])))",
-          "legendFormat": "p95 {{model}}",
-          "refId": "B",
-          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (model, le) (rate(local_ai_proxy_ttft_seconds_bucket{stream=\"true\"}[5m])))",
-          "legendFormat": "p99 {{model}}",
-          "refId": "C",
+          "legendFormat": "{{model}}",
+          "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
         }
       ]
     },
     {
-      "title": "Full request duration (p50/p95) by model",
+      "title": "Full request duration p95 by model",
       "type": "timeseries",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 4},
@@ -202,15 +190,9 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (model, le) (rate(local_ai_proxy_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p50 {{model}}",
-          "refId": "A",
-          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
-        },
-        {
           "expr": "histogram_quantile(0.95, sum by (model, le) (rate(local_ai_proxy_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p95 {{model}}",
-          "refId": "B",
+          "legendFormat": "{{model}}",
+          "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
         }
       ]
