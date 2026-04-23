@@ -61,6 +61,10 @@ type HealthChecker struct {
 	// are not contacted and are reported with StateDisabled.
 	Disabled DisabledLookup
 
+	// Metrics, if set, receives the backend-healthy gauge updates
+	// whenever a check records a new state. Nil-safe.
+	Metrics *Metrics
+
 	mu     sync.RWMutex
 	states map[string]BackendHealth // keyed by url.String()
 
@@ -246,6 +250,8 @@ func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string) {
 	}
 	hc.states[u.String()] = next
 	hc.mu.Unlock()
+
+	hc.Metrics.SetBackendHealthy(u.String(), state == StateHealthy)
 
 	if !had || prev.State != state {
 		msg := "backend healthy"

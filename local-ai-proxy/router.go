@@ -27,15 +27,23 @@ type Healthy interface {
 // the model field. Anything larger is rejected.
 const maxRoutingBodyBytes = 8 << 20 // 8 MiB
 
+// RouteResult is what a Router returns for a single request.
+//
+// Model is the routed model name, or "" in passthrough mode where the
+// router doesn't inspect the body. Candidates are the backend URLs
+// eligible to serve the request, ordered arbitrarily; the caller
+// picks one (typically least-loaded) and may retry through the rest
+// on failure. Body is the buffered request body that fan-out retries
+// replay; nil means "use r.Body" (single-attempt only, passthrough).
+type RouteResult struct {
+	Model      string
+	Candidates []*url.URL
+	Body       []byte
+}
+
 // Router decides which backends are eligible to serve a request.
 type Router interface {
-	// Route returns the set of backend URLs eligible to serve r. The
-	// caller picks one (typically least-loaded) and may retry through
-	// the rest on failure. If Route consumed r.Body to find the model
-	// name, it returns the buffered body bytes so each attempt can
-	// build a fresh request; otherwise body is nil and the caller
-	// uses r.Body (single-attempt only).
-	Route(r *http.Request) (candidates []*url.URL, body []byte, err error)
+	Route(r *http.Request) (*RouteResult, error)
 
 	// Models returns the set of known models, or nil if the router does
 	// not know (caller should proxy /v1/models upstream instead).
@@ -52,8 +60,8 @@ func NewPassthroughRouter(backend *url.URL) *PassthroughRouter {
 	return &PassthroughRouter{backend: backend}
 }
 
-func (p *PassthroughRouter) Route(r *http.Request) ([]*url.URL, []byte, error) {
-	return []*url.URL{p.backend}, nil, nil
+func (p *PassthroughRouter) Route(r *http.Request) (*RouteResult, error) {
+	return &RouteResult{Candidates: []*url.URL{p.backend}}, nil
 }
 
 func (p *PassthroughRouter) Models() []string { return nil }
@@ -77,31 +85,31 @@ func NewModelRouter(source Source) *ModelRouter {
 	return &ModelRouter{source: source}
 }
 
-func (m *ModelRouter) Route(r *http.Request) ([]*url.URL, []byte, error) {
+func (m *ModelRouter) Route(r *http.Request) (*RouteResult, error) {
 	if r.Body == nil {
-		return nil, nil, errors.New("request has no body; cannot determine model")
+		return nil, errors.New("request has no body; cannot determine model")
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRoutingBodyBytes+1))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read request body: %w", err)
+		return nil, fmt.Errorf("read request body: %w", err)
 	}
 	if len(body) > maxRoutingBodyBytes {
-		return nil, nil, errors.New("request body too large")
+		return nil, errors.New("request body too large")
 	}
 
 	var env struct {
 		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, nil, fmt.Errorf("request body is not valid JSON: %w", err)
+		return nil, fmt.Errorf("request body is not valid JSON: %w", err)
 	}
 	if env.Model == "" {
-		return nil, nil, errors.New("request body missing model field")
+		return nil, errors.New("request body missing model field")
 	}
 
 	urls, ok := m.source.Snapshot()[env.Model]
 	if !ok || len(urls) == 0 {
-		return nil, nil, fmt.Errorf("unknown model: %s", env.Model)
+		return nil, fmt.Errorf("unknown model: %s", env.Model)
 	}
 
 	candidates := urls
@@ -113,12 +121,12 @@ func (m *ModelRouter) Route(r *http.Request) ([]*url.URL, []byte, error) {
 			}
 		}
 		if len(filtered) == 0 {
-			return nil, nil, fmt.Errorf("%w: %s", ErrNoHealthyBackend, env.Model)
+			return nil, fmt.Errorf("%w: %s", ErrNoHealthyBackend, env.Model)
 		}
 		candidates = filtered
 	}
 
-	return candidates, body, nil
+	return &RouteResult{Model: env.Model, Candidates: candidates, Body: body}, nil
 }
 
 // PickBackend selects one URL from candidates. With a Load, picks the

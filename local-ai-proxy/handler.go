@@ -44,6 +44,10 @@ type Handler struct {
 	// Load, if set, is incremented around each upstream call so the
 	// router can pick the least-loaded backend.
 	Load LoadTracker
+
+	// Metrics, if set, receives Prometheus observations from the
+	// request path. Nil-safe.
+	Metrics *Metrics
 }
 
 func NewHandler(router Router) *Handler {
@@ -103,8 +107,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	candidates, bodyBytes, err := h.router.Route(r)
+	route, err := h.router.Route(r)
 	if err != nil {
+		h.Metrics.ObserveRouteError(classifyRouteError(err))
 		if errors.Is(err, ErrNoHealthyBackend) {
 			h.logger.Warn("no healthy backend", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
 			writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", err.Error())
@@ -115,7 +120,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.dispatch(w, r, candidates, bodyBytes)
+	h.dispatch(w, r, route)
+}
+
+// classifyRouteError maps a Route() error to a stable metric label.
+func classifyRouteError(err error) string {
+	if errors.Is(err, ErrNoHealthyBackend) {
+		return RouteErrNoHealthy
+	}
+	msg := err.Error()
+	switch {
+	case strings.HasPrefix(msg, "unknown model"):
+		return RouteErrUnknownModel
+	case strings.Contains(msg, "too large"):
+		return RouteErrBodyTooLarge
+	default:
+		return RouteErrInvalidRequest
+	}
 }
 
 // dispatch tries each eligible backend in load-aware order. On the
@@ -130,17 +151,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Every retryable failure fires a Probe at that backend so the health
 // checker re-verifies out-of-band. A 4xx is a "the backend answered";
 // the probe decides if that backend stays routable.
-func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, candidates []*url.URL, bodyBytes []byte) {
-	remaining := candidates
+func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, route *RouteResult) {
+	remaining := route.Candidates
 	for len(remaining) > 0 {
 		if r.Context().Err() != nil {
 			return
 		}
 		backend := PickBackend(remaining, h.loadRead())
 		remaining = removeURL(remaining, backend)
-		lastTry := len(remaining) == 0 || bodyBytes == nil
+		lastTry := len(remaining) == 0 || route.Body == nil
 
-		if done := h.tryOnce(w, r, backend, bodyBytes, lastTry); done {
+		if done := h.tryOnce(w, r, route.Model, backend, route.Body, lastTry); done {
 			return
 		}
 	}
@@ -150,10 +171,16 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, candidates []
 // response was committed to the client or if we emitted a terminal
 // error; done=false signals "try the next candidate". When lastTry
 // is true the response (success or failure) is committed verbatim.
-func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, backend *url.URL, bodyBytes []byte, lastTry bool) bool {
+func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, backend *url.URL, bodyBytes []byte, lastTry bool) bool {
+	backendStr := backend.String()
+	start := time.Now()
 	if h.Load != nil {
-		h.Load.Inc(backend.String())
-		defer h.Load.Dec(backend.String())
+		h.Load.Inc(backendStr)
+		h.Metrics.SetInflight(backendStr, h.Load.Count(backendStr))
+		defer func() {
+			h.Load.Dec(backendStr)
+			h.Metrics.SetInflight(backendStr, h.Load.Count(backendStr))
+		}()
 	}
 
 	// Use *bytes.Reader (not NopCloser) so Go's http client detects the
@@ -184,19 +211,23 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, backend *url.U
 			return true // client went away
 		}
 		h.probe(backend)
+		h.Metrics.ObserveAttempt(model, backendStr, 0, false, 0)
 		if lastTry {
-			h.logger.Warn("upstream transport error", "err", err.Error(), "backend", backend.String())
+			h.logger.Warn("upstream transport error", "err", err.Error(), "backend", backendStr)
 			writeOpenAIError(w, http.StatusBadGateway, "api_error", "upstream backend unreachable")
 			return true
 		}
-		h.logger.Info("upstream transport error, retrying", "err", err.Error(), "backend", backend.String())
+		h.logger.Info("upstream transport error, retrying", "err", err.Error(), "backend", backendStr)
+		h.Metrics.ObserveRetry(backendStr, "transport_error")
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 && !lastTry {
 		h.probe(backend)
-		h.logger.Info("upstream error status, retrying", "status", resp.StatusCode, "backend", backend.String())
+		h.Metrics.ObserveAttempt(model, backendStr, resp.StatusCode, false, 0)
+		h.Metrics.ObserveRetry(backendStr, retryReasonForStatus(resp.StatusCode))
+		h.logger.Info("upstream error status, retrying", "status", resp.StatusCode, "backend", backendStr)
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
 		return false
 	}
@@ -204,7 +235,16 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, backend *url.U
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_ = streamBody(w, resp.Body)
+	committed := resp.StatusCode < 400
+	h.Metrics.ObserveAttempt(model, backendStr, resp.StatusCode, committed, time.Since(start).Seconds())
 	return true
+}
+
+func retryReasonForStatus(status int) string {
+	if status >= 500 {
+		return "http_5xx"
+	}
+	return "http_4xx"
 }
 
 func (h *Handler) probe(backend *url.URL) {

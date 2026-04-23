@@ -36,15 +36,18 @@ func TestPassthroughRouterAlwaysReturnsBackend(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"whatever","messages":[]}`))
-	candidates, body, err := r.Route(req)
+	got, err := r.Route(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 1 || candidates[0] != u {
-		t.Errorf("got %v; want [%v]", candidates, u)
+	if len(got.Candidates) != 1 || got.Candidates[0] != u {
+		t.Errorf("got %v; want [%v]", got.Candidates, u)
 	}
-	if body != nil {
+	if got.Body != nil {
 		t.Errorf("passthrough should not buffer body")
+	}
+	if got.Model != "" {
+		t.Errorf("passthrough Model = %q; want empty", got.Model)
 	}
 	if r.Models() != nil {
 		t.Errorf("passthrough Models() should be nil (signals unknown)")
@@ -60,18 +63,21 @@ func TestModelRouterRoutesByModel(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"beta","messages":[]}`))
-	candidates, body, err := r.Route(req)
+	got, err := r.Route(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 1 || candidates[0].String() != "http://b.example:8000" {
-		t.Errorf("candidates = %v; want [http://b.example:8000]", candidates)
+	if len(got.Candidates) != 1 || got.Candidates[0].String() != "http://b.example:8000" {
+		t.Errorf("candidates = %v; want [http://b.example:8000]", got.Candidates)
 	}
-	if body == nil {
+	if got.Body == nil {
 		t.Fatal("ModelRouter must buffer body so caller can retry")
 	}
-	if !strings.Contains(string(body), `"model":"beta"`) {
-		t.Errorf("buffered body = %q; missing model field", body)
+	if !strings.Contains(string(got.Body), `"model":"beta"`) {
+		t.Errorf("buffered body = %q; missing model field", got.Body)
+	}
+	if got.Model != "beta" {
+		t.Errorf("Model = %q; want beta", got.Model)
 	}
 }
 
@@ -81,7 +87,7 @@ func TestModelRouterUnknownModel(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"ghost"}`))
-	_, _, err := r.Route(req)
+	_, err := r.Route(req)
 	if err == nil || !strings.Contains(err.Error(), "unknown model") {
 		t.Errorf("want unknown model error, got %v", err)
 	}
@@ -92,7 +98,7 @@ func TestModelRouterMissingBody(t *testing.T) {
 	r := NewModelRouter(src)
 	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 	req.Body = nil
-	_, _, err := r.Route(req)
+	_, err := r.Route(req)
 	if err == nil {
 		t.Fatal("want error when body is nil")
 	}
@@ -103,7 +109,7 @@ func TestModelRouterInvalidJSON(t *testing.T) {
 	r := NewModelRouter(src)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`not json`))
-	_, _, err := r.Route(req)
+	_, err := r.Route(req)
 	if err == nil || !strings.Contains(err.Error(), "valid JSON") {
 		t.Errorf("want JSON error, got %v", err)
 	}
@@ -114,7 +120,7 @@ func TestModelRouterMissingModelField(t *testing.T) {
 	r := NewModelRouter(src)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"messages":[]}`))
-	_, _, err := r.Route(req)
+	_, err := r.Route(req)
 	if err == nil || !strings.Contains(err.Error(), "model") {
 		t.Errorf("want missing-model error, got %v", err)
 	}
@@ -125,7 +131,7 @@ func TestModelRouterBodyTooLarge(t *testing.T) {
 	r := NewModelRouter(src)
 	big := strings.NewReader(strings.Repeat("x", maxRoutingBodyBytes+1))
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", big)
-	_, _, err := r.Route(req)
+	_, err := r.Route(req)
 	if err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Errorf("want too-large error, got %v", err)
 	}
