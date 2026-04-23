@@ -17,6 +17,13 @@ test:
 test-race:
 	$(GO) test -race $(PKG)
 
+# System tests: spin up real HTTP backends, launch the proxy binary as
+# a subprocess, drive traffic over real TCP. Gated by the `system`
+# build tag so they don't run on the default `test` target. Requires
+# `make build` first — the tests invoke bin/local-ai-proxy.
+test-system: build
+	$(GO) test -tags system -count=1 $(PKG)
+
 # testing/synctest is experimental in Go 1.24; drop this target on 1.25+.
 test-synctest:
 	GOEXPERIMENT=synctest $(GO) test -race $(PKG)
