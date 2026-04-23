@@ -102,6 +102,41 @@ HTTP server:
 - [ ] Global `http.MaxBytesReader` guard for non-`ModelRouter` paths
       (ModelRouter already caps at 8 MiB).
 
+Attack surface against backends (authenticated clients → backend):
+
+- [ ] **Header forwarding should be an allowlist, not a blocklist.** Today
+      we strip hop-by-hop + Content-Length and pass everything else
+      through. Switch to: `Accept`, `Accept-Encoding`, `Authorization`,
+      `Content-Type`, `User-Agent`, `X-User-Id`, `OpenAI-*`. Prevents
+      arbitrary header injection into future vLLM/llama.cpp endpoints.
+- [ ] **Resource caps on the request body**, not schema validation. A
+      client requesting `max_tokens=100000, n=10` ties up the GPU for
+      everyone. Add per-model operator-configurable caps (via etcd) for
+      `max_tokens`, `n`, `top_logprobs`. Reject / clamp if exceeded. Do
+      NOT enforce strict schema — loses forward-compat with tools,
+      guided_decoding, reasoning_effort, etc.
+- [ ] **Path prefix allowlist** for `/v1/*` (chat/completions,
+      completions, embeddings, rerank, models). Stops a future vLLM
+      `/v1/admin`-ish endpoint from being exposed through the proxy.
+      Downside: every new legit endpoint needs a code change.
+- [ ] **SSRF in multimodal `image_url` fetches is a backend problem**,
+      not fixable in the proxy (we can't tell which URLs the backend
+      will fetch vs. which are data: URIs it decodes locally).
+      Document this in the deploy notes so operators restrict backend
+      egress at the network layer.
+- [ ] **Per-user inflight cap** keyed by `X-User-Id` (soft cap, return
+      429). One authenticated user shouldn't be able to starve the rest.
+      Ties into quotas.
+
+Multimodal:
+
+- [ ] **Raise `maxRoutingBodyBytes` to a config field**, default ~32 MiB.
+      Base64-encoded images bloat request bodies; the current 8 MiB cap
+      hits for multi-image requests. Log a warning when a request
+      approaches the cap. Streaming-parse-for-model is a bigger change
+      (breaks body replay for retry) — not worth unless the 32 MiB
+      default is still too tight.
+
 Observability / testing:
 
 - [ ] Prom `/metrics` endpoint (loopback-only), with request-rate and
