@@ -278,6 +278,15 @@
         mode: '0644'
       notify: restart grafana
 
+    - name: Install inference (local-ai-proxy) dashboard
+      copy:
+        src: inference-dashboard.json
+        dest: /var/lib/grafana-docker/dashboards/inference.json
+        owner: "472"
+        group: "472"
+        mode: '0644'
+      notify: restart grafana
+
     - name: Install Grafana dashboards
       include_tasks: install_dashboard.yml
       vars:
