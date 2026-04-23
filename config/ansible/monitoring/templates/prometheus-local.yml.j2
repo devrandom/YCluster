@@ -56,6 +56,21 @@ scrape_configs:
       - url: 'http://127.0.0.1:12723/api/prometheus/targets/ceph-exporter'
         refresh_interval: 30s
 
+  # local-ai-proxy (inference gateway). Deployed on every storage node
+  # but only the storage leader actually runs the service; standbys
+  # report up=0, which is itself a useful signal. When the VIP fails
+  # over to a different storage host, that host flips to up=1 and the
+  # previous one to up=0.
+  - job_name: 'inference-proxy'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    static_configs:
+{% for host in groups['storage'] | default([]) %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:4001']
+        labels:
+          node: '{{ host }}'
+{% endfor %}
+
   # Blackbox exporter for HTTPS domain monitoring.
   # Per-target module is set via file_sd labels (see update-blackbox-targets.py).
   - job_name: 'https-domain'
