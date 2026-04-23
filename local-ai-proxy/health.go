@@ -251,7 +251,7 @@ func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string) {
 	hc.states[u.String()] = next
 	hc.mu.Unlock()
 
-	hc.Metrics.SetBackendHealthy(u.String(), state == StateHealthy)
+	hc.Metrics.SetBackendState(u.String(), state.String())
 
 	if !had || prev.State != state {
 		msg := "backend healthy"

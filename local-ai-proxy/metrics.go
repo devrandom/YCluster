@@ -19,8 +19,13 @@ type Metrics struct {
 	retries      *prometheus.CounterVec
 	inflight     *prometheus.GaugeVec
 	backendUp    *prometheus.GaugeVec
+	backendState *prometheus.GaugeVec
 	routeErrors  *prometheus.CounterVec
 }
+
+// backendStateLabels enumerates the possible state label values so we
+// can clear the previous value when a backend transitions.
+var backendStateLabels = []string{"healthy", "down", "disabled", "unknown"}
 
 // NewMetrics builds a registry with the proxy's collectors plus the
 // standard Go/process collectors. Returning *Metrics (not a handler)
@@ -54,14 +59,18 @@ func NewMetrics() *Metrics {
 		}, []string{"backend"}),
 		backendUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "local_ai_proxy_backend_healthy",
-			Help: "1 if the backend's last health check succeeded, 0 otherwise. Disabled backends report 0.",
+			Help: "1 if the backend's last health check succeeded, 0 otherwise (disabled backends also report 0). Use backend_state for three-way state.",
 		}, []string{"backend"}),
+		backendState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "local_ai_proxy_backend_state",
+			Help: "One time series per (backend, state). Value is 1 for the current state, 0 for the others. State values: healthy, down, disabled, unknown.",
+		}, []string{"backend", "state"}),
 		routeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "local_ai_proxy_route_errors_total",
 			Help: "Requests rejected by the router before any upstream dispatch.",
 		}, []string{"reason"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.retries, m.inflight, m.backendUp, m.routeErrors)
+	reg.MustRegister(m.requests, m.duration, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors)
 	return m
 }
 
@@ -109,16 +118,25 @@ func (m *Metrics) ObserveRouteError(reason string) {
 	m.routeErrors.WithLabelValues(reason).Inc()
 }
 
-// SetBackendHealthy updates the 0/1 health gauge for a backend.
-func (m *Metrics) SetBackendHealthy(backend string, up bool) {
+// SetBackendState updates both the 0/1 healthy gauge (for simple
+// alerts) and the labeled state gauge. state must be one of
+// "healthy", "down", "disabled", "unknown".
+func (m *Metrics) SetBackendState(backend, state string) {
 	if m == nil {
 		return
 	}
-	v := 0.0
-	if up {
-		v = 1
+	up := 0.0
+	if state == "healthy" {
+		up = 1
 	}
-	m.backendUp.WithLabelValues(backend).Set(v)
+	m.backendUp.WithLabelValues(backend).Set(up)
+	for _, s := range backendStateLabels {
+		v := 0.0
+		if s == state {
+			v = 1
+		}
+		m.backendState.WithLabelValues(backend, s).Set(v)
+	}
 }
 
 // SetInflight updates the in-flight gauge for a backend. Called by
