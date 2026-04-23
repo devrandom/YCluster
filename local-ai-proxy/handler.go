@@ -9,9 +9,46 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// ttftReader wraps an upstream response body to record the timestamp
+// of the first non-empty Read. For streaming requests (SSE) that's
+// "time to first token"; for non-streaming it's time to full-body
+// delivery by the backend (which buffers until the generation is
+// complete).
+type ttftReader struct {
+	inner io.Reader
+	start time.Time
+	once  sync.Once
+	first time.Time
+	seen  bool
+}
+
+func newTTFTReader(inner io.Reader, start time.Time) *ttftReader {
+	return &ttftReader{inner: inner, start: start}
+}
+
+func (r *ttftReader) Read(p []byte) (int, error) {
+	n, err := r.inner.Read(p)
+	if n > 0 {
+		r.once.Do(func() {
+			r.first = time.Now()
+			r.seen = true
+		})
+	}
+	return n, err
+}
+
+func (r *ttftReader) TTFT() (time.Duration, bool) {
+	if !r.seen {
+		return 0, false
+	}
+	return r.first.Sub(r.start), true
+}
 
 // hopByHop headers must not be forwarded by a proxy (RFC 7230 §6.1).
 // Content-Length is also skipped: Go's http client sets it from
@@ -161,7 +198,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, route *RouteR
 		remaining = removeURL(remaining, backend)
 		lastTry := len(remaining) == 0 || route.Body == nil
 
-		if done := h.tryOnce(w, r, route.Model, backend, route.Body, lastTry); done {
+		if done := h.tryOnce(w, r, route.Model, route.Stream, backend, route.Body, lastTry); done {
 			return
 		}
 	}
@@ -171,7 +208,7 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, route *RouteR
 // response was committed to the client or if we emitted a terminal
 // error; done=false signals "try the next candidate". When lastTry
 // is true the response (success or failure) is committed verbatim.
-func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, backend *url.URL, bodyBytes []byte, lastTry bool) bool {
+func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, stream bool, backend *url.URL, bodyBytes []byte, lastTry bool) bool {
 	backendStr := backend.String()
 	start := time.Now()
 	if h.Load != nil {
@@ -234,9 +271,15 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, 
 
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_ = streamBody(w, resp.Body)
+	ttftReader := newTTFTReader(resp.Body, start)
+	_ = streamBody(w, ttftReader)
 	committed := resp.StatusCode < 400
 	h.Metrics.ObserveAttempt(model, backendStr, resp.StatusCode, committed, time.Since(start).Seconds())
+	if committed {
+		if ttft, ok := ttftReader.TTFT(); ok {
+			h.Metrics.ObserveTTFT(model, backendStr, strconv.FormatBool(stream), ttft.Seconds())
+		}
+	}
 	return true
 }
 

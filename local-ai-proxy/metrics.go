@@ -16,6 +16,7 @@ type Metrics struct {
 
 	requests     *prometheus.CounterVec
 	duration     *prometheus.HistogramVec
+	ttft         *prometheus.HistogramVec
 	retries      *prometheus.CounterVec
 	inflight     *prometheus.GaugeVec
 	backendUp    *prometheus.GaugeVec
@@ -46,9 +47,14 @@ func NewMetrics() *Metrics {
 		}, []string{"model", "backend", "status"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "local_ai_proxy_request_duration_seconds",
-			Help:    "Duration of successfully-committed requests (from handler entry to response write completion).",
+			Help:    "Duration of successfully-committed requests (from handler entry to response write completion). Dominated by output length; pair with ttft for responsiveness.",
 			Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
 		}, []string{"model", "backend"}),
+		ttft: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "local_ai_proxy_ttft_seconds",
+			Help:    "Time from handler entry to first body byte from the upstream. For streaming requests this is time-to-first-token; for non-streaming requests it equals total request duration (backend buffers until done).",
+			Buckets: []float64{.025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
+		}, []string{"model", "backend", "stream"}),
 		retries: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "local_ai_proxy_retries_total",
 			Help: "Failed attempts that triggered a fail-over to another backend.",
@@ -70,7 +76,7 @@ func NewMetrics() *Metrics {
 			Help: "Requests rejected by the router before any upstream dispatch.",
 		}, []string{"reason"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors)
+	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors)
 	return m
 }
 
@@ -97,6 +103,17 @@ func (m *Metrics) ObserveAttempt(model, backend string, status int, committed bo
 	if committed {
 		m.duration.WithLabelValues(model, backend).Observe(seconds)
 	}
+}
+
+// ObserveTTFT records the time-to-first-token observation. stream is
+// "true" or "false" (based on the request body's "stream" field) so
+// dashboards can filter — the metric only means "first token" for
+// streaming requests; for non-streaming it's the full duration.
+func (m *Metrics) ObserveTTFT(model, backend, stream string, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.ttft.WithLabelValues(model, backend, stream).Observe(seconds)
 }
 
 // ObserveRetry increments the retry counter when a request fails over
