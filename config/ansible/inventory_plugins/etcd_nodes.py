@@ -84,10 +84,19 @@ class InventoryModule(BaseInventoryPlugin):
         self.inventory.add_group('frontend')
         self.inventory.add_group('nas')
         self.inventory.add_group('nvidia')
+        self.inventory.add_group('adhoc')
         self.inventory.add_group('all_nodes')
+        # Supergroup for generic Ubuntu cluster nodes that get base config
+        # (locale, chrony, ycluster package, admin-api, etc.)
+        self.inventory.add_group('managed')
 
         # nvidia is a subgroup of compute
         self.inventory.add_child('compute', 'nvidia')
+
+        # managed = storage + compute (incl. nvidia via compute) + adhoc
+        self.inventory.add_child('managed', 'storage')
+        self.inventory.add_child('managed', 'compute')
+        self.inventory.add_child('managed', 'adhoc')
 
         # Discover actual etcd members from the cluster
         etcd_members = set()
@@ -173,6 +182,8 @@ class InventoryModule(BaseInventoryPlugin):
                         self.inventory.add_child('nas', hostname)
                     elif node_type == 'nvidia':
                         self.inventory.add_child('nvidia', hostname)
+                    elif node_type == 'adhoc':
+                        self.inventory.add_child('adhoc', hostname)
                     else:
                         if not self.inventory.groups.get('other'):
                             self.inventory.add_group('other')

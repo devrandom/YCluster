@@ -1,6 +1,6 @@
 ---
-- name: Setup base infrastructure on storage and compute nodes
-  hosts: storage:compute
+- name: Setup base infrastructure on managed cluster nodes
+  hosts: managed
   become: yes
   vars:
     admin_services_dir: /opt/admin-services
@@ -65,27 +65,6 @@
         force: no
       ignore_errors: yes
 
-    - name: Create minimal wrapper scripts for legacy compatibility
-      copy:
-        dest: "{{ item.dest }}"
-        mode: '0755'
-        owner: root
-        group: root
-        content: "{{ item.content }}"
-      loop:
-        - dest: '/usr/local/lib/cluster/populate-local-node'
-          content: |
-            #!/bin/bash
-            exec ycluster cluster populate-local-node "$@"
-        - dest: '/usr/local/lib/cluster/check-cluster'
-          content: |
-            #!/bin/bash
-            exec ycluster cluster status "$@"
-        - dest: '/usr/local/lib/cluster/update-dhcp-hosts'
-          content: |
-            #!/bin/bash
-            exec ycluster dhcp update-hosts "$@"
-
 - name: Storage specific setup
   hosts: storage
   become: yes
@@ -98,7 +77,7 @@
         update_password: always
 
     - name: Populate local node information in etcd
-      command: /usr/local/lib/cluster/populate-local-node
+      command: ycluster cluster populate-local-node
       environment:
         ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
       register: populate_result
