@@ -54,8 +54,8 @@ type etcdBackendEntry struct {
 	APIBase string `json:"api_base"`
 }
 
-// etcdModelValue is the JSON value stored at each etcd key. The schema
-// is future-proof for fan-out: router currently uses backends[0] only.
+// etcdModelValue is the JSON value stored at each etcd key. All listed
+// backends are load-balanced by ModelRouter.
 type etcdModelValue struct {
 	Backends []etcdBackendEntry `json:"backends"`
 }
@@ -112,10 +112,6 @@ func (s *EtcdSource) Start(ctx context.Context) error {
 		name := s.modelName(kv.Key)
 		if urls, ok := s.parseKV(kv.Key, kv.Value); ok {
 			m[name] = urls
-			if len(urls) > 1 {
-				s.logger.Warn("model has multiple backends; using first until fan-out is implemented",
-					"model", name, "count", len(urls))
-			}
 		}
 	}
 	s.snapshot.Store(&m)
@@ -151,10 +147,6 @@ func (s *EtcdSource) watch(ctx context.Context, startRev int64) {
 			case clientv3.EventTypePut:
 				if urls, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value); ok {
 					next[name] = urls
-					if len(urls) > 1 {
-						s.logger.Warn("model updated with multiple backends; using first until fan-out is implemented",
-							"model", name, "count", len(urls))
-					}
 				}
 			case clientv3.EventTypeDelete:
 				delete(next, name)
