@@ -25,7 +25,8 @@
                 preferred_ip_protocol: ip4
             http_401:
               # For endpoints that return 401 when probed without auth
-              # (e.g. LiteLLM /v1/models). Treat 401 as healthy.
+              # (e.g. /v1/models behind nginx auth_request).
+              # Treat 401 as healthy.
               prober: http
               timeout: 10s
               http:
