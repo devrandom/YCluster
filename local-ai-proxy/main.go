@@ -14,22 +14,53 @@ import (
 	"time"
 )
 
+// DefaultConfigPath is the config file read by both `serve` and the
+// ops subcommands (`models`, `backends`) when -config is not given.
+const DefaultConfigPath = "/etc/local-ai-proxy/config.yaml"
+
 func main() {
-	addr := flag.String("addr", "", "listen address (overrides config)")
-	backendURL := flag.String("backend", "", "single backend URL (overrides config; implies passthrough mode)")
-	configPath := flag.String("config", "", "path to YAML config")
-	flag.Parse()
+	// Subcommand dispatch. `-config <path>` may appear before the
+	// subcommand (so ops commands use the same config as the server).
+	args := os.Args[1:]
+	configPath := DefaultConfigPath
+	for len(args) >= 2 && args[0] == "-config" {
+		configPath = args[1]
+		args = args[2:]
+	}
+	if len(args) > 0 {
+		switch args[0] {
+		case "models", "backends":
+			runCLI(args[0], args[1:], configPath)
+			return
+		case "serve":
+			args = args[1:]
+		}
+	}
+
+	// Serve mode. Parse the remaining flags as before.
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", "", "listen address (overrides config)")
+	backendURL := fs.String("backend", "", "single backend URL (overrides config; implies passthrough mode)")
+	cfgFlag := fs.String("config", "", "path to YAML config (default "+DefaultConfigPath+")")
+	_ = fs.Parse(args)
+	if *cfgFlag != "" {
+		configPath = *cfgFlag
+	}
 
 	cfg := Config{
 		Listen:  ":4000",
 		Backend: Backend{URL: "http://localhost:8080"},
 	}
-	if *configPath != "" {
-		loaded, err := LoadConfig(*configPath)
+	if _, err := os.Stat(configPath); err == nil {
+		loaded, err := LoadConfig(configPath)
 		if err != nil {
 			log.Fatal(err)
 		}
 		cfg = loaded
+	} else if !errors.Is(err, os.ErrNotExist) || configPath != DefaultConfigPath {
+		// Missing default config falls back to the built-in defaults.
+		// An explicit -config path must exist.
+		log.Fatalf("config %s: %v", configPath, err)
 	}
 	if *addr != "" {
 		cfg.Listen = *addr
