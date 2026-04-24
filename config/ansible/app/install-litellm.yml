@@ -106,14 +106,18 @@
       systemd:
         daemon_reload: yes
 
+    # LiteLLM was replaced by local-ai-proxy. The service file is kept
+    # installed as a rollback option but stopped and disabled by default.
+    # Flip with `-e litellm_enabled=true` to bring it back up.
     - name: Re-enable litellm service to update symlinks
       command: systemctl reenable litellm.service
-      when: litellm_service_file.changed
+      when: litellm_service_file.changed and (litellm_enabled | default(false) | bool)
 
-    - name: Enable litellm service (part of storage-apps target)
+    - name: Set litellm service state (stopped and disabled by default)
       systemd:
         name: litellm.service
-        enabled: yes
+        state: "{{ 'started' if litellm_enabled | default(false) | bool else 'stopped' }}"
+        enabled: "{{ litellm_enabled | default(false) | bool }}"
 
     - name: Configure PostgreSQL for LiteLLM
       when: is_storage_leader
