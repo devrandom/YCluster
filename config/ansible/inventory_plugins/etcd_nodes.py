@@ -151,7 +151,13 @@ class InventoryModule(BaseInventoryPlugin):
                     # Skip DHCP hosts (hostnames starting with 'dhcp-')
                     if hostname.startswith('dhcp-'):
                         continue
-                    
+
+                    # Skip disabled nodes — they are allocated in etcd but
+                    # not provisioned, so ansible should not target them.
+                    if allocation.get('disabled'):
+                        continue
+
+
                     # Add host to inventory
                     self.inventory.add_host(hostname)
                     
