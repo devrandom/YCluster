@@ -111,6 +111,13 @@
         msg: "YCluster installed successfully: {{ ycluster_version.stdout }}"
 
     - name: Generate bash completion script
-      shell: ycluster --completion > /etc/bash_completion.d/ycluster-completion.bash
-      args:
-        creates: /etc/bash_completion.d/ycluster-completion.bash
+      shell: |
+        set -o pipefail
+        new=$(ycluster --completion)
+        old=$(cat /etc/bash_completion.d/ycluster-completion.bash 2>/dev/null || true)
+        if [ "$new" != "$old" ]; then
+          printf '%s\n' "$new" > /etc/bash_completion.d/ycluster-completion.bash
+          echo CHANGED
+        fi
+      register: completion_result
+      changed_when: "'CHANGED' in completion_result.stdout"
