@@ -1,7 +1,7 @@
 # Managed by Ansible — install-local-ai-proxy.yml
 # See docs/local-ai-proxy.md for design notes.
 listen: "{{ proxy_listen }}"
-{% if use_etcd | default(false) | bool %}
+{% if use_etcd | default(true) | bool %}
 etcd:
   prefix: "{{ etcd_prefix | default('/cluster/config/inference/models/') }}"
 {% else %}
