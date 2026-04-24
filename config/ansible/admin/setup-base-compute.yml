@@ -15,11 +15,18 @@
         name: dnsmasq
         state: present
 
+    - name: Check if systemd-resolved is installed
+      command: systemctl list-unit-files systemd-resolved.service
+      register: resolved_unit
+      changed_when: false
+      failed_when: false
+
     - name: Disable systemd-resolved to free port 53
       systemd:
         name: systemd-resolved
         state: stopped
         enabled: no
+      when: "'systemd-resolved.service' in resolved_unit.stdout"
 
     - name: Check if resolv.conf is a symlink
       stat:
