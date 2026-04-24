@@ -6,19 +6,16 @@
 #
 # Two deploy modes:
 #
-# 1) Passthrough to a single backend (default):
+# 1) Etcd-sourced model routing (default — this is what production
+#    runs). The proxy watches /cluster/config/inference/models/ for
+#    model definitions and routes by the request's "model" field.
+#    Override the prefix with -e etcd_prefix=...
+#
+# 2) Passthrough to a single backend (dev / bring-up):
 #    ansible-playbook install-local-ai-proxy.yml --limit s3 \
-#      -e backend_url=http://nv1.xc:8000
+#      -e use_etcd=false -e backend_url=http://nv1.xc:8000
 #    The proxy forwards the full client path (including /v1/...) to
 #    the backend, so backend_url is host-only — no /v1 suffix.
-#
-# 2) Etcd-sourced model routing (after running
-#    scripts/migrate-litellm-to-etcd.py):
-#    ansible-playbook install-local-ai-proxy.yml --limit s3 \
-#      -e use_etcd=true
-#    The proxy watches /cluster/config/inference/models/ for model
-#    definitions and routes by the request's "model" field.
-#    Override the prefix with -e etcd_prefix=...
 #
 # The playbook builds the Go binary once on the control node (where
 # /opt/infrastructure/local-ai-proxy/ already has the source via
@@ -29,6 +26,7 @@
   hosts: storage
   become: yes
   vars:
+    use_etcd: true
     backend_url: "http://nv1.xc:8000"
     proxy_listen: ":4001"
     proxy_src_dir: /opt/infrastructure/local-ai-proxy
@@ -236,7 +234,7 @@
         msg: >-
           local-ai-proxy on {{ inventory_hostname }}:4001 replied
           {{ smoke.status | default('unreachable') }}
-          ({% if use_etcd | default(false) | bool %}source=etcd:{{ etcd_prefix | default('/cluster/config/inference/models/') }}{% else %}backend={{ backend_url }}{% endif %})
+          ({% if use_etcd | default(true) | bool %}source=etcd:{{ etcd_prefix | default('/cluster/config/inference/models/') }}{% else %}backend={{ backend_url }}{% endif %})
 
   handlers:
     - name: restart local-ai-proxy
