@@ -1,6 +1,6 @@
 ---
 - name: Configure NTP client to use local NTP server
-  hosts: storage:compute
+  hosts: managed
   become: yes
   tasks:
     - name: Remove ntpsec if installed
