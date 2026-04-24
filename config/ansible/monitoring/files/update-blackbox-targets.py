@@ -149,12 +149,13 @@ def get_probe_specs(domain):
             "probe_name": "root",
         },
         {
-            # LiteLLM inference gateway served by the open-webui vhost.
-            # Returns 401 Missing API key when probed without credentials;
-            # the http_401 module treats that as healthy.
+            # Inference gateway (local-ai-proxy) served by the
+            # open-webui vhost. nginx auth_request returns 401 when
+            # probed without credentials; http_401 treats that as
+            # healthy.
             "url": f"https://{domain}/v1/models",
             "module": "http_401",
-            "probe_name": "litellm-models",
+            "probe_name": "inference-models",
         },
         {
             # Admin-api public whitelist read-only status page.
