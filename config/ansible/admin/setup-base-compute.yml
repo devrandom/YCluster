@@ -1,6 +1,6 @@
 ---
-- name: Setup base configuration for compute nodes
-  hosts: compute
+- name: Setup base configuration for non-core managed nodes (local dnsmasq forwarder)
+  hosts: compute:adhoc:nas
   become: yes
 
   handlers:
