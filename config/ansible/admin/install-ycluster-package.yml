@@ -1,6 +1,6 @@
 ---
 - name: Install YCluster Python package
-  hosts: storage:compute
+  hosts: managed
   become: yes
   vars:
     ycluster_package_dir: /opt/ycluster

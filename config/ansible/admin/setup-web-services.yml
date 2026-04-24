@@ -1,6 +1,6 @@
 ---
-- name: Setup web services on storage and compute nodes
-  hosts: storage:compute
+- name: Setup web services on managed cluster nodes
+  hosts: managed
   become: yes
   vars:
     admin_services_dir: /opt/admin-services

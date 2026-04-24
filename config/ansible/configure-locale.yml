@@ -1,6 +1,6 @@
 ---
 - name: Configure locale on all managed nodes
-  hosts: storage:compute
+  hosts: managed
   become: yes
   tasks:
     - name: Ensure locale C.UTF-8 is available

@@ -222,7 +222,7 @@
           
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/lib/cluster/update-dhcp-hosts
+          ExecStart=/usr/local/bin/ycluster dhcp update-hosts
 
     - name: Enable and start network services
       systemd:
