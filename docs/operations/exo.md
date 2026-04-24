@@ -22,7 +22,7 @@ fit on one Mac. Survey outcome:
 
 So: **replicate vllm-mlx per mac for throughput when the model fits on
 one box; use exo when the model needs sharding or you want TP to cut
-single-request latency.** Both can coexist; LiteLLM routes to either.
+single-request latency.** Both can coexist; the inference gateway routes to either.
 
 ## Install
 
@@ -257,7 +257,7 @@ curl -s http://m1.yc:52415/v1/chat/completions \
   }'
 ```
 
-Plug into LiteLLM by adding `http://m1.yc:52415/v1/` as a backend. Any
+Register it with `ycluster inference add http://m1.yc:52415`. Any
 mac in the cluster serves the same instance (requests proxy to the
 coordinator internally), so a single backend URL is enough.
 
@@ -313,7 +313,7 @@ informative than M2.5.
 
 | Goal | Use |
 |---|---|
-| More throughput on a model that fits on one mac | **replicated vllm-mlx** behind LiteLLM — N×tps from N macs, no comms cost |
+| More throughput on a model that fits on one mac | **replicated vllm-mlx** behind the inference gateway — N×tps from N macs, no comms cost |
 | Lower batch=1 latency, small active-weight model (MoE, heavy quant) | vllm-mlx single-box (TP won't help — kernel-bound, see above) |
 | Lower batch=1 latency, large active-weight model at the bandwidth ceiling | **exo TP MlxJaccl** — TP lets per-mac reads scale out |
 | Run a model that exceeds one mac's unified memory | **exo TP MlxJaccl** — no alternative; required topology |
