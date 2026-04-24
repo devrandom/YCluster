@@ -93,10 +93,11 @@ class InventoryModule(BaseInventoryPlugin):
         # nvidia is a subgroup of compute
         self.inventory.add_child('compute', 'nvidia')
 
-        # managed = storage + compute (incl. nvidia via compute) + adhoc
+        # managed = storage + compute (incl. nvidia via compute) + adhoc + nas
         self.inventory.add_child('managed', 'storage')
         self.inventory.add_child('managed', 'compute')
         self.inventory.add_child('managed', 'adhoc')
+        self.inventory.add_child('managed', 'nas')
 
         # Discover actual etcd members from the cluster
         etcd_members = set()
