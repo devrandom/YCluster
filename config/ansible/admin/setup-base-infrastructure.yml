@@ -65,6 +65,29 @@
         force: no
       ignore_errors: yes
 
+    # Local DNS health checks resolve the bare hostname via 127.0.0.1
+    # (local dnsmasq). Dnsmasq only forwards *.xc to the gateway, so
+    # the short hostname must be in /etc/hosts. Nodes that were
+    # re-provisioned with a new name (e.g. former c1 -> x1) can end up
+    # with a stale 127.0.1.1 line; replace it.
+    - name: Ensure 127.0.1.1 loopback entry matches inventory hostname
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s'
+        line: "127.0.1.1 {{ inventory_hostname }}.xc {{ inventory_hostname }}"
+        state: present
+      notify: reload dnsmasq hosts
+
+  handlers:
+    # dnsmasq reads /etc/hosts at startup; nudge it to re-read when
+    # we change the loopback line. SIGHUP is a no-op if dnsmasq isn't
+    # running yet (first-run case on a fresh node).
+    - name: reload dnsmasq hosts
+      systemd:
+        name: dnsmasq
+        state: reloaded
+      failed_when: false
+
 - name: Storage specific setup
   hosts: storage
   become: yes
