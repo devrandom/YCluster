@@ -34,3 +34,10 @@
     - name: Apply netplan configuration
       command: netplan apply
       when: netplan_config.changed or cloud_init_removed.changed
+
+    # Joining-node bootstrap aid: with netplan installing the
+    # gateway-VIP fallback default route above, we just need DNS
+    # pointed somewhere that resolves before keepalived/squid have
+    # been installed locally.
+    - name: Configure managed-node DNS (loopback + gateway fallback)
+      include_tasks: tasks/configure-managed-dns.yml

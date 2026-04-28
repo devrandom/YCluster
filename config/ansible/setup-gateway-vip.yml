@@ -3,10 +3,9 @@
   hosts: core
   become: yes
   vars:
-    gateway_vip: "10.0.0.254"
     gateway_interface: "{{ cluster_interface }}"
-    vip_metric: 500  # Higher than DHCP default (100)
-    
+
+
   tasks:
     - name: Install keepalived and iptables-persistent
       apt:
@@ -156,39 +155,6 @@
         content: |
           include /etc/keepalived/conf.d/*.conf
       notify: restart keepalived
-
-    - name: Check if backup gateway route exists
-      shell: ip -j route show default | jq -r '.[] | select(.gateway == "{{ gateway_vip }}" and .metric == {{ vip_metric }}) | .gateway'
-      register: route_check
-      failed_when: false
-      changed_when: false
-
-    - name: Add backup gateway route to all nodes
-      command: ip route add default via {{ gateway_vip }} metric {{ vip_metric }}
-      when: route_check.stdout != gateway_vip
-      
-    - name: Make backup gateway route persistent
-      lineinfile:
-        path: /etc/rc.local
-        line: 'ip route add default via {{ gateway_vip }} metric {{ vip_metric }} 2>/dev/null || true'
-        insertbefore: 'exit 0'
-        create: yes
-        mode: '0755'
-
-    - name: Ensure rc.local has shebang
-      lineinfile:
-        path: /etc/rc.local
-        line: '#!/bin/bash'
-        insertbefore: BOF
-        create: yes
-        mode: '0755'
-
-    - name: Ensure rc.local ends with exit 0
-      lineinfile:
-        path: /etc/rc.local
-        line: 'exit 0'
-        create: yes
-        mode: '0755'
 
     - name: Enable and start keepalived
       systemd:

@@ -1,0 +1,51 @@
+# Idempotent DNS setup for managed cluster nodes.
+#
+# End state: a static /etc/resolv.conf with the local dnsmasq forwarder
+# (127.0.0.1) preferred and the cluster gateway VIP as the fallback.
+# We write this content once and never mutate it across stages.
+#
+#   nameserver 127.0.0.1     # local dnsmasq once it's installed
+#   nameserver {gateway_vip} # cluster forwarder via keepalived VIP
+#   search xc
+#   options timeout:1        # fail-fast to the fallback before dnsmasq is up
+#
+# Sequencing implication: before dnsmasq is installed locally, glibc
+# tries 127.0.0.1, fails within ~1s, then succeeds against the gateway
+# VIP. That covers the bootstrap window for nodes joining a running
+# cluster (the gateway VIP must already be up — cold-cluster bootstrap
+# of the very first core node still depends on uplink DHCP DNS).
+
+- name: Check if systemd-resolved is installed
+  command: systemctl list-unit-files systemd-resolved.service
+  register: _resolved_unit
+  changed_when: false
+  failed_when: false
+
+- name: Disable systemd-resolved (frees port 53 for local dnsmasq)
+  systemd:
+    name: systemd-resolved
+    state: stopped
+    enabled: no
+  when: "'systemd-resolved.service' in _resolved_unit.stdout"
+
+- name: Check if /etc/resolv.conf is a symlink (systemd-resolved stub)
+  stat:
+    path: /etc/resolv.conf
+  register: _resolv_stat
+
+- name: Remove systemd-resolved symlink at /etc/resolv.conf
+  file:
+    path: /etc/resolv.conf
+    state: absent
+  when: _resolv_stat.stat.islnk is defined and _resolv_stat.stat.islnk
+
+- name: Write static /etc/resolv.conf (loopback + gateway fallback)
+  copy:
+    dest: /etc/resolv.conf
+    mode: '0644'
+    content: |
+      # Managed by Ansible — admin/tasks/configure-managed-dns.yml
+      nameserver 127.0.0.1
+      nameserver {{ gateway_vip }}
+      search xc
+      options timeout:1
