@@ -3,3 +3,12 @@ tang_port: 8777
 
 # Bootstrap files location (ansible SSH key, etc.)
 bootstrap_files_dir: /opt/bootstrap-files
+
+# Cluster gateway VIP — keepalived-managed across core nodes; routes
+# external traffic and runs dnsmasq + squid for joining nodes.
+gateway_vip: "10.0.0.254"
+
+# Metric for the cluster default route via gateway_vip. Higher than
+# the DHCP-installed uplink default (100) so a working uplink wins,
+# and the cluster route is the fallback when no uplink is up.
+vip_metric: 500
