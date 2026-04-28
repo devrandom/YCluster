@@ -3,7 +3,6 @@
   hosts: core
   become: yes
   vars:
-    gateway_vip: "10.0.0.254"
     wg_reconcile_interval: "30s"
 
   tasks:
@@ -95,7 +94,6 @@
   become: yes
   vars:
     wg_peer_subnet: "10.0.1.0/24"
-    gateway_vip: "10.0.0.254"
     wg_route_metric: 1024
   tasks:
     - name: Check for existing wg peer route via gateway VIP

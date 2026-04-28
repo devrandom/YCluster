@@ -9,6 +9,14 @@ network:
       dhcp4: false
       addresses: ["{{ ansible_host }}/24"]
       optional: true
+      # Fallback default route via the cluster gateway VIP. Higher
+      # metric than DHCP on the uplink (100) so a working uplink wins
+      # and this kicks in only when the uplink is down. The VIP itself
+      # is in this subnet, so no on-link hint needed.
+      routes:
+        - to: default
+          via: "{{ gateway_vip }}"
+          metric: {{ vip_metric }}
 {% if amt_interface %}
     amt:
       match:

@@ -15,38 +15,8 @@
         name: dnsmasq
         state: present
 
-    - name: Check if systemd-resolved is installed
-      command: systemctl list-unit-files systemd-resolved.service
-      register: resolved_unit
-      changed_when: false
-      failed_when: false
-
-    - name: Disable systemd-resolved to free port 53
-      systemd:
-        name: systemd-resolved
-        state: stopped
-        enabled: no
-      when: "'systemd-resolved.service' in resolved_unit.stdout"
-
-    - name: Check if resolv.conf is a symlink
-      stat:
-        path: /etc/resolv.conf
-      register: resolv_stat
-
-    - name: Remove systemd-resolved symlink
-      file:
-        path: /etc/resolv.conf
-        state: absent
-      when: resolv_stat.stat.islnk is defined and resolv_stat.stat.islnk
-
-    - name: Create static resolv.conf (use gateway until local dnsmasq is running)
-      copy:
-        dest: /etc/resolv.conf
-        content: |
-          nameserver 10.0.0.254
-          nameserver 127.0.0.1
-          search xc
-        mode: '0644'
+    - name: Configure managed-node DNS (loopback + gateway fallback)
+      include_tasks: tasks/configure-managed-dns.yml
 
     - name: Clear default dnsmasq.conf to avoid conflicts
       copy:
@@ -87,7 +57,7 @@
         content: |
           # DNS configuration
           # Forward .xc queries to gateway VIP
-          server=/xc/10.0.0.254
+          server=/xc/{{ gateway_vip }}
           domain=xc
           domain-needed
 
