@@ -279,7 +279,7 @@
       "title": "Backend health",
       "type": "table",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
-      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 22},
+      "gridPos": {"h": 9, "w": 6, "x": 0, "y": 22},
       "id": 8,
       "description": "One row per backend, showing its current state (healthy / down / disabled / unknown).",
       "fieldConfig": {
@@ -302,7 +302,7 @@
       "pluginVersion": "10",
       "targets": [
         {
-          "expr": "local_ai_proxy_backend_state == 1",
+          "expr": "max by (backend, state) (local_ai_proxy_backend_state) == 1",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -311,9 +311,58 @@
       ],
       "transformations": [
         {"id": "organize", "options": {
-          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "cluster": true, "node": false},
-          "renameByName": {"backend": "Backend", "state": "State", "node": "Host"},
-          "indexByName": {"backend": 0, "state": 1, "node": 2}
+          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "cluster": true},
+          "renameByName": {"backend": "Backend", "state": "State"},
+          "indexByName": {"backend": 0, "state": 1}
+        }}
+      ]
+    },
+    {
+      "title": "Model health",
+      "type": "table",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 6, "y": 22},
+      "id": 20,
+      "description": "Healthy / total backends per model. Zero healthy means requests to that model fail with 503.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "auto", "cellOptions": {"type": "color-background"}}
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "Healthy"}, "properties": [
+            {"id": "custom.cellOptions", "value": {"type": "color-background"}},
+            {"id": "thresholds", "value": {"mode": "absolute", "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 1},
+              {"color": "green", "value": 2}
+            ]}}
+          ]}
+        ]
+      },
+      "options": {"showHeader": true, "footer": {"show": false}, "sortBy": [{"displayName": "Healthy", "desc": false}]},
+      "pluginVersion": "10",
+      "targets": [
+        {
+          "expr": "max by (model) (local_ai_proxy_model_healthy_backends)",
+          "instant": true,
+          "format": "table",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        },
+        {
+          "expr": "max by (model) (local_ai_proxy_model_total_backends)",
+          "instant": true,
+          "format": "table",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {
+          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "cluster": true},
+          "renameByName": {"model": "Model", "Value #A": "Healthy", "Value #B": "Total"},
+          "indexByName": {"model": 0, "Value #A": 1, "Value #B": 2}
         }}
       ]
     },
