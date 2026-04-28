@@ -169,6 +169,30 @@ func (hc *HealthChecker) Snapshot() map[string]BackendHealth {
 	return out
 }
 
+// updateModelMetrics recomputes per-model healthy/total backend counts
+// from the current states and the source snapshot. Called after every
+// state transition so the gauges also reflect model-set changes.
+func (hc *HealthChecker) updateModelMetrics() {
+	if hc.Metrics == nil {
+		return
+	}
+	snap := hc.source.Snapshot()
+	hc.mu.RLock()
+	counts := make(map[string]struct{ healthy, total int }, len(snap))
+	for model, urls := range snap {
+		c := counts[model]
+		for _, u := range urls {
+			c.total++
+			if bh, ok := hc.states[u.String()]; ok && bh.State == StateHealthy {
+				c.healthy++
+			}
+		}
+		counts[model] = c
+	}
+	hc.mu.RUnlock()
+	hc.Metrics.SetModelBackends(counts)
+}
+
 // checkAll runs one round of checks against every unique backend URL
 // currently in source.Snapshot(). Exposed for tests.
 func (hc *HealthChecker) checkAll(ctx context.Context) {
@@ -252,6 +276,7 @@ func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string) {
 	hc.mu.Unlock()
 
 	hc.Metrics.SetBackendState(u.String(), state.String())
+	hc.updateModelMetrics()
 
 	if !had || prev.State != state {
 		msg := "backend healthy"
