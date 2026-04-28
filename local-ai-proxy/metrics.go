@@ -22,6 +22,9 @@ type Metrics struct {
 	backendUp    *prometheus.GaugeVec
 	backendState *prometheus.GaugeVec
 	routeErrors  *prometheus.CounterVec
+
+	modelHealthy *prometheus.GaugeVec
+	modelTotal   *prometheus.GaugeVec
 }
 
 // backendStateLabels enumerates the possible state label values so we
@@ -75,8 +78,16 @@ func NewMetrics() *Metrics {
 			Name: "local_ai_proxy_route_errors_total",
 			Help: "Requests rejected by the router before any upstream dispatch.",
 		}, []string{"reason"}),
+		modelHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "local_ai_proxy_model_healthy_backends",
+			Help: "Number of currently-healthy backends serving each model.",
+		}, []string{"model"}),
+		modelTotal: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "local_ai_proxy_model_total_backends",
+			Help: "Number of backends configured for each model (healthy + down + disabled + unknown).",
+		}, []string{"model"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors)
+	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors, m.modelHealthy, m.modelTotal)
 	return m
 }
 
@@ -153,6 +164,21 @@ func (m *Metrics) SetBackendState(backend, state string) {
 			v = 1
 		}
 		m.backendState.WithLabelValues(backend, s).Set(v)
+	}
+}
+
+// SetModelBackends replaces the per-model backend counts with the
+// given snapshot. Models no longer present are cleared so stale
+// series don't linger after a config reload removes a model.
+func (m *Metrics) SetModelBackends(counts map[string]struct{ healthy, total int }) {
+	if m == nil {
+		return
+	}
+	m.modelHealthy.Reset()
+	m.modelTotal.Reset()
+	for model, c := range counts {
+		m.modelHealthy.WithLabelValues(model).Set(float64(c.healthy))
+		m.modelTotal.WithLabelValues(model).Set(float64(c.total))
 	}
 }
 
