@@ -6,6 +6,8 @@
     cuda_version: "12-8"
     # Blackwell GPUs require open kernel modules - proprietary driver unsupported
     nvidia_driver_package: "nvidia-open"
+    # Default power limit in watts (max for RTX PRO 6000 Blackwell is 600)
+    nvidia_power_limit_watts: 300
   tasks:
     - name: Display NVIDIA GPU status
       debug:
@@ -95,7 +97,46 @@
         msg: "{{ nvidia_smi.stdout_lines }}"
       when: nvidia_smi.rc == 0
 
+    - name: Install nvidia-power-limit script
+      copy:
+        src: files/scripts/nvidia-power-limit
+        dest: /usr/local/sbin/nvidia-power-limit
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Install nvidia-power-limit systemd service
+      copy:
+        dest: /etc/systemd/system/nvidia-power-limit.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Set NVIDIA GPU power limits
+          After=nvidia-persistenced.service
+          Wants=nvidia-persistenced.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/sbin/nvidia-power-limit {{ '--max' if nvidia_power_limit_watts >= 600 else '' }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Reload systemd
+
+    - name: Enable and start nvidia-power-limit service
+      systemd:
+        name: nvidia-power-limit
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
     - name: Reboot required notice
       debug:
         msg: "NOTICE: Reboot required to load NVIDIA kernel modules"
       when: driver_install.changed or cuda_install.changed
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
