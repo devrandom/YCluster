@@ -1,0 +1,28 @@
+#!/bin/bash
+# Set NVIDIA GPU power limits. Defaults to 300W; pass --max to restore 600W.
+set -euo pipefail
+
+LIMIT=300
+
+usage() {
+    echo "Usage: $0 [--max]"
+    echo "  (no args)  Set power limit to 300W (default)"
+    echo "  --max      Set power limit to 600W (maximum)"
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --max) LIMIT=600 ;;
+        *) usage ;;
+    esac
+    shift
+done
+
+GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+
+echo "Setting power limit to ${LIMIT}W on ${GPU_COUNT} GPU(s)..."
+for i in $(seq 0 $((GPU_COUNT - 1))); do
+    nvidia-smi -i "$i" -pl "$LIMIT"
+done
+echo "Done."
