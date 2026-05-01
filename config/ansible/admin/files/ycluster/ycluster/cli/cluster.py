@@ -38,6 +38,16 @@ def register_cluster_commands(subparsers):
     enable_parser.add_argument('hostname', help='Hostname to enable (e.g., c1)')
     enable_parser.set_defaults(func=cluster_enable_host)
 
+    # Drain command
+    drain_parser = cluster_subparsers.add_parser('drain', help='Drain a node (disable leader election)')
+    drain_parser.add_argument('hostname', help='Hostname to drain (e.g., s2)')
+    drain_parser.set_defaults(func=cluster_drain_host)
+
+    # Undrain command
+    undrain_parser = cluster_subparsers.add_parser('undrain', help='Undrain a node (re-enable leader election)')
+    undrain_parser.add_argument('hostname', help='Hostname to undrain (e.g., s2)')
+    undrain_parser.set_defaults(func=cluster_undrain_host)
+
 
 def register_health_alias(subparsers):
     """Register top-level 'health' command as alias for 'cluster health'"""
@@ -94,6 +104,40 @@ def cluster_disable_host(args):
 def cluster_enable_host(args):
     """Re-enable a host so it appears in status page"""
     _set_host_state(args.hostname, 'enable')
+
+
+def _set_drain_state(hostname, drain):
+    """Helper to drain/undrain a node via the admin API"""
+    import sys
+    storage_leader = get_storage_leader_ip()
+    if not storage_leader:
+        print("Error: Could not determine storage leader", file=sys.stderr)
+        sys.exit(1)
+
+    action = 'drain' if drain else 'undrain'
+    url = f"http://{storage_leader}:12723/api/{action}/{hostname}"
+    try:
+        response = requests.post(url, timeout=10)
+        data = response.json()
+        if response.status_code == 200:
+            status = data.get('status', action + 'ed')
+            print(f"{hostname}: {status}")
+        else:
+            print(f"Error: {data.get('error', 'Unknown error')}", file=sys.stderr)
+            sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cluster_drain_host(args):
+    """Drain a node to disable leader election"""
+    _set_drain_state(args.hostname, drain=True)
+
+
+def cluster_undrain_host(args):
+    """Undrain a node to re-enable leader election"""
+    _set_drain_state(args.hostname, drain=False)
 
 
 def get_storage_leader_ip():
