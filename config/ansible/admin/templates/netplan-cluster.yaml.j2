@@ -9,14 +9,21 @@ network:
       dhcp4: false
       addresses: ["{{ ansible_host }}/24"]
       optional: true
-      # Fallback default route via the cluster gateway VIP. Higher
-      # metric than DHCP on the uplink (100) so a working uplink wins
-      # and this kicks in only when the uplink is down. The VIP itself
-      # is in this subnet, so no on-link hint needed.
       routes:
+        # Fallback default route via the cluster gateway VIP. Higher
+        # metric than DHCP on the uplink (100) so a working uplink wins
+        # and this kicks in only when the uplink is down. The VIP itself
+        # is in this subnet, so no on-link hint needed.
         - to: default
           via: "{{ gateway_vip }}"
           metric: {{ vip_metric }}
+        # WireGuard peer subnet. networkd installs this unconditionally at
+        # boot — no on-link check, so it survives reboots even if the VIP
+        # has not yet been claimed by keepalived. Traffic flows as soon as
+        # the VIP comes up; no retry logic needed.
+        - to: "{{ wg_peer_subnet }}"
+          via: "{{ gateway_vip }}"
+          metric: {{ wg_route_metric }}
 {% if amt_interface %}
     amt:
       match:
