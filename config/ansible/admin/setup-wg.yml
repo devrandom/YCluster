@@ -84,47 +84,19 @@
       systemd:
         daemon_reload: yes
 
-# Cluster-side: every node needs a route for the wg peer subnet pointing
-# at the gateway VIP (whoever owns it holds the active wg server and has
-# 10.0.1.0/24 connected via wg0). On the wg server itself the connected
-# route via wg0 has a lower metric than this static route, so it wins —
-# the two rules coexist safely on all cluster nodes.
-- name: Install wg peer subnet route on all cluster nodes
+# The wg peer subnet route (10.0.1.0/24 via gateway_vip) is now declared
+# in the netplan template (admin/templates/netplan-cluster.yaml.j2) and
+# applied by configure-netplan.yml. networkd installs the route
+# unconditionally at boot — no on-link validation, no rc.local race.
+#
+# This play removes the old rc.local lines that did the same job.
+- name: Remove legacy rc.local wg peer route entries
   hosts: storage:compute
   become: yes
-  vars:
-    wg_peer_subnet: "10.0.1.0/24"
-    wg_route_metric: 1024
   tasks:
-    - name: Check for existing wg peer route via gateway VIP
-      shell: "ip -4 route show {{ wg_peer_subnet }} via {{ gateway_vip }} | grep -q ."
-      register: wg_route_check
-      failed_when: false
-      changed_when: false
-
-    - name: Add wg peer route at runtime (metric keeps connected wg0 first)
-      command: "ip -4 route add {{ wg_peer_subnet }} via {{ gateway_vip }} metric {{ wg_route_metric }}"
-      when: wg_route_check.rc != 0
-
-    - name: Make wg peer route persistent via rc.local
+    - name: Remove old rc.local wg route line
       lineinfile:
         path: /etc/rc.local
         line: 'ip -4 route add {{ wg_peer_subnet }} via {{ gateway_vip }} metric {{ wg_route_metric }} 2>/dev/null || true'
-        insertbefore: 'exit 0'
-        create: yes
-        mode: '0755'
-
-    - name: Ensure rc.local has shebang
-      lineinfile:
-        path: /etc/rc.local
-        line: '#!/bin/bash'
-        insertbefore: BOF
-        create: yes
-        mode: '0755'
-
-    - name: Ensure rc.local ends with exit 0
-      lineinfile:
-        path: /etc/rc.local
-        line: 'exit 0'
-        create: yes
-        mode: '0755'
+        state: absent
+      when: ansible_facts['os_family'] == 'Debian'
