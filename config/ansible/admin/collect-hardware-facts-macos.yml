@@ -1,0 +1,125 @@
+---
+# Collect hardware facts for macOS nodes and persist to etcd.
+#
+# ycluster is not installed on macOS nodes, so we:
+#   1. Run system_profiler + sysctl on each macOS node, assemble facts JSON
+#   2. Slurp the JSON back to the Ansible controller
+#   3. Copy it to a storage node and write to etcd via ycluster inventory
+#
+# Usage:
+#   ./run-playbook.sh admin/collect-hardware-facts-macos.yml
+#   ./run-playbook.sh admin/collect-hardware-facts-macos.yml --limit m1
+
+- name: Collect hardware facts from macOS nodes
+  hosts: macos
+  become: no
+  gather_facts: no
+
+  tasks:
+    - name: Collect and assemble hardware facts
+      shell: |
+        set -e
+        SP=$(system_profiler SPHardwareDataType SPStorageDataType SPDisplaysDataType SPNetworkDataType -json 2>/dev/null)
+        SYSCTL=$(sysctl hw.physicalcpu hw.logicalcpu hw.memsize machdep.cpu.brand_string 2>/dev/null || true)
+        OS=$(sw_vers -productVersion)
+        KERNEL=$(uname -r)
+        python3 -c "
+import json, sys, datetime
+
+sp = json.loads(sys.argv[1])
+sysctl_lines = dict(
+    line.split(': ', 1) for line in sys.argv[2].strip().splitlines() if ': ' in line
+)
+
+facts = {
+    'collected_at': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+00:00'),
+    'os': 'macOS ' + sys.argv[3].strip(),
+    'kernel': sys.argv[4].strip(),
+    'cpu': None, 'ram_gb': None,
+    'disks': [], 'nics': [], 'gpus': [],
+    'serial': None, 'product': None, 'bios_version': None,
+}
+
+hw = (sp.get('SPHardwareDataType') or [{}])[0]
+facts['product'] = hw.get('machine_name')
+facts['serial'] = hw.get('serial_number')
+facts['bios_version'] = hw.get('SMC_version_system') or hw.get('boot_rom_version')
+mem_str = hw.get('physical_memory', '')
+if mem_str:
+    parts = mem_str.split()
+    if len(parts) == 2 and parts[1] == 'GB':
+        facts['ram_gb'] = int(parts[0])
+
+brand = sysctl_lines.get('machdep.cpu.brand_string', '').strip() or facts.get('product') or 'Apple Silicon'
+phys  = sysctl_lines.get('hw.physicalcpu', '').strip()
+logical = sysctl_lines.get('hw.logicalcpu', '').strip()
+facts['cpu'] = (brand + ', ' + phys + 'c/' + logical + 't') if phys and logical else brand
+
+seen = set()
+for vol in (sp.get('SPStorageDataType') or []):
+    dev = vol.get('bsd_name', '').rstrip('0123456789').rstrip('s')
+    if not dev or dev in seen:
+        continue
+    seen.add(dev)
+    size_bytes = vol.get('com.apple.diskmanagement.sizeondisk') or 0
+    size_g = int(size_bytes) // (1024**3) if size_bytes else 0
+    medium = vol.get('physical_interconnect', '').lower()
+    disk_type = 'nvme' if ('pcie' in medium or 'nvme' in medium) else 'ssd' if 'flash' in medium else 'hdd'
+    facts['disks'].append({'name': dev, 'model': vol.get('device_model') or vol.get('_name'), 'size': str(size_g)+'G' if size_g else '?', 'type': disk_type})
+
+for gpu in (sp.get('SPDisplaysDataType') or []):
+    name = gpu.get('sppci_model') or gpu.get('_name')
+    if name:
+        facts['gpus'].append({'vendor': 'Apple' if 'Apple' in name else gpu.get('sppci_vendor',''), 'model': name, 'vram': gpu.get('sppci_vram') or gpu.get('_spdisplays_vram')})
+
+for iface in (sp.get('SPNetworkDataType') or []):
+    name = iface.get('interface') or iface.get('_name')
+    if not name or iface.get('spnetwork_interface_type') in ('IEEE80211', 'Bridge'):
+        continue
+    facts['nics'].append({'name': name, 'mac': iface.get('spnetwork_hardware_address'), 'speed': iface.get('spnetwork_actual_link_speed'), 'driver': None})
+
+print(json.dumps(facts))
+" "\$SP" "\$SYSCTL" "\$OS" "\$KERNEL"
+      args:
+        executable: /bin/bash
+      register: facts_result
+      changed_when: false
+
+    - name: Write facts JSON to temp file on storage node
+      delegate_to: "{{ groups['storage'] | first }}"
+      copy:
+        content: "{{ facts_result.stdout }}"
+        dest: "/tmp/ycluster-hw-{{ inventory_hostname }}.json"
+        mode: '0600'
+
+    - name: Persist facts to etcd via storage node
+      delegate_to: "{{ groups['storage'] | first }}"
+      environment:
+        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      shell: |
+        python3 -c "
+import json
+from ycluster.common.etcd_utils import get_etcd_client
+with open('/tmp/ycluster-hw-{{ inventory_hostname }}.json') as f:
+    facts = json.load(f)
+client = get_etcd_client()
+client.put('/cluster/nodes/hardware/{{ inventory_hostname }}', json.dumps(facts))
+print('{{ inventory_hostname }}: stored')
+print('  product: ' + str(facts.get('product')))
+print('  cpu:     ' + str(facts.get('cpu')))
+print('  ram:     ' + str(facts.get('ram_gb')) + ' GB')
+"
+      args:
+        executable: /bin/bash
+      register: write_result
+      changed_when: true
+
+    - name: Clean up temp file on storage node
+      delegate_to: "{{ groups['storage'] | first }}"
+      file:
+        path: "/tmp/ycluster-hw-{{ inventory_hostname }}.json"
+        state: absent
+
+    - name: Show result
+      debug:
+        msg: "{{ write_result.stdout_lines }}"
