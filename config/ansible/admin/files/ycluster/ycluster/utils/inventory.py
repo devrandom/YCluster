@@ -77,7 +77,7 @@ def list_all():
         try:
             alloc = json.loads(value.decode())
             hostname = alloc.get('hostname')
-            if hostname:
+            if hostname and not hostname.startswith('dhcp-'):
                 nodes[hostname] = {'allocation': alloc, 'hardware': None, 'asset': {}}
         except Exception:
             pass
