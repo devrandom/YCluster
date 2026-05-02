@@ -23,6 +23,10 @@ def register_inventory_commands(subparsers):
 
     # collect
     collect_p = sub.add_parser('collect', help='Collect hardware facts for this node and persist to etcd')
+    collect_p.add_argument('--from-file', dest='from_file', metavar='FILE',
+                           help='Load pre-collected facts from JSON file instead of collecting locally')
+    collect_p.add_argument('--hostname', dest='hostname', metavar='HOSTNAME',
+                           help='Target hostname when using --from-file (defaults to local hostname)')
     collect_p.set_defaults(func=_collect)
 
     # set-asset
@@ -123,10 +127,17 @@ def _print_node(hostname, hw, asset):
 
 
 def _collect(args):
+    import json as _json
     import platform as _platform
-    hostname = _platform.node()
-    print(f"Collecting hardware facts for {hostname}...")
-    facts = inv.collect_hardware()
+    from_file = getattr(args, 'from_file', None)
+    hostname = getattr(args, 'hostname', None) or _platform.node()
+    if from_file:
+        with open(from_file) as f:
+            facts = _json.load(f)
+        print(f"Loaded facts from {from_file} for {hostname}")
+    else:
+        print(f"Collecting hardware facts for {hostname}...")
+        facts = inv.collect_hardware()
     inv.put_hardware(hostname, facts)
     print(f"Stored at /cluster/nodes/hardware/{hostname}")
     _print_node(hostname, facts, inv.get_asset(hostname))
