@@ -49,15 +49,19 @@ _CACHED_CLIENT = None
 
 
 def get_etcd_client(hosts=None, max_retries=3, retry_delay=1, grpc_options=None):
-    """Return a cached etcd client, creating it with retries if needed."""
+    """Return a cached etcd client, creating it with retries if needed.
+
+    The cached client is reused without a round-trip status() call —
+    status() costs ~330ms per call on some nodes, and calling it on every
+    get_etcd_client() invocation adds up to seconds when the health
+    endpoint calls get_etcd_client() many times per request. If the
+    cached client has gone stale, the next real operation will raise an
+    exception; callers that need reconnect behaviour should set
+    _CACHED_CLIENT = None and retry.
+    """
     global _CACHED_CLIENT
-    if _CACHED_CLIENT:
-        try:
-            _CACHED_CLIENT.status()
-            return _CACHED_CLIENT
-        except Exception as e:
-            print(f"Cached etcd client failed health check: {e}")
-            _CACHED_CLIENT = None
+    if _CACHED_CLIENT is not None:
+        return _CACHED_CLIENT
 
     hosts = hosts or get_etcd_hosts()
     try:

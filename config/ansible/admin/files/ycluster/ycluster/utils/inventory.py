@@ -150,20 +150,29 @@ def collect_hardware():
         lines = {k.strip(): v.strip() for k, v in
                  (line.split(':', 1) for line in r.stdout.splitlines() if ':' in line)}
         model = lines.get('Model name', '').replace('(R)', '').replace('(TM)', '').strip()
-        cores = lines.get('CPU(s)', '')
-        threads_per = lines.get('Thread(s) per core', '1')
+        # CPU(s) = total logical CPUs (threads). Physical cores = sockets * cores-per-socket.
+        total_threads = int(lines.get('CPU(s)', 0) or 0)
+        sockets = int(lines.get('Socket(s)', 1) or 1)
+        cores_per_socket = int(lines.get('Core(s) per socket', 0) or 0)
+        phys_cores = sockets * cores_per_socket or total_threads
         if model:
-            facts['cpu'] = f"{model}, {cores}c/{int(cores or 0)*int(threads_per or 1)}t" if cores else model
+            facts['cpu'] = f"{model}, {phys_cores}c/{total_threads}t" if total_threads else model
     except Exception:
         pass
 
-    # RAM
+    # RAM — sum installed DIMMs from dmidecode for exact physical capacity.
     try:
-        r = _run(['free', '-g'])
+        r = _run(['dmidecode', '-t', 'memory'], timeout=10)
+        total_mb = 0
         for line in r.stdout.splitlines():
-            if line.startswith('Mem:'):
-                facts['ram_gb'] = int(line.split()[1])
-                break
+            line = line.strip()
+            if line.startswith('Size:') and 'No Module Installed' not in line:
+                parts = line.split()
+                if len(parts) >= 3:
+                    val, unit = int(parts[1]), parts[2].upper()
+                    total_mb += val * 1024 if unit == 'GB' else val
+        if total_mb:
+            facts['ram_gb'] = total_mb // 1024
     except Exception:
         pass
 
@@ -221,12 +230,14 @@ def collect_hardware():
             if link_type not in ('ether',):
                 continue
             nic = {'name': name, 'mac': iface.get('address'), 'speed': None, 'driver': None}
-            # ethtool for speed
+            # ethtool for speed — skip "Unknown!" (unplugged/down interfaces)
             try:
                 et = _run(['ethtool', name], timeout=3)
                 for line in et.stdout.splitlines():
                     if 'Speed:' in line:
-                        nic['speed'] = line.split(':', 1)[1].strip()
+                        speed = line.split(':', 1)[1].strip()
+                        if speed and speed != 'Unknown!':
+                            nic['speed'] = speed
                         break
             except Exception:
                 pass
