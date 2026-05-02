@@ -23,6 +23,8 @@
 
     - name: Collect and persist hardware facts
       command: ycluster inventory collect
+      environment:
+        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
       register: collect_result
       changed_when: true
 

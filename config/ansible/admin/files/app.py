@@ -2473,22 +2473,30 @@ def get_inference_status():
         return None
 
 
+def get_all_host_health(hosts):
+    """Fetch health for all non-disabled hosts in parallel."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    host_health = {}
+    active = [h for h in hosts if not h.get('disabled', False)]
+    for h in hosts:
+        if h.get('disabled', False):
+            host_health[h['hostname']] = {'status': 'disabled', 'services': []}
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = {executor.submit(get_host_health, h['ip']): h['hostname'] for h in active}
+        for future in as_completed(futures):
+            host_health[futures[future]] = future.result()
+
+    return host_health
+
+
 @app.route('/api/cluster-status')
 def cluster_status_api():
     """API endpoint returning cluster status as JSON"""
     hosts = get_all_hosts()
-    host_health = {}
     leadership = get_leadership_status()
     certificate_status = check_certificate_expiry()
-
-    # Get health status for each host (skip disabled hosts)
-    for host in hosts:
-        if host.get('disabled', False):
-            host_health[host['hostname']] = {'status': 'disabled', 'services': []}
-        else:
-            host_health[host['hostname']] = get_host_health(host['ip'])
-
-    # Extract VIP status from existing health data
+    host_health = get_all_host_health(hosts)
     vip_status = get_cluster_vip_status(host_health)
 
     return jsonify({
@@ -2524,18 +2532,9 @@ def static_files(filename):
 def status_page():
     """Web page showing cluster-wide health status"""
     hosts = get_all_hosts()
-    host_health = {}
     leadership = get_leadership_status()
     certificate_status = check_certificate_expiry()
-
-    # Get health status for each host (skip disabled hosts)
-    for host in hosts:
-        if host.get('disabled', False):
-            host_health[host['hostname']] = {'status': 'disabled', 'services': []}
-        else:
-            host_health[host['hostname']] = get_host_health(host['ip'])
-    
-    # Extract VIP status from existing health data
+    host_health = get_all_host_health(hosts)
     vip_status = get_cluster_vip_status(host_health)
     
     # Get drain status for this node

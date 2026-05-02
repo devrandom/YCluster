@@ -1,6 +1,9 @@
 #!/bin/bash
 # Sync local repo to s3.yc:/opt/infrastructure/ using rsync + watchman.
 # Runs an initial sync, then re-syncs on any file change.
+#
+# The watchman trigger persists in the watchman daemon across restarts of
+# this script. Ctrl-C only removes the trigger (not the watch root).
 
 set -euo pipefail
 
@@ -16,7 +19,8 @@ do_sync() {
 }
 
 cleanup() {
-    watchman watch-del "$REPO" >/dev/null 2>&1 || true
+    kill "$TAIL_PID" 2>/dev/null || true
+    watchman trigger-del "$REPO" dev-sync >/dev/null 2>&1 || true
     echo "stopped"
 }
 trap cleanup EXIT
@@ -41,8 +45,8 @@ watchman -j <<EOF >/dev/null
 EOF
 
 do_sync
-echo "watching $REPO — trigger log: $LOG (Ctrl-C to stop)"
+echo "watching $REPO — background log: $LOG (Ctrl-C to stop)"
+touch "$LOG"
 tail -f "$LOG" &
 TAIL_PID=$!
-trap "kill $TAIL_PID 2>/dev/null; watchman watch-del '$REPO' >/dev/null 2>&1 || true; echo stopped" EXIT
-while true; do sleep 1; done
+wait $TAIL_PID
