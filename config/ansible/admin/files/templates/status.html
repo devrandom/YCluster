@@ -538,8 +538,8 @@
                             <template x-if="(node.hardware?.gpus || []).length === 0">
                                 <span style="color: #666;">-</span>
                             </template>
-                            <template x-for="g in (node.hardware?.gpus || [])" :key="g.model || g.vendor">
-                                <div x-text="g.model || g.vendor"></div>
+                            <template x-for="g in gpuSummary(node.hardware?.gpus || [])" :key="g.label">
+                                <div x-text="g.label"></div>
                             </template>
                         </td>
                         <!-- Asset fields — inline editable -->
@@ -993,6 +993,18 @@
                     }
                     
                     return tooltip;
+                },
+
+                // Collapse repeated GPU entries into "N× Model"
+                gpuSummary(gpus) {
+                    const counts = {};
+                    for (const g of gpus) {
+                        const key = g.model || g.vendor || '?';
+                        counts[key] = (counts[key] || 0) + 1;
+                    }
+                    return Object.entries(counts).map(([label, n]) => ({
+                        label: n > 1 ? `${n}× ${label}` : label
+                    }));
                 },
 
                 // Inventory methods
