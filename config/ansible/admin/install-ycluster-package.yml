@@ -110,6 +110,13 @@
       debug:
         msg: "YCluster installed successfully: {{ ycluster_version.stdout }}"
 
+    - name: Restart admin-api if package was updated
+      systemd:
+        name: admin-api
+        state: restarted
+      when: ycluster_sync.changed
+      failed_when: false
+
     - name: Generate bash completion script
       shell: |
         set -e
