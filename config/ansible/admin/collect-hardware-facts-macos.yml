@@ -16,21 +16,17 @@
   gather_facts: no
 
   tasks:
-    - name: Copy collection script to macOS node
+    - name: Install collection script
+      become: yes
       copy:
-        src: files/collect-hw-macos.py
-        dest: /tmp/collect-hw-macos.py
+        src: files/scripts/collect-hw-macos.py
+        dest: /usr/local/ycluster/collect-hw-macos
         mode: '0755'
 
     - name: Run collection script
-      command: python3 /tmp/collect-hw-macos.py
+      command: python3 /usr/local/ycluster/collect-hw-macos
       register: facts_result
       changed_when: false
-
-    - name: Remove collection script
-      file:
-        path: /tmp/collect-hw-macos.py
-        state: absent
 
     - name: Write facts JSON to temp file on storage node
       delegate_to: "{{ groups['storage'] | first }}"
