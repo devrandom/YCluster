@@ -389,6 +389,9 @@ def _collect_hardware_linux():
                 vendor = parts[3]
                 device = parts[5]
                 if any(c in cls for c in ('VGA', 'Display', '3D', 'Processing Acc')):
+                    # Skip BMC/IPMI display chips — not real GPUs
+                    if 'ASPEED' in vendor or 'Matrox' in vendor or 'IPMI' in device:
+                        continue
                     facts['gpus'].append({'vendor': vendor, 'model': device})
     except Exception:
         pass
