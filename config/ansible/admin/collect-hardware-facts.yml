@@ -7,7 +7,7 @@
 #   ./run-playbook.sh admin/collect-hardware-facts.yml --limit s2
 #   ./run-playbook.sh admin/collect-hardware-facts.yml --limit nvidia
 - name: Collect hardware inventory facts
-  hosts: storage:compute:nvidia:nas
+  hosts: storage:compute:nvidia:nas:adhoc
   become: yes
   serial: 10   # parallel — safe, each node writes only its own etcd key
 
