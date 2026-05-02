@@ -326,8 +326,11 @@ def _collect_hardware_linux():
         data = json.loads(r.stdout)
         for dev in data.get('blockdevices', []):
             name = dev.get('name', '')
-            # Skip loop, ram, zram devices
-            if any(name.startswith(p) for p in ('loop', 'ram', 'zram')):
+            # Skip loop, ram, zram, and virtual/BMC devices
+            if any(name.startswith(p) for p in ('loop', 'ram', 'zram', 'sr')):
+                continue
+            model = (dev.get('model') or '').strip()
+            if any(s in model for s in ('Virtual HDisk', 'Virtual CDROM', 'Disk Image')):
                 continue
             rota = dev.get('rota')
             if isinstance(rota, str):
@@ -335,7 +338,7 @@ def _collect_hardware_linux():
             disk_type = 'hdd' if rota else ('nvme' if name.startswith('nvme') else 'ssd')
             facts['disks'].append({
                 'name': name,
-                'model': (dev.get('model') or '').strip() or None,
+                'model': model or None,
                 'size': dev.get('size', '?'),
                 'type': disk_type,
             })

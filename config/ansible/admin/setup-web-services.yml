@@ -27,53 +27,16 @@
         state: directory
         mode: '0755'
 
-    - name: Copy user-data template
-      copy:
-        src: "templates/user-data.j2"
-        dest: "{{ admin_services_dir }}/templates/user-data.j2"
-        mode: '0644'
-      notify: restart admin-api
-
-    - name: Copy status page template
-      copy:
-        src: "templates/status.html"
-        dest: "{{ admin_services_dir }}/templates/status.html"
-        mode: '0644'
-      notify: restart admin-api
-
-    - name: Copy macOS bootstrap template
-      copy:
-        src: "templates/macos-bootstrap.sh.j2"
-        dest: "{{ admin_services_dir }}/templates/macos-bootstrap.sh.j2"
-        mode: '0644'
-      notify: restart admin-api
-
-    - name: Copy NAS bootstrap template
-      copy:
-        src: "templates/nas-bootstrap.sh.j2"
-        dest: "{{ admin_services_dir }}/templates/nas-bootstrap.sh.j2"
-        mode: '0644'
-      notify: restart admin-api
-
-    - name: Copy Nvidia bootstrap template
-      copy:
-        src: "templates/nvidia-bootstrap.sh.j2"
-        dest: "{{ admin_services_dir }}/templates/nvidia-bootstrap.sh.j2"
-        mode: '0644'
-      notify: restart admin-api
-
-    - name: Copy WireGuard bootstrap template (Linux)
-      copy:
-        src: "templates/wg-bootstrap.sh.j2"
-        dest: "{{ admin_services_dir }}/templates/wg-bootstrap.sh.j2"
-        mode: '0644'
-      notify: restart admin-api
-
-    - name: Copy WireGuard bootstrap template (macOS)
-      copy:
-        src: "templates/wg-bootstrap-macos.sh.j2"
-        dest: "{{ admin_services_dir }}/templates/wg-bootstrap-macos.sh.j2"
-        mode: '0644'
+    - name: Copy Flask templates
+      synchronize:
+        src: "templates/"
+        dest: "{{ admin_services_dir }}/templates/"
+        delete: yes
+        rsync_opts:
+          - "--checksum"
+          - "--no-owner"
+          - "--no-group"
+          - "--chmod=F0644"
       notify: restart admin-api
 
     - name: Create static files directory
