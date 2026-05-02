@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cluster Inventory</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .header-container { position: relative; text-align: center; }
+        h1 { color: #333; text-align: center; }
+        table { width: 100%; border-collapse: collapse; background-color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f8f9fa; font-weight: bold; }
+        tr:hover { background-color: #f8f9fa; }
+        .type-storage { border-left: 4px solid #007bff; }
+        .type-compute { border-left: 4px solid #28a745; }
+        .type-macos   { border-left: 4px solid #ffc107; }
+        .type-nvidia  { border-left: 4px solid #76b900; }
+        .type-nas     { border-left: 4px solid #6f42c1; }
+        .back-link { position: absolute; top: 0; left: 0; color: #007bff; text-decoration: none; font-size: 0.9em; }
+        .back-link:hover { text-decoration: underline; }
+        .status-message { text-align: center; color: #666; font-size: 0.9em; margin-top: 8px; }
+    </style>
+    <script defer src="/static/alpine-3.14.1.min.js"></script>
+</head>
+<body x-data="inventoryPage()">
+    <div class="header-container">
+        <a href="/" class="back-link">&#8592; Admin</a>
+        <h1>Hardware Inventory
+            <a href="/api/inventory/export.csv" style="font-size: 0.5em; font-weight: normal; margin-left: 12px; color: #007bff;">&#11015; CSV</a>
+        </h1>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Host</th>
+                <th>Product</th>
+                <th>CPU</th>
+                <th>RAM</th>
+                <th>Disks</th>
+                <th>GPUs</th>
+                <th>Location</th>
+                <th>Cost</th>
+                <th>Purchased</th>
+                <th>Warranty</th>
+                <th>Notes</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            <template x-if="!inventory || inventory.length === 0">
+                <tr><td colspan="12" style="text-align: center; color: #666;">No inventory data — run: ycluster inventory collect</td></tr>
+            </template>
+            <template x-for="node in inventory" :key="node.hostname">
+                <tr :class="`type-${node.type || 'storage'}`">
+                    <td>
+                        <strong x-text="node.hostname"></strong>
+                        <div style="font-size: 0.75em; color: #666;" x-text="node.type"></div>
+                    </td>
+                    <td>
+                        <span x-text="node.hardware?.product || '-'"></span>
+                        <template x-if="node.hardware?.serial">
+                            <div style="font-size: 0.75em; color: #666;" x-text="'S/N: ' + node.hardware.serial"></div>
+                        </template>
+                    </td>
+                    <td style="font-size: 0.85em;" x-text="node.hardware?.cpu || '-'"></td>
+                    <td x-text="node.hardware?.ram_gb ? node.hardware.ram_gb + ' GB' : '-'"></td>
+                    <td style="font-size: 0.8em;">
+                        <template x-if="(node.hardware?.disks || []).length === 0">
+                            <span style="color: #666;">-</span>
+                        </template>
+                        <template x-for="d in (node.hardware?.disks || [])" :key="d.name">
+                            <div x-text="d.name + ' ' + d.size + ' ' + d.type"></div>
+                        </template>
+                    </td>
+                    <td style="font-size: 0.8em;">
+                        <template x-if="(node.hardware?.gpus || []).length === 0">
+                            <span style="color: #666;">-</span>
+                        </template>
+                        <template x-for="g in gpuSummary(node.hardware?.gpus || [])" :key="g.label">
+                            <div x-text="g.label"></div>
+                        </template>
+                    </td>
+                    <!-- Asset fields — inline editable -->
+                    <td>
+                        <template x-if="editingAsset !== node.hostname">
+                            <span x-text="node.asset?.location || '-'" style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                        </template>
+                        <template x-if="editingAsset === node.hostname">
+                            <input type="text" x-model="assetDraft.location" style="width: 100px; font-size: 0.85em;">
+                        </template>
+                    </td>
+                    <td>
+                        <template x-if="editingAsset !== node.hostname">
+                            <span x-text="formatCost(node.asset)" style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                        </template>
+                        <template x-if="editingAsset === node.hostname">
+                            <div style="display: flex; gap: 4px; align-items: center;">
+                                <input type="number" x-model="assetDraft.cost" step="0.01" min="0" placeholder="0.00"
+                                       style="width: 80px; font-size: 0.85em;">
+                                <select x-model="assetDraft.cost_currency" style="font-size: 0.85em;">
+                                    <option value="EUR">EUR €</option>
+                                    <option value="USD">USD $</option>
+                                </select>
+                            </div>
+                        </template>
+                    </td>
+                    <td>
+                        <template x-if="editingAsset !== node.hostname">
+                            <span x-text="node.asset?.purchased_at || '-'" style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                        </template>
+                        <template x-if="editingAsset === node.hostname">
+                            <input type="date" x-model="assetDraft.purchased_at" style="width: 120px; font-size: 0.85em;">
+                        </template>
+                    </td>
+                    <td>
+                        <template x-if="editingAsset !== node.hostname">
+                            <span x-text="node.asset?.warranty_expires || '-'"
+                                  :style="isWarrantyExpiring(node.asset?.warranty_expires) ? 'color: #856404; font-weight: bold;' : ''"
+                                  style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                        </template>
+                        <template x-if="editingAsset === node.hostname">
+                            <input type="date" x-model="assetDraft.warranty_expires" style="width: 120px; font-size: 0.85em;">
+                        </template>
+                    </td>
+                    <td>
+                        <template x-if="editingAsset !== node.hostname">
+                            <span x-text="node.asset?.notes || '-'" style="cursor: pointer; font-size: 0.85em;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                        </template>
+                        <template x-if="editingAsset === node.hostname">
+                            <input type="text" x-model="assetDraft.notes" style="width: 140px; font-size: 0.85em;">
+                        </template>
+                    </td>
+                    <td style="white-space: nowrap;">
+                        <template x-if="editingAsset !== node.hostname">
+                            <button @click="startEditAsset(node.hostname, node.asset)"
+                                    style="padding: 2px 8px; font-size: 0.8em; cursor: pointer; border: 1px solid #007bff; background: white; color: #007bff; border-radius: 3px;">Edit</button>
+                        </template>
+                        <template x-if="editingAsset === node.hostname">
+                            <span>
+                                <button @click="saveAsset(node.hostname)"
+                                        style="padding: 2px 8px; font-size: 0.8em; cursor: pointer; border: none; background: #28a745; color: white; border-radius: 3px; margin-right: 4px;">Save</button>
+                                <button @click="cancelEditAsset()"
+                                        style="padding: 2px 8px; font-size: 0.8em; cursor: pointer; border: 1px solid #6c757d; background: white; color: #6c757d; border-radius: 3px;">Cancel</button>
+                            </span>
+                        </template>
+                    </td>
+                </tr>
+            </template>
+        </tbody>
+    </table>
+    <div x-show="statusMessage" x-html="statusMessage" class="status-message"></div>
+
+    <script>
+        function inventoryPage() {
+            return {
+                inventory: [],
+                editingAsset: null,
+                assetDraft: {},
+                statusMessage: '',
+
+                async init() {
+                    await this.fetchInventory();
+                },
+
+                async fetchInventory() {
+                    try {
+                        const r = await fetch('/api/inventory');
+                        if (r.ok) this.inventory = await r.json();
+                    } catch (e) {
+                        console.warn('Inventory fetch failed:', e);
+                    }
+                },
+
+                gpuSummary(gpus) {
+                    const counts = {};
+                    for (const g of gpus) {
+                        const key = g.model || g.vendor || '?';
+                        counts[key] = (counts[key] || 0) + 1;
+                    }
+                    return Object.entries(counts).map(([label, n]) => ({
+                        label: n > 1 ? `${n}\u00d7 ${label}` : label
+                    }));
+                },
+
+                isWarrantyExpiring(date) {
+                    if (!date) return false;
+                    const days = (new Date(date) - new Date()) / 86400000;
+                    return days >= 0 && days < 90;
+                },
+
+                formatCost(asset) {
+                    if (!asset || !asset.cost) return '-';
+                    const symbols = { EUR: '\u20ac', USD: '$' };
+                    const sym = symbols[asset.cost_currency || 'EUR'] || (asset.cost_currency || '\u20ac');
+                    return `${sym}${parseFloat(asset.cost).toFixed(2)}`;
+                },
+
+                startEditAsset(hostname, asset) {
+                    this.editingAsset = hostname;
+                    this.assetDraft = {
+                        vendor:           (asset || {}).vendor || '',
+                        purchased_at:     (asset || {}).purchased_at || '',
+                        warranty_expires: (asset || {}).warranty_expires || '',
+                        cost:             (asset || {}).cost || '',
+                        cost_currency:    (asset || {}).cost_currency || 'EUR',
+                        location:         (asset || {}).location || '',
+                        notes:            (asset || {}).notes || '',
+                    };
+                },
+
+                cancelEditAsset() {
+                    this.editingAsset = null;
+                    this.assetDraft = {};
+                },
+
+                async saveAsset(hostname) {
+                    this.statusMessage = `<span style="color: #007bff;">Saving...</span>`;
+                    try {
+                        const r = await fetch(`/api/inventory/asset/${hostname}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.assetDraft),
+                        });
+                        const data = await r.json();
+                        if (data.error) {
+                            this.statusMessage = `<span style="color: #dc3545;">Error: ${data.error}</span>`;
+                        } else {
+                            this.editingAsset = null;
+                            this.assetDraft = {};
+                            this.statusMessage = `<span style="color: #28a745;">${hostname} saved.</span>`;
+                            await this.fetchInventory();
+                            setTimeout(() => { this.statusMessage = ''; }, 3000);
+                        }
+                    } catch (e) {
+                        this.statusMessage = `<span style="color: #dc3545;">Network error: ${e.message}</span>`;
+                    }
+                },
+            }
+        }
+    </script>
+</body>
+</html>

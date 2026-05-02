@@ -2536,6 +2536,11 @@ def status_page():
     """
     return render_template('status.html')
 
+@app.route('/inventory')
+def inventory_page():
+    """Hardware inventory and asset management page."""
+    return render_template('inventory.html')
+
 if __name__ == '__main__':
     # Wait for etcd to be available
     while True:

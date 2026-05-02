@@ -88,6 +88,11 @@
             50% { opacity: 0.5; }
             100% { opacity: 1; }
         }
+        .logo {
+            width: 48px;
+            height: 48px;
+            vertical-align: middle;
+        }
         @media (max-width: 600px) {
             .container {
                 padding: 2rem;
@@ -97,11 +102,7 @@
                 font-size: 2rem;
             }
         }
-        .logo {
-            width: 48px;
-            height: 48px;
-            vertical-align: middle;
-        }
+
     </style>
 </head>
 <body>
@@ -120,6 +121,15 @@
                 </div>
             </a>
             
+            <a href="/inventory" class="link-card">
+                <div class="link-title">
+                    🖥️ Hardware Inventory
+                </div>
+                <div class="link-description">
+                    Hardware specs, asset tracking, purchase dates, and warranty status for all cluster nodes
+                </div>
+            </a>
+
             <a href="https://gitlab.com/devrandom01/ycluster" class="link-card" target="_blank">
                 <div class="link-title">
                     <img src="assets/gitlab-logo-500-svg.svg" alt="GitLab" class="logo">
@@ -129,7 +139,7 @@
                     Access the complete infrastructure code, documentation, and deployment playbooks
                 </div>
             </a>
-            
+
             <a href="/api/allocations" class="link-card">
                 <div class="link-title">
                     🔧 Node Allocations API
