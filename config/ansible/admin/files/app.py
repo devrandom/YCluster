@@ -2530,26 +2530,11 @@ def static_files(filename):
 
 @app.route('/status')
 def status_page():
-    """Web page showing cluster-wide health status"""
-    hosts = get_all_hosts()
-    leadership = get_leadership_status()
-    certificate_status = check_certificate_expiry()
-    host_health = get_all_host_health(hosts)
-    vip_status = get_cluster_vip_status(host_health)
-    
-    # Get drain status for this node
-    current_node_drained = is_node_drained()
-    
-    return render_template('status.html',
-                         hosts=hosts,
-                         host_health=host_health,
-                         leadership=leadership,
-                         vip_status=vip_status,
-                         certificate_status=certificate_status,
-                         inference_status=get_inference_status(),
-                         responding_hostname=platform.node(),
-                         current_node_drained=current_node_drained,
-                         timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    """Web page showing cluster-wide health status.
+    All data is fetched client-side via /api/cluster-status — no server-side
+    health checks here to avoid doing the work twice on every page load.
+    """
+    return render_template('status.html')
 
 if __name__ == '__main__':
     # Wait for etcd to be available
