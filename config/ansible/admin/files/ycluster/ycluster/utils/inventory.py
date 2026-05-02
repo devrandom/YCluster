@@ -120,6 +120,130 @@ def _run(cmd, **kwargs):
 def collect_hardware():
     """
     Collect hardware facts for the local node and return a dict.
+    Dispatches to the platform-specific implementation.
+    """
+    if platform.system() == 'Darwin':
+        return _collect_hardware_darwin()
+    return _collect_hardware_linux()
+
+
+def _collect_hardware_darwin():
+    """Collect hardware facts on macOS using system_profiler and sysctl."""
+    facts = {
+        'collected_at': datetime.now(UTC).isoformat(),
+        'cpu': None,
+        'ram_gb': None,
+        'disks': [],
+        'nics': [],
+        'gpus': [],
+        'serial': None,
+        'product': None,
+        'bios_version': None,
+        'os': None,
+        'kernel': None,
+    }
+
+    # OS / kernel
+    try:
+        facts['kernel'] = platform.release()
+        facts['os'] = f"macOS {platform.mac_ver()[0]}"
+    except Exception:
+        pass
+
+    # Hardware overview via system_profiler
+    try:
+        r = _run(['system_profiler', 'SPHardwareDataType', '-json'], timeout=15)
+        data = json.loads(r.stdout)
+        hw = data.get('SPHardwareDataType', [{}])[0]
+        facts['product'] = hw.get('machine_name')
+        facts['serial'] = hw.get('serial_number')
+        facts['bios_version'] = hw.get('platform_UUID') and hw.get('SMC_version_system') or hw.get('boot_rom_version')
+        mem_str = hw.get('physical_memory', '')  # e.g. "512 GB"
+        if mem_str:
+            parts = mem_str.split()
+            if len(parts) == 2 and parts[1] == 'GB':
+                facts['ram_gb'] = int(parts[0])
+    except Exception:
+        pass
+
+    # CPU via sysctl
+    try:
+        brand = _run(['sysctl', '-n', 'machdep.cpu.brand_string'], timeout=5).stdout.strip()
+        if not brand:
+            # Apple Silicon
+            brand = _run(['sysctl', '-n', 'machdep.cpu.core_count'], timeout=5).stdout.strip()
+            brand = facts.get('product') or 'Apple Silicon'
+        phys = _run(['sysctl', '-n', 'hw.physicalcpu'], timeout=5).stdout.strip()
+        logical = _run(['sysctl', '-n', 'hw.logicalcpu'], timeout=5).stdout.strip()
+        if brand and phys and logical:
+            facts['cpu'] = f"{brand}, {phys}c/{logical}t"
+        elif brand:
+            facts['cpu'] = brand
+    except Exception:
+        pass
+
+    # Disks via system_profiler
+    try:
+        r = _run(['system_profiler', 'SPStorageDataType', '-json'], timeout=15)
+        data = json.loads(r.stdout)
+        seen = set()
+        for vol in data.get('SPStorageDataType', []):
+            dev = vol.get('bsd_name', '').replace('s0', '').rstrip('0123456789s')
+            if not dev or dev in seen:
+                continue
+            seen.add(dev)
+            size_bytes = vol.get('com.apple.diskmanagement.sizeondisk') or 0
+            size_gb = int(size_bytes) // (1024 ** 3) if size_bytes else None
+            medium = vol.get('physical_interconnect', '').lower()
+            disk_type = 'nvme' if 'pcie' in medium or 'nvme' in medium else 'ssd' if 'flash' in medium else 'hdd'
+            facts['disks'].append({
+                'name': dev,
+                'model': vol.get('device_model') or vol.get('_name'),
+                'size': f"{size_gb}G" if size_gb else '?',
+                'type': disk_type,
+            })
+    except Exception:
+        pass
+
+    # GPUs via system_profiler
+    try:
+        r = _run(['system_profiler', 'SPDisplaysDataType', '-json'], timeout=15)
+        data = json.loads(r.stdout)
+        for gpu in data.get('SPDisplaysDataType', []):
+            name = gpu.get('sppci_model') or gpu.get('_name')
+            vram = gpu.get('sppci_vram') or gpu.get('_spdisplays_vram')
+            if name:
+                facts['gpus'].append({'vendor': 'Apple' if 'Apple' in name else gpu.get('sppci_vendor', ''), 'model': name, 'vram': vram})
+    except Exception:
+        pass
+
+    # NICs via system_profiler
+    try:
+        r = _run(['system_profiler', 'SPNetworkDataType', '-json'], timeout=15)
+        data = json.loads(r.stdout)
+        for iface in data.get('SPNetworkDataType', []):
+            hw_addr = iface.get('spnetwork_hardware_address') or iface.get('Ethernet', {}).get('MAC Address')
+            name = iface.get('interface') or iface.get('_name')
+            if not name:
+                continue
+            itype = iface.get('spnetwork_interface_type', '')
+            if itype in ('IEEE80211', 'Bridge'):
+                continue
+            facts['nics'].append({
+                'name': name,
+                'mac': hw_addr,
+                'speed': iface.get('spnetwork_actual_link_speed'),
+                'driver': None,
+            })
+    except Exception:
+        pass
+
+    return facts
+
+
+def _collect_hardware_linux():
+    """
+    Collect hardware facts for the local Linux node and return a dict.
     Uses dmidecode, lshw, lspci, nvidia-smi where available.
     Degrades gracefully when tools are missing.
     """
