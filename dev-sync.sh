@@ -6,6 +6,7 @@ set -euo pipefail
 
 DEST="s3.yc:/opt/infrastructure/"
 REPO="$(cd "$(dirname "$0")" && pwd)"
+LOG="/tmp/dev-sync.log"
 
 rsync_opts=(-az --exclude-from="$REPO/.watchignore")
 
@@ -21,12 +22,27 @@ cleanup() {
 trap cleanup EXIT
 
 watchman watch "$REPO" >/dev/null
-watchman -- trigger "$REPO" dev-sync '*' -- bash -c "
-    rsync -az --exclude-from='$REPO/.watchignore' '$REPO/' '$DEST' \
-        && echo \"[\$(date +%T)] done\" \
-        || echo \"[\$(date +%T)] rsync failed\"
-" >/dev/null
+
+# Use JSON trigger spec — the CLI `-- trigger` shorthand has issues with
+# watchman 4.9 (stdout/stderr redirect fields not supported, * glob
+# only matches root-level files). The JSON spec is explicit and reliable.
+watchman -j <<EOF >/dev/null
+["trigger", "$REPO", {
+  "name": "dev-sync",
+  "expression": ["allof", ["type", "f"], ["not", ["anyof",
+    ["match", ".git/**", "wholename"],
+    ["match", "**/__pycache__/**", "wholename"],
+    ["match", "**/.venv/**", "wholename"],
+    ["match", "**/venv/**", "wholename"]
+  ]]],
+  "command": ["bash", "-c", "rsync -az --exclude-from='$REPO/.watchignore' '$REPO/' '$DEST' >> $LOG 2>&1 && echo \"[\$(date +%T)] done\" >> $LOG || echo \"[\$(date +%T)] rsync failed\" >> $LOG"],
+  "stdin": "/dev/null"
+}]
+EOF
 
 do_sync
-echo "watching $REPO (Ctrl-C to stop)"
+echo "watching $REPO — trigger log: $LOG (Ctrl-C to stop)"
+tail -f "$LOG" &
+TAIL_PID=$!
+trap "kill $TAIL_PID 2>/dev/null; watchman watch-del '$REPO' >/dev/null 2>&1 || true; echo stopped" EXIT
 while true; do sleep 1; done
