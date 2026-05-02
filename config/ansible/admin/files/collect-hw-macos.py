@@ -52,20 +52,24 @@ phys = sysctl.get('hw.physicalcpu', '').strip()
 logical = sysctl.get('hw.logicalcpu', '').strip()
 facts['cpu'] = (brand + ', ' + phys + 'c/' + logical + 't') if phys and logical else brand
 
-# Disks
-seen = set()
+# Disks — deduplicate by physical device name to avoid listing every
+# APFS volume separately. Use physical_drive metadata for type/model.
+seen_models = set()
 for vol in (sp.get('SPStorageDataType') or []):
-    dev = vol.get('bsd_name', '').rstrip('0123456789').rstrip('s')
-    if not dev or dev in seen:
+    pd = vol.get('physical_drive') or {}
+    model = pd.get('device_name', '').strip()
+    if not model or model == 'Disk Image' or model in seen_models:
         continue
-    seen.add(dev)
-    size_bytes = vol.get('com.apple.diskmanagement.sizeondisk') or 0
+    seen_models.add(model)
+    size_bytes = vol.get('size_in_bytes') or 0
     size_g = int(size_bytes) // (1024 ** 3) if size_bytes else 0
-    medium = vol.get('physical_interconnect', '').lower()
-    disk_type = 'nvme' if ('pcie' in medium or 'nvme' in medium) else 'ssd' if 'flash' in medium else 'hdd'
+    protocol = pd.get('protocol', '').lower()
+    medium_type = pd.get('medium_type', '').lower()
+    disk_type = 'nvme' if 'nvme' in protocol or 'pcie' in protocol or 'fabric' in protocol else \
+                'ssd' if 'ssd' in medium_type or 'flash' in medium_type else 'hdd'
     facts['disks'].append({
-        'name': dev,
-        'model': vol.get('device_model') or vol.get('_name'),
+        'name': vol.get('bsd_name', ''),
+        'model': model,
         'size': str(size_g) + 'G' if size_g else '?',
         'type': disk_type,
     })
@@ -80,15 +84,22 @@ for gpu in (sp.get('SPDisplaysDataType') or []):
             'vram': gpu.get('sppci_vram') or gpu.get('_spdisplays_vram'),
         })
 
-# NICs
+# NICs — only physical Ethernet interfaces
+skip_types = {'IEEE80211', 'Bridge', 'FireWire', 'Thunderbolt'}
 for iface in (sp.get('SPNetworkDataType') or []):
     name = iface.get('interface') or iface.get('_name')
-    if not name or iface.get('spnetwork_interface_type') in ('IEEE80211', 'Bridge'):
+    if not name:
         continue
+    if iface.get('spnetwork_interface_type') in skip_types:
+        continue
+    # Skip virtual/bridge/loopback by name prefix
+    if name.startswith(('bridge', 'lo', 'utun', 'ipsec', 'gif', 'stf', 'anpi')):
+        continue
+    eth = iface.get('Ethernet') or {}
     facts['nics'].append({
         'name': name,
-        'mac': iface.get('spnetwork_hardware_address'),
-        'speed': iface.get('spnetwork_actual_link_speed'),
+        'mac': eth.get('MAC Address') or iface.get('spnetwork_hardware_address'),
+        'speed': eth.get('MediaSpeed') or iface.get('spnetwork_actual_link_speed'),
         'driver': None,
     })
 
