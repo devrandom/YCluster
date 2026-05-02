@@ -23,6 +23,10 @@ Leadership:
 Node Management:
 - /cluster/nodes/{hostname}/drain -> "true" if node is drained
 
+Inventory:
+- /cluster/nodes/hardware/{hostname} -> hardware facts JSON (auto-collected)
+- /cluster/nodes/asset/{hostname}    -> asset metadata JSON (manually entered)
+
 TLS Configuration:
 - /cluster/tls/cert -> PEM certificate data
 - /cluster/tls/key -> PEM private key data
@@ -1323,6 +1327,120 @@ def drain_status_target(target_hostname):
         return jsonify({'hostname': target_hostname, 'drained': is_drained})
     except Exception as e:
         return jsonify({'error': f'Failed to check drain status for {target_hostname}: {str(e)}'}), 500
+
+@app.route('/api/inventory/hardware/<hostname>')
+def inventory_get_hardware(hostname):
+    """Return hardware facts for a node (read-only, internal only)"""
+    try:
+        from ycluster.utils.inventory import get_hardware
+        data = get_hardware(hostname)
+        if data is None:
+            return jsonify({'error': f'No hardware data for {hostname}'}), 404
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inventory/asset/<hostname>', methods=['GET'])
+def inventory_get_asset(hostname):
+    """Return asset metadata for a node (internal only)"""
+    try:
+        from ycluster.utils.inventory import get_asset
+        return jsonify(get_asset(hostname))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inventory/asset/<hostname>', methods=['PUT', 'POST'])
+def inventory_set_asset(hostname):
+    """Set asset metadata fields for a node (internal only)"""
+    try:
+        from ycluster.utils.inventory import put_asset
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({'error': 'No JSON body'}), 400
+        # Only allow known safe fields
+        allowed = {'vendor', 'purchased_at', 'warranty_expires', 'cost', 'cost_currency', 'location', 'notes'}
+        filtered = {k: v for k, v in data.items() if k in allowed}
+        if not filtered:
+            return jsonify({'error': 'No valid fields in request'}), 400
+        result = put_asset(hostname, filtered)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inventory')
+def inventory_list():
+    """Return full inventory (hardware + asset) for all nodes (internal only)"""
+    try:
+        from ycluster.utils.inventory import list_all
+        rows = list_all()
+        out = []
+        for r in rows:
+            alloc = r['allocation'] or {}
+            out.append({
+                'hostname': alloc.get('hostname'),
+                'type': alloc.get('type'),
+                'ip': alloc.get('ip'),
+                'hardware': r['hardware'],
+                'asset': r['asset'],
+            })
+        out.sort(key=lambda x: x['hostname'] or '')
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/inventory/export.csv')
+def inventory_export_csv():
+    """Export full inventory as CSV (internal only)"""
+    import csv, io
+    try:
+        from ycluster.utils.inventory import list_all
+        rows = list_all()
+        rows.sort(key=lambda r: (r['allocation'] or {}).get('hostname', '') or '')
+
+        fieldnames = [
+            'hostname', 'type', 'ip',
+            'product', 'serial', 'bios_version',
+            'cpu', 'ram_gb', 'disks', 'gpus', 'nics',
+            'os', 'kernel',
+            'vendor', 'purchased_at', 'warranty_expires', 'cost', 'cost_currency', 'location', 'notes',
+            'hw_collected_at', 'asset_updated_at',
+        ]
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        for r in rows:
+            alloc = r['allocation'] or {}
+            hw = r['hardware'] or {}
+            asset = r['asset'] or {}
+            writer.writerow({
+                'hostname':         alloc.get('hostname', ''),
+                'type':             alloc.get('type', ''),
+                'ip':               alloc.get('ip', ''),
+                'product':          hw.get('product', ''),
+                'serial':           hw.get('serial', ''),
+                'bios_version':     hw.get('bios_version', ''),
+                'cpu':              hw.get('cpu', ''),
+                'ram_gb':           hw.get('ram_gb', ''),
+                'disks':            '; '.join(f"{d['name']} {d['size']} {d['type']}" for d in (hw.get('disks') or [])),
+                'gpus':             '; '.join(g.get('model') or g.get('vendor', '?') for g in (hw.get('gpus') or [])),
+                'nics':             '; '.join(f"{n['name']}" + (f" {n['speed']}" if n.get('speed') else '') for n in (hw.get('nics') or [])),
+                'os':               hw.get('os', ''),
+                'kernel':           hw.get('kernel', ''),
+                'vendor':           asset.get('vendor', ''),
+                'purchased_at':     asset.get('purchased_at', ''),
+                'warranty_expires': asset.get('warranty_expires', ''),
+                'cost':             asset.get('cost', ''),
+                'cost_currency':    asset.get('cost_currency', 'EUR'),
+                'location':         asset.get('location', ''),
+                'notes':            asset.get('notes', ''),
+                'hw_collected_at':  (hw.get('collected_at') or '')[:19],
+                'asset_updated_at': (asset.get('updated_at') or '')[:19],
+            })
+        from flask import Response
+        return Response(buf.getvalue(), mimetype='text/csv',
+                        headers={'Content-Disposition': 'attachment; filename=inventory.csv'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/ping')
 def ping():

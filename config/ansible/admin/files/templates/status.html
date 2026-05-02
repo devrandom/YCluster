@@ -486,6 +486,133 @@
         </table>
     </div>
 
+    <!-- Inventory Section -->
+    <div style="margin-bottom: 20px;">
+        <h2>Inventory
+            <a href="/api/inventory/export.csv" style="font-size: 0.6em; font-weight: normal; margin-left: 12px; color: #007bff;">&#11015; CSV</a>
+        </h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Host</th>
+                    <th>Product</th>
+                    <th>CPU</th>
+                    <th>RAM</th>
+                    <th>Disks</th>
+                    <th>GPUs</th>
+                    <th>Location</th>
+                    <th>Cost</th>
+                    <th>Purchased</th>
+                    <th>Warranty</th>
+                    <th>Notes</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                <template x-if="!inventory || inventory.length === 0">
+                    <tr><td colspan="11" style="text-align: center; color: #666;">No inventory data — run: ycluster inventory collect</td></tr>
+                </template>
+                <template x-for="node in inventory" :key="node.hostname">
+                    <tr :class="`type-${node.type || 'storage'}`">
+                        <td>
+                            <strong x-text="node.hostname"></strong>
+                            <div style="font-size: 0.75em; color: #666;" x-text="node.type"></div>
+                        </td>
+                        <td>
+                            <span x-text="node.hardware?.product || '-'"></span>
+                            <template x-if="node.hardware?.serial">
+                                <div style="font-size: 0.75em; color: #666;" x-text="'S/N: ' + node.hardware.serial"></div>
+                            </template>
+                        </td>
+                        <td style="font-size: 0.85em;" x-text="node.hardware?.cpu || '-'"></td>
+                        <td x-text="node.hardware?.ram_gb ? node.hardware.ram_gb + ' GB' : '-'"></td>
+                        <td style="font-size: 0.8em;">
+                            <template x-if="(node.hardware?.disks || []).length === 0">
+                                <span style="color: #666;">-</span>
+                            </template>
+                            <template x-for="d in (node.hardware?.disks || [])" :key="d.name">
+                                <div x-text="d.name + ' ' + d.size + ' ' + d.type"></div>
+                            </template>
+                        </td>
+                        <td style="font-size: 0.8em;">
+                            <template x-if="(node.hardware?.gpus || []).length === 0">
+                                <span style="color: #666;">-</span>
+                            </template>
+                            <template x-for="g in (node.hardware?.gpus || [])" :key="g.model || g.vendor">
+                                <div x-text="g.model || g.vendor"></div>
+                            </template>
+                        </td>
+                        <!-- Asset fields — inline editable -->
+                        <td>
+                            <template x-if="editingAsset !== node.hostname">
+                                <span x-text="formatCost(node.asset)" style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                            </template>
+                            <template x-if="editingAsset === node.hostname">
+                                <div style="display: flex; gap: 4px; align-items: center;">
+                                    <input type="number" x-model="assetDraft.cost" step="0.01" min="0" placeholder="0.00"
+                                           style="width: 80px; font-size: 0.85em;">
+                                    <select x-model="assetDraft.cost_currency" style="font-size: 0.85em;">
+                                        <option value="EUR">EUR €</option>
+                                        <option value="USD">USD $</option>
+                                    </select>
+                                </div>
+                            </template>
+                        </td>
+                        <td>
+                            <template x-if="editingAsset !== node.hostname">
+                                <span x-text="node.asset?.location || '-'" style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                            </template>
+                            <template x-if="editingAsset === node.hostname">
+                                <input type="text" x-model="assetDraft.location" style="width: 100px; font-size: 0.85em;">
+                            </template>
+                        </td>
+                        <td>
+                            <template x-if="editingAsset !== node.hostname">
+                                <span x-text="node.asset?.purchased_at || '-'" style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                            </template>
+                            <template x-if="editingAsset === node.hostname">
+                                <input type="date" x-model="assetDraft.purchased_at" style="width: 120px; font-size: 0.85em;">
+                            </template>
+                        </td>
+                        <td>
+                            <template x-if="editingAsset !== node.hostname">
+                                <span x-text="node.asset?.warranty_expires || '-'"
+                                      :style="isWarrantyExpiring(node.asset?.warranty_expires) ? 'color: #856404; font-weight: bold;' : ''"
+                                      style="cursor: pointer;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                            </template>
+                            <template x-if="editingAsset === node.hostname">
+                                <input type="date" x-model="assetDraft.warranty_expires" style="width: 120px; font-size: 0.85em;">
+                            </template>
+                        </td>
+                        <td>
+                            <template x-if="editingAsset !== node.hostname">
+                                <span x-text="node.asset?.notes || '-'" style="cursor: pointer; font-size: 0.85em;" @click="startEditAsset(node.hostname, node.asset)"></span>
+                            </template>
+                            <template x-if="editingAsset === node.hostname">
+                                <input type="text" x-model="assetDraft.notes" style="width: 140px; font-size: 0.85em;">
+                            </template>
+                        </td>
+                        <td style="white-space: nowrap;">
+                            <template x-if="editingAsset !== node.hostname">
+                                <button @click="startEditAsset(node.hostname, node.asset)"
+                                        style="padding: 2px 8px; font-size: 0.8em; cursor: pointer; border: 1px solid #007bff; background: white; color: #007bff; border-radius: 3px;">Edit</button>
+                            </template>
+                            <template x-if="editingAsset === node.hostname">
+                                <span>
+                                    <button @click="saveAsset(node.hostname)"
+                                            style="padding: 2px 8px; font-size: 0.8em; cursor: pointer; border: none; background: #28a745; color: white; border-radius: 3px; margin-right: 4px;">Save</button>
+                                    <button @click="cancelEditAsset()"
+                                            style="padding: 2px 8px; font-size: 0.8em; cursor: pointer; border: 1px solid #6c757d; background: white; color: #6c757d; border-radius: 3px;">Cancel</button>
+                                </span>
+                            </template>
+                        </td>
+                    </tr>
+                </template>
+            </tbody>
+        </table>
+        <div x-show="assetStatusMessage" x-html="assetStatusMessage" style="margin-top: 6px; font-size: 0.9em;"></div>
+    </div>
+
     <div class="refresh-info">
         <span>Last updated: <span x-text="lastUpdateTime"></span></span> | 
         <span>Served by: <span x-text="respondingNode"></span></span>
@@ -518,10 +645,15 @@
                 servicesExpanded: {},
                 clockSyncedExpanded: false,
                 drainStatusMessage: '',
+                inventory: [],
+                editingAsset: null,
+                assetDraft: {},
+                assetStatusMessage: '',
                 
                 // Methods
                 async init() {
                     await this.updateStatus();
+                    await this.fetchInventory();
                     this.scheduleNextUpdate();
                 },
                 
@@ -861,7 +993,74 @@
                     }
                     
                     return tooltip;
-                }
+                },
+
+                // Inventory methods
+                async fetchInventory() {
+                    try {
+                        const response = await fetch('/api/inventory');
+                        if (response.ok) {
+                            this.inventory = await response.json();
+                        }
+                    } catch (e) {
+                        // Inventory fetch failing is non-fatal
+                        console.warn('Inventory fetch failed:', e);
+                    }
+                },
+
+                isWarrantyExpiring(date) {
+                    if (!date) return false;
+                    const days = (new Date(date) - new Date()) / 86400000;
+                    return days >= 0 && days < 90;
+                },
+
+                formatCost(asset) {
+                    if (!asset || !asset.cost) return '-';
+                    const symbols = { EUR: '€', USD: '$' };
+                    const sym = symbols[asset.cost_currency || 'EUR'] || (asset.cost_currency || '€');
+                    return `${sym}${parseFloat(asset.cost).toFixed(2)}`;
+                },
+
+                startEditAsset(hostname, asset) {
+                    this.editingAsset = hostname;
+                    this.assetDraft = {
+                        vendor:           (asset || {}).vendor || '',
+                        purchased_at:     (asset || {}).purchased_at || '',
+                        warranty_expires: (asset || {}).warranty_expires || '',
+                        cost:             (asset || {}).cost || '',
+                        cost_currency:    (asset || {}).cost_currency || 'EUR',
+                        location:         (asset || {}).location || '',
+                        notes:            (asset || {}).notes || '',
+                    };
+                },
+
+                cancelEditAsset() {
+                    this.editingAsset = null;
+                    this.assetDraft = {};
+                },
+
+                async saveAsset(hostname) {
+                    this.assetStatusMessage = `<span style="color: #007bff;">Saving...</span>`;
+                    try {
+                        const response = await fetch(`/api/inventory/asset/${hostname}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(this.assetDraft),
+                        });
+                        const data = await response.json();
+                        if (data.error) {
+                            this.assetStatusMessage = `<span style="color: #dc3545;">Error: ${data.error}</span>`;
+                        } else {
+                            this.editingAsset = null;
+                            this.assetDraft = {};
+                            this.assetStatusMessage = `<span style="color: #28a745;">${hostname} saved.</span>`;
+                            await this.fetchInventory();
+                            setTimeout(() => { this.assetStatusMessage = ''; }, 3000);
+                        }
+                    } catch (e) {
+                        this.assetStatusMessage = `<span style="color: #dc3545;">Network error: ${e.message}</span>`;
+                    }
+                },
             }
         }
     </script>

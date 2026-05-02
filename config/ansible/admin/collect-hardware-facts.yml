@@ -1,0 +1,31 @@
+---
+# Collect hardware facts for all (or selected) nodes and persist to etcd.
+# Runs ycluster inventory collect on each node via SSH.
+#
+# Usage:
+#   ./run-playbook.sh admin/collect-hardware-facts.yml
+#   ./run-playbook.sh admin/collect-hardware-facts.yml --limit s2
+#   ./run-playbook.sh admin/collect-hardware-facts.yml --limit nvidia
+- name: Collect hardware inventory facts
+  hosts: storage:compute:nvidia:nas
+  become: yes
+  serial: 10   # parallel — safe, each node writes only its own etcd key
+
+  tasks:
+    - name: Ensure dmidecode is installed
+      apt:
+        name:
+          - dmidecode
+          - pciutils
+          - ethtool
+        state: present
+      tags: packages
+
+    - name: Collect and persist hardware facts
+      command: ycluster inventory collect
+      register: collect_result
+      changed_when: true
+
+    - name: Show collection output
+      debug:
+        msg: "{{ collect_result.stdout_lines }}"
