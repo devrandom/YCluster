@@ -140,6 +140,17 @@
         owner: root
         group: root
 
+    # dnsmasq refuses to start if tftp-root doesn't exist. The directory is
+    # populated later by setup-pxe-boot.yml, but it must exist now so dnsmasq
+    # can start. Pre-create it here.
+    - name: Create TFTP root directory
+      file:
+        path: /var/lib/tftpboot
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
     - name: Create dnsmasq configuration (DNS and TFTP only)
       copy:
         dest: /etc/dnsmasq.d/dns-tftp.conf
@@ -149,14 +160,14 @@
           local=/xc/
           domain=xc
           domain-needed
-          
+
           # Dynamic binding for VIP support
           bind-dynamic
-          
+
           # PXE boot configuration
           enable-tftp
           tftp-root=/var/lib/tftpboot
-          
+
           # Disable DHCP (handled by scapy-based server)
           port=53
       notify: restart dnsmasq
