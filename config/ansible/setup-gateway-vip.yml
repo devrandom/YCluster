@@ -124,6 +124,7 @@
               weight -20
               fall 2
               rise 2
+              init_fail
           }
           
           vrrp_instance VI_GATEWAY {
@@ -163,7 +164,10 @@
         state: started
 
   handlers:
+    # Serialize restarts so peers stay up and a third node can't briefly
+    # win MASTER while two are simultaneously silent.
     - name: restart keepalived
       systemd:
         name: keepalived
         state: restarted
+      throttle: 1

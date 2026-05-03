@@ -58,7 +58,10 @@
       notify: restart keepalived
 
   handlers:
+    # Serialize restarts so peers stay up and a third node can't briefly
+    # win MASTER while two are simultaneously silent.
     - name: restart keepalived
       systemd:
         name: keepalived
         state: restarted
+      throttle: 1
