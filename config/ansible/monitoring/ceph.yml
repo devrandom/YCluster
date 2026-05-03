@@ -3,29 +3,43 @@
   hosts: storage
   become: yes
   tasks:
+    # Skip nodes that don't have ceph installed yet (e.g. a storage node
+    # added to the inventory before storage/setup-ceph-disk.yml has joined
+    # it to the cluster).
+    - name: Check for ceph CLI
+      stat:
+        path: /usr/bin/ceph
+      register: ceph_cli
+
     - name: Enable Ceph Prometheus module
       command: ceph mgr module enable prometheus
       register: ceph_prometheus_result
       changed_when: "'already enabled' not in ceph_prometheus_result.stderr"
-      failed_when: 
+      failed_when:
         - ceph_prometheus_result.rc != 0
         - "'already enabled' not in ceph_prometheus_result.stderr"
+      when: ceph_cli.stat.exists
 
     - name: Verify Ceph Prometheus module is enabled
       command: ceph mgr module ls
       register: ceph_modules
       changed_when: false
+      when: ceph_cli.stat.exists
 
     - name: Display Ceph Prometheus module status
       debug:
         msg: "Ceph Prometheus module: {{ 'Enabled' if 'prometheus' in ceph_modules.stdout else 'Not enabled' }}"
+      when: ceph_cli.stat.exists
 
     - name: Get Ceph Prometheus endpoint
       command: ceph mgr services
       register: ceph_services
       changed_when: false
+      when: ceph_cli.stat.exists
 
     - name: Display Ceph Prometheus endpoint
       debug:
         msg: "Ceph Prometheus metrics available at: {{ ceph_services.stdout | from_json | json_query('prometheus') | default('Not available') }}"
-      when: ceph_services.stdout | from_json | json_query('prometheus') is defined
+      when:
+        - ceph_cli.stat.exists
+        - ceph_services.stdout | from_json | json_query('prometheus') is defined
