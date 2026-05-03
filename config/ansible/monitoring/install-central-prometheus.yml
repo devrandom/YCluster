@@ -70,9 +70,11 @@
         enabled: yes
 
   handlers:
+    # Only restart if currently running. The service is normally only active
+    # on the storage leader (gated on misc-rbd mount), so on other nodes we
+    # don't want to start it just because the config changed.
     - name: restart central prometheus if running
-      systemd:
-        name: prometheus-central
-        state: restarted
-      when: ansible_facts.services['prometheus-central.service'].state == 'running'
-      failed_when: false
+      shell: |
+        if systemctl is-active --quiet prometheus-central; then
+          systemctl restart prometheus-central
+        fi
