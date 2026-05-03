@@ -1,0 +1,100 @@
+---
+# Rolling upgrade of microceph across storage nodes.
+#
+# Background: microceph refuses cluster operations (e.g. add OSD) when
+# members are at different versions. The snap is normally pinned via
+# `snap refresh --hold` to prevent surprise upgrades; new nodes joining
+# can pick up a newer revision from squid/stable, creating a mismatch.
+# This playbook brings every node forward to the highest installed
+# revision in the cluster (or to the latest in the channel if all match).
+#
+# Order: non-leader nodes first, storage leader last. Each node is held
+# again after upgrade so subsequent surprise refreshes don't recur.
+# serial: 1 to keep the dqlite quorum intact between restarts.
+#
+# Usage:
+#   ./run-playbook.sh storage/upgrade-microceph.yml
+#   ./run-playbook.sh storage/upgrade-microceph.yml --limit s1,s2
+
+- name: Pre-flight checks and target revision discovery
+  hosts: storage
+  gather_facts: no
+  tasks:
+    # Refuse to start a rolling upgrade if the cluster isn't healthy to
+    # begin with — otherwise we have no clean baseline to detect when
+    # each node has finished settling. Same accept-list as the per-node
+    # post-check so we don't bail on benign warnings.
+    - name: Check ceph health before starting upgrade
+      shell: ceph health 2>&1
+      register: precheck_health
+      changed_when: false
+      run_once: true
+
+    - name: Refuse to start unless ceph is healthy
+      fail:
+        msg: |
+          Refusing to start microceph upgrade — ceph health is:
+            {{ precheck_health.stdout }}
+          Resolve the unhealthy state first, or override the gate by
+          re-running with -e ignore_precheck_health=true.
+      when:
+        - not (ignore_precheck_health | default(false) | bool)
+        - precheck_health.stdout is not match('^HEALTH_OK')
+        - precheck_health.stdout is not match('^HEALTH_WARN.*slow ops')
+        - precheck_health.stdout is not match('^HEALTH_WARN.*recent crash')
+      run_once: true
+
+    - name: Read installed microceph revision on each storage node
+      shell: snap list microceph 2>/dev/null | awk 'NR==2 {print $3}'
+      register: current_rev
+      changed_when: false
+      failed_when: false
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['storage'] }}"
+      run_once: true
+
+    - name: Compute target revision (highest currently installed)
+      set_fact:
+        target_revision: "{{ current_rev.results
+                              | map(attribute='stdout')
+                              | reject('equalto', '')
+                              | map('int')
+                              | max }}"
+      run_once: true
+
+    - name: Display upgrade plan
+      debug:
+        msg: |
+          Pre-check ceph health: {{ precheck_health.stdout }}
+          Target revision: {{ target_revision }}
+          Per-node current revisions:
+          {% for r in current_rev.results %}
+            {{ r.item }}: {{ r.stdout }}
+          {% endfor %}
+      run_once: true
+
+# Two plays so we can deterministically upgrade the storage leader last,
+# minimizing the window where the leader's RBD-using services see a
+# microceph restart.
+
+- name: Upgrade microceph on non-leader storage nodes
+  hosts: storage
+  become: yes
+  serial: 1
+  gather_facts: no
+  tasks:
+    - import_tasks: tasks/upgrade-microceph-node.yml
+      vars:
+        target_revision: "{{ hostvars[groups['storage'][0]]['target_revision'] }}"
+      when: not (storage_leader | default(false))
+
+- name: Upgrade microceph on storage leader
+  hosts: storage
+  become: yes
+  serial: 1
+  gather_facts: no
+  tasks:
+    - import_tasks: tasks/upgrade-microceph-node.yml
+      vars:
+        target_revision: "{{ hostvars[groups['storage'][0]]['target_revision'] }}"
+      when: storage_leader | default(false)

@@ -2,30 +2,65 @@
 - name: Add new storage nodes to MicroCeph cluster
   hosts: storage
   gather_facts: yes
-  
-  tasks:
-    - name: Fail if playbook is limited to a single node
-      fail:
-        msg: "This playbook requires multiple nodes to join an existing cluster. Current play limited to single node: {{ inventory_hostname }}. Use --tags single_node_ceph to override."
-      when: 
-        - ansible_play_hosts | length == 1
-        - "'single_node_ceph' not in ansible_run_tags"
-      run_once: true
 
-    - name: Check if MicroCeph is already configured on each node
+  tasks:
+    - name: Install microceph snap if missing
+      shell: snap install microceph --channel=squid/stable
+      args:
+        creates: /snap/bin/microceph
+      register: microceph_install
+
+    # Match the existing s1-s3 nodes which have automatic snap refresh
+    # disabled, so an unintended upgrade can't bring down a storage node
+    # without warning.
+    - name: Hold microceph snap updates
+      command: snap refresh --hold microceph
+      when: microceph_install.changed
+      changed_when: true
+
+    # Probe microceph status on every storage node, not just play_hosts.
+    # With --limit, ansible_play_hosts only contains the new node, so
+    # checking just play_hosts would falsely conclude no cluster exists
+    # and try to bootstrap a brand new one on the new node.
+    - name: Probe microceph status on all storage nodes
       command: microceph status
-      register: microceph_status
+      register: microceph_probe
       failed_when: false
       changed_when: false
-
-    - name: Check if any nodes are already in cluster  
-      set_fact:
-        cluster_exists: "{{ ansible_play_hosts | map('extract', hostvars, 'microceph_status') | selectattr('rc', 'equalto', 0) | list | length > 0 }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['storage'] }}"
       run_once: true
 
-    - name: Bootstrap cluster if not initialized
+    - name: Build cluster and new node lists from probe
+      set_fact:
+        cluster_nodes: "{{ microceph_probe.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+        new_nodes: "{{ microceph_probe.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+      run_once: true
+
+    - name: Identify whether this host is already in cluster
+      set_fact:
+        is_in_cluster: "{{ inventory_hostname in cluster_nodes }}"
+
+    # Belt-and-suspenders: bootstrapping a new cluster is destructive
+    # if the detection above is wrong (e.g. all probes failed for a
+    # transient network reason). Default behavior is "join only" — the
+    # operator must opt in with -e allow_bootstrap=true to create a
+    # fresh cluster.
+    - name: Refuse to bootstrap a new cluster without explicit opt-in
+      fail:
+        msg: |
+          No existing MicroCeph cluster found across {{ groups['storage'] | join(', ') }}.
+          Refusing to auto-bootstrap. If this is genuinely a fresh cluster
+          (not an existing-cluster detection failure), re-run with
+          -e allow_bootstrap=true.
+      when:
+        - cluster_nodes | length == 0
+        - not (allow_bootstrap | default(false) | bool)
+      run_once: true
+
+    - name: Bootstrap MicroCeph cluster on first node (opt-in)
       block:
-        - name: Bootstrap MicroCeph cluster on first node
+        - name: Bootstrap MicroCeph cluster
           command: microceph cluster bootstrap
           when: inventory_hostname == ansible_play_hosts[0]
           register: bootstrap_result
@@ -34,41 +69,25 @@
           pause:
             seconds: 5
           when: inventory_hostname == ansible_play_hosts[0]
-      when: not cluster_exists
 
-    - name: Re-check if MicroCeph is already configured on each node
-      command: microceph status
-      register: microceph_status
-      failed_when: false
-      changed_when: false
+        - name: Re-probe microceph status after bootstrap
+          command: microceph status
+          register: microceph_probe_after
+          failed_when: false
+          changed_when: false
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['storage'] }}"
+          run_once: true
 
-    - name: Identify nodes already in cluster
-      set_fact:
-        is_in_cluster: "{{ microceph_status.rc == 0 }}"
-
-    - name: Build cluster and new node lists
-      set_fact:
-        cluster_nodes: []
-        new_nodes: []
-      run_once: true
-
-    - name: Identify cluster nodes
-      set_fact:
-        cluster_nodes: "{{ cluster_nodes + [item] }}"
-      loop: "{{ ansible_play_hosts }}"
-      when: 
-        - hostvars[item]['is_in_cluster']
-        - inventory_hostname == ansible_play_hosts[0]
-      run_once: true
-
-    - name: Identify new nodes
-      set_fact:
-        new_nodes: "{{ new_nodes + [item] }}"
-      loop: "{{ ansible_play_hosts }}"
-      when: 
-        - not hostvars[item]['is_in_cluster']
-        - inventory_hostname == ansible_play_hosts[0]
-      run_once: true
+        - name: Rebuild cluster/new lists after bootstrap
+          set_fact:
+            cluster_nodes: "{{ microceph_probe_after.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+            new_nodes: "{{ microceph_probe_after.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+            is_in_cluster: "{{ inventory_hostname in (microceph_probe_after.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list) }}"
+          run_once: true
+      when:
+        - cluster_nodes | length == 0
+        - allow_bootstrap | default(false) | bool
 
     - name: Set rendezvous node (first configured node)
       set_fact:
@@ -76,25 +95,29 @@
       run_once: true
       when: cluster_nodes | length > 0
 
-    - name: Fail if no existing cluster found
+    - name: Fail if still no cluster after bootstrap attempt
       fail:
-        msg: "No existing MicroCeph cluster found. Please run setup-ceph-disk.yml first."
+        msg: "Cluster setup did not produce a rendezvous node. Investigate microceph status on storage hosts."
       when: rendezvous_node is not defined
       run_once: true
 
+    # Generate join tokens once on the rendezvous node (via delegate_to).
+    # run_once ensures the loop fires a single time across the whole play,
+    # so the token list is built regardless of which hosts --limit selected.
     - name: Generate join tokens for new nodes
       command: microceph cluster add {{ item }}
       register: join_tokens
       delegate_to: "{{ rendezvous_node }}"
       loop: "{{ new_nodes }}"
-      when: inventory_hostname == rendezvous_node and new_nodes | length > 0
+      when: new_nodes | length > 0
+      run_once: true
 
     - name: Extract join token for this node
       set_fact:
         my_join_token: "{{ item.stdout }}"
-      loop: "{{ hostvars[rendezvous_node]['join_tokens']['results'] | default([]) }}"
-      when: 
-        - not is_in_cluster 
+      loop: "{{ join_tokens.results | default([]) }}"
+      when:
+        - not is_in_cluster
         - rendezvous_node is defined
         - item.item == inventory_hostname
 
