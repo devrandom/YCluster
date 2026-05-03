@@ -134,6 +134,8 @@
 
     - name: Update nginx configuration with certbot-manager
       command: "/usr/local/bin/certbot-manager update-nginx{% if 'storage' not in group_names %} --local{% endif %}"
+      environment:
+        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
       register: nginx_update_result
       changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
@@ -151,6 +153,18 @@
         path: /etc/nginx/sites-enabled/default
         state: absent
       notify: restart nginx
+
+    # Fetch certs from etcd before nginx restarts; otherwise on a fresh
+    # storage node nginx fails to start because /etc/nginx/ssl/key.pem
+    # doesn't exist yet. Only storage nodes hold cluster TLS certs in etcd.
+    - name: Fetch initial TLS certificates
+      command: /usr/local/lib/cluster/fetch-tls-certs
+      environment:
+        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      register: fetch_result
+      failed_when: fetch_result.rc != 0
+      changed_when: "'Certificates updated' in fetch_result.stdout"
+      when: "'storage' in group_names"
 
     - name: Flush handlers to restart nginx immediately
       meta: flush_handlers
@@ -189,14 +203,6 @@
         - admin-api
         - nginx
 
-    - name: Enable and start TLS fetch timer (storage only)
-      systemd:
-        name: fetch-tls-certs.timer
-        enabled: yes
-        state: started
-        daemon_reload: yes
-      when: "'storage' in group_names"
-
   handlers:
     - name: restart admin-api
       systemd:
@@ -212,12 +218,6 @@
   hosts: storage
   become: yes
   tasks:
-    - name: Fetch initial TLS certificates
-      command: /usr/local/lib/cluster/fetch-tls-certs
-      register: fetch_result
-      failed_when: fetch_result.rc != 0
-      changed_when: "'Certificates updated' in fetch_result.stdout"
-
     - name: Create systemd timer for certificate refresh
       copy:
         dest: /etc/systemd/system/fetch-tls-certs.timer
@@ -240,9 +240,16 @@
           [Unit]
           Description=Fetch TLS certificates from etcd
           After=network.target
-          
+
           [Service]
           Type=oneshot
           Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
           ExecStart=/usr/local/lib/cluster/fetch-tls-certs
           ExecStartPost=/bin/systemctl reload nginx
+
+    - name: Enable and start TLS fetch timer
+      systemd:
+        name: fetch-tls-certs.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
