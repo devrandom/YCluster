@@ -7,6 +7,7 @@ vrrp_script chk_uplink_service {
     weight 50
     fall 2
     rise 2
+    init_fail
 }
 
 vrrp_instance VI_UPLINK_SERVICE {

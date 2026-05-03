@@ -14,5 +14,6 @@
 - import_playbook: install-docker-registry.yml
 
 # Leader Election - Must come last to manage above database services
+- import_playbook: setup-storage-vip.yml
 - import_playbook: install-storage-leader-election.yml
 - import_playbook: install-cluster-heartbeat.yml
