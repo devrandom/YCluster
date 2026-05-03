@@ -1,0 +1,64 @@
+---
+# Per-node tasks for upgrade-microceph.yml. Idempotent: if already at
+# target revision, skip the snap operations entirely.
+
+- name: Get current microceph revision on this host
+  shell: snap list microceph 2>/dev/null | awk 'NR==2 {print $3}'
+  register: this_rev
+  changed_when: false
+
+- name: Already at target — no-op
+  debug:
+    msg: "{{ inventory_hostname }} already at revision {{ this_rev.stdout }}"
+  when: this_rev.stdout | int >= target_revision | int
+
+- block:
+    - name: Display upgrade plan
+      debug:
+        msg: "Upgrading {{ inventory_hostname }}: {{ this_rev.stdout }} -> {{ target_revision }}"
+
+    - name: Unhold microceph snap
+      command: snap refresh --unhold microceph
+      changed_when: true
+
+    - name: Refresh microceph to latest in squid/stable
+      command: snap refresh microceph --channel=squid/stable
+      changed_when: true
+
+    - name: Re-hold microceph snap
+      command: snap refresh --hold microceph
+      changed_when: true
+
+    # Don't trust `microceph status` here — during a partial upgrade it
+    # returns "Database is waiting for an upgrade". Use `ceph` directly
+    # (talks to MONs, independent of microceph's dqlite layer), and
+    # delegate to a peer so a still-restarting local daemon doesn't
+    # confuse the check.
+    - name: Wait for ceph cluster to be healthy after node upgrade
+      shell: |
+        timeout 300 bash -c '
+          while true; do
+            health=$(ceph health 2>/dev/null) || true
+            case "$health" in
+              HEALTH_OK*) exit 0 ;;
+              # HEALTH_WARN is acceptable only if the warnings are
+              # transient post-restart noise (slow ops, recent crash);
+              # anything else (OSD_DOWN, PG_AVAILABILITY, etc.) means
+              # we should keep waiting.
+              "HEALTH_WARN "*"slow ops"*) exit 0 ;;
+              "HEALTH_WARN "*"recent crash"*) exit 0 ;;
+            esac
+            sleep 5
+          done
+        '
+      delegate_to: "{{ peer_for_health_check }}"
+      changed_when: false
+
+    - name: Brief settle pause before next node
+      pause:
+        seconds: 5
+  vars:
+    # A peer that isn't the node we just upgraded (so its ceph CLI
+    # surely works). Pick the first storage node that isn't us.
+    peer_for_health_check: "{{ (groups['storage'] | reject('equalto', inventory_hostname) | list)[0] }}"
+  when: this_rev.stdout | int < target_revision | int
