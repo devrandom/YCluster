@@ -106,8 +106,10 @@ for node_type in list(NODE_TYPE_INTERFACES.keys()):
 # etcd configuration
 ETCD_PREFIX = '/cluster/nodes'
 
-# Core nodes configuration
-CORE_NODES = ['s1', 's2', 's3']
+# Core nodes are derived dynamically from etcd allocations (see
+# get_core_nodes()) so adding a new storage node doesn't require a code
+# change. The inventory plugin treats any s\d+ hostname as a core node;
+# we mirror that by filtering on type == 'storage'.
 
 # Thread lock for allocation operations
 allocation_lock = threading.Lock()
@@ -2094,7 +2096,7 @@ def get_comprehensive_health():
     
     # Check keepalived service (only on core nodes)
     current_hostname = platform.node()
-    if current_hostname in CORE_NODES:
+    if current_hostname in get_core_nodes():
         keepalived_running = check_service_status('keepalived')
         health_status['services']['keepalived'] = {
             'status': 'healthy' if keepalived_running else 'unhealthy',
@@ -2163,6 +2165,16 @@ def alert_webhook():
         return jsonify({'error': str(e)}), 500
 
 _STATIC_HOSTNAME_RE = re.compile(r'^([a-z]{1,3})(\d+)$')
+
+
+def get_core_nodes():
+    """Return list of core node hostnames (storage-typed, not disabled).
+
+    Used to decide whether keepalived should be running on a given node
+    and which nodes to include in cluster-wide VIP/keepalived checks.
+    """
+    return [h['hostname'] for h in get_all_hosts()
+            if h.get('type') == 'storage' and not h.get('disabled')]
 
 
 def get_all_hosts():
@@ -2325,7 +2337,7 @@ def get_cluster_vip_status(host_health):
     all_hosts = get_all_hosts()
     
     # Process only core nodes (where keepalived runs and VIPs can be active)
-    for core_node in CORE_NODES:
+    for core_node in get_core_nodes():
         # Find the core node in all_hosts to get its IP
         core_host = next((host for host in all_hosts if host['hostname'] == core_node), None)
         if not core_host:
