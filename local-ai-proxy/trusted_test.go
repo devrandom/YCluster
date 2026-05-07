@@ -79,3 +79,41 @@ func TestTrustedHeadersMissingUserPassesUnchanged(t *testing.T) {
 		t.Errorf("got %q; want empty", got)
 	}
 }
+
+func TestTrustedHeadersGroupsStripped(t *testing.T) {
+	var gotUser, gotGroups string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser = r.Header.Get("X-User-Id")
+		gotGroups = r.Header.Get("X-User-Groups")
+		w.WriteHeader(http.StatusOK)
+	})
+	chained, err := TrustedHeadersMiddleware(nil, inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		remote     string
+		wantUser   string
+		wantGroups string
+	}{
+		{"loopback-trusted", "127.0.0.1:1234", "alice", "staff,admins"},
+		{"external-stripped", "10.0.0.42:55555", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotUser, gotGroups = "", ""
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			req.RemoteAddr = tc.remote
+			req.Header.Set("X-User-Id", "alice")
+			req.Header.Set("X-User-Groups", "staff,admins")
+			chained.ServeHTTP(httptest.NewRecorder(), req)
+			if gotUser != tc.wantUser {
+				t.Errorf("X-User-Id = %q; want %q", gotUser, tc.wantUser)
+			}
+			if gotGroups != tc.wantGroups {
+				t.Errorf("X-User-Groups = %q; want %q", gotGroups, tc.wantGroups)
+			}
+		})
+	}
+}

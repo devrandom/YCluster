@@ -6,11 +6,11 @@ import (
 	"net/http"
 )
 
-// TrustedHeadersMiddleware strips identity headers (X-User-Id) from any
-// request whose remote address is not in the configured trusted-proxy
-// set. That way a reverse proxy in front of us can inject X-User-Id
-// after authenticating a client, while direct hits from anywhere else
-// can't forge it.
+// TrustedHeadersMiddleware strips identity headers (X-User-Id,
+// X-User-Groups) from any request whose remote address is not in the
+// configured trusted-proxy set. That way a reverse proxy in front of
+// us can inject identity after authenticating a client, while direct
+// hits from anywhere else can't forge it.
 //
 // cidrs may be empty/nil; in that case loopback is trusted.
 func TrustedHeadersMiddleware(cidrs []string, next http.Handler) (http.Handler, error) {
@@ -21,6 +21,7 @@ func TrustedHeadersMiddleware(cidrs []string, next http.Handler) (http.Handler, 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !remoteIsTrusted(r, nets) {
 			r.Header.Del("X-User-Id")
+			r.Header.Del("X-User-Groups")
 		}
 		next.ServeHTTP(w, r)
 	}), nil
