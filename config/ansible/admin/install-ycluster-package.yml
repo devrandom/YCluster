@@ -86,12 +86,18 @@
           # Backward compatibility wrapper for {{ item.script }}
           exec ycluster {{ item.command }} "$@"
       loop:
-        - { script: 'lease-manager', command: 'dhcp' }
-        - { script: 'https-config', command: 'https' }
         - { script: 'certbot-manager', command: 'certbot' }
-        - { script: 'frontend-manager', command: 'frontend' }
         - { script: 'tls-config', command: 'tls' }
         - { script: 'rathole-config', command: 'rathole' }
+
+    - name: Remove obsolete wrapper scripts
+      file:
+        path: "/usr/local/bin/{{ item }}"
+        state: absent
+      loop:
+        - lease-manager
+        - https-config
+        - frontend-manager
 
     - name: Ensure bash completion directory exists
       file:

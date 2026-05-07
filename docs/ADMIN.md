@@ -331,11 +331,11 @@ ycluster storage rbd bind -k /path/to/passphrase/file
 
 #### Storage
 
-Provision the node via PXE boot and autoinstall.  The node will automatically be classified as a storage node based on its MAC address prefix and allocated a hostname from the `s1` to `s20` range.  You can verify that the node has been allocated an address in the expected range with `lease-manager all`.
+Provision the node via PXE boot and autoinstall.  The node will automatically be classified as a storage node based on its MAC address prefix and allocated a hostname from the `s1` to `s20` range.  You can verify that the node has been allocated an address in the expected range with `ycluster dhcp list all`.
 
 #### MacOS
 
-Allocate a hostname.  On a core node, run `lease-manager all` and select a new hostname from the `m1` to `m20` range.  Set this hostname on the macOS node and connect the node to the network.  You can verify that the node has been allocated an address in the expected range with `lease manager all`.
+Allocate a hostname.  On a core node, run `ycluster dhcp list all` and select a new hostname from the `m1` to `m20` range.  Set this hostname on the macOS node and connect the node to the network.  You can verify that the node has been allocated an address in the expected range with `ycluster dhcp list all`.
 
 Copy the SSH public key from a core node to the macOS node to allow SSH access.
 

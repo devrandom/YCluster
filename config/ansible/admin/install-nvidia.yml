@@ -3,7 +3,7 @@
   hosts: nvidia
   become: yes
   vars:
-    cuda_version: "12-8"
+    cuda_version: "12-9"
     # Blackwell GPUs require open kernel modules - proprietary driver unsupported
     nvidia_driver_package: "nvidia-open"
     # Default power limit in watts (max for RTX PRO 6000 Blackwell is 600)
