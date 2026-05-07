@@ -38,7 +38,8 @@ server {
     add_header X-XSS-Protection "1; mode=block" always;
     
     # Internal auth subrequest: validates the client's Authorization
-    # against master key + Open-WebUI api_key table, returns X-User-Id.
+    # against master key + Open-WebUI api_key table, returns X-User-Id
+    # and X-User-Groups (comma-separated OWUI group names).
     location = /__auth {
         internal;
         proxy_pass http://127.0.0.1:4002/auth;
@@ -52,10 +53,12 @@ server {
     location /v1/ {
         auth_request /__auth;
         auth_request_set $user_id $upstream_http_x_user_id;
+        auth_request_set $user_groups $upstream_http_x_user_groups;
 
-        # Strip client bearer; local-ai-proxy trusts X-User-Id from us.
+        # Strip client bearer; local-ai-proxy trusts identity headers from us.
         proxy_set_header Authorization "";
         proxy_set_header X-User-Id $user_id;
+        proxy_set_header X-User-Groups $user_groups;
 
         proxy_pass http://127.0.0.1:4001/v1/;
         proxy_set_header Host $host;

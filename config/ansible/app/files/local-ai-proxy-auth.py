@@ -4,13 +4,15 @@ local-ai-proxy auth validator.
 
 A tiny HTTP service intended to be called by nginx auth_request. Given
 a Bearer token on the incoming request, returns 200 with X-User-Id
-set, or 401. nginx forwards X-User-Id to local-ai-proxy, which trusts
-it because the request comes from loopback.
+and X-User-Groups set, or 401. nginx forwards both headers to
+local-ai-proxy, which trusts them because the request comes from
+loopback.
 
 Validation sources (in order):
   1. LiteLLM master key from etcd /cluster/config/litellm/master-key
-     → user = "root"
-  2. Open-WebUI's api_key table → user = u.email
+     → user = "root", groups = ""
+  2. Open-WebUI's api_key table → user = u.email,
+     groups = comma-separated OWUI group names (from group_member join)
 
 Listens on 127.0.0.1:4002 by default (override with LISTEN_ADDR env).
 """
@@ -55,20 +57,34 @@ def get_pg():
 
 
 def lookup_openwebui_user(api_key):
-    """Return email for an api_key row, or None."""
+    """Return (email, groups) for an api_key row, or (None, []).
+
+    groups is a list of OWUI group names the user is a member of.
+    """
     try:
         conn = get_pg()
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT u.email FROM api_key ak
+                SELECT u.email,
+                       COALESCE(
+                           array_agg(g.name) FILTER (WHERE g.name IS NOT NULL),
+                           '{}'
+                       ) AS groups
+                FROM api_key ak
                 JOIN "user" u ON u.id = ak.user_id
+                LEFT JOIN group_member gm ON gm.user_id = u.id
+                LEFT JOIN "group" g ON g.id = gm.group_id
                 WHERE ak.key = %s
+                GROUP BY u.email
                 """,
                 (api_key,),
             )
             row = cur.fetchone()
-            return row[0] if row else None
+            if row is None:
+                return None, []
+            email, groups = row
+            return email, list(groups or [])
     except psycopg2.Error as e:
         log.warning("openwebui lookup failed: %s", e)
         # Force reconnect on next call.
@@ -78,7 +94,7 @@ def lookup_openwebui_user(api_key):
         except Exception:
             pass
         _state["pg"] = None
-        return None
+        return None, []
 
 
 @app.route("/auth")
@@ -94,12 +110,14 @@ def auth():
     if master and token == master:
         resp = Response(status=200)
         resp.headers["X-User-Id"] = "root"
+        resp.headers["X-User-Groups"] = ""
         return resp
 
-    email = lookup_openwebui_user(token)
+    email, groups = lookup_openwebui_user(token)
     if email:
         resp = Response(status=200)
         resp.headers["X-User-Id"] = email
+        resp.headers["X-User-Groups"] = ",".join(groups)
         return resp
 
     return Response(status=401)
