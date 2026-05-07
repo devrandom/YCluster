@@ -96,6 +96,10 @@ Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.y
 
 - No commit message prefixes (no "feat:", "fix:", etc.)
 - Do not create commits unless explicitly asked by the user
+- Run the relevant tests/build before committing. If the local toolchain is too
+  old (e.g. local-ai-proxy needs Go ≥ 1.25 and the dev box has 1.19), run them
+  on a cluster node that has it (`ssh s3.yc 'cd /opt/infrastructure/local-ai-proxy && go test ./...'`)
+  or stop and tell the user — never commit untested code.
 - Keep scripts in `config/ansible/scripts/` directory, installed by playbooks
 - Prefer Python libraries over subprocess for mainstream tasks
 - Playbooks must be idempotent
