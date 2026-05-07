@@ -5,6 +5,7 @@ Called by storage leader to send periodic health status
 """
 
 import os
+import re
 import sys
 import json
 import socket
@@ -75,6 +76,20 @@ def get_cluster_health():
                     unreachable_nodes += 1
                     unreachable_node_names.append(hostname)
                 else:
+                    # Ignore non-core nodes whose only non-healthy service is
+                    # clock_skew — remote NTP checks flap and aren't worth
+                    # alerting on. Storage nodes (s*) need tight time sync for
+                    # Ceph, so clock skew there still counts as unhealthy.
+                    is_core = re.match(r'^s\d+$', hostname) is not None
+                    services = node_health.get('services', {})
+                    bad = [
+                        svc for svc, d in services.items()
+                        if isinstance(d, dict)
+                        and d.get('status') in ('unhealthy', 'error', 'degraded')
+                    ]
+                    if not is_core and bad and all(svc == 'clock_skew' for svc in bad):
+                        healthy_nodes += 1
+                        continue
                     unhealthy_nodes += 1
                     unhealthy_node_names.append(hostname)
             
@@ -246,20 +261,16 @@ def send_heartbeat():
         message = format_health_message(health_data, status)
         print(message)
         
-        # Send appropriate ping
-        if exit_code == 0:
-            # Success ping
-            response = requests.post(healthchecks_url, 
-                                    data=message,
-                                    timeout=10)
-        elif exit_code == 1:
-            # Warning - use exit code endpoint
-            response = requests.post(f"{healthchecks_url}/1", 
+        # Send appropriate ping. Healthchecks.io treats any non-zero exit
+        # status as a failure, so warnings post to the bare URL (success)
+        # with the WARNING body still visible in the ping log. /fail is
+        # reserved for true critical conditions.
+        if exit_code in (0, 1):
+            response = requests.post(healthchecks_url,
                                     data=message,
                                     timeout=10)
         else:
-            # Failure
-            response = requests.post(f"{healthchecks_url}/fail", 
+            response = requests.post(f"{healthchecks_url}/fail",
                                     data=message,
                                     timeout=10)
         
