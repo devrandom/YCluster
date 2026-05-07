@@ -85,6 +85,11 @@ type Handler struct {
 	// Metrics, if set, receives Prometheus observations from the
 	// request path. Nil-safe.
 	Metrics *Metrics
+
+	// ACL, if set, gates per-request model access on X-User-Id and
+	// X-User-Groups (which TrustedHeadersMiddleware has already
+	// validated as coming from a trusted proxy). Nil disables checks.
+	ACL *ACLConfig
 }
 
 func NewHandler(router Router) *Handler {
@@ -155,6 +160,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.logger.Info("route rejected", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
+	}
+
+	if h.ACL != nil {
+		user := r.Header.Get("X-User-Id")
+		groups := SplitGroups(r.Header.Get("X-User-Groups"))
+		if err := h.ACL.Check(route.Model, user, groups); err != nil {
+			h.Metrics.ObserveRouteError(RouteErrACLDenied)
+			h.logger.Info("acl denied",
+				"model", route.Model, "user", user, "groups", groups,
+				"method", r.Method, "path", r.URL.Path)
+			writeOpenAIError(w, http.StatusForbidden, "permission_denied", err.Error())
+			return
+		}
 	}
 
 	h.dispatch(w, r, route)

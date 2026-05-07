@@ -131,6 +131,7 @@ func main() {
 	h := NewHandler(router)
 	h.Health = health
 	h.Metrics = metrics
+	h.ACL = cfg.ACL
 	if _, ok := router.(*ModelRouter); ok {
 		h.Load = loadCounter
 	}

@@ -194,8 +194,9 @@ func (m *Metrics) SetInflight(backend string, count int64) {
 // Stable reason strings for ObserveRouteError — avoids typos drifting
 // across callsites and keeps label cardinality bounded.
 const (
-	RouteErrUnknownModel    = "unknown_model"
-	RouteErrNoHealthy       = "no_healthy_backend"
-	RouteErrInvalidRequest  = "invalid_request"
-	RouteErrBodyTooLarge    = "body_too_large"
+	RouteErrUnknownModel   = "unknown_model"
+	RouteErrNoHealthy      = "no_healthy_backend"
+	RouteErrInvalidRequest = "invalid_request"
+	RouteErrBodyTooLarge   = "body_too_large"
+	RouteErrACLDenied      = "acl_denied"
 )
