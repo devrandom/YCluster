@@ -20,3 +20,5 @@
 # - import_playbook: install-meshcommander.yml
 - import_playbook: install-rocm.yml
 - import_playbook: install-llama-cpp-rocm.yml
+- import_playbook: install-nvidia.yml
+- import_playbook: install-vllm.yml

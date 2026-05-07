@@ -66,11 +66,11 @@
           Certbot installed successfully!
           
           To configure domains:
-          https-config set-domain your-domain.com
-          https-config add-alias alias.com
-          
+          ycluster https set-domain your-domain.com
+          ycluster https add-alias alias.com
+
           To get initial certificate:
           certbot-manager obtain
-          
+
           To check status:
-          https-config get
+          ycluster https get

@@ -330,11 +330,11 @@ def obtain_certificate(test_cert=False, non_interactive=False):
     domains = get_all_domains(config)
     
     if not domains:
-        print("No domains configured. Use 'https-config set-domain <domain>' first.")
+        print("No domains configured. Use 'ycluster https set-domain <domain>' first.")
         return False
     
     if 'domain' not in config:
-        print("No primary domain configured. Use 'https-config set-domain <domain>' first.")
+        print("No primary domain configured. Use 'ycluster https set-domain <domain>' first.")
         return False
     
     primary_domain = config['domain']
