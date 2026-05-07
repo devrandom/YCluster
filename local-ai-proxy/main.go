@@ -131,7 +131,13 @@ func main() {
 	h := NewHandler(router)
 	h.Health = health
 	h.Metrics = metrics
-	h.ACL = cfg.ACL
+	if es, ok := source.(*EtcdSource); ok {
+		// Hot-reloading union: yaml acl ⊎ inline-per-model + etcd default.
+		yamlACL := cfg.ACL
+		h.ACLProvider = func() *ACLConfig { return MergeACL(yamlACL, es.ACLSnapshot()) }
+	} else {
+		h.ACL = cfg.ACL
+	}
 	if _, ok := router.(*ModelRouter); ok {
 		h.Load = loadCounter
 	}

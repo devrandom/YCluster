@@ -55,24 +55,38 @@ type etcdBackendEntry struct {
 }
 
 // etcdModelValue is the JSON value stored at each etcd key. All listed
-// backends are load-balanced by ModelRouter.
+// backends are load-balanced by ModelRouter. ACL, when present, is
+// merged into the proxy's effective ACL alongside any YAML rules.
 type etcdModelValue struct {
 	Backends []etcdBackendEntry `json:"backends"`
+	ACL      *ACLModelRule      `json:"acl,omitempty"`
 }
 
 // EtcdSource watches an etcd prefix. Each key under the prefix represents
 // one model; the suffix after the prefix is the model name. The value is
-// JSON matching etcdValue.
+// JSON matching etcdValue. Inline ACL rules and an optional singleton
+// default-policy key feed into the proxy's effective ACL.
 type EtcdSource struct {
-	client *clientv3.Client
-	prefix string
-	logger *slog.Logger
+	client          *clientv3.Client
+	prefix          string
+	aclDefaultKey   string
+	logger          *slog.Logger
 
-	// snapshot holds an immutable map; swapped atomically on updates.
+	// snapshot holds an immutable backend map; swapped atomically on updates.
 	snapshot atomic.Pointer[map[string][]*url.URL]
 
-	cancel context.CancelFunc
-	done   chan struct{}
+	// aclModels holds a parallel immutable map of inline ACL rules per
+	// model. Swapped together with snapshot so callers see a consistent
+	// (backends, ACL) view per model.
+	aclModels atomic.Pointer[map[string]ACLModelRule]
+
+	// aclDefault is the value of aclDefaultKey: "allow", "deny", or "".
+	aclDefault atomic.Pointer[string]
+
+	cancel    context.CancelFunc
+	done      chan struct{}
+	dfltCancel context.CancelFunc
+	dfltDone   chan struct{}
 }
 
 // DefaultEtcdEndpoint is used when etcd.endpoints is empty. Matches the
@@ -96,9 +110,10 @@ func NewEtcdSource(cfg EtcdConfig, logger *slog.Logger) (*EtcdSource, error) {
 		return nil, fmt.Errorf("etcd client: %w", err)
 	}
 	return &EtcdSource{
-		client: client,
-		prefix: cfg.Prefix,
-		logger: logger,
+		client:        client,
+		prefix:        cfg.Prefix,
+		aclDefaultKey: cfg.ACLDefaultKey,
+		logger:        logger,
 	}, nil
 }
 
@@ -108,20 +123,70 @@ func (s *EtcdSource) Start(ctx context.Context) error {
 		return fmt.Errorf("initial etcd get %s: %w", s.prefix, err)
 	}
 	m := make(map[string][]*url.URL, len(getResp.Kvs))
+	a := make(map[string]ACLModelRule)
 	for _, kv := range getResp.Kvs {
 		name := s.modelName(kv.Key)
-		if urls, ok := s.parseKV(kv.Key, kv.Value); ok {
+		urls, acl, ok := s.parseKV(kv.Key, kv.Value)
+		if ok {
 			m[name] = urls
+			if acl != nil {
+				a[name] = *acl
+			}
 		}
 	}
 	s.snapshot.Store(&m)
-	s.logger.Info("etcd source initial load", "prefix", s.prefix, "models", len(m))
+	s.aclModels.Store(&a)
+	s.logger.Info("etcd source initial load", "prefix", s.prefix, "models", len(m), "acl_rules", len(a))
 
 	watchCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.done = make(chan struct{})
 	startRev := getResp.Header.Revision + 1
 	go s.watch(watchCtx, startRev)
+
+	if s.aclDefaultKey != "" {
+		if err := s.startACLDefaultWatch(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *EtcdSource) startACLDefaultWatch(ctx context.Context) error {
+	resp, err := s.client.Get(ctx, s.aclDefaultKey)
+	if err != nil {
+		return fmt.Errorf("initial etcd get %s: %w", s.aclDefaultKey, err)
+	}
+	if len(resp.Kvs) > 0 {
+		v := strings.TrimSpace(string(resp.Kvs[0].Value))
+		s.aclDefault.Store(&v)
+		s.logger.Info("etcd acl default loaded", "key", s.aclDefaultKey, "value", v)
+	}
+	wctx, cancel := context.WithCancel(context.Background())
+	s.dfltCancel = cancel
+	s.dfltDone = make(chan struct{})
+	go func() {
+		defer close(s.dfltDone)
+		ch := s.client.Watch(wctx, s.aclDefaultKey, clientv3.WithRev(resp.Header.Revision+1))
+		for wresp := range ch {
+			if err := wresp.Err(); err != nil {
+				s.logger.Warn("etcd acl-default watch error", "err", err.Error())
+				continue
+			}
+			for _, ev := range wresp.Events {
+				switch ev.Type {
+				case clientv3.EventTypePut:
+					v := strings.TrimSpace(string(ev.Kv.Value))
+					s.aclDefault.Store(&v)
+					s.logger.Info("etcd acl default updated", "value", v)
+				case clientv3.EventTypeDelete:
+					empty := ""
+					s.aclDefault.Store(&empty)
+					s.logger.Info("etcd acl default cleared")
+				}
+			}
+		}
+	}()
 	return nil
 }
 
@@ -136,36 +201,49 @@ func (s *EtcdSource) watch(ctx context.Context, startRev int64) {
 		if len(wresp.Events) == 0 {
 			continue
 		}
-		cur := s.snapshot.Load()
-		next := make(map[string][]*url.URL, len(*cur)+len(wresp.Events))
-		for k, v := range *cur {
-			next[k] = v
+		curM := s.snapshot.Load()
+		curA := s.aclModels.Load()
+		nextM := make(map[string][]*url.URL, len(*curM)+len(wresp.Events))
+		for k, v := range *curM {
+			nextM[k] = v
+		}
+		nextA := make(map[string]ACLModelRule, len(*curA)+len(wresp.Events))
+		for k, v := range *curA {
+			nextA[k] = v
 		}
 		for _, ev := range wresp.Events {
 			name := s.modelName(ev.Kv.Key)
 			switch ev.Type {
 			case clientv3.EventTypePut:
-				if urls, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value); ok {
-					next[name] = urls
+				urls, acl, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value)
+				if ok {
+					nextM[name] = urls
+				}
+				if acl != nil {
+					nextA[name] = *acl
+				} else {
+					delete(nextA, name)
 				}
 			case clientv3.EventTypeDelete:
-				delete(next, name)
+				delete(nextM, name)
+				delete(nextA, name)
 			}
 		}
-		s.snapshot.Store(&next)
-		s.logger.Info("etcd source updated", "models", len(next))
+		s.snapshot.Store(&nextM)
+		s.aclModels.Store(&nextA)
+		s.logger.Info("etcd source updated", "models", len(nextM), "acl_rules", len(nextA))
 	}
 }
 
-func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, bool) {
+func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, *ACLModelRule, bool) {
 	var v etcdModelValue
 	if err := json.Unmarshal(value, &v); err != nil {
 		s.logger.Warn("etcd value not JSON", "key", string(key), "err", err.Error())
-		return nil, false
+		return nil, nil, false
 	}
 	if len(v.Backends) == 0 {
 		s.logger.Warn("etcd value has empty backends list", "key", string(key))
-		return nil, false
+		return nil, nil, false
 	}
 	urls := make([]*url.URL, 0, len(v.Backends))
 	for i, b := range v.Backends {
@@ -181,9 +259,9 @@ func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, bool) {
 		urls = append(urls, u)
 	}
 	if len(urls) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
-	return urls, true
+	return urls, v.ACL, true
 }
 
 func (s *EtcdSource) modelName(key []byte) string {
@@ -204,7 +282,34 @@ func (s *EtcdSource) Close() error {
 	if s.done != nil {
 		<-s.done
 	}
+	if s.dfltCancel != nil {
+		s.dfltCancel()
+	}
+	if s.dfltDone != nil {
+		<-s.dfltDone
+	}
 	return s.client.Close()
+}
+
+// ACLSnapshot returns the etcd-side ACL view (inline per-model rules
+// plus the singleton default key, if configured). nil when no rules
+// or default are present, so MergeACL can skip work entirely.
+func (s *EtcdSource) ACLSnapshot() *ACLConfig {
+	var modelsCopy map[string]ACLModelRule
+	if mp := s.aclModels.Load(); mp != nil && len(*mp) > 0 {
+		modelsCopy = make(map[string]ACLModelRule, len(*mp))
+		for k, v := range *mp {
+			modelsCopy[k] = v
+		}
+	}
+	var def string
+	if dp := s.aclDefault.Load(); dp != nil {
+		def = *dp
+	}
+	if def == "" && modelsCopy == nil {
+		return nil
+	}
+	return &ACLConfig{Default: def, Models: modelsCopy}
 }
 
 // Client exposes the underlying etcd client so adjacent components

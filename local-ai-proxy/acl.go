@@ -96,3 +96,69 @@ func SplitGroups(header string) []string {
 func aclDenied(model string) error {
 	return fmt.Errorf("model %q is not permitted for this user", model)
 }
+
+// MergeACL returns the union of base and overlay. If both are nil the
+// result is nil (no ACL). If only one is nil the other is returned
+// as-is. When both are present:
+//
+//   - Default = overlay.Default if non-empty, else base.Default.
+//   - For each model present in either side, the result's user and
+//     group lists are the union (deduped) of the two sides. So a rule
+//     in either source broadens access; deletions on either side don't
+//     narrow access while the other side still grants it.
+func MergeACL(base, overlay *ACLConfig) *ACLConfig {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	if base == nil {
+		return overlay
+	}
+	if overlay == nil {
+		return base
+	}
+	out := &ACLConfig{
+		Default: base.Default,
+		Models:  make(map[string]ACLModelRule, len(base.Models)+len(overlay.Models)),
+	}
+	if overlay.Default != "" {
+		out.Default = overlay.Default
+	}
+	for m, r := range base.Models {
+		out.Models[m] = r
+	}
+	for m, ov := range overlay.Models {
+		if existing, ok := out.Models[m]; ok {
+			out.Models[m] = ACLModelRule{
+				Users:  unionStrings(existing.Users, ov.Users),
+				Groups: unionStrings(existing.Groups, ov.Groups),
+			}
+		} else {
+			out.Models[m] = ov
+		}
+	}
+	return out
+}
+
+func unionStrings(a, b []string) []string {
+	if len(a) == 0 {
+		return append([]string(nil), b...)
+	}
+	if len(b) == 0 {
+		return append([]string(nil), a...)
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	for _, s := range b {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}

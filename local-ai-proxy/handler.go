@@ -89,7 +89,22 @@ type Handler struct {
 	// ACL, if set, gates per-request model access on X-User-Id and
 	// X-User-Groups (which TrustedHeadersMiddleware has already
 	// validated as coming from a trusted proxy). Nil disables checks.
+	// Used as a fallback when ACLProvider is nil.
 	ACL *ACLConfig
+
+	// ACLProvider, if set, replaces ACL with a function called per
+	// request — used to layer hot-reloading etcd rules on top of the
+	// static YAML config. Returning nil disables checks for that
+	// request. When ACLProvider is non-nil, the static ACL field is
+	// ignored.
+	ACLProvider func() *ACLConfig
+}
+
+func (h *Handler) currentACL() *ACLConfig {
+	if h.ACLProvider != nil {
+		return h.ACLProvider()
+	}
+	return h.ACL
 }
 
 func NewHandler(router Router) *Handler {
@@ -162,10 +177,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.ACL != nil {
+	if acl := h.currentACL(); acl != nil {
 		user := r.Header.Get("X-User-Id")
 		groups := SplitGroups(r.Header.Get("X-User-Groups"))
-		if err := h.ACL.Check(route.Model, user, groups); err != nil {
+		if err := acl.Check(route.Model, user, groups); err != nil {
 			h.Metrics.ObserveRouteError(RouteErrACLDenied)
 			h.logger.Info("acl denied",
 				"model", route.Model, "user", user, "groups", groups,
