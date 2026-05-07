@@ -39,6 +39,11 @@ type Config struct {
 	// clients can't forge identity. Empty/unset defaults to loopback
 	// only ("127.0.0.1/32", "::1/128").
 	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
+
+	// ACL is optional per-model access control. When unset (or with
+	// default="allow" and no model rules), the proxy is fully open.
+	// See acl.go for semantics.
+	ACL *ACLConfig `yaml:"acl,omitempty"`
 }
 
 // DefaultTrustedProxies applies when trusted_proxies is unset in YAML.
@@ -98,6 +103,9 @@ func (c Config) Validate() error {
 	}
 	if c.Etcd != nil && c.Etcd.Prefix == "" {
 		return fmt.Errorf("etcd.prefix is required")
+	}
+	if err := c.ACL.Validate(); err != nil {
+		return err
 	}
 	return nil
 }
