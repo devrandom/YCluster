@@ -124,6 +124,92 @@ func TestACLValidate(t *testing.T) {
 	}
 }
 
+func TestMergeACLNilCases(t *testing.T) {
+	if got := MergeACL(nil, nil); got != nil {
+		t.Errorf("nil/nil = %v; want nil", got)
+	}
+	a := &ACLConfig{Default: "deny"}
+	if got := MergeACL(a, nil); got != a {
+		t.Errorf("a/nil should return a unchanged")
+	}
+	if got := MergeACL(nil, a); got != a {
+		t.Errorf("nil/a should return a unchanged")
+	}
+}
+
+func TestMergeACLDefaults(t *testing.T) {
+	cases := []struct {
+		base, overlay, want string
+	}{
+		{"allow", "", "allow"},
+		{"deny", "", "deny"},
+		{"allow", "deny", "deny"},
+		{"deny", "allow", "allow"},
+		{"", "deny", "deny"},
+	}
+	for _, c := range cases {
+		got := MergeACL(&ACLConfig{Default: c.base}, &ACLConfig{Default: c.overlay})
+		if got.Default != c.want {
+			t.Errorf("merge(%q,%q).Default = %q; want %q", c.base, c.overlay, got.Default, c.want)
+		}
+	}
+}
+
+func TestMergeACLUnionsRules(t *testing.T) {
+	base := &ACLConfig{
+		Default: "deny",
+		Models: map[string]ACLModelRule{
+			"shared": {Users: []string{"alice"}, Groups: []string{"staff"}},
+			"only-base": {Users: []string{"bob"}},
+		},
+	}
+	overlay := &ACLConfig{
+		Models: map[string]ACLModelRule{
+			"shared": {Users: []string{"carol", "alice"}, Groups: []string{"admins"}},
+			"only-overlay": {Groups: []string{"hackers"}},
+		},
+	}
+	merged := MergeACL(base, overlay)
+
+	if got := merged.Default; got != "deny" {
+		t.Errorf("Default = %q; want deny (from base)", got)
+	}
+	// shared should have union of both
+	shared := merged.Models["shared"]
+	wantU := []string{"alice", "carol"}
+	if !sameSet(shared.Users, wantU) {
+		t.Errorf("shared.Users = %v; want set %v", shared.Users, wantU)
+	}
+	wantG := []string{"staff", "admins"}
+	if !sameSet(shared.Groups, wantG) {
+		t.Errorf("shared.Groups = %v; want set %v", shared.Groups, wantG)
+	}
+	// only-base passes through
+	if !sameSet(merged.Models["only-base"].Users, []string{"bob"}) {
+		t.Errorf("only-base lost: %v", merged.Models["only-base"])
+	}
+	// only-overlay passes through
+	if !sameSet(merged.Models["only-overlay"].Groups, []string{"hackers"}) {
+		t.Errorf("only-overlay lost: %v", merged.Models["only-overlay"])
+	}
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		seen[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := seen[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func TestSplitGroups(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
