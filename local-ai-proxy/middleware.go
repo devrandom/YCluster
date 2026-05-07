@@ -35,8 +35,8 @@ func (w *statusWriter) Unwrap() http.ResponseWriter {
 }
 
 // LoggingMiddleware logs one structured record per request: method,
-// path, status, duration, bytes out, X-User-Id (if present), and
-// remote addr. Logger may be nil to use slog.Default().
+// path, status, duration, bytes out, X-User-Id and X-User-Groups (if
+// present), and remote addr. Logger may be nil to use slog.Default().
 func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
@@ -52,6 +52,7 @@ func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
 			slog.Int64("bytes_out", sw.bytes),
 			slog.String("user", r.Header.Get("X-User-Id")),
+			slog.String("groups", r.Header.Get("X-User-Groups")),
 			slog.String("remote", r.RemoteAddr),
 		)
 	})
