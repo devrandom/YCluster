@@ -386,3 +386,41 @@
       systemd:
         name: prometheus-node-exporter
         state: restarted
+
+- name: Install node exporter on compute and nvidia nodes
+  hosts: nvidia:compute
+  become: yes
+  tasks:
+    - name: Install node exporter
+      apt:
+        name:
+          - prometheus-node-exporter
+        state: present
+
+    - name: Configure node exporter with textfile collector
+      copy:
+        dest: /etc/default/prometheus-node-exporter
+        content: |
+          ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter"
+        mode: '0644'
+      notify: restart node exporter
+
+    - name: Create textfile directory for node exporter
+      file:
+        path: /var/lib/prometheus/node-exporter
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Enable and start node exporter
+      systemd:
+        name: prometheus-node-exporter
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: restart node exporter
+      systemd:
+        name: prometheus-node-exporter
+        state: restarted
