@@ -424,3 +424,88 @@
       systemd:
         name: prometheus-node-exporter
         state: restarted
+
+- name: Install node exporter on macOS nodes
+  hosts: macos
+  become: yes
+  vars:
+    node_exporter_port: 9100
+    node_exporter_textfile_dir: "/var/lib/prometheus/node-exporter"
+  tasks:
+    - name: Check if Homebrew is installed
+      stat:
+        path: /opt/homebrew/bin/brew
+      register: homebrew_check
+      become: no
+
+    - name: Check if node_exporter is installed
+      shell: |
+        cd /Users/dev && sudo -u dev env HOME=/Users/dev /opt/homebrew/bin/brew list node_exporter 2>&1
+      register: node_exporter_check
+      become: no
+      changed_when: false
+      failed_when: false
+
+    - name: Install node_exporter via Homebrew
+      shell: |
+        cd /Users/dev && sudo -u dev env HOME=/Users/dev /opt/homebrew/bin/brew install node_exporter
+      become: yes
+      environment:
+        PATH: "/opt/homebrew/bin:{{ ansible_facts['env']['PATH'] }}"
+      when: node_exporter_check.rc != 0
+
+    - name: Create textfile directory for node exporter
+      file:
+        path: "{{ node_exporter_textfile_dir }}"
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+
+    - name: Create node exporter LaunchDaemon plist
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>Label</key>
+              <string>com.ycluster.node-exporter</string>
+              <key>ProgramArguments</key>
+              <array>
+                  <string>/opt/homebrew/opt/node_exporter/bin/node_exporter</string>
+                  <string>--collector.textfile.directory={{ node_exporter_textfile_dir }}</string>
+                  <string>--web.listen-address=0.0.0.0:{{ node_exporter_port }}</string>
+              </array>
+              <key>UserName</key>
+              <string>dev</string>
+              <key>GroupName</key>
+              <string>admin</string>
+              <key>RunAtLoad</key>
+              <true/>
+              <key>KeepAlive</key>
+              <true/>
+              <key>StandardOutPath</key>
+              <string>/opt/homebrew/var/log/node-exporter.log</string>
+              <key>StandardErrorPath</key>
+              <string>/opt/homebrew/var/log/node-exporter.log</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.ycluster.node-exporter.plist
+        mode: '0644'
+      notify: restart node exporter
+
+    - name: Load and start node exporter
+      shell: |
+        launchctl load /Library/LaunchDaemons/com.ycluster.node-exporter.plist
+        launchctl start com.ycluster.node-exporter
+      become: yes
+
+  handlers:
+    - name: restart node exporter
+      shell: |
+        launchctl stop com.ycluster.node-exporter || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.node-exporter.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.node-exporter.plist
+        launchctl start com.ycluster.node-exporter
+      become: yes
