@@ -2432,7 +2432,7 @@ def get_leadership_status():
 PROMETHEUS_JOB_SPECS = {
     'node-exporter': {
         'port': 9100,
-        'predicate': lambda h: h['type'] in ('storage', 'nvidia', 'compute'),
+        'predicate': lambda h: h['type'] in ('storage', 'nvidia', 'compute', 'nas'),
     },
     'ycluster-health': {
         'port': 12723,

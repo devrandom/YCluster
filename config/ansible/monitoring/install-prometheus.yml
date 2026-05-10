@@ -387,8 +387,8 @@
         name: prometheus-node-exporter
         state: restarted
 
-- name: Install node exporter on compute and nvidia nodes
-  hosts: nvidia:compute
+- name: Install node exporter on compute, nvidia and nas nodes
+  hosts: nvidia:compute:nas
   become: yes
   tasks:
     - name: Install node exporter
