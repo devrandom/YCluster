@@ -94,7 +94,6 @@
           [Unit]
           Description=local-ai-proxy
           After=network.target
-          PartOf=ycluster-apps.target
 
           [Service]
           Type=exec
@@ -111,7 +110,7 @@
           StandardError=journal
 
           [Install]
-          WantedBy=ycluster-apps.target
+          WantedBy=multi-user.target
       register: service_unit
       notify: restart local-ai-proxy
 
