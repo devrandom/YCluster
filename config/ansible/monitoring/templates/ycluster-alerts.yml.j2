@@ -64,23 +64,23 @@ groups:
 
       # Low disk space
       - alert: LowDiskSpace
-        expr: (1 - (node_filesystem_avail_bytes{fstype!="tmpfs",fstype!="overlay"} / node_filesystem_size_bytes)) * 100 > 85
+        expr: (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 85
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "Low disk space on {{ $labels.node }}"
-          description: "Disk usage on {{ $labels.node }} mountpoint {{ $labels.mountpoint }} is above 85%"
+          description: "Disk usage on {{ $labels.node }} root filesystem is above 85%"
 
       # Critical disk space
       - alert: CriticalDiskSpace
-        expr: (1 - (node_filesystem_avail_bytes{fstype!="tmpfs",fstype!="overlay"} / node_filesystem_size_bytes)) * 100 > 95
+        expr: (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 95
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "Critical disk space on {{ $labels.node }}"
-          description: "Disk usage on {{ $labels.node }} mountpoint {{ $labels.mountpoint }} is above 95%"
+          description: "Disk usage on {{ $labels.node }} root filesystem is above 95%"
 
       # Load average
       - alert: HighLoadAverage
