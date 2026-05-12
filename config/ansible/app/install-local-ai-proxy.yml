@@ -97,7 +97,7 @@
 
           [Service]
           Type=exec
-          ExecStart={{ proxy_bin_dst }} --config /etc/local-ai-proxy/config.yaml
+          ExecStart={{ proxy_bin_dst }} serve --config /etc/local-ai-proxy/config.yaml
           User=local-ai-proxy
           Group=local-ai-proxy
           Restart=on-failure

@@ -24,9 +24,20 @@ type ACLConfig struct {
 	Models  map[string]ACLModelRule `yaml:"models,omitempty"`
 }
 
+type ACLDecision bool
+
+const (
+    ACLAllow ACLDecision = true
+    ACLDeny  ACLDecision = false
+)
+
+type ACLEntry struct {
+    Subject  string       `yaml:"subject"`
+    Decision ACLDecision `yaml:"decision"`
+}
+
 type ACLModelRule struct {
-	Users  []string `yaml:"users,omitempty"`
-	Groups []string `yaml:"groups,omitempty"`
+    Entries []ACLEntry `yaml:"entries,omitempty"`
 }
 
 // Validate rejects unknown defaults early. An empty default is treated
@@ -43,10 +54,8 @@ func (a *ACLConfig) Validate() error {
 	return nil
 }
 
-// Check returns nil when the request is permitted. Otherwise it
-// returns a permission_denied error suitable for surfacing to the
-// client. user may be empty (no X-User-Id); in that case only rules
-// containing "*" or explicitly listing "" can match.
+// Check evaluates each entry in order. The first matching entry determines
+// the outcome. If no entry matches, the default policy applies.
 func (a *ACLConfig) Check(model, user string, groups []string) error {
 	if a == nil {
 		return nil
@@ -58,22 +67,38 @@ func (a *ACLConfig) Check(model, user string, groups []string) error {
 		}
 		return nil
 	}
-	for _, u := range rule.Users {
-		if u == "*" || u == user {
-			return nil
+	for _, e := range rule.Entries {
+		if !entryMatches(e.Subject, user, groups) {
+			continue
 		}
+		if e.Decision == ACLDeny {
+			return aclDenied(model)
+		}
+		return nil
 	}
-	for _, g := range rule.Groups {
+	if a.Default == "deny" {
+		return aclDenied(model)
+	}
+	return nil
+}
+
+func entryMatches(subject, user string, groups []string) bool {
+	if strings.HasPrefix(subject, "user:") {
+		u := strings.TrimPrefix(subject, "user:")
+		return u == "*" || u == user
+	}
+	if strings.HasPrefix(subject, "group:") {
+		g := strings.TrimPrefix(subject, "group:")
 		if g == "*" {
-			return nil
+			return true
 		}
 		for _, ug := range groups {
 			if g == ug {
-				return nil
+				return true
 			}
 		}
 	}
-	return aclDenied(model)
+	return false
 }
 
 // SplitGroups parses the comma-separated X-User-Groups header into a
@@ -95,6 +120,70 @@ func SplitGroups(header string) []string {
 
 func aclDenied(model string) error {
 	return fmt.Errorf("model %q is not permitted for this user", model)
+}
+
+type ACLDelta struct {
+	Entries []ACLEntry
+}
+
+func (d *ACLDelta) Apply(rule ACLModelRule) ACLModelRule {
+	return ACLModelRule{Entries: d.Entries}
+}
+
+func ParseACLDeltas(tokens []string) ([]ACLDelta, error) {
+	var delta ACLDelta
+	for _, tok := range tokens {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if strings.HasPrefix(tok, "+user:") {
+			delta.Entries = append(delta.Entries, ACLEntry{
+				Subject:  "user:" + strings.TrimPrefix(tok, "+user:"),
+				Decision: ACLAllow,
+			})
+		} else if strings.HasPrefix(tok, "-user:") {
+			delta.Entries = append(delta.Entries, ACLEntry{
+				Subject:  "user:" + strings.TrimPrefix(tok, "-user:"),
+				Decision: ACLDeny,
+			})
+		} else if strings.HasPrefix(tok, "+group:") {
+			delta.Entries = append(delta.Entries, ACLEntry{
+				Subject:  "group:" + strings.TrimPrefix(tok, "+group:"),
+				Decision: ACLAllow,
+			})
+		} else if strings.HasPrefix(tok, "-group:") {
+			delta.Entries = append(delta.Entries, ACLEntry{
+				Subject:  "group:" + strings.TrimPrefix(tok, "-group:"),
+				Decision: ACLDeny,
+			})
+		} else {
+			return nil, fmt.Errorf("invalid ACL token %q", tok)
+		}
+	}
+	if len(delta.Entries) > 0 {
+		return []ACLDelta{delta}, nil
+	}
+	return nil, nil
+}
+
+func contains(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func filterStrings(slice []string, reject string) []string {
+	out := slice[:0]
+	for _, s := range slice {
+		if s != reject {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // MergeACL returns the union of base and overlay. If both are nil the
@@ -128,12 +217,28 @@ func MergeACL(base, overlay *ACLConfig) *ACLConfig {
 	}
 	for m, ov := range overlay.Models {
 		if existing, ok := out.Models[m]; ok {
-			out.Models[m] = ACLModelRule{
-				Users:  unionStrings(existing.Users, ov.Users),
-				Groups: unionStrings(existing.Groups, ov.Groups),
-			}
+			merged := appendEntries(existing.Entries, ov.Entries)
+			out.Models[m] = ACLModelRule{Entries: merged}
 		} else {
 			out.Models[m] = ov
+		}
+	}
+	return out
+}
+
+func appendEntries(a, b []ACLEntry) []ACLEntry {
+	seen := make(map[string]bool, len(a)+len(b))
+	var out []ACLEntry
+	for _, e := range a {
+		if !seen[e.Subject] {
+			seen[e.Subject] = true
+			out = append(out, e)
+		}
+	}
+	for _, e := range b {
+		if !seen[e.Subject] {
+			seen[e.Subject] = true
+			out = append(out, e)
 		}
 	}
 	return out
