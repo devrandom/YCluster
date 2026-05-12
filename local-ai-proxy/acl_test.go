@@ -34,7 +34,7 @@ func TestACLUserMatch(t *testing.T) {
 	a := &ACLConfig{
 		Default: "deny",
 		Models: map[string]ACLModelRule{
-			"m": {Users: []string{"alice"}},
+			"m": {Entries: []ACLEntry{{Subject: "user:alice", Decision: ACLAllow}}},
 		},
 	}
 	if err := a.Check("m", "alice", nil); err != nil {
@@ -49,7 +49,7 @@ func TestACLGroupMatch(t *testing.T) {
 	a := &ACLConfig{
 		Default: "deny",
 		Models: map[string]ACLModelRule{
-			"m": {Groups: []string{"admins"}},
+			"m": {Entries: []ACLEntry{{Subject: "group:admins", Decision: ACLAllow}}},
 		},
 	}
 	if err := a.Check("m", "alice", []string{"staff", "admins"}); err != nil {
@@ -64,7 +64,7 @@ func TestACLWildcardUser(t *testing.T) {
 	a := &ACLConfig{
 		Default: "deny",
 		Models: map[string]ACLModelRule{
-			"m": {Users: []string{"*"}},
+			"m": {Entries: []ACLEntry{{Subject: "user:*", Decision: ACLAllow}}},
 		},
 	}
 	if err := a.Check("m", "anyone", nil); err != nil {
@@ -76,7 +76,7 @@ func TestACLWildcardGroup(t *testing.T) {
 	a := &ACLConfig{
 		Default: "deny",
 		Models: map[string]ACLModelRule{
-			"m": {Groups: []string{"*"}},
+			"m": {Entries: []ACLEntry{{Subject: "group:*", Decision: ACLAllow}}},
 		},
 	}
 	if err := a.Check("m", "alice", nil); err != nil {
@@ -85,16 +85,18 @@ func TestACLWildcardGroup(t *testing.T) {
 }
 
 func TestACLDefaultAllowWithRuleStillEnforced(t *testing.T) {
-	// A rule on a model overrides default=allow: matching it requires
-	// the user/group lists to permit, otherwise denied.
 	a := &ACLConfig{
 		Default: "allow",
 		Models: map[string]ACLModelRule{
-			"m": {Users: []string{"alice"}},
+			"m": {Entries: []ACLEntry{{Subject: "user:alice", Decision: ACLAllow}}},
 		},
 	}
-	if err := a.Check("m", "bob", nil); err == nil {
-		t.Errorf("rule should deny non-matching user even when default=allow")
+	// New semantics: if no entry matches, default applies. So bob (no match) follows default=allow.
+	if err := a.Check("m", "bob", nil); err != nil {
+		t.Errorf("bob should follow default=allow, got %v", err)
+	}
+	if err := a.Check("m", "alice", nil); err != nil {
+		t.Errorf("alice should be allowed by rule, got %v", err)
 	}
 	if err := a.Check("other", "bob", nil); err != nil {
 		t.Errorf("unlisted model should follow default=allow, got %v", err)
@@ -159,14 +161,20 @@ func TestMergeACLUnionsRules(t *testing.T) {
 	base := &ACLConfig{
 		Default: "deny",
 		Models: map[string]ACLModelRule{
-			"shared": {Users: []string{"alice"}, Groups: []string{"staff"}},
-			"only-base": {Users: []string{"bob"}},
+			"shared": {Entries: []ACLEntry{
+				{Subject: "user:alice", Decision: ACLAllow},
+				{Subject: "group:staff", Decision: ACLAllow},
+			}},
+			"only-base": {Entries: []ACLEntry{{Subject: "user:bob", Decision: ACLAllow}}},
 		},
 	}
 	overlay := &ACLConfig{
 		Models: map[string]ACLModelRule{
-			"shared": {Users: []string{"carol", "alice"}, Groups: []string{"admins"}},
-			"only-overlay": {Groups: []string{"hackers"}},
+			"shared": {Entries: []ACLEntry{
+				{Subject: "user:carol", Decision: ACLAllow},
+				{Subject: "group:admins", Decision: ACLAllow},
+			}},
+			"only-overlay": {Entries: []ACLEntry{{Subject: "group:hackers", Decision: ACLAllow}}},
 		},
 	}
 	merged := MergeACL(base, overlay)
@@ -176,21 +184,23 @@ func TestMergeACLUnionsRules(t *testing.T) {
 	}
 	// shared should have union of both
 	shared := merged.Models["shared"]
-	wantU := []string{"alice", "carol"}
-	if !sameSet(shared.Users, wantU) {
-		t.Errorf("shared.Users = %v; want set %v", shared.Users, wantU)
+	subjects := make(map[string]bool)
+	for _, e := range shared.Entries {
+		subjects[e.Subject] = true
 	}
-	wantG := []string{"staff", "admins"}
-	if !sameSet(shared.Groups, wantG) {
-		t.Errorf("shared.Groups = %v; want set %v", shared.Groups, wantG)
+	want := []string{"user:alice", "group:staff", "user:carol", "group:admins"}
+	if len(subjects) != len(want) {
+		t.Errorf("shared.Entries count = %d; want %d", len(subjects), len(want))
 	}
 	// only-base passes through
-	if !sameSet(merged.Models["only-base"].Users, []string{"bob"}) {
-		t.Errorf("only-base lost: %v", merged.Models["only-base"])
+	onlyBase := merged.Models["only-base"]
+	if len(onlyBase.Entries) != 1 || onlyBase.Entries[0].Subject != "user:bob" {
+		t.Errorf("only-base lost: %v", onlyBase)
 	}
 	// only-overlay passes through
-	if !sameSet(merged.Models["only-overlay"].Groups, []string{"hackers"}) {
-		t.Errorf("only-overlay lost: %v", merged.Models["only-overlay"])
+	onlyOverlay := merged.Models["only-overlay"]
+	if len(onlyOverlay.Entries) != 1 || onlyOverlay.Entries[0].Subject != "group:hackers" {
+		t.Errorf("only-overlay lost: %v", onlyOverlay)
 	}
 }
 
@@ -231,5 +241,93 @@ func TestSplitGroups(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+func TestParseACLDeltas(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tokens  []string
+		wantErr bool
+	}{
+		{
+			name:    "allow user and group",
+			tokens:  []string{"+user:alice", "+group:admins"},
+			wantErr: false,
+		},
+		{
+			name:    "deny user",
+			tokens:  []string{"-user:bob"},
+			wantErr: false,
+		},
+		{
+			name:    "deny group",
+			tokens:  []string{"-group:staff"},
+			wantErr: false,
+		},
+		{
+			name:    "mixed tokens",
+			tokens:  []string{"+user:alice", "-user:bob", "+group:admins", "-group:staff"},
+			wantErr: false,
+		},
+		{
+			name:    "invalid token",
+			tokens:  []string{"+user"},
+			wantErr: true,
+		},
+		{
+			name:    "clear not a token",
+			tokens:  []string{"clear"},
+			wantErr: true,
+		},
+		{
+			name:    "unknown prefix",
+			tokens:  []string{"xuser:alice"},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseACLDeltas(tc.tokens)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestACLDeltaApply(t *testing.T) {
+	base := ACLModelRule{
+		Entries: []ACLEntry{
+			{Subject: "user:alice", Decision: ACLAllow},
+			{Subject: "group:staff", Decision: ACLAllow},
+		},
+	}
+	d := ACLDelta{
+		Entries: []ACLEntry{
+			{Subject: "user:bob", Decision: ACLAllow},
+			{Subject: "group:admins", Decision: ACLDeny},
+		},
+	}
+	result := d.Apply(base)
+	if len(result.Entries) != 2 {
+		t.Errorf("Entries count = %d; want 2", len(result.Entries))
+	}
+	if result.Entries[0].Subject != "user:bob" || result.Entries[1].Subject != "group:admins" {
+		t.Errorf("Entries = %v; want bob+admins", result.Entries)
+	}
+}
+
+func TestACLDeltaApplyIdempotent(t *testing.T) {
+	d := ACLDelta{
+		Entries: []ACLEntry{{Subject: "user:alice", Decision: ACLAllow}},
+	}
+	rule := ACLModelRule{}
+	r1 := d.Apply(rule)
+	r2 := d.Apply(r1)
+	if len(r2.Entries) != 1 {
+		t.Errorf("should not duplicate: %v", r2.Entries)
 	}
 }

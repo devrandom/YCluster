@@ -29,6 +29,8 @@ func runCLI(subcmd string, args []string, configPath string) {
 		runModels(args, configPath)
 	case "backends":
 		runBackends(args, configPath)
+	case "acl":
+		runACL(args, configPath)
 	default:
 		fatal("unknown subcommand %q", subcmd)
 	}
@@ -41,20 +43,13 @@ func runModels(args []string, configPath string) {
 	subcmd := args[0]
 	args = args[1:]
 
-	cfg := mustLoadConfig(configPath)
-	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
-		fatal("CLI requires etcd-backed config (no etcd section in %s)", configPath)
-	}
-	client := mustEtcdClient(cfg.Etcd)
-	defer client.Close()
-
 	switch subcmd {
 	case "ls", "list":
-		modelsLs(client, cfg.Etcd.Prefix)
+		modelsLs(configPath, args)
 	case "add":
-		modelsAdd(args, client, cfg.Etcd.Prefix)
+		modelsAdd(args, configPath)
 	case "remove", "rm":
-		modelsRemove(args, client, cfg.Etcd.Prefix)
+		modelsRemove(args, configPath)
 	default:
 		fatalUsage("models <ls|add|remove>")
 	}
@@ -67,31 +62,30 @@ func runBackends(args []string, configPath string) {
 	subcmd := args[0]
 	args = args[1:]
 
+	switch subcmd {
+	case "disable":
+		backendsDisable(args, configPath)
+	case "enable":
+		backendsEnable(args, configPath)
+	case "ls", "list":
+		backendsLs(args, configPath)
+	default:
+		fatalUsage("backends <disable|enable|ls>")
+	}
+}
+
+func modelsLs(configPath string, args []string) {
+	if len(args) != 0 {
+		fatalUsage("models ls")
+	}
 	cfg := mustLoadConfig(configPath)
 	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
 		fatal("CLI requires etcd-backed config (no etcd section in %s)", configPath)
 	}
 	client := mustEtcdClient(cfg.Etcd)
 	defer client.Close()
+	prefix := cfg.Etcd.Prefix
 
-	prefix := cfg.Etcd.DisabledPrefix
-	if prefix == "" {
-		prefix = DefaultDisabledPrefix
-	}
-
-	switch subcmd {
-	case "disable":
-		backendsDisable(args, client, prefix)
-	case "enable":
-		backendsEnable(args, client, prefix)
-	case "ls", "list":
-		backendsLs(client, prefix)
-	default:
-		fatalUsage("backends <disable|enable|ls>")
-	}
-}
-
-func modelsLs(client *clientv3.Client, prefix string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	resp, err := client.Get(ctx, prefix, clientv3.WithPrefix())
@@ -133,7 +127,7 @@ func modelsLs(client *clientv3.Client, prefix string) {
 	}
 }
 
-func modelsAdd(args []string, client *clientv3.Client, prefix string) {
+func modelsAdd(args []string, configPath string) {
 	fs := flag.NewFlagSet("models add", flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: local-ai-proxy models add <api-base> [model]") }
 	_ = fs.Parse(args)
@@ -146,11 +140,12 @@ func modelsAdd(args []string, client *clientv3.Client, prefix string) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	client, prefix := mustEtcdForCLI(configPath)
+	defer client.Close()
 	if len(rest) == 2 {
 		modelsAddOne(client, prefix, rest[1], apiBase)
 		return
 	}
-	// Auto-discover.
 	ids, err := discoverModels(apiBase)
 	if err != nil {
 		fatal("%v", err)
@@ -212,7 +207,7 @@ func modelsAddOneResult(client *clientv3.Client, prefix, model, apiBase string) 
 	return true
 }
 
-func modelsRemove(args []string, client *clientv3.Client, prefix string) {
+func modelsRemove(args []string, configPath string) {
 	fs := flag.NewFlagSet("models remove", flag.ExitOnError)
 	apiBaseFlag := fs.String("api-base", "", "remove only this backend instead of the whole model")
 	fs.Usage = func() {
@@ -225,6 +220,8 @@ func modelsRemove(args []string, client *clientv3.Client, prefix string) {
 		os.Exit(2)
 	}
 	model := rest[0]
+	client, prefix := mustEtcdForCLI(configPath)
+	defer client.Close()
 	key := prefix + model
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -283,7 +280,7 @@ func modelsRemove(args []string, client *clientv3.Client, prefix string) {
 	fmt.Printf("Removed backend %s from %s.\n", target, model)
 }
 
-func backendsDisable(args []string, client *clientv3.Client, prefix string) {
+func backendsDisable(args []string, configPath string) {
 	fs := flag.NewFlagSet("backends disable", flag.ExitOnError)
 	reason := fs.String("reason", "", "human-readable reason (stored as JSON metadata)")
 	fs.Usage = func() {
@@ -299,6 +296,8 @@ func backendsDisable(args []string, client *clientv3.Client, prefix string) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	client, prefix := mustEtcdForCLI(configPath)
+	defer client.Close()
 	key := prefix + target
 	value := ""
 	if *reason != "" {
@@ -323,7 +322,7 @@ func backendsDisable(args []string, client *clientv3.Client, prefix string) {
 	fmt.Println("(takes effect at next health-check cycle)")
 }
 
-func backendsEnable(args []string, client *clientv3.Client, prefix string) {
+func backendsEnable(args []string, configPath string) {
 	if len(args) != 1 {
 		fatalUsage("backends enable <url>")
 	}
@@ -331,6 +330,8 @@ func backendsEnable(args []string, client *clientv3.Client, prefix string) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	client, prefix := mustEtcdForCLI(configPath)
+	defer client.Close()
 	key := prefix + target
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -346,7 +347,12 @@ func backendsEnable(args []string, client *clientv3.Client, prefix string) {
 	fmt.Println("(takes effect at next health-check cycle)")
 }
 
-func backendsLs(client *clientv3.Client, prefix string) {
+func backendsLs(args []string, configPath string) {
+	if len(args) != 0 {
+		fatalUsage("backends ls")
+	}
+	client, prefix := mustEtcdForCLI(configPath)
+	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	resp, err := client.Get(ctx, prefix, clientv3.WithPrefix())
@@ -433,6 +439,15 @@ func mustLoadConfig(path string) Config {
 	return cfg
 }
 
+func mustEtcdForCLI(path string) (*clientv3.Client, string) {
+	cfg := mustLoadConfig(path)
+	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
+		fatal("CLI requires etcd-backed config (no etcd section in %s)", path)
+	}
+	client := mustEtcdClient(cfg.Etcd)
+	return client, cfg.Etcd.Prefix
+}
+
 func mustEtcdClient(cfg *EtcdConfig) *clientv3.Client {
 	endpoints := cfg.Endpoints
 	if len(endpoints) == 0 {
@@ -450,12 +465,211 @@ func mustEtcdClient(cfg *EtcdConfig) *clientv3.Client {
 	return client
 }
 
-func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+func runACL(args []string, configPath string) {
+if len(args) == 0 {
+		fatalUsage("acl <ls|setdefault|set>")
+	}
+	subcmd := args[0]
+	args = args[1:]
+
+	switch subcmd {
+	case "ls":
+		aclLs(args, configPath)
+	case "setdefault":
+		aclSetDefault(args, configPath)
+	case "set":
+		aclSet(args, configPath)
+	default:
+		fatalUsage("acl <ls|setdefault|set>")
+	}
+}
+
+func aclLs(args []string, configPath string) {
+	if len(args) != 0 {
+		fatalUsage("acl ls")
+	}
+	cfg := mustLoadConfig(configPath)
+	if cfg.Etcd == nil {
+		fatal("acl ls requires etcd config")
+	}
+	client := mustEtcdClient(cfg.Etcd)
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if cfg.Etcd.ACLDefaultKey != "" {
+		resp, err := client.Get(ctx, cfg.Etcd.ACLDefaultKey)
+		if err != nil {
+			fatal("etcd get %s: %v", cfg.Etcd.ACLDefaultKey, err)
+		}
+		if len(resp.Kvs) > 0 {
+			fmt.Printf("default: %s\n", string(resp.Kvs[0].Value))
+		} else {
+			fmt.Println("default: (not set)")
+		}
+	} else {
+		fmt.Println("default: (acl_default_key not configured)")
+	}
+	fmt.Println()
+	resp, err := client.Get(ctx, cfg.Etcd.Prefix, clientv3.WithPrefix())
+	if err != nil {
+		fatal("etcd get %s: %v", cfg.Etcd.Prefix, err)
+	}
+	type modelACL struct {
+		model  string
+		entries []ACLEntry
+	}
+	var ac []modelACL
+	for _, kv := range resp.Kvs {
+		name := strings.TrimPrefix(string(kv.Key), cfg.Etcd.Prefix)
+		var v etcdModelValue
+		if err := json.Unmarshal(kv.Value, &v); err != nil {
+			continue
+		}
+		if v.ACL != nil {
+			ac = append(ac, modelACL{model: name, entries: v.ACL.Entries})
+		}
+	}
+	if len(ac) == 0 {
+		fmt.Println("No per-model ACL rules.")
+		return
+	}
+	sort.Slice(ac, func(i, j int) bool { return ac[i].model < ac[j].model })
+	for _, e := range ac {
+		fmt.Printf("%s:\n", e.model)
+		for _, entry := range e.entries {
+			prefix := "+"
+			if entry.Decision == ACLDeny {
+				prefix = "-"
+			}
+			fmt.Printf("  %s%s\n", prefix, entry.Subject)
+		}
+	}
+}
+
+func aclSetDefault(args []string, configPath string) {
+	if len(args) != 1 {
+		fatalUsage("acl setdefault <allow|deny>")
+	}
+	val := args[0]
+	if val != "allow" && val != "deny" {
+		fatal("acl setdefault must be allow or deny, got %q", val)
+	}
+	cfg := mustLoadConfig(configPath)
+	if cfg.Etcd == nil || cfg.Etcd.ACLDefaultKey == "" {
+		fatal("acl_default_key not configured in config")
+	}
+	client := mustEtcdClient(cfg.Etcd)
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Put(ctx, cfg.Etcd.ACLDefaultKey, val); err != nil {
+		fatal("etcd put: %v", err)
+	}
+	fmt.Printf("default: %s\n", val)
+}
+
+func aclSet(args []string, configPath string) {
+	model := ""
+	tokens := []string{}
+	if len(args) >= 1 {
+		model = args[0]
+		tokens = args[1:]
+	}
+	if model == "" {
+		fatalUsage("acl set <model> [+-user:name|+-group:name...]")
+	}
+	// No tokens means clear.
+	if len(tokens) == 0 {
+		cfg := mustLoadConfig(configPath)
+		if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
+			fatal("CLI requires etcd-backed config")
+		}
+		client := mustEtcdClient(cfg.Etcd)
+		defer client.Close()
+		key := cfg.Etcd.Prefix + model
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, err := client.Get(ctx, key)
+		if err != nil {
+			fatal("etcd get %s: %v", key, err)
+		}
+		var v etcdModelValue
+		if len(resp.Kvs) > 0 {
+			if err := json.Unmarshal(resp.Kvs[0].Value, &v); err != nil {
+				fatal("existing value at %s is not JSON: %v", key, err)
+			}
+		} else {
+			fatal("no such model: %s", model)
+		}
+		v.ACL = nil
+		buf, err := json.Marshal(v)
+		if err != nil {
+			fatal("marshal: %v", err)
+		}
+		if _, err := client.Put(ctx, key, string(buf)); err != nil {
+			fatal("etcd put %s: %v", key, err)
+		}
+		fmt.Printf("ACL cleared for %s\n", model)
+		return
+	}
+	deltas, err := ParseACLDeltas(tokens)
+	if err != nil {
+		fatal("%v", err)
+	}
+	cfg := mustLoadConfig(configPath)
+	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
+		fatal("CLI requires etcd-backed config")
+	}
+	client := mustEtcdClient(cfg.Etcd)
+	defer client.Close()
+	key := cfg.Etcd.Prefix + model
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := client.Get(ctx, key)
+	if err != nil {
+		fatal("etcd get %s: %v", key, err)
+	}
+	var v etcdModelValue
+	if len(resp.Kvs) > 0 {
+		if err := json.Unmarshal(resp.Kvs[0].Value, &v); err != nil {
+			fatal("existing value at %s is not JSON: %v", key, err)
+		}
+	} else {
+		fatal("no such model: %s", model)
+	}
+	for _, delta := range deltas {
+		*v.ACL = delta.Apply(*v.ACL)
+	}
+	if v.ACL != nil && len(v.ACL.Entries) == 0 {
+		v.ACL = nil
+	}
+	buf, err := json.Marshal(v)
+	if err != nil {
+		fatal("marshal: %v", err)
+	}
+	if _, err := client.Put(ctx, key, string(buf)); err != nil {
+		fatal("etcd put %s: %v", key, err)
+	}
+	if v.ACL == nil {
+		fmt.Printf("ACL cleared for %s\n", model)
+	} else {
+		fmt.Printf("ACL updated for %s:\n", model)
+		for _, entry := range v.ACL.Entries {
+			prefix := "+"
+			if entry.Decision == ACLDeny {
+				prefix = "-"
+			}
+			fmt.Printf("  %s%s\n", prefix, entry.Subject)
+		}
+	}
 }
 
 func fatalUsage(usage string) {
 	fmt.Fprintln(os.Stderr, "usage: local-ai-proxy "+usage)
 	os.Exit(2)
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
 }

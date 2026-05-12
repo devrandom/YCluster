@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -29,12 +30,18 @@ func main() {
 	}
 	if len(args) > 0 {
 		switch args[0] {
-		case "models", "backends":
+		case "models", "backends", "acl":
 			runCLI(args[0], args[1:], configPath)
 			return
 		case "serve":
 			args = args[1:]
+		default:
+			fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-config <path>] <models|backends|acl|serve>\n")
+			os.Exit(1)
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-config <path>] <models|backends|acl|serve>\n")
+		os.Exit(1)
 	}
 
 	// Serve mode. Parse the remaining flags as before.
