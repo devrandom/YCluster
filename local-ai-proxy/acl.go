@@ -12,20 +12,57 @@ type ACLConfig struct {
 type ACLDecision bool
 
 const (
-    ACLAllow ACLDecision = true
-    ACLDeny  ACLDecision = false
+	ACLAllow ACLDecision = true
+	ACLDeny  ACLDecision = false
 )
 
 type ACLEntry struct {
-    Subject  string       `yaml:"subject"`
-    Decision ACLDecision `yaml:"decision"`
+	Subject  string      `yaml:"subject"`
+	Decision ACLDecision `yaml:"decision"`
 }
 
 type ACLModelRule struct {
-    Entries []ACLEntry `yaml:"entries,omitempty"`
+	Entries []ACLEntry `yaml:"entries,omitempty"`
 }
 
 func (a *ACLConfig) Validate() error {
+	if a == nil {
+		return nil
+	}
+	for model, rule := range a.Models {
+		for i, e := range rule.Entries {
+			if err := validateSubject(e.Subject); err != nil {
+				return fmt.Errorf("model %q entry %d: %v", model, i, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateSubject rejects malformed subject strings. Catches typos
+// ("users:alice"), empty names ("user:"), and concatenation bugs
+// where multiple CLI tokens got squashed into one ("user:a-user:*").
+func validateSubject(s string) error {
+	var name string
+	switch {
+	case strings.HasPrefix(s, "user:"):
+		name = strings.TrimPrefix(s, "user:")
+	case strings.HasPrefix(s, "group:"):
+		name = strings.TrimPrefix(s, "group:")
+	default:
+		return fmt.Errorf("subject %q must start with user: or group:", s)
+	}
+	if name == "" {
+		return fmt.Errorf("subject %q has empty name", s)
+	}
+	if strings.ContainsAny(name, " \t\n\r") {
+		return fmt.Errorf("subject %q contains whitespace", s)
+	}
+	for _, marker := range []string{"+user:", "-user:", "+group:", "-group:", "user:", "group:"} {
+		if strings.Contains(name, marker) {
+			return fmt.Errorf("subject %q contains embedded %q (likely concatenated tokens)", s, marker)
+		}
+	}
 	return nil
 }
 
@@ -46,8 +83,8 @@ func (a *ACLConfig) Check(model, user string, groups []string) error {
 		}
 		return nil
 	}
-return nil
-	}
+	return nil
+}
 
 func entryMatches(subject, user string, groups []string) bool {
 	if strings.HasPrefix(subject, "user:") {
@@ -89,68 +126,41 @@ func aclDenied(model string) error {
 	return fmt.Errorf("model %q is not permitted for this user", model)
 }
 
-type ACLDelta struct {
-	Entries []ACLEntry
-}
-
-func (d *ACLDelta) Apply(rule ACLModelRule) ACLModelRule {
-	return ACLModelRule{Entries: d.Entries}
-}
-
-func ParseACLDeltas(tokens []string) ([]ACLDelta, error) {
-	var delta ACLDelta
+// ParseACLEntries turns CLI tokens like "+user:alice" / "-group:staff"
+// into ACLEntry values, preserving order.
+func ParseACLEntries(tokens []string) ([]ACLEntry, error) {
+	var out []ACLEntry
 	for _, tok := range tokens {
 		tok = strings.TrimSpace(tok)
 		if tok == "" {
 			continue
 		}
-		if strings.HasPrefix(tok, "+user:") {
-			delta.Entries = append(delta.Entries, ACLEntry{
-				Subject:  "user:" + strings.TrimPrefix(tok, "+user:"),
-				Decision: ACLAllow,
-			})
-		} else if strings.HasPrefix(tok, "-user:") {
-			delta.Entries = append(delta.Entries, ACLEntry{
-				Subject:  "user:" + strings.TrimPrefix(tok, "-user:"),
-				Decision: ACLDeny,
-			})
-		} else if strings.HasPrefix(tok, "+group:") {
-			delta.Entries = append(delta.Entries, ACLEntry{
-				Subject:  "group:" + strings.TrimPrefix(tok, "+group:"),
-				Decision: ACLAllow,
-			})
-		} else if strings.HasPrefix(tok, "-group:") {
-			delta.Entries = append(delta.Entries, ACLEntry{
-				Subject:  "group:" + strings.TrimPrefix(tok, "-group:"),
-				Decision: ACLDeny,
-			})
-		} else {
+		var (
+			subject  string
+			decision ACLDecision
+		)
+		switch {
+		case strings.HasPrefix(tok, "+user:"):
+			subject = "user:" + strings.TrimPrefix(tok, "+user:")
+			decision = ACLAllow
+		case strings.HasPrefix(tok, "-user:"):
+			subject = "user:" + strings.TrimPrefix(tok, "-user:")
+			decision = ACLDeny
+		case strings.HasPrefix(tok, "+group:"):
+			subject = "group:" + strings.TrimPrefix(tok, "+group:")
+			decision = ACLAllow
+		case strings.HasPrefix(tok, "-group:"):
+			subject = "group:" + strings.TrimPrefix(tok, "-group:")
+			decision = ACLDeny
+		default:
 			return nil, fmt.Errorf("invalid ACL token %q", tok)
 		}
-	}
-	if len(delta.Entries) > 0 {
-		return []ACLDelta{delta}, nil
-	}
-	return nil, nil
-}
-
-func contains(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
+		if err := validateSubject(subject); err != nil {
+			return nil, err
 		}
+		out = append(out, ACLEntry{Subject: subject, Decision: decision})
 	}
-	return false
-}
-
-func filterStrings(slice []string, reject string) []string {
-	out := slice[:0]
-	for _, s := range slice {
-		if s != reject {
-			out = append(out, s)
-		}
-	}
-	return out
+	return out, nil
 }
 
 func MergeACL(base, overlay *ACLConfig) *ACLConfig {
@@ -180,6 +190,11 @@ func MergeACL(base, overlay *ACLConfig) *ACLConfig {
 	return out
 }
 
+// appendEntries unions entries from a (base) and b (overlay), keyed by
+// Subject. The first occurrence wins, so base entries take precedence
+// over conflicting overlay entries with the same Subject. This is
+// deliberate: YAML-configured rules should not be silently overridden
+// by etcd writes.
 func appendEntries(a, b []ACLEntry) []ACLEntry {
 	seen := make(map[string]bool, len(a)+len(b))
 	var out []ACLEntry
@@ -193,30 +208,6 @@ func appendEntries(a, b []ACLEntry) []ACLEntry {
 		if !seen[e.Subject] {
 			seen[e.Subject] = true
 			out = append(out, e)
-		}
-	}
-	return out
-}
-
-func unionStrings(a, b []string) []string {
-	if len(a) == 0 {
-		return append([]string(nil), b...)
-	}
-	if len(b) == 0 {
-		return append([]string(nil), a...)
-	}
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, s := range a {
-		if _, ok := seen[s]; !ok {
-			seen[s] = struct{}{}
-			out = append(out, s)
-		}
-	}
-	for _, s := range b {
-		if _, ok := seen[s]; !ok {
-			seen[s] = struct{}{}
-			out = append(out, s)
 		}
 	}
 	return out

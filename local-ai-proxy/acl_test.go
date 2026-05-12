@@ -200,50 +200,28 @@ func TestSplitGroups(t *testing.T) {
 	}
 }
 
-func TestParseACLDeltas(t *testing.T) {
+func TestParseACLEntries(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		tokens  []string
 		wantErr bool
 	}{
-		{
-			name:    "allow user and group",
-			tokens:  []string{"+user:alice", "+group:admins"},
-			wantErr: false,
-		},
-		{
-			name:    "deny user",
-			tokens:  []string{"-user:bob"},
-			wantErr: false,
-		},
-		{
-			name:    "deny group",
-			tokens:  []string{"-group:staff"},
-			wantErr: false,
-		},
-		{
-			name:    "mixed tokens",
-			tokens:  []string{"+user:alice", "-user:bob", "+group:admins", "-group:staff"},
-			wantErr: false,
-		},
-		{
-			name:    "invalid token",
-			tokens:  []string{"+user"},
-			wantErr: true,
-		},
-		{
-			name:    "clear not a token",
-			tokens:  []string{"clear"},
-			wantErr: true,
-		},
-		{
-			name:    "unknown prefix",
-			tokens:  []string{"xuser:alice"},
-			wantErr: true,
-		},
+		{name: "allow user and group", tokens: []string{"+user:alice", "+group:admins"}, wantErr: false},
+		{name: "deny user", tokens: []string{"-user:bob"}, wantErr: false},
+		{name: "deny group", tokens: []string{"-group:staff"}, wantErr: false},
+		{name: "mixed tokens", tokens: []string{"+user:alice", "-user:bob", "+group:admins", "-group:staff"}, wantErr: false},
+		{name: "wildcard user", tokens: []string{"+user:*"}, wantErr: false},
+		{name: "wildcard group", tokens: []string{"-group:*"}, wantErr: false},
+		{name: "invalid token", tokens: []string{"+user"}, wantErr: true},
+		{name: "clear not a token", tokens: []string{"clear"}, wantErr: true},
+		{name: "unknown prefix", tokens: []string{"xuser:alice"}, wantErr: true},
+		{name: "empty user name", tokens: []string{"+user:"}, wantErr: true},
+		{name: "concatenated tokens", tokens: []string{"+user:alice-user:*"}, wantErr: true},
+		{name: "embedded user marker", tokens: []string{"+user:alice+user:bob"}, wantErr: true},
+		{name: "whitespace in subject", tokens: []string{"+user:alice bob"}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseACLDeltas(tc.tokens)
+			_, err := ParseACLEntries(tc.tokens)
 			if tc.wantErr && err == nil {
 				t.Errorf("expected error, got nil")
 			}
@@ -254,52 +232,44 @@ func TestParseACLDeltas(t *testing.T) {
 	}
 }
 
-func TestACLDeltaApply(t *testing.T) {
-	base := ACLModelRule{
-		Entries: []ACLEntry{
+func TestParseACLEntriesOrder(t *testing.T) {
+	got, err := ParseACLEntries([]string{"+user:alice", "-user:*"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []ACLEntry{
+		{Subject: "user:alice", Decision: ACLAllow},
+		{Subject: "user:*", Decision: ACLDeny},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("entries = %v; want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entries[%d] = %v; want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestACLConfigValidate(t *testing.T) {
+	good := &ACLConfig{Models: map[string]ACLModelRule{
+		"m": {Entries: []ACLEntry{
 			{Subject: "user:alice", Decision: ACLAllow},
-			{Subject: "group:staff", Decision: ACLAllow},
-		},
-	}
-	d := ACLDelta{
-		Entries: []ACLEntry{
-			{Subject: "user:bob", Decision: ACLAllow},
-			{Subject: "group:admins", Decision: ACLDeny},
-		},
-	}
-	result := d.Apply(base)
-	if len(result.Entries) != 2 {
-		t.Errorf("Entries count = %d; want 2", len(result.Entries))
-	}
-	if result.Entries[0].Subject != "user:bob" || result.Entries[1].Subject != "group:admins" {
-		t.Errorf("Entries = %v; want bob+admins", result.Entries)
-	}
-}
-
-func TestACLDeltaApplyToEmpty(t *testing.T) {
-	d := ACLDelta{
-		Entries: []ACLEntry{
-			{Subject: "user:x@y.com", Decision: ACLAllow},
+			{Subject: "group:staff", Decision: ACLDeny},
 			{Subject: "user:*", Decision: ACLDeny},
-		},
+		}},
+	}}
+	if err := good.Validate(); err != nil {
+		t.Errorf("good config rejected: %v", err)
 	}
-	result := d.Apply(ACLModelRule{})
-	if len(result.Entries) != 2 {
-		t.Errorf("Entries count = %d; want 2", len(result.Entries))
+	bad := &ACLConfig{Models: map[string]ACLModelRule{
+		"m": {Entries: []ACLEntry{{Subject: "user:alice-user:*", Decision: ACLAllow}}},
+	}}
+	if err := bad.Validate(); err == nil {
+		t.Errorf("expected error for concatenated subject")
 	}
-	if result.Entries[0].Subject != "user:x@y.com" {
-		t.Errorf("first entry = %v; want user:x@y.com", result.Entries[0].Subject)
-	}
-}
-
-func TestACLDeltaApplyIdempotent(t *testing.T) {
-	d := ACLDelta{
-		Entries: []ACLEntry{{Subject: "user:alice", Decision: ACLAllow}},
-	}
-	rule := ACLModelRule{}
-	r1 := d.Apply(rule)
-	r2 := d.Apply(r1)
-	if len(r2.Entries) != 1 {
-		t.Errorf("should not duplicate: %v", r2.Entries)
+	var nilCfg *ACLConfig
+	if err := nilCfg.Validate(); err != nil {
+		t.Errorf("nil config should validate, got %v", err)
 	}
 }
