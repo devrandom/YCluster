@@ -467,7 +467,7 @@ func mustEtcdClient(cfg *EtcdConfig) *clientv3.Client {
 
 func runACL(args []string, configPath string) {
 if len(args) == 0 {
-		fatalUsage("acl <ls|setdefault|set>")
+		fatalUsage("acl <ls|set>")
 	}
 	subcmd := args[0]
 	args = args[1:]
@@ -475,12 +475,10 @@ if len(args) == 0 {
 	switch subcmd {
 	case "ls":
 		aclLs(args, configPath)
-	case "setdefault":
-		aclSetDefault(args, configPath)
 	case "set":
 		aclSet(args, configPath)
 	default:
-		fatalUsage("acl <ls|setdefault|set>")
+		fatalUsage("acl <ls|set>")
 	}
 }
 
@@ -496,26 +494,12 @@ func aclLs(args []string, configPath string) {
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if cfg.Etcd.ACLDefaultKey != "" {
-		resp, err := client.Get(ctx, cfg.Etcd.ACLDefaultKey)
-		if err != nil {
-			fatal("etcd get %s: %v", cfg.Etcd.ACLDefaultKey, err)
-		}
-		if len(resp.Kvs) > 0 {
-			fmt.Printf("default: %s\n", string(resp.Kvs[0].Value))
-		} else {
-			fmt.Println("default: (not set)")
-		}
-	} else {
-		fmt.Println("default: (acl_default_key not configured)")
-	}
-	fmt.Println()
 	resp, err := client.Get(ctx, cfg.Etcd.Prefix, clientv3.WithPrefix())
 	if err != nil {
 		fatal("etcd get %s: %v", cfg.Etcd.Prefix, err)
 	}
 	type modelACL struct {
-		model  string
+		model   string
 		entries []ACLEntry
 	}
 	var ac []modelACL
@@ -544,28 +528,6 @@ func aclLs(args []string, configPath string) {
 			fmt.Printf("  %s%s\n", prefix, entry.Subject)
 		}
 	}
-}
-
-func aclSetDefault(args []string, configPath string) {
-	if len(args) != 1 {
-		fatalUsage("acl setdefault <allow|deny>")
-	}
-	val := args[0]
-	if val != "allow" && val != "deny" {
-		fatal("acl setdefault must be allow or deny, got %q", val)
-	}
-	cfg := mustLoadConfig(configPath)
-	if cfg.Etcd == nil || cfg.Etcd.ACLDefaultKey == "" {
-		fatal("acl_default_key not configured in config")
-	}
-	client := mustEtcdClient(cfg.Etcd)
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := client.Put(ctx, cfg.Etcd.ACLDefaultKey, val); err != nil {
-		fatal("etcd put: %v", err)
-	}
-	fmt.Printf("default: %s\n", val)
 }
 
 func aclSet(args []string, configPath string) {
