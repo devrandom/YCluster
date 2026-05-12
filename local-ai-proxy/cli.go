@@ -577,7 +577,7 @@ func aclSet(args []string, configPath string) {
 		fmt.Printf("ACL cleared for %s\n", model)
 		return
 	}
-	deltas, err := ParseACLDeltas(tokens)
+	entries, err := ParseACLEntries(tokens)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -602,14 +602,10 @@ func aclSet(args []string, configPath string) {
 	} else {
 		fatal("no such model: %s", model)
 	}
-	for _, delta := range deltas {
-		if v.ACL == nil {
-			v.ACL = &ACLModelRule{}
-		}
-		*v.ACL = delta.Apply(*v.ACL)
-	}
-	if v.ACL != nil && len(v.ACL.Entries) == 0 {
+	if len(entries) == 0 {
 		v.ACL = nil
+	} else {
+		v.ACL = &ACLModelRule{Entries: entries}
 	}
 	buf, err := json.Marshal(v)
 	if err != nil {
