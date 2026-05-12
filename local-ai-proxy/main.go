@@ -47,31 +47,8 @@ func main() {
 		configPath = *cfgFlag
 	}
 
-	cfg := Config{
-		Listen:  ":4000",
-		Backend: Backend{URL: "http://localhost:8080"},
-	}
-	if _, err := os.Stat(configPath); err == nil {
-		loaded, err := LoadConfig(configPath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		cfg = loaded
-	} else if !errors.Is(err, os.ErrNotExist) || configPath != DefaultConfigPath {
-		// Missing default config falls back to the built-in defaults.
-		// An explicit -config path must exist.
-		log.Fatalf("config %s: %v", configPath, err)
-	}
-	if *addr != "" {
-		cfg.Listen = *addr
-	}
-	if *backendURL != "" {
-		// --backend overrides to passthrough mode: clear multi-source fields.
-		cfg.Backend.URL = *backendURL
-		cfg.Backends = nil
-		cfg.Etcd = nil
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := LoadConfigOrDefault(configPath, *addr, *backendURL)
+	if err != nil {
 		log.Fatal(err)
 	}
 

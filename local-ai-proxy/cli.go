@@ -24,6 +24,23 @@ import (
 //	local-ai-proxy models ls
 //	local-ai-proxy backends disable http://x1.xc:8080
 func runCLI(subcmd string, args []string, configPath string) {
+	switch subcmd {
+	case "models":
+		runModels(args, configPath)
+	case "backends":
+		runBackends(args, configPath)
+	default:
+		fatal("unknown subcommand %q", subcmd)
+	}
+}
+
+func runModels(args []string, configPath string) {
+	if len(args) == 0 {
+		fatalUsage("models <ls|add|remove>")
+	}
+	subcmd := args[0]
+	args = args[1:]
+
 	cfg := mustLoadConfig(configPath)
 	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
 		fatal("CLI requires etcd-backed config (no etcd section in %s)", configPath)
@@ -32,44 +49,41 @@ func runCLI(subcmd string, args []string, configPath string) {
 	defer client.Close()
 
 	switch subcmd {
-	case "models":
-		runModels(args, client, cfg.Etcd.Prefix)
-	case "backends":
-		prefix := cfg.Etcd.DisabledPrefix
-		if prefix == "" {
-			prefix = DefaultDisabledPrefix
-		}
-		runBackends(args, client, prefix)
-	default:
-		fatal("unknown subcommand %q", subcmd)
-	}
-}
-
-func runModels(args []string, client *clientv3.Client, prefix string) {
-	if len(args) == 0 {
-		fatalUsage("models <ls|add|remove>")
-	}
-	switch args[0] {
 	case "ls", "list":
-		modelsLs(client, prefix)
+		modelsLs(client, cfg.Etcd.Prefix)
 	case "add":
-		modelsAdd(args[1:], client, prefix)
+		modelsAdd(args, client, cfg.Etcd.Prefix)
 	case "remove", "rm":
-		modelsRemove(args[1:], client, prefix)
+		modelsRemove(args, client, cfg.Etcd.Prefix)
 	default:
 		fatalUsage("models <ls|add|remove>")
 	}
 }
 
-func runBackends(args []string, client *clientv3.Client, prefix string) {
+func runBackends(args []string, configPath string) {
 	if len(args) == 0 {
 		fatalUsage("backends <disable|enable|ls>")
 	}
-	switch args[0] {
+	subcmd := args[0]
+	args = args[1:]
+
+	cfg := mustLoadConfig(configPath)
+	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
+		fatal("CLI requires etcd-backed config (no etcd section in %s)", configPath)
+	}
+	client := mustEtcdClient(cfg.Etcd)
+	defer client.Close()
+
+	prefix := cfg.Etcd.DisabledPrefix
+	if prefix == "" {
+		prefix = DefaultDisabledPrefix
+	}
+
+	switch subcmd {
 	case "disable":
-		backendsDisable(args[1:], client, prefix)
+		backendsDisable(args, client, prefix)
 	case "enable":
-		backendsEnable(args[1:], client, prefix)
+		backendsEnable(args, client, prefix)
 	case "ls", "list":
 		backendsLs(client, prefix)
 	default:
