@@ -68,12 +68,6 @@ type EtcdConfig struct {
 	// URL of a backend the operator has marked as known-down. Defaults
 	// to DefaultDisabledPrefix. Set empty to disable the feature.
 	DisabledPrefix string `yaml:"disabled_prefix,omitempty"`
-
-	// ACLDefaultKey is the etcd singleton key whose value ("allow" or
-	// "deny") overrides the YAML acl.default at runtime. Empty disables
-	// the override (YAML default is authoritative). The proxy watches
-	// this key for hot-reload.
-	ACLDefaultKey string `yaml:"acl_default_key,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {

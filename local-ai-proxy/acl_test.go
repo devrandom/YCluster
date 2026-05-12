@@ -9,60 +9,42 @@ func TestACLNilAlwaysAllows(t *testing.T) {
 	}
 }
 
-func TestACLDefaultAllow(t *testing.T) {
-	a := &ACLConfig{Default: "allow"}
-	if err := a.Check("anything", "alice", nil); err != nil {
-		t.Errorf("default=allow + no rule should allow, got %v", err)
-	}
-}
-
-func TestACLDefaultEmptyTreatedAsAllow(t *testing.T) {
-	a := &ACLConfig{}
-	if err := a.Check("anything", "alice", nil); err != nil {
-		t.Errorf("empty default should allow, got %v", err)
-	}
-}
-
-func TestACLDefaultDeny(t *testing.T) {
-	a := &ACLConfig{Default: "deny"}
-	if err := a.Check("anything", "alice", []string{"staff"}); err == nil {
-		t.Errorf("default=deny + no rule should deny")
-	}
-}
-
 func TestACLUserMatch(t *testing.T) {
 	a := &ACLConfig{
-		Default: "deny",
 		Models: map[string]ACLModelRule{
-			"m": {Entries: []ACLEntry{{Subject: "user:alice", Decision: ACLAllow}}},
+			"m": {Entries: []ACLEntry{
+				{Subject: "user:alice", Decision: ACLAllow},
+				{Subject: "user:*", Decision: ACLDeny},
+			}},
 		},
 	}
 	if err := a.Check("m", "alice", nil); err != nil {
 		t.Errorf("user match should allow, got %v", err)
 	}
 	if err := a.Check("m", "bob", nil); err == nil {
-		t.Errorf("non-matching user should deny")
+		t.Errorf("non-matching user should deny by user:*")
 	}
 }
 
 func TestACLGroupMatch(t *testing.T) {
 	a := &ACLConfig{
-		Default: "deny",
 		Models: map[string]ACLModelRule{
-			"m": {Entries: []ACLEntry{{Subject: "group:admins", Decision: ACLAllow}}},
+			"m": {Entries: []ACLEntry{
+				{Subject: "group:admins", Decision: ACLAllow},
+				{Subject: "group:*", Decision: ACLDeny},
+			}},
 		},
 	}
 	if err := a.Check("m", "alice", []string{"staff", "admins"}); err != nil {
 		t.Errorf("group member should allow, got %v", err)
 	}
 	if err := a.Check("m", "alice", []string{"staff"}); err == nil {
-		t.Errorf("non-member should deny")
+		t.Errorf("non-member should deny by group:*")
 	}
 }
 
 func TestACLWildcardUser(t *testing.T) {
 	a := &ACLConfig{
-		Default: "deny",
 		Models: map[string]ACLModelRule{
 			"m": {Entries: []ACLEntry{{Subject: "user:*", Decision: ACLAllow}}},
 		},
@@ -72,9 +54,30 @@ func TestACLWildcardUser(t *testing.T) {
 	}
 }
 
+func TestACLWildcardUserEmptyUser(t *testing.T) {
+	// user:* matches even when no X-User-Id header was supplied
+	// (handler.go passes "" in that case). Document the behavior: the
+	// wildcard means "any subject", not "any authenticated subject".
+	allow := &ACLConfig{
+		Models: map[string]ACLModelRule{
+			"m": {Entries: []ACLEntry{{Subject: "user:*", Decision: ACLAllow}}},
+		},
+	}
+	if err := allow.Check("m", "", nil); err != nil {
+		t.Errorf("+user:* should allow empty user, got %v", err)
+	}
+	deny := &ACLConfig{
+		Models: map[string]ACLModelRule{
+			"m": {Entries: []ACLEntry{{Subject: "user:*", Decision: ACLDeny}}},
+		},
+	}
+	if err := deny.Check("m", "", nil); err == nil {
+		t.Errorf("-user:* should deny empty user")
+	}
+}
+
 func TestACLWildcardGroup(t *testing.T) {
 	a := &ACLConfig{
-		Default: "deny",
 		Models: map[string]ACLModelRule{
 			"m": {Entries: []ACLEntry{{Subject: "group:*", Decision: ACLAllow}}},
 		},
@@ -86,7 +89,6 @@ func TestACLWildcardGroup(t *testing.T) {
 
 func TestACLAllowSpecificThenDenyAll(t *testing.T) {
 	a := &ACLConfig{
-		Default: "allow",
 		Models: map[string]ACLModelRule{
 			"m": {Entries: []ACLEntry{
 				{Subject: "user:x@y.com", Decision: ACLAllow},
@@ -102,53 +104,11 @@ func TestACLAllowSpecificThenDenyAll(t *testing.T) {
 	}
 }
 
-func TestACLDefaultAllowWithRuleStillEnforced(t *testing.T) {
-	a := &ACLConfig{
-		Default: "allow",
-		Models: map[string]ACLModelRule{
-			"m": {Entries: []ACLEntry{{Subject: "user:alice", Decision: ACLAllow}}},
-		},
-	}
-	// New semantics: if no entry matches, default applies. So bob (no match) follows default=allow.
-	if err := a.Check("m", "bob", nil); err != nil {
-		t.Errorf("bob should follow default=allow, got %v", err)
-	}
-	if err := a.Check("m", "alice", nil); err != nil {
-		t.Errorf("alice should be allowed by rule, got %v", err)
-	}
-	if err := a.Check("other", "bob", nil); err != nil {
-		t.Errorf("unlisted model should follow default=allow, got %v", err)
-	}
-}
-
-func TestACLValidate(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		def     string
-		wantErr bool
-	}{
-		{"empty", "", false},
-		{"allow", "allow", false},
-		{"deny", "deny", false},
-		{"bogus", "maybe", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := (&ACLConfig{Default: tc.def}).Validate()
-			if tc.wantErr && err == nil {
-				t.Errorf("want error for default=%q", tc.def)
-			}
-			if !tc.wantErr && err != nil {
-				t.Errorf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
 func TestMergeACLNilCases(t *testing.T) {
 	if got := MergeACL(nil, nil); got != nil {
 		t.Errorf("nil/nil = %v; want nil", got)
 	}
-	a := &ACLConfig{Default: "deny"}
+	a := &ACLConfig{Models: map[string]ACLModelRule{"m": {}}}
 	if got := MergeACL(a, nil); got != a {
 		t.Errorf("a/nil should return a unchanged")
 	}
@@ -157,27 +117,8 @@ func TestMergeACLNilCases(t *testing.T) {
 	}
 }
 
-func TestMergeACLDefaults(t *testing.T) {
-	cases := []struct {
-		base, overlay, want string
-	}{
-		{"allow", "", "allow"},
-		{"deny", "", "deny"},
-		{"allow", "deny", "deny"},
-		{"deny", "allow", "allow"},
-		{"", "deny", "deny"},
-	}
-	for _, c := range cases {
-		got := MergeACL(&ACLConfig{Default: c.base}, &ACLConfig{Default: c.overlay})
-		if got.Default != c.want {
-			t.Errorf("merge(%q,%q).Default = %q; want %q", c.base, c.overlay, got.Default, c.want)
-		}
-	}
-}
-
 func TestMergeACLUnionsRules(t *testing.T) {
 	base := &ACLConfig{
-		Default: "deny",
 		Models: map[string]ACLModelRule{
 			"shared": {Entries: []ACLEntry{
 				{Subject: "user:alice", Decision: ACLAllow},
@@ -197,9 +138,6 @@ func TestMergeACLUnionsRules(t *testing.T) {
 	}
 	merged := MergeACL(base, overlay)
 
-	if got := merged.Default; got != "deny" {
-		t.Errorf("Default = %q; want deny (from base)", got)
-	}
 	// shared should have union of both
 	shared := merged.Models["shared"]
 	subjects := make(map[string]bool)

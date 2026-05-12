@@ -5,23 +5,8 @@ import (
 	"strings"
 )
 
-// ACLConfig is per-model access control. Default policy applies to
-// any model with no explicit rule. A rule grants access if the
-// authenticated user matches the user list OR is a member of any
-// listed group. The literal "*" in either list means "any
-// authenticated identity".
-//
-//	acl:
-//	  default: allow      # or "deny"; applies to unlisted models
-//	  models:
-//	    secret-model:
-//	      users: [root]
-//	      groups: [admins]
-//	    public-model:
-//	      groups: ["*"]   # any authenticated user
 type ACLConfig struct {
-	Default string                  `yaml:"default,omitempty"`
-	Models  map[string]ACLModelRule `yaml:"models,omitempty"`
+	Models map[string]ACLModelRule `yaml:"models,omitempty"`
 }
 
 type ACLDecision bool
@@ -40,31 +25,16 @@ type ACLModelRule struct {
     Entries []ACLEntry `yaml:"entries,omitempty"`
 }
 
-// Validate rejects unknown defaults early. An empty default is treated
-// as "allow" for backwards compatibility with configs that pre-date ACLs.
 func (a *ACLConfig) Validate() error {
-	if a == nil {
-		return nil
-	}
-	switch a.Default {
-	case "", "allow", "deny":
-	default:
-		return fmt.Errorf("acl.default: must be \"allow\" or \"deny\", got %q", a.Default)
-	}
 	return nil
 }
 
-// Check evaluates each entry in order. The first matching entry determines
-// the outcome. If no entry matches, the default policy applies.
 func (a *ACLConfig) Check(model, user string, groups []string) error {
 	if a == nil {
 		return nil
 	}
 	rule, ok := a.Models[model]
 	if !ok {
-		if a.Default == "deny" {
-			return aclDenied(model)
-		}
 		return nil
 	}
 	for _, e := range rule.Entries {
@@ -76,11 +46,8 @@ func (a *ACLConfig) Check(model, user string, groups []string) error {
 		}
 		return nil
 	}
-	if a.Default == "deny" {
-		return aclDenied(model)
+return nil
 	}
-	return nil
-}
 
 func entryMatches(subject, user string, groups []string) bool {
 	if strings.HasPrefix(subject, "user:") {
@@ -186,15 +153,6 @@ func filterStrings(slice []string, reject string) []string {
 	return out
 }
 
-// MergeACL returns the union of base and overlay. If both are nil the
-// result is nil (no ACL). If only one is nil the other is returned
-// as-is. When both are present:
-//
-//   - Default = overlay.Default if non-empty, else base.Default.
-//   - For each model present in either side, the result's user and
-//     group lists are the union (deduped) of the two sides. So a rule
-//     in either source broadens access; deletions on either side don't
-//     narrow access while the other side still grants it.
 func MergeACL(base, overlay *ACLConfig) *ACLConfig {
 	if base == nil && overlay == nil {
 		return nil
@@ -206,11 +164,7 @@ func MergeACL(base, overlay *ACLConfig) *ACLConfig {
 		return base
 	}
 	out := &ACLConfig{
-		Default: base.Default,
-		Models:  make(map[string]ACLModelRule, len(base.Models)+len(overlay.Models)),
-	}
-	if overlay.Default != "" {
-		out.Default = overlay.Default
+		Models: make(map[string]ACLModelRule, len(base.Models)+len(overlay.Models)),
 	}
 	for m, r := range base.Models {
 		out.Models[m] = r
