@@ -30,4 +30,7 @@ services:
       - 'MEM_VECTOR_STORE_QDRANT_DIMS=768'
     extra_hosts:
       - host.docker.internal:host-gateway
+      # Resolve cluster .xc names that aren't in Docker's embedded DNS so the
+      # container can hit the host's nginx vhosts (inference.xc → local-ai-proxy).
+      - inference.xc:host-gateway
     restart: unless-stopped
