@@ -84,6 +84,24 @@ func TestACLWildcardGroup(t *testing.T) {
 	}
 }
 
+func TestACLAllowSpecificThenDenyAll(t *testing.T) {
+	a := &ACLConfig{
+		Default: "allow",
+		Models: map[string]ACLModelRule{
+			"m": {Entries: []ACLEntry{
+				{Subject: "user:x@y.com", Decision: ACLAllow},
+				{Subject: "user:*", Decision: ACLDeny},
+			}},
+		},
+	}
+	if err := a.Check("m", "x@y.com", nil); err != nil {
+		t.Errorf("x@y.com should be allowed, got %v", err)
+	}
+	if err := a.Check("m", "anyone@else.com", nil); err == nil {
+		t.Errorf("anyone@else.com should be denied by user:* rule")
+	}
+}
+
 func TestACLDefaultAllowWithRuleStillEnforced(t *testing.T) {
 	a := &ACLConfig{
 		Default: "allow",
@@ -317,6 +335,22 @@ func TestACLDeltaApply(t *testing.T) {
 	}
 	if result.Entries[0].Subject != "user:bob" || result.Entries[1].Subject != "group:admins" {
 		t.Errorf("Entries = %v; want bob+admins", result.Entries)
+	}
+}
+
+func TestACLDeltaApplyToEmpty(t *testing.T) {
+	d := ACLDelta{
+		Entries: []ACLEntry{
+			{Subject: "user:x@y.com", Decision: ACLAllow},
+			{Subject: "user:*", Decision: ACLDeny},
+		},
+	}
+	result := d.Apply(ACLModelRule{})
+	if len(result.Entries) != 2 {
+		t.Errorf("Entries count = %d; want 2", len(result.Entries))
+	}
+	if result.Entries[0].Subject != "user:x@y.com" {
+		t.Errorf("first entry = %v; want user:x@y.com", result.Entries[0].Subject)
 	}
 }
 
