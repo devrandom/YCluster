@@ -518,7 +518,10 @@ func aclLs(args []string, configPath string) {
 		return
 	}
 	sort.Slice(ac, func(i, j int) bool { return ac[i].model < ac[j].model })
-	for _, e := range ac {
+	for i, e := range ac {
+		if i > 0 {
+			fmt.Println()
+		}
 		fmt.Printf("%s:\n", e.model)
 		for _, entry := range e.entries {
 			prefix := "+"
