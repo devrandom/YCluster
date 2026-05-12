@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -89,7 +91,10 @@ func TestServableModelsIncludesUnknown(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/v1/models")
+	resp, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET /v1/models: %v", err)
+	}
 	defer resp.Body.Close()
 	var body struct {
 		Data []struct {
@@ -115,7 +120,10 @@ func TestServableModelsWithoutHealthShowsAll(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL + "/v1/models")
+	resp, err := http.Get(srv.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET /v1/models: %v", err)
+	}
 	defer resp.Body.Close()
 	var body struct {
 		Data []struct {
@@ -125,5 +133,59 @@ func TestServableModelsWithoutHealthShowsAll(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	if len(body.Data) != 2 {
 		t.Errorf("want 2 models (no health info), got %v", body.Data)
+	}
+}
+
+// /v1/models must hide models the requesting user has no access to,
+// otherwise the listing leaks model names that the user can't actually
+// invoke (and pollutes client UIs like Open-WebUI's model picker).
+func TestServableModelsFiltersByACL(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, "http://h1:1")},
+		"beta":  {mustURL(t, "http://h2:1")},
+	}}
+	h := NewHandler(NewModelRouter(src))
+	h.ACL = &ACLConfig{Models: map[string]ACLModelRule{
+		"alpha": {Entries: []ACLEntry{
+			{Subject: "user:alice", Decision: ACLAllow},
+			{Subject: "user:*", Decision: ACLDeny},
+		}},
+		// beta has no rule -> default allow
+	}}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	get := func(user string) []string {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+		if user != "" {
+			req.Header.Set("X-User-Id", user)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /v1/models: %v", err)
+		}
+		defer resp.Body.Close()
+		var body struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		ids := make([]string, 0, len(body.Data))
+		for _, d := range body.Data {
+			ids = append(ids, d.ID)
+		}
+		sort.Strings(ids)
+		return ids
+	}
+
+	if got, want := get("alice"), []string{"alpha", "beta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("alice should see both: got %v want %v", got, want)
+	}
+	if got, want := get("bob"), []string{"beta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("bob should see only beta: got %v want %v", got, want)
+	}
+	if got, want := get(""), []string{"beta"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("anonymous should see only beta (user:* denies): got %v want %v", got, want)
 	}
 }
