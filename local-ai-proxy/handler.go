@@ -147,7 +147,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Passthrough (Models()==nil) falls through to proxy the upstream.
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
 		if modelRouted {
-			writeModelsList(w, h.servableModels())
+			models := h.servableModels()
+			if acl := h.currentACL(); acl != nil {
+				user := r.Header.Get("X-User-Id")
+				groups := SplitGroups(r.Header.Get("X-User-Groups"))
+				filtered := models[:0]
+				for _, m := range models {
+					if acl.Check(m, user, groups) == nil {
+						filtered = append(filtered, m)
+					}
+				}
+				models = filtered
+			}
+			writeModelsList(w, models)
 			return
 		}
 	}
