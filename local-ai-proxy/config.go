@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -83,6 +84,34 @@ func LoadConfig(path string) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func LoadConfigOrDefault(configPath, addr, backendURL string) (Config, error) {
+	cfg := Config{
+		Listen:  ":4000",
+		Backend: Backend{URL: "http://localhost:8080"},
+	}
+	if _, err := os.Stat(configPath); err == nil {
+		loaded, err := LoadConfig(configPath)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg = loaded
+	} else if !errors.Is(err, os.ErrNotExist) || configPath != DefaultConfigPath {
+		return Config{}, fmt.Errorf("config %s: %v", configPath, err)
+	}
+	if addr != "" {
+		cfg.Listen = addr
+	}
+	if backendURL != "" {
+		cfg.Backend.URL = backendURL
+		cfg.Backends = nil
+		cfg.Etcd = nil
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
