@@ -27,13 +27,9 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 ```
 
 ### Dev Workflow (syncing local changes to cluster)
-`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s3.yc:/opt/infrastructure/`:
+`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s3.yc:/opt/infrastructure/`. Run it in a terminal (outside of agent sessions) to keep changes flowing while you develop:
 ```bash
 bash dev-sync.sh  # runs initial sync then watches for changes
-```
-For ad-hoc syncing, run `dev-sync.sh` directly (watchman runs in the background):
-```bash
-bash dev-sync.sh
 ```
 Then run the playbook via SSH as above.
 
