@@ -1,0 +1,13 @@
+---
+- name: Setup dotfiles for root
+  hosts: managed
+  become: yes
+
+  tasks:
+    - name: Create root .tmux.conf for scrollwheel scrolling
+      copy:
+        dest: /root/.tmux.conf
+        content: |
+          # Enable mouse scroll in tmux
+          set -g mouse on
+        mode: '0644'

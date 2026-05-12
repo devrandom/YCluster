@@ -66,7 +66,7 @@ def lookup_openwebui_user(api_key):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT u.email,
+                SELECT u.email, u.role,
                        COALESCE(
                            array_agg(g.name) FILTER (WHERE g.name IS NOT NULL),
                            '{}'
@@ -76,15 +76,18 @@ def lookup_openwebui_user(api_key):
                 LEFT JOIN group_member gm ON gm.user_id = u.id
                 LEFT JOIN "group" g ON g.id = gm.group_id
                 WHERE ak.key = %s
-                GROUP BY u.email
+                GROUP BY u.email, u.role
                 """,
                 (api_key,),
             )
             row = cur.fetchone()
             if row is None:
                 return None, []
-            email, groups = row
-            return email, list(groups or [])
+            email, role, groups = row
+            groups = list(groups or [])
+            if role == "admin":
+                groups.append("admin")
+            return email, groups
     except psycopg2.Error as e:
         log.warning("openwebui lookup failed: %s", e)
         # Force reconnect on next call.
