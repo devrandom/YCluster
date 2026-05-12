@@ -638,6 +638,9 @@ func aclSet(args []string, configPath string) {
 		fatal("no such model: %s", model)
 	}
 	for _, delta := range deltas {
+		if v.ACL == nil {
+			v.ACL = &ACLModelRule{}
+		}
 		*v.ACL = delta.Apply(*v.ACL)
 	}
 	if v.ACL != nil && len(v.ACL.Entries) == 0 {
