@@ -20,11 +20,11 @@ import (
 const DefaultConfigPath = "/etc/local-ai-proxy/config.yaml"
 
 func main() {
-	// Subcommand dispatch. `-config <path>` may appear before the
-	// subcommand (so ops commands use the same config as the server).
+	// Subcommand dispatch. `-c <path>` or `--config <path>` may appear
+	// before the subcommand (so ops commands use the same config as the server).
 	args := os.Args[1:]
 	configPath := DefaultConfigPath
-	for len(args) >= 2 && args[0] == "-config" {
+	for len(args) >= 2 && (args[0] == "-c" || args[0] == "--config") {
 		configPath = args[1]
 		args = args[2:]
 	}
@@ -36,11 +36,11 @@ func main() {
 		case "serve":
 			args = args[1:]
 		default:
-			fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-config <path>] <models|backends|acl|serve>\n")
+			fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-c <path>|--config <path>] <subcommand>\n")
 			os.Exit(1)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-config <path>] <models|backends|acl|serve>\n")
+		fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-c <path>|--config <path>] <subcommand>\n")
 		os.Exit(1)
 	}
 
