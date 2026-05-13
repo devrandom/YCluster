@@ -177,6 +177,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	route, err := h.router.Route(r)
+	if route != nil {
+		SetRequestModel(r.Context(), route.Model)
+	}
 	if err != nil {
 		h.Metrics.ObserveRouteError(classifyRouteError(err))
 		if errors.Is(err, ErrNoHealthyBackend) {

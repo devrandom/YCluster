@@ -51,6 +51,23 @@ func TestLoggingMiddlewareEmitsStructuredLine(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareLogsModelFromContext(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	handler := LoggingMiddleware(logger, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		SetRequestModel(r.Context(), "gpt-foo")
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	var entry map[string]any
+	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &entry)
+	if entry["model"] != "gpt-foo" {
+		t.Errorf("model = %v; want gpt-foo", entry["model"])
+	}
+}
+
 func TestLoggingMiddlewareDefaultStatusIsOK(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))

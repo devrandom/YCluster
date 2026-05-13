@@ -1,10 +1,34 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
 )
+
+// reqInfoKey carries per-request fields that downstream handlers
+// populate for the logging middleware to read after ServeHTTP returns
+// (e.g. the routed model name, which isn't known until Route() runs).
+type reqInfoKey struct{}
+
+type reqInfo struct {
+	model string
+}
+
+func reqInfoFrom(ctx context.Context) *reqInfo {
+	v, _ := ctx.Value(reqInfoKey{}).(*reqInfo)
+	return v
+}
+
+// SetRequestModel records the routed model on the request context so
+// LoggingMiddleware can include it in the access log. No-op if the
+// context wasn't initialised by LoggingMiddleware.
+func SetRequestModel(ctx context.Context, model string) {
+	if info := reqInfoFrom(ctx); info != nil {
+		info.model = model
+	}
+}
 
 // statusWriter wraps http.ResponseWriter to capture status code and
 // bytes written for logging. Implements Unwrap so that
@@ -44,6 +68,8 @@ func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w}
+		info := &reqInfo{}
+		r = r.WithContext(context.WithValue(r.Context(), reqInfoKey{}, info))
 		next.ServeHTTP(sw, r)
 		logger.LogAttrs(r.Context(), slog.LevelInfo, "request",
 			slog.String("method", r.Method),
@@ -54,6 +80,7 @@ func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 			slog.String("user", r.Header.Get("X-User-Id")),
 			slog.String("groups", r.Header.Get("X-User-Groups")),
 			slog.String("remote", r.RemoteAddr),
+			slog.String("model", info.model),
 		)
 	})
 }
