@@ -1,0 +1,103 @@
+---
+- name: Setup usage stats infrastructure
+  hosts: storage
+  become: yes
+  vars:
+    admin_services_dir: /opt/admin-services
+  environment:
+    ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+
+  tasks:
+    - name: Check if storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_mounted
+      failed_when: false
+      changed_when: false
+
+    - set_fact:
+        is_storage_leader: "{{ rbd_mounted.rc == 0 }}"
+
+    - name: Generate usage_stats password in etcd (idempotent - only writes if missing)
+      shell: |
+        python3 -c "
+        import secrets
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        val = client.get('/cluster/config/usage_stats/db-password')[0]
+        if val is not None:
+            print('exists')
+        else:
+            client.put('/cluster/config/usage_stats/db-password', secrets.token_urlsafe(24))
+            print('created')
+        "
+      changed_when: false
+      run_once: yes
+
+    - name: Copy provisioning script
+      copy:
+        src: files/provision-usage-stats.py
+        dest: /usr/local/bin/provision-usage-stats
+        mode: '0755'
+      when: is_storage_leader
+
+    - name: Run provisioning on storage leader
+      command: /usr/local/bin/provision-usage-stats
+      when: is_storage_leader
+
+    - name: Copy collect-model-stats script
+      copy:
+        src: files/collect-model-stats.py
+        dest: /usr/local/bin/collect-model-stats
+        mode: '0755'
+
+    - name: Create systemd service for collect-model-stats
+      copy:
+        dest: /etc/systemd/system/collect-model-stats.service
+        content: |
+          [Unit]
+          Description=Collect model usage stats from local-ai-proxy logs
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          Environment="http_proxy="
+          Environment="https_proxy="
+          Environment="HTTP_PROXY="
+          Environment="HTTPS_PROXY="
+          ExecStart=/usr/local/bin/collect-model-stats
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart collect-model-stats
+
+    - name: Create systemd timer for collect-model-stats
+      copy:
+        dest: /etc/systemd/system/collect-model-stats.timer
+        content: |
+          [Unit]
+          Description=Run collect-model-stats every 30 seconds
+
+          [Timer]
+          OnBootSec=15s
+          OnUnitActiveSec=30s
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+      notify: restart collect-model-stats
+
+    - name: Enable and start collect-model-stats timer
+      systemd:
+        name: collect-model-stats.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart collect-model-stats
+      systemd:
+        name: collect-model-stats.timer
+        state: restarted
