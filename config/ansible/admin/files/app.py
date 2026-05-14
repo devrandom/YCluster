@@ -41,6 +41,7 @@ import re
 import sys
 
 from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
+import psycopg2
 import ntplib
 import os
 import threading
@@ -2552,6 +2553,78 @@ def status_page():
 def inventory_page():
     """Hardware inventory and asset management page."""
     return render_template('inventory.html')
+
+@app.route('/admin/model-usage')
+def model_usage_page():
+    """Model usage stats page backed by cached PostgreSQL data."""
+    since_days = request.args.get('since', 7, type=int)
+    since_days = max(1, min(90, since_days))
+    user_filter = request.args.get('user', '')
+    model_filter = request.args.get('model', '')
+    return render_template('admin-model-usage.html', since_days=since_days, user_filter=user_filter, model_filter=model_filter)
+
+
+@app.route('/admin/model-usage/data')
+def model_usage_data():
+    """JSON endpoint for model usage data."""
+    since_days = request.args.get('since', 7, type=int)
+    since_days = max(1, min(90, since_days))
+    user_filter = request.args.get('user', '')
+    model_filter = request.args.get('model', '')
+
+    since_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    since_dt = since_dt.replace(day=since_dt.day - since_days)
+
+    rows = []
+    try:
+        etcd = get_etcd_client()
+        password_bytes = etcd.get('/cluster/config/usage_stats/db-password')[0]
+        if password_bytes is None:
+            return jsonify({'error': 'password not found'}), 500
+        password = password_bytes.decode()
+    except Exception:
+        return jsonify({'error': 'etcd unavailable'}), 500
+
+    try:
+        conn = psycopg2.connect(
+            host='10.0.0.100',
+            database='usage_stats',
+            user='usage_stats',
+            password=password,
+        )
+        with conn:
+            with conn.cursor() as cur:
+                params = [since_dt]
+                where = 'WHERE period_start >= %s'
+                if user_filter:
+                    where += ' AND user_id = %s'
+                    params.append(user_filter)
+                if model_filter:
+                    where += ' AND model = %s'
+                    params.append(model_filter)
+                cur.execute(f'''
+                    SELECT
+                        user_id,
+                        model,
+                        period_start::date AS date,
+                        SUM(request_count) AS requests,
+                        SUM(total_duration_ms)::float / NULLIF(SUM(request_count),0) AS avg_duration,
+                        SUM(total_bytes_out) AS bytes
+                    FROM model_usage
+                    {where}
+                    GROUP BY user_id, model, period_start::date
+                    ORDER BY date DESC, user_id, model
+                ''', params)
+                rows = [
+                    {'user': str(r[0]), 'model': str(r[1]), 'date': str(r[2]),
+                     'requests': r[3], 'avg_duration': r[4] or 0, 'bytes': r[5]}
+                    for r in cur.fetchall()
+                ]
+        conn.close()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    return jsonify(rows)
 
 if __name__ == '__main__':
     # Wait for etcd to be available
