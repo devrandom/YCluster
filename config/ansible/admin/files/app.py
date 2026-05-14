@@ -2567,64 +2567,80 @@ def model_usage_page():
 @app.route('/admin/model-usage/data')
 def model_usage_data():
     """JSON endpoint for model usage data."""
-    since_days = request.args.get('since', 7, type=int)
-    since_days = max(1, min(90, since_days))
+    since_days = max(1, min(90, request.args.get('since', 7, type=int)))
     user_filter = request.args.get('user', '')
     model_filter = request.args.get('model', '')
 
+    conn, since_dt, err = _usage_stats_cursor(since_days)
+    if err:
+        return jsonify({'error': err}), 500
+
+    with conn:
+        with conn.cursor() as cur:
+            params = [since_dt]
+            where = 'WHERE period_start >= %s'
+            if user_filter:
+                where += ' AND user_id = %s'
+                params.append(user_filter)
+            if model_filter:
+                where += ' AND model = %s'
+                params.append(model_filter)
+            cur.execute(f'''
+                SELECT
+                    user_id,
+                    model,
+                    period_start::date AS date,
+                    SUM(request_count) AS requests,
+                    SUM(total_duration_ms)::float / NULLIF(SUM(request_count),0) AS avg_duration,
+                    SUM(total_bytes_out) AS bytes
+                FROM model_usage
+                {where}
+                GROUP BY user_id, model, period_start::date
+                ORDER BY date DESC, user_id, model
+            ''', params)
+            rows = [
+                {'user': str(r[0]), 'model': str(r[1]), 'date': str(r[2]),
+                 'requests': r[3], 'avg_duration': r[4] or 0, 'bytes': r[5]}
+                for r in cur.fetchall()
+            ]
+    return jsonify(rows)
+
+
+def _usage_stats_cursor(since_days):
     since_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     since_dt = since_dt.replace(day=since_dt.day - since_days)
-
-    rows = []
     try:
         etcd = get_etcd_client()
         password_bytes = etcd.get('/cluster/config/usage_stats/db-password')[0]
         if password_bytes is None:
-            return jsonify({'error': 'password not found'}), 500
+            return None, since_dt, 'password not found'
         password = password_bytes.decode()
     except Exception:
-        return jsonify({'error': 'etcd unavailable'}), 500
-
+        return None, since_dt, 'etcd unavailable'
     try:
-        conn = psycopg2.connect(
-            host='10.0.0.100',
-            database='usage_stats',
-            user='usage_stats',
-            password=password,
-        )
-        with conn:
-            with conn.cursor() as cur:
-                params = [since_dt]
-                where = 'WHERE period_start >= %s'
-                if user_filter:
-                    where += ' AND user_id = %s'
-                    params.append(user_filter)
-                if model_filter:
-                    where += ' AND model = %s'
-                    params.append(model_filter)
-                cur.execute(f'''
-                    SELECT
-                        user_id,
-                        model,
-                        period_start::date AS date,
-                        SUM(request_count) AS requests,
-                        SUM(total_duration_ms)::float / NULLIF(SUM(request_count),0) AS avg_duration,
-                        SUM(total_bytes_out) AS bytes
-                    FROM model_usage
-                    {where}
-                    GROUP BY user_id, model, period_start::date
-                    ORDER BY date DESC, user_id, model
-                ''', params)
-                rows = [
-                    {'user': str(r[0]), 'model': str(r[1]), 'date': str(r[2]),
-                     'requests': r[3], 'avg_duration': r[4] or 0, 'bytes': r[5]}
-                    for r in cur.fetchall()
-                ]
-        conn.close()
+        conn = psycopg2.connect(host='10.0.0.100', database='usage_stats', user='usage_stats', password=password)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return None, since_dt, str(e)
+    return conn, since_dt, None
 
-    return jsonify(rows)
+
+@app.route('/admin/model-usage/options')
+def model_usage_options():
+    """JSON endpoint returning distinct users and models for filter dropdowns."""
+    since_days = max(1, min(90, request.args.get('since', 7, type=int)))
+
+    conn, since_dt, err = _usage_stats_cursor(since_days)
+    if err:
+        return jsonify({'error': err}), 500
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute('''SELECT DISTINCT user_id FROM model_usage WHERE period_start >= %s ORDER BY user_id''', [since_dt])
+            users = [str(r[0]) for r in cur.fetchall()]
+            cur.execute('''SELECT DISTINCT model FROM model_usage WHERE period_start >= %s ORDER BY model''', [since_dt])
+            models = [str(r[0]) for r in cur.fetchall()]
+    return jsonify({'users': users, 'models': models})
+
 
 if __name__ == '__main__':
     # Wait for etcd to be available
