@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Manual exo launcher for macOS cluster nodes (m1+). Run under `dev` on
-# the mac itself — not on the admin host. Foreground invocation so you
-# can watch the startup banner and cluster discovery; wrap in tmux/
-# screen/nohup if you want to detach. LaunchDaemon comes later.
+# exo launcher for macOS cluster nodes (m1+). In production this is run
+# by the com.ycluster.exo LaunchDaemon (as user `dev`) — see
+# config/ansible/macos/setup-exo.yml. Can also be run by hand under
+# `dev` on the mac to watch the startup banner and cluster discovery.
 #
-# Prerequisites on the mac:
-#   - exo checked out at EXO_REPO (default ~/exo) on the same commit as
-#     the other nodes
+# Prerequisites on the mac (all provisioned by setup-exo.yml):
+#   - exo checked out at EXO_REPO (default ~/exo) on the pinned commit
 #   - uv installed (brew install uv)
-#   - dashboard/build/ populated (build on admin host with
-#     ext/build-exo-dashboard.sh and rsync the build/ dir over)
+#   - dashboard/build/ populated (built on the control host with
+#     config/ansible/scripts/build-exo-dashboard.sh and shipped over)
 #   - models available under EXO_MODELS_DIRS
 #
 # The OpenAI-compatible API will listen on :52415 once startup finishes.

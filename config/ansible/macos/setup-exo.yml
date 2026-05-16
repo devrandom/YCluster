@@ -1,0 +1,251 @@
+---
+# Productionize exo on the macOS inference nodes (m1+).
+#
+# - builds the exo dashboard once on the control host (podman; npm is
+#   never run on the macs)
+# - clones/pins exo on each mac to a fixed commit and applies the
+#   carried privacy patches (ext patches/, see docs/operations/exo.md)
+# - installs the com.ycluster.exo LaunchDaemon so exo auto-starts on boot
+# - installs the com.ycluster.exo-place supervisor on every exo mac so
+#   the K2.6 instance is re-placed automatically — exo does not persist
+#   instance placements across a restart. The supervisors self-elect a
+#   single placement leader (lowest connected node_id), so only one
+#   places — exo has no elected-master API to query.
+# - the llama-server LaunchDaemon it supersedes is disabled (not removed)
+#   by setup-macos.yml
+#
+# Run after setup-macos.yml and setup-thunderbolt-rdma.yml.
+# See docs/operations/exo.md.
+- name: Setup exo on macOS inference nodes
+  hosts: macos
+  become: yes
+  vars:
+    exo_version: v1.0.71                       # pinned exo-explore/exo tag/commit
+    exo_remote_url: https://github.com/exo-explore/exo.git
+    exo_repo: /Users/dev/exo                   # checkout on the mac
+    exo_patch_dir: /Users/dev/exo-patches      # carried patches, on the mac
+    exo_build_dir: /var/lib/exo-build/exo      # checkout on the control host
+    homebrew_bin: /opt/homebrew/bin
+
+  tasks:
+    # --- dashboard build (control host, once) -----------------------------
+    - name: Install podman on the control host
+      apt:
+        name: podman
+        state: present
+      delegate_to: localhost
+      run_once: yes
+
+    - name: Check out exo on the control host for the dashboard build
+      git:
+        repo: "{{ exo_remote_url }}"
+        dest: "{{ exo_build_dir }}"
+        version: "{{ exo_version }}"
+        force: yes
+      delegate_to: localhost
+      run_once: yes
+      register: exo_build_checkout
+
+    - name: Check for an existing dashboard build
+      stat:
+        path: "{{ exo_build_dir }}/dashboard/build/index.html"
+      delegate_to: localhost
+      run_once: yes
+      register: exo_dashboard_build
+
+    - name: Build the exo dashboard (podman)
+      command: "{{ playbook_dir }}/../scripts/build-exo-dashboard.sh {{ exo_build_dir }}"
+      delegate_to: localhost
+      run_once: yes
+      when: exo_build_checkout.changed or not exo_dashboard_build.stat.exists
+
+    # --- exo checkout + patches on the mac --------------------------------
+    - name: Install uv via Homebrew
+      homebrew:
+        name: uv
+        state: present
+      become_user: dev
+      environment:
+        PATH: "{{ homebrew_bin }}:{{ ansible_facts['env']['PATH'] }}"
+
+    - name: Ensure Homebrew log directory exists
+      file:
+        path: /opt/homebrew/var/log
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+
+    - name: Stage carried exo patches on the mac
+      copy:
+        src: files/exo/patches/
+        dest: "{{ exo_patch_dir }}/"
+        owner: dev
+        group: admin
+        mode: '0644'
+
+    - name: Clone, pin and patch the exo checkout
+      # Self-idempotent: a no-op when HEAD already matches the pinned
+      # commit and every carried patch reverse-applies cleanly (i.e. is
+      # already present). Otherwise reset to a pristine pinned tree and
+      # re-apply the patches deterministically.
+      shell: |
+        set -euo pipefail
+        if [[ ! -d "{{ exo_repo }}/.git" ]]; then
+            git clone "{{ exo_remote_url }}" "{{ exo_repo }}"
+        fi
+        cd "{{ exo_repo }}"
+        git fetch --tags --force origin >/dev/null 2>&1 || true
+        target=$(git rev-parse "{{ exo_version }}^{commit}")
+        patched=1
+        for p in "{{ exo_patch_dir }}"/*.patch; do
+            [[ -e "$p" ]] || continue
+            git apply --reverse --check "$p" >/dev/null 2>&1 || patched=0
+        done
+        if [[ "$(git rev-parse HEAD)" == "$target" && "$patched" == 1 ]]; then
+            echo UNCHANGED
+            exit 0
+        fi
+        git reset --hard "$target"
+        git clean -fd
+        for p in "{{ exo_patch_dir }}"/*.patch; do
+            [[ -e "$p" ]] || continue
+            echo "applying patch: $(basename "$p")"
+            git apply --verbose "$p"
+        done
+        echo UPDATED
+      become_user: dev
+      register: exo_checkout
+      changed_when: "'UPDATED' in exo_checkout.stdout"
+      notify: restart exo service
+
+    - name: Ship the prebuilt dashboard to the mac
+      # owner/group disabled so the sync doesn't fight file ownership:
+      # the build dir lives inside dev's exo checkout, exo serves it
+      # read-only, and ignoring ownership keeps the task idempotent.
+      synchronize:
+        src: "{{ exo_build_dir }}/dashboard/build/"
+        dest: "{{ exo_repo }}/dashboard/build/"
+        delete: yes
+        owner: no
+        group: no
+      notify: restart exo service
+
+    # --- launcher scripts -------------------------------------------------
+    - name: Install run-exo.sh
+      copy:
+        src: files/exo/run-exo.sh
+        dest: /Users/dev/run-exo.sh
+        owner: dev
+        group: admin
+        mode: '0755'
+      notify: restart exo service
+
+    - name: Install exo-place.sh
+      copy:
+        src: files/exo/exo-place.sh
+        dest: /Users/dev/exo-place.sh
+        owner: dev
+        group: admin
+        mode: '0755'
+      notify: reload exo-place daemon
+
+    # --- LaunchDaemons ----------------------------------------------------
+    - name: Create exo LaunchDaemon plist
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          	<key>KeepAlive</key>
+          	<true/>
+          	<key>Label</key>
+          	<string>com.ycluster.exo</string>
+          	<key>ProgramArguments</key>
+          	<array>
+          		<string>/Users/dev/run-exo.sh</string>
+          	</array>
+          	<key>UserName</key>
+          	<string>dev</string>
+          	<key>GroupName</key>
+          	<string>admin</string>
+          	<key>EnvironmentVariables</key>
+          	<dict>
+          		<key>HOME</key>
+          		<string>/Users/dev</string>
+          		<key>PATH</key>
+          		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+          	</dict>
+          	<key>RunAtLoad</key>
+          	<true/>
+          	<key>StandardErrorPath</key>
+          	<string>/opt/homebrew/var/log/exo.log</string>
+          	<key>StandardOutPath</key>
+          	<string>/opt/homebrew/var/log/exo.log</string>
+          	<key>WorkingDirectory</key>
+          	<string>/Users/dev</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.ycluster.exo.plist
+        mode: '0644'
+      notify: restart exo service
+
+    - name: Create exo placement-supervisor LaunchDaemon plist
+      # Runs on every exo mac — exo does not persist instance placements
+      # across a restart, so this supervisor re-places K2.6 whenever exo
+      # comes up with no instance (boot, crash, manual restart). The
+      # supervisors self-elect one placement leader (see exo-place.sh).
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          	<key>KeepAlive</key>
+          	<true/>
+          	<key>Label</key>
+          	<string>com.ycluster.exo-place</string>
+          	<key>ProgramArguments</key>
+          	<array>
+          		<string>/Users/dev/exo-place.sh</string>
+          	</array>
+          	<key>UserName</key>
+          	<string>dev</string>
+          	<key>GroupName</key>
+          	<string>admin</string>
+          	<key>EnvironmentVariables</key>
+          	<dict>
+          		<key>HOME</key>
+          		<string>/Users/dev</string>
+          		<key>PATH</key>
+          		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+          		<key>SUPERVISE</key>
+          		<string>1</string>
+          	</dict>
+          	<key>RunAtLoad</key>
+          	<true/>
+          	<key>StandardErrorPath</key>
+          	<string>/opt/homebrew/var/log/exo-place.log</string>
+          	<key>StandardOutPath</key>
+          	<string>/opt/homebrew/var/log/exo-place.log</string>
+          	<key>WorkingDirectory</key>
+          	<string>/Users/dev</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.ycluster.exo-place.plist
+        mode: '0644'
+      notify: reload exo-place daemon
+
+  handlers:
+    - name: restart exo service
+      shell: |
+        launchctl stop com.ycluster.exo || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.exo.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.exo.plist
+
+    - name: reload exo-place daemon
+      shell: |
+        launchctl stop com.ycluster.exo-place || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.exo-place.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.exo-place.plist

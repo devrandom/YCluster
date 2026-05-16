@@ -26,24 +26,28 @@ single-request latency.** Both can coexist; the inference gateway routes to eith
 
 ## Install
 
-Dashboard requires an npm build and we refuse to run npm on the macs.
-Build-once-on-admin, deploy the artifact.
+Provisioning is fully Ansible-managed by `macos/setup-exo.yml` (part of
+`site.yml`). One playbook run:
+
+- builds the exo dashboard once on the control host in a podman
+  container (npm is never run on the macs) via
+  `config/ansible/scripts/build-exo-dashboard.sh`;
+- clones/pins exo on each mac to the `exo_version` tag and applies the
+  carried privacy patches (`config/ansible/macos/files/exo/patches/`);
+- ships the prebuilt dashboard, `run-exo.sh` and `exo-place.sh`;
+- installs the `com.ycluster.exo` LaunchDaemon so exo auto-starts on
+  boot, and the `com.ycluster.exo-place` placement supervisor on every
+  exo mac.
 
 ```bash
-# One-time on admin host:
-git clone https://github.com/exo-explore/exo.git ext/exo
-./ext/build-exo-dashboard.sh   # rootless podman container, produces ext/exo/dashboard/build/
-
-# Deploy to macs (checks out same commit, rsyncs dashboard build, drops launcher):
-./ext/deploy-exo.sh            # defaults to EXO_HOSTS="m1.yc m2.yc"
-
-# On each mac (manual for now; LaunchDaemon later):
-ssh dev@m1.yc './run-exo.sh'
+ssh s3.yc "cd /etc/ansible && ./run-playbook.sh macos/setup-exo.yml"
 ```
 
-Scripts live in `ext/` in this repo. `run-exo.sh` sets `EXO_OFFLINE=1`
-and `EXO_LIBP2P_NAMESPACE=ycluster` so peers only discover each other,
-not random nodes on the same network.
+To bump exo, change `exo_version` in `macos/setup-exo.yml` and re-run;
+the playbook rebuilds the dashboard and re-pins/-patches every mac.
+
+`run-exo.sh` sets `EXO_OFFLINE=1` and `EXO_LIBP2P_NAMESPACE=ycluster` so
+peers only discover each other, not random nodes on the same network.
 
 Prerequisites per-mac (both root *and* dev user, per our macos.md):
 
@@ -55,7 +59,7 @@ Prerequisites per-mac (both root *and* dev user, per our macos.md):
 
 Exo expects HuggingFace safetensors repos from the `mlx-community/*`
 org — never GGUF. The model card catalog at
-`ext/exo/resources/inference_model_cards/` bundles metadata for
+`resources/inference_model_cards/` (in the exo checkout) bundles metadata for
 ~108 pre-characterized models including all MiniMax M2.1/M2.5/M2.7
 variants, Qwen3, Llama, GLM, Gemma, etc. Custom quants need a TOML
 card, but anything in the catalog is one `/place_instance` call away.
@@ -251,6 +255,16 @@ Dashboard at `http://<mac>:52415/` renders the same state visually.
 
 ### Placing an instance
 
+In production the K2.6 instance is placed automatically: the
+`com.ycluster.exo-place` LaunchDaemon runs `exo-place.sh` in supervisor
+mode (`SUPERVISE=1`) on every exo mac, re-placing the instance whenever
+exo comes up with none — exo does not persist placements across a
+restart. exo exposes no elected-master API, so the supervisors
+self-elect a single placement leader (the lowest `node_id` in
+`topology.nodes`); leadership follows liveness, so if that node drops
+out the next one takes over. To re-place by hand (any model/topology),
+run `exo-place.sh` on a mac, or use the raw API:
+
 ```bash
 # Preview all viable placements (server enumerates; params are hints):
 curl -sS "http://m1.yc:52415/instance/previews?model_id=mlx-community/MiniMax-M2.5-4bit&sharding=Tensor&instance_meta=MlxRing&min_nodes=2"
@@ -321,7 +335,8 @@ coordinator internally), so a single backend URL is enough.
 Batch=1 streaming on `mlx-community/MiniMax-M2.5-4bit` (128 GB, 62
 layers, 4-bit MoE with thinking mode), `temperature=0`, one warmup +
 3 timed runs, `max_tokens=300`. Two 512 GB Apple Silicon Ultras with a
-Thunderbolt link between them. Script: `ext/bench-chat.py`.
+Thunderbolt link between them. Script:
+`config/ansible/macos/files/exo/bench-chat.py`.
 
 | Config | TTFT | tok/s | Δ vs single |
 |---|---|---|---|
@@ -424,10 +439,6 @@ of the below is needed:
     placement fails — see "Vision-capable models" above.
   - The TB controller was found wedged during bring-up; a reboot of
     m1 cleared it — see "Thunderbolt controller can wedge" above.
-- LaunchDaemon to auto-start `run-exo.sh` on boot (paralleling
-  `com.ycluster.llama-server.plist`). Until then, run manually under
-  `dev` (`./run-exo.sh`); `nohup` fails under `sudo -i` with no tty,
-  so use a `screen`/`tmux` session if you need to detach.
 - Bench a bandwidth-bound model to validate the regime claim above.
   Candidates: Kimi-K2.5 at 3.6-4 bit (~450-500 GB, ~32 B active),
   MiniMax-M2.7-bf16, or DeepSeek-V3-class. These are models where
