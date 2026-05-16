@@ -81,16 +81,21 @@ def _cmd_add(args):
 
 
 def _cmd_remove(args):
-    argv = ['models', 'remove', args.model]
+    # local-ai-proxy uses Go's flag package, which stops parsing at the first
+    # positional — so flags must precede the model name.
+    argv = ['models', 'remove']
     if args.api_base:
         argv += ['--api-base', args.api_base]
+    argv.append(args.model)
     _forward(*argv)
 
 
 def _cmd_disable(args):
-    argv = ['backends', 'disable', args.url]
+    # Flags must precede the positional — see _cmd_remove.
+    argv = ['backends', 'disable']
     if args.reason:
         argv += ['--reason', args.reason]
+    argv.append(args.url)
     _forward(*argv)
 
 
