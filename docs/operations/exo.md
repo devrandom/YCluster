@@ -339,6 +339,35 @@ you'd see on 2×3090 serving a 7B model. The "near-linear scaling"
 claim in exo's blog applies to bandwidth-bound regimes (see below) —
 M2.5-4bit isn't one.
 
+### K2.6 batch scaling (2026-05-16)
+
+`mlx-community/Kimi-K2.6-mlx-DQ3_K_M-q8` (470 GB, 61 layers, ~32 B
+active, 3-bit MoE) — exo TP across two 512 GB M3 Ultras, MlxJaccl
+(RDMA over TB), streaming, `temperature=0`. Concurrent requests via
+thread pool; aggregate = total tokens / batch wall time.
+
+| Batch | Aggregate tok/s | Per-request tok/s | TTFT |
+|---|---|---|---|
+| 1  | 27   | 27   | 1.9 s |
+| 4  | 52.8 | 14.7 | 2.9 s |
+| 8  | 66.9 | 9.3  | 3.3 s |
+| 16 | 69.9 | 9.1  | 18.6 s |
+
+Aggregate plateaus at **~70 tok/s** (batch 8→16 gains +3 and TTFT
+blows up — prefill contention). That ~70 is roughly what a *single*
+M3 Ultra's memory bandwidth would sustain for a 32 B-active 3-bit
+model (~12 GB/token ÷ ~800 GB/s ≈ 60-66). So two macs in TP deliver
+about *one* mac's worth of throughput — the per-layer JACCL
+all-reduce eats the second machine's contribution almost entirely.
+
+Conclusion: **TP across the Thunderbolt link does not scale
+throughput.** K2.6 runs on two macs because it does not fit on one
+(470 GB > 512 GB with KV headroom), not for speed. batch=1 at 27
+tok/s is comms-latency-bound (a single stream can't hide the
+cross-node sync); the ~70 tok/s ceiling is bandwidth/comms-bound.
+This is the bandwidth-class model the regime framing below wanted
+tested — and TP still loses.
+
 ### Regime framing (why M2.5 was the wrong test)
 
 Whether TP helps batch=1 depends on which resource is actually bound:
