@@ -209,23 +209,54 @@ func modelsAddOneResult(client *clientv3.Client, prefix, model, apiBase string) 
 
 func modelsRemove(args []string, configPath string) {
 	fs := flag.NewFlagSet("models remove", flag.ExitOnError)
-	apiBaseFlag := fs.String("api-base", "", "remove only this backend instead of the whole model")
+	apiBaseFlag := fs.String("api-base", "", "backend to remove (alternative to giving the URL positionally)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: local-ai-proxy models remove <model> [--api-base <url>]")
+		fmt.Fprintln(os.Stderr, "       local-ai-proxy models remove <url> [model]")
+		fmt.Fprintln(os.Stderr, "a positional containing '://' is treated as a backend URL;")
+		fmt.Fprintln(os.Stderr, "<url> alone removes that backend from every model.")
 	}
 	_ = fs.Parse(args)
 	rest := fs.Args()
-	if len(rest) != 1 {
-		fs.Usage()
-		os.Exit(2)
-	}
-	model := rest[0]
+
 	client, prefix := mustEtcdForCLI(configPath)
 	defer client.Close()
-	key := prefix + model
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// Resolve (model, apiBase) from the positionals plus --api-base.
+	// A positional containing "://" is a backend URL; the other a model.
+	// This lets `remove` mirror `add`'s `<url> [model]` shape while still
+	// accepting the model-first `<model> [--api-base <url>]` form.
+	model := ""
+	apiBase := *apiBaseFlag
+	for _, a := range rest {
+		if strings.Contains(a, "://") {
+			if apiBase != "" && apiBase != a {
+				fatal("backend specified twice (%s and %s)", apiBase, a)
+			}
+			apiBase = a
+		} else {
+			if model != "" {
+				fatal("more than one model given (%s and %s)", model, a)
+			}
+			model = a
+		}
+	}
+	if model == "" && apiBase == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+
+	// Backend only: drop that backend from every model — the inverse of
+	// the bulk `models add <api-base>` auto-discovery.
+	if model == "" {
+		modelsRemoveBackendEverywhere(ctx, client, prefix, apiBase)
+		return
+	}
+
+	key := prefix + model
 	resp, err := client.Get(ctx, key)
 	if err != nil {
 		fatal("etcd get %s: %v", key, err)
@@ -234,7 +265,7 @@ func modelsRemove(args []string, configPath string) {
 		fatal("no such model: %s", model)
 	}
 
-	if *apiBaseFlag == "" {
+	if apiBase == "" {
 		if _, err := client.Delete(ctx, key); err != nil {
 			fatal("etcd delete %s: %v", key, err)
 		}
@@ -242,7 +273,7 @@ func modelsRemove(args []string, configPath string) {
 		return
 	}
 
-	target, err := normalizeBackendURL(*apiBaseFlag)
+	target, err := normalizeBackendURL(apiBase)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -278,6 +309,63 @@ func modelsRemove(args []string, configPath string) {
 		fatal("etcd put %s: %v", key, err)
 	}
 	fmt.Printf("Removed backend %s from %s.\n", target, model)
+}
+
+// modelsRemoveBackendEverywhere drops the given backend URL from every
+// model that references it. Models left with no backends are deleted.
+func modelsRemoveBackendEverywhere(ctx context.Context, client *clientv3.Client, prefix, apiBase string) {
+	target, err := normalizeBackendURL(apiBase)
+	if err != nil {
+		fatal("%v", err)
+	}
+	resp, err := client.Get(ctx, prefix, clientv3.WithPrefix())
+	if err != nil {
+		fatal("etcd get %s: %v", prefix, err)
+	}
+	touched, deleted := 0, 0
+	for _, kv := range resp.Kvs {
+		name := strings.TrimPrefix(string(kv.Key), prefix)
+		var v etcdModelValue
+		if err := json.Unmarshal(kv.Value, &v); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s: invalid JSON, skipped: %v\n", name, err)
+			continue
+		}
+		filtered := v.Backends[:0]
+		removed := false
+		for _, b := range v.Backends {
+			if b.APIBase == target {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, b)
+		}
+		if !removed {
+			continue
+		}
+		touched++
+		if len(filtered) == 0 {
+			if _, err := client.Delete(ctx, string(kv.Key)); err != nil {
+				fatal("etcd delete %s: %v", kv.Key, err)
+			}
+			deleted++
+			fmt.Printf("  deleted model %s (last backend removed)\n", name)
+			continue
+		}
+		v.Backends = filtered
+		buf, err := json.Marshal(v)
+		if err != nil {
+			fatal("marshal %s: %v", name, err)
+		}
+		if _, err := client.Put(ctx, string(kv.Key), string(buf)); err != nil {
+			fatal("etcd put %s: %v", kv.Key, err)
+		}
+		fmt.Printf("  removed backend from %s\n", name)
+	}
+	if touched == 0 {
+		fmt.Printf("No models reference backend %s\n", target)
+		return
+	}
+	fmt.Printf("Removed backend %s from %d model(s); %d model(s) deleted.\n", target, touched, deleted)
 }
 
 func backendsDisable(args []string, configPath string) {

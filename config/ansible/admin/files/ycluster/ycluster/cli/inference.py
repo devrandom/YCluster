@@ -37,9 +37,11 @@ def register_inference_commands(subparsers):
     add_parser.set_defaults(func=_cmd_add)
 
     # ycluster inference remove <model> [--api-base <url>]
-    remove_parser = sub.add_parser('remove', help='Remove a model (or a specific backend from it)')
-    remove_parser.add_argument('model', help='Model name')
-    remove_parser.add_argument('--api-base', default=None, help='Remove only this backend (default: remove whole model)')
+    # ycluster inference remove <url> [model]   (mirrors `add`; <url> alone = every model)
+    remove_parser = sub.add_parser('remove', help='Remove a model, or a backend from one/all models')
+    remove_parser.add_argument('target', nargs='?', default=None, help='Model name, or a backend URL (a value containing :// is treated as a backend)')
+    remove_parser.add_argument('model', nargs='?', default=None, help='Model name, when the first argument is a backend URL')
+    remove_parser.add_argument('--api-base', default=None, help='Backend to remove (alternative to giving the URL positionally)')
     remove_parser.set_defaults(func=_cmd_remove)
 
     # ycluster inference disable <url> [--reason ...]
@@ -82,11 +84,16 @@ def _cmd_add(args):
 
 def _cmd_remove(args):
     # local-ai-proxy uses Go's flag package, which stops parsing at the first
-    # positional — so flags must precede the model name.
+    # positional — so flags must precede positionals. The proxy CLI sniffs a
+    # '://' positional as a backend URL, so we just forward verbatim.
+    positionals = [a for a in (args.target, args.model) if a]
+    if not positionals and not args.api_base:
+        print("error: specify a model, or a backend URL / --api-base", file=sys.stderr)
+        sys.exit(2)
     argv = ['models', 'remove']
     if args.api_base:
         argv += ['--api-base', args.api_base]
-    argv.append(args.model)
+    argv += positionals
     _forward(*argv)
 
 
