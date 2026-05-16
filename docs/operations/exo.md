@@ -325,16 +325,19 @@ informative than M2.5.
 Exo is operational but shelved for non-trivial experiments until one
 of the below is needed:
 
-- **Kimi-K2.5 dual-mac status (2026-04-22)**: v1.0.70 (April 17)
-  fixes the model load timeout that killed K2.5 loads mid-mmap
-  ([#1826](https://github.com/exo-explore/exo/issues/1826),
-  [#1889](https://github.com/exo-explore/exo/pull/1889)). However,
-  TP warmup still hangs on multi-node clusters
-  ([#1853](https://github.com/exo-explore/exo/issues/1853)) — a
-  deeper MLX `METAL_FAST_SYNCH` synchronization issue, not
-  K2.5-specific. PP works but offers no batch=1 latency benefit
-  (strictly slower than single-mac mmap). **TP on K2.5 across two
-  Macs is blocked on #1853.**
+- **Kimi-K2.5 dual-mac status (2026-05-16)**: Both known blockers
+  appear resolved upstream — verify before next attempt.
+  v1.0.70 (April 17) fixes the model load timeout that killed K2.5
+  loads mid-mmap ([#1826](https://github.com/exo-explore/exo/issues/1826),
+  [#1889](https://github.com/exo-explore/exo/pull/1889)). The TP
+  warmup hang ([#1853](https://github.com/exo-explore/exo/issues/1853))
+  was closed-as-completed April 23; maintainer's comment suggests
+  the reporter was on upstream MLX rather than exo's MLX fork, and
+  the `pipeline_parallel_prefill`-with-eval-sync fix was already on
+  main. Use exo's bundled MLX (via `uv run exo`) — don't pip-install
+  mlx separately. Newer issue [#1975](https://github.com/exo-explore/exo/issues/1975)
+  reports a different JACCL placement failure on 2-node TB5 RDMA;
+  watch for it during bring-up.
 - LaunchDaemon to auto-start `run-exo.sh` on boot (paralleling
   `com.ycluster.llama-server.plist`). Until then, run manually.
 - Bench a bandwidth-bound model to validate the regime claim above.
