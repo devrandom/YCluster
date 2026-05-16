@@ -109,6 +109,27 @@ model as placeable with `/instance/previews` before calling
 `/place_instance` — a non-empty preview list means the directory
 passed the completeness check.
 
+There is a **second** vision dependency that the completeness check
+does *not* catch: the `[vision]` `processor_repo` (e.g. Kimi-K2.6's
+card points at `moonshotai/Kimi-K2.6`). exo loads the image processor
+from `~/.exo/models/<processor_repo>/` lazily on the **first image
+request** — so placement and text generation succeed, then the first
+multimodal request fails with the processor missing. Stage it too,
+but only the non-weight files (the processor needs config / tokenizer
+/ `trust_remote_code` modules — a few MB — not the model weights):
+
+```bash
+hf download moonshotai/Kimi-K2.6 --include "*.json" "*.py" "tokenizer*" "*.txt" "*.model"
+EXODIR=~/.exo/models/moonshotai--Kimi-K2.6
+SNAP=$(echo ~/.cache/huggingface/hub/models--moonshotai--Kimi-K2.6/snapshots/*/)
+rm -rf "$EXODIR" && mkdir -p "$EXODIR" && cd "$EXODIR"
+for f in "$SNAP"*; do ln -s "$f" .; done
+```
+
+Both the vision weights and the processor must be present on **every**
+node serving the instance. Verify multimodal end-to-end with an actual
+image request — text-only success doesn't exercise either path.
+
 ### Distributing weights mac-to-mac
 
 Both Macs need their own local copy (or local-looking symlinks).
