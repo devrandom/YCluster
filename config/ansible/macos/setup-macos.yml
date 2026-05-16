@@ -178,13 +178,20 @@
       become: yes
       changed_when: false
 
-    - name: Create llama-server LaunchDaemon plist
+    # DEPRECATED: llama-server is superseded by the exo cluster (see
+    # macos/setup-exo.yml). The plist is kept (Disabled) so the playbook
+    # stays idempotent on nodes where it was previously deployed, but the
+    # service no longer loads at boot. Remove this block once all nodes
+    # are confirmed clean.
+    - name: Create llama-server LaunchDaemon plist (deprecated — disabled)
       copy:
         content: |
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
+          	<key>Disabled</key>
+          	<true/>
           	<key>KeepAlive</key>
           	<true/>
           	<key>Label</key>
@@ -219,7 +226,7 @@
         dest: /Library/LaunchDaemons/com.ycluster.llama-server.plist
         mode: '0644'
       become: yes
-      notify: restart llama-server service
+      notify: disable llama-server service
 
     - name: Enable auto-restart after power failure
       # macOS bootstrap sets this for new nodes; this task catches up
@@ -357,9 +364,11 @@
         launchctl start com.ycluster.health
       become: yes
     
-    - name: restart llama-server service
+    - name: disable llama-server service
+      # Superseded by exo. Stop and unload; the Disabled key in the plist
+      # keeps it from loading again at boot.
       shell: |
         launchctl stop com.ycluster.llama-server || true
         launchctl unload /Library/LaunchDaemons/com.ycluster.llama-server.plist || true
-        launchctl load /Library/LaunchDaemons/com.ycluster.llama-server.plist
       become: yes
+      changed_when: false
