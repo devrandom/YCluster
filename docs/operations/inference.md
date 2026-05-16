@@ -29,10 +29,29 @@ ycluster inference remove qwen3-30b
 
 # Remove just one backend from a fanned-out model
 ycluster inference remove qwen3-30b --api-base http://m2.xc:8080
+
+# Remove a backend from EVERY model that has it — the inverse of bulk
+# `add <url>`. Mirrors `add`'s shape: a positional containing :// is
+# treated as a backend URL.
+ycluster inference remove http://m1.xc:52415
+
+# Remove one backend from one model, backend-first (same as the
+# --api-base form above, just positional)
+ycluster inference remove http://m2.xc:8080 qwen3-30b
 ```
 
 Backend URLs are host-only (no `/v1` suffix) — the proxy appends the
 client path as-is.
+
+`remove` mirrors `add`'s argument shape: `add`/`remove <url> [model]`
+operate on a backend (all its models, or one), while `remove <model>`
+still works model-first. A positional containing `://` is the backend.
+
+A backend that auto-discovers more models than you want (e.g. exo
+exposes its entire ~120-model catalog at `/v1/models`) is best added
+by naming the specific model: `ycluster inference add <url> <model>`.
+If you already ran the bulk form, `ycluster inference remove <url>`
+undoes it in one go.
 
 Under the hood `ycluster inference …` shells out to the proxy's own
 CLI (`local-ai-proxy models …`), which owns the etcd schema. You can
