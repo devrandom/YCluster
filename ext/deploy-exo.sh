@@ -45,8 +45,10 @@ echo
 for host in $hosts; do
     echo "==> $host"
 
-    # Ensure the checkout exists and is at the pinned commit. We fetch
-    # by sha directly so branches don't have to match.
+    # Ensure the checkout exists and is reset to the pinned commit. We
+    # fetch by sha directly so branches don't have to match. reset --hard
+    # + clean leaves a pristine tree so the patches below apply
+    # deterministically on every deploy (and not twice).
     ssh "dev@$host" bash -s <<EOF
 set -euo pipefail
 if [[ ! -d ~/exo/.git ]]; then
@@ -54,8 +56,18 @@ if [[ ! -d ~/exo/.git ]]; then
 fi
 cd ~/exo
 git fetch origin "$pinned_commit" || git fetch origin
-git checkout --detach "$pinned_commit"
+git reset --hard "$pinned_commit"
+git clean -fd
 EOF
+
+    # Apply local patches carried on top of the pinned upstream commit
+    # (e.g. privacy fixes). Patches live in ext/patches/. Applied after
+    # the pristine reset above so they never double-apply.
+    for patch in "$here"/patches/*.patch; do
+        [[ -e "$patch" ]] || continue
+        echo "  applying patch: $(basename "$patch")"
+        ssh "dev@$host" 'cd ~/exo && git apply --verbose' < "$patch"
+    done
 
     # Ship the prebuilt dashboard. --delete keeps the dir tight; no
     # other writer touches it on the mac.

@@ -1,0 +1,29 @@
+diff --git a/src/exo/shared/types/text_generation.py b/src/exo/shared/types/text_generation.py
+index 1d3fd526..d3e9967e 100644
+--- a/src/exo/shared/types/text_generation.py
++++ b/src/exo/shared/types/text_generation.py
+@@ -40,6 +40,12 @@ def resolve_reasoning_params(
+ class InputMessageContent(TruncatingString):
+     truncate_length = 100
+ 
++    def __repr__(self):
++        # Privacy: never render prompt content into logs. Many exo log
++        # lines dump whole task/command objects, whose repr recurses into
++        # this field — show length only, never the text.
++        return f"<InputMessageContent: {len(self)} chars>"
++
+ 
+ class InputMessage(BaseModel, frozen=True):
+     """Internal message for text generation pipelines."""
+diff --git a/src/exo/worker/engines/mlx/utils_mlx.py b/src/exo/worker/engines/mlx/utils_mlx.py
+index c884c106..8d4f6437 100644
+--- a/src/exo/worker/engines/mlx/utils_mlx.py
++++ b/src/exo/worker/engines/mlx/utils_mlx.py
+@@ -610,7 +610,6 @@ def apply_chat_template(
+             messages.append({"role": msg.role, "content": msg.content})
+ 
+     prompt = render_chat_template(tokenizer, messages, task_params)
+-    logger.info(prompt)
+ 
+     return prompt
+ 
