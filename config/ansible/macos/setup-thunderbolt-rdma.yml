@@ -1,0 +1,85 @@
+---
+# Thunderbolt / RDMA setup for macOS inference nodes.
+#
+# exo's JACCL backend uses RDMA over the Thunderbolt bridge between Macs.
+# macOS auto-bundles every TB port into bridge0 in PROMISC mode, which
+# breaks RDMA queue-pair setup. This playbook makes the fix persistent:
+# a LaunchDaemon un-bridges the active TB port at boot and assigns it a
+# static IP on the 10.0.2.0/24 transport subnet (m1 -> .1, m2 -> .2).
+#
+# The TB subnet is exo-only — nothing else in the cluster depends on it.
+# See docs/operations/exo.md for the transport rationale.
+- name: Setup Thunderbolt/RDMA on macOS nodes
+  hosts: macos
+  become: yes
+  vars:
+    # 10.0.2.<N> where N is the mac number (m1 -> 1, m2 -> 2).
+    tb_rdma_ip: "10.0.2.{{ inventory_hostname | regex_replace('^m([0-9]+).*$', '\\1') }}"
+    tb_script_dir: /usr/local/ycluster
+
+  tasks:
+    - name: Ensure ycluster service directory exists
+      file:
+        path: "{{ tb_script_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Install Thunderbolt/RDMA setup script
+      copy:
+        src: files/tb-rdma-setup.sh
+        dest: "{{ tb_script_dir }}/tb-rdma-setup.sh"
+        mode: '0755'
+      notify: reload tb-rdma daemon
+
+    - name: Check RDMA status
+      # `rdma_ctl enable` must be run once from Recovery OS — it cannot be
+      # automated here. This task only verifies the steady state; without
+      # RDMA enabled, exo's JACCL backend silently falls back to TCP.
+      command: rdma_ctl status
+      register: rdma_status
+      changed_when: false
+      failed_when: false
+
+    - name: Warn if RDMA is not enabled
+      debug:
+        msg: >-
+          RDMA is not enabled on {{ inventory_hostname }}
+          (rdma_ctl status: {{ rdma_status.stdout | default(rdma_status.stderr) | trim }}).
+          Enable it manually once from Recovery OS: `rdma_ctl enable`.
+          exo's JACCL backend will fall back to TCP until then.
+      when: "'enabled' not in (rdma_status.stdout | default(''))"
+
+    - name: Create Thunderbolt/RDMA LaunchDaemon plist
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>Label</key>
+              <string>com.ycluster.tb-rdma</string>
+              <key>ProgramArguments</key>
+              <array>
+                  <string>{{ tb_script_dir }}/tb-rdma-setup.sh</string>
+                  <string>{{ tb_rdma_ip }}</string>
+              </array>
+              <key>RunAtLoad</key>
+              <true/>
+              <key>StandardOutPath</key>
+              <string>/var/log/tb-rdma.log</string>
+              <key>StandardErrorPath</key>
+              <string>/var/log/tb-rdma.log</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.ycluster.tb-rdma.plist
+        mode: '0644'
+      notify: reload tb-rdma daemon
+
+  handlers:
+    # The daemon is a one-shot (RunAtLoad, no KeepAlive): reloading it
+    # re-runs the setup script, which applies the un-bridge + static IP
+    # immediately on deploy as well as at every boot.
+    - name: reload tb-rdma daemon
+      shell: |
+        launchctl unload /Library/LaunchDaemons/com.ycluster.tb-rdma.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.tb-rdma.plist

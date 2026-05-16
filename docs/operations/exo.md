@@ -86,6 +86,29 @@ The runners load the model from disk regardless and reach
 `RunnerReady`. Verify via `/state.runners` (see below) rather than the
 download counts.
 
+#### Vision-capable models need the vision sidecar staged too
+
+If a model card has a `[vision]` section whose `weights_repo` differs
+from the model id (e.g. Kimi-K2.6's card points at
+`exolabs/Kimi-K2.6-vision`), exo's `is_model_directory_complete`
+considers the model **incomplete** until that sidecar repo is *also*
+present under `~/.exo/models/` — **even for text-only use**. Under
+`EXO_OFFLINE=1` exo can't fetch it, so `/place_instance` fails. Stage
+it the same way as the main weights:
+
+```bash
+hf download exolabs/Kimi-K2.6-vision
+EXODIR=~/.exo/models/exolabs--Kimi-K2.6-vision
+SNAP=$(echo ~/.cache/huggingface/hub/models--exolabs--Kimi-K2.6-vision/snapshots/*/)
+rm -rf "$EXODIR" && mkdir -p "$EXODIR" && cd "$EXODIR"
+for f in "$SNAP"*; do ln -s "$f" .; done
+```
+
+The vision sidecar is small (~1 GB for K2.6). Confirm exo sees the
+model as placeable with `/instance/previews` before calling
+`/place_instance` — a non-empty preview list means the directory
+passed the completeness check.
+
 ### Distributing weights mac-to-mac
 
 Both Macs need their own local copy (or local-looking symlinks).
@@ -134,44 +157,47 @@ Verify: `ifconfig en5 | grep flags` should no longer show `PROMISC`.
 
 ### Persistence across reboots
 
-Neither the un-bridging nor the static IP survives a reboot. Wire a
-LaunchDaemon per mac so it's automatic:
+Neither the un-bridging nor the static IP survives a reboot. This is
+automated by the `macos/setup-thunderbolt-rdma.yml` playbook, which
+installs a `com.ycluster.tb-rdma` LaunchDaemon per mac:
 
-```xml
-<!-- /Library/LaunchDaemons/xc.ycluster.tb-rdma.plist -->
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>xc.ycluster.tb-rdma</string>
-  <key>RunAtLoad</key><true/>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string><string>-c</string>
-    <string>/sbin/ifconfig bridge0 deletem en5;
-            /sbin/ifconfig en5 inet 10.0.2.N netmask 255.255.255.0 up</string>
-  </array>
-  <key>StandardErrorPath</key><string>/var/log/tb-rdma.log</string>
-</dict>
-</plist>
+```bash
+ssh s3.yc 'cd /etc/ansible && ./run-playbook.sh macos/setup-thunderbolt-rdma.yml --limit m1'
 ```
 
-Replace `10.0.2.N` per mac (m1→`.1`, m2→`.2`). Load with
-`sudo launchctl bootstrap system /Library/LaunchDaemons/xc.ycluster.tb-rdma.plist`.
+The daemon runs `tb-rdma-setup.sh` at boot. That script does *not*
+just `ifconfig` blindly — macOS `configd` auto-bundles TB ports into
+`bridge0` asynchronously after boot, so the script (1) waits for the
+TB port to be enumerated and bridged before un-bridging it, and
+(2) runs a short guard loop afterwards, re-applying if configd
+re-bridges the port. The per-host IP (m1→`.1`, m2→`.2`) is derived
+from the hostname. Log: `/var/log/tb-rdma.log` on each mac.
 
 ### RDMA prereq
 
-Enable once per mac (persists across reboots):
+`rdma_ctl enable` must be run **once per mac from Recovery OS** — it
+still refuses to run from a normal shell on macOS 26.2 (`rdma_ctl:
+This tool needs to be executed from Recovery OS`). Only `rdma_ctl
+status` works from a normal shell; the playbook uses it to verify
+state and warns (it cannot enable). Without RDMA enabled, exo's
+JACCL backend silently falls back to TCP with the same perf profile
+as MlxRing.
 
 ```bash
-sudo rdma_ctl enable
-rdma_ctl status      # should print: enabled
+rdma_ctl status      # from a normal shell — should print: enabled
 ```
 
-Earlier builds of macOS 26 required enabling from Recovery Mode, but
-the 26.2+ `rdma_ctl` command works from a normal shell. Without RDMA
-enabled, exo's JACCL backend silently falls back to TCP with the
-same perf profile as MlxRing.
+### Thunderbolt controller can wedge
+
+A symptom seen in practice: `system_profiler SPThunderboltDataType`
+reports `Status: No device connected` on *every* receptacle of *both*
+Macs, `en5` goes `status: inactive`, and ping over the TB subnet
+fails 100% — with the cable physically untouched. TB is point-to-point,
+so one wedged controller drags the whole link down and both ends look
+disconnected. A reboot of the affected Mac clears it; rebooting one
+end is enough if that end was the wedged one (the peer's port recovers
+once the link re-negotiates). After the reboot, re-apply the en5
+config (the LaunchDaemon above does this automatically).
 
 ## Cluster operations
 
@@ -325,21 +351,25 @@ informative than M2.5.
 Exo is operational but shelved for non-trivial experiments until one
 of the below is needed:
 
-- **Kimi-K2.5 dual-mac status (2026-05-16)**: Both known blockers
-  appear resolved upstream — verify before next attempt.
-  v1.0.70 (April 17) fixes the model load timeout that killed K2.5
-  loads mid-mmap ([#1826](https://github.com/exo-explore/exo/issues/1826),
-  [#1889](https://github.com/exo-explore/exo/pull/1889)). The TP
-  warmup hang ([#1853](https://github.com/exo-explore/exo/issues/1853))
-  was closed-as-completed April 23; maintainer's comment suggests
-  the reporter was on upstream MLX rather than exo's MLX fork, and
-  the `pipeline_parallel_prefill`-with-eval-sync fix was already on
-  main. Use exo's bundled MLX (via `uv run exo`) — don't pip-install
-  mlx separately. Newer issue [#1975](https://github.com/exo-explore/exo/issues/1975)
-  reports a different JACCL placement failure on 2-node TB5 RDMA;
-  watch for it during bring-up.
+- **Kimi-K2.6 dual-mac bring-up (2026-05-16)**: Deployed exo v1.0.71
+  on m1/m2 and placed `mlx-community/Kimi-K2.6-mlx-DQ3_K_M-q8`
+  (470 GB) with `Tensor`/`MlxJaccl`/`min_nodes=2`. Notes for next
+  time:
+  - v1.0.70 (April 17) removed the model load timeout that killed
+    large-model loads mid-mmap
+    ([#1826](https://github.com/exo-explore/exo/issues/1826),
+    [#1889](https://github.com/exo-explore/exo/pull/1889)). The TP
+    warmup hang ([#1853](https://github.com/exo-explore/exo/issues/1853))
+    was closed-as-completed April 23 — use exo's bundled MLX (via
+    `uv run exo`), don't pip-install mlx separately.
+  - The vision sidecar (`exolabs/Kimi-K2.6-vision`) must be staged or
+    placement fails — see "Vision-capable models" above.
+  - The TB controller was found wedged during bring-up; a reboot of
+    m1 cleared it — see "Thunderbolt controller can wedge" above.
 - LaunchDaemon to auto-start `run-exo.sh` on boot (paralleling
-  `com.ycluster.llama-server.plist`). Until then, run manually.
+  `com.ycluster.llama-server.plist`). Until then, run manually under
+  `dev` (`./run-exo.sh`); `nohup` fails under `sudo -i` with no tty,
+  so use a `screen`/`tmux` session if you need to detach.
 - Bench a bandwidth-bound model to validate the regime claim above.
   Candidates: Kimi-K2.5 at 3.6-4 bit (~450-500 GB, ~32 B active),
   MiniMax-M2.7-bf16, or DeepSeek-V3-class. These are models where

@@ -26,3 +26,4 @@
 
 # macOS Node Configuration - Client node setup and health monitoring
 - import_playbook: macos/setup-macos.yml
+- import_playbook: macos/setup-thunderbolt-rdma.yml
