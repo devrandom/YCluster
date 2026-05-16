@@ -7,17 +7,6 @@
       meta: end_host
       when: not (ansible_local.gpu.has_nvidia_gpu | default(false))
 
-    - name: Ensure dev user exists
-      user:
-        name: dev
-        shell: /bin/bash
-        create_home: yes
-
-    - name: Install uv via snap
-      community.general.snap:
-        name: astral-uv
-        classic: yes
-
     - name: Install vLLM as a uv tool (0.20.x)
       command: /snap/bin/uv tool install --upgrade 'vllm>=0.20,<0.21'
       become_user: dev

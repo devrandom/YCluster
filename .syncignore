@@ -7,3 +7,4 @@ venv/
 .venv/
 dev/
 local-ai-proxy/bin/
+ext/llama.cpp
