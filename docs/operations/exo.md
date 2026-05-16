@@ -112,14 +112,15 @@ passed the completeness check.
 There is a **second** vision dependency that the completeness check
 does *not* catch: the `[vision]` `processor_repo` (e.g. Kimi-K2.6's
 card points at `moonshotai/Kimi-K2.6`). exo loads the image processor
-from `~/.exo/models/<processor_repo>/` lazily on the **first image
-request** — so placement and text generation succeed, then the first
-multimodal request fails with the processor missing. Stage it too,
-but only the non-weight files (the processor needs config / tokenizer
-/ `trust_remote_code` modules — a few MB — not the model weights):
+from `~/.exo/models/<processor_repo>/` — `config.json`,
+`preprocessor_config.json`, the `trust_remote_code` `*.py` modules,
+tokenizer. Stage the **non-weight files** of that repo (a few MB, not
+the model weights). Use `--exclude "*.safetensors"` rather than an
+`--include` glob — an `--include "*.json"` was observed to silently
+miss `config.json` / `preprocessor_config.json`:
 
 ```bash
-hf download moonshotai/Kimi-K2.6 --include "*.json" "*.py" "tokenizer*" "*.txt" "*.model"
+hf download moonshotai/Kimi-K2.6 --exclude "*.safetensors" "*.mp4"
 EXODIR=~/.exo/models/moonshotai--Kimi-K2.6
 SNAP=$(echo ~/.cache/huggingface/hub/models--moonshotai--Kimi-K2.6/snapshots/*/)
 rm -rf "$EXODIR" && mkdir -p "$EXODIR" && cd "$EXODIR"
@@ -127,8 +128,15 @@ for f in "$SNAP"*; do ln -s "$f" .; done
 ```
 
 Both the vision weights and the processor must be present on **every**
-node serving the instance. Verify multimodal end-to-end with an actual
-image request — text-only success doesn't exercise either path.
+node before the model loads. The processor is read at **model-load
+time**, not per-request — if you stage it after placement you must
+re-place (or restart exo) for it to take effect. A request whose
+`prompt_tokens` barely exceeds the text-only count means the image was
+*not* processed (placeholder tokens only); a working vision request
+adds hundreds of image-patch tokens. Verify with an actual image and
+check the token count — don't trust a model's answer to a leading
+question (a solid-colour test image lets the model guess the colour
+without seeing it).
 
 ### Distributing weights mac-to-mac
 
