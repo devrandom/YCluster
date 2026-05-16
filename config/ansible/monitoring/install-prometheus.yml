@@ -388,7 +388,7 @@
         state: restarted
 
 - name: Install node exporter on compute, nvidia and nas nodes
-  hosts: nvidia:compute:nas
+  hosts: compute:nas
   become: yes
   tasks:
     - name: Install node exporter

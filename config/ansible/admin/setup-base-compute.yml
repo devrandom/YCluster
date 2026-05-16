@@ -74,3 +74,26 @@
         enabled: yes
         state: started
         daemon_reload: yes
+
+    - name: Ensure dev user exists
+      user:
+        name: dev
+        shell: /bin/bash
+        create_home: yes
+        groups:
+          - render
+          - video
+        append: yes
+
+    - name: Install astral-uv snap
+      community.general.snap:
+        name: astral-uv
+        classic: yes
+
+    - name: Install huggingface-cli as a uv tool
+      command: /snap/bin/uv tool install --upgrade huggingface_hub
+      become_user: dev
+      environment:
+        HOME: /home/dev
+      register: hf_install
+      changed_when: "'Installed' in hf_install.stdout or 'Updated' in hf_install.stdout"
