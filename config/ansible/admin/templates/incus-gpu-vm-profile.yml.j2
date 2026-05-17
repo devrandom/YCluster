@@ -10,6 +10,7 @@ devices:
     type: nic
     network: {{ incus_bridge }}
     name: eth0
+    # Isolation ACL is applied at the network level (see install-incus.yml).
   root:
     type: disk
     path: /

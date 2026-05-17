@@ -8,6 +8,15 @@
     incus_bridge: incusbr0
     incus_bridge_cidr: "10.100.0.1/24"
     incus_storage_pool: local
+    # Networks GPU VMs are blocked from reaching (egress drop). They keep
+    # internet access; only cluster-local / private ranges are denied.
+    # Note: the VM bridge subnet itself (10.100.0.0/24) is intentionally
+    # NOT listed, so DHCP/DNS to the bridge keeps working.
+    incus_isolation_blocked_cidrs:
+      - "10.0.0.0/24"        # cluster network
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+      - "169.254.0.0/16"     # link-local
     # NOTE: the primary (.0) PCI function of each GPU dedicated to VM
     # passthrough is set per node in host_vars/<node>.yml as
     # incus_passthrough_gpu_pci. It is intentionally NOT defaulted here:
@@ -91,6 +100,32 @@
       args:
         stdin: "{{ lookup('template', 'incus-preseed.yml.j2') }}"
       when: incus_pool_check.rc != 0
+
+    - name: Check whether the gpu-vm-isolation ACL exists
+      command: incus network acl show gpu-vm-isolation
+      register: acl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create gpu-vm-isolation ACL
+      command: incus network acl create gpu-vm-isolation
+      when: acl_check.rc != 0
+
+    - name: Apply gpu-vm-isolation ACL rules
+      shell: incus network acl edit gpu-vm-isolation
+      args:
+        stdin: "{{ lookup('template', 'incus-acl-isolation.yml.j2') }}"
+      changed_when: false
+
+    # ACL config goes on the bridge network (not the NIC) — for bridge
+    # networks the per-NIC default-action keys are not valid options.
+    - name: Attach isolation ACL and default actions to the VM bridge
+      command: "incus network set {{ incus_bridge }} {{ item }}"
+      loop:
+        - "security.acls gpu-vm-isolation"
+        - "security.acls.default.egress.action allow"
+        - "security.acls.default.ingress.action allow"
+      changed_when: false
 
     - name: Check whether gpu-vm profile exists
       command: incus profile show gpu-vm

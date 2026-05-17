@@ -1,0 +1,10 @@
+name: gpu-vm-isolation
+description: GPU VMs may reach the internet but not cluster-local / private networks
+config: {}
+ingress: []
+egress:
+{% for cidr in incus_isolation_blocked_cidrs %}
+  - action: drop
+    destination: {{ cidr }}
+    state: enabled
+{% endfor %}
