@@ -3,6 +3,11 @@ description: GPU VMs may reach the internet but not cluster-local / private netw
 config: {}
 ingress: []
 egress:
+{% for cidr in incus_isolation_allowed_cidrs %}
+  - action: allow
+    destination: {{ cidr }}
+    state: enabled
+{% endfor %}
 {% for cidr in incus_isolation_blocked_cidrs %}
   - action: drop
     destination: {{ cidr }}
