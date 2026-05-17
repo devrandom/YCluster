@@ -8,6 +8,8 @@
     incus_bridge: incusbr0
     incus_bridge_cidr: "10.100.0.1/24"
     incus_storage_pool: local
+    # etcd endpoints for the `ycluster vm` CLI (core nodes s1-s3).
+    etcd_endpoints: "10.0.0.11:2379,10.0.0.12:2379,10.0.0.13:2379"
     # GPU VMs keep internet access but are denied cluster-local / private
     # ranges. The VM bridge subnet falls inside 10.0.0.0/8, so it must be
     # explicitly allowed — and listed first, since ACL rules are evaluated
@@ -156,21 +158,15 @@
         stdin: "{{ lookup('template', 'incus-gpu-vm-profile.yml.j2') }}"
       changed_when: false
 
-    - name: Install incus-gpu-vm GPU pool config
-      template:
-        src: incus-gpu-vm.default.j2
-        dest: /etc/default/incus-gpu-vm
-        mode: '0644'
-        owner: root
-        group: root
-
-    - name: Install incus-gpu-vm helper
-      copy:
-        src: files/scripts/incus-gpu-vm
-        dest: /usr/local/bin/incus-gpu-vm
-        mode: '0755'
-        owner: root
-        group: root
+    # `ycluster vm` (the VM management CLI) runs on this host and needs to
+    # reach the cluster etcd; non-core nodes have no local etcd, so point
+    # the etcd client at the core nodes. /etc/environment is applied to
+    # SSH/PAM sessions, including Ansible's.
+    - name: Point ycluster's etcd client at the core nodes
+      lineinfile:
+        path: /etc/environment
+        regexp: '^ETCD_HOSTS='
+        line: "ETCD_HOSTS={{ etcd_endpoints }}"
 
     - name: Install incus-build-gpu-image helper
       template:

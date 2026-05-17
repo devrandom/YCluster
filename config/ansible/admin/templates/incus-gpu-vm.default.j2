@@ -1,5 +1,0 @@
-# Passthrough GPU pool for incus-gpu-vm — managed by Ansible (install-incus.yml).
-# Primary (.0) PCI function of each GPU dedicated to VM passthrough.
-GPU_POOL=(
-{% for g in incus_passthrough_gpu_pci | default([]) %}    {{ g }}
-{% endfor %})
