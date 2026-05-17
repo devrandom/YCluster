@@ -23,3 +23,4 @@
 - import_playbook: install-llama-cpp-rocm.yml
 - import_playbook: install-nvidia.yml
 - import_playbook: install-vllm.yml
+- import_playbook: install-incus.yml

@@ -1,0 +1,17 @@
+name: gpu-vm
+description: Ephemeral GPU-passthrough VM (local disk)
+config:
+  limits.cpu: "8"
+  limits.memory: 32GiB
+  # NVIDIA DKMS modules in the guest are unsigned.
+  security.secureboot: "false"
+devices:
+  eth0:
+    type: nic
+    network: {{ incus_bridge }}
+    name: eth0
+  root:
+    type: disk
+    path: /
+    pool: {{ incus_storage_pool }}
+    size: 80GiB

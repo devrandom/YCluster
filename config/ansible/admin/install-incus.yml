@@ -1,0 +1,133 @@
+---
+- name: Configure Incus VM host on designated Nvidia nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # CUDA toolkit version baked into the GPU guest image (matches install-nvidia.yml)
+    cuda_version: "12-9"
+    incus_bridge: incusbr0
+    incus_bridge_cidr: "10.100.0.1/24"
+    incus_storage_pool: local
+    # NOTE: the primary (.0) PCI function of each GPU dedicated to VM
+    # passthrough is set per node in host_vars/<node>.yml as
+    # incus_passthrough_gpu_pci. It is intentionally NOT defaulted here:
+    # a play-level var would outrank host_vars and shadow it.
+  tasks:
+    - name: End play unless this node is an Incus VM host
+      meta: end_host
+      when: not (incus_vm_host | default(false))
+
+    - name: Install Incus, QEMU (VM support), driverctl and jq
+      apt:
+        name:
+          - incus
+          # VM support — the incus package does not depend on QEMU
+          - qemu-system-x86
+          - ovmf
+          - driverctl
+          - jq
+        state: present
+        update_cache: yes
+      register: incus_pkgs
+
+    - name: Restart Incus to pick up the QEMU VM driver
+      systemd:
+        name: incus
+        state: restarted
+      when: incus_pkgs.changed
+
+    - name: Remove conflicting lxd snap if present
+      command: snap remove lxd
+      register: lxd_remove
+      changed_when: "'removed' in lxd_remove.stdout"
+      failed_when:
+        - lxd_remove.rc != 0
+        - "'not installed' not in lxd_remove.stderr"
+
+    - name: Add dev user to incus-admin group
+      user:
+        name: dev
+        groups: incus-admin
+        append: yes
+
+    - name: Ensure vfio-pci is loaded at boot
+      copy:
+        dest: /etc/modules-load.d/vfio-pci.conf
+        content: "vfio-pci\n"
+        mode: '0644'
+
+    # Each GPU passes through with its HD-Audio function (.1) — they share an
+    # IOMMU group, so vfio requires the whole group bound.
+    - name: Compute all passthrough PCI functions (GPU + audio)
+      set_fact:
+        incus_passthrough_all: >-
+          {{ (incus_passthrough_gpu_pci | default([]))
+             + (incus_passthrough_gpu_pci | default([])
+                | map('regex_replace', '\.0$', '.1') | list) }}
+
+    - name: Pin passthrough GPU functions to vfio-pci (driverctl override)
+      copy:
+        dest: "/etc/driverctl.d/{{ item }}"
+        content: "vfio-pci\n"
+        mode: '0644'
+      loop: "{{ incus_passthrough_all }}"
+      register: vfio_overrides
+
+    - name: Reboot reminder for vfio binding
+      debug:
+        msg: >-
+          Reboot {{ inventory_hostname }} to bind GPUs
+          {{ incus_passthrough_gpu_pci | join(', ') }} to vfio-pci.
+      when: vfio_overrides.changed
+
+    - name: Check whether Incus storage pool exists
+      command: "incus storage show {{ incus_storage_pool }}"
+      register: incus_pool_check
+      changed_when: false
+      failed_when: false
+
+    - name: Initialise Incus (storage pool, NAT bridge, default profile)
+      shell: incus admin init --preseed
+      args:
+        stdin: "{{ lookup('template', 'incus-preseed.yml.j2') }}"
+      when: incus_pool_check.rc != 0
+
+    - name: Check whether gpu-vm profile exists
+      command: incus profile show gpu-vm
+      register: gpuvm_profile_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create gpu-vm profile
+      command: incus profile create gpu-vm
+      when: gpuvm_profile_check.rc != 0
+
+    - name: Apply gpu-vm profile configuration
+      shell: incus profile edit gpu-vm
+      args:
+        stdin: "{{ lookup('template', 'incus-gpu-vm-profile.yml.j2') }}"
+      changed_when: false
+
+    - name: Install incus-gpu-vm GPU pool config
+      template:
+        src: incus-gpu-vm.default.j2
+        dest: /etc/default/incus-gpu-vm
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Install incus-gpu-vm helper
+      copy:
+        src: files/scripts/incus-gpu-vm
+        dest: /usr/local/bin/incus-gpu-vm
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Install incus-build-gpu-image helper
+      template:
+        src: incus-build-gpu-image.sh.j2
+        dest: /usr/local/bin/incus-build-gpu-image
+        mode: '0755'
+        owner: root
+        group: root
