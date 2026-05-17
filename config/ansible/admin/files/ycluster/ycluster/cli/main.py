@@ -47,6 +47,7 @@ def create_parser():
     from .inference import register_inference_commands
     from .wg import register_wg_commands
     from .inventory import register_inventory_commands
+    from .vm import register_vm_commands
 
     register_cluster_commands(subparsers)
     register_health_alias(subparsers)
@@ -61,6 +62,7 @@ def create_parser():
     register_inference_commands(subparsers)
     register_wg_commands(subparsers)
     register_inventory_commands(subparsers)
+    register_vm_commands(subparsers)
 
     return parser
 

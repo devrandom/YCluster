@@ -30,3 +30,9 @@ type = "tcp"
 [server.services.ssh3]
 bind_addr = "127.0.0.1:2203"
 type = "tcp"
+
+# VM-access bastion (Incus VM host). Publicly bound so VMs can be reached
+# via: ssh -J jump@<this-host>:2210 user@<vm-name>
+[server.services.vm-bastion]
+bind_addr = "0.0.0.0:2210"
+type = "tcp"

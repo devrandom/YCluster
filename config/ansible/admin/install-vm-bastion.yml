@@ -1,0 +1,123 @@
+---
+# Deploys a bastion container on the Incus VM bridge. The bastion runs a
+# jump-only sshd plus a rathole client, giving external SSH access to GPU
+# VMs via:  ssh -J jump@<rathole-host>:2210 ubuntu@<vm-name>
+#
+# The bastion sits on incusbr0, so it is confined exactly like the VMs: it
+# can reach the VMs and the internet, but not nv2's sshd or the cluster.
+#
+# Per-user access is generated from the etcd registries by
+# `ycluster vm bastion-sync` (run here, and on every VM/key change).
+#
+# Requires the rathole server to expose the matching 'vm-bastion' service
+# (app/templates/rathole-server.toml.j2 — re-run app/install-rathole-server.yml).
+- name: Deploy the VM-access bastion container
+  hosts: nvidia
+  become: yes
+  vars:
+    vm_bastion_container: bastion
+    vm_bastion_service: vm-bastion
+    vm_bastion_jump_user: jump
+    vm_bastion_image: "images:ubuntu/24.04"
+    etcd_endpoints: "10.0.0.11:2379,10.0.0.12:2379,10.0.0.13:2379"
+  tasks:
+    - name: End play unless this node is an Incus VM host
+      meta: end_host
+      when: not (incus_vm_host | default(false))
+
+    - name: Check rathole binary exists on the Ansible controller
+      stat:
+        path: /usr/local/bin/rathole
+      register: rathole_bin
+      delegate_to: localhost
+
+    - name: Fail if rathole binary is missing
+      fail:
+        msg: "Rathole binary not found on the controller. Run app/build-rathole.yml first."
+      when: not rathole_bin.stat.exists
+
+    - name: Read rathole tunnel config from etcd
+      command: etcdctl get --print-value-only /cluster/nodes/rathole/config
+      delegate_to: "{{ groups['core'][0] }}"
+      register: rathole_cfg_raw
+      changed_when: false
+
+    - name: Parse rathole tunnel config
+      set_fact:
+        rathole_remote_addr: "{{ (rathole_cfg_raw.stdout | from_json).remote_addr }}"
+        rathole_token: "{{ (rathole_cfg_raw.stdout | from_json).token }}"
+      no_log: true
+
+    - name: Copy rathole binary to the Incus host
+      copy:
+        src: /usr/local/bin/rathole
+        dest: /usr/local/bin/rathole
+        mode: '0755'
+
+    - name: Check whether the bastion container exists
+      command: "incus info {{ vm_bastion_container }}"
+      register: bastion_info
+      changed_when: false
+      failed_when: false
+
+    - name: Launch the bastion container
+      command: "incus launch {{ vm_bastion_image }} {{ vm_bastion_container }}"
+      when: bastion_info.rc != 0
+
+    - name: Wait for the bastion container to be reachable
+      command: "incus exec {{ vm_bastion_container }} -- true"
+      register: bastion_ready
+      retries: 30
+      delay: 3
+      until: bastion_ready.rc == 0
+      changed_when: false
+
+    - name: Push rathole binary into the bastion
+      command: >
+        incus file push /usr/local/bin/rathole
+        {{ vm_bastion_container }}/usr/local/bin/rathole --mode 0755
+      changed_when: false
+
+    - name: Render the bastion setup script
+      set_fact:
+        bastion_setup_script: "{{ lookup('template', 'bastion-setup.sh.j2') }}"
+      no_log: true
+
+    - name: Stage the bastion setup script on the host
+      copy:
+        content: "{{ bastion_setup_script }}"
+        dest: /tmp/bastion-setup.sh
+        mode: '0700'
+      no_log: true
+
+    - name: Push the setup script into the bastion
+      command: >
+        incus file push /tmp/bastion-setup.sh
+        {{ vm_bastion_container }}/root/bastion-setup.sh --mode 0700
+      changed_when: false
+
+    - name: Run the bastion setup script
+      command: "incus exec {{ vm_bastion_container }} -- bash /root/bastion-setup.sh"
+      register: bastion_setup_run
+      changed_when: "'Bastion configured' in bastion_setup_run.stdout"
+
+    - name: Clean up staged setup scripts (host and container)
+      block:
+        - name: Remove staged script on the host
+          file:
+            path: /tmp/bastion-setup.sh
+            state: absent
+        - name: Remove staged script in the bastion
+          command: "incus exec {{ vm_bastion_container }} -- rm -f /root/bastion-setup.sh"
+          changed_when: false
+
+    - name: Populate the bastion access list from the etcd registries
+      command: ycluster vm bastion-sync
+      environment:
+        ETCD_HOSTS: "{{ etcd_endpoints }}"
+      register: bastion_sync_run
+      changed_when: "'synced' in bastion_sync_run.stdout"
+
+    - name: Show bastion deployment result
+      debug:
+        msg: "{{ bastion_setup_run.stdout_lines + bastion_sync_run.stdout_lines }}"
