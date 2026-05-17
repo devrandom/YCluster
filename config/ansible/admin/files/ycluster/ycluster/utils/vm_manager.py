@@ -22,9 +22,9 @@ from ..common.etcd_utils import get_etcd_client
 USERS_PREFIX = "/cluster/users/"
 VMS_PREFIX = "/cluster/vms/"
 
-GPU_VM_PROFILE = "gpu-vm"
-GPU_VM_IMAGE = "ubuntu-cuda"
-GPU_VM_GUEST_USER = "ubuntu"          # default user in the Ubuntu cloud image
+VM_PROFILE = "gpu-vm"
+VM_IMAGE = "ubuntu-cuda"               # single image for all VMs (GPU or not)
+VM_GUEST_USER = "ubuntu"               # default user in the Ubuntu cloud image
 BASTION_CONTAINER = "bastion"
 BASTION_JUMP_USER = "jump"
 
@@ -241,16 +241,46 @@ def _owner_vms():
     return out
 
 
-def _inject_owner_keys(vm_name, keys):
-    """Install an owner's keys into a VM's guest user."""
+def _guest_login_user(vm_name):
+    """The VM's primary login user (uid 1000) — 'ubuntu' on cloud images."""
+    r = _incus("exec", vm_name, "--", "getent", "passwd", "1000", check=False)
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.split(":", 1)[0]
+    return VM_GUEST_USER
+
+
+def _ensure_sshd(vm_name):
+    """Make sure the VM has an SSH server listening on port 22."""
     _wait_agent(vm_name)
+    # cloud-init creates the default user on first boot — wait for it.
+    _incus("exec", vm_name, "--", "cloud-init", "status", "--wait", check=False)
+    if _incus("exec", vm_name, "--", "test", "-x", "/usr/sbin/sshd",
+              check=False).returncode != 0:
+        print("Installing openssh-server in the VM...")
+        _incus("exec", vm_name, "--", "bash", "-c",
+               "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && "
+               "apt-get install -y -qq openssh-server")
+    # Use the plain service so :22 is reliably listening (Ubuntu 24.04
+    # ships ssh socket-activated).
+    _incus("exec", vm_name, "--", "bash", "-c",
+           "systemctl disable --now ssh.socket 2>/dev/null || true; "
+           "systemctl enable --now ssh.service")
+
+
+def _inject_owner_keys(vm_name, keys):
+    """Install an owner's keys into the VM's primary login user."""
+    _wait_agent(vm_name)
+    # cloud-init creates the default user on first boot — wait for it.
+    _incus("exec", vm_name, "--", "cloud-init", "status", "--wait", check=False)
+    guest = _guest_login_user(vm_name)
     content = "".join(k.strip() + "\n" for k in keys)
-    _push_file(vm_name, f"/home/{GPU_VM_GUEST_USER}/.ssh/authorized_keys",
-               content, GPU_VM_GUEST_USER)
+    _push_file(vm_name, f"/home/{guest}/.ssh/authorized_keys", content, guest)
 
 
-def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=GPU_VM_IMAGE):
+def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=VM_IMAGE):
     _valid_vm_name(name)
+    if gpus < 0:
+        raise ValueError("--gpus cannot be negative")
     user = user_get(owner)
     if not user or not user.get("ssh_keys"):
         raise ValueError(
@@ -259,14 +289,17 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=GPU_VM_IMAGE):
     if vm_get(name) or _instance_exists(name):
         raise ValueError(f"VM '{name}' already exists.")
 
-    free = free_gpus()
-    if len(free) < gpus:
-        raise ValueError(f"Only {len(free)} GPU(s) free, requested {gpus}.")
-    picked = free[:gpus]
+    picked = []
+    if gpus:
+        free = free_gpus()
+        if len(free) < gpus:
+            raise ValueError(f"Only {len(free)} GPU(s) free, requested {gpus}.")
+        picked = free[:gpus]
 
-    print(f"Creating VM '{name}' ({cpu} CPU, {mem} RAM, {gpus} GPU) "
+    gpu_desc = f"{gpus} GPU" if gpus else "no GPU"
+    print(f"Creating VM '{name}' ({cpu} CPU, {mem} RAM, {gpu_desc}) "
           f"owned by '{owner}'...")
-    _incus("init", image, name, "--vm", "--profile", GPU_VM_PROFILE,
+    _incus("init", image, name, "--vm", "--profile", VM_PROFILE,
            "-c", f"limits.cpu={cpu}", "-c", f"limits.memory={mem}")
     for i, pci in enumerate(picked):
         _incus("config", "device", "add", name, f"gpu{i}", "gpu",
@@ -281,13 +314,15 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=GPU_VM_IMAGE):
         "gpus": gpus,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
-    print("Waiting for the VM to boot, then injecting SSH keys...")
+    print("Waiting for the VM to boot, provisioning SSH...")
+    _ensure_sshd(name)
     _inject_owner_keys(name, user["ssh_keys"])
     bastion_sync()
 
-    print(f"Launched '{name}' with GPU(s): {', '.join(picked)}")
+    where = f"GPU(s): {', '.join(picked)}" if picked else "no GPU"
+    print(f"Launched '{name}' ({where})")
     print(f"  ssh -J {BASTION_JUMP_USER}@<rathole-host>:2210 "
-          f"{GPU_VM_GUEST_USER}@{name}")
+          f"{VM_GUEST_USER}@{name}")
 
 
 def vm_stop(name):

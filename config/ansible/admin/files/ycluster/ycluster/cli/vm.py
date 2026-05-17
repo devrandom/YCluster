@@ -12,10 +12,11 @@ def register_vm_commands(subparsers):
     lp.add_argument('name')
     lp.add_argument('--owner', required=True,
                     help='Registered user who owns (and can SSH to) the VM')
-    lp.add_argument('--gpus', type=int, default=1)
+    lp.add_argument('--gpus', type=int, default=1,
+                    help='Number of GPUs to pass through (0 for a CPU-only VM)')
     lp.add_argument('--cpu', type=int, default=8)
     lp.add_argument('--mem', default='32GiB')
-    lp.add_argument('--image', default=vm.GPU_VM_IMAGE)
+    lp.add_argument('--image', default=vm.VM_IMAGE)
     lp.set_defaults(func=lambda a: vm.vm_launch(
         a.name, a.owner, a.gpus, a.cpu, a.mem, a.image))
 
