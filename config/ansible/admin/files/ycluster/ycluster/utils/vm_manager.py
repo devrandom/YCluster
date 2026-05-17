@@ -28,7 +28,8 @@ GPU_VM_GUEST_USER = "ubuntu"          # default user in the Ubuntu cloud image
 BASTION_CONTAINER = "bastion"
 BASTION_JUMP_USER = "jump"
 
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")     # Incus instance names
+_USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")        # identifiers / emails
 
 
 # --------------------------------------------------------------------------
@@ -153,10 +154,18 @@ def vm_gpus():
 # --------------------------------------------------------------------------
 # user SSH key registry
 # --------------------------------------------------------------------------
-def _valid_name(name, kind):
-    if not _NAME_RE.match(name):
-        raise ValueError(f"Invalid {kind} '{name}': use lowercase letters, "
-                         f"digits and hyphens.")
+def _valid_vm_name(name):
+    if not _VM_NAME_RE.match(name):
+        raise ValueError(f"Invalid VM name '{name}': use lowercase letters, "
+                         f"digits and hyphens (Incus instance name rules).")
+
+
+def _valid_user(name):
+    # Usernames are plain identifiers (often email addresses); they only
+    # need to be safe as an etcd key component — no slashes or whitespace.
+    if not _USER_RE.match(name):
+        raise ValueError(f"Invalid user '{name}': allowed characters are "
+                         f"letters, digits and . _ % + @ -")
 
 
 def user_get(user):
@@ -168,7 +177,7 @@ def users_all():
 
 
 def user_add_key(user, key):
-    _valid_name(user, "user name")
+    _valid_user(user)
     key = key.strip()
     if not re.match(r"^(ssh-|ecdsa-|sk-)", key):
         raise ValueError("That does not look like an SSH public key.")
@@ -241,7 +250,7 @@ def _inject_owner_keys(vm_name, keys):
 
 
 def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=GPU_VM_IMAGE):
-    _valid_name(name, "VM name")
+    _valid_vm_name(name)
     user = user_get(owner)
     if not user or not user.get("ssh_keys"):
         raise ValueError(
@@ -314,15 +323,17 @@ def vm_list():
 
 
 def vm_sync_keys(user):
-    """Re-inject a user's current keys into every running VM they own."""
-    rec = user_get(user)
-    if not rec:
-        raise ValueError(f"No such user: {user}")
-    owned = _owner_vms().get(user, [])
-    for name in owned:
+    """Re-inject a user's current keys into every running VM they own.
+
+    If the user has no keys left (or the record is gone), the VMs'
+    authorized_keys are emptied — removing a user's keys revokes access.
+    """
+    rec = user_get(user) or {"ssh_keys": []}
+    keys = rec.get("ssh_keys", [])
+    for name in _owner_vms().get(user, []):
         if _instance_exists(name):
             print(f"Refreshing keys in '{name}'...")
-            _inject_owner_keys(name, rec.get("ssh_keys", []))
+            _inject_owner_keys(name, keys)
 
 
 # --------------------------------------------------------------------------
