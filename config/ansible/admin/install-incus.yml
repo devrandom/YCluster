@@ -8,12 +8,14 @@
     incus_bridge: incusbr0
     incus_bridge_cidr: "10.100.0.1/24"
     incus_storage_pool: local
-    # Networks GPU VMs are blocked from reaching (egress drop). They keep
-    # internet access; only cluster-local / private ranges are denied.
-    # Note: the VM bridge subnet itself (10.100.0.0/24) is intentionally
-    # NOT listed, so DHCP/DNS to the bridge keeps working.
+    # GPU VMs keep internet access but are denied cluster-local / private
+    # ranges. The VM bridge subnet falls inside 10.0.0.0/8, so it must be
+    # explicitly allowed — and listed first, since ACL rules are evaluated
+    # in order (first match wins).
+    incus_isolation_allowed_cidrs:
+      - "10.100.0.0/24"      # the VM bridge itself — DHCP/DNS/gateway
     incus_isolation_blocked_cidrs:
-      - "10.0.0.0/24"        # cluster network
+      - "10.0.0.0/8"         # cluster + all private 10/8
       - "172.16.0.0/12"
       - "192.168.0.0/16"
       - "169.254.0.0/16"     # link-local
