@@ -1,0 +1,124 @@
+#!/bin/bash
+# Manage ephemeral GPU-passthrough VMs on this Incus host.
+# Installed by Ansible (install-incus.yml). The passthrough GPU pool is
+# read from /etc/default/incus-gpu-vm.
+set -euo pipefail
+
+CONF="/etc/default/incus-gpu-vm"
+if [[ ! -r "$CONF" ]]; then
+    echo "Missing $CONF — run the install-incus.yml playbook." >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "$CONF"
+if [[ ${#GPU_POOL[@]} -eq 0 ]]; then
+    echo "No passthrough GPUs configured in $CONF." >&2
+    exit 1
+fi
+
+IMAGE_DEFAULT="ubuntu-cuda"
+PROFILE="gpu-vm"
+
+usage() {
+    cat <<EOF
+Usage:
+  incus-gpu-vm launch <name> [--gpus N] [--cpu N] [--mem SIZE] [--image NAME]
+  incus-gpu-vm list                 List GPU VMs and their GPU assignment
+  incus-gpu-vm gpus                 Show free/assigned passthrough GPUs
+  incus-gpu-vm stop <name>          Stop a VM (ephemeral VMs are then deleted)
+
+VMs are ephemeral: stopping one deletes it and frees its GPU(s).
+Default image '$IMAGE_DEFAULT' is built by: incus-build-gpu-image
+EOF
+    exit 1
+}
+
+# PCI addresses currently assigned to any Incus instance.
+assigned_gpus() {
+    incus list --format json \
+        | jq -r '.[].devices | to_entries[]
+                 | select(.value.type=="gpu") | .value.pci' 2>/dev/null
+}
+
+free_gpus() {
+    local assigned
+    assigned="$(assigned_gpus)"
+    local g
+    for g in "${GPU_POOL[@]}"; do
+        grep -qxF "$g" <<<"$assigned" || echo "$g"
+    done
+}
+
+cmd_launch() {
+    [[ $# -ge 1 ]] || usage
+    local name="$1"; shift
+    local gpus=1 cpu=8 mem=32GiB image="$IMAGE_DEFAULT"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gpus)  gpus="$2";  shift 2 ;;
+            --cpu)   cpu="$2";   shift 2 ;;
+            --mem)   mem="$2";   shift 2 ;;
+            --image) image="$2"; shift 2 ;;
+            *) usage ;;
+        esac
+    done
+
+    mapfile -t avail < <(free_gpus)
+    if (( ${#avail[@]} < gpus )); then
+        echo "Only ${#avail[@]} GPU(s) free, requested $gpus" >&2
+        exit 1
+    fi
+
+    echo "Creating VM '$name' (${cpu} CPU, ${mem} RAM, ${gpus} GPU)..."
+    incus init "$image" "$name" --vm --ephemeral \
+        --profile "$PROFILE" \
+        -c limits.cpu="$cpu" -c limits.memory="$mem"
+
+    local i pci audio
+    for ((i = 0; i < gpus; i++)); do
+        pci="${avail[$i]}"
+        audio="${pci%.0}.1"
+        incus config device add "$name" "gpu$i" gpu gputype=physical pci="$pci"
+        incus config device add "$name" "gpu${i}snd" pci address="$audio"
+    done
+
+    incus start "$name"
+    echo "Launched '$name' with GPU(s): ${avail[*]:0:$gpus}"
+}
+
+cmd_list() {
+    incus list --format json | jq -r '
+        .[] | select(.profiles | index("'"$PROFILE"'"))
+        | "\(.name)\t\(.status)\t" +
+          ([.devices | to_entries[]
+            | select(.value.type=="gpu") | .value.pci] | join(",") // "-")'
+}
+
+cmd_gpus() {
+    local assigned
+    assigned="$(assigned_gpus)"
+    local g
+    for g in "${GPU_POOL[@]}"; do
+        if grep -qxF "$g" <<<"$assigned"; then
+            echo "$g  ASSIGNED"
+        else
+            echo "$g  free"
+        fi
+    done
+}
+
+cmd_stop() {
+    [[ $# -eq 1 ]] || usage
+    incus stop "$1"
+    echo "Stopped '$1'."
+}
+
+[[ $# -ge 1 ]] || usage
+sub="$1"; shift
+case "$sub" in
+    launch) cmd_launch "$@" ;;
+    list)   cmd_list ;;
+    gpus)   cmd_gpus ;;
+    stop)   cmd_stop "$@" ;;
+    *)      usage ;;
+esac
