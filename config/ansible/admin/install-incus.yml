@@ -19,6 +19,11 @@
       - "172.16.0.0/12"
       - "192.168.0.0/16"
       - "169.254.0.0/16"     # link-local
+    # Upstream DNS for the VM bridge resolver. nv2's /etc/resolv.conf lists a
+    # dead 127.0.0.1 first (no local resolver on non-core nodes), which stalls
+    # lookups, so the bridge dnsmasq is given explicit servers instead.
+    incus_vm_dns_servers:
+      - "10.0.0.254"         # cluster resolver
     # NOTE: the primary (.0) PCI function of each GPU dedicated to VM
     # passthrough is set per node in host_vars/<node>.yml as
     # incus_passthrough_gpu_pci. It is intentionally NOT defaulted here:
@@ -127,6 +132,12 @@
         - "security.acls gpu-vm-isolation"
         - "security.acls.default.egress.action allow"
         - "security.acls.default.ingress.action allow"
+      changed_when: false
+
+    - name: Point the VM bridge resolver at explicit upstream DNS
+      shell: >
+        incus network set {{ incus_bridge }} raw.dnsmasq
+        "$(printf '%s\n' no-resolv {{ incus_vm_dns_servers | map('regex_replace', '^', 'server=') | join(' ') }})"
       changed_when: false
 
     - name: Check whether gpu-vm profile exists
