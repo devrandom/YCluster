@@ -35,18 +35,35 @@
       meta: end_host
       when: not (incus_vm_host | default(false))
 
-    - name: Install Incus, QEMU (VM support), driverctl and jq
+    - name: Install Incus, QEMU (VM support) and jq
       apt:
         name:
           - incus
           # VM support — the incus package does not depend on QEMU
           - qemu-system-x86
           - ovmf
-          - driverctl
+          # virtiofsd: without it, Incus disk shares to VMs fall back to 9p,
+          # which is markedly slower for large sequential reads (model loads).
+          - virtiofsd
           - jq
         state: present
         update_cache: yes
       register: incus_pkgs
+
+    # driverctl binds vfio-pci by device-id, which sweeps up every identically
+    # modelled GPU (host ones included). GPU passthrough is handled by
+    # address-specific driver_override instead — see gpu-passthrough.service.
+    - name: Remove driverctl and its override files
+      block:
+        - name: Purge the driverctl package
+          apt:
+            name: driverctl
+            state: absent
+            purge: yes
+        - name: Remove the driverctl override directory
+          file:
+            path: /etc/driverctl.d
+            state: absent
 
     - name: Restart Incus to pick up the QEMU VM driver
       systemd:
@@ -83,20 +100,46 @@
              + (incus_passthrough_gpu_pci | default([])
                 | map('regex_replace', '\.0$', '.1') | list) }}
 
-    - name: Pin passthrough GPU functions to vfio-pci (driverctl override)
-      copy:
-        dest: "/etc/driverctl.d/{{ item }}"
-        content: "vfio-pci\n"
-        mode: '0644'
-      loop: "{{ incus_passthrough_all }}"
-      register: vfio_overrides
+    - name: Remove the old nvidia autoload blacklist
+      file:
+        path: /etc/modprobe.d/blacklist-nvidia-passthrough.conf
+        state: absent
 
-    - name: Reboot reminder for vfio binding
-      debug:
-        msg: >-
-          Reboot {{ inventory_hostname }} to bind GPUs
-          {{ incus_passthrough_gpu_pci | join(', ') }} to vfio-pci.
-      when: vfio_overrides.changed
+    # 'blacklist' only stops modalias autoload; services such as
+    # nvidia-cdi-refresh still load nvidia explicitly. 'install ... /bin/false'
+    # blocks every load path. nvidia is then loaded deliberately, after the
+    # passthrough GPUs are bound to vfio-pci, with 'modprobe --ignore-install'.
+    - name: Defer nvidia loading until after vfio-pci binding
+      copy:
+        dest: /etc/modprobe.d/nvidia-deferred.conf
+        content: |
+          install nvidia /bin/false
+          install nvidia_modeset /bin/false
+          install nvidia_uvm /bin/false
+          install nvidia_drm /bin/false
+        mode: '0644'
+
+    - name: Install the GPU-passthrough bind script
+      template:
+        src: gpu-passthrough-bind.sh.j2
+        dest: /usr/local/sbin/gpu-passthrough-bind
+        mode: '0755'
+
+    - name: Install the GPU-passthrough systemd service
+      template:
+        src: gpu-passthrough.service.j2
+        dest: /etc/systemd/system/gpu-passthrough.service
+        mode: '0644'
+      register: gpu_passthrough_unit
+
+    # Enabled only — never started here. The script must run at boot, while
+    # nvidia is still blocked; running it live on a host where nvidia already
+    # holds a passthrough GPU would attempt a rebind that hangs in-kernel.
+    - name: Enable the GPU-passthrough service
+      systemd:
+        name: gpu-passthrough.service
+        enabled: yes
+        daemon_reload: "{{ gpu_passthrough_unit.changed }}"
 
     - name: Check whether Incus storage pool exists
       command: "incus storage show {{ incus_storage_pool }}"

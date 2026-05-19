@@ -302,11 +302,11 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=VM_IMAGE):
     _incus("init", image, name, "--vm", "--profile", VM_PROFILE,
            "-c", f"limits.cpu={cpu}", "-c", f"limits.memory={mem}")
     for i, pci in enumerate(picked):
+        # A 'gpu' device of gputype=physical attaches the GPU's whole IOMMU
+        # group (the HD-Audio .1 function comes with it) — do not add it
+        # separately or Incus fails with "device is already attached".
         _incus("config", "device", "add", name, f"gpu{i}", "gpu",
                "gputype=physical", f"pci={pci}")
-        if pci.endswith(".0"):                 # pass the paired audio function
-            _incus("config", "device", "add", name, f"gpu{i}snd", "pci",
-                   f"address={pci[:-1]}1")
     _incus("start", name)
 
     _put_json(VMS_PREFIX + name, {
@@ -323,6 +323,39 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=VM_IMAGE):
     print(f"Launched '{name}' ({where})")
     print(f"  ssh -J {BASTION_JUMP_USER}@<rathole-host>:2210 "
           f"{VM_GUEST_USER}@{name}")
+
+
+def vm_resize(name, size):
+    """Grow a VM's root disk to `size` (e.g. '160GiB').
+
+    The root disk is inherited from the 'gpu-vm' profile; this creates a
+    per-instance override. Incus only applies a new root-disk size when the
+    VM starts, so a running VM is restarted; cloud-init then grows the
+    partition and filesystem on boot. Incus only supports growing.
+    """
+    _valid_vm_name(name)
+    if not _instance_exists(name):
+        raise ValueError(f"No such VM: {name}")
+    # 'override' creates an instance-local copy of the profile device; if the
+    # device is already overridden it fails, so fall back to 'set'.
+    ov = _incus("config", "device", "override", name, "root",
+                f"size={size}", check=False)
+    if ov.returncode != 0:
+        _incus("config", "device", "set", name, "root", f"size={size}")
+    print(f"Root disk of '{name}' set to {size}.")
+
+    running = any(i.get("status") == "Running"
+                  for i in _incus_json("list", name, "--format", "json"))
+    if running:
+        print("Restarting the VM so the new size takes effect...")
+        _incus("restart", name)
+        _wait_agent(name)
+        _incus("exec", name, "--", "cloud-init", "status", "--wait",
+               check=False)
+        print("  Restarted; cloud-init grew the filesystem.")
+    else:
+        print("  VM is stopped — the filesystem will grow on next boot "
+              "(cloud-init growpart).")
 
 
 def vm_stop(name):
