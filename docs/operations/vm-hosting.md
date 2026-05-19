@@ -59,6 +59,13 @@ is running** hangs in-kernel: the process is stuck holding the device
 - The bind script refuses to run if it finds a passthrough GPU already
   on `nvidia` — it errors out rather than attempt the rebind.
 
+The same wedge is also triggered by **force-stopping a running GPU VM**
+— `incus stop --force` / `incus delete --force` SIGKILL qemu mid GPU
+reset and leave the device in `vfio_pci_core_disable`. Only the *clean*
+path is safe: `incus stop` (no `--force`) and then `incus delete`, or
+just use `ycluster vm destroy` which does this for you. Never `--force`
+a running GPU VM.
+
 If a shutdown hangs on a wedged process (and the BMC NIC is unwired, so
 there is no out-of-band console), reboot via sysrq from a live shell:
 
@@ -233,10 +240,22 @@ blip does not wedge `virtiofsd`.
 ### Pre-warm the FlashInfer kernel cache
 
 vLLM's first start on a fresh VM JIT-compiles FlashInfer's CUTLASS MoE
-kernels (~10 min of `nvcc`). These kernels are keyed by GPU arch
-(`sm120`) and quantization (NVFP4/FP8/BF16), **not** the specific model,
-so they are reusable across models. Building the cache into
-`ubuntu-cuda-vllm` during the image build (one throwaway vLLM start)
-would remove that cost from every VM launch. vLLM's `torch.compile`
-cache, by contrast, is model-specific — do not bake it; keep it in a
-persistent per-VM volume instead.
+kernels — measured at ~10 min on the first run; a second start in the
+same VM (cache hit) takes **27 s** of init engine vs **620 s** cold, a
+~23× speedup. The kernels are keyed by GPU arch (`sm120`) and
+quantization (NVFP4/FP8/BF16), **not** the specific model, so they are
+reusable across models.
+
+The clean way to bake the cache into `ubuntu-cuda-vllm` is
+**`flashinfer.aot`** — `python -m flashinfer.aot --add-moe true …`
+(model-agnostic, no GPU needed at build time — `nvcc` cross-compiles
+for `sm120` regardless of host hardware). Do **not** pre-warm by running
+vLLM with a specific model in the build script: it makes the image
+build depend on that model being cached on the build host, only covers
+the kernels that model exercised, and the cache then reflects one
+particular host. Two scoped questions to confirm before landing it:
+that `--add-moe` covers NVFP4 sm120 specifically, and that the AOT
+`--out-dir` is where vLLM's runtime JIT looks (or arrange it so).
+
+vLLM's `torch.compile` cache, by contrast, is model-specific — do not
+bake it; keep it in a persistent per-VM volume instead.
