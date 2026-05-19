@@ -8,8 +8,8 @@ optional external SSH access. The `ycluster vm` CLI manages them.
 - **Hosts**: any node with `incus_vm_host: true` in its host_vars
   (currently `nv2`, `nv3`).
 - **Playbook**: `admin/install-incus.yml` — ends early on non-VM-hosts.
-- **Image**: `ubuntu-cuda` — Ubuntu 24.04 + NVIDIA open driver + CUDA,
-  built on the host by `incus-build-gpu-image`.
+- **Images**: `ubuntu-cuda` and the derived `ubuntu-cuda-vllm` — see
+  [Images](#images).
 
 ## GPU Split (host vs. passthrough)
 
@@ -34,7 +34,9 @@ share an IOMMU group, so vfio requires the whole group.
 once at boot:
 
 1. For each passthrough PCI function: write `vfio-pci` to the device's
-   `driver_override` and `drivers_probe` it. This is **address-specific**.
+   `driver_override` and `drivers_probe` it (**address-specific**). Each
+   GPU's Resizable BAR is also shrunk here — see
+   [Large-BAR GPUs](#large-bar-gpus-and-vm-boot-time).
 2. `modprobe --ignore-install nvidia` (+ `nvidia_modeset/uvm/drm`) — the
    host GPUs bind nvidia; the passthrough GPUs are skipped because their
    `driver_override` forces `vfio-pci`.
@@ -73,6 +75,17 @@ these hosts is the identical model, so a device-id bind sweeps up the
 host GPUs too. Address-specific `driver_override` is the only way to
 split identical cards. `driverctl` is removed by the playbook.
 
+### Large-BAR GPUs and VM boot time
+
+These GPUs expose a **128 GiB Resizable BAR** (the full VRAM aperture).
+A VM's OVMF firmware must lay out and map every passed-through BAR
+before the guest kernel starts — with two 128 GiB BARs that took
+**~10 minutes**. The bind script therefore shrinks each passthrough
+GPU's BAR to **1 GiB** (writing the size index to `resourceN_resize`
+while the device is unbound), which cuts VM firmware boot to ~90 s.
+Inference is unaffected — benchmarked identical at 1 GiB vs 128 GiB:
+once weights are resident, generation is GPU-internal, not BAR-bound.
+
 ## Managing VMs
 
 The `ycluster vm` CLI runs on the VM host (it shells out to `incus`
@@ -103,13 +116,49 @@ guest automatically and refreshed on `ssh add/remove`.
 ### etcd layout
 
 - `/cluster/users/<user>` — `{"ssh_keys": [...]}`
-- `/cluster/vms/<name>` — `{"owner": ..., "gpus": N, "created": ...}`
+- `/cluster/vms/<name>` — `{"owner", "gpus", "host", "created", "state"}`.
+  `state` is `provisioning` while a launch is in progress and `ready`
+  once it completes — so an interrupted launch is recognisable. `host`
+  records which VM host the VM runs on (`vm list` shows runtime state
+  only for the local host's VMs; others show `(remote)`).
 
 ### Disk resize
 
 `ycluster vm resize` overrides the profile root-disk size, then restarts
 the VM (Incus only applies a new size on start). cloud-init grows the
 partition and filesystem on boot. Grow-only — Incus cannot shrink.
+
+## Images
+
+Two layered VM images, built on the host and published to the local
+Incus image store:
+
+- **`ubuntu-cuda`** — Ubuntu 24.04 + NVIDIA open driver + CUDA toolkit,
+  plus the build tools vLLM needs to JIT-compile kernels at runtime
+  (`python3-dev`, `ninja-build`, `cmake`). Built by `incus-build-gpu-image`.
+- **`ubuntu-cuda-vllm`** — `ubuntu-cuda` + vLLM preinstalled as a `uv`
+  tool. Built by `incus-build-vllm-image`, a layered build from
+  `ubuntu-cuda`. Kept as a separate image so a vLLM bump does not force
+  a full CUDA rebuild. `uv` is installed pinned and SHA256-verified from
+  PyPI (`uv_version` / `uv_sha256` playbook vars) — not the third-party
+  `astral-uv` snap, which auto-refreshes.
+
+Versions are playbook vars in `install-incus.yml`: `cuda_version`,
+`vllm_version`, `uv_version` / `uv_sha256`.
+
+### virtiofs for host directory shares
+
+`install-incus.yml` installs `virtiofsd`. Without it, Incus disk devices
+that share a host directory into a VM silently fall back to **9p**,
+markedly slower for large sequential reads (model loading).
+
+### HF model cache (read-only share)
+
+When a host Hugging Face cache is shared into a VM read-only, point only
+the hub cache at it — `HF_HUB_CACHE=/<mount>/hub` — and leave `HF_HOME`
+at its writable default. `--trust-remote-code` makes transformers write
+the model's dynamic module under `$HF_HOME/modules`, which fails on a
+read-only mount.
 
 ## Networking
 
@@ -147,11 +196,14 @@ rationale is not lost.
 Today the host runs vLLM on its non-passthrough GPUs. Moving it into a
 VM would let **all** GPUs be `vfio-pci` and remove the nvidia driver
 (and the whole `nvidia-deferred` / boot-ordering mechanism) from the
-host. GPU compute in a VFIO VM is near-native; for tensor-parallel
-inference the only risk is GPU↔GPU traffic, and the launch scripts
-already set `NCCL_P2P_DISABLE=1` (these workstation cards have no
-NVLink), so that traffic goes via host RAM regardless — a VM handles it
-fine. Pending a TP=2 benchmark, host vs. VM.
+host.
+
+**Benchmarked** (MiniMax-M2.7-NVFP4, TP=2, `vllm bench serve`): a GPU
+VM is within run-to-run noise of bare metal — no measurable penalty.
+`NCCL_P2P_DISABLE=1` is already set (these workstation cards have no
+NVLink), so GPU↔GPU traffic goes via host RAM either way, which a VFIO
+VM handles at native speed. So the move is **not gated by performance**
+— decide it on the isolation/simplicity merits (see `inference-vm`).
 
 ### `inference-vm` profile
 
@@ -177,3 +229,14 @@ guest, read-write). Data then survives VM destroy/recreate and follows
 the user across their VMs. Mount the CIFS share with `uid=1000,gid=1000`
 (every guest's login user is uid 1000); use a systemd automount so a NAS
 blip does not wedge `virtiofsd`.
+
+### Pre-warm the FlashInfer kernel cache
+
+vLLM's first start on a fresh VM JIT-compiles FlashInfer's CUTLASS MoE
+kernels (~10 min of `nvcc`). These kernels are keyed by GPU arch
+(`sm120`) and quantization (NVFP4/FP8/BF16), **not** the specific model,
+so they are reusable across models. Building the cache into
+`ubuntu-cuda-vllm` during the image build (one throwaway vLLM start)
+would remove that cost from every VM launch. vLLM's `torch.compile`
+cache, by contrast, is model-specific — do not bake it; keep it in a
+persistent per-VM volume instead.

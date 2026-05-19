@@ -28,6 +28,18 @@ for addr in "${passthrough[@]}"; do
     fi
     echo vfio-pci > "$dev/driver_override"
     [ -n "$cur" ] && echo "$addr" > "$dev/driver/unbind"
+    # Shrink the GPU's Resizable BAR (default 128 GiB VRAM aperture) to 1 GiB
+    # while the device is unbound. Otherwise a VM's OVMF firmware spends
+    # ~10 min mapping the huge BAR before the guest kernel starts. The write
+    # value is log2(size / MiB): 10 -> 2^10 MiB = 1 GiB. Only GPU (.0)
+    # functions expose resource1_resize; the audio (.1) functions do not.
+    if [ -w "$dev/resource1_resize" ]; then
+        if echo 10 > "$dev/resource1_resize" 2>/dev/null; then
+            echo "  $addr: BAR1 resized to 1 GiB"
+        else
+            echo "  WARNING: $addr BAR1 resize failed (VM boot will be slow)" >&2
+        fi
+    fi
     echo "$addr" > /sys/bus/pci/drivers_probe
 done
 
