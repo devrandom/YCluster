@@ -12,6 +12,7 @@ etcd layout:
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -249,9 +250,15 @@ def _guest_login_user(vm_name):
     return VM_GUEST_USER
 
 
-def _ensure_sshd(vm_name):
+# A GPU VM's OVMF firmware spends several minutes enumerating the large
+# BARs of passed-through GPUs before the guest kernel even starts, so the
+# agent takes far longer to appear than for a CPU-only VM.
+GPU_VM_AGENT_TIMEOUT = 900
+
+
+def _ensure_sshd(vm_name, agent_timeout=180):
     """Make sure the VM has an SSH server listening on port 22."""
-    _wait_agent(vm_name)
+    _wait_agent(vm_name, agent_timeout)
     # cloud-init creates the default user on first boot — wait for it.
     _incus("exec", vm_name, "--", "cloud-init", "status", "--wait", check=False)
     if _incus("exec", vm_name, "--", "test", "-x", "/usr/sbin/sshd",
@@ -267,9 +274,9 @@ def _ensure_sshd(vm_name):
            "systemctl enable --now ssh.service")
 
 
-def _inject_owner_keys(vm_name, keys):
+def _inject_owner_keys(vm_name, keys, agent_timeout=180):
     """Install an owner's keys into the VM's primary login user."""
-    _wait_agent(vm_name)
+    _wait_agent(vm_name, agent_timeout)
     # cloud-init creates the default user on first boot — wait for it.
     _incus("exec", vm_name, "--", "cloud-init", "status", "--wait", check=False)
     guest = _guest_login_user(vm_name)
@@ -309,15 +316,30 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=VM_IMAGE):
                "gputype=physical", f"pci={pci}")
     _incus("start", name)
 
-    _put_json(VMS_PREFIX + name, {
+    # Register immediately, before SSH provisioning, so the VM is accounted
+    # for even if this command crashes — but mark it 'provisioning' until
+    # the launch fully completes, so an interrupted launch is recognisable.
+    record = {
         "owner": owner,
         "gpus": gpus,
+        "host": socket.gethostname(),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    })
-    print("Waiting for the VM to boot, provisioning SSH...")
-    _ensure_sshd(name)
-    _inject_owner_keys(name, user["ssh_keys"])
+        "state": "provisioning",
+    }
+    _put_json(VMS_PREFIX + name, record)
+
+    timeout = GPU_VM_AGENT_TIMEOUT if gpus else 180
+    if gpus:
+        print("Waiting for the VM to boot (GPU VMs are slow — the firmware "
+              "enumerates the GPU BARs first), provisioning SSH...")
+    else:
+        print("Waiting for the VM to boot, provisioning SSH...")
+    _ensure_sshd(name, timeout)
+    _inject_owner_keys(name, user["ssh_keys"], timeout)
     bastion_sync()
+
+    record["state"] = "ready"
+    _put_json(VMS_PREFIX + name, record)
 
     where = f"GPU(s): {', '.join(picked)}" if picked else "no GPU"
     print(f"Launched '{name}' ({where})")
@@ -349,7 +371,9 @@ def vm_resize(name, size):
     if running:
         print("Restarting the VM so the new size takes effect...")
         _incus("restart", name)
-        _wait_agent(name)
+        rec = vm_get(name)
+        _wait_agent(name, GPU_VM_AGENT_TIMEOUT
+                    if (rec or {}).get("gpus") else 180)
         _incus("exec", name, "--", "cloud-init", "status", "--wait",
                check=False)
         print("  Restarted; cloud-init grew the filesystem.")
@@ -370,7 +394,14 @@ def vm_start(name):
 
 def vm_destroy(name):
     if _instance_exists(name):
-        _incus("delete", name, "--force")
+        # Stop cleanly first. Deleting a running GPU VM with --force SIGKILLs
+        # qemu mid GPU-reset, which can wedge the device in-kernel (only a
+        # host reboot clears it). A clean stop resets the GPU properly.
+        running = any(i.get("status") == "Running"
+                      for i in _incus_json("list", name, "--format", "json"))
+        if running:
+            _incus("stop", name)
+        _incus("delete", name)
     _delete(VMS_PREFIX + name)
     bastion_sync()
     print(f"Destroyed '{name}' and removed its registration.")
@@ -381,13 +412,23 @@ def vm_list():
     if not vms:
         print("No VMs registered.")
         return
+    local = socket.gethostname()
     states = {i["name"]: i.get("status", "?")
               for i in _incus_json("list", "--format", "json")}
-    print(f"{'NAME':<20} {'OWNER':<14} {'GPUS':<5} {'STATE':<10} CREATED")
+    print(f"{'NAME':<20} {'OWNER':<24} {'HOST':<8} {'GPUS':<5} "
+          f"{'STATE':<14} CREATED")
     for name, rec in sorted(vms.items()):
-        print(f"{name:<20} {rec.get('owner', '?'):<14} "
-              f"{str(rec.get('gpus', '?')):<5} "
-              f"{states.get(name, '(absent)'):<10} {rec.get('created', '')}")
+        host = rec.get("host")
+        if rec.get("state") == "provisioning":
+            state = "provisioning"        # launch did not complete
+        elif host is None or host == local:
+            # Incus state is only visible for VMs on this host.
+            state = states.get(name, "(absent)")
+        else:
+            state = "(remote)"
+        print(f"{name:<20} {rec.get('owner', '?'):<24} {host or '?':<8} "
+              f"{str(rec.get('gpus', '?')):<5} {state:<14} "
+              f"{rec.get('created', '')}")
 
 
 def vm_sync_keys(user):
