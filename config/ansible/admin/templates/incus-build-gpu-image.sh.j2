@@ -36,7 +36,8 @@ incus exec "$BUILDER" -- bash -euxc "
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y build-essential dkms linux-headers-\$(uname -r) \
-        pkg-config libglvnd-dev curl openssh-server
+        pkg-config libglvnd-dev curl openssh-server \
+        python3-dev ninja-build cmake
     curl -fsSL -o /tmp/cuda-keyring.deb \
         https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
     apt-get install -y /tmp/cuda-keyring.deb

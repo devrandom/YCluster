@@ -1,0 +1,15 @@
+[Unit]
+Description=GPU passthrough split (vfio-pci) and host nvidia load
+After=systemd-modules-load.service
+# Run before anything that expects the nvidia driver, so they don't start
+# while nvidia is still blocked by nvidia-deferred.conf.
+Before=nvidia-persistenced.service nvidia-dcgm.service
+Before=nvidia-power-limit.service nvidia-cdi-refresh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gpu-passthrough-bind
+
+[Install]
+WantedBy=multi-user.target

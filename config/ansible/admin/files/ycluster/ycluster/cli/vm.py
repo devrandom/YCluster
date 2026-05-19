@@ -35,6 +35,11 @@ def register_vm_commands(subparsers):
     dp.add_argument('name')
     dp.set_defaults(func=lambda a: vm.vm_destroy(a.name))
 
+    rp = sub.add_parser('resize', help="Grow a VM's root disk")
+    rp.add_argument('name')
+    rp.add_argument('size', help='New disk size, e.g. 160GiB')
+    rp.set_defaults(func=lambda a: vm.vm_resize(a.name, a.size))
+
     gp = sub.add_parser('gpus', help='Show passthrough GPU allocation')
     gp.set_defaults(func=lambda a: vm.vm_gpus())
 
