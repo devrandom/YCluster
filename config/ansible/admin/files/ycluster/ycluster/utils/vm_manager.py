@@ -24,7 +24,10 @@ USERS_PREFIX = "/cluster/users/"
 VMS_PREFIX = "/cluster/vms/"
 
 VM_PROFILE = "gpu-vm"
-VM_IMAGE = "ubuntu-cuda"               # single image for all VMs (GPU or not)
+VM_IMAGE = "ubuntu-cuda-vllm"          # default for all VMs (GPU or not):
+                                       # ubuntu-cuda + vLLM + FlashInfer AOT
+                                       # cache. Pass --image ubuntu-cuda to
+                                       # skip the vLLM layer (~1 GiB lighter).
 VM_GUEST_USER = "ubuntu"               # default user in the Ubuntu cloud image
 BASTION_CONTAINER = "bastion"
 BASTION_JUMP_USER = "jump"
