@@ -144,14 +144,40 @@ Incus image store:
   plus the build tools vLLM needs to JIT-compile kernels at runtime
   (`python3-dev`, `ninja-build`, `cmake`). Built by `incus-build-gpu-image`.
 - **`ubuntu-cuda-vllm`** — `ubuntu-cuda` + vLLM preinstalled as a `uv`
-  tool. Built by `incus-build-vllm-image`, a layered build from
-  `ubuntu-cuda`. Kept as a separate image so a vLLM bump does not force
-  a full CUDA rebuild. `uv` is installed pinned and SHA256-verified from
-  PyPI (`uv_version` / `uv_sha256` playbook vars) — not the third-party
+  tool, plus the FlashInfer SM120 kernel cache AOT-baked in (see
+  [Pre-warm the FlashInfer kernel cache](#pre-warm-the-flashinfer-kernel-cache)).
+  Built by `incus-build-vllm-image`, a layered build from `ubuntu-cuda`.
+  Kept as a separate image so a vLLM bump does not force a full CUDA
+  rebuild. `uv` is installed pinned and SHA256-verified from PyPI
+  (`uv_version` / `uv_sha256` playbook vars) — not the third-party
   `astral-uv` snap, which auto-refreshes.
 
 Versions are playbook vars in `install-incus.yml`: `cuda_version`,
-`vllm_version`, `uv_version` / `uv_sha256`.
+`vllm_version`, `uv_version` / `uv_sha256`, `flashinfer_version`.
+
+### Building / rebuilding
+
+`install-incus.yml` builds whichever image is missing (idempotent —
+existing-alias check skips the work on later runs). To target just the
+image-build step:
+
+```bash
+# build missing image(s) only
+ansible-playbook admin/install-incus.yml --limit nv3 --tags build-images
+
+# force-rebuild even if the alias exists (e.g. after a version bump)
+ansible-playbook admin/install-incus.yml --limit nv3 \
+    --tags build-images -e force_rebuild_images=true
+```
+
+Ansible buffers command output until the task returns, so the first
+`ubuntu-cuda-vllm` build (~45 min, dominated by the FlashInfer AOT
+compile) shows nothing until completion. For progress, run the helper
+by hand the first time:
+
+```bash
+ssh nv3.yc sudo incus-build-vllm-image           # or --force to rebuild
+```
 
 ### virtiofs for host directory shares
 
