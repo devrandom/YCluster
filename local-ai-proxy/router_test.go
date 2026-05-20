@@ -347,6 +347,47 @@ func TestHandlerUnknownPathReturns404(t *testing.T) {
 	}
 }
 
+// TestHandlerRewritesTokenizePaths verifies that /v1/tokenize and
+// /v1/detokenize are accepted (so external clients can reach them via
+// the standard /v1/ surface) and rewritten to the backend's native
+// non-/v1/ paths, which is what both llama.cpp and vLLM actually
+// serve.
+func TestHandlerRewritesTokenizePaths(t *testing.T) {
+	var seenPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens":[1,2,3]}`))
+	}))
+	defer upstream.Close()
+
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, upstream.URL)},
+	}}
+	proxy := httptest.NewServer(NewHandler(NewModelRouter(src)))
+	defer proxy.Close()
+
+	cases := []struct{ in, want string }{
+		{"/v1/tokenize", "/tokenize"},
+		{"/v1/detokenize", "/detokenize"},
+	}
+	for _, c := range cases {
+		seenPath = ""
+		resp, err := http.Post(proxy.URL+c.in, "application/json",
+			strings.NewReader(`{"model":"alpha","content":"hi"}`))
+		if err != nil {
+			t.Fatalf("%s: %v", c.in, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s: status = %d; want 200", c.in, resp.StatusCode)
+		}
+		if seenPath != c.want {
+			t.Errorf("%s: upstream saw %q; want %q", c.in, seenPath, c.want)
+		}
+	}
+}
+
 // TestHandlerSendsContentLengthNotChunked verifies that when
 // ModelRouter consumes and substitutes the body, the upstream request
 // goes out with Content-Length set rather than Transfer-Encoding:

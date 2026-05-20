@@ -176,6 +176,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tokenizer aliases: llama.cpp and vLLM both expose tokenizer
+	// endpoints at the bare /tokenize and /detokenize paths (neither
+	// serves them under /v1/). We accept the /v1/-prefixed form so
+	// clients can reach them through the same external surface as the
+	// rest of the OpenAI-compatible API, then rewrite to the backend's
+	// native path before dispatching.
+	switch r.URL.Path {
+	case "/v1/tokenize":
+		r.URL.Path = "/tokenize"
+	case "/v1/detokenize":
+		r.URL.Path = "/detokenize"
+	}
+
 	route, err := h.router.Route(r)
 	if route != nil {
 		SetRequestModel(r.Context(), route.Model)
