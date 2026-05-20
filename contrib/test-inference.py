@@ -70,10 +70,47 @@ def main() -> int:
     if not url_base or not model:
         print("error: set LITELLM_URL + LITELLM_MODEL (or DEFAULT_URL + DEFAULT_MODEL) in env.sh", file=sys.stderr)
         return 2
-    url = url_base.rstrip("/") + "/v1/chat/completions"
+    base = url_base.rstrip("/")
+    url = base + "/v1/chat/completions"
 
     print(f"Endpoint: {url}")
     print(f"Model:    {model}")
+    print()
+
+    # Tokenizer round-trip via the proxy's /tokenize and /detokenize
+    # passthrough (llama.cpp native; vLLM accepts the same paths).
+    sample = "hello world"
+    tok_req = urllib.request.Request(
+        base + "/v1/tokenize",
+        data=json.dumps({"model": model, "content": sample}).encode(),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(tok_req) as resp:
+            tok_body = json.loads(resp.read())
+        tokens_list = tok_body.get("tokens") or []
+        print(f"tokenize:   {sample!r} -> {tokens_list}")
+
+        detok_req = urllib.request.Request(
+            base + "/v1/detokenize",
+            data=json.dumps({"model": model, "tokens": tokens_list}).encode(),
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(detok_req) as resp:
+            detok_body = json.loads(resp.read())
+        roundtrip = detok_body.get("content", "")
+        ok = "ok" if roundtrip.strip() == sample else f"MISMATCH: {roundtrip!r}"
+        print(f"detokenize: {tokens_list} -> {roundtrip!r}  [{ok}]")
+    except urllib.error.HTTPError as e:
+        print(f"tokenize: HTTP {e.code} — {e.read().decode('utf-8', 'replace').strip()}")
     print()
 
     payload = json.dumps({
