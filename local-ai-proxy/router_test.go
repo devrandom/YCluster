@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"testing"
@@ -458,6 +461,136 @@ func TestHandlerV1PathsAreForwarded(t *testing.T) {
 	}
 	if gotPath != "/v1/rerank" {
 		t.Errorf("upstream got %q; want /v1/rerank", gotPath)
+	}
+}
+
+// buildAudioMultipart constructs a multipart body that mimics an OpenAI
+// /v1/audio/transcriptions request: a "file" file-part with arbitrary
+// bytes plus a "model" form-value part.
+func buildAudioMultipart(t *testing.T, model string, fileBytes []byte) (body []byte, contentType string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	fh := make(textproto.MIMEHeader)
+	fh.Set("Content-Disposition", `form-data; name="file"; filename="audio.wav"`)
+	fh.Set("Content-Type", "audio/wav")
+	fp, err := mw.CreatePart(fh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fp.Write(fileBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mw.WriteField("model", model); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes(), mw.FormDataContentType()
+}
+
+// TestModelRouterRoutesMultipartByModelField verifies that for multipart
+// audio requests the router extracts `model` from the form field, not
+// the JSON body (which doesn't exist).
+func TestModelRouterRoutesMultipartByModelField(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"whisper-1": {mustURL(t, "http://w.example:9000")},
+	}}
+	r := NewModelRouter(src)
+
+	bodyBytes, ct := buildAudioMultipart(t, "whisper-1", []byte("RIFF\x00\x00\x00\x00WAVEfake-audio"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions",
+		bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", ct)
+
+	got, err := r.Route(req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got.Model != "whisper-1" {
+		t.Errorf("Model = %q; want whisper-1", got.Model)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].String() != "http://w.example:9000" {
+		t.Errorf("Candidates = %v; want [http://w.example:9000]", got.Candidates)
+	}
+	if !bytes.Equal(got.Body, bodyBytes) {
+		t.Errorf("buffered body does not match original (lengths %d vs %d)", len(got.Body), len(bodyBytes))
+	}
+}
+
+// TestModelRouterMultipartMissingModel returns a clear error rather than
+// trying to JSON-parse a multipart body.
+func TestModelRouterMultipartMissingModel(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"whisper-1": {mustURL(t, "http://w.example:9000")},
+	}}
+	r := NewModelRouter(src)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("file", "dummy"); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions",
+		bytes.NewReader(buf.Bytes()))
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	_, err := r.Route(req)
+	if err == nil || !strings.Contains(err.Error(), "missing model field") {
+		t.Errorf("err = %v; want 'missing model field'", err)
+	}
+}
+
+// TestHandlerForwardsMultipartUnchanged exercises the full handler path:
+// a multipart request gets routed by `model` and the upstream sees the
+// exact same body bytes plus the same Content-Type boundary.
+func TestHandlerForwardsMultipartUnchanged(t *testing.T) {
+	var seenBody []byte
+	var seenCT, seenPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenCT = r.Header.Get("Content-Type")
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	src := &fakeSource{m: map[string][]*url.URL{
+		"whisper-1": {mustURL(t, upstream.URL)},
+	}}
+	proxy := httptest.NewServer(NewHandler(NewModelRouter(src)))
+	defer proxy.Close()
+
+	fileBytes := bytes.Repeat([]byte{0xDE, 0xAD, 0xBE, 0xEF}, 1024)
+	bodyBytes, ct := buildAudioMultipart(t, "whisper-1", fileBytes)
+
+	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/audio/transcriptions",
+		bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", ct)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d; want 200", resp.StatusCode)
+	}
+	if seenPath != "/v1/audio/transcriptions" {
+		t.Errorf("upstream path = %q; want /v1/audio/transcriptions", seenPath)
+	}
+	if seenCT != ct {
+		t.Errorf("upstream Content-Type = %q; want %q (boundary must round-trip)", seenCT, ct)
+	}
+	if !bytes.Equal(seenBody, bodyBytes) {
+		t.Errorf("upstream body bytes differ (got %d bytes, want %d)", len(seenBody), len(bodyBytes))
 	}
 }
 

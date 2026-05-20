@@ -1,0 +1,86 @@
+# WhisperX on AMD Strix Halo (gfx1151) — Variant A from ext/whisperx.md
+# Uses CTranslate2 v4.7.1 official ROCm wheel; no source build.
+#
+#   podman build -t whisperx-rocm:v4.7.1-gfx1151 -f Containerfile .
+#
+# Final size: ~28-30 GB.
+FROM docker.io/rocm/pytorch:rocm7.2.2_ubuntu24.04_py3.12_pytorch_release_2.10.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HF_HOME=/cache/huggingface \
+    HF_HUB_OFFLINE=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    AMDGPU_TARGETS=gfx1151 \
+    LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib/llvm/lib:${LD_LIBRARY_PATH}
+
+# 1. System deps for audio decoding and downloads
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg curl ca-certificates unzip git libnuma1 libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Pin transitive deps to whatever the rocm/pytorch image already has,
+#    so pip never silently swaps ROCm torch for PyPI CUDA torch.
+#    (Inline python -c; buildah/podman lacks BuildKit heredoc support.)
+RUN /opt/venv/bin/python -c "import torch, torchvision, torchaudio; \
+print('torch==' + torch.__version__.split('+')[0]); \
+print('torchvision==' + torchvision.__version__.split('+')[0]); \
+print('torchaudio==' + torchaudio.__version__.split('+')[0])" > /opt/constraints.txt \
+ && cat /opt/constraints.txt
+
+# 3. CTranslate2 v4.7.1 ROCm wheel (gfx1151 kernels baked in per `strings` inspection).
+RUN curl -fL -o /tmp/ct2-rocm.zip \
+      https://github.com/OpenNMT/CTranslate2/releases/download/v4.7.1/rocm-python-wheels-Linux.zip \
+ && unzip -j /tmp/ct2-rocm.zip 'temp-linux/ctranslate2-4.7.1-cp312-*manylinux*x86_64.whl' -d /tmp/ \
+ && /opt/venv/bin/pip install --no-cache-dir -c /opt/constraints.txt /tmp/ctranslate2-4.7.1-cp312-*.whl \
+ && rm -rf /tmp/ct2-rocm.zip /tmp/ctranslate2-*.whl
+
+# 4. WhisperX + faster-whisper + pyannote.
+#    Versions snapshot 2026-05-20 on rocm/pytorch 7.2.2; verified working with
+#    the diarize.py patch in step 5. Bump deliberately, not by accident:
+#    - pyannote.audio 4.x changed Pipeline return type (DiarizeOutput) and
+#      dropped use_auth_token; the patch below targets 4.0.4 specifically.
+#    - transformers 5.x removed several deprecated APIs; pin to a known-good.
+RUN /opt/venv/bin/pip install --no-cache-dir -c /opt/constraints.txt \
+        "numpy==2.4.4" \
+        "transformers==5.9.0" \
+        "accelerate==1.13.0" \
+        "nltk==3.9.4" \
+        "omegaconf==2.3.0" \
+        "onnxruntime==1.26.0" \
+        "lightning==2.6.1" \
+        "faster-whisper==1.2.1" \
+        "pyannote.audio==4.0.4" \
+        "fastapi==0.118.0" \
+        "uvicorn[standard]==0.38.0" \
+        "python-multipart==0.0.20" \
+ && /opt/venv/bin/pip install --no-cache-dir -c /opt/constraints.txt --no-deps \
+        "whisperx==3.7.4"
+
+# 5a. use_auth_token → token across pyannote and whisperx (pyannote 4.x rename).
+RUN find /opt/venv/lib/python3.12/site-packages/pyannote \
+         /opt/venv/lib/python3.12/site-packages/whisperx \
+         -type f -name "*.py" \
+        -exec sed -i 's/use_auth_token/token/g' {} +
+
+# 5b. Patch whisperx/diarize.py for pyannote 4.x's DiarizeOutput return type.
+COPY patches/whisperx-pyannote4.py /tmp/whisperx-pyannote4.py
+RUN /opt/venv/bin/python /tmp/whisperx-pyannote4.py && rm /tmp/whisperx-pyannote4.py
+
+# 6. torchcodec lacks ROCm wheels; remove to silence pyannote warning.
+RUN /opt/venv/bin/pip uninstall -y torchcodec || true
+
+# 7. Non-root user. UID 1001 matches host `dev` user; --userns=keep-id maps directly.
+#    Base image's existing UID-1000 user is left alone.
+RUN useradd -m -u 1001 -s /bin/bash whisperx \
+ && mkdir -p /cache/huggingface /work \
+ && chown -R whisperx:whisperx /cache /work
+COPY --chown=whisperx:whisperx server.py /opt/whisperx-server/server.py
+
+USER whisperx
+WORKDIR /work
+EXPOSE 9000
+
+# Default: run the OpenAI-compatible HTTP server. Override with
+# `--entrypoint /opt/venv/bin/python -m whisperx` for CLI use.
+ENTRYPOINT ["/opt/venv/bin/python", "/opt/whisperx-server/server.py"]
