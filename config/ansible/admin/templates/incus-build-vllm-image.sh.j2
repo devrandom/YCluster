@@ -157,6 +157,11 @@ incus exec "$BUILDER" -- bash -euxc "
 
 echo "==> Stopping and publishing image..."
 incus stop "$BUILDER"
+# `incus publish --alias` fails if the alias is already taken (no
+# overwrite flag), so on --force we drop it first. The previous image
+# fingerprint is left behind, garbage-collected by `incus image flush`
+# or naturally when nothing references it.
+incus image alias delete "$ALIAS" 2>/dev/null || true
 incus publish "$BUILDER" --alias "$ALIAS" \
     --compression zstd \
     description="ubuntu-cuda + vLLM ${VLLM_VERSION} + FlashInfer ${FLASHINFER_VERSION} AOT cache"
