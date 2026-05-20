@@ -150,3 +150,9 @@ External:    client → your-domain.com/v1/ (nginx + auth_request) → local-ai-
 See [`docs/local-ai-proxy.md`](../local-ai-proxy.md) for the proxy's
 design rationale and how it differs from LiteLLM / Bifrost / one-api
 on client-disconnect handling.
+
+For audio transcription (OpenAI `/v1/audio/transcriptions` and
+`/v1/audio/translations`) the proxy uses the same `model` routing
+key, just read from the multipart form field instead of the JSON
+body. See [`transcription.md`](transcription.md) for the WhisperX
+stack on AMD Strix Halo (gfx1151).

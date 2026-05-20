@@ -1,0 +1,192 @@
+---
+# WhisperX OpenAI-compatible HTTP server, running as rootless podman under
+# the `dev` user on AMD Strix Halo (gfx1151) nodes. The container image is
+# built locally from files/whisperx/ and managed by a podman Quadlet user
+# unit. No HF_TOKEN at runtime — the gated pyannote diarization model must
+# be present in ~dev/.cache/huggingface (a one-time host-side prefetch).
+#
+# The play gates on the gpu local fact plus an explicit
+# `whisperx_enabled: true` host_vars opt-in, so it's a no-op on hosts
+# that don't have a Strix Halo (gfx1151) iGPU or that haven't opted in.
+- name: Install WhisperX (ROCm gfx1151) on compute nodes
+  hosts: compute
+  become: yes
+  gather_facts: yes
+  vars:
+    whisperx_user: dev
+    whisperx_home: /home/dev
+    whisperx_src_dir: /home/dev/whisperx
+    whisperx_image_tag: "v4.7.1-gfx1151"
+    whisperx_port: 9000
+    whisperx_model: large-v3
+    whisperx_device: cuda
+    whisperx_compute_type: float16
+    whisperx_diarize: true
+    whisperx_diarize_model: pyannote/speaker-diarization-community-1
+  tasks:
+    - name: End play for nodes without AMD GPU
+      meta: end_host
+      when: not (ansible_local.gpu.has_amd_gpu | default(false))
+
+    - name: End play for nodes that have not opted into whisperx
+      meta: end_host
+      when: not (whisperx_enabled | default(false))
+
+    - name: Resolve whisperx user uid
+      getent:
+        database: passwd
+        key: "{{ whisperx_user }}"
+
+    - name: Set whisperx_uid fact
+      set_fact:
+        whisperx_uid: "{{ getent_passwd[whisperx_user][1] }}"
+
+    - name: Ensure podman is installed
+      apt:
+        name:
+          - podman
+          - uidmap
+          - slirp4netns
+        state: present
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Ensure dev user is in render and video groups
+      user:
+        name: "{{ whisperx_user }}"
+        groups: render,video
+        append: yes
+
+    - name: Enable lingering for dev (user systemd units run without login)
+      command: loginctl enable-linger {{ whisperx_user }}
+      args:
+        creates: /var/lib/systemd/linger/{{ whisperx_user }}
+
+    - name: Ensure build source directory exists
+      file:
+        path: "{{ whisperx_src_dir }}/patches"
+        state: directory
+        owner: "{{ whisperx_user }}"
+        group: "{{ whisperx_user }}"
+        mode: '0755'
+
+    - name: Ensure work directories exist
+      file:
+        path: "{{ whisperx_home }}/whisperx/{{ item }}"
+        state: directory
+        owner: "{{ whisperx_user }}"
+        group: "{{ whisperx_user }}"
+        mode: '0755'
+      loop: [audio, out]
+
+    - name: Copy Containerfile
+      copy:
+        src: files/whisperx/Containerfile
+        dest: "{{ whisperx_src_dir }}/Containerfile"
+        owner: "{{ whisperx_user }}"
+        group: "{{ whisperx_user }}"
+        mode: '0644'
+      register: containerfile
+
+    - name: Copy server.py
+      copy:
+        src: files/whisperx/server.py
+        dest: "{{ whisperx_src_dir }}/server.py"
+        owner: "{{ whisperx_user }}"
+        group: "{{ whisperx_user }}"
+        mode: '0644'
+      register: server_py
+
+    - name: Copy pyannote 4.x patch
+      copy:
+        src: files/whisperx/patches/whisperx-pyannote4.py
+        dest: "{{ whisperx_src_dir }}/patches/whisperx-pyannote4.py"
+        owner: "{{ whisperx_user }}"
+        group: "{{ whisperx_user }}"
+        mode: '0644'
+      register: patch_py
+
+    - name: Check if image is already built
+      become_user: "{{ whisperx_user }}"
+      command: podman image exists localhost/whisperx-rocm:{{ whisperx_image_tag }}
+      register: image_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Build whisperx image
+      become_user: "{{ whisperx_user }}"
+      command: >
+        podman build
+        -t localhost/whisperx-rocm:{{ whisperx_image_tag }}
+        -f {{ whisperx_src_dir }}/Containerfile
+        {{ whisperx_src_dir }}
+      args:
+        chdir: "{{ whisperx_src_dir }}"
+      when: containerfile.changed or server_py.changed or patch_py.changed
+            or image_exists.rc != 0
+      register: image_build
+      # Build is ~10 min cold, near-instant with full cache.
+      async: 1800
+      poll: 30
+
+    - name: Ensure Quadlet directory exists
+      file:
+        path: "{{ whisperx_home }}/.config/containers/systemd"
+        state: directory
+        owner: "{{ whisperx_user }}"
+        group: "{{ whisperx_user }}"
+        mode: '0755'
+
+    - name: Install whisperx Quadlet unit
+      template:
+        src: templates/whisperx.container.j2
+        dest: "{{ whisperx_home }}/.config/containers/systemd/whisperx.container"
+        owner: "{{ whisperx_user }}"
+        group: "{{ whisperx_user }}"
+        mode: '0644'
+      register: quadlet
+
+    - name: Reload systemd user manager for dev (always, so Quadlet regen runs)
+      become_user: "{{ whisperx_user }}"
+      command: systemctl --user daemon-reload
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ whisperx_uid }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ whisperx_uid }}/bus"
+      changed_when: false
+
+    - name: Pre-check pyannote diarization model is cached on the host
+      stat:
+        path: "{{ whisperx_home }}/.cache/huggingface/hub/models--pyannote--speaker-diarization-community-1"
+      register: diarize_cache
+      when: whisperx_diarize | bool
+
+    - name: Warn if diarization model is not cached
+      fail:
+        msg: |
+          Diarization is enabled but the gated model is not cached at
+          {{ whisperx_home }}/.cache/huggingface/hub/models--pyannote--speaker-diarization-community-1.
+          As {{ whisperx_user }}, run: huggingface-cli download {{ whisperx_diarize_model }}
+          with HF_TOKEN exported. (One-time; container then runs offline.)
+      when:
+        - whisperx_diarize | bool
+        - not (diarize_cache.stat.exists | default(false))
+
+    - name: Enable and (re)start whisperx user service
+      become_user: "{{ whisperx_user }}"
+      systemd:
+        name: whisperx.service
+        scope: user
+        state: "{{ 'restarted' if (quadlet.changed or image_build.changed | default(false)) else 'started' }}"
+        enabled: yes
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ whisperx_uid }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ whisperx_uid }}/bus"
+
+    - name: Wait for whisperx /healthz
+      uri:
+        url: "http://127.0.0.1:{{ whisperx_port }}/healthz"
+        status_code: 200
+      register: healthz
+      until: healthz.status == 200 and healthz.json.model_loaded
+      retries: 30
+      delay: 5

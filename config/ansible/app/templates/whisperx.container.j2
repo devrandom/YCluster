@@ -1,0 +1,45 @@
+[Unit]
+Description=WhisperX OpenAI-compatible HTTP server (ROCm gfx1151)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=localhost/whisperx-rocm:{{ whisperx_image_tag }}
+ContainerName=whisperx
+# Listen on the cluster LAN so other nodes (e.g. the inference gateway)
+# can reach it. Cluster network is internal-only; external traffic is
+# fronted by nginx with auth.
+PublishPort={{ whisperx_port }}:9000
+
+# GPU access
+AddDevice=/dev/kfd
+AddDevice=/dev/dri
+SecurityLabelDisable=true
+UserNS=keep-id
+
+# Podman extras not directly mapped by Quadlet keywords in podman 4.9.
+# (GroupAdd= was added in podman 5.0; on 4.9 we pass it through.)
+PodmanArgs=--ipc=host --security-opt seccomp=unconfined --group-add keep-groups
+
+# Bind-mount the host HF cache. The pyannote diarization model must be
+# pre-cached here; HF_HUB_OFFLINE=1 (baked into the image) prevents any
+# runtime token lookup.
+Volume=%h/.cache/huggingface:/cache/huggingface:rw
+# Working area for ad-hoc inputs/outputs (useful for one-off CLI runs).
+Volume=%h/whisperx/audio:/work/audio:rw
+Volume=%h/whisperx/out:/work/out:rw
+
+Environment=WHISPERX_MODEL={{ whisperx_model }}
+Environment=WHISPERX_DEVICE={{ whisperx_device }}
+Environment=WHISPERX_COMPUTE_TYPE={{ whisperx_compute_type }}
+Environment=WHISPERX_DIARIZE={{ whisperx_diarize | string | lower }}
+Environment=WHISPERX_DIARIZE_MODEL={{ whisperx_diarize_model }}
+
+[Service]
+Restart=on-failure
+RestartSec=10
+# Cold start downloads silero-vad and (first request) wav2vec2 alignment.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target
