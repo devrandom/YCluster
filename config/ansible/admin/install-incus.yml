@@ -239,3 +239,44 @@
         mode: '0755'
         owner: root
         group: root
+
+    # Build the two VM images if they are missing. The 'build-images' tag
+    # lets you target just this section (`--tags build-images`); the
+    # 'force_rebuild_images=true' extra-var rebuilds even when present.
+    # Both scripts are no-ops when the image already exists and --force is
+    # not passed, so this stays idempotent across normal playbook runs.
+    #
+    # NOTE: building 'ubuntu-cuda-vllm' takes ~45 min (vLLM install +
+    # AOT-compiling FlashInfer kernels at MAX_JOBS=8). Ansible buffers
+    # command output until the task returns, so on the first build of a
+    # fresh host you will see nothing for that whole time. For progress,
+    # run the scripts by hand the first time:
+    #   ssh nv3.yc sudo incus-build-gpu-image
+    #   ssh nv3.yc sudo incus-build-vllm-image
+    - name: Check whether ubuntu-cuda image exists
+      shell: incus image alias list --format csv | grep -q '^ubuntu-cuda,'
+      register: gpu_image_check
+      changed_when: false
+      failed_when: false
+      tags: build-images
+
+    - name: Build ubuntu-cuda image (cloud image + NVIDIA driver + CUDA)
+      command: >-
+        /usr/local/bin/incus-build-gpu-image
+        {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
+      when: gpu_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
+      tags: build-images
+
+    - name: Check whether ubuntu-cuda-vllm image exists
+      shell: incus image alias list --format csv | grep -q '^ubuntu-cuda-vllm,'
+      register: vllm_image_check
+      changed_when: false
+      failed_when: false
+      tags: build-images
+
+    - name: Build ubuntu-cuda-vllm image (vLLM + FlashInfer AOT cache, ~45 min)
+      command: >-
+        /usr/local/bin/incus-build-vllm-image
+        {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
+      when: vllm_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
+      tags: build-images
