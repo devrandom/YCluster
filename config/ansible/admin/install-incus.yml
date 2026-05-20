@@ -7,6 +7,13 @@
     cuda_version: "12-9"
     # vLLM version baked into the derived 'ubuntu-cuda-vllm' image
     vllm_version: "0.20.1"
+    # FlashInfer source tag matching the version vLLM pulls in. Used to
+    # AOT-build the SM120 NVFP4 MoE kernels into the image so first vLLM
+    # start is ~70 s instead of ~10 min. Must match the wheel's
+    # flashinfer.__version__ exactly (or .load() at runtime will skip the
+    # AOT path). Verify with: incus exec <vm> -- python3 -c
+    # 'import flashinfer; print(flashinfer.__version__)'
+    flashinfer_version: "0.6.8.post1"
     # uv (used to install vLLM) — pinned and hash-verified from PyPI.
     # On bump, update both: curl -s https://pypi.org/pypi/uv/<ver>/json
     uv_version: "0.11.13"

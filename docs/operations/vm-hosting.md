@@ -246,16 +246,51 @@ same VM (cache hit) takes **27 s** of init engine vs **620 s** cold, a
 quantization (NVFP4/FP8/BF16), **not** the specific model, so they are
 reusable across models.
 
-The clean way to bake the cache into `ubuntu-cuda-vllm` is
-**`flashinfer.aot`** — `python -m flashinfer.aot --add-moe true …`
-(model-agnostic, no GPU needed at build time — `nvcc` cross-compiles
-for `sm120` regardless of host hardware). Do **not** pre-warm by running
-vLLM with a specific model in the build script: it makes the image
-build depend on that model being cached on the build host, only covers
-the kernels that model exercised, and the cache then reflects one
-particular host. Two scoped questions to confirm before landing it:
-that `--add-moe` covers NVFP4 sm120 specifically, and that the AOT
-`--out-dir` is where vLLM's runtime JIT looks (or arrange it so).
+**`flashinfer.aot` validated end-to-end** (FlashInfer 0.6.8.post1,
+CUDA 13.0, `compute_120f`, MiniMax-M2.7-NVFP4 TP=2):
+
+| Scenario | init engine | of which `torch.compile` |
+|---|---|---|
+| Cold (no caches) | 605 s | 46 s |
+| **AOT cache only** | **71 s** | 47 s |
+| Both caches hot   | 27 s | 0 s |
+
+The AOT cache alone eliminates the FlashInfer kernel JIT (~555 s); the
+remaining ~47 s is vLLM's inductor `torch.compile`, which is
+model-specific and not what `flashinfer.aot` covers. An 8.5× speedup
+without per-model dependencies — good enough.
+
+`incus-build-vllm-image` does this automatically. The non-obvious bits:
+
+- The AOT compiler needs the full flashinfer source tree (`csrc/`,
+  `include/`, `3rdparty/cutlass`, `3rdparty/spdlog`), not just the
+  wheel — so the script clones the matching release tag in the
+  builder VM. The pin (`flashinfer_version` in `install-incus.yml`)
+  must equal `flashinfer.__version__` in the wheel; mismatch silently
+  bypasses the AOT cache at runtime, so the script verifies it.
+- A small wrapper drives `flashinfer.aot.compile_and_package_modules`
+  from the *installed wheel* (so its cubin / version checks pass) but
+  with `project_root=<clone>` (so include paths point at the source).
+- `FLASHINFER_CUDA_ARCH_LIST=12.0` is auto-normalised to
+  `compute_120f` under CUDA ≥ 12.9; the SM120 module guards
+  substring-match `compute_120`, so this still enables them.
+- `MAX_JOBS=8` on a 48 GiB builder. Each `cicc` peaks above 5 GiB RSS,
+  so the script provisions ~8 × 5 GiB plus headroom. At 32 GiB the
+  default 8-wide saturates and OOM-kills the in-VM agent (verified);
+  at 32 GiB you would need to drop to `MAX_JOBS=4` and accept ~70 min
+  instead of ~40.
+- Output (~940 MiB) goes straight into `<wheel>/data/aot/`, which is
+  exactly where `JitSpec.aot_path` looks when the optional
+  `flashinfer-jit-cache` package is not installed (it isn't — PyPI
+  has it quarantined). No runtime env override needed.
+
+The SM120 NVFP4 MoE kernels we actually exercise are `fused_moe_120`,
+`fp4_quantization_120(f)`, `gemm_sm120`, `fp4_gemm_cutlass_sm120`,
+`mxfp8_gemm_cutlass_sm120` — all built by `--add-moe true`. The script
+builds the full default set (`--add-comm/gemma/oai-oss/moe/act/misc/xqa`
+all true, plus attention which is unconditional) so non-MoE / non-NVFP4
+models also benefit; trim to `--add-moe true` alone if image size matters
+more than broad coverage.
 
 vLLM's `torch.compile` cache, by contrast, is model-specific — do not
 bake it; keep it in a persistent per-VM volume instead.
