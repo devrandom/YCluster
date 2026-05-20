@@ -51,6 +51,9 @@ incus exec "$BUILDER" -- bash -euxc "
 
 echo "==> Stopping and publishing image..."
 incus stop "$BUILDER"
+# `incus publish --alias` refuses to overwrite an existing alias, so on
+# --force we drop it first.
+incus image alias delete "$ALIAS" 2>/dev/null || true
 incus publish "$BUILDER" --alias "$ALIAS" \
     --compression zstd \
     description="Ubuntu 24.04 + NVIDIA open driver + CUDA ${CUDA_VERSION}"
