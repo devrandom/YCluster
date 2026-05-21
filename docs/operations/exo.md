@@ -313,6 +313,84 @@ INST=$(curl -s http://m1.yc:52415/state | jq -r '.instances|keys[0]')
 curl -sX DELETE http://m1.yc:52415/instance/$INST
 ```
 
+### Restart exo
+
+exo is run as a LaunchDaemon (`com.ycluster.exo`). The placement
+supervisor is a separate one (`com.ycluster.exo-place`). Restart one
+mac at a time so the other keeps cluster state visible:
+
+```bash
+ssh m1.yc 'sudo launchctl kickstart -k system/com.ycluster.exo'
+# wait for /state to respond, then:
+ssh m2.yc 'sudo launchctl kickstart -k system/com.ycluster.exo'
+```
+
+After both come back the placement supervisor re-places K2.6 on the
+next ~30 s tick. exo does not persist placements across a restart, so
+expect a full reload cycle (see timings below).
+
+### Watch loading progress
+
+```bash
+watch -n5 'curl -s http://m1.yc:52415/state | jq ".runners"'
+# RunnerLoading shows {layersLoaded, totalLayers}; both runners
+# should advance roughly in lockstep for Tensor sharding.
+```
+
+### K2.6 load timings (2026-05-21, m1 + m2 Mac Studio M3 Ultra 512 GB, TB JACCL)
+
+End-to-end after `launchctl kickstart -k` on both exo daemons:
+
+| Phase | Duration |
+| --- | --- |
+| Daemons up → instance placed by supervisor | ~30 s (one supervisor poll) |
+| `shard_and_load` start → `runner loaded` (mmap + TP shard + vision sidecar) | ~80 s |
+| Warmup (50 tokens) | ~14 s |
+| `runner loaded` → `RunnerReady` (incl. warmup) | ~25 s |
+| **Total kickstart → serving** | **~2 min** |
+
+Once `RunnerReady` on both nodes, first chat completion returns in
+~2 s end-to-end.
+
+### Recovery playbook
+
+Failure modes seen in practice and the order to try:
+
+1. **TB wedge** (`system_profiler SPThunderboltDataType` shows
+   `Status: No device connected` on every receptacle, ping over the
+   TB subnet fails). See "Thunderbolt controller can wedge" above.
+   Reboot the affected mac (rebooting one end is usually enough).
+
+2. **`No cycles found with sufficient memory`** despite both macs
+   being ~empty. macOS keeps weights from prior loads in *inactive*
+   pages, and exo's memory check appears not to count them as
+   available. Run `sudo purge` on each mac to reclaim:
+
+   ```bash
+   ssh m1.yc 'vm_stat | grep -E "free|inactive"; sudo purge; vm_stat | grep -E "free|inactive"'
+   ```
+
+   A single purge has reclaimed ~280 GiB instantly when a stale K2.6
+   was sitting in inactive memory.
+
+3. **Ghost instance** — runners stuck in `RunnerConnecting`/
+   `RunnerIdle`/`RunnerShuttingDown` and never progressing to
+   `RunnerLoading`. Happens when an earlier placement failed
+   mid-flight (e.g. cycle/memory error after the instance object
+   was already created). The `exo-place.sh` supervisor only checks
+   `instance_count > 0`, so it won't re-place around a ghost. Evict
+   manually:
+
+   ```bash
+   INST=$(curl -s http://m1.yc:52415/state | jq -r '.instances|keys[0]')
+   curl -sX DELETE http://m1.yc:52415/instance/$INST
+   ```
+
+   If a `RunnerShuttingDown` from the delete itself then gets
+   stuck, restart exo (see above) — that resets the runner state
+   machine cleanly. In the 2026-05-21 incident this was the step
+   that finally unblocked the load.
+
 ## OpenAI-compatible serving
 
 ```bash
@@ -439,6 +517,29 @@ of the below is needed:
     placement fails — see "Vision-capable models" above.
   - The TB controller was found wedged during bring-up; a reboot of
     m1 cleared it — see "Thunderbolt controller can wedge" above.
+- **TODO: harden K2.6 auto-recovery (2026-05-21 incident).** After
+  a TB wedge → reboot of m2, placement failed with `No cycles found
+  with sufficient memory` because m1 had ~288 GiB of stale K2.6
+  weights sitting in macOS "inactive" pages from prior loads. `sudo
+  purge` on m1 reclaimed them instantly. Then the failed
+  placement left a ghost instance with stuck `RunnerConnecting`/
+  `RunnerIdle` runners; we had to `DELETE /instance/<id>` by hand
+  because the `exo-place.sh` supervisor only checks
+  `instance_count > 0` and saw the ghost as healthy. Things to fix:
+  - Supervisor should treat instances with all-stuck runners (no
+    `RunnerLoading`/`WarmingUp`/`RunnerReady` after some threshold)
+    as dead and delete + re-place.
+  - Consider `sudo purge` (or an exo restart) on the placement
+    leader before re-placing K2.6, to clear inactive-page residue
+    from prior loads — exo's memory check appears to ignore
+    inactive pages even though macOS will reclaim them under
+    pressure.
+  - Consider falling back to `MlxRing` (TCP) after N minutes of
+    `MlxJaccl` cycle failures so K2.6 stays available (at reduced
+    bandwidth) while a TB wedge is being chased.
+  - Consider a TB-peer-ping watchdog that reboots the local node
+    after N consecutive minutes of failure (with cooldown) — TB
+    wedges have recurred and only reboots clear them.
 - Bench a bandwidth-bound model to validate the regime claim above.
   Candidates: Kimi-K2.5 at 3.6-4 bit (~450-500 GB, ~32 B active),
   MiniMax-M2.7-bf16, or DeepSeek-V3-class. These are models where
