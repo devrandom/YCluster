@@ -1,109 +1,15 @@
-# Audio Transcription (WhisperX on ROCm)
+# Audio Transcription — Ops
 
-YCluster runs **WhisperX** on AMD Strix Halo (gfx1151) compute nodes
-as an OpenAI-compatible audio endpoint. Routing goes through the
-same inference gateway as chat completions, so OpenAI client
-libraries reach it with no special configuration.
+WhisperX runs on AMD Strix Halo (gfx1151) compute nodes as a podman
+rootless service, fronted by `local-ai-proxy` and the `inference.xc`
+nginx vhost.
 
-## What it does
-
-- **Transcription** with `faster-whisper large-v3` on ROCm 7.2.2 —
-  fp16 inference on the iGPU.
-- **Word-level alignment** via wav2vec2 (per-word timestamps).
-- **Speaker diarization** via `pyannote/speaker-diarization-community-1`.
-- **Translation to English** (`/v1/audio/translations`).
+For the **user-facing API surface** (endpoints, form fields, examples),
+see [`docs/usage/transcription.md`](../usage/transcription.md). This
+page covers deployment, architecture, and troubleshooting only.
 
 See [`ext/whisperx.md`](../../ext/whisperx.md) for the underlying
 container-strategy report this is built on.
-
-## Usage
-
-The cluster registers two model names that both point at the same
-backend:
-
-- `whisper-1` — the canonical OpenAI name (use this from OpenAI SDKs).
-- `large-v3` — the actual underlying model (explicit; reserves a slot
-  if we add other variants later).
-
-```bash
-export OPENAI_API_KEY=sk-<your-openwebui-key>
-export OPENAI_BASE_URL=http://inference.xc/v1   # or https://your-domain.com/v1
-
-# Plain transcription
-curl -s -X POST "$OPENAI_BASE_URL/audio/transcriptions" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -F file=@meeting.wav \
-  -F model=whisper-1 \
-  -F response_format=text
-```
-
-Python:
-
-```python
-from openai import OpenAI
-client = OpenAI()
-with open("meeting.wav", "rb") as f:
-    print(client.audio.transcriptions.create(model="whisper-1", file=f).text)
-```
-
-### OpenAI-standard form fields
-
-| Field             | Description                                                 |
-|-------------------|-------------------------------------------------------------|
-| `file`            | Binary audio (wav, mp3, m4a, flac, opus, ogg, webm)         |
-| `model`           | `whisper-1` or `large-v3`                                   |
-| `language`        | ISO-639-1 (auto-detect if omitted)                          |
-| `response_format` | `json` \| `text` \| `srt` \| `vtt` \| `verbose_json`        |
-| `temperature`     | Sampling temperature (default 0)                            |
-| `prompt`          | Initial prompt to bias decoding                             |
-
-### WhisperX extensions (not in the OpenAI spec)
-
-| Field           | Default | Description                                       |
-|-----------------|---------|---------------------------------------------------|
-| `align`         | `true`  | Run wav2vec2 word alignment                       |
-| `diarize`       | `false` | Run pyannote speaker diarization                  |
-| `min_speakers`  | —       | Lower bound on diarized speaker count             |
-| `max_speakers`  | —       | Upper bound on diarized speaker count             |
-
-`response_format=verbose_json` is what to ask for if you want word
-timestamps or speaker labels — the OpenAI-compatible `json` format
-returns only the flat `text`.
-
-```bash
-# Diarized verbose output (word timestamps + speaker turns)
-curl -s -X POST "$OPENAI_BASE_URL/audio/transcriptions" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -F file=@meeting.wav \
-  -F model=whisper-1 \
-  -F response_format=verbose_json \
-  -F diarize=true \
-  -F max_speakers=4
-```
-
-### Translation
-
-```bash
-# Translate any source language to English
-curl -s -X POST "$OPENAI_BASE_URL/audio/translations" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -F file=@japanese.wav \
-  -F model=whisper-1 \
-  -F response_format=text
-```
-
-## Limits
-
-- **Upload size**: 200 MiB at the nginx vhost (`client_max_body_size`
-  in `inference-internal.conf`) and at the proxy
-  (`maxMultipartBodyBytes` in `local-ai-proxy/router.go`). Bumping one
-  without the other gives misleading 413s.
-- **Long audio**: verified stable up to 30 min on a single GPU. The
-  WhisperX upstream guide does not yet report 1 h+ runs on gfx1151;
-  for safety, chunk longer recordings application-side.
-- **Concurrency**: the server takes a coarse global lock around each
-  inference (the iGPU is the bottleneck anyway). Concurrent requests
-  serialize.
 
 ## Architecture
 
@@ -116,16 +22,18 @@ client → inference.xc/v1/audio/...   (nginx, auth_request)
 
 - **Container image**: `localhost/whisperx-rocm:v4.7.1-gfx1151`,
   built locally from
-  `config/ansible/app/files/whisperx/Containerfile`.
+  `config/ansible/app/files/whisperx/Containerfile`. Ships its own
+  ROCm 7.2.2 + PyTorch 2.10 + CTranslate2 4.7.1 (gfx1151 wheel), so
+  the host's ROCm version is irrelevant.
 - **Service**: `whisperx.service` — a podman Quadlet user unit under
   `dev` on each opted-in host. Linger-enabled, restarts on failure.
 - **Models**: pyannote diarization is HF-gated; the gated model is
   pre-cached into `~dev/.cache/huggingface` once with a token. The
   container then runs with `HF_HUB_OFFLINE=1` so no token is ever
   needed at runtime.
-- **Proxy**: `local-ai-proxy` routes `/v1/audio/*` requests by
-  parsing the multipart `model` form field (same routing key the
-  JSON endpoints use, just discovered differently).
+- **Proxy**: `local-ai-proxy` routes `/v1/audio/*` requests by parsing
+  the multipart `model` form field (same routing key the JSON
+  endpoints use, just discovered differently).
 - **Model registration** (replace `<host>` with the whisperx node):
   ```bash
   ycluster inference add http://<host>.xc:9000               # → large-v3
@@ -152,6 +60,17 @@ The playbook is idempotent. It rebuilds the container image only if
 the Containerfile, `server.py`, or any patch file changed; restarts
 the systemd user unit only when the Quadlet template or image hash
 changed.
+
+## Body-size knobs
+
+200 MiB is the max upload size, set in **two** places that must stay
+in lockstep:
+
+- nginx `client_max_body_size` in
+  `config/ansible/app/files/inference-internal.conf`.
+- `maxMultipartBodyBytes` in `local-ai-proxy/router.go`.
+
+Bumping one without the other gives misleading 413s.
 
 ## Troubleshooting
 

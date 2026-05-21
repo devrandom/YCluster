@@ -154,5 +154,6 @@ on client-disconnect handling.
 For audio transcription (OpenAI `/v1/audio/transcriptions` and
 `/v1/audio/translations`) the proxy uses the same `model` routing
 key, just read from the multipart form field instead of the JSON
-body. See [`transcription.md`](transcription.md) for the WhisperX
-stack on AMD Strix Halo (gfx1151).
+body. See [`docs/usage/transcription.md`](../usage/transcription.md)
+for the API surface, and [`transcription.md`](transcription.md) for
+the WhisperX deployment on AMD Strix Halo (gfx1151).
