@@ -20,3 +20,8 @@ venv/
 /dev/dhcp-hosts
 /bench-results/
 /research/
+/audio-samples/
+/config.yml
+/*.token
+/secrets.yaml
+/secrets.yml
