@@ -178,12 +178,16 @@ func (hc *HealthChecker) updateModelMetrics() {
 	}
 	snap := hc.source.Snapshot()
 	hc.mu.RLock()
-	counts := make(map[string]struct{ healthy, total int }, len(snap))
+	counts := make(map[string]struct{ healthy, enabled, total int }, len(snap))
 	for model, urls := range snap {
 		c := counts[model]
 		for _, u := range urls {
 			c.total++
-			if bh, ok := hc.states[u.String()]; ok && bh.State == StateHealthy {
+			bh, ok := hc.states[u.String()]
+			if !ok || bh.State != StateDisabled {
+				c.enabled++
+			}
+			if ok && bh.State == StateHealthy {
 				c.healthy++
 			}
 		}
