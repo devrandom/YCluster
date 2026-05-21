@@ -43,8 +43,22 @@ for addr in "${passthrough[@]}"; do
     echo "$addr" > /sys/bus/pci/drivers_probe
 done
 
-# All passthrough GPUs are now on vfio-pci; load nvidia for the host GPUs.
+# All passthrough GPUs are now on vfio-pci; load nvidia for any host GPUs.
 # --ignore-install bypasses the /bin/false guard in nvidia-deferred.conf.
-for mod in nvidia nvidia_modeset nvidia_uvm nvidia_drm; do
-    modprobe --ignore-install "$mod"
+# Count NVIDIA VGA/3D devices not bound to vfio-pci. If zero (every GPU is
+# passed through), skip the nvidia modprobe -- it would fail with
+# "No such device" and trip set -e.
+host_nvidia=0
+for dev in /sys/bus/pci/devices/*; do
+    [ "$(cat "$dev/vendor" 2>/dev/null)" = "0x10de" ] || continue
+    class=$(cat "$dev/class" 2>/dev/null)
+    case "$class" in 0x030000|0x030200) ;; *) continue ;; esac
+    drv=""
+    [ -L "$dev/driver" ] && drv=$(basename "$(readlink -f "$dev/driver")")
+    [ "$drv" != vfio-pci ] && host_nvidia=$((host_nvidia + 1))
 done
+if [ "$host_nvidia" -gt 0 ]; then
+    for mod in nvidia nvidia_modeset nvidia_uvm nvidia_drm; do
+        modprobe --ignore-install "$mod"
+    done
+fi
