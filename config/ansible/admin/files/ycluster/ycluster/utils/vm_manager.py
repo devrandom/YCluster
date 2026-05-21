@@ -518,20 +518,77 @@ def bastion_sync():
     print(f"Bastion synced: {n} authorized key line(s).")
 
 
+def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
+    """Watch incus lifecycle events; on instance-started/restarted, queue a
+    key re-sync for that VM's owner.
+
+    Covers the case where a VM that was stopped (or in ERROR) when the
+    watcher booted gets started later — no etcd event fires, so this is
+    the only way to notice. Runs in a daemon thread; if `incus monitor`
+    dies, it is restarted with a short backoff.
+    """
+    relevant = ("instance-started", "instance-restarted")
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ["incus", "monitor", "--type=lifecycle", "--format=json"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1,
+            )
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                md = ev.get("metadata") or {}
+                action = md.get("action")
+                if action not in relevant:
+                    continue
+                src = md.get("source") or ""
+                # source is "/1.0/instances/<name>"
+                parts = src.strip("/").split("/")
+                if len(parts) < 3 or parts[1] != "instances":
+                    continue
+                name = parts[2]
+                if name == BASTION_CONTAINER:
+                    continue
+                rec = vm_get(name)
+                owner = rec.get("owner") if rec else None
+                if not owner:
+                    continue
+                print(f"bastion-watch: lifecycle '{action}' on '{name}' "
+                      f"(owner={owner}) — queueing key sync", flush=True)
+                with cond:
+                    dirty_users.add(owner)
+                    bastion_dirty[0] = True
+                    cond.notify()
+            proc.wait()
+        except Exception as e:
+            print(f"bastion-watch: incus monitor crashed: {e!r}",
+                  file=sys.stderr, flush=True)
+        time.sleep(5)                              # backoff before restart
+
+
 def bastion_watch(debounce=2.0):
     """Watch the user and VM registries; re-sync the bastion and VM keys
     on any change.
 
     Long-running. Initial sync runs first (covers events missed while we
     were down), then etcd watches on /cluster/users/ and /cluster/vms/
-    drive subsequent syncs. Events are coalesced with a `debounce`-second
-    settle window so a burst becomes one sync.
+    drive subsequent syncs. A third watcher consumes the incus lifecycle
+    event stream so VMs that come up later also get their keys pushed.
+    Events are coalesced with a `debounce`-second settle window so a
+    burst becomes one sync.
 
-    Two kinds of work per cycle:
-      * bastion_sync() — always, since either prefix can affect it
-      * vm_sync_keys(user) — for each user whose record changed, and for
-        the current owner of each changed VM (covers ownership changes).
-        Acts only on RUNNING VMs that live on this host.
+    Three kinds of trigger:
+      * etcd /cluster/users/<u> change  → bastion_sync + vm_sync_keys(u)
+      * etcd /cluster/vms/<v> change    → bastion_sync + vm_sync_keys(<v owner>)
+      * incus instance-started/restarted → vm_sync_keys(<v owner>)
+
+    vm_sync_keys acts only on RUNNING VMs that live on this host.
     """
     import threading
 
@@ -585,6 +642,13 @@ def bastion_watch(debounce=2.0):
     w1 = client.add_watch_prefix_callback(USERS_PREFIX, on_user_event)
     w2 = client.add_watch_prefix_callback(VMS_PREFIX, on_vm_event)
     print(f"bastion-watch: registered watches w1={w1} w2={w2}", flush=True)
+
+    threading.Thread(
+        target=_incus_lifecycle_thread,
+        args=(cond, dirty_users, bastion_dirty),
+        daemon=True,
+    ).start()
+    print("bastion-watch: incus lifecycle monitor started", flush=True)
 
     while True:
         with cond:
