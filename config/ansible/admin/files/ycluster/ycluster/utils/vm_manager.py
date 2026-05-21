@@ -499,3 +499,52 @@ def bastion_sync():
                content, BASTION_JUMP_USER)
     n = sum(1 for line in content.splitlines() if not line.startswith("#"))
     print(f"Bastion synced: {n} authorized key line(s).")
+
+
+def bastion_watch(debounce=2.0):
+    """Watch the user and VM registries; re-sync the bastion on any change.
+
+    Long-running. The initial sync runs first (covers events missed while
+    we were down), then etcd watches on /cluster/users/ and /cluster/vms/
+    drive subsequent syncs. Events are coalesced with a `debounce`-second
+    settle window so a burst (e.g. a vm-launch writing several keys)
+    becomes one sync.
+    """
+    import threading
+
+    if not _instance_exists(BASTION_CONTAINER):
+        print(f"Bastion container '{BASTION_CONTAINER}' not found — exiting.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print("bastion-watch: initial sync...", flush=True)
+    bastion_sync()
+    print(f"bastion-watch: watching {USERS_PREFIX} and {VMS_PREFIX} "
+          f"(debounce={debounce}s)", flush=True)
+
+    cond = threading.Condition()
+    dirty = [False]
+
+    def on_event(_event):
+        print(f"bastion-watch: event on watched prefix", flush=True)
+        with cond:
+            dirty[0] = True
+            cond.notify()
+
+    client = get_etcd_client()
+    w1 = client.add_watch_prefix_callback(USERS_PREFIX, on_event)
+    w2 = client.add_watch_prefix_callback(VMS_PREFIX, on_event)
+    print(f"bastion-watch: registered watches w1={w1} w2={w2}", flush=True)
+
+    while True:
+        with cond:
+            while not dirty[0]:
+                cond.wait()
+        time.sleep(debounce)                  # let the burst settle
+        with cond:
+            dirty[0] = False
+        try:
+            bastion_sync()
+        except Exception as e:
+            print(f"bastion-watch: sync failed: {e}",
+                  file=sys.stderr, flush=True)

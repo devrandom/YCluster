@@ -118,6 +118,36 @@
       register: bastion_sync_run
       changed_when: "'synced' in bastion_sync_run.stdout"
 
+    - name: Install ycluster-bastion-watch systemd unit
+      copy:
+        dest: /etc/systemd/system/ycluster-bastion-watch.service
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          [Unit]
+          Description=Watch etcd user/VM registries and re-sync the bastion
+          After=network-online.target snap.incus.daemon.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          Environment=ETCD_HOSTS={{ etcd_endpoints }}
+          ExecStart=/usr/local/bin/ycluster vm bastion-watch
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      register: bastion_watch_unit
+
+    - name: Enable and start ycluster-bastion-watch
+      systemd:
+        name: ycluster-bastion-watch
+        enabled: yes
+        state: "{{ 'restarted' if bastion_watch_unit.changed else 'started' }}"
+        daemon_reload: yes
+
     - name: Show bastion deployment result
       debug:
         msg: "{{ bastion_setup_run.stdout_lines + bastion_sync_run.stdout_lines }}"
