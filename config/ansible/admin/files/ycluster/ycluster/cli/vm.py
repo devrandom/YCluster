@@ -47,6 +47,11 @@ def register_vm_commands(subparsers):
                         help='Regenerate the bastion SSH access list from etcd')
     bp.set_defaults(func=lambda a: vm.bastion_sync())
 
+    bwp = sub.add_parser('bastion-watch',
+                         help='Long-running: re-sync the bastion on every '
+                              'user/VM registry change (systemd service)')
+    bwp.set_defaults(func=lambda a: vm.bastion_watch())
+
     # --- ssh key registry ---
     ssh_p = sub.add_parser('ssh', help='Manage per-user SSH keys for VM access')
     ssh_p.set_defaults(func=lambda a: a.parser.print_help(), parser=ssh_p)
