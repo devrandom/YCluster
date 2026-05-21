@@ -24,6 +24,7 @@ type Metrics struct {
 	routeErrors  *prometheus.CounterVec
 
 	modelHealthy *prometheus.GaugeVec
+	modelEnabled *prometheus.GaugeVec
 	modelTotal   *prometheus.GaugeVec
 }
 
@@ -82,12 +83,16 @@ func NewMetrics() *Metrics {
 			Name: "local_ai_proxy_model_healthy_backends",
 			Help: "Number of currently-healthy backends serving each model.",
 		}, []string{"model"}),
+		modelEnabled: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "local_ai_proxy_model_enabled_backends",
+			Help: "Number of non-disabled backends serving each model (healthy + down + unknown). A model with model_healthy_backends == 0 and model_enabled_backends > 0 is alertable.",
+		}, []string{"model"}),
 		modelTotal: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "local_ai_proxy_model_total_backends",
 			Help: "Number of backends configured for each model (healthy + down + disabled + unknown).",
 		}, []string{"model"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors, m.modelHealthy, m.modelTotal)
+	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors, m.modelHealthy, m.modelEnabled, m.modelTotal)
 	return m
 }
 
@@ -170,14 +175,16 @@ func (m *Metrics) SetBackendState(backend, state string) {
 // SetModelBackends replaces the per-model backend counts with the
 // given snapshot. Models no longer present are cleared so stale
 // series don't linger after a config reload removes a model.
-func (m *Metrics) SetModelBackends(counts map[string]struct{ healthy, total int }) {
+func (m *Metrics) SetModelBackends(counts map[string]struct{ healthy, enabled, total int }) {
 	if m == nil {
 		return
 	}
 	m.modelHealthy.Reset()
+	m.modelEnabled.Reset()
 	m.modelTotal.Reset()
 	for model, c := range counts {
 		m.modelHealthy.WithLabelValues(model).Set(float64(c.healthy))
+		m.modelEnabled.WithLabelValues(model).Set(float64(c.enabled))
 		m.modelTotal.WithLabelValues(model).Set(float64(c.total))
 	}
 }

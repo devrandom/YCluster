@@ -14,6 +14,41 @@ groups:
           summary: "Inference backend {{ $labels.backend }} retrying"
           description: "local-ai-proxy has been failing over from {{ $labels.backend }} at {{ $value | printf \"%.2f\" }} req/s for 10m. Usually config drift, flaky upstream, or a saturated replica."
 
+      # An inference backend is reported as Down (failed health checks).
+      # Operator-disabled backends are tracked as state="disabled" and
+      # excluded automatically — they're known-out and shouldn't page.
+      # Aggregated across the local-ai-proxy replicas on s1/s2/s3 so
+      # we get one alert per backend (same pattern as HTTPSDomainDown):
+      # min == 1 means every proxy agrees the backend is down. A single
+      # proxy's network blip won't page.
+      # 5m of sustained down covers the K2.6-class reload window
+      # (kickstart → RunnerReady is ~2m on m1+m2) without flapping.
+      - alert: InferenceBackendDown
+        expr: min by (backend) (local_ai_proxy_backend_state{state="down"}) == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference backend {{ $labels.backend }} down"
+          description: "local-ai-proxy health checks have been failing against {{ $labels.backend }} for 5m. Disabled backends don't trigger this; if you intentionally took it offline, mark it disabled via /cluster/config/inference/disabled/<url>."
+
+      # A model has zero healthy backends but at least one non-disabled
+      # backend configured — i.e. the model is unservable for reasons
+      # other than the operator turning it off. (A model whose only
+      # backends are all disabled has enabled_backends == 0 and is
+      # silent here, intentionally.) Aggregated across proxies the
+      # same way as InferenceBackendDown — alert only when every
+      # proxy agrees no healthy backend exists, so a single proxy's
+      # blip doesn't page.
+      - alert: InferenceModelDown
+        expr: max by (model) (local_ai_proxy_model_healthy_backends) == 0 and max by (model) (local_ai_proxy_model_enabled_backends) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference model {{ $labels.model }} has no healthy backends"
+          description: "No healthy backend has served model {{ $labels.model }} for 5m. Check the per-backend InferenceBackendDown alerts and recover or disable the affected backends."
+
       # vLLM KV cache >90% means preemption is imminent — incoming
       # requests start getting kicked out of the running batch and
       # restarted, which trashes TTFT. Alert before it starts, not after.
