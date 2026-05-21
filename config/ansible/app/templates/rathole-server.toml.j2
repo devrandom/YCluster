@@ -31,8 +31,17 @@ type = "tcp"
 bind_addr = "127.0.0.1:2203"
 type = "tcp"
 
-# VM-access bastion (Incus VM host). Publicly bound so VMs can be reached
-# via: ssh -J jump@<this-host>:2210 user@<vm-name>
-[server.services.vm-bastion]
-bind_addr = "0.0.0.0:2210"
+# VM-access bastions (one public port per Incus VM host). Each VM host
+# runs its own bastion container on its own incusbr0 and registers a
+# distinct service name so the tunnels do not collide on the rathole
+# server. Reach VMs with: ssh -J jump@<this-host>:<port> user@<vm-name>
+#
+# Per-host service name is set via `vm_bastion_service` in host_vars (see
+# admin/install-vm-bastion.yml).
+[server.services.vm-bastion-nv2]
+bind_addr = "0.0.0.0:2212"
+type = "tcp"
+
+[server.services.vm-bastion-nv3]
+bind_addr = "0.0.0.0:2213"
 type = "tcp"
