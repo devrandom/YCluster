@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """Streaming chat-completion smoke test.
 
-Reads endpoint/model/key from environment variables (picked up from
-./env.sh by walking up from the script's directory):
-
-  LITELLM_URL    endpoint, or DEFAULT_URL as fallback
-  LITELLM_MODEL  model name, or DEFAULT_MODEL as fallback
-  CLUSTER_KEY    bearer token
-
-All three are deployment-specific and belong in env.sh (which is
-gitignored) — not hardcoded here.
+Endpoint + bearer token come from config.yml at the repo root (see
+contrib/_cluster_config.py). The model is passed as the first
+positional argument, or via the MODEL environment variable.
 
 Prints reasoning tokens in dim gray and answer tokens at normal weight,
 flushing after every chunk so you see the stream unfold live.
@@ -20,57 +14,28 @@ Handles both reasoning shapes:
 """
 import json
 import os
-import re
 import sys
 import time
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _cluster_config
 
 
 DIM = "\033[2m"
 RESET = "\033[0m"
 
 
-def find_env_sh(start: str) -> str | None:
-    """Walk up from start looking for env.sh; returns its path or None."""
-    d = os.path.abspath(start)
-    while True:
-        candidate = os.path.join(d, "env.sh")
-        if os.path.isfile(candidate):
-            return candidate
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
-
-
-def load_env_sh(path: str) -> None:
-    """Apply `export KEY=VALUE` lines from path to os.environ. Values
-    already in the environment win — lets callers override via CLI."""
-    pat = re.compile(r'^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
-    with open(path) as f:
-        for line in f:
-            line = line.split("#", 1)[0].rstrip()
-            m = pat.match(line)
-            if not m:
-                continue
-            k, v = m.group(1), m.group(2).strip()
-            if v.startswith('"') and v.endswith('"') or v.startswith("'") and v.endswith("'"):
-                v = v[1:-1]
-            os.environ.setdefault(k, v)
-
-
 def main() -> int:
-    env_path = find_env_sh(os.path.dirname(os.path.abspath(__file__)))
-    if env_path:
-        load_env_sh(env_path)
-
-    url_base = os.environ.get("LITELLM_URL") or os.environ.get("DEFAULT_URL")
-    model = os.environ.get("LITELLM_MODEL") or os.environ.get("DEFAULT_MODEL")
-    key = os.environ.get("CLUSTER_KEY", "")
-    if not url_base or not model:
-        print("error: set LITELLM_URL + LITELLM_MODEL (or DEFAULT_URL + DEFAULT_MODEL) in env.sh", file=sys.stderr)
+    model = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("MODEL")
+    if not model:
+        print(f"usage: {sys.argv[0]} <model>   (or set MODEL env var)", file=sys.stderr)
         return 2
-    base = url_base.rstrip("/")
+
+    cfg = _cluster_config.load()
+    base = cfg.endpoint
+    key = cfg.token
     url = base + "/v1/chat/completions"
 
     print(f"Endpoint: {url}")
