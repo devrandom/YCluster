@@ -83,6 +83,15 @@ def _instance_exists(name):
     return _incus("info", name, check=False).returncode == 0
 
 
+def _instance_running(name):
+    r = _incus("list", name, "--format", "csv", "-c", "ns", check=False)
+    for line in r.stdout.splitlines():
+        host_name, _, state = line.partition(",")
+        if host_name == name:
+            return state.upper() == "RUNNING"
+    return False
+
+
 def _wait_agent(name, timeout=180):
     """Wait until `incus exec` works inside an instance."""
     deadline = time.time() + timeout
@@ -439,13 +448,21 @@ def vm_sync_keys(user):
 
     If the user has no keys left (or the record is gone), the VMs'
     authorized_keys are emptied — removing a user's keys revokes access.
+
+    Only acts on VMs that exist *on this host* (incus is local-only) and
+    are currently RUNNING — stopped VMs would block on _wait_agent for
+    minutes and aren't reachable anyway.
     """
     rec = user_get(user) or {"ssh_keys": []}
     keys = rec.get("ssh_keys", [])
     for name in _owner_vms().get(user, []):
-        if _instance_exists(name):
-            print(f"Refreshing keys in '{name}'...")
-            _inject_owner_keys(name, keys)
+        if not _instance_exists(name):
+            continue                           # VM not on this host
+        if not _instance_running(name):
+            print(f"Skipping '{name}' (not running).")
+            continue
+        print(f"Refreshing keys in '{name}'...")
+        _inject_owner_keys(name, keys)
 
 
 # --------------------------------------------------------------------------
@@ -502,13 +519,19 @@ def bastion_sync():
 
 
 def bastion_watch(debounce=2.0):
-    """Watch the user and VM registries; re-sync the bastion on any change.
+    """Watch the user and VM registries; re-sync the bastion and VM keys
+    on any change.
 
-    Long-running. The initial sync runs first (covers events missed while
-    we were down), then etcd watches on /cluster/users/ and /cluster/vms/
+    Long-running. Initial sync runs first (covers events missed while we
+    were down), then etcd watches on /cluster/users/ and /cluster/vms/
     drive subsequent syncs. Events are coalesced with a `debounce`-second
-    settle window so a burst (e.g. a vm-launch writing several keys)
-    becomes one sync.
+    settle window so a burst becomes one sync.
+
+    Two kinds of work per cycle:
+      * bastion_sync() — always, since either prefix can affect it
+      * vm_sync_keys(user) — for each user whose record changed, and for
+        the current owner of each changed VM (covers ownership changes).
+        Acts only on RUNNING VMs that live on this host.
     """
     import threading
 
@@ -519,32 +542,73 @@ def bastion_watch(debounce=2.0):
 
     print("bastion-watch: initial sync...", flush=True)
     bastion_sync()
+    # Initial VM-key sync for every owner with VMs on this host.
+    for owner in sorted(_owner_vms()):
+        try:
+            vm_sync_keys(owner)
+        except Exception as e:
+            print(f"bastion-watch: initial vm_sync_keys({owner}) failed: {e}",
+                  file=sys.stderr, flush=True)
     print(f"bastion-watch: watching {USERS_PREFIX} and {VMS_PREFIX} "
           f"(debounce={debounce}s)", flush=True)
 
     cond = threading.Condition()
-    dirty = [False]
+    dirty_users = set()                       # users whose records changed
+    dirty_vms = set()                         # VM names whose records changed
+    bastion_dirty = [False]
 
-    def on_event(_event):
-        print(f"bastion-watch: event on watched prefix", flush=True)
-        with cond:
-            dirty[0] = True
-            cond.notify()
+    def _on_event(response, prefix, dest_set):
+        try:
+            n = len(response.events) if hasattr(response, "events") else 0
+            print(f"bastion-watch: {n} event(s) on {prefix}", flush=True)
+            with cond:
+                bastion_dirty[0] = True
+                for ev in (response.events or []):
+                    key = ev.key.decode()
+                    if key.startswith(prefix):
+                        dest_set.add(key[len(prefix):])
+                cond.notify()
+        except Exception as e:
+            print(f"bastion-watch: callback error on {prefix}: {e!r}",
+                  file=sys.stderr, flush=True)
+            with cond:
+                bastion_dirty[0] = True
+                cond.notify()
+
+    def on_user_event(response):
+        _on_event(response, USERS_PREFIX, dirty_users)
+
+    def on_vm_event(response):
+        _on_event(response, VMS_PREFIX, dirty_vms)
 
     client = get_etcd_client()
-    w1 = client.add_watch_prefix_callback(USERS_PREFIX, on_event)
-    w2 = client.add_watch_prefix_callback(VMS_PREFIX, on_event)
+    w1 = client.add_watch_prefix_callback(USERS_PREFIX, on_user_event)
+    w2 = client.add_watch_prefix_callback(VMS_PREFIX, on_vm_event)
     print(f"bastion-watch: registered watches w1={w1} w2={w2}", flush=True)
 
     while True:
         with cond:
-            while not dirty[0]:
+            while not bastion_dirty[0]:
                 cond.wait()
         time.sleep(debounce)                  # let the burst settle
         with cond:
-            dirty[0] = False
+            users = set(dirty_users); dirty_users.clear()
+            vms = set(dirty_vms); dirty_vms.clear()
+            bastion_dirty[0] = False
+        # VM-record changes can shift ownership; pull each changed VM's
+        # current owner into the per-user resync set.
+        for name in vms:
+            rec = vm_get(name)
+            if rec and rec.get("owner"):
+                users.add(rec["owner"])
         try:
             bastion_sync()
         except Exception as e:
-            print(f"bastion-watch: sync failed: {e}",
+            print(f"bastion-watch: bastion_sync failed: {e}",
                   file=sys.stderr, flush=True)
+        for user in sorted(users):
+            try:
+                vm_sync_keys(user)
+            except Exception as e:
+                print(f"bastion-watch: vm_sync_keys({user}) failed: {e}",
+                      file=sys.stderr, flush=True)
