@@ -29,11 +29,13 @@ VM_IMAGE = "ubuntu-cuda-vllm"          # default for VMs (GPU or not):
                                        # cache. Pass --image ubuntu-cuda to
                                        # skip the vLLM layer (~1 GiB lighter).
 CT_PROFILE = "gpu-ct"
-CT_IMAGE = "images:ubuntu/24.04"       # default for containers: upstream
-                                       # cloud image. The host's amdgpu
-                                       # driver is shared via /dev/kfd +
-                                       # /dev/dri (no in-image ROCm yet —
-                                       # tenants apt-install what they need).
+CT_IMAGE = "ubuntu-rocm"               # default for containers: Ubuntu
+                                       # 24.04 + ROCm HIP runtime + render
+                                       # group / ubuntu membership matching
+                                       # the host's render gid (built by
+                                       # incus-build-rocm-image). Pass
+                                       # --image images:ubuntu/24.04 to
+                                       # use the plain upstream base.
 VM_GUEST_USER = "ubuntu"               # default user in the Ubuntu cloud image
 BASTION_CONTAINER = "bastion"
 BASTION_JUMP_USER = "jump"

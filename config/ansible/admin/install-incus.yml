@@ -23,6 +23,15 @@
     # On bump, update both: curl -s https://pypi.org/pypi/uv/<ver>/json
     uv_version: "0.11.13"
     uv_sha256: "e23ddb47f7a317979cf1945cf9ed89d2639f60f7d06164f9ff1ad292c4cc5b3c"
+    # ROCm userspace version baked into the 'ubuntu-rocm' container
+    # image. ROCm 7 userspace works against older kernel amdgpu/amdkfd
+    # (host runs ROCm 6.4.4); the kfd ioctl ABI is back-compatible.
+    rocm_version: "7.0.2"
+    # gid of the host's 'render' group (owns /dev/kfd, /dev/dri/renderD*).
+    # On Ubuntu 24.04 with rocm-* packages this is 993; on stock distros
+    # without ROCm it's often 992. Override per-host in host_vars if a
+    # particular machine differs.
+    incus_render_gid: 993
     incus_bridge: incusbr0
     incus_bridge_cidr: "10.100.0.1/24"
     incus_storage_pool: local
@@ -238,6 +247,30 @@
     - name: Configure gpu-ct profile (container hosts only)
       when: incus_container_host | default(false)
       block:
+        # raw.idmap (used by the gpu-ct profile to map the host's render
+        # gid into containers) requires root to have permission to map
+        # the specific outside id, which means an explicit /etc/subgid
+        # entry. Default ranges are root:1000000:1000000000, which
+        # doesn't cover small system gids like 993.
+        - name: Allow root to map host render gid into unprivileged containers
+          lineinfile:
+            path: /etc/subgid
+            line: "root:{{ incus_render_gid }}:1"
+            regexp: '^root:{{ incus_render_gid }}:'
+          register: subgid_render
+        # Remove any stale entries for prior render gids (e.g. when the
+        # var changes between deploys).
+        - name: Prune stale /etc/subgid render entries
+          shell: |
+            sed -i '/^root:992:1$/d' /etc/subgid
+          changed_when: false
+          when: incus_render_gid != 992
+        - name: Restart Incus to pick up subgid change
+          systemd:
+            name: incus
+            state: restarted
+          when: subgid_render.changed
+
         - name: Check whether gpu-ct profile exists
           command: incus profile show gpu-ct
           register: gpuct_profile_check
@@ -297,6 +330,15 @@
             owner: root
             group: root
 
+    - name: Install incus-build-rocm-image helper (container hosts only)
+      when: incus_container_host | default(false)
+      template:
+        src: incus-build-rocm-image.sh.j2
+        dest: /usr/local/bin/incus-build-rocm-image
+        mode: '0755'
+        owner: root
+        group: root
+
     # Build the two VM images if they are missing. The 'build-images' tag
     # lets you target just this section (`--tags build-images`); the
     # 'force_rebuild_images=true' extra-var rebuilds even when present.
@@ -334,3 +376,18 @@
             /usr/local/bin/incus-build-vllm-image
             {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
           when: vllm_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
+
+    - name: Build AMD ROCm container image if missing (container hosts only)
+      when: incus_container_host | default(false)
+      tags: build-images
+      block:
+        - name: Check whether ubuntu-rocm image exists
+          shell: incus image alias list --format csv | grep -q '^ubuntu-rocm,'
+          register: rocm_image_check
+          changed_when: false
+          failed_when: false
+        - name: Build ubuntu-rocm image (~15 min)
+          command: >-
+            /usr/local/bin/incus-build-rocm-image
+            {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
+          when: rocm_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
