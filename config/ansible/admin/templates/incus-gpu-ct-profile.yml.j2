@@ -3,6 +3,14 @@ description: GPU-sharing LXC container (host kernel, /dev/kfd + /dev/dri)
 config:
   limits.cpu: "8"
   limits.memory: 32GiB
+  # Map the host's 'render' group (gid {{ incus_render_gid }}) into the
+  # container with the same gid, so the bind-mounted /dev/kfd and
+  # /dev/dri/renderD128 (mode 660 root:render on the host) appear as
+  # root:render inside. The ubuntu-rocm image preallocates a 'render'
+  # group at the matching gid and makes the default ubuntu user a member,
+  # so ROCm works without sudo.
+  raw.idmap: |-
+    gid {{ incus_render_gid }} {{ incus_render_gid }}
 devices:
   eth0:
     type: nic
@@ -22,8 +30,14 @@ devices:
   gpu0:
     type: gpu
     gputype: physical
+    uid: "0"
+    gid: "{{ incus_render_gid }}"
+    mode: "0660"
   kfd:
     type: unix-char
     source: /dev/kfd
     path: /dev/kfd
+    uid: "0"
+    gid: "{{ incus_render_gid }}"
+    mode: "0660"
 ---
