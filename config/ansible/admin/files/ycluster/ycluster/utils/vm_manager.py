@@ -24,13 +24,20 @@ USERS_PREFIX = "/cluster/users/"
 VMS_PREFIX = "/cluster/vms/"
 
 VM_PROFILE = "gpu-vm"
-VM_IMAGE = "ubuntu-cuda-vllm"          # default for all VMs (GPU or not):
+VM_IMAGE = "ubuntu-cuda-vllm"          # default for VMs (GPU or not):
                                        # ubuntu-cuda + vLLM + FlashInfer AOT
                                        # cache. Pass --image ubuntu-cuda to
                                        # skip the vLLM layer (~1 GiB lighter).
+CT_PROFILE = "gpu-ct"
+CT_IMAGE = "images:ubuntu/24.04"       # default for containers: upstream
+                                       # cloud image. The host's amdgpu
+                                       # driver is shared via /dev/kfd +
+                                       # /dev/dri (no in-image ROCm yet —
+                                       # tenants apt-install what they need).
 VM_GUEST_USER = "ubuntu"               # default user in the Ubuntu cloud image
 BASTION_CONTAINER = "bastion"
 BASTION_JUMP_USER = "jump"
+HOST_CONFIG_PATH = "/etc/ycluster/host.yml"
 
 _VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")     # Incus instance names
 _USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")        # identifiers / emails
@@ -181,6 +188,27 @@ def _valid_user(name):
                          f"letters, digits and . _ % + @ -")
 
 
+def _default_instance_type():
+    """Read the per-host default ('vm' or 'container') from HOST_CONFIG_PATH.
+
+    The file is written by admin/install-incus.yml. We avoid pulling in
+    PyYAML and just grep for the one key we care about. Fallback is 'vm'
+    so legacy hosts (those installed before this file existed) keep their
+    prior behaviour.
+    """
+    try:
+        with open(HOST_CONFIG_PATH) as f:
+            for line in f:
+                key, _, val = line.partition(":")
+                if key.strip() == "default_instance_type":
+                    v = val.strip().strip('"').strip("'")
+                    if v in ("vm", "container"):
+                        return v
+    except FileNotFoundError:
+        pass
+    return "vm"
+
+
 def user_get(user):
     return _get_json(USERS_PREFIX + user)
 
@@ -296,56 +324,93 @@ def _inject_owner_keys(vm_name, keys, agent_timeout=180):
     _push_file(vm_name, f"/home/{guest}/.ssh/authorized_keys", content, guest)
 
 
-def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=VM_IMAGE):
+def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
+              instance_type=None):
+    """Launch a GPU instance (VM or container).
+
+    instance_type='auto' (or None) picks based on the host's
+    /etc/ycluster/host.yml — 'vm' on VM hosts (NVIDIA passthrough),
+    'container' on container hosts (AMD shared GPU). Override with
+    instance_type='vm' or 'container'.
+
+    For containers the gpu-ct profile already attaches the host's single
+    GPU; --gpus 0 removes it, any positive --gpus value just keeps the
+    profile's device (there's no per-GPU pinning on a single-GPU host).
+    """
     _valid_vm_name(name)
     if gpus < 0:
         raise ValueError("--gpus cannot be negative")
+    if instance_type in (None, "auto"):
+        instance_type = _default_instance_type()
+    if instance_type not in ("vm", "container"):
+        raise ValueError(f"Invalid --type '{instance_type}' (vm|container|auto)")
+    if image is None:
+        image = VM_IMAGE if instance_type == "vm" else CT_IMAGE
+    profile = VM_PROFILE if instance_type == "vm" else CT_PROFILE
+
     user = user_get(owner)
     if not user or not user.get("ssh_keys"):
         raise ValueError(
             f"User '{owner}' has no SSH keys registered. Add one first:\n"
             f"  ycluster vm ssh add {owner} '<public-key>'")
     if vm_get(name) or _instance_exists(name):
-        raise ValueError(f"VM '{name}' already exists.")
+        raise ValueError(f"'{name}' already exists.")
 
+    # GPU selection: VM path pins specific passthrough GPUs from the host's
+    # vfio pool; container path shares the host's single GPU via the profile,
+    # so 'gpus' here is just a 0/non-zero toggle.
     picked = []
-    if gpus:
+    if instance_type == "vm" and gpus:
         free = free_gpus()
         if len(free) < gpus:
             raise ValueError(f"Only {len(free)} GPU(s) free, requested {gpus}.")
         picked = free[:gpus]
 
     gpu_desc = f"{gpus} GPU" if gpus else "no GPU"
-    print(f"Creating VM '{name}' ({cpu} CPU, {mem} RAM, {gpu_desc}) "
-          f"owned by '{owner}'...")
-    _incus("init", image, name, "--vm", "--profile", VM_PROFILE,
+    print(f"Creating {instance_type} '{name}' ({cpu} CPU, {mem} RAM, "
+          f"{gpu_desc}) owned by '{owner}'...")
+    # incus init: --vm = VM; no flag = container (the default).
+    type_args = ["--vm"] if instance_type == "vm" else []
+    _incus("init", image, name, *type_args, "--profile", profile,
            "-c", f"limits.cpu={cpu}", "-c", f"limits.memory={mem}")
-    for i, pci in enumerate(picked):
-        # A 'gpu' device of gputype=physical attaches the GPU's whole IOMMU
-        # group (the HD-Audio .1 function comes with it) — do not add it
-        # separately or Incus fails with "device is already attached".
-        _incus("config", "device", "add", name, f"gpu{i}", "gpu",
-               "gputype=physical", f"pci={pci}")
+
+    if instance_type == "vm":
+        for i, pci in enumerate(picked):
+            # A 'gpu' device of gputype=physical attaches the GPU's whole IOMMU
+            # group (the HD-Audio .1 function comes with it) — do not add it
+            # separately or Incus fails with "device is already attached".
+            _incus("config", "device", "add", name, f"gpu{i}", "gpu",
+                   "gputype=physical", f"pci={pci}")
+    else:
+        # gpu-ct profile bakes in a shared gpu0 device. Strip it on --gpus 0.
+        if gpus == 0:
+            _incus("config", "device", "remove", name, "gpu0", check=False)
+
     _incus("start", name)
 
-    # Register immediately, before SSH provisioning, so the VM is accounted
-    # for even if this command crashes — but mark it 'provisioning' until
-    # the launch fully completes, so an interrupted launch is recognisable.
+    # Register immediately, before SSH provisioning, so the instance is
+    # accounted for even if this command crashes — but mark it 'provisioning'
+    # until the launch fully completes, so an interrupted launch is
+    # recognisable.
     record = {
         "owner": owner,
         "gpus": gpus,
+        "type": instance_type,
         "host": socket.gethostname(),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "state": "provisioning",
     }
     _put_json(VMS_PREFIX + name, record)
 
-    timeout = GPU_VM_AGENT_TIMEOUT if gpus else 180
-    if gpus:
+    # Containers boot in seconds (no firmware enum); only GPU VMs need the
+    # extended timeout.
+    timeout = (GPU_VM_AGENT_TIMEOUT
+               if (instance_type == "vm" and gpus) else 180)
+    if instance_type == "vm" and gpus:
         print("Waiting for the VM to boot (GPU VMs are slow — the firmware "
               "enumerates the GPU BARs first), provisioning SSH...")
     else:
-        print("Waiting for the VM to boot, provisioning SSH...")
+        print(f"Waiting for the {instance_type} to boot, provisioning SSH...")
     _ensure_sshd(name, timeout)
     _inject_owner_keys(name, user["ssh_keys"], timeout)
     bastion_sync()
@@ -353,9 +418,11 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=VM_IMAGE):
     record["state"] = "ready"
     _put_json(VMS_PREFIX + name, record)
 
-    where = f"GPU(s): {', '.join(picked)}" if picked else "no GPU"
+    where = (f"GPU(s): {', '.join(picked)}" if picked
+             else ("shared GPU" if (instance_type == "container" and gpus)
+                   else "no GPU"))
     print(f"Launched '{name}' ({where})")
-    print(f"  ssh -J {BASTION_JUMP_USER}@<rathole-host>:2210 "
+    print(f"  ssh -J {BASTION_JUMP_USER}@<rathole-host>:<port> "
           f"{VM_GUEST_USER}@{name}")
 
 

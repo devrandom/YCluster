@@ -13,7 +13,7 @@
 # Requires the rathole server to expose the matching 'vm-bastion' service
 # (app/templates/rathole-server.toml.j2 — re-run app/install-rathole-server.yml).
 - name: Deploy the VM-access bastion container
-  hosts: nvidia
+  hosts: compute
   become: yes
   vars:
     vm_bastion_container: bastion
@@ -21,9 +21,10 @@
     vm_bastion_image: "images:ubuntu/24.04"
     etcd_endpoints: "10.0.0.11:2379,10.0.0.12:2379,10.0.0.13:2379"
   tasks:
-    - name: End play unless this node is an Incus VM host
+    - name: End play unless this node hosts Incus instances
       meta: end_host
-      when: not (incus_vm_host | default(false))
+      when: not (incus_vm_host | default(false)
+                 or incus_container_host | default(false))
 
     - name: Check rathole binary exists on the Ansible controller
       stat:
@@ -70,6 +71,22 @@
       retries: 30
       delay: 3
       until: bastion_ready.rc == 0
+      changed_when: false
+
+    # First-boot cloud-init holds the apt-lists lock for ~30 s. The setup
+    # script runs apt-get install, which will fail with "Could not get
+    # lock /var/lib/apt/lists/lock" if it races. cloud-init may not be
+    # installed in older base images, so poll for the lock directly.
+    - name: Wait for the bastion's apt lock to be free
+      shell: |
+        for _ in $(seq 1 150); do
+          incus exec {{ vm_bastion_container }} -- bash -c \
+            'pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null' \
+            || exit 0
+          sleep 4
+        done
+        echo "apt still locked after 600s" >&2
+        exit 1
       changed_when: false
 
     - name: Push rathole binary into the bastion

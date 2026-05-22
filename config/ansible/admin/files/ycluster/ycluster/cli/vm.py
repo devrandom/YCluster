@@ -8,17 +8,25 @@ def register_vm_commands(subparsers):
     p.set_defaults(func=lambda args: args.parser.print_help(), parser=p)
     sub = p.add_subparsers(dest='vm_command', help='vm commands')
 
-    lp = sub.add_parser('launch', help='Launch a GPU-passthrough VM')
+    lp = sub.add_parser('launch', help='Launch a GPU VM or container')
     lp.add_argument('name')
     lp.add_argument('--owner', required=True,
-                    help='Registered user who owns (and can SSH to) the VM')
+                    help='Registered user who owns (and can SSH to) the instance')
     lp.add_argument('--gpus', type=int, default=1,
-                    help='Number of GPUs to pass through (0 for a CPU-only VM)')
+                    help='VM: number of GPUs to pass through (0 = none). '
+                         'Container: 0 to detach the shared GPU, anything '
+                         '>0 keeps it (single shared GPU per host).')
     lp.add_argument('--cpu', type=int, default=8)
     lp.add_argument('--mem', default='32GiB')
-    lp.add_argument('--image', default=vm.VM_IMAGE)
+    lp.add_argument('--type', dest='instance_type',
+                    choices=['auto', 'vm', 'container'], default='auto',
+                    help="Instance type. 'auto' (default) picks per-host: "
+                         "vm on VM hosts (NVIDIA passthrough), container on "
+                         "container hosts (AMD shared GPU).")
+    lp.add_argument('--image', default=None,
+                    help='Override the default image for the chosen type.')
     lp.set_defaults(func=lambda a: vm.vm_launch(
-        a.name, a.owner, a.gpus, a.cpu, a.mem, a.image))
+        a.name, a.owner, a.gpus, a.cpu, a.mem, a.image, a.instance_type))
 
     lsp = sub.add_parser('list', help='List registered VMs')
     lsp.set_defaults(func=lambda a: vm.vm_list())
