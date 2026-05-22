@@ -250,6 +250,148 @@ groups:
           summary: "Held packages on {{ $labels.node }} not upgraded in over 30 days"
           description: "Run: cd /etc/ansible && ./run-playbook.sh storage/upgrade-held-packages.yml"
 
+  - name: ycluster-storage-disks
+    rules:
+      # ZFS pool not ONLINE (DEGRADED / FAULTED / UNAVAIL / ...)
+      - alert: ZfsPoolNotOnline
+        expr: ycluster_zpool_state != 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ZFS pool {{ $labels.pool }} on {{ $labels.node }} is {{ $labels.health }}"
+          description: "Pool {{ $labels.pool }} is in state {{ $labels.health }} — investigate with `zpool status {{ $labels.pool }}`"
+
+      # Any device-level read/write/cksum errors in a pool
+      - alert: ZfsPoolDeviceErrors
+        expr: ycluster_zpool_errors_total > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ZFS pool {{ $labels.pool }} has {{ $labels.type }} errors on {{ $labels.node }}"
+          description: "Pool {{ $labels.pool }} has accumulated {{ $value }} {{ $labels.type }} errors — check `zpool status -v {{ $labels.pool }}`"
+
+      # Pool-level data corruption
+      - alert: ZfsPoolDataErrors
+        expr: ycluster_zpool_data_errors > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ZFS pool {{ $labels.pool }} reports data errors on {{ $labels.node }}"
+          description: "Pool {{ $labels.pool }} has {{ $value }} data errors — run `zpool status -v {{ $labels.pool }}` and consider restoring affected files"
+
+      # Pool getting full
+      - alert: ZfsPoolHighCapacity
+        expr: ycluster_zpool_capacity_ratio > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ZFS pool {{ $labels.pool }} above 85% on {{ $labels.node }}"
+          description: "Pool {{ $labels.pool }} is at {{ $value | humanizePercentage }} — ZFS write performance degrades sharply above 80–90%"
+
+      - alert: ZfsPoolCriticalCapacity
+        expr: ycluster_zpool_capacity_ratio > 0.95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ZFS pool {{ $labels.pool }} above 95% on {{ $labels.node }}"
+          description: "Pool {{ $labels.pool }} is at {{ $value | humanizePercentage }} — free space or evict data immediately"
+
+      # Scrub age — RAIDZ1 with 14TB disks should scrub regularly to catch bit rot
+      - alert: ZfsScrubOverdue
+        expr: (time() - ycluster_zpool_last_scrub_timestamp_seconds) > 60 * 24 * 3600 and ycluster_zpool_last_scrub_timestamp_seconds > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "ZFS pool {{ $labels.pool }} has not been scrubbed in over 60 days"
+          description: "Last scrub on {{ $labels.pool }} ({{ $labels.node }}) was over 60 days ago — run `zpool scrub {{ $labels.pool }}`"
+
+      # Samba services on NAS nodes
+      - alert: SambaDown
+        expr: node_systemd_unit_state{name=~"smbd.service|nmbd.service",state="active"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Samba {{ $labels.name }} not running on {{ $labels.node }}"
+          description: "{{ $labels.name }} is not in active state on {{ $labels.node }} — clients cannot reach the share"
+
+      # SMART health failure — drive is reporting overall self-assessment failed
+      - alert: SmartDriveUnhealthy
+        expr: smartmon_device_smart_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SMART unhealthy: {{ $labels.disk }} on {{ $labels.node }}"
+          description: "Drive {{ $labels.disk }} on {{ $labels.node }} reports overall SMART health failure — replace the drive"
+
+      # Pending sectors — pending reallocation, often a precursor to drive failure
+      - alert: SmartPendingSectors
+        expr: smartmon_current_pending_sector_raw_value > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SMART pending sectors on {{ $labels.disk }} ({{ $labels.node }})"
+          description: "Drive {{ $labels.disk }} has {{ $value }} pending sectors — early warning of drive failure"
+
+      # Reallocated sectors — drive has already remapped bad sectors
+      - alert: SmartReallocatedSectors
+        expr: smartmon_reallocated_sector_ct_raw_value > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "SMART reallocated sectors on {{ $labels.disk }} ({{ $labels.node }})"
+          description: "Drive {{ $labels.disk }} has reallocated {{ $value }} sectors — monitor for further degradation"
+
+      # Offline-uncorrectable: data lost
+      - alert: SmartOfflineUncorrectable
+        expr: smartmon_offline_uncorrectable_raw_value > 0
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SMART offline uncorrectable on {{ $labels.disk }} ({{ $labels.node }})"
+          description: "Drive {{ $labels.disk }} reports {{ $value }} offline-uncorrectable sectors — replace the drive"
+
+      # Drive temperature high. Different vendors expose temp under different SMART
+      # attribute IDs (190 = airflow_temperature_cel, 194 = temperature_celsius);
+      # the `or` matches whichever the drive reports.
+      - alert: SmartDriveTemperatureHigh
+        expr: (smartmon_airflow_temperature_cel_raw_value > 55) or (smartmon_temperature_celsius_raw_value > 55)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Drive {{ $labels.disk }} hot ({{ $value }}°C) on {{ $labels.node }}"
+          description: "Drive {{ $labels.disk }} on {{ $labels.node }} has been above 55°C for 15 minutes"
+
+      - alert: SmartDriveTemperatureCritical
+        expr: (smartmon_airflow_temperature_cel_raw_value > 60) or (smartmon_temperature_celsius_raw_value > 60)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Drive {{ $labels.disk }} critically hot ({{ $value }}°C) on {{ $labels.node }}"
+          description: "Drive {{ $labels.disk }} on {{ $labels.node }} is above 60°C — risk of imminent failure"
+
+      # smartmon textfile collector stopped writing
+      - alert: SmartmonStale
+        expr: (time() - node_textfile_mtime_seconds{file="/var/lib/prometheus/node-exporter/smartmon.prom"}) > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "smartmon textfile collector stale on {{ $labels.node }}"
+          description: "smartmon.prom on {{ $labels.node }} has not been updated in over an hour — SMART metrics may be stale"
+
   - name: ycluster-external
     rules:
       # No uplink available (informational)

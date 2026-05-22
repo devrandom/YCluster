@@ -89,6 +89,62 @@
         - smbd
         - nmbd
 
+    - name: Install ZFS pool textfile exporter script
+      copy:
+        src: "{{ playbook_dir }}/../scripts/zfs-pool-exporter.py"
+        dest: /usr/local/bin/zfs-pool-exporter
+        mode: '0755'
+
+    - name: Install zfs-pool-exporter systemd unit
+      copy:
+        dest: /etc/systemd/system/zfs-pool-exporter.service
+        content: |
+          [Unit]
+          Description=Export ZFS pool health metrics for node-exporter textfile collector
+          After=zfs.target
+          Wants=zfs.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/zfs-pool-exporter
+          # The textfile dir is owned by prometheus:prometheus (mode 0755);
+          # root can write to it.
+          User=root
+        mode: '0644'
+      register: zpool_unit
+
+    - name: Install zfs-pool-exporter timer
+      copy:
+        dest: /etc/systemd/system/zfs-pool-exporter.timer
+        content: |
+          [Unit]
+          Description=Run ZFS pool exporter every minute
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec=1min
+          AccuracySec=10s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      register: zpool_timer
+
+    - name: Reload systemd if zfs-pool-exporter units changed
+      systemd:
+        daemon_reload: yes
+      when: zpool_unit.changed or zpool_timer.changed
+
+    - name: Enable and start zfs-pool-exporter timer
+      systemd:
+        name: zfs-pool-exporter.timer
+        enabled: yes
+        state: started
+
+    - name: Prime the exporter immediately
+      command: /usr/local/bin/zfs-pool-exporter
+      changed_when: false
+
   handlers:
     - name: restart smbd
       systemd:

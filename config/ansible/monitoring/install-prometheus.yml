@@ -20,6 +20,7 @@
         name:
           - prometheus
           - prometheus-node-exporter
+          - prometheus-node-exporter-collectors
           - prometheus-alertmanager
         state: present
 
@@ -39,6 +40,29 @@
         owner: prometheus
         group: prometheus
         mode: '0755'
+
+    # Ubuntu's prometheus-node-exporter-collectors ships a smartmon timer whose
+    # ConditionPathExistsGlob only matches /dev/sd* and /dev/hd* — NVMe-only
+    # hosts silently skip every fire. Add NVMe to the glob via a drop-in.
+    - name: Create smartmon timer drop-in directory
+      file:
+        path: /etc/systemd/system/prometheus-node-exporter-smartmon.timer.d
+        state: directory
+        mode: '0755'
+
+    - name: Enable smartmon timer for NVMe-only hosts
+      copy:
+        dest: /etc/systemd/system/prometheus-node-exporter-smartmon.timer.d/nvme.conf
+        content: |
+          [Unit]
+          ConditionPathExistsGlob=|/dev/nvme*
+        mode: '0644'
+      register: smartmon_dropin
+
+    - name: Reload systemd if smartmon drop-in changed
+      systemd:
+        daemon_reload: yes
+      when: smartmon_dropin.changed
 
     - name: Create Prometheus configuration directory
       file:
@@ -246,6 +270,7 @@
       loop:
         - prometheus
         - prometheus-node-exporter
+        - prometheus-node-exporter-smartmon.timer
         - prometheus-alertmanager
         - ntfy-webhook
         - update-blackbox-targets.timer
@@ -388,13 +413,14 @@
         state: restarted
 
 - name: Install node exporter on compute, nvidia and nas nodes
-  hosts: compute:nas
+  hosts: compute:nvidia:nas
   become: yes
   tasks:
     - name: Install node exporter
       apt:
         name:
           - prometheus-node-exporter
+          - prometheus-node-exporter-collectors
         state: present
 
     - name: Configure node exporter with textfile collector
@@ -413,11 +439,37 @@
         group: prometheus
         mode: '0755'
 
-    - name: Enable and start node exporter
+    # Ubuntu's prometheus-node-exporter-collectors ships a smartmon timer whose
+    # ConditionPathExistsGlob only matches /dev/sd* and /dev/hd* — NVMe-only
+    # hosts silently skip every fire. Add NVMe to the glob via a drop-in.
+    - name: Create smartmon timer drop-in directory
+      file:
+        path: /etc/systemd/system/prometheus-node-exporter-smartmon.timer.d
+        state: directory
+        mode: '0755'
+
+    - name: Enable smartmon timer for NVMe-only hosts
+      copy:
+        dest: /etc/systemd/system/prometheus-node-exporter-smartmon.timer.d/nvme.conf
+        content: |
+          [Unit]
+          ConditionPathExistsGlob=|/dev/nvme*
+        mode: '0644'
+      register: smartmon_dropin
+
+    - name: Reload systemd if smartmon drop-in changed
       systemd:
-        name: prometheus-node-exporter
+        daemon_reload: yes
+      when: smartmon_dropin.changed
+
+    - name: Enable and start node exporter and smartmon collector
+      systemd:
+        name: "{{ item }}"
         enabled: yes
         state: started
+      loop:
+        - prometheus-node-exporter
+        - prometheus-node-exporter-smartmon.timer
 
   handlers:
     - name: restart node exporter
