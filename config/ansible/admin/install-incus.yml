@@ -1,6 +1,11 @@
 ---
-- name: Configure Incus VM host on designated Nvidia nodes
-  hosts: nvidia
+# Configures Incus on a compute node. Two host modes, both gated by a
+# host_var:
+#   incus_vm_host: true       — full VM host with GPU passthrough (nv2/nv3)
+#   incus_container_host: true — LXC container host with shared GPU (c1/c2)
+# Nothing happens on hosts where neither is set.
+- name: Configure Incus on designated compute nodes
+  hosts: compute
   become: yes
   vars:
     # CUDA toolkit version baked into the GPU guest image (matches install-nvidia.yml)
@@ -44,24 +49,31 @@
     # incus_passthrough_gpu_pci. It is intentionally NOT defaulted here:
     # a play-level var would outrank host_vars and shadow it.
   tasks:
-    - name: End play unless this node is an Incus VM host
+    - name: End play unless this node hosts Incus instances
       meta: end_host
-      when: not (incus_vm_host | default(false))
+      when: not (incus_vm_host | default(false)
+                 or incus_container_host | default(false))
 
-    - name: Install Incus, QEMU (VM support) and jq
+    - name: Install Incus and jq (shared base)
       apt:
         name:
           - incus
-          # VM support — the incus package does not depend on QEMU
+          - jq
+        state: present
+        update_cache: yes
+      register: incus_pkgs
+
+    - name: Install QEMU and OVMF (VM hosts only)
+      apt:
+        name:
           - qemu-system-x86
           - ovmf
           # virtiofsd: without it, Incus disk shares to VMs fall back to 9p,
           # which is markedly slower for large sequential reads (model loads).
           - virtiofsd
-          - jq
         state: present
-        update_cache: yes
-      register: incus_pkgs
+      register: incus_vm_pkgs
+      when: incus_vm_host | default(false)
 
     # driverctl binds vfio-pci by device-id, which sweeps up every identically
     # modelled GPU (host ones included). GPU passthrough is handled by
@@ -82,7 +94,7 @@
       systemd:
         name: incus
         state: restarted
-      when: incus_pkgs.changed
+      when: incus_pkgs.changed or (incus_vm_pkgs.changed | default(false))
 
     - name: Remove conflicting lxd snap if present
       command: snap remove lxd
@@ -98,61 +110,69 @@
         groups: incus-admin
         append: yes
 
-    - name: Ensure vfio-pci is loaded at boot
-      copy:
-        dest: /etc/modules-load.d/vfio-pci.conf
-        content: "vfio-pci\n"
-        mode: '0644'
+    # ---- VM-host-only: NVIDIA GPU passthrough wiring -----------------------
+    # Container hosts (c1/c2 with AMD) keep amdgpu loaded normally; nothing
+    # below applies to them.
+    - name: GPU passthrough setup (NVIDIA VM hosts)
+      when: incus_vm_host | default(false)
+      block:
+        - name: Ensure vfio-pci is loaded at boot
+          copy:
+            dest: /etc/modules-load.d/vfio-pci.conf
+            content: "vfio-pci\n"
+            mode: '0644'
 
-    # Each GPU passes through with its HD-Audio function (.1) — they share an
-    # IOMMU group, so vfio requires the whole group bound.
-    - name: Compute all passthrough PCI functions (GPU + audio)
-      set_fact:
-        incus_passthrough_all: >-
-          {{ (incus_passthrough_gpu_pci | default([]))
-             + (incus_passthrough_gpu_pci | default([])
-                | map('regex_replace', '\.0$', '.1') | list) }}
+        # Each GPU passes through with its HD-Audio function (.1) — they
+        # share an IOMMU group, so vfio requires the whole group bound.
+        - name: Compute all passthrough PCI functions (GPU + audio)
+          set_fact:
+            incus_passthrough_all: >-
+              {{ (incus_passthrough_gpu_pci | default([]))
+                 + (incus_passthrough_gpu_pci | default([])
+                    | map('regex_replace', '\.0$', '.1') | list) }}
 
-    - name: Remove the old nvidia autoload blacklist
-      file:
-        path: /etc/modprobe.d/blacklist-nvidia-passthrough.conf
-        state: absent
+        - name: Remove the old nvidia autoload blacklist
+          file:
+            path: /etc/modprobe.d/blacklist-nvidia-passthrough.conf
+            state: absent
 
-    # 'blacklist' only stops modalias autoload; services such as
-    # nvidia-cdi-refresh still load nvidia explicitly. 'install ... /bin/false'
-    # blocks every load path. nvidia is then loaded deliberately, after the
-    # passthrough GPUs are bound to vfio-pci, with 'modprobe --ignore-install'.
-    - name: Defer nvidia loading until after vfio-pci binding
-      copy:
-        dest: /etc/modprobe.d/nvidia-deferred.conf
-        content: |
-          install nvidia /bin/false
-          install nvidia_modeset /bin/false
-          install nvidia_uvm /bin/false
-          install nvidia_drm /bin/false
-        mode: '0644'
+        # 'blacklist' only stops modalias autoload; services such as
+        # nvidia-cdi-refresh still load nvidia explicitly. 'install ... /bin/false'
+        # blocks every load path. nvidia is then loaded deliberately, after
+        # the passthrough GPUs are bound to vfio-pci, with
+        # 'modprobe --ignore-install'.
+        - name: Defer nvidia loading until after vfio-pci binding
+          copy:
+            dest: /etc/modprobe.d/nvidia-deferred.conf
+            content: |
+              install nvidia /bin/false
+              install nvidia_modeset /bin/false
+              install nvidia_uvm /bin/false
+              install nvidia_drm /bin/false
+            mode: '0644'
 
-    - name: Install the GPU-passthrough bind script
-      template:
-        src: gpu-passthrough-bind.sh.j2
-        dest: /usr/local/sbin/gpu-passthrough-bind
-        mode: '0755'
+        - name: Install the GPU-passthrough bind script
+          template:
+            src: gpu-passthrough-bind.sh.j2
+            dest: /usr/local/sbin/gpu-passthrough-bind
+            mode: '0755'
 
-    - name: Install the GPU-passthrough systemd service
-      template:
-        src: gpu-passthrough.service.j2
-        dest: /etc/systemd/system/gpu-passthrough.service
-        mode: '0644'
-      register: gpu_passthrough_unit
+        - name: Install the GPU-passthrough systemd service
+          template:
+            src: gpu-passthrough.service.j2
+            dest: /etc/systemd/system/gpu-passthrough.service
+            mode: '0644'
+          register: gpu_passthrough_unit
 
-    # Enabled only — never started here. The script must run at boot, while
-    # nvidia is still blocked; running it live on a host where nvidia already
-    # holds a passthrough GPU would attempt a rebind that hangs in-kernel.
-    - name: Enable the GPU-passthrough service
-      systemd:
-        name: gpu-passthrough.service
-        enabled: yes
-        daemon_reload: "{{ gpu_passthrough_unit.changed }}"
+        # Enabled only — never started here. The script must run at boot,
+        # while nvidia is still blocked; running it live on a host where
+        # nvidia already holds a passthrough GPU would attempt a rebind that
+        # hangs in-kernel.
+        - name: Enable the GPU-passthrough service
+          systemd:
+            name: gpu-passthrough.service
+            enabled: yes
+            daemon_reload: "{{ gpu_passthrough_unit.changed }}"
 
     - name: Check whether Incus storage pool exists
       command: "incus storage show {{ incus_storage_pool }}"
@@ -198,21 +218,39 @@
         "$(printf '%s\n' no-resolv {{ incus_vm_dns_servers | map('regex_replace', '^', 'server=') | join(' ') }})"
       changed_when: false
 
-    - name: Check whether gpu-vm profile exists
-      command: incus profile show gpu-vm
-      register: gpuvm_profile_check
-      changed_when: false
-      failed_when: false
+    - name: Configure gpu-vm profile (VM hosts only)
+      when: incus_vm_host | default(false)
+      block:
+        - name: Check whether gpu-vm profile exists
+          command: incus profile show gpu-vm
+          register: gpuvm_profile_check
+          changed_when: false
+          failed_when: false
+        - name: Create gpu-vm profile
+          command: incus profile create gpu-vm
+          when: gpuvm_profile_check.rc != 0
+        - name: Apply gpu-vm profile configuration
+          shell: incus profile edit gpu-vm
+          args:
+            stdin: "{{ lookup('template', 'incus-gpu-vm-profile.yml.j2') }}"
+          changed_when: false
 
-    - name: Create gpu-vm profile
-      command: incus profile create gpu-vm
-      when: gpuvm_profile_check.rc != 0
-
-    - name: Apply gpu-vm profile configuration
-      shell: incus profile edit gpu-vm
-      args:
-        stdin: "{{ lookup('template', 'incus-gpu-vm-profile.yml.j2') }}"
-      changed_when: false
+    - name: Configure gpu-ct profile (container hosts only)
+      when: incus_container_host | default(false)
+      block:
+        - name: Check whether gpu-ct profile exists
+          command: incus profile show gpu-ct
+          register: gpuct_profile_check
+          changed_when: false
+          failed_when: false
+        - name: Create gpu-ct profile
+          command: incus profile create gpu-ct
+          when: gpuct_profile_check.rc != 0
+        - name: Apply gpu-ct profile configuration
+          shell: incus profile edit gpu-ct
+          args:
+            stdin: "{{ lookup('template', 'incus-gpu-ct-profile.yml.j2') }}"
+          changed_when: false
 
     # `ycluster vm` (the VM management CLI) runs on this host and needs to
     # reach the cluster etcd; non-core nodes have no local etcd, so point
@@ -224,21 +262,40 @@
         regexp: '^ETCD_HOSTS='
         line: "ETCD_HOSTS={{ etcd_endpoints }}"
 
-    - name: Install incus-build-gpu-image helper
-      template:
-        src: incus-build-gpu-image.sh.j2
-        dest: /usr/local/bin/incus-build-gpu-image
+    - name: Ensure /etc/ycluster directory exists
+      file:
+        path: /etc/ycluster
+        state: directory
         mode: '0755'
-        owner: root
-        group: root
 
-    - name: Install incus-build-vllm-image helper
-      template:
-        src: incus-build-vllm-image.sh.j2
-        dest: /usr/local/bin/incus-build-vllm-image
-        mode: '0755'
-        owner: root
-        group: root
+    # ycluster's `vm launch` reads this to pick the default instance type
+    # for the current host (vm on nv2/nv3, container on c1/c2). Override
+    # at the CLI with `--type vm` or `--type container`.
+    - name: Write ycluster host config
+      copy:
+        dest: /etc/ycluster/host.yml
+        mode: '0644'
+        content: |
+          # Generated by admin/install-incus.yml — do not edit by hand.
+          default_instance_type: {{ 'vm' if (incus_vm_host | default(false)) else 'container' }}
+
+    - name: Install incus image-build helpers (VM hosts only)
+      when: incus_vm_host | default(false)
+      block:
+        - name: Install incus-build-gpu-image helper
+          template:
+            src: incus-build-gpu-image.sh.j2
+            dest: /usr/local/bin/incus-build-gpu-image
+            mode: '0755'
+            owner: root
+            group: root
+        - name: Install incus-build-vllm-image helper
+          template:
+            src: incus-build-vllm-image.sh.j2
+            dest: /usr/local/bin/incus-build-vllm-image
+            mode: '0755'
+            owner: root
+            group: root
 
     # Build the two VM images if they are missing. The 'build-images' tag
     # lets you target just this section (`--tags build-images`); the
@@ -253,30 +310,27 @@
     # run the scripts by hand the first time:
     #   ssh nv3.yc sudo incus-build-gpu-image
     #   ssh nv3.yc sudo incus-build-vllm-image
-    - name: Check whether ubuntu-cuda image exists
-      shell: incus image alias list --format csv | grep -q '^ubuntu-cuda,'
-      register: gpu_image_check
-      changed_when: false
-      failed_when: false
+    - name: Build NVIDIA VM images if missing (VM hosts only)
+      when: incus_vm_host | default(false)
       tags: build-images
-
-    - name: Build ubuntu-cuda image (cloud image + NVIDIA driver + CUDA)
-      command: >-
-        /usr/local/bin/incus-build-gpu-image
-        {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
-      when: gpu_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
-      tags: build-images
-
-    - name: Check whether ubuntu-cuda-vllm image exists
-      shell: incus image alias list --format csv | grep -q '^ubuntu-cuda-vllm,'
-      register: vllm_image_check
-      changed_when: false
-      failed_when: false
-      tags: build-images
-
-    - name: Build ubuntu-cuda-vllm image (vLLM + FlashInfer AOT cache, ~45 min)
-      command: >-
-        /usr/local/bin/incus-build-vllm-image
-        {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
-      when: vllm_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
-      tags: build-images
+      block:
+        - name: Check whether ubuntu-cuda image exists
+          shell: incus image alias list --format csv | grep -q '^ubuntu-cuda,'
+          register: gpu_image_check
+          changed_when: false
+          failed_when: false
+        - name: Build ubuntu-cuda image (cloud image + NVIDIA driver + CUDA)
+          command: >-
+            /usr/local/bin/incus-build-gpu-image
+            {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
+          when: gpu_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
+        - name: Check whether ubuntu-cuda-vllm image exists
+          shell: incus image alias list --format csv | grep -q '^ubuntu-cuda-vllm,'
+          register: vllm_image_check
+          changed_when: false
+          failed_when: false
+        - name: Build ubuntu-cuda-vllm image (vLLM + FlashInfer AOT cache, ~45 min)
+          command: >-
+            /usr/local/bin/incus-build-vllm-image
+            {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
+          when: vllm_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)

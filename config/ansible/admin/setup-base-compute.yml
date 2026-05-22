@@ -55,11 +55,12 @@
     # resolver. Non-core nodes never hold the VIP, so for them the flag is
     # functionally a no-op (inherited for symmetry).
     #
-    # On Incus VM hosts, the 'incus' package drops in /etc/dnsmasq.d/incus
-    # with 'bind-interfaces' + 'except-interface=incusbr0' so the host
-    # dnsmasq does not fight the Incus-internal dnsmasq on incusbr0.
-    # dnsmasq refuses to combine bind-interfaces with bind-dynamic, so on
-    # those hosts we drop bind-dynamic and let the Incus drop-in win.
+    # On any Incus host (VM or container), the 'incus' package drops in
+    # /etc/dnsmasq.d/incus with 'bind-interfaces' + 'except-interface=incusbr0'
+    # so the host dnsmasq does not fight the Incus-internal dnsmasq on
+    # incusbr0. dnsmasq refuses to combine bind-interfaces with
+    # bind-dynamic, so on those hosts we drop bind-dynamic and let the
+    # Incus drop-in win.
     - name: Create dnsmasq configuration (DNS only)
       copy:
         dest: /etc/dnsmasq.d/dns.conf
@@ -71,7 +72,8 @@
           domain=xc
           domain-needed
 
-          {% if not (incus_vm_host | default(false)) %}
+          {% if not (incus_vm_host | default(false)
+                     or incus_container_host | default(false)) %}
           # Dynamic binding for VIP support
           bind-dynamic
           {% else %}

@@ -1,0 +1,29 @@
+name: gpu-ct
+description: GPU-sharing LXC container (host kernel, /dev/kfd + /dev/dri)
+config:
+  limits.cpu: "8"
+  limits.memory: 32GiB
+devices:
+  eth0:
+    type: nic
+    network: {{ incus_bridge }}
+    name: eth0
+    # Isolation ACL is applied at the network level (see install-incus.yml).
+  root:
+    type: disk
+    path: /
+    pool: {{ incus_storage_pool }}
+    size: 40GiB
+  # All containers attached to this profile share the host's single GPU.
+  # 'gputype=physical' on a container bind-mounts only the DRM nodes
+  # (/dev/dri/cardN, /dev/dri/renderDN). ROCm compute also needs the
+  # /dev/kfd char device, which incus does not include — attach it as a
+  # plain unix-char device. No vfio, no driver rebind, no VRAM quota.
+  gpu0:
+    type: gpu
+    gputype: physical
+  kfd:
+    type: unix-char
+    source: /dev/kfd
+    path: /dev/kfd
+---
