@@ -16,48 +16,56 @@
       meta: end_host
       when: not (ansible_local.gpu.has_amd_gpu | default(false))
 
-    # Kernel pinning: use a known-good kernel for amdgpu DKMS
-    - name: Remove HWE kernel meta-package (prevents incompatible kernel upgrades)
-      apt:
-        name:
-          - linux-image-generic-hwe-24.04
-          - linux-headers-generic-hwe-24.04
-        state: absent
-      register: hwe_removed
+    # Kernel pinning: use a known-good kernel for amdgpu DKMS.
+    # Gated behind the 'kernel-pin' tag (and 'never' so it doesn't run by
+    # default) because purging the running kernel on a remote host is a
+    # bricking risk if the pinned kernel lacks NIC drivers or panics.
+    # Run with `--tags kernel-pin` during a maintenance window with
+    # console/IPMI access.
+    - name: Pin kernel to known-good amdgpu DKMS version
+      tags: ['kernel-pin', 'never']
+      block:
+        - name: Remove HWE kernel meta-package (prevents incompatible kernel upgrades)
+          apt:
+            name:
+              - linux-image-generic-hwe-24.04
+              - linux-headers-generic-hwe-24.04
+            state: absent
+          register: hwe_removed
 
-    - name: Install pinned kernel
-      apt:
-        name:
-          - "linux-image-{{ rocm_kernel_version }}"
-          - "linux-headers-{{ rocm_kernel_version }}"
-          # modules-extra carries the less-common NIC drivers (e.g. r8169
-          # for RTL8125). Without it the box boots with no Ethernet.
-          - "linux-modules-extra-{{ rocm_kernel_version }}"
-        state: present
-        update_cache: yes
+        - name: Install pinned kernel
+          apt:
+            name:
+              - "linux-image-{{ rocm_kernel_version }}"
+              - "linux-headers-{{ rocm_kernel_version }}"
+              # modules-extra carries the less-common NIC drivers (e.g. r8169
+              # for RTL8125). Without it the box boots with no Ethernet.
+              - "linux-modules-extra-{{ rocm_kernel_version }}"
+            state: present
+            update_cache: yes
 
-    - name: Find incompatible kernels to remove
-      shell: >
-        dpkg -l linux-image-*-generic linux-headers-*-generic 2>/dev/null |
-        awk '/^ii/{print $2}' |
-        grep -v '{{ rocm_kernel_version }}' |
-        grep -v '6.8.0' |
-        grep -v linux-image-generic |
-        tr '\n' ' '
-      register: incompatible_kernels
-      changed_when: false
+        - name: Find incompatible kernels to remove
+          shell: >
+            dpkg -l linux-image-*-generic linux-headers-*-generic 2>/dev/null |
+            awk '/^ii/{print $2}' |
+            grep -v '{{ rocm_kernel_version }}' |
+            grep -v '6.8.0' |
+            grep -v linux-image-generic |
+            tr '\n' ' '
+          register: incompatible_kernels
+          changed_when: false
 
-    - name: Remove incompatible kernels (keep pinned and GA)
-      apt:
-        name: "{{ incompatible_kernels.stdout.split() }}"
-        state: absent
-        purge: yes
-      when: incompatible_kernels.stdout.strip() != ""
-      register: kernels_removed
+        - name: Remove incompatible kernels (keep pinned and GA)
+          apt:
+            name: "{{ incompatible_kernels.stdout.split() }}"
+            state: absent
+            purge: yes
+          when: incompatible_kernels.stdout.strip() != ""
+          register: kernels_removed
 
-    - name: Update GRUB
-      command: update-grub
-      when: kernels_removed is changed
+        - name: Update GRUB
+          command: update-grub
+          when: kernels_removed is changed
 
     - name: Install prerequisites
       apt:
