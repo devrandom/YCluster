@@ -82,6 +82,11 @@
           {% endif %}
           # DNS only, no DHCP
           port=53
+          # Only answer queries from clients on a directly-attached subnet.
+          # Matters on nodes with public-routable interfaces (e.g. c3's
+          # public IPv6) so we don't run an open recursive resolver. No-op
+          # on LAN-only nodes.
+          local-service
       notify: restart dnsmasq
 
     - name: Enable and start dnsmasq service

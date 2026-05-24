@@ -19,7 +19,16 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+if ! GPU_INDEXES=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); then
+    echo "nvidia-smi unavailable; no host-visible GPUs (all passed through?). Nothing to do."
+    exit 0
+fi
+
+GPU_COUNT=$(printf '%s\n' "$GPU_INDEXES" | grep -c .)
+if [[ "$GPU_COUNT" -eq 0 ]]; then
+    echo "No host-visible NVIDIA GPUs (all passed through?). Nothing to do."
+    exit 0
+fi
 
 echo "Setting power limit to ${LIMIT}W on ${GPU_COUNT} GPU(s)..."
 for i in $(seq 0 $((GPU_COUNT - 1))); do
