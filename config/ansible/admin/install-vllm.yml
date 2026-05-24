@@ -3,9 +3,13 @@
   hosts: nvidia
   become: yes
   tasks:
-    - name: End play for nodes without NVIDIA GPU
+    # Skip hosts with no host-usable NVIDIA GPU — either no NVIDIA hardware
+    # at all, or every NVIDIA card is bound to vfio-pci for guest passthrough
+    # (nv3 case). vLLM's import path initialises CUDA and fails when no GPU
+    # is visible to the host driver.
+    - name: End play for nodes with no host-visible NVIDIA GPU
       meta: end_host
-      when: not (ansible_local.gpu.has_nvidia_gpu | default(false))
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
 
     - name: Install vLLM as a uv tool (0.20.x)
       command: /snap/bin/uv tool install --upgrade 'vllm>=0.20,<0.21'
