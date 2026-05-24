@@ -28,6 +28,20 @@ SERVER_IP = '10.0.1.1'
 WG_INTERFACE = 'wg0'
 WG_CONF_PATH = '/etc/wireguard/wg0.conf'
 
+# When True, mutating operations (etcd writes/deletes, conf writes, wg-quick,
+# wg syncconf) are logged but skipped. Read-only operations are unaffected.
+# Set via set_dry_run() from the CLI's --dry-run flag.
+DRY_RUN = False
+
+
+def set_dry_run(enabled):
+    global DRY_RUN
+    DRY_RUN = bool(enabled)
+
+
+def _log_dry(msg):
+    print(f"[dry-run] {msg}")
+
 
 def _run(cmd, input=None, check=True, capture=True):
     return subprocess.run(
@@ -81,7 +95,10 @@ def init_server(endpoints, port=None, rotate=False):
     existing['port'] = port or existing.get('port') or DEFAULT_PORT
     existing['endpoints'] = normalized
     existing['server_ip'] = SERVER_IP
-    client.put(SERVER_KEY, json.dumps(existing))
+    if DRY_RUN:
+        _log_dry(f"etcd put {SERVER_KEY}")
+    else:
+        client.put(SERVER_KEY, json.dumps(existing))
     return existing
 
 
@@ -139,7 +156,10 @@ def register_peer(hostname, pubkey):
         'created_at': datetime.now(UTC).isoformat(),
         'approved_at': None,
     }
-    client.put(f"{PEER_PREFIX}{hostname}", json.dumps(record))
+    if DRY_RUN:
+        _log_dry(f"etcd put {PEER_PREFIX}{hostname} (register pending)")
+    else:
+        client.put(f"{PEER_PREFIX}{hostname}", json.dumps(record))
     return record
 
 
@@ -153,7 +173,10 @@ def set_peer_status(hostname, status):
     peer['status'] = status
     if status == 'approved':
         peer['approved_at'] = datetime.now(UTC).isoformat()
-    client.put(f"{PEER_PREFIX}{hostname}", json.dumps(peer))
+    if DRY_RUN:
+        _log_dry(f"etcd put {PEER_PREFIX}{hostname} (status={status})")
+    else:
+        client.put(f"{PEER_PREFIX}{hostname}", json.dumps(peer))
     return peer
 
 
@@ -177,10 +200,16 @@ def delete_peer(hostname):
         except Exception:
             mac = None
 
-    client.delete(f"{PEER_PREFIX}{hostname}")
-    client.delete(f"{NODE_PREFIX}{hostname}")
-    if mac:
-        client.delete(f"/cluster/nodes/by-mac/{mac}")
+    if DRY_RUN:
+        _log_dry(f"etcd delete {PEER_PREFIX}{hostname}")
+        _log_dry(f"etcd delete {NODE_PREFIX}{hostname}")
+        if mac:
+            _log_dry(f"etcd delete /cluster/nodes/by-mac/{mac}")
+    else:
+        client.delete(f"{PEER_PREFIX}{hostname}")
+        client.delete(f"{NODE_PREFIX}{hostname}")
+        if mac:
+            client.delete(f"/cluster/nodes/by-mac/{mac}")
 
 
 def render_server_config():
@@ -246,6 +275,41 @@ def _wg_interface_exists():
     return r.returncode == 0
 
 
+def _local_wg_pubkey():
+    """Return the pubkey derived from the existing wg0.conf, or None."""
+    import os
+    if not os.path.exists(WG_CONF_PATH):
+        return None
+    try:
+        with open(WG_CONF_PATH) as f:
+            for line in f:
+                if line.strip().startswith('PrivateKey'):
+                    _, _, priv = line.partition('=')
+                    priv = priv.strip()
+                    if priv:
+                        return _run(['wg', 'pubkey'], input=priv).stdout.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _assert_local_is_server(server):
+    """Refuse to write server config on a host that isn't the wg server.
+
+    Without this guard, running `ycluster wg approve` on a remote client
+    (which has etcd reachability over wg) would render the server config
+    onto that client, overwriting its client wg0.conf and leaking the
+    server's privkey.
+    """
+    local_pub = _local_wg_pubkey()
+    if local_pub is not None and local_pub != server['pubkey']:
+        raise RuntimeError(
+            f"refusing to reconcile: local wg0 pubkey {local_pub} does not "
+            f"match server pubkey {server['pubkey']} in etcd. This host is "
+            f"not the wg server — run reconcile on a core node instead."
+        )
+
+
 def reconcile(up=False, down=False):
     """Apply server config to the live wg0 interface.
 
@@ -259,24 +323,42 @@ def reconcile(up=False, down=False):
         print("wg-quick not installed on this host; skipping reconcile")
         return
 
+    server = get_server()
+    if not server:
+        raise RuntimeError("wg server not initialized — run 'ycluster wg init <endpoint>'")
+    _assert_local_is_server(server)
+
     if down:
         if _wg_interface_exists():
-            _run(['wg-quick', 'down', WG_INTERFACE])
-            print("wg0 down")
+            if DRY_RUN:
+                _log_dry(f"wg-quick down {WG_INTERFACE}")
+            else:
+                _run(['wg-quick', 'down', WG_INTERFACE])
+                print("wg0 down")
         return
 
     config = render_server_config()
     import os, tempfile
-    os.makedirs('/etc/wireguard', mode=0o700, exist_ok=True)
-    with open(WG_CONF_PATH, 'w') as f:
-        f.write(config)
-    os.chmod(WG_CONF_PATH, 0o600)
+    if DRY_RUN:
+        _log_dry(f"write {WG_CONF_PATH} ({len(config)} bytes)")
+    else:
+        os.makedirs('/etc/wireguard', mode=0o700, exist_ok=True)
+        with open(WG_CONF_PATH, 'w') as f:
+            f.write(config)
+        os.chmod(WG_CONF_PATH, 0o600)
 
     exists = _wg_interface_exists()
     if not exists:
         if up:
-            _run(['wg-quick', 'up', WG_INTERFACE])
-            print("wg0 up")
+            if DRY_RUN:
+                _log_dry(f"wg-quick up {WG_INTERFACE}")
+            else:
+                _run(['wg-quick', 'up', WG_INTERFACE])
+                print("wg0 up")
+        return
+
+    if DRY_RUN:
+        _log_dry(f"wg syncconf {WG_INTERFACE} (from rendered server config)")
         return
 
     stripped = _run(['wg-quick', 'strip', WG_INTERFACE]).stdout
