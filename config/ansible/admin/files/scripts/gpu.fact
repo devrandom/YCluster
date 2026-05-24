@@ -14,9 +14,24 @@ if lspci -n 2>/dev/null | grep -qE "^[0-9a-f:.]+\s+(0300|0302|0380):\s+10de:"; t
     has_nvidia_gpu=true
 fi
 
+# Count NVIDIA GPUs that are *currently usable by the host* — i.e. not
+# bound to vfio-pci. On hosts where all NVIDIA cards are passed through
+# to guests this is 0, and tasks like vLLM install / nvidia-smi-based
+# tuning should be skipped.
+nvidia_host_gpu_count=0
+if [ "$has_nvidia_gpu" = "true" ]; then
+    for slot in $(lspci -Dn 2>/dev/null | awk '/^[0-9a-f:.]+ (0300|0302|0380): 10de:/{print $1}'); do
+        driver=$(basename "$(readlink "/sys/bus/pci/devices/$slot/driver" 2>/dev/null)" 2>/dev/null)
+        if [ -n "$driver" ] && [ "$driver" != vfio-pci ]; then
+            nvidia_host_gpu_count=$((nvidia_host_gpu_count + 1))
+        fi
+    done
+fi
+
 cat <<EOF
 {
     "has_amd_gpu": $has_amd_gpu,
-    "has_nvidia_gpu": $has_nvidia_gpu
+    "has_nvidia_gpu": $has_nvidia_gpu,
+    "nvidia_host_gpu_count": $nvidia_host_gpu_count
 }
 EOF

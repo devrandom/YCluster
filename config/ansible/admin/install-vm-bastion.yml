@@ -89,10 +89,21 @@
         exit 1
       changed_when: false
 
-    - name: Push rathole binary into the bastion
+    # Push to a staging path and atomic-rename: overwriting a running
+    # binary with `incus file push` (open O_TRUNC) fails with ETXTBSY,
+    # but rename(2) over a running executable is fine — the kernel keeps
+    # the old inode alive for the running process and links the new one
+    # in place. The setup script restarts rathole afterwards.
+    - name: Push rathole binary into the bastion (staging path)
       command: >
         incus file push /usr/local/bin/rathole
-        {{ vm_bastion_container }}/usr/local/bin/rathole --mode 0755
+        {{ vm_bastion_container }}/usr/local/bin/rathole.new --mode 0755
+      changed_when: false
+
+    - name: Atomically replace rathole binary inside the bastion
+      command: >
+        incus exec {{ vm_bastion_container }} --
+        mv /usr/local/bin/rathole.new /usr/local/bin/rathole
       changed_when: false
 
     - name: Render the bastion setup script
