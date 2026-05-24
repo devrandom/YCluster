@@ -28,25 +28,32 @@
         state: present
         update_cache: yes
 
-    - name: Download CUDA keyring package
+    - name: Ensure /var/cache/ycluster exists
+      file:
+        path: /var/cache/ycluster
+        state: directory
+        mode: '0755'
+
+    # Keep the keyring deb cached in a persistent path; acts as a sentinel
+    # that the CUDA repo is already wired up. Re-runs skip the download and
+    # the apt-cache refresh unless the keyring actually changed.
+    - name: Cache the CUDA keyring deb
       get_url:
         url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-        dest: /tmp/cuda-keyring_1.1-1_all.deb
+        dest: /var/cache/ycluster/cuda-keyring_1.1-1_all.deb
         mode: '0644'
+      register: cuda_keyring_dl
 
     - name: Install CUDA keyring package
       apt:
-        deb: /tmp/cuda-keyring_1.1-1_all.deb
+        deb: /var/cache/ycluster/cuda-keyring_1.1-1_all.deb
         state: present
-
-    - name: Clean up keyring deb
-      file:
-        path: /tmp/cuda-keyring_1.1-1_all.deb
-        state: absent
+      register: cuda_keyring_install
 
     - name: Update apt cache after adding CUDA repo
       apt:
         update_cache: yes
+      when: cuda_keyring_install is changed
 
     - name: Install CUDA toolkit
       apt:

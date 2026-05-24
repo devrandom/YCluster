@@ -111,12 +111,14 @@
         repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/{{ rocm_version }} noble main"
         state: present
         filename: rocm
+      register: rocm_repo_added
 
     - name: Add amdgpu repository
       apt_repository:
         repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/amdgpu/{{ rocm_version }}/ubuntu noble main"
         state: present
         filename: amdgpu
+      register: amdgpu_repo_added
 
     - name: Set ROCm package pinning preference
       copy:
@@ -126,10 +128,12 @@
           Pin: release o=repo.radeon.com
           Pin-Priority: 600
         mode: '0644'
+      register: rocm_pin_set
 
     - name: Update apt cache after adding ROCm repos
       apt:
         update_cache: yes
+      when: rocm_repo_added is changed or amdgpu_repo_added is changed or rocm_pin_set is changed
 
     - name: Install amdgpu-dkms driver
       apt:

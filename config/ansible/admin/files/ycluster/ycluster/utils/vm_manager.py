@@ -125,6 +125,22 @@ def _push_file(inst, path, content, owner, mode="0600"):
     _incus("exec", inst, "--", "chmod", "700", directory)
 
 
+def _read_file(inst, path):
+    """Return the contents of `path` inside `inst`, or None if absent.
+
+    Used by callers that want to compare against intended content before
+    pushing, so that no-op re-syncs don't trigger spurious changes (or
+    file-mtime churn that downstream watchers care about).
+    """
+    r = subprocess.run(
+        ["incus", "file", "pull", f"{inst}{path}", "-"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
 # --------------------------------------------------------------------------
 # GPU pool (discovered: GPUs bound to vfio-pci are available for passthrough)
 # --------------------------------------------------------------------------
@@ -580,10 +596,13 @@ def bastion_sync():
               f"sync. Run admin/install-vm-bastion.yml first.", file=sys.stderr)
         return
     content = _bastion_authorized_keys()
-    _push_file(BASTION_CONTAINER,
-               f"/home/{BASTION_JUMP_USER}/.ssh/authorized_keys",
-               content, BASTION_JUMP_USER)
+    keys_path = f"/home/{BASTION_JUMP_USER}/.ssh/authorized_keys"
+    existing = _read_file(BASTION_CONTAINER, keys_path)
     n = sum(1 for line in content.splitlines() if not line.startswith("#"))
+    if existing == content:
+        print(f"Bastion sync: no changes ({n} key line(s) already in place).")
+        return
+    _push_file(BASTION_CONTAINER, keys_path, content, BASTION_JUMP_USER)
     print(f"Bastion synced: {n} authorized key line(s).")
 
 

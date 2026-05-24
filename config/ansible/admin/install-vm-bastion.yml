@@ -89,6 +89,28 @@
         exit 1
       changed_when: false
 
+    # Skip the push entirely when the binary content already matches.
+    # Without this, every run swaps the rathole inode (atomic-rename)
+    # and the setup script's restart-on-replace logic would bounce
+    # rathole every site.yml run.
+    - name: Hash the rathole binary on the host
+      stat:
+        path: /usr/local/bin/rathole
+        checksum_algorithm: sha256
+      register: rathole_host_stat
+
+    - name: Hash the rathole binary inside the bastion
+      command: incus exec {{ vm_bastion_container }} -- sha256sum /usr/local/bin/rathole
+      register: rathole_bastion_sum
+      changed_when: false
+      failed_when: false
+
+    - name: Decide whether the rathole binary needs replacing
+      set_fact:
+        rathole_binary_needs_push: >-
+          {{ rathole_bastion_sum.rc != 0
+             or rathole_host_stat.stat.checksum != (rathole_bastion_sum.stdout.split() | first) }}
+
     # Push to a staging path and atomic-rename: overwriting a running
     # binary with `incus file push` (open O_TRUNC) fails with ETXTBSY,
     # but rename(2) over a running executable is fine — the kernel keeps
@@ -98,53 +120,78 @@
       command: >
         incus file push /usr/local/bin/rathole
         {{ vm_bastion_container }}/usr/local/bin/rathole.new --mode 0755
+      when: rathole_binary_needs_push
       changed_when: false
 
     - name: Atomically replace rathole binary inside the bastion
       command: >
         incus exec {{ vm_bastion_container }} --
         mv /usr/local/bin/rathole.new /usr/local/bin/rathole
+      when: rathole_binary_needs_push
       changed_when: false
+
+    # The mv above swaps the on-disk inode; the running rathole keeps the
+    # old inode open until restarted. Bounce it explicitly here rather
+    # than having the setup script chase inodes inside the container.
+    - name: Restart rathole after binary replacement
+      command: >
+        incus exec {{ vm_bastion_container }} --
+        systemctl restart rathole-bastion.service
+      when: rathole_binary_needs_push
+      changed_when: rathole_binary_needs_push
 
     - name: Render the bastion setup script
       set_fact:
         bastion_setup_script: "{{ lookup('template', 'bastion-setup.sh.j2') }}"
       no_log: true
 
+    # The staged script (mode 0700) contains the rathole token, so its
+    # *file* mode is the sensitive bit; the parent dir is fine at 0755
+    # (matches install-nvidia.yml so the two plays don't flip-flop it).
+    - name: Ensure /var/cache/ycluster exists for the staged script
+      file:
+        path: /var/cache/ycluster
+        state: directory
+        mode: '0755'
+
+    # Persist the rendered script across runs so `copy:`'s checksum check
+    # can recognise no-change re-runs as no-ops. (Previously this was
+    # staged into /tmp and deleted after exec, which guaranteed a fresh
+    # "changed" report every time.)
     - name: Stage the bastion setup script on the host
       copy:
         content: "{{ bastion_setup_script }}"
-        dest: /tmp/bastion-setup.sh
+        dest: /var/cache/ycluster/bastion-setup.sh
         mode: '0700'
       no_log: true
+      register: bastion_setup_stage
 
     - name: Push the setup script into the bastion
       command: >
-        incus file push /tmp/bastion-setup.sh
+        incus file push /var/cache/ycluster/bastion-setup.sh
         {{ vm_bastion_container }}/root/bastion-setup.sh --mode 0700
+      when: bastion_setup_stage is changed
       changed_when: false
 
+    # Always exec — the script also detects atomic-replaced /usr/local/bin/rathole
+    # (inode diff vs the running rathole process) and restarts on its own.
+    # With the rewritten template, "Bastion configured" is printed only when
+    # the script actually mutated something or restarted a service; on a
+    # genuine no-op it prints "Bastion: no changes." and we report ok.
     - name: Run the bastion setup script
       command: "incus exec {{ vm_bastion_container }} -- bash /root/bastion-setup.sh"
       register: bastion_setup_run
       changed_when: "'Bastion configured' in bastion_setup_run.stdout"
 
-    - name: Clean up staged setup scripts (host and container)
-      block:
-        - name: Remove staged script on the host
-          file:
-            path: /tmp/bastion-setup.sh
-            state: absent
-        - name: Remove staged script in the bastion
-          command: "incus exec {{ vm_bastion_container }} -- rm -f /root/bastion-setup.sh"
-          changed_when: false
-
+    # bastion-sync now skips the incus push when the rendered key list
+    # matches what is already in the container, and prints "no changes"
+    # in that case. changed_when distinguishes the two paths.
     - name: Populate the bastion access list from the etcd registries
       command: ycluster vm bastion-sync
       environment:
         ETCD_HOSTS: "{{ etcd_endpoints }}"
       register: bastion_sync_run
-      changed_when: "'synced' in bastion_sync_run.stdout"
+      changed_when: "'no changes' not in bastion_sync_run.stdout"
 
     - name: Install ycluster-bastion-watch systemd unit
       copy:
