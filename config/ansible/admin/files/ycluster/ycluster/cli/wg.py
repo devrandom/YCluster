@@ -10,6 +10,8 @@ from ..utils import wg_config
 
 def register_wg_commands(subparsers):
     p = subparsers.add_parser('wg', help='WireGuard overlay management')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Log mutations (etcd writes, wg0.conf, wg-quick, syncconf) without applying them')
     p.set_defaults(func=lambda args: args.parser.print_help(), parser=p)
     sub = p.add_subparsers(dest='wg_command', help='wg commands')
 
@@ -52,6 +54,7 @@ def register_wg_commands(subparsers):
 
 
 def _init(args):
+    wg_config.set_dry_run(args.dry_run)
     server = wg_config.init_server(args.endpoints, port=args.port, rotate=args.rotate)
     print(f"wg server initialized")
     print(f"  pubkey:    {server['pubkey']}")
@@ -104,8 +107,11 @@ def _list(args):
 
 
 def _approve(args):
+    wg_config.set_dry_run(args.dry_run)
     peer = wg_config.set_peer_status(args.hostname, 'approved')
     print(f"{args.hostname}: approved")
+    if args.dry_run:
+        return
     try:
         wg_config.reconcile()
     except Exception as e:
@@ -113,8 +119,11 @@ def _approve(args):
 
 
 def _revoke(args):
+    wg_config.set_dry_run(args.dry_run)
     wg_config.set_peer_status(args.hostname, 'revoked')
     print(f"{args.hostname}: revoked")
+    if args.dry_run:
+        return
     try:
         wg_config.reconcile()
     except Exception as e:
@@ -122,8 +131,11 @@ def _revoke(args):
 
 
 def _delete(args):
+    wg_config.set_dry_run(args.dry_run)
     wg_config.delete_peer(args.hostname)
     print(f"{args.hostname}: deleted")
+    if args.dry_run:
+        return
     try:
         wg_config.reconcile()
     except Exception as e:
@@ -131,6 +143,7 @@ def _delete(args):
 
 
 def _reconcile(args):
+    wg_config.set_dry_run(args.dry_run)
     wg_config.reconcile(up=args.up, down=args.down)
 
 
