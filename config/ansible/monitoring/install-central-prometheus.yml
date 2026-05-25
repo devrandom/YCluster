@@ -46,7 +46,7 @@
             --web.console.libraries=/etc/prometheus/console_libraries \
             --web.enable-lifecycle \
             --web.enable-admin-api \
-            --web.listen-address=127.0.0.1:9091 \
+            --web.listen-address=0.0.0.0:9091 \
             --web.external-url=http://{{ ansible_host }}:9091/
           Restart=always
           RestartSec=5
@@ -55,6 +55,7 @@
           WantedBy=ycluster-apps.target
         mode: '0644'
       register: prometheus_central_service_file
+      notify: restart central prometheus if running
 
     - name: Reload systemd daemon
       systemd:

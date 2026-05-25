@@ -330,11 +330,24 @@
         dashboard_url: "{{ item.url }}"
         dashboard_sha256: "{{ item.sha256 }}"
         dashboard_filename: "{{ item.filename }}"
+        dashboard_datasource_uid: "{{ item.datasource_uid | default('prometheus-local') }}"
+        dashboard_uid_override: "{{ item.uid_override | default('') }}"
+        dashboard_title_override: "{{ item.title_override | default('') }}"
       loop:
         - name: "Node Exporter Full"
           url: "https://grafana.com/api/dashboards/1860/revisions/41/download"
           sha256: "132c20c446b28f0348183bd2980fd2e7a2dde3daab4d26c8605a5e117049953b"
           filename: "node-exporter-full.json"
+        # Second copy of 1860 wired to prometheus-central for 90-day
+        # history. Distinct uid + title so Grafana provisions both side
+        # by side (otherwise they collide on the upstream-pinned uid).
+        - name: "Node Exporter Full (Central)"
+          url: "https://grafana.com/api/dashboards/1860/revisions/41/download"
+          sha256: "132c20c446b28f0348183bd2980fd2e7a2dde3daab4d26c8605a5e117049953b"
+          filename: "node-exporter-full-central.json"
+          datasource_uid: "prometheus-central"
+          uid_override: "node-exporter-full-central"
+          title_override: "Node Exporter Full (Central — 90d)"
         - name: "Ceph - Cluster"
           url: "https://grafana.com/api/dashboards/2842/revisions/18/download"
           sha256: "3e12f352c7ed91d3b9440c78ea8cb0549215caa6e2da8b78df741322a4da3402"
