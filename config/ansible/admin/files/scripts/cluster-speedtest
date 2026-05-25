@@ -1,0 +1,57 @@
+#!/bin/bash
+# Quick external bandwidth test using public OSS-friendly endpoints.
+# Downloads a single file and reports throughput in MB/s.
+#
+# Usage:
+#   cluster-speedtest                    # default: 1GB from Linode Frankfurt
+#   cluster-speedtest -s 100MB           # smaller probe (faster, less precise)
+#   cluster-speedtest -r amsterdam       # different EU region
+#   cluster-speedtest -u <url>           # arbitrary URL
+#   cluster-speedtest -t 30              # cap at 30s wall-clock
+set -euo pipefail
+
+size=1GB
+region=frankfurt
+url=
+max_time=120
+
+usage() {
+    sed -n '2,11p' "$0"
+    exit "${1:-0}"
+}
+
+while getopts "s:r:u:t:h" opt; do
+    case "$opt" in
+        s) size=$OPTARG ;;
+        r) region=$OPTARG ;;
+        u) url=$OPTARG ;;
+        t) max_time=$OPTARG ;;
+        h) usage 0 ;;
+        *) usage 1 ;;
+    esac
+done
+
+if [ -z "$url" ]; then
+    # Linode/Akamai per-region speed test boxes. Public, no signup,
+    # OSS-friendly (CDN-hosted plain files, no proprietary client).
+    # Region list: https://www.linode.com/speed-test/
+    url="https://speedtest.${region}.linode.com/${size}-${region}.bin"
+fi
+
+printf 'URL: %s\n' "$url"
+printf 'Max-time: %ss\n' "$max_time"
+printf '\n'
+
+curl --silent --show-error --location \
+    --max-time "$max_time" \
+    --output /dev/null \
+    --write-out '%{speed_download} %{size_download} %{time_total} %{http_code}\n' \
+    "$url" \
+    | awk '{
+        if ($4 != "200") {
+            printf "HTTP %s — see URL above\n", $4
+            exit 1
+        }
+        printf "Downloaded: %.1f MB in %.2f s\n", $2/1e6, $3
+        printf "Throughput: %.2f MB/s  (%.0f Mbps)\n", $1/1e6, $1*8/1e6
+    }'

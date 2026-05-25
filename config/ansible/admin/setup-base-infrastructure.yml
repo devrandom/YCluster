@@ -58,6 +58,14 @@
         owner: www-data
         group: www-data
 
+    - name: Install cluster-speedtest utility
+      copy:
+        src: files/scripts/cluster-speedtest
+        dest: /usr/local/bin/cluster-speedtest
+        owner: root
+        group: root
+        mode: '0755'
+
     - name: Clone infrastructure repository
       git:
         repo: https://gitlab.com/devrandom01/ycluster.git
