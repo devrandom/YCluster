@@ -30,18 +30,21 @@
         fail_msg: "Downloaded {{ dashboard_name }} dashboard content SHA256 does not match expected hash. Expected: {{ dashboard_sha256 }}, Got: {{ dashboard_content.stdout | hash('sha256') }}"
         success_msg: "{{ dashboard_name }} dashboard content SHA256 verified successfully"
 
-    - name: Configure {{ dashboard_name }} dashboard for local Prometheus
+    # `dashboard_datasource_uid` defaults to prometheus-local; set it to
+    # prometheus-central (etc.) to point a copy at another datasource.
+    # `dashboard_uid_override` / `dashboard_title_override` let the same
+    # upstream dashboard be installed multiple times against different
+    # datasources without colliding on Grafana's `uid` or title.
+    - name: Configure {{ dashboard_name }} dashboard
       shell: |
-        jq '
-          . as $dashboard |
-          # Remove inputs and requires sections
+        jq --arg ds "{{ dashboard_datasource_uid | default('prometheus-local') }}" \
+           --arg uid "{{ dashboard_uid_override | default('') }}" \
+           --arg title "{{ dashboard_title_override | default('') }}" '
           del(.__inputs, .__requires) |
-          # Update datasource references to use local Prometheus
+          (if $uid != "" then .uid = $uid else . end) |
+          (if $title != "" then .title = $title else . end) |
           walk(if type == "object" and has("datasource") then
-            .datasource = {
-              "type": "prometheus",
-              "uid": "prometheus-local"
-            }
+            .datasource = {"type": "prometheus", "uid": $ds}
           else . end)
         ' "{{ dashboard_temp_file.path }}" > /var/lib/grafana-docker/dashboards/{{ dashboard_filename }}
       notify: restart grafana
