@@ -77,13 +77,11 @@ start_openwebui() {
     local secret_key=$(get_or_generate_secret_key)
 
     # Read inference master key from etcd so Open-WebUI can call the
-    # inference gateway on first boot. Path is /cluster/config/litellm/master-key
-    # for historical reasons — the LiteLLM service has been removed but the
-    # key value itself is reused as the admin bearer for local-ai-proxy.
-    # If the key doesn't exist Open-WebUI simply won't have an
-    # OpenAI-compatible backend pre-configured — that is acceptable.
+    # inference gateway on first boot. If the key doesn't exist
+    # Open-WebUI simply won't have an OpenAI-compatible backend
+    # pre-configured — that is acceptable.
     local inference_master_key
-    inference_master_key=$(etcdctl get "/cluster/config/litellm/master-key" --print-value-only 2>/dev/null || true)
+    inference_master_key=$(etcdctl get "/cluster/config/inference/master-key" --print-value-only 2>/dev/null || true)
 
     local env_file=$(mktemp --tmpdir=/dev/shm)
     

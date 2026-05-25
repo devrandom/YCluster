@@ -54,5 +54,5 @@
 
 ### Security
 - SSH-key rotation procedure (Ansible key at `/data/ansible_ssh_key` and any node-to-node keys).
-- Secrets-rotation flow for things stored in etcd (`/cluster/config/litellm/master-key` — legacy path, still the cluster admin bearer — and similar) and in vault.
+- Secrets-rotation flow for things stored in etcd (`/cluster/config/inference/master-key` and similar) and in vault.
 - Audit-log story: journald aggregation, etcd/Ceph audit logs, retention.

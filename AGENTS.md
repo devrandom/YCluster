@@ -145,7 +145,7 @@ sudo systemctl restart snap.microceph.daemon.service
 ## Etcd Paths
 - `/cluster/nodes/by-hostname/<name>` - Node registration
 - `/cluster/config/` - Cluster configuration
-- `/cluster/config/litellm/master-key` - Cluster admin bearer (legacy path name from the removed LiteLLM service; the key value is reused by local-ai-proxy's auth validator)
+- `/cluster/config/inference/master-key` - Cluster admin bearer (validated by local-ai-proxy-auth.service)
 - `/cluster/config/inference/models/<name>` - Per-model config: JSON `{"backends":[{"api_base":"..."}, ...]}`. Watched by local-ai-proxy (hot-reload).
 - `/cluster/config/inference/disabled/<url>` - Backends pulled out of rotation
 - `/cluster/services/` - Service state and leader election

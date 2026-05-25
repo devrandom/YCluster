@@ -121,10 +121,8 @@ path.
   `ycluster-apps.target`, runs on every storage node).
 - **Auth validator**: `local-ai-proxy-auth.service` — small Flask app
   called by nginx `auth_request`. Accepts either the cluster admin
-  master key (stored at `/cluster/config/litellm/master-key` in etcd
-  for historical reasons — LiteLLM has been removed but the key value
-  itself is reused) or a row in Open-WebUI's `api_key` PostgreSQL
-  table.
+  master key (stored at `/cluster/config/inference/master-key` in
+  etcd) or a row in Open-WebUI's `api_key` PostgreSQL table.
 - **Model store**: etcd prefix `/cluster/config/inference/models/`;
   each key is a model name, the JSON value is
   `{"backends":[{"api_base":"…"}, …]}`. The schema is fan-out-ready

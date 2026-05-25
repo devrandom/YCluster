@@ -9,8 +9,7 @@ local-ai-proxy, which trusts them because the request comes from
 loopback.
 
 Validation sources (in order):
-  1. Cluster admin master key from etcd /cluster/config/litellm/master-key
-     (legacy path name from the LiteLLM era; the key value itself is reused)
+  1. Cluster admin master key from etcd /cluster/config/inference/master-key
      → user = "root", groups = ""
   2. Open-WebUI's api_key table → user = u.email,
      groups = comma-separated OWUI group names (from group_member join)
@@ -28,7 +27,7 @@ import psycopg2
 from flask import Flask, Response, request
 
 
-MASTER_KEY_ETCD_PATH = "/cluster/config/litellm/master-key"
+MASTER_KEY_ETCD_PATH = "/cluster/config/inference/master-key"
 OWUI_DSN = "dbname=openwebui user=openwebui password=openwebui host=localhost"
 
 app = Flask(__name__)
