@@ -81,3 +81,4 @@ Bumping one without the other gives misleading 413s.
 | `Failed to load audio: ffmpeg ... Invalid data` on the server | Upload was 0 bytes (e.g. `curl` without `-L` on a redirect). Verify the source. |
 | Diarization missing from output (no `speaker` keys) | `diarize=true` not sent, or pyannote model missing from `~dev/.cache/huggingface` on the whisperx host. Run `huggingface-cli download pyannote/speaker-diarization-community-1` as dev with a token, then restart the service. |
 | First request slow (~30 s) but subsequent ones fast | Cold-start model load; wav2vec2 alignment models download per-language on first use. |
+| Client disconnects but GPU stays busy / next request blocked | Known limitation. CPython threads can't be cancelled; the in-flight transcribe runs to completion. See [`docs/design/whisperx-streaming-cancel.md`](../design/whisperx-streaming-cancel.md) for the planned fix. |
