@@ -175,9 +175,9 @@ WG is orthogonal to node type — a wg-bootstrapped `compute` node is still a co
 
 ## Inference Gateway
 
-LiteLLM inference gateway provides a single OpenAI-compatible API at `http://inference.xc/v1/` (cluster-internal) and `https://your-domain.com/v1/` (external). Manage models with `ycluster inference add/remove`. Users share their Open-WebUI API keys for direct access.
+`local-ai-proxy` provides a single OpenAI-compatible API at `http://inference.xc/v1/` (cluster-internal) and `https://your-domain.com/v1/` (external). Manage models with `ycluster inference add/remove`. Users share their Open-WebUI API keys for direct access.
 
-**WARNING**: Do not add external LLM providers directly to Open-WebUI — user emails will leak in HTTP headers. Always add backends through LiteLLM. See [docs/operations/inference.md](docs/operations/inference.md) for details.
+**WARNING**: Do not add external LLM providers directly to Open-WebUI — user emails will leak in HTTP headers. Always add backends through the inference gateway. See [docs/operations/inference.md](docs/operations/inference.md) for details.
 
 ## Management Commands
 
@@ -192,7 +192,7 @@ All cluster management is now consolidated under the `ycluster` CLI:
 - **Rathole Configuration**: `ycluster rathole` - reverse proxy settings
 - **WireGuard Overlay**: `ycluster wg` - remote-node onboarding and peer management
 - **Storage Management**: `ycluster storage` - RBD volume operations
-- **Inference Gateway**: `ycluster inference` - manage LiteLLM models and backends
+- **Inference Gateway**: `ycluster inference` - manage models and backends served by local-ai-proxy
 
 ### Getting Started with ycluster
 

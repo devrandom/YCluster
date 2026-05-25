@@ -83,8 +83,8 @@
 
     # Client-side configuration so any docker pull/build can talk to the
     # cluster's local registry. Must happen here (before app/app.yml runs)
-    # rather than in storage/install-docker-registry.yml, because litellm
-    # and open-webui pull from registry.xc:5000 during app deploy.
+    # rather than in storage/install-docker-registry.yml, because open-webui
+    # pulls from registry.xc:5000 during app deploy.
     - name: Configure Docker daemon to use local registry
       copy:
         dest: /etc/docker/daemon.json

@@ -120,10 +120,11 @@ path.
 - **Systemd service**: `local-ai-proxy.service` (part of
   `ycluster-apps.target`, runs on every storage node).
 - **Auth validator**: `local-ai-proxy-auth.service` — small Flask app
-  called by nginx `auth_request`. Accepts either the internal service
-  key (stored at `/cluster/config/litellm/master-key` in etcd for
-  historical reasons — the path name is legacy, the key itself is
-  reused) or a row in Open-WebUI's `api_key` PostgreSQL table.
+  called by nginx `auth_request`. Accepts either the cluster admin
+  master key (stored at `/cluster/config/litellm/master-key` in etcd
+  for historical reasons — LiteLLM has been removed but the key value
+  itself is reused) or a row in Open-WebUI's `api_key` PostgreSQL
+  table.
 - **Model store**: etcd prefix `/cluster/config/inference/models/`;
   each key is a model name, the JSON value is
   `{"backends":[{"api_base":"…"}, …]}`. The schema is fan-out-ready
@@ -134,11 +135,6 @@ path.
 - **Runtime config**: `/etc/local-ai-proxy/config.yaml` (listen
   address, etcd endpoints/prefix, trusted-proxy CIDRs, health
   interval). Model edits are hot; restart only for YAML changes.
-- **Rollback option**: `litellm.service` is still installed but
-  stopped and disabled by default. Re-enable it with
-  `ansible-playbook app/install-litellm.yml -e litellm_enabled=true`
-  if a rollback is needed.
-
 ### Request Paths
 
 ```
@@ -148,8 +144,9 @@ External:    client → your-domain.com/v1/ (nginx + auth_request) → local-ai-
 ```
 
 See [`docs/local-ai-proxy.md`](../local-ai-proxy.md) for the proxy's
-design rationale and how it differs from LiteLLM / Bifrost / one-api
-on client-disconnect handling.
+design rationale (it replaced LiteLLM in this cluster) and how it
+differs from LiteLLM / Bifrost / one-api on client-disconnect
+handling.
 
 For audio transcription (OpenAI `/v1/audio/transcriptions` and
 `/v1/audio/translations`) the proxy uses the same `model` routing

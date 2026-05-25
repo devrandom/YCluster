@@ -9,7 +9,8 @@ local-ai-proxy, which trusts them because the request comes from
 loopback.
 
 Validation sources (in order):
-  1. LiteLLM master key from etcd /cluster/config/litellm/master-key
+  1. Cluster admin master key from etcd /cluster/config/litellm/master-key
+     (legacy path name from the LiteLLM era; the key value itself is reused)
      → user = "root", groups = ""
   2. Open-WebUI's api_key table → user = u.email,
      groups = comma-separated OWUI group names (from group_member join)
