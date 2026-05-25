@@ -80,7 +80,10 @@ func NewHealthChecker(source Source, interval time.Duration, logger *slog.Logger
 		interval: interval,
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   5 * time.Second,
+			// 15s tolerates backends (notably whisperx) that block on
+			// /v1/models while a worker is busy transcribing — observed
+			// ~3.7s under load with occasional spikes past 5s.
+			Timeout: 15 * time.Second,
 		},
 		logger: logger,
 		states: make(map[string]BackendHealth),
