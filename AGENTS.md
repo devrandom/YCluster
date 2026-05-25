@@ -59,7 +59,7 @@ ycluster certbot obtain --test
 - **MicroCeph**: Distributed block storage with RBD
 - **Leader election**: etcd-based single-instance coordination for PostgreSQL, Qdrant, DHCP
 - **Keepalived**: VIP failover for gateway (10.0.0.254) and storage (10.0.0.100)
-- **LiteLLM**: Inference gateway at `inference.xc` (port 4000), routing to vLLM/llama-server backends
+- **local-ai-proxy**: Inference gateway at `inference.xc` (port 4001, nginx-fronted with auth_request), routing to vLLM/llama-server/whisperx backends
 
 ### Network
 - **Gateway VIP (10.0.0.254)**: Routing, DHCP, DNS - may move to non-storage nodes
@@ -83,7 +83,7 @@ ycluster certbot obtain --test
   - `monitoring/` - Prometheus, Grafana, alerting
   - `inventory_plugins/etcd_nodes.py` - Dynamic inventory from etcd
 - `config/ansible/admin/files/ycluster/` - Python CLI tool source
-  - `app/` - Application deployments (Open-WebUI, LiteLLM, Rathole)
+  - `app/` - Application deployments (Open-WebUI, local-ai-proxy, Rathole)
 
 ### Inventory
 Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.yml`. The etcd_nodes inventory plugin dynamically discovers nodes.
@@ -145,14 +145,14 @@ sudo systemctl restart snap.microceph.daemon.service
 ## Etcd Paths
 - `/cluster/nodes/by-hostname/<name>` - Node registration
 - `/cluster/config/` - Cluster configuration
-- `/cluster/config/litellm/master-key` - LiteLLM admin key (generated on first start, starts with `sk-`)
-- `/cluster/config/litellm/salt-key` - LiteLLM encryption salt (immutable after first model is added)
-- `/cluster/config/litellm/db-password` - LiteLLM PostgreSQL password
+- `/cluster/config/litellm/master-key` - Cluster admin bearer (legacy path name from the removed LiteLLM service; the key value is reused by local-ai-proxy's auth validator)
+- `/cluster/config/inference/models/<name>` - Per-model config: JSON `{"backends":[{"api_base":"..."}, ...]}`. Watched by local-ai-proxy (hot-reload).
+- `/cluster/config/inference/disabled/<url>` - Backends pulled out of rotation
 - `/cluster/services/` - Service state and leader election
 
-## Inference Gateway (LiteLLM)
+## Inference Gateway (local-ai-proxy)
 
-LiteLLM runs on the storage leader as `litellm.service` (part of `ycluster-apps.target`). Endpoint is `http://inference.xc/v1/` (port 4000, proxied by nginx). Auth uses OpenAI-style Bearer tokens validated by a custom auth hook (`litellm-custom-auth.py`) that checks the master key, LiteLLM internal tokens, and Open-WebUI's `api_key` PostgreSQL table.
+`local-ai-proxy.service` runs on every storage node (part of `ycluster-apps.target`), listening on `127.0.0.1:4001`. nginx fronts it at `http://inference.xc/v1/` (cluster-internal) and `https://<domain>/v1/` (external) with `auth_request` enforcing per-user bearer auth via `local-ai-proxy-auth.service` on `127.0.0.1:4002`. Accepted tokens: the cluster admin master key in etcd, or a row in Open-WebUI's `api_key` table.
 
 For usage and operations (adding models, API keys, etc.), see `docs/operations/inference.md`.
 

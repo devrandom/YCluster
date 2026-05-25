@@ -1,6 +1,5 @@
 # TODO
 
-- Pin LiteLLM image instead of tracking `ghcr.io/berriai/litellm-database:main-latest`. `litellm-Dockerfile` currently floats — a drop_params / schema semantics change upstream can silently alter proxy behavior. Pick a version and pin it in `config/ansible/app/files/litellm-Dockerfile`. Currently running `1.81.14` as of 2026-04-11.
 - Document MiniMax M2.5 client-side workarounds in `docs/operations/inference.md`: (a) use `/v1/completions` (not `/v1/chat/completions`) with a raw text prompt ending in the desired prefix for shaped output — the chat-completions `continue_final_message` flag is silently ignored by vllm-mlx 0.2.7; (b) client-side XML parsing of `<minimax:tool_call>` envelopes; (c) client-side truncation to emulate `stop`; (d) strip trailing `[e~[` from `.content` / `.text`. See `research/minimax-vllm-mlx-structured-output-2026-04-11.md`.
 - vllm-mlx on m1 has a stack of upstream bugs and ad-hoc operational gaps (no `stop`, no guided decoding, broken special-token detokenization, no MiniMax tool-call parser, no pinned version, launch commands unscripted) — parked in `research/minimax-vllm-mlx-structured-output-2026-04-11.md` under "Upstream work queue" and "Operational gaps (m1)". Not actionable in the near term.
 - Authenticate the "drain" function on the cluster status page
@@ -55,5 +54,5 @@
 
 ### Security
 - SSH-key rotation procedure (Ansible key at `/data/ansible_ssh_key` and any node-to-node keys).
-- Secrets-rotation flow for things stored in etcd (`/cluster/config/litellm/*` etc.) and in vault.
+- Secrets-rotation flow for things stored in etcd (`/cluster/config/litellm/master-key` — legacy path, still the cluster admin bearer — and similar) and in vault.
 - Audit-log story: journald aggregation, etcd/Ceph audit logs, retention.

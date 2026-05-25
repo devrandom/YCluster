@@ -1,8 +1,8 @@
 ---
-# Install local-ai-proxy alongside LiteLLM.
-# Listens on :4001 and forwards to a single vLLM/llama-server backend.
-# Not in the hot path yet — intended for side-by-side cancellation
-# validation vs. LiteLLM on :4000 before we swap them over.
+# Install local-ai-proxy (the cluster's inference gateway).
+# Listens on :4001 and forwards to vLLM/llama-server/whisperx backends.
+# Replaced LiteLLM (which previously ran on :4000) and now owns the
+# inference.xc nginx vhost.
 #
 # Two deploy modes:
 #
@@ -185,9 +185,7 @@
         enabled: yes
         state: started
 
-    # ---- nginx vhost: inference.xc with /v1 (new) and /old/v1 (LiteLLM) ----
-    # This playbook now owns the inference.xc nginx config; install-litellm.yml
-    # no longer touches nginx.
+    # ---- nginx vhost: inference.xc → local-ai-proxy ----
 
     - name: Install inference.xc nginx config
       copy:
@@ -213,6 +211,31 @@
         - /etc/nginx/sites-enabled/local-ai-proxy-internal
         - /etc/nginx/sites-available/local-ai-proxy-internal
       notify: reload nginx
+
+    # ---- Remove LiteLLM remnants (replaced by local-ai-proxy) ----
+    - name: Stop and disable litellm service if present
+      systemd:
+        name: litellm.service
+        state: stopped
+        enabled: false
+      failed_when: false
+      register: litellm_stop
+
+    - name: Remove LiteLLM systemd unit, manager, and config dir
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/litellm.service
+        - /etc/systemd/system/ycluster-apps.target.wants/litellm.service
+        - /usr/local/lib/cluster/litellm-manager
+        - /etc/litellm
+      register: litellm_removed
+
+    - name: Reload systemd after removing litellm unit
+      systemd:
+        daemon_reload: yes
+      when: litellm_removed.changed
 
     - name: Apply any pending service restarts before smoke check
       meta: flush_handlers
