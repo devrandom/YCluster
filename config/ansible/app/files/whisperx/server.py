@@ -39,6 +39,7 @@ Env config (read at startup):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -204,7 +205,10 @@ async def _run(
         tmp.write(await file.read())
         tmp_path = tmp.name
 
-    try:
+    # GPU work is synchronous and blocking; push it off the event loop
+    # so /v1/models and /healthz stay responsive during a transcribe.
+    # The threading.Lock inside still serialises GPU access.
+    def _do_transcribe():
         with _lock:
             asr = _load_asr()
             audio = whisperx.load_audio(tmp_path)
@@ -247,6 +251,9 @@ async def _run(
             result.setdefault("task", task)
             result["duration"] = float(len(audio) / 16000.0)
             return _format_response(result, response_format)
+
+    try:
+        return await asyncio.to_thread(_do_transcribe)
     finally:
         try:
             os.unlink(tmp_path)
