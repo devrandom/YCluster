@@ -46,6 +46,12 @@ server {
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header Authorization $http_authorization;
+
+        # Subrequests inherit client_max_body_size from this block, not
+        # from the parent location. Without this, large /v1/ uploads
+        # (audio transcription) hit 413 in the auth subrequest before
+        # the body is ever proxied upstream.
+        client_max_body_size 200M;
     }
 
     # OpenAI-compatible inference API via local-ai-proxy.
@@ -72,10 +78,12 @@ server {
         proxy_buffering off;
         proxy_cache off;
 
-        # Long timeouts for inference requests
-        proxy_connect_timeout 10m;
-        proxy_send_timeout 10m;
-        proxy_read_timeout 10m;
+        # Long timeouts for inference requests. 30m accommodates audio
+        # transcription of multi-hour files (whisperx returns one JSON
+        # blob at the end — proxy_read_timeout caps the whole job).
+        proxy_connect_timeout 30m;
+        proxy_send_timeout 30m;
+        proxy_read_timeout 30m;
 
         # Allow large inputs (embeddings, long prompts, audio uploads to
         # /v1/audio/transcriptions). Matches inference-internal.conf.
