@@ -77,8 +77,9 @@ server {
         proxy_send_timeout 10m;
         proxy_read_timeout 10m;
 
-        # Allow large inputs (embeddings, long prompts)
-        client_max_body_size 50M;
+        # Allow large inputs (embeddings, long prompts, audio uploads to
+        # /v1/audio/transcriptions). Matches inference-internal.conf.
+        client_max_body_size 200M;
     }
 
     # Transitional fallback to LiteLLM for clients that pin the old path.
