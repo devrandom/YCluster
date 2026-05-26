@@ -312,11 +312,9 @@ def main():
     ipmi = collect_ipmi()
     gpu = collect_nvidia()
     comino_temps, comino_fans = collect_comino()
-    if not ipmi and not gpu and not comino_temps:
-        # Don't clobber a previously-good file with an empty one;
-        # that would make alerts flap on transient ipmitool errors.
-        print("# no readings; leaving previous file in place", file=sys.stderr)
-        return 1
+    # Always rewrite the file so node_textfile_mtime_seconds advances
+    # even when individual sub-collectors come up empty. The mtime
+    # staleness alert fires only when the script itself stops running.
     write_prom(ipmi, gpu, comino_temps, comino_fans)
     return 0
 
