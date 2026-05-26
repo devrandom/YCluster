@@ -1,0 +1,120 @@
+---
+# Chassis (IPMI) and GPU (nvidia-smi) temperature collection for nvidia
+# nodes. Uses the node_exporter textfile collector — that directory is
+# already configured by install-prometheus.yml.
+#
+# IPMI is the only way to read VFIO-passthrough GPU temps from the host:
+# the BMC reads thermal diodes via the chassis sensor bus, so it works
+# regardless of which driver (nvidia, vfio-pci, none) is bound to the
+# card.
+- name: Install node temperature collector on nvidia nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    collector_path: /usr/local/lib/cluster/node-temps-collector
+    interval_sec: 30
+
+  tasks:
+    - name: Install ipmitool
+      apt:
+        name: ipmitool
+        state: present
+
+    # The prometheus-node-exporter-collectors package ships its own
+    # ipmitool_sensor.timer that writes to the same textfile dir and
+    # publishes node_ipmi_temperature_celsius *without* the role label
+    # we depend on for alert routing. Disable it; our collector is the
+    # single source of truth.
+    - name: Disable shipped ipmitool_sensor timer/service
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+      failed_when: false
+      loop:
+        - prometheus-node-exporter-ipmitool-sensor.timer
+        - prometheus-node-exporter-ipmitool-sensor.service
+
+    - name: Remove stale ipmitool_sensor.prom from shipped collector
+      file:
+        path: /var/lib/prometheus/node-exporter/ipmitool_sensor.prom
+        state: absent
+
+    - name: Ensure ipmi kernel modules load at boot
+      copy:
+        dest: /etc/modules-load.d/ipmi.conf
+        content: |
+          ipmi_devintf
+          ipmi_si
+        mode: '0644'
+      register: ipmi_modules
+
+    - name: Load ipmi modules now
+      shell: modprobe ipmi_devintf && modprobe ipmi_si
+      when: ipmi_modules.changed
+      failed_when: false
+
+    - name: Install temperature collector script
+      copy:
+        src: files/node-temps-collector.py
+        dest: "{{ collector_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create systemd service for temp collector
+      copy:
+        dest: /etc/systemd/system/node-temps-collector.service
+        content: |
+          [Unit]
+          Description=Collect chassis and GPU temperatures for node_exporter
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 {{ collector_path }}
+          User=root
+          # ipmitool needs /dev/ipmi*; nvidia-smi needs no extra perms.
+          # Keep modest sandboxing; ProtectSystem=strict would block the
+          # textfile dir write, so use ReadWritePaths instead.
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths=/var/lib/prometheus/node-exporter
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd timer for temp collector
+      copy:
+        dest: /etc/systemd/system/node-temps-collector.timer
+        content: |
+          [Unit]
+          Description=Collect chassis and GPU temperatures every {{ interval_sec }}s
+
+          [Timer]
+          OnBootSec=20s
+          OnUnitActiveSec={{ interval_sec }}s
+          AccuracySec=5s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable and start temp collector timer
+      systemd:
+        name: node-temps-collector.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Run an initial collection so metrics appear immediately
+      command: /usr/bin/python3 {{ collector_path }}
+      changed_when: false
+      failed_when: false
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes

@@ -478,3 +478,66 @@ groups:
         annotations:
           summary: "HTTPS domain {{ $labels.instance }} slow response"
           description: "HTTPS domain {{ $labels.instance }} response time is {{ $value }}s (>10s) for more than 5 minutes"
+
+  - name: ycluster-temperature
+    rules:
+      # Ambient (intake) temperature on chassis with a true inlet sensor
+      # (nv1 has INLET_AIR_TEMP). Workstation boards (nv2, nv3) don't
+      # expose an intake sensor; their readings fall under role="other"
+      # or "memory" and don't fire this alert.
+      - alert: HighAmbientTemperature
+        expr: max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High ambient temperature on {{ $labels.node }}"
+          description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (>25°C) for more than 5 minutes"
+
+      - alert: CriticalAmbientTemperature
+        expr: max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 30
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical ambient temperature on {{ $labels.node }}"
+          description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (>30°C) — check room HVAC"
+
+      # GPU temperature — covers both host-visible GPUs (via nvidia-smi)
+      # and VFIO-passthrough GPUs (via IPMI per-slot sensors). Take the
+      # max across all GPUs on a node so any hot card fires.
+      - alert: HighGPUTemperature
+        expr: |
+          max by (node) (node_gpu_temperature_celsius) > 80
+          or
+          max by (node) (node_ipmi_temperature_celsius{role="gpu"}) > 80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High GPU temperature on {{ $labels.node }}"
+          description: "A GPU on {{ $labels.node }} has been above 80°C for more than 2 minutes"
+
+      - alert: CriticalGPUTemperature
+        expr: |
+          max by (node) (node_gpu_temperature_celsius) > 90
+          or
+          max by (node) (node_ipmi_temperature_celsius{role="gpu"}) > 90
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical GPU temperature on {{ $labels.node }}"
+          description: "A GPU on {{ $labels.node }} has been above 90°C — thermal throttling imminent"
+
+      # Stale temperature metrics — the collector timer fires every 30s,
+      # so anything older than a few minutes means the timer or IPMI is
+      # broken.
+      - alert: TemperatureCollectorStale
+        expr: time() - node_textfile_mtime_seconds{file=~".*temps.prom"} > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Temperature collector stale on {{ $labels.node }}"
+          description: "temps.prom on {{ $labels.node }} hasn't been updated in {{ $value | humanizeDuration }}"
