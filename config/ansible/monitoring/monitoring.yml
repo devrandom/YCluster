@@ -2,6 +2,7 @@
 - import_playbook: install-blackbox.yml
 - import_playbook: install-prometheus.yml
 - import_playbook: install-central-prometheus.yml
+- import_playbook: install-node-temps.yml
 - import_playbook: ceph.yml
 
 - name: Configure monitoring endpoints

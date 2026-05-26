@@ -323,6 +323,15 @@
         mode: '0644'
       notify: restart grafana
 
+    - name: Install temperature dashboard
+      copy:
+        src: temperature-dashboard.json
+        dest: /var/lib/grafana-docker/dashboards/temperature.json
+        owner: "472"
+        group: "472"
+        mode: '0644'
+      notify: restart grafana
+
     - name: Install Grafana dashboards
       include_tasks: install_dashboard.yml
       vars:
