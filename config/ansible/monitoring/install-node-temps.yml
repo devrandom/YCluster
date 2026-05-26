@@ -12,6 +12,7 @@
   become: yes
   vars:
     collector_path: /usr/local/lib/cluster/node-temps-collector
+    vm_gpu_collector_path: /usr/local/lib/cluster/vm-gpu-collector
     interval_sec: 30
 
   tasks:
@@ -117,6 +118,76 @@
       command: /usr/bin/python3 {{ collector_path }}
       changed_when: false
       failed_when: false
+
+    # VM GPU collector: VFIO-passthrough GPUs aren't visible to the host
+    # nvidia driver. Exec nvidia-smi inside running incus VMs to get
+    # utilisation, memory, and power. Only installed on hosts that
+    # actually run VMs (incus_vm_host: true in host_vars).
+    - name: Install VM GPU collector script
+      copy:
+        src: files/vm-gpu-collector.py
+        dest: "{{ vm_gpu_collector_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+      when: incus_vm_host | default(false)
+
+    - name: Create systemd service for VM GPU collector
+      copy:
+        dest: /etc/systemd/system/vm-gpu-collector.service
+        content: |
+          [Unit]
+          Description=Collect GPU metrics from VMs holding passthrough GPUs
+          After=incus.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 {{ vm_gpu_collector_path }}
+          User=root
+          # ProtectSystem=strict makes /var/lib/prometheus read-only;
+          # allow the textfile target back in. Avoid PrivateNetwork —
+          # incus exec uses the local unix socket but the broader incus
+          # daemon needs unrestricted network access we shouldn't touch.
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths=/var/lib/prometheus/node-exporter
+        mode: '0644'
+      when: incus_vm_host | default(false)
+      notify: reload systemd
+
+    - name: Create systemd timer for VM GPU collector
+      copy:
+        dest: /etc/systemd/system/vm-gpu-collector.timer
+        content: |
+          [Unit]
+          Description=Collect VM GPU metrics every {{ interval_sec }}s
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec={{ interval_sec }}s
+          AccuracySec=5s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      when: incus_vm_host | default(false)
+      notify: reload systemd
+
+    - name: Enable and start VM GPU collector timer
+      systemd:
+        name: vm-gpu-collector.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      when: incus_vm_host | default(false)
+
+    - name: Run an initial VM GPU collection
+      command: /usr/bin/python3 {{ vm_gpu_collector_path }}
+      changed_when: false
+      failed_when: false
+      when: incus_vm_host | default(false)
 
   handlers:
     - name: reload systemd

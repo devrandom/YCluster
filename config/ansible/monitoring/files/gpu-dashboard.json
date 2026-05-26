@@ -1,0 +1,255 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "GPU compute utilization",
+      "description": "Combines host nvidia-smi (nv1, nv2 host-side cards) and VM-side nvidia-smi (VFIO passthrough into incus VMs).",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "mean", "max"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_gpu_utilization_percent",
+          "legendFormat": "{{node}} (host) gpu{{index}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_vm_gpu_utilization_percent",
+          "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU power draw",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "id": 2,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_gpu_power_watts",
+          "legendFormat": "{{node}} (host) gpu{{index}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_vm_gpu_power_watts",
+          "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU temperature",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "id": 3,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5, "thresholdsStyle": { "mode": "line" } }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_gpu_temperature_celsius",
+          "legendFormat": "{{node}} (host) gpu{{index}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_vm_gpu_temperature_celsius",
+          "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_ipmi_temperature_celsius{role=\"gpu\"}",
+          "legendFormat": "{{node}} / {{sensor}} (IPMI)",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU memory used",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 18 },
+      "id": 4,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_gpu_memory_used_bytes",
+          "legendFormat": "{{node}} (host) gpu{{index}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_vm_gpu_memory_used_bytes",
+          "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Current GPU state",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 27 },
+      "id": 5,
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Value #util" }, "properties": [{ "id": "unit", "value": "percent" }, { "id": "displayName", "value": "Util %" }] },
+          { "matcher": { "id": "byName", "options": "Value #temp" }, "properties": [{ "id": "unit", "value": "celsius" }, { "id": "displayName", "value": "Temp" }] },
+          { "matcher": { "id": "byName", "options": "Value #power" }, "properties": [{ "id": "unit", "value": "watt" }, { "id": "displayName", "value": "Power" }] },
+          { "matcher": { "id": "byName", "options": "Value #memused" }, "properties": [{ "id": "unit", "value": "bytes" }, { "id": "displayName", "value": "Mem used" }] }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          { "displayName": "node", "desc": false },
+          { "displayName": "name", "desc": false }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "label_replace(node_gpu_utilization_percent, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_utilization_percent",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "refId": "util"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "label_replace(node_gpu_temperature_celsius, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_temperature_celsius",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "refId": "temp"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "label_replace(node_gpu_power_watts, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_power_watts",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "refId": "power"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "label_replace(node_gpu_memory_used_bytes, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_memory_used_bytes",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "refId": "memused"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": { "byField": "pci_bus_id", "mode": "outer" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true,
+              "job": true, "job 1": true, "job 2": true, "job 3": true, "job 4": true,
+              "instance": true, "instance 1": true, "instance 2": true, "instance 3": true, "instance 4": true,
+              "__name__": true,
+              "node_type": true, "node_type 1": true, "node_type 2": true, "node_type 3": true, "node_type 4": true,
+              "index 2": true, "index 3": true, "index 4": true,
+              "name 2": true, "name 3": true, "name 4": true,
+              "vm 2": true, "vm 3": true, "vm 4": true,
+              "node 2": true, "node 3": true, "node 4": true
+            },
+            "renameByName": {
+              "node 1": "node", "vm 1": "vm", "index 1": "gpu", "name 1": "name"
+            },
+            "indexByName": {
+              "node": 0, "vm": 1, "gpu": 2, "pci_bus_id": 3, "name": 4,
+              "Value #util": 5, "Value #temp": 6, "Value #power": 7, "Value #memused": 8
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["ycluster", "gpu"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "YCluster — GPU",
+  "uid": "ycluster-gpu",
+  "version": 1,
+  "weekStart": ""
+}

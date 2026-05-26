@@ -239,7 +239,13 @@
         },
         "overrides": []
       },
-      "options": { "showHeader": true },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          { "displayName": "node", "desc": false },
+          { "displayName": "sensor", "desc": false }
+        ]
+      },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
