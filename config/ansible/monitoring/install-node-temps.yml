@@ -144,10 +144,11 @@
           Type=oneshot
           ExecStart=/usr/bin/python3 {{ vm_gpu_collector_path }}
           User=root
-          # ProtectSystem=strict makes /var/lib/prometheus read-only;
-          # allow the textfile target back in. Avoid PrivateNetwork —
-          # incus exec uses the local unix socket but the broader incus
-          # daemon needs unrestricted network access we shouldn't touch.
+          # incus CLI does `mkdir $HOME/.config/incus` on every invocation;
+          # under ProtectSystem=strict that hits the read-only /root and
+          # fails. PrivateTmp gives us a fresh writable /tmp on every
+          # run — relocate HOME there so incus has somewhere to scribble.
+          Environment=HOME=/tmp
           ProtectSystem=strict
           ProtectHome=true
           PrivateTmp=true

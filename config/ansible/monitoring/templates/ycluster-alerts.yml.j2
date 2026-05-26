@@ -568,14 +568,14 @@ groups:
           summary: "Critical GPU temperature on {{ $labels.node }}"
           description: "A GPU on {{ $labels.node }} has been above 90°C — thermal throttling imminent"
 
-      # Stale temperature metrics — the collector timer fires every 30s,
-      # so anything older than a few minutes means the timer or IPMI is
-      # broken.
-      - alert: TemperatureCollectorStale
-        expr: time() - node_textfile_mtime_seconds{file=~".*temps.prom"} > 300
+      # Stale collector output — timers fire every 30s, so anything
+      # older than a few minutes means the script or its dependencies
+      # (ipmitool, incus, comino device) stopped working.
+      - alert: CollectorStale
+        expr: time() - node_textfile_mtime_seconds{file=~".*(temps|vm_gpu).prom"} > 300
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Temperature collector stale on {{ $labels.node }}"
-          description: "temps.prom on {{ $labels.node }} hasn't been updated in {{ $value | humanizeDuration }}"
+          summary: "Textfile collector stale on {{ $labels.node }}"
+          description: "{{ $labels.file }} on {{ $labels.node }} hasn't been updated in {{ $value | humanizeDuration }}"

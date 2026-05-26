@@ -23,7 +23,7 @@
       "title": "GPU compute utilization",
       "description": "Combines host nvidia-smi (nv1, nv2 host-side cards) and VM-side nvidia-smi (VFIO passthrough into incus VMs).",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
       "id": 1,
       "fieldConfig": {
         "defaults": {
@@ -38,15 +38,62 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_gpu_utilization_percent",
+          "expr": "node_gpu_utilization_percent{node=~\"$node\"}",
           "legendFormat": "{{node}} (host) gpu{{index}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_vm_gpu_utilization_percent",
+          "expr": "node_vm_gpu_utilization_percent{node=~\"$node\"}",
           "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
           "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU compute utilization (10-min average)",
+      "description": "avg_over_time of nvidia-smi util — smooths instantaneous sampling artefacts so you can see load shape rather than scrape jitter.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "id": 12,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 15 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Total" },
+            "properties": [
+              { "id": "custom.lineWidth", "value": 3 },
+              { "id": "custom.fillOpacity", "value": 0 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "white" } }
+            ]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "mean", "max"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "avg_over_time(node_gpu_utilization_percent{node=~\"$node\"}[10m])",
+          "legendFormat": "{{node}} (host) gpu{{index}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "avg_over_time(node_vm_gpu_utilization_percent{node=~\"$node\"}[10m])",
+          "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "avg(avg_over_time(node_gpu_utilization_percent{node=~\"$node\"}[10m]) or avg_over_time(node_vm_gpu_utilization_percent{node=~\"$node\"}[10m]))",
+          "legendFormat": "Total",
+          "refId": "C"
         }
       ]
     },
@@ -67,13 +114,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_gpu_power_watts",
+          "expr": "node_gpu_power_watts{node=~\"$node\"}",
           "legendFormat": "{{node}} (host) gpu{{index}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_vm_gpu_power_watts",
+          "expr": "node_vm_gpu_power_watts{node=~\"$node\"}",
           "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
           "refId": "B"
         }
@@ -105,19 +152,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_gpu_temperature_celsius",
+          "expr": "node_gpu_temperature_celsius{node=~\"$node\"}",
           "legendFormat": "{{node}} (host) gpu{{index}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_vm_gpu_temperature_celsius",
+          "expr": "node_vm_gpu_temperature_celsius{node=~\"$node\"}",
           "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_ipmi_temperature_celsius{role=\"gpu\"}",
+          "expr": "node_ipmi_temperature_celsius{role=\"gpu\",node=~\"$node\"}",
           "legendFormat": "{{node}} / {{sensor}} (IPMI)",
           "refId": "C"
         }
@@ -140,13 +187,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_gpu_memory_used_bytes",
+          "expr": "node_gpu_memory_used_bytes{node=~\"$node\"}",
           "legendFormat": "{{node}} (host) gpu{{index}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "node_vm_gpu_memory_used_bytes",
+          "expr": "node_vm_gpu_memory_used_bytes{node=~\"$node\"}",
           "legendFormat": "{{node}} / {{vm}} gpu{{index}}",
           "refId": "B"
         }
@@ -179,7 +226,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "label_replace(node_gpu_utilization_percent, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_utilization_percent",
+          "expr": "label_replace(node_gpu_utilization_percent{node=~\"$node\"}, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_utilization_percent{node=~\"$node\"}",
           "legendFormat": "__auto",
           "format": "table",
           "instant": true,
@@ -187,7 +234,7 @@
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "label_replace(node_gpu_temperature_celsius, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_temperature_celsius",
+          "expr": "label_replace(node_gpu_temperature_celsius{node=~\"$node\"}, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_temperature_celsius{node=~\"$node\"}",
           "legendFormat": "__auto",
           "format": "table",
           "instant": true,
@@ -195,7 +242,7 @@
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "label_replace(node_gpu_power_watts, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_power_watts",
+          "expr": "label_replace(node_gpu_power_watts{node=~\"$node\"}, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_power_watts{node=~\"$node\"}",
           "legendFormat": "__auto",
           "format": "table",
           "instant": true,
@@ -203,7 +250,7 @@
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "label_replace(node_gpu_memory_used_bytes, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_memory_used_bytes",
+          "expr": "label_replace(node_gpu_memory_used_bytes{node=~\"$node\"}, \"vm\", \"host\", \"\", \"\") or node_vm_gpu_memory_used_bytes{node=~\"$node\"}",
           "legendFormat": "__auto",
           "format": "table",
           "instant": true,
@@ -244,7 +291,27 @@
   "refresh": "30s",
   "schemaVersion": 38,
   "tags": ["ycluster", "gpu"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+        "query": {
+          "qryType": 1,
+          "query": "label_values({__name__=~\"node_gpu_.+|node_vm_gpu_.+\"}, node)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "sort": 1,
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+      }
+    ]
+  },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "",

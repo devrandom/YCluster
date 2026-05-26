@@ -157,14 +157,11 @@ def main():
         for gpu in query_vm(vm):
             samples.append((vm, gpu))
 
-    if not samples:
-        # Don't clobber a previous good file with an empty one — keeps
-        # alerts from flapping when a single collection round comes up
-        # empty (e.g. VM rebooting). The textfile-mtime alert covers
-        # the persistent-empty case.
-        print("# no VM GPU samples; leaving previous file in place", file=sys.stderr)
-        return 1
-
+    # Always rewrite so node_textfile_mtime_seconds advances. If no VM
+    # is up with GPUs, the metric family vanishes — `absent()` or
+    # `count() by (node)` queries can detect that explicitly. Stale
+    # mtime means the script itself stopped running and is caught by
+    # the staleness alert.
     write_prom(samples)
     return 0
 
