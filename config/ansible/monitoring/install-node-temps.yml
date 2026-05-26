@@ -15,9 +15,13 @@
     interval_sec: 30
 
   tasks:
-    - name: Install ipmitool
+    - name: Install temp collector dependencies
       apt:
-        name: ipmitool
+        name:
+          - ipmitool
+          # pyserial: used when /dev/ttyACM0 exists (Comino RM cooling
+          # controller on liquid-cooled chassis like nv3).
+          - python3-serial
         state: present
 
     # The prometheus-node-exporter-collectors package ships its own

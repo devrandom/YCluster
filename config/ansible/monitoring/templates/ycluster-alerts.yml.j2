@@ -481,12 +481,15 @@ groups:
 
   - name: ycluster-temperature
     rules:
-      # Ambient (intake) temperature on chassis with a true inlet sensor
-      # (nv1 has INLET_AIR_TEMP). Workstation boards (nv2, nv3) don't
-      # expose an intake sensor; their readings fall under role="other"
-      # or "memory" and don't fire this alert.
+      # Ambient (intake) temperature. Sources: IPMI INLET_AIR_TEMP on
+      # server-class chassis (nv1), Comino RM air-inlet probe on
+      # liquid-cooled workstation chassis (nv3). Nodes without either
+      # don't fire (nv2 has no intake sensor wired up).
       - alert: HighAmbientTemperature
-        expr: max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 25
+        expr: |
+          max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 25
+          or
+          max by (node) (node_comino_temperature_celsius{role="ambient"}) > 25
         for: 5m
         labels:
           severity: warning
@@ -495,13 +498,48 @@ groups:
           description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (>25°C) for more than 5 minutes"
 
       - alert: CriticalAmbientTemperature
-        expr: max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 30
+        expr: |
+          max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 30
+          or
+          max by (node) (node_comino_temperature_celsius{role="ambient"}) > 30
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "Critical ambient temperature on {{ $labels.node }}"
           description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (>30°C) — check room HVAC"
+
+      # CPU die temperature via k10temp (AMD) — temp1 is Tctl. Far more
+      # reliable than IPMI "CPU Package Temp", which is often a socket
+      # aux thermistor with vendor-set thresholds. The chip-name join
+      # is what scopes us to k10temp specifically.
+      - alert: HighCPUTemperature
+        expr: |
+          max by (node) (
+            node_hwmon_temp_celsius{sensor="temp1"}
+            * on(chip, instance) group_left()
+            node_hwmon_chip_names{chip_name="k10temp"}
+          ) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU temperature on {{ $labels.node }}"
+          description: "CPU Tctl on {{ $labels.node }} is {{ $value }}°C (>85°C) for more than 5 minutes"
+
+      - alert: CriticalCPUTemperature
+        expr: |
+          max by (node) (
+            node_hwmon_temp_celsius{sensor="temp1"}
+            * on(chip, instance) group_left()
+            node_hwmon_chip_names{chip_name="k10temp"}
+          ) > 95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU temperature on {{ $labels.node }}"
+          description: "CPU Tctl on {{ $labels.node }} is {{ $value }}°C — at or past TJMax, thermal throttling"
 
       # GPU temperature — covers both host-visible GPUs (via nvidia-smi)
       # and VFIO-passthrough GPUs (via IPMI per-slot sensors). Take the
