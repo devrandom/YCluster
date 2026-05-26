@@ -100,11 +100,16 @@ def collect_ipmi():
 
 
 def collect_nvidia():
-    """Return list of (index, pci_bus_id, name, celsius) from nvidia-smi."""
+    """Return list of dicts for each host-visible GPU."""
     out = []
+    query = (
+        "index,pci.bus_id,name,"
+        "temperature.gpu,utilization.gpu,utilization.memory,"
+        "memory.used,memory.total,power.draw"
+    )
     try:
         r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,pci.bus_id,name,temperature.gpu",
+            ["nvidia-smi", f"--query-gpu={query}",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
         )
@@ -117,14 +122,22 @@ def collect_nvidia():
         return out
     for line in r.stdout.splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) != 4:
+        if len(parts) != 9:
             continue
-        idx, pci, name, temp = parts
         try:
-            t = float(temp)
+            out.append({
+                "index":         parts[0],
+                "pci_bus_id":    parts[1],
+                "name":          parts[2],
+                "temp_c":        float(parts[3]),
+                "util_gpu":      float(parts[4]),
+                "util_mem":      float(parts[5]),
+                "mem_used_mib":  float(parts[6]),
+                "mem_total_mib": float(parts[7]),
+                "power_w":       float(parts[8]),
+            })
         except ValueError:
             continue
-        out.append((idx, pci, name, t))
     return out
 
 
@@ -235,12 +248,37 @@ def write_prom(ipmi, gpu, comino_temps, comino_fans):
         lines.append(
             f'node_ipmi_temperature_celsius{{sensor="{esc(sensor)}",role="{role}"}} {val}'
         )
+    def gpu_lbls(g):
+        return (
+            f'index="{esc(g["index"])}",'
+            f'pci_bus_id="{esc(g["pci_bus_id"])}",'
+            f'name="{esc(g["name"])}"'
+        )
+
     lines.append("# HELP node_gpu_temperature_celsius GPU temperature via nvidia-smi (host-visible GPUs only).")
     lines.append("# TYPE node_gpu_temperature_celsius gauge")
-    for idx, pci, name, val in gpu:
-        lines.append(
-            f'node_gpu_temperature_celsius{{index="{esc(idx)}",pci_bus_id="{esc(pci)}",name="{esc(name)}"}} {val}'
-        )
+    for g in gpu:
+        lines.append(f'node_gpu_temperature_celsius{{{gpu_lbls(g)}}} {g["temp_c"]}')
+    lines.append("# HELP node_gpu_utilization_percent GPU compute utilization percent (host-visible GPUs).")
+    lines.append("# TYPE node_gpu_utilization_percent gauge")
+    for g in gpu:
+        lines.append(f'node_gpu_utilization_percent{{{gpu_lbls(g)}}} {g["util_gpu"]}')
+    lines.append("# HELP node_gpu_memory_utilization_percent GPU memory-bandwidth utilization percent.")
+    lines.append("# TYPE node_gpu_memory_utilization_percent gauge")
+    for g in gpu:
+        lines.append(f'node_gpu_memory_utilization_percent{{{gpu_lbls(g)}}} {g["util_mem"]}')
+    lines.append("# HELP node_gpu_memory_used_bytes GPU memory used in bytes.")
+    lines.append("# TYPE node_gpu_memory_used_bytes gauge")
+    for g in gpu:
+        lines.append(f'node_gpu_memory_used_bytes{{{gpu_lbls(g)}}} {g["mem_used_mib"] * 1024 * 1024}')
+    lines.append("# HELP node_gpu_memory_total_bytes GPU memory total in bytes.")
+    lines.append("# TYPE node_gpu_memory_total_bytes gauge")
+    for g in gpu:
+        lines.append(f'node_gpu_memory_total_bytes{{{gpu_lbls(g)}}} {g["mem_total_mib"] * 1024 * 1024}')
+    lines.append("# HELP node_gpu_power_watts GPU power draw in watts.")
+    lines.append("# TYPE node_gpu_power_watts gauge")
+    for g in gpu:
+        lines.append(f'node_gpu_power_watts{{{gpu_lbls(g)}}} {g["power_w"]}')
     lines.append("# HELP node_comino_temperature_celsius Temperature from a Comino RM cooling controller.")
     lines.append("# TYPE node_comino_temperature_celsius gauge")
     for sensor, role, val in comino_temps:

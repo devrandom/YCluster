@@ -332,6 +332,15 @@
         mode: '0644'
       notify: restart grafana
 
+    - name: Install GPU dashboard
+      copy:
+        src: gpu-dashboard.json
+        dest: /var/lib/grafana-docker/dashboards/gpu.json
+        owner: "472"
+        group: "472"
+        mode: '0644'
+      notify: restart grafana
+
     - name: Install Grafana dashboards
       include_tasks: install_dashboard.yml
       vars:
