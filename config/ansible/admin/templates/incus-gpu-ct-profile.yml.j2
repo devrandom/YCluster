@@ -16,7 +16,12 @@ devices:
     type: nic
     network: {{ incus_bridge }}
     name: eth0
-    # Isolation ACL is applied at the network level (see install-incus.yml).
+    # Cluster-egress ACL (gpu-vm-isolation) restricts WHERE these
+    # containers may talk; the flags below restrict WHO can talk to whom on
+    # the local bridge. See the gpu-vm profile template for full notes.
+    security.port_isolation: "true"
+    security.mac_filtering: "true"
+    security.ipv4_filtering: "true"
   root:
     type: disk
     path: /
