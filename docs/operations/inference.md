@@ -152,3 +152,10 @@ key, just read from the multipart form field instead of the JSON
 body. See [`docs/usage/transcription.md`](../usage/transcription.md)
 for the API surface, and [`transcription.md`](transcription.md) for
 the WhisperX deployment on AMD Strix Halo (gfx1151).
+
+The proxy routes by `model` and forwards the request path verbatim, so
+backends that natively speak the Anthropic Messages API are reachable at
+`/v1/messages` with no translation layer. The Kimi models on exo do; see
+[`docs/usage/anthropic-messages.md`](../usage/anthropic-messages.md) for
+the client-facing API (including the `Authorization: Bearer` vs
+`x-api-key` caveat) and [`exo.md`](exo.md) for the serving topology.
