@@ -38,13 +38,18 @@
     # etcd endpoints for the `ycluster vm` CLI (core nodes s1-s3).
     etcd_endpoints: "10.0.0.11:2379,10.0.0.12:2379,10.0.0.13:2379"
     # GPU VMs keep internet access but are denied cluster-local / private
-    # ranges. The VM bridge subnet falls inside 10.0.0.0/8, so it must be
-    # explicitly allowed — and listed first, since ACL rules are evaluated
-    # in order (first match wins).
+    # ranges. Incus ACL semantics: within one ACL, drop wins over allow.
+    # That means an over-broad drop (e.g. 10.0.0.0/8) shadows the
+    # 10.100.0.0/24 allow and breaks DHCP/DNS/gateway to the bridge.
+    # So we list only the *specific* cluster subnets to deny — none of
+    # which overlap with 10.100.0.0/24 — and rely on the default-accept
+    # for everything else (the bridge subnet + the public internet).
     incus_isolation_allowed_cidrs:
       - "10.100.0.0/24"      # the VM bridge itself — DHCP/DNS/gateway
     incus_isolation_blocked_cidrs:
-      - "10.0.0.0/8"         # cluster + all private 10/8
+      - "10.0.0.0/16"        # cluster LAN + WireGuard overlay
+                             # (room for future cluster /24s)
+      - "10.10.10.0/24"      # AMT
       - "172.16.0.0/12"
       - "192.168.0.0/16"
       - "169.254.0.0/16"     # link-local

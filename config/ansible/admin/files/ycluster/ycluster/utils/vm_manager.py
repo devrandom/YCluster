@@ -41,6 +41,16 @@ BASTION_CONTAINER = "bastion"
 BASTION_JUMP_USER = "jump"
 HOST_CONFIG_PATH = "/etc/ycluster/host.yml"
 
+# Per-host incus bridge subnet (10.100.0.0/24). VMs and containers get a
+# pinned IP from this range so dnsmasq can never hand the same address to
+# two long-running guests (the lease-prune-while-still-running scenario
+# that previously caused VM↔VM IP collisions). The pool excludes the
+# bridge gateway (.1), the bastion (left to dnsmasq's first-free pick),
+# and a small cushion at the top.
+VM_IP_SUBNET_PREFIX = "10.100.0"
+VM_IP_POOL_START = 10
+VM_IP_POOL_END = 200
+
 _VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")     # Incus instance names
 _USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")        # identifiers / emails
 
@@ -90,6 +100,74 @@ def _incus_json(*args):
 
 def _instance_exists(name):
     return _incus("info", name, check=False).returncode == 0
+
+
+def _pinned_ips():
+    """Return {instance_name: ipv4.address} for instances whose eth0 nic
+    device has a static IP assigned (via instance-level override or via the
+    profile they inherit from)."""
+    pinned = {}
+    for inst in _incus_json("list", "--format", "json"):
+        eth0 = (inst.get("expanded_devices") or {}).get("eth0") or {}
+        ip = eth0.get("ipv4.address")
+        if ip:
+            pinned[inst["name"]] = ip
+    return pinned
+
+
+def _occupied_ips():
+    """Set of IPs already in use on this host's incus bridge: every pinned
+    eth0 address plus every currently-live address (e.g. the bastion's
+    DHCP-assigned .36 that has no static pin)."""
+    occupied = set(_pinned_ips().values())
+    for inst in _incus_json("list", "--format", "json"):
+        net = (inst.get("state") or {}).get("network") or {}
+        for iface in net.values():
+            for a in iface.get("addresses", []) or []:
+                if a.get("family") == "inet" and a.get("scope") == "global":
+                    occupied.add(a["address"])
+    return occupied
+
+
+def _pick_vm_ip(prefer=None, taken=None):
+    """Return the first unused IP in VM_IP_POOL_START..VM_IP_POOL_END.
+
+    If `prefer` is supplied and not currently taken by another instance,
+    return it instead (used by `pin_existing_vms` to preserve a running
+    guest's address across the migration). `taken` lets callers pass an
+    accumulating set so successive picks within one operation don't
+    collide.
+    """
+    if taken is None:
+        taken = _occupied_ips()
+    else:
+        taken = set(taken)
+    if prefer and prefer not in taken:
+        return prefer
+    for i in range(VM_IP_POOL_START, VM_IP_POOL_END + 1):
+        ip = f"{VM_IP_SUBNET_PREFIX}.{i}"
+        if ip not in taken:
+            return ip
+    raise RuntimeError(
+        f"No free IPs in {VM_IP_SUBNET_PREFIX}.{VM_IP_POOL_START}–"
+        f"{VM_IP_POOL_END}; taken: {sorted(taken)}"
+    )
+
+
+def _pin_instance_ip(name, ip):
+    """Pin `name`'s eth0 nic to `ip`. Idempotent.
+
+    Uses `device override` (which creates an instance-local copy of the
+    profile device with the new key) the first time, and `device set`
+    afterwards (override fails once the device is already overridden).
+    Takes effect immediately for new devices; existing running guests
+    pick up the change on next DHCP renewal (≈1h) or instance restart.
+    """
+    ov = _incus("config", "device", "override", name, "eth0",
+                f"ipv4.address={ip}", check=False)
+    if ov.returncode != 0:
+        _incus("config", "device", "set", name, "eth0",
+               f"ipv4.address={ip}")
 
 
 def _instance_running(name):
@@ -392,6 +470,12 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     _incus("init", image, name, *type_args, "--profile", profile,
            "-c", f"limits.cpu={cpu}", "-c", f"limits.memory={mem}")
 
+    # Pin a static IP before first start, so dnsmasq always offers the
+    # same address to this MAC and ipv4_filtering (in the gpu-vm / gpu-ct
+    # profile) has an authoritative source-IP to enforce.
+    pinned_ip = _pick_vm_ip()
+    _pin_instance_ip(name, pinned_ip)
+
     if instance_type == "vm":
         for i, pci in enumerate(picked):
             # A 'gpu' device of gputype=physical attaches the GPU's whole IOMMU
@@ -526,6 +610,72 @@ def vm_list():
         print(f"{name:<20} {rec.get('owner', '?'):<24} {host or '?':<8} "
               f"{str(rec.get('gpus', '?')):<5} {state:<14} "
               f"{rec.get('created', '')}")
+
+
+def pin_existing_vms():
+    """Migration helper: pin a static IP on every non-bastion incus
+    instance on this host that doesn't already have one.
+
+    Strategy:
+      - For each instance, prefer its currently-live address (so a running
+        guest keeps its address through the migration) unless that address
+        collides with another instance's pin/live IP.
+      - Otherwise allocate the lowest free address from the VM IP pool.
+
+    Pin takes effect immediately for the device record; the running guest
+    keeps its current cached IP until the DHCP lease renews (≈1h with the
+    default lease) or the instance is restarted. Subsequent renewals will
+    receive the pinned address even after a long lease lapse.
+    """
+    insts = _incus_json("list", "--format", "json")
+    pinned_by_name = _pinned_ips()
+    taken = set(pinned_by_name.values())
+
+    # Map every instance to its current live IPv4 (None when stopped or
+    # unreachable). Then count occurrences so we can detect collisions
+    # like the vm3/vm2 case where two guests claim the same address.
+    live = {}
+    for inst in insts:
+        ip = None
+        net = (inst.get("state") or {}).get("network") or {}
+        for iface in net.values():
+            for a in iface.get("addresses", []) or []:
+                if a.get("family") == "inet" and a.get("scope") == "global":
+                    ip = a["address"]
+                    break
+            if ip:
+                break
+        live[inst["name"]] = ip
+    live_counts = {}
+    for ip in live.values():
+        if ip:
+            live_counts[ip] = live_counts.get(ip, 0) + 1
+
+    changes = []
+    # Pin instances whose live IP is *uniquely theirs* first, so the lucky
+    # tie-winner gets to keep it before we reallocate the others.
+    queue_first = []
+    queue_later = []
+    for name, ip in live.items():
+        if name == BASTION_CONTAINER or name in pinned_by_name:
+            continue
+        if ip and live_counts.get(ip, 0) == 1:
+            queue_first.append(name)
+        else:
+            queue_later.append(name)
+
+    for name in queue_first + queue_later:
+        target = _pick_vm_ip(prefer=live[name], taken=taken)
+        if target == live[name]:
+            note = "kept current"
+        elif live[name]:
+            note = f"was {live[name]} (collision)"
+        else:
+            note = "was n/a (stopped)"
+        _pin_instance_ip(name, target)
+        taken.add(target)
+        changes.append((name, target, note))
+    return changes
 
 
 def vm_sync_keys(user):

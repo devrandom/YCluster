@@ -51,6 +51,12 @@ def register_vm_commands(subparsers):
     gp = sub.add_parser('gpus', help='Show passthrough GPU allocation')
     gp.set_defaults(func=lambda a: vm.vm_gpus())
 
+    pip = sub.add_parser(
+        'pin-ips',
+        help='Pin a static IP on every existing VM/container (migration '
+             'helper; new launches pin automatically).')
+    pip.set_defaults(func=lambda a: _print_pins(vm.pin_existing_vms()))
+
     bp = sub.add_parser('bastion-sync',
                         help='Regenerate the bastion SSH access list from etcd')
     bp.set_defaults(func=lambda a: vm.bastion_sync())
@@ -90,3 +96,17 @@ def _ssh_remove(args):
     vm.user_remove_key(args.user, args.key)
     vm.vm_sync_keys(args.user)
     vm.bastion_sync()
+
+
+def _print_pins(changes):
+    if not changes:
+        print("No changes — every instance on this host is already pinned "
+              "(or only the bastion is present).")
+        return
+    print(f"Pinned {len(changes)} instance(s):")
+    for name, ip, note in changes:
+        print(f"  {name:<24} {ip:<16}  ({note})")
+    print("\nThe pin takes effect on next DHCP renewal (≈1h) or on the "
+          "next instance restart.")
+    print("Restart now for immediate effect plus to activate "
+          "port_isolation / ipv4_filtering from the updated profile.")

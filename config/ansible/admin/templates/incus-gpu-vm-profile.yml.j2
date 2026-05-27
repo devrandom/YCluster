@@ -10,7 +10,21 @@ devices:
     type: nic
     network: {{ incus_bridge }}
     name: eth0
-    # Isolation ACL is applied at the network level (see install-incus.yml).
+    # Cluster-egress ACL (gpu-vm-isolation, applied at the network level)
+    # restricts WHERE these VMs may talk. The flags below restrict WHO can
+    # talk to whom on the local bridge:
+    #
+    # port_isolation:  bridge-level "isolated" flag — two isolated ports
+    #                  cannot pass frames to each other. The bastion uses
+    #                  the default profile (not isolated), so the
+    #                  ssh -J → VM path still works; VM↔VM is blocked.
+    # mac_filtering:   guest cannot spoof its source MAC.
+    # ipv4_filtering:  guest cannot spoof its source IPv4. Requires the
+    #                  instance to have an `ipv4.address` set (vm_launch
+    #                  pins one per VM).
+    security.port_isolation: "true"
+    security.mac_filtering: "true"
+    security.ipv4_filtering: "true"
   root:
     type: disk
     path: /
