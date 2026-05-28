@@ -51,6 +51,16 @@ VM_IP_SUBNET_PREFIX = "10.100.0"
 VM_IP_POOL_START = 10
 VM_IP_POOL_END = 200
 
+# NAS share: each instance gets a dedicated subdir under /near1/vm/<name>
+# on the host, attached as /data inside the guest. virtiofsd sandboxes the
+# export, so the guest cannot escape to sibling VMs' subdirs or to other
+# parts of /near1. All VMs still write to NAS as the same Samba user (the
+# host's CIFS mount pins uid=1000,gid=1000) — isolation is at the virtiofs
+# export boundary, not at NAS ACL level.
+NAS_HOST_BASE = "/near1/vm"
+NAS_GUEST_PATH = "/data"
+NAS_DEVICE = "data"
+
 _VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")     # Incus instance names
 _USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")        # identifiers / emails
 
@@ -168,6 +178,34 @@ def _pin_instance_ip(name, ip):
     if ov.returncode != 0:
         _incus("config", "device", "set", name, "eth0",
                f"ipv4.address={ip}")
+
+
+def _ensure_nas_share(name):
+    """Best-effort: provision /near1/vm/<name> on the host and attach it
+    as a virtiofs disk at /data inside the instance. Idempotent — safe to
+    call on every start as a backfill. Silently skips (warning only) if
+    /near1 is unreachable, so a NAS outage doesn't block VM start.
+    """
+    host_dir = f"{NAS_HOST_BASE}/{name}"
+    # `timeout` guards a hung CIFS automount: if the NAS is down, an
+    # access to /near1 can block forever on the systemd automount.
+    try:
+        subprocess.run(["mkdir", "-p", host_dir],
+                       check=True, timeout=10,
+                       stderr=subprocess.PIPE, text=True)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        msg = getattr(e, "stderr", "") or str(e)
+        print(f"  NAS /near1 unreachable — skipping /data attach on "
+              f"'{name}' ({msg.strip() or e.__class__.__name__}).",
+              file=sys.stderr)
+        return
+
+    have = _incus("config", "device", "list", name, check=False)
+    if NAS_DEVICE in have.stdout.split():
+        return
+    _incus("config", "device", "add", name, NAS_DEVICE, "disk",
+           f"source={host_dir}", f"path={NAS_GUEST_PATH}",
+           "shift=true", "required=false")
 
 
 def _instance_running(name):
@@ -488,6 +526,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
         if gpus == 0:
             _incus("config", "device", "remove", name, "gpu0", check=False)
 
+    _ensure_nas_share(name)
     _incus("start", name)
 
     # Register immediately, before SSH provisioning, so the instance is
@@ -569,8 +608,19 @@ def vm_stop(name):
 
 
 def vm_start(name):
+    # Backfill any host-side state added since this instance was created
+    # (currently just the /data NAS share). Idempotent.
+    _ensure_nas_share(name)
     _incus("start", name)
     print(f"Started '{name}'.")
+
+
+def vm_restart(name):
+    if _instance_running(name):
+        _incus("stop", name)
+    _ensure_nas_share(name)
+    _incus("start", name)
+    print(f"Restarted '{name}'.")
 
 
 def vm_destroy(name):

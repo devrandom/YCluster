@@ -39,6 +39,10 @@ def register_vm_commands(subparsers):
     stp.add_argument('name')
     stp.set_defaults(func=lambda a: vm.vm_start(a.name))
 
+    rsp = sub.add_parser('restart', help='Stop (if running) and start a VM')
+    rsp.add_argument('name')
+    rsp.set_defaults(func=lambda a: vm.vm_restart(a.name))
+
     dp = sub.add_parser('destroy', help='Delete a VM and its registration')
     dp.add_argument('name')
     dp.set_defaults(func=lambda a: vm.vm_destroy(a.name))
