@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YCluster — Utilization</title>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; background: #111217; color: #eee;
+                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .bar { position: fixed; top: 0; left: 0; right: 0; height: 32px;
+               background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+               display: flex; align-items: center; padding: 0 12px; font-size: 13px;
+               z-index: 10; }
+        .bar a { color: #9ab; text-decoration: none; margin-right: 16px; }
+        .bar a:hover { color: #fff; }
+        .bar .title { color: #ccc; font-weight: 600; }
+        iframe { position: absolute; top: 32px; left: 0; width: 100%; height: calc(100% - 32px);
+                 border: 0; display: block; }
+    </style>
+</head>
+<body>
+    <div class="bar">
+        <a href="/">← Admin</a>
+        <span class="title">Utilization</span>
+        <span style="flex:1"></span>
+        <a href="/grafana/d/ycluster-utilization/utilization" target="_blank">Open in Grafana ↗</a>
+    </div>
+    <iframe src="/grafana/d/ycluster-utilization/utilization?kiosk=tv&theme=dark&refresh=30s"></iframe>
+</body>
+</html>

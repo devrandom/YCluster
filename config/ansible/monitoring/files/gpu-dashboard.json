@@ -315,7 +315,7 @@
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "",
-  "title": "YCluster — GPU",
+  "title": "GPU",
   "uid": "ycluster-gpu",
   "version": 1,
   "weekStart": ""

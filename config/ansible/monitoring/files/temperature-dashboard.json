@@ -274,7 +274,7 @@
   "time": { "from": "now-6h", "to": "now" },
   "timepicker": {},
   "timezone": "",
-  "title": "YCluster — Temperature",
+  "title": "Temperature",
   "uid": "ycluster-temperature",
   "version": 1,
   "weekStart": ""
