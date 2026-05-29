@@ -341,6 +341,15 @@
         mode: '0644'
       notify: restart grafana
 
+    - name: Install Utilization dashboard
+      copy:
+        src: utilization-dashboard.json
+        dest: /var/lib/grafana-docker/dashboards/utilization.json
+        owner: "472"
+        group: "472"
+        mode: '0644'
+      notify: restart grafana
+
     - name: Install Grafana dashboards
       include_tasks: install_dashboard.yml
       vars:
@@ -365,7 +374,7 @@
           filename: "node-exporter-full-central.json"
           datasource_uid: "prometheus-central"
           uid_override: "node-exporter-full-central"
-          title_override: "Node Exporter Full (Central — 90d)"
+          title_override: "Node Exporter Full (Central, 90d)"
         - name: "Ceph - Cluster"
           url: "https://grafana.com/api/dashboards/2842/revisions/18/download"
           sha256: "3e12f352c7ed91d3b9440c78ea8cb0549215caa6e2da8b78df741322a4da3402"

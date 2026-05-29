@@ -187,6 +187,12 @@
         dest: /var/www/html/index.html
         mode: '0644'
 
+    - name: Copy embedded Utilization dashboard page
+      copy:
+        src: "dashboard.html"
+        dest: /var/www/html/dashboard.html
+        mode: '0644'
+
     - name: Copy ansible SSH public key
       copy:
         src: "{{ bootstrap_files_dir }}/ansible_ssh_key.pub"

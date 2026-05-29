@@ -522,7 +522,7 @@
   "time": {"from": "now-1h", "to": "now"},
   "timepicker": {},
   "timezone": "",
-  "title": "YCluster Inference",
+  "title": "Inference",
   "uid": "ycluster-inference",
   "version": 1,
   "weekStart": ""
