@@ -25,6 +25,42 @@
         <span style="flex:1"></span>
         <a href="/grafana/d/ycluster-utilization/utilization" target="_blank">Open in Grafana ↗</a>
     </div>
-    <iframe src="/grafana/d/ycluster-utilization/utilization?kiosk=tv&theme=dark&refresh=30s"></iframe>
+    <iframe id="dash"></iframe>
+    <script>
+    (function () {
+        const iframe = document.getElementById('dash');
+        const BASE = '/grafana/d/ycluster-utilization/utilization';
+        // Presentation-only params we inject into the iframe but hide from the
+        // parent URL — so bookmarking captures node/time/etc. without the
+        // chrome-stripping flags polluting the link.
+        const PRESENT = { kiosk: '', theme: 'dark', refresh: '30s' };
+        const PRESENT_KEYS = Object.keys(PRESENT);
+
+        function buildInitialSrc() {
+            const qs = new URLSearchParams(window.location.search);
+            PRESENT_KEYS.forEach(k => qs.delete(k));
+            for (const [k, v] of Object.entries(PRESENT)) {
+                qs.set(k, v);
+            }
+            // Boolean kiosk: emit `kiosk` not `kiosk=`. URLSearchParams always
+            // serialises with `=`, so patch that one key after toString.
+            return BASE + '?' + qs.toString().replace(/(^|&)kiosk=(&|$)/, '$1kiosk$2');
+        }
+        iframe.src = buildInitialSrc();
+
+        // Mirror iframe state -> parent URL (same-origin, so this works).
+        let last = '';
+        setInterval(() => {
+            try {
+                const inner = new URLSearchParams(iframe.contentWindow.location.search);
+                PRESENT_KEYS.forEach(k => inner.delete(k));
+                const qs = inner.toString();
+                if (qs === last) return;
+                last = qs;
+                history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : ''));
+            } catch (e) { /* iframe still loading or transient cross-origin */ }
+        }, 1000);
+    })();
+    </script>
 </body>
 </html>
