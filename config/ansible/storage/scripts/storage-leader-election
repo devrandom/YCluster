@@ -192,7 +192,7 @@ stop_all_services() {
             timeout 5s cryptsetup close user || \
             # If that fails, use dmsetup with wipe_table for maximum aggression
             (dmsetup wipe_table --force user || \
-             dmsetup remove --force --retry --wipe_table user || \
+             dmsetup remove --force --retry user || \
              echo "Failed to remove LUKS mapper user")
         ) &
         
@@ -256,7 +256,7 @@ stop_all_services() {
             timeout 5s cryptsetup close user || \
             # If that fails, use dmsetup with wipe_table for maximum aggression
             (dmsetup wipe_table --force user || \
-             dmsetup remove --force --retry --wipe_table user || \
+             dmsetup remove --force --retry user || \
              echo "Failed to remove LUKS mapper user")
         ) &
         
@@ -311,7 +311,10 @@ while true; do
             # Send heartbeat periodically while we're leader
             HEARTBEAT_COUNTER=$((HEARTBEAT_COUNTER + RENEW_INTERVAL))
             if [ $HEARTBEAT_COUNTER -ge $HEARTBEAT_INTERVAL ]; then
-                send_heartbeat
+                # Best-effort external dead-man's-switch ping; never let its
+                # failure (e.g. uplink down) abort the loop under `set -e` and
+                # drop storage leadership.
+                send_heartbeat || true
                 HEARTBEAT_COUNTER=0
             fi
         fi
