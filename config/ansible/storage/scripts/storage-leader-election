@@ -79,9 +79,14 @@ is_node_drained() {
     [ "$drain_status" = "true" ]
 }
 
-# Function to send healthchecks.io heartbeat
+# Function to send healthchecks.io heartbeat.
+# Runs detached with a hard timeout: cluster-heartbeat makes HTTP calls
+# (admin API + healthchecks.io) that block for tens of seconds during a WAN
+# outage. If that ran inline it would stall this loop past the 30s lease TTL
+# and cost us leadership (observed 2026-06-01). It is pure telemetry, so
+# never let it delay lease renewal.
 send_heartbeat() {
-    /usr/local/lib/cluster/cluster-heartbeat
+    ( timeout 15s /usr/local/lib/cluster/cluster-heartbeat || true ) &
 }
 
 # Function to check and restart critical services if they died unexpectedly
