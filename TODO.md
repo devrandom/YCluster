@@ -55,6 +55,7 @@
 - Capacity-planning notes: Ceph write-perf cliff at ~85% (empirical, in NOTES), recommended free-space margins, rebalance time estimates.
 
 ### Security
+- Harden etcd access — it currently has no auth, no TLS, and no firewall (listens `0.0.0.0:2379` plaintext), so any node on the flat `/24` can read/write all of etcd, including the inference master key and Open-WebUI secret key. Most non-core etcd access is cruft (admin-api health telemetry + a delegatable `inventory collect` write); the only real non-core client is the `ycluster vm` CLI on compute. Plan: drop the cruft, then either proxy VM allocation through the admin API + firewall etcd to `s*`, or use mTLS. Full audit and phased plan in `docs/design/etcd-access-hardening.md`.
 - SSH-key rotation procedure (Ansible key at `/data/ansible_ssh_key` and any node-to-node keys).
 - Secrets-rotation flow for things stored in etcd (`/cluster/config/inference/master-key` and similar) and in vault.
 - Audit-log story: journald aggregation, etcd/Ceph audit logs, retention.
