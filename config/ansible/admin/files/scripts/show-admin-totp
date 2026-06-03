@@ -23,12 +23,23 @@ def get_totp_secret():
         print(f"Error reading TOTP secret: {e}", file=sys.stderr)
         return None
 
+def get_label():
+    """Read the TOTP group label written by the setup playbook, if present."""
+    label_file = '/home/admin/.google_authenticator.label'
+    try:
+        with open(label_file, 'r') as f:
+            return f.read().strip() or None
+    except FileNotFoundError:
+        return None
+
 def display_qr(secret):
     """Display QR code for TOTP enrollment"""
     import qrcode
-    
-    # Create otpauth URL
-    otpauth_url = f"otpauth://totp/admin@ycluster?secret={secret}&issuer=YCluster"
+
+    label = get_label()
+    account = f"admin-{label}@ycluster" if label else "admin@ycluster"
+    issuer = f"YCluster ({label})" if label else "YCluster"
+    otpauth_url = f"otpauth://totp/{account}?secret={secret}&issuer={issuer.replace(' ', '%20')}"
     
     # Generate QR code
     qr = qrcode.QRCode()
