@@ -7,7 +7,8 @@
     instance_suffix: "{{ '-' + instance if instance else '' }}"
     build_dir: "/opt/src/open-webui-build{{ instance_suffix }}"
     plugins_repo: "https://github.com/devrandom/open-webui-plugins.git"
-    webui_repo: "https://github.com/devrandom/open-webui.git"
+    webui_repo: "https://github.com/open-webui/open-webui.git"
+    webui_version: "v0.9.6"
     image_name: "registry.xc:5000/open-webui-with-plugins"
     image_tag: "{{ instance if instance else 'latest' }}"
 
@@ -36,6 +37,8 @@
       git:
         repo: "{{ webui_repo }}"
         dest: "{{ build_dir }}/open-webui"
+        version: "{{ webui_version }}"
+        force: yes
         update: "{{ instance == '' }}"
 
     - name: Build and push with buildx using registry cache
