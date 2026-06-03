@@ -545,6 +545,21 @@ The `ycluster` command provides comprehensive tab completion.
 
 ### Ansible Vault
 
+#### Vault file layout
+
+The real vault files live in `config/vault/` (outside the ansible tree and
+gitignored). The paths Ansible expects under `config/ansible/group_vars/` are
+symlinks into `config/vault/`:
+
+```
+config/ansible/group_vars/all/vault.yml     -> ../../vault/all.yml
+config/ansible/group_vars/storage/vault.yml -> ../../vault/storage.yml
+```
+
+The symlinks themselves are tracked in git; their targets are not. On a fresh
+checkout you must populate `config/vault/*.yml` (encrypted with
+`ansible-vault`) before any playbook that references `vault_*` vars will run.
+
 Create a vault password:
 
 ```shell
