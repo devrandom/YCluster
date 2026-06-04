@@ -1,7 +1,32 @@
 # etcd access hardening
 
 ## Status
-Plan / audit only. Nothing implemented.
+**Phase 1 implemented and validated on the dev container cluster** (see
+`docs/design/virtual-test-environment.md`). Phase 2 (close the boundary) not
+yet started.
+
+Phase 1 changes:
+- admin-api no longer holds an etcd client on non-storage nodes. Every
+  etcd-touching path in the health surface is gated behind `is_etcd_node()`
+  (`get_current_node_type() == 'storage'`, i.e. `s*`): the startup
+  "wait for etcd" loop, the `/test` connectivity probe, `is_storage_leader`,
+  `is_dhcp_leader`, `is_node_drained`, `check_certificate_expiry`, and the
+  keepalived check's `get_core_nodes()` (which did a full `by-hostname/`
+  prefix scan just to ask "am I core?"). Verified: a compute node starts
+  without etcd, serves `/metrics` + `/api/health` with the etcd-dependent
+  services reported `not_applicable`/`false`, and holds **zero** TCP
+  connections to `:2379` (confirmed by stack-trace instrumentation and live
+  socket inspection).
+- `ycluster inventory collect` gained a `--print` mode (collect locally, emit
+  JSON, no etcd write). `collect-hardware-facts.yml` now mirrors the macOS
+  flow: each node collects locally and the etcd write is delegated to a
+  storage node. Verified: a compute node's hardware record lands in etcd
+  (written via the storage node) while the compute node itself makes no etcd
+  connection.
+
+A standing principle came out of this: avoid unnecessary etcd calls in
+general. The core-node health path still makes ~6 reads per scrape — tracked
+as a perf follow-up in `TODO.md`.
 
 ## Problem
 etcd is the single source of truth for cluster state and secrets, yet it
