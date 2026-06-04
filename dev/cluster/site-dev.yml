@@ -1,0 +1,16 @@
+---
+# Curated, container-safe subset of the real cluster playbooks for the dev
+# environment.
+#
+# IMPORTANT: run this as the TOP-LEVEL playbook from dev/cluster/ —
+#   ../../venv/bin/ansible-playbook site-dev.yml
+# Ansible loads group_vars/host_vars relative to the top-level playbook's
+# directory (here: dev/cluster/, which has none), so the vaulted group_vars
+# under config/ansible/ are NOT pulled in. That keeps the dev cluster
+# runnable without the production vault password.
+#
+# Excluded vs the real site.yml: Ceph/MicroCeph (snap + kernel modules +
+# real disks — can't run in containers), monitoring, macOS, and the
+# PXE/autoinstall bits. Add playbooks here as they're made container-safe.
+
+- import_playbook: ../../config/ansible/install-etcd.yml
