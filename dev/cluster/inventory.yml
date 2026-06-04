@@ -1,22 +1,17 @@
 # Static boot inventory for the dev container cluster.
 #
-# Connection is via `incus exec` (no SSH) — on Qubes, host->container SSH
-# return traffic hits the dropped INPUT chain, and exec sidesteps the
-# network entirely. `ansible_host` is still set because playbooks like
-# install-etcd.yml build peer URLs from hostvars[...]['ansible_host'].
+# Connection is plain SSH as root (faithful to the real cluster, and makes
+# the synchronize/rsync-based playbooks work). Host->container works on
+# Qubes because the container's replies are established/related, which the
+# Qubes INPUT chain accepts. dev-cluster.sh provisions sshd + the dev key.
 #
-# Mirrors the real group layout (etcd/core/storage/compute/managed) so the
-# real playbooks run unmodified.
+# Mirrors the real group layout (etcd/core/compute/managed) so the real
+# playbooks run unmodified.
 all:
   vars:
-    ansible_connection: community.general.incus
-    # Target the instance by name. Must pin this: the plugin's remote_addr
-    # also accepts ansible_host (which we set to the IP for playbook logic),
-    # and ansible_host would otherwise win and break the lookup.
-    ansible_incus_host: "{{ inventory_hostname }}"
-    ansible_incus_remote: local
+    ansible_connection: ssh
     ansible_user: root
-    ansible_become: false   # incus exec is already root
+    ansible_become: false   # we log in as root
     # Harmless default: on a fresh 3-node bootstrap the "add member to
     # existing cluster" task is skipped, but Ansible 2.19 templates its
     # delegate_to before evaluating when:, erroring on the undefined var.

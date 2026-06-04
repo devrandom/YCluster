@@ -17,7 +17,15 @@
 #
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- config --------------------------------------------------------------
+SSH_KEY="$SCRIPT_DIR/.ssh/id_dev"   # generated on first `up`; gitignored
+# Incus state defaults to the volatile AppVM root (resets on reboot, small).
+# We relocate it to the persistent private volume (/rw) via a Qubes bind-dir.
+STATE_DIR=/var/lib/incus
+PERSIST_DIR=/rw/bind-dirs/var/lib/incus
+BIND_CONF=/rw/config/qubes-bind-dirs.d/50-incus.conf
 NETWORK=ycdev0
 SUBNET=10.0.0.1/24
 PROFILE=yc-node
@@ -42,8 +50,31 @@ EOF
 INCUS() { sudo incus "$@"; }
 
 # --- substrate -----------------------------------------------------------
+ensure_persist() {
+  # Move /var/lib/incus (daemon DB + image cache + dir storage pool) off the
+  # volatile AppVM root onto the persistent private volume (/rw), so the dev
+  # cluster survives reboots and gets /rw's large disk instead of the ~2GB
+  # free on root. `reset` stays the explicit throwaway; reboots no longer
+  # cost a full reprovision.
+  if [ ! -f "$BIND_CONF" ]; then
+    sudo mkdir -p "$(dirname "$BIND_CONF")"
+    echo "binds+=('$STATE_DIR')" | sudo tee "$BIND_CONF" >/dev/null
+    echo "[*] $BIND_CONF written (Qubes binds $STATE_DIR from /rw at boot)"
+  fi
+  # Already on /rw — via the Qubes boot-time mount, or a prior run this boot.
+  if mountpoint -q "$STATE_DIR"; then return 0; fi
+  # First time this boot (before Qubes' native bind takes effect): stop incus,
+  # then bind /rw over the root copy. We start clean rather than seeding — the
+  # ensure_* steps rebuild the minimal state idempotently, and the hidden root
+  # copy is reclaimed at the next reboot (root is volatile).
+  echo "[*] relocating $STATE_DIR -> $PERSIST_DIR (until next reboot makes it native)"
+  sudo systemctl stop incus.service incus.socket
+  sudo mkdir -p "$PERSIST_DIR"
+  sudo mount --bind "$PERSIST_DIR" "$STATE_DIR"
+}
+
 ensure_daemon() {
-  sudo systemctl start incus.socket incus.service 2>/dev/null || true
+  sudo systemctl start incus.socket incus.service
   if ! INCUS storage list --format csv >/dev/null 2>&1 || \
      ! INCUS storage list --format csv 2>/dev/null | grep -q .; then
     echo "[*] incus admin init --minimal"
@@ -64,11 +95,15 @@ ensure_firewall() {
   done
 }
 
-ensure_access() {
-  # Let the invoking user drive incus without sudo (needed by the Ansible
-  # community.general.incus connection, which runs `incus` as that user).
-  # ACL the socket so we don't depend on an incus-admin group re-login.
-  sudo setfacl -m "u:$(id -un):rw" /var/lib/incus/unix.socket 2>/dev/null || true
+ensure_sshkey() {
+  # Ansible connects over SSH (faithful to the real cluster; also makes the
+  # synchronize/rsync-based playbooks work, which the incus-exec connection
+  # can't). Generate a throwaway keypair once.
+  if [ ! -f "$SSH_KEY" ]; then
+    mkdir -p "$(dirname "$SSH_KEY")"; chmod 700 "$(dirname "$SSH_KEY")"
+    ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" -C ycluster-dev >/dev/null
+    echo "[*] generated dev ssh key $SSH_KEY"
+  fi
 }
 
 ensure_network() {
@@ -102,6 +137,27 @@ wait_ready() {  # wait for systemd inside the container to be usable
 
 configure_node() {
   local n=$1 ip="10.0.0.${OCTET[$1]}"
+  # Disable the boot-time apt jobs up front so they never race provisioning
+  # for the dpkg lock. Guard by existence (the minimal image may not ship
+  # all of these) — a conditional, not error-swallowing.
+  local unit
+  for unit in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service; do
+    if INCUS exec "$n" -- systemctl list-unit-files "$unit" --no-legend | grep -q .; then
+      INCUS exec "$n" -- systemctl disable --now "$unit"
+    fi
+  done
+  # No apt recommends. The ycluster package's real deps are the explicitly
+  # listed apt packages; recommends drag in build-essential, scipy, tk,
+  # tcpdump/wireshark (via scapy/matplotlib/ipython) — ~640MB/node that
+  # overflows the small AppVM root across 4 dir-pool copies. A deliberate
+  # dev-env footprint cut (see design doc), not a playbook change.
+  INCUS exec "$n" -- sh -c 'printf "APT::Install-Recommends \"false\";\nAPT::Install-Suggests \"false\";\n" > /etc/apt/apt.conf.d/99-no-recommends'
+  # Refresh the apt cache once at provision time. The stock image ships a
+  # stale index, so exact-version installs 404 on since-superseded transitive
+  # deps. Real nodes get this during autoinstall/bootstrap; do the equivalent
+  # here so the playbooks find a fresh cache (no manual apt-get update).
+  INCUS exec "$n" -- env DEBIAN_FRONTEND=noninteractive \
+    apt-get update -o DPkg::Lock::Timeout=120 >/dev/null
   # Static networkd config written directly. We avoid netplan ("netplan
   # apply" calls udevadm, which has no running udev in a container) and DHCP
   # (dnsmasq sits behind Qubes' dropped INPUT chain). Drop the image's
@@ -119,7 +175,7 @@ Gateway=10.0.0.1
 $(for d in $DNS; do echo "DNS=$d"; done)
 EOF
   INCUS exec "$n" -- ip addr flush dev eth0 scope global
-  INCUS exec "$n" -- systemctl enable systemd-networkd >/dev/null 2>&1 || true
+  INCUS exec "$n" -- systemctl enable systemd-networkd
   INCUS exec "$n" -- systemctl restart systemd-networkd
   # Deterministic resolv.conf (don't depend on resolved wiring in-container)
   INCUS exec "$n" -- sh -c "rm -f /etc/resolv.conf; for d in $DNS; do echo \"nameserver \$d\"; done > /etc/resolv.conf"
@@ -127,6 +183,15 @@ EOF
   INCUS exec "$n" -- sh -c "sed -i '/\.xc/d; / s[0-9] /d; / c[0-9] /d' /etc/hosts; cat >> /etc/hosts" <<EOF
 $HOSTS_BLOCK
 EOF
+  # SSH: install sshd and authorize the dev key for root (Ansible uses SSH).
+  # stdout suppressed to keep apt progress quiet; stderr (real errors) shown.
+  if ! INCUS exec "$n" -- test -x /usr/sbin/sshd; then
+    INCUS exec "$n" -- env DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y -o DPkg::Lock::Timeout=120 openssh-server >/dev/null
+  fi
+  INCUS exec "$n" -- sh -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh'
+  INCUS exec "$n" -- sh -c 'cat > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys' < "${SSH_KEY}.pub"
+  INCUS exec "$n" -- systemctl enable --now ssh
 }
 
 ensure_node() {
@@ -145,12 +210,12 @@ ensure_node() {
 
 # --- commands ------------------------------------------------------------
 cmd_up() {
-  ensure_daemon; ensure_access; ensure_firewall; ensure_network; ensure_profile
+  ensure_persist; ensure_daemon; ensure_sshkey; ensure_firewall; ensure_network; ensure_profile
   for n in "${NODES[@]}"; do ensure_node "$n"; done
   echo; cmd_status
 }
 
-cmd_down()   { for n in "${NODES[@]}"; do INCUS delete -f "$n" 2>/dev/null && echo "[*] deleted $n" || true; done; }
+cmd_down()   { for n in "${NODES[@]}"; do if INCUS info "$n" >/dev/null 2>&1; then INCUS delete -f "$n"; echo "[*] deleted $n"; fi; done; }
 cmd_reset()  { cmd_down; cmd_up; }
 cmd_status() { INCUS list; }
 cmd_exec()   { local n=$1; shift || true; INCUS exec "$n" -- "${@:-bash}"; }

@@ -29,3 +29,6 @@ venv/
 /*.token
 /secrets.yaml
 /secrets.yml
+
+# dev cluster throwaway ssh key
+dev/cluster/.ssh/
