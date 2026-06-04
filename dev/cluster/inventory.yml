@@ -18,6 +18,11 @@ all:
     # The set_fact in the playbook overrides this when the existing-cluster
     # path actually runs. (Latent install-etcd.yml bug surfaced by the dev env.)
     working_etcd_host: s1
+    # Normally from config/ansible/group_vars (deliberately not loaded here).
+    # Supply the non-secret ones the container-safe playbooks need:
+    cluster_interface: eth0                          # core.yml value is bare-metal
+    # inventory_dir (not playbook_dir) — the latter varies per imported play.
+    bootstrap_files_dir: "{{ inventory_dir }}/.ssh"  # holds ansible_ssh_key.pub
   children:
     etcd:
       hosts:

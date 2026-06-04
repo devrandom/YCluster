@@ -104,6 +104,10 @@ ensure_sshkey() {
     ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" -C ycluster-dev >/dev/null
     echo "[*] generated dev ssh key $SSH_KEY"
   fi
+  # setup-web-services.yml publishes {{ bootstrap_files_dir }}/ansible_ssh_key.pub;
+  # in the dev env bootstrap_files_dir points at this .ssh dir, so expose the
+  # dev pubkey under that name.
+  cp -f "${SSH_KEY}.pub" "$(dirname "$SSH_KEY")/ansible_ssh_key.pub"
 }
 
 ensure_network() {
