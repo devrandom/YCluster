@@ -79,11 +79,31 @@ Qubes drops; everything else is bridge/FORWARD or SSH).
    a systemd-networkd `.network` directly and `rm` the image's netplan
    (both `/etc/netplan/*.yaml` and the generated `/run` unit, which sorts
    first and would DHCP).
-3. **Vault.** Only `group_vars/storage/vault.yml` is vaulted; our nodes
-   don't need it, so the dev inventory has **no `storage` group**. The
-   playbooks we exercise target etcd/core/managed/compute. (Aside: on
-   s3.yc that file is a symlink to `../../vault`; in this checkout it's a
-   materialized vault file — local layout quirk, unrelated.)
+3. **Vault.** The vaulted files are `group_vars/all/vault.yml` and
+   `group_vars/storage/vault.yml`, both **symlinks** into
+   `config/ansible/vault/` (`all.yml`, `storage.yml`) — the symlinks are
+   tracked, the target dir is gitignored (real secrets never committed).
+   We sidestep them by running dev playbooks from `dev/cluster/`:
+   `group_vars`/`host_vars` resolve relative to the **top-level playbook's**
+   dir (`dev/cluster/`, which has none), so the prod `group_vars` — vault
+   included — are simply never loaded. That's why `site-dev.yml` and
+   `collect-hw-dev.yml` are thin wrappers living in `dev/cluster/` that
+   `import_playbook` the real ones. Dev supplies the few non-secret vars the
+   container-safe playbooks need directly in `inventory.yml`.
+   - The dev inventory **does** define a `storage` group (s1-s3, mirroring
+     the real cluster where core nodes are the storage group) so playbooks
+     that delegate to `groups['storage'] | first` (e.g.
+     `collect-hardware-facts.yml`'s etcd write) resolve. This is safe
+     precisely because of the playbook-dir rule above — naming the group
+     does not pull `group_vars/storage/`.
+   - **Alternative (not currently used):** drop **empty, unencrypted**
+     `config/ansible/vault/all.yml` + `storage.yml` to satisfy the dangling
+     symlinks. Then the real playbooks become runnable from their normal
+     `config/ansible/` location with no vault password — the vaulted vars
+     resolve empty and dev overrides supply real values. Safe to leak-check:
+     `config/ansible/vault/` is gitignored, so these stay local-only. Worth
+     doing if/when wiring playbooks into dev that reference many vaulted vars
+     (e.g. Phase 2) makes the per-var inline-override approach unwieldy.
 4. **SSH, not the incus-exec connection.** First wired Ansible via
    `community.general.incus` (no SSH key dance), but the real playbooks use
    the `synchronize` module (rsync), which needs a genuine transport — it
