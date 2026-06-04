@@ -1,0 +1,45 @@
+# Static boot inventory for the dev container cluster.
+#
+# Connection is via `incus exec` (no SSH) — on Qubes, host->container SSH
+# return traffic hits the dropped INPUT chain, and exec sidesteps the
+# network entirely. `ansible_host` is still set because playbooks like
+# install-etcd.yml build peer URLs from hostvars[...]['ansible_host'].
+#
+# Mirrors the real group layout (etcd/core/storage/compute/managed) so the
+# real playbooks run unmodified.
+all:
+  vars:
+    ansible_connection: community.general.incus
+    # Target the instance by name. Must pin this: the plugin's remote_addr
+    # also accepts ansible_host (which we set to the IP for playbook logic),
+    # and ansible_host would otherwise win and break the lookup.
+    ansible_incus_host: "{{ inventory_hostname }}"
+    ansible_incus_remote: local
+    ansible_user: root
+    ansible_become: false   # incus exec is already root
+    # Harmless default: on a fresh 3-node bootstrap the "add member to
+    # existing cluster" task is skipped, but Ansible 2.19 templates its
+    # delegate_to before evaluating when:, erroring on the undefined var.
+    # The set_fact in the playbook overrides this when the existing-cluster
+    # path actually runs. (Latent install-etcd.yml bug surfaced by the dev env.)
+    working_etcd_host: s1
+  children:
+    etcd:
+      hosts:
+        s1: { ansible_host: 10.0.0.11 }
+        s2: { ansible_host: 10.0.0.12 }
+        s3: { ansible_host: 10.0.0.13 }
+    core:
+      hosts: { s1: {}, s2: {}, s3: {} }
+    compute:
+      hosts:
+        c1: { ansible_host: 10.0.0.51 }
+    managed:
+      children:
+        core: {}
+        compute: {}
+# NOTE: deliberately no `storage` group — config/ansible/group_vars/storage/
+# vault.yml is the only vaulted file, and our nodes don't need it. The
+# playbooks we exercise target etcd/core/managed/compute. The dev cluster
+# will supply its own (non-vault) secrets when we wire services that need
+# them, rather than depend on the production vault password.
