@@ -9,9 +9,10 @@
 # whole thing from scratch each session.
 #
 # Usage:
-#   ./dev-cluster.sh up        # init incus + network + nodes (idempotent)
-#   ./dev-cluster.sh down      # delete the node containers (keep net/profile)
-#   ./dev-cluster.sh reset     # down + recreate
+#   ./dev-cluster.sh up        # init incus + network + apt cache + nodes (idempotent)
+#   ./dev-cluster.sh down      # delete the node containers (keep net/profile/cache)
+#   ./dev-cluster.sh reset     # down + recreate (warm apt cache reused)
+#   ./dev-cluster.sh purge     # down + also delete the persistent apt cache
 #   ./dev-cluster.sh status    # show nodes
 #   ./dev-cluster.sh exec s1 [cmd...]   # shell/command in a node
 #
@@ -32,6 +33,13 @@ PROFILE=yc-node
 IMAGE=images:ubuntu/24.04
 DNS="1.1.1.1 8.8.8.8"
 
+# Persistent apt cache (apt-cacher-ng). A substrate container — survives
+# `down`/`reset` so recreating nodes pulls debs from the warm cache instead
+# of the internet. Removed only by `purge`.
+CACHE=aptcache
+CACHE_IP=10.0.0.2
+CACHE_PORT=3142
+
 # node -> last octet (10.0.0.X). Core = s1-s3, compute = c1.
 NODES=(s1 s2 s3 c1)
 declare -A OCTET=( [s1]=11 [s2]=12 [s3]=13 [c1]=51 )
@@ -42,6 +50,7 @@ HOSTS_BLOCK=$(cat <<'EOF'
 10.0.0.12 s2 s2.xc
 10.0.0.13 s3 s3.xc
 10.0.0.51 c1 c1.xc
+10.0.0.2 aptcache
 10.0.0.100 admin.xc registry.xc inference.xc storage.xc
 10.0.0.254 gateway.xc
 EOF
@@ -139,35 +148,25 @@ wait_ready() {  # wait for systemd inside the container to be usable
   done
 }
 
-configure_node() {
-  local n=$1 ip="10.0.0.${OCTET[$1]}"
+disable_apt_timers() {
   # Disable the boot-time apt jobs up front so they never race provisioning
   # for the dpkg lock. Guard by existence (the minimal image may not ship
   # all of these) — a conditional, not error-swallowing.
-  local unit
+  local n=$1 unit
   for unit in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service; do
     if INCUS exec "$n" -- systemctl list-unit-files "$unit" --no-legend | grep -q .; then
       INCUS exec "$n" -- systemctl disable --now "$unit"
     fi
   done
-  # No apt recommends. The ycluster package's real deps are the explicitly
-  # listed apt packages; recommends drag in build-essential, scipy, tk,
-  # tcpdump/wireshark (via scapy/matplotlib/ipython) — ~640MB/node that
-  # overflows the small AppVM root across 4 dir-pool copies. A deliberate
-  # dev-env footprint cut (see design doc), not a playbook change.
-  INCUS exec "$n" -- sh -c 'printf "APT::Install-Recommends \"false\";\nAPT::Install-Suggests \"false\";\n" > /etc/apt/apt.conf.d/99-no-recommends'
-  # Refresh the apt cache once at provision time. The stock image ships a
-  # stale index, so exact-version installs 404 on since-superseded transitive
-  # deps. Real nodes get this during autoinstall/bootstrap; do the equivalent
-  # here so the playbooks find a fresh cache (no manual apt-get update).
-  INCUS exec "$n" -- env DEBIAN_FRONTEND=noninteractive \
-    apt-get update -o DPkg::Lock::Timeout=120 >/dev/null
+}
+
+configure_net() {
   # Static networkd config written directly. We avoid netplan ("netplan
   # apply" calls udevadm, which has no running udev in a container) and DHCP
   # (dnsmasq sits behind Qubes' dropped INPUT chain). Drop the image's
-  # cloud-init netplan so it stops generating a DHCP unit for eth0.
-  # Remove the image's netplan (both the source yaml and the already-
-  # generated /run unit, which otherwise sorts before ours and DHCPs).
+  # cloud-init netplan (both the source yaml and the already-generated /run
+  # unit, which otherwise sorts before ours and DHCPs).
+  local n=$1 ip=$2
   INCUS exec "$n" -- sh -c 'rm -f /etc/netplan/*.yaml /run/systemd/network/*netplan*'
   INCUS exec "$n" -- sh -c "cat > /etc/systemd/network/10-yc.network" <<EOF
 [Match]
@@ -183,6 +182,28 @@ EOF
   INCUS exec "$n" -- systemctl restart systemd-networkd
   # Deterministic resolv.conf (don't depend on resolved wiring in-container)
   INCUS exec "$n" -- sh -c "rm -f /etc/resolv.conf; for d in $DNS; do echo \"nameserver \$d\"; done > /etc/resolv.conf"
+}
+
+configure_node() {
+  local n=$1 ip="10.0.0.${OCTET[$1]}"
+  disable_apt_timers "$n"
+  configure_net "$n" "$ip"
+  # No apt recommends. The ycluster package's real deps are the explicitly
+  # listed apt packages; recommends drag in build-essential, scipy, tk,
+  # tcpdump/wireshark (via scapy/matplotlib/ipython) — ~640MB/node that
+  # overflows the small AppVM root across 4 dir-pool copies. A deliberate
+  # dev-env footprint cut (see design doc), not a playbook change.
+  INCUS exec "$n" -- sh -c 'printf "APT::Install-Recommends \"false\";\nAPT::Install-Suggests \"false\";\n" > /etc/apt/apt.conf.d/99-no-recommends'
+  # Route apt through the persistent apt-cacher-ng container so recreating
+  # nodes pulls debs from cache, not the internet. http only — the Ubuntu
+  # archives are http; https sources would just CONNECT-tunnel uncached.
+  INCUS exec "$n" -- sh -c "printf 'Acquire::http::Proxy \"http://${CACHE_IP}:${CACHE_PORT}\";\n' > /etc/apt/apt.conf.d/00-aptcache-proxy"
+  # Refresh the apt cache once at provision time. The stock image ships a
+  # stale index, so exact-version installs 404 on since-superseded transitive
+  # deps. Real nodes get this during autoinstall/bootstrap; do the equivalent
+  # here so the playbooks find a fresh cache (no manual apt-get update).
+  INCUS exec "$n" -- env DEBIAN_FRONTEND=noninteractive \
+    apt-get update -o DPkg::Lock::Timeout=120 >/dev/null
   # /etc/hosts: drop any prior cluster entries, then append ours
   INCUS exec "$n" -- sh -c "sed -i '/\.xc/d; / s[0-9] /d; / c[0-9] /d' /etc/hosts; cat >> /etc/hosts" <<EOF
 $HOSTS_BLOCK
@@ -196,6 +217,32 @@ EOF
   INCUS exec "$n" -- sh -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh'
   INCUS exec "$n" -- sh -c 'cat > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys' < "${SSH_KEY}.pub"
   INCUS exec "$n" -- systemctl enable --now ssh
+}
+
+ensure_cache() {
+  # Persistent apt-cacher-ng container. Created on first `up`, survives
+  # `down`/`reset` (it's not in NODES), so node provisioning after a reset
+  # hits a warm deb cache. Its own apt-cacher-ng install is the only thing
+  # that ever goes to the internet — and only once.
+  if ! INCUS info "$CACHE" >/dev/null 2>&1; then
+    echo "[*] create $CACHE ($CACHE_IP) — persistent apt cache"
+    INCUS init "$IMAGE" "$CACHE" --profile "$PROFILE"
+    INCUS config device override "$CACHE" eth0 ipv4.address="$CACHE_IP"
+    INCUS start "$CACHE"
+  elif [ "$(INCUS list "$CACHE" -c s -f csv)" != RUNNING ]; then
+    INCUS start "$CACHE"
+  fi
+  wait_ready "$CACHE"
+  disable_apt_timers "$CACHE"
+  configure_net "$CACHE" "$CACHE_IP"
+  # Install apt-cacher-ng directly (no proxy — this *is* the proxy).
+  if ! INCUS exec "$CACHE" -- test -x /usr/sbin/apt-cacher-ng; then
+    INCUS exec "$CACHE" -- env DEBIAN_FRONTEND=noninteractive \
+      apt-get update -o DPkg::Lock::Timeout=120 >/dev/null
+    INCUS exec "$CACHE" -- env DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=120 apt-cacher-ng >/dev/null
+  fi
+  INCUS exec "$CACHE" -- systemctl enable --now apt-cacher-ng
 }
 
 ensure_node() {
@@ -215,6 +262,7 @@ ensure_node() {
 # --- commands ------------------------------------------------------------
 cmd_up() {
   ensure_persist; ensure_daemon; ensure_sshkey; ensure_firewall; ensure_network; ensure_profile
+  ensure_cache   # before nodes — they apt through it
   for n in "${NODES[@]}"; do ensure_node "$n"; done
   echo; cmd_status
 }
@@ -223,12 +271,15 @@ cmd_down()   { for n in "${NODES[@]}"; do if INCUS info "$n" >/dev/null 2>&1; th
 cmd_reset()  { cmd_down; cmd_up; }
 cmd_status() { INCUS list; }
 cmd_exec()   { local n=$1; shift || true; INCUS exec "$n" -- "${@:-bash}"; }
+# purge also drops the persistent apt cache (down keeps it).
+cmd_purge()  { cmd_down; if INCUS info "$CACHE" >/dev/null 2>&1; then INCUS delete -f "$CACHE"; echo "[*] deleted $CACHE"; fi; }
 
 case "${1:-up}" in
   up)     cmd_up ;;
   down)   cmd_down ;;
   reset)  cmd_reset ;;
+  purge)  cmd_purge ;;
   status) cmd_status ;;
   exec)   shift; cmd_exec "$@" ;;
-  *) echo "usage: $0 {up|down|reset|status|exec <node> [cmd...]}" >&2; exit 1 ;;
+  *) echo "usage: $0 {up|down|reset|purge|status|exec <node> [cmd...]}" >&2; exit 1 ;;
 esac
