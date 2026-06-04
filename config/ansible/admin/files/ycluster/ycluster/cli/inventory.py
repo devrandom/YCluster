@@ -27,6 +27,10 @@ def register_inventory_commands(subparsers):
                            help='Load pre-collected facts from JSON file instead of collecting locally')
     collect_p.add_argument('--hostname', dest='hostname', metavar='HOSTNAME',
                            help='Target hostname when using --from-file (defaults to local hostname)')
+    collect_p.add_argument('--print', dest='print_only', action='store_true',
+                           help='Collect facts and print them as JSON to stdout without '
+                                'writing to etcd (for nodes that delegate the etcd write '
+                                'to a storage node)')
     collect_p.set_defaults(func=_collect)
 
     # set-asset
@@ -130,7 +134,21 @@ def _collect(args):
     import json as _json
     import platform as _platform
     from_file = getattr(args, 'from_file', None)
+    print_only = getattr(args, 'print_only', False)
     hostname = getattr(args, 'hostname', None) or _platform.node()
+
+    # --print: collect locally and emit clean JSON, no etcd. Non-storage nodes
+    # use this so the etcd write can be delegated to a storage node (etcd is
+    # core-only — see docs/design/etcd-access-hardening.md). Keep stdout pure
+    # JSON so callers can capture it.
+    if print_only:
+        if from_file:
+            print("--print and --from-file are mutually exclusive", file=sys.stderr)
+            sys.exit(1)
+        facts = inv.collect_hardware()
+        print(_json.dumps(facts, indent=2))
+        return
+
     if from_file:
         with open(from_file) as f:
             facts = _json.load(f)

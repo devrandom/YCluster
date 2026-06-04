@@ -728,6 +728,18 @@ def check_dns_status():
 
 def check_certificate_expiry():
     """Check TLS certificate expiry from etcd"""
+    # The cluster TLS cert lives in etcd and is core-only. Non-storage nodes
+    # hold no etcd client (etcd is firewalled to s*), and this is a cluster-wide
+    # metric the core nodes already report, so skip it off-core.
+    if not is_etcd_node():
+        return {
+            'status': 'not_applicable',
+            'details': {
+                'message': 'certificate check is core-only (s*)',
+                'days_until_expiry': None,
+                'expires_at': None
+            }
+        }
     try:
         client = get_etcd_client()
         cert_value, _ = client.get('/cluster/tls/cert')
@@ -1194,6 +1206,8 @@ def check_open_webui():
 
 def is_storage_leader():
     """Check if this node is the current storage leader"""
+    if not is_etcd_node():
+        return False
     try:
         client = get_etcd_client()
         result = client.get('/cluster/leader/app')
@@ -1206,6 +1220,8 @@ def is_storage_leader():
 
 def is_dhcp_leader():
     """Check if this node is the current DHCP leader"""
+    if not is_etcd_node():
+        return False
     try:
         client = get_etcd_client()
         result = client.get('/cluster/leader/dhcp')
@@ -1218,6 +1234,8 @@ def is_dhcp_leader():
 
 def is_node_drained():
     """Check if this node is drained"""
+    if not is_etcd_node():
+        return False
     try:
         hostname = platform.node()
         client = get_etcd_client()
@@ -1238,6 +1256,16 @@ def get_current_node_type():
         elif prefix == 'm':
             return 'macos'
     return 'unknown'
+
+def is_etcd_node():
+    """True if this node may talk to etcd (storage nodes, s*).
+
+    etcd is being locked down to s* only (see docs/design/etcd-access-hardening.md).
+    Non-storage admin-api instances (compute/nvidia/nas/macos/adhoc) must not
+    build an etcd client: their only etcd use was reporting leadership/connectivity
+    telemetry that is always trivially false off-core. Gating here keeps those
+    instances etcd-free so etcd can be firewalled to s*."""
+    return get_current_node_type() == 'storage'
 
 def check_service_conditionally(health_status, service_name, check_func, required_on_storage_only=True):
     """
@@ -1757,18 +1785,26 @@ def get_comprehensive_health():
         'services': {}
     }
     
-    # Check etcd
-    try:
-        client = get_etcd_client()
-        client.get('/test')
-        health_status['services']['etcd'] = {'status': 'healthy', 'details': 'connected'}
-    except Exception as e:
-        health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
-        health_status['overall'] = 'unhealthy'
-    
     # Determine current node type
     current_node_type = get_current_node_type()
     is_storage_node = current_node_type == 'storage'
+
+    # Check etcd — only storage (s*) nodes talk to etcd. Non-storage admin-api
+    # instances hold no etcd client (etcd is firewalled to s*), so probing it
+    # here would be both meaningless and a connection we deliberately removed.
+    if is_etcd_node():
+        try:
+            client = get_etcd_client()
+            client.get('/test')
+            health_status['services']['etcd'] = {'status': 'healthy', 'details': 'connected'}
+        except Exception as e:
+            health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
+            health_status['overall'] = 'unhealthy'
+    else:
+        health_status['services']['etcd'] = {
+            'status': 'not_applicable',
+            'details': {'reason': 'etcd access is core-only (s*)'}
+        }
     
     # Check Ceph storage (only on storage nodes)
     if is_storage_node:
@@ -2095,9 +2131,11 @@ def get_comprehensive_health():
         'details': vip_health['storage_vip']
     }
     
-    # Check keepalived service (only on core nodes)
+    # Check keepalived service (only on core nodes). Short-circuit on
+    # non-storage nodes so get_core_nodes() (an etcd read) only runs where an
+    # etcd client exists — non-core nodes are never core. etcd is core-only.
     current_hostname = platform.node()
-    if current_hostname in get_core_nodes():
+    if is_etcd_node() and current_hostname in get_core_nodes():
         keepalived_running = check_service_status('keepalived')
         health_status['services']['keepalived'] = {
             'status': 'healthy' if keepalived_running else 'unhealthy',
@@ -2643,14 +2681,19 @@ def model_usage_options():
 
 
 if __name__ == '__main__':
-    # Wait for etcd to be available
-    while True:
-        try:
-            client = get_etcd_client()
-            print("Connected to etcd successfully")
-            break
-        except Exception as e:
-            print(f"Waiting for etcd: {e}")
-            time.sleep(5)
-    
+    # Wait for etcd to be available — only on storage (s*) nodes, which are the
+    # only ones that talk to etcd. Non-storage admin-api instances must start
+    # (and serve local /metrics) without etcd, since etcd is firewalled to s*.
+    if is_etcd_node():
+        while True:
+            try:
+                client = get_etcd_client()
+                print("Connected to etcd successfully")
+                break
+            except Exception as e:
+                print(f"Waiting for etcd: {e}")
+                time.sleep(5)
+    else:
+        print("Non-storage node: skipping etcd wait (etcd access is core-only)")
+
     app.run(host='0.0.0.0', port=12723)

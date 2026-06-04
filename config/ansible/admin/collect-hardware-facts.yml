@@ -1,6 +1,10 @@
 ---
 # Collect hardware facts for all (or selected) nodes and persist to etcd.
-# Runs ycluster inventory collect on each node via SSH.
+#
+# Each node collects its own facts locally (no etcd access required), then the
+# etcd write is delegated to a storage node. This mirrors the macOS flow and
+# keeps non-core nodes (compute/nas/adhoc) off etcd entirely — etcd is being
+# locked down to s* only. See docs/design/etcd-access-hardening.md.
 #
 # Usage:
 #   ./run-playbook.sh admin/collect-hardware-facts.yml
@@ -21,13 +25,35 @@
         state: present
       tags: packages
 
-    - name: Collect and persist hardware facts
-      command: ycluster inventory collect
+    - name: Collect hardware facts locally (no etcd write)
+      command: ycluster inventory collect --print
+      register: collect_result
+      changed_when: false
+
+    - name: Write facts JSON to temp file on storage node
+      delegate_to: "{{ groups['storage'] | first }}"
+      copy:
+        content: "{{ collect_result.stdout }}"
+        dest: "/tmp/ycluster-hw-{{ inventory_hostname }}.json"
+        mode: '0600'
+
+    - name: Persist facts to etcd via storage node
+      delegate_to: "{{ groups['storage'] | first }}"
       environment:
         ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
-      register: collect_result
+      shell: >-
+        ycluster inventory collect --from-file
+        /tmp/ycluster-hw-{{ inventory_hostname }}.json
+        --hostname {{ inventory_hostname }}
+      register: write_result
       changed_when: true
 
-    - name: Show collection output
+    - name: Clean up temp file on storage node
+      delegate_to: "{{ groups['storage'] | first }}"
+      file:
+        path: "/tmp/ycluster-hw-{{ inventory_hostname }}.json"
+        state: absent
+
+    - name: Show result
       debug:
-        msg: "{{ collect_result.stdout_lines }}"
+        msg: "{{ write_result.stdout_lines }}"

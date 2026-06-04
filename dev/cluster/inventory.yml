@@ -31,6 +31,14 @@ all:
         s3: { ansible_host: 10.0.0.13 }
     core:
       hosts: { s1: {}, s2: {}, s3: {} }
+    # In the real cluster the core nodes (s1-s3) are also the storage group.
+    # We mirror that so playbooks that delegate to `groups['storage'] | first`
+    # (e.g. collect-hardware-facts.yml's etcd write) resolve correctly.
+    # Safe re vault: group_vars are loaded from the top-level playbook's dir
+    # (dev/cluster/, which has no group_vars), so naming a `storage` group here
+    # does NOT pull config/ansible/group_vars/storage/vault.yml.
+    storage:
+      hosts: { s1: {}, s2: {}, s3: {} }
     compute:
       hosts:
         c1: { ansible_host: 10.0.0.51 }
@@ -38,8 +46,3 @@ all:
       children:
         core: {}
         compute: {}
-# NOTE: deliberately no `storage` group — config/ansible/group_vars/storage/
-# vault.yml is the only vaulted file, and our nodes don't need it. The
-# playbooks we exercise target etcd/core/managed/compute. The dev cluster
-# will supply its own (non-vault) secrets when we wire services that need
-# them, rather than depend on the production vault password.

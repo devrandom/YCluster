@@ -1,0 +1,13 @@
+---
+# Dev wrapper for the real hardware-facts collection playbook.
+#
+# Run as the TOP-LEVEL playbook from dev/cluster/ so group_vars/host_vars
+# resolve relative to here (none) rather than to config/ansible/ (which holds
+# the vaulted group_vars). Same rationale as site-dev.yml.
+#
+#   ../../venv/bin/ansible-playbook collect-hw-dev.yml
+#
+# Exercises the etcd-access-hardening change: each node collects locally with
+# `ycluster inventory collect --print` (no etcd), and the etcd write is
+# delegated to a storage node (groups['storage'] | first).
+- import_playbook: ../../config/ansible/admin/collect-hardware-facts.yml
