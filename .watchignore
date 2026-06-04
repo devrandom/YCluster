@@ -16,6 +16,11 @@ dev/dhcp-hosts
 .idea
 __pycache__
 .vault_pass
+# group_vars vault.yml are symlinks into config/ansible/vault/; sync the links
+# themselves (the real encrypted targets stay excluded via line 4). rsync is
+# first-match-wins, so these includes must precede the **/vault*.yml exclude.
++ /config/ansible/group_vars/all/vault.yml
++ /config/ansible/group_vars/storage/vault.yml
 **/vault*.yml
 .venv/
 venv/
