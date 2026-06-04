@@ -1,10 +1,11 @@
 # Virtual test environment
 
 ## Status
-In progress. Substrate is up and persistent; the real `install-etcd.yml`
-and `install-ycluster-package.yml` run green against it. Next is layering
-admin-api + leader election, then the etcd-hardening work. This doc records
-the decisions and the target shape.
+Working. Substrate is up and persistent, and the real playbooks for etcd,
+the ycluster package, DHCP leader election, and admin-api (web-services)
+all run green against it. Leader-election failover and admin-api's etcd
+read/write (including from the non-core node c1) are validated. Ready for
+the etcd-hardening work. This doc records the decisions and target shape.
 
 ### Progress (updated 2026-06-04)
 **Working end-to-end: a real 3-node etcd quorum runs in the containers via
@@ -90,6 +91,18 @@ Qubes drops; everything else is bridge/FORWARD or SSH).
    quorum (orphaned `default/` ignored); but re-provisioning over a
    half-configured etcd needs a wipe (`systemctl stop etcd; rm -rf
    /var/lib/etcd/* /etc/default/etcd`) — or just `dev-cluster.sh reset`.
+8. **`setup-base-infrastructure.yml` not run as-is.** It installs
+   squid/**dnsmasq**/keepalived/cmake/clang etc.; `dnsmasq` collides with
+   the image's `systemd-resolved` on :53 and fails the apt task, and none
+   of it is relevant to the admin-api/etcd surface. `site-dev.yml` instead
+   has a small inline stand-in play that installs just nginx + the
+   directories `setup-web-services.yml` expects. (If a future test needs
+   keepalived/dnsmasq for real, disable resolved in `configure_node` first.)
+9. **`playbook_dir` vs `inventory_dir`.** `bootstrap_files_dir` (for the
+   `ansible_ssh_key.pub` web-services publishes) was first set from
+   `playbook_dir`, which resolves to each *imported* playbook's own
+   directory (`config/ansible/admin/`), not `dev/cluster/`. Use
+   `inventory_dir`, which is constant for the whole run.
 
 **keepalived VRRP failover validated** (2026-06-04). A minimal standalone
 VRRP instance on s1/s2/s3 (priorities 110/105/100) confirmed the
@@ -104,13 +117,21 @@ leader (etcd `/cluster/leader/app`) **and** a responding registry on
 when wiring it.
 
 #### Next steps
-1. Add admin-api + leader-election playbooks to `site-dev.yml` (supplying
-   dev secrets, no production vault).
-2. Run the etcd-hardening changes against it.
+1. Run the etcd-hardening changes against it (admin-api health-check
+   gating, inventory-collect delegation, firewall/mTLS).
 
-Done: from-blank bootstrap on fresh (post-reboot) containers is clean —
-`site-dev.yml` (`install-etcd.yml`) forms a healthy 3-node quorum and
-`install-ycluster-package.yml` installs cluster-wide over SSH.
+Done:
+- From-blank bootstrap on fresh (post-reboot) containers is clean —
+  `site-dev.yml` forms a healthy 3-node quorum and the ycluster package
+  installs cluster-wide over SSH.
+- **DHCP leader election** runs on s1-s3; a single leader holds an
+  ephemeral-lease key (`/cluster/leader/dhcp`); stopping the leader fails
+  over to another node, recovery leaves a single holder (no split-brain).
+- **admin-api** (real `setup-web-services.yml`, nginx in `--local`
+  HTTP-only mode) is active on s1-s3 + c1; `/api/status` reads etcd and
+  `/api/allocate` from **c1 (non-core)** writes
+  `/cluster/nodes/by-{hostname,mac}/…` — the exact non-core etcd-access
+  surface the hardening work targets.
 
 Repo changes for this work are uncommitted.
 

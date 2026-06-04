@@ -14,3 +14,43 @@
 # PXE/autoinstall bits. Add playbooks here as they're made container-safe.
 
 - import_playbook: ../../config/ansible/install-etcd.yml
+
+# ycluster CLI/package — provides yc-dhcp-server, certbot-manager, etc.
+- import_playbook: ../../config/ansible/admin/install-ycluster-package.yml
+
+# etcd-based leader election (DHCP leader). Core-only, etcd-only — a clean
+# exercise of the cluster's leader-election pattern. Note: the dhcp-server
+# it gates stays disabled (we don't run DHCP in the dev env), but the
+# election itself runs and picks a single leader via etcd.
+- import_playbook: ../../config/ansible/admin/install-dhcp-leader-election.yml
+
+# Minimal stand-in for setup-base-infrastructure.yml, which web-services
+# depends on. We don't run the real one because it installs squid/dnsmasq/
+# keepalived/cmake/clang etc. — dnsmasq collides with systemd-resolved on
+# :53 in a container, and none of it is relevant to the admin-api/etcd
+# surface we're testing. Provide just nginx + the directories web-services
+# expects.
+- name: admin-api prerequisites (dev stand-in for base-infrastructure)
+  hosts: managed
+  become: yes
+  tasks:
+    - name: Install nginx + net-tools
+      apt:
+        name: [nginx, net-tools]
+        state: present
+    - name: Create directories web-services expects
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.owner | default('root') }}"
+      loop:
+        - { path: /opt/admin-services }
+        - { path: /usr/local/lib/cluster }
+        - { path: /var/www/html, owner: www-data }
+
+# admin-api itself: the real playbook. nginx is rendered in --local mode
+# (HTTP, no etcd certs) on non-storage nodes, and the etcd-cert fetch is
+# gated on the storage group (absent here), so it runs unmodified.
+- import_playbook: ../../config/ansible/admin/setup-web-services.yml
