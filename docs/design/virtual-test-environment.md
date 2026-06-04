@@ -37,6 +37,23 @@ missing; the Incus state itself is now **persistent** (see below):
   gitignored) in each node's root. Host->container SSH works on Qubes
   because the container's replies are established/related, which the INPUT
   chain accepts.
+- **Persistent apt cache.** An `apt-cacher-ng` container (`aptcache`,
+  10.0.0.2) is substrate — created on `up`, kept across `down`/`reset`
+  (removed only by `purge`), cache stored in its own rootfs on `/rw`.
+  `configure_node` points each node's apt at it
+  (`Acquire::http::Proxy http://10.0.0.2:3142`), so recreating nodes pulls
+  debs from the warm cache instead of the internet. Verified: a package
+  installed on one node is served from cache (`|I|` log entry) to the next,
+  no origin fetch. http-only (the Ubuntu archives are http).
+  Concurrency note: Ansible installs across nodes in parallel (`forks`), so
+  all nodes apt the same packages at once. apt-cacher-ng serves concurrent
+  requests for the same file correctly (all succeed, no races); it *can*
+  also merge them into one origin fetch, but for tiny/sub-second debs the
+  requests each fetch from origin before the in-flight entry registers — so
+  a cold recreate may still do N origin fetches. The cache's real win is the
+  warm path (every recreate after the first). To get all-cache-hits on a
+  fresh recreate, provision one node fully first to populate the cache,
+  then the rest.
 - **Container apt prep** (in `configure_node`): no recommends/suggests
   (`/etc/apt/apt.conf.d/99-no-recommends`) — the ycluster package's real
   deps are the explicitly-listed apt packages; recommends drag in
