@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# etcd client config (endpoints + TLS certs) from the single source; set -a
+# exports the ETCDCTL_* vars so the bare etcdctl calls below pick them up.
+set -a; . /etc/ycluster/etcd-client.env 2>/dev/null || true; set +a
+
 # Get instance name from environment or default to empty
 INSTANCE="${OPENWEBUI_INSTANCE:-}"
 

@@ -21,8 +21,22 @@ all:
     # Normally from config/ansible/group_vars (deliberately not loaded here).
     # Supply the non-secret ones the container-safe playbooks need:
     cluster_interface: eth0                          # core.yml value is bare-metal
+    # Dev has no real domain or cluster TLS certs in etcd, so force nginx into
+    # local (HTTP-only) mode even on storage nodes (s1-s3 are in the storage
+    # group here for delegation). Without this, certbot-manager update-nginx
+    # takes the real-HTTPS path and fails with "No primary domain configured".
+    web_services_force_local: true
     # inventory_dir (not playbook_dir) — the latter varies per imported play.
     bootstrap_files_dir: "{{ inventory_dir }}/.ssh"  # holds ansible_ssh_key.pub
+    # etcd client config single-source-of-truth (mirrors group_vars/all/main.yml,
+    # which the dev playbooks deliberately don't load). See that file.
+    etcd_tls_enabled: false
+    etcd_tls_dir: /etc/etcd/tls
+    etcd_scheme: "{{ 'https' if etcd_tls_enabled else 'http' }}"
+    etcd_hosts: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', ':2379') | join(',') }}"
+    etcdctl_endpoints: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.+)$', etcd_scheme ~ '://\\1:2379') | join(',') }}"
+    etcd_tls_env: "{{ {'ETCD_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCD_CERT': etcd_tls_dir ~ '/client.crt', 'ETCD_KEY': etcd_tls_dir ~ '/client.key', 'ETCDCTL_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCDCTL_CERT': etcd_tls_dir ~ '/client.crt', 'ETCDCTL_KEY': etcd_tls_dir ~ '/client.key'} if etcd_tls_enabled else {} }}"
+    etcd_client_env: "{{ {'ETCD_HOSTS': etcd_hosts, 'ETCDCTL_ENDPOINTS': etcdctl_endpoints} | combine(etcd_tls_env) }}"
   children:
     etcd:
       hosts:

@@ -4,8 +4,7 @@
   become: yes
   vars:
     admin_services_dir: /opt/admin-services
-  environment:
-    ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+  environment: "{{ etcd_client_env }}"
 
   tasks:
     - name: Check if storage leader
@@ -60,7 +59,7 @@
 
           [Service]
           Type=oneshot
-          Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           Environment="http_proxy="
           Environment="https_proxy="
           Environment="HTTP_PROXY="

@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# etcd client config (endpoints + TLS certs) from the single source; set -a
+# exports the ETCDCTL_* vars so etcdctl picks them up.
+set -a; . /etc/ycluster/etcd-client.env 2>/dev/null || true; set +a
+
 BACKUP_DIR="/rbd/user/backups"
 ENCRYPTED_BACKUP_DIR="/rbd/user/backups/encrypted"
 POSTGRES_BACKUP_DIR="$BACKUP_DIR/postgres"
@@ -157,7 +161,7 @@ backup_etcd() {
     local backup_file="$ETCD_BACKUP_DIR/${TIMESTAMP}.db"
     
     # Create etcd snapshot
-    if etcdctl snapshot save "$backup_file" --endpoints=localhost:2379; then
+    if etcdctl snapshot save "$backup_file"; then
         log "etcd backup completed: $backup_file"
         
         # Verify backup file

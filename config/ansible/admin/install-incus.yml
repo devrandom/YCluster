@@ -35,8 +35,6 @@
     incus_bridge: incusbr0
     incus_bridge_cidr: "10.100.0.1/24"
     incus_storage_pool: local
-    # etcd endpoints for the `ycluster vm` CLI (core nodes s1-s3).
-    etcd_endpoints: "10.0.0.11:2379,10.0.0.12:2379,10.0.0.13:2379"
     # GPU VMs keep internet access but are denied cluster-local / private
     # ranges. Incus ACL semantics: within one ACL, drop wins over allow.
     # That means an over-broad drop (e.g. 10.0.0.0/8) shadows the
@@ -298,7 +296,7 @@
       lineinfile:
         path: /etc/environment
         regexp: '^ETCD_HOSTS='
-        line: "ETCD_HOSTS={{ etcd_endpoints }}"
+        line: "ETCD_HOSTS={{ etcd_hosts }}"
 
     - name: Ensure /etc/ycluster directory exists
       file:

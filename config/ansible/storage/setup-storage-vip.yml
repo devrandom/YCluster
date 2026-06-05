@@ -28,10 +28,13 @@
         mode: '0755'
         content: |
           #!/bin/bash
-          
-          # Check if we are the current storage leader
-          ETCD_ENDPOINTS="{% for host in groups['etcd'] %}http://{{ hostvars[host]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
-          CURRENT_LEADER=$(etcdctl --endpoints="$ETCD_ENDPOINTS" get /cluster/leader/app --print-value-only 2>/dev/null)
+
+          # etcd endpoints + TLS certs from the single source (set -a exports the
+          # ETCDCTL_* vars so etcdctl picks them up).
+          set -a; . /etc/ycluster/etcd-client.env; set +a
+          # Check if we are the current storage leader (etcdctl reads
+          # ETCDCTL_ENDPOINTS + cert vars from the sourced env above).
+          CURRENT_LEADER=$(etcdctl get /cluster/leader/app --print-value-only 2>/dev/null)
           LOCAL_HOSTNAME=$(hostname)
           
           if [ "$CURRENT_LEADER" = "$LOCAL_HOSTNAME" ]; then

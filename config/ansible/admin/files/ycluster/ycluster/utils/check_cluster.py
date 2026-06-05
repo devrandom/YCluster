@@ -16,10 +16,16 @@ from datetime import datetime
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from ..common.etcd_utils import get_etcd_client, get_etcd_hosts
+from ..common.etcd_utils import get_etcd_client, get_etcd_hosts, get_tls_kwargs
 
 # Disable gRPC HTTP proxy to avoid routing etcd connections through squid
 GRPC_OPTIONS = [('grpc.enable_http_proxy', 0)]
+
+# TLS material from the environment (empty dict = plaintext). When set, the
+# direct etcd3 clients below present the client cert, and etcdctl gets https
+# endpoints (it picks up ETCDCTL_CACERT/CERT/KEY from the environment).
+_TLS_KWARGS = get_tls_kwargs()
+_ETCD_SCHEME = 'https' if _TLS_KWARGS else 'http'
 
 # Get initial etcd host from environment or use default
 INITIAL_ETCD_HOST = get_etcd_hosts()[0]
@@ -32,15 +38,20 @@ def get_cluster_members(initial_host):
     """Get all etcd cluster members using etcdctl"""
     try:
         import subprocess
-        result = subprocess.run(['etcdctl', 'member', 'list', '--write-out=json'], 
-                              capture_output=True, text=True, timeout=5)
+        endpoints = ','.join(f"{_ETCD_SCHEME}://{h}" for h in get_etcd_hosts())
+        # Pass endpoints via the flag; drop ETCDCTL_ENDPOINTS from the child env
+        # so etcdctl doesn't abort on "env var shadowed by command-line flag".
+        # Cert vars (ETCDCTL_CACERT/CERT/KEY) are kept for TLS.
+        child_env = {k: v for k, v in os.environ.items() if k != 'ETCDCTL_ENDPOINTS'}
+        result = subprocess.run(['etcdctl', '--endpoints', endpoints, 'member', 'list', '--write-out=json'],
+                              capture_output=True, text=True, timeout=5, env=child_env)
         if result.returncode == 0:
             members_data = json.loads(result.stdout)
             members = []
             for member in members_data.get('members', []):
                 for url in member.get('clientURLs', []):
-                    if url.startswith('http://'):
-                        ip = url.replace('http://', '').split(':')[0]
+                    if '://' in url:
+                        ip = url.split('://', 1)[1].split(':')[0]
                         members.append(f"{ip}:2379")
                         break
             if members:
@@ -55,8 +66,8 @@ def check_etcd_host(host_port):
     """Check health of a single etcd host"""
     try:
         host, port = host_port.split(':')
-        client = etcd3.client(host=host, port=int(port), grpc_options=GRPC_OPTIONS)
-        
+        client = etcd3.client(host=host, port=int(port), grpc_options=GRPC_OPTIONS, **_TLS_KWARGS)
+
         # Get status
         status = client.status()
         
