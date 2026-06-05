@@ -20,17 +20,40 @@ def get_etcd_hosts():
     return ['localhost:2379']
 
 
+def get_tls_kwargs():
+    """Return etcd3.client TLS kwargs from the environment, or {} for plaintext.
+
+    Reads ETCD_CACERT / ETCD_CERT / ETCD_KEY (the same names etcdctl uses, sans
+    the ETCDCTL_ prefix). When set, the etcd3 client uses a secure (TLS) gRPC
+    channel and presents the client cert for mutual auth. When unset, returns
+    {} and the client stays plaintext — so this is a no-op until certs are
+    deployed (see docs/design/etcd-access-hardening.md, Phase 2).
+    """
+    ca = os.environ.get('ETCD_CACERT')
+    cert = os.environ.get('ETCD_CERT')
+    key = os.environ.get('ETCD_KEY')
+    kwargs = {}
+    if ca:
+        kwargs['ca_cert'] = ca
+    if cert:
+        kwargs['cert_cert'] = cert
+    if key:
+        kwargs['cert_key'] = key
+    return kwargs
+
+
 def connect_with_retry(hosts, max_retries=3, retry_delay=1, grpc_options=None):
     """Attempt to connect to etcd using host list with retries."""
     grpc_options = grpc_options or [('grpc.enable_http_proxy', 0)]
+    tls_kwargs = get_tls_kwargs()
     last_errors = []
-    
+
     for attempt in range(max_retries):
         attempt_errors = []
         for host_port in hosts:
             try:
                 host, port = host_port.split(':')
-                client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options)
+                client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options, **tls_kwargs)
                 client.status()
                 return client
             except Exception as e:

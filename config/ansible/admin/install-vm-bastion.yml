@@ -19,7 +19,6 @@
     vm_bastion_container: bastion
     vm_bastion_jump_user: jump
     vm_bastion_image: "images:ubuntu/24.04"
-    etcd_endpoints: "10.0.0.11:2379,10.0.0.12:2379,10.0.0.13:2379"
   tasks:
     - name: End play unless this node hosts Incus instances
       meta: end_host
@@ -40,6 +39,7 @@
     - name: Read rathole tunnel config from etcd
       command: etcdctl get --print-value-only /cluster/nodes/rathole/config
       delegate_to: "{{ groups['core'][0] }}"
+      environment: "{{ etcd_client_env }}"
       register: rathole_cfg_raw
       changed_when: false
 
@@ -188,8 +188,7 @@
     # in that case. changed_when distinguishes the two paths.
     - name: Populate the bastion access list from the etcd registries
       command: ycluster vm bastion-sync
-      environment:
-        ETCD_HOSTS: "{{ etcd_endpoints }}"
+      environment: "{{ etcd_client_env }}"
       register: bastion_sync_run
       changed_when: "'no changes' not in bastion_sync_run.stdout"
 
@@ -207,7 +206,7 @@
 
           [Service]
           Type=simple
-          Environment=ETCD_HOSTS={{ etcd_endpoints }}
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/local/bin/ycluster vm bastion-watch
           Restart=always
           RestartSec=5

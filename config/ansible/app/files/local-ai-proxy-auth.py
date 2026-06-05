@@ -22,9 +22,13 @@ import os
 import sys
 from wsgiref.simple_server import make_server
 
-import etcd3
 import psycopg2
 from flask import Flask, Response, request
+
+# ycluster is pip-installed on the storage nodes this runs on; reuse the single
+# TLS-aware etcd client (reads ETCD_HOSTS + ETCD_CACERT/CERT/KEY from env)
+# rather than hardcoding a plaintext localhost connection.
+from ycluster.common.etcd_utils import get_etcd_client
 
 
 MASTER_KEY_ETCD_PATH = "/cluster/config/inference/master-key"
@@ -41,7 +45,7 @@ _state = {
 
 def get_master_key():
     if _state["master_key"] is None:
-        client = etcd3.client()
+        client = get_etcd_client()
         value, _ = client.get(MASTER_KEY_ETCD_PATH)
         if value:
             _state["master_key"] = value.decode().strip()

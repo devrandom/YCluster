@@ -1,13 +1,20 @@
 #!/bin/bash
 set -e
 
-ETCD_ENDPOINTS="$1"
+# Endpoints from /etc/ycluster/etcd-client.env (ETCDCTL_ENDPOINTS), injected by
+# the systemd unit via EnvironmentFile=; that file also exports ETCDCTL_CACERT/
+# CERT/KEY when TLS is on (etcdctl reads them automatically). A positional arg
+# still overrides for manual runs.
+ETCD_ENDPOINTS="${1:-$ETCDCTL_ENDPOINTS}"
+# We pass --endpoints explicitly below; unset the env var so etcdctl doesn't
+# abort on "env var shadowed by command-line flag". TLS cert env vars
+# (ETCDCTL_CACERT/CERT/KEY) have no conflicting flag here, so they stay.
+unset ETCDCTL_ENDPOINTS
 LEASE_TTL=30
 RENEW_INTERVAL=10
 
 if [ -z "$ETCD_ENDPOINTS" ]; then
-    echo "Usage: $0 <etcd_endpoints>"
-    echo "Example: $0 http://localhost:2379"
+    echo "Usage: $0 [etcd_endpoints]  (else set ETCDCTL_ENDPOINTS / source /etc/ycluster/etcd-client.env)"
     exit 1
 fi
 

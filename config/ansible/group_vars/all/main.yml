@@ -1,6 +1,25 @@
 # Network-bound disk encryption
 tang_port: 8777
 
+# --- etcd client config (single source of truth) ---------------------------
+# Every etcd client (Python via etcd_utils, and shell via etcdctl) gets its
+# endpoints + TLS material from one place: /etc/ycluster/etcd-client.env,
+# written by install-ycluster-package.yml from the vars below and referenced by
+# units via EnvironmentFile= and by scripts via `source`. Flip etcd_tls_enabled
+# to true (Phase 2b) to switch the whole cluster to mTLS — see
+# docs/design/etcd-access-hardening.md.
+etcd_tls_enabled: false
+etcd_tls_dir: /etc/etcd/tls
+etcd_scheme: "{{ 'https' if etcd_tls_enabled else 'http' }}"
+# Comma-separated host:port list (no scheme) for the Python client (ETCD_HOSTS).
+etcd_hosts: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', ':2379') | join(',') }}"
+# Comma-separated scheme://host:port list for etcdctl (ETCDCTL_ENDPOINTS).
+etcdctl_endpoints: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.+)$', etcd_scheme ~ '://\\1:2379') | join(',') }}"
+# TLS cert env (empty unless etcd_tls_enabled), shared by python + etcdctl.
+etcd_tls_env: "{{ {'ETCD_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCD_CERT': etcd_tls_dir ~ '/client.crt', 'ETCD_KEY': etcd_tls_dir ~ '/client.key', 'ETCDCTL_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCDCTL_CERT': etcd_tls_dir ~ '/client.crt', 'ETCDCTL_KEY': etcd_tls_dir ~ '/client.key'} if etcd_tls_enabled else {} }}"
+# Full env dict for ad-hoc command/shell tasks: environment: "{{ etcd_client_env }}"
+etcd_client_env: "{{ {'ETCD_HOSTS': etcd_hosts, 'ETCDCTL_ENDPOINTS': etcdctl_endpoints} | combine(etcd_tls_env) }}"
+
 # Bootstrap files location (ansible SSH key, etc.)
 bootstrap_files_dir: /opt/bootstrap-files
 

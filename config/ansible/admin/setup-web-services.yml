@@ -63,7 +63,7 @@
 
           [Service]
           Type=simple
-          Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/bin/python3 {{ admin_services_dir }}/app.py
           StandardOutput=journal
           StandardError=journal
@@ -133,9 +133,8 @@
       notify: restart nginx
 
     - name: Update nginx configuration with certbot-manager
-      command: "/usr/local/bin/certbot-manager update-nginx{% if 'storage' not in group_names %} --local{% endif %}"
-      environment:
-        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) or 'storage' not in group_names %} --local{% endif %}"
+      environment: "{{ etcd_client_env }}"
       register: nginx_update_result
       changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
@@ -159,12 +158,12 @@
     # doesn't exist yet. Only storage nodes hold cluster TLS certs in etcd.
     - name: Fetch initial TLS certificates
       command: /usr/local/lib/cluster/fetch-tls-certs
-      environment:
-        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      environment: "{{ etcd_client_env }}"
       register: fetch_result
       failed_when: fetch_result.rc != 0
       changed_when: "'Certificates updated' in fetch_result.stdout"
-      when: "'storage' in group_names"
+      # Dev (web_services_force_local) has no cluster TLS certs in etcd, so skip.
+      when: "'storage' in group_names and not (web_services_force_local | default(false))"
 
     - name: Flush handlers to restart nginx immediately
       meta: flush_handlers
@@ -249,7 +248,7 @@
 
           [Service]
           Type=oneshot
-          Environment="ETCD_HOSTS={% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/local/lib/cluster/fetch-tls-certs
           ExecStartPost=/bin/systemctl reload nginx
 

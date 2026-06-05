@@ -6,30 +6,13 @@ Script to manage TLS certificates in etcd
 import json
 import sys
 import argparse
-import etcd3
-import os
 import datetime
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-def get_etcd_client():
-    """Get etcd client with connection to available hosts"""
-    etcd_hosts = os.environ.get('ETCD_HOSTS', 'localhost:2379').split(',')
-    grpc_options = [('grpc.enable_http_proxy', 0)]
-    
-    for host_port in etcd_hosts:
-        try:
-            host, port = host_port.split(':')
-            client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options)
-            client.status()  # Test connection
-            return client
-        except Exception as e:
-            print(f"Failed to connect to {host_port}: {e}")
-            continue
-    
-    raise Exception(f"Could not connect to any etcd host: {etcd_hosts}")
+from ..common.etcd_utils import get_etcd_client
 
 def generate_self_signed_cert(common_name="cluster.local", san_list=None):
     """Generate a self-signed certificate"""

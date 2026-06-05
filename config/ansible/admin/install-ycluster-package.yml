@@ -100,6 +100,32 @@
         - https-config
         - frontend-manager
 
+    - name: Ensure /etc/ycluster exists
+      file:
+        path: /etc/ycluster
+        state: directory
+        mode: '0755'
+
+    - name: Write etcd client environment (single source of truth)
+      # Referenced by systemd units via EnvironmentFile= and by shell scripts via
+      # `source`. Driven by the etcd_* vars in group_vars/all/main.yml; flipping
+      # etcd_tls_enabled adds the cert lines and switches the scheme to https.
+      copy:
+        dest: /etc/ycluster/etcd-client.env
+        mode: '0644'
+        content: |
+          # Managed by Ansible (install-ycluster-package.yml). Do not edit.
+          ETCD_HOSTS={{ etcd_hosts }}
+          ETCDCTL_ENDPOINTS={{ etcdctl_endpoints }}
+          {% if etcd_tls_enabled %}
+          ETCD_CACERT={{ etcd_tls_dir }}/ca.crt
+          ETCD_CERT={{ etcd_tls_dir }}/client.crt
+          ETCD_KEY={{ etcd_tls_dir }}/client.key
+          ETCDCTL_CACERT={{ etcd_tls_dir }}/ca.crt
+          ETCDCTL_CERT={{ etcd_tls_dir }}/client.crt
+          ETCDCTL_KEY={{ etcd_tls_dir }}/client.key
+          {% endif %}
+
     - name: Ensure bash completion directory exists
       file:
         path: /etc/bash_completion.d

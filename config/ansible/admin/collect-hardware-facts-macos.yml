@@ -37,8 +37,7 @@
 
     - name: Persist facts to etcd via storage node
       delegate_to: "{{ groups['storage'] | first }}"
-      environment:
-        ETCD_HOSTS: "{% for h in groups['etcd'] %}{{ hostvars[h]['ansible_host'] }}:2379{% if not loop.last %},{% endif %}{% endfor %}"
+      environment: "{{ etcd_client_env }}"
       shell: >-
         ycluster inventory collect --from-file
         /tmp/ycluster-hw-{{ inventory_hostname }}.json

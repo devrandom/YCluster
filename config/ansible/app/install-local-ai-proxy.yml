@@ -156,6 +156,9 @@
 
           [Service]
           Type=exec
+          # etcd client config (endpoints + TLS certs); optional so a missing
+          # file falls back to the localhost default (etcd is local on storage).
+          EnvironmentFile=-/etc/ycluster/etcd-client.env
           ExecStart=/usr/local/bin/local-ai-proxy-auth
           User=local-ai-proxy
           Group=local-ai-proxy
