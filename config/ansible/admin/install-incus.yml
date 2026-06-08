@@ -288,33 +288,9 @@
             stdin: "{{ lookup('template', 'incus-gpu-ct-profile.yml.j2') }}"
           changed_when: false
 
-    # `ycluster vm` (the VM management CLI) runs on this host and needs to
-    # reach the cluster etcd; non-core nodes have no local etcd, so point
-    # the etcd client at the core nodes. /etc/environment is applied to
-    # SSH/PAM sessions, including Ansible's.
-    - name: Point ycluster's etcd client at the core nodes
-      lineinfile:
-        path: /etc/environment
-        regexp: '^ETCD_HOSTS='
-        line: "ETCD_HOSTS={{ etcd_hosts }}"
-
-    # Once clients talk TLS (phase connect+), the interactive `ycluster vm` CLI
-    # needs the client cert too (etcd_utils reads these). /etc/environment can't
-    # source the shared etcd-client.env, so mirror its cert paths here; removed
-    # again if the phase rolls back below connect. ETCD_HOSTS above already
-    # carries the phase-correct (TLS) port.
-    - name: Set etcd client cert env for the vm CLI (TLS phases)
-      lineinfile:
-        path: /etc/environment
-        regexp: "^{{ item.key }}="
-        line: "{{ item.key }}={{ item.value }}"
-        state: "{{ 'present' if (etcd_client_tls | default(false)) else 'absent' }}"
-      loop:
-        - { key: ETCD_CACERT, value: "{{ etcd_tls_dir }}/ca.crt" }
-        - { key: ETCD_CERT, value: "{{ etcd_tls_dir }}/client.crt" }
-        - { key: ETCD_KEY, value: "{{ etcd_tls_dir }}/client.key" }
-      loop_control:
-        label: "{{ item.key }}"
+    # The etcd client env for interactive/PAM sessions (used by `ycluster vm`
+    # here) is set generically in install-ycluster-package.yml for every
+    # etcd-client node — not bolted on per node type. See that playbook.
 
     - name: Ensure /etc/ycluster directory exists
       file:
