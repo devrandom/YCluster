@@ -38,6 +38,30 @@
             state: directory
             mode: '0700'
 
+        # bootstrap_files_dir is per-node local storage (like the ansible ssh
+        # key), NOT a shared mount, and generation runs on whichever core node is
+        # the controller. The unified CA is replicated to /etc/ycluster/ca on
+        # every core node (Play 2 below), so import it here first — then a run
+        # from ANY core node reuses the same CA instead of minting a divergent
+        # one that would break trust. Absent only on the first-ever run, where
+        # the CA tasks then generate it fresh.
+        - name: Check for an already-replicated unified CA on this controller
+          stat:
+            path: /etc/ycluster/ca/ca.key
+          register: replicated_ca
+
+        - name: Seed pki_dir from the replicated unified CA when present
+          copy:
+            src: "/etc/ycluster/ca/{{ item }}"
+            dest: "{{ pki_dir }}/{{ item }}"
+            remote_src: yes
+            mode: '0600'
+          loop:
+            - ca.crt
+            - ca.key
+          when: replicated_ca.stat.exists
+          no_log: true
+
         - name: etcd CA private key
           community.crypto.openssl_privatekey:
             path: "{{ pki_dir }}/ca.key"
