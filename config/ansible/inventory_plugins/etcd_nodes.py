@@ -13,13 +13,33 @@ DOCUMENTATION = '''
             required: true
             choices: ['etcd_nodes']
         etcd_hosts:
-            description: List of etcd hosts
+            description: >
+                Fallback list of etcd hosts (host:port, no scheme). Normally the
+                endpoints come from the cluster's single source of truth instead
+                (see below); this is only used when that is unavailable.
             required: false
             default: ['localhost:2379']
         prefix:
             description: etcd key prefix for node data
             required: false
             default: '/cluster/nodes'
+        ca_cert:
+            description: Fallback path to the etcd CA cert (overridden by ETCD_CACERT)
+            required: false
+        cert_cert:
+            description: Fallback path to the client cert (overridden by ETCD_CERT)
+            required: false
+        cert_key:
+            description: Fallback path to the client key (overridden by ETCD_KEY)
+            required: false
+    notes:
+        - >
+            Endpoints and TLS material are resolved from the cluster's single
+            source of truth so the controller follows the etcd TLS phase (port +
+            certs) automatically with no edits here. Precedence: ETCD_* in the
+            live environment, then /etc/ycluster/etcd-client.env (present on core
+            controllers), then this plugin's config, then localhost:2379. When
+            TLS material is found the client connects over mTLS; otherwise plain.
 '''
 
 REQUIREMENTS = ['etcd3']
@@ -28,6 +48,7 @@ from ansible.plugins.inventory import BaseInventoryPlugin
 from ansible.errors import AnsibleError
 import json
 import re
+import os
 
 
 class InventoryModule(BaseInventoryPlugin):
@@ -41,6 +62,43 @@ class InventoryModule(BaseInventoryPlugin):
                 valid = True
         return valid
 
+    def _resolve_etcd_connection(self, config):
+        """Resolve (hosts, tls_kwargs) from the cluster's single source of truth.
+
+        Precedence for each value: live ETCD_* environment, then
+        /etc/ycluster/etcd-client.env (present on core controllers), then this
+        plugin's config, then a localhost default. This lets the controller
+        follow the etcd TLS phase (port + certs) with no edits to inventory_etcd.yml.
+        """
+        src = {}
+        try:
+            with open('/etc/ycluster/etcd-client.env') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        src[k] = v
+        except OSError:
+            pass
+        # Live environment wins over the file.
+        src.update({k: v for k, v in os.environ.items() if k.startswith('ETCD')})
+
+        if src.get('ETCD_HOSTS'):
+            hosts = [h for h in src['ETCD_HOSTS'].split(',') if h]
+        else:
+            hosts = config.get('etcd_hosts') or ['localhost:2379']
+
+        tls_kwargs = {}
+        ca = src.get('ETCD_CACERT') or config.get('ca_cert')
+        cert = src.get('ETCD_CERT') or config.get('cert_cert')
+        key = src.get('ETCD_KEY') or config.get('cert_key')
+        if ca:
+            tls_kwargs['ca_cert'] = ca
+        if cert and key:
+            tls_kwargs['cert_cert'] = cert
+            tls_kwargs['cert_key'] = key
+        return hosts, tls_kwargs
+
     def parse(self, inventory, loader, path, cache=True):
         """Parse the inventory file and populate the inventory object"""
         try:
@@ -53,10 +111,10 @@ class InventoryModule(BaseInventoryPlugin):
 
         # Read configuration
         config = self._read_config_data(path)
-        
-        etcd_hosts = config.get('etcd_hosts', ['localhost:2379'])
+
         prefix = config.get('prefix', '/cluster/nodes')
-        
+        etcd_hosts, tls_kwargs = self._resolve_etcd_connection(config)
+
         # Connect to etcd
         etcd_client = None
         # Disable HTTP proxy for etcd3 client, since they are on this subnet.  grpcio version 1.51 does not
@@ -66,7 +124,9 @@ class InventoryModule(BaseInventoryPlugin):
         for host_port in etcd_hosts:
             try:
                 host, port = host_port.split(':')
-                etcd_client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options)
+                # tls_kwargs (ca_cert/cert_cert/cert_key) is empty until the
+                # cluster is on mTLS; when set, etcd3 connects over TLS.
+                etcd_client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options, **tls_kwargs)
                 etcd_client.status()  # Test connection
                 break
             except:
