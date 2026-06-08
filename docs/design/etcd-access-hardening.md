@@ -1,9 +1,61 @@
 # etcd access hardening
 
 ## Status
-**Phase 1 implemented and validated on the dev container cluster** (see
-`docs/design/virtual-test-environment.md`). Phase 2 (close the boundary) not
-yet started.
+**Phase 1 and Phase 2 (mTLS) implemented and validated on the dev container
+cluster** (see `docs/design/virtual-test-environment.md`). Rollout to the real
+cluster (Phase 2c) is pending; the operational procedure is in
+`docs/operations/etcd.md`.
+
+Phase 2 chose **mTLS** (option (b) below), not the admin-API proxy (a): the
+`ycluster vm` CLI keeps direct etcd access (incl. its long-lived watches) with
+a client cert, so no allocation-proxy rewrite was needed. mTLS covers the
+client port (2379→TLS) *and* the peer port (2380→TLS). A source-IP firewall is
+**out of scope** — possession of a client cert is the boundary; source IP is
+forgeable and deliberately not trusted (see "Why a source-IP firewall is not
+sufficient").
+
+Phase 2 changes:
+- **2a — centralized etcd client config.** One source of truth for endpoints +
+  TLS material (`group_vars/all/main.yml` → `/etc/ycluster/etcd-client.env`,
+  consumed by units via `EnvironmentFile=`, scripts via `source`, Python via
+  `common/etcd_utils.py`). Pure refactor; behaviour unchanged.
+- **2b — unified CA + mTLS.** `setup-etcd-tls.yml` generates one cluster CA + a
+  shared `etcd-core` identity (server/peer/client) + a non-core `etcd-client`
+  cert, once on the controller into the replicated `bootstrap_files_dir`
+  (ssh-key style, owned by no single node), then distributes to `/etc/etcd/tls`.
+  etcd authenticates by **cert possession**, never source IP:
+  `peer-cert-allowed-cn=etcd-core` + `experimental-peer-skip-client-san-verification`
+  for peers, `client-cert-allowed-hostname=etcd-client` for clients (both certs
+  carry a `DNS:etcd-client` SAN), so there is no reverse-DNS in the handshake
+  path.
+- **2c-pre — phased, zero-quorum-gap migration mechanism.** A live plaintext
+  cluster cannot be flipped to mTLS in one shot (a TLS node can't peer with a
+  plaintext node, and etcd peer connections aren't half-TLS). The migration is
+  driven by a single ordered var `etcd_tls_phase`:
+
+  | phase | client/peer transport | listeners | enforcement |
+  |---|---|---|---|
+  | `off` | plaintext | `2379/2380` only | none |
+  | `listen` | plaintext | `2379/2380` **+** TLS `2381/2382` | none (additive) |
+  | `connect` | **TLS** | both | none (plaintext fallback) |
+  | `enforce` | TLS | TLS `2381/2382` only | `client-cert-auth` on both ports |
+
+  TLS gets **dedicated permanent ports** (`2381` client, `2382` peer) so it can
+  coexist with plaintext during the overlap — a listening socket is TLS or not,
+  never both. The phases are rolled out one node at a time. The only non-config
+  step is at `connect`: the advertised peer URL lives in the Raft membership
+  (not `/etc/default/etcd`), so it's switched at runtime via
+  `etcdctl member update` — `listen` having run on every node first guarantees
+  every node already serves the TLS peer port before any node dials it.
+
+  Validated on dev by `dev/cluster/etcd-tls-migrate.sh`: bootstrap a plaintext
+  3-node cluster, then `off→listen→connect→enforce` rolling one node at a time,
+  asserting a **quorum write succeeds after every individual node restart**
+  while the others are a phase behind. Plus: live mTLS proven (member list over
+  TLS, plaintext-to-TLS-port refused, openssl handshake to `CN=etcd-core`),
+  idempotent steady state (`changed=0`), and stability across a cold
+  `systemctl restart etcd` on all nodes and a full container reboot (etcd
+  autostarts at boot, reforms quorum over TLS, plaintext stays refused).
 
 Phase 1 changes:
 - admin-api no longer holds an etcd client on non-storage nodes. Every

@@ -1,5 +1,101 @@
 # etcd Operations
 
+## TLS (mTLS)
+
+etcd runs with mutual TLS on both the client and peer ports. Authentication is
+by **client-cert possession**, never source IP (it's forgeable on the flat
+`/24`). Design rationale: `docs/design/etcd-access-hardening.md`.
+
+### Cert layout (per core node, `/etc/etcd/tls/`)
+
+| file | what | who can read |
+|---|---|---|
+| `ca.crt` | cluster etcd CA (public) | world-readable |
+| `server.crt` / `server.key` | shared `etcd-core` identity (server + peer) | `etcd:etcd`, key `0600` |
+| `client.crt` / `client.key` | core's client identity (= the core cert) | group `etcd-client`, `0640` |
+
+Non-core etcd clients (compute / Incus hosts) get `ca.crt` + a
+`CN=etcd-client` `client.{crt,key}` in the same dir. The unified CA
+(cert **and** key) also lands at `/etc/ycluster/ca/` on core nodes. All of it
+is generated once by `setup-etcd-tls.yml` into the replicated
+`bootstrap_files_dir` (owned by no single node, ssh-key style) and distributed
+by Ansible. Certs are 1-year (CA 10-year).
+
+### Ports
+
+- **Plaintext** `2379` (client) / `2380` (peer) — exist only during a migration
+  (phases `listen`/`connect`); removed at `enforce`.
+- **TLS** `2381` (client) / `2382` (peer) — the permanent mTLS ports.
+
+### Running etcdctl by hand
+
+On a core node, source the managed env (sets endpoints + `ETCDCTL_CACERT/CERT/KEY`):
+
+```bash
+set -a; . /etc/ycluster/etcd-client.env; set +a
+etcdctl endpoint health --cluster
+```
+
+Or explicitly:
+
+```bash
+etcdctl --endpoints https://10.0.0.11:2381 \
+  --cacert /etc/etcd/tls/ca.crt --cert /etc/etcd/tls/client.crt --key /etc/etcd/tls/client.key \
+  member list -w table
+```
+
+### Rotating / adding a client cert
+
+Re-running `setup-etcd-tls.yml` is idempotent — it regenerates only what's
+missing. To force reissue, delete the relevant files from `bootstrap_files_dir`
+(prod: the etcd PKI dir) and re-run. To onboard a new non-core etcd client,
+add its group to the distribution play in `setup-etcd-tls.yml` (the `compute`
+play is the template) and run it `--limit <node>`.
+
+## Migrating a live cluster from plaintext to mTLS
+
+Driven by the single ordered var `etcd_tls_phase`
+(`off → listen → connect → enforce`). **Roll each phase out one node at a time
+with `--limit`, confirming quorum between nodes** — never a fleet-wide run, or
+all three etcd restart together and quorum drops. Rehearsed end-to-end on the
+dev cluster by `dev/cluster/etcd-tls-migrate.sh` (mirror that script's order).
+
+Set `etcd_tls_phase` in host_vars (or pass `-e etcd_tls_phase=<phase>`).
+
+> **First deploy is itself a rolling step.** Older etcd configs were never
+> rewritten on a node that already had data; this code always renders
+> `/etc/default/etcd` from a template, so the *first* run — even at phase `off`
+> — rewrites the config and restarts etcd once per node. Do that first pass
+> `--limit` per node too.
+
+For each phase, and for each node `s1`, `s2`, `s3` in turn:
+
+```bash
+# 1. distribute certs (from `listen` on) + render etcd config + restart, one node
+ansible-playbook setup-etcd-tls.yml install-etcd.yml -e etcd_tls_phase=<phase> --limit s1
+# 2. confirm quorum survived before touching the next node
+etcdctl endpoint health --cluster        # (TLS env once past `off`)
+```
+
+After all three nodes are at the phase, refresh the client env so etcd clients
+follow:
+
+```bash
+ansible-playbook admin/install-ycluster-package.yml -e etcd_tls_phase=<phase>
+```
+
+Phase notes:
+- **`listen`** — additive (adds the TLS listeners); safe, no client/peer change.
+- **`connect`** — switches clients to TLS and runs `etcdctl member update` to
+  flip each node's advertised peer URL to `https`. Safe only because every node
+  reached `listen` first. Verify peer URLs flipped: `etcdctl member list`.
+- **`enforce`** — drops the plaintext listeners and turns on `client-cert-auth`.
+  Only advance here once **every** node is at `connect` (all peer URLs `https`).
+
+Don't skip phases or advance a phase before the previous one is on all nodes —
+the ordering is what preserves quorum. Issue client certs for the real Incus
+hosts (nv2/nv3) before they need etcd at/after `connect`.
+
 ## Cluster Recovery
 
 ### Scenario 1: Single Node Failure with Cluster Quorum Intact

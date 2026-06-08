@@ -1,25 +1,56 @@
 # Network-bound disk encryption
 tang_port: 8777
 
+# --- etcd TLS migration phase ----------------------------------------------
+# Ordered rollout so a LIVE plaintext cluster can reach mTLS with no quorum
+# gap. Roll each phase out to ALL core nodes before advancing to the next.
+#   off      plaintext only (default; pre-migration / current prod state).
+#   listen   etcd ALSO listens for TLS on dedicated ports; clients & peers
+#            still use plaintext. Purely additive — rolling it out disturbs
+#            nothing. Once every node is at `listen`, all nodes can serve TLS.
+#   connect  clients dial TLS and each node's advertised peer URL is switched
+#            to TLS (etcdctl member update); plaintext listeners stay up as a
+#            fallback. Safe because `listen` guaranteed every node serves TLS.
+#   enforce  plaintext listeners removed and client-cert-auth required. TLS only.
+# A single ordered var (not independent booleans) makes the illegal orderings
+# — e.g. enforce-before-connect — unrepresentable. See
+# docs/design/etcd-access-hardening.md and docs/operations/etcd.md (runbook).
+#
+# Deliberately NOT hardcoded here: a value at this (playbook group_vars) level
+# would override an inventory/host_vars setting when a wrapper imports these
+# playbooks (the dev cluster relies on this). Everything below treats it as
+# default('off'). Set etcd_tls_phase in host_vars (per node during a rollout),
+# never the derived booleans.
+etcd_tls_rank: "{{ {'off': 0, 'listen': 1, 'connect': 2, 'enforce': 3}[etcd_tls_phase | default('off')] }}"
+etcd_tls_listening: "{{ (etcd_tls_rank | int) >= 1 }}"   # serve the TLS port(s)
+etcd_client_tls: "{{ (etcd_tls_rank | int) >= 2 }}"      # clients/peers use TLS
+etcd_tls_enforced: "{{ (etcd_tls_rank | int) >= 3 }}"    # plaintext removed
+# Certs/PKI must exist from `listen` onward (setup-etcd-tls.yml gates on this).
+etcd_tls_enabled: "{{ (etcd_tls_rank | int) >= 1 }}"
+
 # --- etcd client config (single source of truth) ---------------------------
 # Every etcd client (Python via etcd_utils, and shell via etcdctl) gets its
 # endpoints + TLS material from one place: /etc/ycluster/etcd-client.env,
 # written by install-ycluster-package.yml from the vars below and referenced by
 # units via EnvironmentFile= and by scripts via `source`.
-#
-# To switch the whole cluster to mTLS (Phase 2c), define etcd_tls_enabled: true
-# (here or in group/host vars) — see docs/design/etcd-access-hardening.md.
-# Deliberately NOT hardcoded here: a value at this (playbook group_vars) level
-# would override the dev cluster's inventory setting when its wrapper imports
-# these playbooks. Everything below treats it as default(false).
 etcd_tls_dir: /etc/etcd/tls
-etcd_scheme: "{{ 'https' if (etcd_tls_enabled | default(false)) else 'http' }}"
+# Ports. Plaintext keeps the legacy ports (removed at `enforce`); TLS gets its
+# own permanent ports so the two can coexist during migration — a listening
+# socket is TLS or not, never both on one port.
+etcd_plaintext_client_port: 2379
+etcd_plaintext_peer_port: 2380
+etcd_tls_client_port: 2381
+etcd_tls_peer_port: 2382
+# The scheme/ports clients & peers should USE this phase (TLS once connecting).
+etcd_scheme: "{{ 'https' if (etcd_client_tls | default(false)) else 'http' }}"
+etcd_client_port: "{{ etcd_tls_client_port if (etcd_client_tls | default(false)) else etcd_plaintext_client_port }}"
+etcd_peer_port: "{{ etcd_tls_peer_port if (etcd_client_tls | default(false)) else etcd_plaintext_peer_port }}"
 # Comma-separated host:port list (no scheme) for the Python client (ETCD_HOSTS).
-etcd_hosts: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', ':2379') | join(',') }}"
+etcd_hosts: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', ':' ~ etcd_client_port) | join(',') }}"
 # Comma-separated scheme://host:port list for etcdctl (ETCDCTL_ENDPOINTS).
-etcdctl_endpoints: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.+)$', etcd_scheme ~ '://\\1:2379') | join(',') }}"
-# TLS cert env (empty unless etcd_tls_enabled), shared by python + etcdctl.
-etcd_tls_env: "{{ {'ETCD_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCD_CERT': etcd_tls_dir ~ '/client.crt', 'ETCD_KEY': etcd_tls_dir ~ '/client.key', 'ETCDCTL_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCDCTL_CERT': etcd_tls_dir ~ '/client.crt', 'ETCDCTL_KEY': etcd_tls_dir ~ '/client.key'} if (etcd_tls_enabled | default(false)) else {} }}"
+etcdctl_endpoints: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.+)$', etcd_scheme ~ '://\\1:' ~ etcd_client_port) | join(',') }}"
+# TLS cert env (empty until clients connect over TLS), shared by python + etcdctl.
+etcd_tls_env: "{{ {'ETCD_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCD_CERT': etcd_tls_dir ~ '/client.crt', 'ETCD_KEY': etcd_tls_dir ~ '/client.key', 'ETCDCTL_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCDCTL_CERT': etcd_tls_dir ~ '/client.crt', 'ETCDCTL_KEY': etcd_tls_dir ~ '/client.key'} if (etcd_client_tls | default(false)) else {} }}"
 # Full env dict for ad-hoc command/shell tasks: environment: "{{ etcd_client_env }}"
 etcd_client_env: "{{ {'ETCD_HOSTS': etcd_hosts, 'ETCDCTL_ENDPOINTS': etcdctl_endpoints} | combine(etcd_tls_env) }}"
 
