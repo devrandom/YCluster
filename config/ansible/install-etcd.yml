@@ -6,7 +6,10 @@
     etcd_data_dir: "/var/lib/etcd"
     etcd_listen_client_port: 2379
     etcd_listen_peer_port: 2380
-    
+    # etcd_scheme (http/https) and etcd_tls_dir come from group_vars/all (or the
+    # dev inventory). When TLS is on, prefix etcdctl with the client cert env.
+    etcdctl_tls_env: "{{ ('ETCDCTL_CACERT=' ~ etcd_tls_dir ~ '/ca.crt ETCDCTL_CERT=' ~ etcd_tls_dir ~ '/client.crt ETCDCTL_KEY=' ~ etcd_tls_dir ~ '/client.key ') if (etcd_tls_enabled | default(false)) else '' }}"
+
   tasks:
     - name: Install etcd from apt
       apt:
@@ -26,7 +29,7 @@
     - name: Determine cluster configuration
       set_fact:
         etcd_cluster_size: "{{ groups['etcd'] | length }}"
-        etcd_initial_cluster: "{{ groups['etcd'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['etcd'] | map('extract', hostvars, 'ansible_host')) | map('join', '=http://') | map('regex_replace', '$', ':2380') | join(',') }}"
+        etcd_initial_cluster: "{{ groups['etcd'] | map('extract', hostvars, 'inventory_hostname') | zip(groups['etcd'] | map('extract', hostvars, 'ansible_host')) | map('join', '=' ~ etcd_scheme ~ '://') | map('regex_replace', '$', ':2380') | join(',') }}"
 
     - name: Check if etcd data directory exists and has data
       stat:
@@ -35,7 +38,7 @@
 
     - name: Check if ANY etcd node in cluster is already running
       shell: |
-        ETCDCTL_ENDPOINTS="http://{{ item }}:2379" etcdctl member list --write-out=json
+        {{ etcdctl_tls_env }}ETCDCTL_ENDPOINTS="{{ etcd_scheme }}://{{ item }}:2379" etcdctl member list --write-out=json
       register: etcd_cluster_check
       failed_when: false
       changed_when: false
@@ -57,13 +60,31 @@
         content: |
           ETCD_NAME="{{ inventory_hostname }}"
           ETCD_DATA_DIR="{{ etcd_data_dir }}"
-          ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
-          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_host }}:{{ etcd_listen_client_port }}"
-          ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
-          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
-          ETCD_INITIAL_CLUSTER="{{ inventory_hostname }}=http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+          ETCD_LISTEN_CLIENT_URLS="{{ etcd_scheme }}://0.0.0.0:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_client_port }}"
+          ETCD_LISTEN_PEER_URLS="{{ etcd_scheme }}://0.0.0.0:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_CLUSTER="{{ inventory_hostname }}={{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
           ETCD_INITIAL_CLUSTER_STATE="new"
           ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+          {% if etcd_tls_enabled | default(false) %}
+          ETCD_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+          ETCD_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+          ETCD_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+          ETCD_CLIENT_CERT_AUTH="true"
+          # Authenticate clients by cert (valid for "etcd-client"), not source IP.
+          ETCD_CLIENT_CERT_ALLOWED_HOSTNAME="etcd-client"
+          ETCD_PEER_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+          ETCD_PEER_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+          ETCD_PEER_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+          ETCD_PEER_CLIENT_CERT_AUTH="true"
+          # Auth is by cert possession, never source IP/hostname (which is
+          # forgeable — the whole point of mTLS here). Constrain peers to the
+          # core CN and skip the SAN/source-IP check entirely. This also keeps
+          # auth self-contained: no reverse-DNS in the handshake path.
+          ETCD_PEER_CERT_ALLOWED_CN="etcd-core"
+          ETCD_EXPERIMENTAL_PEER_SKIP_CLIENT_SAN_VERIFICATION="true"
+          {% endif %}
         owner: root
         group: root
         mode: '0644'
@@ -76,13 +97,31 @@
         content: |
           ETCD_NAME="{{ inventory_hostname }}"
           ETCD_DATA_DIR="{{ etcd_data_dir }}"
-          ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
-          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_host }}:{{ etcd_listen_client_port }}"
-          ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
-          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+          ETCD_LISTEN_CLIENT_URLS="{{ etcd_scheme }}://0.0.0.0:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_client_port }}"
+          ETCD_LISTEN_PEER_URLS="{{ etcd_scheme }}://0.0.0.0:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
           ETCD_INITIAL_CLUSTER="{{ etcd_initial_cluster }}"
           ETCD_INITIAL_CLUSTER_STATE="new"
           ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+          {% if etcd_tls_enabled | default(false) %}
+          ETCD_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+          ETCD_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+          ETCD_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+          ETCD_CLIENT_CERT_AUTH="true"
+          # Authenticate clients by cert (valid for "etcd-client"), not source IP.
+          ETCD_CLIENT_CERT_ALLOWED_HOSTNAME="etcd-client"
+          ETCD_PEER_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+          ETCD_PEER_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+          ETCD_PEER_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+          ETCD_PEER_CLIENT_CERT_AUTH="true"
+          # Auth is by cert possession, never source IP/hostname (which is
+          # forgeable — the whole point of mTLS here). Constrain peers to the
+          # core CN and skip the SAN/source-IP check entirely. This also keeps
+          # auth self-contained: no reverse-DNS in the handshake path.
+          ETCD_PEER_CERT_ALLOWED_CN="etcd-core"
+          ETCD_EXPERIMENTAL_PEER_SKIP_CLIENT_SAN_VERIFICATION="true"
+          {% endif %}
         owner: root
         group: root
         mode: '0644'
@@ -92,7 +131,7 @@
 
     - name: Get existing cluster members for joining node
       shell: |
-        ETCDCTL_ENDPOINTS="http://{{ item }}:2379" \
+        {{ etcdctl_tls_env }}ETCDCTL_ENDPOINTS="{{ etcd_scheme }}://{{ item }}:2379" \
         etcdctl member list --write-out=json
       register: existing_members_result
       failed_when: false
@@ -106,7 +145,7 @@
 
     - name: Build initial cluster string for joining node
       set_fact:
-        etcd_join_cluster: "{{ (existing_members_json.stdout | from_json).members | map(attribute='name') | zip((existing_members_json.stdout | from_json).members | map(attribute='peerURLs') | map('first')) | map('join', '=') | join(',') }},{{ inventory_hostname }}=http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+        etcd_join_cluster: "{{ (existing_members_json.stdout | from_json).members | map(attribute='name') | zip((existing_members_json.stdout | from_json).members | map(attribute='peerURLs') | map('first')) | map('join', '=') | join(',') }},{{ inventory_hostname }}={{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
 
     - name: Configure etcd for joining existing cluster
@@ -115,13 +154,31 @@
         content: |
           ETCD_NAME="{{ inventory_hostname }}"
           ETCD_DATA_DIR="{{ etcd_data_dir }}"
-          ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:{{ etcd_listen_client_port }}"
-          ETCD_ADVERTISE_CLIENT_URLS="http://{{ ansible_host }}:{{ etcd_listen_client_port }}"
-          ETCD_LISTEN_PEER_URLS="http://0.0.0.0:{{ etcd_listen_peer_port }}"
-          ETCD_INITIAL_ADVERTISE_PEER_URLS="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+          ETCD_LISTEN_CLIENT_URLS="{{ etcd_scheme }}://0.0.0.0:{{ etcd_listen_client_port }}"
+          ETCD_ADVERTISE_CLIENT_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_client_port }}"
+          ETCD_LISTEN_PEER_URLS="{{ etcd_scheme }}://0.0.0.0:{{ etcd_listen_peer_port }}"
+          ETCD_INITIAL_ADVERTISE_PEER_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
           ETCD_INITIAL_CLUSTER="{{ etcd_join_cluster }}"
           ETCD_INITIAL_CLUSTER_STATE="existing"
           ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+          {% if etcd_tls_enabled | default(false) %}
+          ETCD_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+          ETCD_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+          ETCD_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+          ETCD_CLIENT_CERT_AUTH="true"
+          # Authenticate clients by cert (valid for "etcd-client"), not source IP.
+          ETCD_CLIENT_CERT_ALLOWED_HOSTNAME="etcd-client"
+          ETCD_PEER_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+          ETCD_PEER_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+          ETCD_PEER_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+          ETCD_PEER_CLIENT_CERT_AUTH="true"
+          # Auth is by cert possession, never source IP/hostname (which is
+          # forgeable — the whole point of mTLS here). Constrain peers to the
+          # core CN and skip the SAN/source-IP check entirely. This also keeps
+          # auth self-contained: no reverse-DNS in the handshake path.
+          ETCD_PEER_CERT_ALLOWED_CN="etcd-core"
+          ETCD_EXPERIMENTAL_PEER_SKIP_CLIENT_SAN_VERIFICATION="true"
+          {% endif %}
         owner: root
         group: root
         mode: '0644'
@@ -135,9 +192,9 @@
 
     - name: Add member to existing etcd cluster using etcdctl
       shell: |
-        ETCDCTL_ENDPOINTS="http://{{ working_etcd_host }}:2379" \
+        {{ etcdctl_tls_env }}ETCDCTL_ENDPOINTS="{{ etcd_scheme }}://{{ working_etcd_host }}:2379" \
         etcdctl member add "{{ inventory_hostname }}" \
-        --peer-urls="http://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
+        --peer-urls="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_peer_port }}"
       register: add_member_result
       failed_when: add_member_result.rc != 0
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
@@ -175,7 +232,7 @@
         msg: |
           etcd cluster configured with {{ etcd_cluster_size }} node(s)
           Node: {{ inventory_hostname }}
-          Client URL: http://{{ ansible_host }}:{{ etcd_listen_client_port }}
+          Client URL: {{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_listen_client_port }}
 
   handlers:
     - name: restart etcd

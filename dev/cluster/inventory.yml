@@ -30,8 +30,13 @@ all:
     bootstrap_files_dir: "{{ inventory_dir }}/.ssh"  # holds ansible_ssh_key.pub
     # etcd client config single-source-of-truth (mirrors group_vars/all/main.yml,
     # which the dev playbooks deliberately don't load). See that file.
-    etcd_tls_enabled: false
+    etcd_tls_enabled: true
     etcd_tls_dir: /etc/etcd/tls
+    # Controller-side PKI dir. setup-etcd-tls.yml/install-etcd.yml live in
+    # config/ansible/ and so load config/ansible/group_vars/all (which sets
+    # bootstrap_files_dir=/opt/bootstrap-files, higher precedence than this
+    # inventory). etcd_pki_dir is NOT defined there, so this dev value wins.
+    etcd_pki_dir: "{{ inventory_dir }}/.ssh/etcd-pki"
     etcd_scheme: "{{ 'https' if etcd_tls_enabled else 'http' }}"
     etcd_hosts: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '$', ':2379') | join(',') }}"
     etcdctl_endpoints: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.+)$', etcd_scheme ~ '://\\1:2379') | join(',') }}"

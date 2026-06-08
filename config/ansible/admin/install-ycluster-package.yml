@@ -117,7 +117,7 @@
           # Managed by Ansible (install-ycluster-package.yml). Do not edit.
           ETCD_HOSTS={{ etcd_hosts }}
           ETCDCTL_ENDPOINTS={{ etcdctl_endpoints }}
-          {% if etcd_tls_enabled %}
+          {% if etcd_tls_enabled | default(false) %}
           ETCD_CACERT={{ etcd_tls_dir }}/ca.crt
           ETCD_CERT={{ etcd_tls_dir }}/client.crt
           ETCD_KEY={{ etcd_tls_dir }}/client.key

@@ -37,7 +37,6 @@ ADMIN_API_PORT = 12723
 def get_cluster_members(initial_host):
     """Get all etcd cluster members using etcdctl"""
     try:
-        import subprocess
         endpoints = ','.join(f"{_ETCD_SCHEME}://{h}" for h in get_etcd_hosts())
         # Pass endpoints via the flag; drop ETCDCTL_ENDPOINTS from the child env
         # so etcdctl doesn't abort on "env var shadowed by command-line flag".
