@@ -81,7 +81,9 @@ health checker's rotation.
 
 Users generate keys in Open-WebUI (Account Settings → API Key →
 Generate). The same `sk-…` key authenticates both Open-WebUI and
-direct API calls to the inference gateway.
+direct API calls to the inference gateway. See
+[`docs/usage/inference.md`](../usage/inference.md) for the
+client-facing API (chat/completions, streaming, model discovery).
 
 ```bash
 export OPENAI_API_KEY=sk-<your-openwebui-key>

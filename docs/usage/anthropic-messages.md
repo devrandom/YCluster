@@ -20,7 +20,7 @@ That means `/v1/messages` works **only for models whose backend natively
 implements the Anthropic Messages API** — i.e. the Kimi models served by
 exo. OpenAI-only backends (vLLM, llama-server, WhisperX) answer on
 `/v1/chat/completions` and friends, not on `/v1/messages`. For those,
-use the [OpenAI-compatible surface](../operations/inference.md) instead.
+use the [OpenAI-compatible surface](inference.md) instead.
 
 ## Authentication
 

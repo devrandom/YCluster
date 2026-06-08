@@ -7,7 +7,8 @@ at the cluster's inference base URL.
 Behind the scenes the cluster runs **WhisperX** (faster-whisper +
 wav2vec2 alignment + pyannote diarization) on AMD Strix Halo. See
 [`docs/operations/transcription.md`](../operations/transcription.md)
-for the deployment and ops side.
+for the deployment and ops side. For text/LLM chat on the same
+gateway, see [`inference.md`](inference.md).
 
 ## What's available
 
