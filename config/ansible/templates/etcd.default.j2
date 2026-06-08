@@ -1,0 +1,49 @@
+# /etc/default/etcd — managed by install-etcd.yml. Do not edit by hand.
+#
+# Listeners are phase-driven (see group_vars/all/main.yml etcd_tls_phase):
+#   - plaintext listeners on the legacy ports until `enforce` removes them.
+#   - TLS listeners on the dedicated TLS ports from `listen` onward.
+# A socket is TLS or not, never both, so the two schemes use distinct ports and
+# coexist during the migration. ADVERTISE_* reflect the scheme/port clients and
+# peers should USE this phase. For an already-joined member etcd reads its peers
+# from the data dir, so INITIAL_* are only consulted at first bootstrap; the
+# peer-URL switch at `connect` is done at runtime via `etcdctl member update`.
+ETCD_NAME="{{ inventory_hostname }}"
+ETCD_DATA_DIR="{{ etcd_data_dir }}"
+{% set listen_client = [] %}
+{% set listen_peer = [] %}
+{% if not (etcd_tls_enforced | default(false)) %}
+{%   set _ = listen_client.append('http://0.0.0.0:' ~ etcd_plaintext_client_port) %}
+{%   set _ = listen_peer.append('http://0.0.0.0:' ~ etcd_plaintext_peer_port) %}
+{% endif %}
+{% if etcd_tls_listening | default(false) %}
+{%   set _ = listen_client.append('https://0.0.0.0:' ~ etcd_tls_client_port) %}
+{%   set _ = listen_peer.append('https://0.0.0.0:' ~ etcd_tls_peer_port) %}
+{% endif %}
+ETCD_LISTEN_CLIENT_URLS="{{ listen_client | join(',') }}"
+ETCD_LISTEN_PEER_URLS="{{ listen_peer | join(',') }}"
+ETCD_ADVERTISE_CLIENT_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_client_port }}"
+ETCD_INITIAL_ADVERTISE_PEER_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_peer_port }}"
+ETCD_INITIAL_CLUSTER="{{ etcd_initial_cluster_value }}"
+ETCD_INITIAL_CLUSTER_STATE="{{ etcd_cluster_state_value }}"
+ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+{% if etcd_tls_listening | default(false) %}
+ETCD_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+ETCD_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+ETCD_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+ETCD_PEER_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
+ETCD_PEER_KEY_FILE="{{ etcd_tls_dir }}/server.key"
+ETCD_PEER_TRUSTED_CA_FILE="{{ etcd_tls_dir }}/ca.crt"
+# Auth by cert possession, never source IP/hostname (forgeable — the whole
+# point of mTLS here). Constrain peers to the core CN and skip the SAN/source-IP
+# check; keeps auth self-contained (no reverse-DNS in the handshake path).
+ETCD_PEER_CERT_ALLOWED_CN="etcd-core"
+ETCD_EXPERIMENTAL_PEER_SKIP_CLIENT_SAN_VERIFICATION="true"
+ETCD_CLIENT_CERT_ALLOWED_HOSTNAME="etcd-client"
+{% if etcd_tls_enforced | default(false) %}
+# Enforcement: require a valid client cert on both the client and peer ports.
+# Only safe once every node connects over TLS (phase `connect` completed).
+ETCD_CLIENT_CERT_AUTH="true"
+ETCD_PEER_CLIENT_CERT_AUTH="true"
+{% endif %}
+{% endif %}

@@ -1,0 +1,6 @@
+---
+# Dev wrapper: regenerate /etc/ycluster/etcd-client.env (scheme/port/certs) so
+# etcd clients follow the current phase. Run across all nodes once per phase by
+# etcd-tls-migrate.sh, after the per-node etcd roll. Top-level from dev/cluster/
+# so the dev inventory's etcd_* vars win (see site-dev.yml).
+- import_playbook: ../../config/ansible/admin/install-ycluster-package.yml

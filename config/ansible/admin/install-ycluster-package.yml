@@ -108,8 +108,10 @@
 
     - name: Write etcd client environment (single source of truth)
       # Referenced by systemd units via EnvironmentFile= and by shell scripts via
-      # `source`. Driven by the etcd_* vars in group_vars/all/main.yml; flipping
-      # etcd_tls_enabled adds the cert lines and switches the scheme to https.
+      # `source`. Driven by the etcd_* vars in group_vars/all/main.yml; the
+      # etcd_tls_phase ladder switches the scheme/port (etcd_hosts/endpoints) and,
+      # once clients connect over TLS (etcd_client_tls, phase `connect`+), adds
+      # the cert lines.
       copy:
         dest: /etc/ycluster/etcd-client.env
         mode: '0644'
@@ -117,7 +119,7 @@
           # Managed by Ansible (install-ycluster-package.yml). Do not edit.
           ETCD_HOSTS={{ etcd_hosts }}
           ETCDCTL_ENDPOINTS={{ etcdctl_endpoints }}
-          {% if etcd_tls_enabled | default(false) %}
+          {% if etcd_client_tls | default(false) %}
           ETCD_CACERT={{ etcd_tls_dir }}/ca.crt
           ETCD_CERT={{ etcd_tls_dir }}/client.crt
           ETCD_KEY={{ etcd_tls_dir }}/client.key

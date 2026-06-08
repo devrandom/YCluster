@@ -50,8 +50,9 @@ def get_cluster_members(initial_host):
             for member in members_data.get('members', []):
                 for url in member.get('clientURLs', []):
                     if '://' in url:
-                        ip = url.split('://', 1)[1].split(':')[0]
-                        members.append(f"{ip}:2379")
+                        # Keep the advertised host:port (the client port varies
+                        # by TLS phase — plaintext vs the dedicated TLS port).
+                        members.append(url.split('://', 1)[1])
                         break
             if members:
                 return members

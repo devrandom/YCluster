@@ -1,0 +1,11 @@
+---
+# Dev wrapper: the etcd-facing slice of the cluster, rolled one node at a time
+# during a TLS migration rehearsal (etcd-tls-migrate.sh). Run as a TOP-LEVEL
+# playbook from dev/cluster/ so config/ansible/group_vars/all is NOT loaded and
+# the dev inventory's etcd_* vars win (same rationale as site-dev.yml).
+#
+# Order matters: certs are distributed to a node BEFORE its etcd is told to
+# listen/connect over TLS, so a single `--limit <node>` run gives that node
+# everything it needs in one pass.
+- import_playbook: ../../config/ansible/setup-etcd-tls.yml
+- import_playbook: ../../config/ansible/install-etcd.yml
