@@ -13,6 +13,11 @@
 # real disks — can't run in containers), monitoring, macOS, and the
 # PXE/autoinstall bits. Add playbooks here as they're made container-safe.
 
+# etcd mTLS PKI — generate + distribute certs BEFORE etcd starts. Each play is
+# gated per-host on etcd_tls_enabled (no-op until the flip). See
+# etcd-access-hardening.md.
+- import_playbook: ../../config/ansible/setup-etcd-tls.yml
+
 - import_playbook: ../../config/ansible/install-etcd.yml
 
 # ycluster CLI/package — provides yc-dhcp-server, certbot-manager, etc.

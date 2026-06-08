@@ -1,0 +1,214 @@
+---
+# etcd mTLS PKI: generate the cluster etcd CA + certs once (controller-side,
+# into bootstrap_files_dir — replicated like the ansible SSH key, owned by no
+# single node), then distribute to the nodes that talk to etcd. Runs BEFORE
+# install-etcd.yml so the certs exist before etcd starts and before the first
+# etcdctl probe. See docs/design/etcd-access-hardening.md (Phase 2b).
+#
+# Every play is gated per-host on etcd_tls_enabled (a no-op until the flip).
+# The gate lives on a block (not on the import_playbook `when`, which doesn't
+# reliably see inventory vars). Identity model:
+#   - ca.{crt,key}      cluster etcd CA (also the unified cluster CA root)
+#   - core.{crt,key}    shared identity for ALL core (s*) nodes — etcd server,
+#                       peer, and client. SAN covers every core IP/hostname +
+#                       localhost + 127.0.0.1 + the storage VIP.
+#   - client.{crt,key}  client identity for non-core etcd clients (compute/Incus
+#                       hosts, and the controller's dynamic inventory).
+
+- name: Generate etcd PKI (controller-side, idempotent)
+  # Runs on a core host (so it has the etcd_*/bootstrap_files_dir vars), but the
+  # crypto happens on the controller via delegate_to: localhost. run_once → one
+  # generation pass into bootstrap_files_dir.
+  hosts: etcd
+  gather_facts: no
+  become: no
+  run_once: true
+  vars:
+    pki_dir: "{{ etcd_pki_dir | default(bootstrap_files_dir ~ '/etcd-pki') }}"
+    core_san_raw: "{{ (groups['etcd'] | map('extract', hostvars, 'ansible_host') | list) + (groups['etcd'] | list) + ['127.0.0.1', 'localhost', '10.0.0.100'] }}"
+    core_san: "{{ core_san_raw | map('regex_replace', '^(\\d{1,3}(\\.\\d{1,3}){3})$', 'IP:\\1') | map('regex_replace', '^(?!IP:)(.+)$', 'DNS:\\1') | list }}"
+  tasks:
+    - name: Generate etcd PKI on the controller
+      when: etcd_tls_enabled | default(false)
+      delegate_to: localhost
+      block:
+        - name: Ensure PKI directory exists (gitignored, replicated secrets)
+          file:
+            path: "{{ pki_dir }}"
+            state: directory
+            mode: '0700'
+
+        - name: etcd CA private key
+          community.crypto.openssl_privatekey:
+            path: "{{ pki_dir }}/ca.key"
+            size: 4096
+
+        - name: etcd CA CSR
+          community.crypto.openssl_csr:
+            path: "{{ pki_dir }}/ca.csr"
+            privatekey_path: "{{ pki_dir }}/ca.key"
+            common_name: "YCluster etcd CA"
+            basic_constraints: ['CA:TRUE']
+            basic_constraints_critical: true
+            key_usage: ['keyCertSign', 'cRLSign']
+            key_usage_critical: true
+
+        - name: etcd CA certificate (self-signed, 10y)
+          community.crypto.x509_certificate:
+            path: "{{ pki_dir }}/ca.crt"
+            csr_path: "{{ pki_dir }}/ca.csr"
+            privatekey_path: "{{ pki_dir }}/ca.key"
+            provider: selfsigned
+            selfsigned_not_after: "+3650d"
+
+        - name: core private key
+          community.crypto.openssl_privatekey:
+            path: "{{ pki_dir }}/core.key"
+            size: 2048
+
+        - name: core CSR
+          community.crypto.openssl_csr:
+            path: "{{ pki_dir }}/core.csr"
+            privatekey_path: "{{ pki_dir }}/core.key"
+            common_name: "etcd-core"
+            # core_san covers the node IPs/hostnames (for clients verifying the
+            # server cert). 'etcd-client' is a stable identity used with etcd's
+            # client-cert-allowed-hostname so client auth is by cert, not src IP.
+            subject_alt_name: "{{ core_san + ['DNS:etcd-client'] }}"
+            key_usage: ['digitalSignature', 'keyEncipherment', 'keyAgreement']
+            extended_key_usage: ['serverAuth', 'clientAuth']
+
+        - name: core certificate (signed by CA, 1y)
+          community.crypto.x509_certificate:
+            path: "{{ pki_dir }}/core.crt"
+            csr_path: "{{ pki_dir }}/core.csr"
+            provider: ownca
+            ownca_path: "{{ pki_dir }}/ca.crt"
+            ownca_privatekey_path: "{{ pki_dir }}/ca.key"
+            ownca_not_after: "+365d"
+
+        - name: client private key
+          community.crypto.openssl_privatekey:
+            path: "{{ pki_dir }}/client.key"
+            size: 2048
+
+        - name: client CSR
+          community.crypto.openssl_csr:
+            path: "{{ pki_dir }}/client.csr"
+            privatekey_path: "{{ pki_dir }}/client.key"
+            common_name: "etcd-client"
+            subject_alt_name: ['DNS:etcd-client']
+            key_usage: ['digitalSignature', 'keyEncipherment']
+            extended_key_usage: ['clientAuth']
+
+        - name: client certificate (signed by CA, 1y)
+          community.crypto.x509_certificate:
+            path: "{{ pki_dir }}/client.crt"
+            csr_path: "{{ pki_dir }}/client.csr"
+            provider: ownca
+            ownca_path: "{{ pki_dir }}/ca.crt"
+            ownca_privatekey_path: "{{ pki_dir }}/ca.key"
+            ownca_not_after: "+365d"
+
+- name: Distribute etcd certificates to etcd nodes (core)
+  hosts: etcd
+  become: yes
+  vars:
+    pki_dir: "{{ etcd_pki_dir | default(bootstrap_files_dir ~ '/etcd-pki') }}"
+  tasks:
+    - name: Install etcd TLS material on core nodes
+      when: etcd_tls_enabled | default(false)
+      block:
+        - name: Ensure an etcd-client group exists (read access to the client key)
+          group:
+            name: etcd-client
+            system: yes
+
+        # etcd's apt package (install-etcd.yml) creates the etcd user, but that
+        # runs after this play; pre-create it so the server.key chown works on a
+        # fresh node. apt is idempotent if the user already exists.
+        - name: Ensure etcd system group exists
+          group:
+            name: etcd
+            system: yes
+
+        - name: Ensure etcd system user exists
+          user:
+            name: etcd
+            group: etcd
+            system: yes
+            create_home: no
+            shell: /usr/sbin/nologin
+
+        - name: Ensure /etc/etcd/tls exists
+          file:
+            path: "{{ etcd_tls_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Install CA + server (daemon) + client material on core nodes
+          copy:
+            src: "{{ item.src }}"
+            dest: "{{ etcd_tls_dir }}/{{ item.dest }}"
+            owner: "{{ item.owner | default('root') }}"
+            group: "{{ item.group | default('root') }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ pki_dir }}/ca.crt",   dest: ca.crt,     mode: '0644' }
+            - { src: "{{ pki_dir }}/core.crt", dest: server.crt, mode: '0644' }
+            - { src: "{{ pki_dir }}/core.key", dest: server.key, owner: etcd, group: etcd, mode: '0600' }
+            - { src: "{{ pki_dir }}/core.crt", dest: client.crt, mode: '0644' }
+            - { src: "{{ pki_dir }}/core.key", dest: client.key, group: etcd-client, mode: '0640' }
+          no_log: true
+
+        - name: Ensure /etc/ycluster/ca exists
+          file:
+            path: /etc/ycluster/ca
+            state: directory
+            mode: '0755'
+
+        - name: Install unified CA (cert + key) on core nodes
+          copy:
+            src: "{{ item.src }}"
+            dest: "/etc/ycluster/ca/{{ item.dest }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ pki_dir }}/ca.crt", dest: ca.crt, mode: '0644' }
+            - { src: "{{ pki_dir }}/ca.key", dest: ca.key, mode: '0600' }
+          no_log: true
+
+- name: Distribute etcd client certificates to non-core etcd clients (compute)
+  hosts: compute
+  become: yes
+  vars:
+    pki_dir: "{{ etcd_pki_dir | default(bootstrap_files_dir ~ '/etcd-pki') }}"
+  tasks:
+    - name: Install etcd client TLS material on compute nodes
+      when: etcd_tls_enabled | default(false)
+      block:
+        - name: Ensure an etcd-client group exists
+          group:
+            name: etcd-client
+            system: yes
+
+        - name: Ensure /etc/etcd/tls exists
+          file:
+            path: "{{ etcd_tls_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Install CA + client material on compute nodes
+          copy:
+            src: "{{ item.src }}"
+            dest: "{{ etcd_tls_dir }}/{{ item.dest }}"
+            group: "{{ item.group | default('root') }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ pki_dir }}/ca.crt",     dest: ca.crt,     mode: '0644' }
+            - { src: "{{ pki_dir }}/client.crt", dest: client.crt, mode: '0644' }
+            - { src: "{{ pki_dir }}/client.key", dest: client.key, group: etcd-client, mode: '0640' }
+          no_log: true
