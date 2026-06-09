@@ -77,12 +77,31 @@ ansible-playbook setup-etcd-tls.yml install-etcd.yml -e etcd_tls_phase=<phase> -
 etcdctl endpoint health --cluster        # (TLS env once past `off`)
 ```
 
-After all three nodes are at the phase, refresh the client env so etcd clients
-follow:
+After all three nodes are at the phase, converge **every etcd client** so it
+follows. This is two steps, not one:
 
 ```bash
+# 1. write the TLS etcd-client.env + /etc/environment fleet-wide
 ansible-playbook admin/install-ycluster-package.yml -e etcd_tls_phase=<phase>
+# 2. re-render the service units that consume etcd, so they pick up the
+#    EnvironmentFile and RESTART onto the new endpoints. site.yml is the
+#    convergence; or run the unit-defining playbooks (setup-web-services,
+#    install-certbot, admin-stats, setup-network-services, setup-wg,
+#    install-dhcp-leader-election, monitoring/install-prometheus,
+#    app/install-local-ai-proxy, storage/install-storage-leader-election).
+ansible-playbook site.yml -e etcd_tls_phase=<phase> --limit <node>
 ```
+
+> **Writing the env file is not enough.** A unit only reads
+> `/etc/ycluster/etcd-client.env` if it has `EnvironmentFile=` *and* is
+> restarted **after** both the file and the unit are in place — a running
+> process keeps its old (plaintext) environment. Re-run the unit-defining
+> playbooks so the units are converted and restarted. `local-ai-proxy` is a
+> compiled Go binary: it must be **rebuilt and redeployed**
+> (`app/install-local-ai-proxy.yml`) — it reads the same `ETCD_*` env.
+> Oneshot/timer units (`update-dhcp-hosts`, `ycluster-wg-reconcile`,
+> `update-blackbox-targets`) do **not** read `/etc/environment`, so they need
+> `EnvironmentFile=` explicitly — verify with `systemctl cat <unit>`.
 
 Phase notes:
 - **`listen`** — additive (adds the TLS listeners); safe, no client/peer change.

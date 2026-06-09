@@ -207,7 +207,9 @@ func buildRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
 			_ = src.Close()
 			return nil, nil, err
 		}
-		logger.Info("local-ai-proxy starting", "mode", "etcd", "listen", cfg.Listen, "endpoints", cfg.Etcd.Endpoints, "prefix", cfg.Etcd.Prefix)
+		// Log the resolved endpoints (ETCD_HOSTS env wins over YAML), not the
+		// raw YAML field, which is usually empty in production.
+		logger.Info("local-ai-proxy starting", "mode", "etcd", "listen", cfg.Listen, "endpoints", etcdEndpoints(cfg.Etcd), "prefix", cfg.Etcd.Prefix)
 		return NewModelRouter(src), src, nil
 	}
 

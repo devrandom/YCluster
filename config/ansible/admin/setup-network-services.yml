@@ -233,6 +233,7 @@
           
           [Service]
           Type=oneshot
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/local/bin/ycluster dhcp update-hosts
 
     - name: Enable and start network services

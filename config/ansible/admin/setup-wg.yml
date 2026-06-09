@@ -53,6 +53,7 @@
 
           [Service]
           Type=oneshot
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/local/lib/cluster/wg-reconcile
 
     - name: Install wg-reconcile systemd timer

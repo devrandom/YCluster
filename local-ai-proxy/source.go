@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -91,15 +90,7 @@ func NewEtcdSource(cfg EtcdConfig, logger *slog.Logger) (*EtcdSource, error) {
 	if cfg.Prefix == "" {
 		return nil, fmt.Errorf("etcd.prefix is required")
 	}
-	if len(cfg.Endpoints) == 0 {
-		cfg.Endpoints = []string{DefaultEtcdEndpoint}
-	}
-	client, err := clientv3.New(clientv3.Config{
-		Endpoints:   cfg.Endpoints,
-		DialTimeout: 5 * time.Second,
-		Username:    cfg.Username,
-		Password:    cfg.Password,
-	})
+	client, err := newEtcdClient(&cfg)
 	if err != nil {
 		return nil, fmt.Errorf("etcd client: %w", err)
 	}
