@@ -127,6 +127,7 @@
           ETCDCTL_CERT={{ etcd_tls_dir }}/client.crt
           ETCDCTL_KEY={{ etcd_tls_dir }}/client.key
           {% endif %}
+      notify: restart etcd client services
 
     - name: Expose etcd client env to interactive / PAM sessions
       # systemd units use EnvironmentFile=/etc/ycluster/etcd-client.env; but the
@@ -193,3 +194,26 @@
         executable: /bin/bash
       register: completion_result
       changed_when: "'CHANGED' in completion_result.stdout"
+
+  handlers:
+    # systemd only re-reads EnvironmentFile on (re)start, so changing
+    # etcd-client.env contents (e.g. an etcd_tls_phase flip) does not by itself
+    # move a running service onto the new endpoints. Restart every active unit
+    # that sources the file so etcd clients follow the phase in one pass.
+    - name: restart etcd client services
+      shell: |
+        rc=0
+        for unit in $(grep -rlE 'EnvironmentFile=-?/etc/ycluster/etcd-client.env' /etc/systemd/system/*.service 2>/dev/null | xargs -r -n1 basename | sort -u); do
+          if systemctl is-active --quiet "$unit"; then
+            if systemctl restart "$unit"; then
+              echo "restarted $unit"
+            else
+              echo "FAILED $unit"; rc=1
+            fi
+          fi
+        done
+        exit $rc
+      args:
+        executable: /bin/bash
+      register: etcd_clients_restarted
+      changed_when: "'restarted ' in etcd_clients_restarted.stdout"
