@@ -54,6 +54,10 @@ play is the template) and run it `--limit <node>`.
 
 ## Migrating a live cluster from plaintext to mTLS
 
+> **Already done on the prod cluster** (steady state is `enforce`). This section
+> is the procedure to repeat for a rebuild, plus the lessons that procedure now
+> bakes in — see "Rollout lessons" below.
+
 Driven by the single ordered var `etcd_tls_phase`
 (`off → listen → connect → enforce`). **Roll each phase out one node at a time
 with `--limit`, confirming quorum between nodes** — never a fleet-wide run, or

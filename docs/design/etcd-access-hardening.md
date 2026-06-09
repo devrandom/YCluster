@@ -1,9 +1,14 @@
 # etcd access hardening
 
 ## Status
-**Phase 1 and Phase 2 (mTLS) implemented and validated on the dev container
-cluster** (see `docs/design/virtual-test-environment.md`). Rollout to the real
-cluster (Phase 2c) is pending; the operational procedure is in
+**Done — rolled out to the real cluster.** etcd runs mTLS-only (`enforce`): all
+core nodes listen on TLS `2381` (client) / `2382` (peer) with `client-cert-auth`,
+no plaintext listeners remain, and every cluster etcd client connects with a
+client cert. Phase 1 + Phase 2 (mTLS) were validated on the dev container cluster
+(see `docs/design/virtual-test-environment.md`), then rolled out per node through
+the `off → listen → connect → enforce` ladder with quorum preserved throughout.
+The steady-state default is now `etcd_tls_phase: enforce` in
+`group_vars/all/main.yml`. Operational procedure + rollout lessons:
 `docs/operations/etcd.md`.
 
 Phase 2 chose **mTLS** (option (b) below), not the admin-API proxy (a): the
