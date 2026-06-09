@@ -213,6 +213,7 @@
       systemd:
         name: admin-api
         state: restarted
+        daemon_reload: yes
 
     - name: restart nginx
       systemd:
