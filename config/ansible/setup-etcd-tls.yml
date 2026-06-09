@@ -203,14 +203,19 @@
             - { src: "{{ pki_dir }}/ca.key", dest: ca.key, mode: '0600' }
           no_log: true
 
-- name: Distribute etcd client certificates to non-core etcd clients (compute)
-  hosts: compute
+# All non-core managed etcd clients: storage (s4+), compute (incl nvidia), nas.
+# Core (s1-s3) get the core cert from the play above; adhoc are deliberately
+# excluded (untrusted — they must lose etcd access at enforce).
+- name: Distribute etcd client certificates to non-core etcd clients
+  hosts: storage:compute:nas
   become: yes
   vars:
     pki_dir: "{{ etcd_pki_dir | default(bootstrap_files_dir ~ '/etcd-pki') }}"
   tasks:
-    - name: Install etcd client TLS material on compute nodes
-      when: etcd_tls_enabled | default(false)
+    - name: Install etcd client TLS material on non-core nodes
+      when:
+        - etcd_tls_enabled | default(false)
+        - inventory_hostname not in groups['etcd']
       block:
         - name: Ensure an etcd-client group exists
           group:
@@ -225,7 +230,7 @@
             group: root
             mode: '0755'
 
-        - name: Install CA + client material on compute nodes
+        - name: Install CA + client material on non-core nodes
           copy:
             src: "{{ item.src }}"
             dest: "{{ etcd_tls_dir }}/{{ item.dest }}"
