@@ -1,5 +1,9 @@
 ---
 # Core Infrastructure - Foundation services and cluster coordination
+# etcd mTLS PKI first: distribute certs to every etcd client BEFORE install-etcd
+# and the client-env flip, so a node is never pointed at the TLS port without
+# the certs to use it. No-op until the TLS phase is enabled.
+- import_playbook: setup-etcd-tls.yml
 - import_playbook: install-etcd.yml
 - import_playbook: configure-locale.yml
 
