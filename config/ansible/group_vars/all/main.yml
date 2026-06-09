@@ -16,11 +16,13 @@ tang_port: 8777
 # — e.g. enforce-before-connect — unrepresentable. See
 # docs/design/etcd-access-hardening.md and docs/operations/etcd.md (runbook).
 #
-# Deliberately NOT hardcoded here: a value at this (playbook group_vars) level
-# would override an inventory/host_vars setting when a wrapper imports these
-# playbooks (the dev cluster relies on this). Everything below treats it as
-# default('off'). Set etcd_tls_phase in host_vars (per node during a rollout),
-# never the derived booleans.
+# Steady state: the prod cluster is fully rolled out to `enforce` (mTLS only), so
+# that is the default — a plain site.yml run must NOT silently render plaintext
+# and revert the cluster. Override per node via host_vars or `-e etcd_tls_phase=`
+# (higher precedence) for a future re-rollout. The dev cluster sets its own value
+# in dev/cluster/inventory.yml and is unaffected (its wrappers don't load this
+# group_vars). Set the phase, never the derived booleans below.
+etcd_tls_phase: enforce
 etcd_tls_rank: "{{ {'off': 0, 'listen': 1, 'connect': 2, 'enforce': 3}[etcd_tls_phase | default('off')] }}"
 etcd_tls_listening: "{{ (etcd_tls_rank | int) >= 1 }}"   # serve the TLS port(s)
 etcd_client_tls: "{{ (etcd_tls_rank | int) >= 2 }}"      # clients/peers use TLS
