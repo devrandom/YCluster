@@ -11,3 +11,6 @@
 - import_playbook: install-open-webui.yml
 # Stage instance: install half only (build is gated by tags: [build, never])
 - import_playbook: open-webui-stage.yml
+# Inference gateway. After open-webui: the auth sidecar validates API keys
+# against open-webui's database.
+- import_playbook: install-local-ai-proxy.yml
