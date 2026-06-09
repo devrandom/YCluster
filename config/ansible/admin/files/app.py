@@ -1803,7 +1803,7 @@ def get_comprehensive_health():
     else:
         health_status['services']['etcd'] = {
             'status': 'not_applicable',
-            'details': {'reason': 'etcd access is core-only (s*)'}
+            'details': {'reason': 'admin-api uses etcd only on storage nodes'}
         }
     
     # Check Ceph storage (only on storage nodes)
@@ -2524,11 +2524,29 @@ def get_inference_status():
         return None
 
 
+def _scrub_adhoc_etcd(result):
+    """Adhoc nodes are untrusted and never get etcd client certs (etcd is
+    restricted to the trusted fleet via mTLS), so ignore any etcd status they
+    self-report — older adhoc images probe etcd unconditionally and would
+    otherwise always read unhealthy at the enforce phase. Recompute overall only
+    if etcd was the sole failure."""
+    services = result.get('services')
+    if isinstance(services, dict) and 'etcd' in services:
+        services['etcd'] = {'status': 'not_applicable',
+                            'details': {'reason': 'adhoc nodes are untrusted; no etcd access'}}
+        if result.get('overall') == 'unhealthy' and not any(
+                isinstance(v, dict) and v.get('status') == 'unhealthy'
+                for v in services.values()):
+            result['overall'] = 'healthy'
+    return result
+
+
 def get_all_host_health(hosts):
     """Fetch health for all non-disabled hosts in parallel."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     host_health = {}
     active = [h for h in hosts if not h.get('disabled', False)]
+    types = {h['hostname']: h.get('type') for h in hosts}
     for h in hosts:
         if h.get('disabled', False):
             host_health[h['hostname']] = {'status': 'disabled', 'services': []}
@@ -2536,7 +2554,11 @@ def get_all_host_health(hosts):
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = {executor.submit(get_host_health, h['ip']): h['hostname'] for h in active}
         for future in as_completed(futures):
-            host_health[futures[future]] = future.result()
+            name = futures[future]
+            result = future.result()
+            if types.get(name) == 'adhoc':
+                result = _scrub_adhoc_etcd(result)
+            host_health[name] = result
 
     return host_health
 
