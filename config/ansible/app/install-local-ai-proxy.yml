@@ -34,10 +34,21 @@
     proxy_bin_dst: /usr/local/bin/local-ai-proxy
     go_bin: /usr/lib/go-1.24/bin/go
   tasks:
+    # The etcd client key is distributed mode 0640, group etcd-client (see
+    # setup-etcd-tls.yml). Both the Go proxy and the Python auth sidecar run as
+    # local-ai-proxy and read it, so the user must be in that group once the
+    # cluster is on mTLS. Idempotent + harmless before the group has the key.
+    - name: Ensure etcd-client group exists
+      group:
+        name: etcd-client
+        system: yes
+
     - name: Create local-ai-proxy system user
       user:
         name: local-ai-proxy
         system: yes
+        groups: etcd-client
+        append: yes
         shell: /usr/sbin/nologin
         home: /var/lib/local-ai-proxy
         create_home: no
@@ -97,6 +108,7 @@
 
           [Service]
           Type=exec
+          EnvironmentFile=-/etc/ycluster/etcd-client.env
           ExecStart={{ proxy_bin_dst }} serve --config /etc/local-ai-proxy/config.yaml
           User=local-ai-proxy
           Group=local-ai-proxy
@@ -156,8 +168,6 @@
 
           [Service]
           Type=exec
-          # etcd client config (endpoints + TLS certs); optional so a missing
-          # file falls back to the localhost default (etcd is local on storage).
           EnvironmentFile=-/etc/ycluster/etcd-client.env
           ExecStart=/usr/local/bin/local-ai-proxy-auth
           User=local-ai-proxy

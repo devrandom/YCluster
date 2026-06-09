@@ -239,6 +239,7 @@
           [Service]
           Type=oneshot
           User=root
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/bin/python3 /usr/local/lib/cluster/update-blackbox-targets
         mode: '0644'
       notify: reload systemd

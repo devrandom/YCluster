@@ -537,16 +537,7 @@ func mustEtcdForCLI(path string) (*clientv3.Client, string) {
 }
 
 func mustEtcdClient(cfg *EtcdConfig) *clientv3.Client {
-	endpoints := cfg.Endpoints
-	if len(endpoints) == 0 {
-		endpoints = []string{DefaultEtcdEndpoint}
-	}
-	client, err := clientv3.New(clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: 5 * time.Second,
-		Username:    cfg.Username,
-		Password:    cfg.Password,
-	})
+	client, err := newEtcdClient(cfg)
 	if err != nil {
 		fatal("etcd client: %v", err)
 	}
