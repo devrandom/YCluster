@@ -13,6 +13,9 @@ long-running command shows:
 
 The "[<count> lines]" and closing "..." can only appear at EOF, since the count
 and the identity of the last N lines aren't known until the stream ends.
+
+With -l/--log FILE, the complete un-elided input is teed to FILE (flushed per
+line) so it can be followed in detail, e.g. with `tail -f`.
 """
 
 import argparse
@@ -29,12 +32,15 @@ def main():
                    help="head lines to show (overrides -n)")
     p.add_argument("-T", "--tail", type=int, metavar="N",
                    help="tail lines to show (overrides -n)")
+    p.add_argument("-l", "--log", metavar="FILE",
+                   help="tee the full, un-elided input to FILE")
     args = p.parse_args()
 
     head = args.head if args.head is not None else args.n
     tail = args.tail if args.tail is not None else args.n
 
     out = sys.stdout
+    log = open(args.log, "w") if args.log else None
     buf = deque(maxlen=tail) if tail > 0 else None
     elided = 0
     opened = False
@@ -42,6 +48,9 @@ def main():
 
     try:
         for line in iter(sys.stdin.readline, ""):
+            if log:
+                log.write(line)
+                log.flush()
             if seen < head:
                 out.write(line)
                 out.flush()
@@ -68,6 +77,9 @@ def main():
         sys.exit(0)
     except KeyboardInterrupt:
         sys.exit(130)
+    finally:
+        if log:
+            log.close()
 
 
 if __name__ == "__main__":
