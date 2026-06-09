@@ -375,9 +375,10 @@ def _run_compact():
     dns_results = []
 
     if non_amt_nodes:
+        dns_nodes = [n for n in non_amt_nodes if re.match(r'^s\d+$', n.get('hostname', ''))]
         with ThreadPoolExecutor(max_workers=10) as executor:
             dhcp_futures = {executor.submit(check_dhcp_service_on_host, n['ip']): n for n in non_amt_nodes}
-            dns_futures = {executor.submit(check_dnsmasq_service_on_host, n['ip'], n.get('hostname', 'unknown')): n for n in non_amt_nodes}
+            dns_futures = {executor.submit(check_dnsmasq_service_on_host, n['ip'], n.get('hostname', 'unknown')): n for n in dns_nodes}
 
             for future in as_completed(dhcp_futures):
                 result = future.result()
@@ -458,8 +459,7 @@ def _run_verbose():
     for result in sorted(etcd_results, key=lambda x: x['host']):
         if result['healthy']:
             leader_str = " (LEADER)" if result.get('is_leader') else ""
-            print(f"✓ {result['host']}: Healthy{leader_str}")
-            print(f"  Version: {result['version']}, DB Size: {result['db_size']:,} bytes")
+            print(f"✓ {result['host']}: Healthy{leader_str} (v{result['version']}, DB {result['db_size']:,} bytes)")
         else:
             print(f"✗ {result['host']}: Unhealthy - {result['error']}")
 
@@ -476,14 +476,16 @@ def _run_verbose():
         nodes = get_all_nodes(client)
         non_amt_nodes = [n for n in nodes if n.get('ip') and not n.get('hostname', '').endswith('a')]
 
-        # DHCP + DNS checks in parallel
+        # DHCP + DNS checks in parallel. DHCP is probed everywhere (a stray
+        # server anywhere is a problem); dnsmasq only runs on storage nodes.
+        dns_nodes = [n for n in non_amt_nodes if re.match(r'^s\d+$', n.get('hostname', ''))]
         dhcp_results = []
         dhcp_running = []
         dns_results = []
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             dhcp_futures = {executor.submit(check_dhcp_service_on_host, n['ip']): n for n in non_amt_nodes}
-            dns_futures = {executor.submit(check_dnsmasq_service_on_host, n['ip'], n.get('hostname', 'unknown')): n for n in non_amt_nodes}
+            dns_futures = {executor.submit(check_dnsmasq_service_on_host, n['ip'], n.get('hostname', 'unknown')): n for n in dns_nodes}
 
             for future in as_completed(dhcp_futures):
                 result = future.result()
@@ -497,23 +499,23 @@ def _run_verbose():
                 result['_node'] = dns_futures[future]
                 dns_results.append(result)
 
-        # Print DHCP
+        # Print DHCP (only the running server is interesting; per-node
+        # "not running" is the expected state under leader election)
         print("\n" + "=" * 60)
         print("DHCP Service Status:")
         print("-" * 60)
-        for result in dhcp_results:
+        for result in sorted(dhcp_running, key=lambda r: r['_node'].get('hostname', '')):
             node = result['_node']
-            if result['running']:
-                method = result.get('method', 'unknown')
-                etcd_st = "✓" if result.get('etcd_connected', False) else "✗"
-                print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DHCP Running (via {method})")
-                print(f"  etcd connection: {etcd_st}, server IP: {result.get('server_ip', 'unknown')}")
-            else:
-                print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): DHCP Not running - {result['error']}")
+            etcd_st = "✓" if result.get('etcd_connected', False) else "✗"
+            print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DHCP running "
+                  f"(etcd {etcd_st}, server IP {result.get('server_ip', 'unknown')})")
 
         n_dhcp = len(dhcp_running)
         if n_dhcp == 0:
             print("⚠ WARNING: No DHCP servers running in cluster!")
+            for result in sorted(dhcp_results, key=lambda r: r['_node'].get('hostname', '')):
+                node = result['_node']
+                print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): {result['error']}")
         elif n_dhcp > 1:
             ips = ', '.join(r['host'] for r in dhcp_running)
             print(f"⚠ WARNING: Multiple DHCP servers running: {ips}")
@@ -524,20 +526,18 @@ def _run_verbose():
         print("\n" + "=" * 60)
         print("dnsmasq Service Status:")
         print("-" * 60)
-        for result in dns_results:
+        for result in sorted(dns_results, key=lambda r: r['_node'].get('hostname', '')):
             node = result['_node']
             if result.get('running'):
-                method = result.get('method', 'unknown')
                 if result.get('dns_working', False):
-                    print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DNS Running (via {method})")
-                    print(f"  DNS Resolution: {result['hostname']} -> {result['resolved_ip']}")
-                    if 'amt_hostname' in result:
-                        print(f"  AMT Resolution: {result['amt_hostname']} -> {result['amt_resolved_ip']}")
+                    amt = f", {result['amt_hostname']} -> {result['amt_resolved_ip']}" if 'amt_hostname' in result else ""
+                    print(f"✓ {node.get('hostname', 'unknown')} ({result['host']}): DNS OK "
+                          f"({result['hostname']} -> {result['resolved_ip']}{amt})")
                 else:
-                    print(f"⚠ {node.get('hostname', 'unknown')} ({result['host']}): DNS Running but resolution failed (via {method})")
-                    print(f"  DNS Error: {result.get('dns_error', 'Unknown error')}")
+                    print(f"⚠ {node.get('hostname', 'unknown')} ({result['host']}): DNS running but: "
+                          f"{result.get('dns_error', 'Unknown error')}")
             else:
-                print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): DNS Not running - {result['error']}")
+                print(f"✗ {node.get('hostname', 'unknown')} ({result['host']}): DNS not running - {result['error']}")
     else:
         nodes = []
 
