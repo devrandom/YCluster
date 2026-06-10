@@ -42,6 +42,17 @@ ycluster tls generate --common-name your-domain.com
 ycluster certbot obtain --test
 ```
 
+### Held Packages
+Some packages are deliberately held from auto-upgrade (apt: `postgresql-16`;
+snap: `microceph`). Upgrade them only via their playbooks — never ad-hoc
+apt/snap commands (the playbooks handle serialization, leader ordering, and
+the staleness-monitoring timestamp):
+```bash
+./run-playbook.sh storage/upgrade-held-packages.yml   # apt holds
+./run-playbook.sh storage/upgrade-microceph.yml       # microceph snap
+```
+See `docs/operations/packages.md`.
+
 ## Architecture
 
 ### Node Types
