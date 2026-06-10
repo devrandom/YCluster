@@ -8,7 +8,7 @@ A prioritized index into the detail below; nothing here is a separate item.
 - incus VM DNS records — DONE 2026-06-10: dev-tested, deployed to nv2/nv3/c1/c2, bastion resolution verified (details in item below).
 - "core" consistency — main fixes DONE 2026-06-10 (rathole parametric per core node; static etcd/core floor + per-cluster inventory). Residual: `CORE_NODE_IPS` fallback + stale "s1-s3" comments (see item below).
 - Review quick-win bugs B1-B8 — DONE 2026-06-10 (all eight fixed; canary-validated on s2, B2 also live-tested on the dev cluster; see review-followups section).
-- Admin API hardening S1-S3 — highest security ROI: dev-server-as-root, unauthenticated mutating endpoints, unvalidated etcd-key params.
+- Admin API hardening — S1 + S3 DONE 2026-06-10 (waitress as dedicated `admin-api` user with systemd sandboxing + narrow grants; hostname route params validated). S2 (auth on mutating endpoints) still open — needs a design pass: status-page buttons must send a key, and `/api/allocate` is used by not-yet-credentialed bootstrapping nodes.
 - Failed-systemd-units alert (Monitoring) — DONE 2026-06-10; caught a real failure (nv1 autossh tunnel) within minutes of deployment.
 
 **Next (operational resilience; caused real outages or data-loss exposure):**
@@ -107,9 +107,9 @@ B1-B8 fixed and deployed: timing-safe+bytes compare (B1); allocation CAS result 
 - B8 — bare `except:` in `inventory_plugins/etcd_nodes.py:132` yields a silent empty inventory; catch specific exceptions + warn per host.
 
 ### Admin API hardening (highest security ROI)
-- S1 — admin-api runs Flask's dev server as root with no systemd hardening (`app.py:2721`, `setup-web-services.yml:67`). Move to gunicorn/waitress, dedicated user, `NoNewPrivileges`/`ProtectSystem=strict`.
+- S1 — DONE 2026-06-10. waitress (single process, 8 threads — preserves allocation_lock semantics) as system user `admin-api` with `NoNewPrivileges`/`ProtectSystem=strict`/`ProtectHome`/`PrivateTmp` — fully sudo-free. Group grants only: `shadow` (autoinstall password hash), `etcd-client` (client TLS key). The ceph health check uses a dedicated read-only ceph identity (`client.admin-api`, `mon allow r`, keyring root:admin-api 640, provisioned by setup-web-services.yml); the docker check reports systemd unit state only (API-socket access would mean root-equivalent docker group, not worth a version string). The secrets_mount check treats mounted-but-unreadable as healthy (contents are deliberately root-only).
 - S2 — mutating admin-api endpoints unauthenticated (`/api/host/<h>/disable|enable`, drain, `/api/allocate`); anything on 10.0.0.0/24 can disable hosts or claim allocations. (Supersedes the standalone drain-auth item — validate against the etcd master key.)
-- S3 — route params flow unvalidated into etcd keys (`f"{ETCD_PREFIX}/by-hostname/{hostname}"`); validate `^[a-z]+[0-9]+$` before use.
+- S3 — DONE 2026-06-10. `@validated_hostname` decorator (`^[a-z]{1,4}[0-9]{1,3}$|dhcp-NNN`) on all nine `<hostname>`/`<target_hostname>` routes → 400 before any etcd interpolation; `<node_type>`/`<job>` params already dict-validated.
 
 ### Architecture
 - A1 — bootstrap is trust-on-first-use keyed to MAC addresses (rogue LAN device can PXE-join as any node type; `/bootstrap/*` served unsigned to `sudo bash`). Document the LAN/TOFU trust model in ARCHITECTURE.md; cheap hardening: MAC-OUI validation + checksum-verified bootstrap scripts.

@@ -36,6 +36,7 @@ MAC Address Formats:
 - Non-normalized: with colons (58:47:ca:ab:cd:ef) - used in DHCP leases and network tools
 """
 
+import functools
 import json
 import re
 import sys
@@ -114,6 +115,24 @@ ETCD_PREFIX = '/cluster/nodes'
 
 # Thread lock for allocation operations
 allocation_lock = threading.Lock()
+
+# Hostname route params flow into etcd keys (f"{ETCD_PREFIX}/by-hostname/...");
+# validate before interpolation so a crafted URL can't address adjacent etcd
+# namespaces. Covers <prefix><number> names and the dynamic dhcp-NNN form.
+HOSTNAME_PARAM_RE = re.compile(r'^(?:[a-z]{1,4}[0-9]{1,3}|dhcp-[0-9]{1,3})$')
+
+
+def validated_hostname(view):
+    """Reject requests whose hostname/target_hostname route param doesn't
+    look like a cluster hostname, before it reaches any etcd key."""
+    @functools.wraps(view)
+    def wrapper(*args, **kwargs):
+        for key in ('hostname', 'target_hostname'):
+            value = kwargs.get(key)
+            if value is not None and not HOSTNAME_PARAM_RE.match(value):
+                return jsonify({'error': f'invalid hostname: {value!r}'}), 400
+        return view(*args, **kwargs)
+    return wrapper
 
 # IP allocation configuration (avoiding DHCP range 10.0.0.100-200)
 IP_RANGES = {
@@ -439,6 +458,7 @@ def wg_register():
 
 
 @app.route('/api/wg/poll/<hostname>')
+@validated_hostname
 def wg_poll(hostname):
     """Poll for approval status. Requires fp query param (pubkey_sha256)
     to prevent unauthenticated enumeration of peer configs."""
@@ -518,6 +538,7 @@ def allocations():
 
 
 @app.route('/api/host/<hostname>/disable', methods=['POST'])
+@validated_hostname
 def disable_host(hostname):
     """Disable a host so it doesn't appear in status page"""
     try:
@@ -542,6 +563,7 @@ def disable_host(hostname):
 
 
 @app.route('/api/host/<hostname>/enable', methods=['POST'])
+@validated_hostname
 def enable_host(hostname):
     """Re-enable a host so it appears in status page"""
     try:
@@ -663,7 +685,11 @@ def check_port_open(host, port, timeout=3):
 def check_ceph_status():
     """Check Ceph cluster health"""
     try:
-        result = subprocess.run(['ceph', 'health'], 
+        # Read-only ceph identity provisioned by setup-web-services.yml;
+        # keyring is root:admin-api 640, so no privileges needed.
+        result = subprocess.run(['ceph', '-n', 'client.admin-api',
+                                 '-k', '/etc/ceph/ceph.client.admin-api.keyring',
+                                 'health'],
                               capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             health_output = result.stdout.strip()
@@ -868,53 +894,28 @@ def check_clock_skew():
         }
 
 def check_docker_daemon():
-    """Check Docker daemon status and functionality"""
+    """Check Docker daemon status"""
     try:
-        # Check if Docker service is running
+        # systemd unit state is as much as an unprivileged checker can see:
+        # the docker API socket is root/docker-group only, and docker-group
+        # membership is root-equivalent — not worth it for a version string.
         docker_service_running = check_service_status('docker')
-        
-        # Check if Docker socket is accessible
-        docker_socket_accessible = False
-        docker_version = None
-        docker_error = None
-        
+
         if docker_service_running:
-            try:
-                # Test Docker daemon connectivity
-                result = subprocess.run(['docker', 'version', '--format', '{{.Server.Version}}'], 
-                                      capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    docker_socket_accessible = True
-                    docker_version = result.stdout.strip()
-                else:
-                    docker_error = result.stderr.strip()
-            except subprocess.TimeoutExpired:
-                docker_error = 'Docker command timeout'
-            except Exception as e:
-                docker_error = f'Docker command failed: {str(e)}'
-        
-        # Overall status
-        if docker_service_running and docker_socket_accessible:
             status = 'healthy'
-            message = f'Docker daemon running (version {docker_version})'
-        elif docker_service_running:
-            status = 'degraded'
-            message = f'Docker service running but daemon not accessible: {docker_error}'
+            message = 'Docker service running'
         else:
             status = 'unhealthy'
             message = 'Docker service not running'
-        
+
         return {
             'status': status,
             'details': {
                 'service_active': docker_service_running,
-                'daemon_accessible': docker_socket_accessible,
-                'version': docker_version,
-                'message': message,
-                'error': docker_error
+                'message': message
             }
         }
-        
+
     except Exception as e:
         return {
             'status': 'error',
@@ -1106,10 +1107,14 @@ def check_secrets_mount():
             else:
                 secrets_error = '/secrets directory does not exist'
         except PermissionError:
-            secrets_error = 'Permission denied accessing /secrets'
+            # The service runs unprivileged and /secrets contents are
+            # deliberately root-only; mounted-but-unreadable is the
+            # expected state, and mountedness is what this check is for.
+            secrets_accessible = is_mounted
+            secrets_error = None
         except Exception as e:
             secrets_error = f'Error accessing /secrets: {str(e)}'
-        
+
         # Determine overall status
         if is_mounted and secrets_accessible:
             status = 'healthy'
@@ -1331,6 +1336,7 @@ def undrain_node():
         return jsonify({'error': f'Failed to undrain node: {str(e)}'}), 500
 
 @app.route('/api/drain/<target_hostname>', methods=['POST'])
+@validated_hostname
 def drain_target_node(target_hostname):
     """Drain a specific node - disable leader election"""
     try:
@@ -1341,6 +1347,7 @@ def drain_target_node(target_hostname):
         return jsonify({'error': f'Failed to drain node {target_hostname}: {str(e)}'}), 500
 
 @app.route('/api/undrain/<target_hostname>', methods=['POST'])
+@validated_hostname
 def undrain_target_node(target_hostname):
     """Undrain a specific node - re-enable leader election"""
     try:
@@ -1363,6 +1370,7 @@ def drain_status():
         return jsonify({'error': f'Failed to check drain status: {str(e)}'}), 500
 
 @app.route('/api/drain/status/<target_hostname>')
+@validated_hostname
 def drain_status_target(target_hostname):
     """Check drain status of a specific node"""
     try:
@@ -1374,6 +1382,7 @@ def drain_status_target(target_hostname):
         return jsonify({'error': f'Failed to check drain status for {target_hostname}: {str(e)}'}), 500
 
 @app.route('/api/inventory/hardware/<hostname>')
+@validated_hostname
 def inventory_get_hardware(hostname):
     """Return hardware facts for a node (read-only, internal only)"""
     try:
@@ -1386,6 +1395,7 @@ def inventory_get_hardware(hostname):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/inventory/asset/<hostname>', methods=['GET'])
+@validated_hostname
 def inventory_get_asset(hostname):
     """Return asset metadata for a node (internal only)"""
     try:
@@ -1395,6 +1405,7 @@ def inventory_get_asset(hostname):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/inventory/asset/<hostname>', methods=['PUT', 'POST'])
+@validated_hostname
 def inventory_set_asset(hostname):
     """Set asset metadata fields for a node (internal only)"""
     try:
@@ -2732,4 +2743,7 @@ if __name__ == '__main__':
     else:
         print("Non-storage node: skipping etcd wait (etcd access is core-only)")
 
-    app.run(host='0.0.0.0', port=12723)
+    # waitress: production WSGI server, single process with a thread pool —
+    # same concurrency model the in-process allocation_lock assumes.
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=12723, threads=8)

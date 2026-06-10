@@ -8,8 +8,33 @@
   tasks:
     - name: Install net-tools package for arp command
       apt:
-        name: net-tools
+        name:
+          - net-tools
+          - python3-waitress
         state: present
+
+    - name: Ensure etcd-client group exists
+      group:
+        name: etcd-client
+        system: yes
+
+    - name: Create admin-api system user
+      user:
+        name: admin-api
+        system: yes
+        shell: /usr/sbin/nologin
+        home: "{{ admin_services_dir }}"
+        create_home: no
+        # shadow: /autoinstall/user-data reads the ubuntu password hash from
+        # /etc/shadow (root:shadow 640). etcd-client: read access to the etcd
+        # client TLS key (root:etcd-client 640).
+        groups: [shadow, etcd-client]
+        append: yes
+
+    - name: Remove the admin-api sudoers grants (superseded by the read-only ceph identity)
+      file:
+        path: /etc/sudoers.d/admin-api
+        state: absent
 
     - name: Copy etcd-based allocation API
       copy:
@@ -69,7 +94,12 @@
           StandardError=journal
           Restart=always
           RestartSec=5
-          User=root
+          User=admin-api
+          Group=admin-api
+          NoNewPrivileges=yes
+          ProtectSystem=strict
+          ProtectHome=yes
+          PrivateTmp=yes
 
           [Install]
           WantedBy=multi-user.target
@@ -224,6 +254,25 @@
   hosts: storage
   become: yes
   tasks:
+    # Read-only ceph identity for admin-api's health check, so it needs
+    # neither the admin keyring nor sudo. get-or-create is idempotent and
+    # returns the existing key on re-runs.
+    - name: Create read-only ceph identity for admin-api
+      command: ceph auth get-or-create client.admin-api mon 'allow r'
+      register: ceph_admin_api_identity
+      changed_when: false
+      failed_when: false
+
+    - name: Install admin-api ceph keyring
+      copy:
+        content: "{{ ceph_admin_api_identity.stdout }}\n"
+        dest: /etc/ceph/ceph.client.admin-api.keyring
+        owner: root
+        group: admin-api
+        mode: '0640'
+      when: ceph_admin_api_identity.rc == 0
+      notify: restart admin-api
+
     - name: Create systemd timer for certificate refresh
       copy:
         dest: /etc/systemd/system/fetch-tls-certs.timer
@@ -259,3 +308,9 @@
         enabled: yes
         state: started
         daemon_reload: yes
+
+  handlers:
+    - name: restart admin-api
+      systemd:
+        name: admin-api
+        state: restarted
