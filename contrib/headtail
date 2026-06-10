@@ -26,8 +26,8 @@ from collections import deque
 def main():
     p = argparse.ArgumentParser(
         description="Show the first and last N lines of stdin, eliding the middle.")
-    p.add_argument("-n", type=int, default=10, metavar="N",
-                   help="lines to show at each end (default: 10)")
+    p.add_argument("-n", type=int, default=20, metavar="N",
+                   help="lines to show at each end (default: 20)")
     p.add_argument("-H", "--head", type=int, metavar="N",
                    help="head lines to show (overrides -n)")
     p.add_argument("-T", "--tail", type=int, metavar="N",

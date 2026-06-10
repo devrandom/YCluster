@@ -68,9 +68,9 @@
       changed_when: false
       when: networkd_links.rc != 0
 
-    - name: Re-run failed wait-online oneshots
+    - name: Re-run failed network-dependent oneshots
       shell: |
-        for unit in systemd-networkd-wait-online.service NetworkManager-wait-online.service; do
+        for unit in systemd-networkd-wait-online.service NetworkManager-wait-online.service fwupd-refresh.service; do
           if [ "$(systemctl is-failed "$unit" 2>/dev/null)" = "failed" ]; then
             systemctl restart "$unit" && echo "cleared $unit"
           fi
