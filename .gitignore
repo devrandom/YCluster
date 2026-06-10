@@ -32,3 +32,6 @@ venv/
 
 # dev cluster throwaway ssh key
 dev/cluster/.ssh/
+
+# Cluster-specific inventory (real values); template is inventory_cluster.yml.example
+config/ansible/inventory_cluster.yml
