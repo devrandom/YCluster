@@ -224,11 +224,20 @@
         - "security.acls.default.ingress.action allow"
       changed_when: false
 
+    # raw.dnsmasq ownership is split by line type: resolver lines here,
+    # host-record lines by `ycluster vm` (sync_dns_records gives pinned
+    # instances lease-independent DNS) — preserve them when rewriting.
     - name: Point the VM bridge resolver at explicit upstream DNS
-      shell: >
-        incus network set {{ incus_bridge }} raw.dnsmasq
-        "$(printf '%s\n' no-resolv {{ incus_vm_dns_servers | map('regex_replace', '^', 'server=') | join(' ') }})"
-      changed_when: false
+      shell: |
+        current="$(incus network get {{ incus_bridge }} raw.dnsmasq)"
+        records="$(printf '%s\n' "$current" | grep '^host-record=' || true)"
+        desired="$(printf '%s\n' no-resolv {{ incus_vm_dns_servers | map('regex_replace', '^', 'server=') | join(' ') }}; printf '%s' "$records")"
+        if [ "$current" != "$desired" ]; then
+          incus network set {{ incus_bridge }} raw.dnsmasq "$desired"
+          echo CHANGED
+        fi
+      register: incus_bridge_dns
+      changed_when: "'CHANGED' in incus_bridge_dns.stdout"
 
     - name: Configure gpu-vm profile (VM hosts only)
       when: incus_vm_host | default(false)

@@ -61,6 +61,13 @@ def register_vm_commands(subparsers):
              'helper; new launches pin automatically).')
     pip.set_defaults(func=lambda a: _print_pins(vm.pin_existing_vms()))
 
+    sdp = sub.add_parser(
+        'sync-dns',
+        help='Reconcile bridge dnsmasq host-records with the pinned '
+             'instance IPs (launch/destroy/pin-ips sync automatically; '
+             'run this after manual incus changes or to backfill).')
+    sdp.set_defaults(func=lambda a: _print_dns_sync(vm.sync_dns_records()))
+
     bp = sub.add_parser('bastion-sync',
                         help='Regenerate the bastion SSH access list from etcd')
     bp.set_defaults(func=lambda a: vm.bastion_sync())
@@ -100,6 +107,17 @@ def _ssh_remove(args):
     vm.user_remove_key(args.user, args.key)
     vm.vm_sync_keys(args.user)
     vm.bastion_sync()
+
+
+def _print_dns_sync(changed):
+    if not changed:
+        print("No changes — every bridge's host-records already match "
+              "the pins.")
+        return
+    for bridge, records in sorted(changed.items()):
+        print(f"{bridge}: {len(records)} host-record(s)")
+        for r in records:
+            print(f"  {r}")
 
 
 def _print_pins(changes):

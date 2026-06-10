@@ -180,6 +180,54 @@ def _pin_instance_ip(name, ip):
                f"ipv4.address={ip}")
 
 
+def _managed_bridges():
+    return [n["name"] for n in _incus_json("network", "list", "--format", "json")
+            if n.get("type") == "bridge" and n.get("managed")]
+
+
+def sync_dns_records():
+    """Reconcile each managed bridge's dnsmasq host-records with the
+    instances' eth0 IP pins.
+
+    A pinned `ipv4.address` reserves the address in dnsmasq but creates no
+    DNS record: dnsmasq only answers for an instance's name while the guest
+    holds a live lease, so a guest that lets its lease lapse between
+    renewals drops out of DNS and name-based SSH via the bastion breaks
+    intermittently. A `host-record` line is static — it resolves regardless
+    of lease state.
+
+    raw.dnsmasq ownership is split by line type: this function owns every
+    `host-record=` line (regenerated from the pins, so hand-added
+    host-records are overwritten); admin/install-incus.yml owns the
+    resolver lines and preserves host-records.
+
+    Returns {bridge: [host-record lines]} for the bridges that changed.
+    """
+    by_bridge = {}
+    for inst in _incus_json("list", "--format", "json"):
+        eth0 = (inst.get("expanded_devices") or {}).get("eth0") or {}
+        ip, bridge = eth0.get("ipv4.address"), eth0.get("network")
+        if ip and bridge:
+            by_bridge.setdefault(bridge, []).append((inst["name"], ip))
+
+    changed = {}
+    for bridge in _managed_bridges():
+        domain = (_incus("network", "get", bridge, "dns.domain").stdout.strip()
+                  or "incus")
+        records = sorted(f"host-record={name},{name}.{domain},{ip}"
+                         for name, ip in by_bridge.get(bridge, []))
+        current = [line for line in
+                   _incus("network", "get", bridge, "raw.dnsmasq")
+                   .stdout.splitlines() if line]
+        desired = [line for line in current
+                   if not line.startswith("host-record=")] + records
+        if desired != current:
+            _incus("network", "set", bridge, "raw.dnsmasq",
+                   "\n".join(desired))
+            changed[bridge] = records
+    return changed
+
+
 def _ensure_nas_share(name):
     """Best-effort: provision /near1/vm/<name> on the host and attach it
     as a virtiofs disk at /data inside the instance. Idempotent — safe to
@@ -513,6 +561,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     # profile) has an authoritative source-IP to enforce.
     pinned_ip = _pick_vm_ip()
     _pin_instance_ip(name, pinned_ip)
+    sync_dns_records()
 
     if instance_type == "vm":
         for i, pci in enumerate(picked):
@@ -633,6 +682,7 @@ def vm_destroy(name):
         if running:
             _incus("stop", name)
         _incus("delete", name)
+    sync_dns_records()
     _delete(VMS_PREFIX + name)
     bastion_sync()
     print(f"Destroyed '{name}' and removed its registration.")
@@ -725,6 +775,7 @@ def pin_existing_vms():
         _pin_instance_ip(name, target)
         taken.add(target)
         changes.append((name, target, note))
+    sync_dns_records()
     return changes
 
 
