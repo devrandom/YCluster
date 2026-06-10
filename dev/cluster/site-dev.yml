@@ -59,3 +59,30 @@
 # (HTTP, no etcd certs) on non-storage nodes, and the etcd-cert fetch is
 # gated on the storage group (absent here), so it runs unmodified.
 - import_playbook: ../../config/ansible/admin/setup-web-services.yml
+
+# Frontend fixture: register f1 in etcd and seed a rathole tunnel config, then
+# build + install the rathole server on it. Exercises the frontend group and
+# the etcd-sourced rathole token (no inventory secret — see install-rathole-
+# server.yml). build-rathole.yml is a no-op when the binary already exists on
+# the controller.
+- name: Seed frontend registration and rathole config (dev fixture)
+  hosts: s1
+  become: yes
+  tasks:
+    - name: Register f1 as a frontend node
+      command: ycluster frontend add f1 10.0.0.41
+      environment: "{{ etcd_client_env }}"
+      register: fe_add
+      changed_when: "'Added' in fe_add.stdout"
+      failed_when: fe_add.rc != 0 and 'already exists' not in fe_add.stdout
+
+    - name: Seed a rathole tunnel config in etcd
+      command: >
+        etcdctl put /cluster/nodes/rathole/config
+        '{"remote_addr":"f1.xc:2333","token":"dev-rathole-token"}'
+      environment: "{{ etcd_client_env }}"
+      changed_when: true
+      no_log: true
+
+- import_playbook: ../../config/ansible/app/build-rathole.yml
+- import_playbook: ../../config/ansible/app/install-rathole-server.yml
