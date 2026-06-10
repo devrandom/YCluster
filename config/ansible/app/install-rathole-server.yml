@@ -33,6 +33,23 @@
         owner: root
         group: root
 
+    # Read the token from etcd at task time (no_log) rather than carrying it
+    # as an inventory var, so `ansible-inventory --host <frontend>` can't print
+    # it. Same pattern as admin/install-vm-bastion.yml. Frontends have no etcd
+    # access, so delegate the read to a core node.
+    - name: Read rathole tunnel config from etcd
+      command: etcdctl get --print-value-only /cluster/nodes/rathole/config
+      delegate_to: "{{ groups['core'][0] }}"
+      environment: "{{ etcd_client_env }}"
+      register: rathole_cfg_raw
+      changed_when: false
+      no_log: true
+
+    - name: Parse rathole token
+      set_fact:
+        rathole_token: "{{ (rathole_cfg_raw.stdout | from_json).token }}"
+      no_log: true
+
     - name: Create rathole server configuration
       template:
         src: rathole-server.toml.j2
@@ -41,6 +58,7 @@
         owner: root
         group: root
       notify: restart rathole
+      no_log: true
 
     - name: Create rathole systemd service for server
       copy:

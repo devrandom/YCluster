@@ -62,6 +62,7 @@
   register: totp_seed_content
   run_once: yes
   delegate_to: "{{ totp_seed_host }}"
+  no_log: true
 
 - name: Create SSH directory for admin user
   file:
@@ -78,6 +79,7 @@
     owner: "{{ admin_user }}"
     group: "{{ admin_user }}"
     mode: '0600'
+  no_log: true
 
 - name: Install TOTP label sidecar (used by show-admin-totp for the QR account name)
   copy:
