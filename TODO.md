@@ -9,7 +9,7 @@ A prioritized index into the detail below; nothing here is a separate item.
 - "core" consistency — main fixes DONE 2026-06-10 (rathole parametric per core node; static etcd/core floor + per-cluster inventory). Residual: `CORE_NODE_IPS` fallback + stale "s1-s3" comments (see item below).
 - Review quick-win bugs B1-B8 — DONE 2026-06-10 (all eight fixed; canary-validated on s2, B2 also live-tested on the dev cluster; see review-followups section).
 - Admin API hardening S1-S3 — highest security ROI: dev-server-as-root, unauthenticated mutating endpoints, unvalidated etcd-key params.
-- Failed-systemd-units alert (Monitoring) — would have caught every breakage found this session.
+- Failed-systemd-units alert (Monitoring) — DONE 2026-06-10; caught a real failure (nv1 autossh tunnel) within minutes of deployment.
 
 **Next (operational resilience; caused real outages or data-loss exposure):**
 - Gateway health-check hardening + s4 gateway-VIP eligibility — flapped the VIP on a 3-min WAN blip (2026-06-01).
@@ -69,7 +69,7 @@ A prioritized index into the detail below; nothing here is a separate item.
 - Backup freshness / rsync-success metric + alert.
 - Clock-skew alert rule (README claims it; not present in `ycluster-alerts.yml.j2`).
 - Ansible-run-success metric so "did the last apply succeed on every host" isn't a manual SSH check.
-- **Failed-systemd-units alert.** Every breakage found during the 2026-06-10 session (collect-model-stats, rathole, rathole-ssh, certbot-renew, wg-reconcile — all stale units hardcoded to plaintext etcd `:2379` after TLS enforcement) was a unit silently in `failed` state, discovered only by manual `journalctl` / a reboot test. node-exporter already exports `node_systemd_unit_state{state="failed"}`, so this is just an alert rule in `ycluster-alerts.yml.j2` (`== 1` for ~15m, per unit/node). Prerequisite: mask/fix the known-benign offenders first or they'll be permanent noise — `openipmi` done 2026-06-10 (`storage/disable-openipmi.yml`); still open on storage nodes: `tangd.socket`, `serial-getty@ttyS4`. Partly subsumes the per-service liveness and ansible-run-success items above.
+- **Failed-systemd-units alert — DONE 2026-06-10.** `SystemdUnitFailed` rule in `ycluster-alerts.yml.j2` (`node_systemd_unit_state{state="failed"} == 1` for 15m, warning). Benign offenders cleared by the new `monitoring/clear-benign-failed-units.yml` (generic, condition-detected: re-runs stale wait-online oneshots, installs a zz- drop-in making wait-online `--any -o routable` — netplan's strict per-NIC drop-in stacks ExecStarts, so an unplugged secondary NIC failed the unit and added 120s to boot; disables networkd wait-online where networkd manages no links; masks failed serial-getty@* instances and host nvidia services on all-passthrough VM hosts). Boot-validated by rebooting nv1: wait-online 120s-timeout-fail → 2.4s success. The alert caught a real failure within minutes of deployment (nv1's hand-rolled autossh-tunnel tunnel: `After=network.target` raced DNS + invalid `Restart=Always` meant no retry; fixed in place — not repo-managed, consider ansible-izing). Partly subsumes the per-service liveness and ansible-run-success items above.
 
 ### CI / testing
 - ansible-lint in a GitHub Action gating `main`.
