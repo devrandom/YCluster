@@ -7,7 +7,7 @@ A prioritized index into the detail below; nothing here is a separate item.
 **Now (correctness/security with live impact or near-free fixes):**
 - incus VM DNS records — DONE 2026-06-10: dev-tested, deployed to nv2/nv3/c1/c2, bastion resolution verified (details in item below).
 - "core" consistency — main fixes DONE 2026-06-10 (rathole parametric per core node; static etcd/core floor + per-cluster inventory). Residual: `CORE_NODE_IPS` fallback + stale "s1-s3" comments (see item below).
-- Review quick-win bugs B1-B8 — cheap, several security-relevant (timing-safe compare, allocation/DHCP races, unverified ISO/binary downloads).
+- Review quick-win bugs B1-B8 — DONE 2026-06-10 (all eight fixed; canary-validated on s2, B2 also live-tested on the dev cluster; see review-followups section).
 - Admin API hardening S1-S3 — highest security ROI: dev-server-as-root, unauthenticated mutating endpoints, unvalidated etcd-key params.
 - Failed-systemd-units alert (Monitoring) — would have caught every breakage found this session.
 
@@ -95,7 +95,8 @@ A prioritized index into the detail below; nothing here is a separate item.
 
 From `docs/reviews/2026-06-09-codebase-review.md` (IDs reference that doc; line numbers are vs commit f1e3305). Items already tracked elsewhere in this file are not duplicated here: drain-auth (top section + superseded by S2 below), CA-off-RBD (Security), rathole PROXY protocol, gateway health check, etcd read consolidation.
 
-### Verified bugs (quick wins)
+### Verified bugs (quick wins) — all DONE 2026-06-10
+B1-B8 fixed and deployed: timing-safe+bytes compare (B1); allocation CAS result checked with retry/re-read (B2); DHCP allocation compares + in-transaction old-hostname delete + retry (B3); proxy retries only 5xx/429/404 (B4, 404 kept deliberately for model-placement drift); psql via stdin + ON_ERROR_STOP + escaped literal (B5); become fixed (B6); sha256 on Qdrant tarball (TOFU, binary matched deployed) and Ubuntu ISO both sources (B7); per-host warnings + broken-client reset in inventory plugin (B8).
 - B1 — timing-unsafe master-key compare: `local-ai-proxy-auth.py:117` uses `token == master`; switch to `secrets.compare_digest`.
 - B2 — allocation etcd transaction result ignored (`admin/files/app.py:326`, `failure=[]`, return unchecked); a compare failure returns an uncommitted/colliding hostname-IP. Check result, retry/raise.
 - B3 — DHCP allocation check-then-use race (`utils/dhcp_server.py` ~:473-545, empty `compare=[]`); include `version(...)==0` compares.
@@ -123,6 +124,7 @@ From `docs/reviews/2026-06-09-codebase-review.md` (IDs reference that doc; line 
 - H4 — `admin/install-vm-bastion.yml` reads the rathole token via etcdctl without `no_log` on the registering task.
 
 ### Minor
+- `/api/allocate` hardcodes `"existing": true` in its response, so callers can't tell a lookup from a fresh allocation — on 2026-06-10 this disguised an accidental allocation as a read during canary testing and fired a node-down alert. Return the real created/existing state (get_or_create_allocation knows it) and consider a `dry_run`/lookup-only query param for diagnostics.
 - Go: health `Probe()` goroutines use bare `context.Background()` with no timeout (`health.go`); 4xx bodies only partially drained on retry (`handler.go:329`); ACL is allow-by-default for unlisted models (consider a deny-unknown mode).
 - Python: global etcd client cached forever (`etcd_utils.py:86`), stale after member changes; mixed `print(file=sys.stderr)` vs logging in app.py; MAC normalization duplicated across ~5 files; nginx `-t` stderr discarded in `certbot_manager.py:215`.
 - `/api/allocations` and `/api/health` expose full topology/health detail unauthenticated on the cluster network (recon value; acceptable under the LAN trust model once A1 is stated).

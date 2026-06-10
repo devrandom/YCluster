@@ -307,35 +307,49 @@ def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
 
         # Determine machine type and allocate hostname
         machine_type = node_type or determine_type_from_mac(mac_address)
-        hostname = get_next_hostname(client, machine_type)
-        ip_address = determine_ip_from_hostname(hostname, via_wg=via_wg)
-        amt_ip_address = determine_ip_from_hostname(hostname + "a")
 
-        allocation_data = {
-            'hostname': hostname,
-            'type': machine_type,
-            'ip': ip_address,
-            'amt_ip': amt_ip_address,
-            'mac': normalized_mac,
-            'via_wg': via_wg,
-            'allocated_at': datetime.now(UTC).isoformat()
-        }
-        
-        # Store in etcd
-        allocation_json = json.dumps(allocation_data)
-        client.transaction(
-            compare=[
-                client.transactions.version(f"{ETCD_PREFIX}/by-mac/{normalized_mac}") == 0,
-                client.transactions.version(f"{ETCD_PREFIX}/by-hostname/{hostname}") == 0
-            ],
-            success=[
-                client.transactions.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json),
-                client.transactions.put(f"{ETCD_PREFIX}/by-hostname/{hostname}", allocation_json)
-            ],
-            failure=[]
-        )
-        
-        return allocation_data
+        # allocation_lock only serializes this process; the DHCP server (and
+        # any other admin-api instance) allocates concurrently, so commit via
+        # compare-and-swap and retry on conflict.
+        for _ in range(5):
+            hostname = get_next_hostname(client, machine_type)
+            ip_address = determine_ip_from_hostname(hostname, via_wg=via_wg)
+            amt_ip_address = determine_ip_from_hostname(hostname + "a")
+
+            allocation_data = {
+                'hostname': hostname,
+                'type': machine_type,
+                'ip': ip_address,
+                'amt_ip': amt_ip_address,
+                'mac': normalized_mac,
+                'via_wg': via_wg,
+                'allocated_at': datetime.now(UTC).isoformat()
+            }
+
+            allocation_json = json.dumps(allocation_data)
+            committed, _ = client.transaction(
+                compare=[
+                    client.transactions.version(f"{ETCD_PREFIX}/by-mac/{normalized_mac}") == 0,
+                    client.transactions.version(f"{ETCD_PREFIX}/by-hostname/{hostname}") == 0
+                ],
+                success=[
+                    client.transactions.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json),
+                    client.transactions.put(f"{ETCD_PREFIX}/by-hostname/{hostname}", allocation_json)
+                ],
+                failure=[]
+            )
+            if committed:
+                return allocation_data
+
+            # Lost the race. If this MAC got allocated elsewhere, return that
+            # allocation; otherwise the hostname was taken — pick the next.
+            existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
+            if existing_data[0]:
+                return json.loads(existing_data[0].decode())
+
+        raise RuntimeError(
+            f"allocation for {normalized_mac} failed: etcd transaction "
+            f"conflicted on every attempt")
 
 @app.route('/api/allocate')
 def allocate_hostname():

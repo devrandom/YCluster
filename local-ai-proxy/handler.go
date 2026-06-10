@@ -240,11 +240,11 @@ func classifyRouteError(err error) string {
 // dispatch tries each eligible backend in load-aware order. On the
 // last remaining candidate (or when the body isn't replayable — i.e.
 // passthrough single-backend mode), whatever response comes back is
-// committed to the client verbatim. Earlier attempts can be retried
-// if they transport-error or return any 4xx/5xx: we treat fan-out
-// backends as interchangeable, so a 4xx from one backend (config
-// drift: missing model, stricter template, per-backend auth misconfig)
-// shouldn't reach the client if a peer would serve it.
+// committed to the client verbatim. Earlier attempts are retried on
+// transport errors and on retryableStatus (5xx/429/404 — see there);
+// other 4xx are client errors that would fail identically everywhere,
+// so they commit immediately instead of replaying non-idempotent
+// inference work against every peer.
 //
 // Every retryable failure fires a Probe at that backend so the health
 // checker re-verifies out-of-band. A 4xx is a "the backend answered";
@@ -321,7 +321,7 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 && !lastTry {
+	if retryableStatus(resp.StatusCode) && !lastTry {
 		h.probe(backend)
 		h.Metrics.ObserveAttempt(model, backendStr, resp.StatusCode, false, 0)
 		h.Metrics.ObserveRetry(backendStr, retryReasonForStatus(resp.StatusCode))
@@ -344,11 +344,25 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, 
 	return true
 }
 
+// retryableStatus reports whether an upstream status is worth retrying
+// on a peer: 5xx (backend broken), 429 (backend saturated), 404
+// (model-placement drift — the model may be missing on this replica
+// but present on a peer).
+func retryableStatus(status int) bool {
+	return status >= 500 ||
+		status == http.StatusTooManyRequests ||
+		status == http.StatusNotFound
+}
+
 func retryReasonForStatus(status int) string {
-	if status >= 500 {
+	switch {
+	case status >= 500:
 		return "http_5xx"
+	case status == http.StatusTooManyRequests:
+		return "http_429"
+	default:
+		return "http_404"
 	}
-	return "http_4xx"
 }
 
 func (h *Handler) probe(backend *url.URL) {

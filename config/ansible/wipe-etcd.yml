@@ -1,7 +1,7 @@
 ---
 - name: Stop and wipe etcd cluster
   hosts: etcd
-  become: core
+  become: true
   vars:
     etcd_data_dir: "/var/lib/etcd"
     
