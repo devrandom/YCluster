@@ -5,6 +5,7 @@ Wants=network.target
 
 [Service]
 Type=exec
+EnvironmentFile=/etc/ycluster/etcd-client.env
 ExecStart=/usr/local/bin/rathole-ssh-client-start
 Restart=always
 RestartSec=5
