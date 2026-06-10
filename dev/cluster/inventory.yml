@@ -76,6 +76,13 @@ all:
     compute:
       hosts:
         c1: { ansible_host: 10.0.0.51 }
+    # Frontend node — external rathole-server host in the real cluster; here a
+    # container on the dev bridge. Deliberately NOT in `managed` (it runs the
+    # rathole server, not admin-api). Exercises the frontend group + the
+    # etcd-sourced rathole token (app/install-rathole-server.yml).
+    frontend:
+      hosts:
+        f1: { ansible_host: 10.0.0.41 }
     managed:
       children:
         core: {}
