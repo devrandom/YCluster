@@ -53,19 +53,32 @@
       loop: "{{ groups['storage'] }}"
       run_once: true
 
-    - name: Compute target revision (highest currently installed)
+    - name: Read latest revision available in squid/stable
+      shell: snap info microceph 2>/dev/null | awk -F'[()]' '/squid\/stable:/ {print $2; exit}'
+      register: channel_rev
+      changed_when: false
+      run_once: true
+
+    # Mismatched nodes are only brought up to the highest installed
+    # revision (converge the cluster, don't jump further in the same
+    # run); once all nodes match, the target is the channel's latest.
+    - name: Compute target revision
       set_fact:
-        target_revision: "{{ current_rev.results
-                              | map(attribute='stdout')
-                              | reject('equalto', '')
-                              | map('int')
-                              | max }}"
+        target_revision: "{{ (installed_revs | max)
+                             if (installed_revs | min) != (installed_revs | max)
+                             else ([installed_revs | max, channel_rev.stdout | default('0', true) | int] | max) }}"
+      vars:
+        installed_revs: "{{ current_rev.results
+                             | map(attribute='stdout')
+                             | reject('equalto', '')
+                             | map('int') | list }}"
       run_once: true
 
     - name: Display upgrade plan
       debug:
         msg: |
           Pre-check ceph health: {{ precheck_health.stdout }}
+          Channel (squid/stable) revision: {{ channel_rev.stdout | default('unknown') }}
           Target revision: {{ target_revision }}
           Per-node current revisions:
           {% for r in current_rev.results %}
