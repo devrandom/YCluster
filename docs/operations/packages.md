@@ -38,3 +38,30 @@ dpkg --get-selections | grep hold
 # Check available upgrades for held packages:
 apt list --upgradable 2>/dev/null | grep -E 'postgresql'
 ```
+
+## Held Snaps (microceph)
+
+Snaps are held too, and like apt holds they only stay current if someone
+upgrades them deliberately. `microceph` is pinned on every storage node via
+`snap refresh --hold` (applied by `storage/add-ceph-nodes.yml`) because
+microceph refuses cluster operations (e.g. add OSD) when members run
+different revisions — a surprise refresh on one node would wedge the
+cluster, and a refresh restarts the Ceph daemons.
+
+Upgrade with the rolling-upgrade playbook, never with ad-hoc `snap refresh`:
+
+```bash
+cd /etc/ansible && ./run-playbook.sh storage/upgrade-microceph.yml
+```
+
+It gates on `ceph health`, upgrades one node at a time (`serial: 1`, dqlite
+quorum needs 2/3), does the storage leader last, waits for the cluster to
+settle between nodes, and re-applies the hold afterwards.
+
+Check for pending refreshes:
+
+```bash
+# On each storage node:
+snap list | grep held          # what is pinned, and at which revision
+snap refresh --list            # what a refresh would install
+```
