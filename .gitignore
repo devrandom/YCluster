@@ -15,10 +15,6 @@ dev/tftpboot/
 __pycache__
 .vault_pass
 **/vault*.yml
-# group_vars vault.yml are symlinks into config/ansible/vault/ (the real
-# encrypted files stay ignored via line 3); track the links themselves.
-!config/ansible/group_vars/all/vault.yml
-!config/ansible/group_vars/storage/vault.yml
 .venv/
 venv/
 /dev/dhcp-hosts

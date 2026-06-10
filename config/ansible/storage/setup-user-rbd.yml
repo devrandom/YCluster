@@ -2,6 +2,10 @@
 - name: Setup encrypted user RBD volume with Tang and backup password
   hosts: storage
   become: yes
+  # Pulled by explicit file reference, not a group_vars/storage auto-load, so
+  # it stays out of `ansible-inventory --host` dumps (vault/storage.yml).
+  vars_files:
+    - ../vault/storage.yml
   vars:
     rbd_pool: "rbd"
     rbd_volume_name: "user"

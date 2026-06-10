@@ -2,6 +2,10 @@
 - name: Setup admin user with TOTP authentication (storage)
   hosts: storage
   become: yes
+  # Pulled by explicit file reference, not a group_vars/storage auto-load, so
+  # it stays out of `ansible-inventory --host` dumps (vault/storage.yml).
+  vars_files:
+    - ../vault/storage.yml
   vars:
     admin_user: admin
     admin_uid: 2000
@@ -21,6 +25,10 @@
 - name: Setup admin user with TOTP authentication (general)
   hosts: all:!storage:!macos
   become: yes
+  # Pulled by explicit file reference, not a group_vars/all auto-load, so it
+  # stays out of `ansible-inventory --host` dumps (vault/general.yml).
+  vars_files:
+    - ../vault/general.yml
   vars:
     admin_user: admin
     admin_uid: 2000

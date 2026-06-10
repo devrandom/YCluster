@@ -11,6 +11,10 @@
 - name: Setup Samba on NAS nodes
   hosts: nas
   become: yes
+  # Pulled by explicit file reference, not a group_vars/all auto-load, so it
+  # stays out of `ansible-inventory --host` dumps (vault/general.yml).
+  vars_files:
+    - ../vault/general.yml
   vars:
     samba_user: cluster
     samba_share_name: near1
