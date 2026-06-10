@@ -99,6 +99,10 @@
 - name: Storage specific setup
   hosts: storage
   become: yes
+  # Pulled by explicit file reference, not a group_vars/storage auto-load, so
+  # it stays out of `ansible-inventory --host` dumps (vault/storage.yml).
+  vars_files:
+    - ../vault/storage.yml
 
   tasks:
     - name: Set ubuntu user password

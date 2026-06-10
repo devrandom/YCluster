@@ -13,6 +13,10 @@
 - name: Mount NAS share on Linux nodes
   hosts: core:compute
   become: yes
+  # Pulled by explicit file reference, not a group_vars/all auto-load, so it
+  # stays out of `ansible-inventory --host` dumps (vault/general.yml).
+  vars_files:
+    - ../vault/general.yml
   vars:
     samba_user: cluster
     samba_share_name: near1
@@ -105,6 +109,10 @@
 - name: Mount NAS share on macOS nodes
   hosts: macos
   become: yes
+  # Pulled by explicit file reference, not a group_vars/all auto-load, so it
+  # stays out of `ansible-inventory --host` dumps (vault/general.yml).
+  vars_files:
+    - ../vault/general.yml
   vars:
     samba_user: cluster
     samba_share_name: near1
