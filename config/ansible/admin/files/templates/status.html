@@ -109,22 +109,6 @@
             border: 1px solid #ddd;
             border-radius: 3px;
         }
-        .drain-button {
-            padding: 2px 6px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 0.8em;
-            margin-left: 5px;
-            border: none;
-        }
-        .drain-button.undrain {
-            background-color: #28a745;
-            color: white;
-        }
-        .drain-button.drain {
-            background-color: #ffc107;
-            color: black;
-        }
         .error-indicator {
             display: inline-block;
             width: 8px;
@@ -277,19 +261,13 @@
                         </template>
                     </td>
                     
-                    <!-- Drain status -->
+                    <!-- Drain status (read-only — drain/undrain via the ycluster CLI) -->
                     <td>
                         <template x-if="hostHealth[host.hostname] && hostHealth[host.hostname].drained">
-                            <div>
-                                <span class="status-warning">Drained</span>
-                                <button @click="toggleNodeDrain(host.hostname, false)" class="drain-button undrain">Undrain</button>
-                            </div>
+                            <span class="status-warning">Drained</span>
                         </template>
                         <template x-if="!hostHealth[host.hostname] || !hostHealth[host.hostname].drained">
-                            <div>
-                                <span class="status-healthy">Active</span>
-                                <button @click="toggleNodeDrain(host.hostname, true)" class="drain-button drain">Drain</button>
-                            </div>
+                            <span class="status-healthy">Active</span>
                         </template>
                     </td>
                     
@@ -334,8 +312,6 @@
             </template>
         </tbody>
     </table>
-    <div id="drain-status" style="margin-bottom: 20px; font-size: 0.9em; color: #666;" x-html="drainStatusMessage"></div>
-
     <!-- Clock Skew Status Section -->
     <div style="margin-bottom: 20px;">
         <h2>Clock Synchronization</h2>
@@ -527,7 +503,6 @@
                 lastError: '',
                 servicesExpanded: {},
                 clockSyncedExpanded: false,
-                drainStatusMessage: '',
                 // Methods
                 async init() {
                     await this.updateStatus();
@@ -660,42 +635,7 @@
                 toggleServices(hostname) {
                     this.servicesExpanded[hostname] = !this.servicesExpanded[hostname];
                 },
-                
-                async toggleNodeDrain(hostname, shouldDrain) {
-                    const action = shouldDrain ? 'Draining' : 'Undraining';
-                    this.drainStatusMessage = `<span style="color: #007bff;">${action} ${hostname}...</span>`;
-                    
-                    const endpoint = shouldDrain ? `/api/drain/${hostname}` : `/api/undrain/${hostname}`;
-                    
-                    try {
-                        const response = await fetch(endpoint, { method: 'POST' });
-                        const data = await response.json();
-                        
-                        if (data.error) {
-                            this.drainStatusMessage = `<span style="color: #dc3545;">Error: ${data.error}</span>`;
-                        } else {
-                            const status = data.status === 'drained' ? 'drained' : 'active';
-                            this.drainStatusMessage = `<span style="color: #28a745;">${hostname} ${status} successfully.</span>`;
-                            
-                            // Refresh status immediately
-                            setTimeout(() => {
-                                this.updateStatus();
-                                this.drainStatusMessage = '';
-                            }, 2000);
-                        }
-                    } catch (error) {
-                        this.drainStatusMessage = `<span style="color: #dc3545;">Network error: ${error.message}</span>`;
-                        
-                        // Also show error indicator in header
-                        this.showErrorIndicator = true;
-                        this.lastError = `Drain operation failed: ${error.message}`;
-                        setTimeout(() => {
-                            this.showErrorIndicator = false;
-                            this.lastError = '';
-                        }, 5000);
-                    }
-                },
-                
+
                 // Helper methods for computed values
                 keepalivedActiveCount() {
                     if (!this.vipStatus.keepalived_nodes) return 0;

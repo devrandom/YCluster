@@ -537,55 +537,10 @@ def allocations():
     return jsonify(allocations)
 
 
-@app.route('/api/host/<hostname>/disable', methods=['POST'])
-@validated_hostname
-def disable_host(hostname):
-    """Disable a host so it doesn't appear in status page"""
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return jsonify({'error': f'etcd connection failed: {str(e)}'}), 503
-
-    try:
-        result = client.get(f"{ETCD_PREFIX}/by-hostname/{hostname}")
-        if not result[0]:
-            return jsonify({'error': 'Host not found'}), 404
-
-        allocation = json.loads(result[0].decode())
-        allocation['disabled'] = True
-
-        client.put(f"{ETCD_PREFIX}/by-hostname/{hostname}", json.dumps(allocation))
-        client.put(f"{ETCD_PREFIX}/by-mac/{allocation['mac']}", json.dumps(allocation))
-
-        return jsonify({'status': 'ok', 'hostname': hostname, 'disabled': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/host/<hostname>/enable', methods=['POST'])
-@validated_hostname
-def enable_host(hostname):
-    """Re-enable a host so it appears in status page"""
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return jsonify({'error': f'etcd connection failed: {str(e)}'}), 503
-
-    try:
-        result = client.get(f"{ETCD_PREFIX}/by-hostname/{hostname}")
-        if not result[0]:
-            return jsonify({'error': 'Host not found'}), 404
-
-        allocation = json.loads(result[0].decode())
-        allocation['disabled'] = False
-
-        client.put(f"{ETCD_PREFIX}/by-hostname/{hostname}", json.dumps(allocation))
-        client.put(f"{ETCD_PREFIX}/by-mac/{allocation['mac']}", json.dumps(allocation))
-
-        return jsonify({'status': 'ok', 'hostname': hostname, 'disabled': False})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
+# Cluster mutations (disable/enable, drain, asset edits) are CLI-only:
+# the ycluster CLI writes etcd directly, authenticated by the cluster-CA
+# etcd client certificate. The admin API serves reads and the TOFU
+# bootstrap surface (/api/allocate, /bootstrap/*, /autoinstall/*).
 
 @app.route('/api/dhcp-config')
 def get_dhcp_config():
@@ -1313,50 +1268,6 @@ def check_service_conditionally(health_status, service_name, check_func, require
             'details': {'reason': 'not required on compute nodes'}
         }
 
-@app.route('/api/drain', methods=['POST'])
-def drain_node():
-    """Drain this node - disable leader election"""
-    try:
-        hostname = platform.node()
-        client = get_etcd_client()
-        client.put(f'/cluster/nodes/{hostname}/drain', 'true')
-        return jsonify({'status': 'drained', 'hostname': hostname})
-    except Exception as e:
-        return jsonify({'error': f'Failed to drain node: {str(e)}'}), 500
-
-@app.route('/api/undrain', methods=['POST']) 
-def undrain_node():
-    """Undrain this node - re-enable leader election"""
-    try:
-        hostname = platform.node()
-        client = get_etcd_client()
-        client.delete(f'/cluster/nodes/{hostname}/drain')
-        return jsonify({'status': 'active', 'hostname': hostname})
-    except Exception as e:
-        return jsonify({'error': f'Failed to undrain node: {str(e)}'}), 500
-
-@app.route('/api/drain/<target_hostname>', methods=['POST'])
-@validated_hostname
-def drain_target_node(target_hostname):
-    """Drain a specific node - disable leader election"""
-    try:
-        client = get_etcd_client()
-        client.put(f'/cluster/nodes/{target_hostname}/drain', 'true')
-        return jsonify({'status': 'drained', 'hostname': target_hostname})
-    except Exception as e:
-        return jsonify({'error': f'Failed to drain node {target_hostname}: {str(e)}'}), 500
-
-@app.route('/api/undrain/<target_hostname>', methods=['POST'])
-@validated_hostname
-def undrain_target_node(target_hostname):
-    """Undrain a specific node - re-enable leader election"""
-    try:
-        client = get_etcd_client()
-        client.delete(f'/cluster/nodes/{target_hostname}/drain')
-        return jsonify({'status': 'active', 'hostname': target_hostname})
-    except Exception as e:
-        return jsonify({'error': f'Failed to undrain node {target_hostname}: {str(e)}'}), 500
-
 @app.route('/api/drain/status')
 def drain_status():
     """Check drain status of this node"""
@@ -1401,25 +1312,6 @@ def inventory_get_asset(hostname):
     try:
         from ycluster.utils.inventory import get_asset
         return jsonify(get_asset(hostname))
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/inventory/asset/<hostname>', methods=['PUT', 'POST'])
-@validated_hostname
-def inventory_set_asset(hostname):
-    """Set asset metadata fields for a node (internal only)"""
-    try:
-        from ycluster.utils.inventory import put_asset
-        data = request.get_json(force=True)
-        if not data:
-            return jsonify({'error': 'No JSON body'}), 400
-        # Only allow known safe fields
-        allowed = {'vendor', 'purchased_at', 'warranty_expires', 'cost', 'cost_currency', 'location', 'notes'}
-        filtered = {k: v for k, v in data.items() if k in allowed}
-        if not filtered:
-            return jsonify({'error': 'No valid fields in request'}), 400
-        result = put_asset(hostname, filtered)
-        return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
