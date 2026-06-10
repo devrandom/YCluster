@@ -1,0 +1,128 @@
+---
+# Clear known-benign failed systemd units so the SystemdUnitFailed alert
+# (ycluster-alerts.yml.j2) only fires on real breakage. Three classes,
+# all detected by condition rather than per-host config; idempotent:
+#
+#  * wait-online oneshots: stale boot-time failures stick until the unit
+#    re-runs. Re-running on a node ansible can reach succeeds and clears
+#    the state; a failure on a future boot is real signal, not noise.
+#  * serial-getty@* instances that have failed: agetty on a usable port
+#    does not fail at boot, so a failed instance means the firmware
+#    advertises a serial port the hardware doesn't actually provide.
+#    Mask the broken instance.
+#  * nvidia-persistenced / nvidia-cdi-refresh on VM hosts whose GPUs are
+#    all passed through: nvidia is deliberately never loaded there
+#    (install-incus.yml defers it; gpu-passthrough only loads it when
+#    host GPUs remain), so these can never succeed. Mask them.
+- name: Clear known-benign failed systemd units
+  hosts: managed
+  become: yes
+  tasks:
+    # Drop-ins for this unit stack: netplan generates a strict per-interface
+    # ExecStart (waits for every non-optional NIC), and any manual override
+    # appends rather than replaces, so the strict line still runs and times
+    # out when a secondary NIC is unplugged. A zz- drop-in sorts last, so
+    # its ExecStart= reset clears all earlier lines: a cluster node is
+    # online when any interface is routable.
+    - name: Create wait-online drop-in directory
+      file:
+        path: /etc/systemd/system/systemd-networkd-wait-online.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Treat any routable interface as online (wait-online drop-in)
+      copy:
+        dest: /etc/systemd/system/systemd-networkd-wait-online.service.d/zz-any-routable.conf
+        mode: '0644'
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any -o routable
+      register: wait_online_dropin
+
+    - name: Reload systemd for the wait-online drop-in
+      systemd:
+        daemon_reload: yes
+      when: wait_online_dropin.changed
+
+    # On hosts where another stack (NetworkManager) owns every link,
+    # networkd manages nothing and its wait-online can never succeed —
+    # network-online semantics are provided by that stack's own
+    # wait-online instead.
+    - name: Check whether networkd manages any link
+      shell: networkctl list --no-pager --no-legend | awk '$5 != "unmanaged" {found=1} END {exit !found}'
+      register: networkd_links
+      failed_when: false
+      changed_when: false
+
+    - name: Disable networkd wait-online where networkd manages no links
+      systemd:
+        name: systemd-networkd-wait-online.service
+        enabled: no
+        state: stopped
+      when: networkd_links.rc != 0
+
+    - name: Clear networkd wait-online failed state where disabled
+      command: systemctl reset-failed systemd-networkd-wait-online.service
+      failed_when: false
+      changed_when: false
+      when: networkd_links.rc != 0
+
+    - name: Re-run failed wait-online oneshots
+      shell: |
+        for unit in systemd-networkd-wait-online.service NetworkManager-wait-online.service; do
+          if [ "$(systemctl is-failed "$unit" 2>/dev/null)" = "failed" ]; then
+            systemctl restart "$unit" && echo "cleared $unit"
+          fi
+        done
+      register: wait_online
+      changed_when: "'cleared ' in wait_online.stdout"
+
+    - name: Find failed serial-getty instances
+      shell: systemctl list-units --state=failed --no-legend --plain 'serial-getty@*.service' | awk '{print $1}'
+      register: failed_gettys
+      changed_when: false
+
+    - name: Mask failed serial-getty instances
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        masked: yes
+      loop: "{{ failed_gettys.stdout_lines }}"
+
+    - name: Clear masked serial-getty failed state
+      command: systemctl reset-failed {{ item }}
+      loop: "{{ failed_gettys.stdout_lines }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Check whether the nvidia module is loaded (VM hosts)
+      command: grep -q '^nvidia ' /proc/modules
+      register: nvidia_loaded
+      failed_when: false
+      changed_when: false
+      when: incus_vm_host | default(false)
+
+    - name: Mask host nvidia services on all-passthrough VM hosts
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        masked: yes
+      loop:
+        - nvidia-persistenced.service
+        - nvidia-cdi-refresh.service
+        - nvidia-cdi-refresh.path
+      when:
+        - incus_vm_host | default(false)
+        - nvidia_loaded.rc is defined and nvidia_loaded.rc != 0
+
+    - name: Clear nvidia unit failed state on all-passthrough VM hosts
+      command: systemctl reset-failed {{ item }}
+      loop:
+        - nvidia-persistenced.service
+        - nvidia-cdi-refresh.service
+      failed_when: false
+      changed_when: false
+      when:
+        - incus_vm_host | default(false)
+        - nvidia_loaded.rc is defined and nvidia_loaded.rc != 0

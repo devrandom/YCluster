@@ -11,6 +11,18 @@ groups:
           summary: "Node {{ $labels.node }} is down"
           description: "Node {{ $labels.node }} has been down for more than 1 minute"
 
+      # Any systemd unit in failed state — silent unit failures otherwise
+      # surface only on manual journalctl inspection. Known-benign
+      # offenders are cleared/masked by clear-benign-failed-units.yml.
+      - alert: SystemdUnitFailed
+        expr: node_systemd_unit_state{state="failed"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unit {{ $labels.name }} failed on {{ $labels.node }}"
+          description: "systemd unit {{ $labels.name }} on {{ $labels.node }} ({{ $labels.instance }}) has been in failed state for more than 15 minutes"
+
       # YCluster health API
       - alert: YClusterHealthAPIDown
         expr: up{job="ycluster-health"} == 0
