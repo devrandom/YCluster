@@ -40,7 +40,7 @@ mount_filesystem() {
 
 # Helper function to get Tang servers for Clevis policy
 get_tang_servers() {
-    echo "s1:8777 s2:8777 s3:8777"
+    echo "{{ tang_servers | join(' ') }}"
 }
 
 # Helper function to generate Clevis policy JSON

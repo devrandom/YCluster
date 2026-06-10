@@ -10,6 +10,8 @@
     luks_mapper_name: "{{ rbd_volume_name }}"
     luks_mapper_path: "/dev/mapper/{{ luks_mapper_name }}"
     mount_point: "/rbd/user"
+    # Tang/Clevis unlock set: the static etcd quorum (the DR/bootstrap floor).
+    tang_servers: "{{ groups['etcd'] | map('regex_replace', '$', ':' ~ tang_port) | list }}"
 
   tasks:
     - name: Install required packages
@@ -23,8 +25,8 @@
         state: present
 
     - name: Install User RBD manager script
-      copy:
-        src: scripts/user-rbd-manager
+      template:
+        src: user-rbd-manager.j2
         dest: /usr/local/bin/user-rbd-manager
         mode: '0755'
 
@@ -93,10 +95,7 @@
             method: GET
             return_content: yes
           register: tang_advs
-          loop:
-            - "s1:8777"
-            - "s2:8777"
-            - "s3:8777"
+          loop: "{{ tang_servers }}"
           when: luks_check.rc != 0
           run_once: true
           delegate_to: "{{ groups['storage'][0] }}"
