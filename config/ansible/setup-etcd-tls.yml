@@ -203,10 +203,10 @@
             - { src: "{{ pki_dir }}/ca.key", dest: ca.key, mode: '0600' }
           no_log: true
 
-# All non-core managed etcd clients: storage (s4+), compute (incl nvidia), nas.
-# Core (s1-s3) get the core cert from the play above; adhoc are deliberately
-# excluded (untrusted — they must lose etcd access at enforce).
-- name: Distribute etcd client certificates to non-core etcd clients
+# All non-etcd managed etcd clients: storage (s4+), compute (incl nvidia), nas.
+# The etcd nodes (s1-s3) get the server cert from the play above; adhoc are
+# deliberately excluded (untrusted — they must lose etcd access at enforce).
+- name: Distribute etcd client certificates to non-etcd etcd clients
   hosts: storage:compute:nas
   become: yes
   vars:

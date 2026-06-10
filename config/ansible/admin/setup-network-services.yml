@@ -1,5 +1,5 @@
 ---
-- name: Setup network services on storage nodes s1-s3
+- name: Setup network services on core nodes
   hosts: core
   become: yes
     
