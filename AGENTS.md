@@ -8,8 +8,21 @@ YCluster is a self-bootstrapping infrastructure platform for small AI clusters. 
 
 ## Common Commands
 
+### Reaching the cluster over SSH
+`s3.yc` is the documented entry point: SSH to it lands you on a core node
+with `/etc/ansible` and the vault password available. The `.yc` names are
+**operator-local ssh_config aliases** (with ProxyJump set up on the operator's
+machine) — they live in `~/.ssh/config`, not in this repo. `s3` is an arbitrary
+but settled choice; don't assume an arbitrary `<host>.yc` alias exists
+(e.g. `s4.yc` may not). To reach another node deterministically, hop through the
+entry node using cluster-internal names, which always resolve cluster-side:
+```bash
+ssh s3.yc 'ssh s4 systemctl status etcd'      # internal name, resolved on the cluster
+ssh s3.yc 'ssh f1.xc uptime'                   # frontend nodes resolve by .xc too (see below)
+```
+
 ### Running Ansible Playbooks
-From a core node (s1-s3) via SSH — preferred for development:
+From a core node via SSH — preferred for development:
 ```bash
 # /etc/ansible is a symlink to /opt/infrastructure/config/ansible
 # run-playbook.sh sources /etc/ansible/env.sh (sets LC_ALL and ANSIBLE_VAULT_PASSWORD_FILE)
@@ -62,7 +75,7 @@ See `docs/operations/packages.md`.
 - **macOS nodes (m1+)**: macOS compute nodes, bootstrapped via `/bootstrap/macos` endpoint
 - **Nvidia nodes (nv1+)**: Ubuntu-based Nvidia GPU servers, bootstrapped via `/bootstrap/nvidia` endpoint
 - **NAS nodes (nas1+)**: Ubuntu-based NAS devices, bootstrapped via `/bootstrap/nas` endpoint (dynamic IP)
-- **Frontend nodes (f1+)**: External access via Rathole reverse proxy
+- **Frontend nodes (f1+)**: External access via Rathole reverse proxy. When registered by IP they also get an internal `.xc` DNS record, so they're reachable from inside the cluster by name (`ssh f1.xc`, `ping f1`)
 - **Adhoc nodes (x1-x49)**: Ad-hoc nodes that join by setting hostname before DHCP (no Ansible required)
 
 ### Key Services

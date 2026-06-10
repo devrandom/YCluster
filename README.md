@@ -117,14 +117,21 @@ ansible-playbook install-rathole-server.yml
 ycluster rathole set --remote-addr "your-server.com:2333" --token "your_secret_token"
 ```
 
+A frontend registered by IP (`ycluster frontend add f1 203.0.113.7`) also gets
+an internal `.xc` DNS record, so cluster nodes can reach it by name — `ping f1`,
+`ssh f1.xc` — instead of by raw IP. The record is published from the etcd
+registration into `/etc/static-hosts` and served by dnsmasq (refreshed every
+~30s); frontends registered by hostname are skipped since they already resolve
+via public DNS. `ycluster frontend list` shows the registered address.
+
 The rathole configuration provides two separate services:
 
 - **Main rathole service**: Runs only on the storage leader and provides HTTP/HTTPS tunnels for web services
-- **SSH rathole service**: Runs on all core nodes (s1, s2, s3) and provides individual SSH access tunnels
+- **SSH rathole service**: Runs on every core node and provides individual SSH access tunnels
 
-Each core node gets its own SSH tunnel endpoint on the rathole server. The SSH services bind to localhost on the rathole server, so access them by first SSH'ing into your frontend server, then connecting to the specific node:
+Each core node gets its own SSH tunnel endpoint on the rathole server, with a port that follows the node number (`sN` → `220N`: s1→2201, s2→2202, …, s4→2204). The SSH services bind to localhost on the rathole server, so access them by first SSH'ing into your frontend server, then connecting to the specific node:
 
-Add this SSH config to your `~/.ssh/config` for easy access:
+Add this SSH config to your `~/.ssh/config` for easy access (one `Host` block per core node):
 
 ```
 Host s?.rat
@@ -137,6 +144,8 @@ Host s2.rat
     Port 2202
 Host s3.rat
     Port 2203
+Host s4.rat
+    Port 2204
 ```
 
 Then use direct access - `ssh s1.rat`.

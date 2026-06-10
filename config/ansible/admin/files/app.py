@@ -607,6 +607,21 @@ def get_hosts():
             except:
                 pass
     
+    # Frontend nodes live under a separate etcd prefix (not by-hostname) and
+    # sit outside the cluster subnet — emit their reachable address so the
+    # cluster can resolve/ping/ssh them by name. Only IP-registered nodes can
+    # go in a hosts file; hostname-registered ones already resolve via DNS.
+    for value, metadata in client.get_prefix("/cluster/nodes/frontend/"):
+        if value:
+            try:
+                node = json.loads(value.decode())
+                name = node.get('name')
+                ip = node.get('ip')
+                if name and ip:
+                    hosts_entries.append(f"{ip} {name} {name}.xc")
+            except:
+                pass
+
     # Add service aliases that point to storage VIP
     hosts_entries.append("10.0.0.100 registry.xc")
     hosts_entries.append("10.0.0.100 admin.xc")
