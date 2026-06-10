@@ -1,0 +1,30 @@
+# Cluster-specific control-plane topology — TEMPLATE.
+#
+# Copy to inventory_cluster.yml (gitignored) and edit for this deployment.
+# It declares where THIS cluster exceeds the floor in inventory_boot.yml
+# (which gives every cluster etcd = core = s1-s3). Loaded between the floor
+# and the etcd_nodes plugin, and unioned in. If the real file is absent,
+# ansible just uses the floor plus whatever the plugin discovers dynamically.
+#
+#   * Extra CORE nodes (control-plane nodes beyond the quorum) -> core.hosts.
+#   * To grow the ETCD quorum (keep it ODD) -> core.children.etcd.hosts,
+#     then run the etcd member-add procedure.
+#
+# IPs follow the convention: sN = 10.0.0.10+N (s4 = .14, s5 = .15, ...).
+# Listing a node here (with ansible_host) is what makes it resolvable for DR
+# and bootstrap while etcd is down.
+all:
+  children:
+    core:
+      hosts: {}
+      # Extra core nodes beyond the s1-s3 floor, e.g.:
+      #   s4:
+      #     ansible_host: 10.0.0.14
+      children:
+        etcd:
+          hosts: {}
+          # To grow the quorum to 5, add members here, e.g.:
+          #   s4:
+          #     ansible_host: 10.0.0.14
+          #   s5:
+          #     ansible_host: 10.0.0.15
