@@ -44,6 +44,10 @@ IP_RANGES = {
 DYNAMIC_IP_START = 200
 DYNAMIC_IP_END = 249
 
+# Sentinel: an allocation attempt lost its etcd compare-and-swap race and
+# should be re-run from the top (re-check existing state, re-pick, re-commit).
+_ALLOC_RETRY = object()
+
 # Core nodes use static IPs: s1=10.0.0.11, s2=10.0.0.12, s3=10.0.0.13
 CORE_NODE_IPS = {
     's1': '10.0.0.11',
@@ -438,6 +442,19 @@ class DHCPServer:
     
     def allocate_hostname_and_ip(self, mac_address, requested_hostname=None):
         """Allocate hostname and IP using same logic as Flask app"""
+        # The commit is a compare-and-swap; another allocator (admin-api, or
+        # a second dhcp-server during leader failover) can win the race, in
+        # which case the whole check/pick/commit cycle is re-run.
+        for _ in range(3):
+            result = self._allocate_attempt(mac_address, requested_hostname)
+            if result is not _ALLOC_RETRY:
+                return result
+        logger.error(f"Allocation for {mac_address} conflicted on every attempt")
+        return None, None
+
+    def _allocate_attempt(self, mac_address, requested_hostname=None):
+        """One allocation attempt: returns (hostname, ip), (None, None) on
+        fatal error, or _ALLOC_RETRY on a lost etcd race."""
         # Normalize MAC address
         normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
         
@@ -463,6 +480,10 @@ class DHCPServer:
         hostname = None
         ip_address = None
         machine_type = None
+        # mod_revision of an existing by-hostname entry we validated as ours
+        # (same MAC); None means the hostname must still be unallocated at
+        # commit time.
+        hostname_mod_revision = None
 
         # Use requested hostname if provided and valid
         if requested_hostname:
@@ -483,6 +504,7 @@ class DHCPServer:
                         # Same MAC, update allocation
                         hostname = requested_hostname
                         machine_type = self.determine_type_from_hostname(hostname)
+                        hostname_mod_revision = existing_hostname_data[1].mod_revision
                 else:
                     # Hostname available, use it
                     hostname = requested_hostname
@@ -522,22 +544,45 @@ class DHCPServer:
         allocation_json = json.dumps(allocation)
         
         try:
-            # If we're reallocating, remove old entries first
+            # Compare-and-swap: the checks above are non-atomic with this
+            # write, so guard them with compares — by-mac unchanged since we
+            # read it (or still absent), and the target hostname still in the
+            # state we validated. A concurrent allocator makes the
+            # transaction fail instead of silently double-assigning.
             if existing_data[0]:
-                old_allocation = json.loads(existing_data[0].decode())
-                old_hostname = old_allocation['hostname']
+                compare = [client.transactions.mod(
+                    f"/cluster/nodes/by-mac/{normalized_mac}")
+                    == existing_data[1].mod_revision]
+            else:
+                compare = [client.transactions.version(
+                    f"/cluster/nodes/by-mac/{normalized_mac}") == 0]
+            if hostname_mod_revision is not None:
+                compare.append(client.transactions.mod(
+                    f"/cluster/nodes/by-hostname/{hostname}")
+                    == hostname_mod_revision)
+            else:
+                compare.append(client.transactions.version(
+                    f"/cluster/nodes/by-hostname/{hostname}") == 0)
+
+            success = [
+                client.transactions.put(f"/cluster/nodes/by-mac/{normalized_mac}", allocation_json),
+                client.transactions.put(f"/cluster/nodes/by-hostname/{hostname}", allocation_json)
+            ]
+            # Reallocation: retire the old hostname entry in the same
+            # transaction (deleting it up front would orphan the record if
+            # the writes then failed).
+            if existing_data[0]:
+                old_hostname = json.loads(existing_data[0].decode())['hostname']
                 if old_hostname != hostname:
-                    client.delete(f"/cluster/nodes/by-hostname/{old_hostname}")
-            
-            # Use a transaction to ensure atomicity
-            client.transaction(
-                compare=[],  # No compare needed since we handle conflicts above
-                success=[
-                    client.transactions.put(f"/cluster/nodes/by-mac/{normalized_mac}", allocation_json),
-                    client.transactions.put(f"/cluster/nodes/by-hostname/{hostname}", allocation_json)
-                ],
-                failure=[]
-            )
+                    success.append(client.transactions.delete(
+                        f"/cluster/nodes/by-hostname/{old_hostname}"))
+
+            committed, _ = client.transaction(
+                compare=compare, success=success, failure=[])
+            if not committed:
+                logger.warning(f"Allocation of {hostname} to {mac_address} "
+                               f"lost an etcd race; retrying")
+                return _ALLOC_RETRY
             logger.info(f"Allocated {hostname} ({ip_address}) to {mac_address}")
             return hostname, ip_address
         except Exception as e:

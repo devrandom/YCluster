@@ -20,12 +20,12 @@ Line numbers reference the tree as of commit `f1e3305`.
 
 ## 1. Verified bugs — quick wins
 
-- [ ] **B1. Timing-unsafe master-key comparison**
+- [x] **B1. Timing-unsafe master-key comparison**
   `config/ansible/app/files/local-ai-proxy-auth.py:117` uses `token == master`.
   Fix: `secrets.compare_digest(token, master)`. Practical exploitability over a
   network is low, but the fix is free.
 
-- [ ] **B2. Allocation transaction result ignored**
+- [x] **B2. Allocation transaction result ignored**
   `config/ansible/admin/files/app.py:326-336`: the etcd transaction has
   `failure=[]` and its return value is never checked; `allocation_data` is
   returned as if committed. The in-process `allocation_lock` does not protect
@@ -34,36 +34,36 @@ Line numbers reference the tree as of commit `f1e3305`.
   written or collides with another node. Fix: check the transaction result,
   retry or raise on failure.
 
-- [ ] **B3. DHCP allocation check-then-use race**
+- [x] **B3. DHCP allocation check-then-use race**
   `config/ansible/admin/files/ycluster/ycluster/utils/dhcp_server.py` (~:473-545):
   hostname existence check is non-atomic with the write; transaction uses empty
   `compare=[]`. Same class of bug as B2 — include `version(...) == 0` compares
   in the transaction.
 
-- [ ] **B4. Go proxy retries every ≥400 status on the next backend**
+- [x] **B4. Go proxy retries every ≥400 status on the next backend**
   `local-ai-proxy/handler.go:324`. A 400/401/404 (bad request, model missing on
   one backend, auth misconfig) is replayed against every backend — duplicates
   non-idempotent POST work and masks real client errors as "all backends
   failed". Fix: retry only 5xx/429 (404 too only if model-placement drift
   tolerance is wanted, as a deliberate choice).
 
-- [ ] **B5. SQL string interpolation**
+- [x] **B5. SQL string interpolation**
   `config/ansible/admin/files/provision-usage-stats.py:35`:
   `f"CREATE USER ... PASSWORD '{password}'"`. Password comes from etcd so risk
   is low, but a `'` in it breaks the statement. Use a parameterized statement
   or `quote_literal`.
 
-- [ ] **B6. `wipe-etcd.yml:4` has `become: core`**
+- [x] **B6. `wipe-etcd.yml:4` has `become: core`**
   Not a valid `become` value (boolean expected) — playbook is broken or
   silently not escalating. Should be `become: true`.
 
-- [ ] **B7. Unverified binary downloads**
+- [x] **B7. Unverified binary downloads**
   Qdrant tarball (`config/ansible/storage/install-qdrant.yml`) and the Ubuntu
   ISO (`config/ansible/admin/setup-pxe-boot.yml`) fetched with no checksum.
   The ISO is the root of trust for every PXE-provisioned node. Add
   `checksum: sha256:...` to the `get_url` tasks.
 
-- [ ] **B8. Bare `except:` in the etcd inventory plugin**
+- [x] **B8. Bare `except:` in the etcd inventory plugin**
   `config/ansible/inventory_plugins/etcd_nodes.py:132` swallows all connection
   errors; if every etcd host fails, Ansible gets an empty inventory with no
   diagnostic and "succeeds" against nothing. Catch specific exceptions and warn

@@ -134,7 +134,7 @@ func (m *Metrics) ObserveTTFT(model, backend, stream string, seconds float64) {
 
 // ObserveRetry increments the retry counter when a request fails over
 // from backend → another backend. reason is one of:
-// "transport_error", "http_4xx", "http_5xx".
+// "transport_error", "http_404", "http_429", "http_5xx".
 func (m *Metrics) ObserveRetry(backend, reason string) {
 	if m == nil {
 		return

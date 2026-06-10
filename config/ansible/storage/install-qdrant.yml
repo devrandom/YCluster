@@ -16,9 +16,14 @@
       register: qdrant_installed
 
     - name: Download Qdrant tar.gz package
-      shell: |
-        wget -O /tmp/qdrant.tar.gz https://github.com/qdrant/qdrant/releases/download/v1.14.1/qdrant-x86_64-unknown-linux-gnu.tar.gz
-        chmod 644 /tmp/qdrant.tar.gz
+      get_url:
+        url: https://github.com/qdrant/qdrant/releases/download/v1.14.1/qdrant-x86_64-unknown-linux-gnu.tar.gz
+        dest: /tmp/qdrant.tar.gz
+        # Qdrant publishes no checksum asset; hash pinned from the official
+        # tarball, whose qdrant binary is byte-identical to the cluster's
+        # running /opt/qdrant/qdrant (verified 2026-06-10). Update on bump.
+        checksum: sha256:7d43068cce7477061a7bd91fd5e5e139e35cfacb09d0dcdc4f4a33ace7d782d8
+        mode: '0644'
       when: not qdrant_installed.stat.exists
 
     - name: Create Qdrant installation directory

@@ -15,10 +15,14 @@ def get_password():
 
 
 def psql(cmd, db=None, check=False):
+    # SQL arrives via stdin so it never touches a shell command line (no
+    # quoting surface, not visible in ps). ON_ERROR_STOP keeps the return
+    # code meaningful: without it psql exits 0 even when a statement fails.
     db_args = ['-d', db] if db else []
     result = subprocess.run(
-        ['su', '-', 'postgres', '-c', 'psql ' + ' '.join(db_args) + ' -c "' + cmd + '"'],
-        capture_output=True, text=True
+        ['su', '-', 'postgres', '-c',
+         'psql -v ON_ERROR_STOP=1 ' + ' '.join(db_args)],
+        input=cmd, capture_output=True, text=True
     )
     if result.returncode != 0:
         ignored = any(e in result.stderr for e in ('already exists', 'already has', 'does not exist'))
@@ -32,7 +36,10 @@ def psql(cmd, db=None, check=False):
 def main():
     password = get_password()
 
-    psql(f"CREATE USER usage_stats WITH PASSWORD '{password}';")
+    # SQL-literal escape: a quote in the password must not break (or
+    # truncate) the statement.
+    pw_literal = password.replace("'", "''")
+    psql(f"CREATE USER usage_stats WITH PASSWORD '{pw_literal}';")
     psql("CREATE DATABASE usage_stats OWNER usage_stats;")
 
     psql("""CREATE TABLE IF NOT EXISTS model_usage (

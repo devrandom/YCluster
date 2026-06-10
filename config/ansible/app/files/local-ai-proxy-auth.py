@@ -19,6 +19,7 @@ Listens on 127.0.0.1:4002 by default (override with LISTEN_ADDR env).
 
 import logging
 import os
+import secrets
 import sys
 from wsgiref.simple_server import make_server
 
@@ -114,7 +115,10 @@ def auth():
         return Response(status=401)
 
     master = get_master_key()
-    if master and token == master:
+    # compare_digest: constant-time (no early exit on first mismatch, so
+    # response timing can't leak key prefixes). Bytes, not str: the str form
+    # raises TypeError on non-ASCII, and token is attacker-controlled.
+    if master and secrets.compare_digest(token.encode(), master.encode()):
         resp = Response(status=200)
         resp.headers["X-User-Id"] = "root"
         resp.headers["X-User-Groups"] = ""

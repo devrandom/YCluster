@@ -129,7 +129,11 @@ class InventoryModule(BaseInventoryPlugin):
                 etcd_client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options, **tls_kwargs)
                 etcd_client.status()  # Test connection
                 break
-            except:
+            except Exception as e:
+                # A client whose status() failed is not usable — clear it so
+                # the all-hosts-down check below doesn't pass a broken client.
+                etcd_client = None
+                self.display.warning(f"etcd inventory: {host_port} unreachable: {e}")
                 continue
         
         if not etcd_client:

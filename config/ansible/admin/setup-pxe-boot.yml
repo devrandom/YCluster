@@ -2,7 +2,12 @@
 - name: Setup PXE boot infrastructure on core nodes
   hosts: core
   become: yes
-    
+  vars:
+    # From https://releases.ubuntu.com/24.04.3/SHA256SUMS. The ISO is the
+    # root of trust for every PXE-provisioned node — verify it no matter
+    # which source (local mirror or upstream) it came from.
+    ubuntu_iso_sha256: c3514bf0056180d09376462a7a1b4f213c1d6e8ea67fae5c25099c6fd3d8274b
+
   tasks:
     - name: Create TFTP directory structure
       file:
@@ -40,6 +45,7 @@
       get_url:
         url: http://10.0.0.254/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
+        checksum: "sha256:{{ ubuntu_iso_sha256 }}"
         mode: '0644'
       register: local_iso_download
       ignore_errors: yes
@@ -49,6 +55,7 @@
       get_url:
         url: https://releases.ubuntu.com/24.04.3/ubuntu-24.04.3-live-server-amd64.iso
         dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
+        checksum: "sha256:{{ ubuntu_iso_sha256 }}"
         mode: '0644'
       when: not iso_file.stat.exists and (local_iso_download is failed or local_iso_download is skipped)
 
