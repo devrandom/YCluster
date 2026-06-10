@@ -48,13 +48,6 @@ DYNAMIC_IP_END = 249
 # should be re-run from the top (re-check existing state, re-pick, re-commit).
 _ALLOC_RETRY = object()
 
-# Core nodes use static IPs: s1=10.0.0.11, s2=10.0.0.12, s3=10.0.0.13
-CORE_NODE_IPS = {
-    's1': '10.0.0.11',
-    's2': '10.0.0.12', 
-    's3': '10.0.0.13'
-}
-
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -265,14 +258,13 @@ class DHCPServer:
         except (subprocess.CalledProcessError, yaml.YAMLError, IndexError, KeyError) as e:
             logger.warning(f"Could not get primary interface from netplan: {e}")
         
-        # Fallback: check hostname-based allocation
+        # Fallback: derive the IP from the hostname convention
         hostname = socket.gethostname()
-        
-        # Check if this is a known core node
-        if hostname in CORE_NODE_IPS:
-            logger.info(f"Using core node IP for {hostname}: {CORE_NODE_IPS[hostname]}")
-            return CORE_NODE_IPS[hostname]
-        
+        ip = self.determine_ip_from_hostname(hostname)
+        if ip:
+            logger.info(f"Using convention IP for {hostname}: {ip}")
+            return ip
+
         raise ValueError("Could not determine server IP from netplan primary interface or hostname")
 
     def determine_ip_from_hostname(self, hostname):

@@ -175,6 +175,19 @@ class InventoryModule(BaseInventoryPlugin):
         except Exception as e:
             self.display.warning(f"Failed to enumerate etcd members: {e}")
 
+        # Cross-check live membership against the statically-defined etcd
+        # group (the DR/bootstrap floor from the boot inventory, parsed
+        # before this plugin) and surface drift instead of hiding it.
+        static_etcd = self.inventory.groups.get('etcd')
+        if etcd_members and static_etcd:
+            static_ips = {h.vars.get('ansible_host') for h in static_etcd.get_hosts()}
+            static_ips.discard(None)
+            if static_ips and static_ips != etcd_members:
+                self.display.warning(
+                    f"etcd inventory: live etcd membership {sorted(etcd_members)} "
+                    f"differs from the static etcd group {sorted(static_ips)} — "
+                    f"update the static quorum definition (or investigate the cluster)")
+
         # Read storage leader from etcd
         leader_key = '/cluster/leader/app'
         leader_value, _ = etcd_client.get(leader_key)
