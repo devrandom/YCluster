@@ -1,4 +1,6 @@
 ---
+- import_playbook: disable-openipmi.yml
+
 # Storage Infrastructure - Ceph setup and configuration (order critical)
 #- import_playbook: add-ceph-nodes.yml
 - import_playbook: setup-ceph-disk.yml
