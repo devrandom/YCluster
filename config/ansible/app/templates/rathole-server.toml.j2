@@ -19,17 +19,17 @@ type = "tcp"
 bind_addr = "0.0.0.0:443"
 type = "tcp"
 
-[server.services.ssh1]
-bind_addr = "127.0.0.1:2201"
+# One SSH ingress endpoint per core node (idx N -> port 2200+N), reached
+# with: ssh -J jump@host.ycluster.net:220N ... . Generated from the core
+# group so it scales as core nodes are added (s4+), matching the client
+# side in rathole_config.py.
+{% for host in groups['core'] | sort %}
+{% set idx = host[1:] | int %}
+[server.services.ssh{{ idx }}]
+bind_addr = "127.0.0.1:{{ 2200 + idx }}"
 type = "tcp"
 
-[server.services.ssh2]
-bind_addr = "127.0.0.1:2202"
-type = "tcp"
-
-[server.services.ssh3]
-bind_addr = "127.0.0.1:2203"
-type = "tcp"
+{% endfor %}
 
 # VM-access bastions (one public port per Incus VM host). Each VM host
 # runs its own bastion container on its own incusbr0 and registers a

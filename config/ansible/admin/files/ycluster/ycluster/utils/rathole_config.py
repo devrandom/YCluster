@@ -101,13 +101,14 @@ def _generate_config(template_path):
         print("Error: No token found in rathole configuration", file=sys.stderr)
         sys.exit(1)
     
-    # Determine core node index from hostname using regex
+    # Determine core node index from hostname. idx N maps to the server's
+    # ssh{N} endpoint (port 2200+N), one per core node (s1, s2, ... s4+).
     hostname = socket.gethostname()
-    match = re.match(r'^s([123])$', hostname)
+    match = re.match(r'^s(\d+)$', hostname)
     if not match:
-        print(f"Error: Not a core node. Hostname '{hostname}' must be s1-s3", file=sys.stderr)
+        print(f"Error: Not a core node. Hostname '{hostname}' must be s<N>", file=sys.stderr)
         sys.exit(1)
-    
+
     idx = int(match.group(1))
     
     # Read template file and render with jinja2
