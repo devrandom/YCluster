@@ -13,38 +13,42 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from ..common.etcd_utils import get_etcd_client
 
-CA_BASE_PATH = "/rbd/misc/ca"
+# The unified cluster CA, replicated to core nodes by setup-etcd-tls.yml
+# (also the etcd CA — see docs/design/etcd-access-hardening.md).
+CA_BASE_PATH = "/etc/ycluster/ca"
 CA_CERT_PATH = f"{CA_BASE_PATH}/ca.crt"
 CA_KEY_PATH = f"{CA_BASE_PATH}/ca.key"
 CERTS_PATH = f"{CA_BASE_PATH}/certs"
 
+# Skip reissuing a cert that is still valid for at least this long.
+REISSUE_THRESHOLD = datetime.timedelta(days=30)
+
 def ensure_ca_directory():
     """Ensure CA directory structure exists"""
-    os.makedirs(CA_BASE_PATH, mode=0o700, exist_ok=True)
+    os.makedirs(CA_BASE_PATH, mode=0o755, exist_ok=True)
     os.makedirs(CERTS_PATH, mode=0o755, exist_ok=True)
 
-def is_storage_leader():
-    """Check if this node is the storage leader"""
-    try:
-        client = get_etcd_client()
-        leader_key = '/cluster/leader/app'
-        leader_value, _ = client.get(leader_key)
-        if leader_value:
-            leader_hostname = leader_value.decode().strip()
-            current_hostname = os.uname().nodename
-            return leader_hostname == current_hostname
-    except Exception as e:
-        print(f"Error checking storage leader status: {e}")
-        return False
-    return False
+def has_ca_key():
+    """Whether this node holds the cluster CA private key (core nodes)"""
+    return os.path.exists(CA_KEY_PATH)
+
+def _require_ca_key():
+    if not has_ca_key():
+        raise Exception(
+            f"Cluster CA key not found at {CA_KEY_PATH} — "
+            "CA operations run on core nodes (see setup-etcd-tls.yml)")
 
 def generate_ca():
-    """Generate a new Certificate Authority"""
-    if not is_storage_leader():
-        raise Exception("CA operations can only be performed on the storage leader")
-    
+    """Generate a new Certificate Authority.
+
+    Normally the cluster CA is minted by setup-etcd-tls.yml; this is a
+    fallback for deployments that don't run it. Never overwrites an
+    existing CA.
+    """
+    if os.path.exists(CA_CERT_PATH) or os.path.exists(CA_KEY_PATH):
+        raise Exception(f"CA already exists at {CA_BASE_PATH}; refusing to overwrite")
+
     ensure_ca_directory()
     
     # Generate CA private key
@@ -60,7 +64,7 @@ def generate_ca():
         x509.NameAttribute(NameOID.LOCALITY_NAME, "Local"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "YCluster"),
         x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Certificate Authority"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "YCluster Root CA"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "YCluster CA"),
     ])
     
     ca_cert = x509.CertificateBuilder().subject_name(
@@ -124,17 +128,37 @@ def load_ca():
     
     return ca_cert, ca_key
 
+def _existing_cert_valid(cert_file, ca_cert):
+    """Whether an issued cert is from the current CA and not close to expiry"""
+    if not os.path.exists(cert_file):
+        return False
+    try:
+        with open(cert_file, 'rb') as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+    except Exception:
+        return False
+    if cert.issuer != ca_cert.subject:
+        return False
+    return cert.not_valid_after - datetime.datetime.utcnow() > REISSUE_THRESHOLD
+
 def generate_server_cert(hostname, san_list=None):
     """Generate a server certificate signed by the CA"""
-    if not is_storage_leader():
-        raise Exception("Certificate generation can only be performed on the storage leader")
-    
+    _require_ca_key()
+
     ensure_ca_directory()
     ca_cert, ca_key = load_ca()
-    
+
+    cert_file = f"{CERTS_PATH}/{hostname}.crt"
+    key_file = f"{CERTS_PATH}/{hostname}.key"
+    if _existing_cert_valid(cert_file, ca_cert) and os.path.exists(key_file):
+        print(f"Certificate for {hostname} already exists and is valid; skipping")
+        with open(cert_file, 'rb') as f:
+            server_cert = x509.load_pem_x509_certificate(f.read())
+        return server_cert, None, cert_file, key_file
+
     if san_list is None:
         san_list = [hostname]
-    
+
     # Generate server private key
     server_key = rsa.generate_private_key(
         public_exponent=65537,
@@ -196,10 +220,6 @@ def generate_server_cert(hostname, san_list=None):
         ]),
         critical=True,
     ).sign(ca_key, hashes.SHA256())
-    
-    # Write server certificate and key
-    cert_file = f"{CERTS_PATH}/{hostname}.crt"
-    key_file = f"{CERTS_PATH}/{hostname}.key"
     
     with open(cert_file, 'wb') as f:
         f.write(server_cert.public_bytes(serialization.Encoding.PEM))
@@ -277,9 +297,8 @@ def get_ca_info():
 
 def revoke_certificate(hostname):
     """Revoke a certificate (remove files)"""
-    if not is_storage_leader():
-        raise Exception("Certificate revocation can only be performed on the storage leader")
-    
+    _require_ca_key()
+
     cert_file = f"{CERTS_PATH}/{hostname}.crt"
     key_file = f"{CERTS_PATH}/{hostname}.key"
     

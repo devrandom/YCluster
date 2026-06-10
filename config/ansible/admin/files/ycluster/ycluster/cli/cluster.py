@@ -3,7 +3,6 @@ Cluster status and health management commands
 """
 
 from ..utils import check_cluster
-import requests
 
 
 def register_cluster_commands(subparsers):
@@ -73,25 +72,16 @@ def cluster_populate_local_node(args):
 
 
 def _set_host_state(hostname, action):
-    """Helper to enable/disable a host via API"""
+    """Helper to enable/disable a host (direct etcd write, CLI-only mutation)"""
     import sys
-    storage_leader = get_storage_leader_ip()
-    if not storage_leader:
-        print("Error: Could not determine storage leader", file=sys.stderr)
-        sys.exit(1)
-
-    url = f"http://{storage_leader}:12723/api/host/{hostname}/{action}"
+    from ..utils.host_state import set_host_disabled
     try:
-        response = requests.post(url, timeout=10)
-        if response.status_code == 200:
-            print(f"{action.title()}d host: {hostname}")
-        elif response.status_code == 404:
-            print(f"Error: Host '{hostname}' not found", file=sys.stderr)
-            sys.exit(1)
-        else:
-            print(f"Error: {response.json().get('error', 'Unknown error')}", file=sys.stderr)
-            sys.exit(1)
-    except requests.exceptions.RequestException as e:
+        set_host_disabled(hostname, action == 'disable')
+        print(f"{action.title()}d host: {hostname}")
+    except KeyError:
+        print(f"Error: Host '{hostname}' not found", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -107,25 +97,16 @@ def cluster_enable_host(args):
 
 
 def _set_drain_state(hostname, drain):
-    """Helper to drain/undrain a node via the admin API"""
+    """Helper to drain/undrain a node (direct etcd write, CLI-only mutation)"""
     import sys
-    storage_leader = get_storage_leader_ip()
-    if not storage_leader:
-        print("Error: Could not determine storage leader", file=sys.stderr)
-        sys.exit(1)
-
-    action = 'drain' if drain else 'undrain'
-    url = f"http://{storage_leader}:12723/api/{action}/{hostname}"
+    from ..utils.host_state import set_drain
     try:
-        response = requests.post(url, timeout=10)
-        data = response.json()
-        if response.status_code == 200:
-            status = data.get('status', action + 'ed')
-            print(f"{hostname}: {status}")
-        else:
-            print(f"Error: {data.get('error', 'Unknown error')}", file=sys.stderr)
-            sys.exit(1)
-    except requests.exceptions.RequestException as e:
+        set_drain(hostname, drain)
+        print(f"{hostname}: {'drained' if drain else 'active'}")
+    except KeyError:
+        print(f"Error: Host '{hostname}' not found", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -138,22 +119,3 @@ def cluster_drain_host(args):
 def cluster_undrain_host(args):
     """Undrain a node to re-enable leader election"""
     _set_drain_state(args.hostname, drain=False)
-
-
-def get_storage_leader_ip():
-    """Get storage leader IP from etcd"""
-    from ..common.etcd_utils import get_etcd_client
-    import json
-    try:
-        client = get_etcd_client()
-        result = client.get('/cluster/leader/app')
-        if not result[0]:
-            return None
-        leader_hostname = result[0].decode()
-        result = client.get(f'/cluster/nodes/by-hostname/{leader_hostname}')
-        if result[0]:
-            allocation = json.loads(result[0].decode())
-            return allocation.get('ip')
-    except:
-        pass
-    return None

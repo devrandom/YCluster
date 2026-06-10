@@ -1,8 +1,51 @@
 ---
+# Blackbox mTLS certs are minted from the unified cluster CA
+# (/etc/ycluster/ca, replicated to core nodes by setup-etcd-tls.yml).
+# Minting runs once on any core node holding the CA key, then the certs
+# are fetched to the controller and distributed below.
+- name: Mint blackbox TLS certificates from the cluster CA
+  hosts: etcd
+  become: yes
+  run_once: true
+  tasks:
+    - name: Check for the cluster CA key
+      stat:
+        path: /etc/ycluster/ca/ca.key
+      register: ca_key
+
+    - name: Generate and fetch certificates
+      when: ca_key.stat.exists
+      block:
+        - name: Generate server certificates for each blackbox host
+          command: /usr/local/bin/ycluster tls ca generate-server {{ item }} --san {{ hostvars[item]['ansible_host'] }} --san localhost --san 127.0.0.1
+          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
+          register: gen_cert_result
+          changed_when: "'skipping' not in gen_cert_result.stdout"
+
+        - name: Fetch CA certificate to control machine
+          fetch:
+            src: /etc/ycluster/ca/ca.crt
+            dest: /tmp/blackbox-ca.crt
+            flat: yes
+
+        - name: Fetch server certificates to control machine
+          fetch:
+            src: /etc/ycluster/ca/certs/{{ item }}.crt
+            dest: /tmp/blackbox-{{ item }}.crt
+            flat: yes
+          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
+
+        - name: Fetch server keys to control machine
+          fetch:
+            src: /etc/ycluster/ca/certs/{{ item }}.key
+            dest: /tmp/blackbox-{{ item }}.key
+            flat: yes
+          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
+
 - name: Install Blackbox Exporter
   hosts: core:frontend
   become: yes
-  
+
   tasks:
     - name: Install Blackbox Exporter
       apt:
@@ -41,54 +84,6 @@
         mode: '0755'
         owner: prometheus
         group: prometheus
-
-    - name: Check if /rbd/misc is mounted (indicates storage leader)
-      shell: mountpoint -q /rbd/misc
-      register: rbd_misc_mounted
-      failed_when: false
-      changed_when: false
-
-    - name: Set storage leader status based on mount
-      set_fact:
-        storage_leader: "{{ rbd_misc_mounted.rc == 0 }}"
-
-    - name: Generate and fetch certificates (storage leader only)
-      when: storage_leader
-      block:
-        - name: Check if CA exists
-          stat:
-            path: /rbd/misc/ca/ca.crt
-          register: ca_exists
-
-        - name: Generate CA if not exists
-          command: /usr/local/bin/ycluster tls ca generate
-          when: not ca_exists.stat.exists
-
-        - name: Generate server certificates for each blackbox host
-          command: /usr/local/bin/ycluster tls ca generate-server {{ item }} --san {{ hostvars[item]['ansible_host'] }} --san localhost --san 127.0.0.1
-          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
-          register: gen_cert_result
-          failed_when: gen_cert_result.rc != 0 and 'already exists' not in gen_cert_result.stderr
-
-        - name: Fetch CA certificate to control machine
-          fetch:
-            src: /rbd/misc/ca/ca.crt
-            dest: /tmp/blackbox-ca.crt
-            flat: yes
-
-        - name: Fetch server certificates to control machine
-          fetch:
-            src: /rbd/misc/ca/certs/{{ item }}.crt
-            dest: /tmp/blackbox-{{ item }}.crt
-            flat: yes
-          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
-
-        - name: Fetch server keys to control machine
-          fetch:
-            src: /rbd/misc/ca/certs/{{ item }}.key
-            dest: /tmp/blackbox-{{ item }}.key
-            flat: yes
-          loop: "{{ groups['core'] + (groups['frontend'] | default([])) }}"
 
     - name: Check if CA certificate was fetched
       delegate_to: localhost
@@ -147,9 +142,9 @@
             mode: '0644'
           notify: restart blackbox exporter
 
-    - name: Warn if no storage leader available
+    - name: Warn if no cluster CA available
       debug:
-        msg: "WARNING: No storage leader available - TLS certificates not configured. Run playbook again when storage leader is available."
+        msg: "WARNING: No cluster CA available - TLS certificates not configured. Run setup-etcd-tls.yml (or ycluster tls ca generate on a core node), then re-run this playbook."
       when: not ca_cert_fetched.stat.exists
 
     - name: Enable and start Blackbox Exporter
