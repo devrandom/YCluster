@@ -111,6 +111,7 @@
       loop: "{{ new_nodes }}"
       when: new_nodes | length > 0
       run_once: true
+      no_log: true
 
     - name: Extract join token for this node
       set_fact:
@@ -120,10 +121,12 @@
         - not is_in_cluster
         - rendezvous_node is defined
         - item.item == inventory_hostname
+      no_log: true
 
     - name: Join new nodes to cluster
       command: microceph cluster join {{ my_join_token }}
       when: not is_in_cluster and my_join_token is defined
+      no_log: true
 
     - name: Wait for cluster to stabilize
       pause:

@@ -262,6 +262,7 @@
       register: ceph_admin_api_identity
       changed_when: false
       failed_when: false
+      no_log: true
 
     - name: Install admin-api ceph keyring
       copy:
@@ -272,6 +273,7 @@
         mode: '0640'
       when: ceph_admin_api_identity.rc == 0
       notify: restart admin-api
+      no_log: true
 
     - name: Create systemd timer for certificate refresh
       copy:

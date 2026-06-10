@@ -42,6 +42,7 @@
       environment: "{{ etcd_client_env }}"
       register: rathole_cfg_raw
       changed_when: false
+      no_log: true
 
     - name: Parse rathole tunnel config
       set_fact:
