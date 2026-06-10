@@ -1,8 +1,32 @@
+# Static backbone inventory — the universal control-plane quorum.
+#
+# Defines the etcd quorum WITHOUT querying etcd. This serves three purposes
+# that all need the group to exist before/without a live etcd cluster:
+#   1. Bootstrap — install-etcd.yml reads groups['etcd'] to build the initial
+#      cluster, so the members must be known before etcd is ever up.
+#   2. Disaster recovery — etcd-recovery playbooks (wipe-etcd, install-etcd,
+#      setup-etcd-tls) target `hosts: etcd`; without this they'd match nothing
+#      when the cluster is down (the etcd_nodes plugin bails on no connection).
+#   3. A floor for `core` so it isn't empty during an outage.
+#
+# This is GENERAL, not specific to one cluster: every ycluster's etcd quorum
+# is the first three storage nodes (s1-s3) at the convention IPs (storage base
+# 10.0.0.11-13). Cluster-specific nodes (s4+, all other node types) are NOT
+# listed here — the etcd_nodes plugin (inventory_etcd.yml, loaded second) adds
+# them dynamically and unions in, so e.g. s4/s5 auto-join `core` and `storage`
+# when they register. Keep etcd at an ODD count; promoting a 4th voting member
+# is a deliberate change (add it here + run the etcd member-add procedure).
 all:
   children:
     core:
-      hosts:
-        s1:
-          ansible_host: 10.0.0.11
+      children:
+        etcd:
+          hosts:
+            s1:
+              ansible_host: 10.0.0.11
+            s2:
+              ansible_host: 10.0.0.12
+            s3:
+              ansible_host: 10.0.0.13
     macos:
       hosts: {}
