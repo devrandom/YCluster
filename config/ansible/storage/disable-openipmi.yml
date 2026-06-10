@@ -1,0 +1,27 @@
+---
+# Storage nodes have no BMC (out-of-band is AMT), so the openipmi LSB
+# init script — pulled in as a dependency of ipmitool — fails on every
+# boot trying to load IPMI kernel drivers. Mask it to keep
+# `systemctl --failed` clean. Nvidia nodes have real BMCs and keep it.
+- name: Disable openipmi on storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Check if openipmi unit exists
+      command: systemctl cat openipmi.service
+      register: openipmi_unit
+      failed_when: false
+      changed_when: false
+
+    - name: Stop and mask openipmi
+      systemd:
+        name: openipmi
+        state: stopped
+        masked: yes
+      when: openipmi_unit.rc == 0
+
+    - name: Clear failed state
+      command: systemctl reset-failed openipmi.service
+      failed_when: false
+      changed_when: false
+      when: openipmi_unit.rc == 0
