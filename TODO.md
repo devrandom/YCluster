@@ -1,5 +1,30 @@
 # TODO
 
+## Priorities (triaged 2026-06-10)
+
+A prioritized index into the detail below; nothing here is a separate item.
+
+**Now (correctness/security with live impact or near-free fixes):**
+- incus VM DNS records (P0, top of backlog) — recurring SSH breakage today.
+- "core" consistency audit — has a live crash loop (rathole-ssh on s4); reconcile the dynamic `core` group vs hardcoded s1-s3.
+- Review quick-win bugs B1-B8 — cheap, several security-relevant (timing-safe compare, allocation/DHCP races, unverified ISO/binary downloads).
+- Admin API hardening S1-S3 — highest security ROI: dev-server-as-root, unauthenticated mutating endpoints, unvalidated etcd-key params.
+- Failed-systemd-units alert (Monitoring) — would have caught every breakage found this session.
+
+**Next (operational resilience; caused real outages or data-loss exposure):**
+- Gateway health-check hardening + s4 gateway-VIP eligibility — flapped the VIP on a 3-min WAN blip (2026-06-01).
+- DR runbooks, esp. etcd quorum loss (only unrecoverable failure mode) + a `restore` path; Ceph off-cluster backup story.
+- Incus storage `dir`→`zfs` migration — runaway-guest root-fs fill (nv3 cascade).
+- WG inbound ingress that follows the leader; rathole PROXY protocol for real client IPs.
+- Architecture A1-A4 (bootstrap trust model, plaintext keys, setup-time RBD `--exclusive`, Go-proxy watch resilience).
+
+**Later (hygiene, docs, breadth):**
+- Ansible hygiene H1-H4; remaining Monitoring gaps; Docker pruning; CI/lint.
+- Node-lifecycle + scaling/capacity runbooks; secrets/SSH-key rotation; audit-log story; vendor-account cleanup.
+- Minor review items; exo prompt-logging upstream; vllm-mlx operational gaps; MiniMax client workarounds doc.
+
+---
+
 - **P0: Give pinned incus VMs a permanent DNS record so name-based SSH (`ssh -J jump@<host>:<port> ubuntu@<vm>`) doesn't depend on a live DHCP lease.** incus only serves a DNS record for a VM while it holds a current `dnsmasq` lease; a static `ipv4.address` reservation pins the IP but creates no DNS record. A guest that lets its lease lapse between renewals (e.g. vm2 re-DISCOVERs ~every 90 min against a 1h lease) drops out of `dnsmasq.leases` for a recurring window, so the bastion's name lookup intermittently fails with "Temporary failure in name resolution" and external SSH breaks. Manually patched on nv2 2026-06-07 via `incus network set incusbr0 raw.dnsmasq` adding `host-record=vm2,vm2.incus,10.100.0.2` — but that lives only in nv2's running config and isn't recreated by `ycluster vm` IP-pinning. Durable fix: when `_pin_instance_ip` pins a VM's address (`config/ansible/admin/files/ycluster/ycluster/utils/vm_manager.py`), also write a matching `host-record` into the bridge's `raw.dnsmasq` (and reconcile/remove it on un-pin/delete), applied across all incus VM hosts (nv2, nv3, c1, c2). Consider whether incus `dns.mode`/static NIC DNS can do this natively instead of `raw.dnsmasq` surgery.
 - Document MiniMax M2.5 client-side workarounds in `docs/operations/inference.md`: (a) use `/v1/completions` (not `/v1/chat/completions`) with a raw text prompt ending in the desired prefix for shaped output — the chat-completions `continue_final_message` flag is silently ignored by vllm-mlx 0.2.7; (b) client-side XML parsing of `<minimax:tool_call>` envelopes; (c) client-side truncation to emulate `stop`; (d) strip trailing `[e~[` from `.content` / `.text`. See `research/minimax-vllm-mlx-structured-output-2026-04-11.md`.
 - vllm-mlx on m1 has a stack of upstream bugs and ad-hoc operational gaps (no `stop`, no guided decoding, broken special-token detokenization, no MiniMax tool-call parser, no pinned version, launch commands unscripted) — parked in `research/minimax-vllm-mlx-structured-output-2026-04-11.md` under "Upstream work queue" and "Operational gaps (m1)". Not actionable in the near term.
@@ -11,6 +36,8 @@
 - Consolidate redundant etcd reads in admin-api's health path (perf). On a core node, every `/metrics` scrape (frequent, per-node by Prometheus) makes ~6 separate etcd round-trips inside `get_comprehensive_health`: the `/test` probe, `is_storage_leader` (`/cluster/leader/app`), `is_dhcp_leader` (`/cluster/leader/dhcp`), `is_node_drained` (`/cluster/nodes/<h>/drain`), `check_certificate_expiry` (`/cluster/tls/cert`), and `get_core_nodes` → `get_all_hosts` (a full `by-hostname/` *prefix scan*). Fetch them in one batched/cached pass (e.g. a short TTL cache or a single multi-key read per scrape). Non-core nodes already make zero etcd calls here after the etcd-access-hardening Phase 1 gating; this is the core-node follow-up.
 - Add periodic Docker image pruning on storage nodes (s1-s3). Dangling image layers from open-webui rebuilds accumulate in `/var/lib/docker/overlay2` and fill the root fs — on 2026-06-04 s2 hit `MON_DISK_LOW` (mon store lives on `/`, `/dev/mapper/vg0-root`) with ~50G of untagged `<none>` open-webui-with-plugins layers; `docker image prune -f` reclaimed it. Schedule a periodic `docker image prune -f` (dangling-only — never `-a`, which on a non-leader would delete the tagged-but-not-running open-webui `:latest` and force a ~4.4G re-pull on failover) via a systemd timer or Ansible-managed cron on each storage node. Note s2/s3 root disks (197G) are smaller than s1 (295G) so they hit the 30% `mon_data_avail_warn` threshold sooner. Registry blobs are unaffected by pruning — they live on RBD at `/rbd/misc/docker-registry/data`, outside Docker's image store.
 - WG inbound ingress needs a stable externally-routable endpoint that follows the active leader. Currently the DNAT on the upstream router points at a specific core node's uplink IP (e.g. `192.168.0.104` = s3), so wg breaks on gateway-VIP failover to s1/s2. Options to investigate: (1) uplink-side VIP via keepalived on the 192.168.0.x segment — clean but only s2/s3 are on that subnet (s1 is on 192.168.9.x), so s1 can't participate and gateway-VIP leadership would need to be constrained to s2/s3; (2) static route `10.0.0.0/24 via <core node>` on the router so DNAT can target `10.0.0.254` directly — simplest but single-next-hop fragility; (3) a tiny UDP forwarder on each core node that knows which peer currently holds the gateway VIP and proxies wg packets there. Option 1 is probably the right call once s1's uplink is reconciled.
+
+- **Audit the definition of "core" for consistency cluster-wide.** Suspected drift: the cluster likely started with core = s1-s3 (3 etcd/quorum nodes) and has been moving toward a larger core (s1-s5?), but the two notions of "core" have diverged. Concretely, the etcd inventory plugin builds the `core` group dynamically from node *type* = storage, so it currently resolves to s1-s4 (`inventory_plugins/etcd_nodes.py:261`), while `rathole_config.py:106` hardcodes `^s([123])$`. Found via the 2026-06-10 reboot test: `app/install-rathole.yml` (`hosts: core`) enables `rathole-ssh` on s4, but its config generator refuses ("Hostname 's4' must be s1-s3"), so the unit crash-loops every 5s on a clean boot — it had only ever "worked" on s4 as a stale pre-TLS-enforcement process. The SSH rathole tunnel is a 3-endpoint design (idx 1-3), so s4 isn't meant to participate. Two things to resolve: (1) immediate — scope `rathole-ssh` enablement to s1-s3 (and stop/disable/reset-failed it on s4+), or extend the SSH tunnel to N core nodes if that's the intent; (2) systemic — grep for every place that defines or assumes "core" (the inventory `core` group, `CORE_NODE_IPS`, hardcoded `s1-s3` / `s[123]` / `^s([1-3])$` regexes, quorum-count assumptions of 3, keepalived VIP eligibility, etcd member expectations) and reconcile them to one source of truth. Decide whether core = etcd-quorum nodes (a fixed small set) or = all storage nodes, and make code/inventory agree. NOTE: rathole-ssh is currently crash-looping on s4 — mask it there as a stopgap if the noise matters before this is fixed.
 
 ## Production readiness gaps (2026-05-22 audit)
 
@@ -36,6 +63,7 @@
 - Backup freshness / rsync-success metric + alert.
 - Clock-skew alert rule (README claims it; not present in `ycluster-alerts.yml.j2`).
 - Ansible-run-success metric so "did the last apply succeed on every host" isn't a manual SSH check.
+- **Failed-systemd-units alert.** Every breakage found during the 2026-06-10 session (collect-model-stats, rathole, rathole-ssh, certbot-renew, wg-reconcile — all stale units hardcoded to plaintext etcd `:2379` after TLS enforcement) was a unit silently in `failed` state, discovered only by manual `journalctl` / a reboot test. node-exporter already exports `node_systemd_unit_state{state="failed"}`, so this is just an alert rule in `ycluster-alerts.yml.j2` (`== 1` for ~15m, per unit/node). Prerequisite: mask/fix the known-benign offenders first or they'll be permanent noise — `openipmi` done 2026-06-10 (`storage/disable-openipmi.yml`); still open on storage nodes: `tangd.socket`, `serial-getty@ttyS4`. Partly subsumes the per-service liveness and ansible-run-success items above.
 
 ### CI / testing
 - ansible-lint in a GitHub Action gating `main`.
@@ -56,6 +84,42 @@
 ### Scaling / capacity docs
 - Add-storage-node and add-compute-node procedures (Ceph rebalance expectations, OSD onboarding, network/VLAN, GPU setup where relevant).
 - Capacity-planning notes: Ceph write-perf cliff at ~85% (empirical, in NOTES), recommended free-space margins, rebalance time estimates.
+
+## Code review follow-ups (2026-06-09)
+
+From `docs/reviews/2026-06-09-codebase-review.md` (IDs reference that doc; line numbers are vs commit f1e3305). Items already tracked elsewhere in this file are not duplicated here: drain-auth (top section + superseded by S2 below), CA-off-RBD (Security), rathole PROXY protocol, gateway health check, etcd read consolidation.
+
+### Verified bugs (quick wins)
+- B1 — timing-unsafe master-key compare: `local-ai-proxy-auth.py:117` uses `token == master`; switch to `secrets.compare_digest`.
+- B2 — allocation etcd transaction result ignored (`admin/files/app.py:326`, `failure=[]`, return unchecked); a compare failure returns an uncommitted/colliding hostname-IP. Check result, retry/raise.
+- B3 — DHCP allocation check-then-use race (`utils/dhcp_server.py` ~:473-545, empty `compare=[]`); include `version(...)==0` compares.
+- B4 — Go proxy retries every ≥400 on the next backend (`handler.go:324`); replays non-idempotent POSTs and masks client errors. Retry only 5xx/429.
+- B5 — SQL string interpolation in `admin/files/provision-usage-stats.py:35`; parameterize.
+- B6 — `wipe-etcd.yml:4` has `become: core` (invalid value); should be `become: true`.
+- B7 — unverified downloads: Qdrant tarball (`storage/install-qdrant.yml`) and Ubuntu ISO (`admin/setup-pxe-boot.yml`) fetched with no checksum; add `checksum:`.
+- B8 — bare `except:` in `inventory_plugins/etcd_nodes.py:132` yields a silent empty inventory; catch specific exceptions + warn per host.
+
+### Admin API hardening (highest security ROI)
+- S1 — admin-api runs Flask's dev server as root with no systemd hardening (`app.py:2721`, `setup-web-services.yml:67`). Move to gunicorn/waitress, dedicated user, `NoNewPrivileges`/`ProtectSystem=strict`.
+- S2 — mutating admin-api endpoints unauthenticated (`/api/host/<h>/disable|enable`, drain, `/api/allocate`); anything on 10.0.0.0/24 can disable hosts or claim allocations. (Supersedes the standalone drain-auth item — validate against the etcd master key.)
+- S3 — route params flow unvalidated into etcd keys (`f"{ETCD_PREFIX}/by-hostname/{hostname}"`); validate `^[a-z]+[0-9]+$` before use.
+
+### Architecture
+- A1 — bootstrap is trust-on-first-use keyed to MAC addresses (rogue LAN device can PXE-join as any node type; `/bootstrap/*` served unsigned to `sudo bash`). Document the LAN/TOFU trust model in ARCHITECTURE.md; cheap hardening: MAC-OUI validation + checksum-verified bootstrap scripts.
+- A2 — API keys stored plaintext (etcd master key; Open-WebUI `api_key` rows). Threat-model item; hashing the OWUI keys needs upstream changes.
+- A3 — setup-time RBD maps lack `--exclusive` (`storage/setup-user-rbd.yml:68`, `storage/setup-misc-rbd.yml:29`) though runtime mounts have it; add for consistency.
+- A4 — Go proxy etcd-watch isn't restarted on break (`source.go:134`) so model config silently stops hot-reloading; disabled-backends set goes stale on etcd outage (`disabled.go:32`). Add watch-error → re-list-and-rewatch.
+
+### Ansible hygiene
+- H1 — `groups['storage'][0]` delegation (~20× in `storage/setup-user-rbd.yml`) breaks under `--limit`; use the mountpoint-based leader-detection convention.
+- H2 — `ignore_errors: yes` on stop/teardown paths (`wipe-etcd.yml`, `storage/stop-storage-leader-election.yml`) hides hung services before destructive steps; use `failed_when:` with explicit checks.
+- H3 — systemd units for the DHCP server and admin-api have no hardening directives even where root is required for raw sockets.
+- H4 — `admin/install-vm-bastion.yml` reads the rathole token via etcdctl without `no_log` on the registering task.
+
+### Minor
+- Go: health `Probe()` goroutines use bare `context.Background()` with no timeout (`health.go`); 4xx bodies only partially drained on retry (`handler.go:329`); ACL is allow-by-default for unlisted models (consider a deny-unknown mode).
+- Python: global etcd client cached forever (`etcd_utils.py:86`), stale after member changes; mixed `print(file=sys.stderr)` vs logging in app.py; MAC normalization duplicated across ~5 files; nginx `-t` stderr discarded in `certbot_manager.py:215`.
+- `/api/allocations` and `/api/health` expose full topology/health detail unauthenticated on the cluster network (recon value; acceptable under the LAN trust model once A1 is stated).
 
 ### Security
 - etcd access hardening — **DONE** (mTLS-only / `enforce` on all core nodes; cert-possession is the boundary, no plaintext listeners; see `docs/design/etcd-access-hardening.md`). Remaining optional follow-up: **unify the cluster CA off RBD.** `setup-etcd-tls.yml` mints a dedicated etcd CA into the replicated `bootstrap_files_dir` + `/etc/ycluster/ca`, while `ca_manager.py` keeps a *separate* CA on RBD (`/rbd/misc/ca`, gated on `is_storage_leader`). Relocate `ca_manager`'s CA off RBD to the replicated filesystem path so one cluster CA serves etcd + blackbox + future mTLS: import the existing RBD CA to preserve already-issued blackbox certs, and relax the storage-leader gate to "CA key present". Not a blocker — etcd has its own working CA today.
