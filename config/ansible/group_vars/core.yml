@@ -1,6 +1,7 @@
-# Core Node Configuration (s1-s3)
-# ================================
-# Core nodes run etcd, VIPs, and gateway services.
+# Core Node Configuration (control-plane nodes, s1+)
+# ==================================================
+# Core nodes run VIPs and gateway services; the etcd quorum subset (s1-s3,
+# the `etcd` group) also runs etcd.
 
 # Network Interfaces
 # ------------------

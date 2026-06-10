@@ -1,5 +1,5 @@
 ---
-- name: Setup PXE boot infrastructure on storage nodes s1-s3
+- name: Setup PXE boot infrastructure on core nodes
   hosts: core
   become: yes
     
