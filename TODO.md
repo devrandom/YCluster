@@ -124,6 +124,7 @@ B1-B8 fixed and deployed: timing-safe+bytes compare (B1); allocation CAS result 
 - H4 — `admin/install-vm-bastion.yml` reads the rathole token via etcdctl without `no_log` on the registering task.
 
 ### Minor
+- `install-ycluster-package.yml` restarts admin-api when the package updates but not dhcp-server, so the DHCP leader keeps running old package code until something else restarts it (had to restart it by hand after the 2026-06-10 B3 rollout). Add dhcp-server (when active) to the package-update restart, like the etcd-endpoint-change handler already does.
 - `/api/allocate` hardcodes `"existing": true` in its response, so callers can't tell a lookup from a fresh allocation — on 2026-06-10 this disguised an accidental allocation as a read during canary testing and fired a node-down alert. Return the real created/existing state (get_or_create_allocation knows it) and consider a `dry_run`/lookup-only query param for diagnostics.
 - Go: health `Probe()` goroutines use bare `context.Background()` with no timeout (`health.go`); 4xx bodies only partially drained on retry (`handler.go:329`); ACL is allow-by-default for unlisted models (consider a deny-unknown mode).
 - Python: global etcd client cached forever (`etcd_utils.py:86`), stale after member changes; mixed `print(file=sys.stderr)` vs logging in app.py; MAC normalization duplicated across ~5 files; nginx `-t` stderr discarded in `certbot_manager.py:215`.
