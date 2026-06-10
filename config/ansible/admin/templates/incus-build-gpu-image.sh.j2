@@ -35,7 +35,11 @@ echo "==> Installing NVIDIA driver and CUDA in guest..."
 incus exec "$BUILDER" -- bash -euxc "
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y build-essential dkms linux-headers-\$(uname -r) \
+    # linux-headers-virtual keeps headers in lockstep with linux-image-virtual,
+    # so DKMS rebuilds the NVIDIA module when unattended-upgrades stages a new
+    # kernel; without it the next reboot comes up driverless.
+    apt-get install -y build-essential dkms linux-headers-virtual \
+        linux-headers-\$(uname -r) \
         pkg-config libglvnd-dev curl openssh-server \
         python3-dev ninja-build cmake
     curl -fsSL -o /tmp/cuda-keyring.deb \
