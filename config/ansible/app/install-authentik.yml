@@ -1,0 +1,202 @@
+---
+# Cluster IdP: authentik (server + worker containers, Postgres-backed).
+# Runs on the storage leader via ycluster-apps.target, like Open-WebUI.
+# Design: docs/design/vm-usage-scheduling-accounts.md.
+#
+# Secrets (secret key, akadmin bootstrap password, API bootstrap token) are
+# generated once into etcd by authentik-manager — nothing vaulted is needed
+# for a base install. GitHub/GitLab login is optional: define
+# authentik_github_client_id/_secret (and/or _gitlab_) to enable those
+# sources; absent vars render no source.
+- name: Install authentik on storage nodes
+  hosts: storage
+  become: yes
+  vars:
+    authentik_version: "2026.2.4"
+    authentik_port: "{{ authentik_local_port | default('9300') }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Create authentik configuration directory
+      file:
+        path: /etc/authentik
+        state: directory
+        mode: '0755'
+
+    - name: Create authentik blueprints directory
+      file:
+        path: /etc/authentik/blueprints
+        state: directory
+        mode: '0755'
+
+    - name: Copy Docker Compose file for authentik
+      copy:
+        src: files/authentik-compose.yaml
+        dest: /etc/authentik/docker-compose.yml
+        mode: '0644'
+
+    - name: Install enrollment blueprint (invitation-gated)
+      copy:
+        src: files/authentik-blueprint-enrollment.yaml
+        dest: /etc/authentik/blueprints/ycluster-enrollment.yaml
+        mode: '0644'
+
+    - name: Install recovery blueprint (admin-generated reset links)
+      copy:
+        src: files/authentik-blueprint-recovery.yaml
+        dest: /etc/authentik/blueprints/ycluster-recovery.yaml
+        mode: '0644'
+
+    # Contains OAuth client secrets when sources are configured; group 1000
+    # so the in-container authentik user (uid/gid 1000) can read it.
+    - name: Install OAuth sources blueprint
+      template:
+        src: templates/authentik-blueprint-sources.yaml.j2
+        dest: /etc/authentik/blueprints/ycluster-oauth-sources.yaml
+        owner: root
+        group: '1000'
+        mode: '0640'
+      no_log: true
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
+    - name: Create authentik manager script
+      copy:
+        src: files/authentik-manager
+        dest: /usr/local/lib/cluster/authentik-manager
+        mode: '0755'
+
+    - name: Create authentik systemd service
+      copy:
+        dest: /etc/systemd/system/authentik.service
+        content: |
+          [Unit]
+          Description=authentik (cluster IdP)
+          After=network.target docker.service misc-rbd.service
+          Requires=docker.service misc-rbd.service
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/lib/cluster/authentik-manager start
+          ExecStop=/usr/local/lib/cluster/authentik-manager stop
+          TimeoutStartSec=600
+          TimeoutStopSec=60
+          User=root
+          Restart=on-failure
+          RestartSec=10
+          Environment=AUTHENTIK_TAG={{ authentik_version }}
+          Environment=AUTHENTIK_PORT={{ authentik_port }}
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: authentik_service_file
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Re-enable authentik service to update symlinks
+      command: systemctl reenable authentik.service
+      when: authentik_service_file.changed
+
+    - name: Enable authentik service (part of storage-apps target)
+      systemd:
+        name: authentik.service
+        enabled: yes
+
+    - name: Configure PostgreSQL for authentik
+      when: is_storage_leader
+      block:
+        - name: Create PostgreSQL database for authentik
+          postgresql_db:
+            name: authentik
+            state: present
+          become_user: postgres
+
+        - name: Create PostgreSQL user for authentik
+          postgresql_user:
+            name: authentik
+            password: authentik
+            db: authentik
+            state: present
+          become_user: postgres
+
+        - name: Grant schema permissions to authentik user
+          postgresql_privs:
+            database: authentik
+            state: present
+            privs: ALL
+            type: schema
+            objs: public
+            roles: authentik
+          become_user: postgres
+
+        # obj_name is required — without it the module silently no-ops
+        # (db: is only the connect database). authentik must own its DB:
+        # its template_schema migration runs CREATE SCHEMA.
+        - name: Make authentik owner of the database
+          postgresql_owner:
+            db: authentik
+            obj_name: authentik
+            new_owner: authentik
+            obj_type: database
+          become_user: postgres
+
+    - name: Install authentik internal nginx site (auth.xc)
+      template:
+        src: templates/authentik-internal.conf.j2
+        dest: /etc/nginx/sites-available/authentik-internal
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable authentik internal nginx site
+      file:
+        src: /etc/nginx/sites-available/authentik-internal
+        dest: /etc/nginx/sites-enabled/authentik-internal
+        state: link
+      notify: reload nginx
+
+    - name: Install authentik nginx template
+      template:
+        src: files/authentik_auth.conf.j2
+        dest: /etc/nginx/templates/authentik_auth.conf.j2
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      vars:
+        proxy_port: "{{ authentik_port }}"
+
+    - name: Generate authentik nginx configuration from template
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
+      environment: "{{ etcd_client_env }}"
+      register: nginx_update_result
+      changed_when: "'configuration updated' in nginx_update_result.stdout"
+      failed_when: nginx_update_result.rc != 0
+
+    - name: Enable authentik nginx site
+      file:
+        src: /etc/nginx/sites-available/authentik_auth
+        dest: /etc/nginx/sites-enabled/authentik_auth
+        state: link
+      notify: reload nginx
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded

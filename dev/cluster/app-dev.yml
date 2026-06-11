@@ -1,0 +1,96 @@
+---
+# App-layer additions for the dev container cluster: substrate stand-ins
+# (docker, postgres, /rbd mounts) + the real authentik playbook.
+#
+# Run as the TOP-LEVEL playbook from dev/cluster/ (same vault-avoidance rule
+# as site-dev.yml):
+#   ../../venv/bin/ansible-playbook app-dev.yml
+#
+# Requires security.nesting=true on the node profile (docker-in-container) —
+# dev-cluster.sh sets it; existing clusters need a node restart to pick it up.
+
+# Stand-in for the storage substrate the app playbooks assume:
+# - docker (real cluster: install-docker-official.yml — not used here because
+#   its daemon.json points DNS/registry-mirror at cluster VIPs that don't
+#   exist in dev; Ubuntu's docker.io + compose v2 plugin suffice)
+# - a dummy misc-rbd.service satisfying app units' Requires=, bind-mounting
+#   /rbd/misc and /rbd/user (started only on the designated leader — the
+#   mountpoint check is exactly how the real playbooks detect the leader)
+# - postgres with the real playbook's listen/pg_hba settings (Docker bridge
+#   access), default data dir instead of /rbd/user/postgres
+- name: App substrate stand-ins (docker, rbd mounts)
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Install docker + compose
+      apt:
+        name: [docker.io, docker-compose-v2, iptables]
+        state: present
+
+    - name: Install dev misc-rbd.service stand-in
+      copy:
+        dest: /etc/systemd/system/misc-rbd.service
+        content: |
+          [Unit]
+          Description=Dev stand-in for RBD mounts (/rbd/misc, /rbd/user)
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStartPre=/bin/mkdir -p /rbd/misc /rbd/user
+          ExecStart=/bin/sh -c 'mountpoint -q /rbd/misc || mount --bind /rbd/misc /rbd/misc'
+          ExecStart=/bin/sh -c 'mountpoint -q /rbd/user || mount --bind /rbd/user /rbd/user'
+
+          [Install]
+          WantedBy=multi-user.target
+      register: misc_rbd_unit
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+      when: misc_rbd_unit.changed
+
+- name: Leader fixture (s1) — RBD mounts + postgres
+  hosts: s1
+  become: yes
+  tasks:
+    - name: Start RBD mount stand-in (marks s1 as storage leader)
+      systemd:
+        name: misc-rbd.service
+        enabled: yes
+        state: started
+
+    - name: Install postgres
+      apt:
+        name: [postgresql, postgresql-contrib, python3-psycopg2]
+        state: present
+
+    - name: Configure PostgreSQL to listen on all addresses
+      lineinfile:
+        path: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^#?listen_addresses\s*='
+        line: "listen_addresses = '*'"
+      notify: restart postgresql
+
+    - name: Configure PostgreSQL client authentication for Docker networks
+      lineinfile:
+        path: /etc/postgresql/16/main/pg_hba.conf
+        line: "host    all             all             172.0.0.0/8             scram-sha-256"
+        insertafter: "# IPv4 local connections:"
+      notify: restart postgresql
+
+    - name: Ensure postgres is running
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart postgresql
+      systemd:
+        name: postgresql
+        state: restarted
+
+# The real playbook, unmodified: leader detection via the /rbd/user
+# mountpoint finds s1; nginx renders in --local mode (web_services_force_local).
+- import_playbook: ../../config/ansible/app/install-authentik.yml

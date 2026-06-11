@@ -1,0 +1,88 @@
+#!/bin/bash
+set -e
+
+# etcd client config (endpoints + TLS certs) from the single source; set -a
+# exports the ETCDCTL_* vars so the bare etcdctl calls below pick them up.
+set -a; . /etc/ycluster/etcd-client.env 2>/dev/null || true; set +a
+
+AUTHENTIK_DATA_DIR="/rbd/misc/authentik"
+COMPOSE_PROJECT="authentik"
+ETCD_KEY_PREFIX="/cluster/config/authentik"
+
+# Get an existing secret from etcd, or generate one and store it atomically
+# (txn: put only if the key doesn't exist, then read back whatever won).
+get_or_generate_secret() {
+    local etcd_key="${ETCD_KEY_PREFIX}/$1"
+    local generator="$2"
+
+    local existing=$(etcdctl get "$etcd_key" --print-value-only 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+        echo "$existing"
+        return 0
+    fi
+
+    local new_value=$($generator)
+    local txn=$(cat <<EOF
+version("$etcd_key") = "0"
+
+put "$etcd_key" "$new_value"
+
+get "$etcd_key" --print-value-only
+EOF
+)
+    # need to echo trailing newlines because here-doc strips them
+    echo -e "$txn\n\n" | etcdctl txn > /dev/null
+
+    etcdctl get "$etcd_key" --print-value-only
+}
+
+gen_secret_key() { openssl rand -base64 48 | tr -d '\n'; }
+gen_password()   { openssl rand -base64 18 | tr -d '\n'; }
+gen_token()      { openssl rand -hex 32; }
+
+start_authentik() {
+    # Data directories with authentik's in-container uid/gid (1000)
+    # (misc-rbd.service dependency ensures /rbd/misc is mounted)
+    mkdir -p "$AUTHENTIK_DATA_DIR"/{media,custom-templates,certs}
+    chown -R 1000:1000 "$AUTHENTIK_DATA_DIR"
+
+    local secret_key=$(get_or_generate_secret secret-key gen_secret_key)
+    local bootstrap_password=$(get_or_generate_secret bootstrap-password gen_password)
+    local bootstrap_token=$(get_or_generate_secret bootstrap-token gen_token)
+
+    local env_file=$(mktemp --tmpdir=/dev/shm)
+    trap "rm -f '$env_file'" EXIT
+
+    echo "AUTHENTIK_SECRET_KEY=$secret_key" > "$env_file"
+    echo "AUTHENTIK_BOOTSTRAP_PASSWORD=$bootstrap_password" >> "$env_file"
+    echo "AUTHENTIK_BOOTSTRAP_TOKEN=$bootstrap_token" >> "$env_file"
+    echo "AUTHENTIK_TAG=${AUTHENTIK_TAG:?AUTHENTIK_TAG must be set by the unit}" >> "$env_file"
+    echo "AUTHENTIK_PORT=${AUTHENTIK_PORT:-9300}" >> "$env_file"
+    echo "AUTHENTIK_DATA_DIR=$AUTHENTIK_DATA_DIR" >> "$env_file"
+    echo "AUTHENTIK_DB_USER=authentik" >> "$env_file"
+    echo "AUTHENTIK_DB_PASS=authentik" >> "$env_file"
+    echo "AUTHENTIK_DB_NAME=authentik" >> "$env_file"
+
+    cd /etc/authentik
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
+}
+
+stop_authentik() {
+    echo "Stopping authentik"
+    cd /etc/authentik
+    docker compose -p "$COMPOSE_PROJECT" down
+    echo "authentik stopped"
+}
+
+case "$1" in
+    start)
+        start_authentik
+        ;;
+    stop)
+        stop_authentik
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac

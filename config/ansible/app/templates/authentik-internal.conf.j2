@@ -1,0 +1,36 @@
+# HTTP - auth.xc (cluster-internal)
+#
+# authentik IdP, internal access (ycluster user CLI, future OIDC clients
+# inside the cluster). External access is the separate certbot-managed
+# vhost (authentik_auth.conf.j2 → auth.<domain>).
+# Restricted to the cluster subnet.
+server {
+    listen 80;
+    server_name auth.xc;
+
+    client_max_body_size 10M;
+
+    location / {
+        allow 10.0.0.0/24;
+        allow 127.0.0.0/8;
+        # Docker bridge networks on the host (Open-WebUI's OIDC client
+        # reaches us via host-gateway).
+        allow 172.16.0.0/12;
+        deny all;
+
+        proxy_pass http://127.0.0.1:{{ authentik_port }}/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support (authentik UI)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+}

@@ -11,7 +11,11 @@ all:
   vars:
     ansible_connection: ssh
     ansible_user: root
-    ansible_become: false   # we log in as root
+    # No ansible_become here: an inventory var would override play-level
+    # `become`/`become_user` keywords (breaking e.g. become_user: postgres
+    # in install-authentik.yml). We log in as root, so plays' become: yes
+    # is a no-op except where become_user switches identity — exactly like
+    # the real cluster.
     # Harmless default: on a fresh 3-node bootstrap the "add member to
     # existing cluster" task is skipped, but Ansible 2.19 templates its
     # delegate_to before evaluating when:, erroring on the undefined var.

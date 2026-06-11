@@ -1,0 +1,86 @@
+# Recovery flow for admin-generated reset links (`ycluster user recovery`).
+# No SMTP anywhere: the API returns a one-time URL the admin hands to the
+# user out-of-band, mirroring the invitation UX. The link's token carries
+# the pending user, so the flow only prompts for a new password.
+version: 1
+metadata:
+  name: ycluster-recovery
+entries:
+  - model: authentik_flows.flow
+    id: flow-recovery
+    identifiers:
+      slug: recovery-link
+    attrs:
+      name: ycluster-recovery
+      title: Set a new password
+      designation: recovery
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-password
+    identifiers:
+      name: ycluster-recovery-field-password
+    attrs:
+      field_key: password
+      label: New password
+      type: password
+      required: true
+      placeholder: New password
+      order: 0
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-password-repeat
+    identifiers:
+      name: ycluster-recovery-field-password-repeat
+    attrs:
+      field_key: password_repeat
+      label: New password (repeat)
+      type: password
+      required: true
+      placeholder: New password (repeat)
+      order: 1
+
+  - model: authentik_stages_prompt.promptstage
+    id: stage-prompt
+    identifiers:
+      name: ycluster-recovery-prompt
+    attrs:
+      fields:
+        - !KeyOf prompt-password
+        - !KeyOf prompt-password-repeat
+
+  - model: authentik_stages_user_write.userwritestage
+    id: stage-user-write
+    identifiers:
+      name: ycluster-recovery-user-write
+    attrs:
+      user_creation_mode: never_create
+
+  - model: authentik_stages_user_login.userloginstage
+    id: stage-user-login
+    identifiers:
+      name: ycluster-recovery-user-login
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow-recovery
+      stage: !KeyOf stage-prompt
+      order: 10
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow-recovery
+      stage: !KeyOf stage-user-write
+      order: 20
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow-recovery
+      stage: !KeyOf stage-user-login
+      order: 30
+
+  # The users/<pk>/recovery/ API refuses without a recovery flow on the brand.
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      flow_recovery: !KeyOf flow-recovery

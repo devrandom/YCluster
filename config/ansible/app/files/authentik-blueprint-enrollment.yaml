@@ -1,0 +1,96 @@
+# Invitation-gated enrollment flow (see docs/design/vm-usage-scheduling-accounts.md).
+# Public enrollment is closed: the invitation stage aborts the flow unless a
+# valid single-use invitation token is presented (`ycluster user invite`
+# issues them). The invitation's fixed_data pre-binds username/email/name,
+# so the user only sets a password.
+version: 1
+metadata:
+  name: ycluster-enrollment
+entries:
+  - model: authentik_flows.flow
+    id: flow-enrollment
+    identifiers:
+      slug: enrollment-invitation
+    attrs:
+      name: ycluster-enrollment
+      title: Welcome to YCluster
+      designation: enrollment
+      authentication: require_unauthenticated
+
+  - model: authentik_stages_invitation.invitationstage
+    id: stage-invitation
+    identifiers:
+      name: ycluster-enrollment-invitation
+    attrs:
+      continue_flow_without_invitation: false
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-password
+    identifiers:
+      name: ycluster-enrollment-field-password
+    attrs:
+      field_key: password
+      label: Password
+      type: password
+      required: true
+      placeholder: Password
+      order: 0
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-password-repeat
+    identifiers:
+      name: ycluster-enrollment-field-password-repeat
+    attrs:
+      field_key: password_repeat
+      label: Password (repeat)
+      type: password
+      required: true
+      placeholder: Password (repeat)
+      order: 1
+
+  - model: authentik_stages_prompt.promptstage
+    id: stage-prompt
+    identifiers:
+      name: ycluster-enrollment-prompt
+    attrs:
+      fields:
+        - !KeyOf prompt-password
+        - !KeyOf prompt-password-repeat
+
+  - model: authentik_stages_user_write.userwritestage
+    id: stage-user-write
+    identifiers:
+      name: ycluster-enrollment-user-write
+    attrs:
+      user_creation_mode: always_create
+      create_users_as_inactive: false
+      user_type: internal
+
+  - model: authentik_stages_user_login.userloginstage
+    id: stage-user-login
+    identifiers:
+      name: ycluster-enrollment-user-login
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow-enrollment
+      stage: !KeyOf stage-invitation
+      order: 10
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow-enrollment
+      stage: !KeyOf stage-prompt
+      order: 20
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow-enrollment
+      stage: !KeyOf stage-user-write
+      order: 30
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow-enrollment
+      stage: !KeyOf stage-user-login
+      order: 40

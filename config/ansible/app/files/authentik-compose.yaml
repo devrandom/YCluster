@@ -1,0 +1,47 @@
+services:
+  server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG}
+    container_name: authentik-server
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_POSTGRESQL__HOST: host.docker.internal
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB_NAME:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASS:-authentik}
+      # Applied by authentik on first boot only: akadmin password + an API
+      # token for it (the token is what `ycluster user` authenticates with).
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN}
+    volumes:
+      - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/media:/media
+      - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/custom-templates:/templates
+      - /etc/authentik/blueprints:/blueprints/custom:ro
+    ports:
+      - ${AUTHENTIK_PORT:-9300}:9000
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    shm_size: 512m
+    restart: unless-stopped
+
+  worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG}
+    container_name: authentik-worker
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_POSTGRESQL__HOST: host.docker.internal
+      AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB_NAME:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASS:-authentik}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN}
+    volumes:
+      - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/media:/media
+      - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/custom-templates:/templates
+      - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/certs:/certs
+      - /etc/authentik/blueprints:/blueprints/custom:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    shm_size: 512m
+    restart: unless-stopped
