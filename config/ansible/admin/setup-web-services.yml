@@ -150,6 +150,18 @@
         dest: /etc/nginx/admin-api-public-locations.conf
       notify: restart nginx
 
+    - name: Configure nginx authenticated locations (IdP forward-auth)
+      copy:
+        src: admin-api-authed-locations.conf
+        dest: /etc/nginx/admin-api-authed-locations.conf
+      notify: restart nginx
+
+    - name: Install shared IdP forward-auth proxy snippet
+      copy:
+        src: admin-api-authentik-proxy.conf
+        dest: /etc/nginx/admin-api-authentik-proxy.conf
+      notify: restart nginx
+
     - name: Install shared grafana proxy snippet
       copy:
         src: admin-api-grafana-proxy.conf

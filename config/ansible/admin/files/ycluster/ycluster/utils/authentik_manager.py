@@ -73,6 +73,13 @@ class AuthentikAPI:
         return flows[0]['pk']
 
 
+def _get_user(api, email):
+    users = api.get('/core/users/', params={'username': email})['results']
+    if not users:
+        raise RuntimeError(f"no account for {email}")
+    return users[0]
+
+
 def add_user(email, name=None):
     """Create an internal account keyed by email (no credentials — for
     external-login linking; use invite for internal-password onboarding)."""
@@ -127,14 +134,29 @@ def list_users():
                          u['last_login'] or 'never'))
 
 
+ADMIN_GROUP = 'ycluster-admins'
+
+
+def set_admin(email, remove=False):
+    """Add (or remove) an account to the ycluster-admins group, which gates
+    the forward-auth'd admin web pages."""
+    api = AuthentikAPI()
+    user = _get_user(api, email)
+    groups = api.get('/core/groups/', params={'name': ADMIN_GROUP})['results']
+    if not groups:
+        raise RuntimeError(
+            f"group {ADMIN_GROUP} not found — has authentik applied the admin blueprint?")
+    action = 'remove_user' if remove else 'add_user'
+    api.post(f"/core/groups/{groups[0]['pk']}/{action}/", json={'pk': user['pk']})
+    print(f"{'Removed' if remove else 'Added'} {email} {'from' if remove else 'to'} {ADMIN_GROUP}")
+
+
 def recovery_link(email):
     """Generate a one-time password-set link for an existing account
     (out-of-band delivery — no SMTP anywhere in the cluster)."""
     api = AuthentikAPI()
-    users = api.get('/core/users/', params={'username': email})['results']
-    if not users:
-        raise RuntimeError(f"no account for {email}")
-    result = api.post(f"/core/users/{users[0]['pk']}/recovery/", json={})
+    user = _get_user(api, email)
+    result = api.post(f"/core/users/{user['pk']}/recovery/", json={})
     # Re-root the link on the user-facing base — the API builds it from the
     # request host (cluster-internal).
     link = result['link']
