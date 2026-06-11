@@ -84,7 +84,7 @@ def _get_user(api, email):
     return users[0]
 
 
-def add_user(email, name=None):
+def add_user(email, name=None, active=True):
     """Create an internal account keyed by email (no credentials — for
     external-login linking; use invite for internal-password onboarding)."""
     api = AuthentikAPI()
@@ -93,9 +93,66 @@ def add_user(email, name=None):
         'email': email,
         'name': name or email,
         'type': 'internal',
-        'is_active': True,
+        'is_active': active,
     })
     return {'email': email, 'pk': user['pk']}
+
+
+def import_owui_users(dry_run=False):
+    """Migrate Open-WebUI accounts into authentik by copying their bcrypt
+    password hashes (Django BCryptPasswordHasher format, 'bcrypt$' + hash).
+    Creates missing accounts (username = email) and writes the hash only
+    where the account has no usable password (Django marks those with a
+    '!' prefix) — never overwrites a password someone has set. The API
+    cannot set a raw hash, so this writes authentik's DB directly; both
+    databases are local, so it runs on the storage leader. Verification
+    needs the bcrypt hasher that install-authentik.yml ships in authentik's
+    user_settings.py."""
+    import psycopg2
+
+    api = AuthentikAPI()
+    existing = {u['username']
+                for u in api.get('/core/users/', params={'page_size': 500})['results']}
+
+    owui = psycopg2.connect(host='localhost', dbname='openwebui',
+                            user='openwebui', password='openwebui')
+    with owui, owui.cursor() as cur:
+        cur.execute('SELECT a.email, u.name, a.password, a.active'
+                    ' FROM auth a JOIN "user" u ON u.id = a.id'
+                    ' ORDER BY a.email')
+        accounts = cur.fetchall()
+    owui.close()
+
+    results = []
+    ak = psycopg2.connect(host='localhost', dbname='authentik',
+                          user='authentik', password='authentik')
+    with ak, ak.cursor() as cur:
+        for email, name, pw_hash, active in accounts:
+            if not (pw_hash or '').startswith('$2'):
+                results.append({'email': email, 'action': 'skipped',
+                                'detail': 'no bcrypt hash in Open-WebUI'})
+                continue
+            created = email not in existing
+            if dry_run:
+                results.append({'email': email, 'action': 'would-import',
+                                'detail': 'new account' if created else 'existing account'})
+                continue
+            if created:
+                add_user(email, name, active=active)
+            cur.execute(
+                "UPDATE authentik_core_user"
+                " SET password = %s, password_change_date = now()"
+                " WHERE username = %s"
+                "   AND (password IS NULL OR password = '' OR password LIKE '!%%')",
+                ('bcrypt$' + pw_hash, email))
+            if cur.rowcount:
+                results.append({'email': email, 'action': 'imported',
+                                'detail': 'created account' if created else ''})
+            else:
+                results.append({'email': email, 'action': 'kept',
+                                'detail': 'password already set in authentik'})
+    ak.close()
+    return results
 
 
 def invite_user(email, name=None, days=7):

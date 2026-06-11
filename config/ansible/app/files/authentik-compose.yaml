@@ -17,6 +17,7 @@ services:
       - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/media:/media
       - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/custom-templates:/templates
       - /etc/authentik/blueprints:/blueprints/custom:ro
+      - /etc/authentik/user_settings.py:/data/user_settings.py:ro
     ports:
       - ${AUTHENTIK_PORT:-9300}:9000
     extra_hosts:
@@ -41,6 +42,7 @@ services:
       - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/custom-templates:/templates
       - ${AUTHENTIK_DATA_DIR:-/rbd/misc/authentik}/certs:/certs
       - /etc/authentik/blueprints:/blueprints/custom:ro
+      - /etc/authentik/user_settings.py:/data/user_settings.py:ro
     extra_hosts:
       - host.docker.internal:host-gateway
     shm_size: 512m
