@@ -117,6 +117,18 @@ server {
 server {
     listen 127.0.0.2:80;
     server_name _;
-    return 301 https://$host$request_uri;
+
+    # ACME HTTP-01 challenges (certbot --webroot). Must live in THIS block:
+    # explicit 127.0.0.2:80 listeners beat the wildcard :80 server, so
+    # certbot's --nginx authenticator (which injects into wildcard/name-
+    # matched blocks) never answers on the tunnel path.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 {% endif %}
