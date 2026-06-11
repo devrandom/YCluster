@@ -340,6 +340,15 @@ def obtain_certificate(test_cert=False, non_interactive=False):
     primary_domain = config['domain']
     email = config.get('email')
     
+    # HTTP-01 challenges arrive via the rathole tunnel (127.0.0.2) — certbot
+    # must run on the node where the tunnel lands, or the CA never reaches
+    # the webroot this process writes to.
+    rathole = subprocess.run(['systemctl', 'is-active', '--quiet', 'rathole'])
+    if rathole.returncode != 0:
+        print("rathole.service is not active on this node — run this on the "
+              "node holding the public tunnel (normally the storage leader).")
+        return False
+
     print(f"Obtaining certificate for domains: {', '.join(domains)}")
     print(f"Primary domain: {primary_domain}")
     if email:
@@ -377,7 +386,7 @@ def obtain_certificate(test_cert=False, non_interactive=False):
         cmd = [
             'certbot', 'certonly',
             '--csr', csr_path,
-            '--nginx',
+            '--webroot', '-w', '/var/www/html',
             '--agree-tos',
             '--no-eff-email',
             '--cert-path', str(cert_path),
@@ -509,7 +518,7 @@ def renew_certificates(non_interactive=False):
         cmd = [
             'certbot', 'certonly',
             '--csr', csr_path,
-            '--nginx',
+            '--webroot', '-w', '/var/www/html',
             '--force-renewal',  # Force renewal even if not due
             '--cert-path', str(cert_path),
             '--chain-path', str(chain_path)
