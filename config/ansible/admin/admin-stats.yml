@@ -95,8 +95,61 @@
         state: started
         daemon_reload: yes
 
+    - name: Copy collect-vm-stats script
+      copy:
+        src: files/collect-vm-stats.py
+        dest: /usr/local/bin/collect-vm-stats
+        mode: '0755'
+
+    - name: Create systemd service for collect-vm-stats
+      copy:
+        dest: /etc/systemd/system/collect-vm-stats.service
+        content: |
+          [Unit]
+          Description=Drain VM lifecycle events and sample running instances
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          EnvironmentFile=/etc/ycluster/etcd-client.env
+          ExecStart=/usr/local/bin/collect-vm-stats
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart collect-vm-stats
+
+    - name: Create systemd timer for collect-vm-stats
+      copy:
+        dest: /etc/systemd/system/collect-vm-stats.timer
+        content: |
+          [Unit]
+          Description=Run collect-vm-stats every 2 minutes
+
+          [Timer]
+          OnBootSec=60s
+          OnUnitActiveSec=120s
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+      notify: restart collect-vm-stats
+
+    - name: Enable and start collect-vm-stats timer
+      systemd:
+        name: collect-vm-stats.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
   handlers:
     - name: restart collect-model-stats
       systemd:
         name: collect-model-stats.timer
+        state: restarted
+
+    - name: restart collect-vm-stats
+      systemd:
+        name: collect-vm-stats.timer
         state: restarted

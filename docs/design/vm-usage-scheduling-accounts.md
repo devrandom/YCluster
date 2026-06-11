@@ -211,9 +211,17 @@ for actually-RUNNING VMs and their GPU counts, and accrues:
 vm_samples(ts, vm, host, owner, gpus, state)
 ```
 
-Poll path: a new endpoint on the admin-api that already runs on every node
-(e.g. `GET /api/vms` → local `incus list --format json`, VM-host nodes
-only). Avoids opening Postgres or ssh fan-out from the leader.
+Sampling is push-based: a `vm-state-sampler` timer on each incus host
+(installed by `install-incus.yml`) runs `ycluster vm sample`, which
+snapshots local incus state into `/cluster/vm-state/<host>` over the
+cluster's one trust mechanism — etcd client certs. The collector turns
+fresh snapshots into rows (stale ones are skipped, so a dead host is
+never mistaken for runtime; UNIQUE(vm, host, ts) makes re-reads
+idempotent). Two pull designs were tried and dropped: an admin-api
+`GET /api/vms` endpoint (admin-api is deliberately sandboxed without
+incus socket access — S1 hardening — and `incus-admin` membership would
+mean full instance control) and leader→host root ssh (assumes an ssh
+trust topology that nothing else in the steady-state cluster relies on).
 
 ### Reconciliation
 

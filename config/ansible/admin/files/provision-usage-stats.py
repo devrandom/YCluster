@@ -54,6 +54,42 @@ def main():
         UNIQUE(period_start, period_end, user_id, model)
     );""", db='usage_stats', check=True)
 
+    # VM usage accounting (see docs/design/vm-usage-scheduling-accounts.md):
+    # vm_events is the billing-authoritative lifecycle log (drained from the
+    # etcd queue; etcd_key UNIQUE makes the drain exactly-once); vm_samples
+    # is the periodic observation of actual incus state (cross-check).
+    psql("""CREATE TABLE IF NOT EXISTS vm_events (
+        id BIGSERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ NOT NULL,
+        vm TEXT NOT NULL,
+        host TEXT,
+        event TEXT NOT NULL,
+        owner TEXT,
+        gpus INT,
+        initiator TEXT,
+        billable BOOLEAN NOT NULL DEFAULT FALSE,
+        etcd_key TEXT UNIQUE
+    );""", db='usage_stats', check=True)
+    psql("CREATE INDEX IF NOT EXISTS vm_events_ts_idx ON vm_events (ts);",
+         db='usage_stats', check=True)
+
+    psql("""CREATE TABLE IF NOT EXISTS vm_samples (
+        id BIGSERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ NOT NULL,
+        vm TEXT NOT NULL,
+        host TEXT,
+        owner TEXT,
+        gpus INT,
+        state TEXT,
+        interval_s INT NOT NULL
+    );""", db='usage_stats', check=True)
+    psql("CREATE INDEX IF NOT EXISTS vm_samples_ts_idx ON vm_samples (ts);",
+         db='usage_stats', check=True)
+    # Snapshot ingestion re-reads the same per-host snapshot until the next
+    # sampler tick overwrites it — the unique key makes that idempotent.
+    psql("""CREATE UNIQUE INDEX IF NOT EXISTS vm_samples_vm_host_ts_idx
+            ON vm_samples (vm, host, ts);""", db='usage_stats', check=True)
+
     psql("GRANT ALL PRIVILEGES ON DATABASE usage_stats TO usage_stats;", check=True)
     psql("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO usage_stats;", db='usage_stats', check=True)
     psql("GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO usage_stats;", db='usage_stats', check=True)

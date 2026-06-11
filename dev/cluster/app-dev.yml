@@ -50,15 +50,22 @@
         daemon_reload: yes
       when: misc_rbd_unit.changed
 
-- name: Leader fixture (s1) — RBD mounts + postgres
-  hosts: s1
+# The first storage node is the designated dev leader (matches the
+# mountpoint-based leader detection the real playbooks use).
+- name: Leader fixture — RBD mounts, VIP, postgres
+  hosts: storage[0]
   become: yes
   tasks:
-    - name: Start RBD mount stand-in (marks s1 as storage leader)
+    - name: Start RBD mount stand-in (marks this node as storage leader)
       systemd:
         name: misc-rbd.service
         enabled: yes
         state: started
+
+    - name: Assign storage VIP to the leader (dev stand-in for keepalived)
+      shell: ip addr show dev eth0 | grep -q "10.0.0.100/" || ip addr add 10.0.0.100/24 dev eth0
+      register: vip_add
+      changed_when: vip_add.rc == 0 and 'inet' not in (vip_add.stdout or '')
 
     - name: Install postgres
       apt:
@@ -90,6 +97,27 @@
       systemd:
         name: postgresql
         state: restarted
+
+# VM-state sampler on the compute fixture nodes (where dev incus + the
+# fakevm fixture live). Same unit files install-incus.yml deploys on real
+# incus hosts — that playbook isn't container-safe (GPU profiles), so the
+# fixture installs them directly.
+- name: vm-state-sampler on the incus fixture hosts (dev)
+  hosts: compute
+  become: yes
+  tasks:
+    - name: Install vm-state-sampler units
+      copy:
+        src: "../../config/ansible/admin/files/vm-state-sampler.{{ item }}"
+        dest: "/etc/systemd/system/vm-state-sampler.{{ item }}"
+      loop: [service, timer]
+
+    - name: Enable and start vm-state-sampler timer
+      systemd:
+        name: vm-state-sampler.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
 
 # The real playbook, unmodified: leader detection via the /rbd/user
 # mountpoint finds s1; nginx renders in --local mode (web_services_force_local).
