@@ -40,6 +40,51 @@ gen_secret_key() { openssl rand -base64 48 | tr -d '\n'; }
 gen_password()   { openssl rand -base64 18 | tr -d '\n'; }
 gen_token()      { openssl rand -hex 32; }
 
+# The Open-WebUI OIDC provider blueprint needs two runtime values (the
+# etcd-sourced client secret and the external domain), so it is written
+# here at service start rather than by Ansible like the static blueprints.
+# open-webui-manager reads the same etcd key for the client side.
+write_owui_blueprint() {
+    local external_domain="$1"
+    local client_secret="$2"
+    local bp=/etc/authentik/blueprints/ycluster-owui.yaml
+    cat > "$bp" <<EOF
+# Written by authentik-manager at service start — do not edit.
+version: 1
+metadata:
+  name: ycluster-owui
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: provider-owui
+    identifiers:
+      name: open-webui
+    attrs:
+      client_type: confidential
+      client_id: open-webui
+      client_secret: "$client_secret"
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      sub_mode: user_email
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+      redirect_uris:
+        - matching_mode: strict
+          url: https://$external_domain/oauth/oidc/callback
+  - model: authentik_core.application
+    identifiers:
+      slug: open-webui
+    attrs:
+      name: Open WebUI
+      provider: !KeyOf provider-owui
+      meta_launch_url: https://$external_domain/
+EOF
+    chown 1000:1000 "$bp"
+    chmod 600 "$bp"
+}
+
 start_authentik() {
     # Data directories with authentik's in-container uid/gid (1000)
     # (misc-rbd.service dependency ensures /rbd/misc is mounted)
@@ -49,6 +94,14 @@ start_authentik() {
     local secret_key=$(get_or_generate_secret secret-key gen_secret_key)
     local bootstrap_password=$(get_or_generate_secret bootstrap-password gen_password)
     local bootstrap_token=$(get_or_generate_secret bootstrap-token gen_token)
+
+    # OIDC client registration for Open-WebUI — only once an external
+    # domain exists (redirect URIs and launch URL are external-only).
+    local external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+    if [ -n "$external_domain" ]; then
+        write_owui_blueprint "$external_domain" \
+            "$(get_or_generate_secret owui-client-secret gen_token)"
+    fi
 
     local env_file=$(mktemp --tmpdir=/dev/shm)
     trap "rm -f '$env_file'" EXIT

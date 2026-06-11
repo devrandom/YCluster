@@ -29,9 +29,24 @@ services:
       - 'MEM_EMBEDDER_PROVIDER=ollama'
       - 'MEM_OLLAMA_LLM_MODEL=deepseek-r1:70b'
       - 'MEM_VECTOR_STORE_QDRANT_DIMS=768'
+      # OIDC login via the cluster IdP — values come from the manager's env
+      # file (set only on the main instance once authentik is live); empty
+      # client id leaves OAuth disabled.
+      - 'OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}'
+      - 'OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}'
+      - 'OPENID_PROVIDER_URL=${OPENID_PROVIDER_URL:-}'
+      - 'OAUTH_PROVIDER_NAME=YCluster'
+      - 'ENABLE_OAUTH_SIGNUP=${ENABLE_OAUTH_SIGNUP:-False}'
+      - 'OAUTH_MERGE_ACCOUNTS_BY_EMAIL=${OAUTH_MERGE_ACCOUNTS_BY_EMAIL:-False}'
+      - 'ENABLE_SIGNUP=${ENABLE_SIGNUP:-True}'
+      - 'DEFAULT_USER_ROLE=${DEFAULT_USER_ROLE:-pending}'
     extra_hosts:
       - host.docker.internal:host-gateway
       # Resolve cluster .xc names that aren't in Docker's embedded DNS so the
       # container can hit the host's nginx vhosts (inference.xc → local-ai-proxy).
       - inference.xc:host-gateway
+      # The OIDC issuer must resolve from inside the container; the host's
+      # nginx serves auth.<domain> with the real certificate, so host-gateway
+      # avoids hairpinning through the external frontend.
+      - auth.${EXTERNAL_DOMAIN:-domain-unset.invalid}:host-gateway
     restart: unless-stopped

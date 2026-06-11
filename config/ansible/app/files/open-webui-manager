@@ -101,6 +101,26 @@ start_openwebui() {
     echo "OPENWEBUI_DB_USER=openwebui${SUFFIX}" >> "$env_file"
     echo "OPENWEBUI_DB_PASS=openwebui${SUFFIX}" >> "$env_file"
     echo "OPENWEBUI_DB_NAME=openwebui${SUFFIX}" >> "$env_file"
+
+    # OIDC login via the cluster IdP (authentik) — main instance only, and
+    # only once authentik has published the client secret and an external
+    # domain is configured. Signup then moves entirely behind authentik
+    # (invitation-gated), so OAuth users land active (role: user) and the
+    # password signup form is disabled; password *login* stays available
+    # for existing accounts during the transition.
+    local external_domain oidc_secret
+    external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+    oidc_secret=$(etcdctl get /cluster/config/authentik/owui-client-secret --print-value-only 2>/dev/null || true)
+    if [ -z "$INSTANCE" ] && [ -n "$external_domain" ] && [ -n "$oidc_secret" ]; then
+        echo "EXTERNAL_DOMAIN=$external_domain" >> "$env_file"
+        echo "OAUTH_CLIENT_ID=open-webui" >> "$env_file"
+        echo "OAUTH_CLIENT_SECRET=$oidc_secret" >> "$env_file"
+        echo "OPENID_PROVIDER_URL=https://auth.$external_domain/application/o/open-webui/.well-known/openid-configuration" >> "$env_file"
+        echo "ENABLE_OAUTH_SIGNUP=True" >> "$env_file"
+        echo "OAUTH_MERGE_ACCOUNTS_BY_EMAIL=True" >> "$env_file"
+        echo "ENABLE_SIGNUP=False" >> "$env_file"
+        echo "DEFAULT_USER_ROLE=user" >> "$env_file"
+    fi
     
     # Ensure temp file is cleaned up on exit
     trap "rm -f '$env_file'" EXIT
