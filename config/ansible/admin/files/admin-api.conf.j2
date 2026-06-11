@@ -104,6 +104,9 @@ server {
     # Public whitelist (wg bootstrap flow + read-only status dashboard).
     include /etc/nginx/admin-api-public-locations.conf;
 
+    # Authenticated pages (forward-auth via the cluster IdP).
+    include /etc/nginx/admin-api-authed-locations.conf;
+
     # Anything not in the whitelist is not exposed.
     location / {
         return 404;
