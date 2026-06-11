@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Users</title>
+  <script src="/static/nav.js" defer></script>
+  <script src="/static/alpine-3.14.1.min.js" defer></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+    h1 { color: #333; text-align: center; margin-bottom: 0.5rem; }
+    h2 { color: #333; font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+    .explainer { color: #666; font-size: 0.85rem; text-align: center; margin-bottom: 1.5rem; }
+    table { width: 100%; border-collapse: collapse; background-color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    th { text-align: left; padding: 8px 12px; border-bottom: 1px solid #ddd; background-color: #f8f9fa; font-weight: bold; font-size: 0.85rem; text-transform: uppercase; }
+    td { padding: 8px 12px; border-bottom: 1px solid #ddd; }
+    tr:hover { background-color: #f8f9fa; }
+    .badge { font-size: 0.7rem; font-weight: 600; border-radius: 999px; padding: 0.05rem 0.55rem; white-space: nowrap; }
+    .badge.admin { color: #6b5300; background: #fff3c4; }
+    .badge.inactive { color: #721c24; background: #f8d7da; }
+    button { padding: 0.3rem 0.7rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; font-size: 0.8rem; }
+    button:hover { background: #2563eb; }
+    button.minor { background: #e5e7eb; color: #333; }
+    input[type=text], input[type=number] { padding: 0.35rem 0.5rem; border-radius: 4px; border: 1px solid #ccc; }
+    .invite-form { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; background: white;
+                   border: 1px solid #d8dce1; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+    .result { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem;
+              margin: 0.75rem 0; font-size: 0.85rem; word-break: break-all; }
+    .error { background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 0.6rem 1rem;
+             margin: 0.75rem 0; color: #b91c1c; font-size: 0.85rem; }
+    .empty { color: #666; font-style: italic; padding: 1.5rem; text-align: center; }
+    .url { font-family: monospace; font-size: 0.75rem; word-break: break-all; }
+  </style>
+</head>
+<body x-data="usersApp()" x-init="load()">
+  <h1>Users</h1>
+  <p class="explainer">
+    Accounts live in the cluster IdP. <b>Invite</b> creates a single-use
+    enrollment link for a <i>new</i> account (hand it over out-of-band — no
+    email is sent); <b>reset link</b> issues a one-time password (re)set for
+    an existing one. <b>Admin</b> grants access to these admin pages.
+  </p>
+
+  <template x-if="error"><div class="error" x-text="error"></div></template>
+  <template x-if="result">
+    <div class="result">
+      <b x-text="result.label"></b>
+      <template x-if="result.url">
+        <div><span class="url" x-text="result.url"></span>
+        <button class="minor" @click="navigator.clipboard.writeText(result.url)">copy</button></div>
+      </template>
+    </div>
+  </template>
+
+  <h2>Invite a new user</h2>
+  <form class="invite-form" @submit.prevent="act('invite', invite.email, {name: invite.name, days: invite.days}, 'Invitation for ' + invite.email + ':')">
+    <input type="text" x-model="invite.email" placeholder="email" size="28" required>
+    <input type="text" x-model="invite.name" placeholder="display name (optional)" size="22">
+    <label>expires <input type="number" x-model="invite.days" min="1" max="90" style="width:4rem"> d</label>
+    <button type="submit">Create invitation</button>
+  </form>
+
+  <h2>Accounts</h2>
+  <template x-if="!loading && users.length === 0"><p class="empty">No accounts</p></template>
+  <table x-show="users.length > 0">
+    <thead><tr><th>Email</th><th>Name</th><th></th><th>Last login</th><th>Actions</th></tr></thead>
+    <tbody>
+      <template x-for="u in users" :key="u.email">
+        <tr>
+          <td x-text="u.email"></td>
+          <td x-text="u.name"></td>
+          <td>
+            <span class="badge admin" x-show="u.is_admin">admin</span>
+            <span class="badge inactive" x-show="!u.active">inactive</span>
+          </td>
+          <td x-text="u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'never'"></td>
+          <td>
+            <button class="minor" @click="act('recovery', u.email, {}, 'Password (re)set link for ' + u.email + ':')">reset link</button>
+            <button class="minor"
+                    @click="act(u.is_admin ? 'admin_remove' : 'admin_add', u.email, {}, '')"
+                    x-text="u.is_admin ? 'revoke admin' : 'make admin'"></button>
+          </td>
+        </tr>
+      </template>
+    </tbody>
+  </table>
+
+  <h2>Outstanding invitations</h2>
+  <template x-if="!loading && invitations.length === 0"><p class="empty">None</p></template>
+  <table x-show="invitations.length > 0">
+    <thead><tr><th>Email</th><th>Expires</th><th>Link</th><th></th></tr></thead>
+    <tbody>
+      <template x-for="inv in invitations" :key="inv.url">
+        <tr>
+          <td x-text="inv.email"></td>
+          <td x-text="inv.expires ? inv.expires.slice(0, 16).replace('T', ' ') : '-'"></td>
+          <td><span class="url" x-text="inv.url"></span></td>
+          <td>
+            <button class="minor" @click="navigator.clipboard.writeText(inv.url)">copy</button>
+            <button class="minor" @click="act('uninvite', inv.email, {}, '')">revoke</button>
+          </td>
+        </tr>
+      </template>
+    </tbody>
+  </table>
+
+  <script>
+    function usersApp() {
+      return {
+        users: [],
+        invitations: [],
+        loading: false,
+        error: '',
+        result: null,
+        invite: {email: '', name: '', days: 7},
+
+        load() {
+          this.loading = true
+          fetch('/admin/users/data')
+            .then(r => r.json())
+            .then(d => {
+              if (d.error) { this.error = d.error }
+              else { this.users = d.users; this.invitations = d.invitations }
+              this.loading = false
+            })
+            .catch(() => { this.error = 'failed to load'; this.loading = false })
+        },
+
+        act(action, email, extra, label) {
+          this.error = ''; this.result = null
+          fetch('/admin/users/action', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action, email, ...extra}),
+          })
+            .then(r => r.json())
+            .then(d => {
+              if (d.error) { this.error = d.error; return }
+              if (d.url) this.result = {label, url: d.url}
+              else if (d.message) this.result = {label: d.message}
+              if (action === 'invite') this.invite = {email: '', name: '', days: 7}
+              this.load()
+            })
+            .catch(() => { this.error = 'request failed' })
+        }
+      }
+    }
+  </script>
+</body>
+</html>

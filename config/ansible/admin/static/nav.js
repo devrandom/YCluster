@@ -17,6 +17,7 @@
         ['VM Schedule', '/admin/vm-schedule'],
         ['VM Usage', '/admin/vm-usage'],
         ['Model Usage', '/admin/model-usage'],
+        ['Users', '/admin/users'],
         ['Monitoring', '/grafana/dashboards'],
         ['Account', authHref],
     ];

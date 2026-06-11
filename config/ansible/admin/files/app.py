@@ -2769,6 +2769,56 @@ def vm_schedule_set():
     return jsonify({'ok': True, 'mode': mode})
 
 
+@app.route('/admin/users')
+def users_page():
+    """Account management against the cluster IdP (admin-only)."""
+    return render_template('admin-users.html')
+
+
+@app.route('/admin/users/data')
+def users_data():
+    _, is_admin = _authentik_identity()
+    if not is_admin:
+        return jsonify({'error': 'admin only'}), 403
+    from ycluster.utils import authentik_manager
+    try:
+        return jsonify({'users': authentik_manager.users_data(),
+                        'invitations': authentik_manager.invitations_data()})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+
+
+# Mutating, admin-only (same forward-auth reasoning as vm_schedule_set);
+# every action maps onto a `ycluster user` operation.
+@app.route('/admin/users/action', methods=['POST'])
+def users_action():
+    email_id, is_admin = _authentik_identity()
+    if not is_admin:
+        return jsonify({'error': 'admin only'}), 403
+    from ycluster.utils import authentik_manager
+    data = request.get_json(silent=True) or {}
+    action = data.get('action')
+    email = (data.get('email') or '').strip()
+    if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
+        return jsonify({'error': 'invalid email'}), 400
+    try:
+        if action == 'invite':
+            days = max(1, min(90, int(data.get('days') or 7)))
+            url = authentik_manager.invite_user(email, data.get('name') or None, days)
+            return jsonify({'ok': True, 'url': url})
+        if action == 'uninvite':
+            count = authentik_manager.revoke_invitation(email)
+            return jsonify({'ok': True, 'message': f'revoked {count} invitation(s)'})
+        if action == 'recovery':
+            return jsonify({'ok': True, 'url': authentik_manager.recovery_link(email)})
+        if action in ('admin_add', 'admin_remove'):
+            msg = authentik_manager.set_admin(email, remove=(action == 'admin_remove'))
+            return jsonify({'ok': True, 'message': msg})
+        return jsonify({'error': 'unknown action'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
 @app.route('/admin/vm-usage')
 def vm_usage_page():
     """VM GPU-hour accounting: billable/tracked (events) vs observed (samples)."""

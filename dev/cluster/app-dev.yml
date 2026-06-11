@@ -129,6 +129,18 @@
           default_instance_type: container
           vm_nas_share: false
 
+# No cluster DNS in dev — point auth.xc at the leader's nginx (the
+# authentik-internal vhost) so the CLI and admin-api reach the IdP by its
+# real name, like on the real cluster.
+- name: auth.xc hosts entry (dev stand-in for cluster DNS)
+  hosts: managed
+  become: yes
+  tasks:
+    - name: Resolve auth.xc to the leader
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars[groups['storage'][0]].ansible_host }} auth.xc"
+
 # The real playbook, unmodified: leader detection via the /rbd/user
 # mountpoint finds s1; nginx renders in --local mode (web_services_force_local).
 - import_playbook: ../../config/ansible/app/install-authentik.yml
