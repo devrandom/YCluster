@@ -43,6 +43,12 @@
         dest: /etc/authentik/docker-compose.yml
         mode: '0644'
 
+    - name: Install custom Django settings (bcrypt hasher for imported hashes)
+      copy:
+        src: files/authentik-user-settings.py
+        dest: /etc/authentik/user_settings.py
+        mode: '0644'
+
     - name: Install enrollment blueprint (invitation-gated)
       copy:
         src: files/authentik-blueprint-enrollment.yaml

@@ -38,6 +38,13 @@ def register_user_commands(subparsers):
     uninvite_parser.add_argument('email', help='Invited email')
     uninvite_parser.set_defaults(func=user_uninvite)
 
+    import_parser = user_subparsers.add_parser(
+        'import-owui',
+        help='Import Open-WebUI accounts by copying their bcrypt password hashes')
+    import_parser.add_argument('--dry-run', action='store_true',
+                               help='Report what would happen without changing anything')
+    import_parser.set_defaults(func=user_import_owui)
+
     list_parser = user_subparsers.add_parser('list', help='List accounts')
     list_parser.set_defaults(func=user_list)
 
@@ -78,6 +85,13 @@ def user_uninvite(args):
         print(f"Revoked {count} invitation(s) for {args.email}")
     else:
         print(f"No outstanding invitation for {args.email}")
+
+
+def user_import_owui(args):
+    from ..utils import authentik_manager
+    fmt = "{:<40} {:<14} {}"
+    for r in authentik_manager.import_owui_users(dry_run=args.dry_run):
+        print(fmt.format(r['email'], r['action'], r['detail']))
 
 
 def user_list(args):
