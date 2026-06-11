@@ -242,13 +242,16 @@ per-user and per-VM GPU-hours over a period, billable vs observed
 
 Desired-state reconciliation, the idiom the cluster already speaks:
 
-- **Schedule model**: per VM, weekly recurring windows (e.g. Mon–Fri
-  08:00–20:00) plus one-off overrides ("up for the next 4 h", "down this
-  week"). Stored in Postgres; edited via the web page.
-- **Reconciler**: leader-elected timer compares desired vs actual state
-  and issues start/stop through the same admin-api host endpoint
-  (POST, host-local incus calls → `vm_manager`, so events are emitted with
-  `initiator=scheduler`).
+- **Schedule model**: per VM, a mode (`unmanaged` — scheduler never
+  touches it — / `on` / `off` / `schedule` with weekly UTC windows),
+  stored as desired state in etcd (`/cluster/vm-desired/<name>`); edited
+  via the web page (admin-api writes it, owner-scoped via the forward-auth
+  identity headers).
+- **Reconciler**: a `vm-reconciler` timer on each incus host (sibling of
+  the sampler, same trust shape: the host pulls intent from etcd with its
+  client cert and converges its own instances through `vm_manager` —
+  there is no inbound control channel). Scheduler starts emit
+  `initiator=scheduler, billable=true`.
 - **Stops must be graceful** — never `incus stop --force` on a GPU VM
   (FLR wedge, see vm-hosting.md "Critical rule"). A scheduled stop sends a
   wall warning into the guest and waits a grace period; clean shutdown
@@ -260,13 +263,30 @@ Desired-state reconciliation, the idiom the cluster already speaks:
 
 A *stopped* VM still holds its passthrough GPUs — the incus device entries
 keep the PCI addresses allocated, so scheduling a VM down does **not**
-return its GPUs to the pool. For scheduling to actually share hardware,
-the reconciler should (optionally, per VM) detach GPU devices on scheduled
-stop and re-attach on start from the free pool — exactly the manual
-procedure used to resize vm1, and the planned `vm set-gpus` subcommand
-(TODO.md). This also opens the door to billing *reservation* hours vs
-*runtime* hours differently. Defer to a later iteration, but design the
-schedule schema with a `release_gpus_on_stop` flag from the start.
+return its GPUs to the pool. This is also why the v1 reconciler needs no
+admission control: it only starts VMs that already own their GPUs, so
+overlapping schedules cannot race for cards (RAM is the only contended
+resource, and a failed start is retried-and-logged, never forced).
+
+For scheduling to actually share hardware, a later iteration adds
+`release_gpus_on_stop`: detach GPU devices on scheduled stop, re-acquire
+from the free pool on start (the manual vm1 resize procedure / planned
+`vm set-gpus`). That MUST land together with — not before — two pieces
+(decided 2026-06-11):
+
+- **Save-time admission control**: reject (don't just warn) a schedule
+  whose windows overcommit a host's GPU pool against the already-accepted
+  schedules, so conflicts surface when the user is looking at the page,
+  not as a silent start failure at 8am.
+- **Commitments visibility**: the schedule page shows existing
+  commitments per host (whose windows hold how many GPUs when), so users
+  see available capacity *before* composing a schedule rather than
+  blindly trying and erroring out.
+
+Plus: start failures (RAM exhaustion etc.) surface as a status on the
+schedule page, not only in the reconciler journal. Releasing GPUs also
+opens the door to billing *reservation* hours vs *runtime* hours
+differently.
 
 ## Phase 4 — Quotas
 

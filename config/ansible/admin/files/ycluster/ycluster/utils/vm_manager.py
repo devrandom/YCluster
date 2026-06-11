@@ -34,6 +34,22 @@ VM_STATE_PREFIX = "/cluster/vm-state/"
 # Stamped into each snapshot; must match the vm-state-sampler.timer cadence
 # (files/vm-state-sampler.timer) — observed GPU-hours = sum(gpus * interval_s).
 VM_STATE_INTERVAL_S = 120
+# Desired power state per VM, written by the scheduling page (admin-api on
+# the leader) and converged by the vm-reconciler timer on each incus host —
+# hosts pull intent and push state over etcd client certs; there is no
+# inbound control channel. {"mode": "on"|"off"|"schedule", "windows":
+# [{"days": [0-6, Mon=0], "start": "HH:MM", "end": "HH:MM"}] (UTC),
+# "updated_by": ..., "updated_at": ...}. No record = unmanaged (status quo).
+VM_DESIRED_PREFIX = "/cluster/vm-desired/"
+# Scheduler stop-grace markers ({"warned_at": iso}). Tick-based: one
+# reconcile tick warns the guest and stamps the marker, a later tick
+# (>= the grace below after the warning) stops — no in-process sleeps,
+# so concurrent stops don't serialize and a hung guest can't stall the
+# reconciler.
+VM_GRACE_PREFIX = "/cluster/vm-grace/"
+# Minimum warning-to-shutdown grace for scheduler-initiated stops
+# (effective grace is this rounded up to the next reconciler tick).
+SCHEDULED_STOP_GRACE_S = 300
 
 VM_PROFILE = "gpu-vm"
 VM_IMAGE = "ubuntu-cuda-vllm"          # default for VMs (GPU or not):
@@ -246,6 +262,11 @@ def _ensure_nas_share(name):
     call on every start as a backfill. Silently skips (warning only) if
     /near1 is unreachable, so a NAS outage doesn't block VM start.
     """
+    # Per-host opt-out (`vm_nas_share: false` in HOST_CONFIG_PATH) for
+    # hosts without a NAS mount — e.g. the dev container cluster, where
+    # the virtiofs attach can't work anyway (no idmapping under nesting).
+    if _host_config_value("vm_nas_share") == "false":
+        return
     host_dir = f"{NAS_HOST_BASE}/{name}"
     # `timeout` guards a hung CIFS automount: if the NAS is down, an
     # access to /near1 can block forever on the systemd automount.
@@ -382,25 +403,26 @@ def _valid_user(name):
                          f"letters, digits and . _ % + @ -")
 
 
-def _default_instance_type():
-    """Read the per-host default ('vm' or 'container') from HOST_CONFIG_PATH.
-
-    The file is written by admin/install-incus.yml. We avoid pulling in
-    PyYAML and just grep for the one key we care about. Fallback is 'vm'
-    so legacy hosts (those installed before this file existed) keep their
-    prior behaviour.
-    """
+def _host_config_value(wanted):
+    """Read one key from HOST_CONFIG_PATH (written by install-incus.yml).
+    Line-based on purpose — no PyYAML dependency. None when absent."""
     try:
         with open(HOST_CONFIG_PATH) as f:
             for line in f:
                 key, _, val = line.partition(":")
-                if key.strip() == "default_instance_type":
-                    v = val.strip().strip('"').strip("'")
-                    if v in ("vm", "container"):
-                        return v
-    except FileNotFoundError:
+                if key.strip() == wanted:
+                    return val.strip().strip('"').strip("'")
+    except OSError:
         pass
-    return "vm"
+    return None
+
+
+def _default_instance_type():
+    """Per-host default ('vm' or 'container') from HOST_CONFIG_PATH,
+    written by admin/install-incus.yml. Fallback is 'vm' so legacy hosts
+    (installed before the file existed) keep their prior behaviour."""
+    v = _host_config_value("default_instance_type")
+    return v if v in ("vm", "container") else "vm"
 
 
 def user_get(user):
@@ -516,6 +538,114 @@ def _inject_owner_keys(vm_name, keys, agent_timeout=180):
     guest = _guest_login_user(vm_name)
     content = "".join(k.strip() + "\n" for k in keys)
     _push_file(vm_name, f"/home/{guest}/.ssh/authorized_keys", content, guest)
+
+
+def desired_get(name):
+    return _get_json(VM_DESIRED_PREFIX + name)
+
+
+def desired_set(name, desired):
+    _put_json(VM_DESIRED_PREFIX + name, desired)
+
+
+def desired_delete(name):
+    _delete(VM_DESIRED_PREFIX + name)
+
+
+def _desired_on(desired, now):
+    """Evaluate a desired-state record at `now` (UTC)."""
+    mode = desired.get("mode")
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    minute = now.hour * 60 + now.minute
+    for w in desired.get("windows", []):
+        try:
+            sh, sm = map(int, w["start"].split(":"))
+            eh, em = map(int, w["end"].split(":"))
+        except (KeyError, ValueError):
+            continue
+        start, end = sh * 60 + sm, eh * 60 + em
+        if end > start:
+            if now.weekday() in w.get("days", []) and start <= minute < end:
+                return True
+        else:
+            # Window crosses midnight: the early-morning part belongs to
+            # the previous day's entry.
+            if (now.weekday() in w.get("days", []) and minute >= start) or \
+               ((now.weekday() - 1) % 7 in w.get("days", []) and minute < end):
+                return True
+    return False
+
+
+def reconcile():
+    """Converge local instances toward their desired power state.
+
+    Run by the vm-reconciler timer on incus hosts. Only registered
+    instances on THIS host with a desired-state record are touched;
+    everything else keeps the status quo. Scheduler starts are billable
+    (the owner asked for this runtime). Stops are graceful and
+    tick-based: first tick walls a warning into the guest and stamps a
+    grace marker, a later tick (grace elapsed, intent re-checked by
+    getting here again) cleanly stops — NEVER --force (GPU FLR wedge).
+    Failed convergence prints and retries next tick.
+    """
+    host = socket.gethostname()
+    now = datetime.now(timezone.utc)
+    statuses = {i.get("name"): i.get("status")
+                for i in _incus_json("list", "--format", "json")}
+    graces = _all_json(VM_GRACE_PREFIX)
+    for name, rec in sorted(vms_all().items()):
+        if rec.get("host") != host:
+            continue
+        desired = desired_get(name)
+        if not desired:
+            continue
+        want_on = _desired_on(desired, now)
+        running = statuses.get(name) == "Running"
+        grace = graces.get(name)
+
+        if want_on:
+            if grace:
+                _delete(VM_GRACE_PREFIX + name)
+                if running:
+                    print(f"reconcile: '{name}' desired flipped back on — "
+                          f"cancelled pending stop")
+            if not running:
+                print(f"reconcile: starting '{name}' (schedule/desired on)")
+                try:
+                    vm_start(name, billable=True, initiator="scheduler")
+                except Exception as e:
+                    print(f"  start failed (will retry next tick): {e}",
+                          file=sys.stderr)
+        elif running:
+            if not grace:
+                print(f"reconcile: warning '{name}' of scheduled stop "
+                      f"(>= {SCHEDULED_STOP_GRACE_S}s grace)")
+                _incus("exec", name, "--", "sh", "-c",
+                       "echo 'YCluster: scheduled shutdown within minutes "
+                       "(save your work)' | wall", check=False)
+                _put_json(VM_GRACE_PREFIX + name,
+                          {"warned_at": now.isoformat(timespec="seconds")})
+                continue
+            try:
+                warned = datetime.fromisoformat(grace["warned_at"])
+            except (KeyError, TypeError, ValueError):
+                warned = None
+            if warned is None or \
+                    (now - warned).total_seconds() >= SCHEDULED_STOP_GRACE_S:
+                print(f"reconcile: stopping '{name}' "
+                      f"(schedule/desired off, grace elapsed)")
+                try:
+                    vm_stop(name, initiator="scheduler")
+                    _delete(VM_GRACE_PREFIX + name)
+                except Exception as e:
+                    print(f"  stop failed (will retry next tick; "
+                          f"NOT forcing): {e}", file=sys.stderr)
+        elif grace:
+            # Already stopped (e.g. the owner shut it down during grace).
+            _delete(VM_GRACE_PREFIX + name)
 
 
 def _record_event(event, name, owner=None, gpus=None, initiator="cli",
@@ -724,29 +854,32 @@ def vm_resize(name, size):
               "(cloud-init growpart).")
 
 
-def vm_stop(name, billable=False):
+def vm_stop(name, billable=False, initiator="cli"):
     _incus("stop", name)
-    _record_event_from_record("stop", name, billable=billable)
+    _record_event_from_record("stop", name, initiator=initiator,
+                              billable=billable)
     print(f"Stopped '{name}'.")
 
 
-def vm_start(name, billable=False):
+def vm_start(name, billable=False, initiator="cli"):
     # Backfill any host-side state added since this instance was created
     # (currently just the /data NAS share). Idempotent.
     _ensure_nas_share(name)
     _incus("start", name)
-    _record_event_from_record("start", name, billable=billable)
+    _record_event_from_record("start", name, initiator=initiator,
+                              billable=billable)
     print(f"Started '{name}'.")
 
 
-def vm_restart(name, billable=False):
+def vm_restart(name, billable=False, initiator="cli"):
     if _instance_running(name):
         _incus("stop", name)
     _ensure_nas_share(name)
     _incus("start", name)
     # Continuity event: interval assembly treats a restart as uninterrupted
     # running time (the stop/start gap is seconds).
-    _record_event_from_record("restart", name, billable=billable)
+    _record_event_from_record("restart", name, initiator=initiator,
+                              billable=billable)
     print(f"Restarted '{name}'.")
 
 
@@ -763,6 +896,8 @@ def vm_destroy(name):
     _record_event_from_record("destroy", name)
     sync_dns_records()
     _delete(VMS_PREFIX + name)
+    desired_delete(name)
+    _delete(VM_GRACE_PREFIX + name)
     bastion_sync()
     print(f"Destroyed '{name}' and removed its registration.")
 

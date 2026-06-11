@@ -1,0 +1,10 @@
+[Unit]
+Description=Run vm-reconciler every 2 minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=120s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

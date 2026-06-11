@@ -75,6 +75,10 @@ def register_vm_commands(subparsers):
         'sample', help='Snapshot local incus state to etcd (vm-state-sampler timer)')
     smp.set_defaults(func=lambda a: vm.sample_state())
 
+    rcp = sub.add_parser(
+        'reconcile', help='Converge local instances to desired power state (vm-reconciler timer)')
+    rcp.set_defaults(func=lambda a: vm.reconcile())
+
     sdp = sub.add_parser(
         'sync-dns',
         help='Reconcile bridge dnsmasq host-records with the pinned '

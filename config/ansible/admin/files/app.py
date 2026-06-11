@@ -41,7 +41,7 @@ import json
 import re
 import sys
 
-from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
+from flask import Flask, request, jsonify, redirect, render_template, send_from_directory, send_file
 import psycopg2
 import ntplib
 import os
@@ -2542,10 +2542,29 @@ def status_page():
     """
     return render_template('status.html')
 
-@app.route('/inventory')
+@app.route('/admin/utilization')
+def utilization_page():
+    """Embedded Utilization dashboard (fullscreen grafana kiosk)."""
+    return render_template('utilization.html')
+
+
+@app.route('/dashboard.html')
+def utilization_page_legacy():
+    """Pre-2026-06 location of the Utilization kiosk."""
+    return redirect('/admin/utilization', code=301)
+
+
+@app.route('/admin/inventory')
 def inventory_page():
     """Hardware inventory and asset management page."""
     return render_template('inventory.html')
+
+
+@app.route('/inventory')
+def inventory_page_legacy():
+    """Pre-2026-06 location — the page moved under /admin/ with the other
+    signed-in pages (its /api/inventory* data endpoints did not move)."""
+    return redirect('/admin/inventory', code=301)
 
 @app.route('/admin/model-usage')
 def model_usage_page():
@@ -2617,6 +2636,137 @@ def _usage_stats_cursor(since_days):
     except Exception as e:
         return None, since_dt, str(e)
     return conn, since_dt, None
+
+
+# Single sources of truth: the etcd schema belongs to vm_manager (the
+# writer); the admin group name to authentik_manager (which manages it).
+from ycluster.utils.vm_manager import (VMS_PREFIX, VM_STATE_PREFIX,
+                                       VM_DESIRED_PREFIX, vms_all)
+from ycluster.utils.authentik_manager import ADMIN_GROUP
+
+
+def _authentik_identity():
+    """Identity from the forward-auth headers (set only by nginx on the
+    external vhost; authentik joins groups with '|'). Internal callers
+    (admin.xc, direct :12723) carry no headers and are root-equivalent
+    operator space — treated as admin with no email."""
+    email = request.headers.get('X-Authentik-Email') or None
+    groups = [g for g in (request.headers.get('X-Authentik-Groups') or '').split('|') if g]
+    is_admin = email is None or ADMIN_GROUP in groups
+    return email, is_admin
+
+
+@app.route('/admin/vm-schedule')
+def vm_schedule_page():
+    """Schedule VMs to be up: desired-state editor, converged by the
+    per-host vm-reconciler."""
+    return render_template('admin-vm-schedule.html')
+
+
+@app.route('/admin/vm-schedule/data')
+def vm_schedule_data():
+    email, is_admin = _authentik_identity()
+    try:
+        client = get_etcd_client()
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+
+    live = {}
+    for value, metadata in client.get_prefix(VM_STATE_PREFIX):
+        if not value:
+            continue
+        try:
+            for inst in json.loads(value.decode()).get('instances', []):
+                live[inst['name']] = inst.get('status')
+        except Exception:
+            continue
+
+    desired_all = {}
+    for value, metadata in client.get_prefix(VM_DESIRED_PREFIX):
+        if not value:
+            continue
+        try:
+            desired_all[metadata.key.decode()[len(VM_DESIRED_PREFIX):]] = \
+                json.loads(value.decode())
+        except Exception:
+            continue
+
+    rows = []
+    for name, rec in vms_all().items():
+        if not is_admin and rec.get('owner') != email:
+            continue
+        desired = desired_all.get(name)
+        rows.append({
+            'vm': name,
+            'owner': rec.get('owner'),
+            'host': rec.get('host'),
+            'gpus': rec.get('gpus'),
+            'status': live.get(name, 'unknown'),
+            'mode': (desired or {}).get('mode', 'unmanaged'),
+            'windows': (desired or {}).get('windows', []),
+        })
+    return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
+                    'email': email, 'is_admin': is_admin})
+
+
+def _valid_windows(windows):
+    if not isinstance(windows, list) or len(windows) > 20:
+        return False
+    for w in windows:
+        if not isinstance(w, dict):
+            return False
+        days = w.get('days')
+        if not isinstance(days, list) or not days or \
+           not all(isinstance(d, int) and 0 <= d <= 6 for d in days):
+            return False
+        for field in ('start', 'end'):
+            try:
+                h, m = map(int, str(w.get(field, '')).split(':'))
+                if not (0 <= h <= 23 and 0 <= m <= 59):
+                    return False
+            except ValueError:
+                return False
+    return True
+
+
+# Mutating endpoint by design (unlike the S2-removed admin mutations):
+# externally it is only reachable through the forward-auth gate, so the
+# identity headers are nginx-enforced; internal callers are operator space.
+@app.route('/admin/vm-schedule/set', methods=['POST'])
+def vm_schedule_set():
+    email, is_admin = _authentik_identity()
+    try:
+        client = get_etcd_client()
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+
+    data = request.get_json(silent=True) or {}
+    name = data.get('vm', '')
+    rec_raw = client.get(VMS_PREFIX + name)[0] if re.fullmatch(r'[a-z0-9-]+', name) else None
+    if not rec_raw:
+        return jsonify({'error': 'no such VM'}), 404
+    rec = json.loads(rec_raw.decode())
+    if not is_admin and rec.get('owner') != email:
+        return jsonify({'error': 'not your VM'}), 403
+
+    mode = data.get('mode')
+    if mode == 'unmanaged':
+        client.delete(VM_DESIRED_PREFIX + name)
+        return jsonify({'ok': True, 'mode': 'unmanaged'})
+    if mode not in ('on', 'off', 'schedule'):
+        return jsonify({'error': 'mode must be on|off|schedule|unmanaged'}), 400
+    windows = data.get('windows', [])
+    if mode == 'schedule' and not _valid_windows(windows):
+        return jsonify({'error': 'invalid windows'}), 400
+
+    desired = {
+        'mode': mode,
+        'windows': windows if mode == 'schedule' else [],
+        'updated_by': email or 'internal',
+        'updated_at': datetime.now(UTC).isoformat(timespec='seconds'),
+    }
+    client.put(VM_DESIRED_PREFIX + name, json.dumps(desired))
+    return jsonify({'ok': True, 'mode': mode})
 
 
 @app.route('/admin/vm-usage')
