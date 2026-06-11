@@ -22,6 +22,18 @@ from ..common.etcd_utils import get_etcd_client
 
 USERS_PREFIX = "/cluster/users/"
 VMS_PREFIX = "/cluster/vms/"
+# Lifecycle event queue, drained into usage_stats by collect-vm-stats on
+# the storage leader. Deliberately NOT under VMS_PREFIX — vm_list/vms_all
+# iterate that prefix and would mistake events for registrations.
+EVENTS_PREFIX = "/cluster/vms-events/"
+# Per-host incus state snapshots, written by the vm-state-sampler timer on
+# incus hosts (`ycluster vm sample`) and read by collect-vm-stats. Push via
+# etcd client certs — the cluster's one trust mechanism — rather than the
+# leader reaching into hosts (ssh/HTTP).
+VM_STATE_PREFIX = "/cluster/vm-state/"
+# Stamped into each snapshot; must match the vm-state-sampler.timer cadence
+# (files/vm-state-sampler.timer) — observed GPU-hours = sum(gpus * interval_s).
+VM_STATE_INTERVAL_S = 120
 
 VM_PROFILE = "gpu-vm"
 VM_IMAGE = "ubuntu-cuda-vllm"          # default for VMs (GPU or not):
@@ -506,8 +518,68 @@ def _inject_owner_keys(vm_name, keys, agent_timeout=180):
     _push_file(vm_name, f"/home/{guest}/.ssh/authorized_keys", content, guest)
 
 
+def _record_event(event, name, owner=None, gpus=None, initiator="cli",
+                  billable=False):
+    """Append a lifecycle event to the etcd queue (usage accounting).
+
+    Best-effort: accounting must never break a lifecycle operation. CLI
+    operations default to non-billable (admin debugging must not count
+    against the owner's quota) — `--bill` opts in; the future
+    scheduler/web path emits its own initiator with billable=True.
+    """
+    try:
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "vm": name,
+            "host": socket.gethostname(),
+            "event": event,
+            "owner": owner,
+            "gpus": gpus,
+            "initiator": initiator,
+            "billable": billable,
+        }
+        _put_json(f"{EVENTS_PREFIX}{time.time_ns()}-{name}", payload)
+    except Exception as e:
+        print(f"Warning: failed to record {event} event for {name}: {e}",
+              file=sys.stderr)
+
+
+def _record_event_from_record(event, name, initiator="cli", billable=False):
+    rec = vm_get(name) or {}
+    _record_event(event, name, owner=rec.get("owner"), gpus=rec.get("gpus"),
+                  initiator=initiator, billable=billable)
+
+
+def sample_state():
+    """Snapshot local incus state into etcd for usage accounting.
+
+    Run by the vm-state-sampler timer on incus hosts. One overwritten key
+    per host; the collector on the storage leader turns fresh snapshots
+    into usage_stats.vm_samples rows (stale snapshots — host down, timer
+    dead — are skipped there, so absence is never mistaken for runtime).
+    """
+    instances = []
+    for inst in _incus_json("list", "--format", "json"):
+        name = inst.get("name")
+        # The bastion is infrastructure, not a user instance.
+        if not name or name == BASTION_CONTAINER:
+            continue
+        devices = inst.get("expanded_devices") or {}
+        gpus = sum(1 for d in devices.values()
+                   if isinstance(d, dict) and d.get("type") == "gpu")
+        instances.append({"name": name, "status": inst.get("status"),
+                          "type": inst.get("type"), "gpus": gpus})
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "interval_s": VM_STATE_INTERVAL_S,
+        "instances": instances,
+    }
+    _put_json(VM_STATE_PREFIX + socket.gethostname(), payload)
+    print(f"sampled {len(instances)} instance(s)")
+
+
 def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
-              instance_type=None):
+              instance_type=None, billable=False):
     """Launch a GPU instance (VM or container).
 
     instance_type='auto' (or None) picks based on the host's
@@ -591,6 +663,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
         "state": "provisioning",
     }
     _put_json(VMS_PREFIX + name, record)
+    _record_event("launch", name, owner=owner, gpus=gpus, billable=billable)
 
     # Containers boot in seconds (no firmware enum); only GPU VMs need the
     # extended timeout.
@@ -651,24 +724,29 @@ def vm_resize(name, size):
               "(cloud-init growpart).")
 
 
-def vm_stop(name):
+def vm_stop(name, billable=False):
     _incus("stop", name)
+    _record_event_from_record("stop", name, billable=billable)
     print(f"Stopped '{name}'.")
 
 
-def vm_start(name):
+def vm_start(name, billable=False):
     # Backfill any host-side state added since this instance was created
     # (currently just the /data NAS share). Idempotent.
     _ensure_nas_share(name)
     _incus("start", name)
+    _record_event_from_record("start", name, billable=billable)
     print(f"Started '{name}'.")
 
 
-def vm_restart(name):
+def vm_restart(name, billable=False):
     if _instance_running(name):
         _incus("stop", name)
     _ensure_nas_share(name)
     _incus("start", name)
+    # Continuity event: interval assembly treats a restart as uninterrupted
+    # running time (the stop/start gap is seconds).
+    _record_event_from_record("restart", name, billable=billable)
     print(f"Restarted '{name}'.")
 
 
@@ -682,6 +760,7 @@ def vm_destroy(name):
         if running:
             _incus("stop", name)
         _incus("delete", name)
+    _record_event_from_record("destroy", name)
     sync_dns_records()
     _delete(VMS_PREFIX + name)
     bastion_sync()

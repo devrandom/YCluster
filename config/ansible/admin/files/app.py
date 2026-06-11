@@ -51,7 +51,7 @@ import subprocess
 import socket
 import platform
 import requests
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 import dns.resolver
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -2600,8 +2600,10 @@ def model_usage_data():
 
 
 def _usage_stats_cursor(since_days):
+    # timedelta, not day-field arithmetic: replace(day=...) raises whenever
+    # the window crosses a month boundary (since_days >= current day).
     since_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    since_dt = since_dt.replace(day=since_dt.day - since_days)
+    since_dt = since_dt - timedelta(days=since_days)
     try:
         etcd = get_etcd_client()
         password_bytes = etcd.get('/cluster/config/usage_stats/db-password')[0]
@@ -2615,6 +2617,112 @@ def _usage_stats_cursor(since_days):
     except Exception as e:
         return None, since_dt, str(e)
     return conn, since_dt, None
+
+
+@app.route('/admin/vm-usage')
+def vm_usage_page():
+    """VM GPU-hour accounting: billable/tracked (events) vs observed (samples)."""
+    since_days = max(1, min(90, request.args.get('since', 7, type=int)))
+    return render_template('admin-vm-usage.html', since_days=since_days)
+
+
+@app.route('/admin/vm-usage/data')
+def vm_usage_data():
+    """Per-VM GPU-hours in the window: billable + tracked from lifecycle
+    events (interval assembly), observed from incus-state samples."""
+    since_days = max(1, min(90, request.args.get('since', 7, type=int)))
+    conn, since_dt, err = _usage_stats_cursor(since_days)
+    if err:
+        return jsonify({'error': err}), 500
+    now = datetime.now(UTC)
+
+    with conn:
+        with conn.cursor() as cur:
+            # Events inside the window, plus each VM's single latest event
+            # before it — that one row decides whether an interval was open
+            # (and with what gpus/billable) at the window start, so the scan
+            # stays bounded as history grows.
+            cur.execute('''SELECT DISTINCT ON (vm) ts, vm, event, owner, gpus, billable
+                           FROM vm_events WHERE ts < %s
+                           ORDER BY vm, ts DESC''', [since_dt])
+            pre_events = cur.fetchall()
+            cur.execute('''SELECT ts, vm, event, owner, gpus, billable
+                           FROM vm_events WHERE ts >= %s
+                           ORDER BY vm, ts''', [since_dt])
+            events = pre_events + cur.fetchall()
+            cur.execute('''
+                SELECT vm, MAX(COALESCE(owner, '')),
+                       SUM(CASE WHEN state = 'Running' THEN gpus * interval_s ELSE 0 END)::float / 3600,
+                       COUNT(*) FILTER (WHERE state = 'Running')
+                FROM vm_samples WHERE ts >= %s
+                GROUP BY vm
+            ''', [since_dt])
+            sampled = {r[0]: {'owner': r[1], 'observed': r[2] or 0.0,
+                              'samples': r[3]} for r in cur.fetchall()}
+            cur.execute('''SELECT DISTINCT ON (vm) vm, state
+                           FROM vm_samples ORDER BY vm, ts DESC''')
+            last_state = dict(cur.fetchall())
+
+    # Assemble running intervals per VM from the event stream (each VM's
+    # pre-window event sorts before its window events, and the state machine
+    # is per-VM, so the combined list needs no global re-sort). launch/start
+    # open an interval (restart keeps one open across the gap), stop/destroy
+    # close it; an interval still open accrues until now. Time is clipped to
+    # the window; billable is a property of the opening event.
+    def accrue(st, end):
+        start, ev_gpus, ev_billable = st['open']
+        lo, hi = max(start, since_dt), min(end, now)
+        if hi > lo:
+            hours = (hi - lo).total_seconds() / 3600 * (ev_gpus or 0)
+            st['tracked'] += hours
+            if ev_billable:
+                st['billable'] += hours
+
+    per_vm = {}
+    for ts, vm, event, owner, gpus, billable in events:
+        st = per_vm.setdefault(vm, {'owner': owner, 'open': None,
+                                    'billable': 0.0, 'tracked': 0.0})
+        if owner:
+            st['owner'] = owner
+        if event in ('launch', 'start', 'restart'):
+            if st['open'] is None:
+                st['open'] = (ts, gpus, billable)
+        elif event in ('stop', 'destroy'):
+            if st['open'] is not None:
+                accrue(st, ts)
+                st['open'] = None
+    for st in per_vm.values():
+        if st['open'] is not None:
+            accrue(st, now)
+
+    rows = []
+    for vm in sorted(set(per_vm) | set(sampled)):
+        ev = per_vm.get(vm, {})
+        sm = sampled.get(vm, {})
+        tracked = round(ev.get('tracked', 0.0), 4)
+        observed = round(sm.get('observed', 0.0), 4)
+        # Is the VM on the clock right now, and on whose dime: an open
+        # event interval says billable/unbilled; running per the latest
+        # sample with no open interval is untracked runtime.
+        if ev.get('open') is not None:
+            current = 'billable' if ev['open'][2] else 'unbilled'
+        elif last_state.get(vm) == 'Running':
+            current = 'untracked'
+        else:
+            current = None
+        rows.append({
+            'vm': vm,
+            'owner': ev.get('owner') or sm.get('owner') or '',
+            'billable_gpu_hours': round(ev.get('billable', 0.0), 4),
+            'tracked_gpu_hours': tracked,
+            'observed_gpu_hours': observed,
+            'samples': sm.get('samples', 0),
+            'current': current,
+            # Sampling granularity is one interval; flag drift beyond that
+            # plus 10% slack.
+            'drift': abs(observed - tracked) > max(0.1, tracked * 0.1),
+        })
+    return jsonify(rows)
 
 
 @app.route('/admin/model-usage/options')

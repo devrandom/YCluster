@@ -397,3 +397,21 @@
             /usr/local/bin/incus-build-rocm-image
             {{ '--force' if (force_rebuild_images | default(false) | bool) else '' }}
           when: rocm_image_check.rc != 0 or (force_rebuild_images | default(false) | bool)
+
+    # --- VM usage sampling (see docs/design/vm-usage-scheduling-accounts.md)
+    # Push-based: this host snapshots its own incus state into etcd (client
+    # certs, the cluster's one trust mechanism); the storage leader's
+    # collect-vm-stats turns fresh snapshots into usage_stats rows.
+    - name: Install vm-state-sampler units (usage accounting snapshots)
+      copy:
+        src: "files/vm-state-sampler.{{ item }}"
+        dest: "/etc/systemd/system/vm-state-sampler.{{ item }}"
+      loop: [service, timer]
+      register: vm_sampler_units
+
+    - name: Enable and start vm-state-sampler timer
+      systemd:
+        name: vm-state-sampler.timer
+        enabled: yes
+        state: "{{ 'restarted' if vm_sampler_units.changed else 'started' }}"
+        daemon_reload: yes

@@ -25,23 +25,33 @@ def register_vm_commands(subparsers):
                          "container hosts (AMD shared GPU).")
     lp.add_argument('--image', default=None,
                     help='Override the default image for the chosen type.')
+    lp.add_argument('--bill', action='store_true',
+                    help='Bill this runtime to the owner (CLI operations '
+                         'default to non-billable admin/debug time)')
     lp.set_defaults(func=lambda a: vm.vm_launch(
-        a.name, a.owner, a.gpus, a.cpu, a.mem, a.image, a.instance_type))
+        a.name, a.owner, a.gpus, a.cpu, a.mem, a.image, a.instance_type,
+        billable=a.bill))
 
     lsp = sub.add_parser('list', help='List registered VMs')
     lsp.set_defaults(func=lambda a: vm.vm_list())
 
     sp = sub.add_parser('stop', help='Stop a VM')
     sp.add_argument('name')
-    sp.set_defaults(func=lambda a: vm.vm_stop(a.name))
+    sp.add_argument('--bill', action='store_true',
+                    help='Mark as billable (owner-requested) rather than admin/debug')
+    sp.set_defaults(func=lambda a: vm.vm_stop(a.name, billable=a.bill))
 
     stp = sub.add_parser('start', help='Start a stopped VM')
     stp.add_argument('name')
-    stp.set_defaults(func=lambda a: vm.vm_start(a.name))
+    stp.add_argument('--bill', action='store_true',
+                    help='Bill this runtime to the owner (CLI default: non-billable)')
+    stp.set_defaults(func=lambda a: vm.vm_start(a.name, billable=a.bill))
 
     rsp = sub.add_parser('restart', help='Stop (if running) and start a VM')
     rsp.add_argument('name')
-    rsp.set_defaults(func=lambda a: vm.vm_restart(a.name))
+    rsp.add_argument('--bill', action='store_true',
+                    help='Bill the continued runtime to the owner')
+    rsp.set_defaults(func=lambda a: vm.vm_restart(a.name, billable=a.bill))
 
     dp = sub.add_parser('destroy', help='Delete a VM and its registration')
     dp.add_argument('name')
@@ -60,6 +70,10 @@ def register_vm_commands(subparsers):
         help='Pin a static IP on every existing VM/container (migration '
              'helper; new launches pin automatically).')
     pip.set_defaults(func=lambda a: _print_pins(vm.pin_existing_vms()))
+
+    smp = sub.add_parser(
+        'sample', help='Snapshot local incus state to etcd (vm-state-sampler timer)')
+    smp.set_defaults(func=lambda a: vm.sample_state())
 
     sdp = sub.add_parser(
         'sync-dns',

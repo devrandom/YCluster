@@ -1,0 +1,11 @@
+[Unit]
+Description=Snapshot local incus state to etcd (VM usage sampling)
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ycluster/etcd-client.env
+ExecStart=/usr/local/bin/ycluster vm sample
+
+[Install]
+WantedBy=multi-user.target
