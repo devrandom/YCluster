@@ -48,34 +48,52 @@ def register_user_commands(subparsers):
 
 def user_add(args):
     from ..utils import authentik_manager
-    authentik_manager.add_user(args.email, args.name)
+    result = authentik_manager.add_user(args.email, args.name)
+    print(f"Created user {result['email']} (pk {result['pk']})")
 
 
 def user_invite(args):
     from ..utils import authentik_manager
-    authentik_manager.invite_user(args.email, args.name, args.days)
+    url = authentik_manager.invite_user(args.email, args.name, args.days)
+    print(f"Invitation for {args.email} (expires in {args.days}d, single use):")
+    print(f"  {url}")
 
 
 def user_admin(args):
     from ..utils import authentik_manager
-    authentik_manager.set_admin(args.email, args.remove)
+    print(authentik_manager.set_admin(args.email, args.remove))
 
 
 def user_recovery(args):
     from ..utils import authentik_manager
-    authentik_manager.recovery_link(args.email)
+    url = authentik_manager.recovery_link(args.email)
+    print(f"Password (re)set link for {args.email} (one-time):")
+    print(f"  {url}")
 
 
 def user_uninvite(args):
     from ..utils import authentik_manager
-    authentik_manager.revoke_invitation(args.email)
+    count = authentik_manager.revoke_invitation(args.email)
+    if count:
+        print(f"Revoked {count} invitation(s) for {args.email}")
+    else:
+        print(f"No outstanding invitation for {args.email}")
 
 
 def user_list(args):
     from ..utils import authentik_manager
-    authentik_manager.list_users()
+    fmt = "{:<40} {:<26} {:<8} {:<7} {:<6} {}"
+    print(fmt.format('EMAIL', 'NAME', 'TYPE', 'ACTIVE', 'ADMIN', 'LAST LOGIN'))
+    for u in authentik_manager.users_data():
+        print(fmt.format(u['email'], u['name'], u['type'],
+                         'yes' if u['active'] else 'no',
+                         'yes' if u['is_admin'] else '',
+                         u['last_login'] or 'never'))
 
 
 def user_invitations(args):
     from ..utils import authentik_manager
-    authentik_manager.list_invitations()
+    fmt = "{:<40} {:<28} {}"
+    print(fmt.format('EMAIL', 'EXPIRES', 'URL'))
+    for inv in authentik_manager.invitations_data():
+        print(fmt.format(inv['email'], inv['expires'] or '-', inv['url']))

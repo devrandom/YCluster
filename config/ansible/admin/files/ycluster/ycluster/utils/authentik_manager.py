@@ -5,6 +5,9 @@ Authenticates with the bootstrap API token that authentik-manager
 generates once into etcd. The base URL defaults to the cluster-internal
 nginx vhost; override with YC_AUTHENTIK_URL (e.g. http://127.0.0.1:9300
 when running on the storage leader without DNS).
+
+Operations return data (the admin-api /admin/users page consumes them
+as JSON); the `ycluster user` CLI wrappers do the printing.
 """
 
 import os
@@ -16,6 +19,7 @@ from ..common.etcd_utils import get_etcd_client
 
 ENROLLMENT_FLOW_SLUG = 'enrollment-invitation'
 TOKEN_ETCD_KEY = '/cluster/config/authentik/bootstrap-token'
+ADMIN_GROUP = 'ycluster-admins'
 
 
 def _base_url():
@@ -91,11 +95,12 @@ def add_user(email, name=None):
         'type': 'internal',
         'is_active': True,
     })
-    print(f"Created user {user['username']} (pk {user['pk']})")
+    return {'email': email, 'pk': user['pk']}
 
 
 def invite_user(email, name=None, days=7):
-    """Issue a single-use enrollment invitation pre-bound to the email."""
+    """Issue a single-use enrollment invitation pre-bound to the email.
+    Returns the invitation URL."""
     api = AuthentikAPI()
     # Enrollment always creates the account, so an invitation for an
     # existing account would fail at the user_write stage. Refuse early.
@@ -103,8 +108,8 @@ def invite_user(email, name=None, days=7):
     if existing:
         raise RuntimeError(
             f"account {email} already exists — enrollment invitations are for "
-            f"new accounts. Use 'ycluster user recovery {email}' to issue a "
-            f"password (re)set link instead.")
+            f"new accounts. Issue a password (re)set link instead "
+            f"('ycluster user recovery {email}').")
     invitation = api.post('/stages/invitation/invitations/', json={
         'name': 'invite-' + email.replace('@', '-at-').replace('.', '-'),
         'flow': api.flow_pk(ENROLLMENT_FLOW_SLUG),
@@ -116,30 +121,45 @@ def invite_user(email, name=None, days=7):
             'name': name or email,
         },
     })
-    url = f"{_link_base_url()}/if/flow/{ENROLLMENT_FLOW_SLUG}/?itoken={invitation['pk']}"
-    print(f"Invitation for {email} (expires in {days}d, single use):")
-    print(f"  {url}")
+    return f"{_link_base_url()}/if/flow/{ENROLLMENT_FLOW_SLUG}/?itoken={invitation['pk']}"
 
 
-def list_users():
+def users_data():
+    """Accounts as a list of dicts (email, name, type, active, last_login,
+    is_admin), service accounts excluded."""
     api = AuthentikAPI()
     users = api.get('/core/users/', params={'page_size': 500})['results']
-    fmt = "{:<40} {:<30} {:<10} {:<8} {}"
-    print(fmt.format('EMAIL', 'NAME', 'TYPE', 'ACTIVE', 'LAST LOGIN'))
+    rows = []
     for u in users:
         if u['type'] not in ('internal', 'external'):
             continue
-        print(fmt.format(u['email'] or u['username'], u['name'], u['type'],
-                         'yes' if u['is_active'] else 'no',
-                         u['last_login'] or 'never'))
+        group_names = [g.get('name') for g in (u.get('groups_obj') or [])]
+        rows.append({
+            'email': u['email'] or u['username'],
+            'name': u['name'],
+            'type': u['type'],
+            'active': bool(u['is_active']),
+            'last_login': u['last_login'],
+            'is_admin': ADMIN_GROUP in group_names,
+        })
+    return sorted(rows, key=lambda r: r['email'])
 
 
-ADMIN_GROUP = 'ycluster-admins'
+def invitations_data():
+    """Outstanding invitations as a list of dicts (email, expires, url)."""
+    api = AuthentikAPI()
+    invitations = api.get('/stages/invitation/invitations/', params={'page_size': 500})['results']
+    link_base = _link_base_url()
+    return [{
+        'email': (inv.get('fixed_data') or {}).get('email', inv['name']),
+        'expires': inv['expires'],
+        'url': f"{link_base}/if/flow/{ENROLLMENT_FLOW_SLUG}/?itoken={inv['pk']}",
+    } for inv in invitations]
 
 
 def set_admin(email, remove=False):
     """Add (or remove) an account to the ycluster-admins group, which gates
-    the forward-auth'd admin web pages."""
+    the forward-auth'd admin web pages. Returns the action performed."""
     api = AuthentikAPI()
     user = _get_user(api, email)
     groups = api.get('/core/groups/', params={'name': ADMIN_GROUP})['results']
@@ -148,7 +168,7 @@ def set_admin(email, remove=False):
             f"group {ADMIN_GROUP} not found — has authentik applied the admin blueprint?")
     action = 'remove_user' if remove else 'add_user'
     api.post(f"/core/groups/{groups[0]['pk']}/{action}/", json={'pk': user['pk']})
-    print(f"{'Removed' if remove else 'Added'} {email} {'from' if remove else 'to'} {ADMIN_GROUP}")
+    return f"{'removed' if remove else 'added'} {email} {'from' if remove else 'to'} {ADMIN_GROUP}"
 
 
 def recovery_link(email):
@@ -160,32 +180,15 @@ def recovery_link(email):
     # Re-root the link on the user-facing base — the API builds it from the
     # request host (cluster-internal).
     link = result['link']
-    link = _link_base_url() + '/if/' + link.split('/if/', 1)[1]
-    print(f"Password (re)set link for {email} (one-time):")
-    print(f"  {link}")
+    return _link_base_url() + '/if/' + link.split('/if/', 1)[1]
 
 
 def revoke_invitation(email):
-    """Delete outstanding invitation(s) for an email."""
+    """Delete outstanding invitation(s) for an email. Returns the count."""
     api = AuthentikAPI()
     invitations = api.get('/stages/invitation/invitations/', params={'page_size': 500})['results']
     matched = [inv for inv in invitations
                if (inv.get('fixed_data') or {}).get('email') == email]
-    if not matched:
-        print(f"No outstanding invitation for {email}")
-        return
     for inv in matched:
         api._request('DELETE', f"/stages/invitation/invitations/{inv['pk']}/")
-        print(f"Revoked invitation {inv['pk']} for {email}")
-
-
-def list_invitations():
-    api = AuthentikAPI()
-    invitations = api.get('/stages/invitation/invitations/', params={'page_size': 500})['results']
-    fmt = "{:<40} {:<28} {}"
-    print(fmt.format('EMAIL', 'EXPIRES', 'URL'))
-    link_base = _link_base_url()
-    for inv in invitations:
-        email = (inv.get('fixed_data') or {}).get('email', inv['name'])
-        url = f"{link_base}/if/flow/{ENROLLMENT_FLOW_SLUG}/?itoken={inv['pk']}"
-        print(fmt.format(email, inv['expires'] or '-', url))
+    return len(matched)
