@@ -123,10 +123,28 @@
             
             <a href="/inventory" class="link-card">
                 <div class="link-title">
-                    🖥️ Hardware Inventory
+                    🖥️ Hardware Inventory 🔐
                 </div>
                 <div class="link-description">
-                    Hardware specs, asset tracking, purchase dates, and warranty status for all cluster nodes
+                    Hardware specs, asset tracking, purchase dates, and warranty status for all cluster nodes (sign-in required)
+                </div>
+            </a>
+
+            <a href="/admin/model-usage" class="link-card">
+                <div class="link-title">
+                    📈 Model Usage 🔐
+                </div>
+                <div class="link-description">
+                    Inference requests, duration, and bytes by user and model (sign-in required)
+                </div>
+            </a>
+
+            <a href="#" class="link-card" id="account-link">
+                <div class="link-title">
+                    👤 Account
+                </div>
+                <div class="link-description">
+                    Sign in, manage your credentials, and launch your applications (cluster IdP)
                 </div>
             </a>
 
@@ -145,7 +163,7 @@
                     🔧 Node Allocations API
                 </div>
                 <div class="link-description">
-                    View current node allocations and MAC address mappings in JSON format
+                    Current node allocations and MAC address mappings in JSON format (cluster-internal only)
                 </div>
             </a>
             
@@ -172,10 +190,18 @@
                     ❤️ Health API
                 </div>
                 <div class="link-description">
-                    Raw health check data for monitoring and automation systems
+                    Raw health check data for monitoring and automation systems (cluster-internal only)
                 </div>
             </a>
         </div>
+
+        <script>
+            // The IdP lives on the auth. sibling of whatever host serves this
+            // page, so the link works both internally (admin.xc -> auth.xc)
+            // and externally (admin.<domain> -> auth.<domain>).
+            document.getElementById('account-link').href =
+                location.protocol + '//' + location.hostname.replace(/^admin\./, 'auth.') + '/';
+        </script>
         
         <div class="footer">
             <p>YCluster provides automated provisioning, distributed storage, and service orchestration with built-in failover capabilities.</p>
