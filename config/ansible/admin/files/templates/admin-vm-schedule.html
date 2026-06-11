@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VM Schedule</title>
+  <script src="/static/nav.js" defer></script>
+  <script src="/static/alpine-3.14.1.min.js" defer></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+    h1 { color: #333; text-align: center; margin-bottom: 0.5rem; }
+    .explainer { color: #666; font-size: 0.85rem; text-align: center; margin-bottom: 1.5rem; }
+    .card { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+    .vm-head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+    .vm-name { font-size: 1.15rem; font-weight: bold; }
+    .meta { color: #666; font-size: 0.85rem; }
+    .running { color: #166534; font-weight: bold; }
+    .stopped { color: #92400e; font-weight: bold; }
+    select, input[type=time] { padding: 0.3rem 0.4rem; border-radius: 4px; border: 1px solid #ccc; }
+    .window { display: flex; gap: 0.6rem; align-items: center; margin: 0.4rem 0; flex-wrap: wrap; }
+    .days label { font-size: 0.8rem; margin-right: 0.35rem; user-select: none; }
+    button { padding: 0.35rem 0.9rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    button.minor { background: #e5e7eb; color: #333; }
+    .saved { color: #166534; font-size: 0.85rem; margin-left: 0.5rem; }
+    .error { color: #b91c1c; font-size: 0.85rem; margin-left: 0.5rem; }
+    .empty { color: #666; font-style: italic; padding: 2rem; text-align: center; }
+  </style>
+</head>
+<body x-data="schedApp()" x-init="load()">
+  <h1>VM Schedule</h1>
+  <p class="explainer">
+    Declare when your VMs should be up; each host converges within ~2
+    minutes. All times are <b>UTC</b>. Scheduled stops warn the guest and
+    wait a grace period. Scheduler-started runtime is billed to the owner;
+    <b>unmanaged</b> means the scheduler never touches the VM.
+  </p>
+
+  <template x-if="loading"><p class="empty">Loading...</p></template>
+  <template x-if="!loading && rows.length === 0">
+    <p class="empty">No VMs registered to you</p>
+  </template>
+
+  <template x-for="row in rows" :key="row.vm">
+    <div class="card">
+      <div class="vm-head">
+        <span class="vm-name" x-text="row.vm"></span>
+        <span :class="row.status === 'Running' ? 'running' : 'stopped'"
+              x-text="row.status"></span>
+        <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + (isAdmin ? ` · ${row.owner}` : '')"></span>
+        <select x-model="row.mode">
+          <option value="unmanaged">unmanaged</option>
+          <option value="on">always on</option>
+          <option value="off">off</option>
+          <option value="schedule">schedule</option>
+        </select>
+        <button @click="save(row)">Save</button>
+        <span class="saved" x-show="row.saved" x-text="row.saved"></span>
+        <span class="error" x-show="row.error" x-text="row.error"></span>
+      </div>
+      <template x-if="row.mode === 'schedule'">
+        <div>
+          <template x-for="(w, wi) in row.windows" :key="wi">
+            <div class="window">
+              <span class="days">
+                <template x-for="(d, di) in dayNames" :key="di">
+                  <label><input type="checkbox" :checked="w.days.includes(di)"
+                                @change="toggleDay(w, di)"><span x-text="d"></span></label>
+                </template>
+              </span>
+              <input type="time" x-model="w.start"> –
+              <input type="time" x-model="w.end">
+              <button class="minor" @click="row.windows.splice(wi, 1)">remove</button>
+            </div>
+          </template>
+          <button class="minor"
+                  @click="row.windows.push({days: [0,1,2,3,4], start: '08:00', end: '20:00'})">
+            add window</button>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <script>
+    function schedApp() {
+      return {
+        rows: [],
+        isAdmin: false,
+        loading: false,
+        dayNames: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+
+        load() {
+          this.loading = true
+          fetch('/admin/vm-schedule/data')
+            .then(r => r.json())
+            .then(data => {
+              this.rows = (data.rows || []).map(r => ({...r, saved: '', error: ''}))
+              this.isAdmin = data.is_admin
+              this.loading = false
+            })
+            .catch(() => { this.loading = false })
+        },
+
+        toggleDay(w, di) {
+          const i = w.days.indexOf(di)
+          if (i >= 0) w.days.splice(i, 1); else w.days.push(di)
+        },
+
+        save(row) {
+          row.saved = ''; row.error = ''
+          fetch('/admin/vm-schedule/set', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({vm: row.vm, mode: row.mode, windows: row.windows}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              if (ok) row.saved = 'saved — converges within ~2 min'
+              else row.error = d.error || 'failed'
+            })
+            .catch(() => { row.error = 'request failed' })
+        }
+      }
+    }
+  </script>
+</body>
+</html>

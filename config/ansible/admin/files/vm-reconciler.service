@@ -1,0 +1,14 @@
+[Unit]
+Description=Converge local incus instances to desired power state
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ycluster/etcd-client.env
+ExecStart=/usr/local/bin/ycluster vm reconcile
+# Stops are tick-based (warn one tick, stop a later one) so a run never
+# sleeps; the budget is for converging several starts/stops in one tick.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

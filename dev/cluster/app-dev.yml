@@ -102,22 +102,32 @@
 # fakevm fixture live). Same unit files install-incus.yml deploys on real
 # incus hosts — that playbook isn't container-safe (GPU profiles), so the
 # fixture installs them directly.
-- name: vm-state-sampler on the incus fixture hosts (dev)
+- name: vm-state-sampler + vm-reconciler on the incus fixture hosts (dev)
   hosts: compute
   become: yes
   tasks:
-    - name: Install vm-state-sampler units
+    - name: Install sampler/reconciler units
       copy:
-        src: "../../config/ansible/admin/files/vm-state-sampler.{{ item }}"
-        dest: "/etc/systemd/system/vm-state-sampler.{{ item }}"
-      loop: [service, timer]
+        src: "../../config/ansible/admin/files/{{ item.0 }}.{{ item.1 }}"
+        dest: "/etc/systemd/system/{{ item.0 }}.{{ item.1 }}"
+      loop: "{{ ['vm-state-sampler', 'vm-reconciler'] | product(['service', 'timer']) | list }}"
 
-    - name: Enable and start vm-state-sampler timer
+    - name: Enable and start sampler/reconciler timers
       systemd:
-        name: vm-state-sampler.timer
+        name: "{{ item }}.timer"
         enabled: yes
         state: started
         daemon_reload: yes
+      loop: [vm-state-sampler, vm-reconciler]
+
+    # No NAS in dev (and virtiofs attach can't work under nesting anyway) —
+    # without this, vm start adds a broken /data device and fails.
+    - name: Host config — container default, no NAS share (dev)
+      copy:
+        dest: /etc/ycluster/host.yml
+        content: |
+          default_instance_type: container
+          vm_nas_share: false
 
 # The real playbook, unmodified: leader detection via the /rbd/user
 # mountpoint finds s1; nginx renders in --local mode (web_services_force_local).

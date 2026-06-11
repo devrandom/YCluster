@@ -33,10 +33,9 @@ for _v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
 
 import psycopg2
 from ycluster.common.etcd_utils import get_etcd_client
+# The etcd schema belongs to vm_manager (the writer of these prefixes).
+from ycluster.utils.vm_manager import EVENTS_PREFIX, VMS_PREFIX, VM_STATE_PREFIX
 
-EVENTS_PREFIX = "/cluster/vms-events/"
-VMS_PREFIX = "/cluster/vms/"
-VM_STATE_PREFIX = "/cluster/vm-state/"
 ETCD_CREDS_KEY = "/cluster/config/usage_stats/db-password"
 # A snapshot older than this is a dead sampler/host, not running VMs.
 SNAPSHOT_MAX_AGE = timedelta(minutes=10)
