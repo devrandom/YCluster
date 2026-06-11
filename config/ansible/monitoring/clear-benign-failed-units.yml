@@ -10,10 +10,15 @@
 #    does not fail at boot, so a failed instance means the firmware
 #    advertises a serial port the hardware doesn't actually provide.
 #    Mask the broken instance.
-#  * nvidia-persistenced / nvidia-cdi-refresh on VM hosts whose GPUs are
-#    all passed through: nvidia is deliberately never loaded there
-#    (install-incus.yml defers it; gpu-passthrough only loads it when
-#    host GPUs remain), so these can never succeed. Mask them.
+#  * nvidia-persistenced on VM hosts whose GPUs are all passed through:
+#    nvidia is deliberately never loaded there (install-incus.yml defers
+#    it; gpu-passthrough only loads it when host GPUs remain), so it can
+#    never succeed. Mask it.
+#  * nvidia-cdi-refresh wherever it exists: it fails on hosts where the
+#    nvidia driver isn't loaded, and CDI generation is to be owned by
+#    gpu-passthrough-bind instead (NOTES.md TODO). Disable it. The
+#    on-disk spec (/etc/cdi/nvidia.yaml) stays valid until a driver
+#    upgrade; after one, regenerate with `nvidia-ctk cdi generate`.
 - name: Clear known-benign failed systemd units
   hosts: managed
   become: yes
@@ -105,24 +110,35 @@
 
     - name: Mask host nvidia services on all-passthrough VM hosts
       systemd:
-        name: "{{ item }}"
+        name: nvidia-persistenced.service
         state: stopped
         masked: yes
-      loop:
-        - nvidia-persistenced.service
-        - nvidia-cdi-refresh.service
-        - nvidia-cdi-refresh.path
       when:
         - incus_vm_host | default(false)
         - nvidia_loaded.rc is defined and nvidia_loaded.rc != 0
 
     - name: Clear nvidia unit failed state on all-passthrough VM hosts
-      command: systemctl reset-failed {{ item }}
-      loop:
-        - nvidia-persistenced.service
-        - nvidia-cdi-refresh.service
+      command: systemctl reset-failed nvidia-persistenced.service
       failed_when: false
       changed_when: false
       when:
         - incus_vm_host | default(false)
         - nvidia_loaded.rc is defined and nvidia_loaded.rc != 0
+
+    - name: Find nvidia-cdi-refresh units
+      shell: systemctl list-unit-files --no-legend --plain 'nvidia-cdi-refresh.*' | awk '{print $1}'
+      register: cdi_units
+      changed_when: false
+
+    - name: Disable nvidia-cdi-refresh units
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+      loop: "{{ cdi_units.stdout_lines }}"
+
+    - name: Clear nvidia-cdi-refresh failed state
+      command: systemctl reset-failed nvidia-cdi-refresh.service
+      failed_when: false
+      changed_when: false
+      when: cdi_units.stdout_lines | length > 0
