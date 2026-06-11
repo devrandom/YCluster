@@ -1,0 +1,46 @@
+# Branding: present the IdP as YCluster, not authentik. Logo/favicon/
+# background are SVGs the playbook drops into the media public dir (leader
+# RBD); brand file fields take media/public-relative paths (absolute paths
+# are rejected) and render as signed /files/ URLs. Stock flows users
+# actually see get YCluster titles (our own flows are titled in their
+# blueprints).
+version: 1
+metadata:
+  name: ycluster-branding
+entries:
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      # Serve this brand for every request host — without it authentik
+      # falls back to its built-in stock brand for unmatched domains.
+      default: true
+      branding_title: YCluster
+      branding_logo: ycluster-logo.svg
+      branding_favicon: ycluster-favicon.svg
+      branding_default_flow_background: ycluster-background.svg
+      # Force the light theme: ui_theme on the API is read-only — the
+      # interface reads it from these attributes. Light-only matches the
+      # admin pages, and the logo/background assume a light card.
+      attributes:
+        settings:
+          theme:
+            base: light
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-authentication-flow
+    attrs:
+      title: Sign in to YCluster
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-source-authentication
+    attrs:
+      title: Sign in to YCluster
+
+  - model: authentik_flows.flow
+    identifiers:
+      slug: default-source-enrollment
+    attrs:
+      title: Welcome to YCluster — pick a username

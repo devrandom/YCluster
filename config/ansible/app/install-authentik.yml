@@ -61,6 +61,33 @@
         dest: /etc/authentik/blueprints/ycluster-recovery.yaml
         mode: '0644'
 
+    - name: Install branding blueprint (YCluster look on the IdP pages)
+      copy:
+        src: files/authentik-blueprint-branding.yaml
+        dest: /etc/authentik/blueprints/ycluster-branding.yaml
+        mode: '0644'
+
+    # The media dir is on the leader's RBD volume (compose mounts it at
+    # /media); the brand blueprint references these relative to
+    # media/public, where authentik serves files from.
+    - name: Create authentik media public directory
+      file:
+        path: /rbd/misc/authentik/media/public
+        state: directory
+        mode: '0755'
+      when: is_storage_leader
+
+    - name: Install brand logo, favicon, and background into the media dir
+      copy:
+        src: "files/{{ item }}"
+        dest: "/rbd/misc/authentik/media/public/{{ item }}"
+        mode: '0644'
+      loop:
+        - ycluster-logo.svg
+        - ycluster-favicon.svg
+        - ycluster-background.svg
+      when: is_storage_leader
+
     # Contains OAuth client secrets when sources are configured; group 1000
     # so the in-container authentik user (uid/gid 1000) can read it.
     - name: Install OAuth sources blueprint
