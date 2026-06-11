@@ -2,10 +2,17 @@
 // page links. Each page includes exactly one line:
 //   <script src="/static/nav.js" defer></script>
 // The bar self-injects at the top of <body>; the current page is
-// highlighted. The Account entry points at the IdP on the auth. sibling of
+// highlighted. Also injects the YCluster favicon (same brand assets as the
+// IdP pages). The Account entry points at the IdP on the auth. sibling of
 // whatever host serves the page (admin.xc -> auth.xc, admin.<domain> ->
 // auth.<domain>); any element with id="account-link" gets the same href.
 (function () {
+    const favicon = document.createElement('link');
+    favicon.rel = 'icon';
+    favicon.type = 'image/svg+xml';
+    favicon.href = '/static/ycluster-favicon.svg';
+    document.head.appendChild(favicon);
+
     const authHref = location.protocol + '//' +
         location.hostname.replace(/^admin\./, 'auth.') + '/';
 
@@ -32,6 +39,7 @@
             font-size: 0.875rem;
         }
         #yc-nav .brand { font-weight: 700; color: #1f2328; margin-right: 0.75rem; }
+        #yc-nav .brand img { width: 18px; height: 18px; vertical-align: -3px; margin-right: 0.4rem; }
         #yc-nav a {
             color: #0a5dc2; text-decoration: none;
             padding: 0.2rem 0.55rem; border-radius: 4px;
@@ -44,7 +52,7 @@
     const here = location.pathname.replace(/\/+$/, '') || '/';
     const nav = document.createElement('nav');
     nav.id = 'yc-nav';
-    nav.innerHTML = '<span class="brand">YCluster</span>' + items.map(function (it) {
+    nav.innerHTML = '<span class="brand"><img src="/static/ycluster-favicon.svg" alt="">YCluster</span>' + items.map(function (it) {
         const cur = it[1] === here ? ' class="cur"' : '';
         return '<a href="' + it[1] + '"' + cur + '>' + it[0] + '</a>';
     }).join('');

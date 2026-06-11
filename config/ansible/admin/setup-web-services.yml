@@ -80,6 +80,15 @@
         - nav.js
       notify: restart admin-api
 
+    # Canonical copy lives with the IdP branding assets (app/files) so the
+    # admin pages and authentik share one set.
+    - name: Copy brand favicon
+      copy:
+        src: ../app/files/ycluster-favicon.svg
+        dest: "{{ admin_services_dir }}/static/ycluster-favicon.svg"
+        mode: '0644'
+      notify: restart admin-api
+
     - name: Create systemd service for admin API
       copy:
         dest: /etc/systemd/system/admin-api.service
