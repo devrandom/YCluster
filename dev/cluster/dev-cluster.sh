@@ -160,6 +160,11 @@ ensure_profile() {
     INCUS profile device add "$PROFILE" root disk path=/ pool=default
     INCUS profile device add "$PROFILE" eth0 nic network="$NETWORK"
   fi
+  # docker-in-container (app-dev.yml: authentik). Applies on node (re)start.
+  if [ "$(INCUS profile get "$PROFILE" security.nesting)" != "true" ]; then
+    echo "[*] enable security.nesting on $PROFILE"
+    INCUS profile set "$PROFILE" security.nesting=true
+  fi
 }
 
 # --- nodes ---------------------------------------------------------------

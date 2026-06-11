@@ -1,0 +1,50 @@
+# Optional external login methods (GitHub / GitLab OAuth), rendered only for
+# the providers whose credentials are configured. Sources use email_link
+# matching with NO enrollment flow: an external login succeeds only by
+# linking to an existing account (verified-email match) — strangers get
+# nothing. Internal login always remains available.
+version: 1
+metadata:
+  name: ycluster-oauth-sources
+entries:
+{% if authentik_github_client_id | default('') %}
+  - model: authentik_sources_oauth.oauthsource
+    id: source-github
+    identifiers:
+      slug: github
+    attrs:
+      name: GitHub
+      provider_type: github
+      consumer_key: "{{ authentik_github_client_id }}"
+      consumer_secret: "{{ authentik_github_client_secret }}"
+      enabled: true
+      user_matching_mode: email_link
+      authentication_flow: !Find [authentik_flows.flow, [slug, default-source-authentication]]
+{% endif %}
+{% if authentik_gitlab_client_id | default('') %}
+  - model: authentik_sources_oauth.oauthsource
+    id: source-gitlab
+    identifiers:
+      slug: gitlab
+    attrs:
+      name: GitLab
+      provider_type: gitlab
+      consumer_key: "{{ authentik_gitlab_client_id }}"
+      consumer_secret: "{{ authentik_gitlab_client_secret }}"
+      enabled: true
+      user_matching_mode: email_link
+      authentication_flow: !Find [authentik_flows.flow, [slug, default-source-authentication]]
+{% endif %}
+  # Show configured sources as login buttons on the default login page
+  - model: authentik_stages_identification.identificationstage
+    identifiers:
+      name: default-authentication-identification
+    attrs:
+      sources:
+{% if authentik_github_client_id | default('') %}
+        - !KeyOf source-github
+{% endif %}
+{% if authentik_gitlab_client_id | default('') %}
+        - !KeyOf source-gitlab
+{% endif %}
+        - !Find [authentik_core.source, [slug, authentik-built-in]]

@@ -148,15 +148,16 @@ internal login, or the admin links the source to their account manually.
   keys) survive the cutover.
 - Password login stays enabled during a transition window, then
   `ENABLE_LOGIN_FORM=false`.
-- **Migrating existing accounts**: seed authentik from OWUI's `user`
-  table (one-shot script over the authentik API / `ycluster user add`;
-  map `role='admin'` to an authentik admin group), then send each user
-  an invite to set credentials or link GitHub/GitLab. Password hashes
-  are deliberately *not* migrated (OWUI's bcrypt rows could be written
-  into authentik's Django schema, but that's an unsupported hack — the
-  invite flow replaces it). Nothing else moves: merge-by-email lands
-  each OIDC login in the user's existing OWUI account, so chats,
-  settings and `api_key` rows survive untouched.
+- **Migrating existing accounts**: iterate OWUI's `user` table and send
+  each email a `ycluster user invite` — enrollment *creates* the
+  authentik account (invitations are for new accounts only; `user add`
+  is reserved for accounts that will only ever log in externally). Map
+  OWUI `role='admin'` to an authentik admin group after enrollment.
+  Password hashes are deliberately *not* migrated (OWUI's bcrypt rows
+  could be written into authentik's Django schema, but that's an
+  unsupported hack — the invite flow replaces it). Nothing else moves:
+  merge-by-email lands each OIDC login in the user's existing OWUI
+  account, so chats, settings and `api_key` rows survive untouched.
 - `local-ai-proxy-auth` is **unchanged**: inference API keys continue to
   live in Open-WebUI's `api_key` table. Moving key issuance into our own
   service is a later, independent step (see Open questions).

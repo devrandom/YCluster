@@ -1,0 +1,56 @@
+# HTTPS/HTTP - authentik (cluster IdP), EXTERNAL vhost
+#
+# The `_auth` suffix in the template filename makes certbot-manager render
+# this site with the `auth.` subdomain of the primary domain AND include
+# that subdomain in the certificate SAN on the next obtain/renew.
+# 127.0.0.2 is the rathole public tunnel endpoint — external access is
+# required for off-cluster logins (and OAuth callbacks if external login
+# sources are enabled). Cluster-internal access is the separate auth.xc
+# vhost (authentik-internal.conf.j2).
+server {
+    {% if use_tls %}
+    listen 443 ssl http2;
+    listen 127.0.0.2:443 ssl http2;
+    {% else %}
+    listen 80;
+    listen 127.0.0.2:80;
+    {% endif %}
+    server_name {{ domain | default('_') }};
+
+    client_max_body_size 10M;
+
+    {% if use_tls %}
+    # SSL configuration
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+
+    # SSL security settings
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
+    add_header X-Content-Type-Options nosniff always;
+
+    # Proxy to the authentik server container
+    location / {
+        proxy_pass http://127.0.0.1:(( proxy_port ))/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support (authentik UI + outpost connections)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+}

@@ -48,6 +48,7 @@ def create_parser():
     from .wg import register_wg_commands
     from .inventory import register_inventory_commands
     from .vm import register_vm_commands
+    from .user import register_user_commands
 
     register_cluster_commands(subparsers)
     register_health_alias(subparsers)
@@ -63,6 +64,7 @@ def create_parser():
     register_wg_commands(subparsers)
     register_inventory_commands(subparsers)
     register_vm_commands(subparsers)
+    register_user_commands(subparsers)
 
     return parser
 
