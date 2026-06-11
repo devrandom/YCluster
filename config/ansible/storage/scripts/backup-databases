@@ -159,9 +159,20 @@ backup_etcd() {
     fi
     
     local backup_file="$ETCD_BACKUP_DIR/${TIMESTAMP}.db"
-    
-    # Create etcd snapshot
-    if etcdctl snapshot save "$backup_file"; then
+
+    # Create etcd snapshot. `etcdctl snapshot save` requires exactly one
+    # endpoint, but the centralized client env (etcd-client.env) lists every
+    # member -- try each in turn.
+    local endpoints="${ETCDCTL_ENDPOINTS:-127.0.0.1:2379}"
+    local snapshot_ok=1 ep
+    for ep in ${endpoints//,/ }; do
+        if ETCDCTL_ENDPOINTS="$ep" etcdctl snapshot save "$backup_file"; then
+            snapshot_ok=0
+            break
+        fi
+        log "WARNING: etcd snapshot from $ep failed, trying next endpoint"
+    done
+    if [ "$snapshot_ok" -eq 0 ]; then
         log "etcd backup completed: $backup_file"
         
         # Verify backup file
