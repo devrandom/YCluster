@@ -2,11 +2,10 @@
 <html>
 <head>
     <title>Cluster Status</title>
+    <script src="/static/nav.js" defer></script>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
         h1 { color: #333; text-align: center; }
-        .back-link { position: absolute; top: 0; left: 0; color: #007bff; text-decoration: none; font-size: 0.9em; }
-        .back-link:hover { text-decoration: underline; }
         .refresh-info { text-align: center; color: #666; margin-bottom: 20px; }
         table { width: 100%; border-collapse: collapse; background-color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
@@ -138,7 +137,6 @@
 </head>
 <body x-data="clusterStatus()">
     <div class="header-container">
-        <a href="/" class="back-link">&#8592; Admin</a>
         <h1>Cluster Status</h1>
         <div class="status-indicators">
             <span x-show="showUpdateIndicator" x-transition.duration.2000ms class="update-indicator"></span>

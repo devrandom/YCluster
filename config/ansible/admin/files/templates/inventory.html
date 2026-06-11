@@ -2,6 +2,7 @@
 <html>
 <head>
     <title>Cluster Inventory</title>
+    <script src="/static/nav.js" defer></script>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
         .header-container { position: relative; text-align: center; }
@@ -15,15 +16,12 @@
         .type-macos   { border-left: 4px solid #ffc107; }
         .type-nvidia  { border-left: 4px solid #76b900; }
         .type-nas     { border-left: 4px solid #6f42c1; }
-        .back-link { position: absolute; top: 0; left: 0; color: #007bff; text-decoration: none; font-size: 0.9em; }
-        .back-link:hover { text-decoration: underline; }
         .footnote { text-align: center; color: #666; font-size: 0.85em; margin-top: 8px; }
     </style>
     <script defer src="/static/alpine-3.14.1.min.js"></script>
 </head>
 <body x-data="inventoryPage()">
     <div class="header-container">
-        <a href="/" class="back-link">&#8592; Admin</a>
         <h1>Hardware Inventory
             <a href="/api/inventory/export.csv" style="font-size: 0.5em; font-weight: normal; margin-left: 12px; color: #007bff;">&#11015; CSV</a>
         </h1>

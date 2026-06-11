@@ -70,11 +70,14 @@
         state: directory
         mode: '0755'
 
-    - name: Copy Alpine.js static file
+    - name: Copy static files
       copy:
-        src: "static/alpine-3.14.1.min.js"
-        dest: "{{ admin_services_dir }}/static/alpine-3.14.1.min.js"
+        src: "static/{{ item }}"
+        dest: "{{ admin_services_dir }}/static/{{ item }}"
         mode: '0644'
+      loop:
+        - alpine-3.14.1.min.js
+        - nav.js
       notify: restart admin-api
 
     - name: Create systemd service for admin API
@@ -226,12 +229,6 @@
       copy:
         src: "index.html"
         dest: /var/www/html/index.html
-        mode: '0644'
-
-    - name: Copy embedded Utilization dashboard page
-      copy:
-        src: "dashboard.html"
-        dest: /var/www/html/dashboard.html
         mode: '0644'
 
     - name: Copy ansible SSH public key
