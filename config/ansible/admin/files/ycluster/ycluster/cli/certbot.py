@@ -18,6 +18,8 @@ def register_certbot_commands(subparsers):
     # Obtain command
     obtain_parser = certbot_subparsers.add_parser('obtain', help='Obtain a new certificate')
     obtain_parser.add_argument('--test', action='store_true', help='Use staging server (test certificate)')
+    obtain_parser.add_argument('--server', help='ACME directory URL of an alternative CA '
+                               '(mutually exclusive with --test; set REQUESTS_CA_BUNDLE for a private CA)')
     obtain_parser.add_argument('-n', '--non-interactive', action='store_true', help='Run in non-interactive mode')
     obtain_parser.set_defaults(func=certbot_obtain)
     
@@ -52,7 +54,11 @@ def register_certbot_commands(subparsers):
 
 def certbot_obtain(args):
     """Obtain certificate"""
-    success = certbot_manager.obtain_certificate(test_cert=args.test, non_interactive=args.non_interactive)
+    if args.test and args.server:
+        print("--test and --server are mutually exclusive")
+        sys.exit(1)
+    success = certbot_manager.obtain_certificate(test_cert=args.test, non_interactive=args.non_interactive,
+                                                 server=args.server)
     sys.exit(0 if success else 1)
 
 
