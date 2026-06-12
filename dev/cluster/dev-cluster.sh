@@ -105,6 +105,20 @@ ensure_firewall() {
       echo "[*] DOCKER-USER: allow $d $NETWORK"
     fi
   done
+  # Keepalived's VRRP adverts (multicast 224.0.0.18) otherwise hit the
+  # catch-all masquerades in BOTH the incus and qubes postrouting chains
+  # (dst is outside 10.0.0.0/24): every node's adverts NAT to the bridge
+  # address and collide on one conntrack tuple, so only one node's adverts
+  # survive -> VRRP split-brain (two MASTERs, duplicate VIP). Exempt
+  # multicast from NAT in both chains.
+  if ! sudo nft list chain inet incus "pstrt.$NETWORK" 2>/dev/null | grep -q "224.0.0.0/4"; then
+    sudo nft insert rule inet incus "pstrt.$NETWORK" ip daddr 224.0.0.0/4 return
+    echo "[*] pstrt.$NETWORK: multicast exempt from masquerade"
+  fi
+  if ! sudo nft list chain ip qubes postrouting 2>/dev/null | grep -q "224.0.0.0/4"; then
+    sudo nft insert rule ip qubes postrouting ip daddr 224.0.0.0/4 return
+    echo "[*] qubes postrouting: multicast exempt from masquerade"
+  fi
 }
 
 ensure_sshkey() {
@@ -292,7 +306,9 @@ ensure_node() {
 
 # --- commands ------------------------------------------------------------
 cmd_up() {
-  ensure_persist; ensure_daemon; ensure_sshkey; ensure_sshconfig; ensure_firewall; ensure_network; ensure_profile
+  # firewall after network: the multicast NAT exemption needs the incus
+  # pstrt chain, which exists only once the network does.
+  ensure_persist; ensure_daemon; ensure_sshkey; ensure_sshconfig; ensure_network; ensure_firewall; ensure_profile
   ensure_cache   # before nodes — they apt through it
   for n in "${NODES[@]}"; do ensure_node "$n"; done
   echo; cmd_status

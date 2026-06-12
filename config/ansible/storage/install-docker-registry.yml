@@ -2,14 +2,15 @@
 - name: Install Docker Registry on core nodes
   hosts: core
   become: yes
+  vars:
+    # Overridable (registry_docker_packages, e.g. from the dev cluster's
+    # inventory) so environments without the Docker apt repo can satisfy
+    # the docker + compose-v2 requirement from their own packages.
+    docker_packages: "{{ registry_docker_packages | default(['docker-ce', 'docker-ce-cli', 'docker-buildx-plugin', 'docker-compose-plugin']) }}"
   tasks:
     - name: Ensure Docker is installed (should be done by install-docker-official.yml)
       apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - docker-buildx-plugin
-          - docker-compose-plugin
+        name: "{{ docker_packages }}"
         state: present
 
     - name: Start and enable Docker service

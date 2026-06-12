@@ -32,6 +32,12 @@ all:
     web_services_force_local: true
     # inventory_dir (not playbook_dir) — the latter varies per imported play.
     bootstrap_files_dir: "{{ inventory_dir }}/.ssh"  # holds ansible_ssh_key.pub
+    # Dev has no Docker apt repo; install-docker-registry.yml falls back to
+    # these for its docker + compose-v2 requirement.
+    registry_docker_packages: [docker.io, docker-compose-v2]
+    # Host Go for the local-ai-proxy control-node build (Debian has no
+    # golang-1.24 package; >=1.21 auto-fetches the go.mod toolchain).
+    local_ai_proxy_go_bin: /usr/lib/go-1.23/bin/go
     # etcd client config single-source-of-truth (mirrors group_vars/all/main.yml,
     # which the dev playbooks deliberately don't load). See that file.
     #

@@ -29,10 +29,16 @@
     use_etcd: true
     backend_url: "http://nv1.xc:8000"
     proxy_listen: ":4001"
-    proxy_src_dir: /opt/infrastructure/local-ai-proxy
-    proxy_bin_src: /opt/infrastructure/local-ai-proxy/bin/local-ai-proxy
+    # Repo root relative to this playbook (config/ansible/app/), so the
+    # build works from any checkout location (/opt/infrastructure on the
+    # cluster, the developer's clone for the dev container cluster).
+    proxy_src_dir: "{{ playbook_dir }}/../../../local-ai-proxy"
+    proxy_bin_src: "{{ proxy_src_dir }}/bin/local-ai-proxy"
     proxy_bin_dst: /usr/local/bin/local-ai-proxy
-    go_bin: /usr/lib/go-1.24/bin/go
+    # Overridable (local_ai_proxy_go_bin) for control nodes without the
+    # golang-1.24 apt package; any Go >= 1.21 auto-fetches the toolchain
+    # go.mod asks for.
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
   tasks:
     # The etcd client key is distributed mode 0640, group etcd-client (see
     # setup-etcd-tls.yml). Both the Go proxy and the Python auth sidecar run as
@@ -61,6 +67,14 @@
         group: local-ai-proxy
         mode: '0755'
 
+    - name: Check for Go toolchain on control node
+      stat:
+        path: "{{ go_bin }}"
+      delegate_to: localhost
+      become: no
+      run_once: yes
+      register: go_stat
+
     - name: Install Go toolchain on control node
       apt:
         name: golang-1.24
@@ -68,6 +82,7 @@
       delegate_to: localhost
       become: yes
       run_once: yes
+      when: not go_stat.stat.exists
 
     - name: Build local-ai-proxy binary on control node
       make:
