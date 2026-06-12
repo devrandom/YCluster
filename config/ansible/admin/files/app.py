@@ -2875,6 +2875,23 @@ def vm_usage_data():
                            FROM vm_samples ORDER BY vm, ts DESC''')
             last_state = dict(cur.fetchall())
 
+    # Registry (current GPU count) and schedules; usage numbers still
+    # render if etcd is unreachable.
+    registry, desired_all = {}, {}
+    try:
+        registry = vms_all()
+        client = get_etcd_client()
+        for value, metadata in client.get_prefix(VM_DESIRED_PREFIX):
+            if not value:
+                continue
+            try:
+                desired_all[metadata.key.decode()[len(VM_DESIRED_PREFIX):]] = \
+                    json.loads(value.decode())
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     # Assemble running intervals per VM from the event stream (each VM's
     # pre-window event sorts before its window events, and the state machine
     # is per-VM, so the combined list needs no global re-sort). launch/start
@@ -2925,6 +2942,10 @@ def vm_usage_data():
         rows.append({
             'vm': vm,
             'owner': ev.get('owner') or sm.get('owner') or '',
+            'gpus': registry.get(vm, {}).get('gpus'),
+            'schedule_mode': ((desired_all.get(vm) or {}).get('mode', 'unmanaged')
+                              if vm in registry else None),
+            'windows': (desired_all.get(vm) or {}).get('windows', []),
             'billable_gpu_hours': round(ev.get('billable', 0.0), 4),
             'tracked_gpu_hours': tracked,
             'observed_gpu_hours': observed,

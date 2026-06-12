@@ -23,6 +23,8 @@
     .drift { color: #b91c1c; font-weight: bold; }
     .now-billable { color: #166534; font-weight: bold; }
     .now-untracked { color: #b91c1c; font-weight: bold; }
+    details summary { cursor: pointer; }
+    .win { font-size: 0.8rem; color: #555; white-space: nowrap; padding: 0.1rem 0 0 0.5rem; }
   </style>
 </head>
 <body x-data="vmUsageApp()" x-init="fetchRows()">
@@ -64,7 +66,9 @@
           <tr>
             <th>Owner</th>
             <th>VM</th>
+            <th class="num">GPUs</th>
             <th>Now</th>
+            <th>Schedule</th>
             <th class="num">Billable GPU-h</th>
             <th class="num">Tracked GPU-h</th>
             <th class="num">Observed GPU-h</th>
@@ -77,8 +81,22 @@
             <tr>
               <td x-text="row.owner || '(unregistered)'"></td>
               <td x-text="row.vm"></td>
+              <td class="num" x-text="row.gpus ?? '—'"></td>
               <td :class="row.current === 'billable' ? 'now-billable' : (row.current === 'untracked' ? 'now-untracked' : '')"
                   x-text="row.current ? `running (${row.current})` : '—'"></td>
+              <td>
+                <template x-if="row.windows && row.windows.length">
+                  <details>
+                    <summary x-text="`${row.schedule_mode} (${row.windows.length})`"></summary>
+                    <template x-for="w in row.windows">
+                      <div class="win" x-text="fmtWindow(w)"></div>
+                    </template>
+                  </details>
+                </template>
+                <template x-if="!(row.windows && row.windows.length)">
+                  <span x-text="row.schedule_mode || '—'"></span>
+                </template>
+              </td>
               <td class="num" x-text="row.billable_gpu_hours.toFixed(2)"></td>
               <td class="num" x-text="row.tracked_gpu_hours.toFixed(2)"></td>
               <td class="num" x-text="row.observed_gpu_hours.toFixed(2)"></td>
@@ -105,6 +123,12 @@
             .then(r => r.json())
             .then(data => { this.rows = data; this.loading = false })
             .catch(() => { this.rows = []; this.loading = false })
+        },
+
+        fmtWindow(w) {
+          const f = d => new Date(d).toLocaleString(undefined,
+            {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false})
+          return `${f(w.start)} → ${f(w.end)}`
         }
       }
     }
