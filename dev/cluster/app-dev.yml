@@ -1,71 +1,104 @@
 ---
 # App-layer additions for the dev container cluster: substrate stand-ins
-# (docker, postgres, /rbd mounts) + the real authentik playbook.
+# (docker, /rbd mounts, qdrant) + the REAL storage leader election, docker
+# registry, storage VIP (keepalived), rathole client, authentik, and the
+# incus/fakevm fixture on c1.
 #
 # Run as the TOP-LEVEL playbook from dev/cluster/ (same vault-avoidance rule
 # as site-dev.yml):
 #   ../../venv/bin/ansible-playbook app-dev.yml
 #
-# Requires security.nesting=true on the node profile (docker-in-container) —
-# dev-cluster.sh sets it; existing clusters need a node restart to pick it up.
+# Requires security.nesting=true on the node profile (docker-in-container,
+# incus-in-container) — dev-cluster.sh sets it; existing clusters need a node
+# restart to pick it up.
+#
+# Unlike the earlier fixed-leader fixture, the storage leader is now chosen
+# by the real storage-leader-election service: whichever core node wins the
+# /cluster/leader/app lease starts user-rbd/misc-rbd (bind-mount stand-ins),
+# postgresql@16-main, qdrant (stand-in), docker-registry, rathole, and
+# ycluster-apps.target — exactly the production control flow. NOTE the
+# stand-in /rbd mounts are node-local, so a leadership failover in dev gets
+# an empty database/media tree on the new leader (production has shared RBD);
+# the system test fails leadership over and back deliberately.
 
 # Stand-in for the storage substrate the app playbooks assume:
 # - docker (real cluster: install-docker-official.yml — not used here because
 #   its daemon.json points DNS/registry-mirror at cluster VIPs that don't
 #   exist in dev; Ubuntu's docker.io + compose v2 plugin suffice)
-# - a dummy misc-rbd.service satisfying app units' Requires=, bind-mounting
-#   /rbd/misc and /rbd/user (started only on the designated leader — the
-#   mountpoint check is exactly how the real playbooks detect the leader)
+# - dummy misc-rbd/user-rbd services satisfying app units' Requires= and the
+#   mountpoint-based leader checks, bind-mounting /rbd/misc and /rbd/user
+#   (started only by the leader-election service, like the real units)
+# - a dummy qdrant.service (no qdrant in dev; the election starts/monitors it)
+# - a no-op cluster-heartbeat (external dead-man's-switch telemetry)
 # - postgres with the real playbook's listen/pg_hba settings (Docker bridge
-#   access), default data dir instead of /rbd/user/postgres
-- name: App substrate stand-ins (docker, rbd mounts)
+#   access), default data dir instead of /rbd/user/postgres, autostart
+#   disabled (the election starts postgresql@16-main on the leader)
+- name: App substrate stand-ins (docker, rbd mounts, qdrant, postgres)
   hosts: storage
   become: yes
   tasks:
-    - name: Install docker + compose
+    - name: Install docker + compose + registry/python deps
       apt:
-        name: [docker.io, docker-compose-v2, iptables]
+        name: [docker.io, docker-compose-v2, iptables, python3-docker]
         state: present
 
-    - name: Install dev misc-rbd.service stand-in
+    - name: Install dev RBD mount stand-ins (misc-rbd, user-rbd)
       copy:
-        dest: /etc/systemd/system/misc-rbd.service
+        dest: "/etc/systemd/system/{{ item.unit }}.service"
         content: |
           [Unit]
-          Description=Dev stand-in for RBD mounts (/rbd/misc, /rbd/user)
+          Description=Dev stand-in for RBD mount ({{ item.path }})
 
           [Service]
           Type=oneshot
           RemainAfterExit=yes
-          ExecStartPre=/bin/mkdir -p /rbd/misc /rbd/user
-          ExecStart=/bin/sh -c 'mountpoint -q /rbd/misc || mount --bind /rbd/misc /rbd/misc'
-          ExecStart=/bin/sh -c 'mountpoint -q /rbd/user || mount --bind /rbd/user /rbd/user'
+          ExecStartPre=/bin/mkdir -p {{ item.path }}
+          ExecStart=/bin/sh -c 'mountpoint -q {{ item.path }} || mount --bind {{ item.path }} {{ item.path }}'
+          ExecStop=/bin/sh -c 'mountpoint -q {{ item.path }} && umount {{ item.path }} || true'
 
           [Install]
           WantedBy=multi-user.target
-      register: misc_rbd_unit
+      loop:
+        - { unit: misc-rbd, path: /rbd/misc }
+        - { unit: user-rbd, path: /rbd/user }
+      register: rbd_units
+
+    - name: Install dev qdrant stand-in
+      copy:
+        dest: /etc/systemd/system/qdrant.service
+        content: |
+          [Unit]
+          Description=Dev stand-in for qdrant (no vector DB in the dev cluster)
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/true
+
+          [Install]
+          WantedBy=multi-user.target
+      register: qdrant_unit
 
     - name: Reload systemd daemon
       systemd:
         daemon_reload: yes
-      when: misc_rbd_unit.changed
+      when: rbd_units.changed or qdrant_unit.changed
 
-# The first storage node is the designated dev leader (matches the
-# mountpoint-based leader detection the real playbooks use).
-- name: Leader fixture — RBD mounts, VIP, postgres
-  hosts: storage[0]
-  become: yes
-  tasks:
-    - name: Start RBD mount stand-in (marks this node as storage leader)
-      systemd:
-        name: misc-rbd.service
-        enabled: yes
-        state: started
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
 
-    - name: Assign storage VIP to the leader (dev stand-in for keepalived)
-      shell: ip addr show dev eth0 | grep -q "10.0.0.100/" || ip addr add 10.0.0.100/24 dev eth0
-      register: vip_add
-      changed_when: vip_add.rc == 0 and 'inet' not in (vip_add.stdout or '')
+    - name: Install no-op cluster-heartbeat (dev stand-in for external telemetry)
+      copy:
+        dest: /usr/local/lib/cluster/cluster-heartbeat
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          # Dev stand-in: the real cluster-heartbeat pings the admin API and
+          # healthchecks.io; the dev cluster has neither configured.
+          exit 0
 
     - name: Install postgres
       apt:
@@ -77,35 +110,154 @@
         path: /etc/postgresql/16/main/postgresql.conf
         regexp: '^#?listen_addresses\s*='
         line: "listen_addresses = '*'"
-      notify: restart postgresql
+      register: pg_listen
 
     - name: Configure PostgreSQL client authentication for Docker networks
       lineinfile:
         path: /etc/postgresql/16/main/pg_hba.conf
         line: "host    all             all             172.0.0.0/8             scram-sha-256"
         insertafter: "# IPv4 local connections:"
-      notify: restart postgresql
+      register: pg_hba
 
-    - name: Ensure postgres is running
+    - name: Disable PostgreSQL autostart (managed by leader election)
       systemd:
         name: postgresql
-        state: started
-        enabled: yes
+        enabled: no
 
-  handlers:
-    - name: restart postgresql
+    - name: Check if this host is the storage leader
+      command: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    # apt's postinst auto-starts postgres; the election owns its state.
+    # Stop it on non-leaders ourselves (cleanly — otherwise the election
+    # service's aggressive cleanup pkill -9s it and leaves the unit
+    # 'failed') and bounce it on the leader if its config changed.
+    - name: Stop postgres on non-leaders (election starts it on the leader)
+      shell: |
+        if systemctl is-active --quiet postgresql@16-main; then
+          systemctl stop postgresql@16-main
+          echo stopped
+        fi
+        systemctl reset-failed postgresql@16-main 2>/dev/null || true
+      register: pg_stop
+      changed_when: "'stopped' in pg_stop.stdout"
+      when: rbd_user_mounted.rc != 0
+
+    - name: Restart postgres on the leader if config changed
       systemd:
-        name: postgresql
+        name: postgresql@16-main
         state: restarted
+      when: rbd_user_mounted.rc == 0 and (pg_listen.changed or pg_hba.changed)
 
-# VM-state sampler on the compute fixture nodes (where dev incus + the
-# fakevm fixture live). Same unit files install-incus.yml deploys on real
-# incus hosts — that playbook isn't container-safe (GPU profiles), so the
-# fixture installs them directly.
-- name: vm-state-sampler + vm-reconciler on the incus fixture hosts (dev)
+    # Migration from the earlier fixed-leader fixture: the VIP used to be a
+    # static address on the designated leader. Keepalived owns it from here
+    # on; drop a pre-keepalived static assignment so two holders can't
+    # coexist. (No-op on fresh nodes and once keepalived is configured.)
+    - name: Remove legacy hand-assigned storage VIP (keepalived owns it now)
+      shell: |
+        if [ ! -f /etc/keepalived/conf.d/storage-vip.conf ] \
+           && ip addr show dev eth0 | grep -q "10.0.0.100/"; then
+          ip addr del 10.0.0.100/24 dev eth0
+          echo removed
+        fi
+      register: legacy_vip
+      changed_when: "'removed' in legacy_vip.stdout"
+
+    - name: Disable misc-rbd autostart (managed by leader election)
+      systemd:
+        name: misc-rbd
+        enabled: no
+
+# The real registry / rathole-client / leader-election / VIP playbooks, in
+# the order the election expects (it starts docker-registry and rathole, so
+# their units must exist before the election service does).
+# registry_docker_packages: dev has docker.io, not the docker-ce repo.
+- import_playbook: ../../config/ansible/storage/install-docker-registry.yml
+- import_playbook: ../../config/ansible/app/install-rathole.yml
+- import_playbook: ../../config/ansible/storage/install-storage-leader-election.yml
+- import_playbook: ../../config/ansible/storage/setup-storage-vip.yml
+
+# Provisioning below (authentik's leader detection, app starts) needs an
+# elected leader holding the /rbd mounts. The lease appears within one
+# election RENEW_INTERVAL (10s) of the service starting.
+- name: Wait for storage leader election to converge
+  hosts: s1
+  become: yes
+  tasks:
+    - name: Wait for /cluster/leader/app
+      command: etcdctl get /cluster/leader/app --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: app_leader
+      until: app_leader.stdout | trim | length > 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+    - name: Wait for /rbd/user mount on the leader
+      command: mountpoint -q /rbd/user
+      delegate_to: "{{ app_leader.stdout | trim }}"
+      register: leader_mount
+      until: leader_mount.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+
+# VM-state sampler + reconciler on the compute fixture nodes, plus a nested
+# incus daemon so `ycluster vm launch/sample/reconcile` runs for real (the
+# "fakevm" is an ordinary container inside c1). install-incus.yml itself
+# isn't container-safe (GPU profiles, host firewall), so the fixture
+# installs the same unit files directly and builds a minimal bridge +
+# gpu-ct profile matching what vm_manager expects.
+- name: Incus + vm-state-sampler + vm-reconciler on the fixture hosts (dev)
   hosts: compute
   become: yes
   tasks:
+    # dnsmasq-base: incus managed networks spawn their own dnsmasq for the
+    # bridge (lost to the dev env's no-recommends apt config otherwise).
+    - name: Install incus
+      apt:
+        name: [incus, dnsmasq-base]
+        state: present
+
+    - name: Initialise nested incus (dir storage pool)
+      shell: |
+        set -e
+        if ! incus storage show default >/dev/null 2>&1; then
+          incus admin init --minimal
+          echo changed
+        fi
+      register: incus_init
+      changed_when: "'changed' in incus_init.stdout"
+
+    # Converge network/profile per attribute, not just on absence — a
+    # pre-existing manual fixture (e.g. an earlier hand-built gpu-ct) may
+    # have the object but not the devices vm_manager needs.
+    - name: VM bridge incusbr0 (vm_manager pins IPs from 10.100.0.0/24)
+      shell: |
+        set -e
+        if ! incus network show incusbr0 >/dev/null 2>&1; then
+          incus network create incusbr0 ipv4.address=10.100.0.1/24 ipv4.nat=true ipv6.address=none
+          echo changed
+        elif [ "$(incus network get incusbr0 ipv4.address)" != "10.100.0.1/24" ]; then
+          incus network set incusbr0 ipv4.address 10.100.0.1/24
+          echo changed
+        fi
+      register: incus_net
+      changed_when: "'changed' in incus_net.stdout"
+
+    - name: gpu-ct profile with root + eth0 (dev stand-in — no GPU device)
+      shell: |
+        set -e
+        incus profile show gpu-ct >/dev/null 2>&1 || { incus profile create gpu-ct; echo changed; }
+        incus profile device get gpu-ct root pool >/dev/null 2>&1 \
+          || { incus profile device add gpu-ct root disk path=/ pool=default; echo changed; }
+        incus profile device get gpu-ct eth0 network >/dev/null 2>&1 \
+          || { incus profile device add gpu-ct eth0 nic network=incusbr0; echo changed; }
+      register: incus_profile
+      changed_when: "'changed' in incus_profile.stdout"
+
     - name: Install sampler/reconciler units
       copy:
         src: "../../config/ansible/admin/files/{{ item.0 }}.{{ item.1 }}"
@@ -129,18 +281,105 @@
           default_instance_type: container
           vm_nas_share: false
 
-# No cluster DNS in dev — point auth.xc at the leader's nginx (the
-# authentik-internal vhost) so the CLI and admin-api reach the IdP by its
-# real name, like on the real cluster.
+    # Stand-in inference backend (the "GPU node" role): just enough of the
+    # OpenAI surface for local-ai-proxy to route to. The system test points
+    # /cluster/config/inference/models/dev-echo at it.
+    - name: Install dev OpenAI stub backend
+      copy:
+        src: files/dev-openai-stub.py
+        dest: /usr/local/bin/dev-openai-stub
+        mode: '0755'
+      register: stub_script
+
+    - name: Install dev OpenAI stub unit
+      copy:
+        dest: /etc/systemd/system/dev-openai-stub.service
+        content: |
+          [Unit]
+          Description=Dev stand-in inference backend (OpenAI API stub)
+          After=network.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/bin/python3 /usr/local/bin/dev-openai-stub
+          Restart=on-failure
+          User=nobody
+
+          [Install]
+          WantedBy=multi-user.target
+      register: stub_unit
+
+    - name: Enable and start dev OpenAI stub
+      systemd:
+        name: dev-openai-stub
+        enabled: yes
+        state: "{{ (stub_script.changed or stub_unit.changed) | ternary('restarted', 'started') }}"
+        daemon_reload: yes
+
+# No cluster DNS in dev — point auth.xc at the storage VIP (which keepalived
+# places on the leader, where the authentik-internal nginx vhost runs) so
+# the CLI and admin-api reach the IdP by its real name, like on the real
+# cluster.
 - name: auth.xc hosts entry (dev stand-in for cluster DNS)
   hosts: managed
   become: yes
   tasks:
-    - name: Resolve auth.xc to the leader
+    - name: Resolve auth.xc to the storage VIP
       lineinfile:
         path: /etc/hosts
-        line: "{{ hostvars[groups['storage'][0]].ansible_host }} auth.xc"
+        regexp: ' auth\.xc$'
+        line: "10.0.0.100 auth.xc"
+
+# authentik-manager only writes the forward-auth blueprints (proxy provider
+# + Cluster Admin application on the embedded outpost) when an external
+# domain is configured. Seed a dev one. nginx stays in --local mode
+# regardless (web_services_force_local), so this only affects the IdP's
+# own config + user-facing links.
+- name: External-domain fixture (dev.test) for forward-auth blueprints
+  hosts: s1
+  become: yes
+  tasks:
+    - name: Read /cluster/https/domain
+      command: etcdctl get /cluster/https/domain --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: https_domain
+      changed_when: false
+
+    - name: Set dev external domain
+      command: ycluster https set-domain dev.test
+      environment: "{{ etcd_client_env }}"
+      when: https_domain.stdout | trim | length == 0
+      register: domain_set
+
+# Blueprints are written by authentik-manager at service start; if the
+# domain was just set and authentik is already up, bounce it once.
+- name: Regenerate authentik blueprints after domain fixture
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Restart authentik on the leader
+      shell: |
+        if mountpoint -q /rbd/user && systemctl is-active --quiet authentik; then
+          systemctl restart authentik
+          echo restarted
+        fi
+      register: ak_restart
+      changed_when: "'restarted' in ak_restart.stdout"
+      when: hostvars['s1'].domain_set is not skipped
 
 # The real playbook, unmodified: leader detection via the /rbd/user
-# mountpoint finds s1; nginx renders in --local mode (web_services_force_local).
+# mountpoint finds the elected leader; nginx renders in --local mode
+# (web_services_force_local).
 - import_playbook: ../../config/ansible/app/install-authentik.yml
+
+# Usage accounting, unmodified: provisions the usage_stats DB on the leader
+# and the collect-vm-stats / collect-model-stats timers that drain
+# /cluster/vms-events/ + /cluster/vm-state/ into postgres.
+- import_playbook: ../../config/ansible/admin/admin-stats.yml
+
+# The inference gateway, unmodified: builds the Go binary on this machine
+# (local_ai_proxy_go_bin in the dev inventory points at the host Go, which
+# auto-fetches the go.mod toolchain), deploys proxy + auth sidecar + the
+# inference.xc vhost on all storage nodes. The system test routes the
+# dev-echo model at c1's stub backend via etcd.
+- import_playbook: ../../config/ansible/app/install-local-ai-proxy.yml

@@ -153,6 +153,38 @@ leader (etcd `/cluster/leader/app`) **and** a responding registry on
 + a registry are wired. Set `cluster_interface: eth0` in the dev inventory
 when wiring it.
 
+### Progress (updated 2026-06-11)
+**App layer + system test.** `app-dev.yml` now runs the REAL storage
+leader election (`/cluster/leader/app` lease) instead of a fixed-leader
+fixture: the winner starts the rbd-mount stand-ins, postgresql@16-main,
+qdrant (stand-in), the real docker registry, the real rathole client, and
+ycluster-apps.target (authentik). `setup-storage-vip.yml` runs unmodified
+— keepalived places the storage VIP on the leader, gated on the registry
+health check. Failover is driven via the election's drain key.
+
+`system-test.sh` smoke-tests the whole integration surface end to end
+(see its header): etcd/mTLS, CLI round-trips, frontend mgmt, admin-api
+from c1, leader+VIP placement, dhcp + storage leadership failover,
+authentik user mgmt (CLI → API → postgres), nested-incus VM lifecycle on
+c1 (launch → sample → desired-state → reconcile), usage accounting into
+postgres, rathole tunnels through f1, the admin web forward-auth gate,
+and local-ai-proxy with a stub backend on c1.
+
+Additional gotchas:
+
+10. **VRRP adverts were NAT-masqueraded — split-brain.** Multicast
+    224.0.0.18 is outside 10.0.0.0/24, so BOTH the incus
+    (`pstrt.ycdev0`) and qubes (`postrouting`) catch-all masquerades
+    rewrote advert sources to the bridge address; all nodes' adverts
+    collided on one conntrack tuple and only one node's survived → two
+    MASTERs holding the VIP. Fixed in `ensure_firewall()`: insert
+    `ip daddr 224.0.0.0/4 return` into both chains (and flush stale
+    proto-112 conntrack entries once).
+11. **apt auto-starts postgres on install.** The election owns service
+    state; non-leaders must have postgresql@16-main stopped cleanly by
+    the playbook or the election service's aggressive cleanup pkill -9s
+    it and leaves the unit `failed`.
+
 #### Next steps
 1. Run the etcd-hardening changes against it (admin-api health-check
    gating, inventory-collect delegation, firewall/mTLS).
