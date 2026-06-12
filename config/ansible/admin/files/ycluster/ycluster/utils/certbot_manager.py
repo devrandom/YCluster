@@ -324,8 +324,8 @@ def start_fetch_tls_timer():
     except Exception as e:
         print(f"Warning: Could not start fetch-tls-certs timer: {e}")
 
-def obtain_certificate(test_cert=False, non_interactive=False):
-    """Obtain a new certificate from Let's Encrypt using CSR mode"""
+def obtain_certificate(test_cert=False, non_interactive=False, server=None):
+    """Obtain a new certificate from Let's Encrypt (or another ACME CA) using CSR mode"""
     config = get_https_config()
     domains = get_all_domains(config)
     
@@ -407,7 +407,11 @@ def obtain_certificate(test_cert=False, non_interactive=False):
         if test_cert:
             cmd.append('--test-cert')
             print("Using staging server (test certificate)")
-        
+
+        if server:
+            cmd.extend(['--server', server])
+            print(f"Using ACME server: {server}")
+
         run_certbot_command(cmd)
         print("Certificate obtained successfully!")
         
