@@ -124,8 +124,13 @@ def _all_json(prefix):
 # incus helpers
 # --------------------------------------------------------------------------
 def _incus(*args, check=True, stdin=None):
+    # The incus CLI reads instance config from a non-TTY stdin until EOF,
+    # so it must never inherit ours (`ssh host 'ycluster vm launch ...'`
+    # keeps stdin open and incus init blocks forever).
+    stdin_kw = ({"input": stdin} if stdin is not None
+                else {"stdin": subprocess.DEVNULL})
     r = subprocess.run(
-        ["incus", *args], input=stdin, text=True, capture_output=True
+        ["incus", *args], text=True, capture_output=True, **stdin_kw
     )
     if check and r.returncode != 0:
         raise RuntimeError(f"incus {' '.join(args)} failed: {r.stderr.strip()}")
