@@ -101,6 +101,17 @@ server {
     # Return a clean 429 instead of nginx's default HTML page when rate-limited
     limit_req_status 429;
 
+    {% if not use_tls %}
+    # ACME HTTP-01 challenges (certbot --webroot) for the FIRST certificate:
+    # until TLS exists this block owns the 127.0.0.2:80 tunnel endpoint, so
+    # the challenge path must be served here (the TLS-mode twin lives in the
+    # redirect block below).
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type text/plain;
+    }
+    {% endif %}
+
     # Public whitelist (wg bootstrap flow + read-only status dashboard).
     include /etc/nginx/admin-api-public-locations.conf;
 
