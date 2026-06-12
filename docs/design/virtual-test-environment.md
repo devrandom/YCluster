@@ -185,6 +185,86 @@ Additional gotchas:
     the playbook or the election service's aggressive cleanup pkill -9s
     it and leaves the unit `failed`.
 
+### Progress (updated 2026-06-12)
+**Prod-gap items 1–4 closed** (see "Closing the remaining prod gap"):
+
+- **State follows leadership.** `dev-cluster.sh` attaches a shared
+  `rbd-backing` storage volume to all core containers at
+  `/srv/rbd-backing`; the `user-rbd`/`misc-rbd` stand-ins bind its
+  subdirs onto `/rbd/*` on the elected leader only. Postgres uses prod's
+  `data_directory = /rbd/user/postgres` (one-time initdb onto the shared
+  backing), so failover hands the new leader the SAME
+  postgres/authentik/registry/qdrant state — asserted explicitly by the
+  failover section. The authentik image is pre-pulled on all storage
+  nodes (a first-time leader otherwise pulls ~2 GB mid-failover).
+- **Real qdrant** (`storage/install-qdrant.yml` unmodified), data on
+  `/rbd/user/qdrant`.
+- **Real base infrastructure** (`base-infra-dev.yml`): the real
+  `setup-network-services.yml` (squid, dnsmasq cluster DNS rendered from
+  etcd via update-dhcp-hosts), `configure-ntp.yml` (chrony, `-x` in
+  containers — never touch the shared kernel clock), and
+  `setup-gateway-vip.yml` (10.0.0.254). c1's `/api/health` goes fully
+  healthy; core nodes stay 503 on the Ceph check only. With incus's own
+  bridge DHCP disabled, the cluster's scapy DHCP server serves an
+  **adhoc-join test**: a fresh `x1` container DHCPs its conventional IP
+  by hostname, lands in etcd, and appears in cluster DNS.
+- **ACME rehearsal** (`acme-dev.yml`): Pebble on f1 (validating through
+  cluster DNS at the gateway VIP, external domain pointed at the f1
+  edge) issues a real certificate via `ycluster certbot obtain
+  --server …` on the leader — HTTP-01 through the rathole tunnel into
+  the public vhost's webroot, cert landing in etcd. The `--server`
+  option was added to the CLI for any private ACME CA.
+
+`system-test.sh` now runs 16 sections; all pass from a clean provision.
+
+**Prod bugs found by this round** (fixes in the shared code):
+- `_incus()` let the incus CLI inherit stdin; `ssh host 'ycluster vm
+  launch …'` from a terminal hung forever in `incus init` (reads config
+  from non-TTY stdin to EOF).
+- `update-dhcp-hosts` could create `/etc/static-hosts` as 0600 (mktemp
+  perms survive `cp` when the destination doesn't exist); the
+  privilege-dropped dnsmasq then silently serves NXDOMAIN for every
+  cluster name.
+- The public vhost served ACME challenges only in the `use_tls` redirect
+  block, so the FIRST certificate (no TLS yet → local-mode 127.0.0.2:80)
+  could never validate through the tunnel.
+- The election's graceful teardown stops `user-rbd` in PARALLEL with the
+  services holding the mount; the plain umount loses the race (EBUSY,
+  swallowed by `|| true`) and only the prod-only force-unmap bulldozes
+  the leftovers — postgres takes a `pkill -9` on every failover. The dev
+  units retry the umount instead; the election-script stop ordering is
+  worth revisiting in prod (graceful-stop postgres BEFORE the rbd
+  units).
+
+Additional gotchas:
+
+12. **Top-level `config/ansible/*.yml` imports load prod group_vars.**
+    Playbooks directly in `config/ansible/` (setup-gateway-vip,
+    configure-ntp) pull `config/ansible/group_vars/core.yml`, whose
+    bare-metal interface names outrank dev inventory vars — keepalived
+    rendered `interface enp2s0f0np0` and died. Only extra-vars outrank
+    playbook-adjacent group_vars: `base-infra-dev.yml` must run with
+    `-e cluster_interface=eth0 -e uplink_interface=eth0`. (Subdir
+    playbooks — admin/, storage/, app/ — have no adjacent group_vars,
+    which is why everything else works from the inventory.)
+13. **Stale /rbd mounts break mountpoint-based leader detection.** An
+    interrupted teardown can leave `/rbd/user` mounted with `user-rbd`
+    inactive; every `mountpoint -q` leader check then fires on two
+    nodes. `app-dev.yml` unmounts any /rbd mount whose unit is inactive.
+14. **`umount -f -l` doesn't work in these containers** ("block devices
+    are not permitted on filesystem"), so the election's aggressive
+    cleanup can't clear mounts — another reason the dev units' ExecStop
+    retry matters.
+15. **cloud-init re-applies network config late in first boot** — the
+    adhoc node answers DHCP, then flaps the interface; the connectivity
+    assert needs a retry.
+16. **Pebble's release tarball ships the binary 0644/uid-1001** —
+    chmod/chown explicitly or systemd gets 203/EXEC.
+17. **authentik seeds the bootstrap token well after `/-/health/live/`
+    passes** on a fresh DB; authenticated API calls 403 until the
+    blueprint apply finishes. The test waits for an authenticated call
+    to succeed before judging user management.
+
 #### Next steps
 1. Run the etcd-hardening changes against it (admin-api health-check
    gating, inventory-collect delegation, firewall/mTLS).
@@ -316,7 +396,8 @@ these later.)
 ## Closing the remaining prod gap
 
 Where the dev cluster can still get closer to production, ordered by
-value-per-effort (as of 2026-06-12):
+value-per-effort (as of 2026-06-12). **Items 1–4 are DONE (2026-06-12)**
+— see the progress section above; items 5–7 remain.
 
 1. **State-follows-leader storage.** The `/rbd` stand-ins are node-local
    bind mounts, so a leadership failover hands the new leader an *empty*
