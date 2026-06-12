@@ -313,9 +313,59 @@ these later.)
 4. **Later (optional):** full-stack tier on real KVM VMs (Ceph/PG/Qdrant/
    Open-WebUI) hosted on a cluster Incus host.
 
+## Closing the remaining prod gap
+
+Where the dev cluster can still get closer to production, ordered by
+value-per-effort (as of 2026-06-12):
+
+1. **State-follows-leader storage.** The `/rbd` stand-ins are node-local
+   bind mounts, so a leadership failover hands the new leader an *empty*
+   postgres/authentik — prod hands it the same RBD data. Fix without
+   Ceph: one host-side directory bind-mounted into all core containers,
+   with the `user-rbd`/`misc-rbd` stand-ins mounting it on the leader
+   only. Data-follows-leader with single-writer discipline enforced by
+   the election — prod's contract minus the rbd/LUKS mechanics. Also
+   removes system-test.sh's leadership-drift caveat and lets the
+   failover section assert state survival, not just service placement.
+2. **Real base-infrastructure.** Replace the nginx-only stand-in with the
+   real squid/dnsmasq/chrony/keepalived play; needs systemd-resolved
+   disabled in `configure_node` (the :53 collision). Buys real `.xc`
+   cluster DNS instead of seeded `/etc/hosts`, the gateway VIP
+   (10.0.0.254), working NTP (most of the dev `/api/health` 503), and
+   likely live DHCP on the bridge — container-to-container DHCP is
+   FORWARD-path; the Qubes INPUT problem was host-side dnsmasq only.
+   With DHCP live, an **adhoc-node join test** becomes possible: launch
+   a fresh `x1` container, let it DHCP + hit `/bootstrap/`, assert it
+   registers — node onboarding minus PXE firmware.
+3. **Real qdrant** instead of the oneshot stand-in (single light binary;
+   makes the election's service set fully real).
+4. **ACME rehearsal against Pebble** (Let's Encrypt's test server, one
+   small container): exercise `ycluster certbot obtain` through the real
+   rathole tunnel against a local ACME endpoint. Puts a regression test
+   around the most painful operational lore (obtain-on-rathole-node,
+   webroot vs `--nginx`, 127.0.0.2 listeners).
+5. **Open-WebUI "lite"** — official image, no build (~1 GB RAM,
+   borderline): closes the `api_key`-table path in local-ai-proxy auth
+   (only the master key is exercised today) and the OIDC client flow
+   against authentik.
+6. **Chaos additions to system-test.sh** (no new fixtures): kill -9 the
+   leader (lease-expiry takeover instead of clean revoke), bounce one
+   etcd member and assert quorum + rejoin, registry pull-through during
+   failover.
+7. **Optional:** monitoring stack (container-safe, ~0.5–1 GB RAM; makes
+   the `/grafana/` gated path + alert webhook real); the held-package
+   upgrade playbook's serialization/leader-ordering logic (runs without
+   Ceph).
+
+Hard ceiling on this substrate (needs the phase-4 KVM tier or the real
+cluster): Ceph/MicroCeph (kernel modules, block devices, snapd), KVM
+VMs / GPU passthrough, PXE/UEFI netboot (the `dev/` qemu harness covers
+it elsewhere), macOS nodes, real inference backends.
+
 ## Open questions
-- keepalived VRRP fidelity in privileged containers (multicast on the
-  Incus bridge) — validate in phase 1.
+- ~~keepalived VRRP fidelity in privileged containers (multicast on the
+  Incus bridge) — validate in phase 1.~~ Works, after exempting
+  multicast from the host masquerades (gotcha 10).
 - Which playbook tasks assume bare-metal facts (disks, NICs, snap) and
   need guarding/stubbing to run in containers — discover while wiring
   `site-dev.yml`.
