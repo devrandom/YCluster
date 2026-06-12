@@ -38,7 +38,8 @@ VM_STATE_INTERVAL_S = 120
 # the leader) and converged by the vm-reconciler timer on each incus host —
 # hosts pull intent and push state over etcd client certs; there is no
 # inbound control channel. {"mode": "on"|"off"|"schedule", "windows":
-# [{"days": [0-6, Mon=0], "start": "HH:MM", "end": "HH:MM"}] (UTC),
+# [{"start": <ISO datetime>, "end": <ISO datetime>}] (UTC; one-shot
+# absolute windows, not recurring; multiple allowed),
 # "updated_by": ..., "updated_at": ...}. No record = unmanaged (status quo).
 VM_DESIRED_PREFIX = "/cluster/vm-desired/"
 # Scheduler stop-grace markers ({"warned_at": iso}). Tick-based: one
@@ -564,23 +565,18 @@ def _desired_on(desired, now):
         return True
     if mode == "off":
         return False
-    minute = now.hour * 60 + now.minute
     for w in desired.get("windows", []):
         try:
-            sh, sm = map(int, w["start"].split(":"))
-            eh, em = map(int, w["end"].split(":"))
+            start = datetime.fromisoformat(str(w["start"]))
+            end = datetime.fromisoformat(str(w["end"]))
         except (KeyError, ValueError):
             continue
-        start, end = sh * 60 + sm, eh * 60 + em
-        if end > start:
-            if now.weekday() in w.get("days", []) and start <= minute < end:
-                return True
-        else:
-            # Window crosses midnight: the early-morning part belongs to
-            # the previous day's entry.
-            if (now.weekday() in w.get("days", []) and minute >= start) or \
-               ((now.weekday() - 1) % 7 in w.get("days", []) and minute < end):
-                return True
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if start <= now < end:
+            return True
     return False
 
 

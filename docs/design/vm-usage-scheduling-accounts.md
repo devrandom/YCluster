@@ -243,7 +243,9 @@ per-user and per-VM GPU-hours over a period, billable vs observed
 Desired-state reconciliation, the idiom the cluster already speaks:
 
 - **Schedule model**: per VM, a mode (`unmanaged` — scheduler never
-  touches it — / `on` / `off` / `schedule` with weekly UTC windows),
+  touches it — / `on` / `off` / `schedule` with one-shot absolute
+  windows — start/end datetimes, stored UTC, multiple allowed; the
+  page edits them in local time with an end-or-duration input),
   stored as desired state in etcd (`/cluster/vm-desired/<name>`); edited
   via the web page (admin-api writes it, owner-scoped via the forward-auth
   identity headers).
