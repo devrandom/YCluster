@@ -16,9 +16,9 @@
     .meta { color: #666; font-size: 0.85rem; }
     .running { color: #166534; font-weight: bold; }
     .stopped { color: #92400e; font-weight: bold; }
-    select, input[type=time] { padding: 0.3rem 0.4rem; border-radius: 4px; border: 1px solid #ccc; }
+    select, input[type=datetime-local], input[type=number] { padding: 0.3rem 0.4rem; border-radius: 4px; border: 1px solid #ccc; }
     .window { display: flex; gap: 0.6rem; align-items: center; margin: 0.4rem 0; flex-wrap: wrap; }
-    .days label { font-size: 0.8rem; margin-right: 0.35rem; user-select: none; }
+    .expired { color: #92400e; font-size: 0.8rem; font-style: italic; }
     button { padding: 0.35rem 0.9rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; }
     button:hover { background: #2563eb; }
     button.minor { background: #e5e7eb; color: #333; }
@@ -31,9 +31,11 @@
   <h1>VM Schedule</h1>
   <p class="explainer">
     Declare when your VMs should be up; each host converges within ~2
-    minutes. All times are <b>UTC</b>. Scheduled stops warn the guest and
-    wait a grace period. Scheduler-started runtime is billed to the owner;
-    <b>unmanaged</b> means the scheduler never touches the VM.
+    minutes. Windows are <b>one-shot</b> (start – end, multiple allowed,
+    times shown in your local timezone); set the end directly or via the
+    hours field. Scheduled stops warn the guest and wait a grace period.
+    Scheduler-started runtime is billed to the owner; <b>unmanaged</b>
+    means the scheduler never touches the VM.
   </p>
 
   <template x-if="loading"><p class="empty">Loading...</p></template>
@@ -62,20 +64,20 @@
         <div>
           <template x-for="(w, wi) in row.windows" :key="wi">
             <div class="window">
-              <span class="days">
-                <template x-for="(d, di) in dayNames" :key="di">
-                  <label><input type="checkbox" :checked="w.days.includes(di)"
-                                @change="toggleDay(w, di)"><span x-text="d"></span></label>
-                </template>
-              </span>
-              <input type="time" x-model="w.start"> –
-              <input type="time" x-model="w.end">
+              <input type="date" x-model="w.startDate">
+              <input type="number" min="0" max="23" style="width:3.5rem"
+                     x-model.number="w.startHour" title="hour (0-23)"> –
+              <input type="date" x-model="w.endDate">
+              <input type="number" min="0" max="23" style="width:3.5rem"
+                     x-model.number="w.endHour" title="hour (0-23)">
+              <label class="meta">(<input type="number" min="1" step="1"
+                     style="width:4rem" :value="hours(w)"
+                     @change="setHours(w, Math.round(+$event.target.value))"> h)</label>
+              <span class="expired" x-show="expired(w)">expired</span>
               <button class="minor" @click="row.windows.splice(wi, 1)">remove</button>
             </div>
           </template>
-          <button class="minor"
-                  @click="row.windows.push({days: [0,1,2,3,4], start: '08:00', end: '20:00'})">
-            add window</button>
+          <button class="minor" @click="addWindow(row)">add window</button>
         </div>
       </template>
     </div>
@@ -87,31 +89,78 @@
         rows: [],
         isAdmin: false,
         loading: false,
-        dayNames: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+
+        // Stored as UTC ISO; edited as local date + whole hour.
+        parts(d) {
+          const p = n => String(n).padStart(2, '0')
+          return {date: `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`, hour: d.getHours()}
+        },
+
+        mkDate(dateStr, hour) {
+          const h = Math.min(23, Math.max(0, Math.trunc(+hour || 0)))
+          return new Date(`${dateStr}T${String(h).padStart(2, '0')}:00:00`)
+        },
 
         load() {
           this.loading = true
           fetch('/admin/vm-schedule/data')
             .then(r => r.json())
             .then(data => {
-              this.rows = (data.rows || []).map(r => ({...r, saved: '', error: ''}))
+              this.rows = (data.rows || []).map(r => ({...r,
+                windows: (r.windows || [])
+                  .filter(w => !isNaN(new Date(w.start)) && !isNaN(new Date(w.end)))
+                  .map(w => {
+                    // Snap display to whole hours without shrinking the
+                    // window: floor the start, ceil the end.
+                    const s = new Date(w.start); s.setMinutes(0, 0, 0)
+                    const e = new Date(w.end)
+                    if (e.getMinutes() || e.getSeconds()) { e.setHours(e.getHours() + 1); e.setMinutes(0, 0, 0) }
+                    const sp = this.parts(s), ep = this.parts(e)
+                    return {startDate: sp.date, startHour: sp.hour, endDate: ep.date, endHour: ep.hour}
+                  }),
+                saved: '', error: ''}))
               this.isAdmin = data.is_admin
               this.loading = false
             })
             .catch(() => { this.loading = false })
         },
 
-        toggleDay(w, di) {
-          const i = w.days.indexOf(di)
-          if (i >= 0) w.days.splice(i, 1); else w.days.push(di)
+        hours(w) {
+          const ms = this.mkDate(w.endDate, w.endHour) - this.mkDate(w.startDate, w.startHour)
+          return ms > 0 ? Math.round(ms / 3600000) : ''
+        },
+
+        setHours(w, h) {
+          const start = this.mkDate(w.startDate, w.startHour)
+          if (isNaN(start) || !(h > 0)) return
+          const ep = this.parts(new Date(start.getTime() + h * 3600000))
+          w.endDate = ep.date; w.endHour = ep.hour
+        },
+
+        expired(w) { return this.mkDate(w.endDate, w.endHour) <= new Date() },
+
+        addWindow(row) {
+          const start = new Date()
+          start.setMinutes(0, 0, 0); start.setHours(start.getHours() + 1)
+          const sp = this.parts(start), ep = this.parts(new Date(start.getTime() + 4 * 3600000))
+          row.windows.push({startDate: sp.date, startHour: sp.hour, endDate: ep.date, endHour: ep.hour})
         },
 
         save(row) {
           row.saved = ''; row.error = ''
+          const windows = []
+          for (const w of row.windows) {
+            const start = this.mkDate(w.startDate, w.startHour), end = this.mkDate(w.endDate, w.endHour)
+            if (isNaN(start) || isNaN(end) || end <= start) {
+              row.error = 'each window needs a start before its end'
+              return
+            }
+            windows.push({start: start.toISOString(), end: end.toISOString()})
+          }
           fetch('/admin/vm-schedule/set', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({vm: row.vm, mode: row.mode, windows: row.windows}),
+            body: JSON.stringify({vm: row.vm, mode: row.mode, windows}),
           })
             .then(r => r.json().then(d => ({ok: r.ok, d})))
             .then(({ok, d}) => {

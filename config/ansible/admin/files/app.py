@@ -2709,24 +2709,34 @@ def vm_schedule_data():
                     'email': email, 'is_admin': is_admin})
 
 
-def _valid_windows(windows):
-    if not isinstance(windows, list) or len(windows) > 20:
-        return False
+def _parse_windows(windows):
+    """Validate one-shot scheduling windows and normalize them to UTC ISO
+    strings, sorted, with fully-elapsed windows dropped. Each window is
+    {'start': <ISO datetime>, 'end': <ISO datetime>} with explicit
+    timezones (the page sends UTC). Returns the normalized list, or None
+    if anything is invalid."""
+    if not isinstance(windows, list) or len(windows) > 50:
+        return None
+    now = datetime.now(UTC)
+    out = []
     for w in windows:
         if not isinstance(w, dict):
-            return False
-        days = w.get('days')
-        if not isinstance(days, list) or not days or \
-           not all(isinstance(d, int) and 0 <= d <= 6 for d in days):
-            return False
-        for field in ('start', 'end'):
-            try:
-                h, m = map(int, str(w.get(field, '')).split(':'))
-                if not (0 <= h <= 23 and 0 <= m <= 59):
-                    return False
-            except ValueError:
-                return False
-    return True
+            return None
+        try:
+            start = datetime.fromisoformat(str(w.get('start')))
+            end = datetime.fromisoformat(str(w.get('end')))
+        except (TypeError, ValueError):
+            return None
+        if start.tzinfo is None or end.tzinfo is None:
+            return None
+        start, end = start.astimezone(UTC), end.astimezone(UTC)
+        if end <= start:
+            return None
+        if end <= now:
+            continue
+        out.append({'start': start.isoformat(timespec='seconds'),
+                    'end': end.isoformat(timespec='seconds')})
+    return sorted(out, key=lambda w: w['start'])
 
 
 # Mutating endpoint by design (unlike the S2-removed admin mutations):
@@ -2755,13 +2765,15 @@ def vm_schedule_set():
         return jsonify({'ok': True, 'mode': 'unmanaged'})
     if mode not in ('on', 'off', 'schedule'):
         return jsonify({'error': 'mode must be on|off|schedule|unmanaged'}), 400
-    windows = data.get('windows', [])
-    if mode == 'schedule' and not _valid_windows(windows):
-        return jsonify({'error': 'invalid windows'}), 400
+    windows = []
+    if mode == 'schedule':
+        windows = _parse_windows(data.get('windows', []))
+        if windows is None:
+            return jsonify({'error': 'invalid windows'}), 400
 
     desired = {
         'mode': mode,
-        'windows': windows if mode == 'schedule' else [],
+        'windows': windows,
         'updated_by': email or 'internal',
         'updated_at': datetime.now(UTC).isoformat(timespec='seconds'),
     }
