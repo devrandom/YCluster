@@ -27,6 +27,10 @@ def main():
         with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
             temp_file.write(response.text)
             temp_file_path = temp_file.name
+
+        # mkstemp files are 0600; if the cp below CREATES the hosts file it
+        # inherits that, and the privilege-dropped dnsmasq can't read it.
+        os.chmod(temp_file_path, 0o644)
         
         try:
             # Only reload if the configuration has actually changed
