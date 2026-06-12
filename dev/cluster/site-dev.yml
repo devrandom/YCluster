@@ -30,11 +30,11 @@
 - import_playbook: ../../config/ansible/admin/install-dhcp-leader-election.yml
 
 # Minimal stand-in for setup-base-infrastructure.yml, which web-services
-# depends on. We don't run the real one because it installs squid/dnsmasq/
-# keepalived/cmake/clang etc. — dnsmasq collides with systemd-resolved on
-# :53 in a container, and none of it is relevant to the admin-api/etcd
-# surface we're testing. Provide just nginx + the directories web-services
-# expects.
+# depends on. We don't run the real one here because it loads
+# vault/storage.yml and installs a build toolchain. Provide just nginx +
+# the directories web-services expects; the real network services
+# (squid/dnsmasq/chrony/gateway VIP) come from base-infra-dev.yml, run
+# after this playbook.
 - name: admin-api prerequisites (dev stand-in for base-infrastructure)
   hosts: managed
   become: yes

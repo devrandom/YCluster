@@ -4,16 +4,20 @@
 #
 # Exercises the integration seams between the components the dev cluster
 # carries: etcd (mTLS quorum), the ycluster CLI, leader elections (DHCP +
-# storage), keepalived/VIP, the docker registry, postgres, authentik,
-# rathole (client on the storage leader + ssh clients on all core nodes,
-# server on f1), the admin API (core + non-core), the admin web UI's
-# forward-auth gate, incus VM management (nested incus on c1: launch →
-# sample → desired-state → reconcile), usage accounting (etcd → postgres),
-# and local-ai-proxy (etcd-routed models, nginx auth_request, hot reload).
+# storage), keepalived (storage + gateway VIPs), base infrastructure
+# (cluster DNS from etcd, squid, chrony/NTP), adhoc-node DHCP join, the
+# docker registry, postgres, authentik, rathole (client on the storage
+# leader + ssh clients on all core nodes, server on f1), the admin API
+# (core + non-core), the admin web UI's forward-auth gate, incus VM
+# management (nested incus on c1: launch → sample → desired-state →
+# reconcile), usage accounting (etcd → postgres), local-ai-proxy
+# (etcd-routed models, nginx auth_request, hot reload), and the ACME
+# certificate path (certbot on the leader → webroot → HTTP-01 through the
+# f1 tunnel → Pebble test CA).
 #
 # Deliberately NOT covered (can't run in system containers / on a laptop):
-# Ceph, real ACME/certbot, the PXE/autoinstall boot path, GPU passthrough,
-# Open-WebUI, the monitoring stack.
+# Ceph, the PXE/autoinstall boot path, GPU passthrough, Open-WebUI, the
+# monitoring stack.
 #
 # Usage:
 #   ./system-test.sh                 # up + provision + assert (idempotent)
@@ -24,12 +28,10 @@
 # moves on, so one broken seam doesn't hide the state of the others.
 # Exit code is non-zero if any section failed.
 #
-# Dev caveat: the /rbd stand-ins are node-local, so leader-local
-# provisioning (authentik DB, usage_stats) only exists on the node that
-# led during app-dev.yml. The failover section restores leadership to the
-# section-start leader, but if leadership drifted between runs,
-# --assert-only can fail on those legs — run the full mode (it provisions
-# the current leader) to converge.
+# The /rbd stand-ins bind a backing volume shared by all core containers,
+# so postgres/qdrant/registry/authentik state follows leadership exactly
+# like the real RBD maps — any elected leader serves the same data, and
+# the failover section asserts that survival explicitly.
 set -uo pipefail
 
 cd "$(dirname "$0")"
@@ -41,6 +43,7 @@ PLAYBOOK="../../venv/bin/ansible-playbook"
 CORE=(s1 s2 s3)
 declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [f1]=10.0.0.41 )
 VIP=10.0.0.100
+GW_VIP=10.0.0.254
 TLSDIR=/etc/etcd/tls
 CERTS="--cacert $TLSDIR/ca.crt --cert $TLSDIR/client.crt --key $TLSDIR/client.key"
 # Sourcing the canonical client env gives etcdctl AND the ycluster CLI
@@ -73,6 +76,13 @@ retry() {
 
 app_leader() { $SSH s1 "$E etcdctl get /cluster/leader/app --print-value-only" 2>/dev/null | tr -d '[:space:]'; }
 
+# dns_q <node> <server> <name> — A record straight from a DNS server,
+# bypassing nsswitch//etc/hosts (which carries many of the same names).
+dns_q() {
+  $SSH "$1" "python3 -c \"import dns.resolver as r; res=r.Resolver(configure=False); res.nameservers=['$2']; print(res.resolve('$3','A')[0])\"" 2>/dev/null
+}
+check_dns() { [ "$(dns_q "$1" "$2" "$3")" = "$4" ]; }
+
 declare -a FAILED=()
 SECTIONS=0
 section() {  # $1=name $2=fn — run fn in a subshell; record, don't abort
@@ -97,9 +107,24 @@ provision() {
   $PLAYBOOK collect-hw-dev.yml > /tmp/system-test-collect-hw.log 2>&1 \
     || die "collect-hw-dev.yml failed (see /tmp/system-test-collect-hw.log)"
   ok "collect-hw-dev.yml"
+  # -e: setup-gateway-vip.yml/configure-ntp.yml are top-level config/ansible
+  # playbooks, so they load the prod group_vars/core.yml whose interface
+  # names are bare-metal; extra-vars outrank them (see base-infra-dev.yml).
+  $PLAYBOOK base-infra-dev.yml -e cluster_interface=eth0 -e uplink_interface=eth0 \
+      > /tmp/system-test-base-infra.log 2>&1 \
+    || die "base-infra-dev.yml failed (see /tmp/system-test-base-infra.log)"
+  ok "base-infra-dev.yml"
+  # Stale drain keys from an aborted earlier run make nodes sit out the
+  # election (and the playbooks below need it to converge).
+  for n in "${CORE[@]}"; do
+    $SSH s1 "$E etcdctl del /cluster/nodes/$n/drain" >/dev/null 2>&1 || true
+  done
   $PLAYBOOK app-dev.yml       > /tmp/system-test-app-dev.log 2>&1 \
     || die "app-dev.yml failed (see /tmp/system-test-app-dev.log)"
   ok "app-dev.yml"
+  $PLAYBOOK acme-dev.yml      > /tmp/system-test-acme.log 2>&1 \
+    || die "acme-dev.yml failed (see /tmp/system-test-acme.log)"
+  ok "acme-dev.yml"
 }
 
 # --------------------------------------------------------------------------
@@ -240,7 +265,84 @@ sec_admin_api() {
 }
 
 # --------------------------------------------------------------------------
-# 5. storage leader election + VIP + leader-only services
+# 5. base infrastructure: cluster DNS, NTP, squid, gateway VIP
+# --------------------------------------------------------------------------
+sec_base_infra() {
+  for n in s1 s2 s3 c1; do
+    $SSH "$n" "systemctl is-active --quiet dnsmasq && systemctl is-active --quiet squid && systemctl is-active --quiet chrony" \
+      || die "dnsmasq/squid/chrony not all active on $n"
+  done
+  ok "dnsmasq + squid + chrony active on all managed nodes"
+
+  local holders=0
+  for n in "${CORE[@]}"; do
+    if $SSH "$n" "ip -br addr show eth0" | grep -q "$GW_VIP"; then
+      holders=$((holders + 1))
+    fi
+  done
+  [ "$holders" = 1 ] || die "gateway VIP holder count = $holders (want exactly 1)"
+  ok "gateway VIP ($GW_VIP) on exactly one core node"
+
+  # Cluster DNS: names rendered from etcd into /etc/static-hosts (the
+  # update-dhcp-hosts timer ticks every 30s) — queried straight at the
+  # DNS servers, both node-local and via the gateway VIP.
+  retry 20 3 "auth.xc via s1's dnsmasq"  check_dns s1 127.0.0.1 auth.xc "$VIP"
+  retry 20 3 "admin.xc via the gateway VIP from c1" check_dns c1 "$GW_VIP" admin.xc "$VIP"
+  ok "cluster DNS serves etcd-rendered service names (locally + via gateway VIP)"
+
+  # dns/squid/ntp/clock-skew were c1's only health gaps — with base infra
+  # in place the node must report fully healthy (HTTP 200).
+  retry 20 3 "/api/health fully healthy on c1" \
+    $SSH c1 "curl -fsS --max-time 10 http://localhost/api/health -o /dev/null"
+  ok "c1 /api/health overall healthy (dns, squid, ntp, clock skew green)"
+
+  # Core nodes stay 503 (no Ceph in containers) — assert the base-infra
+  # services individually instead.
+  $SSH s1 "curl -s --max-time 10 http://localhost/api/health" | python3 -c '
+import json, sys
+h = json.load(sys.stdin)["services"]
+bad = [k for k in ("dns", "squid", "ntp", "clock_skew") if h[k]["status"] != "healthy"]
+sys.exit(1 if bad else 0)' || die "base-infra services not all healthy on s1"
+  ok "dns/squid/ntp/clock_skew healthy on s1 (ceph keeps core 503, expected)"
+}
+
+# --------------------------------------------------------------------------
+# 6. adhoc node join (hostname-based DHCP, no ansible)
+# --------------------------------------------------------------------------
+sec_adhoc() {
+  local n=x1 ip=10.0.0.151
+  sudo incus delete -f $n >/dev/null 2>&1 || true   # stale runs
+  $SSH s1 "$E etcdctl del /cluster/nodes/by-hostname/$n" >/dev/null
+
+  # An adhoc node is "any box that sets its hostname and DHCPs" — no
+  # ansible, no registration call. The stock image's cloud-init netplan
+  # does exactly that on first boot.
+  sudo incus launch images:ubuntu/24.04 $n --profile yc-node >/dev/null \
+    || die "launch $n"
+  retry 30 2 "$n gets its conventional adhoc IP via DHCP" \
+    sudo incus exec $n -- sh -c "ip -br addr show eth0 | grep -q $ip/"
+  ok "$n DHCP'd $ip (hostname-based allocation by the cluster DHCP server)"
+
+  $SSH s1 "$E etcdctl get /cluster/nodes/by-hostname/$n --print-value-only" \
+    | grep -q "\"$ip\"" || die "$n allocation not in etcd"
+  ok "$n registered in etcd by the DHCP server"
+
+  # Retried: cloud-init re-applies the network config late in first boot,
+  # briefly flapping the interface right after the lease lands.
+  retry 10 2 "connectivity to $n" $SSH s1 "ping -c1 -W2 $ip"
+  retry 20 3 "$n.xc appears in cluster DNS" check_dns s1 127.0.0.1 $n.xc $ip
+  ok "$n pingable and resolvable as $n.xc (etcd -> static-hosts tick)"
+
+  local mac
+  mac=$(sudo incus config get $n volatile.eth0.hwaddr)
+  sudo incus delete -f $n
+  $SSH s1 "$E etcdctl del /cluster/nodes/by-hostname/$n" >/dev/null
+  $SSH s1 "$E etcdctl del /cluster/nodes/by-mac/${mac//:/}" >/dev/null
+  ok "cleaned up ($n deleted, etcd records removed)"
+}
+
+# --------------------------------------------------------------------------
+# 7. storage leader election + VIP + leader-only services
 # --------------------------------------------------------------------------
 sec_leader() {
   local leader
@@ -254,6 +356,15 @@ sec_leader() {
     $SSH "$leader" "systemctl is-active --quiet $svc" || die "$svc not active on leader"
   done
   ok "leader runs postgres, registry, rathole, authentik, qdrant, rbd mounts"
+
+  $SSH "$leader" "findmnt -no SOURCE /rbd/user" | grep -q rbd-backing \
+    || die "/rbd/user not bound from the shared backing volume"
+  ok "/rbd mounts come from the shared backing (state follows leader)"
+
+  # Real qdrant (not a stand-in): answers on its HTTP port with data on /rbd.
+  retry 10 2 "qdrant readyz on leader" \
+    $SSH "$leader" "curl -fsS --max-time 5 http://127.0.0.1:6333/readyz -o /dev/null"
+  ok "qdrant ready on the leader (storage on /rbd/user/qdrant)"
 
   for n in "${CORE[@]}"; do
     [ "$n" = "$leader" ] && continue
@@ -280,7 +391,7 @@ sec_leader() {
 }
 
 # --------------------------------------------------------------------------
-# 6. DHCP leader election (+ disruptive failover)
+# 8. DHCP leader election (+ disruptive failover)
 # --------------------------------------------------------------------------
 sec_dhcp_election() {
   local holder
@@ -303,7 +414,7 @@ sec_dhcp_election() {
 }
 
 # --------------------------------------------------------------------------
-# 7. postgres + authentik + user management (CLI -> IdP API -> postgres)
+# 9. postgres + authentik + user management (CLI -> IdP API -> postgres)
 # --------------------------------------------------------------------------
 sec_authentik() {
   local leader
@@ -316,6 +427,13 @@ sec_authentik() {
   retry 20 3 "authentik health via auth.xc (VIP)" \
     $SSH c1 "curl -fsS --max-time 10 http://auth.xc/-/health/live/ -o /dev/null"
   ok "authentik live via auth.xc"
+
+  # The bootstrap token is seeded into the DB by authentik's blueprint
+  # apply, which lags /-/health/live/ by a while on a fresh database —
+  # wait until an authenticated call succeeds before judging user mgmt.
+  retry 40 3 "authentik API accepts the bootstrap token" \
+    $SSH "$leader" "$E ycluster user list"
+  ok "bootstrap token accepted by the IdP API"
 
   # CLI -> authentik API (token from etcd) -> postgres, asserted at each hop.
   # Fixed address keeps re-runs idempotent ('already exists' is fine).
@@ -343,7 +461,7 @@ sec_authentik() {
 }
 
 # --------------------------------------------------------------------------
-# 8. incus vm lifecycle on c1 (launch -> sample -> desired -> reconcile)
+# 10. incus vm lifecycle on c1 (launch -> sample -> desired -> reconcile)
 # --------------------------------------------------------------------------
 sec_vm() {
   local vm=smokevm owner=smoke-owner
@@ -411,7 +529,7 @@ sec_vm() {
 }
 
 # --------------------------------------------------------------------------
-# 9. usage accounting (vm events/samples -> postgres on the leader)
+# 11. usage accounting (vm events/samples -> postgres on the leader)
 # --------------------------------------------------------------------------
 sec_usage() {
   local leader
@@ -434,7 +552,7 @@ sec_usage() {
 }
 
 # --------------------------------------------------------------------------
-# 10. rathole tunnels (client on leader + ssh clients -> server on f1)
+# 12. rathole tunnels (client on leader + ssh clients -> server on f1)
 # --------------------------------------------------------------------------
 sec_rathole() {
   for n in "${CORE[@]}"; do
@@ -459,7 +577,7 @@ sec_rathole() {
 }
 
 # --------------------------------------------------------------------------
-# 11. admin web UI forward-auth gate (nginx auth_request -> authentik outpost)
+# 13. admin web UI forward-auth gate (nginx auth_request -> authentik outpost)
 # --------------------------------------------------------------------------
 sec_admin_web() {
   # The proxy provider matches requests by external host (forward_single),
@@ -491,7 +609,7 @@ sec_admin_web() {
 }
 
 # --------------------------------------------------------------------------
-# 12. local-ai-proxy (etcd-routed model, nginx auth_request, hot reload)
+# 14. local-ai-proxy (etcd-routed model, nginx auth_request, hot reload)
 # --------------------------------------------------------------------------
 sec_inference() {
   for n in "${CORE[@]}"; do
@@ -538,7 +656,41 @@ sec_inference() {
 }
 
 # --------------------------------------------------------------------------
-# 13. storage leadership + VIP failover (drain) and failback  [disruptive]
+# 15. ACME: certbot on the leader -> HTTP-01 via the f1 tunnel -> Pebble
+# --------------------------------------------------------------------------
+sec_acme() {
+  local leader
+  leader=$(app_leader)
+  $SSH f1 "systemctl is-active --quiet pebble" || die "pebble not active on f1"
+  retry 10 2 "pebble ACME directory (via cluster DNS for pebble.xc)" \
+    $SSH "$leader" "curl -fsS --max-time 5 --cacert /etc/dev-pebble-ca.pem https://pebble.xc:14000/dir -o /dev/null"
+  ok "pebble directory served over TLS"
+
+  # Pebble regenerates its CA on restart, orphaning certbot's cached ACME
+  # account — drop only the pebble account dir (never the real LE ones).
+  $SSH "$leader" "rm -rf /etc/letsencrypt/accounts/pebble.xc*"
+
+  # The real obtain path end-to-end: certbot refuses to run off the
+  # rathole node; HTTP-01 goes CA -> f1:80 -> tunnel -> leader 127.0.0.2
+  # public vhost -> /var/www/html webroot.
+  $SSH "$leader" "$E REQUESTS_CA_BUNDLE=/etc/dev-pebble-ca.pem ycluster certbot obtain --server https://pebble.xc:14000/dir -n" \
+    >/dev/null || die "ycluster certbot obtain via pebble"
+  ok "certificate issued (HTTP-01 through the f1 tunnel, webroot mode)"
+
+  $SSH s1 "$E etcdctl get /cluster/tls/cert --print-value-only" \
+    | openssl x509 -noout -issuer | grep -qi pebble \
+    || die "etcd cert not issued by pebble"
+  ok "pebble-issued certificate stored in etcd"
+
+  # obtain re-renders nginx for real-HTTPS mode on the leader; the dev
+  # cluster runs local mode (web_services_force_local) — restore it.
+  $SSH "$leader" "$E ycluster certbot update-nginx --local" >/dev/null \
+    || die "certbot update-nginx --local"
+  ok "nginx restored to dev local mode"
+}
+
+# --------------------------------------------------------------------------
+# 16. storage leadership + VIP failover (drain) and failback  [disruptive]
 # --------------------------------------------------------------------------
 sec_failover() {
   $DISRUPTIVE || { ok "(skipped: --no-disruptive)"; return 0; }
@@ -575,10 +727,25 @@ sec_failover() {
     $SSH c1 "curl -fsS --max-time 5 http://${IP[f1]}/status -o /dev/null"
   ok "rathole client re-homed: f1:80 serves again"
 
+  # State followed leadership: the new leader binds the same shared backing,
+  # so it serves the SAME postgres — authentik DB, the smoke user created in
+  # section 9, and the usage rows drained in section 11 must all be there.
+  $SSH "$new" "findmnt -no SOURCE /rbd/user" | grep -q rbd-backing \
+    || die "/rbd/user on $new not from the shared backing"
+  retry 20 3 "postgres with authentik DB on $new" \
+    $SSH "$new" "su - postgres -c 'psql -Atl' | grep -q '^authentik|'"
+  $SSH "$new" "su - postgres -c \"psql -At authentik -c \\\"select count(*) from authentik_core_user where email='smoke-user@dev.test'\\\"\"" \
+    | grep -qx 1 || die "smoke user row missing on new leader"
+  local ev
+  ev=$($SSH "$new" "su - postgres -c \"psql -At usage_stats -c \\\"select count(*) from vm_events where vm='smokevm'\\\"\"")
+  [ "${ev:-0}" -ge 3 ] || die "usage_stats rows missing on new leader (got '$ev')"
+  retry 60 3 "authentik healthy on new leader $new" \
+    $SSH c1 "curl -fsS --max-time 5 http://auth.xc/-/health/live/ -o /dev/null"
+  ok "state followed leadership: authentik DB, smoke user, usage rows on $new"
+
   # Failback: the election is first-come, so make the outcome deterministic
-  # by draining EVERY candidate except the original. The original holds the
-  # only populated dev postgres/authentik state, so steady state must
-  # return there before the apps can be asserted healthy again.
+  # by draining EVERY candidate except the original — restores the cluster's
+  # starting state and exercises a second transition over the same data.
   for n in "${CORE[@]}"; do
     if [ "$n" = "$old" ]; then
       $SSH s1 "$E etcdctl del /cluster/nodes/$n/drain" >/dev/null
@@ -612,15 +779,18 @@ main() {
   section "2. ycluster CLI round-trips"                  sec_cli
   section "3. frontend management"                       sec_frontend
   section "4. admin-api (core + non-core) + inventory"   sec_admin_api
-  section "5. storage leader + VIP + leader services"    sec_leader
-  section "6. dhcp leader election"                      sec_dhcp_election
-  section "7. postgres + authentik + user management"    sec_authentik
-  section "8. incus vm lifecycle (c1)"                   sec_vm
-  section "9. usage accounting -> postgres"              sec_usage
-  section "10. rathole tunnels via f1"                   sec_rathole
-  section "11. admin web forward-auth gate"              sec_admin_web
-  section "12. local-ai-proxy inference path"            sec_inference
-  section "13. leadership + VIP failover/failback"       sec_failover
+  section "5. base infra: DNS, NTP, squid, gateway VIP"  sec_base_infra
+  section "6. adhoc node join via DHCP"                  sec_adhoc
+  section "7. storage leader + VIP + leader services"    sec_leader
+  section "8. dhcp leader election"                      sec_dhcp_election
+  section "9. postgres + authentik + user management"    sec_authentik
+  section "10. incus vm lifecycle (c1)"                  sec_vm
+  section "11. usage accounting -> postgres"             sec_usage
+  section "12. rathole tunnels via f1"                   sec_rathole
+  section "13. admin web forward-auth gate"              sec_admin_web
+  section "14. local-ai-proxy inference path"            sec_inference
+  section "15. ACME via pebble (certbot + tunnel)"       sec_acme
+  section "16. leadership + VIP failover/failback"       sec_failover
 
   log "SUMMARY"
   if [ ${#FAILED[@]} -eq 0 ]; then

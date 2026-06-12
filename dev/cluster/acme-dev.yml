@@ -1,0 +1,165 @@
+---
+# ACME rehearsal fixture: Pebble (Let's Encrypt's test CA) on f1, issuing
+# for the dev external domain through the REAL certificate path — certbot
+# on the storage leader, webroot under the public vhost, HTTP-01 arriving
+# through the rathole tunnel at f1:80. Exercises the operationally painful
+# lore end-to-end: obtain-on-the-rathole-node, webroot vs --nginx, the
+# 127.0.0.2 public listener.
+#
+# Run as a TOP-LEVEL playbook from dev/cluster/ (vault avoidance):
+#   ../../venv/bin/ansible-playbook acme-dev.yml
+#
+# Pebble validates the cluster's external domain (whatever
+# /cluster/https/domain says) by resolving it at the cluster DNS (gateway
+# VIP), where a dnsmasq fixture points the domain and its subdomains at
+# f1 — the same "public DNS -> frontend edge" shape as production.
+
+- name: Pebble test ACME CA on the frontend node
+  hosts: frontend
+  become: yes
+  vars:
+    pebble_version: v2.10.1
+    pebble_sha256: 4f2fcb5bca8c85c9cf73ad140fccfc0d2be40bd81ab99879c79b7b8a0b4f70ed
+  tasks:
+    - name: Check if pebble is already installed
+      stat:
+        path: /opt/pebble/pebble
+      register: pebble_bin
+
+    - name: Download pebble release
+      get_url:
+        url: "https://github.com/letsencrypt/pebble/releases/download/{{ pebble_version }}/pebble-linux-amd64.tar.gz"
+        dest: /tmp/pebble.tar.gz
+        checksum: "sha256:{{ pebble_sha256 }}"
+        mode: '0644'
+      when: not pebble_bin.stat.exists
+
+    - name: Create pebble directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop: [/opt/pebble, /etc/pebble]
+
+    - name: Extract pebble binary
+      unarchive:
+        src: /tmp/pebble.tar.gz
+        dest: /opt/pebble
+        remote_src: yes
+        extra_opts: ['--strip-components=3']
+      when: not pebble_bin.stat.exists
+
+    # The release tarball ships the binary 0644/uid-1001.
+    - name: Make pebble executable
+      file:
+        path: /opt/pebble/pebble
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Clean up pebble tarball
+      file:
+        path: /tmp/pebble.tar.gz
+        state: absent
+
+    # Pebble's own HTTPS listener cert (NOT the certs it issues): a
+    # self-signed one for pebble.xc. Clients trust it explicitly via
+    # REQUESTS_CA_BUNDLE / --cacert.
+    - name: Generate pebble listener certificate
+      command: >
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
+        -keyout /etc/pebble/key.pem -out /etc/pebble/cert.pem
+        -days 3650 -nodes -subj /CN=pebble.xc
+        -addext subjectAltName=DNS:pebble.xc,IP:{{ ansible_host }}
+      args:
+        creates: /etc/pebble/cert.pem
+
+    # httpPort/tlsPort: where pebble CONNECTS for HTTP-01/TLS-ALPN-01
+    # validation (the real ports on the public edge), not listeners.
+    - name: Pebble configuration
+      copy:
+        dest: /etc/pebble/pebble-config.json
+        content: |
+          {
+            "pebble": {
+              "listenAddress": "0.0.0.0:14000",
+              "managementListenAddress": "0.0.0.0:15000",
+              "certificate": "/etc/pebble/cert.pem",
+              "privateKey": "/etc/pebble/key.pem",
+              "httpPort": 80,
+              "tlsPort": 443,
+              "ocspResponderURL": "",
+              "externalAccountBindingRequired": false
+            }
+          }
+      register: pebble_config
+
+    - name: Pebble systemd unit
+      copy:
+        dest: /etc/systemd/system/pebble.service
+        content: |
+          [Unit]
+          Description=Pebble test ACME server
+          After=network.target
+
+          [Service]
+          Type=exec
+          Environment=PEBBLE_VA_NOSLEEP=1
+          Environment=PEBBLE_WFE_NONCEREJECT=0
+          ExecStart=/opt/pebble/pebble -config /etc/pebble/pebble-config.json -dnsserver 10.0.0.254:53
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      register: pebble_unit
+
+    - name: Enable and start pebble
+      systemd:
+        name: pebble
+        enabled: yes
+        state: "{{ (pebble_config.changed or pebble_unit.changed) | ternary('restarted', 'started') }}"
+        daemon_reload: yes
+
+    - name: Read pebble listener certificate
+      slurp:
+        src: /etc/pebble/cert.pem
+      register: pebble_ca
+
+# certbot itself (+ the renewal timer), the real playbook.
+- import_playbook: ../../config/ansible/admin/install-certbot.yml
+
+- name: Core-node fixtures for the pebble CA
+  hosts: core
+  become: yes
+  tasks:
+    # Trust anchor for talking TO pebble (REQUESTS_CA_BUNDLE for certbot).
+    - name: Distribute pebble listener certificate
+      copy:
+        content: "{{ hostvars[groups['frontend'][0]].pebble_ca.content | b64decode }}"
+        dest: /etc/dev-pebble-ca.pem
+        mode: '0644'
+
+    # "Public DNS" for the dev external domain: the configured domain (and
+    # all subdomains — the cert SANs are subdomain aliases) resolves to the
+    # frontend edge, plus a name for pebble's own API. Cluster DNS only —
+    # exactly the view pebble's -dnsserver gives it.
+    - name: Read the external domain
+      command: etcdctl get /cluster/https/domain --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: acme_domain
+      changed_when: false
+      failed_when: acme_domain.stdout | trim | length == 0
+
+    - name: dnsmasq fixture for the external domain -> frontend + pebble.xc
+      copy:
+        dest: /etc/dnsmasq.d/dev-acme.conf
+        content: |
+          address=/{{ acme_domain.stdout | trim }}/{{ hostvars[groups['frontend'][0]].ansible_host }}
+          address=/pebble.xc/{{ hostvars[groups['frontend'][0]].ansible_host }}
+      register: acme_dns
+
+    - name: Restart dnsmasq to pick up the fixture
+      systemd:
+        name: dnsmasq
+        state: restarted
+      when: acme_dns.changed

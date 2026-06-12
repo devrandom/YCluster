@@ -1,0 +1,108 @@
+---
+# Real base infrastructure for the dev container cluster: squid, dnsmasq
+# (cluster DNS rendered from etcd), chrony (NTP), and the keepalived
+# gateway VIP (10.0.0.254) — the container-safe parts of what
+# admin/setup-base-infrastructure.yml + admin/setup-network-services.yml +
+# setup-gateway-vip.yml + configure-ntp.yml give the real cluster.
+#
+# Run as a TOP-LEVEL playbook from dev/cluster/ (same vault-avoidance rule
+# as site-dev.yml). The interface overrides are REQUIRED: the two imports
+# living directly in config/ansible/ load the prod group_vars/core.yml,
+# whose bare-metal interface names outrank the dev inventory — only
+# extra-vars beat playbook-adjacent group_vars.
+#   ../../venv/bin/ansible-playbook base-infra-dev.yml \
+#     -e cluster_interface=eth0 -e uplink_interface=eth0
+#
+# setup-base-infrastructure.yml itself is deliberately NOT imported: it
+# loads vault/storage.yml (ubuntu password) and installs a build toolchain
+# the dev nodes don't need. The three service playbooks are imported
+# unmodified; this play covers the base-infrastructure tasks they assume
+# (packages, the 127.0.1.1 hostname line, systemd-resolved out of :53).
+
+- name: Dev subset of setup-base-infrastructure (packages, resolved, hostname line)
+  hosts: managed
+  become: yes
+  tasks:
+    - name: Install base service packages
+      apt:
+        name: [squid, dnsmasq, keepalived, chrony]
+        state: present
+
+    # dnsmasq needs :53; the images run systemd-resolved by default.
+    # setup-network-services.yml does this for core — non-core nodes run
+    # dnsmasq too (with the stock forwarder config), so do it everywhere.
+    - name: Disable systemd-resolved to free port 53
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+      failed_when: false
+
+    # Same task as setup-base-infrastructure.yml: the local dnsmasq answers
+    # the node's own name from /etc/hosts (the admin-api DNS health check).
+    - name: Ensure 127.0.1.1 loopback entry matches inventory hostname
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s'
+        line: "127.0.1.1 {{ inventory_hostname }}.xc {{ inventory_hostname }}"
+        state: present
+      notify: reload dnsmasq hosts
+
+    # Three chronyds (plus the host's) share one kernel clock in containers;
+    # -x serves NTP without touching the clock. The clock is the host's and
+    # already correct.
+    - name: Run chrony without clock control (-x) in containers
+      lineinfile:
+        path: /etc/default/chrony
+        regexp: '^DAEMON_OPTS='
+        line: 'DAEMON_OPTS="-x"'
+      register: chrony_opts
+
+    - name: Restart chrony to pick up -x
+      systemd:
+        name: chrony
+        state: restarted
+      when: chrony_opts.changed
+
+    - name: Enable and start dnsmasq + squid
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop: [dnsmasq, squid]
+
+  handlers:
+    - name: reload dnsmasq hosts
+      systemd:
+        name: dnsmasq
+        state: reloaded
+      failed_when: false
+
+# Real NTP client config (server 10.0.0.254 prefer + pool fallback,
+# allow 10.0.0.0/24 so the VIP holder serves the clock-skew checks).
+- import_playbook: ../../config/ansible/configure-ntp.yml
+
+# Real network services on core: squid config, dnsmasq cluster DNS
+# (local=/xc/, addn-hosts=/etc/static-hosts rendered from etcd by the
+# update-dhcp-hosts timer), static resolv.conf -> 127.0.0.1.
+- import_playbook: ../../config/ansible/admin/setup-network-services.yml
+
+# Real gateway VIP (10.0.0.254, VRRP + NAT failover scripts). Dev vars
+# (gateway_vip, uplink_interface=eth0) come from the dev inventory; the
+# multicast NAT exemption in dev-cluster.sh keeps VRRP sane on the bridge.
+- import_playbook: ../../config/ansible/setup-gateway-vip.yml
+
+# Non-core nodes resolve through the cluster like prod compute nodes do
+# (prod hands them the gateway VIP via DHCP). 1.1.1.1 stays as glibc
+# fallback for when the VIP is mid-failover.
+- name: Point non-core resolvers at the cluster DNS (gateway VIP)
+  hosts: compute
+  become: yes
+  tasks:
+    - name: resolv.conf -> gateway VIP
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 10.0.0.254
+          nameserver 1.1.1.1
+          search xc

@@ -38,6 +38,11 @@ all:
     # Host Go for the local-ai-proxy control-node build (Debian has no
     # golang-1.24 package; >=1.21 auto-fetches the go.mod toolchain).
     local_ai_proxy_go_bin: /usr/lib/go-1.23/bin/go
+    # setup-gateway-vip.yml (imported by base-infra-dev.yml). Containers
+    # have one NIC, so the "uplink" is the cluster interface; the health
+    # check still proves real egress through it.
+    gateway_vip: 10.0.0.254
+    uplink_interface: eth0
     # etcd client config single-source-of-truth (mirrors group_vars/all/main.yml,
     # which the dev playbooks deliberately don't load). See that file.
     #

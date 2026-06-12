@@ -35,6 +35,14 @@ PROFILE=yc-node
 IMAGE=images:ubuntu/24.04
 DNS="1.1.1.1 8.8.8.8"
 
+# Shared filesystem volume attached to all core containers: the dev stand-in
+# for the Ceph RBD images. The user-rbd/misc-rbd stand-in units (app-dev.yml)
+# bind-mount its subdirs onto /rbd/user and /rbd/misc on the elected leader
+# only, so postgres/qdrant/registry/authentik state follows leadership like
+# the real RBD maps do. Survives down/reset (it's pool state, not a node).
+RBD_VOLUME=rbd-backing
+RBD_MOUNT=/srv/rbd-backing
+
 # Persistent apt cache (apt-cacher-ng). A substrate container — survives
 # `down`/`reset` so recreating nodes pulls debs from the warm cache instead
 # of the internet. Removed only by `purge`.
@@ -164,6 +172,14 @@ ensure_network() {
     echo "[*] create network $NETWORK"
     INCUS network create "$NETWORK" ipv4.address="$SUBNET" ipv4.nat=true ipv6.address=none
   fi
+  # The cluster's own scapy DHCP server (dhcp leader) must be the only
+  # answerer on the bridge — the adhoc-join test DHCPs from it. Incus's
+  # bridge dnsmasq would race it (the Qubes INPUT drop usually keeps it
+  # deaf, but don't depend on that). Nodes use static IPs anyway.
+  if [ "$(INCUS network get "$NETWORK" ipv4.dhcp)" != "false" ]; then
+    echo "[*] disable incus DHCP on $NETWORK"
+    INCUS network set "$NETWORK" ipv4.dhcp false
+  fi
 }
 
 ensure_profile() {
@@ -290,6 +306,13 @@ ensure_cache() {
   INCUS exec "$CACHE" -- systemctl enable --now apt-cacher-ng
 }
 
+ensure_rbd_backing() {
+  if ! INCUS storage volume show default "$RBD_VOLUME" >/dev/null 2>&1; then
+    echo "[*] create shared storage volume $RBD_VOLUME"
+    INCUS storage volume create default "$RBD_VOLUME"
+  fi
+}
+
 ensure_node() {
   local n=$1 ip="10.0.0.${OCTET[$1]}"
   if ! INCUS info "$n" >/dev/null 2>&1; then
@@ -300,6 +323,12 @@ ensure_node() {
   elif [ "$(INCUS list "$n" -c s -f csv)" != RUNNING ]; then
     INCUS start "$n"
   fi
+  # Core nodes share the rbd-backing volume (hot-attaches to running nodes).
+  if [[ $n == s* ]] && ! INCUS config device get "$n" "$RBD_VOLUME" source >/dev/null 2>&1; then
+    echo "[*] attach $RBD_VOLUME to $n at $RBD_MOUNT"
+    INCUS config device add "$n" "$RBD_VOLUME" disk pool=default \
+      source="$RBD_VOLUME" path="$RBD_MOUNT"
+  fi
   wait_ready "$n"
   configure_node "$n"
 }
@@ -309,6 +338,7 @@ cmd_up() {
   # firewall after network: the multicast NAT exemption needs the incus
   # pstrt chain, which exists only once the network does.
   ensure_persist; ensure_daemon; ensure_sshkey; ensure_sshconfig; ensure_network; ensure_firewall; ensure_profile
+  ensure_rbd_backing
   ensure_cache   # before nodes — they apt through it
   for n in "${NODES[@]}"; do ensure_node "$n"; done
   echo; cmd_status
