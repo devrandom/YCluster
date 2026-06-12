@@ -15,25 +15,28 @@
 # Unlike the earlier fixed-leader fixture, the storage leader is now chosen
 # by the real storage-leader-election service: whichever core node wins the
 # /cluster/leader/app lease starts user-rbd/misc-rbd (bind-mount stand-ins),
-# postgresql@16-main, qdrant (stand-in), docker-registry, rathole, and
-# ycluster-apps.target — exactly the production control flow. NOTE the
-# stand-in /rbd mounts are node-local, so a leadership failover in dev gets
-# an empty database/media tree on the new leader (production has shared RBD);
-# the system test fails leadership over and back deliberately.
+# postgresql@16-main, qdrant, docker-registry, rathole, and
+# ycluster-apps.target — exactly the production control flow. The /rbd
+# stand-ins bind-mount a storage volume shared by all core containers
+# (dev-cluster.sh attaches it at /srv/rbd-backing), so postgres / qdrant /
+# registry / authentik state follows leadership across failovers like the
+# real RBD maps do — prod's data contract minus the rbd/LUKS mechanics.
 
 # Stand-in for the storage substrate the app playbooks assume:
 # - docker (real cluster: install-docker-official.yml — not used here because
 #   its daemon.json points DNS/registry-mirror at cluster VIPs that don't
 #   exist in dev; Ubuntu's docker.io + compose v2 plugin suffice)
-# - dummy misc-rbd/user-rbd services satisfying app units' Requires= and the
-#   mountpoint-based leader checks, bind-mounting /rbd/misc and /rbd/user
-#   (started only by the leader-election service, like the real units)
-# - a dummy qdrant.service (no qdrant in dev; the election starts/monitors it)
+# - misc-rbd/user-rbd services satisfying app units' Requires= and the
+#   mountpoint-based leader checks, bind-mounting the shared backing volume
+#   onto /rbd/misc and /rbd/user (started only by the leader-election
+#   service, like the real units)
 # - a no-op cluster-heartbeat (external dead-man's-switch telemetry)
-# - postgres with the real playbook's listen/pg_hba settings (Docker bridge
-#   access), default data dir instead of /rbd/user/postgres, autostart
-#   disabled (the election starts postgresql@16-main on the leader)
-- name: App substrate stand-ins (docker, rbd mounts, qdrant, postgres)
+# - postgres with the real playbook's listen/pg_hba/data_directory settings
+#   (data on /rbd/user/postgres like prod, initdb'd once onto the shared
+#   backing), autostart disabled (the election starts postgresql@16-main on
+#   the leader)
+# Qdrant is the real thing (storage/install-qdrant.yml, imported below).
+- name: App substrate stand-ins (docker, rbd mounts, postgres)
   hosts: storage
   become: yes
   tasks:
@@ -42,47 +45,44 @@
         name: [docker.io, docker-compose-v2, iptables, python3-docker]
         state: present
 
+    # The qdrant data dir is created here (not by install-qdrant.yml) because
+    # it must exist on whatever node mounts /rbd/user next, at mount time.
+    # uid/gid 1001 = the fixed qdrant user from install-qdrant.yml.
     - name: Install dev RBD mount stand-ins (misc-rbd, user-rbd)
       copy:
         dest: "/etc/systemd/system/{{ item.unit }}.service"
         content: |
           [Unit]
-          Description=Dev stand-in for RBD mount ({{ item.path }})
+          Description=Dev stand-in for RBD mount ({{ item.backing }} -> {{ item.path }})
 
           [Service]
           Type=oneshot
           RemainAfterExit=yes
-          ExecStartPre=/bin/mkdir -p {{ item.path }}
-          ExecStart=/bin/sh -c 'mountpoint -q {{ item.path }} || mount --bind {{ item.path }} {{ item.path }}'
-          ExecStop=/bin/sh -c 'mountpoint -q {{ item.path }} && umount {{ item.path }} || true'
+          ExecStartPre=/bin/mkdir -p {{ item.backing }} {{ item.path }}
+          ExecStart=/bin/sh -c 'mountpoint -q {{ item.path }} || mount --bind {{ item.backing }} {{ item.path }}'
+          {% if item.unit == 'user-rbd' -%}
+          ExecStartPost=/bin/sh -c 'install -d -o 1001 -g 1001 /rbd/user/qdrant'
+          {% endif -%}
+          # The election stops this unit in PARALLEL with the services
+          # holding the mount, so the first umount attempts hit EBUSY —
+          # retry until they let go. The aggressive-cleanup fallback
+          # (umount -f -l) doesn't work in containers, so a swallowed
+          # failure here would leave a stale mount that breaks every
+          # mountpoint-based leader check. The final lazy umount is
+          # unguarded on purpose: if even that fails, fail visibly.
+          ExecStop=/bin/sh -c 'mountpoint -q {{ item.path }} || exit 0; for i in $(seq 30); do umount {{ item.path }} 2>/dev/null && exit 0; sleep 1; done; umount -l {{ item.path }}'
 
           [Install]
           WantedBy=multi-user.target
       loop:
-        - { unit: misc-rbd, path: /rbd/misc }
-        - { unit: user-rbd, path: /rbd/user }
+        - { unit: misc-rbd, path: /rbd/misc, backing: /srv/rbd-backing/misc }
+        - { unit: user-rbd, path: /rbd/user, backing: /srv/rbd-backing/user }
       register: rbd_units
-
-    - name: Install dev qdrant stand-in
-      copy:
-        dest: /etc/systemd/system/qdrant.service
-        content: |
-          [Unit]
-          Description=Dev stand-in for qdrant (no vector DB in the dev cluster)
-
-          [Service]
-          Type=oneshot
-          RemainAfterExit=yes
-          ExecStart=/bin/true
-
-          [Install]
-          WantedBy=multi-user.target
-      register: qdrant_unit
 
     - name: Reload systemd daemon
       systemd:
         daemon_reload: yes
-      when: rbd_units.changed or qdrant_unit.changed
+      when: rbd_units.changed
 
     - name: Create cluster scripts directory
       file:
@@ -119,14 +119,84 @@
         insertafter: "# IPv4 local connections:"
       register: pg_hba
 
+    - name: Point PostgreSQL at the shared data directory (prod parity)
+      lineinfile:
+        path: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^#?data_directory\s*='
+        line: "data_directory = '/rbd/user/postgres'"
+      register: pg_datadir
+
     - name: Disable PostgreSQL autostart (managed by leader election)
       systemd:
         name: postgresql
         enabled: no
 
+    # The shared backing volume is mounted on every core node (the leader
+    # additionally binds it under /rbd), so the one-time initdb can run from
+    # any node before there even is a leader. su instead of become_user:
+    # ansible's unprivileged become needs setfacl on temp files (acl isn't
+    # installed in the minimal containers).
+    - name: Check for an existing postgres cluster on the shared backing
+      stat:
+        path: /srv/rbd-backing/user/postgres/PG_VERSION
+      run_once: true
+      register: shared_pg
+
+    # Explicit, world-traversable parents — otherwise the postgres dir task
+    # below creates them 0700/postgres and qdrant (uid 1001) can't reach
+    # its own data dir.
+    - name: Create the shared backing subdirectories
+      file:
+        path: "/srv/rbd-backing/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop: [user, misc]
+      run_once: true
+
+    - name: Create the shared postgres data directory
+      file:
+        path: /srv/rbd-backing/user/postgres
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
+      run_once: true
+      when: not shared_pg.stat.exists
+
+    - name: Initialise the shared postgres cluster
+      command: su -s /bin/sh postgres -c "/usr/lib/postgresql/16/bin/initdb -D /srv/rbd-backing/user/postgres"
+      run_once: true
+      when: not shared_pg.stat.exists
+
+    # A stale /rbd mount (mountpoint present but unit inactive — e.g. left
+    # by an interrupted teardown racing the unit's umount) breaks every
+    # mountpoint-based leader check. The unit owns the mount: no unit, no
+    # mount.
+    - name: Unmount stale /rbd mounts left without their unit
+      shell: |
+        cleaned=
+        for u in user-rbd:/rbd/user misc-rbd:/rbd/misc; do
+          unit=${u%%:*}; path=${u##*:}
+          if ! systemctl is-active --quiet "$unit" && mountpoint -q "$path"; then
+            umount "$path"
+            cleaned=1
+          fi
+        done
+        [ -z "$cleaned" ] || echo cleaned
+      register: stale_rbd
+      changed_when: "'cleaned' in stale_rbd.stdout"
+
     - name: Check if this host is the storage leader
       command: mountpoint -q /rbd/user
       register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Check whether the active mount is the shared backing
+      command: findmnt -no SOURCE /rbd/user
+      register: rbd_user_source
       failed_when: false
       changed_when: false
 
@@ -149,7 +219,29 @@
       systemd:
         name: postgresql@16-main
         state: restarted
-      when: rbd_user_mounted.rc == 0 and (pg_listen.changed or pg_hba.changed)
+      when: >-
+        rbd_user_mounted.rc == 0
+        and 'rbd-backing' in rbd_user_source.stdout
+        and (pg_listen.changed or pg_hba.changed or pg_datadir.changed)
+
+    # Migration from the node-local /rbd stand-ins: a leader still holding
+    # the old self-bind mount restarts its election service, which
+    # gracefully stops the apps and unmounts; the next leader (possibly the
+    # same node) mounts the shared backing via the new unit definitions
+    # (already installed on all nodes at this point). The downstream
+    # imports re-provision leader-local state (authentik DB, usage_stats)
+    # onto the shared postgres.
+    - name: Bounce the election where the old node-local mount is active
+      shell: |
+        if systemctl is-active --quiet storage-leader-election; then
+          systemctl restart storage-leader-election
+          echo restarted
+        fi
+      register: rbd_migrate
+      changed_when: "'restarted' in rbd_migrate.stdout"
+      when: >-
+        rbd_user_mounted.rc == 0
+        and 'rbd-backing' not in rbd_user_source.stdout
 
     # Migration from the earlier fixed-leader fixture: the VIP used to be a
     # static address on the designated leader. Keepalived owns it from here
@@ -170,12 +262,33 @@
         name: misc-rbd
         enabled: no
 
-# The real registry / rathole-client / leader-election / VIP playbooks, in
-# the order the election expects (it starts docker-registry and rathole, so
-# their units must exist before the election service does).
-# registry_docker_packages: dev has docker.io, not the docker-ce repo.
+# The real registry / rathole-client / qdrant / leader-election / VIP
+# playbooks, in the order the election expects (it starts docker-registry,
+# rathole and qdrant, so their units must exist before the election service
+# does). registry_docker_packages: dev has docker.io, not the docker-ce repo.
 - import_playbook: ../../config/ansible/storage/install-docker-registry.yml
 - import_playbook: ../../config/ansible/app/install-rathole.yml
+- import_playbook: ../../config/ansible/storage/install-qdrant.yml
+
+# Migration from the earlier qdrant oneshot stand-in: if the leader's
+# qdrant unit is 'active' but no qdrant process exists, the stand-in is
+# still loaded — bounce it so the real binary starts on the real unit.
+- name: Converge qdrant from the dev stand-in
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Restart qdrant on the leader if the stand-in is still active
+      shell: |
+        if mountpoint -q /rbd/user; then
+          install -d -o 1001 -g 1001 /rbd/user/qdrant
+          if systemctl is-active --quiet qdrant && ! pgrep -x qdrant >/dev/null; then
+            systemctl restart qdrant
+            echo restarted
+          fi
+        fi
+      register: qdrant_migrate
+      changed_when: "'restarted' in qdrant_migrate.stdout"
+
 - import_playbook: ../../config/ansible/storage/install-storage-leader-election.yml
 - import_playbook: ../../config/ansible/storage/setup-storage-vip.yml
 
@@ -371,6 +484,25 @@
 # mountpoint finds the elected leader; nginx renders in --local mode
 # (web_services_force_local).
 - import_playbook: ../../config/ansible/app/install-authentik.yml
+
+# Pre-pull the authentik image on every storage node: a first-time leader
+# otherwise pulls ~2GB mid-failover and authentik is down for however long
+# that takes. The tag is read from the installed unit, the single source of
+# truth, so this never drifts from install-authentik.yml.
+- name: Pre-pull authentik image on all storage nodes
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Pull the authentik image if absent
+      shell: |
+        set -e
+        tag=$(grep -oP 'AUTHENTIK_TAG=\K\S+' /etc/systemd/system/authentik.service)
+        if ! docker image inspect "ghcr.io/goauthentik/server:$tag" >/dev/null 2>&1; then
+          docker pull -q "ghcr.io/goauthentik/server:$tag"
+          echo pulled
+        fi
+      register: ak_pull
+      changed_when: "'pulled' in ak_pull.stdout"
 
 # Usage accounting, unmodified: provisions the usage_stats DB on the leader
 # and the collect-vm-stats / collect-model-stats timers that drain
