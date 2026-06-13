@@ -893,10 +893,13 @@ def reconcile():
                 warned = datetime.fromisoformat(grace["warned_at"])
             except (KeyError, TypeError, ValueError):
                 warned = None
-            if warned is None or \
+            # `immediate` is set by the schedule page's "stop now" button to
+            # bypass the remaining grace (the guest was already warned).
+            immediate = bool(grace.get("immediate"))
+            if immediate or warned is None or \
                     (now - warned).total_seconds() >= SCHEDULED_STOP_GRACE_S:
-                print(f"reconcile: stopping '{name}' "
-                      f"(schedule/desired off, grace elapsed)")
+                print(f"reconcile: stopping '{name}' (schedule/desired off, "
+                      f"{'immediate' if immediate else 'grace elapsed'})")
                 try:
                     vm_stop(name, initiator="scheduler")
                     _delete(VM_GRACE_PREFIX + name)
