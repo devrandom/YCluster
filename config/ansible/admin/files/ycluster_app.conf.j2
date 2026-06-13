@@ -1,0 +1,57 @@
+# app.<domain> — user-facing self-service surface (VM scheduling), gated by
+# the cluster IdP's "YCluster" application (no group policy → open to every
+# enrolled user; the Flask app owner-scopes each VM). Only the vm-schedule
+# paths are served here, so admin-only pages (inventory, model-usage, user
+# management on admin.<domain>) are NOT reachable via this host even though
+# the same outpost fronts both. Rendered by certbot-manager from this
+# `*_app.conf.j2` template (the `_app` suffix sets domain=app.<primary> and
+# adds it to the certificate SAN). External users reach it through the
+# rathole tunnel → 127.0.0.2; HTTP-01 + the :80→:443 redirect are handled
+# by the shared public `_` server in admin-api.conf.j2.
+server {
+    {% if use_tls %}
+    listen 127.0.0.2:443 ssl http2;
+    {% else %}
+    listen 127.0.0.2:80;
+    {% endif %}
+    server_name {{ domain | default('app') }};
+
+    client_max_body_size 1M;
+
+    {% if use_tls %}
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
+    add_header X-Content-Type-Options nosniff always;
+
+    # IdP outpost plumbing (login redirect, OAuth callback, auth subrequest).
+    include /etc/nginx/admin-api-authentik-outpost.conf;
+
+    # The scheduling page + its data/set/stop-now APIs — forward-authed, then
+    # owner-scoped in Flask. POST covers the desired-state and stop-now writes.
+    location ^~ /admin/vm-schedule {
+        limit_except GET HEAD POST { deny all; }
+        limit_req zone=public_status burst=20 nodelay;
+        include /etc/nginx/admin-api-authentik-proxy.conf;
+    }
+
+    # Page assets (nav.js, alpine, favicon) — no secrets; served straight from
+    # Flask without the gate so the page can load them post-login.
+    location ^~ /static/ {
+        limit_req zone=public_status burst=40 nodelay;
+        proxy_pass http://127.0.0.1:12723;
+        proxy_set_header Host $host;
+    }
+
+    # Anything else on this host bounces to the one page it serves — no other
+    # admin path is reachable via app.<domain>.
+    location / {
+        return 302 /admin/vm-schedule;
+    }
+}

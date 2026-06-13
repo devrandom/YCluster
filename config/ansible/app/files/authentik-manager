@@ -116,7 +116,7 @@ entries:
     identifiers:
       slug: cluster-admin
     attrs:
-      name: Cluster Admin
+      name: YCluster Admin
       provider: !KeyOf provider-admin
       meta_launch_url: https://admin.$external_domain/inventory
   - model: authentik_policies.policybinding
@@ -124,12 +124,34 @@ entries:
       target: !KeyOf app-admin
       group: !KeyOf group-admins
       order: 0
+  # User-facing app surface (app.<domain>): self-service VM scheduling.
+  # No policy binding -> visible and usable by every enrolled user; the
+  # Flask app owner-scopes per VM. nginx serves only the vm-schedule paths
+  # on this host, so admin-only pages aren't reachable here.
+  - model: authentik_providers_proxy.proxyprovider
+    id: provider-app
+    identifiers:
+      name: cluster-app
+    attrs:
+      mode: forward_single
+      external_host: https://app.$external_domain
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+  - model: authentik_core.application
+    id: app-app
+    identifiers:
+      slug: ycluster
+    attrs:
+      name: YCluster
+      provider: !KeyOf provider-app
+      meta_launch_url: https://app.$external_domain/
   - model: authentik_outposts.outpost
     identifiers:
       managed: goauthentik.io/outposts/embedded
     attrs:
       providers:
         - !KeyOf provider-admin
+        - !KeyOf provider-app
       config:
         authentik_host: https://auth.$external_domain
 EOF

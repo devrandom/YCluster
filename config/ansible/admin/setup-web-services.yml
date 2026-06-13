@@ -149,6 +149,12 @@
         dest: /etc/nginx/templates/admin-api.conf.j2
       register: nginx_template_changed
 
+    - name: Install app.<domain> vhost template (user-facing scheduling page)
+      copy:
+        src: ycluster_app.conf.j2
+        dest: /etc/nginx/templates/ycluster_app.conf.j2
+      register: nginx_app_template_changed
+
     - name: Configure nginx shared locations
       copy:
         src: admin-api-locations.conf
@@ -172,6 +178,12 @@
       copy:
         src: admin-api-authentik-proxy.conf
         dest: /etc/nginx/admin-api-authentik-proxy.conf
+      notify: restart nginx
+
+    - name: Install shared authentik outpost-plumbing snippet
+      copy:
+        src: admin-api-authentik-outpost.conf
+        dest: /etc/nginx/admin-api-authentik-outpost.conf
       notify: restart nginx
 
     - name: Install shared grafana proxy snippet
@@ -198,6 +210,15 @@
       file:
         src: /etc/nginx/sites-available/admin-api
         dest: /etc/nginx/sites-enabled/admin-api
+        state: link
+      notify: restart nginx
+
+    # Rendered by certbot-manager update-nginx (above) from the
+    # ycluster_app.conf.j2 template; enable it as its own site.
+    - name: Enable app.<domain> nginx site
+      file:
+        src: /etc/nginx/sites-available/ycluster_app
+        dest: /etc/nginx/sites-enabled/ycluster_app
         state: link
       notify: restart nginx
 
