@@ -263,32 +263,41 @@ Desired-state reconciliation, the idiom the cluster already speaks:
 
 ### GPU reservation vs runtime (important wrinkle)
 
-A *stopped* VM still holds its passthrough GPUs — the incus device entries
-keep the PCI addresses allocated, so scheduling a VM down does **not**
-return its GPUs to the pool. This is also why the v1 reconciler needs no
-admission control: it only starts VMs that already own their GPUs, so
-overlapping schedules cannot race for cards (RAM is the only contended
-resource, and a failed start is retried-and-logged, never forced).
+A *stopped* VM holds its passthrough GPUs by default — the incus device
+entries keep the PCI addresses allocated, so a plain stop does **not**
+return its GPUs to the pool. Iteration 2 (implemented 2026-06-12) makes
+scheduling actually share hardware, as one coupled bundle (decided
+2026-06-11 — none of these is safe alone):
 
-For scheduling to actually share hardware, a later iteration adds
-`release_gpus_on_stop`: detach GPU devices on scheduled stop, re-acquire
-from the free pool on start (the manual vm1 resize procedure / planned
-`vm set-gpus`). That MUST land together with — not before — two pieces
-(decided 2026-06-11):
+- **Release on scheduled stop**: after the graceful stop, the reconciler
+  detaches the VM's GPU devices back to the host pool (`release_gpus`;
+  also `ycluster vm release-gpus` for manual ops). Every start path
+  (`vm_start`/`vm_restart`, scheduler or CLI) first re-attaches from
+  `free_gpus()` up to the VM's registered count, and fails — never
+  under-delivers — when the pool can't cover it.
+- **Save-time admission control**: `/admin/vm-schedule/set` rejects (409)
+  a desired state whose GPU needs overcommit the host pool against the
+  already-accepted commitments, so conflicts surface when the user is
+  looking at the page, not as a silent start failure at 8am. Commitment
+  semantics: `unmanaged` and `on` hold the VM's registered GPUs *always*
+  (unmanaged devices are never released), `off` holds none, `schedule`
+  holds them during its windows. The pool size comes from each host's
+  sampler snapshot (`gpu_pool` in `/cluster/vm-state/<host>`); a host
+  that hasn't reported one yet fails open. Containers share the host GPU
+  and never enter pool accounting. Going `unmanaged` is never blocked —
+  it's an opt-out, and manual CLI ops are policy-free by design (which
+  also means a manual start of a released, unmanaged VM can take GPUs
+  that schedules counted on; admission protects intent, not the CLI).
+- **Commitments visibility**: the schedule page lists, per host, the
+  pool size and who holds how many GPUs when, so users see available
+  capacity *before* composing a schedule.
+- **Failure surfacing**: reconciler start/stop failures (e.g. RAM
+  exhaustion — VFIO pins guest RAM) are written to
+  `/cluster/vm-issue/<name>` and shown on the VM's schedule card;
+  cleared automatically once the VM converges or leaves management.
 
-- **Save-time admission control**: reject (don't just warn) a schedule
-  whose windows overcommit a host's GPU pool against the already-accepted
-  schedules, so conflicts surface when the user is looking at the page,
-  not as a silent start failure at 8am.
-- **Commitments visibility**: the schedule page shows existing
-  commitments per host (whose windows hold how many GPUs when), so users
-  see available capacity *before* composing a schedule rather than
-  blindly trying and erroring out.
-
-Plus: start failures (RAM exhaustion etc.) surface as a status on the
-schedule page, not only in the reconciler journal. Releasing GPUs also
-opens the door to billing *reservation* hours vs *runtime* hours
-differently.
+Releasing GPUs also opens the door to billing *reservation* hours vs
+*runtime* hours differently.
 
 ## Phase 4 — Quotas
 
@@ -300,6 +309,123 @@ Once tracking has produced a few weeks of real data:
   blocked — admins retain full manual control, and CLI ops are
   non-billable anyway.
 - Soft-limit warnings on the page before hard refusal.
+
+## Phase 5 — Web-driven VM creation
+
+Today a VM is born only via `ycluster vm launch` on the incus host. This
+phase lets an owner create one from the web page. It builds directly on
+the Phase 3 reconciler and the iteration-2 GPU release/acquire machinery
+(implemented 2026-06-12); it does *not* depend on quotas (Phase 4), though
+quotas would later gate self-serve creation.
+
+### Control-path constraint (why creation is asynchronous)
+
+The admin-api runs as the unprivileged `admin-api` user (groups
+`shadow, etcd-client`), so even where it is colocated on an incus host it
+**cannot call `incus`** — its only mutation channel is etcd. The single
+privileged actor that can touch incus is the **vm-reconciler** (root,
+timer-driven, on each incus host), which already pulls intent from etcd
+and converges. So creation must follow the established shape: the web
+layer writes intent to etcd; the target host's reconciler executes it.
+Creation is therefore submit-then-poll, not request/response.
+
+### Record in place, gated by `state` (no new intent prefix)
+
+A "create me" request is just a normal registry record at
+`/cluster/vms/<name>` whose local incus instance doesn't exist yet — no
+separate intent prefix, no second scan loop. The reconciler already
+iterates `vms_all()` filtered to `host == self`; it gains a branch for
+records with no local instance.
+
+The trigger **must be an explicit state field, not mere absence** — else
+a VM someone `incus delete`s by hand (leaving a stale record) gets
+silently resurrected. The state machine:
+
+- `requested` — record written by the web layer; **reconciler launches.**
+- `provisioning` — set when the provision task starts (see below); blocks
+  re-trigger on the next tick. A `provisioning` record with no live task
+  and no instance is an *interrupted* provision → clean up and relaunch.
+- `ready` — provisioned, reachable, **stopped with GPUs released**.
+  Normal power convergence takes over from here.
+- A `ready`/running record whose instance has vanished is an *anomaly*,
+  **not** a create request: handled as today (a `vm_start` that fails
+  "instance not found" records a `/cluster/vm-issue/`), surfacing the
+  problem rather than recreating.
+
+`vm_destroy` deletes the record, so a properly destroyed VM never comes
+back. The registry record gains the fields provisioning needs but that
+are launch-args-only today: `cpu`, `mem`, `image` (plus the existing
+`owner`, `gpus`, `type`, `host`).
+
+### Provision GPU-less, attach GPUs only to run
+
+`vm_launch`'s slow tail is purely SSH/cloud-init — wait for the guest
+agent, `cloud-init status --wait`, install/enable `ssh.service`, inject
+the owner's `authorized_keys`, sync the bastion allow-list. **None of it
+touches a GPU** (the CUDA/driver stack is baked into the image at build
+time). The multi-minute wait (`GPU_VM_AGENT_TIMEOUT=900` vs 180 for CPU
+VMs) is entirely OVMF enumerating the passed-through GPU BARs before the
+kernel starts. So creation splits into:
+
+- **Provision (no GPUs, ~180 s)** — `incus init` *without* GPU devices →
+  pin IP / DNS → NAS share → start → wait agent → cloud-init → sshd →
+  inject keys → bastion sync → **stop** → `state: ready`. The GPU count
+  is recorded (so it counts as a commitment for admission control) but no
+  card is attached; the pool stays free the whole time provisioning runs.
+- **Run (GPUs attached)** — the existing start path:
+  `_ensure_gpus_attached` acquires up to the registered count from
+  `free_gpus()`, then `incus start`. The one slow GPU boot happens here,
+  only when the VM is actually wanted, and only the start path carries
+  the 900 s budget.
+
+This is strictly better than today's monolithic launch: provisioning is
+~180 s instead of ~900 s, GPUs aren't tied up during minutes of
+apt/cloud-init work, and the VM lands **stopped with its GPUs free** —
+exactly the steady state the scheduler assumes, so a freshly created VM
+is immediately schedulable with no special-casing.
+
+### Execution: a detached per-VM provision task
+
+GPU-less provisioning (~180 s) still exceeds the 120 s reconcile tick and
+brushes the reconciler service's `TimeoutStartSec=300`, so the reconciler
+must **not** run it inline. On seeing `state: requested` + no instance, it
+spins off a detached, longer-budget oneshot — `vm-provision@<name>.service`
+(`systemd-run` or a templated unit, e.g. `TimeoutStartSec=600`) — and
+returns immediately. The task flips `requested → provisioning → ready`,
+so subsequent ticks don't re-enter, and a crash leaves `provisioning` for
+the interrupted-recovery branch. This is the "spinoff task" that makes the
+long-running concern tractable; the GPU boot moves entirely to the start
+path, which already handles it.
+
+### Host placement and admission
+
+The registry record needs `host` set, so the web layer picks the incus
+host at create time — informed by the per-host pool sizes (`gpu_pool` in
+the sampler snapshots) and `gpu_commitments` already added in iteration 2.
+The same admission check that guards scheduling (`gpu_conflict` against
+accepted commitments) runs at create, so an over-capacity request is
+rejected on the page rather than failing at first start. Placement can be
+operator-chosen (dropdown) initially, auto (least-loaded host with a free
+GPU slot) later.
+
+### Web surface and authorization
+
+A create form on the schedule (or a new) page: name, GPUs, CPU, mem,
+image/type, host. The POST endpoint validates and writes the `requested`
+record. **Admin-gated initially** — there is no per-owner budget to admit
+self-serve creation against until Phase 4, so unrestricted owner creation
+waits on quotas. Pre-flight validation: owner must already have SSH keys
+registered (`vm_launch` requires them), name not already taken, capacity
+fits.
+
+### Open risk to validate empirically
+
+A guest provisioned with **zero** GPU devices, then later booted with GPUs
+attached, must have its baked-in nvidia driver bind cleanly on that
+GPU-present boot. It should — physical passthrough presents the GPU as a
+normal PCI device at boot and the driver loads when present, and it's the
+same attach-then-boot ordering `_ensure_gpus_attached` + start already
+uses — but confirm on a real passthrough VM before relying on it.
 
 ## Implementation order
 
@@ -332,8 +458,14 @@ idempotency, and doc updates.
    the FLR-wedge failure mode.
 7. Quotas. — **1–2 d** once 4–6 exist (budget table, reconciler check,
    page warnings).
+8. Web-driven VM creation (Phase 5). — **2–3 d**: split `vm_launch` into
+   GPU-less provision + GPU-attach-run ~0.5 d (the run half already
+   exists as `_ensure_gpus_attached`); the `vm-provision@.service` +
+   reconciler create branch + state machine ~1 d; web form, placement,
+   create-time admission ~1 d. Depends on 6 + iteration-2; independent of
+   7 (but quotas gate self-serve, so ship admin-gated first).
 
-Total ≈ **11–19 days**. Each step is independently shippable; 4–5 don't
+Total ≈ **13–22 days**. Each step is independently shippable; 4–5 don't
 depend on 1–3 (tracking needs no login), so the two tracks can proceed in
 parallel. The riskiest items for schedule slip are authentik flow
 iteration (1) and graceful-stop edge cases (6); everything else follows

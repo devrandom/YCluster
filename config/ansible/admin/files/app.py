@@ -2641,7 +2641,8 @@ def _usage_stats_cursor(since_days):
 # Single sources of truth: the etcd schema belongs to vm_manager (the
 # writer); the admin group name to authentik_manager (which manages it).
 from ycluster.utils.vm_manager import (VMS_PREFIX, VM_STATE_PREFIX,
-                                       VM_DESIRED_PREFIX, vms_all)
+                                       VM_DESIRED_PREFIX, VM_ISSUE_PREFIX,
+                                       vms_all, gpu_commitments, gpu_conflict)
 from ycluster.utils.authentik_manager import ADMIN_GROUP
 
 
@@ -2654,6 +2655,65 @@ def _authentik_identity():
     groups = [g for g in (request.headers.get('X-Authentik-Groups') or '').split('|') if g]
     is_admin = email is None or ADMIN_GROUP in groups
     return email, is_admin
+
+
+def _etcd_json_prefix(client, prefix):
+    """{name: decoded JSON} for the direct children of an etcd prefix,
+    skipping unparseable values."""
+    out = {}
+    for value, metadata in client.get_prefix(prefix):
+        if not value:
+            continue
+        try:
+            out[metadata.key.decode()[len(prefix):]] = json.loads(value.decode())
+        except Exception:
+            continue
+    return out
+
+
+def _gpu_admission_error(client, name, rec, mode, windows):
+    """Admission control for a proposed desired state: None if the VM's
+    registered GPU count fits its host's pool against the commitments
+    already accepted for the other VMs there, else a rejection message.
+    Fails open when the host hasn't reported a pool size yet (sampler
+    predates the gpu_pool field) — better to accept than to brick
+    scheduling during a rollout."""
+    host, gpus = rec.get('host'), rec.get('gpus') or 0
+    if rec.get('type') == 'container' or not host or not gpus \
+            or mode not in ('on', 'schedule'):
+        return None
+    pool = None
+    raw = client.get(VM_STATE_PREFIX + host)[0]
+    if raw:
+        try:
+            snap = json.loads(raw.decode())
+            if isinstance(snap.get('gpu_pool'), int):
+                pool = snap['gpu_pool']
+        except Exception:
+            pass
+    if pool is None:
+        return None
+    now = datetime.now(UTC)
+    registry = vms_all()
+    registry.pop(name, None)
+    desired_all = _etcd_json_prefix(client, VM_DESIRED_PREFIX)
+    commits = gpu_commitments(registry, desired_all, now).get(host, [])
+    if mode == 'on':
+        ranges = [(now, datetime.max.replace(tzinfo=UTC))]
+    else:
+        ranges = [(datetime.fromisoformat(w['start']),
+                   datetime.fromisoformat(w['end'])) for w in windows]
+    for lo, hi in ranges:
+        worst = gpu_conflict(commits, gpus, pool, lo, hi)
+        if worst:
+            p, free, active = worst
+            held = ', '.join(f"{c['vm']} ({c['gpus']})" for c in active)
+            when = ('now' if p == now
+                    else p.strftime('%Y-%m-%d %H:%M UTC'))
+            return (f"needs {gpus} GPU(s) on {host} but only "
+                    f"{max(free, 0)} uncommitted at {when} "
+                    f"(pool {pool}; held by {held})")
+    return None
 
 
 @app.route('/admin/vm-schedule')
@@ -2671,28 +2731,26 @@ def vm_schedule_data():
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
 
-    live = {}
+    live, pools = {}, {}
     for value, metadata in client.get_prefix(VM_STATE_PREFIX):
         if not value:
             continue
         try:
-            for inst in json.loads(value.decode()).get('instances', []):
+            snap = json.loads(value.decode())
+            host = metadata.key.decode()[len(VM_STATE_PREFIX):]
+            if isinstance(snap.get('gpu_pool'), int):
+                pools[host] = snap['gpu_pool']
+            for inst in snap.get('instances', []):
                 live[inst['name']] = inst.get('status')
         except Exception:
             continue
 
-    desired_all = {}
-    for value, metadata in client.get_prefix(VM_DESIRED_PREFIX):
-        if not value:
-            continue
-        try:
-            desired_all[metadata.key.decode()[len(VM_DESIRED_PREFIX):]] = \
-                json.loads(value.decode())
-        except Exception:
-            continue
+    desired_all = _etcd_json_prefix(client, VM_DESIRED_PREFIX)
+    issues = _etcd_json_prefix(client, VM_ISSUE_PREFIX)
 
+    registry = vms_all()
     rows = []
-    for name, rec in vms_all().items():
+    for name, rec in registry.items():
         if not is_admin and rec.get('owner') != email:
             continue
         desired = desired_all.get(name)
@@ -2704,9 +2762,31 @@ def vm_schedule_data():
             'status': live.get(name, 'unknown'),
             'mode': (desired or {}).get('mode', 'unmanaged'),
             'windows': (desired or {}).get('windows', []),
+            'issue': issues.get(name),
+        })
+
+    # Capacity commitments per host, so users can see what's free before
+    # composing a schedule. VM names are shown to everyone (capacity is
+    # shared knowledge); owners only to admins.
+    now = datetime.now(UTC)
+    commitments = gpu_commitments(registry, desired_all, now)
+    hosts = []
+    for host in sorted(set(commitments) | set(pools)):
+        if not pools.get(host) and not commitments.get(host):
+            continue          # container hosts: no passthrough pool
+        hosts.append({
+            'host': host,
+            'pool': pools.get(host),
+            'commitments': [
+                {'vm': c['vm'], 'gpus': c['gpus'], 'mode': c['mode'],
+                 'owner': c['owner'] if is_admin else None,
+                 'windows': None if c['windows'] is None else
+                     [{'start': s.isoformat(), 'end': e.isoformat()}
+                      for s, e in c['windows']]}
+                for c in commitments.get(host, [])],
         })
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
-                    'email': email, 'is_admin': is_admin})
+                    'hosts': hosts, 'email': email, 'is_admin': is_admin})
 
 
 def _parse_windows(windows):
@@ -2770,6 +2850,15 @@ def vm_schedule_set():
         windows = _parse_windows(data.get('windows', []))
         if windows is None:
             return jsonify({'error': 'invalid windows'}), 400
+
+    # Scheduled stops release GPUs to the host pool, so overlapping
+    # schedules genuinely contend — reject overcommitment at save time
+    # rather than failing the start at window-open. (Going 'unmanaged'
+    # is always allowed: it's an opt-out, and manual CLI ops are never
+    # blocked by policy.)
+    conflict = _gpu_admission_error(client, name, rec, mode, windows)
+    if conflict:
+        return jsonify({'error': conflict}), 409
 
     desired = {
         'mode': mode,
@@ -2880,15 +2969,7 @@ def vm_usage_data():
     registry, desired_all = {}, {}
     try:
         registry = vms_all()
-        client = get_etcd_client()
-        for value, metadata in client.get_prefix(VM_DESIRED_PREFIX):
-            if not value:
-                continue
-            try:
-                desired_all[metadata.key.decode()[len(VM_DESIRED_PREFIX):]] = \
-                    json.loads(value.decode())
-            except Exception:
-                continue
+        desired_all = _etcd_json_prefix(get_etcd_client(), VM_DESIRED_PREFIX)
     except Exception:
         pass
 

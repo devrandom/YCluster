@@ -51,6 +51,12 @@ VM_GRACE_PREFIX = "/cluster/vm-grace/"
 # Minimum warning-to-shutdown grace for scheduler-initiated stops
 # (effective grace is this rounded up to the next reconciler tick).
 SCHEDULED_STOP_GRACE_S = 300
+# Last reconciler failure per VM ({"op": "start"|"stop", "error": ...,
+# "at": iso}), written when convergence fails and cleared once the VM
+# converges (or its desired record disappears). Read by the schedule page
+# so start failures (e.g. RAM exhaustion) surface to the owner, not only
+# in the reconciler journal.
+VM_ISSUE_PREFIX = "/cluster/vm-issue/"
 
 VM_PROFILE = "gpu-vm"
 VM_IMAGE = "ubuntu-cuda-vllm"          # default for VMs (GPU or not):
@@ -392,6 +398,71 @@ def vm_gpus():
         print(f"{g}  {'ASSIGNED' if g in assigned else 'free'}")
 
 
+def _instance_info(name):
+    """The instance's full JSON record, or None if it doesn't exist on
+    this host."""
+    insts = _incus_json("list", name, "--format", "json")
+    for inst in insts:
+        if inst.get("name") == name:
+            return inst
+    return None
+
+
+def release_gpus(name):
+    """Detach a stopped VM's passthrough GPU devices back to the host
+    pool. The registry keeps the VM's GPU count — the next start
+    re-acquires that many from the pool. Returns the number detached.
+
+    Only meaningful for VMs (containers share the host GPU via the
+    profile, there is nothing to release).
+    """
+    inst = _instance_info(name)
+    if not inst or inst.get("type") != "virtual-machine":
+        return 0
+    if inst.get("status") == "Running":
+        raise RuntimeError(f"'{name}' is running — stop it before "
+                           f"releasing its GPUs")
+    released = 0
+    for dev_name, dev in sorted((inst.get("devices") or {}).items()):
+        if isinstance(dev, dict) and dev.get("type") == "gpu" and dev.get("pci"):
+            _incus("config", "device", "remove", name, dev_name)
+            released += 1
+    return released
+
+
+def _ensure_gpus_attached(name):
+    """Attach passthrough GPUs from the host pool until the VM has its
+    registered count — the inverse of release_gpus, run before every
+    start. No-op for containers, unregistered instances, and VMs that
+    already hold their GPUs. Raises when the pool can't cover the gap
+    (the registered count is a commitment; starting with fewer would
+    silently under-deliver).
+    """
+    inst = _instance_info(name)
+    if not inst or inst.get("type") != "virtual-machine":
+        return
+    want = (vm_get(name) or {}).get("gpus") or 0
+    devices = inst.get("devices") or {}
+    have = sum(1 for d in devices.values()
+               if isinstance(d, dict) and d.get("type") == "gpu" and d.get("pci"))
+    missing = want - have
+    if missing <= 0:
+        return
+    free = free_gpus()
+    if len(free) < missing:
+        raise RuntimeError(
+            f"'{name}' needs {missing} more GPU(s) but only {len(free)} "
+            f"free in the host pool")
+    idx = 0
+    for pci in free[:missing]:
+        while f"gpu{idx}" in devices:
+            idx += 1
+        _incus("config", "device", "add", name, f"gpu{idx}", "gpu",
+               "gputype=physical", f"pci={pci}")
+        devices[f"gpu{idx}"] = {"type": "gpu", "pci": pci}
+        print(f"  re-attached GPU {pci} as gpu{idx}")
+
+
 # --------------------------------------------------------------------------
 # user SSH key registry
 # --------------------------------------------------------------------------
@@ -558,6 +629,23 @@ def desired_delete(name):
     _delete(VM_DESIRED_PREFIX + name)
 
 
+def _parse_window(w, now=None):
+    """Parse one {start, end} window into a (start, end) pair of UTC
+    datetimes, or None if malformed/naive/elapsed. `now` (if given)
+    drops windows whose end is already past."""
+    try:
+        start = datetime.fromisoformat(str(w["start"]))
+        end = datetime.fromisoformat(str(w["end"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if start.tzinfo is None or end.tzinfo is None:
+        return None
+    start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    if end <= start or (now is not None and end <= now):
+        return None
+    return start, end
+
+
 def _desired_on(desired, now):
     """Evaluate a desired-state record at `now` (UTC)."""
     mode = desired.get("mode")
@@ -566,18 +654,85 @@ def _desired_on(desired, now):
     if mode == "off":
         return False
     for w in desired.get("windows", []):
-        try:
-            start = datetime.fromisoformat(str(w["start"]))
-            end = datetime.fromisoformat(str(w["end"]))
-        except (KeyError, ValueError):
-            continue
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        if end.tzinfo is None:
-            end = end.replace(tzinfo=timezone.utc)
-        if start <= now < end:
+        parsed = _parse_window(w)
+        if parsed and parsed[0] <= now < parsed[1]:
             return True
     return False
+
+
+# --------------------------------------------------------------------------
+# GPU capacity commitments (admission control for the scheduling page)
+#
+# The dual of _desired_on: rather than "is this VM on now", it answers
+# "which GPUs are spoken for, when". A VM's registered GPUs are committed
+# *always* under unmanaged (devices never released) and `on`, *never*
+# under `off` (scheduled stop releases them), and during its windows
+# under `schedule`. Containers share the host GPU and never enter pool
+# accounting. Pure functions — no etcd, so unit-testable in isolation;
+# the admission orchestration (etcd reads) stays in the admin app.
+# --------------------------------------------------------------------------
+def gpu_commitments(registry, desired_all, now):
+    """{host: [{vm, owner, gpus, mode, windows}]} implied by the registry
+    and the accepted desired records. `windows` is None for always-held
+    commitments, else a list of (start, end) UTC datetime pairs with
+    elapsed windows dropped (a schedule with no live windows commits
+    nothing and is omitted)."""
+    hosts = {}
+    for vm, rec in registry.items():
+        if rec.get("type") == "container":
+            continue
+        gpus, host = rec.get("gpus") or 0, rec.get("host")
+        if not gpus or not host:
+            continue
+        mode = (desired_all.get(vm) or {}).get("mode", "unmanaged")
+        if mode == "off":
+            continue
+        windows = None
+        if mode == "schedule":
+            windows = [p for p in
+                       (_parse_window(w, now)
+                        for w in (desired_all.get(vm) or {}).get("windows", []))
+                       if p]
+            if not windows:
+                continue
+        hosts.setdefault(host, []).append(
+            {"vm": vm, "owner": rec.get("owner"), "gpus": gpus,
+             "mode": mode, "windows": windows})
+    return hosts
+
+
+def gpu_conflict(commits, gpus, pool, lo, hi):
+    """Worst capacity violation for a candidate needing `gpus` GPUs
+    throughout [lo, hi): (when, free_then, holders), or None if it fits.
+    Committed capacity only changes at window starts, so probing `lo`
+    plus every window start inside the range covers the peaks."""
+    points = [lo]
+    for c in commits:
+        for s, _ in (c["windows"] or []):
+            if lo < s < hi:
+                points.append(s)
+    worst = None
+    for p in points:
+        active = [c for c in commits
+                  if c["windows"] is None
+                  or any(s <= p < e for s, e in c["windows"])]
+        free = pool - sum(c["gpus"] for c in active)
+        if free < gpus and (worst is None or free < worst[1]):
+            worst = (p, free, active)
+    return worst
+
+
+def _record_issue(issues, name, op, error, now):
+    _put_json(VM_ISSUE_PREFIX + name,
+              {"op": op, "error": str(error)[:300],
+               "at": now.isoformat(timespec="seconds")})
+    issues[name] = True
+
+
+def _clear_issue(issues, name):
+    if name in issues:
+        _delete(VM_ISSUE_PREFIX + name)
+        del issues[name]
 
 
 def reconcile():
@@ -589,19 +744,25 @@ def reconcile():
     (the owner asked for this runtime). Stops are graceful and
     tick-based: first tick walls a warning into the guest and stamps a
     grace marker, a later tick (grace elapsed, intent re-checked by
-    getting here again) cleanly stops — NEVER --force (GPU FLR wedge).
-    Failed convergence prints and retries next tick.
+    getting here again) cleanly stops — NEVER --force (GPU FLR wedge) —
+    then releases the VM's passthrough GPUs back to the host pool
+    (vm_start re-acquires). Failed convergence prints, records a
+    per-VM issue (shown on the schedule page), and retries next tick.
     """
     host = socket.gethostname()
     now = datetime.now(timezone.utc)
     statuses = {i.get("name"): i.get("status")
                 for i in _incus_json("list", "--format", "json")}
     graces = _all_json(VM_GRACE_PREFIX)
-    for name, rec in sorted(vms_all().items()):
-        if rec.get("host") != host:
-            continue
-        desired = desired_get(name)
+    desireds = _all_json(VM_DESIRED_PREFIX)
+    issues = _all_json(VM_ISSUE_PREFIX)
+    all_vms = vms_all()
+    local_vms = {name for name, rec in all_vms.items()
+                 if rec.get("host") == host}
+    for name in sorted(local_vms):
+        desired = desireds.get(name)
         if not desired:
+            _clear_issue(issues, name)
             continue
         want_on = _desired_on(desired, now)
         running = statuses.get(name) == "Running"
@@ -613,13 +774,17 @@ def reconcile():
                 if running:
                     print(f"reconcile: '{name}' desired flipped back on — "
                           f"cancelled pending stop")
-            if not running:
+            if running:
+                _clear_issue(issues, name)
+            else:
                 print(f"reconcile: starting '{name}' (schedule/desired on)")
                 try:
                     vm_start(name, billable=True, initiator="scheduler")
+                    _clear_issue(issues, name)
                 except Exception as e:
                     print(f"  start failed (will retry next tick): {e}",
                           file=sys.stderr)
+                    _record_issue(issues, name, "start", e, now)
         elif running:
             if not grace:
                 print(f"reconcile: warning '{name}' of scheduled stop "
@@ -641,12 +806,30 @@ def reconcile():
                 try:
                     vm_stop(name, initiator="scheduler")
                     _delete(VM_GRACE_PREFIX + name)
+                    released = release_gpus(name)
+                    if released:
+                        print(f"  released {released} GPU(s) to the "
+                              f"host pool")
+                    _clear_issue(issues, name)
                 except Exception as e:
                     print(f"  stop failed (will retry next tick; "
                           f"NOT forcing): {e}", file=sys.stderr)
-        elif grace:
-            # Already stopped (e.g. the owner shut it down during grace).
-            _delete(VM_GRACE_PREFIX + name)
+                    _record_issue(issues, name, "stop", e, now)
+        else:
+            _clear_issue(issues, name)
+            if grace:
+                # Already stopped (e.g. the owner shut it down during
+                # grace) — release as a scheduled stop would have.
+                _delete(VM_GRACE_PREFIX + name)
+                released = release_gpus(name)
+                if released:
+                    print(f"reconcile: '{name}' already stopped — released "
+                          f"{released} GPU(s) to the host pool")
+    # Issues for VMs that left the registry entirely would dangle
+    # forever (vm_destroy clears its own, but a record can also vanish
+    # by hand). Issues for other hosts' VMs are theirs to manage.
+    for name in sorted(set(issues) - set(all_vms)):
+        _delete(VM_ISSUE_PREFIX + name)
 
 
 def _record_event(event, name, owner=None, gpus=None, initiator="cli",
@@ -703,6 +886,9 @@ def sample_state():
     payload = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "interval_s": VM_STATE_INTERVAL_S,
+        # Passthrough pool size — the schedule page's admission control
+        # checks accepted windows against this capacity.
+        "gpu_pool": len(gpu_pool()),
         "instances": instances,
     }
     _put_json(VM_STATE_PREFIX + socket.gethostname(), payload)
@@ -866,6 +1052,8 @@ def vm_start(name, billable=False, initiator="cli"):
     # Backfill any host-side state added since this instance was created
     # (currently just the /data NAS share). Idempotent.
     _ensure_nas_share(name)
+    # Re-acquire GPUs the scheduler released on a previous stop.
+    _ensure_gpus_attached(name)
     _incus("start", name)
     _record_event_from_record("start", name, initiator=initiator,
                               billable=billable)
@@ -876,6 +1064,7 @@ def vm_restart(name, billable=False, initiator="cli"):
     if _instance_running(name):
         _incus("stop", name)
     _ensure_nas_share(name)
+    _ensure_gpus_attached(name)
     _incus("start", name)
     # Continuity event: interval assembly treats a restart as uninterrupted
     # running time (the stop/start gap is seconds).
@@ -899,6 +1088,7 @@ def vm_destroy(name):
     _delete(VMS_PREFIX + name)
     desired_delete(name)
     _delete(VM_GRACE_PREFIX + name)
+    _delete(VM_ISSUE_PREFIX + name)
     bastion_sync()
     print(f"Destroyed '{name}' and removed its registration.")
 

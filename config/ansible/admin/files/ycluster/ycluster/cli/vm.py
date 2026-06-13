@@ -65,6 +65,14 @@ def register_vm_commands(subparsers):
     gp = sub.add_parser('gpus', help='Show passthrough GPU allocation')
     gp.set_defaults(func=lambda a: vm.vm_gpus())
 
+    rgp = sub.add_parser(
+        'release-gpus',
+        help="Detach a stopped VM's passthrough GPUs back to the host "
+             "pool (the next start re-acquires its registered count)")
+    rgp.add_argument('name')
+    rgp.set_defaults(func=lambda a: print(
+        f"Released {vm.release_gpus(a.name)} GPU(s) from '{a.name}'."))
+
     pip = sub.add_parser(
         'pin-ips',
         help='Pin a static IP on every existing VM/container (migration '
