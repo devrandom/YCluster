@@ -159,6 +159,20 @@ EOF
     chmod 600 "$bp"
 }
 
+# Write the domain-dependent blueprints (OWUI OIDC client + admin/app
+# forward-auth). Only once an external domain exists — redirect URIs and
+# launch URLs are external-only. The authentik worker watches the blueprint
+# dir and auto-applies on change, so refreshing these needs no container
+# restart (see the `write-blueprints` command).
+write_all_blueprints() {
+    local external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+    if [ -n "$external_domain" ]; then
+        write_owui_blueprint "$external_domain" \
+            "$(get_or_generate_secret owui-client-secret gen_token)"
+        write_admin_blueprint "$external_domain"
+    fi
+}
+
 start_authentik() {
     # Data directories with authentik's in-container uid/gid (1000)
     # (misc-rbd.service dependency ensures /rbd/misc is mounted)
@@ -169,14 +183,7 @@ start_authentik() {
     local bootstrap_password=$(get_or_generate_secret bootstrap-password gen_password)
     local bootstrap_token=$(get_or_generate_secret bootstrap-token gen_token)
 
-    # OIDC client registration for Open-WebUI — only once an external
-    # domain exists (redirect URIs and launch URL are external-only).
-    local external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
-    if [ -n "$external_domain" ]; then
-        write_owui_blueprint "$external_domain" \
-            "$(get_or_generate_secret owui-client-secret gen_token)"
-        write_admin_blueprint "$external_domain"
-    fi
+    write_all_blueprints
 
     local env_file=$(mktemp --tmpdir=/dev/shm)
     trap "rm -f '$env_file'" EXIT
@@ -209,8 +216,15 @@ case "$1" in
     stop)
         stop_authentik
         ;;
+    write-blueprints)
+        # Rewrite the domain-dependent blueprints without restarting the
+        # containers; the worker auto-applies. Used by install-authentik's
+        # handler so a manager update refreshes blueprints with no outage,
+        # and by `ycluster https set-domain`.
+        write_all_blueprints
+        ;;
     *)
-        echo "Usage: $0 {start|stop}"
+        echo "Usage: $0 {start|stop|write-blueprints}"
         exit 1
         ;;
 esac

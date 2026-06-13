@@ -110,6 +110,7 @@
         src: files/authentik-manager
         dest: /usr/local/lib/cluster/authentik-manager
         mode: '0755'
+      notify: refresh authentik blueprints
 
     - name: Create authentik systemd service
       copy:
@@ -233,3 +234,11 @@
       systemd:
         name: nginx
         state: reloaded
+
+    # Rewrite the domain-dependent blueprints (the worker auto-applies) so a
+    # manager update lands without restarting authentik. Leader-only: that's
+    # where authentik and the watched blueprint dir live.
+    - name: refresh authentik blueprints
+      command: /usr/local/lib/cluster/authentik-manager write-blueprints
+      environment: "{{ etcd_client_env }}"
+      when: is_storage_leader
