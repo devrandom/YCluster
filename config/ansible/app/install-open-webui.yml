@@ -46,6 +46,7 @@
         owner: openwebui
         group: openwebui
         mode: '0644'
+      notify: restart open-webui
 
     - name: Create cluster scripts directory
       file:
@@ -58,6 +59,7 @@
         src: files/open-webui-manager
         dest: /usr/local/lib/cluster/open-webui-manager
         mode: '0755'
+      notify: restart open-webui
 
     - name: Create open-webui systemd service
       copy:
@@ -84,6 +86,7 @@
           [Install]
           WantedBy=ycluster-apps.target
       register: openwebui_service_file
+      notify: restart open-webui
 
     - name: Reload systemd daemon
       systemd:
@@ -163,3 +166,14 @@
       systemd:
         name: nginx
         state: reloaded
+
+    # Leader-only: the unit Requires=misc-rbd.service and /rbd/misc is mounted
+    # only on the leader, so a restart on a non-leader would fail to start.
+    # Picks up compose/manager/unit changes (brief chat outage) instead of
+    # leaving the running container on stale config.
+    - name: restart open-webui
+      systemd:
+        name: "open-webui{{ instance_suffix }}.service"
+        state: restarted
+        daemon_reload: yes
+      when: is_storage_leader
