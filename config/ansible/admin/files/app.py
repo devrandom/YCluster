@@ -2642,7 +2642,9 @@ def _usage_stats_cursor(since_days):
 # writer); the admin group name to authentik_manager (which manages it).
 from ycluster.utils.vm_manager import (VMS_PREFIX, VM_STATE_PREFIX,
                                        VM_DESIRED_PREFIX, VM_ISSUE_PREFIX,
-                                       vms_all, gpu_commitments, gpu_conflict)
+                                       VM_GRACE_PREFIX, SCHEDULED_STOP_GRACE_S,
+                                       vms_all, gpu_commitments, gpu_conflict,
+                                       _desired_on)
 from ycluster.utils.authentik_manager import ADMIN_GROUP
 
 
@@ -2747,6 +2749,8 @@ def vm_schedule_data():
 
     desired_all = _etcd_json_prefix(client, VM_DESIRED_PREFIX)
     issues = _etcd_json_prefix(client, VM_ISSUE_PREFIX)
+    graces = _etcd_json_prefix(client, VM_GRACE_PREFIX)
+    now = datetime.now(UTC)
 
     registry = vms_all()
     rows = []
@@ -2754,21 +2758,38 @@ def vm_schedule_data():
         if not is_admin and rec.get('owner') != email:
             continue
         desired = desired_all.get(name)
+        mode = (desired or {}).get('mode', 'unmanaged')
+        status = live.get(name, 'unknown')
+        # Pending = the reconciler will change this VM's state on its next
+        # tick (its live state differs from what the schedule wants now).
+        # Only managed modes converge; unmanaged is hands-off.
+        pending = None
+        if mode in ('on', 'off', 'schedule'):
+            want_on = _desired_on(desired, now)
+            live_on = status == 'Running'
+            # A grace marker is the reconciler's own evidence the VM is
+            # running and pending-stop — fresher than the periodic sample,
+            # so trust it even if `status` lags.
+            if want_on and not live_on:
+                pending = 'start'
+            elif (not want_on) and (live_on or graces.get(name)):
+                pending = 'stop'
         rows.append({
             'vm': name,
             'owner': rec.get('owner'),
             'host': rec.get('host'),
             'gpus': rec.get('gpus'),
-            'status': live.get(name, 'unknown'),
-            'mode': (desired or {}).get('mode', 'unmanaged'),
+            'status': status,
+            'mode': mode,
             'windows': (desired or {}).get('windows', []),
             'issue': issues.get(name),
+            'pending': pending,
+            'grace': graces.get(name),
         })
 
     # Capacity commitments per host, so users can see what's free before
     # composing a schedule. VM names are shown to everyone (capacity is
     # shared knowledge); owners only to admins.
-    now = datetime.now(UTC)
     commitments = gpu_commitments(registry, desired_all, now)
     hosts = []
     for host in sorted(set(commitments) | set(pools)):
@@ -2786,7 +2807,8 @@ def vm_schedule_data():
                 for c in commitments.get(host, [])],
         })
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
-                    'hosts': hosts, 'email': email, 'is_admin': is_admin})
+                    'hosts': hosts, 'email': email, 'is_admin': is_admin,
+                    'grace_seconds': SCHEDULED_STOP_GRACE_S})
 
 
 def _parse_windows(windows):
@@ -2871,6 +2893,41 @@ def vm_schedule_set():
     }
     client.put(VM_DESIRED_PREFIX + name, json.dumps(desired))
     return jsonify({'ok': True, 'mode': mode})
+
+
+# Mutating, forward-auth/owner gated like vm_schedule_set. Stamps an
+# `immediate` grace marker so the next reconciler tick stops the VM without
+# waiting out the remaining grace (the guest has effectively been warned).
+@app.route('/admin/vm-schedule/stop-now', methods=['POST'])
+def vm_schedule_stop_now():
+    email, is_admin = _authentik_identity()
+    try:
+        client = get_etcd_client()
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+
+    data = request.get_json(silent=True) or {}
+    name = data.get('vm', '')
+    rec_raw = client.get(VMS_PREFIX + name)[0] if re.fullmatch(r'[a-z0-9-]+', name) else None
+    if not rec_raw:
+        return jsonify({'error': 'no such VM'}), 404
+    rec = json.loads(rec_raw.decode())
+    if not is_admin and rec.get('owner') != email:
+        return jsonify({'error': 'not your VM'}), 403
+
+    # Only meaningful as a pending-stop bypass: the schedule must currently
+    # want the VM OFF. (If it wants ON, there's nothing to stop.)
+    desired_raw = client.get(VM_DESIRED_PREFIX + name)[0]
+    desired = json.loads(desired_raw.decode()) if desired_raw else None
+    if not desired or desired.get('mode') == 'unmanaged' \
+            or _desired_on(desired, datetime.now(UTC)):
+        return jsonify({'error': 'no pending stop for this VM'}), 409
+
+    client.put(VM_GRACE_PREFIX + name, json.dumps({
+        'warned_at': datetime.now(UTC).isoformat(timespec='seconds'),
+        'immediate': True,
+    }))
+    return jsonify({'ok': True})
 
 
 @app.route('/admin/users')

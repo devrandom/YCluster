@@ -18,6 +18,9 @@
     .meta { color: #666; font-size: 0.85rem; }
     .running { color: #166534; font-weight: bold; }
     .stopped { color: #92400e; font-weight: bold; }
+    .pending { color: #1d4ed8; font-weight: bold; font-size: 0.85rem; }
+    button.warn { background: #b45309; padding: 0.2rem 0.6rem; font-size: 0.8rem; }
+    button.warn:hover { background: #92400e; }
     select, input[type=datetime-local], input[type=number] { padding: 0.3rem 0.4rem; border-radius: 4px; border: 1px solid #ccc; }
     .window { display: flex; gap: 0.6rem; align-items: center; margin: 0.4rem 0; flex-wrap: wrap; }
     .expired { color: #92400e; font-size: 0.8rem; font-style: italic; }
@@ -32,15 +35,17 @@
 <body x-data="schedApp()" x-init="load()">
   <h1>VM Schedule</h1>
   <p class="explainer">
-    Declare when your VMs should be up; each host converges within ~2
-    minutes. Windows are <b>one-shot</b> (start – end, multiple allowed,
+    Declare when your VMs should be up; each host converges within ~1
+    minute. Windows are <b>one-shot</b> (start – end, multiple allowed,
     times shown in your local timezone); set the end directly or via the
-    hours field. Scheduled stops warn the guest, wait a grace period,
-    then release the VM's GPUs back to the host pool (re-attached at the
-    next start) — so saves are checked against host GPU capacity, and
-    the commitments below show what's already claimed.
-    Scheduler-started runtime is billed to the owner; <b>unmanaged</b>
-    means the scheduler never touches the VM (its GPUs stay held).
+    hours field. A <b>⏳ pending</b> tag shows when a VM's live state
+    differs from what the schedule wants now. Scheduled stops warn the
+    guest, wait a grace period, then release the VM's GPUs back to the
+    host pool (re-attached at the next start) — <b>Stop now</b> skips the
+    remaining grace. Saves are checked against host GPU capacity, shown in
+    the commitments below. Scheduler-started runtime is billed to the
+    owner; <b>unmanaged</b> means the scheduler never touches the VM (its
+    GPUs stay held); switching modes keeps your windows for later.
   </p>
 
   <template x-if="loading"><p class="empty">Loading...</p></template>
@@ -54,6 +59,9 @@
         <span class="vm-name" x-text="row.vm"></span>
         <span :class="row.status === 'Running' ? 'running' : 'stopped'"
               x-text="row.status"></span>
+        <span class="pending" x-show="row.pending" x-text="pendingText(row)"></span>
+        <button class="warn" x-show="row.pending === 'stop'"
+                @click="stopNow(row)" x-text="stopNowLabel(row)"></button>
         <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + (isAdmin ? ` · ${row.owner}` : '')"></span>
         <select x-model="row.mode">
           <option value="unmanaged">unmanaged</option>
@@ -114,6 +122,8 @@
         hosts: [],
         isAdmin: false,
         loading: false,
+        graceSeconds: 300,
+        poller: null,
 
         // Stored as UTC ISO; edited as local date + whole hour.
         parts(d) {
@@ -146,9 +156,58 @@
                 saved: '', error: ''}))
               this.hosts = data.hosts || []
               this.isAdmin = data.is_admin
+              this.graceSeconds = data.grace_seconds || this.graceSeconds
               this.loading = false
+              // Refresh volatile state (status / pending / grace) on a
+              // timer without clobbering in-progress window edits.
+              if (!this.poller) this.poller = setInterval(() => this.pollStatus(), 12000)
             })
             .catch(() => { this.loading = false })
+        },
+
+        pollStatus() {
+          fetch('/admin/vm-schedule/data')
+            .then(r => r.json())
+            .then(data => {
+              this.graceSeconds = data.grace_seconds || this.graceSeconds
+              this.hosts = data.hosts || []
+              const byVm = {}
+              for (const r of (data.rows || [])) byVm[r.vm] = r
+              for (const row of this.rows) {
+                const u = byVm[row.vm]
+                if (u) { row.status = u.status; row.pending = u.pending
+                         row.grace = u.grace; row.issue = u.issue }
+              }
+            })
+            .catch(() => {})
+        },
+
+        pendingText(row) {
+          if (row.pending === 'start') return '⏳ starting (≤1 min)'
+          if (row.pending !== 'stop') return ''
+          const g = row.grace
+          if (!g) return '⏳ stopping'
+          if (g.immediate) return '⏳ stopping now'
+          const rem = this.graceSeconds - (Date.now() - new Date(g.warned_at)) / 1000
+          if (rem <= 0) return '⏳ stopping now'
+          return `⏳ stopping in ~${Math.ceil(rem / 60)} min`
+        },
+
+        stopNowLabel(row) {
+          return (row.grace && row.grace.immediate) ? 'stopping…' : 'Stop now'
+        },
+
+        stopNow(row) {
+          fetch('/admin/vm-schedule/stop-now', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({vm: row.vm}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              if (ok) { row.grace = {immediate: true}; this.pollStatus() }
+              else row.error = d.error || 'failed'
+            })
+            .catch(() => { row.error = 'request failed' })
         },
 
         fmtStamp(d) {
@@ -209,9 +268,8 @@
             .then(r => r.json().then(d => ({ok: r.ok, d})))
             .then(({ok, d}) => {
               if (ok) {
-                row.saved = 'saved — converges within ~2 min'
-                fetch('/admin/vm-schedule/data').then(r => r.json())
-                  .then(d2 => { this.hosts = d2.hosts || [] })
+                row.saved = 'saved — converges within ~1 min'
+                this.pollStatus()
               } else row.error = d.error || 'failed'
             })
             .catch(() => { row.error = 'request failed' })

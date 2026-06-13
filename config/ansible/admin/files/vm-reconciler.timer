@@ -1,9 +1,9 @@
 [Unit]
-Description=Run vm-reconciler every 2 minutes
+Description=Run vm-reconciler every minute
 
 [Timer]
 OnBootSec=90s
-OnUnitActiveSec=120s
+OnUnitActiveSec=60s
 Persistent=true
 
 [Install]
