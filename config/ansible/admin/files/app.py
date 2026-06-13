@@ -2840,22 +2840,25 @@ def vm_schedule_set():
         return jsonify({'error': 'not your VM'}), 403
 
     mode = data.get('mode')
-    if mode == 'unmanaged':
-        client.delete(VM_DESIRED_PREFIX + name)
-        return jsonify({'ok': True, 'mode': 'unmanaged'})
-    if mode not in ('on', 'off', 'schedule'):
+    if mode not in ('on', 'off', 'schedule', 'unmanaged'):
         return jsonify({'error': 'mode must be on|off|schedule|unmanaged'}), 400
-    windows = []
-    if mode == 'schedule':
-        windows = _parse_windows(data.get('windows', []))
-        if windows is None:
-            return jsonify({'error': 'invalid windows'}), 400
 
-    # Scheduled stops release GPUs to the host pool, so overlapping
-    # schedules genuinely contend — reject overcommitment at save time
-    # rather than failing the start at window-open. (Going 'unmanaged'
-    # is always allowed: it's an opt-out, and manual CLI ops are never
-    # blocked by policy.)
+    # Windows are preserved across every mode (including unmanaged) so a
+    # user can flip on/off/unmanaged as a temporary override and switch
+    # back to 'schedule' with their plan intact — the reconciler only acts
+    # on windows under 'schedule', and never touches an 'unmanaged' VM at
+    # all. Require valid windows only for 'schedule' (the live mode);
+    # tolerate junk as dormant data for the others. Clearing the plan is a
+    # deliberate edit (remove the windows), not a side effect of a mode flip.
+    windows = _parse_windows(data.get('windows', []))
+    if mode == 'schedule' and windows is None:
+        return jsonify({'error': 'invalid windows'}), 400
+    if windows is None:
+        windows = []
+
+    # Admission control self-gates to the modes that newly commit GPUs
+    # against the host pool ('on' = always-held, 'schedule' = windows);
+    # 'off'/'unmanaged' return None (no new commitment).
     conflict = _gpu_admission_error(client, name, rec, mode, windows)
     if conflict:
         return jsonify({'error': conflict}), 409
