@@ -64,13 +64,17 @@
         <button class="warn" x-show="row.pending === 'stop'"
                 @click="stopNow(row)" x-text="stopNowLabel(row)"></button>
         <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + (isAdmin ? ` · ${row.owner}` : '')"></span>
-        <select x-model="row.mode">
-          <option value="unmanaged">unmanaged</option>
+        <select x-model="row.mode" :disabled="locked(row)">
+          <!-- unmanaged is admin-only; shown (disabled) so an admin-set
+               value still displays for users, but they can't select it.
+               An explicit admin-set unmanaged locks the whole row. -->
+          <option value="unmanaged" :disabled="!isAdmin">unmanaged</option>
           <option value="on">always on</option>
           <option value="off">off</option>
           <option value="schedule">schedule</option>
         </select>
-        <button @click="save(row)">Save</button>
+        <button @click="save(row)" :disabled="locked(row)">Save</button>
+        <span class="meta" x-show="locked(row)">admin-managed</span>
         <span class="saved" x-show="row.saved" x-text="row.saved"></span>
         <span class="error" x-show="row.error" x-text="row.error"></span>
       </div>
@@ -181,6 +185,12 @@
               }
             })
             .catch(() => {})
+        },
+
+        // Non-admins can't touch a VM an admin explicitly set unmanaged.
+        // (A no-record VM also shows mode 'unmanaged' but stays editable.)
+        locked(row) {
+          return !this.isAdmin && row.mode === 'unmanaged' && row.has_desired
         },
 
         pendingText(row) {
