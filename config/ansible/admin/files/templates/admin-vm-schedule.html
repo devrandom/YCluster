@@ -198,9 +198,8 @@
           if (row.pending !== 'stop') return ''
           const g = row.grace
           if (!g) return 'stopping'
-          if (g.immediate) return 'stopping now'
           const rem = this.graceSeconds - (Date.now() - new Date(g.warned_at)) / 1000
-          if (rem <= 0) return 'stopping now'
+          if (g.immediate || rem <= 0) return 'stopping now'
           return `stopping in ~${Math.ceil(rem / 60)} min`
         },
 
