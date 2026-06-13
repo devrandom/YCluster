@@ -18,7 +18,8 @@
     .meta { color: #666; font-size: 0.85rem; }
     .running { color: #166534; font-weight: bold; }
     .stopped { color: #92400e; font-weight: bold; }
-    .pending { color: #1d4ed8; font-weight: bold; font-size: 0.85rem; }
+    .pending { font-size: 1rem; cursor: default; animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     button.warn { background: #b45309; padding: 0.2rem 0.6rem; font-size: 0.8rem; }
     button.warn:hover { background: #92400e; }
     select, input[type=datetime-local], input[type=number] { padding: 0.3rem 0.4rem; border-radius: 4px; border: 1px solid #ccc; }
@@ -59,7 +60,7 @@
         <span class="vm-name" x-text="row.vm"></span>
         <span :class="row.status === 'Running' ? 'running' : 'stopped'"
               x-text="row.status"></span>
-        <span class="pending" x-show="row.pending" x-text="pendingText(row)"></span>
+        <span class="pending" x-show="row.pending" :title="pendingText(row)">⏳</span>
         <button class="warn" x-show="row.pending === 'stop'"
                 @click="stopNow(row)" x-text="stopNowLabel(row)"></button>
         <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + (isAdmin ? ` · ${row.owner}` : '')"></span>
@@ -183,14 +184,14 @@
         },
 
         pendingText(row) {
-          if (row.pending === 'start') return '⏳ starting (≤1 min)'
+          if (row.pending === 'start') return 'starting'
           if (row.pending !== 'stop') return ''
           const g = row.grace
-          if (!g) return '⏳ stopping'
-          if (g.immediate) return '⏳ stopping now'
+          if (!g) return 'stopping'
+          if (g.immediate) return 'stopping now'
           const rem = this.graceSeconds - (Date.now() - new Date(g.warned_at)) / 1000
-          if (rem <= 0) return '⏳ stopping now'
-          return `⏳ stopping in ~${Math.ceil(rem / 60)} min`
+          if (rem <= 0) return 'stopping now'
+          return `stopping in ~${Math.ceil(rem / 60)} min`
         },
 
         stopNowLabel(row) {
@@ -268,7 +269,7 @@
             .then(r => r.json().then(d => ({ok: r.ok, d})))
             .then(({ok, d}) => {
               if (ok) {
-                row.saved = 'saved — converges within ~1 min'
+                row.saved = '✓ saved'
                 this.pollStatus()
               } else row.error = d.error || 'failed'
             })
