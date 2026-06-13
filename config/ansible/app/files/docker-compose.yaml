@@ -39,6 +39,10 @@ services:
       - 'ENABLE_OAUTH_SIGNUP=${ENABLE_OAUTH_SIGNUP:-False}'
       - 'OAUTH_MERGE_ACCOUNTS_BY_EMAIL=${OAUTH_MERGE_ACCOUNTS_BY_EMAIL:-False}'
       - 'ENABLE_SIGNUP=${ENABLE_SIGNUP:-True}'
+      # Username/password login form. Hidden once OAuth is live (manager sets
+      # this False) so the IdP button is the only way in; True by default so a
+      # pre-OAuth instance stays reachable.
+      - 'ENABLE_LOGIN_FORM=${ENABLE_LOGIN_FORM:-True}'
       - 'DEFAULT_USER_ROLE=${DEFAULT_USER_ROLE:-pending}'
     extra_hosts:
       - host.docker.internal:host-gateway

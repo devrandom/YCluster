@@ -42,12 +42,14 @@
         src: files/authentik-compose.yaml
         dest: /etc/authentik/docker-compose.yml
         mode: '0644'
+      notify: restart authentik
 
     - name: Install custom Django settings (bcrypt hasher for imported hashes)
       copy:
         src: files/authentik-user-settings.py
         dest: /etc/authentik/user_settings.py
         mode: '0644'
+      notify: restart authentik
 
     - name: Install enrollment blueprint (invitation-gated)
       copy:
@@ -137,6 +139,7 @@
           [Install]
           WantedBy=ycluster-apps.target
       register: authentik_service_file
+      notify: restart authentik
 
     - name: Reload systemd daemon
       systemd:
@@ -234,6 +237,18 @@
       systemd:
         name: nginx
         state: reloaded
+
+    # Leader-only: the unit Requires=misc-rbd.service and /rbd/misc mounts
+    # only on the leader, so a restart on a non-leader would fail to start.
+    # For compose/settings/unit changes that only take effect on boot (brief
+    # IdP outage). Blueprint changes do NOT come here — they refresh live via
+    # the no-restart handler below.
+    - name: restart authentik
+      systemd:
+        name: authentik.service
+        state: restarted
+        daemon_reload: yes
+      when: is_storage_leader
 
     # Rewrite the domain-dependent blueprints (the worker auto-applies) so a
     # manager update lands without restarting authentik. Leader-only: that's

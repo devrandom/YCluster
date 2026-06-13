@@ -105,9 +105,9 @@ start_openwebui() {
     # OIDC login via the cluster IdP (authentik) — main instance only, and
     # only once authentik has published the client secret and an external
     # domain is configured. Signup then moves entirely behind authentik
-    # (invitation-gated), so OAuth users land active (role: user) and the
-    # password signup form is disabled; password *login* stays available
-    # for existing accounts during the transition.
+    # (invitation-gated), so OAuth users land active (role: user) and both
+    # the password signup and the login form are disabled — the IdP button
+    # becomes the only way in.
     local external_domain oidc_secret
     external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
     oidc_secret=$(etcdctl get /cluster/config/authentik/owui-client-secret --print-value-only 2>/dev/null || true)
@@ -119,6 +119,7 @@ start_openwebui() {
         echo "ENABLE_OAUTH_SIGNUP=True" >> "$env_file"
         echo "OAUTH_MERGE_ACCOUNTS_BY_EMAIL=True" >> "$env_file"
         echo "ENABLE_SIGNUP=False" >> "$env_file"
+        echo "ENABLE_LOGIN_FORM=False" >> "$env_file"
         echo "DEFAULT_USER_ROLE=user" >> "$env_file"
     fi
     
