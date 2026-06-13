@@ -153,7 +153,6 @@
       copy:
         src: ycluster_app.conf.j2
         dest: /etc/nginx/templates/ycluster_app.conf.j2
-      register: nginx_app_template_changed
 
     - name: Configure nginx shared locations
       copy:
