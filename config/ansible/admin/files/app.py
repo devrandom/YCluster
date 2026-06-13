@@ -42,8 +42,6 @@ import re
 import sys
 
 from flask import Flask, request, jsonify, redirect, render_template, send_from_directory, send_file
-import psycopg2
-import ntplib
 import os
 import threading
 import time
@@ -814,6 +812,7 @@ def check_certificate_expiry():
 
 def check_clock_skew():
     """Check clock skew using NTP protocol to VIP"""
+    import ntplib   # lazy: only this health check needs it
 
     # NTP server to check against (VIP)
     ntp_server = '10.0.0.254'
@@ -2632,19 +2631,18 @@ def _usage_stats_cursor(since_days):
     except Exception:
         return None, since_dt, 'etcd unavailable'
     try:
+        import psycopg2   # lazy: only the usage-stats (postgres) endpoints need it
         conn = psycopg2.connect(host='10.0.0.100', database='usage_stats', user='usage_stats', password=password)
     except Exception as e:
         return None, since_dt, str(e)
     return conn, since_dt, None
 
 
-# Single sources of truth: the etcd schema belongs to vm_manager (the
-# writer); the admin group name to authentik_manager (which manages it).
-from ycluster.utils.vm_manager import (VMS_PREFIX, VM_STATE_PREFIX,
-                                       VM_DESIRED_PREFIX, VM_ISSUE_PREFIX,
-                                       VM_GRACE_PREFIX, SCHEDULED_STOP_GRACE_S,
-                                       vms_all, gpu_commitments, gpu_conflict,
-                                       _desired_on)
+# Single sources of truth: the etcd schema + data-access layer belong to
+# vm_manager (the writer/owner of these prefixes) — the VM endpoints below
+# go through its domain functions, never the raw etcd client; the admin
+# group name to authentik_manager (which manages it).
+from ycluster.utils import vm_manager as vmm
 from ycluster.utils.authentik_manager import ADMIN_GROUP
 
 
@@ -2659,21 +2657,7 @@ def _authentik_identity():
     return email, is_admin
 
 
-def _etcd_json_prefix(client, prefix):
-    """{name: decoded JSON} for the direct children of an etcd prefix,
-    skipping unparseable values."""
-    out = {}
-    for value, metadata in client.get_prefix(prefix):
-        if not value:
-            continue
-        try:
-            out[metadata.key.decode()[len(prefix):]] = json.loads(value.decode())
-        except Exception:
-            continue
-    return out
-
-
-def _gpu_admission_error(client, name, rec, mode, windows):
+def _gpu_admission_error(name, rec, mode, windows):
     """Admission control for a proposed desired state: None if the VM's
     registered GPU count fits its host's pool against the commitments
     already accepted for the other VMs there, else a rejection message.
@@ -2684,29 +2668,21 @@ def _gpu_admission_error(client, name, rec, mode, windows):
     if rec.get('type') == 'container' or not host or not gpus \
             or mode not in ('on', 'schedule'):
         return None
-    pool = None
-    raw = client.get(VM_STATE_PREFIX + host)[0]
-    if raw:
-        try:
-            snap = json.loads(raw.decode())
-            if isinstance(snap.get('gpu_pool'), int):
-                pool = snap['gpu_pool']
-        except Exception:
-            pass
-    if pool is None:
+    snap = vmm.state_get(host)
+    pool = snap.get('gpu_pool') if snap else None
+    if not isinstance(pool, int):
         return None
     now = datetime.now(UTC)
-    registry = vms_all()
+    registry = vmm.vms_all()
     registry.pop(name, None)
-    desired_all = _etcd_json_prefix(client, VM_DESIRED_PREFIX)
-    commits = gpu_commitments(registry, desired_all, now).get(host, [])
+    commits = vmm.gpu_commitments(registry, vmm.desired_all(), now).get(host, [])
     if mode == 'on':
         ranges = [(now, datetime.max.replace(tzinfo=UTC))]
     else:
         ranges = [(datetime.fromisoformat(w['start']),
                    datetime.fromisoformat(w['end'])) for w in windows]
     for lo, hi in ranges:
-        worst = gpu_conflict(commits, gpus, pool, lo, hi)
+        worst = vmm.gpu_conflict(commits, gpus, pool, lo, hi)
         if worst:
             p, free, active = worst
             held = ', '.join(f"{c['vm']} ({c['gpus']})" for c in active)
@@ -2729,30 +2705,22 @@ def vm_schedule_page():
 def vm_schedule_data():
     email, is_admin = _authentik_identity()
     try:
-        client = get_etcd_client()
+        states = vmm.state_all()
+        desired_all = vmm.desired_all()
+        issues = vmm.issues_all()
+        graces = vmm.grace_all()
+        registry = vmm.vms_all()
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
 
     live, pools = {}, {}
-    for value, metadata in client.get_prefix(VM_STATE_PREFIX):
-        if not value:
-            continue
-        try:
-            snap = json.loads(value.decode())
-            host = metadata.key.decode()[len(VM_STATE_PREFIX):]
-            if isinstance(snap.get('gpu_pool'), int):
-                pools[host] = snap['gpu_pool']
-            for inst in snap.get('instances', []):
-                live[inst['name']] = inst.get('status')
-        except Exception:
-            continue
+    for host, snap in states.items():
+        if isinstance(snap.get('gpu_pool'), int):
+            pools[host] = snap['gpu_pool']
+        for inst in snap.get('instances', []):
+            live[inst['name']] = inst.get('status')
 
-    desired_all = _etcd_json_prefix(client, VM_DESIRED_PREFIX)
-    issues = _etcd_json_prefix(client, VM_ISSUE_PREFIX)
-    graces = _etcd_json_prefix(client, VM_GRACE_PREFIX)
     now = datetime.now(UTC)
-
-    registry = vms_all()
     rows = []
     for name, rec in registry.items():
         if not is_admin and rec.get('owner') != email:
@@ -2765,7 +2733,7 @@ def vm_schedule_data():
         # Only managed modes converge; unmanaged is hands-off.
         pending = None
         if mode in ('on', 'off', 'schedule'):
-            want_on = _desired_on(desired, now)
+            want_on = vmm.desired_on(desired, now)
             live_on = status == 'Running'
             # A grace marker is the reconciler's own evidence the VM is
             # running and pending-stop — fresher than the periodic sample,
@@ -2793,7 +2761,7 @@ def vm_schedule_data():
     # Capacity commitments per host, so users can see what's free before
     # composing a schedule. VM names are shown to everyone (capacity is
     # shared knowledge); owners only to admins.
-    commitments = gpu_commitments(registry, desired_all, now)
+    commitments = vmm.gpu_commitments(registry, desired_all, now)
     hosts = []
     for host in sorted(set(commitments) | set(pools)):
         if not pools.get(host) and not commitments.get(host):
@@ -2811,7 +2779,7 @@ def vm_schedule_data():
         })
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
                     'hosts': hosts, 'email': email, 'is_admin': is_admin,
-                    'grace_seconds': SCHEDULED_STOP_GRACE_S})
+                    'grace_seconds': vmm.SCHEDULED_STOP_GRACE_S})
 
 
 def _parse_windows(windows):
@@ -2850,17 +2818,16 @@ def _parse_windows(windows):
 @app.route('/admin/vm-schedule/set', methods=['POST'])
 def vm_schedule_set():
     email, is_admin = _authentik_identity()
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return jsonify({'error': f'etcd connection failed: {e}'}), 503
-
     data = request.get_json(silent=True) or {}
     name = data.get('vm', '')
-    rec_raw = client.get(VMS_PREFIX + name)[0] if re.fullmatch(r'[a-z0-9-]+', name) else None
-    if not rec_raw:
+    if not re.fullmatch(r'[a-z0-9-]+', name):
         return jsonify({'error': 'no such VM'}), 404
-    rec = json.loads(rec_raw.decode())
+    try:
+        rec = vmm.vm_get(name)
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+    if not rec:
+        return jsonify({'error': 'no such VM'}), 404
     if not is_admin and rec.get('owner') != email:
         return jsonify({'error': 'not your VM'}), 403
 
@@ -2873,8 +2840,8 @@ def vm_schedule_set():
     # as 'unmanaged') and stays schedulable by its owner — only an explicit
     # record locks it.
     if not is_admin:
-        cur_raw = client.get(VM_DESIRED_PREFIX + name)[0]
-        cur_mode = json.loads(cur_raw.decode()).get('mode') if cur_raw else None
+        cur = vmm.desired_get(name)
+        cur_mode = cur.get('mode') if cur else None
         if mode == 'unmanaged':
             return jsonify({'error': 'only admins can set a VM unmanaged'}), 403
         if cur_mode == 'unmanaged':
@@ -2896,17 +2863,16 @@ def vm_schedule_set():
     # Admission control self-gates to the modes that newly commit GPUs
     # against the host pool ('on' = always-held, 'schedule' = windows);
     # 'off'/'unmanaged' return None (no new commitment).
-    conflict = _gpu_admission_error(client, name, rec, mode, windows)
+    conflict = _gpu_admission_error(name, rec, mode, windows)
     if conflict:
         return jsonify({'error': conflict}), 409
 
-    desired = {
+    vmm.desired_set(name, {
         'mode': mode,
         'windows': windows,
         'updated_by': email or 'internal',
         'updated_at': datetime.now(UTC).isoformat(timespec='seconds'),
-    }
-    client.put(VM_DESIRED_PREFIX + name, json.dumps(desired))
+    })
     return jsonify({'ok': True, 'mode': mode})
 
 
@@ -2916,32 +2882,30 @@ def vm_schedule_set():
 @app.route('/admin/vm-schedule/stop-now', methods=['POST'])
 def vm_schedule_stop_now():
     email, is_admin = _authentik_identity()
-    try:
-        client = get_etcd_client()
-    except Exception as e:
-        return jsonify({'error': f'etcd connection failed: {e}'}), 503
-
     data = request.get_json(silent=True) or {}
     name = data.get('vm', '')
-    rec_raw = client.get(VMS_PREFIX + name)[0] if re.fullmatch(r'[a-z0-9-]+', name) else None
-    if not rec_raw:
+    if not re.fullmatch(r'[a-z0-9-]+', name):
         return jsonify({'error': 'no such VM'}), 404
-    rec = json.loads(rec_raw.decode())
+    try:
+        rec = vmm.vm_get(name)
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+    if not rec:
+        return jsonify({'error': 'no such VM'}), 404
     if not is_admin and rec.get('owner') != email:
         return jsonify({'error': 'not your VM'}), 403
 
     # Only meaningful as a pending-stop bypass: the schedule must currently
     # want the VM OFF. (If it wants ON, there's nothing to stop.)
-    desired_raw = client.get(VM_DESIRED_PREFIX + name)[0]
-    desired = json.loads(desired_raw.decode()) if desired_raw else None
+    desired = vmm.desired_get(name)
     if not desired or desired.get('mode') == 'unmanaged' \
-            or _desired_on(desired, datetime.now(UTC)):
+            or vmm.desired_on(desired, datetime.now(UTC)):
         return jsonify({'error': 'no pending stop for this VM'}), 409
 
-    client.put(VM_GRACE_PREFIX + name, json.dumps({
+    vmm.grace_set(name, {
         'warned_at': datetime.now(UTC).isoformat(timespec='seconds'),
         'immediate': True,
-    }))
+    })
     return jsonify({'ok': True})
 
 
@@ -3043,8 +3007,8 @@ def vm_usage_data():
     # render if etcd is unreachable.
     registry, desired_all = {}, {}
     try:
-        registry = vms_all()
-        desired_all = _etcd_json_prefix(get_etcd_client(), VM_DESIRED_PREFIX)
+        registry = vmm.vms_all()
+        desired_all = vmm.desired_all()
     except Exception:
         pass
 

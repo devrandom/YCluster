@@ -50,7 +50,7 @@ class ParseWindowTests(unittest.TestCase):
 
     def test_elapsed_dropped_only_with_now(self):
         s, e = dt(h=10), dt(h=14)
-        # Without `now`, a past window still parses (used by _desired_on,
+        # Without `now`, a past window still parses (used by desired_on,
         # which judges containment itself).
         self.assertEqual(vm._parse_window(win(s, e)), (s, e))
         # With `now` past the end, it's dropped (admission/commitments).
@@ -69,37 +69,37 @@ class ParseWindowTests(unittest.TestCase):
 
 class DesiredOnTests(unittest.TestCase):
     def test_on_off(self):
-        self.assertTrue(vm._desired_on({"mode": "on"}, dt(h=12)))
-        self.assertFalse(vm._desired_on({"mode": "off"}, dt(h=12)))
+        self.assertTrue(vm.desired_on({"mode": "on"}, dt(h=12)))
+        self.assertFalse(vm.desired_on({"mode": "off"}, dt(h=12)))
 
     def test_schedule_in_and_out_of_window(self):
         d = {"mode": "schedule", "windows": [win(dt(h=10), dt(h=14))]}
-        self.assertTrue(vm._desired_on(d, dt(h=12)))
-        self.assertFalse(vm._desired_on(d, dt(h=9)))
+        self.assertTrue(vm.desired_on(d, dt(h=12)))
+        self.assertFalse(vm.desired_on(d, dt(h=9)))
         # Half-open: end is exclusive, start inclusive.
-        self.assertTrue(vm._desired_on(d, dt(h=10)))
-        self.assertFalse(vm._desired_on(d, dt(h=14)))
+        self.assertTrue(vm.desired_on(d, dt(h=10)))
+        self.assertFalse(vm.desired_on(d, dt(h=14)))
 
     def test_multiple_windows_any_match(self):
         d = {"mode": "schedule", "windows": [win(dt(h=2), dt(h=4)),
                                              win(dt(h=10), dt(h=14))]}
-        self.assertTrue(vm._desired_on(d, dt(h=11)))
-        self.assertFalse(vm._desired_on(d, dt(h=6)))
+        self.assertTrue(vm.desired_on(d, dt(h=11)))
+        self.assertFalse(vm.desired_on(d, dt(h=6)))
 
     def test_malformed_window_ignored(self):
         d = {"mode": "schedule", "windows": [{"start": "x", "end": "y"},
                                              win(dt(h=10), dt(h=14))]}
-        self.assertTrue(vm._desired_on(d, dt(h=12)))
+        self.assertTrue(vm.desired_on(d, dt(h=12)))
 
     def test_no_windows_is_off(self):
-        self.assertFalse(vm._desired_on({"mode": "schedule", "windows": []},
+        self.assertFalse(vm.desired_on({"mode": "schedule", "windows": []},
                                         dt(h=12)))
 
     def test_unmanaged_ignores_dormant_windows(self):
         # An unmanaged record may carry preserved windows; they must NOT be
         # read as on/off intent (the reconciler skips unmanaged anyway).
         d = {"mode": "unmanaged", "windows": [win(dt(h=10), dt(h=14))]}
-        self.assertFalse(vm._desired_on(d, dt(h=12)))
+        self.assertFalse(vm.desired_on(d, dt(h=12)))
 
 
 def vmrec(host="nv2", gpus=2, owner="a@x", type="vm"):
