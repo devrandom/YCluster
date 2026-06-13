@@ -40,22 +40,24 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 ```
 
 ### Dev Workflow (syncing local changes to cluster)
-`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s3.yc:/opt/infrastructure/`. Run it in a terminal (outside of agent sessions) to keep changes flowing while you develop:
+`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s3.yc:/opt/infrastructure/`. The watchman trigger lives in the watchman daemon, so the watcher runs in the background independently of any terminal. Run it once (outside of agent sessions) to keep changes flowing while you develop:
 ```bash
-bash dev-sync.sh  # runs initial sync then watches for changes
+bash dev-sync.sh --start   # initial sync + register the watchman trigger, then returns
+bash dev-sync.sh --stop    # tear the trigger down
 ```
-Then run the playbook via SSH as above.
+Running with no args prints usage. Then run the playbook via SSH as above.
 
 **Confirming a sync landed (don't hash files by hand).** Trust the watcher by
 default; for a routine confirmation, `tail /tmp/dev-sync.log` for a `done` line
 stamped after your edit (the trigger only logs `done` on rsync exit 0, so
 partial syncs show as `rsync failed`). When you want certainty (before a
 high-stakes playbook run, or you suspect drift), run `bash dev-sync.sh --check`
-— a dry-run checksum compare against the cluster using the same exclude set;
-empty + exit 0 means in sync, exit 1 lists the files that differ (~4s, all SSH
-round-trip). Never per-file `cmp`/`sha256` over SSH (noisy), and don't rely on a
-git-hash check — the synced set is defined by `.watchignore` and includes
-untracked scratch dirs that a tracked-files-only hash can't see.
+— a dry-run checksum compare against the cluster using the same exclude set; it
+also reports whether the watcher is running. Empty diff + exit 0 means in sync,
+exit 1 lists the files that differ (~4s, all SSH round-trip). Never per-file
+`cmp`/`sha256` over SSH (noisy), and don't rely on a git-hash check — the synced
+set is defined by `.watchignore` and includes untracked scratch dirs that a
+tracked-files-only hash can't see.
 
 ### Cluster Management
 The `ycluster` CLI is installed on core nodes:
