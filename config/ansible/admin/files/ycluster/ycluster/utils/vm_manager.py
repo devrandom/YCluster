@@ -790,6 +790,24 @@ def desired_on(desired, now):
     return False
 
 
+def pending_state(desired, status, grace, now):
+    """What the reconciler will do to this VM on its next tick — 'start',
+    'stop', or None (converged / unmanaged) — from its desired record vs
+    its live `status`. Only managed modes converge. A `grace` marker is the
+    reconciler's own (fresher) evidence of a running, pending-stop VM, used
+    when the periodically-sampled `status` lags. The schedule page surfaces
+    this as the ⏳ pending indicator."""
+    if not desired or desired.get("mode") not in ("on", "off", "schedule"):
+        return None
+    want_on = desired_on(desired, now)
+    live_on = status == "Running"
+    if want_on and not live_on:
+        return "start"
+    if not want_on and (live_on or grace):
+        return "stop"
+    return None
+
+
 # --------------------------------------------------------------------------
 # GPU capacity commitments (admission control for the scheduling page)
 #
@@ -883,9 +901,9 @@ def reconcile():
     now = datetime.now(timezone.utc)
     statuses = {i.get("name"): i.get("status")
                 for i in _incus_json("list", "--format", "json")}
-    graces = _all_json(VM_GRACE_PREFIX)
-    desireds = _all_json(VM_DESIRED_PREFIX)
-    issues = _all_json(VM_ISSUE_PREFIX)
+    graces = grace_all()
+    desireds = desired_all()
+    issues = issues_all()
     all_vms = vms_all()
     local_vms = {name for name, rec in all_vms.items()
                  if rec.get("host") == host}
@@ -908,7 +926,7 @@ def reconcile():
 
         if want_on:
             if grace:
-                _delete(VM_GRACE_PREFIX + name)
+                grace_delete(name)
                 if running:
                     print(f"reconcile: '{name}' desired flipped back on — "
                           f"cancelled pending stop")
@@ -923,8 +941,7 @@ def reconcile():
                 _incus("exec", name, "--", "sh", "-c",
                        "echo 'YCluster: scheduled shutdown within minutes "
                        "(save your work)' | wall", check=False)
-                _put_json(VM_GRACE_PREFIX + name,
-                          {"warned_at": now.isoformat(timespec="seconds")})
+                grace_set(name, {"warned_at": now.isoformat(timespec="seconds")})
                 continue
             try:
                 warned = datetime.fromisoformat(grace["warned_at"])
@@ -939,7 +956,7 @@ def reconcile():
                       f"{'immediate' if immediate else 'grace elapsed'})")
                 try:
                     vm_stop(name, initiator="scheduler")
-                    _delete(VM_GRACE_PREFIX + name)
+                    grace_delete(name)
                     released = release_gpus(name)
                     if released:
                         print(f"  released {released} GPU(s) to the "
@@ -954,7 +971,7 @@ def reconcile():
             if grace:
                 # Already stopped (e.g. the owner shut it down during
                 # grace) — release as a scheduled stop would have.
-                _delete(VM_GRACE_PREFIX + name)
+                grace_delete(name)
                 released = release_gpus(name)
                 if released:
                     print(f"reconcile: '{name}' already stopped — released "
@@ -1284,7 +1301,7 @@ def vm_destroy(name):
     sync_dns_records()
     _delete(VMS_PREFIX + name)
     desired_delete(name)
-    _delete(VM_GRACE_PREFIX + name)
+    grace_delete(name)
     _delete(VM_ISSUE_PREFIX + name)
     bastion_sync()
     print(f"Destroyed '{name}' and removed its registration.")

@@ -2728,20 +2728,7 @@ def vm_schedule_data():
         desired = desired_all.get(name)
         mode = (desired or {}).get('mode', 'unmanaged')
         status = live.get(name, 'unknown')
-        # Pending = the reconciler will change this VM's state on its next
-        # tick (its live state differs from what the schedule wants now).
-        # Only managed modes converge; unmanaged is hands-off.
-        pending = None
-        if mode in ('on', 'off', 'schedule'):
-            want_on = vmm.desired_on(desired, now)
-            live_on = status == 'Running'
-            # A grace marker is the reconciler's own evidence the VM is
-            # running and pending-stop — fresher than the periodic sample,
-            # so trust it even if `status` lags.
-            if want_on and not live_on:
-                pending = 'start'
-            elif (not want_on) and (live_on or graces.get(name)):
-                pending = 'stop'
+        pending = vmm.pending_state(desired, status, graces.get(name), now)
         rows.append({
             'vm': name,
             'owner': rec.get('owner'),

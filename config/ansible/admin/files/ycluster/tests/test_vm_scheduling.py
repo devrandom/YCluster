@@ -102,6 +102,35 @@ class DesiredOnTests(unittest.TestCase):
         self.assertFalse(vm.desired_on(d, dt(h=12)))
 
 
+class PendingStateTests(unittest.TestCase):
+    NOW = dt(h=12)
+
+    def test_unmanaged_and_no_record_never_pending(self):
+        self.assertIsNone(vm.pending_state(None, "Running", None, self.NOW))
+        self.assertIsNone(vm.pending_state({"mode": "unmanaged"}, "Stopped",
+                                           None, self.NOW))
+
+    def test_pending_start(self):
+        self.assertEqual(vm.pending_state({"mode": "on"}, "Stopped", None,
+                                          self.NOW), "start")
+
+    def test_pending_stop_when_running(self):
+        self.assertEqual(vm.pending_state({"mode": "off"}, "Running", None,
+                                          self.NOW), "stop")
+
+    def test_pending_stop_from_grace_when_status_lags(self):
+        # status not yet 'Running' in the sample, but a grace marker is the
+        # reconciler's own evidence of a running, pending-stop VM.
+        self.assertEqual(vm.pending_state({"mode": "off"}, "unknown",
+                                          {"warned_at": "x"}, self.NOW), "stop")
+
+    def test_converged(self):
+        self.assertIsNone(vm.pending_state({"mode": "on"}, "Running", None,
+                                           self.NOW))
+        self.assertIsNone(vm.pending_state({"mode": "off"}, "Stopped", None,
+                                           self.NOW))
+
+
 def vmrec(host="nv2", gpus=2, owner="a@x", type="vm"):
     return {"host": host, "gpus": gpus, "owner": owner, "type": type}
 
