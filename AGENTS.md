@@ -46,6 +46,17 @@ bash dev-sync.sh  # runs initial sync then watches for changes
 ```
 Then run the playbook via SSH as above.
 
+**Confirming a sync landed (don't hash files by hand).** Trust the watcher by
+default; for a routine confirmation, `tail /tmp/dev-sync.log` for a `done` line
+stamped after your edit (the trigger only logs `done` on rsync exit 0, so
+partial syncs show as `rsync failed`). When you want certainty (before a
+high-stakes playbook run, or you suspect drift), run `bash dev-sync.sh --check`
+— a dry-run checksum compare against the cluster using the same exclude set;
+empty + exit 0 means in sync, exit 1 lists the files that differ (~4s, all SSH
+round-trip). Never per-file `cmp`/`sha256` over SSH (noisy), and don't rely on a
+git-hash check — the synced set is defined by `.watchignore` and includes
+untracked scratch dirs that a tracked-files-only hash can't see.
+
 ### Cluster Management
 The `ycluster` CLI is installed on core nodes:
 ```bash

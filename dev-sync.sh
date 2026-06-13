@@ -6,6 +6,11 @@
 # the watch connection is flaky and you just want one clean push. The exit
 # status reflects rsync's.
 #
+# With --check, do a dry-run checksum comparison against the cluster and print
+# any files whose content differs (no transfer, no deletes). Empty output +
+# exit 0 means in sync; exit 1 if anything differs. Uses the same exclude set
+# as the live sync, so it's the authoritative "did my edits land?" check.
+#
 # With --stop, stop a running watch (from any terminal) and remove the watchman
 # trigger + watch for this repo. It kills the watcher's tail so the watcher
 # exits cleanly, then tears down the trigger/watch.
@@ -31,6 +36,32 @@ do_sync() {
         return "$rc"
     fi
 }
+
+do_check() {
+    # Dry-run, checksum-based (-c) comparison: report files whose content
+    # differs from what's deployed, using the same exclude set as the live
+    # sync. No --delete — the synced set includes untracked scratch dirs that
+    # legitimately differ from a clean checkout, and we only care that local
+    # state landed. Exit 1 on any difference so the result is scriptable.
+    local out rc
+    out=$(rsync -naci --exclude-from="$REPO/.watchignore" "$REPO/" "$DEST") || {
+        rc=$?
+        echo "[$(date +%T)] rsync check failed (rc=$rc)" >&2
+        return "$rc"
+    }
+    if [[ -z "$out" ]]; then
+        echo "in sync with $DEST"
+    else
+        echo "$out"
+        echo "--- out of sync: $(printf '%s\n' "$out" | wc -l) item(s) differ ---"
+        return 1
+    fi
+}
+
+if [[ "${1:-}" == "--check" ]]; then
+    do_check
+    exit
+fi
 
 if [[ "${1:-}" == "--once" ]]; then
     do_sync
