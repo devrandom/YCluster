@@ -718,6 +718,43 @@ def desired_delete(name):
     _delete(VM_DESIRED_PREFIX + name)
 
 
+def desired_all():
+    """{name: desired record} for every managed VM."""
+    return _all_json(VM_DESIRED_PREFIX)
+
+
+# Stop-grace markers ({"warned_at": iso, "immediate"?: bool}).
+def grace_get(name):
+    return _get_json(VM_GRACE_PREFIX + name)
+
+
+def grace_set(name, rec):
+    _put_json(VM_GRACE_PREFIX + name, rec)
+
+
+def grace_delete(name):
+    _delete(VM_GRACE_PREFIX + name)
+
+
+def grace_all():
+    return _all_json(VM_GRACE_PREFIX)
+
+
+# Reconciler convergence failures ({"op", "error", "at"}), surfaced on the
+# schedule page.
+def issues_all():
+    return _all_json(VM_ISSUE_PREFIX)
+
+
+# Per-host incus state snapshots (status + gpu_pool), written by the sampler.
+def state_get(host):
+    return _get_json(VM_STATE_PREFIX + host)
+
+
+def state_all():
+    return _all_json(VM_STATE_PREFIX)
+
+
 def _parse_window(w, now=None):
     """Parse one {start, end} window into a (start, end) pair of UTC
     datetimes, or None if malformed/naive/elapsed. `now` (if given)
@@ -735,7 +772,7 @@ def _parse_window(w, now=None):
     return start, end
 
 
-def _desired_on(desired, now):
+def desired_on(desired, now):
     """Evaluate a desired-state record at `now` (UTC).
 
     Windows are only consulted under 'schedule'; on/off/unmanaged keep
@@ -756,7 +793,7 @@ def _desired_on(desired, now):
 # --------------------------------------------------------------------------
 # GPU capacity commitments (admission control for the scheduling page)
 #
-# The dual of _desired_on: rather than "is this VM on now", it answers
+# The dual of desired_on: rather than "is this VM on now", it answers
 # "which GPUs are spoken for, when". A VM's registered GPUs are committed
 # *always* under unmanaged (devices never released) and `on`, *never*
 # under `off` (scheduled stop releases them), and during its windows
@@ -865,7 +902,7 @@ def reconcile():
         if not desired or desired.get("mode") == "unmanaged":
             _clear_issue(issues, name)
             continue
-        want_on = _desired_on(desired, now)
+        want_on = desired_on(desired, now)
         running = statuses.get(name) == "Running"
         grace = graces.get(name)
 
@@ -1168,7 +1205,7 @@ def desired_conflict(desired, action, now):
     schedule. Pure — unit-testable; the I/O wrapper supplies the record."""
     if not desired or desired.get("mode") == "unmanaged":
         return None
-    want_on = _desired_on(desired, now)
+    want_on = desired_on(desired, now)
     mode = desired.get("mode")
     if action == "stop" and want_on:
         return (f"scheduled ON (mode={mode}) — the reconciler will restart "
