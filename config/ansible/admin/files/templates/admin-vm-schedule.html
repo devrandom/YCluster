@@ -9,6 +9,8 @@
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
     h1 { color: #333; text-align: center; margin-bottom: 0.5rem; }
+    h2 { color: #333; font-size: 1.05rem; margin: 1.5rem 0 0.75rem; }
+    .win { font-size: 0.85rem; color: #555; padding: 0.15rem 0 0 0.5rem; }
     .explainer { color: #666; font-size: 0.85rem; text-align: center; margin-bottom: 1.5rem; }
     .card { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
     .vm-head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
@@ -33,9 +35,12 @@
     Declare when your VMs should be up; each host converges within ~2
     minutes. Windows are <b>one-shot</b> (start – end, multiple allowed,
     times shown in your local timezone); set the end directly or via the
-    hours field. Scheduled stops warn the guest and wait a grace period.
+    hours field. Scheduled stops warn the guest, wait a grace period,
+    then release the VM's GPUs back to the host pool (re-attached at the
+    next start) — so saves are checked against host GPU capacity, and
+    the commitments below show what's already claimed.
     Scheduler-started runtime is billed to the owner; <b>unmanaged</b>
-    means the scheduler never touches the VM.
+    means the scheduler never touches the VM (its GPUs stay held).
   </p>
 
   <template x-if="loading"><p class="empty">Loading...</p></template>
@@ -60,6 +65,7 @@
         <span class="saved" x-show="row.saved" x-text="row.saved"></span>
         <span class="error" x-show="row.error" x-text="row.error"></span>
       </div>
+      <div class="error" x-show="row.issue" x-text="issueText(row)"></div>
       <template x-if="row.mode === 'schedule'">
         <div>
           <template x-for="(w, wi) in row.windows" :key="wi">
@@ -83,10 +89,29 @@
     </div>
   </template>
 
+  <template x-if="!loading && hosts.length > 0">
+    <div>
+      <h2>Host GPU commitments</h2>
+      <template x-for="h in hosts" :key="h.host">
+        <div class="card">
+          <div class="vm-head">
+            <span class="vm-name" x-text="h.host"></span>
+            <span class="meta" x-text="h.pool != null ? `${h.pool} GPU pool` : 'pool size unknown'"></span>
+          </div>
+          <template x-for="c in h.commitments">
+            <div class="win" x-text="commitText(c)"></div>
+          </template>
+          <div class="meta" x-show="!h.commitments.length">nothing committed — full pool available</div>
+        </div>
+      </template>
+    </div>
+  </template>
+
   <script>
     function schedApp() {
       return {
         rows: [],
+        hosts: [],
         isAdmin: false,
         loading: false,
 
@@ -119,10 +144,29 @@
                     return {startDate: sp.date, startHour: sp.hour, endDate: ep.date, endHour: ep.hour}
                   }),
                 saved: '', error: ''}))
+              this.hosts = data.hosts || []
               this.isAdmin = data.is_admin
               this.loading = false
             })
             .catch(() => { this.loading = false })
+        },
+
+        fmtStamp(d) {
+          return new Date(d).toLocaleString(undefined,
+            {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false})
+        },
+
+        issueText(row) {
+          return `scheduler ${row.issue.op} failed (${this.fmtStamp(row.issue.at)}): ${row.issue.error}`
+        },
+
+        commitText(c) {
+          const who = c.vm + (c.owner ? ` (${c.owner})` : '')
+          if (!c.windows)
+            return `${who} — ${c.gpus} GPU(s) held continuously (${c.mode})`
+          const wins = c.windows.map(w =>
+            `${this.fmtStamp(w.start)} → ${this.fmtStamp(w.end)}`).join(', ')
+          return `${who} — ${c.gpus} GPU(s) during: ${wins}`
         },
 
         hours(w) {
@@ -164,8 +208,11 @@
           })
             .then(r => r.json().then(d => ({ok: r.ok, d})))
             .then(({ok, d}) => {
-              if (ok) row.saved = 'saved — converges within ~2 min'
-              else row.error = d.error || 'failed'
+              if (ok) {
+                row.saved = 'saved — converges within ~2 min'
+                fetch('/admin/vm-schedule/data').then(r => r.json())
+                  .then(d2 => { this.hosts = d2.hosts || [] })
+              } else row.error = d.error || 'failed'
             })
             .catch(() => { row.error = 'request failed' })
         }
