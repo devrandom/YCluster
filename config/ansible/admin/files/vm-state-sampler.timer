@@ -1,12 +1,12 @@
 [Unit]
-Description=Run vm-state-sampler every 2 minutes
+Description=Run vm-state-sampler every minute
 
 [Timer]
 OnBootSec=60s
 # Cadence must match VM_STATE_INTERVAL_S in vm_manager.py — the sampler
 # stamps that value into each snapshot and observed GPU-hours are
 # sum(gpus * interval_s).
-OnUnitActiveSec=120s
+OnUnitActiveSec=60s
 Persistent=true
 
 [Install]

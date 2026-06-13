@@ -33,7 +33,7 @@ EVENTS_PREFIX = "/cluster/vms-events/"
 VM_STATE_PREFIX = "/cluster/vm-state/"
 # Stamped into each snapshot; must match the vm-state-sampler.timer cadence
 # (files/vm-state-sampler.timer) — observed GPU-hours = sum(gpus * interval_s).
-VM_STATE_INTERVAL_S = 120
+VM_STATE_INTERVAL_S = 60
 # Desired power state per VM, written by the scheduling page (admin-api on
 # the leader) and converged by the vm-reconciler timer on each incus host —
 # hosts pull intent and push state over etcd client certs; there is no
