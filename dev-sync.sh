@@ -1,22 +1,23 @@
 #!/bin/bash
 # Sync local repo to s3.yc:/opt/infrastructure/ using rsync + watchman.
-# Runs an initial sync, then re-syncs on any file change.
 #
-# With --once, do a single sync and exit (no watchman, no watch) — handy when
-# the watch connection is flaky and you just want one clean push. The exit
-# status reflects rsync's.
+# Commands (run with no args for usage):
+#   --start  Set up the watchman trigger + run an initial sync, then return.
+#            The watcher keeps running in the watchman daemon after this script
+#            exits — that's what makes --start able to background cleanly.
+#   --stop   Remove the watchman trigger + watch for this repo (stops auto-sync).
+#   --check  Dry-run checksum comparison against the cluster: print any files
+#            whose content differs (no transfer, no deletes) and report whether
+#            the watcher is running. Empty diff + exit 0 means in sync; exit 1
+#            if anything differs. Same exclude set as the live sync, so it's the
+#            authoritative "did my edits land?" check.
+#   --once   Do a single sync and exit (no watchman, no watch) — handy when the
+#            watch connection is flaky and you just want one clean push. Exit
+#            status reflects rsync's.
 #
-# With --check, do a dry-run checksum comparison against the cluster and print
-# any files whose content differs (no transfer, no deletes). Empty output +
-# exit 0 means in sync; exit 1 if anything differs. Uses the same exclude set
-# as the live sync, so it's the authoritative "did my edits land?" check.
-#
-# With --stop, stop a running watch (from any terminal) and remove the watchman
-# trigger + watch for this repo. It kills the watcher's tail so the watcher
-# exits cleanly, then tears down the trigger/watch.
-#
-# The watchman trigger persists in the watchman daemon across restarts of
-# this script. Ctrl-C only removes the trigger (not the watch root).
+# The watchman trigger persists in the watchman daemon across restarts of this
+# script and is what actually re-syncs on edits, independently of any foreground
+# process. --stop tears it down.
 
 set -euo pipefail
 
@@ -25,6 +26,22 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 LOG="/tmp/dev-sync.log"
 
 rsync_opts=(-az --exclude-from="$REPO/.watchignore")
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command>
+
+Sync local repo to $DEST using rsync + watchman.
+
+Commands:
+  --start   Set up the watchman trigger and run an initial sync, then return.
+            The watcher keeps running via the watchman daemon (survives exit).
+  --stop    Remove the watchman trigger + watch for this repo (stops auto-sync).
+  --check   Dry-run checksum compare against the cluster: list files whose
+            content differs (exit 1 if any), and report if the watcher is up.
+  --once    Do a single sync and exit (no watcher).
+EOF
+}
 
 do_sync() {
     echo "[$(date +%T)] syncing..."
@@ -58,43 +75,19 @@ do_check() {
     fi
 }
 
-if [[ "${1:-}" == "--check" ]]; then
-    do_check
-    exit
-fi
-
-if [[ "${1:-}" == "--once" ]]; then
-    do_sync
-    exit
-fi
-
-if [[ "${1:-}" == "--stop" ]]; then
-    # A running watcher sits in `wait` on `tail -f $LOG`; killing that tail lets
-    # it fall through to its own cleanup (trigger-del) and exit. This works even
-    # for an instance started before --stop existed. Then belt-and-suspenders:
-    # remove the trigger + watch directly in case no watcher was running.
-    if pkill -f "tail -f $LOG"; then
-        echo "stopped running dev-sync watcher"
-    fi
-    watchman trigger-del "$REPO" dev-sync >/dev/null 2>&1 || true
-    watchman watch-del "$REPO" >/dev/null 2>&1 || true
-    echo "removed watchman trigger + watch for $REPO"
-    exit
-fi
-
-cleanup() {
-    kill "$TAIL_PID" 2>/dev/null || true
-    watchman trigger-del "$REPO" dev-sync >/dev/null 2>&1 || true
-    echo "stopped"
+is_running() {
+    # The watchman trigger persists in the daemon and is what actually syncs on
+    # edits, so its presence is the authoritative "is the watcher running"
+    # signal — independent of whether any foreground process is attached.
+    watchman trigger-list "$REPO" 2>/dev/null | grep -q '"dev-sync"'
 }
-trap cleanup EXIT INT TERM
 
-watchman watch "$REPO" >/dev/null
-
-# Use JSON trigger spec — the CLI `-- trigger` shorthand has issues with
-# watchman 4.9 (stdout/stderr redirect fields not supported, * glob
-# only matches root-level files). The JSON spec is explicit and reliable.
-watchman -j <<EOF >/dev/null
+setup_trigger() {
+    watchman watch "$REPO" >/dev/null
+    # Use JSON trigger spec — the CLI `-- trigger` shorthand has issues with
+    # watchman 4.9 (stdout/stderr redirect fields not supported, * glob
+    # only matches root-level files). The JSON spec is explicit and reliable.
+    watchman -j <<EOF >/dev/null
 ["trigger", "$REPO", {
   "name": "dev-sync",
   "expression": ["allof", ["type", "f"], ["not", ["anyof",
@@ -107,13 +100,51 @@ watchman -j <<EOF >/dev/null
   "stdin": "/dev/null"
 }]
 EOF
+}
 
-do_sync || true
-echo "watching $REPO — background log: $LOG (Ctrl-C to stop)"
-# Truncate so tail -f shows only this session's output. The watchman trigger
-# appends here and persists across runs, so an un-truncated log replays stale
-# failures from previous sessions on every startup.
-: > "$LOG"
-tail -f "$LOG" &
-TAIL_PID=$!
-wait $TAIL_PID
+case "${1:-}" in
+    --check)
+        if is_running; then
+            echo "watcher: running"
+        else
+            echo "watcher: NOT running — edits are not being auto-synced"
+        fi
+        do_check
+        ;;
+    --once)
+        do_sync
+        ;;
+    --start)
+        if is_running; then
+            echo "watcher already running for $REPO (log: $LOG)"
+            exit 0
+        fi
+        # Truncate so the log holds only this watcher's output; the trigger
+        # appends here and persists across runs, otherwise stale failures from
+        # previous sessions replay on every tail.
+        : > "$LOG"
+        setup_trigger
+        do_sync || true
+        echo "started — watching $REPO in the background; log: $LOG"
+        echo "stop with: $(basename "$0") --stop"
+        ;;
+    --stop)
+        # Kill any legacy foreground watcher (it sits in `wait` on `tail -f
+        # $LOG`; killing the tail lets it fall through to its own cleanup), then
+        # remove the trigger + watch directly — covers a background --start too.
+        if pkill -f "tail -f $LOG"; then
+            echo "stopped running dev-sync watcher"
+        fi
+        watchman trigger-del "$REPO" dev-sync >/dev/null 2>&1 || true
+        watchman watch-del "$REPO" >/dev/null 2>&1 || true
+        echo "removed watchman trigger + watch for $REPO"
+        ;;
+    -h|--help|"")
+        usage
+        ;;
+    *)
+        echo "unknown option: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
