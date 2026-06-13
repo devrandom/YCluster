@@ -2785,6 +2785,9 @@ def vm_schedule_data():
             'issue': issues.get(name),
             'pending': pending,
             'grace': graces.get(name),
+            # Distinguishes an explicit admin-set 'unmanaged' record (locked
+            # to non-admins) from the no-record default (user-schedulable).
+            'has_desired': desired is not None,
         })
 
     # Capacity commitments per host, so users can see what's free before
@@ -2864,6 +2867,18 @@ def vm_schedule_set():
     mode = data.get('mode')
     if mode not in ('on', 'off', 'schedule', 'unmanaged'):
         return jsonify({'error': 'mode must be on|off|schedule|unmanaged'}), 400
+    # 'unmanaged' (scheduler hands-off) is an admin-only escape hatch: non-
+    # admins can neither set it nor change a VM an admin already set
+    # unmanaged. A VM with no record yet is its implicit default (also shown
+    # as 'unmanaged') and stays schedulable by its owner — only an explicit
+    # record locks it.
+    if not is_admin:
+        cur_raw = client.get(VM_DESIRED_PREFIX + name)[0]
+        cur_mode = json.loads(cur_raw.decode()).get('mode') if cur_raw else None
+        if mode == 'unmanaged':
+            return jsonify({'error': 'only admins can set a VM unmanaged'}), 403
+        if cur_mode == 'unmanaged':
+            return jsonify({'error': 'admin-managed VM; only an admin can change it'}), 403
 
     # Windows are preserved across every mode (including unmanaged) so a
     # user can flip on/off/unmanaged as a temporary override and switch
