@@ -13,10 +13,18 @@
     favicon.href = '/static/ycluster-favicon.svg';
     document.head.appendChild(favicon);
 
+    // The user-facing host (app.<domain>) serves only the self-service
+    // scheduling page; the admin host (admin.<domain> / admin.xc) serves the
+    // full set. Show each its own links so app.'s nav doesn't point at admin
+    // pages that just bounce back. Account always targets the auth. sibling.
+    const isApp = location.hostname.startsWith('app.');
     const authHref = location.protocol + '//' +
-        location.hostname.replace(/^admin\./, 'auth.') + '/';
+        location.hostname.replace(/^(admin|app)\./, 'auth.') + '/';
 
-    const items = [
+    const items = isApp ? [
+        ['VM Schedule', '/admin/vm-schedule'],
+        ['Account', authHref],
+    ] : [
         ['Home', '/'],
         ['Status', '/status'],
         ['Utilization', '/admin/utilization'],
@@ -28,6 +36,7 @@
         ['Monitoring', '/grafana/dashboards'],
         ['Account', authHref],
     ];
+    const brand = isApp ? 'YCluster' : 'YCluster Admin';
 
     const style = document.createElement('style');
     style.textContent = `
@@ -52,7 +61,7 @@
     const here = location.pathname.replace(/\/+$/, '') || '/';
     const nav = document.createElement('nav');
     nav.id = 'yc-nav';
-    nav.innerHTML = '<span class="brand"><img src="/static/ycluster-favicon.svg" alt="">YCluster</span>' + items.map(function (it) {
+    nav.innerHTML = '<span class="brand"><img src="/static/ycluster-favicon.svg" alt="">' + brand + '</span>' + items.map(function (it) {
         const cur = it[1] === here ? ' class="cur"' : '';
         return '<a href="' + it[1] + '"' + cur + '>' + it[0] + '</a>';
     }).join('');
