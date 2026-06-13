@@ -387,6 +387,90 @@ def free_gpus():
     return [g for g in gpu_pool() if g not in assigned]
 
 
+def _is_live_vendor(config_bytes):
+    """True if the first two PCI config-space bytes are a real vendor ID.
+    A device whose link is down (DPC-contained) or otherwise inaccessible
+    reads back 0x0000/0xffff."""
+    if len(config_bytes) < 2:
+        return False
+    vid = config_bytes[0] | (config_bytes[1] << 8)
+    return vid not in (0x0000, 0xffff)
+
+
+def _gpu_healthy(pci):
+    """Liveness probe for a free passthrough GPU.
+
+    Resume the device to D0 (exactly what the guest firmware does on boot)
+    and confirm a live config-space read returns its real vendor ID. A GPU
+    wedged by a PCIe fault / DPC link-down — the c1:00.0 failure of
+    2026-06-13 — stays D3hot-inaccessible and/or reads 0xffff; handed to a
+    VM it makes OVMF spin for ~15 min enumerating dead BARs before the
+    launch times out. Detecting it here lets us exclude it instead.
+
+    Best-effort and side-effect-neutral: it restores the device's runtime
+    PM policy, and any probe error counts as unhealthy. Only ever called
+    on FREE GPUs — never poke a device a running guest owns.
+    """
+    dev = f"/sys/bus/pci/devices/{pci}"
+    try:
+        with open(f"{dev}/power/control", "w") as f:
+            f.write("on")                  # pm_runtime_resume -> D0
+        try:
+            with open(f"{dev}/config", "rb") as f:
+                vid = f.read(2)
+        finally:
+            with open(f"{dev}/power/control", "w") as f:
+                f.write("auto")
+    except OSError:
+        return False
+    return _is_live_vendor(vid)
+
+
+def select_healthy_gpus(free, n, is_healthy):
+    """Pick `n` GPUs from `free` (in pool order) that pass `is_healthy`.
+
+    Pure (no I/O): the live callers pass free_gpus() and _gpu_healthy.
+    Returns (picked, wedged) where `wedged` are the probed-unhealthy free
+    GPUs (so the caller can log them). Raises ValueError — distinguishing
+    "wedged" from merely "in use" — when fewer than `n` are healthy.
+    """
+    healthy, wedged = [], []
+    for g in free:
+        (healthy if is_healthy(g) else wedged).append(g)
+    if len(healthy) < n:
+        extra = (f"; {len(wedged)} free but wedged ({', '.join(wedged)})"
+                 if wedged else "")
+        raise ValueError(f"Only {len(healthy)} healthy GPU(s) free, "
+                         f"requested {n}{extra}.")
+    return healthy[:n], wedged
+
+
+def _select_free_gpus(n):
+    """Live wrapper around select_healthy_gpus: choose n healthy free GPUs
+    and log any wedged ones skipped."""
+    picked, wedged = select_healthy_gpus(free_gpus(), n, _gpu_healthy)
+    for g in wedged:
+        print(f"  GPU {g} excluded from allocation: failed liveness probe "
+              f"(PCIe wedge / DPC link-down?)", file=sys.stderr)
+    return picked
+
+
+def _verify_guest_gpus(vm_name, expected):
+    """Best-effort post-boot check: warn loudly if the guest doesn't see
+    `expected` GPUs (a kernel staged without a matching NVIDIA module — the
+    vm1 driver-loss pattern — or a card that fell off the bus). Never
+    fails the operation; returns the count nvidia-smi reported."""
+    r = _incus("exec", vm_name, "--", "nvidia-smi", "-L", check=False)
+    seen = sum(1 for line in r.stdout.splitlines() if line.startswith("GPU "))
+    if r.returncode != 0 or seen != expected:
+        print(f"  WARNING: '{vm_name}' should see {expected} GPU(s) but "
+              f"nvidia-smi reports {seen} (rc={r.returncode}). Check the "
+              f"guest's NVIDIA driver / kernel headers.", file=sys.stderr)
+    else:
+        print(f"  verified {seen} GPU(s) visible in the guest.")
+    return seen
+
+
 def vm_gpus():
     pool = gpu_pool()
     if not pool:
@@ -395,7 +479,13 @@ def vm_gpus():
         return
     assigned = _assigned_gpus()
     for g in pool:
-        print(f"{g}  {'ASSIGNED' if g in assigned else 'free'}")
+        if g in assigned:
+            status = "ASSIGNED"
+        elif _gpu_healthy(g):
+            status = "free"
+        else:
+            status = "WEDGED (PCIe fault? — won't be allocated)"
+        print(f"{g}  {status}")
 
 
 def _instance_info(name):
@@ -448,13 +538,12 @@ def _ensure_gpus_attached(name):
     missing = want - have
     if missing <= 0:
         return
-    free = free_gpus()
-    if len(free) < missing:
-        raise RuntimeError(
-            f"'{name}' needs {missing} more GPU(s) but only {len(free)} "
-            f"free in the host pool")
+    try:
+        picked = _select_free_gpus(missing)
+    except ValueError as e:
+        raise RuntimeError(f"'{name}' needs {missing} more GPU(s): {e}")
     idx = 0
-    for pci in free[:missing]:
+    for pci in picked:
         while f"gpu{idx}" in devices:
             idx += 1
         _incus("config", "device", "add", name, f"gpu{idx}", "gpu",
@@ -647,16 +736,20 @@ def _parse_window(w, now=None):
 
 
 def _desired_on(desired, now):
-    """Evaluate a desired-state record at `now` (UTC)."""
+    """Evaluate a desired-state record at `now` (UTC).
+
+    Windows are only consulted under 'schedule'; on/off/unmanaged keep
+    their windows as dormant data (preserved across mode flips by the web
+    page), so they must never be read as on/off intent. Anything that
+    isn't 'on' or an active 'schedule' window is off."""
     mode = desired.get("mode")
     if mode == "on":
         return True
-    if mode == "off":
-        return False
-    for w in desired.get("windows", []):
-        parsed = _parse_window(w)
-        if parsed and parsed[0] <= now < parsed[1]:
-            return True
+    if mode == "schedule":
+        for w in desired.get("windows", []):
+            parsed = _parse_window(w)
+            if parsed and parsed[0] <= now < parsed[1]:
+                return True
     return False
 
 
@@ -759,9 +852,17 @@ def reconcile():
     all_vms = vms_all()
     local_vms = {name for name, rec in all_vms.items()
                  if rec.get("host") == host}
+    # Two passes so a same-tick GPU handoff is atomic: pass 1 does every
+    # stop/release (and warns/no-ops), returning cards to the pool; pass 2
+    # then starts, so a VM scheduled up as another goes down claims the
+    # freed GPUs this tick instead of failing acquisition and retrying.
+    to_start = []
     for name in sorted(local_vms):
         desired = desireds.get(name)
-        if not desired:
+        # No record, or an explicit 'unmanaged' record (which the web page
+        # now stores to preserve a dormant schedule) — the scheduler never
+        # touches it; keep the status quo.
+        if not desired or desired.get("mode") == "unmanaged":
             _clear_issue(issues, name)
             continue
         want_on = _desired_on(desired, now)
@@ -777,14 +878,7 @@ def reconcile():
             if running:
                 _clear_issue(issues, name)
             else:
-                print(f"reconcile: starting '{name}' (schedule/desired on)")
-                try:
-                    vm_start(name, billable=True, initiator="scheduler")
-                    _clear_issue(issues, name)
-                except Exception as e:
-                    print(f"  start failed (will retry next tick): {e}",
-                          file=sys.stderr)
-                    _record_issue(issues, name, "start", e, now)
+                to_start.append(name)          # deferred to the start pass
         elif running:
             if not grace:
                 print(f"reconcile: warning '{name}' of scheduled stop "
@@ -825,6 +919,19 @@ def reconcile():
                 if released:
                     print(f"reconcile: '{name}' already stopped — released "
                           f"{released} GPU(s) to the host pool")
+
+    # Start pass — after every release above, so freed GPUs are visible to
+    # _ensure_gpus_attached's free_gpus() lookup.
+    for name in to_start:
+        print(f"reconcile: starting '{name}' (schedule/desired on)")
+        try:
+            vm_start(name, billable=True, initiator="scheduler")
+            _clear_issue(issues, name)
+        except Exception as e:
+            print(f"  start failed (will retry next tick): {e}",
+                  file=sys.stderr)
+            _record_issue(issues, name, "start", e, now)
+
     # Issues for VMs that left the registry entirely would dangle
     # forever (vm_destroy clears its own, but a record can also vanish
     # by hand). Issues for other hosts' VMs are theirs to manage.
@@ -929,13 +1036,12 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
 
     # GPU selection: VM path pins specific passthrough GPUs from the host's
     # vfio pool; container path shares the host's single GPU via the profile,
-    # so 'gpus' here is just a 0/non-zero toggle.
+    # so 'gpus' here is just a 0/non-zero toggle. Wedged GPUs (PCIe
+    # fault / DPC link-down) are probed out so a launch fails fast here
+    # instead of hanging OVMF for ~15 min on a dead card.
     picked = []
     if instance_type == "vm" and gpus:
-        free = free_gpus()
-        if len(free) < gpus:
-            raise ValueError(f"Only {len(free)} GPU(s) free, requested {gpus}.")
-        picked = free[:gpus]
+        picked = _select_free_gpus(gpus)
 
     gpu_desc = f"{gpus} GPU" if gpus else "no GPU"
     print(f"Creating {instance_type} '{name}' ({cpu} CPU, {mem} RAM, "
@@ -995,6 +1101,11 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     _inject_owner_keys(name, user["ssh_keys"], timeout)
     bastion_sync()
 
+    # Confirm the guest actually sees the GPUs we passed through (catches a
+    # driverless guest / a card that didn't enumerate); warn, never fail.
+    if instance_type == "vm" and gpus:
+        _verify_guest_gpus(name, gpus)
+
     record["state"] = "ready"
     _put_json(VMS_PREFIX + name, record)
 
@@ -1041,11 +1152,53 @@ def vm_resize(name, size):
               "(cloud-init growpart).")
 
 
-def vm_stop(name, billable=False, initiator="cli"):
+def desired_conflict(desired, action, now):
+    """Reason a manual `action` ('start'|'stop'|'restart') will be reverted
+    by the reconciler, or None.
+
+    A CLI lifecycle op doesn't touch the desired record, so the reconciler
+    keeps converging toward it: stopping a VM the schedule wants ON gets
+    restarted next tick; starting one the schedule wants OFF gets stopped
+    (after grace). 'restart' ends running, so it conflicts like 'start'.
+    None for an unmanaged VM (no record, or an explicit 'unmanaged' record
+    preserving a dormant schedule) or an action that agrees with the
+    schedule. Pure — unit-testable; the I/O wrapper supplies the record."""
+    if not desired or desired.get("mode") == "unmanaged":
+        return None
+    want_on = _desired_on(desired, now)
+    mode = desired.get("mode")
+    if action == "stop" and want_on:
+        return (f"scheduled ON (mode={mode}) — the reconciler will restart "
+                f"it within ~2 min; set mode 'off' to keep it stopped")
+    if action in ("start", "restart") and not want_on:
+        return (f"scheduled OFF (mode={mode}) — the reconciler will stop it "
+                f"again after grace; adjust the schedule to keep it running")
+    return None
+
+
+def _warn_desired_conflict(name, action):
+    """Print a heads-up if a CLI lifecycle op contradicts the VM's schedule
+    (the reconciler would undo it). Only meaningful for CLI-initiated ops."""
+    reason = desired_conflict(desired_get(name), action,
+                              datetime.now(timezone.utc))
+    if reason:
+        print(f"  NOTE: '{name}' is {reason}.", file=sys.stderr)
+
+
+def vm_stop(name, billable=False, initiator="cli", release=False):
     _incus("stop", name)
     _record_event_from_record("stop", name, initiator=initiator,
                               billable=billable)
     print(f"Stopped '{name}'.")
+    # Opt-in: hand the passthrough GPUs back to the host pool (the next
+    # start re-acquires via _ensure_gpus_attached). Off by default so a
+    # plain stop keeps the cards for an immediate restart.
+    if release:
+        released = release_gpus(name)
+        print(f"Released {released} GPU(s) to the host pool."
+              if released else "No passthrough GPUs to release.")
+    if initiator == "cli":
+        _warn_desired_conflict(name, "stop")
 
 
 def vm_start(name, billable=False, initiator="cli"):
@@ -1058,6 +1211,8 @@ def vm_start(name, billable=False, initiator="cli"):
     _record_event_from_record("start", name, initiator=initiator,
                               billable=billable)
     print(f"Started '{name}'.")
+    if initiator == "cli":
+        _warn_desired_conflict(name, "start")
 
 
 def vm_restart(name, billable=False, initiator="cli"):
@@ -1071,6 +1226,8 @@ def vm_restart(name, billable=False, initiator="cli"):
     _record_event_from_record("restart", name, initiator=initiator,
                               billable=billable)
     print(f"Restarted '{name}'.")
+    if initiator == "cli":
+        _warn_desired_conflict(name, "restart")
 
 
 def vm_destroy(name):

@@ -39,7 +39,12 @@ def register_vm_commands(subparsers):
     sp.add_argument('name')
     sp.add_argument('--bill', action='store_true',
                     help='Mark as billable (owner-requested) rather than admin/debug')
-    sp.set_defaults(func=lambda a: vm.vm_stop(a.name, billable=a.bill))
+    sp.add_argument('--release', action='store_true',
+                    help="Also detach the VM's passthrough GPUs back to the "
+                         "host pool (next start re-acquires them). Default: "
+                         "keep them attached for a fast restart.")
+    sp.set_defaults(func=lambda a: vm.vm_stop(a.name, billable=a.bill,
+                                              release=a.release))
 
     stp = sub.add_parser('start', help='Start a stopped VM')
     stp.add_argument('name')

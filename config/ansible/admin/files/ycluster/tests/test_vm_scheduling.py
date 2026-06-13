@@ -95,6 +95,12 @@ class DesiredOnTests(unittest.TestCase):
         self.assertFalse(vm._desired_on({"mode": "schedule", "windows": []},
                                         dt(h=12)))
 
+    def test_unmanaged_ignores_dormant_windows(self):
+        # An unmanaged record may carry preserved windows; they must NOT be
+        # read as on/off intent (the reconciler skips unmanaged anyway).
+        d = {"mode": "unmanaged", "windows": [win(dt(h=10), dt(h=14))]}
+        self.assertFalse(vm._desired_on(d, dt(h=12)))
+
 
 def vmrec(host="nv2", gpus=2, owner="a@x", type="vm"):
     return {"host": host, "gpus": gpus, "owner": owner, "type": type}
@@ -194,6 +200,111 @@ class ConflictTests(unittest.TestCase):
         # pool 3, 1 held, candidate wants 2 -> exactly fits.
         self.assertIsNone(vm.gpu_conflict([commit(1)], 2, 3,
                                           dt(h=10), dt(h=14)))
+
+
+class DesiredConflictTests(unittest.TestCase):
+    NOW = dt(h=12)
+
+    def sched(self, *windows):
+        return {"mode": "schedule", "windows": [win(s, e) for s, e in windows]}
+
+    def test_unmanaged_never_conflicts(self):
+        # Both forms of unmanaged: no record, and an explicit unmanaged
+        # record (with dormant preserved windows) — neither warns.
+        unmanaged_rec = {"mode": "unmanaged",
+                         "windows": [win(dt(h=15), dt(h=18))]}
+        for action in ("start", "stop", "restart"):
+            self.assertIsNone(vm.desired_conflict(None, action, self.NOW))
+            self.assertIsNone(
+                vm.desired_conflict(unmanaged_rec, action, self.NOW))
+
+    def test_stop_conflicts_when_on(self):
+        self.assertIsNotNone(vm.desired_conflict({"mode": "on"}, "stop", self.NOW))
+        # in-window schedule also wants ON
+        d = self.sched((dt(h=10), dt(h=14)))
+        self.assertIn("scheduled ON", vm.desired_conflict(d, "stop", self.NOW))
+
+    def test_stop_ok_when_off(self):
+        self.assertIsNone(vm.desired_conflict({"mode": "off"}, "stop", self.NOW))
+        # out-of-window schedule wants OFF -> stopping agrees
+        d = self.sched((dt(h=15), dt(h=18)))
+        self.assertIsNone(vm.desired_conflict(d, "stop", self.NOW))
+
+    def test_start_conflicts_when_off(self):
+        self.assertIn("scheduled OFF",
+                      vm.desired_conflict({"mode": "off"}, "start", self.NOW))
+        d = self.sched((dt(h=15), dt(h=18)))      # out of window -> wants off
+        self.assertIsNotNone(vm.desired_conflict(d, "start", self.NOW))
+
+    def test_start_ok_when_on(self):
+        self.assertIsNone(vm.desired_conflict({"mode": "on"}, "start", self.NOW))
+        d = self.sched((dt(h=10), dt(h=14)))      # in window -> wants on
+        self.assertIsNone(vm.desired_conflict(d, "start", self.NOW))
+
+    def test_restart_behaves_like_start(self):
+        # restart ends running -> conflicts when schedule wants off
+        self.assertIsNotNone(
+            vm.desired_conflict({"mode": "off"}, "restart", self.NOW))
+        self.assertIsNone(
+            vm.desired_conflict({"mode": "on"}, "restart", self.NOW))
+
+
+class VendorIdTests(unittest.TestCase):
+    def test_live_vendor(self):
+        # NVIDIA 0x10de, little-endian on the wire.
+        self.assertTrue(vm._is_live_vendor(bytes([0xde, 0x10])))
+
+    def test_inaccessible_reads_all_ones(self):
+        self.assertFalse(vm._is_live_vendor(bytes([0xff, 0xff])))
+
+    def test_zero_is_dead(self):
+        self.assertFalse(vm._is_live_vendor(bytes([0x00, 0x00])))
+
+    def test_short_read_is_dead(self):
+        self.assertFalse(vm._is_live_vendor(bytes([0xde])))
+        self.assertFalse(vm._is_live_vendor(b""))
+
+
+class SelectHealthyGpusTests(unittest.TestCase):
+    POOL = ["c1:00.0", "e1:00.0", "01:00.0", "02:00.0"]
+
+    def healthy_except(self, *wedged):
+        bad = set(wedged)
+        return lambda g: g not in bad
+
+    def test_all_healthy_picks_first_n(self):
+        picked, wedged = vm.select_healthy_gpus(
+            self.POOL, 2, self.healthy_except())
+        self.assertEqual(picked, ["c1:00.0", "e1:00.0"])
+        self.assertEqual(wedged, [])
+
+    def test_skips_wedged_in_order(self):
+        # c1 wedged -> first two healthy are e1, 01.
+        picked, wedged = vm.select_healthy_gpus(
+            self.POOL, 2, self.healthy_except("c1:00.0"))
+        self.assertEqual(picked, ["e1:00.0", "01:00.0"])
+        self.assertEqual(wedged, ["c1:00.0"])
+
+    def test_raises_when_wedging_leaves_too_few(self):
+        # only one healthy, want 2 -> error names the wedged ones.
+        with self.assertRaises(ValueError) as cm:
+            vm.select_healthy_gpus(
+                self.POOL, 2, self.healthy_except("01:00.0", "02:00.0", "e1:00.0"))
+        msg = str(cm.exception)
+        self.assertIn("wedged", msg)
+        self.assertIn("e1:00.0", msg)
+
+    def test_raises_plain_when_simply_not_enough(self):
+        # one free, all healthy, want 2 -> no "wedged" noise.
+        picked_free = ["c1:00.0"]
+        with self.assertRaises(ValueError) as cm:
+            vm.select_healthy_gpus(picked_free, 2, self.healthy_except())
+        self.assertNotIn("wedged", str(cm.exception))
+
+    def test_exact_fit(self):
+        picked, wedged = vm.select_healthy_gpus(
+            self.POOL, 4, self.healthy_except())
+        self.assertEqual(len(picked), 4)
 
 
 if __name__ == "__main__":
