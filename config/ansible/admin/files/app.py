@@ -62,7 +62,7 @@ MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 
 NAS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nas-bootstrap.sh.j2')
 NVIDIA_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'nvidia-bootstrap.sh.j2')
 WG_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'wg-bootstrap.sh.j2')
-WG_MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'wg-bootstrap-macos.sh.j2')
+WG_MACOS_BOOTSTRAP_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'wg-macos-bootstrap.sh.j2')
 
 app = Flask(__name__)
 

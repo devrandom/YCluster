@@ -239,9 +239,13 @@ SSHKEY
 
     echo "Enabling Remote Login (SSH)"
     /usr/sbin/systemsetup -setremotelogin on >/dev/null 2>&1 || true
-    # CLT, sleep/power, and SSH key-only hardening are applied by Ansible
-    # (macos/setup-macos.yml) for --type macos nodes — keep this to the
-    # reachability minimum so both bootstraps differ only by the wg tunnel.
+
+    # Disable sleep / enable auto-restart: a sleeping Mac drops the wg tunnel,
+    # so this is a reachability prerequisite that must run at bootstrap, not
+    # wait for Ansible. SSH key-only hardening is applied by Ansible
+    # (macos/setup-macos.yml); CLT comes transitively from the Homebrew
+    # prerequisite above.
+    pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1
 else
     echo "dev mode: skipping hostname / admin user / SSH hardening"
 fi

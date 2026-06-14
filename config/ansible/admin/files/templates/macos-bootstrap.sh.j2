@@ -80,10 +80,36 @@ scutil --set HostName "$HOSTNAME"
 echo "Enabling Remote Login (SSH)..."
 systemsetup -setremotelogin on
 
-# Host hardening — Xcode CLT, sleep/power lockdown, and SSH key-only auth — is
-# applied by Ansible (macos/setup-macos.yml) once the node is reachable, so it
-# stays identical across LAN- and WireGuard-joined nodes. This script does only
-# the minimum needed for Ansible to connect.
+# Install Xcode Command Line Tools — this supplies the python that Ansible
+# needs, so it's a prerequisite for the node being manageable at all (the
+# wg-macos path gets CLT transitively via its Homebrew prerequisite instead).
+# The rest of the host hardening (sleep/power, SSH key-only) is applied by
+# Ansible (macos/setup-macos.yml) once the node is reachable.
+if ! xcode-select -p &>/dev/null; then
+    echo "Installing Xcode Command Line Tools..."
+    # This marker file makes softwareupdate list the CLT
+    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    # Extract the label (e.g., "Command Line Tools for Xcode 26.2-26.2")
+    # Must use Label line, not Title, as softwareupdate -i needs the exact label
+    PROD=$(softwareupdate -l 2>&1 | grep "^\* Label:" | grep -o "Command Line Tools.*" | head -1)
+    if [[ -n "$PROD" ]]; then
+        echo "Installing: $PROD"
+        softwareupdate -i "$PROD" --verbose || echo "Warning: softwareupdate failed, may need manual install"
+    else
+        echo "Warning: Command Line Tools not found in software updates"
+        echo "Try running 'xcode-select --install' manually"
+    fi
+    rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+else
+    echo "Xcode Command Line Tools already installed at $(xcode-select -p)"
+fi
+
+# Disable sleep (and auto-restart after power loss). This is a reachability
+# prerequisite, not just hardening: a sleeping Mac drops its network (and any
+# wg tunnel), so Ansible could never reach it to apply these — it has to happen
+# at bootstrap. setup-macos.yml re-asserts the same values.
+echo "Disabling sleep / enabling auto-restart..."
+pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1
 
 echo "=== Bootstrap complete ==="
 echo "SSH should now be available at $IP_ADDRESS"

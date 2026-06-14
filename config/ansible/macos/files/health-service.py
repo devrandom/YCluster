@@ -104,61 +104,51 @@ def check_ntp_status():
             'details': {'message': f'NTP check failed: {str(e)}'}
         }
 
-def check_dns_status():
-    """Check DNS configuration on macOS"""
+def resolves(name):
+    """Return (ok, error) for whether `name` resolves via the system resolver.
+
+    Uses getaddrinfo, not nslookup/dig: those bypass macOS /etc/resolver/ split
+    DNS and query the default resolver directly, so they'd miss .xc names that
+    only the cluster resolver knows. getaddrinfo honors the full resolver stack,
+    i.e. it tests the same path applications actually use.
+    """
     try:
-        # Get DNS servers for Ethernet interface (if available)
-        ethernet_dns_result = subprocess.run(['networksetup', '-getdnsservers', 'Ethernet'], 
-                                           capture_output=True, text=True, timeout=2)
-        
-        ethernet_dns_configured = ethernet_dns_result.returncode == 0
-        
-        # Parse DNS servers
-        ethernet_dns_servers = []
-        
-        if ethernet_dns_configured and ethernet_dns_result.stdout:
-            ethernet_dns_servers = [line.strip() for line in ethernet_dns_result.stdout.strip().split('\n') 
-                                  if line.strip() and not line.startswith('There aren')]
-        
-        # Test DNS resolution
-        dns_working = False
-        dns_error = None
-        
-        try:
-            # Test DNS resolution using nslookup
-            dns_test_result = subprocess.run(['nslookup', 's1.xc'],
-                                           capture_output=True, text=True, timeout=2)
-            dns_working = dns_test_result.returncode == 0 and 's1.xc' in dns_test_result.stdout
-            if not dns_working:
-                dns_error = 'DNS resolution test failed'
-        except Exception as e:
-            dns_error = f'DNS test failed: {str(e)}'
-        
-        # Check if cluster DNS server (10.0.0.254) is configured
-        cluster_dns_configured = '10.0.0.254' in ethernet_dns_servers
-        
-        # Overall status
-        if cluster_dns_configured and dns_working:
+        socket.getaddrinfo(name, None)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def check_dns_status():
+    """Check DNS resolution on macOS — purely functional.
+
+    Cluster names use split DNS (/etc/resolver/xc routes .xc to the cluster
+    resolver over wg; the node's own resolver handles the rest), so rather than
+    introspect how DNS is wired, just test what matters: that a cluster .xc name
+    and a public name both resolve.
+    """
+    try:
+        cluster_ok, cluster_err = resolves('s1.xc')
+        public_ok, public_err = resolves('example.com')
+
+        if cluster_ok and public_ok:
             status = 'healthy'
-            message = 'DNS configured and working'
-        elif cluster_dns_configured:
+            message = 'DNS resolving (cluster + public)'
+        elif cluster_ok:
             status = 'degraded'
-            message = f'DNS configured but resolution test failed: {dns_error}'
+            message = f'Cluster DNS ok but public resolution failed: {public_err}'
         else:
             status = 'unhealthy'
-            message = 'Cluster DNS server not configured'
-        
+            message = f'Cluster .xc resolution failed: {cluster_err}'
+
         return {
             'status': status,
             'details': {
-                'ethernet_dns_servers': ethernet_dns_servers,
-                'cluster_dns_configured': cluster_dns_configured,
-                'dns_working': dns_working,
+                'cluster_resolves': cluster_ok,
+                'public_resolves': public_ok,
                 'message': message,
-                'error': dns_error
             }
         }
-        
     except Exception as e:
         return {
             'status': 'error',

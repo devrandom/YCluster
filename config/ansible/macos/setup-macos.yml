@@ -2,36 +2,16 @@
 - name: Setup macOS nodes
   hosts: macos
   become: yes
-  # The bootstrap only makes the node reachable (hostname, admin user, SSH);
-  # base macOS hardening lives here so every node converges identically
-  # regardless of how it joined (LAN vs WireGuard). Xcode CLT supplies the
-  # python every Ansible module needs, so install it via raw before facts are
-  # gathered — a freshly-bootstrapped node has no python until then.
-  gather_facts: no
+  # The bootstrap installs Xcode CLT (the python Ansible needs) and makes the
+  # node reachable; post-reachability hardening (sleep/power, SSH key-only)
+  # lives here so every node converges identically whether it joined over LAN
+  # or WireGuard.
   vars:
     ntp_server: "{{ ntp_server_override | default('10.0.0.254') }}"
     dns_server: "{{ dns_server_override | default('10.0.0.254') }}"
     health_service_dir: "/usr/local/ycluster"
 
   tasks:
-    - name: Install Xcode Command Line Tools (raw — runs before python exists)
-      raw: |
-        if /usr/bin/xcode-select -p >/dev/null 2>&1; then
-          echo CLT_PRESENT
-        else
-          touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-          PROD=$(softwareupdate -l 2>&1 | grep '^\* Label:' | grep -o 'Command Line Tools.*' | head -1)
-          [ -n "$PROD" ] && softwareupdate -i "$PROD" --verbose
-          rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-          /usr/bin/xcode-select -p >/dev/null 2>&1 && echo CLT_INSTALLED
-        fi
-      register: clt_result
-      changed_when: "'CLT_INSTALLED' in clt_result.stdout"
-      failed_when: "'CLT_PRESENT' not in clt_result.stdout and 'CLT_INSTALLED' not in clt_result.stdout"
-
-    - name: Gather facts (now that python is available)
-      setup:
-
     - name: Install /etc/inputrc for readline word-navigation (Ctrl+Arrow)
       copy:
         dest: /etc/inputrc
@@ -79,6 +59,10 @@
       become: yes
       when: not homebrew_check.stat.exists
     
+    # Normalize ownership whether the playbook just cloned brew (root-owned) or
+    # it was pre-installed by a human (the wg-macos bootstrap's prerequisite,
+    # owned by their admin account). Skips the expensive recurse once brew is
+    # already dev-owned.
     - name: Set Homebrew ownership to dev user
       file:
         path: /opt/homebrew
@@ -86,7 +70,7 @@
         group: admin
         recurse: yes
       become: yes
-      when: not homebrew_check.stat.exists
+      when: not homebrew_check.stat.exists or (homebrew_check.stat.pw_name | default('')) != 'dev'
     
     - name: Create Homebrew directories
       file:
@@ -99,7 +83,7 @@
       loop:
         - /opt/homebrew/var/homebrew
         - /opt/homebrew/var/homebrew/linked
-      when: not homebrew_check.stat.exists
+      when: not homebrew_check.stat.exists or (homebrew_check.stat.pw_name | default('')) != 'dev'
     
     - name: Add Homebrew to PATH for dev user
       lineinfile:
@@ -254,18 +238,10 @@
 
     - name: Disable sleep and enable auto-restart after power failure
       # A cluster node must stay awake and come back after a brownout; sitting
-      # dark or asleep makes it effectively offline. autorestart also catches
-      # up existing nodes (e.g. m2, which stayed dark after an AC blip).
-      command: "pmset -a {{ item }}"
-      loop:
-        - sleep 0
-        - disksleep 0
-        - displaysleep 0
-        - hibernatemode 0
-        - powernap 0
-        - standby 0
-        - autopoweroff 0
-        - autorestart 1
+      # dark or asleep makes it effectively offline (and drops any wg tunnel).
+      # The bootstrap sets these too — this re-asserts and catches up existing
+      # nodes (e.g. m2, which stayed dark after an AC blip).
+      command: pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1
       become: yes
       changed_when: false
 
@@ -280,6 +256,25 @@
       become: yes
       notify: restart sshd
 
+    # Split DNS: route only .xc (cluster names) to the cluster resolver over
+    # wg and leave the node's own resolver (DHCP / Tailscale / ISP) for
+    # everything else. Pinning the whole Ethernet resolver at the cluster VIP
+    # breaks public resolution on a remote node with its own networking.
+    - name: Ensure /etc/resolver exists
+      file:
+        path: /etc/resolver
+        state: directory
+        mode: '0755'
+      become: yes
+
+    - name: Route .xc DNS to the cluster (split DNS)
+      copy:
+        dest: /etc/resolver/xc
+        content: "nameserver {{ dns_server }}\n"
+        mode: '0644'
+      become: yes
+      notify: flush dns cache
+
     - name: Check current DNS servers for Ethernet
       command: networksetup -getdnsservers "Ethernet"
       register: current_dns_servers
@@ -287,11 +282,15 @@
       ignore_errors: yes
       changed_when: false
 
-    - name: Configure DNS server for Ethernet
-      command: networksetup -setdnsservers "Ethernet" {{ dns_server }}
+    # Undo the old blunt override on already-provisioned nodes: .xc is now
+    # handled by /etc/resolver/xc, so Ethernet should fall back to its own/DHCP
+    # resolver. Self-cleaning — once reverted, dns_server is no longer present.
+    - name: Revert forced cluster DNS on Ethernet to automatic
+      command: networksetup -setdnsservers "Ethernet" "Empty"
       become: yes
       ignore_errors: yes
-      when: current_dns_servers.rc == 0 and dns_server not in current_dns_servers.stdout
+      when: current_dns_servers.rc == 0 and dns_server in current_dns_servers.stdout
+      notify: flush dns cache
 
     - name: Check current NTP server
       command: systemsetup -getnetworktimeserver
@@ -401,6 +400,10 @@
       notify: restart health service
     
   handlers:
+    - name: flush dns cache
+      shell: dscacheutil -flushcache; killall -HUP mDNSResponder
+      become: yes
+
     - name: restart sshd
       # macOS spawns sshd per-connection from launchd, so new sessions pick up
       # sshd_config on their own; bounce the daemon so the change is in force
