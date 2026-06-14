@@ -91,6 +91,45 @@
         state: started
         daemon_reload: yes
 
+    # Frontend nodes are public, so run a host firewall (ufw) with
+    # least-privilege openings rather than relying on an implicit cloud
+    # security group. SSH is allowed before enabling so a run can't lock us
+    # out, and the rathole public ports are parsed from the rendered config so
+    # the rules track the template as services are added.
+    - name: Install ufw
+      apt:
+        name: ufw
+        state: present
+
+    - name: Determine public rathole ports from the rendered config
+      shell: "grep -oE '0\\.0\\.0\\.0:[0-9]+' /etc/rathole/server.toml | cut -d: -f2 | sort -un"
+      register: rathole_public_ports
+      changed_when: false
+
+    - name: Allow SSH through ufw (before enabling, to avoid lockout)
+      community.general.ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: Allow public rathole ports through ufw
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ rathole_public_ports.stdout_lines }}"
+
+    - name: Set default-deny incoming and enable ufw
+      community.general.ufw:
+        state: enabled
+        direction: incoming
+        policy: deny
+
+    - name: Default-allow outgoing
+      community.general.ufw:
+        direction: outgoing
+        policy: allow
+
   handlers:
     - name: reload systemd
       systemd:
