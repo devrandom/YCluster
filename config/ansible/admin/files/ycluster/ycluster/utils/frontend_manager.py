@@ -8,19 +8,22 @@ from ..common.etcd_utils import get_etcd_client
 
 ETCD_PREFIX = '/cluster/nodes/frontend'
 
-def list_frontend_nodes():
-    """List all frontend nodes"""
-    client = get_etcd_client()
-    
+def get_frontend_nodes(client=None):
+    """Return frontend node dicts from etcd (unsorted; malformed entries skipped)."""
+    client = client or get_etcd_client()
     nodes = []
-    for value, metadata in client.get_prefix(ETCD_PREFIX):
+    for value, _ in client.get_prefix(ETCD_PREFIX):
         if value:
             try:
-                node_data = json.loads(value.decode('utf-8'))
-                nodes.append(node_data)
+                nodes.append(json.loads(value.decode('utf-8')))
             except json.JSONDecodeError:
                 continue
-    
+    return nodes
+
+def list_frontend_nodes():
+    """List all frontend nodes"""
+    nodes = get_frontend_nodes()
+
     if not nodes:
         print("No frontend nodes found")
         return

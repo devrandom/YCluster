@@ -4,6 +4,12 @@
   become: yes
   vars:
     gateway_interface: "{{ cluster_interface }}"
+    # A node may hold the gateway VIP only if it physically has its uplink NIC.
+    # Nodes without one (e.g. a storage node that reaches the internet through
+    # the VIP itself) must be excluded, or a shared upstream outage can land the
+    # VIP on a node with no working internet path. Derived from live facts so it
+    # is self-correcting as hardware changes.
+    gateway_vip_eligible: "{{ uplink_interface in ansible_interfaces }}"
 
 
   tasks:
@@ -24,25 +30,26 @@
         owner: root
         group: root
 
+    # Thin wrapper: keepalived runs track scripts with a minimal environment, so
+    # we export the etcd client env (endpoints + mTLS certs) and the uplink
+    # interface, then defer all logic to the ycluster package so it stays
+    # unit-tested and ships with the package. The check judges fitness-to-hold
+    # the VIP by whether this node can reach the frontend nodes over its uplink
+    # (the cluster's real outbound dependency), reading the frontend set live
+    # from etcd. See ycluster/utils/gateway_health.py.
     - name: Create gateway health check script
       copy:
         dest: /usr/local/lib/cluster/check-gateway-health
         mode: '0755'
         content: |
           #!/bin/bash
-          
-          unset http_proxy
-          unset https_proxy
-          
-          # Test internet connectivity by binding to the uplink interface
-          # This will fail if interface doesn't exist, is down, or has no connectivity
-          if ! curl -s --connect-timeout 5 --max-time 10 --interface "{{ uplink_interface }}" http://detectportal.firefox.com/success.txt | grep -q "success"; then
-              echo "No internet connectivity via uplink interface {{ uplink_interface }}"
-              exit 1
-          fi
-          
-          echo "Gateway healthy - internet accessible via {{ uplink_interface }}"
-          exit 0
+          export ETCD_HOSTS="{{ etcd_hosts }}"
+          {% if etcd_tls_env -%}
+          export ETCD_CACERT="{{ etcd_tls_env.ETCD_CACERT }}"
+          export ETCD_CERT="{{ etcd_tls_env.ETCD_CERT }}"
+          export ETCD_KEY="{{ etcd_tls_env.ETCD_KEY }}"
+          {% endif -%}
+          exec python3 -m ycluster.utils.gateway_health "{{ uplink_interface }}"
 
     - name: Create NAT setup script
       copy:
@@ -108,7 +115,15 @@
         owner: root
         group: root
 
+    - name: Remove gateway VIP config on nodes without an uplink
+      file:
+        path: /etc/keepalived/conf.d/gateway-vip.conf
+        state: absent
+      when: not gateway_vip_eligible
+      notify: restart keepalived
+
     - name: Create gateway VIP keepalived configuration
+      when: gateway_vip_eligible
       copy:
         dest: /etc/keepalived/conf.d/gateway-vip.conf
         content: |
@@ -121,8 +136,9 @@
           vrrp_script chk_gateway {
               script "/usr/local/lib/cluster/check-gateway-health"
               interval 10
+              timeout 8
               weight -20
-              fall 2
+              fall 3
               rise 2
               init_fail
           }
