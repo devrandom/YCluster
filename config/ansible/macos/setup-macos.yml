@@ -2,12 +2,36 @@
 - name: Setup macOS nodes
   hosts: macos
   become: yes
+  # The bootstrap only makes the node reachable (hostname, admin user, SSH);
+  # base macOS hardening lives here so every node converges identically
+  # regardless of how it joined (LAN vs WireGuard). Xcode CLT supplies the
+  # python every Ansible module needs, so install it via raw before facts are
+  # gathered — a freshly-bootstrapped node has no python until then.
+  gather_facts: no
   vars:
     ntp_server: "{{ ntp_server_override | default('10.0.0.254') }}"
     dns_server: "{{ dns_server_override | default('10.0.0.254') }}"
     health_service_dir: "/usr/local/ycluster"
-  
+
   tasks:
+    - name: Install Xcode Command Line Tools (raw — runs before python exists)
+      raw: |
+        if /usr/bin/xcode-select -p >/dev/null 2>&1; then
+          echo CLT_PRESENT
+        else
+          touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+          PROD=$(softwareupdate -l 2>&1 | grep '^\* Label:' | grep -o 'Command Line Tools.*' | head -1)
+          [ -n "$PROD" ] && softwareupdate -i "$PROD" --verbose
+          rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+          /usr/bin/xcode-select -p >/dev/null 2>&1 && echo CLT_INSTALLED
+        fi
+      register: clt_result
+      changed_when: "'CLT_INSTALLED' in clt_result.stdout"
+      failed_when: "'CLT_PRESENT' not in clt_result.stdout and 'CLT_INSTALLED' not in clt_result.stdout"
+
+    - name: Gather facts (now that python is available)
+      setup:
+
     - name: Install /etc/inputrc for readline word-navigation (Ctrl+Arrow)
       copy:
         dest: /etc/inputrc
@@ -228,12 +252,33 @@
       become: yes
       notify: disable llama-server service
 
-    - name: Enable auto-restart after power failure
-      # macOS bootstrap sets this for new nodes; this task catches up
-      # existing nodes (e.g. m2, which stayed dark after an AC blip).
-      command: pmset -a autorestart 1
+    - name: Disable sleep and enable auto-restart after power failure
+      # A cluster node must stay awake and come back after a brownout; sitting
+      # dark or asleep makes it effectively offline. autorestart also catches
+      # up existing nodes (e.g. m2, which stayed dark after an AC blip).
+      command: "pmset -a {{ item }}"
+      loop:
+        - sleep 0
+        - disksleep 0
+        - displaysleep 0
+        - hibernatemode 0
+        - powernap 0
+        - standby 0
+        - autopoweroff 0
+        - autorestart 1
       become: yes
       changed_when: false
+
+    - name: Harden SSH — key-only authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*{{ item.key }}\b'
+        line: "{{ item.key }} {{ item.value }}"
+      loop:
+        - { key: PasswordAuthentication, value: 'no' }
+        - { key: ChallengeResponseAuthentication, value: 'no' }
+      become: yes
+      notify: restart sshd
 
     - name: Check current DNS servers for Ethernet
       command: networksetup -getdnsservers "Ethernet"
@@ -356,6 +401,15 @@
       notify: restart health service
     
   handlers:
+    - name: restart sshd
+      # macOS spawns sshd per-connection from launchd, so new sessions pick up
+      # sshd_config on their own; bounce the daemon so the change is in force
+      # immediately rather than at the next reconnect.
+      shell: |
+        launchctl stop com.openssh.sshd 2>/dev/null || true
+        launchctl start com.openssh.sshd 2>/dev/null || true
+      become: yes
+
     - name: restart health service
       shell: |
         launchctl stop com.ycluster.health || true

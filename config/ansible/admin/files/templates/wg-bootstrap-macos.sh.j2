@@ -134,7 +134,9 @@ if [[ -s "$KEY_FILE" ]]; then
     PRIVKEY=$(cat "$KEY_FILE")
     echo "reusing private key from $KEY_FILE"
 elif [[ -s /etc/wireguard/wg0.conf ]]; then
-    PRIVKEY=$(/usr/bin/awk -F' *= *' '/^PrivateKey/{print $2; exit}' /etc/wireguard/wg0.conf)
+    # Strip only the leading "PrivateKey = "; the value is base64 that ends in
+    # "=" padding, so splitting on every "=" (awk -F'=') would truncate it.
+    PRIVKEY=$(/usr/bin/sed -n 's/^PrivateKey[[:space:]]*=[[:space:]]*//p' /etc/wireguard/wg0.conf | head -1)
     if [[ -n "$PRIVKEY" ]]; then
         echo "reusing private key from /etc/wireguard/wg0.conf"
         printf '%s\n' "$PRIVKEY" > "$KEY_FILE"
@@ -152,14 +154,14 @@ echo "pubkey=$PUBKEY"
 # Atomic: allocate cluster hostname+IP AND record wg pubkey as pending peer
 REG=$(/usr/bin/curl -sfL -X POST \
     -H "Content-Type: application/json" \
-    -d "$(/usr/bin/python3 -c "import json,sys; print(json.dumps({'mac':'$MAC','type':'$NODE_TYPE','pubkey':'$PUBKEY'}))")" \
+    -d "$(/usr/bin/jq -nc --arg mac "$MAC" --arg type "$NODE_TYPE" --arg pubkey "$PUBKEY" '{mac:$mac,type:$type,pubkey:$pubkey}')" \
     "$API_SERVER/api/wg/register")
 if [[ -z "$REG" ]]; then
     echo "ERROR: register call failed"; exit 1
 fi
-NEW_HOSTNAME=$(echo "$REG" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["hostname"])')
-IP_ADDRESS=$(echo "$REG" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["ip"])')
-FP=$(echo "$REG" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["pubkey_sha256"])')
+NEW_HOSTNAME=$(echo "$REG" | /usr/bin/jq -r '.hostname')
+IP_ADDRESS=$(echo "$REG" | /usr/bin/jq -r '.ip')
+FP=$(echo "$REG" | /usr/bin/jq -r '.pubkey_sha256')
 echo "allocated hostname=$NEW_HOSTNAME ip=$IP_ADDRESS fingerprint=$FP"
 echo ""
 echo "Waiting for approval. On the admin host run:"
@@ -172,10 +174,10 @@ CONFIG=""
 while (( $(date +%s) < DEADLINE )); do
     POLL=$(/usr/bin/curl -sfL "$API_SERVER/api/wg/poll/$NEW_HOSTNAME?fp=$FP" || true)
     if [[ -n "$POLL" ]]; then
-        STATUS=$(echo "$POLL" | /usr/bin/python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status",""))')
+        STATUS=$(echo "$POLL" | /usr/bin/jq -r '.status // ""')
         case "$STATUS" in
             approved)
-                CONFIG=$(echo "$POLL" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("config",""))')
+                CONFIG=$(echo "$POLL" | /usr/bin/jq -r '.config // ""')
                 break
                 ;;
             revoked)
@@ -237,6 +239,9 @@ SSHKEY
 
     echo "Enabling Remote Login (SSH)"
     /usr/sbin/systemsetup -setremotelogin on >/dev/null 2>&1 || true
+    # CLT, sleep/power, and SSH key-only hardening are applied by Ansible
+    # (macos/setup-macos.yml) for --type macos nodes — keep this to the
+    # reachability minimum so both bootstraps differ only by the wg tunnel.
 else
     echo "dev mode: skipping hostname / admin user / SSH hardening"
 fi
@@ -255,6 +260,14 @@ cat > "$LAUNCH_PLIST" <<PLIST
 <dict>
     <key>Label</key>
     <string>xc.ycluster.wg</string>
+    <!-- launchd's default PATH excludes the brew prefix, so wg-quick's
+         '#!/usr/bin/env bash' would resolve to macOS's bash 3.2 (which it
+         rejects) and it couldn't find wg/wireguard-go. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$BREW_PREFIX/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
     <key>ProgramArguments</key>
     <array>
         <string>$WG_QUICK</string>
@@ -282,6 +295,7 @@ echo "Hostname:    $NEW_HOSTNAME"
 echo "Cluster IP:  $IP_ADDRESS (on wg0)"
 echo "Launch plist: $LAUNCH_PLIST"
 echo ""
-echo "Verify with:  sudo $WG show wg0"
+# macOS names the kernel interface utunN, not wg0, so query without a name.
+echo "Verify with:  sudo $WG show"
 echo "Stop with:    sudo launchctl unload $LAUNCH_PLIST"
 echo "Restart with: sudo launchctl unload $LAUNCH_PLIST && sudo launchctl load -w $LAUNCH_PLIST"
