@@ -3,6 +3,14 @@
 Completed work, moved out of `TODO.md`. Newest first. Items that still have
 residual or follow-on work remain in `TODO.md` until fully closed.
 
+## 2026-06-14
+
+- **Gateway-VIP health check + eligibility hardening.** The `VI_GATEWAY` track script flapped the gateway VIP on a transient WAN/DNS blip — a ~3-min upstream outage on 2026-06-01 cascaded into a storage-leadership failover and a cluster-wide WireGuard flap — and could land the VIP on s4, which has no uplink and routes to the internet *through the VIP itself*. Two fixes (`setup-gateway-vip.yml` + the new `ycluster.utils.gateway_health` module):
+  - **Eligibility:** a node may hold `VI_GATEWAY` only if it actually has its uplink NIC (`gateway_vip_eligible = uplink_interface in ansible_interfaces`). s4's configured uplink is absent, so it is excluded and its stale `gateway-vip.conf` removed; s1–s3 keep it. Fact-derived, so it self-corrects as hardware changes. Confirmed against reality: s1/s2/s3 each route out their own uplink (metric 100, VIP as metric-500 fallback), s4 routes only via the VIP.
+  - **Health check:** rewritten to judge fitness by reachability to the frontend nodes (the cluster's real outbound dependency) over the uplink, read live from etcd — carrier fast-fail, healthy as soon as one frontend's rathole control port answers (connection bound to the uplink via `SO_BINDTODEVICE`), with a next-hop ICMP fallback only when etcd is unreachable or no frontends are configured, so an etcd blip can't move the VIP. Logic lives in the unit-tested `gateway_health` module behind a thin keepalived wrapper that supplies the etcd client env; `fall` 2→3 and a keepalived `timeout` so a sub-minute stutter cannot move the VIP. Rolled out package-first then per-node with the VIP holder (s3) last; the VIP stayed put throughout.
+
+- **Second frontend (dev1a) + host firewall on frontends.** Added dev1a (Vultr) as a second rathole frontend alongside dev1b (DigitalOcean) — two diverse networks, so the gateway health check's "all frontends unreachable" is a trustworthy per-node signal. Frontend nodes are public but relied on an implicit cloud security group; a base image that ships ufw enabled (Vultr) came up reachable only on SSH, silently blocking rathole and the blackbox exporter. `install-rathole-server.yml` now owns the frontend firewall (installs ufw, allows SSH before enabling so a run can't lock us out, opens the public rathole ports parsed from the rendered config, default-deny incoming), and `install-blackbox.yml` opens 9115 on frontends only (the exporter is mTLS `RequireAndVerifyClientCert`, so a port-level allow exposes nothing). Prometheus re-rendered so dev1a is scraped. Applied to dev1a and dev1b.
+
 ## 2026-06-10
 
 ### Security & correctness
