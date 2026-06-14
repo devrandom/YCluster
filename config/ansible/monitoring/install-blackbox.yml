@@ -153,6 +153,17 @@
         enabled: yes
         state: started
 
+    # Frontends run ufw (set up by install-rathole-server.yml); open the
+    # exporter port so core Prometheus can scrape it. The endpoint is mTLS
+    # (RequireAndVerifyClientCert), so a port-level allow is safe. Core nodes
+    # don't run ufw here, so this is frontend-only.
+    - name: Allow blackbox exporter port through ufw on frontends
+      community.general.ufw:
+        rule: allow
+        port: '9115'
+        proto: tcp
+      when: inventory_hostname in groups['frontend']
+
   handlers:
     - name: restart blackbox exporter
       systemd:
