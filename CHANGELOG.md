@@ -3,6 +3,10 @@
 Completed work, moved out of `TODO.md`. Newest first. One line per change;
 detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
+## 2026-06-15
+
+- **Clock-skew health band by node type.** Non-storage nodes now warn at 1s / crit at 10s (was 100ms / 1s); storage nodes keep the strict band since etcd/PostgreSQL need tight sync.
+
 ## 2026-06-14
 
 - **Gateway-VIP hardening.** Health check now gauges fitness by live reachability to the frontends instead of one external HTTP GET (which flapped the VIP on any WAN blip); uplink-less nodes (s4) are excluded from holding the VIP.
