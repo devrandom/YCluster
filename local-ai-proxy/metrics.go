@@ -172,6 +172,21 @@ func (m *Metrics) SetBackendState(backend, state string) {
 	}
 }
 
+// DeleteBackend clears the per-backend health series for a backend that
+// has left the config. Without this the last-written value (e.g. down=1)
+// lingers in the registry forever, keeping InferenceBackendDown firing
+// for a backend no model references anymore. Counters/in-flight series
+// are request-owned and left alone.
+func (m *Metrics) DeleteBackend(backend string) {
+	if m == nil {
+		return
+	}
+	m.backendUp.DeleteLabelValues(backend)
+	for _, s := range backendStateLabels {
+		m.backendState.DeleteLabelValues(backend, s)
+	}
+}
+
 // SetModelBackends replaces the per-model backend counts with the
 // given snapshot. Models no longer present are cleared so stale
 // series don't linger after a config reload removes a model.

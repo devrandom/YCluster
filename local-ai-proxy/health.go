@@ -211,10 +211,12 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 
 	urls := hc.uniqueBackendURLs()
 	hc.mu.Lock()
-	// Drop state entries for URLs that have disappeared from the source.
+	// Drop state entries for URLs that have disappeared from the source,
+	// clearing their metric series too so a stale down=1 doesn't linger.
 	for k := range hc.states {
 		if _, still := urls[k]; !still {
 			delete(hc.states, k)
+			hc.Metrics.DeleteBackend(k)
 		}
 	}
 	hc.mu.Unlock()

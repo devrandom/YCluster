@@ -12,6 +12,22 @@ import (
 	"time"
 )
 
+// countBackendSeries returns the number of series currently exported for
+// the named metric family by the checker's registry.
+func countBackendSeries(t *testing.T, m *Metrics, name string) int {
+	t.Helper()
+	fams, err := m.registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, f := range fams {
+		if f.GetName() == name {
+			return len(f.GetMetric())
+		}
+	}
+	return 0
+}
+
 func newTestHealthChecker(t *testing.T, m map[string][]*url.URL) *HealthChecker {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -158,6 +174,36 @@ func TestHealthCheckerDropsStaleEntries(t *testing.T) {
 	hc.checkAll(context.Background())
 	if _, ok := hc.Snapshot()[up.URL]; ok {
 		t.Fatal("stale entry should have been dropped")
+	}
+}
+
+func TestHealthCheckerClearsMetricsForDroppedBackend(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	source := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, up.URL)},
+	}}
+	hc := NewHealthChecker(source, time.Millisecond, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	hc.Metrics = NewMetrics()
+
+	hc.checkAll(context.Background())
+	// One backend, one series per state label (healthy/down/disabled/unknown).
+	if n := countBackendSeries(t, hc.Metrics, "local_ai_proxy_backend_state"); n != len(backendStateLabels) {
+		t.Fatalf("got %d backend_state series after first check; want %d", n, len(backendStateLabels))
+	}
+
+	// Remove the model; the backend's metric series must be cleared, not
+	// left frozen at its last value (the m2.xc:8080 ghost-alert bug).
+	source.m = map[string][]*url.URL{}
+	hc.checkAll(context.Background())
+	if n := countBackendSeries(t, hc.Metrics, "local_ai_proxy_backend_state"); n != 0 {
+		t.Fatalf("got %d backend_state series after backend removed; want 0", n)
+	}
+	if n := countBackendSeries(t, hc.Metrics, "local_ai_proxy_backend_healthy"); n != 0 {
+		t.Fatalf("got %d backend_healthy series after backend removed; want 0", n)
 	}
 }
 
