@@ -108,8 +108,12 @@ fi
 # prerequisite, not just hardening: a sleeping Mac drops its network (and any
 # wg tunnel), so Ansible could never reach it to apply these — it has to happen
 # at bootstrap. setup-macos.yml re-asserts the same values.
+# disablesleep 1 is the key one on Apple Silicon: `sleep 0` only disables the
+# idle timer, NOT "maintenance sleep" (the Mac still DarkWakes/sleeps in cycles,
+# answering pings via NIC offload while userspace/services hang). disablesleep
+# is what actually keeps it fully awake.
 echo "Disabling sleep / enabling auto-restart..."
-pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1
+pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1 disablesleep 1
 
 echo "=== Bootstrap complete ==="
 echo "SSH should now be available at $IP_ADDRESS"
