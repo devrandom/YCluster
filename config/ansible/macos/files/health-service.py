@@ -296,10 +296,12 @@ def check_clock_skew():
         # Get offset in milliseconds
         offset_ms = response.offset * 1000
         
-        # Determine status based on offset
-        if abs(offset_ms) > 1000:  # More than 1 second
+        # macOS nodes are never storage nodes and drift under native `timed`
+        # between syncs, so use the looser non-storage band (warn 1s / crit 10s).
+        # Keep in sync with ycluster.utils.clock_skew (not importable here).
+        if abs(offset_ms) > 10000:  # More than 10 seconds
             status = 'critical'
-        elif abs(offset_ms) > 100:  # More than 100ms
+        elif abs(offset_ms) > 1000:  # More than 1 second
             status = 'warning'
         else:
             status = 'healthy'

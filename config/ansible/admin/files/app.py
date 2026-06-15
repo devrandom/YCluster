@@ -813,6 +813,7 @@ def check_certificate_expiry():
 def check_clock_skew():
     """Check clock skew using NTP protocol to VIP"""
     import ntplib   # lazy: only this health check needs it
+    from ycluster.utils.clock_skew import classify_clock_offset
 
     # NTP server to check against (VIP)
     ntp_server = '10.0.0.254'
@@ -820,21 +821,16 @@ def check_clock_skew():
     try:
         # Create NTP client
         client = ntplib.NTPClient()
-        
+
         # Make NTP request (this is a lightweight UDP request)
         response = client.request(ntp_server, version=3, timeout=2)
-        
+
         # Get offset in milliseconds
         offset_ms = response.offset * 1000
-        
-        # Determine status based on offset
-        if abs(offset_ms) > 1000:  # More than 1 second
-            status = 'critical'
-        elif abs(offset_ms) > 100:  # More than 100ms
-            status = 'warning'
-        else:
-            status = 'healthy'
-        
+
+        # Thresholds are looser off storage nodes (see clock_skew module).
+        status = classify_clock_offset(offset_ms, get_current_node_type())
+
         return {
             'status': status,
             'details': {
