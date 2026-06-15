@@ -240,8 +240,11 @@
       # A cluster node must stay awake and come back after a brownout; sitting
       # dark or asleep makes it effectively offline (and drops any wg tunnel).
       # The bootstrap sets these too — this re-asserts and catches up existing
-      # nodes (e.g. m2, which stayed dark after an AC blip).
-      command: pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1
+      # nodes (e.g. m2, which stayed dark after an AC blip). disablesleep 1 is
+      # the key one on Apple Silicon: sleep 0 only disables the idle timer, not
+      # "maintenance sleep" (DarkWake cycles that answer pings via NIC offload
+      # while services hang) — disablesleep keeps it fully awake.
+      command: pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1 disablesleep 1
       become: yes
       changed_when: false
 

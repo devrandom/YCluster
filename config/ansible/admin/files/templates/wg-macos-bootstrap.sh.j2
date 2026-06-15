@@ -244,8 +244,10 @@ SSHKEY
     # so this is a reachability prerequisite that must run at bootstrap, not
     # wait for Ansible. SSH key-only hardening is applied by Ansible
     # (macos/setup-macos.yml); CLT comes transitively from the Homebrew
-    # prerequisite above.
-    pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1
+    # prerequisite above. disablesleep 1 is the key one on Apple Silicon:
+    # sleep 0 only disables the idle timer, not "maintenance sleep" (DarkWake
+    # cycles that keep pings alive via NIC offload while services hang).
+    pmset -a sleep 0 disksleep 0 displaysleep 1 hibernatemode 0 powernap 0 standby 0 autopoweroff 0 autorestart 1 disablesleep 1
 else
     echo "dev mode: skipping hostname / admin user / SSH hardening"
 fi
