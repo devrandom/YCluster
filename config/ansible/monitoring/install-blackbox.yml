@@ -75,6 +75,16 @@
               http:
                 preferred_ip_protocol: ip4
                 valid_status_codes: [401]
+            http_ping:
+              # App-liveness probe: 200 AND the body must look like the
+              # /api/ping payload, so a proxy/static fallback returning
+              # 200 with the wrong body still fails the probe.
+              prober: http
+              timeout: 10s
+              http:
+                preferred_ip_protocol: ip4
+                fail_if_body_not_matches_regexp:
+                  - '"status":\s*"ok"'
       notify: restart blackbox exporter
 
     - name: Create blackbox TLS directory

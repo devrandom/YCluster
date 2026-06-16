@@ -158,10 +158,11 @@ def get_probe_specs(domain):
             "probe_name": "inference-models",
         },
         {
-            # Admin-api public whitelist read-only status page.
-            "url": f"https://admin.{domain}/status",
-            "module": "http_2xx",
-            "probe_name": "admin-status",
+            # Admin-api liveness — probes Flask end-to-end (TLS, tunnel,
+            # nginx, app) and validates the /api/ping body, not just 200.
+            "url": f"https://admin.{domain}/api/ping",
+            "module": "http_ping",
+            "probe_name": "admin-ping",
         },
     ]
 
