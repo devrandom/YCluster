@@ -539,7 +539,12 @@ of the below is needed:
     bandwidth) while a TB wedge is being chased.
   - Consider a TB-peer-ping watchdog that reboots the local node
     after N consecutive minutes of failure (with cooldown) — TB
-    wedges have recurred and only reboots clear them.
+    wedges have now recurred at least 3 times (2026-05-16,
+    2026-05-21, 2026-06-17) and only reboots clear them. Each
+    incident also collapses K2.6 serving until both macs come back.
+    Worth investigating whether wedges correlate with JACCL traffic
+    vs. idle, and whether enabling RDMA more aggressively (or any
+    macOS update) changes the rate.
 - Bench a bandwidth-bound model to validate the regime claim above.
   Candidates: Kimi-K2.5 at 3.6-4 bit (~450-500 GB, ~32 B active),
   MiniMax-M2.7-bf16, or DeepSeek-V3-class. These are models where
