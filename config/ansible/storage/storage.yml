@@ -15,6 +15,9 @@
 - import_playbook: install-misc-storage.yml
 - import_playbook: install-docker-registry.yml
 
+# Backup verify-restore drill (needs the backup script + qdrant/postgres present)
+- import_playbook: setup-backup-verify.yml
+
 # Leader Election - Must come last to manage above database services
 - import_playbook: setup-storage-vip.yml
 - import_playbook: install-storage-leader-election.yml

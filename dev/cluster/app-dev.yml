@@ -515,3 +515,19 @@
 # inference.xc vhost on all storage nodes. The system test routes the
 # dev-echo model at c1's stub backend via etcd.
 - import_playbook: ../../config/ansible/app/install-local-ai-proxy.yml
+
+# Backup + verify-restore drill. In prod the backup script ships with
+# setup-user-rbd.yml (not run on dev), so install it here as a stand-in, then
+# run the real setup-backup-verify.yml (age identity + recipient + timer). The
+# system test then exercises backup -> verify-restore end-to-end.
+- name: Install backup-databases script (dev stand-in for setup-user-rbd)
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Install database backup script
+      copy:
+        src: ../../config/ansible/storage/scripts/backup-databases
+        dest: /usr/local/bin/backup-databases
+        mode: '0755'
+
+- import_playbook: ../../config/ansible/storage/setup-backup-verify.yml

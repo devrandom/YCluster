@@ -772,6 +772,46 @@ sec_failover() {
 }
 
 # --------------------------------------------------------------------------
+# 17. backup + verify-restore (encrypt -> scratch reload -> metrics)
+# --------------------------------------------------------------------------
+sec_backup() {
+  local leader
+  leader=$(app_leader)
+  [ -n "$leader" ] || die "no /cluster/leader/app"
+
+  # Identity + recipient are set up by setup-backup-verify.yml.
+  $SSH "$leader" "test -f /rbd/user/backups/.restore-identity/identity.age" \
+    || die "verify-restore identity missing on leader"
+  $SSH s1 "$E ycluster backup recipients list" | grep -q restore-verify \
+    || die "restore-verify recipient not registered"
+  ok "verify-restore age identity present + registered as recipient"
+
+  # Produce fresh encrypted backups of all three engines.
+  $SSH "$leader" "backup-databases backup" >/dev/null 2>&1 \
+    || die "backup-databases backup failed on leader"
+  for c in postgres qdrant etcd; do
+    $SSH "$leader" "ls /rbd/user/backups/encrypted/$c/*.age >/dev/null 2>&1" \
+      || die "no encrypted $c backup produced"
+  done
+  ok "backup produced encrypted postgres/qdrant/etcd dumps"
+
+  # The drill: decrypt + load each backup into throwaway scratch instances
+  # (scratch postgres cluster, scratch etcd data-dir, qdrant archive check).
+  $SSH "$leader" "backup-databases verify-restore" >/dev/null 2>&1 \
+    || die "verify-restore drill reported failures"
+  ok "verify-restore loaded all three backups into scratch instances"
+
+  # The drill emitted node-exporter metrics with success=1 per component.
+  local prom=/var/lib/prometheus/node-exporter/backup_restore.prom
+  $SSH "$leader" "test -f $prom" || die "metrics file $prom not written"
+  for c in postgres qdrant etcd; do
+    $SSH "$leader" "grep -q 'ycluster_backup_restore_success{component=\"$c\"} 1' $prom" \
+      || die "$c not reported successful in $prom"
+  done
+  ok "verify-restore metrics report success for all three engines"
+}
+
+# --------------------------------------------------------------------------
 main() {
   $ASSERT_ONLY || provision
 
@@ -791,6 +831,7 @@ main() {
   section "14. local-ai-proxy inference path"            sec_inference
   section "15. ACME via pebble (certbot + tunnel)"       sec_acme
   section "16. leadership + VIP failover/failback"       sec_failover
+  section "17. backup + verify-restore"                  sec_backup
 
   log "SUMMARY"
   if [ ${#FAILED[@]} -eq 0 ]; then
