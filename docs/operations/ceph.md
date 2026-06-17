@@ -101,4 +101,4 @@ When a storage node (e.g., s2) fails and needs to be replaced, follow these step
 
 ---
 
-*Note: This procedure assumes the cluster maintains quorum throughout the recovery process. For scenarios where quorum is lost, see the disaster recovery procedures.*
+*Note: This procedure assumes the cluster maintains quorum throughout the recovery process. For quorum loss (two of three mons down) and pool corruption, see [disaster-recovery.md → Ceph quorum loss or corruption](disaster-recovery.md#scenario-ceph-quorum-loss-or-corruption).*

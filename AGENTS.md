@@ -189,7 +189,7 @@ sudo systemctl restart snap.microceph.daemon.service
 
 ## Inference Gateway (local-ai-proxy)
 
-`local-ai-proxy.service` runs on every storage node (part of `ycluster-apps.target`), listening on `127.0.0.1:4001`. nginx fronts it at `http://inference.xc/v1/` (cluster-internal) and `https://<domain>/v1/` (external) with `auth_request` enforcing per-user bearer auth via `local-ai-proxy-auth.service` on `127.0.0.1:4002`. Accepted tokens: the cluster admin master key in etcd, or a row in Open-WebUI's `api_key` table.
+`local-ai-proxy.service` runs on the **storage leader only** (part of `ycluster-apps.target`, so it follows the leader/VIP — not on every storage node), listening on `127.0.0.1:4001`. nginx fronts it at `http://inference.xc/v1/` (cluster-internal; `inference.xc` → storage VIP `10.0.0.100`) and `https://<domain>/v1/` (external) with `auth_request` enforcing per-user bearer auth via `local-ai-proxy-auth.service` on `127.0.0.1:4002` (which reads Open-WebUI's `api_key` table from the leader-local postgres). Non-leaders correctly run neither. Accepted tokens: the cluster admin master key in etcd, or a row in Open-WebUI's `api_key` table.
 
 For usage and operations (adding models, API keys, etc.), see `docs/operations/inference.md`.
 

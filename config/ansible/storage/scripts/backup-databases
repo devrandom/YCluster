@@ -449,6 +449,236 @@ show_status() {
     log "Total backup size: $total_size"
 }
 
+# ---------------------------------------------------------------------------
+# Restore / verify-restore
+#
+# `restore` loads a backup back into the LIVE services (DESTRUCTIVE); etcd is a
+# safe primitive (restore to a fresh data-dir, never auto-swap) since rebuilding
+# a quorum is a coordinated multi-node runbook — see
+# docs/operations/disaster-recovery.md.
+#
+# `verify-restore` is the nightly drill: decrypt the newest backup and load it
+# into throwaway scratch instances, then emit node-exporter textfile metrics
+# (alerts in monitoring/templates/ycluster-alerts.yml.j2). It never touches a
+# live service.
+# ---------------------------------------------------------------------------
+
+RESTORE_IDENTITY="${RESTORE_IDENTITY:-/rbd/user/backups/.restore-identity/identity.age}"
+METRICS_FILE="${METRICS_FILE:-/var/lib/prometheus/node-exporter/backup_restore.prom}"
+QDRANT_STORAGE_DIR="/rbd/user/qdrant/storage"
+ETCD_DATA_DIR="/var/lib/etcd"
+PG_VERSION=16
+
+# Newest encrypted backup for a component (postgres|qdrant|etcd), or empty.
+latest_encrypted() {
+    local component="$1"
+    find "$ENCRYPTED_BACKUP_DIR/$component" -name '*.age' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -n | tail -1 | cut -d' ' -f2-
+}
+
+# Decrypt an .age file to stdout using the restore identity.
+decrypt_stream() {
+    local src="$1"
+    if [ ! -f "$RESTORE_IDENTITY" ]; then
+        log "ERROR: restore identity not found: $RESTORE_IDENTITY"
+        log "       (run storage/setup-backup-verify.yml on the storage leader)"
+        return 1
+    fi
+    age -d -i "$RESTORE_IDENTITY" "$src"
+}
+
+# Confirm a destructive action unless --yes was passed.
+require_yes() {
+    if [ "${ASSUME_YES:-0}" = "1" ]; then return 0; fi
+    local reply
+    read -r -p "About to $1. This is DESTRUCTIVE. Type 'yes' to continue: " reply
+    [ "$reply" = "yes" ]
+}
+
+restore_postgres() {
+    local enc="${1:-$(latest_encrypted postgres)}"
+    if [ -z "$enc" ] || [ ! -f "$enc" ]; then
+        log "ERROR: no PostgreSQL backup to restore ($enc)"; return 1
+    fi
+    if ! systemctl is-active --quiet postgresql@16-main; then
+        log "ERROR: postgresql@16-main is not running; start it before restore"; return 1
+    fi
+    require_yes "restore PostgreSQL from $(basename "$enc") into the LIVE cluster" \
+        || { log "Aborted"; return 1; }
+    log "Restoring PostgreSQL from $enc ..."
+    # pg_dumpall is a plain SQL script (roles + every database). ON_ERROR_STOP=0
+    # tolerates benign "role already exists" notices when restoring onto a
+    # cluster that already has the default roles.
+    if decrypt_stream "$enc" | gunzip | sudo -u postgres psql -v ON_ERROR_STOP=0 -d postgres >/dev/null; then
+        log "PostgreSQL restore complete"
+    else
+        log "ERROR: PostgreSQL restore failed"; return 1
+    fi
+}
+
+restore_qdrant() {
+    local enc="${1:-$(latest_encrypted qdrant)}"
+    if [ -z "$enc" ] || [ ! -f "$enc" ]; then
+        log "ERROR: no Qdrant backup to restore ($enc)"; return 1
+    fi
+    require_yes "restore Qdrant from $(basename "$enc") (replaces $QDRANT_STORAGE_DIR)" \
+        || { log "Aborted"; return 1; }
+    local tmp; tmp=$(mktemp /tmp/qdrant-restore.XXXXXX.snapshot)
+    if ! decrypt_stream "$enc" > "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! tar -tf "$tmp" >/dev/null 2>&1; then
+        log "ERROR: decrypted Qdrant snapshot is not a valid archive"; rm -f "$tmp"; return 1
+    fi
+    log "Stopping qdrant ..."
+    systemctl stop qdrant || true
+    # Keep the old storage aside for rollback rather than deleting it.
+    local aside="${QDRANT_STORAGE_DIR}.pre-restore.${TIMESTAMP}"
+    if [ -d "$QDRANT_STORAGE_DIR" ]; then mv "$QDRANT_STORAGE_DIR" "$aside"; fi
+    mkdir -p "$QDRANT_STORAGE_DIR"
+    # Full-storage snapshots (POST /snapshots) are a tar of the storage dir.
+    # NB: verify the extracted layout against the running qdrant version on first
+    # use (see disaster-recovery.md) — the old storage is preserved at $aside.
+    tar -xf "$tmp" -C "$QDRANT_STORAGE_DIR"
+    rm -f "$tmp"
+    systemctl start qdrant
+    log "Qdrant restored; previous storage kept at $aside (remove once verified)"
+}
+
+restore_etcd() {
+    local enc="${1:-$(latest_encrypted etcd)}"
+    if [ -z "$enc" ] || [ ! -f "$enc" ]; then
+        log "ERROR: no etcd backup to restore ($enc)"; return 1
+    fi
+    if [ -z "${RESTORE_ETCD_DATADIR:-}" ]; then
+        log "ERROR: restore etcd requires --data-dir <dir> (a fresh path)."
+        log "       Rebuilding a quorum is a multi-node procedure: see"
+        log "       docs/operations/disaster-recovery.md (etcd quorum loss)."
+        return 1
+    fi
+    if [ -e "$RESTORE_ETCD_DATADIR" ]; then
+        log "ERROR: $RESTORE_ETCD_DATADIR already exists; refusing to overwrite"; return 1
+    fi
+    local tmp; tmp=$(mktemp /tmp/etcd-restore.XXXXXX.db)
+    if ! decrypt_stream "$enc" > "$tmp"; then rm -f "$tmp"; return 1; fi
+    local name="${RESTORE_ETCD_NAME:-$(hostname -s)}"
+    local args=(--data-dir "$RESTORE_ETCD_DATADIR")
+    if [ -n "${RESTORE_ETCD_INITIAL_CLUSTER:-}" ]; then
+        args+=(--name "$name" --initial-cluster "$RESTORE_ETCD_INITIAL_CLUSTER")
+    fi
+    if [ -n "${RESTORE_ETCD_PEER_URL:-}" ]; then
+        args+=(--initial-advertise-peer-urls "$RESTORE_ETCD_PEER_URL")
+    fi
+    if etcdctl snapshot restore "$tmp" "${args[@]}"; then
+        rm -f "$tmp"
+        log "etcd snapshot restored to $RESTORE_ETCD_DATADIR (name=$name)"
+        log "Next: stop etcd, replace $ETCD_DATA_DIR with it (chown etcd:etcd, mode 0700),"
+        log "      then start etcd. Full procedure: docs/operations/disaster-recovery.md"
+    else
+        log "ERROR: etcd snapshot restore failed"; rm -f "$tmp"; return 1
+    fi
+}
+
+verify_restore_postgres() {
+    local enc; enc=$(latest_encrypted postgres)
+    if [ -z "$enc" ]; then log "verify postgres: no backup found (skipped)"; return 2; fi
+    local cluster="verifyrestore" port=5433 rc=0
+    # Drop any leftover scratch cluster from a prior aborted run.
+    if pg_lsclusters -h 2>/dev/null | awk '{print $1" "$2}' | grep -qx "$PG_VERSION $cluster"; then
+        pg_dropcluster --stop "$PG_VERSION" "$cluster" >/dev/null 2>&1 || true
+    fi
+    if ! pg_createcluster "$PG_VERSION" "$cluster" -p "$port" >/dev/null 2>&1; then
+        log "verify postgres: could not create scratch cluster"; return 1
+    fi
+    if ! pg_ctlcluster "$PG_VERSION" "$cluster" start >/dev/null 2>&1; then
+        log "verify postgres: scratch cluster failed to start"
+        pg_dropcluster --stop "$PG_VERSION" "$cluster" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if decrypt_stream "$enc" | gunzip | sudo -u postgres psql -p "$port" -d postgres -v ON_ERROR_STOP=0 >/dev/null 2>&1; then
+        local dbs
+        dbs=$(sudo -u postgres psql -p "$port" -tAc \
+            "SELECT count(*) FROM pg_database WHERE datname NOT IN ('template0','template1','postgres');" 2>/dev/null) || dbs=0
+        if [ "${dbs:-0}" -ge 1 ]; then
+            log "verify postgres: dump loaded cleanly ($dbs user databases)"
+        else
+            log "verify postgres: dump loaded but no user databases found"; rc=1
+        fi
+    else
+        log "verify postgres: psql load failed"; rc=1
+    fi
+    pg_dropcluster --stop "$PG_VERSION" "$cluster" >/dev/null 2>&1 || true
+    return $rc
+}
+
+verify_restore_qdrant() {
+    local enc; enc=$(latest_encrypted qdrant)
+    if [ -z "$enc" ]; then log "verify qdrant: no backup found (skipped)"; return 2; fi
+    # Shallow check: decrypt + archive integrity. A deep load into a temp qdrant
+    # instance is a documented follow-up (disaster-recovery.md).
+    local tmp rc=0; tmp=$(mktemp /tmp/verify-qdrant.XXXXXX.snapshot)
+    if decrypt_stream "$enc" > "$tmp" && tar -tf "$tmp" >/dev/null 2>&1; then
+        log "verify qdrant: snapshot decrypts and is a valid archive (shallow check)"
+    else
+        log "verify qdrant: FAILED"; rc=1
+    fi
+    rm -f "$tmp"
+    return $rc
+}
+
+verify_restore_etcd() {
+    local enc; enc=$(latest_encrypted etcd)
+    if [ -z "$enc" ]; then log "verify etcd: no backup found (skipped)"; return 2; fi
+    local tmp rc=0; tmp=$(mktemp -d /tmp/verify-etcd.XXXXXX)
+    if decrypt_stream "$enc" > "$tmp/snap.db" \
+        && etcdctl snapshot status "$tmp/snap.db" --write-out=json >/dev/null 2>&1 \
+        && etcdctl snapshot restore "$tmp/snap.db" --data-dir "$tmp/data" >/dev/null 2>&1 \
+        && [ -d "$tmp/data/member" ]; then
+        log "verify etcd: snapshot restores to a valid data dir"
+    else
+        log "verify etcd: FAILED"; rc=1
+    fi
+    rm -rf "$tmp"
+    return $rc
+}
+
+# Emit node-exporter textfile metrics for the verify-restore outcome + backup
+# freshness. Rendering/scanning logic is in ycluster.utils.backup_status (unit
+# tested); this just hands it the per-component result tokens (1|0|skip).
+emit_verify_metrics() {
+    local pg="$1" qd="$2" et="$3"
+    local dir; dir=$(dirname "$METRICS_FILE")
+    if [ ! -d "$dir" ]; then
+        log "verify-restore: metrics dir $dir absent, skipping metric emission"
+        return 0
+    fi
+    python3 -m ycluster.utils.backup_status \
+        --encrypted-dir "$ENCRYPTED_BACKUP_DIR" \
+        --out "$METRICS_FILE" \
+        --result postgres="$pg" --result qdrant="$qd" --result etcd="$et" \
+        || log "verify-restore: metric emission failed"
+}
+
+# Map a verify_restore_* return code to a metric token: 0->ok(1), 2->skip, else
+# fail(0). Only a real failure (a present backup that did not load) fails the
+# drill; an absent backup is skipped, not a failure.
+verify_token() { case "$1" in 0) echo 1 ;; 2) echo skip ;; *) echo 0 ;; esac; }
+
+verify_restore() {
+    log "=== verify-restore drill ==="
+    # `&& rc=0 || rc=$?` (not `cmd; rc=$?`) so set -e doesn't abort on a
+    # non-zero return (fail=1 or skip=2) before we capture the code.
+    local pg_rc qd_rc et_rc
+    verify_restore_postgres && pg_rc=0 || pg_rc=$?
+    verify_restore_qdrant   && qd_rc=0 || qd_rc=$?
+    verify_restore_etcd     && et_rc=0 || et_rc=$?
+    emit_verify_metrics "$(verify_token $pg_rc)" "$(verify_token $qd_rc)" "$(verify_token $et_rc)"
+    if [ "$pg_rc" -ne 1 ] && [ "$qd_rc" -ne 1 ] && [ "$et_rc" -ne 1 ]; then
+        log "verify-restore: no failures (postgres=$pg_rc qdrant=$qd_rc etcd=$et_rc; rc 0=ok 2=skip)"
+        return 0
+    fi
+    log "verify-restore: FAILURES (postgres=$pg_rc qdrant=$qd_rc etcd=$et_rc; rc 1=fail)"
+    return 1
+}
+
 # Check if this node is the storage leader
 check_storage_leader() {
     # Check if user RBD is mounted (only storage leader should have this)
@@ -535,16 +765,56 @@ main() {
             cleanup_old_backups
             show_status
             ;;
+        restore)
+            check_storage_leader
+            shift
+            local component="${1:-}"
+            shift || true
+            local restore_file=""
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --yes|-y) ASSUME_YES=1 ;;
+                    --identity) RESTORE_IDENTITY="$2"; shift ;;
+                    --data-dir) RESTORE_ETCD_DATADIR="$2"; shift ;;
+                    --name) RESTORE_ETCD_NAME="$2"; shift ;;
+                    --initial-cluster) RESTORE_ETCD_INITIAL_CLUSTER="$2"; shift ;;
+                    --peer-url) RESTORE_ETCD_PEER_URL="$2"; shift ;;
+                    -*) echo "Unknown restore option: $1"; exit 1 ;;
+                    *) restore_file="$1" ;;
+                esac
+                shift
+            done
+            case "$component" in
+                postgres|postgresql) restore_postgres "$restore_file" ;;
+                qdrant)              restore_qdrant "$restore_file" ;;
+                etcd)                restore_etcd "$restore_file" ;;
+                *)
+                    echo "Usage: $0 restore {postgres|qdrant|etcd} [file] [--yes] [--identity F]"
+                    echo "  Restores the newest backup (or [file]) into the LIVE service. DESTRUCTIVE."
+                    echo "  etcd: restores to a fresh dir only and needs --data-dir <dir>"
+                    echo "        (+ optional --name/--initial-cluster/--peer-url for a cross-node rebuild);"
+                    echo "        rebuilding a quorum is a runbook — see docs/operations/disaster-recovery.md"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        verify-restore)
+            check_storage_leader
+            create_backup_dirs
+            verify_restore
+            ;;
         *)
-            echo "Usage: $0 {backup [postgres|qdrant|etcd|all]|sync|status|cleanup}"
-            echo "  backup [db] - Create backups (default: all databases)"
-            echo "    postgres  - Backup PostgreSQL only"
-            echo "    qdrant    - Backup Qdrant only"
-            echo "    etcd      - Backup etcd only"
-            echo "    all       - Backup all databases (default)"
-            echo "  sync        - Sync encrypted backups to remote destinations"
-            echo "  status      - Show current backup status"
-            echo "  cleanup     - Clean up old backups only"
+            echo "Usage: $0 {backup [postgres|qdrant|etcd|all]|restore <db> [file]|verify-restore|sync|status|cleanup}"
+            echo "  backup [db]    - Create backups (default: all databases)"
+            echo "    postgres     - Backup PostgreSQL only"
+            echo "    qdrant       - Backup Qdrant only"
+            echo "    etcd         - Backup etcd only"
+            echo "    all          - Backup all databases (default)"
+            echo "  restore <db>   - Restore newest backup into the LIVE service (DESTRUCTIVE; --yes to skip prompt)"
+            echo "  verify-restore - Drill: load newest backups into scratch instances, emit metrics"
+            echo "  sync           - Sync encrypted backups to remote destinations"
+            echo "  status         - Show current backup status"
+            echo "  cleanup        - Clean up old backups only"
             exit 1
             ;;
     esac

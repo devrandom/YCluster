@@ -1,0 +1,139 @@
+---
+# Nightly backup verify-restore drill + its age identity.
+#
+# `backup-databases verify-restore` (installed by setup-user-rbd.yml) loads the
+# newest encrypted backups into throwaway scratch instances and emits
+# node-exporter textfile metrics; the SystemdUnitFailed / backup-freshness
+# alerts (ycluster-alerts.yml.j2) page on failure or staleness.
+#
+# To decrypt, the drill needs an age identity ON the storage leader. We keep the
+# private key on the encrypted user RBD (root:root 0400) — the same FS that
+# already holds the live plaintext databases, so it adds no blast radius — and
+# register its public key as a backup recipient so backups are encrypted to it.
+# A hardware-key attended drill (no on-disk privkey) is the off-host complement;
+# see docs/operations/disaster-recovery.md.
+- name: Setup nightly backup verify-restore drill
+  hosts: storage
+  become: yes
+  vars:
+    identity_dir: /rbd/user/backups/.restore-identity
+    identity_file: /rbd/user/backups/.restore-identity/identity.age
+    recipient_name: restore-verify
+
+  tasks:
+    - name: Ensure backup-databases runtime deps are installed
+      apt:
+        name:
+          - age   # encrypt/decrypt backups
+          - jq    # parse recipient list + qdrant snapshot JSON
+        state: present
+
+    # The drill writes its metric here. Prometheus' install owns this dir in
+    # prod; ensure it exists so the metric is produced even where node-exporter
+    # isn't installed (e.g. the dev cluster). Owner left untouched if it exists.
+    - name: Ensure node-exporter textfile directory exists
+      file:
+        path: /var/lib/prometheus/node-exporter
+        state: directory
+        mode: '0755'
+
+    - name: Detect storage leader (user RBD mounted here)
+      command: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    # --- Identity + recipient: storage leader only (it holds the RBD) ----------
+    - name: Create restore-identity directory
+      file:
+        path: "{{ identity_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      when: is_storage_leader
+
+    - name: Check for existing restore identity
+      stat:
+        path: "{{ identity_file }}"
+      register: identity_stat
+      when: is_storage_leader
+
+    - name: Generate restore identity (age keypair)
+      command: age-keygen -o "{{ identity_file }}"
+      when: is_storage_leader and not identity_stat.stat.exists
+      no_log: true
+
+    - name: Lock down restore identity permissions
+      file:
+        path: "{{ identity_file }}"
+        owner: root
+        group: root
+        mode: '0400'
+      when: is_storage_leader
+
+    - name: Derive restore identity public key
+      command: age-keygen -y "{{ identity_file }}"
+      register: restore_pubkey
+      changed_when: false
+      when: is_storage_leader
+
+    - name: Check whether the recipient is already registered
+      command: ycluster backup recipients show "{{ recipient_name }}"
+      register: recipient_show
+      failed_when: false
+      changed_when: false
+      when: is_storage_leader
+
+    - name: Register restore identity as a backup recipient
+      command: >-
+        ycluster backup recipients add "{{ recipient_name }}" "{{ restore_pubkey.stdout }}"
+        --description "Nightly verify-restore drill identity (storage leader)"
+      when: is_storage_leader and recipient_show.rc != 0
+
+    # --- verify-restore service + timer: every storage node, self-gates --------
+    # The script exits early on non-leaders (check_storage_leader), so it is safe
+    # to install the timer fleet-wide; only the current leader runs the drill.
+    - name: Install verify-restore systemd service
+      copy:
+        dest: /etc/systemd/system/backup-verify-restore.service
+        content: |
+          [Unit]
+          Description=Backup verify-restore drill
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/backup-databases verify-restore
+          User=root
+
+    - name: Install verify-restore systemd timer
+      copy:
+        dest: /etc/systemd/system/backup-verify-restore.timer
+        content: |
+          [Unit]
+          Description=Backup verify-restore drill timer
+          Requires=backup-verify-restore.service
+
+          [Timer]
+          # After the daily backup (midnight + up to 1h jitter) has landed.
+          OnCalendar=*-*-* 04:00:00
+          RandomizedDelaySec=30m
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable verify-restore timer
+      systemd:
+        name: backup-verify-restore.timer
+        enabled: yes
+        state: started
