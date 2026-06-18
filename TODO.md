@@ -10,7 +10,6 @@ A prioritized index into the detail below; nothing here is a separate item.
 Completed work has moved to `CHANGELOG.md`.
 
 **Next (operational resilience; caused real outages or data-loss exposure):**
-- remove prod private info from git history (see new AGENTS.md rules)
 - DR runbooks, esp. etcd quorum loss (only unrecoverable failure mode) + a `restore` path; Ceph off-cluster backup story.
 - Incus storage `dir`→`zfs` migration — runaway-guest root-fs fill (nv3 cascade).
 - WG inbound ingress that follows the leader; rathole PROXY protocol for real client IPs.
