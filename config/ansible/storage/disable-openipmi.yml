@@ -1,27 +1,44 @@
 ---
-# Storage nodes have no BMC (out-of-band is AMT), so the openipmi LSB
-# init script — pulled in as a dependency of ipmitool — fails on every
-# boot trying to load IPMI kernel drivers. Mask it to keep
-# `systemctl --failed` clean. Nvidia nodes have real BMCs and keep it.
-- name: Disable openipmi on storage nodes
-  hosts: storage
+# openipmi (an LSB init script pulled in as a dependency of ipmitool) tries to
+# load IPMI kernel drivers at boot and fails on machines with no BMC, dirtying
+# `systemctl --failed` and firing SystemdUnitFailed. Mask it wherever there is
+# no real BMC.
+#
+# BMC presence == an SMBIOS "IPMI Device Information" structure (type 38). The
+# kernel decodes SMBIOS at boot and exposes each structure under
+# /sys/firmware/dmi/entries/<type>-<instance>, so /sys/firmware/dmi/entries/38-0
+# is a parse-free, driver-independent existence check (no dmidecode, no text
+# scraping, correct whether or not the ipmi modules are loaded). Nvidia server
+# boards have a BMC (KCS interface) and keep openipmi; storage (out-of-band is
+# AMT, which is not IPMI), compute, nas and adhoc consumer boards have none.
+- name: Mask openipmi on nodes without a BMC
+  hosts: managed
   become: yes
   tasks:
-    - name: Check if openipmi unit exists
+    - name: Check whether the openipmi unit exists
       command: systemctl cat openipmi.service
       register: openipmi_unit
       failed_when: false
       changed_when: false
 
-    - name: Stop and mask openipmi
+    - name: Probe SMBIOS for an IPMI Device (type 38 => real BMC)
+      stat:
+        path: /sys/firmware/dmi/entries/38-0
+      register: smbios_ipmi
+
+    - name: Stop and mask openipmi where there is no BMC
       systemd:
         name: openipmi
         state: stopped
         masked: yes
-      when: openipmi_unit.rc == 0
+      when:
+        - openipmi_unit.rc == 0
+        - not smbios_ipmi.stat.exists
 
-    - name: Clear failed state
+    - name: Clear any failed state left behind
       command: systemctl reset-failed openipmi.service
       failed_when: false
       changed_when: false
-      when: openipmi_unit.rc == 0
+      when:
+        - openipmi_unit.rc == 0
+        - not smbios_ipmi.stat.exists
