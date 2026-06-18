@@ -1,5 +1,6 @@
 #!/bin/bash
-# Sync local repo to s3.yc:/opt/infrastructure/ using rsync + watchman.
+# Sync local repo to $YC_SYNC_HOST:/opt/infrastructure/ (default s1.yc) using
+# rsync + watchman.
 #
 # Commands (run with no args for usage):
 #   --start  Set up the watchman trigger + run an initial sync, then return.
@@ -21,7 +22,10 @@
 
 set -euo pipefail
 
-DEST="s3.yc:/opt/infrastructure/"
+# Sync target host. Defaults to s1.yc; override with the YC_SYNC_HOST env var
+# (e.g. an operator-local direnv .envrc) — handy when a node's direct route is
+# down and you must sync over a rathole alias such as s3.rat instead.
+DEST="${YC_SYNC_HOST:-s1.yc}:/opt/infrastructure/"
 REPO="$(cd "$(dirname "$0")" && pwd)"
 LOG="/tmp/dev-sync.log"
 
