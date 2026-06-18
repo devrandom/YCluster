@@ -332,6 +332,15 @@ still serving — auto-heals on reboot and needs none of this.)
    `ycluster cluster status`.
 6. **Remaining nodes** (compute, GPU, etc.) PXE/boot and rejoin via DHCP/etcd.
 
+**Re-seed the Ansible vault password before running any playbook.** `run-playbook.sh`
+reads `/run/shm/.vault-pass`, which lives on tmpfs and is wiped by every reboot —
+so after a cold start it is gone on all nodes and `run-playbook.sh` aborts with
+`vault password file /run/shm/.vault-pass was not found` before doing anything.
+Restore it on whichever node you run playbooks from (the entry node):
+`printf %s '<vault-pass>' > /run/shm/.vault-pass && chmod 600 /run/shm/.vault-pass`.
+This is a prerequisite for every playbook-based recovery step here (etcd rejoin,
+site.yml, etc.).
+
 If etcd will not form quorum once the nodes are up (corrupt data on two nodes),
 drop into [etcd quorum loss](#scenario-etcd-quorum-loss) — but Tang quorum
 (step 1) comes first regardless, or `/secrets` never opens.
