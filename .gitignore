@@ -1,5 +1,7 @@
+.claude
 .aider*
 AGENTS.local.md
+NOTES.md
 /config/ansible/vault/
 data/dnsmasq.leases
 data/*.iso
@@ -34,3 +36,7 @@ config/ansible/inventory_cluster.yml
 
 # direnv (operator-local env, e.g. YC_SYNC_HOST)
 .envrc
+
+# private tracking bucket: prod incidents/events + the git-history scrub spec
+# (the replace spec contains the very strings being scrubbed — never commit it)
+/private/
