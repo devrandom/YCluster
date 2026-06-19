@@ -29,7 +29,14 @@ DEST="${YC_SYNC_HOST:-s1.yc}:/opt/infrastructure/"
 REPO="$(cd "$(dirname "$0")" && pwd)"
 LOG="/tmp/dev-sync.log"
 
-rsync_opts=(-az --exclude-from="$REPO/.watchignore")
+# Shared rsync filtering, used by the live sync, the --check dry-run, and the
+# watchman trigger so they can't drift. --copy-unsafe-links dereferences
+# symlinks pointing OUTSIDE the repo tree so their real contents land on the
+# cluster — the only such link is config/ansible/host_vars ->
+# ../../../ycluster-private/host_vars (the private sibling repo); in-tree links
+# (dev/ansible/prod, CLAUDE.md) stay as symlinks.
+rsync_filter=(--copy-unsafe-links --exclude-from="$REPO/.watchignore")
+rsync_opts=(-az "${rsync_filter[@]}")
 
 usage() {
     cat <<EOF
@@ -65,7 +72,7 @@ do_check() {
     # legitimately differ from a clean checkout, and we only care that local
     # state landed. Exit 1 on any difference so the result is scriptable.
     local out rc
-    out=$(rsync -naci --exclude-from="$REPO/.watchignore" "$REPO/" "$DEST") || {
+    out=$(rsync -naci "${rsync_filter[@]}" "$REPO/" "$DEST") || {
         rc=$?
         echo "[$(date +%T)] rsync check failed (rc=$rc)" >&2
         return "$rc"
@@ -100,7 +107,7 @@ setup_trigger() {
     ["match", "**/.venv/**", "wholename"],
     ["match", "**/venv/**", "wholename"]
   ]]],
-  "command": ["bash", "-c", "rsync -az --exclude-from='$REPO/.watchignore' '$REPO/' '$DEST' >> $LOG 2>&1 && echo \"[\$(date +%T)] done\" >> $LOG || echo \"[\$(date +%T)] rsync failed\" >> $LOG"],
+  "command": ["bash", "-c", "rsync ${rsync_opts[*]} '$REPO/' '$DEST' >> $LOG 2>&1 && echo \"[\$(date +%T)] done\" >> $LOG || echo \"[\$(date +%T)] rsync failed\" >> $LOG"],
   "stdin": "/dev/null"
 }]
 EOF

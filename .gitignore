@@ -40,3 +40,6 @@ config/ansible/inventory_cluster.yml
 # private tracking bucket: prod incidents/events + the git-history scrub spec
 # (the replace spec contains the very strings being scrubbed — never commit it)
 /private/
+
+# host_vars lives in the sibling private repo ycluster-private (symlinked in)
+/config/ansible/host_vars
