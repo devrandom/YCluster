@@ -59,6 +59,48 @@
       when: ipmi_modules.changed
       failed_when: false
 
+    # Super-I/O hwmon driver for chassis-ambient (SYSTIN), the only room-temp
+    # proxy on chassis with no IPMI intake / Comino sensor. Auto-detected
+    # rather than declared per-host: try the module, then persist it only
+    # where a Nuvoton chip actually bound. This keeps the playbook
+    # deployment-agnostic (no hostnames) and avoids leaving
+    # systemd-modules-load.service failed on boards that have no such chip,
+    # where the module refuses to insert. node_exporter's hwmon collector
+    # surfaces the sensor automatically once loaded; the chassis-ambient
+    # alert keys on the SYSTIN label and suppresses nodes that have a real
+    # intake sensor, so loading it on an intake-equipped board is harmless.
+    - name: Probe for a Nuvoton Super-I/O chassis-ambient sensor
+      command: modprobe nct6775
+      changed_when: false
+      failed_when: false
+
+    - name: Detect whether an nct6xxx hwmon chip bound
+      shell: grep -ilq '^nct6' /sys/class/hwmon/hwmon*/name
+      register: nct_hwmon
+      changed_when: false
+      failed_when: false
+
+    - name: Persist chassis-ambient sensor module where the chip is present
+      copy:
+        dest: /etc/modules-load.d/nct6775.conf
+        content: "nct6775\n"
+        mode: '0644'
+      when: nct_hwmon.rc == 0
+
+    - name: Drop chassis-ambient persistence where no such chip exists
+      file:
+        path: /etc/modules-load.d/nct6775.conf
+        state: absent
+      when: nct_hwmon.rc != 0
+
+    # The probe pulls in nct6775_core as a dependency even when the platform
+    # driver binds no chip (no hwmon, no metric). Unload it so a board
+    # without the sensor is left exactly as found.
+    - name: Unload probe module where no chip bound
+      shell: for m in nct6775 nct6775_core; do modprobe -r "$m" 2>/dev/null || true; done
+      changed_when: false
+      when: nct_hwmon.rc != 0
+
     - name: Install temperature collector script
       copy:
         src: files/node-temps-collector.py
