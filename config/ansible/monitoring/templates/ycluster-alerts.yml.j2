@@ -529,10 +529,12 @@ groups:
 
   - name: ycluster-temperature
     rules:
-      # Ambient (intake) temperature. Sources: IPMI INLET_AIR_TEMP on
-      # server-class chassis (nv1), Comino RM air-inlet probe on
-      # liquid-cooled workstation chassis (nv3). Nodes without either
-      # don't fire (nv2 has no intake sensor wired up).
+      # Ambient (intake) temperature — true room/inlet air only. Sources:
+      # IPMI INLET_AIR_TEMP on server-class chassis, and the Comino RM
+      # air-inlet probe on liquid-cooled workstation chassis. Both are
+      # role-labeled "ambient" by the collector; internal board sensors are
+      # not, so they can't match here. Chassis with neither intake sensor
+      # are covered (at higher thresholds) by the chassis-ambient alert below.
       - alert: HighAmbientTemperature
         expr: |
           max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 25
@@ -556,6 +558,53 @@ groups:
         annotations:
           summary: "Critical ambient temperature on {{ $labels.node }}"
           description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (>30°C) — check room HVAC"
+
+      # Chassis-ambient (internal board) temperature — a coarser room-temp
+      # proxy for chassis that expose no true intake sensor. Sourced from
+      # the Super-I/O SYSTIN ("system") thermistor via the nct6775 hwmon
+      # driver, selected by sensor label so it is hardware-keyed, not
+      # host-keyed. Thresholds are higher than the intake alert because an
+      # internal sensor sits above room air by a chassis/load-dependent
+      # offset. Suppressed on any node that has a real intake sensor — that
+      # node is governed by the stricter ambient alert, and its internal
+      # sensor runs hotter (and would false-fire here).
+      - alert: HighChassisAmbientTemperature
+        expr: |
+          max by (node) (
+            node_hwmon_temp_celsius
+            * on(chip, sensor, instance) group_left()
+            node_hwmon_sensor_label{label="SYSTIN"}
+          ) > 30
+          unless on(node) (
+            max by (node) (node_ipmi_temperature_celsius{role="ambient"})
+            or
+            max by (node) (node_comino_temperature_celsius{role="ambient"})
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High chassis-ambient temperature on {{ $labels.node }}"
+          description: "Internal board (SYSTIN) sensor on {{ $labels.node }} is {{ $value }}°C (>30°C) for 5m — no intake sensor here, check room temperature"
+
+      - alert: CriticalChassisAmbientTemperature
+        expr: |
+          max by (node) (
+            node_hwmon_temp_celsius
+            * on(chip, sensor, instance) group_left()
+            node_hwmon_sensor_label{label="SYSTIN"}
+          ) > 35
+          unless on(node) (
+            max by (node) (node_ipmi_temperature_celsius{role="ambient"})
+            or
+            max by (node) (node_comino_temperature_celsius{role="ambient"})
+          )
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical chassis-ambient temperature on {{ $labels.node }}"
+          description: "Internal board (SYSTIN) sensor on {{ $labels.node }} is {{ $value }}°C (>35°C) — no intake sensor here, check room HVAC"
 
       # CPU die temperature via k10temp (AMD) — temp1 is Tctl. Far more
       # reliable than IPMI "CPU Package Temp", which is often a socket
