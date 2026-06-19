@@ -7,15 +7,19 @@
 # BMC reads the card's thermal diode via the chassis sensor bus,
 # independent of which host driver (or none) is bound to the device.
 #
-# Comino RM (USB-CDC on /dev/ttyACM0) is the only ambient source on
-# nv3, which uses a workstation board that doesn't expose an inlet
-# sensor via IPMI. See contrib/comino-sensors.py for protocol details.
+# Comino RM (an STM32 USB-CDC device) is the only ambient source on
+# workstation boards that don't expose an inlet sensor via IPMI. It is
+# auto-discovered among the /dev/ttyACM* devices rather than assumed to
+# be ttyACM0: a chassis may expose a second STM32 ACM device (e.g. a
+# CRPS power-supply controller) that enumerates first and takes ttyACM0.
+# See contrib/comino-sensors.py for protocol details.
 #
 # Output (atomic write to /var/lib/prometheus/node-exporter/temps.prom):
 #   node_ipmi_temperature_celsius{sensor="...",role="..."} <value>
 #   node_gpu_temperature_celsius{index="...",pci_bus_id="...",name="..."} <value>
 #   node_comino_temperature_celsius{sensor="...",role="..."} <value>
 #   node_comino_fan_rpm{channel="...",name="..."} <value>
+import glob
 import os
 import re
 import subprocess
@@ -26,9 +30,11 @@ import time
 OUT = "/var/lib/prometheus/node-exporter/temps.prom"
 
 # Comino RM cooling controller (STM32 USB-CDC). If present, the inlet
-# air sensor (T3) is our true ambient on workstation-class chassis
-# like nv3 where IPMI exposes no INLET_AIR_TEMP equivalent.
-COMINO_DEV = "/dev/ttyACM0"
+# air sensor (T3) is our true ambient on workstation-class chassis where
+# IPMI exposes no INLET_AIR_TEMP equivalent. The controller is found by
+# probing each candidate device for a well-formed :get_data reply rather
+# than hardcoding a device node (see comino_candidate_devices).
+COMINO_GLOB = "/dev/ttyACM*"
 COMINO_FIELDS = [
     "TOT", "CUR", "ALARM", "ERROR", "V",
     "T0", "T1", "T2", "T3", "T4", "T5",
@@ -181,38 +187,67 @@ def _comino_channel_labels(port):
     return labels
 
 
+def comino_candidate_devices():
+    """USB-CDC ACM devices that might be the Comino RM controller."""
+    return sorted(glob.glob(COMINO_GLOB))
+
+
+def parse_comino_data(line):
+    """Parse a :get_data reply into a field->value dict, or None if the
+    line doesn't look like a Comino RM response. A second STM32 ACM
+    device (e.g. a CRPS power-supply controller) shares the USB-CDC VID
+    but answers :get_data with a 'command not found' error, which fails
+    the field-count check here."""
+    parts = line.split(";")
+    if len(parts) != len(COMINO_FIELDS):
+        return None
+    return dict(zip(COMINO_FIELDS, parts))
+
+
+def select_comino_device(devices, reader):
+    """Return (dev, data, labels) for the first device whose reader()
+    yields a well-formed Comino reply, or None if none match. reader(dev)
+    returns (line, channel_labels) or None on an I/O failure."""
+    for dev in devices:
+        res = reader(dev)
+        if res is None:
+            continue
+        line, labels = res
+        data = parse_comino_data(line)
+        if data is not None:
+            return dev, data, labels
+    return None
+
+
 def collect_comino():
     """Return (temps, fans). temps = [(sensor, role, c)]; fans = [(ch, name, rpm)]."""
     temps, fans = [], []
-    if not os.path.exists(COMINO_DEV):
-        return temps, fans
     try:
         import serial
     except ImportError:
         print("# pyserial not installed; skipping Comino", file=sys.stderr)
         return temps, fans
 
-    # rm-monitor (if installed) grabs the port via TIOCEXCL during 5s
-    # polls, so retry briefly on EBUSY.
-    last_err = None
-    for _ in range(5):
-        try:
-            with serial.Serial(COMINO_DEV, 9600, timeout=0.1, exclusive=True) as port:
-                ch_labels = _comino_channel_labels(port)
-                line = _comino_query(port, ":get_data")
-            break
-        except (serial.SerialException, OSError) as e:
-            last_err = e
-            time.sleep(0.3)
-    else:
-        print(f"# comino read failed: {last_err}", file=sys.stderr)
-        return temps, fans
+    def reader(dev):
+        # rm-monitor (if installed) grabs the port via TIOCEXCL during 5s
+        # polls, so retry briefly on EBUSY.
+        last_err = None
+        for _ in range(5):
+            try:
+                with serial.Serial(dev, 9600, timeout=0.1, exclusive=True) as port:
+                    labels = _comino_channel_labels(port)
+                    line = _comino_query(port, ":get_data")
+                return line, labels
+            except (serial.SerialException, OSError) as e:
+                last_err = e
+                time.sleep(0.3)
+        print(f"# comino read failed on {dev}: {last_err}", file=sys.stderr)
+        return None
 
-    parts = line.split(";")
-    if len(parts) != len(COMINO_FIELDS):
-        print(f"# comino unexpected field count {len(parts)}: {line!r}", file=sys.stderr)
+    selected = select_comino_device(comino_candidate_devices(), reader)
+    if selected is None:
         return temps, fans
-    data = dict(zip(COMINO_FIELDS, parts))
+    _dev, data, ch_labels = selected
 
     for field, (sensor, role) in COMINO_TEMP_MAP.items():
         try:
