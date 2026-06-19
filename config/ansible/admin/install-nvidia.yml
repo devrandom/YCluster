@@ -67,6 +67,38 @@
         state: present
       register: driver_install
 
+    # On a fresh node's first boot (before the driver was installed) nouveau
+    # claims the GPUs. It must be unloaded before the container toolkit's
+    # postinst probes the GPU with nvidia-smi, otherwise modprobe nvidia wedges
+    # in uninterruptible sleep trying to bind devices nouveau still holds, which
+    # deadlocks the whole apt transaction. Installing the driver above lays down
+    # the nouveau blacklist and rebuilds the initramfs, so a reboot clears it.
+    - name: Check whether nouveau is loaded
+      command: lsmod
+      register: lsmod_out
+      changed_when: false
+
+    - name: Stat the nvidia-shipped nouveau blacklist
+      stat:
+        path: /usr/lib/modprobe.d/nvidia-graphics-drivers.conf
+      register: nouveau_blacklist
+      when: "'nouveau' in lsmod_out.stdout"
+
+    - name: Fail if nouveau is loaded without a blacklist in place
+      fail:
+        msg: >-
+          nouveau is loaded but /usr/lib/modprobe.d/nvidia-graphics-drivers.conf
+          is missing; a reboot would not unload it. Check the
+          {{ nvidia_driver_package }} install.
+      when:
+        - "'nouveau' in lsmod_out.stdout"
+        - not nouveau_blacklist.stat.exists
+
+    - name: Reboot to unload nouveau before configuring the container toolkit
+      reboot:
+        reboot_timeout: 600
+      when: "'nouveau' in lsmod_out.stdout"
+
     - name: Install NVIDIA container toolkit
       apt:
         name: nvidia-container-toolkit
