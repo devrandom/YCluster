@@ -173,6 +173,26 @@ NotImplementedError: MSA sparse backend v1 is bf16-KV only (got fp8_e4m3)
 The trailing arg overrides it (argparse takes the last `--kv-cache-dtype`).
 The accepted value is `bfloat16` — **not** `bf16` (argparse rejects `bf16`).
 
+### Reasoning parser (so Open-WebUI folds the thinking)
+
+M3 emits its chain-of-thought inline as `<mm:think>…</mm:think>`. Without a
+reasoning parser, vLLM leaves it in `content` and Open-WebUI shows it raw.
+Upstream vLLM has a built-in `minimax_m3` parser, but **this image's vLLM build
+predates it**, so we ship the upstream parser file
+(`config/ansible/admin/files/minimax_m3_reasoning_parser.py`, deployed to
+`/opt/inference/minimax-m3/`) with a one-line `register_module` decorator added,
+and load it at launch:
+
+```
+--reasoning-parser-plugin /opt/inference/minimax-m3/minimax_m3_reasoning_parser.py \
+--reasoning-parser minimax_m3
+```
+
+`api_server.py` calls `import_reasoning_parser(...)` on the plugin path at
+startup, which registers the parser; vLLM then extracts the thinking into the
+OpenAI `reasoning_content` field and leaves `content` clean. (Drop both flags
+once you move to an image whose vLLM has `minimax_m3` built in.)
+
 ## 4. Verify it actually works
 
 ```bash

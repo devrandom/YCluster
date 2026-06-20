@@ -42,3 +42,19 @@
       loop:
         - minimax-m3-b12x-setup.sh
         - minimax-m3-b12x-start.sh
+
+    # vLLM reasoning-parser plugin: this image's vLLM build predates upstream's
+    # built-in minimax_m3 parser, so we ship it and load it via
+    # --reasoning-parser-plugin. Without it, M3's <mm:think>...</mm:think>
+    # reasoning is left inline in the content (Open-WebUI can't fold it).
+    - name: Ensure /opt/inference/minimax-m3 exists
+      file:
+        path: /opt/inference/minimax-m3
+        state: directory
+        mode: '0755'
+
+    - name: Install M3 reasoning parser plugin
+      copy:
+        src: minimax_m3_reasoning_parser.py
+        dest: /opt/inference/minimax-m3/minimax_m3_reasoning_parser.py
+        mode: '0644'

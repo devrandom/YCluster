@@ -22,12 +22,18 @@ SERVED_NAME="${SERVED_NAME:-{{ minimax_m3_served_name }}}"
 # still runs on every start. The image routes its caches under /cache via
 # VLLM_CACHE_ROOT and its own XDG_CACHE_HOME=/cache/jit.
 CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/minimax-m3-vllm}"
+# vLLM reasoning-parser plugin: extracts M3's <mm:think>...</mm:think> into
+# reasoning_content (so Open-WebUI folds it) instead of leaving it inline.
+# Needed because this image's vLLM predates upstream's built-in minimax_m3.
+REASONING_PARSER="${REASONING_PARSER:-/opt/inference/minimax-m3/minimax_m3_reasoning_parser.py}"
 
 # pre-flight (no root needed for any of these)
 podman image exists "$IMAGE" \
   || { echo "image $IMAGE missing - run: ~/bin/minimax-m3-b12x-setup.sh" >&2; exit 1; }
 [ -f "$MODEL_HOST/config.json" ] \
   || { echo "checkpoint missing at $MODEL_HOST - run: hf download {{ minimax_m3_repo }} --local-dir $MODEL_HOST" >&2; exit 1; }
+[ -f "$REASONING_PARSER" ] \
+  || { echo "reasoning parser plugin missing at $REASONING_PARSER - run install-minimax-m3.yml" >&2; exit 1; }
 
 mkdir -p "$CACHE_DIR"
 dev_args=()
@@ -39,6 +45,7 @@ podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 #   --kv-cache-dtype bfloat16  - not bf16; default 'auto' -> fp8_e4m3, which
 #                                the MSA sparse backend rejects.
 #   --served-model-name        - prefixed to flag the community quant.
+#   --reasoning-parser-plugin / --reasoning-parser  - extract <mm:think> blocks.
 podman run -d --name "$CONTAINER" \
   "${dev_args[@]}" \
   --network=host --shm-size 32g \
@@ -49,9 +56,12 @@ podman run -d --name "$CONTAINER" \
   -e VLLM_CACHE_ROOT=/cache \
   -v "$MODEL_HOST":/model \
   -v "$CACHE_DIR":/cache \
+  -v "$REASONING_PARSER":/minimax_m3_reasoning_parser.py:ro \
   "$IMAGE" \
     --kv-cache-dtype bfloat16 \
-    --served-model-name "$SERVED_NAME"
+    --served-model-name "$SERVED_NAME" \
+    --reasoning-parser-plugin /minimax_m3_reasoning_parser.py \
+    --reasoning-parser minimax_m3
 
 echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME). First load ~15-20 min."
 echo "  watch:  podman logs -f $CONTAINER"
