@@ -46,6 +46,12 @@ podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 #                                the MSA sparse backend rejects.
 #   --served-model-name        - prefixed to flag the community quant.
 #   --reasoning-parser-plugin / --reasoning-parser  - extract <mm:think> blocks.
+#   --default-chat-template-kwargs thinking_mode=enabled - prefill <mm:think>
+#     so the reasoning parser works in STREAMING. Without it, M3 emits the
+#     start tag mid-stream and the parser's prompt-check false-latches on the
+#     template's instruction text (which literally contains </mm:think>),
+#     skipping extraction and leaking the raw tags. Frontends can still
+#     override per request (e.g. thinking_mode=disabled).
 podman run -d --name "$CONTAINER" \
   "${dev_args[@]}" \
   --network=host --shm-size 32g \
@@ -60,6 +66,7 @@ podman run -d --name "$CONTAINER" \
   "$IMAGE" \
     --kv-cache-dtype bfloat16 \
     --served-model-name "$SERVED_NAME" \
+    --default-chat-template-kwargs '{"thinking_mode":"enabled"}' \
     --reasoning-parser-plugin /minimax_m3_reasoning_parser.py \
     --reasoning-parser minimax_m3
 

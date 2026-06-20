@@ -186,12 +186,29 @@ and load it at launch:
 ```
 --reasoning-parser-plugin /opt/inference/minimax-m3/minimax_m3_reasoning_parser.py \
 --reasoning-parser minimax_m3
+--default-chat-template-kwargs '{"thinking_mode":"enabled"}'
 ```
 
 `api_server.py` calls `import_reasoning_parser(...)` on the plugin path at
 startup, which registers the parser; vLLM then extracts the thinking into the
-OpenAI `reasoning_content` field and leaves `content` clean. (Drop both flags
-once you move to an image whose vLLM has `minimax_m3` built in.)
+`message.reasoning` field (this build's name; older vLLM used
+`reasoning_content`) and leaves `content` clean — verified in both streaming
+and non-streaming. Drop these flags once you move to an image whose vLLM has
+`minimax_m3` built in.
+
+**Why `--default-chat-template-kwargs thinking_mode=enabled` (and the
+caveat).** The parser only streams correctly when the prompt *prefills*
+`<mm:think>` (so generation begins inside the reasoning block). With thinking
+left adaptive/undefined, M3 emits `<mm:think>` as its first generated token —
+but vLLM's one-time prompt-check `is_reasoning_end(prompt)` scans backward and
+hits the `</mm:think>` that appears *literally in the chat template's
+thinking-instructions text*, latching "reasoning ended" before generation and
+disabling streaming extraction (raw tags leak to every frontend). Forcing
+`thinking_mode=enabled` guarantees the prefill — at the cost of M3 reasoning on
+**every** turn (frontends can still override per request). The proper fix is to
+override `is_reasoning_end` in our plugin to ignore the empty
+`<mm:think></mm:think>` instruction pair and restore adaptive thinking — see
+TODO.md.
 
 ## 4. Verify it actually works
 
