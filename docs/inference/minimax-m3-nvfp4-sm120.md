@@ -137,7 +137,7 @@ podman run -d --name "$CONTAINER" \
   --security-opt seccomp=unconfined --group-add keep-groups \
   --ulimit stack=67108864:67108864 \
   -e TP=4 -e GPU_UTIL=0.93 -e MAXLEN=262144 -e MAXSEQS=16 -e PORT="$PORT" \
-  -e VLLM_CACHE_ROOT=/cache -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor \
+  -e VLLM_CACHE_ROOT=/cache \
   -v "$MODEL_HOST":/model \
   -v /home/dev/.cache/minimax-m3-vllm:/cache \
   "$IMAGE" \
@@ -152,11 +152,13 @@ so it's never mistaken for MiniMax's official M3 (the image's default is
 `minimax-m3-nvfp4`; the trailing `--served-model-name` overrides it). Env
 knobs: `TP`, `GPU_UTIL`, `MAXLEN` (context), `MAXSEQS` (concurrency), `PORT`.
 
-**Load time.** Weight loading is only ~2.5 min; the bulk of startup is vLLM's
-inductor `torch.compile` + FULL_AND_PIECEWISE CUDA-graph capture (CPU-bound,
-single-threaded per worker, GPUs idle). The persistent `/cache` mount
-(`VLLM_CACHE_ROOT`) keeps those artifacts across `podman rm`, so the **first**
-load is ~15–20 min but later starts/reboots are much faster.
+**Load time** (~15–20 min): weight load ~2.5 min, `torch.compile` ~40 s, and
+the bulk is **CUDA-graph capture ~7 min** (mostly the FULL decode graphs). The
+persistent `/cache` mount (`VLLM_CACHE_ROOT`, plus the image's own
+`XDG_CACHE_HOME=/cache/jit`) reuses the compile/JIT artifacts across
+`podman rm` — but **graph capture captures live memory pointers, so it isn't
+cacheable and re-runs every start**. So a warm reboot only trims the compile
+time; cutting `cudagraph_mode`/sizes is the lever for the capture cost.
 
 ### The one flag that matters: `--kv-cache-dtype bfloat16`
 

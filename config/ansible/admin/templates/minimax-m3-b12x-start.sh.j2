@@ -16,10 +16,11 @@ PORT="${PORT:-9211}"
 TP="${TP:-4}"
 GPUS="${GPUS:-0 1 2 3}"
 SERVED_NAME="${SERVED_NAME:-{{ minimax_m3_served_name }}}"
-# Persistent torch.compile / inductor cache. The first load still compiles
-# (~15-20 min, GPUs idle while inductor codegens single-threaded), but the
-# artifacts survive the podman rm below, so later starts/reboots skip most of
-# it. Without this, every restart recompiles from cold.
+# Persistent vLLM/JIT compile cache (torch.compile graphs + b12x/triton
+# kernels). Survives the podman rm below, so restarts reuse it instead of
+# recompiling cold. Note: CUDA-graph capture (~7 min) is not cacheable and
+# still runs on every start. The image routes its caches under /cache via
+# VLLM_CACHE_ROOT and its own XDG_CACHE_HOME=/cache/jit.
 CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/minimax-m3-vllm}"
 
 # pre-flight (no root needed for any of these)
@@ -45,7 +46,7 @@ podman run -d --name "$CONTAINER" \
   --ulimit stack=67108864:67108864 \
   -e TP="$TP" -e GPU_UTIL="${GPU_UTIL:-0.93}" -e MAXLEN="${MAXLEN:-262144}" \
   -e MAXSEQS="${MAXSEQS:-16}" -e PORT="$PORT" \
-  -e VLLM_CACHE_ROOT=/cache -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor \
+  -e VLLM_CACHE_ROOT=/cache \
   -v "$MODEL_HOST":/model \
   -v "$CACHE_DIR":/cache \
   "$IMAGE" \
