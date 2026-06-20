@@ -210,6 +210,21 @@ override `is_reasoning_end` in our plugin to ignore the empty
 `<mm:think></mm:think>` instruction pair and restore adaptive thinking — see
 TODO.md.
 
+### Tool calling — unsupported on this image
+
+This deployment sets **no** `--tool-call-parser`, so vLLM cleanly refuses
+`tool_choice: auto` (`"... requires --enable-auto-tool-choice and
+--tool-call-parser to be set"`). That's intentional: M3 emits a custom **XML**
+tool format — `<tool_call><invoke name="fn"><param>val</param>…</invoke></tool_call>`
+(with a namespace token prefix) — which **none** of this image's vLLM tool
+parsers match (`minimax`/`minimax_m2` expect `<tool_calls>` *plural* with JSON).
+Upstream's `minimax_m3` tool parser handles it but is **Rust-based** and absent
+from this build, so — unlike the reasoning parser — it can't be backported as a
+python plugin. Enabling a mismatched parser would only leak raw `<tool_call>`
+XML, so we leave tools off and let vLLM refuse them. **Route tool-using clients
+(opencode, etc.) to a tool-capable model** (e.g. `nvidia/MiniMax-M2.7-NVFP4` or
+the Nemotron models). Tracked in TODO.md.
+
 ## 4. Verify it actually works
 
 ```bash
