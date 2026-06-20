@@ -15,3 +15,9 @@ deployment-agnostic — no node names, IPs, or account specifics.
   b12x kernel image; the stock cutlass NVFP4 MoE path is broken on SM120.
   Background/investigation: [minimax-m3-design-2026-06.md](minimax-m3-design-2026-06.md)
   (superseded — documents the path that turned out not to work).
+
+## Design / remediation notes
+
+- [Reproducible build of the b12x SM120 vLLM image](b12x-reproducible-build-design-2026-06.md)
+  — plan to replace the opaque prebuilt Docker Hub image with one built from
+  pinned public sources and hosted in our registry.
