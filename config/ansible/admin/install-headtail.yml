@@ -1,0 +1,14 @@
+---
+# Install the headtail helper onto every cluster node so `headtail` is on
+# PATH everywhere (caps long output: first + last N lines, eliding the middle;
+# tees the full stream with -l). Source of truth: config/ansible/scripts/headtail.
+- name: Install headtail on all cluster machines
+  hosts: all
+  become: yes
+  tasks:
+    - name: Copy headtail to /usr/local/bin
+      copy:
+        src: ../scripts/headtail
+        dest: /usr/local/bin/headtail
+        owner: root
+        mode: '0755'
