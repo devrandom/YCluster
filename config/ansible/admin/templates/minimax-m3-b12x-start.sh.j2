@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# (Re)start the MiniMax-M3 NVFP4 b12x inference server. Run as the dev user
+# (no sudo), e.g. after a reboot:
+#
+#   ~/bin/minimax-m3-b12x-start.sh
+#
+# Idempotent: replaces any existing container. Uses GPUs 0-3 by default
+# (override with GPUS="0 1 2 3"). Managed by install-minimax-m3.yml - edit
+# there. See docs/inference/minimax-m3-nvfp4-sm120.md.
+set -euo pipefail
+
+IMAGE="{{ minimax_m3_image }}"
+MODEL_HOST="${MODEL_HOST:-{{ minimax_m3_model_dir }}}"
+CONTAINER="${CONTAINER:-minimax-m3-b12x}"
+PORT="${PORT:-9211}"
+TP="${TP:-4}"
+GPUS="${GPUS:-0 1 2 3}"
+SERVED_NAME="${SERVED_NAME:-{{ minimax_m3_served_name }}}"
+# Persistent torch.compile / inductor cache. The first load still compiles
+# (~15-20 min, GPUs idle while inductor codegens single-threaded), but the
+# artifacts survive the podman rm below, so later starts/reboots skip most of
+# it. Without this, every restart recompiles from cold.
+CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/minimax-m3-vllm}"
+
+# pre-flight (no root needed for any of these)
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - run: ~/bin/minimax-m3-b12x-setup.sh" >&2; exit 1; }
+[ -f "$MODEL_HOST/config.json" ] \
+  || { echo "checkpoint missing at $MODEL_HOST - run: hf download {{ minimax_m3_repo }} --local-dir $MODEL_HOST" >&2; exit 1; }
+
+mkdir -p "$CACHE_DIR"
+dev_args=()
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
+
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+# Trailing args override the entrypoint's defaults (argparse takes the last):
+#   --kv-cache-dtype bfloat16  - not bf16; default 'auto' -> fp8_e4m3, which
+#                                the MSA sparse backend rejects.
+#   --served-model-name        - prefixed to flag the community quant.
+podman run -d --name "$CONTAINER" \
+  "${dev_args[@]}" \
+  --network=host --shm-size 32g \
+  --security-opt seccomp=unconfined --group-add keep-groups \
+  --ulimit stack=67108864:67108864 \
+  -e TP="$TP" -e GPU_UTIL="${GPU_UTIL:-0.93}" -e MAXLEN="${MAXLEN:-262144}" \
+  -e MAXSEQS="${MAXSEQS:-16}" -e PORT="$PORT" \
+  -e VLLM_CACHE_ROOT=/cache -e TORCHINDUCTOR_CACHE_DIR=/cache/inductor \
+  -v "$MODEL_HOST":/model \
+  -v "$CACHE_DIR":/cache \
+  "$IMAGE" \
+    --kv-cache-dtype bfloat16 \
+    --served-model-name "$SERVED_NAME"
+
+echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME). First load ~15-20 min."
+echo "  watch:  podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"

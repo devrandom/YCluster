@@ -1,0 +1,44 @@
+---
+# Deploy MiniMax-M3 NVFP4 (b12x) inference scripts to Nvidia GPU nodes.
+# Companion to docs/inference/minimax-m3-nvfp4-sm120.md. Two dev scripts
+# (the dev user has no sudo, and needs none for these):
+#   ~dev/bin/minimax-m3-b12x-setup.sh  - pull the image (first run and after a
+#                                        new image release)
+#   ~dev/bin/minimax-m3-b12x-start.sh  - (re)launch the server, e.g. after reboot
+# Host prerequisites (podman + nvidia CDI) are generic and live in
+# setup-gpu-podman.yml. The image tag is a var here - bump it to ship a release.
+- name: Deploy MiniMax-M3 b12x inference scripts
+  hosts: nvidia
+  become: yes
+  vars:
+    minimax_m3_image: "docker.io/verdictai/minimax-m3-nvfp4-b12x:v1"
+    minimax_m3_repo: "brandonmusic/MiniMax-M3-NVFP4"
+    minimax_m3_model_dir: "/home/dev/models/MiniMax-M3-NVFP4-brandonmusic"
+    # Prefixed with the quant author to flag this is a community NVFP4 quant,
+    # not MiniMax's official M3.
+    minimax_m3_served_name: "brandonmusic/minimax-m3-nvfp4"
+  tasks:
+    # Same guard as install-vllm.yml: skip nodes with no host-visible NVIDIA
+    # GPU (no NVIDIA hardware, or all cards bound to vfio-pci for passthrough).
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install dev inference scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - minimax-m3-b12x-setup.sh
+        - minimax-m3-b12x-start.sh

@@ -1,0 +1,51 @@
+---
+# Make Nvidia GPU nodes ready to run rootless GPU containers as the dev user
+# (podman + nvidia CDI). Generic prerequisite for any containerised inference
+# backend (e.g. the MiniMax-M3 b12x image, see install-minimax-m3.yml).
+# Run after setup-base-compute.yml (which creates the dev user).
+- name: Set up rootless podman + nvidia CDI on GPU nodes
+  hosts: nvidia
+  become: yes
+  tasks:
+    # Same guard as install-vllm.yml: skip nodes with no host-visible NVIDIA
+    # GPU (no NVIDIA hardware, or all cards bound to vfio-pci for passthrough).
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: Install podman
+      apt:
+        name: podman
+        state: present
+        update_cache: yes
+
+    - name: Generate nvidia CDI spec
+      command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+      changed_when: true
+
+    # podman 4.9.3 (Ubuntu 24.04) can't parse the toolkit's CDI 0.7.0 spec:
+    # it rejects the unknown `additionalGids` field, so every
+    # `--device nvidia.com/gpu=N` fails with "unresolvable CDI devices".
+    - name: Pin CDI spec to 0.6.0
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '^cdiVersion: 0\.7\.0$'
+        replace: 'cdiVersion: 0.6.0'
+
+    - name: Strip unparseable additionalGids field
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '(?m)^[ \t]*additionalGids:\n(?:[ \t]*- \d+\n)+'
+        replace: ''
+
+    - name: Remove stale runtime CDI spec
+      file:
+        path: /var/run/cdi/nvidia.yaml
+        state: absent
+
+    # Lets the dev user's rootless podman containers keep running after logout
+    # and start a user manager at boot.
+    - name: Enable systemd lingering for dev
+      command: loginctl enable-linger dev
+      args:
+        creates: /var/lib/systemd/linger/dev

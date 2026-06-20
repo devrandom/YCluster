@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Pull the MiniMax-M3 b12x image. Run as the dev user (no sudo) for the first
+# deployment and after a new image release:
+#
+#   ~/bin/minimax-m3-b12x-setup.sh
+#
+# Host provisioning (podman, CDI, lingering) is a separate, generic ansible
+# step - admin/setup-gpu-podman.yml, run by an operator. Managed by
+# install-minimax-m3.yml - edit there. See docs/inference/minimax-m3-nvfp4-sm120.md.
+set -euo pipefail
+
+IMAGE="{{ minimax_m3_image }}"
+MODEL_HOST="${MODEL_HOST:-{{ minimax_m3_model_dir }}}"
+
+command -v podman >/dev/null \
+  || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+echo "== pull $IMAGE =="
+podman pull "$IMAGE"
+
+echo "== GPU passthrough smoke test =="
+podman run --rm --entrypoint nvidia-smi \
+  --device nvidia.com/gpu=0 --group-add keep-groups "$IMAGE" -L | head -1 \
+  || { echo "GPU passthrough failed - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+echo
+echo "Image ready."
+if [ ! -f "$MODEL_HOST/config.json" ]; then
+  echo "Checkpoint not found at $MODEL_HOST (~250 GB) - download it:"
+  echo "  hf download {{ minimax_m3_repo }} --local-dir $MODEL_HOST"
+fi
+echo "Start the server:  ~/bin/minimax-m3-b12x-start.sh"
