@@ -54,7 +54,58 @@ rebuilds the intermediate bases too, so the whole image derives from the NVIDIA
 CUDA base + pinned sources + the official torch wheel — **no `voipmonitor`
 binaries in the chain**.
 
-## Build plan
+## Fork currency and the upstream M3 path
+
+The vLLM fork (`dev/black-benediction`) branched from upstream `main` on
+**2026-06-05** (merge-base `6a11d72d`, vLLM `0.11.2.dev`) and is already ~531
+commits behind. Our pinned commit `bb6c5b7` is from **2026-06-08**; the branch
+itself has since moved on (DFlash/MiMo work through 2026-06-12). The fork's ~48
+commits are entirely Blackwell/SM120 b12x enablement (NVFP4/FP8 MoE+GEMM
+kernels, sparse MLA/indexer, PCIe allreduce) plus DeepSeek-V4/DFlash and MiMo
+FP4 support — **no MiniMax-M3-specific code**.
+
+Critically, upstream landed **full native MiniMax-M3 support in PR #45381 on
+2026-06-15** — ten days after our fork point. It adds the M3 model (MSA sparse
+attention, vision tower, MTP), the reasoning parser we currently hand-inject as
+a plugin (`vllm/reasoning/minimax_m3_reasoning_parser.py`), and a **Rust-backed**
+tool parser (`vllm/tool_parsers/minimax_m3_tool_parser.py` +
+`rust/src/tool-parser/src/minimax_m3.rs`). That timing is exactly why our image
+has neither built in.
+
+**Scope check — SM120 NVFP4 MoE is not categorically broken.** The
+`nvidia/MiniMax-M2.7-NVFP4` model runs fine on the same SM120 arch (RTX PRO 6000,
+compute cap 12.0) on a **stock vLLM release** (`0.20.2`, native `uv` install, no
+b12x, tool calling on). So the b12x requirement is **M3-specific**, not a blanket
+SM120 NVFP4 problem — M3 needs (a) SM120-correct NVFP4 MoE kernels for its
+particular MoE shape (the stock *cutlass grouped-GEMM* path NaNs on it, while
+M2.7's MoE uses a working backend), (b) the MSA sparse-attention backend, and
+(c) M3 model code — none of which stock vLLM had at M3 deploy time.
+
+## Resolution paths (preferred first)
+
+1. **Preferred — drop b12x for stock vLLM.** Since SM120 NVFP4 MoE already works
+   on stock (M2.7 above), the cleanest end-state is a stock vLLM release carrying
+   both **#45381** (M3 model + parsers, merged 2026-06-15) and the open **SM120
+   MoE-kernel fixes** — e.g. **#43814** ("Enable CUTLASS grouped GEMM (MoE) for
+   SM_120/SM_121") plus the SM120 MSA/sparse-attention work. When such a release
+   exists, `uv tool install vllm` and `vllm serve` M3 on an nv node, check for
+   coherence; if it holds, we **retire the verdictai image entirely** and get
+   native Rust tool calling for free — **no fork to reproduce**. Cheap to re-test
+   whenever those PRs land. This is the real goal; the build below is the fallback
+   until it arrives.
+2. **Fallback — reproducible build of b12x + #45381.** Until stock can serve M3
+   on SM120, the target is **b12x kernels + #45381**, not either alone (#45381
+   alone still lacks the SM120 MoE-kernel fix and would NaN). Cleanest form: the
+   b12x maintainers rebase onto / cherry-pick #45381, then we rebuild from pinned
+   sources (below) — which also drops our reasoning plugin and gains Rust tool
+   calling.
+
+Things to watch: a stock vLLM release picking up #45381 **and** #43814 (→ path 1,
+retire the fork); the b12x branch picking up #45381 (→ path 2).
+
+## Build plan (fallback — resolution path 2)
+
+Only needed until a stock vLLM release can serve M3 on SM120 (path 1 above).
 
 1. **Vendor the recipe.** Mirror `blackwell-llm-docker` (and the source repos, or
    at least snapshot the PR-ref sources to SHA-pinned tarballs we host) into our
@@ -86,9 +137,8 @@ binaries in the chain**.
 
 ## Bonus unlocked by building ourselves
 
-Building from the vLLM fork is also the lever to:
-- Cherry-pick upstream's built-in `minimax_m3` **reasoning** parser and drop our
-  injected plugin.
-- Pick up the upstream `minimax_m3` **tool-call** parser (Rust-based, absent from
-  this image build) and close the tool-calling gap — see
-  [minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md) and TODO.md.
+Building from the vLLM fork is also the lever to close both M3 parser gaps —
+upstream #45381 (2026-06-15) ships the built-in `minimax_m3` reasoning parser
+(drop our injected plugin) and the Rust-backed tool-call parser (close the
+tool-calling gap). See the "Fork currency" section above for the b12x-+-#45381
+path, plus [minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md) and TODO.md.

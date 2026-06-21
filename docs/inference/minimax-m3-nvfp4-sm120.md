@@ -193,8 +193,11 @@ and load it at launch:
 startup, which registers the parser; vLLM then extracts the thinking into the
 `message.reasoning` field (this build's name; older vLLM used
 `reasoning_content`) and leaves `content` clean — verified in both streaming
-and non-streaming. Drop these flags once you move to an image whose vLLM has
-`minimax_m3` built in.
+and non-streaming. Drop these flags (and this whole plugin) once you rebuild on
+a vLLM carrying upstream's native M3 support — PR #45381 (2026-06-15) ships the
+built-in `minimax_m3` reasoning parser. Our image's fork point (2026-06-08)
+predates it; see
+[b12x-reproducible-build-design-2026-06.md](b12x-reproducible-build-design-2026-06.md).
 
 **Why `--default-chat-template-kwargs thinking_mode=enabled` (and the
 caveat).** The parser only streams correctly when the prompt *prefills*
@@ -218,12 +221,16 @@ This deployment sets **no** `--tool-call-parser`, so vLLM cleanly refuses
 tool format — `<tool_call><invoke name="fn"><param>val</param>…</invoke></tool_call>`
 (with a namespace token prefix) — which **none** of this image's vLLM tool
 parsers match (`minimax`/`minimax_m2` expect `<tool_calls>` *plural* with JSON).
-Upstream's `minimax_m3` tool parser handles it but is **Rust-based** and absent
-from this build, so — unlike the reasoning parser — it can't be backported as a
-python plugin. Enabling a mismatched parser would only leak raw `<tool_call>`
-XML, so we leave tools off and let vLLM refuse them. **Route tool-using clients
-(opencode, etc.) to a tool-capable model** (e.g. `nvidia/MiniMax-M2.7-NVFP4` or
-the Nemotron models). Tracked in TODO.md.
+Upstream's `minimax_m3` tool parser handles it but is **Rust-based**
+(`rust/src/tool-parser/src/minimax_m3.rs`, added in PR #45381 on 2026-06-15) and
+absent from this build, so — unlike the reasoning parser — it can't be
+backported as a python plugin. Enabling a mismatched parser would only leak raw
+`<tool_call>` XML, so we leave tools off and let vLLM refuse them. **Route
+tool-using clients (opencode, etc.) to a tool-capable model** (e.g.
+`nvidia/MiniMax-M2.7-NVFP4` or the Nemotron models). The real fix is rebuilding
+on a vLLM that carries #45381 (our fork point predates it) — see
+[b12x-reproducible-build-design-2026-06.md](b12x-reproducible-build-design-2026-06.md).
+Tracked in TODO.md.
 
 ## 4. Verify it actually works
 
@@ -241,6 +248,24 @@ Expect coherent text with `finish_reason: "stop"` (reasoning is inline in
 `<mm:think>…</mm:think>` tags), e.g. the 17×24 answer is `408`. Empty content,
 null bytes (`\0`), or `finish_reason: "length"` on a temp-0 prompt mean the
 kernel path is wrong — see "Why the obvious path fails".
+
+**Deeper verification (`contrib/inference-smoke-test.py`).** A re-runnable,
+model-agnostic harness (hits the gateway via `contrib/_cluster_config.py`; run
+after any image bump) covers three suites, all green on the b12x image:
+
+- **Quality** — fixed temp=0 prompts including quant-degradation traps
+  (bat-and-ball, letter counting, sibling logic). A clean quant passes all and
+  leaks no `<mm:think>` tags; failures here flag silent kernel/quant drift.
+- **Long context (MSA)** — needle-in-haystack; validated clean retrieval at
+  positions 10/50/90% up to **~168k prompt tokens** (`finish_reason: stop`, no
+  NaN), exercising the sparse-attention path. **Disable thinking** for this
+  (`chat_template_kwargs: {"thinking_mode":"disabled"}`) or give a large
+  `max_tokens` — otherwise reasoning eats the budget and the answer truncates to
+  empty content / `finish_reason: length`, which looks like a retrieval failure
+  but isn't.
+- **Vision** — M3 is **multimodal and the path is enabled** on this image: it
+  reads both normal and wide images (no tiling failure), via the standard OpenAI
+  `image_url` content blocks.
 
 ## 5. Register with the inference gateway
 
