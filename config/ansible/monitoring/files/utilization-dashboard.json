@@ -20,7 +20,7 @@
   "panels": [
     {
       "type": "timeseries",
-      "title": "Network bandwidth (external interfaces)",
+      "title": "Network bandwidth (external interfaces, 1-min rate)",
       "description": "RX (positive) + TX (negative) on physical en* interfaces only. Bridges (br-*, incusbr0, docker0), tap/veth, and loopback are excluded.",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
@@ -36,13 +36,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "rate(node_network_receive_bytes_total{node=~\"$node\",device=~\"en.*\"}[15m]) * 8",
+          "expr": "rate(node_network_receive_bytes_total{node=~\"$node\",device=~\"en.*\"}[1m]) * 8",
           "legendFormat": "{{node}} {{device}} rx",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-          "expr": "-rate(node_network_transmit_bytes_total{node=~\"$node\",device=~\"en.*\"}[15m]) * 8",
+          "expr": "-rate(node_network_transmit_bytes_total{node=~\"$node\",device=~\"en.*\"}[1m]) * 8",
           "legendFormat": "{{node}} {{device}} tx",
           "refId": "B"
         }
