@@ -61,6 +61,17 @@ fixes below came up clean and is what's serving now.
 - Co-residency held: the successful bring-up ran with M3 up the whole time, host
   RAM never above ~42 GiB.
 
+**Runtime gotcha — sparse-indexer workspace.** The b12x DSA indexer reserves a
+scratch workspace at warmup and *locks* it (no runtime growth). The image default
+(`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=512`) under-sizes it for long contexts, so
+large agentic requests — opencode (big system prompt + tool schemas + history) is
+the trigger we hit — crash the **engine core** with `Workspace is locked …
+requires N MB … growth is not allowed` (≈960 MB needed vs ≈708 reserved). It's a
+context-length problem, not tool-call parsing. The start script raises it
+(`INDEXER_LOGITS_MB`, default 2048) — verified serving a ~24k-token request that
+would previously have crashed. Trades a little KV-cache space; raise further for
+very long contexts.
+
 Node facts: 8× RTX PRO 6000 (96 GB), **125 GiB host RAM**, PCIe (no NVLink).
 
 ## What GLM-5.2 is

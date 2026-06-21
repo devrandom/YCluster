@@ -37,6 +37,13 @@ GPU_UTIL="${GPU_UTIL:-0.95}"
 MAXLEN="${MAXLEN:-250000}"
 MAXSEQS="${MAXSEQS:-2}"
 MAXBATCH="${MAXBATCH:-8192}"
+# b12x sparse-attention indexer logits workspace, reserved during profiling then
+# *locked* (no growth at runtime). The image default (512 MB) under-reserves for
+# long contexts: large agentic requests (e.g. opencode - big system prompt + tool
+# schemas + history) crash the engine core with "Workspace is locked ... requires
+# N MB ... growth is not allowed". Sized up for headroom; trades a little KV-cache
+# space, no extra VRAM. Raise further if very long contexts still hit it.
+INDEXER_LOGITS_MB="${INDEXER_LOGITS_MB:-2048}"
 SERVED_NAME="${SERVED_NAME:-{{ glm52_served_name }}}"
 # Persistent vLLM/JIT compile cache (torch.compile graphs + b12x/triton
 # kernels), survives the podman rm below. CUDA-graph capture still runs cold.
@@ -97,6 +104,7 @@ podman run -d --name "$CONTAINER" \
   --memory "$MEM" --memory-swap "$MEM" \
   --unsetenv NCCL_GRAPH_FILE --unsetenv NCCL_GRAPH_DUMP_FILE \
   -e VLLM_CACHE_ROOT=/cache \
+  -e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB="$INDEXER_LOGITS_MB" \
   -v "$MODEL_HOST":/model \
   -v "$CACHE_DIR":/cache \
   --entrypoint /opt/venv/bin/vllm \
