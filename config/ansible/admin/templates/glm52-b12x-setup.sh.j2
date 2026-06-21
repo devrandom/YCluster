@@ -28,9 +28,54 @@ podman run --rm --entrypoint nvidia-smi \
 echo
 echo "Image ready."
 if [ ! -f "$MODEL_HOST/config.json" ]; then
-  echo "Checkpoint not found at $MODEL_HOST (~292 GB) - download it:"
+  echo "Checkpoint not found at $MODEL_HOST (~292 GB) - download it, then re-run this script:"
   # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
   # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
   echo "  HF_HUB_DISABLE_XET=1 hf download {{ glm52_repo }} --local-dir $MODEL_HOST"
+  exit 0
 fi
+
+# Prep the checkpoint for the fastsafetensors loader (the start script streams
+# shards direct-to-GPU - mandatory on this ~125 GiB-RAM node; the default loader
+# buffers ~290 GB through host RAM and OOM-panics it). fastsafetensors scans every
+# *.safetensors and rejects any tensor key found in more than one file. This
+# checkpoint redundantly stores its MTP (layer 78) tensors across several shards;
+# the index designates one canonical copy per key, so we drop the non-canonical
+# physical copies (and shelve any fully-redundant shard). Idempotent: a no-op once
+# clean, re-runnable after a fresh download.
+echo "== Dedupe checkpoint for fastsafetensors =="
+podman run --rm -i -v "$MODEL_HOST":/model --entrypoint python3 "$IMAGE" - <<'PYEOF'
+import json, os, glob, struct, shutil
+from safetensors.torch import load_file, save_file
+md = "/model"
+idx = json.load(open(md + "/model.safetensors.index.json"))["weight_map"]
+excl = md + "/.excluded-shards"
+changed = 0
+for f in sorted(glob.glob(md + "/*.safetensors")):
+    b = os.path.basename(f)
+    with open(f, "rb") as fh:
+        n = struct.unpack("<Q", fh.read(8))[0]
+        hdr = json.loads(fh.read(n))
+    keys = [k for k in hdr if k != "__metadata__"]
+    drop = [k for k in keys if idx.get(k) != b]   # non-canonical (or non-indexed) copies
+    if not drop:
+        continue
+    changed += 1
+    if len(drop) == len(keys):
+        os.makedirs(excl, exist_ok=True)
+        print(f"  {b}: fully redundant ({len(keys)} keys) -> .excluded-shards/", flush=True)
+        shutil.move(f, os.path.join(excl, b))
+    else:
+        print(f"  {b}: dropping {len(drop)} non-canonical keys ({len(keys)} -> {len(keys) - len(drop)})", flush=True)
+        meta = hdr.get("__metadata__") or {}
+        t = load_file(f)
+        for k in drop:
+            t.pop(k, None)
+        tmp = f + ".dedup.tmp"
+        save_file(t, tmp, metadata=meta)
+        os.replace(tmp, f)
+print("  already clean" if not changed else f"  {changed} shard(s) deduped", flush=True)
+PYEOF
+
+echo
 echo "Start the server:  ~/bin/glm52-b12x-start.sh"

@@ -5,6 +5,7 @@ detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
 ## 2026-06-21
 
+- **GLM-5.2 (REAP-504B) NVFP4 deployed.** `0xSero/GLM-5.2-504B` serves co-resident with M3 on the b12x stack (SM120, TP=4), registered with the gateway, with working tool calling — closing M3's tool-calling gap. Design + incident: `docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md`.
 - **Inference `backends` CLI prefix fix.** `backends disable/enable/ls` now use the disabled-backends etcd prefix instead of the models prefix (disable had been a silent no-op that littered the model store with junk URL-keyed entries), and `models add` rejects URL-shaped or empty model names.
 
 ## 2026-06-15

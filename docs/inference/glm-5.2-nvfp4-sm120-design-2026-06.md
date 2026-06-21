@@ -1,16 +1,18 @@
 # GLM-5.2 NVFP4 on RTX PRO 6000 / SM120 — design
 
-Status: **PAUSED** after a first bring-up attempt (2026-06-21) that hard-crashed
-the GPU node (see incident below). The playbook + start script exist and the
-checkpoint is downloaded; do not retry until the start script is made
-crash-safe. GLM-5.2 overlaps almost the entire MiniMax-M3 b12x stack, so this
-note records what's reusable, what's different, and the phased rollout.
+Status: **SERVING.** `0xSero/GLM-5.2-504B` is live on the b12x stack, co-resident
+with M3 (GLM on GPUs 4–7 / TP=4, M3 on 0–3), registered with the gateway, with
+working tool calling. It got there via a first attempt that crashed the node —
+the incident and its resolution are recorded below because the fixes are load-
+bearing. GLM-5.2 overlaps almost the entire MiniMax-M3 b12x stack; this note
+records what's reusable, what's different, the incident, and the phased rollout.
 
-## Status & first-attempt incident (2026-06-21)
+## First-attempt incident and resolution (2026-06-21)
 
-First bring-up of `0xSero/GLM-5.2-504B` on the free 4-GPU slice cleared three
-boot blockers and then **hard-panicked the node**, taking M3 (co-resident on the
-same node) down with it. A power-cycle recovered it; M3 was restarted.
+First bring-up of `0xSero/GLM-5.2-504B` on the free 4-GPU slice cleared two boot
+blockers and then **hard-panicked the node**, taking M3 (co-resident) down with
+it. A power-cycle recovered it; M3 was restarted. A second attempt with the
+fixes below came up clean and is what's serving now.
 
 **Boot blockers found & fixed** (folded into `glm52-b12x-start.sh.j2`):
 1. **NCCL `unhandled system error`** at `ncclCommInitRank`. The image bakes
@@ -19,11 +21,15 @@ same node) down with it. A power-cycle recovered it; M3 was restarted.
    NCCL_GRAPH_FILE`. Also: trust the image's baked NCCL/b12x env, don't override
    it (an earlier set of injected `NCCL_*`/`VLLM_*` vars from an unreliable
    source made it worse).
-2. **`fastsafetensors` duplicate-key** (`model.layers.78.mlp.experts...`): this
-   checkpoint duplicates an MTP-layer tensor across shards (64 safetensors vs 63
-   in the index), which fastsafetensors rejects.
+2. **`fastsafetensors` duplicate-key** (`model.layers.78.mlp.experts...`): the
+   checkpoint redundantly stores its MTP (layer-78) tensors across several shards
+   — 176 keys duplicated, plus a fully-orphan non-indexed shard. The index names
+   one canonical copy per key (so the *default* loader never notices), but
+   fastsafetensors scans the files and rejects the dups. Looks like a publisher
+   packaging mistake. Fixed by deduping the checkpoint (keep the index-canonical
+   copy, drop the rest) in `glm52-b12x-setup.sh`.
 
-**The crash** (host-RAM OOM is the leading hypothesis, but unproven):
+**The crash** (host-RAM OOM — confirmed by the fix):
 - The node hard-froze ~3.5 min into the weight load and panicked
   (`Attempted to kill init, exitcode=0x0b` = init killed by **SIGSEGV**, *not*
   the SIGKILL a clean OOM-kill uses). Nothing was persisted: no OOM-killer line,
@@ -38,18 +44,22 @@ same node) down with it. A power-cycle recovered it; M3 was restarted.
   OOM-killer log.
 - The trigger was switching off `fastsafetensors` to the default loader (blocker
   2 "fix"): `fastsafetensors` streams direct-to-GPU and avoids that host-RAM
-  spike, so dropping it for a model this size on a 125 GiB box was the likely
-  cause. A GPU/kernel fault in the b12x/DSA path can't be fully ruled out (no
-  logs), but memory is the strong lead.
+  spike, so dropping it for a model this size on a 125 GiB box was the cause.
+- **Confirmed by the fix.** The successful retry on `fastsafetensors` held host
+  RAM at **35–42 GiB** for the entire load (cap 80 GiB, never close) — vs the
+  default loader's ~106 GiB spike. A b12x/DSA GPU-fault was never fully ruled out
+  by logs, but the RAM trace makes memory the cause.
 
-**Before any retry — make it crash-safe:**
-- Add a podman `--memory` cap to the start script so a runaway gets the
-  *container* OOM-killed, never init/the host — and so a cgroup-OOM vs. other
-  death disambiguates the cause.
-- Restore `fastsafetensors` (streams direct-to-GPU) and fix the duplicate key by
-  excluding the extra 64th shard, rather than the default loader.
-- Bring GLM up **with M3 stopped** first (no production co-resident), watching
-  host RAM + `dmesg`/Xid live, before attempting co-residency.
+**Resolution (all in the scripts now):**
+- **`fastsafetensors`** (streams direct-to-GPU) — the load-bearing fix.
+- **Checkpoint dedup** in `glm52-b12x-setup.sh` so fastsafetensors accepts it
+  (idempotent; the start script guards against an un-deduped checkpoint).
+- **podman `--memory` cap** (default 80 GiB, verified enforced rootless on cgroup
+  v2): a runaway is cgroup-OOM-killed (container), never init/the host. On the
+  attempt before the dedup landed, this worked exactly as intended — GLM died
+  *contained*, M3 and the host survived.
+- Co-residency held: the successful bring-up ran with M3 up the whole time, host
+  RAM never above ~42 GiB.
 
 Node facts: 8× RTX PRO 6000 (96 GB), **125 GiB host RAM**, PCIe (no NVLink).
 
@@ -218,16 +228,17 @@ defer the runtime GPU allocation to deploy time.
 2. ~~Clone the M3 playbook~~ **Done** — `install-glm52.yml` +
    `glm52-b12x-{setup,start}.sh.j2` exist; checkpoint downloaded. **No
    reasoning-parser plugin** (glm45 is stock). `TP`/`GPUS`/`DCP` overridable.
-3. **Stand up REAP-504B — PAUSED after the 2026-06-21 node crash** (see incident
-   above). Before retrying: make the start script crash-safe (`--memory` cap,
-   restore `fastsafetensors` + exclude the duplicate shard), and bring it up
-   **with M3 stopped first** (no production co-resident) watching RAM/dmesg —
-   only then revisit the co-residency layout.
-4. **Validate** with `contrib/inference-smoke-test.py` (A quality / B 250k needle
-   / C vision) **plus a tool-calling check** — the thing M3 can't do. Confirm
-   coherence (no NaN), reasoning folds, tools fire.
-5. **Wire into the gateway** (`/cluster/config/inference/models/<name>`) and
-   write a runbook mirroring the M3 one.
+3. ~~Stand up REAP-504B~~ **Done** — serving co-resident with M3 (GPUs 4–7,
+   TP=4/DCP=4) after the crash-safe rework (see incident/resolution above).
+4. **Validate** — coherence ✓ (17×24=408; bat-and-ball reasoned correctly, no
+   NaN) and **tool calling ✓** (`get_weather{"location":"Paris"}` end-to-end
+   through the gateway — the thing M3 can't do). Reasoning surfaces under the
+   `reasoning` field. Remaining: full `inference-smoke-test.py` A/B/C — note B
+   (needle) needs GLM's `enable_thinking` kwarg, not M3's `thinking_mode`, and C
+   (vision) only applies if this checkpoint is multimodal.
+5. ~~Wire into the gateway~~ **Done** — `ycluster inference add http://nvN.xc:9212`
+   registered `0xSero/GLM-5.2-504B` (hot-reloaded, reachable via `inference.xc` +
+   externally). A standalone runbook mirroring the M3 one is still TODO.
 6. **Decide on full 744B**: if REAP quality is insufficient for the agentic/coding
    use case, stand up full `GLM-5.2-NVFP4` at TP=8 — which means displacing M3
    on the node. Defer this until the REAP benchmark is in hand.
