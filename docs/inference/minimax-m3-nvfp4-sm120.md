@@ -267,6 +267,10 @@ after any image bump) covers three suites, all green on the b12x image:
   reads both normal and wide images (no tiling failure), via the standard OpenAI
   `image_url` content blocks.
 
+**Throughput / latency.** Serving benchmark (concurrency sweep, `vllm bench
+serve`): [../benchmarks/minimax-m3-nvfp4-vllm-serve.md](../benchmarks/minimax-m3-nvfp4-vllm-serve.md)
+— ~75 tok/s single-stream, ~437 output tok/s saturated at conc 16.
+
 ## 5. Register with the inference gateway
 
 Once verified, add the backend so `local-ai-proxy` routes to it
