@@ -32,3 +32,25 @@ func TestValidateModelName(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeBackendURL(t *testing.T) {
+	// A model name ("org/model") parses as host+path; truncating it to the host
+	// lands a junk entry matching no real backend, so reject it instead.
+	bad := []string{"", "   ", "brandonmusic/minimax-m3-nvfp4", "MiniMaxAI/MiniMax-M3", "nv4.xc:9211/v1", "http://nv4.xc:9211/v1/models", "http://nv4.xc?x=1", "http://nv4.xc#f"}
+	for _, s := range bad {
+		if got, err := normalizeBackendURL(s); err == nil {
+			t.Errorf("normalizeBackendURL(%q) = %q, nil; want error", s, got)
+		}
+	}
+	good := map[string]string{
+		"http://nv4.xc:9211":  "http://nv4.xc:9211",
+		"nv4.xc:9211":         "http://nv4.xc:9211", // scheme defaulted
+		"http://nv4.xc:9211/": "http://nv4.xc:9211", // bare trailing slash allowed
+		"https://x1.xc:8080":  "https://x1.xc:8080",
+	}
+	for in, want := range good {
+		if got, err := normalizeBackendURL(in); err != nil || got != want {
+			t.Errorf("normalizeBackendURL(%q) = %q, %v; want %q, nil", in, got, err, want)
+		}
+	}
+}

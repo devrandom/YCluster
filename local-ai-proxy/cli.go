@@ -502,6 +502,13 @@ func normalizeBackendURL(s string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("invalid URL %q: missing host", s)
 	}
+	// A backend URL is scheme://host[:port] only. A path/query/fragment almost
+	// always means a model name ("org/model") was passed where a backend URL
+	// was expected; reject it rather than silently truncating to the host,
+	// which lands a junk disabled/model entry that matches no real backend.
+	if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("invalid backend URL %q: expected scheme://host[:port] with no path (did you mean a model name?)", s)
+	}
 	out := u.Scheme + "://" + u.Host
 	return out, nil
 }
