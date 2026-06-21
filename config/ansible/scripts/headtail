@@ -19,22 +19,35 @@ line) so it can be followed in detail, e.g. with `tail -f`.
 """
 
 import argparse
+import re
 import sys
 from collections import deque
+
+
+def _expand_bare_count(argv):
+    """Translate a bare -N (head/tail style) into -n N before argparse sees it."""
+    out = []
+    for a in argv:
+        m = re.fullmatch(r"-(\d+)", a)
+        if m:
+            out += ["-n", m.group(1)]
+        else:
+            out.append(a)
+    return out
 
 
 def main():
     p = argparse.ArgumentParser(
         description="Show the first and last N lines of stdin, eliding the middle.")
     p.add_argument("-n", type=int, default=20, metavar="N",
-                   help="lines to show at each end (default: 20)")
+                   help="lines to show at each end (default: 20); also accepted bare as -N")
     p.add_argument("-H", "--head", type=int, metavar="N",
                    help="head lines to show (overrides -n)")
     p.add_argument("-T", "--tail", type=int, metavar="N",
                    help="tail lines to show (overrides -n)")
     p.add_argument("-l", "--log", metavar="FILE",
                    help="tee the full, un-elided input to FILE")
-    args = p.parse_args()
+    args = p.parse_args(_expand_bare_count(sys.argv[1:]))
 
     head = args.head if args.head is not None else args.n
     tail = args.tail if args.tail is not None else args.n
