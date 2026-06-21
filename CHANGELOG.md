@@ -3,6 +3,10 @@
 Completed work, moved out of `TODO.md`. Newest first. One line per change;
 detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
+## 2026-06-21
+
+- **Inference `backends` CLI prefix fix.** `backends disable/enable/ls` now use the disabled-backends etcd prefix instead of the models prefix (disable had been a silent no-op that littered the model store with junk URL-keyed entries), and `models add` rejects URL-shaped or empty model names.
+
 ## 2026-06-15
 
 - **Clock-skew health band by node type.** Non-storage nodes now warn at 1s / crit at 10s (was 100ms / 1s); storage nodes keep the strict band since etcd/PostgreSQL need tight sync.

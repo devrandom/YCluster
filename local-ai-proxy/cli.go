@@ -127,6 +127,20 @@ func modelsLs(configPath string, args []string) {
 	}
 }
 
+// validateModelName rejects model names that are almost certainly an argument
+// mistake: empty, or URL-shaped (an api-base passed where the model name
+// belongs). `models add` takes <api-base> [model]; swapping the two otherwise
+// writes a junk URL-keyed model entry, which then trips `models ls`.
+func validateModelName(model string) error {
+	if strings.TrimSpace(model) == "" {
+		return errors.New("empty model name")
+	}
+	if strings.Contains(model, "://") {
+		return fmt.Errorf("model name %q looks like a URL; usage is `models add <api-base> [model]` (api-base first)", model)
+	}
+	return nil
+}
+
 func modelsAdd(args []string, configPath string) {
 	fs := flag.NewFlagSet("models add", flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: local-ai-proxy models add <api-base> [model]") }
@@ -143,6 +157,9 @@ func modelsAdd(args []string, configPath string) {
 	client, prefix := mustEtcdForCLI(configPath)
 	defer client.Close()
 	if len(rest) == 2 {
+		if err := validateModelName(rest[1]); err != nil {
+			fatal("%v", err)
+		}
 		modelsAddOne(client, prefix, rest[1], apiBase)
 		return
 	}
@@ -155,6 +172,11 @@ func modelsAdd(args []string, configPath string) {
 	}
 	added, skipped := 0, 0
 	for _, id := range ids {
+		if err := validateModelName(id); err != nil {
+			fmt.Printf("  skip:  %s (%v)\n", id, err)
+			skipped++
+			continue
+		}
 		ok := modelsAddOneResult(client, prefix, id, apiBase)
 		if ok {
 			fmt.Printf("  added: %s -> %s\n", id, apiBase)
@@ -384,7 +406,7 @@ func backendsDisable(args []string, configPath string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	client, prefix := mustEtcdForCLI(configPath)
+	client, prefix := mustEtcdForCLIDisabled(configPath)
 	defer client.Close()
 	key := prefix + target
 	value := ""
@@ -418,7 +440,7 @@ func backendsEnable(args []string, configPath string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	client, prefix := mustEtcdForCLI(configPath)
+	client, prefix := mustEtcdForCLIDisabled(configPath)
 	defer client.Close()
 	key := prefix + target
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -439,7 +461,7 @@ func backendsLs(args []string, configPath string) {
 	if len(args) != 0 {
 		fatalUsage("backends ls")
 	}
-	client, prefix := mustEtcdForCLI(configPath)
+	client, prefix := mustEtcdForCLIDisabled(configPath)
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -534,6 +556,29 @@ func mustEtcdForCLI(path string) (*clientv3.Client, string) {
 	}
 	client := mustEtcdClient(cfg.Etcd)
 	return client, cfg.Etcd.Prefix
+}
+
+// disabledPrefixFor resolves the etcd prefix for operator-disabled backends,
+// matching the gateway's resolution in main.go (EtcdConfig.DisabledPrefix, or
+// DefaultDisabledPrefix when unset). The CLI MUST agree with the gateway, or a
+// `backends disable` lands where the gateway never looks — and pollutes the
+// models prefix instead.
+func disabledPrefixFor(cfg *EtcdConfig) string {
+	if cfg.DisabledPrefix != "" {
+		return cfg.DisabledPrefix
+	}
+	return DefaultDisabledPrefix
+}
+
+// mustEtcdForCLIDisabled is mustEtcdForCLI for the `backends` subcommands: it
+// returns the disabled-backends prefix instead of the models prefix.
+func mustEtcdForCLIDisabled(path string) (*clientv3.Client, string) {
+	cfg := mustLoadConfig(path)
+	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
+		fatal("CLI requires etcd-backed config (no etcd section in %s)", path)
+	}
+	client := mustEtcdClient(cfg.Etcd)
+	return client, disabledPrefixFor(cfg.Etcd)
 }
 
 func mustEtcdClient(cfg *EtcdConfig) *clientv3.Client {
