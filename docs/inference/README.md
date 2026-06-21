@@ -21,3 +21,7 @@ deployment-agnostic — no node names, IPs, or account specifics.
 - [Reproducible build of the b12x SM120 vLLM image](b12x-reproducible-build-design-2026-06.md)
   — plan to replace the opaque prebuilt Docker Hub image with one built from
   pinned public sources and hosted in our registry.
+- [GLM-5.2 NVFP4 on RTX PRO 6000 / SM120](glm-5.2-nvfp4-sm120-design-2026-06.md)
+  — plan to deploy GLM-5.2 on the same b12x stack as M3 (reuses the image
+  family, gains stock tool calling); evaluate the 4-GPU REAP-469B variant
+  first, then decide on full 744B at TP=8.

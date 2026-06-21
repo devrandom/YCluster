@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Pull the GLM-5.2 b12x image. Run as the dev user (no sudo) for the first
+# deployment and after a new image release:
+#
+#   ~/bin/glm52-b12x-setup.sh
+#
+# The image is the same b12x stack as MiniMax-M3 (its vLLM already registers
+# GlmMoeDsaForCausalLM), so on a node already running M3 this is a no-op pull.
+# Host provisioning (podman, CDI, lingering) is a separate, generic ansible
+# step - admin/setup-gpu-podman.yml, run by an operator. Managed by
+# install-glm52.yml - edit there. See docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md.
+set -euo pipefail
+
+IMAGE="{{ glm52_image }}"
+MODEL_HOST="${MODEL_HOST:-{{ glm52_model_dir }}}"
+
+command -v podman >/dev/null \
+  || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+echo "== pull $IMAGE =="
+podman pull "$IMAGE"
+
+echo "== GPU passthrough smoke test =="
+podman run --rm --entrypoint nvidia-smi \
+  --device nvidia.com/gpu=0 --group-add keep-groups "$IMAGE" -L | head -1 \
+  || { echo "GPU passthrough failed - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+echo
+echo "Image ready."
+if [ ! -f "$MODEL_HOST/config.json" ]; then
+  echo "Checkpoint not found at $MODEL_HOST (~292 GB) - download it:"
+  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
+  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
+  echo "  HF_HUB_DISABLE_XET=1 hf download {{ glm52_repo }} --local-dir $MODEL_HOST"
+fi
+echo "Start the server:  ~/bin/glm52-b12x-start.sh"

@@ -1,0 +1,50 @@
+---
+# Deploy GLM-5.2 NVFP4 (REAP, b12x) inference scripts to Nvidia GPU nodes.
+# Companion to docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md. Two dev
+# scripts (the dev user has no sudo, and needs none for these):
+#   ~dev/bin/glm52-b12x-setup.sh  - pull the image (no-op on a node already
+#                                   running M3 - same b12x stack)
+#   ~dev/bin/glm52-b12x-start.sh  - (re)launch the server, e.g. after reboot
+# Host prerequisites (podman + nvidia CDI) are generic and live in
+# setup-gpu-podman.yml. Unlike M3, GLM-5.2's reasoning/tool parsers (glm45/glm47)
+# are stock in vLLM, so there is no reasoning-parser plugin to ship.
+- name: Deploy GLM-5.2 b12x inference scripts
+  hosts: nvidia
+  become: yes
+  vars:
+    # Same b12x image as M3 - its vLLM already registers GlmMoeDsaForCausalLM
+    # (verified on the node). A newer GLM-5.2-specific line exists
+    # (voipmonitor/vllm:glm52-dark-devotion-*) as an optional later upgrade.
+    glm52_image: "docker.io/verdictai/minimax-m3-nvfp4-b12x:v1"
+    glm52_repo: "0xSero/GLM-5.2-504B"
+    glm52_model_dir: "/home/dev/models/GLM-5.2-504B-0xSero"
+    # The HF repo id verbatim, matching the dominant convention for HF-sourced
+    # models (nvidia/MiniMax-M2.7-NVFP4, mlx-community/Kimi-...) - preserve repo
+    # casing rather than lowercasing. The 504B (vs the full 744B) already flags
+    # this is the REAP-pruned variant. Also the gateway registration key.
+    glm52_served_name: "0xSero/GLM-5.2-504B"
+  tasks:
+    # Same guard as install-vllm.yml: skip nodes with no host-visible NVIDIA
+    # GPU (no NVIDIA hardware, or all cards bound to vfio-pci for passthrough).
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install dev inference scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - glm52-b12x-setup.sh
+        - glm52-b12x-start.sh
