@@ -26,7 +26,7 @@
 #    stock glm45 reasoning parser, so reasoning folds into reasoning_content.
 set -euo pipefail
 
-IMAGE="{{ glm52_image }}"
+IMAGE="${IMAGE:-{{ glm52_image }}}"
 MODEL_HOST="${MODEL_HOST:-{{ glm52_model_dir }}}"
 CONTAINER="${CONTAINER:-glm52-b12x}"
 PORT="${PORT:-9212}"
