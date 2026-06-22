@@ -1,0 +1,102 @@
+---
+# Comino CRPS power-supply telemetry collection for nvidia nodes. Uses
+# the node_exporter textfile collector (dir configured by
+# install-prometheus.yml). See docs/design/comino-crps-power-monitoring.md.
+#
+# On Comino workstation-class GPU chassis the BMC exposes no usable PSU
+# telemetry; the CRPS controller (a second STM32 USB-CDC device) is the
+# only source of per-PSU Vin/Vout/power/fault state. The collector
+# auto-discovers it among /dev/ttyACM*, so this installs unconditionally
+# on nvidia nodes and simply emits no series where no controller answers
+# — same gating discipline as the optional Comino path in
+# node-temps-collector.
+#
+# The CRPS and temps collectors probe the same /dev/ttyACM* bus and open
+# with TIOCEXCL, so their timers are staggered (temps at +20/30s, CRPS at
+# +35/30s) to avoid contending for the port on the same tick.
+- name: Install CRPS power-supply collector on nvidia nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    collector_path: /usr/local/lib/cluster/crps-collector
+    interval_sec: 30
+
+  tasks:
+    - name: Install CRPS collector dependencies
+      apt:
+        name:
+          # pyserial: talks to the CRPS controller over /dev/ttyACM*.
+          - python3-serial
+        state: present
+
+    - name: Install CRPS collector script
+      copy:
+        src: files/crps-collector.py
+        dest: "{{ collector_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create systemd service for CRPS collector
+      copy:
+        dest: /etc/systemd/system/crps-collector.service
+        content: |
+          [Unit]
+          Description=Collect Comino CRPS power-supply telemetry for node_exporter
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 {{ collector_path }}
+          User=root
+          # Each run sweeps a short page budget (a few seconds of port-hold)
+          # plus the live gauges; the baseline seed is spread over the first
+          # ~14 runs rather than one long hold. 60s is ample headroom.
+          TimeoutStartSec=60
+          # Needs /dev/ttyACM* (dialout). ProtectSystem=strict blocks the
+          # textfile-dir write, so grant it via ReadWritePaths instead.
+          # The harvest state file lives in that same (writable) dir.
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths=/var/lib/prometheus/node-exporter
+          DeviceAllow=char-ttyACM rw
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd timer for CRPS collector
+      copy:
+        dest: /etc/systemd/system/crps-collector.timer
+        content: |
+          [Unit]
+          Description=Collect Comino CRPS power-supply telemetry every {{ interval_sec }}s
+
+          [Timer]
+          # Staggered against node-temps-collector (OnBootSec=20s) so the
+          # two collectors don't contend for the shared /dev/ttyACM* bus.
+          OnBootSec=35s
+          OnUnitActiveSec={{ interval_sec }}s
+          AccuracySec=5s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable and start CRPS collector timer
+      systemd:
+        name: crps-collector.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Run an initial collection so metrics appear immediately
+      command: /usr/bin/python3 {{ collector_path }}
+      changed_when: false
+      failed_when: false
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes

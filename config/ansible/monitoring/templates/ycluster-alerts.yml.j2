@@ -669,10 +669,83 @@ groups:
       # older than a few minutes means the script or its dependencies
       # (ipmitool, incus, comino device) stopped working.
       - alert: CollectorStale
-        expr: time() - node_textfile_mtime_seconds{file=~".*(temps|vm_gpu).prom"} > 300
+        expr: time() - node_textfile_mtime_seconds{file=~".*(temps|vm_gpu|crps).prom"} > 300
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "Textfile collector stale on {{ $labels.node }}"
           description: "{{ $labels.file }} on {{ $labels.node }} hasn't been updated in {{ $value | humanizeDuration }}"
+
+  # Comino CRPS power-supply monitoring. On workstation-class GPU chassis
+  # the BMC exposes no usable PSU telemetry; these series come from the
+  # Comino CRPS controller via crps-collector. See
+  # docs/design/comino-crps-power-monitoring.md.
+  - name: ycluster-power
+    rules:
+      # A PSU module dropped out of the bank — either de-enumerated
+      # (present=0) or reporting a non-Normal PMBus status (ok=0). On a
+      # redundant bank this is tolerated, but it's eating the redundancy
+      # margin and the failing module should be serviced.
+      - alert: CrpsPsuDropout
+        expr: |
+          node_crps_psu_present == 0
+          or
+          node_crps_psu_ok == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CRPS PSU module {{ $labels.module }} down on {{ $labels.node }}"
+          description: "PSU module {{ $labels.module }} on {{ $labels.node }} is absent or not in Normal state for more than 1 minute"
+
+      # AC sag — input voltage low on MULTIPLE modules at once. A single
+      # module ramping (e.g. a benign turn-on) is excluded by requiring
+      # two or more modules below threshold simultaneously.
+      - alert: CrpsAcSag
+        expr: count by (node) (node_crps_psu_vin_volts < 200) >= 2
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "AC sag on {{ $labels.node }}"
+          description: "{{ $value }} CRPS modules on {{ $labels.node }} report input voltage below 200V — likely an AC-side sag"
+
+      # Non-redundant bank: no hot-spare reserve modules configured (or
+      # cold redundancy disabled), so losing any single PSU powers the box
+      # off instead of riding through. Should never be the steady state.
+      - alert: CrpsNonRedundant
+        expr: node_crps_reserve_qty == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CRPS bank non-redundant on {{ $labels.node }}"
+          description: "CRPS on {{ $labels.node }} has reserveQty=0 — any single PSU dropout will power the host off"
+
+      # An active controller fault (overheat, cooling, PMBus alert, …) as
+      # opposed to a tolerated alarm. Distinct from the per-module dropout
+      # alert: this fires on the controller's own aggregate fault state.
+      - alert: CrpsControllerFault
+        expr: node_crps_state{state="fault"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRPS controller in FAULT state on {{ $labels.node }}"
+          description: "The Comino CRPS controller on {{ $labels.node }} reports an active fault — check node_crps_alarm flags"
+
+      # Transient caught by the on-board event log that the live gauges
+      # almost certainly missed: a sub-second AC sag or single-PSU dropout
+      # recovers between 30s scrapes, but the controller logs the
+      # Normal->Fault transition and the collector harvests it into this
+      # counter. So a non-zero increase means "a power fault happened
+      # recently even though the PSUs look fine right now." Keyed off the
+      # log path, not live state, precisely to surface the invisible blips.
+      - alert: CrpsLoggedPowerTransient
+        expr: increase(node_crps_log_event_total{state="fault"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "CRPS logged a power fault transient on {{ $labels.node }}"
+          description: "{{ $value | printf \"%.0f\" }} fault entr(ies) appeared in the CRPS event log on {{ $labels.node }} in the last 15m — a brief power fault the live gauges may have ridden over. Inspect `show log` on the controller."

@@ -41,11 +41,27 @@ reply, never by hardcoding a node. The CRPS controller is identified by a
 **Read-only commands only** — never `reboot`, `restore`, `backup`, or `setup`
 (those write config or reset the controller).
 
-- `show crps` — per-PSU block: `idx;fan;temp1;temp2;Vin;Vout;Iin;Iout;Pin;Pout;…`
-- `show alarms` — active alarm/fault flags
-- `show params` — redundancy config: `workQty`, `reserveQty`, `crEnable`, `combineMode`
-- `show log` — on-board event ring buffer (see below; **stateful — each call
-  advances one page**, so the collector must not page it on every scrape)
+Real reply formats (captured from a 4× Great Wall CRPS2000D2 chassis):
+
+- `show crps` — a **transposed** ASCII table: columns are PSU modules
+  (`CRPS 1..N`), rows are PMBus fields (`Temp1 Temp2 Fan Vin Vout Iin Iout Pin
+  Pout VinType Status SmartOn`). `Status: 0x0000` == Normal.
+- `show alarms` — two labelled bit tables (`Alarms:`/`Faults:`) with an
+  aggregate hex word and per-flag `State` column (e.g. `ALARM_CRPS_NORESERV`,
+  `FAULT_OVERHEAT`).
+- `show params` — a single **JSON** line:
+  `{"temp":{...},"crps":{"workQty":2,"reserveQty":2,"crEnable":false,...},"combineMode":false}`.
+- `show log` — on-board event ring buffer. Each entry is one long
+  semicolon record: `id;0;<state>;<ts>;` + rails + temps + four 21-field
+  per-PSU sub-records (`idx;fan;temp1;temp2;Vin;Vout;Iin;Iout;Pout;Pin;…`).
+  **Stateful**: each call shows `page X/N` and advances the cursor by one
+  (the cursor persists across reconnects and wraps at the ring size `N`);
+  there is **no random access** (`show log <n>` returns nothing). Entries
+  span multiple power-on epochs, so `ts` is **not globally monotonic**.
+
+The controller echoes each typed character back wrapped in VT100 cursor
+escapes; strip ANSI before parsing and the echo collapses to a plain line
+the parsers ignore.
 
 ## Serial-port contention
 
@@ -174,13 +190,40 @@ short timer staggered against the temps timer to avoid bus contention. Unit
 tests follow the `test_node_temps_collector.py` pattern: feed canned `show crps`
 / `show alarms` / `show log` text to the parsers and assert the emitted series.
 
-## Open questions
+## Implementation notes (as built)
 
-- Does the CRPS firmware expose a clean live "current epoch seconds" counter
-  (for the `ts` anchor), or must the collector derive epoch age from the newest
-  log entry plus its own observation cadence?
-- Log ring-buffer depth vs. poll interval: confirm the poll harvests new events
-  faster than the buffer wraps under a fault storm (rapid power-cycling produces
-  many entries quickly).
-- Whether to also export `show params` temp limits, for a "PSU thermal limit
-  changed" alert.
+The harvest does not depend on `ts` ordering or cursor position. Each log
+entry is identified by a **content hash**; the collector sweeps a short,
+fixed page budget per scrape (keeping the exclusive port-hold to a few
+seconds — the temps collector shares the bus), dedups against a bounded
+set of seen hashes, and accumulates **persistent counters** in a small
+state file (`/var/lib/prometheus/node-exporter/.crps-state.json`) so they
+survive the oneshot timer's invocations. The first lap of the ring is a
+**baseline seed**: entries are marked seen *without* counting, so the
+pre-existing backlog isn't replayed as fresh events on startup. The seed
+is spread across the first ~14 short sweeps rather than one long
+port-monopolising read. Harvested entries become
+`node_crps_log_event_total{state}`; a logged fault that the live gauges
+missed surfaces as `increase(...{state="fault"}[15m]) > 0`.
+
+## Open questions / resolved
+
+- **Live "current epoch seconds" counter** — the firmware exposes no clean
+  one (`show worktime` is hour-bucketed). The collector therefore does not
+  emit `node_crps_epoch_seconds`; the counters' Prometheus ingestion time
+  is the wall clock, which is what the design's "collector is the
+  wall-clock source of truth" actually requires. Per-epoch `ts`
+  interpolation is left unimplemented (cross-epoch `ts` is non-monotonic
+  and not needed for the counter path).
+- **Ring depth vs. poll** — ring is `N≈275` entries. The short-budget
+  sweep laps it every few minutes; under a sustained fault storm
+  generating >N entries faster than a lap, the oldest unharvested entries
+  can be overwritten before they're counted. The live gauge + counter
+  still record that a storm is in progress; the bounded loss is the tail
+  of a storm's history, not its existence. (Documented, not silently
+  capped.)
+- **Per-module dropout-asymmetry counters** — the per-PSU sub-records are
+  parsed but not yet emitted as per-module log counters; the bank-level
+  `state` counters cover the headline "a transient happened" need.
+- **`show params` temp limits** for a "thermal limit changed" alert —
+  still optional; not exported.
