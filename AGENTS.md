@@ -190,13 +190,20 @@ sudo systemctl restart snap.microceph.daemon.service
 ### Docker SDK Errors
 "Not supported URL scheme http+docker" means `requests >= 2.32` is installed via pip and shadowing the apt package. Check `/usr/local/lib/python3.12/dist-packages/` for pip-installed packages that shouldn't be there.
 
-## Etcd Paths
-- `/cluster/nodes/by-hostname/<name>` - Node registration
-- `/cluster/config/` - Cluster configuration
-- `/cluster/config/inference/master-key` - Cluster admin bearer (validated by local-ai-proxy-auth.service)
-- `/cluster/config/inference/models/<name>` - Per-model config: JSON `{"backends":[{"api_base":"..."}, ...]}`. Watched by local-ai-proxy (hot-reload).
-- `/cluster/config/inference/disabled/<url>` - Backends pulled out of rotation
-- `/cluster/services/` - Service state and leader election
+## Etcd (backing store — not the interface)
+
+etcd is the source of truth, but it is **not** how you interact with the
+cluster: change state through the **`ycluster` CLI** and **ansible**, which own
+validation, hot-reload, and leader/serialization semantics. Reaching for
+`etcdctl` (especially to write) is a smell. These keys are listed for
+*understanding and read-only debugging* — each write goes through the tool that
+owns it:
+
+- `/cluster/nodes/by-hostname/<name>` — node registration (written by DHCP/bootstrap; read via `ycluster cluster status`)
+- `/cluster/config/inference/master-key` — cluster admin bearer (validated by local-ai-proxy-auth.service)
+- `/cluster/config/inference/models/<name>` — model→backend map, JSON `{"backends":[{"api_base":"..."}, ...]}`, hot-reloaded — **manage with `ycluster inference add/remove`** (see `docs/operations/inference.md`)
+- `/cluster/config/inference/disabled/<url>` — backends out of rotation — `ycluster inference disable/enable`
+- `/cluster/services/` — service state & leader election (written by the services themselves; read via `ycluster cluster status`)
 
 ## Inference Gateway (local-ai-proxy)
 
