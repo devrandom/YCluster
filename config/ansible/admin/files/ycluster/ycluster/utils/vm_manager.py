@@ -296,9 +296,20 @@ def _ensure_nas_share(name):
     have = _incus("config", "device", "list", name, check=False)
     if NAS_DEVICE in have.stdout.split():
         return
+    # On a VM host the share is served by virtiofsd, which maps uids in
+    # userspace; shift=true is the established working path there. On a
+    # container host the device is an idmapped bind mount, which the
+    # CIFS-backed /near1 cannot provide ("idmapping abilities are
+    # required but aren't supported on system") — so the container fails
+    # to start. Containers instead align ids via the gpu-ct profile's
+    # raw.idmap (uid/gid 1000 == the Samba user the CIFS mount pins), so
+    # a plain bind mount is read/write without an idmapped mount.
+    inst = _instance_info(name)
+    is_vm = bool(inst) and inst.get("type") == "virtual-machine"
+    shift = ["shift=true"] if is_vm else []
     _incus("config", "device", "add", name, NAS_DEVICE, "disk",
            f"source={host_dir}", f"path={NAS_GUEST_PATH}",
-           "shift=true", "required=false")
+           *shift, "required=false")
 
 
 def _instance_running(name):

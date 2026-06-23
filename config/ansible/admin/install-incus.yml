@@ -277,11 +277,26 @@
             sed -i '/^root:992:1$/d' /etc/subgid
           changed_when: false
           when: incus_render_gid != 992
-        - name: Restart Incus to pick up subgid change
+        # The gpu-ct profile also maps uid/gid 1000 straight through (the
+        # ubuntu user == the Samba uid the CIFS-backed /data share pins),
+        # so the bind-mounted NAS dir is writable without an idmapped
+        # mount. Same as the render gid, this needs explicit subuid/subgid
+        # entries — the default root:1000000:1000000000 ranges don't cover
+        # the small id 1000.
+        - name: Allow root to map uid/gid 1000 into unprivileged containers
+          lineinfile:
+            path: "{{ item }}"
+            line: "root:1000:1"
+            regexp: '^root:1000:'
+          loop:
+            - /etc/subuid
+            - /etc/subgid
+          register: subid_nas
+        - name: Restart Incus to pick up subuid/subgid changes
           systemd:
             name: incus
             state: restarted
-          when: subgid_render.changed
+          when: subgid_render.changed or subid_nas.changed
 
         - name: Check whether gpu-ct profile exists
           command: incus profile show gpu-ct

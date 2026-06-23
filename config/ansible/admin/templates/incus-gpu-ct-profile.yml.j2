@@ -9,8 +9,16 @@ config:
   # root:render inside. The ubuntu-rocm image preallocates a 'render'
   # group at the matching gid and makes the default ubuntu user a member,
   # so ROCm works without sudo.
+  #
+  # Also map the default 'ubuntu' user (uid/gid 1000) straight through to
+  # the same ids on the host. The /data NAS share is a CIFS mount pinned
+  # to uid=gid=1000 (file_mode 0664, dir_mode 0775); CIFS can't back an
+  # idmapped mount, so the share is attached as a plain bind mount (see
+  # _ensure_nas_share). Without this passthrough the container's ubuntu
+  # user lands on a high mapped uid and can't write to its own NAS dir.
   raw.idmap: |-
     gid {{ incus_render_gid }} {{ incus_render_gid }}
+    both 1000 1000
 devices:
   eth0:
     type: nic
