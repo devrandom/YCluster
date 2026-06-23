@@ -698,12 +698,17 @@ def write_prom(metrics):
     # dropout-asymmetry signal that fingers a specific flaky PSU/feed
     # rather than a bank-wide sag.
     me = log["module_events"] if log else {}
+    # Emit a 0 for every currently-present PSU (not just ones that have had
+    # events) so the panel shows flat-zero "healthy" lines rather than "No
+    # data" on a clean box, and increase() has a baseline to work from.
+    present_mods = {m["module"] for m in mods}
+    all_mods = sorted(present_mods | set(me), key=lambda x: int(x) if x.isdigit() else 0)
     lines.append("# HELP node_crps_psu_event_total Per-PSU asymmetric drop events from the event log (single module down while >=2 others healthy).")
     lines.append("# TYPE node_crps_psu_event_total counter")
-    for m in sorted(me, key=lambda x: int(x) if x.isdigit() else 0):
+    for m in all_mods:
         for kind in MODULE_EVENT_KINDS:
             lines.append(
-                f'node_crps_psu_event_total{{module="{esc(m)}",kind="{kind}"}} {int(me[m].get(kind, 0))}'
+                f'node_crps_psu_event_total{{module="{esc(m)}",kind="{kind}"}} {int(me.get(m, {}).get(kind, 0))}'
             )
     lines.append("# HELP node_crps_log_harvest_pages_total Cumulative `show log` pages swept by the collector.")
     lines.append("# TYPE node_crps_log_harvest_pages_total counter")

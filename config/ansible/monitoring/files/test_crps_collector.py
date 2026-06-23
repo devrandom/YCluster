@@ -389,6 +389,8 @@ class WritePromLog(unittest.TestCase):
         self.assertIn("node_crps_log_seeded 1", body)
         self.assertIn('node_crps_psu_event_total{module="4",kind="input_loss"} 7', body)
         self.assertIn('node_crps_psu_event_total{module="4",kind="output_off"} 3', body)
+        # present-but-eventless modules emit a 0 baseline (no "No data")
+        self.assertIn('node_crps_psu_event_total{module="1",kind="input_loss"} 0', body)
 
 
 if __name__ == "__main__":
