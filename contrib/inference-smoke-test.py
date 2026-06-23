@@ -63,7 +63,13 @@ def chat(messages, model, max_tokens=1024, temperature=0.0, thinking=None, timeo
         "stream": False,
     }
     if thinking is not None:
-        body["chat_template_kwargs"] = {"thinking_mode": "enabled" if thinking else "disabled"}
+        # Model families spell the thinking toggle differently; send both keys
+        # (a chat template ignores the one it doesn't use). minimax-family reads
+        # `thinking_mode` (string); glm/qwen-family read `enable_thinking` (bool).
+        body["chat_template_kwargs"] = {
+            "thinking_mode": "enabled" if thinking else "disabled",
+            "enable_thinking": thinking,
+        }
     t0 = time.monotonic()
     try:
         data = _post("/v1/chat/completions", body, timeout)
@@ -210,8 +216,10 @@ def suite_B(model, max_tokens_target):
             msgs = [{"role": "user",
                      "content": hay + "\n\nWhat is the secret passphrase? "
                                        "Answer with only the passphrase."}]
-            # thinking OFF: pure retrieval, so reasoning can't eat the token budget
-            r = chat(msgs, model, max_tokens=96, thinking=False, timeout=600)
+            # thinking OFF: pure retrieval. Budget has headroom so that even a
+            # model ignoring the thinking toggle can still emit the short answer
+            # after a reasoning preamble (the needle answer is a few tokens).
+            r = chat(msgs, model, max_tokens=256, thinking=False, timeout=600)
             ptok = (r.get("usage") or {}).get("prompt_tokens")
             label = f"~{target//1000}k@{int(frac*100):>2}%"
             if r["error"]:

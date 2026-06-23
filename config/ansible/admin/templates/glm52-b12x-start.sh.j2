@@ -1,29 +1,37 @@
 #!/usr/bin/env bash
-# (Re)start the GLM-5.2 NVFP4 (REAP) b12x inference server. Run as the dev user
-# (no sudo), e.g. after a reboot:
+# (Re)start the GLM-5.2 NVFP4 (REAP) inference server on the dark-devotion b12x
+# image. Run as the dev user (no sudo), e.g. after a reboot:
 #
 #   ~/bin/glm52-b12x-start.sh
 #
 # Idempotent: replaces any existing container. Defaults to GPUs 4-7 (TP=4) so it
-# runs co-resident with M3 (which holds 0-3) without disturbing it; override
-# with GPUS / TP / DCP for the shared TP=8 layout. Managed by install-glm52.yml -
+# runs co-resident with M3 (which holds 0-3) without disturbing it; override with
+# GPUS / TP / DCP for the full-box TP=8 layout. Managed by install-glm52.yml -
 # edit there. See docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md.
 #
-# Recipe adapted from 0xSero/glm-5.2-sm120 launch.sh (the SM120-validated config),
-# reconciled with how the M3 image actually wants to run:
-#  - invoke `vllm serve` directly (not the image's M3-tuned serve_m3.py entrypoint)
-#    so the GLM DSA path is selected; the b12x kernels are baked into the image.
-#  - trust the image's baked NCCL/b12x env (patched NCCL, PCIe-allreduce=b12x);
-#    do NOT override it. But replicate the entrypoint's `unset NCCL_GRAPH_FILE`
-#    (the image bakes it empty, which crashes ncclCommInitRank).
-#  - fastsafetensors loader (streams shards direct-to-GPU). Mandatory here: the
-#    default loader buffers through host RAM and OOM-panicked this ~125 GiB node on
-#    a 290 GB checkpoint. The checkpoint must be deduped first (redundant MTP shards
-#    break fastsafetensors) - glm52-b12x-setup.sh does that; here we only guard for it.
-#  - a podman --memory cap so a runaway load OOM-kills the container, not init/the
-#    host (a first co-resident attempt hard-panicked the node).
-#  - the checkpoint's own chat template (not 0xSero's /recipe no-think one) + the
-#    stock glm45 reasoning parser, so reasoning folds into reasoning_content.
+# This image is GLM-5.2-specific (dark-devotion = b12x + the DCP global-topk /
+# topk-scores patch that fixes >8k-context corruption). It ships its own baked
+# launch recipe at /usr/local/bin/serve-glm52.sh, which we drive directly rather
+# than hand-roll vllm args - that script carries the validated env matrix and
+# flags (B12X_MLA_SPARSE attention, b12x MoE + PCIe-allreduce, AOT compile, the
+# index_topk pattern, glm45/glm47 parsers, DCP ag_rs, FULL_AND_PIECEWISE
+# cudagraphs, max-model-len auto, fastsafetensors). We supply only the podman
+# wrapper + a few env overrides:
+#  - PYTHON_BIN=/opt/venv/bin/python: serve-glm52.sh defaults to a sibling .venv
+#    that doesn't exist in the image; point it at the image's venv.
+#  - CUDA_VISIBLE_DEVICES=0..N-1: CDI renumbers the injected GPUs to 0-based, so
+#    override the script's 0-7 default to the actual in-container count.
+#  - GLM51_DISABLE_MTP=1: MTP speculative decode needs the checkpoint's MTP shards,
+#    which the fastsafetensors dedup (glm52-b12x-setup.sh) moves aside. Kept off
+#    until an MTP-capable checkpoint is in place; orthogonal to the correctness fix.
+#  - --unsetenv NCCL_GRAPH_FILE: the image bakes it empty, which crashes the
+#    patched NCCL's ncclCommInitRank (the entrypoint's own `unset` does the same).
+#  - --memory cap: keep a runaway load OOM-killing the container, not the ~125 GiB
+#    host (a co-resident attempt once panicked the node). fastsafetensors streams
+#    shards direct-to-GPU, so real host use stays well under this ceiling.
+#  - VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: enlarge the b12x indexer workspace so long
+#    agentic contexts (opencode) don't crash the engine; the image default
+#    under-reserves and the workspace is locked after profiling (no runtime growth).
 set -euo pipefail
 
 IMAGE="${IMAGE:-{{ glm52_image }}}"
@@ -33,34 +41,14 @@ PORT="${PORT:-9212}"
 TP="${TP:-4}"
 DCP="${DCP:-4}"
 GPUS="${GPUS:-4 5 6 7}"
-GPU_UTIL="${GPU_UTIL:-0.95}"
-MAXLEN="${MAXLEN:-250000}"
-MAXSEQS="${MAXSEQS:-2}"
-MAXBATCH="${MAXBATCH:-8192}"
-# b12x sparse-attention indexer logits workspace, reserved during profiling then
-# *locked* (no growth at runtime). The image default (512 MB) under-reserves for
-# long contexts: large agentic requests (e.g. opencode - big system prompt + tool
-# schemas + history) crash the engine core with "Workspace is locked ... requires
-# N MB ... growth is not allowed". Sized up for headroom; trades a little KV-cache
-# space, no extra VRAM. Raise further if very long contexts still hit it.
-INDEXER_LOGITS_MB="${INDEXER_LOGITS_MB:-2048}"
+GPU_UTIL="${GPU_UTIL:-0.9}"
 SERVED_NAME="${SERVED_NAME:-{{ glm52_served_name }}}"
-# Persistent vLLM/JIT compile cache (torch.compile graphs + b12x/triton
-# kernels), survives the podman rm below. CUDA-graph capture still runs cold.
+INDEXER_LOGITS_MB="${INDEXER_LOGITS_MB:-2048}"
+# Persistent JIT/compile cache (torch.compile + AOT inductor graphs, b12x/triton/
+# flashinfer kernels). The image's baked VLLM_CACHE_DIR/TORCH_EXTENSIONS_DIR point
+# under /cache, so just mount it; survives the podman rm below.
 CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/glm52-vllm}"
-# Container memory cap: keep a runaway load contained to the cgroup (OOM-kills
-# the container) instead of exhausting host RAM and panicking the node, which a
-# first co-resident attempt did. Host has ~125 GiB; fastsafetensors keeps real
-# use well under this, so this is a safety ceiling, not a tuning knob. Lower it
-# when running co-resident with M3.
 MEM="${MEM:-80g}"
-
-# Sparse-attention layer schedule for the DSA indexer (F=full, S=sparse, one
-# char per layer, 78 layers). The checkpoint ships this as config.json
-# `indexer_types` but leaves `index_topk_pattern` null, and the vLLM loader
-# reads the latter - so we must supply it. Verified md5-equal to this
-# checkpoint's `indexer_types` (not just copied from 0xSero's 469B launch.sh).
-INDEX_TOPK_PATTERN="FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"
 
 # pre-flight (no root needed)
 podman image exists "$IMAGE" \
@@ -83,19 +71,14 @@ fi
 
 mkdir -p "$CACHE_DIR"
 dev_args=()
-for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
+ngpu=0
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); ngpu=$((ngpu + 1)); done
+# CDI renumbers the injected GPUs to a 0-based range; serve-glm52.sh otherwise
+# defaults CUDA_VISIBLE_DEVICES to 0-7, which is wrong for a partial-GPU container.
+cvd="$(seq -s, 0 $((ngpu - 1)))"
 
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
-# Trust the image's baked NCCL/b12x env (LD_PRELOAD'd patched NCCL 2.30.4,
-# NCCL_P2P_LEVEL=SYS, VLLM_ENABLE_PCIE_ALLREDUCE=1 + b12x backend, VLLM_USE_B12X_*)
-# - do NOT override it (M3 doesn't either). We bypass the image's M3 entrypoint
-# (serve_m3.py) because the b12x/DSA kernels are baked in at build time, not
-# applied by that script - so `vllm serve` picks the GLM DSA path directly. But
-# we must replicate the one piece of entrypoint hygiene that matters: the image
-# bakes NCCL_GRAPH_FILE='' (empty), which makes the patched NCCL fail
-# ncclCommInitRank with "unhandled system error"; --unsetenv clears it, as the
-# entrypoint's `unset` does. Backend selection is via the serve args below.
 podman run -d --name "$CONTAINER" \
   "${dev_args[@]}" \
   --network=host --shm-size 32g \
@@ -103,36 +86,19 @@ podman run -d --name "$CONTAINER" \
   --ulimit stack=67108864:67108864 \
   --memory "$MEM" --memory-swap "$MEM" \
   --unsetenv NCCL_GRAPH_FILE --unsetenv NCCL_GRAPH_DUMP_FILE \
-  -e VLLM_CACHE_ROOT=/cache \
+  -e PYTHON_BIN=/opt/venv/bin/python \
+  -e CUDA_VISIBLE_DEVICES="$cvd" \
+  -e MODEL=/model \
+  -e SERVED_MODEL_NAME="$SERVED_NAME" \
+  -e HOST=0.0.0.0 -e PORT="$PORT" \
+  -e TP_SIZE="$TP" -e DCP_SIZE="$DCP" \
+  -e GPU_MEMORY_UTILIZATION="$GPU_UTIL" \
+  -e GLM51_DISABLE_MTP=1 \
   -e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB="$INDEXER_LOGITS_MB" \
   -v "$MODEL_HOST":/model \
   -v "$CACHE_DIR":/cache \
-  --entrypoint /opt/venv/bin/vllm \
-  "$IMAGE" \
-    serve /model \
-    --served-model-name "$SERVED_NAME" \
-    --trust-remote-code \
-    --host 0.0.0.0 --port "$PORT" \
-    --tensor-parallel-size "$TP" --pipeline-parallel-size 1 \
-    --decode-context-parallel-size "$DCP" \
-    --quantization modelopt_fp4 \
-    --kv-cache-dtype fp8 \
-    --attention-backend B12X_MLA_SPARSE --moe-backend b12x \
-    --enable-chunked-prefill --enable-prefix-caching --async-scheduling \
-    --load-format fastsafetensors \
-    --gpu-memory-utilization "$GPU_UTIL" \
-    --max-num-batched-tokens "$MAXBATCH" --max-num-seqs "$MAXSEQS" \
-    --max-cudagraph-capture-size "$MAXSEQS" \
-    --max-model-len "$MAXLEN" \
-    --chat-template /model/chat_template.jinja \
-    --tool-call-parser glm47 --enable-auto-tool-choice \
-    --reasoning-parser glm45 \
-    --hf-overrides "{\"index_topk_pattern\":\"$INDEX_TOPK_PATTERN\"}"
-    # Opt-in perf, enable once a clean boot is confirmed (verify flag syntax on
-    # this image's vLLM first):
-    #   --speculative-config '{"method":"mtp","num_speculative_tokens":3}'  # MTP draft
-    #   -cc.pass_config.fuse_allreduce_rms=True                             # allreduce+RMS fusion
+  "$IMAGE" serve-glm52.sh
 
-echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] TP=$TP DCP=$DCP."
+echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] TP=$TP DCP=$DCP, MTP off."
 echo "  watch:  podman logs -f $CONTAINER"
 echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"

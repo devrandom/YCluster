@@ -12,10 +12,13 @@
   hosts: nvidia
   become: yes
   vars:
-    # Same b12x image as M3 - its vLLM already registers GlmMoeDsaForCausalLM
-    # (verified on the node). A newer GLM-5.2-specific line exists
-    # (voipmonitor/vllm:glm52-dark-devotion-*) as an optional later upgrade.
-    glm52_image: "docker.io/verdictai/minimax-m3-nvfp4-b12x:v1"
+    # GLM-5.2-specific dark-devotion b12x build: the same b12x stack plus the DCP
+    # global-topk / topk-scores patch. The shared M3 image
+    # (verdictai/minimax-m3-nvfp4-b12x:v1) serves GLM-5.2 but corrupts output past
+    # ~8k context on the DSA path; this build fixes that (validated to 52k via the
+    # inference smoke test). It ships a baked /usr/local/bin/serve-glm52.sh recipe
+    # that glm52-b12x-start.sh drives directly.
+    glm52_image: "docker.io/voipmonitor/vllm:glm52-dark-devotion-pr31-dcpglobaltopk-mtp-cu132-20260621"
     glm52_repo: "0xSero/GLM-5.2-504B"
     glm52_model_dir: "/home/dev/models/GLM-5.2-504B-0xSero"
     # The HF repo id verbatim, matching the dominant convention for HF-sourced

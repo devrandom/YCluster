@@ -3,6 +3,11 @@
 Completed work, moved out of `TODO.md`. Newest first. One line per change;
 detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
+## 2026-06-23
+
+- **GLM-5.2 on the dark-devotion image.** `0xSero/GLM-5.2-504B` moved to the GLM-specific b12x build (DCP global-topk / topk-scores patch), fixing the >8k-context output corruption the shared M3 image showed on the DSA path; validated to 168k tokens via the inference smoke test.
+- **Smoke test handles reasoning-model thinking toggles.** `inference-smoke-test.py` now sends both `enable_thinking` and `thinking_mode`, fixing false long-context failures on GLM/Qwen whose token budget was eaten by an un-suppressed reasoning preamble.
+
 ## 2026-06-21
 
 - **GLM-5.2 (REAP-504B) NVFP4 deployed.** `0xSero/GLM-5.2-504B` serves co-resident with M3 on the b12x stack (SM120, TP=4), registered with the gateway, with working tool calling — closing M3's tool-calling gap. Design + incident: `docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md`.
