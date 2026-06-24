@@ -41,6 +41,12 @@
         force: yes
         update: "{{ instance == '' }}"
 
+    - name: Patch upstream Kagi web search (fixes 401; upstream sends Bearer/POST instead of Bot/GET)
+      copy:
+        src: files/kagi.py
+        dest: "{{ build_dir }}/open-webui/backend/open_webui/retrieval/web/kagi.py"
+        mode: '0644'
+
     - name: Build and push with buildx using registry cache
       shell: |
         docker buildx build \
