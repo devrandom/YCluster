@@ -1,75 +1,86 @@
 #!/usr/bin/env bash
-# (Re)start the MiniMax-M3 NVFP4 b12x inference server. Run as the dev user
-# (no sudo), e.g. after a reboot:
+# (Re)start the MiniMax-M3 NVFP4 inference server on the dark-devotion b12x image.
+# Run as the dev user (no sudo), e.g. after a reboot:
 #
 #   ~/bin/minimax-m3-b12x-start.sh
 #
-# Idempotent: replaces any existing container. Uses GPUs 0-3 by default
-# (override with GPUS="0 1 2 3"). Managed by install-minimax-m3.yml - edit
-# there. See docs/inference/minimax-m3-nvfp4-sm120.md.
+# Idempotent: replaces any existing container. Uses GPUs 0-3 by default (override
+# with GPUS). Managed by install-minimax-m3.yml - edit there. See
+# docs/inference/minimax-m3-nvfp4-sm120.md.
+#
+# This image (dark-devotion) ships upstream's built-in minimax_m3 *reasoning* and
+# *tool-call* parsers - the older verdictai image had neither, so tool calling was
+# off and we shipped a python reasoning-parser plugin. Both are now baked in. We
+# drive the image's own serve-minimax-m3-nvfp4.sh recipe (it owns kv-cache, TP,
+# parsers, and tools) through serve-minimax-m3-named.sh, which patches the recipe's
+# hard-pinned served name to our id list so the established
+# `brandonmusic/minimax-m3-nvfp4` gateway id keeps working (the proxy forwards the
+# client's model id verbatim - it has no backend-side rename).
+#
+# Differences from the old recipe, all handled by the baked script:
+#  - kv-cache fp8_e4m3 is coherent on this build (the old image NaN'd on fp8, so we
+#    forced bfloat16); no override needed.
+#  - reasoning + tool parsers are --reasoning-parser/--tool-call-parser minimax_m3
+#    (built in); no plugin mount.
+#  - M3_PROFILE=off: the recipe defaults torch profiling ON (overhead + /tmp fill).
 set -euo pipefail
 
 IMAGE="{{ minimax_m3_image }}"
 MODEL_HOST="${MODEL_HOST:-{{ minimax_m3_model_dir }}}"
 CONTAINER="${CONTAINER:-minimax-m3-b12x}"
 PORT="${PORT:-9211}"
-TP="${TP:-4}"
 GPUS="${GPUS:-0 1 2 3}"
-SERVED_NAME="${SERVED_NAME:-{{ minimax_m3_served_name }}}"
-# Persistent vLLM/JIT compile cache (torch.compile graphs + b12x/triton
-# kernels). Survives the podman rm below, so restarts reuse it instead of
-# recompiling cold. Note: CUDA-graph capture (~7 min) is not cacheable and
-# still runs on every start. The image routes its caches under /cache via
-# VLLM_CACHE_ROOT and its own XDG_CACHE_HOME=/cache/jit.
-CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/minimax-m3-vllm}"
-# vLLM reasoning-parser plugin: extracts M3's <mm:think>...</mm:think> into
-# reasoning_content (so Open-WebUI folds it) instead of leaving it inline.
-# Needed because this image's vLLM predates upstream's built-in minimax_m3.
-REASONING_PARSER="${REASONING_PARSER:-/opt/inference/minimax-m3/minimax_m3_reasoning_parser.py}"
+# Served model ids (space-separated -> multiple --served-model-name values). The
+# first is the established gateway id; the image's own MiniMax-M3-NVFP4 is kept
+# too for a seamless cutover and direct-by-image-name access.
+SERVED_NAMES="${SERVED_NAMES:-{{ minimax_m3_served_name }} MiniMax-M3-NVFP4}"
+NAMED_WRAPPER="${NAMED_WRAPPER:-/opt/inference/minimax-m3/serve-minimax-m3-named.sh}"
+# Fresh cache dir for this image family (the dark-devotion build's compile/JIT
+# cache layout differs from the old verdictai image; don't mix them). Survives the
+# podman rm; CUDA-graph capture still runs cold each start.
+CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/minimax-m3-darkdev-vllm}"
+MEM="${MEM:-100g}"
 
-# pre-flight (no root needed for any of these)
+# pre-flight (no root needed)
 podman image exists "$IMAGE" \
   || { echo "image $IMAGE missing - run: ~/bin/minimax-m3-b12x-setup.sh" >&2; exit 1; }
 [ -f "$MODEL_HOST/config.json" ] \
   || { echo "checkpoint missing at $MODEL_HOST - run: hf download {{ minimax_m3_repo }} --local-dir $MODEL_HOST" >&2; exit 1; }
-[ -f "$REASONING_PARSER" ] \
-  || { echo "reasoning parser plugin missing at $REASONING_PARSER - run install-minimax-m3.yml" >&2; exit 1; }
+[ -x "$NAMED_WRAPPER" ] \
+  || { echo "served-name wrapper missing/not executable at $NAMED_WRAPPER - run install-minimax-m3.yml" >&2; exit 1; }
 
 mkdir -p "$CACHE_DIR"
 dev_args=()
-for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
+ngpu=0
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); ngpu=$((ngpu + 1)); done
+# CDI renumbers injected GPUs to a 0-based range; the recipe is pinned TP=4 and
+# would otherwise reference host indices via its CUDA_VISIBLE_DEVICES default.
+cvd="$(seq -s, 0 $((ngpu - 1)))"
 
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
-# Trailing args override the entrypoint's defaults (argparse takes the last):
-#   --kv-cache-dtype bfloat16  - not bf16; default 'auto' -> fp8_e4m3, which
-#                                the MSA sparse backend rejects.
-#   --served-model-name        - prefixed to flag the community quant.
-#   --reasoning-parser-plugin / --reasoning-parser  - extract <mm:think> blocks.
-#   --default-chat-template-kwargs thinking_mode=enabled - prefill <mm:think>
-#     so the reasoning parser works in STREAMING. Without it, M3 emits the
-#     start tag mid-stream and the parser's prompt-check false-latches on the
-#     template's instruction text (which literally contains </mm:think>),
-#     skipping extraction and leaking the raw tags. Frontends can still
-#     override per request (e.g. thinking_mode=disabled).
+# The baked recipe pins MODEL_PATH=/models/MiniMax-M3-NVFP4 (mount the checkpoint
+# there). serve-minimax-m3-named.sh substitutes SERVED_MODEL_NAMES into it.
+# PYTHON_BIN points at the image venv (the recipe defaults to a sibling .venv that
+# isn't present). --unsetenv NCCL_GRAPH_FILE: the image bakes it empty, which
+# crashes the patched NCCL. --memory caps a runaway to the cgroup, not the host.
 podman run -d --name "$CONTAINER" \
   "${dev_args[@]}" \
   --network=host --shm-size 32g \
   --security-opt seccomp=unconfined --group-add keep-groups \
   --ulimit stack=67108864:67108864 \
-  -e TP="$TP" -e GPU_UTIL="${GPU_UTIL:-0.93}" -e MAXLEN="${MAXLEN:-262144}" \
-  -e MAXSEQS="${MAXSEQS:-16}" -e PORT="$PORT" \
-  -e VLLM_CACHE_ROOT=/cache \
-  -v "$MODEL_HOST":/model \
+  --memory "$MEM" --memory-swap "$MEM" \
+  --unsetenv NCCL_GRAPH_FILE --unsetenv NCCL_GRAPH_DUMP_FILE \
+  -e PYTHON_BIN=/opt/venv/bin/python \
+  -e CUDA_VISIBLE_DEVICES="$cvd" \
+  -e HOST=0.0.0.0 -e PORT="$PORT" \
+  -e SERVED_MODEL_NAMES="$SERVED_NAMES" \
+  -e M3_PROFILE=off \
+  -v "$MODEL_HOST":/models/MiniMax-M3-NVFP4 \
   -v "$CACHE_DIR":/cache \
-  -v "$REASONING_PARSER":/minimax_m3_reasoning_parser.py:ro \
-  "$IMAGE" \
-    --kv-cache-dtype bfloat16 \
-    --served-model-name "$SERVED_NAME" \
-    --default-chat-template-kwargs '{"thinking_mode":"enabled"}' \
-    --reasoning-parser-plugin /minimax_m3_reasoning_parser.py \
-    --reasoning-parser minimax_m3
+  -v "$NAMED_WRAPPER":/usr/local/bin/serve-minimax-m3-named.sh:ro \
+  "$IMAGE" serve-minimax-m3-named.sh
 
-echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME). First load ~15-20 min."
+echo "Started '$CONTAINER' on :$PORT (model ids: $SERVED_NAMES), GPUs [$GPUS]. First load ~15-20 min."
 echo "  watch:  podman logs -f $CONTAINER"
 echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"

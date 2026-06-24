@@ -3,6 +3,10 @@
 Completed work, moved out of `TODO.md`. Newest first. One line per change;
 detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
+## 2026-06-24
+
+- **MiniMax-M3 tool calling enabled.** M3 moves to the dark-devotion b12x image, which ships upstream's built-in `minimax_m3` reasoning + tool-call parsers (the old image had neither) — closing M3's tool-calling gap. A served-name wrapper keeps the `brandonmusic/minimax-m3-nvfp4` gateway id, and fp8 kv-cache works on this build (the old image needed a bfloat16 workaround). GLM-5.2-504B retired from user-facing use (REAP-pruning factual-knowledge damage).
+
 ## 2026-06-23
 
 - **GLM-5.2 on the dark-devotion image.** `0xSero/GLM-5.2-504B` moved to the GLM-specific b12x build (DCP global-topk / topk-scores patch), fixing the >8k-context output corruption the shared M3 image showed on the DSA path; validated to 168k tokens via the inference smoke test.

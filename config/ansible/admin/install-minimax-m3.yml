@@ -11,7 +11,11 @@
   hosts: nvidia
   become: yes
   vars:
-    minimax_m3_image: "docker.io/verdictai/minimax-m3-nvfp4-b12x:v1"
+    # dark-devotion b12x build: ships upstream's built-in minimax_m3 reasoning AND
+    # tool-call parsers (the old verdictai image had neither - tool calling was
+    # off), and serves coherent on SM120 with the recipe's fp8 kv-cache (the old
+    # image NaN'd on fp8). Same image as GLM (glm52_image).
+    minimax_m3_image: "docker.io/voipmonitor/vllm:glm52-dark-devotion-pr31-dcpglobaltopk-mtp-cu132-20260621"
     minimax_m3_repo: "brandonmusic/MiniMax-M3-NVFP4"
     minimax_m3_model_dir: "/home/dev/models/MiniMax-M3-NVFP4-brandonmusic"
     # Prefixed with the quant author to flag this is a community NVFP4 quant,
@@ -43,18 +47,20 @@
         - minimax-m3-b12x-setup.sh
         - minimax-m3-b12x-start.sh
 
-    # vLLM reasoning-parser plugin: this image's vLLM build predates upstream's
-    # built-in minimax_m3 parser, so we ship it and load it via
-    # --reasoning-parser-plugin. Without it, M3's <mm:think>...</mm:think>
-    # reasoning is left inline in the content (Open-WebUI can't fold it).
+    # The dark-devotion image has built-in minimax_m3 reasoning + tool-call
+    # parsers, so the old python reasoning-parser plugin is no longer needed.
+    # What we ship instead is serve-minimax-m3-named.sh: a wrapper that patches
+    # the image's baked serve recipe to serve our `brandonmusic/minimax-m3-nvfp4`
+    # id (the recipe otherwise hard-pins MiniMax-M3-NVFP4 and rejects
+    # --served-model-name; the proxy forwards the client's model id verbatim).
     - name: Ensure /opt/inference/minimax-m3 exists
       file:
         path: /opt/inference/minimax-m3
         state: directory
         mode: '0755'
 
-    - name: Install M3 reasoning parser plugin
+    - name: Install M3 served-name wrapper
       copy:
-        src: minimax_m3_reasoning_parser.py
-        dest: /opt/inference/minimax-m3/minimax_m3_reasoning_parser.py
-        mode: '0644'
+        src: serve-minimax-m3-named.sh
+        dest: /opt/inference/minimax-m3/serve-minimax-m3-named.sh
+        mode: '0755'
