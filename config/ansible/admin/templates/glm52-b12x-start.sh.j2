@@ -49,6 +49,13 @@ INDEXER_LOGITS_MB="${INDEXER_LOGITS_MB:-2048}"
 # under /cache, so just mount it; survives the podman rm below.
 CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/glm52-vllm}"
 MEM="${MEM:-80g}"
+# Server-wide hard cap on generated output tokens per request. serve-glm52.sh
+# forwards "$@" to `vllm serve`, and the image documents --generation-config
+# max_new_tokens as "a server-wide limit on the number of output tokens for all
+# requests"; --override-generation-config merges it onto the model's auto config
+# (default sampling preserved). GLM-5.2's reasoning_content is ordinary generated
+# output, so this bounds reasoning + answer together, not just the visible answer.
+MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-10000}"
 
 # pre-flight (no root needed)
 podman image exists "$IMAGE" \
@@ -97,8 +104,9 @@ podman run -d --name "$CONTAINER" \
   -e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB="$INDEXER_LOGITS_MB" \
   -v "$MODEL_HOST":/model \
   -v "$CACHE_DIR":/cache \
-  "$IMAGE" serve-glm52.sh
+  "$IMAGE" serve-glm52.sh \
+    --override-generation-config "{\"max_new_tokens\":$MAX_OUTPUT_TOKENS}"
 
-echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] TP=$TP DCP=$DCP, MTP off."
+echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] TP=$TP DCP=$DCP, MTP off, max_new_tokens=$MAX_OUTPUT_TOKENS."
 echo "  watch:  podman logs -f $CONTAINER"
 echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"
