@@ -2,6 +2,9 @@
 Cluster status and health management commands
 """
 
+import sys
+
+from ..common.etcd_utils import get_etcd_client
 from ..utils import check_cluster
 
 
@@ -20,8 +23,12 @@ def register_cluster_commands(subparsers):
     health_parser.add_argument('-v', '--verbose', action='store_true', help='Show full detailed output')
     health_parser.set_defaults(func=cluster_health)
 
+    # Leader command — print the storage leader hostname (for scripts)
+    leader_parser = cluster_subparsers.add_parser('leader', help='Print the storage leader hostname to stdout')
+    leader_parser.set_defaults(func=cluster_leader)
+
     # Top-level health alias is registered in register_health_alias()
-    
+
 
     # Populate local node command
     populate_parser = cluster_subparsers.add_parser('populate-local-node', help='Populate local node information in etcd')
@@ -58,6 +65,17 @@ def register_health_alias(subparsers):
 def cluster_health(args):
     """Execute compact cluster health check"""
     check_cluster.main(verbose=getattr(args, 'verbose', False))
+
+
+def cluster_leader(args):
+    """Print the storage leader hostname to stdout. Exits non-zero if no
+    leader is elected (etcd has the key, but it's empty, or the call fails)."""
+    client = get_etcd_client()
+    value, _ = client.get('/cluster/leader/app')
+    if not value:
+        print('Error: no storage leader elected (/cluster/leader/app empty)', file=sys.stderr)
+        sys.exit(1)
+    print(value.decode().strip())
 
 
 def cluster_status_verbose(args):
