@@ -2937,6 +2937,13 @@ def users_action():
         if action in ('admin_add', 'admin_remove'):
             msg = authentik_manager.set_admin(email, remove=(action == 'admin_remove'))
             return jsonify({'ok': True, 'message': msg})
+        if action in ('activate', 'deactivate'):
+            msg = authentik_manager.set_active(email, active=(action == 'activate'))
+            return jsonify({'ok': True, 'message': msg})
+        if action == 'edit':
+            name = (data.get('name') or '').strip()
+            msg = authentik_manager.update_user(email, name=name or None)
+            return jsonify({'ok': True, 'message': msg})
         return jsonify({'error': 'unknown action'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 400

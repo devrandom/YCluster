@@ -70,6 +70,9 @@ class AuthentikAPI:
     def post(self, path, json):
         return self._request('POST', path, json=json)
 
+    def patch(self, path, json):
+        return self._request('PATCH', path, json=json)
+
     def flow_pk(self, slug):
         flows = self.get('/flows/instances/', params={'slug': slug})['results']
         if not flows:
@@ -226,6 +229,29 @@ def set_admin(email, remove=False):
     action = 'remove_user' if remove else 'add_user'
     api.post(f"/core/groups/{groups[0]['pk']}/{action}/", json={'pk': user['pk']})
     return f"{'removed' if remove else 'added'} {email} {'from' if remove else 'to'} {ADMIN_GROUP}"
+
+
+def set_active(email, active):
+    """Enable or disable an account (is_active in authentik). Disabling
+    blocks login without removing the account."""
+    api = AuthentikAPI()
+    user = _get_user(api, email)
+    api.patch(f"/core/users/{user['pk']}/", json={'is_active': active})
+    return f"{'enabled' if active else 'disabled'} {email}"
+
+
+def update_user(email, name=None):
+    """Update mutable user fields. Only provided fields are changed;
+    a field passed as None is skipped (so CLI can pass only what was set)."""
+    api = AuthentikAPI()
+    user = _get_user(api, email)
+    payload = {}
+    if name is not None:
+        payload['name'] = name
+    if not payload:
+        raise RuntimeError("no updates specified")
+    api.patch(f"/core/users/{user['pk']}/", json=payload)
+    return f"updated {email}"
 
 
 def recovery_link(email):

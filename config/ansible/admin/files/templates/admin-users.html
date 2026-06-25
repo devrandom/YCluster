@@ -30,6 +30,28 @@
              margin: 0.75rem 0; color: #b91c1c; font-size: 0.85rem; }
     .empty { color: #666; font-style: italic; padding: 1.5rem; text-align: center; }
     .url { font-family: monospace; font-size: 0.75rem; word-break: break-all; }
+    [x-cloak] { display: none !important; }
+    .menu { position: relative; display: inline-block; }
+    .menu-list { position: absolute; right: 0; top: calc(100% + 4px); background: white;
+                 border: 1px solid #d1d5db; border-radius: 6px;
+                 box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+                 min-width: 12rem; z-index: 10; padding: 0.25rem 0; margin: 0;
+                 list-style: none; }
+    .menu-item { display: block; width: 100%; padding: 0.4rem 0.85rem; background: none;
+                 color: #333; text-align: left; font-size: 0.8rem; border-radius: 0;
+                 border: none; cursor: pointer; line-height: 1.4; }
+    .menu-item:hover { background: #f3f4f6; color: #111; }
+    .menu-trigger { font-weight: bold; min-width: 1.8rem; letter-spacing: 0.05em; }
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+                display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .modal { background: white; border-radius: 8px; padding: 1.25rem 1.5rem;
+             min-width: 22rem; max-width: 90vw;
+             box-shadow: 0 20px 50px rgba(0,0,0,0.25); }
+    .modal h3 { margin: 0 0 1rem; font-size: 1rem; }
+    .modal label { display: block; font-size: 0.8rem; color: #555; margin-bottom: 0.75rem; }
+    .modal input { display: block; width: 100%; margin-top: 0.25rem; padding: 0.4rem 0.5rem;
+                   border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box; }
+    .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.5rem; }
   </style>
 </head>
 <body x-data="usersApp()" x-init="load()">
@@ -75,10 +97,21 @@
           </td>
           <td x-text="u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'never'"></td>
           <td>
-            <button class="minor" @click="act('recovery', u.email, {}, 'Password (re)set link for ' + u.email + ':')">reset link</button>
-            <button class="minor"
-                    @click="act(u.is_admin ? 'admin_remove' : 'admin_add', u.email, {}, '')"
-                    x-text="u.is_admin ? 'revoke admin' : 'make admin'"></button>
+            <div class="menu" x-data="{open: false}" @click.outside="open = false">
+              <button class="minor menu-trigger" @click="open = !open" :aria-expanded="open">…</button>
+              <ul class="menu-list" x-show="open" x-cloak>
+                <li><button type="button" class="menu-item"
+                    @click="open=false; act('recovery', u.email, {}, 'Password (re)set link for ' + u.email + ':')">Reset link</button></li>
+                <li><button type="button" class="menu-item"
+                    @click="open=false; act(u.is_admin ? 'admin_remove' : 'admin_add', u.email, {}, '')"
+                    x-text="u.is_admin ? 'Revoke admin' : 'Make admin'"></button></li>
+                <li><button type="button" class="menu-item"
+                    @click="open=false; editTarget = {email: u.email, name: u.name || ''}">Edit name…</button></li>
+                <li><button type="button" class="menu-item"
+                    @click="open=false; act(u.active ? 'deactivate' : 'activate', u.email, {}, '')"
+                    x-text="u.active ? 'Disable' : 'Enable'"></button></li>
+              </ul>
+            </div>
           </td>
         </tr>
       </template>
@@ -104,6 +137,24 @@
     </tbody>
   </table>
 
+  <div class="modal-bg" x-show="editTarget" x-cloak @click.self="editTarget = null" @keydown.escape.window="editTarget = null">
+    <div class="modal" role="dialog" aria-labelledby="edit-user-title">
+      <h3 id="edit-user-title">Edit user</h3>
+      <form @submit.prevent="saveEdit()">
+        <label>Email
+          <input type="text" :value="editTarget && editTarget.email" disabled>
+        </label>
+        <label>Display name
+          <input type="text" x-model="editTarget.name" required>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="minor" @click="editTarget = null">Cancel</button>
+          <button type="submit">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <script>
     function usersApp() {
       return {
@@ -113,6 +164,7 @@
         error: '',
         result: null,
         invite: {email: '', name: '', days: 7},
+        editTarget: null,
 
         load() {
           this.loading = true
@@ -142,6 +194,13 @@
               this.load()
             })
             .catch(() => { this.error = 'request failed' })
+        },
+
+        saveEdit() {
+          if (!this.editTarget) return
+          this.act('edit', this.editTarget.email, {name: this.editTarget.name},
+                   'Updated ' + this.editTarget.email + ':')
+          this.editTarget = null
         }
       }
     }

@@ -28,6 +28,22 @@ def register_user_commands(subparsers):
     admin_parser.add_argument('--remove', action='store_true', help='Revoke instead of grant')
     admin_parser.set_defaults(func=user_admin)
 
+    disable_parser = user_subparsers.add_parser(
+        'disable', help='Disable an account (block login without removing)')
+    disable_parser.add_argument('email', help='Account email')
+    disable_parser.set_defaults(func=user_disable)
+
+    enable_parser = user_subparsers.add_parser(
+        'enable', help='Re-enable a disabled account')
+    enable_parser.add_argument('email', help='Account email')
+    enable_parser.set_defaults(func=user_enable)
+
+    edit_parser = user_subparsers.add_parser(
+        'edit', help='Update mutable fields of an existing account')
+    edit_parser.add_argument('email', help='Account email')
+    edit_parser.add_argument('--name', help='New display name')
+    edit_parser.set_defaults(func=user_edit)
+
     recovery_parser = user_subparsers.add_parser(
         'recovery', help='Issue a one-time password (re)set link for an existing account')
     recovery_parser.add_argument('email', help='Account email')
@@ -69,6 +85,21 @@ def user_invite(args):
 def user_admin(args):
     from ..utils import authentik_manager
     print(authentik_manager.set_admin(args.email, args.remove))
+
+
+def user_disable(args):
+    from ..utils import authentik_manager
+    print(authentik_manager.set_active(args.email, active=False))
+
+
+def user_enable(args):
+    from ..utils import authentik_manager
+    print(authentik_manager.set_active(args.email, active=True))
+
+
+def user_edit(args):
+    from ..utils import authentik_manager
+    print(authentik_manager.update_user(args.email, name=args.name))
 
 
 def user_recovery(args):
