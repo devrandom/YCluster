@@ -81,7 +81,13 @@ class AuthentikAPI:
 
 
 def _get_user(api, email):
+    """Find an account by the user-facing identifier. Most accounts have
+    username == email, but authentik's default admin (akadmin) and any
+    externally-sourced user have a separate username — fall back to the
+    email column so those are reachable too."""
     users = api.get('/core/users/', params={'username': email})['results']
+    if not users:
+        users = api.get('/core/users/', params={'email': email})['results']
     if not users:
         raise RuntimeError(f"no account for {email}")
     return users[0]
