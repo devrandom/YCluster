@@ -17,6 +17,7 @@
     tr:hover { background-color: #f8f9fa; }
     .badge { font-size: 0.7rem; font-weight: 600; border-radius: 999px; padding: 0.05rem 0.55rem; white-space: nowrap; }
     .badge.admin { color: #6b5300; background: #fff3c4; }
+    .badge.active { color: #14532d; background: #d1fae5; }
     .badge.inactive { color: #721c24; background: #f8d7da; }
     button { padding: 0.3rem 0.7rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; font-size: 0.8rem; }
     button:hover { background: #2563eb; }
@@ -93,6 +94,7 @@
           <td x-text="u.name"></td>
           <td>
             <span class="badge admin" x-show="u.is_admin">admin</span>
+            <span class="badge active" x-show="u.active">active</span>
             <span class="badge inactive" x-show="!u.active">inactive</span>
           </td>
           <td x-text="u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'never'"></td>
