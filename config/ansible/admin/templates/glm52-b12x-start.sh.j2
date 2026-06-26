@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# (Re)start the GLM-5.2 NVFP4 (REAP) inference server on the dark-devotion b12x
-# image. Run as the dev user (no sudo), e.g. after a reboot:
+# (Re)start the GLM-5.2 NVFP4 inference server on the dark-devotion b12x image.
+# Run as the dev user (no sudo), e.g. after a reboot:
 #
 #   ~/bin/glm52-b12x-start.sh
 #
-# Idempotent: replaces any existing container. Defaults to GPUs 4-7 (TP=4) so it
-# runs co-resident with M3 (which holds 0-3) without disturbing it; override with
-# GPUS / TP / DCP for the full-box TP=8 layout. Managed by install-glm52.yml -
-# edit there. See docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md.
+# Idempotent: replaces any existing container. Defaults to the full box as
+# PP=2 x TP=4 (all 8 GPUs) - the validated layout for the nvidia full-GLM on this
+# no-NVLink node (~2.2x prefill vs flat TP=8); override GPUS / TP / PP / DCP for
+# other layouts. Managed by install-glm52.yml - edit there.
+# See docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md.
 #
 # This image is GLM-5.2-specific (dark-devotion = b12x + the DCP global-topk /
 # topk-scores patch that fixes >8k-context corruption). It ships its own baked
@@ -21,9 +22,16 @@
 #    that doesn't exist in the image; point it at the image's venv.
 #  - CUDA_VISIBLE_DEVICES=0..N-1: CDI renumbers the injected GPUs to 0-based, so
 #    override the script's 0-7 default to the actual in-container count.
-#  - GLM51_DISABLE_MTP=1: MTP speculative decode needs the checkpoint's MTP shards,
-#    which the fastsafetensors dedup (glm52-b12x-setup.sh) moves aside. Kept off
-#    until an MTP-capable checkpoint is in place; orthogonal to the correctness fix.
+#  - GLM51_DISABLE_MTP: gated off (DISABLE_MTP=1) - MTP is a measured net loss on
+#    this checkpoint, for two compounding reasons. (1) The MTP draft doesn't
+#    implement vLLM's SupportsPP, so it can't run under the default PP=2 (forces
+#    PP=1 TP=8, giving up the 2.2x prefill win). (2) The checkpoint's MTP layer is
+#    bf16/unquantized and b12x only does NVFP4, so the draft must run on a slow
+#    generic kernel (MOE_SPEC_BACKEND=triton) - one 256-expert bf16 draft layer
+#    costs ~a full main-model forward, so despite high acceptance (~85% on code)
+#    decode came out ~26 t/s vs PP's ~39. Revisit only if an NVFP4-quantized MTP
+#    checkpoint appears. (The old REAP checkpoint genuinely lacked usable MTP -
+#    that's this flag's origin, not the nvidia weights.)
 #  - --unsetenv NCCL_GRAPH_FILE: the image bakes it empty, which crashes the
 #    patched NCCL's ncclCommInitRank (the entrypoint's own `unset` does the same).
 #  - --memory cap: keep a runaway load OOM-killing the container, not the ~125 GiB
@@ -40,7 +48,14 @@ CONTAINER="${CONTAINER:-glm52-b12x}"
 PORT="${PORT:-9212}"
 TP="${TP:-4}"
 DCP="${DCP:-4}"
-GPUS="${GPUS:-4 5 6 7}"
+# Pipeline-parallel degree. PP=2 x TP=4 across the full box beats flat TP=8 on
+# this no-NVLink hardware (~2.2x prefill, validated): PP trades TP's per-layer
+# allreduce for one point-to-point hop between two stages, and prefill has the
+# token-parallelism to keep the pipeline full. The recipe hardcodes
+# --pipeline-parallel-size 1, so we re-pass it below (a benign vllm duplicate-key
+# warning; the last value - ours - wins). Set PP=1 TP=8 for the flat layout.
+PP="${PP:-2}"
+GPUS="${GPUS:-0 1 2 3 4 5 6 7}"
 GPU_UTIL="${GPU_UTIL:-0.9}"
 SERVED_NAME="${SERVED_NAME:-{{ glm52_served_name }}}"
 INDEXER_LOGITS_MB="${INDEXER_LOGITS_MB:-2048}"
@@ -48,7 +63,11 @@ INDEXER_LOGITS_MB="${INDEXER_LOGITS_MB:-2048}"
 # flashinfer kernels). The image's baked VLLM_CACHE_DIR/TORCH_EXTENSIONS_DIR point
 # under /cache, so just mount it; survives the podman rm below.
 CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/glm52-vllm}"
-MEM="${MEM:-80g}"
+# Full 744B nvidia checkpoint needs ~110g of cgroup headroom for the warmup peak
+# (80g sufficed for the smaller REAP variant but OOMs the full one).
+MEM="${MEM:-110g}"
+# MTP speculative decode toggle (1=off). See the GLM51_DISABLE_MTP note above.
+DISABLE_MTP="${DISABLE_MTP:-1}"
 # Server-wide hard cap on generated output tokens per request. serve-glm52.sh
 # forwards "$@" to `vllm serve`, and the image documents --generation-config
 # max_new_tokens as "a server-wide limit on the number of output tokens for all
@@ -56,6 +75,26 @@ MEM="${MEM:-80g}"
 # (default sampling preserved). GLM-5.2's reasoning_content is ordinary generated
 # output, so this bounds reasoning + answer together, not just the visible answer.
 MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-10000}"
+
+# Optional recipe-env overrides, forwarded to serve-glm52.sh's same-named knobs
+# only when set (left to the recipe's own defaults otherwise, so the image owns
+# them). MAX_NUM_BATCHED_TOKENS (def 4096) packs more tokens per prefill step;
+# MAX_NUM_SEQS (def 8) caps concurrent sequences. MOE_SPEC_BACKEND (def b12x) is
+# the MTP draft's MoE kernel - the draft layer is bf16/unquantized and b12x only
+# does NVFP4, so MTP needs MOE_SPEC_BACKEND=triton (or another unquantized-capable
+# backend); NUM_SPECULATIVE_TOKENS (def 3) sets the MTP draft depth.
+sched_env=()
+[ -n "${MAX_NUM_BATCHED_TOKENS:-}" ] && sched_env+=(-e "MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS}")
+[ -n "${MAX_NUM_SEQS:-}" ] && sched_env+=(-e "MAX_NUM_SEQS=${MAX_NUM_SEQS}")
+[ -n "${MOE_SPEC_BACKEND:-}" ] && sched_env+=(-e "MOE_SPEC_BACKEND=${MOE_SPEC_BACKEND}")
+[ -n "${NUM_SPECULATIVE_TOKENS:-}" ] && sched_env+=(-e "NUM_SPECULATIVE_TOKENS=${NUM_SPECULATIVE_TOKENS}")
+
+# Escape hatch for extra `vllm serve` flags. serve-glm52.sh forwards "$@" to
+# vllm serve, so anything here is appended verbatim (word-split intentionally) -
+# for one-off experiments without rebuilding the image. (Note: the b12x NVFP4
+# MoE kernel has no expert-parallel path, so --enable-expert-parallel is rejected
+# at init; PP is the working comms-reduction lever, via the PP knob above.)
+EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 
 # pre-flight (no root needed)
 podman image exists "$IMAGE" \
@@ -100,13 +139,17 @@ podman run -d --name "$CONTAINER" \
   -e HOST=0.0.0.0 -e PORT="$PORT" \
   -e TP_SIZE="$TP" -e DCP_SIZE="$DCP" \
   -e GPU_MEMORY_UTILIZATION="$GPU_UTIL" \
-  -e GLM51_DISABLE_MTP=1 \
+  -e GLM51_DISABLE_MTP="$DISABLE_MTP" \
   -e VLLM_SPARSE_INDEXER_MAX_LOGITS_MB="$INDEXER_LOGITS_MB" \
+  "${sched_env[@]}" \
   -v "$MODEL_HOST":/model \
   -v "$CACHE_DIR":/cache \
   "$IMAGE" serve-glm52.sh \
-    --override-generation-config "{\"max_new_tokens\":$MAX_OUTPUT_TOKENS}"
+    --override-generation-config "{\"max_new_tokens\":$MAX_OUTPUT_TOKENS}" \
+    --pipeline-parallel-size "$PP" \
+    $EXTRA_VLLM_ARGS
 
-echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] TP=$TP DCP=$DCP, MTP off, max_new_tokens=$MAX_OUTPUT_TOKENS."
+mtp_state=$([ "$DISABLE_MTP" = 1 ] && echo off || echo on)
+echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] PP=$PP TP=$TP DCP=$DCP, MTP $mtp_state, max_new_tokens=$MAX_OUTPUT_TOKENS."
 echo "  watch:  podman logs -f $CONTAINER"
 echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"

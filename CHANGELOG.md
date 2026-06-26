@@ -5,6 +5,8 @@ detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
 ## 2026-06-26
 
+- **GLM-5.2 defaults to PP=2×TP=4 on the full nvidia checkpoint.** `install-glm52.yml` now points at `nvidia/GLM-5.2-NVFP4` (full 744B; the REAP 504B was retired) and the start script defaults to a PP=2×TP=4 full-box layout — ~2.2× prefill over flat TP=8 on this no-NVLink hardware, validated by the smoke test (A 14/14, B 7/7 to 200k). Adds a `PP` knob and a `DISABLE_MTP` toggle (MTP weights are present but gated off pending validation).
+- **GLM-5.2 start script gains tuning overrides.** `MAX_NUM_BATCHED_TOKENS`/`MAX_NUM_SEQS` passthrough and an `EXTRA_VLLM_ARGS` escape hatch (e.g. `--pipeline-parallel-size 2` with `TP=4` for a PP=2×TP=4 layout) — no image rebuild needed.
 - **Inference perf bench.** `contrib/inference-bench.py` streams cold prefill (TTFT, prefix-cache-busted) and steady decode tok/s against any gateway model, for before/after backend tuning.
 - **podman/CDI now a global GPU-node baseline.** `setup-gpu-podman.yml` moved into `admin.yml`, so Nvidia nodes get rootless-podman + nvidia CDI on a normal `site.yml` run instead of a manual step.
 - **MiniMax-M3 start script self-tunes memory to host RAM**, letting it run on RAM-constrained GPU nodes that previously host-OOM'd during warmup (capped cgroup + swap-spill for the warmup peak + throttled compile fan-out); ample-RAM nodes unchanged.

@@ -1,5 +1,5 @@
 ---
-# Deploy GLM-5.2 NVFP4 (REAP, b12x) inference scripts to Nvidia GPU nodes.
+# Deploy GLM-5.2 NVFP4 (b12x) inference scripts to Nvidia GPU nodes.
 # Companion to docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md. Two dev
 # scripts (the dev user has no sudo, and needs none for these):
 #   ~dev/bin/glm52-b12x-setup.sh  - pull the image (no-op on a node already
@@ -13,19 +13,19 @@
   become: yes
   vars:
     # GLM-5.2-specific dark-devotion b12x build: the same b12x stack plus the DCP
-    # global-topk / topk-scores patch. The shared M3 image
-    # (verdictai/minimax-m3-nvfp4-b12x:v1) serves GLM-5.2 but corrupts output past
-    # ~8k context on the DSA path; this build fixes that (validated to 52k via the
-    # inference smoke test). It ships a baked /usr/local/bin/serve-glm52.sh recipe
-    # that glm52-b12x-start.sh drives directly.
+    # global-topk / topk-scores patch that fixes >8k-context corruption on the DSA
+    # path (validated to 200k via the inference smoke test). It ships a baked
+    # /usr/local/bin/serve-glm52.sh recipe that glm52-b12x-start.sh drives directly.
     glm52_image: "docker.io/voipmonitor/vllm:glm52-dark-devotion-pr31-dcpglobaltopk-mtp-cu132-20260621"
-    glm52_repo: "0xSero/GLM-5.2-504B"
-    glm52_model_dir: "/home/dev/models/GLM-5.2-504B-0xSero"
+    # Full 744B nvidia NVFP4 checkpoint (the REAP 504B variant was retired - its
+    # pruning damaged factual knowledge). Ships a complete MTP layer; runs the
+    # full box as PP=2 x TP=4 (see glm52-b12x-start.sh).
+    glm52_repo: "nvidia/GLM-5.2-NVFP4"
+    glm52_model_dir: "/home/dev/models/GLM-5.2-NVFP4-nvidia"
     # The HF repo id verbatim, matching the dominant convention for HF-sourced
     # models (nvidia/MiniMax-M2.7-NVFP4, mlx-community/Kimi-...) - preserve repo
-    # casing rather than lowercasing. The 504B (vs the full 744B) already flags
-    # this is the REAP-pruned variant. Also the gateway registration key.
-    glm52_served_name: "0xSero/GLM-5.2-504B"
+    # casing rather than lowercasing. Also the gateway registration key.
+    glm52_served_name: "nvidia/GLM-5.2-NVFP4"
   tasks:
     # Same guard as install-vllm.yml: skip nodes with no host-visible NVIDIA
     # GPU (no NVIDIA hardware, or all cards bound to vfio-pci for passthrough).
