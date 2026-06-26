@@ -27,3 +27,11 @@ venv/
 bench-results/
 research/
 *.token
+# ext/ holds third-party checkouts (llama.cpp, flashinfer) cloned for local
+# reference and benchmarking — not part of the repo, regenerated independently.
+ext/
+# npm install output; the tracked content is skills/ under .opencode/, the rest
+# is installed via a separate mechanism on the cluster.
+.opencode/node_modules
+# local scratch (test logs, sync logs, etc.) — gitignored in .gitignore too.
+tmp/
