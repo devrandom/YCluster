@@ -169,12 +169,18 @@ client at the core nodes."*
 **1. `admin-api.service` on non-core nodes — mostly cruft.**
 Deployed cluster-wide (`setup-web-services.yml` is `hosts: managed`) with
 `ETCD_HOSTS=<core>:2379` baked into the unit (`setup-web-services.yml:66`).
-On a non-core node its only always-on etcd use is the health/metrics path
-(`/metrics`, scraped per-node by Prometheus → `get_comprehensive_health`):
+On a non-core node its only always-on etcd use is in
+`get_comprehensive_health()` (called by `/metrics` and `/api/health`):
 
 - `client.get('/test')` — an "is etcd reachable?" connectivity probe
 - `is_storage_leader()` → reads `/cluster/leader/app`
 - `is_dhcp_leader()` → reads `/cluster/leader/dhcp`
+
+`/metrics` is served but never actually scraped off-core: both local
+prometheus (`install-prometheus.yml` is `hosts: core`) and central
+prometheus' `ycluster-health-central` job only scrape core, and the
+`ycluster-health` SD's predicate filters targets to storage hosts
+(`app.py:2404-2415`).
 
 Both leader reads are trivially `False` off-core (a compute/nas node can
 never hold those leases), so the access exists almost entirely to report

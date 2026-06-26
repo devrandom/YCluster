@@ -98,7 +98,7 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - Core nodes: first 3-5 storage nodes
 - Storage nodes: DHCP range 10.0.0.11-30
 - Compute nodes: DHCP range 10.0.0.51-70
-- macOS nodes: DHCP range 10.0.0.71-90
+- macOS nodes: DHCP range 10.0.0.91-110
 - WireGuard peer subnet: 10.0.1.0/24 (remote nodes onboarded via wg overlay keep their type prefix but live in this /24)
 - Gateway VIP: 10.0.0.254 (cluster services, also the wg server VIP)
 - Storage VIP: 10.0.0.100 (storage services)
