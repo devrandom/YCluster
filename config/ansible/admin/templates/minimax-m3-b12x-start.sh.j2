@@ -39,7 +39,24 @@ NAMED_WRAPPER="${NAMED_WRAPPER:-/opt/inference/minimax-m3/serve-minimax-m3-named
 # cache layout differs from the old verdictai image; don't mix them). Survives the
 # podman rm; CUDA-graph capture still runs cold each start.
 CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/minimax-m3-darkdev-vllm}"
-MEM="${MEM:-100g}"
+# Memory defaults adapt to host RAM (explicit env always overrides). M3's steady
+# state is ~16g, but a cold warmup spikes ~3x: the TP workers run inductor/
+# flashinfer compile in parallel. An ample host absorbs that; a RAM-bound one
+# would OOM. So below the threshold we: cap the cgroup below host RAM (a runaway
+# becomes a contained cgroup-OOM, not a host-wide one that also takes out dbus
+# etc), allow unlimited swap (MEMSWAP=-1) so the one-time peak spills instead of
+# being OOM-killed - steady state then drops back into RAM - and throttle the
+# per-worker compile fan-out to lower the peak. 40g splits our 31g and 125g nodes.
+host_ram_gib=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo)
+if [ "${host_ram_gib:-0}" -lt 40 ]; then
+  MEM="${MEM:-26g}"
+  MEMSWAP="${MEMSWAP:--1}"
+  OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
+  INDUCTOR_COMPILE_THREADS="${INDUCTOR_COMPILE_THREADS:-1}"
+else
+  MEM="${MEM:-100g}"
+  MEMSWAP="${MEMSWAP:-$MEM}"
+fi
 
 # pre-flight (no root needed)
 podman image exists "$IMAGE" \
@@ -57,6 +74,12 @@ for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); ngpu=$((ngpu + 1));
 # would otherwise reference host indices via its CUDA_VISIBLE_DEVICES default.
 cvd="$(seq -s, 0 $((ngpu - 1)))"
 
+# Thread caps - auto-set above for low-RAM hosts, else empty (image default).
+# Forward whatever is in effect into the container.
+extra_env=()
+[ -n "${OMP_NUM_THREADS:-}" ] && extra_env+=(-e "OMP_NUM_THREADS=${OMP_NUM_THREADS}")
+[ -n "${INDUCTOR_COMPILE_THREADS:-}" ] && extra_env+=(-e "TORCHINDUCTOR_COMPILE_THREADS=${INDUCTOR_COMPILE_THREADS}")
+
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 # The baked recipe pins MODEL_PATH=/models/MiniMax-M3-NVFP4 (mount the checkpoint
@@ -69,13 +92,14 @@ podman run -d --name "$CONTAINER" \
   --network=host --shm-size 32g \
   --security-opt seccomp=unconfined --group-add keep-groups \
   --ulimit stack=67108864:67108864 \
-  --memory "$MEM" --memory-swap "$MEM" \
+  --memory "$MEM" --memory-swap "$MEMSWAP" \
   --unsetenv NCCL_GRAPH_FILE --unsetenv NCCL_GRAPH_DUMP_FILE \
   -e PYTHON_BIN=/opt/venv/bin/python \
   -e CUDA_VISIBLE_DEVICES="$cvd" \
   -e HOST=0.0.0.0 -e PORT="$PORT" \
   -e SERVED_MODEL_NAMES="$SERVED_NAMES" \
   -e M3_PROFILE=off \
+  "${extra_env[@]}" \
   -v "$MODEL_HOST":/models/MiniMax-M3-NVFP4 \
   -v "$CACHE_DIR":/cache \
   -v "$NAMED_WRAPPER":/usr/local/bin/serve-minimax-m3-named.sh:ro \

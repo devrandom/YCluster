@@ -25,5 +25,6 @@
 - import_playbook: install-llama-cpp-rocm.yml
 - import_playbook: install-nvidia.yml
 - import_playbook: install-vllm.yml
+- import_playbook: setup-gpu-podman.yml
 - import_playbook: install-incus.yml
 - import_playbook: install-vm-bastion.yml

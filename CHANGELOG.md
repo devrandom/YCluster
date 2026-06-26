@@ -3,6 +3,11 @@
 Completed work, moved out of `TODO.md`. Newest first. One line per change;
 detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
+## 2026-06-26
+
+- **podman/CDI now a global GPU-node baseline.** `setup-gpu-podman.yml` moved into `admin.yml`, so Nvidia nodes get rootless-podman + nvidia CDI on a normal `site.yml` run instead of a manual step.
+- **MiniMax-M3 start script self-tunes memory to host RAM**, letting it run on RAM-constrained GPU nodes that previously host-OOM'd during warmup (capped cgroup + swap-spill for the warmup peak + throttled compile fan-out); ample-RAM nodes unchanged.
+
 ## 2026-06-24
 
 - **MiniMax-M3 tool calling enabled.** M3 moves to the dark-devotion b12x image, which ships upstream's built-in `minimax_m3` reasoning + tool-call parsers (the old image had neither) — closing M3's tool-calling gap. A served-name wrapper keeps the `brandonmusic/minimax-m3-nvfp4` gateway id, and fp8 kv-cache works on this build (the old image needed a bfloat16 workaround). GLM-5.2-504B retired from user-facing use (REAP-pruning factual-knowledge damage).
