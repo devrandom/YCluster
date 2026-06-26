@@ -5,6 +5,7 @@ detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
 ## 2026-06-26
 
+- **Inference perf bench.** `contrib/inference-bench.py` streams cold prefill (TTFT, prefix-cache-busted) and steady decode tok/s against any gateway model, for before/after backend tuning.
 - **podman/CDI now a global GPU-node baseline.** `setup-gpu-podman.yml` moved into `admin.yml`, so Nvidia nodes get rootless-podman + nvidia CDI on a normal `site.yml` run instead of a manual step.
 - **MiniMax-M3 start script self-tunes memory to host RAM**, letting it run on RAM-constrained GPU nodes that previously host-OOM'd during warmup (capped cgroup + swap-spill for the warmup peak + throttled compile fan-out); ample-RAM nodes unchanged.
 
