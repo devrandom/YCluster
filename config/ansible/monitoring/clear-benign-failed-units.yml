@@ -73,6 +73,61 @@
       changed_when: false
       when: networkd_links.rc != 0
 
+    # On NM-managed hosts, the upstream NetworkManager-wait-online runs
+    # `nm-online -s -q`, which only succeeds when EVERY NM-managed
+    # device reaches a terminal state. A stuck-disconnected interface
+    # (no carrier, or a connection profile that can't acquire one) blocks
+    # it until NM_ONLINE_TIMEOUT (60s) and then fails — adding a full
+    # boot-time delay plus a failed unit alert on hosts where the
+    # connection isn't required for operation. Replace it with a
+    # wait-any wrapper (mirrors the networkd drop-in's --any -o routable
+    # semantics): succeed as soon as any NM-managed interface is
+    # connected, fail on timeout.
+    - name: Install nm-online wait-any wrapper
+      copy:
+        dest: /usr/local/sbin/nm-online-wait-any
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Wait for any NM-managed device to reach "connected" state.
+          # Mirrors networkd-wait-online --any for hosts where NM is
+          # the active net manager.
+          set -euo pipefail
+          TIMEOUT="${NM_ONLINE_TIMEOUT:-60}"
+          elapsed=0
+          while [ "$elapsed" -lt "$TIMEOUT" ]; do
+            if nmcli -t -f DEVICE,STATE device 2>/dev/null | grep -q ':connected$'; then
+              exit 0
+            fi
+            sleep 1
+            elapsed=$((elapsed + 1))
+          done
+          exit 1
+      when: networkd_links.rc != 0
+
+    - name: Create NM-wait-online drop-in directory
+      file:
+        path: /etc/systemd/system/NetworkManager-wait-online.service.d
+        state: directory
+        mode: '0755'
+      when: networkd_links.rc != 0
+
+    - name: Use wait-any wrapper for NM-wait-online
+      copy:
+        dest: /etc/systemd/system/NetworkManager-wait-online.service.d/zz-wait-any.conf
+        mode: '0644'
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/local/sbin/nm-online-wait-any
+      register: nm_wait_online_dropin
+      when: networkd_links.rc != 0
+
+    - name: Reload systemd for the NM-wait-online drop-in
+      systemd:
+        daemon_reload: yes
+      when: nm_wait_online_dropin.changed
+
     - name: Re-run failed network-dependent oneshots
       shell: |
         for unit in systemd-networkd-wait-online.service NetworkManager-wait-online.service fwupd-refresh.service; do
