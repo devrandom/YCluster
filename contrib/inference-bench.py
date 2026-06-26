@@ -126,21 +126,16 @@ def stream_chat(messages, model, gen, timeout):
     return {"t0": t0, "t_first": t_first, "t_end": time.monotonic(), "usage": usage}
 
 
-def bench(model, lens, gen, timeout):
-    mml = model_max_len(model)
+def bench(model, items, gen, timeout, mml=None):
     print(f"Endpoint: {BASE}\nModel:    {model}"
           + (f"  (max_model_len {mml})" if mml else "") + f"\nDecode:   {gen} tokens\n")
     print(f"  {'ptok':>8}  {'TTFT':>7}  {'prefill':>11}  {'decode':>10}")
     rows = []
-    for target in lens:
-        if mml and target > mml - 2000:
-            print(f"  {DIM}{target:>8}  skip (> max_model_len){RESET}")
-            continue
-        prompt = build_prompt(target)
+    for label, prompt in items:
         r = stream_chat([{"role": "user", "content": prompt}], model, gen, timeout)
         if r.get("error"):
-            print(f"  {RED}ERR {RESET} {target:>8}  {r['error']}")
-            rows.append({"target": target, "error": r["error"]})
+            print(f"  {RED}ERR {RESET} {label:>8}  {r['error']}")
+            rows.append({"label": label, "error": r["error"]})
             continue
         usage = r["usage"] or {}
         ptok = usage.get("prompt_tokens")
@@ -149,10 +144,10 @@ def bench(model, lens, gen, timeout):
         dec = (r["t_end"] - r["t_first"]) if r["t_first"] else None
         prefill_tps = (ptok / ttft) if (ptok and ttft) else None
         decode_tps = ((ctok - 1) / dec) if (dec and dec > 0 and ctok > 1) else None
-        print(f"  {(ptok or target):>8}  {ttft or 0:6.2f}s  "
+        print(f"  {(ptok or label):>8}  {ttft or 0:6.2f}s  "
               f"{(f'{prefill_tps:7.0f} t/s' if prefill_tps else '      n/a'):>11}  "
               f"{(f'{decode_tps:5.1f} t/s' if decode_tps else '   n/a'):>10}")
-        rows.append({"target": target, "prompt_tokens": ptok, "completion_tokens": ctok,
+        rows.append({"label": label, "prompt_tokens": ptok, "completion_tokens": ctok,
                      "ttft_s": ttft, "prefill_tps": prefill_tps, "decode_tps": decode_tps})
     return {"model": model, "max_model_len": mml, "decode_tokens": gen, "rows": rows}
 
@@ -162,20 +157,29 @@ def main():
     def opt(name, default):
         return raw[raw.index(name) + 1] if name in raw else default
     skip = set()
-    for name in ("--lens", "--gen", "--timeout"):
+    for name in ("--lens", "--gen", "--timeout", "--prompt"):
         if name in raw:
             skip |= {raw.index(name), raw.index(name) + 1}
     positional = [a for k, a in enumerate(raw) if not a.startswith("-") and k not in skip]
     model = os.environ.get("MODEL") or (positional[0] if positional else None)
     if not model:
         print(f"usage: MODEL=<id> {sys.argv[0]} [--lens 4000,16000,64000] "
-              "[--gen 64] [--json]", file=sys.stderr)
+              "[--gen 64] [--prompt 'instruction'] [--json]", file=sys.stderr)
         return 2
-    lens = [int(x) for x in opt("--lens", "1000,4000,16000,64000").split(",")]
     gen = int(opt("--gen", "64"))
     timeout = int(opt("--timeout", "600"))
 
-    out = bench(model, lens, gen, timeout)
+    # --prompt: a single fixed user message (decode-focused, e.g. a code-gen task
+    # to gauge MTP acceptance on representative content). Else sweep prefill depths.
+    prompt_override = opt("--prompt", None)
+    if prompt_override is not None:
+        items, mml = [("custom", prompt_override)], None
+    else:
+        mml = model_max_len(model)
+        lens = [int(x) for x in opt("--lens", "1000,4000,16000,64000").split(",")]
+        items = [(str(t), build_prompt(t)) for t in lens if not (mml and t > mml - 2000)]
+
+    out = bench(model, items, gen, timeout, mml)
     if "--json" in raw:
         print("\n" + json.dumps(out, indent=2))
     return 0
