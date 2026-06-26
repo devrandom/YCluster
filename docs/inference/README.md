@@ -22,6 +22,7 @@ deployment-agnostic — no node names, IPs, or account specifics.
   — plan to replace the opaque prebuilt Docker Hub image with one built from
   pinned public sources and hosted in our registry.
 - [GLM-5.2 NVFP4 on RTX PRO 6000 / SM120](glm-5.2-nvfp4-sm120-design-2026-06.md)
-  — plan to deploy GLM-5.2 on the same b12x stack as M3 (reuses the image
-  family, gains stock tool calling); evaluate the 4-GPU REAP-469B variant
-  first, then decide on full 744B at TP=8.
+  — full 744B `nvidia/GLM-5.2-NVFP4` on the b12x stack (same image family as M3,
+  stock tool calling), serving on the whole 8-GPU node at PP=2×TP=4 (~2.2×
+  prefill vs flat TP=8 on this no-NVLink box). Includes the node-crash incident
+  and the retired-REAP history.

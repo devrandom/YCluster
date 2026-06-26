@@ -1,11 +1,59 @@
 # GLM-5.2 NVFP4 on RTX PRO 6000 / SM120 — design
 
-Status: **SERVING.** `0xSero/GLM-5.2-504B` is live on the b12x stack, co-resident
-with M3 (GLM on GPUs 4–7 / TP=4, M3 on 0–3), registered with the gateway, with
-working tool calling. It got there via a first attempt that crashed the node —
-the incident and its resolution are recorded below because the fixes are load-
-bearing. GLM-5.2 overlaps almost the entire MiniMax-M3 b12x stack; this note
-records what's reusable, what's different, the incident, and the phased rollout.
+Status: **SERVING the full 744B `nvidia/GLM-5.2-NVFP4` on the whole 8-GPU node at
+PP=2×TP=4** (see the 2026-06-26 update below — it supersedes the REAP/co-residency
+plan in the back half of this note). It got there via a first attempt (on the REAP
+variant) that crashed the node — the incident and its resolution are recorded
+below because the fixes are load-bearing. GLM-5.2 overlaps almost the entire
+MiniMax-M3 b12x stack; this note records what's reusable, what's different, the
+incident, and how the rollout actually landed.
+
+## Update (2026-06-26): full 744B nvidia checkpoint, PP=2×TP=4, MTP shelved
+
+The phased plan below (stand up REAP-504B co-resident, decide on full later)
+resolved in favor of the **full checkpoint, full box**. Current state, which
+overrides the REAP-specific recipe/layout/plan sections that follow:
+
+- **Checkpoint: `nvidia/GLM-5.2-NVFP4`** (full 744B). The REAP-504B was retired —
+  REAP-pruning damages factual knowledge, and the full box was free to give GLM.
+  `install-glm52.yml` points at it; served gateway id is `nvidia/GLM-5.2-NVFP4`.
+- **Layout: PP=2×TP=4 across all 8 GPUs — NOT flat TP=8.** This is the headline
+  reversal of the "shared TP=8 is the better default" recommendation below.
+  Measured (`contrib/inference-bench.py`, single-stream, cold prefill): PP=2×TP=4
+  gives **~2.2× prefill** (614→1370 t/s at 64k) and ~1.2× decode (33→39.5 t/s)
+  over flat TP=8, validated by the smoke test (A 14/14, B 7/7 to 200k). Why: on
+  this no-NVLink box TP=8's per-layer allreduce over all 78 layers is the
+  bottleneck (GPUs sat comms-bound at 110–127 W/300 W); PP trades it for one
+  point-to-point hop between two stages plus a TP=4 allreduce within a stage, and
+  prefill has the token-parallelism to keep the pipeline full. `tp_size≥4` is
+  mandatory (pure PP=8 hits the EP wall below), so PP=2×TP=4 is the layout.
+- **EP is a dead end on b12x.** `--enable-expert-parallel` → `ValueError: NvFp4
+  MoE backend 'B12X' does not support … ep_size=8`; the b12x kernel only has the
+  TP MoE path, and the EP-capable cutlass/flashinfer backends NaN on SM120 (the
+  reason we're on b12x at all). PP is the only working comms-reduction lever.
+- **MTP is a measured net loss here — shelved** (`DISABLE_MTP=1` default),
+  correcting the "MTP supported, ~60 tok/s" entry in the better-than-M3 section
+  below. Two compounding blockers: (1) the MTP draft (`DeepSeekMTPModel`) doesn't
+  implement vLLM's `SupportsPP`, so MTP forces PP=1 TP=8 — giving up the 2.2×
+  prefill; (2) the checkpoint's MTP layer (78) is bf16/unquantized and b12x only
+  does NVFP4, so the draft needs a slow generic kernel (`MOE_SPEC_BACKEND=triton`).
+  Even working, decode came out ~26 t/s vs PP's ~39 despite ~85% acceptance — one
+  256-expert bf16 triton draft layer costs ≈ a full 78-layer main forward, so it
+  eats every token it saves. Revisit only if an NVFP4-quantized MTP checkpoint
+  appears. (MTP weights *are* present in the nvidia checkpoint — the
+  `GLM51_DISABLE_MTP` flag's origin was the REAP checkpoint genuinely lacking
+  usable MTP, not these weights.)
+- **`max_num_batched_tokens` 4096→16384 had zero single-stream effect** (614→613):
+  the prefill ceiling is real per-token compute/comms, not scheduler chunking. The
+  knob (and `MAX_NUM_SEQS`) only helps aggregate throughput under concurrency,
+  which is untested. The start script exposes both as passthroughs anyway.
+
+Launch is now just `~/bin/glm52-b12x-start.sh` with no overrides — the wrapper
+defaults to this layout (`PP=2 TP=4 DCP=4`, all 8 GPUs, `MEM=110g` for the larger
+warmup peak, MTP off). The `PP`/`DISABLE_MTP`/`MOE_SPEC_BACKEND`/`EXTRA_VLLM_ARGS`
+knobs remain for A/B. The crash-safety machinery (fastsafetensors, checkpoint
+dedup, `--memory` cap, indexer workspace) carries over unchanged and is still
+load-bearing — read the incident section before touching it.
 
 ## First-attempt incident and resolution (2026-06-21)
 

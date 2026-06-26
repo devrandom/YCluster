@@ -1,5 +1,12 @@
 # GLM-5.2 NVFP4 (REAP, b12x) — vLLM serving throughput on SM120
 
+> **Superseded (2026-06-26).** This is a historical snapshot of the retired
+> `0xSero/GLM-5.2-504B` REAP deployment (TP=4, co-resident with M3). Production
+> now runs the full `nvidia/GLM-5.2-NVFP4` (744B) on the whole 8-GPU node at
+> PP=2×TP=4 — see the
+> [design doc's 2026-06-26 update](../inference/glm-5.2-nvfp4-sm120-design-2026-06.md).
+> Kept for the M3 comparison and the cold-start prefill-compile observation.
+
 Online serving benchmark of the GLM-5.2 REAP deployment (see
 [../inference/glm-5.2-nvfp4-sm120-design-2026-06.md](../inference/glm-5.2-nvfp4-sm120-design-2026-06.md)),
 to compare against the
