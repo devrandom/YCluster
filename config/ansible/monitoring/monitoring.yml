@@ -5,6 +5,10 @@
 - import_playbook: install-node-temps.yml
 - import_playbook: install-crps.yml
 - import_playbook: ceph.yml
+# Silence benign boot-time systemd failures (networkd wait-online, snap
+# leftovers, VM-host nvidia units) so SystemdUnitFailed only fires on real
+# breakage. Idempotent.
+- import_playbook: clear-benign-failed-units.yml
 
 - name: Configure monitoring endpoints
   hosts: storage
