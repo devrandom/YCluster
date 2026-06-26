@@ -29,11 +29,18 @@ KNOWN_HOSTS="$SCRIPT_DIR/.ssh/known_hosts"  # local, scrubbed each `up`
 STATE_DIR=/var/lib/incus
 PERSIST_DIR=/rw/bind-dirs/var/lib/incus
 BIND_CONF=/rw/config/qubes-bind-dirs.d/50-incus.conf
+# Rootless: use the per-user bridge created by setup-rootless-incus.sh
+# (incusbr-<uid>, on 10.0.0.0/16, NAT on, DHCP off). Override NETWORK
+# below to point at it instead of creating ycdev0.
 NETWORK=ycdev0
 SUBNET=10.0.0.1/24
 PROFILE=yc-node
 IMAGE=images:ubuntu/24.04
 DNS="1.1.1.1 8.8.8.8"
+# Per-user bridge from setup-rootless-incus.sh. When SUDO is empty we
+# can't create networks, so we attach to this pre-created bridge
+# instead of ycdev0. Set SUDO=sudo to fall back to the old ycdev0 path.
+USER_BRIDGE="incusbr-$(id -u)"
 
 # Shared filesystem volume attached to all core containers: the dev stand-in
 # for the Ceph RBD images. The user-rbd/misc-rbd stand-in units (app-dev.yml)
@@ -67,18 +74,26 @@ HOSTS_BLOCK=$(cat <<'EOF'
 EOF
 )
 
-INCUS() { sudo incus "$@"; }
+# Rootless mode: empty SUDO runs incus as the unprivileged user (via the
+# incus group). The per-user bridge USER_BRIDGE is used instead of ycdev0.
+# Set SUDO=sudo to fall back to the old root-run ycdev0 path.
+SUDO="${SUDO:-}"
+
+INCUS() { $SUDO incus "$@"; }
 
 # --- substrate -----------------------------------------------------------
 ensure_persist() {
+  # Rootless mode: can't bind-mount /var/lib/incus (needs root). The daemon
+  # is already running with a dir pool; skip the /rw relocation.
+  [ -z "$SUDO" ] && return 0
   # Move /var/lib/incus (daemon DB + image cache + dir storage pool) off the
   # volatile AppVM root onto the persistent private volume (/rw), so the dev
   # cluster survives reboots and gets /rw's large disk instead of the ~2GB
   # free on root. `reset` stays the explicit throwaway; reboots no longer
   # cost a full reprovision.
   if [ ! -f "$BIND_CONF" ]; then
-    sudo mkdir -p "$(dirname "$BIND_CONF")"
-    echo "binds+=('$STATE_DIR')" | sudo tee "$BIND_CONF" >/dev/null
+    $SUDO mkdir -p "$(dirname "$BIND_CONF")"
+    echo "binds+=('$STATE_DIR')" | $SUDO tee "$BIND_CONF" >/dev/null
     echo "[*] $BIND_CONF written (Qubes binds $STATE_DIR from /rw at boot)"
   fi
   # Already on /rw — via the Qubes boot-time mount, or a prior run this boot.
@@ -88,13 +103,20 @@ ensure_persist() {
   # ensure_* steps rebuild the minimal state idempotently, and the hidden root
   # copy is reclaimed at the next reboot (root is volatile).
   echo "[*] relocating $STATE_DIR -> $PERSIST_DIR (until next reboot makes it native)"
-  sudo systemctl stop incus.service incus.socket
-  sudo mkdir -p "$PERSIST_DIR"
-  sudo mount --bind "$PERSIST_DIR" "$STATE_DIR"
+  $SUDO systemctl stop incus.service incus.socket
+  $SUDO mkdir -p "$PERSIST_DIR"
+  $SUDO mount --bind "$PERSIST_DIR" "$STATE_DIR"
 }
 
 ensure_daemon() {
-  sudo systemctl start incus.socket incus.service
+  # Rootless mode: the daemon is already running (managed by root). Just
+  # ensure the storage pool exists; incus admin init needs root so skip it.
+  if [ -z "$SUDO" ]; then
+    # In restricted user project we can't list storage pools either, so
+    # trust the pool exists and move on.
+    return 0
+  fi
+  $SUDO systemctl start incus.socket incus.service
   if ! INCUS storage list --format csv >/dev/null 2>&1 || \
      ! INCUS storage list --format csv 2>/dev/null | grep -q .; then
     echo "[*] incus admin init --minimal"
@@ -103,13 +125,19 @@ ensure_daemon() {
 }
 
 ensure_firewall() {
+  # Rootless mode: nftables needs root, so the firewall rules live in
+  # dev/setup-rootless-incus.sh (run once as root) instead — both the
+  # DOCKER-USER accept that lets the bridge reach the internet (without it
+  # apt/curl in the nodes hang on Docker's FORWARD drop) and the VRRP
+  # multicast NAT exemption. Nothing to do here when running rootless.
+  [ -z "$SUDO" ] && return 0
   # ycdev0 egress dies in Docker's FORWARD policy-drop unless we allow it
   # in DOCKER-USER (Docker evaluates it first, reserves it for user rules).
   # See design doc. INPUT (DHCP/DNS to host) stays dropped by Qubes — we
   # don't use it (static IPs + /etc/hosts).
   for d in iifname oifname; do
-    if ! sudo nft -a list chain ip filter DOCKER-USER 2>/dev/null | grep -q "$d \"$NETWORK\""; then
-      sudo nft insert rule ip filter DOCKER-USER $d "\"$NETWORK\"" accept
+    if ! $SUDO nft -a list chain ip filter DOCKER-USER 2>/dev/null | grep -q "$d \"$NETWORK\""; then
+      $SUDO nft insert rule ip filter DOCKER-USER $d "\"$NETWORK\"" accept
       echo "[*] DOCKER-USER: allow $d $NETWORK"
     fi
   done
@@ -119,12 +147,12 @@ ensure_firewall() {
   # address and collide on one conntrack tuple, so only one node's adverts
   # survive -> VRRP split-brain (two MASTERs, duplicate VIP). Exempt
   # multicast from NAT in both chains.
-  if ! sudo nft list chain inet incus "pstrt.$NETWORK" 2>/dev/null | grep -q "224.0.0.0/4"; then
-    sudo nft insert rule inet incus "pstrt.$NETWORK" ip daddr 224.0.0.0/4 return
+  if ! $SUDO nft list chain inet incus "pstrt.$NETWORK" 2>/dev/null | grep -q "224.0.0.0/4"; then
+    $SUDO nft insert rule inet incus "pstrt.$NETWORK" ip daddr 224.0.0.0/4 return
     echo "[*] pstrt.$NETWORK: multicast exempt from masquerade"
   fi
-  if ! sudo nft list chain ip qubes postrouting 2>/dev/null | grep -q "224.0.0.0/4"; then
-    sudo nft insert rule ip qubes postrouting ip daddr 224.0.0.0/4 return
+  if ! $SUDO nft list chain ip qubes postrouting 2>/dev/null | grep -q "224.0.0.0/4"; then
+    $SUDO nft insert rule ip qubes postrouting ip daddr 224.0.0.0/4 return
     echo "[*] qubes postrouting: multicast exempt from masquerade"
   fi
 }
@@ -168,6 +196,14 @@ ensure_sshconfig() {
 }
 
 ensure_network() {
+  # Rootless mode (SUDO empty): the per-user bridge USER_BRIDGE was created
+  # by setup-rootless-incus.sh (10.0.0.0/16, NAT on, DHCP off). We can't see
+  # or reconfigure it from the restricted user project, so just trust it.
+  if [ -z "$SUDO" ]; then
+    NETWORK="$USER_BRIDGE"
+    echo "[*] rootless: using pre-created bridge $NETWORK"
+    return 0
+  fi
   if ! INCUS network show "$NETWORK" >/dev/null 2>&1; then
     echo "[*] create network $NETWORK"
     INCUS network create "$NETWORK" ipv4.address="$SUBNET" ipv4.nat=true ipv6.address=none
@@ -183,13 +219,21 @@ ensure_network() {
 }
 
 ensure_profile() {
+  # Rootless mode: the per-user bridge USER_BRIDGE is the one we attach to.
+  # The restricted user project forbids security.privileged, so skip it.
+  local net="$NETWORK"
+  [ -z "$SUDO" ] && net="$USER_BRIDGE"
   if ! INCUS profile show "$PROFILE" >/dev/null 2>&1; then
     echo "[*] create profile $PROFILE"
     INCUS profile create "$PROFILE"
-    INCUS profile set "$PROFILE" security.privileged=true
+    [ -n "$SUDO" ] && INCUS profile set "$PROFILE" security.privileged=true
     INCUS profile device add "$PROFILE" root disk path=/ pool=default
-    INCUS profile device add "$PROFILE" eth0 nic network="$NETWORK"
+    INCUS profile device add "$PROFILE" eth0 nic network="$net"
   fi
+  # security.ipv4_filtering on the profile eth0 lets instances set
+  # ipv4.address on a DHCP-off bridge (incusbr-* in rootless mode, ycdev0
+  # with DHCP disabled in the sudo path). Set it unconditionally — idempotent.
+  INCUS profile device set "$PROFILE" eth0 security.ipv4_filtering=true
   # docker-in-container (app-dev.yml: authentik). Applies on node (re)start.
   if [ "$(INCUS profile get "$PROFILE" security.nesting)" != "true" ]; then
     echo "[*] enable security.nesting on $PROFILE"
@@ -289,7 +333,6 @@ ensure_cache() {
     echo "[*] create $CACHE ($CACHE_IP) — persistent apt cache"
     INCUS init "$IMAGE" "$CACHE" --profile "$PROFILE"
     INCUS config device override "$CACHE" eth0 ipv4.address="$CACHE_IP"
-    INCUS config device set "$CACHE" eth0 security.ipv4_filtering=true
     INCUS start "$CACHE"
   elif [ "$(INCUS list "$CACHE" -c s -f csv)" != RUNNING ]; then
     INCUS start "$CACHE"
@@ -320,7 +363,6 @@ ensure_node() {
     echo "[*] create $n ($ip)"
     INCUS init "$IMAGE" "$n" --profile "$PROFILE"
     INCUS config device override "$n" eth0 ipv4.address="$ip"
-    INCUS config device set "$n" eth0 security.ipv4_filtering=true
     INCUS start "$n"
   elif [ "$(INCUS list "$n" -c s -f csv)" != RUNNING ]; then
     INCUS start "$n"
