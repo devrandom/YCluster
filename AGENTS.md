@@ -110,7 +110,7 @@ See `docs/operations/packages.md`.
 - **local-ai-proxy**: Inference gateway at `inference.xc` (port 4001, nginx-fronted with auth_request), routing to vLLM/llama-server/whisperx backends
 
 ### Network
-- **Gateway VIP (10.0.0.254)**: Routing, DHCP, DNS - may move to non-storage nodes
+- **Gateway VIP (10.0.0.254)**: Routing, DHCP, DNS - tied to storage nodes (control plane)
 - **Storage VIP (10.0.0.100)**: Admin API, Docker registry - tied to storage nodes (needs etcd)
 - **DNS suffix**: `.xc` for cluster hostnames (e.g., `admin.xc`, `registry.xc`, `inference.xc`, `s1.xc`, `nv1.xc`)
 - **IP ranges by node type**:
