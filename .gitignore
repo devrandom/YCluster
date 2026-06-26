@@ -31,6 +31,9 @@ venv/
 # dev cluster throwaway ssh key
 dev/cluster/.ssh/
 
+# local scratch logs (dev-sync, system-test, etc.) — use ./tmp not /tmp
+/tmp/
+
 # Cluster-specific inventory (real values); template is inventory_cluster.yml.example
 config/ansible/inventory_cluster.yml
 

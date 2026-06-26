@@ -59,7 +59,7 @@ bash dev-sync.sh --stop    # tear the trigger down
 Running with no args prints usage. Then run the playbook via SSH as above.
 
 **Confirming a sync landed (don't hash files by hand).** Trust the watcher by
-default; for a routine confirmation, `tail /tmp/dev-sync.log` for a `done` line
+default; for a routine confirmation, `tail ./tmp/dev-sync.log` for a `done` line
 stamped after your edit (the trigger only logs `done` on rsync exit 0, so
 partial syncs show as `rsync failed`). When you want certainty (before a
 high-stakes playbook run, or you suspect drift), run `bash dev-sync.sh --check`
@@ -149,6 +149,13 @@ Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.y
 - Playbooks must be idempotent
 - Do not swallow errors or stderr output
 - Use `git mv` for file renames
+- **Use `./tmp/` not `/tmp/`** for local scratch files (logs, system-test
+  output, temp configs). `./tmp/` is gitignored. The system-test logs at
+  `./tmp/system-test-<section>.log` follow this convention.
+- **Pipe long command output through `headtail`** (on PATH at
+  `~/bin/headtail`) instead of `head`/`tail` so the start and end of the
+  output are both visible without truncating either. Use `headtail -l FILE`
+  to also tee the full un-elided output to a log file.
 - Use JSON format for command output when available (e.g., `rbd --format json`)
 - Add JSON output format to custom scripts used by other scripts
 - **NEVER run `rm -rf` on mount points or paths that could contain user data without confirming with the user first** - use `rmdir` for empty directories or verify unmounted state first

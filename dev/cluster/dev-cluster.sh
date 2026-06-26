@@ -289,6 +289,7 @@ ensure_cache() {
     echo "[*] create $CACHE ($CACHE_IP) — persistent apt cache"
     INCUS init "$IMAGE" "$CACHE" --profile "$PROFILE"
     INCUS config device override "$CACHE" eth0 ipv4.address="$CACHE_IP"
+    INCUS config device set "$CACHE" eth0 security.ipv4_filtering=true
     INCUS start "$CACHE"
   elif [ "$(INCUS list "$CACHE" -c s -f csv)" != RUNNING ]; then
     INCUS start "$CACHE"
@@ -319,6 +320,7 @@ ensure_node() {
     echo "[*] create $n ($ip)"
     INCUS init "$IMAGE" "$n" --profile "$PROFILE"
     INCUS config device override "$n" eth0 ipv4.address="$ip"
+    INCUS config device set "$n" eth0 security.ipv4_filtering=true
     INCUS start "$n"
   elif [ "$(INCUS list "$n" -c s -f csv)" != RUNNING ]; then
     INCUS start "$n"

@@ -27,7 +27,8 @@ set -euo pipefail
 # down and you must sync over a rathole alias such as s3.rat instead.
 DEST="${YC_SYNC_HOST:-s1.yc}:/opt/infrastructure/"
 REPO="$(cd "$(dirname "$0")" && pwd)"
-LOG="/tmp/dev-sync.log"
+LOG="$REPO/tmp/dev-sync.log"
+mkdir -p "$(dirname "$LOG")"
 
 # Shared rsync filtering, used by the live sync, the --check dry-run, and the
 # watchman trigger so they can't drift. --copy-unsafe-links dereferences

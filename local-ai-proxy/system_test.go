@@ -65,7 +65,7 @@ func startProxy(t *testing.T, cfgYAML string) string {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, bin, "--config", cfgPath)
+	cmd := exec.CommandContext(ctx, bin, "serve", "--config", cfgPath)
 	cmd.Stdout = os.Stderr // surface proxy logs to test output
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

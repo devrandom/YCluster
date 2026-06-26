@@ -36,6 +36,10 @@ set -uo pipefail
 
 cd "$(dirname "$0")"
 
+# Repo-root tmp/ (gitignored) for section logs — never /tmp.
+LOGDIR="$(cd ../.. && pwd)/tmp"
+mkdir -p "$LOGDIR"
+
 # -n: remote commands must not inherit the terminal's stdin — some of them
 # (incus via ycluster) read a non-TTY stdin to EOF and hang an interactive run.
 SSH="ssh -n -F .ssh/config"
@@ -101,29 +105,29 @@ section() {  # $1=name $2=fn — run fn in a subshell; record, don't abort
 provision() {
   log "PROVISION: dev-cluster.sh up + site-dev + collect-hw + app-dev"
   ./dev-cluster.sh up
-  $PLAYBOOK site-dev.yml      > /tmp/system-test-site-dev.log 2>&1 \
-    || die "site-dev.yml failed (see /tmp/system-test-site-dev.log)"
+  $PLAYBOOK site-dev.yml      > "$LOGDIR/system-test-site-dev.log" 2>&1 \
+    || die "site-dev.yml failed (see $LOGDIR/system-test-site-dev.log)"
   ok "site-dev.yml"
-  $PLAYBOOK collect-hw-dev.yml > /tmp/system-test-collect-hw.log 2>&1 \
-    || die "collect-hw-dev.yml failed (see /tmp/system-test-collect-hw.log)"
+  $PLAYBOOK collect-hw-dev.yml > "$LOGDIR/system-test-collect-hw.log" 2>&1 \
+    || die "collect-hw-dev.yml failed (see $LOGDIR/system-test-collect-hw.log)"
   ok "collect-hw-dev.yml"
   # -e: setup-gateway-vip.yml/configure-ntp.yml are top-level config/ansible
   # playbooks, so they load the prod group_vars/core.yml whose interface
   # names are bare-metal; extra-vars outrank them (see base-infra-dev.yml).
   $PLAYBOOK base-infra-dev.yml -e cluster_interface=eth0 -e uplink_interface=eth0 \
-      > /tmp/system-test-base-infra.log 2>&1 \
-    || die "base-infra-dev.yml failed (see /tmp/system-test-base-infra.log)"
+      > "$LOGDIR/system-test-base-infra.log" 2>&1 \
+    || die "base-infra-dev.yml failed (see $LOGDIR/system-test-base-infra.log)"
   ok "base-infra-dev.yml"
   # Stale drain keys from an aborted earlier run make nodes sit out the
   # election (and the playbooks below need it to converge).
   for n in "${CORE[@]}"; do
     $SSH s1 "$E etcdctl del /cluster/nodes/$n/drain" >/dev/null 2>&1 || true
   done
-  $PLAYBOOK app-dev.yml       > /tmp/system-test-app-dev.log 2>&1 \
-    || die "app-dev.yml failed (see /tmp/system-test-app-dev.log)"
+  $PLAYBOOK app-dev.yml       > "$LOGDIR/system-test-app-dev.log" 2>&1 \
+    || die "app-dev.yml failed (see $LOGDIR/system-test-app-dev.log)"
   ok "app-dev.yml"
-  $PLAYBOOK acme-dev.yml      > /tmp/system-test-acme.log 2>&1 \
-    || die "acme-dev.yml failed (see /tmp/system-test-acme.log)"
+  $PLAYBOOK acme-dev.yml      > "$LOGDIR/system-test-acme.log" 2>&1 \
+    || die "acme-dev.yml failed (see $LOGDIR/system-test-acme.log)"
   ok "acme-dev.yml"
 }
 

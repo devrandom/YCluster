@@ -95,7 +95,7 @@ cd dev/cluster
 Sections run **independently** — a failed section is recorded and the
 run continues (one broken seam doesn't hide the state of the others).
 Exit code is non-zero if any section failed. Per-section playbook logs
-land at `/tmp/system-test-<playbook>.log`.
+land at `./tmp/system-test-<playbook>.log` (repo-root `tmp/`, gitignored).
 
 SSH into nodes via the generated config (no setup needed; entries
 auto-resolve to incus containers):
@@ -162,7 +162,7 @@ or templates, it's `admin/setup-web-services.yml --limit managed`.
   locally. `apt install python3-etcd3 python3-flask python3-requests
   python3-protobuf`, or use a venv with them (`./venv/bin/python` is
   auto-detected by `run-tests.sh`).
-- **Section fails mid-run** — section logs at `/tmp/system-test-<playbook>.log`.
+- **Section fails mid-run** — section logs at `./tmp/system-test-<playbook>.log`.
   SSH into the failing node via `dev/cluster/.ssh/config` to inspect
   (e.g. `ssh -F dev/cluster/.ssh/config s1 'journalctl -u postgresql@16-main -n 50'`).
 - **`make test-system` fails** with "binary not found" — needs
