@@ -52,12 +52,26 @@ if [ "$(id -u)" != 0 ]; then
 fi
 log "target user: $TARGET_USER (uid $TARGET_UID), project $PROJECT, bridge $NETWORK"
 
-# --- §1a install incus ---------------------------------------------------
+# --- §1a install incus + QEMU (for --vm) --------------------------------
 ensure_installed() {
-  if command -v incus >/dev/null 2>&1; then return 0; fi
-  log "installing incus"
-  apt-get update
-  apt-get install -y incus
+  local need=()
+  command -v incus >/dev/null 2>&1 || need+=(incus)
+  # Incus VMs need qemu-system-x86 + OVMF firmware; the incus package
+  # doesn't depend on QEMU, it just fails at launch time without it.
+  [ -x /usr/bin/qemu-system-x86_64 ] || need+=(qemu-system-x86)
+  [ -d /usr/share/OVMF ] || need+=(ovmf)
+  if [ ${#need[@]} -gt 0 ]; then
+    log "installing: ${need[*]}"
+    apt-get update
+    apt-get install -y "${need[@]}"
+  fi
+  # The incus daemon caches "QEMU not available" at startup. If QEMU is
+  # now installed, restart the daemon so it re-detects it. This runs even
+  # when nothing was installed (QEMU may have been added out-of-band).
+  if [ -x /usr/bin/qemu-system-x86_64 ]; then
+    log "restarting incus daemon to pick up QEMU"
+    systemctl restart incus.service incus.socket
+  fi
 }
 
 # --- §1b daemon + storage pool ------------------------------------------

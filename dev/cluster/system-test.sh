@@ -49,7 +49,7 @@ SSH="ssh -n -F .ssh/config"
 PLAYBOOK="../../venv/bin/ansible-playbook"
 [ -x "$PLAYBOOK" ] || PLAYBOOK="$(command -v ansible-playbook)"
 CORE=(s1 s2 s3)
-declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [f1]=10.0.0.41 [pebble]=10.0.0.42 )
+declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [c2]=10.0.0.52 [f1]=10.0.0.41 [pebble]=10.0.0.42 )
 VIP=10.0.0.100
 GW_VIP=10.0.0.254
 TLSDIR=/etc/etcd/tls
@@ -475,66 +475,66 @@ sec_authentik() {
 }
 
 # --------------------------------------------------------------------------
-# 10. incus vm lifecycle on c1 (launch -> sample -> desired -> reconcile)
+# 10. incus vm lifecycle on c2 (launch -> sample -> desired -> reconcile)
 # --------------------------------------------------------------------------
 sec_vm() {
   local vm=smokevm owner=smoke-owner
-  $SSH c1 "systemctl is-active --quiet vm-state-sampler.timer && systemctl is-active --quiet vm-reconciler.timer" \
-    || die "sampler/reconciler timers not active on c1"
+  $SSH c2 "systemctl is-active --quiet vm-state-sampler.timer && systemctl is-active --quiet vm-reconciler.timer" \
+    || die "sampler/reconciler timers not active on c2"
   ok "vm-state-sampler + vm-reconciler timers active"
 
   # Throwaway owner key (registered in /cluster/users/, injected into the vm)
   [ -f .ssh/id_smoke ] || ssh-keygen -t ed25519 -N '' -f .ssh/id_smoke -C smoke >/dev/null
-  $SSH c1 "$E ycluster vm ssh add $owner '$(cat .ssh/id_smoke.pub)'" >/dev/null \
+  $SSH c2 "$E ycluster vm ssh add $owner '$(cat .ssh/id_smoke.pub)'" >/dev/null \
     || die "vm ssh add"
-  $SSH c1 "$E ycluster vm ssh list" | grep -q "$owner" || die "vm ssh list"
+  $SSH c2 "$E ycluster vm ssh list" | grep -q "$owner" || die "vm ssh list"
   ok "owner key registered in /cluster/users/"
 
   # Idempotent re-runs: clear any leftover instance from a failed pass.
-  $SSH c1 "$E ycluster vm destroy $vm" >/dev/null 2>&1 || true
+  $SSH c2 "$E ycluster vm destroy $vm" >/dev/null 2>&1 || true
   $SSH s1 "$E etcdctl del /cluster/vm-desired/$vm" >/dev/null
   $SSH s1 "$E etcdctl del /cluster/vm-grace/$vm" >/dev/null
 
   # The real launch path: nested incus container, IP pin, sshd, owner keys.
-  $SSH c1 "$E ycluster vm launch $vm --owner $owner --gpus 0 --cpu 1 --mem 1GiB --image images:ubuntu/24.04/cloud" \
+  $SSH c2 "$E ycluster vm launch $vm --owner $owner --gpus 0 --cpu 1 --mem 1GiB --image images:ubuntu/24.04/cloud" \
     >/dev/null || die "ycluster vm launch"
-  $SSH c1 "incus list $vm --format json" | grep -q '"status": *"Running"' \
+  $SSH c2 "incus list $vm --format json" | grep -q '"status": *"Running"' \
     || die "instance not running after launch"
   $SSH s1 "$E etcdctl get /cluster/vms/$vm --print-value-only" | grep -q '"state": "ready"' \
     || die "vm record not ready in etcd"
   ok "vm launch (nested incus container, etcd registration)"
 
-  $SSH c1 "$E ycluster vm sample" >/dev/null || die "vm sample"
-  $SSH s1 "$E etcdctl get /cluster/vm-state/c1 --print-value-only" \
+  $SSH c2 "$E ycluster vm sample" >/dev/null || die "vm sample"
+  $SSH s1 "$E etcdctl get /cluster/vm-state/c2 --print-value-only" \
     | grep -q "\"$vm\"" || die "sample snapshot missing $vm"
-  ok "vm sample -> /cluster/vm-state/c1"
+  ok "vm sample -> /cluster/vm-state/c2"
 
   # desired=off: first reconcile warns + stamps grace, instance stays up.
   $SSH s1 "$E etcdctl put /cluster/vm-desired/$vm '{\"mode\": \"off\"}'" >/dev/null
-  $SSH c1 "$E ycluster vm reconcile" >/dev/null || die "reconcile (warn tick)"
+  $SSH c2 "$E ycluster vm reconcile" >/dev/null || die "reconcile (warn tick)"
   $SSH s1 "$E etcdctl get /cluster/vm-grace/$vm --print-value-only" | grep -q warned_at \
     || die "grace marker not stamped"
-  $SSH c1 "incus list $vm --format json" | grep -q '"status": *"Running"' \
+  $SSH c2 "incus list $vm --format json" | grep -q '"status": *"Running"' \
     || die "instance stopped before grace elapsed"
   ok "reconcile warn tick: grace stamped, instance still up"
 
   # Backdate the warning so the next tick's grace check has elapsed.
   local past
-  past=$($SSH c1 "date -u -d '-10 minutes' +%Y-%m-%dT%H:%M:%S+00:00")
+  past=$($SSH c2 "date -u -d '-10 minutes' +%Y-%m-%dT%H:%M:%S+00:00")
   $SSH s1 "$E etcdctl put /cluster/vm-grace/$vm '{\"warned_at\": \"$past\"}'" >/dev/null
-  $SSH c1 "$E ycluster vm reconcile" >/dev/null || die "reconcile (stop tick)"
-  $SSH c1 "incus list $vm --format json" | grep -q '"status": *"Stopped"' \
+  $SSH c2 "$E ycluster vm reconcile" >/dev/null || die "reconcile (stop tick)"
+  $SSH c2 "incus list $vm --format json" | grep -q '"status": *"Stopped"' \
     || die "instance not stopped after grace"
   ok "reconcile stop tick: clean stop after grace"
 
   # desired=on: reconcile starts it again (billable scheduler start).
   $SSH s1 "$E etcdctl put /cluster/vm-desired/$vm '{\"mode\": \"on\"}'" >/dev/null
-  $SSH c1 "$E ycluster vm reconcile" >/dev/null || die "reconcile (start)"
-  $SSH c1 "incus list $vm --format json" | grep -q '"status": *"Running"' \
+  $SSH c2 "$E ycluster vm reconcile" >/dev/null || die "reconcile (start)"
+  $SSH c2 "incus list $vm --format json" | grep -q '"status": *"Running"' \
     || die "instance not started by reconcile"
   ok "reconcile start: desired=on brings it back"
 
-  $SSH c1 "$E ycluster vm destroy $vm" >/dev/null || die "vm destroy"
+  $SSH c2 "$E ycluster vm destroy $vm" >/dev/null || die "vm destroy"
   $SSH s1 "$E etcdctl del /cluster/vm-desired/$vm" >/dev/null
   $SSH s1 "$E etcdctl del /cluster/vm-grace/$vm" >/dev/null
   $SSH s1 "$E etcdctl get /cluster/vms/$vm --print-value-only" | grep -q . \

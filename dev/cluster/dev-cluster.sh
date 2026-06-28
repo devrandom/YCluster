@@ -59,8 +59,8 @@ CACHE_PORT=3142
 
 # node -> last octet (10.0.0.X). Core = s1-s3, compute = c1, frontend = f1,
 # pebble = dedicated ACME CA container.
-NODES=(s1 s2 s3 c1 f1 pebble)
-declare -A OCTET=( [s1]=11 [s2]=12 [s3]=13 [c1]=51 [f1]=41 [pebble]=42 )
+NODES=(s1 s2 s3 c1 c2 f1 pebble)
+declare -A OCTET=( [s1]=11 [s2]=12 [s3]=13 [c1]=51 [c2]=52 [f1]=41 [pebble]=42 )
 
 # /etc/hosts seeded into every node (no cluster DNS — we use static hosts).
 HOSTS_BLOCK=$(cat <<'EOF'
@@ -68,6 +68,7 @@ HOSTS_BLOCK=$(cat <<'EOF'
 10.0.0.12 s2 s2.xc
 10.0.0.13 s3 s3.xc
 10.0.0.51 c1 c1.xc
+10.0.0.52 c2 c2.xc
 10.0.0.41 f1 f1.xc
 10.0.0.2 aptcache
 10.0.0.42 pebble pebble.xc
@@ -247,9 +248,11 @@ ensure_profile() {
 }
 
 # --- nodes ---------------------------------------------------------------
-wait_ready() {  # wait for systemd inside the container to be usable
-  local n=$1 i
-  for i in $(seq 1 30); do
+wait_ready() {  # wait for systemd inside the container/VM to be usable
+  local n=$1 i max=30
+  # VMs take longer to boot (firmware + cloud-init)
+  incus list "$n" --format json 2>/dev/null | grep -q '"type": *"virtual-machine"' && max=120
+  for i in $(seq 1 "$max"); do
     if INCUS exec "$n" -- test -S /run/dbus/system_bus_socket 2>/dev/null \
        || INCUS exec "$n" -- systemctl is-system-running >/dev/null 2>&1; then
       return 0
@@ -274,20 +277,25 @@ configure_net() {
   # Static networkd config written directly. We avoid netplan ("netplan
   # apply" calls udevadm, which has no running udev in a container) and DHCP
   # (dnsmasq sits behind Qubes' dropped INPUT chain). Drop the image's
-  # cloud-init netplan (both the source yaml and the already-generated /run
+  # cloud-init netplan (both the source and the already-generated /run
   # unit, which otherwise sorts before ours and DHCPs).
   local n=$1 ip=$2
+  # Containers name the NIC eth0; VMs use enp5s0 (predictable naming).
+  local iface
+  iface=$(INCUS exec "$n" -- sh -c 'ip -o link show | grep -v lo | awk -F": " "{print \$2}" | awk "{print \$1}" | head -1' 2>/dev/null)
+  iface="${iface:-eth0}"
+  iface="${iface%@*}"  # strip @ifN suffix from veth pairs
   INCUS exec "$n" -- sh -c 'rm -f /etc/netplan/*.yaml /run/systemd/network/*netplan*'
   INCUS exec "$n" -- sh -c "cat > /etc/systemd/network/10-yc.network" <<EOF
 [Match]
-Name=eth0
+Name=$iface
 
 [Network]
 Address=${ip}/24
 Gateway=10.0.0.1
 $(for d in $DNS; do echo "DNS=$d"; done)
 EOF
-  INCUS exec "$n" -- ip addr flush dev eth0 scope global
+  INCUS exec "$n" -- ip addr flush dev "$iface" scope global
   INCUS exec "$n" -- systemctl enable systemd-networkd
   INCUS exec "$n" -- systemctl restart systemd-networkd
   # Deterministic resolv.conf (don't depend on resolved wiring in-container)
@@ -363,9 +371,20 @@ ensure_rbd_backing() {
 
 ensure_node() {
   local n=$1 ip="10.0.0.${OCTET[$1]}"
-    if ! INCUS info "$n" >/dev/null 2>&1; then
+  if ! INCUS info "$n" >/dev/null 2>&1; then
     echo "[*] create $n ($ip)"
-    INCUS init "$IMAGE" "$n" --profile "$PROFILE"
+    if [ "$n" = "c2" ]; then
+      if [ -x /usr/bin/qemu-system-x86_64 ]; then
+        # VM: full kernel, nested incus works natively
+        INCUS init images:ubuntu/24.04/cloud "$n" --profile "$PROFILE" --vm
+      else
+        # No QEMU: privileged container (security.privileged allows nesting)
+        INCUS init "$IMAGE" "$n" --profile "$PROFILE"
+        INCUS config set "$n" security.privileged=true
+      fi
+    else
+      INCUS init "$IMAGE" "$n" --profile "$PROFILE"
+    fi
     INCUS start "$n"
   elif [ "$(INCUS list "$n" -c s -f csv)" != RUNNING ]; then
     INCUS start "$n"

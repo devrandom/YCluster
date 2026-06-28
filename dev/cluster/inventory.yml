@@ -106,6 +106,7 @@ all:
     compute:
       hosts:
         c1: { ansible_host: 10.0.0.51 }
+        c2: { ansible_host: 10.0.0.52 }
     # Frontend node — external rathole-server host in the real cluster; here a
     # container on the dev bridge. Deliberately NOT in `managed` (it runs the
     # rathole server, not admin-api). Exercises the frontend group + the
