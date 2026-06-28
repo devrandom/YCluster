@@ -110,6 +110,11 @@ all:
     frontend:
       hosts:
         f1: { ansible_host: 10.0.0.41 }
+    # Dedicated Pebble ACME CA container (test-only; prod uses Let's Encrypt).
+    # NOT in `managed` — it runs no cluster services, just pebble.service.
+    pebble:
+      hosts:
+        pebble: { ansible_host: 10.0.0.42 }
     managed:
       children:
         core: {}

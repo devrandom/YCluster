@@ -46,7 +46,7 @@ SSH="ssh -n -F .ssh/config"
 PLAYBOOK="../../venv/bin/ansible-playbook"
 [ -x "$PLAYBOOK" ] || PLAYBOOK="$(command -v ansible-playbook)"
 CORE=(s1 s2 s3)
-declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [f1]=10.0.0.41 )
+declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [f1]=10.0.0.41 [pebble]=10.0.0.42 )
 VIP=10.0.0.100
 GW_VIP=10.0.0.254
 TLSDIR=/etc/etcd/tls
@@ -673,7 +673,7 @@ sec_inference() {
 sec_acme() {
   local leader
   leader=$(app_leader)
-  $SSH f1 "systemctl is-active --quiet pebble" || die "pebble not active on f1"
+  $SSH pebble "systemctl is-active --quiet pebble" || die "pebble not active on pebble"
   retry 10 2 "pebble ACME directory (via cluster DNS for pebble.xc)" \
     $SSH "$leader" "curl -fsS --max-time 5 --cacert /etc/dev-pebble-ca.pem https://pebble.xc:14000/dir -o /dev/null"
   ok "pebble directory served over TLS"

@@ -1,10 +1,10 @@
 ---
-# ACME rehearsal fixture: Pebble (Let's Encrypt's test CA) on f1, issuing
-# for the dev external domain through the REAL certificate path — certbot
-# on the storage leader, webroot under the public vhost, HTTP-01 arriving
-# through the rathole tunnel at f1:80. Exercises the operationally painful
-# lore end-to-end: obtain-on-the-rathole-node, webroot vs --nginx, the
-# 127.0.0.2 public listener.
+# ACME rehearsal fixture: Pebble (Let's Encrypt's test CA) on a dedicated
+# container, issuing for the dev external domain through the REAL
+# certificate path — certbot on the storage leader, webroot under the
+# public vhost, HTTP-01 arriving through the rathole tunnel at f1:80.
+# Exercises the operationally painful lore end-to-end: obtain-on-the-
+# rathole-node, webroot vs --nginx, the 127.0.0.2 public listener.
 #
 # Run as a TOP-LEVEL playbook from dev/cluster/ (vault avoidance):
 #   ../../venv/bin/ansible-playbook acme-dev.yml
@@ -13,9 +13,10 @@
 # /cluster/https/domain says) by resolving it at the cluster DNS (gateway
 # VIP), where a dnsmasq fixture points the domain and its subdomains at
 # f1 — the same "public DNS -> frontend edge" shape as production.
+# pebble.xc resolves to the dedicated pebble container.
 
-- name: Pebble test ACME CA on the frontend node
-  hosts: frontend
+- name: Pebble test ACME CA on the dedicated pebble container
+  hosts: pebble
   become: yes
   vars:
     pebble_version: v2.10.1
@@ -26,6 +27,13 @@
         path: /opt/pebble/pebble
       register: pebble_bin
 
+    - name: Create pebble directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop: [/opt/pebble, /etc/pebble]
+
     - name: Download pebble release
       get_url:
         url: "https://github.com/letsencrypt/pebble/releases/download/{{ pebble_version }}/pebble-linux-amd64.tar.gz"
@@ -33,13 +41,6 @@
         checksum: "sha256:{{ pebble_sha256 }}"
         mode: '0644'
       when: not pebble_bin.stat.exists
-
-    - name: Create pebble directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      loop: [/opt/pebble, /etc/pebble]
 
     - name: Extract pebble binary
       unarchive:
@@ -49,8 +50,7 @@
         extra_opts: ['--strip-components=3']
       when: not pebble_bin.stat.exists
 
-    # The release tarball ships the binary 0644/uid-1001.
-    - name: Make pebble executable
+    - name: Make pebble executable and owned by root
       file:
         path: /opt/pebble/pebble
         owner: root
@@ -74,8 +74,6 @@
       args:
         creates: /etc/pebble/cert.pem
 
-    # httpPort/tlsPort: where pebble CONNECTS for HTTP-01/TLS-ALPN-01
-    # validation (the real ports on the public edge), not listeners.
     - name: Pebble configuration
       copy:
         dest: /etc/pebble/pebble-config.json
@@ -120,12 +118,6 @@
         state: "{{ (pebble_config.changed or pebble_unit.changed) | ternary('restarted', 'started') }}"
         daemon_reload: yes
 
-    - name: Open firewall for pebble HTTPS listener
-      ufw:
-        rule: allow
-        port: '14000'
-        proto: tcp
-
     - name: Read pebble listener certificate
       slurp:
         src: /etc/pebble/cert.pem
@@ -141,7 +133,7 @@
     # Trust anchor for talking TO pebble (REQUESTS_CA_BUNDLE for certbot).
     - name: Distribute pebble listener certificate
       copy:
-        content: "{{ hostvars[groups['frontend'][0]].pebble_ca.content | b64decode }}"
+        content: "{{ hostvars[groups['pebble'][0]].pebble_ca.content | b64decode }}"
         dest: /etc/dev-pebble-ca.pem
         mode: '0644'
 
@@ -161,7 +153,7 @@
         dest: /etc/dnsmasq.d/dev-acme.conf
         content: |
           address=/{{ acme_domain.stdout | trim }}/{{ hostvars[groups['frontend'][0]].ansible_host }}
-          address=/pebble.xc/{{ hostvars[groups['frontend'][0]].ansible_host }}
+          address=/pebble.xc/{{ hostvars[groups['pebble'][0]].ansible_host }}
       register: acme_dns
 
     - name: Restart dnsmasq to pick up the fixture

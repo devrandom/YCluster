@@ -101,8 +101,7 @@ Reverted the removal — `user: "1002:1002"` stays in
 `install-docker-registry.yml`. The runc downgrade to 1.1.12 fixes the sysctl
 read, so the registry can run as user 1002 (non-root) with no security
 regression.
-
-### Pebble placement — it's not a certbot replacement
+### Pebble placement — moved to dedicated container
 
 **Clarification:** Pebble is NOT a replacement for certbot. They serve
 different roles:
@@ -117,21 +116,64 @@ So in the dev cluster:
 - certbot is the ACME **client** (requests certificates) — same as production
 - The HTTP-01 challenge flows: Pebble → f1:80 → rathole tunnel → leader webroot
 
-**Current placement (f1):**
-f1 is the frontend proxy (Rathole server, public edge). Pebble currently runs
-on f1, which means:
-- f1's firewall needs a rule for port 14000 (Pebble's HTTPS listener)
-- f1 serves two roles: frontend proxy + test CA server
+**Previous placement (f1):** Pebble ran on f1 (frontend proxy), so f1
+served two roles: frontend proxy + test CA server. f1's firewall needed
+a rule for port 14000 (Pebble's HTTPS listener).
 
-**Proposed placement (dedicated VM):**
-Move Pebble to a dedicated VM (e.g. `pebble` container at `10.0.0.42`). This
-would:
-1. Keep f1 focused on its proxy role — no firewall changes needed
-2. Better simulate the "external CA on the internet" — a separate entity
-3. Let Pebble's playbook own its own firewall config
+**New placement (dedicated `pebble` container at `10.0.0.42`):**
+Pebble now runs on a dedicated container. This:
+1. Keeps f1 focused on its proxy role — no firewall changes needed on f1
+2. Better simulates the "external CA on the internet" — a separate entity
+3. Lets Pebble's playbook own its own firewall config
 
-The Pebble VM would need to reach f1:80 for HTTP-01 validation, and be
-reachable from certbot on port 14000. Both work if it's on the cluster network.
+The Pebble container needs to reach f1:80 for HTTP-01 validation, and
+be reachable from certbot on port 14000. Both work since it's on the
+cluster network.
+
+**Files changed:**
+- `dev-cluster.sh` — added `pebble` to NODES, OCTET (42), HOSTS_BLOCK
+- `inventory.yml` — added `pebble` group with `pebble` host at 10.0.0.42
+- `acme-dev.yml` — first play now `hosts: pebble` (was `frontend`); removed
+  UFW rule (no firewall between containers on the same bridge); dnsmasq
+  fixture now points `pebble.xc` at the pebble container's IP
+- `system-test.sh` — section 15 now checks pebble on the `pebble` container
+  (was `f1`); added `[pebble]=10.0.0.42` to IP array
+
+---
+
+## Buildhost — delegated binary builds
+
+**Problem:** Build steps (rathole, open-webui) ran on `localhost` — the
+ansible controller. The controller may be differently configured from the
+cluster machines (different OS, architecture, toolchain versions). Binaries
+built on the wrong arch or with wrong glibc won't run on the cluster.
+
+**Fix:** Added a `buildhost` var (default `s1`) and `build_cache_dir` var
+(default `./tmp/build-cache`) to the inventory. Build playbooks now run on
+the buildhost and install playbooks fetch the binary from the buildhost to
+the controller's `build_cache_dir`, then copy to targets.
+
+**Files changed:**
+- `config/ansible/group_vars/all/main.yml` — added `buildhost: s1`, `build_cache_dir: ./tmp/build-cache`
+- `dev/cluster/inventory.yml` — same vars for dev cluster
+- `config/ansible/app/build-rathole.yml` — runs on localhost, delegates each task to `{{ buildhost }}`
+- `config/ansible/app/build-open-webui.yml` — uses `hosts: "{{ buildhost }}"`
+- `config/ansible/app/install-rathole.yml` — stat on buildhost, fetch to controller, copy to target
+- `config/ansible/app/install-rathole-server.yml` — same fetch-from-buildhost pattern
+- `config/ansible/admin/install-vm-bastion.yml` — same fetch-from-buildhost pattern
+
+**`import_playbook` caveat:**
+`import_playbook` evaluates `hosts` at parse time, before inventory vars are
+loaded. So `build-rathole.yml` uses `hosts: localhost` (static) and delegates
+each task to `{{ buildhost }}` at runtime. `build-open-webui.yml` uses
+`hosts: "{{ buildhost }}"` directly because it's not imported via
+`import_playbook` in the dev flow (it uses `include` semantics).
+
+**`become` on delegated tasks:**
+The `apt install` task in `build-rathole.yml` needs `become: yes` on the
+delegated host (the buildhost). Without it, apt fails because the controller
+runs as unprivileged user. The `become: yes` is on the task, not the play,
+so it only applies to the delegated task.
 
 ---
 
@@ -146,44 +188,11 @@ reachable from certbot on port 14000. Both work if it's on the cluster network.
 | sudo → incus | `system-test.sh` | Dev only |
 | 1002:1002 reverted | `install-docker-registry.yml` | Both (runc downgrade fixes it) |
 | `/status` Host header | `system-test.sh` (sections 12, 16) | Dev only |
+| Buildhost var | `group_vars/all/main.yml`, `dev/cluster/inventory.yml` | Both |
+| Buildhost delegation | `build-rathole.yml`, `install-rathole*.yml`, `install-vm-bastion.yml` | Both |
 
 ## Next Steps
 
-1. **Move Pebble to a dedicated VM** — keep f1 focused on its proxy role
+1. ~~Move Pebble to a dedicated VM~~ — done (pebble container at 10.0.0.42)
 2. **Decide on section 10** — skip in rootless mode, or run dev cluster with SUDO=sudo
 3. **Run full system test** — verify all fixes work together
-
----
-
-## Build Host — stop building on localhost
-
-**Current state:** Build steps (rathole, local-ai-proxy, Go binaries) run
-on `localhost` — the operator's development machine. Ansible delegates build
-tasks to `localhost` and the resulting binaries are copied/scoped to the
-cluster.
-
-**Problem:** The operator's machine may be differently configured from the
-cluster machines:
-- Different OS / architecture (e.g. macOS vs Linux, arm64 vs amd64)
-- Different Go / Rust / toolchain versions
-- Different libraries / headers available
-- Binaries built on the wrong arch or with wrong glibc won't run on the cluster
-
-**Proposal:** Choose a **buildhost** — a dedicated machine (or one of the
-cluster nodes) that has the same OS/arch/toolchain as the cluster targets.
-All build steps should delegate to the buildhost instead of `localhost`.
-
-**Options:**
-- Use one of the core/storage nodes as the buildhost (same OS, same arch)
-- Use a separate dedicated build machine
-- Use a container on the buildhost for reproducible builds
-
-**Affected files:**
-- `config/ansible/app/build-rathole.yml` — `delegate_to: localhost`
-- `config/ansible/app/build-local-ai-proxy.yml` — `delegate_to: localhost`
-- Any other playbook that builds binaries locally
-
-**Migration:**
-1. Define `buildhost` in the inventory (default: `localhost`)
-2. Replace `delegate_to: localhost` with `delegate_to: "{{ buildhost }}"`
-3. Set `buildhost` to a cluster node or dedicated build machine

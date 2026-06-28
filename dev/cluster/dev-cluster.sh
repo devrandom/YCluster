@@ -57,9 +57,10 @@ CACHE=aptcache
 CACHE_IP=10.0.0.2
 CACHE_PORT=3142
 
-# node -> last octet (10.0.0.X). Core = s1-s3, compute = c1, frontend = f1.
-NODES=(s1 s2 s3 c1 f1)
-declare -A OCTET=( [s1]=11 [s2]=12 [s3]=13 [c1]=51 [f1]=41 )
+# node -> last octet (10.0.0.X). Core = s1-s3, compute = c1, frontend = f1,
+# pebble = dedicated ACME CA container.
+NODES=(s1 s2 s3 c1 f1 pebble)
+declare -A OCTET=( [s1]=11 [s2]=12 [s3]=13 [c1]=51 [f1]=41 [pebble]=42 )
 
 # /etc/hosts seeded into every node (no cluster DNS — we use static hosts).
 HOSTS_BLOCK=$(cat <<'EOF'
@@ -69,6 +70,7 @@ HOSTS_BLOCK=$(cat <<'EOF'
 10.0.0.51 c1 c1.xc
 10.0.0.41 f1 f1.xc
 10.0.0.2 aptcache
+10.0.0.42 pebble pebble.xc
 10.0.0.100 admin.xc registry.xc inference.xc storage.xc
 10.0.0.254 gateway.xc
 EOF
