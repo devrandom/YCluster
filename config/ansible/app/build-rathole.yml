@@ -1,18 +1,41 @@
 ---
-# Build rathole from source on the ansible controller (localhost). The binary
-# stays in the cargo build output dir; install-rathole*.yml copy it from there
-# to the target nodes. No `become` — runs as the unprivileged controller user.
+# Build rathole from source on the buildhost (default s1). The binary stays
+# in the cargo build output dir; install-rathole*.yml fetch it from there
+# via the controller. The play runs on localhost (so import_playbook can
+# resolve `hosts` statically) and each task delegates to the buildhost.
 - name: Build rathole from source
   hosts: localhost
   vars:
     rathole_repo_url: "https://github.com/rathole-org/rathole.git"
-    rathole_build_dir: "/tmp/rathole"
+    rathole_build_dir: "/opt/src/rathole"
     rathole_binary_path: "{{ rathole_build_dir }}/target/release/rathole"
   tasks:
     - name: Check if rathole binary already exists
       stat:
         path: "{{ rathole_binary_path }}"
       register: rathole_binary
+      delegate_to: "{{ buildhost }}"
+
+    - name: Install build dependencies
+      apt:
+        name:
+          - rustc
+          - cargo
+          - git
+          - build-essential
+          - libssl-dev
+          - pkg-config
+        state: present
+      become: yes
+      when: not rathole_binary.stat.exists
+      delegate_to: "{{ buildhost }}"
+
+    - name: Remove existing build directory
+      file:
+        path: "{{ rathole_build_dir }}"
+        state: absent
+      when: not rathole_binary.stat.exists
+      delegate_to: "{{ buildhost }}"
 
     - name: Clone rathole repository
       git:
@@ -20,6 +43,7 @@
         dest: "{{ rathole_build_dir }}"
         version: main
       when: not rathole_binary.stat.exists
+      delegate_to: "{{ buildhost }}"
 
     - name: Build rathole binary
       command: cargo build --release
@@ -28,3 +52,4 @@
       environment:
         CARGO_TARGET_DIR: "{{ rathole_build_dir }}/target"
       when: not rathole_binary.stat.exists
+      delegate_to: "{{ buildhost }}"

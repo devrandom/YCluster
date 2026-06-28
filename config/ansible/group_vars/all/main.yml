@@ -59,6 +59,11 @@ etcd_client_env: "{{ {'ETCD_HOSTS': etcd_hosts, 'ETCDCTL_ENDPOINTS': etcdctl_end
 # Bootstrap files location (ansible SSH key, etc.)
 bootstrap_files_dir: /opt/bootstrap-files
 
+# Build host for compiling binaries (rathole, open-webui). Build playbooks
+# run here; install playbooks fetch artifacts from here via the controller.
+buildhost: s1
+build_cache_dir: ./tmp/build-cache
+
 # Cluster gateway VIP — keepalived-managed across core nodes; routes
 # external traffic and runs dnsmasq + squid for joining nodes.
 gateway_vip: "10.0.0.254"

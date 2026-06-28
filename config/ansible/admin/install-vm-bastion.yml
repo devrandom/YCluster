@@ -20,22 +20,31 @@
     vm_bastion_container: bastion
     vm_bastion_jump_user: jump
     vm_bastion_image: "images:ubuntu/24.04"
+    rathole_binary_src: /opt/src/rathole/target/release/rathole
   tasks:
     - name: End play unless this node hosts Incus instances
       meta: end_host
       when: not (incus_vm_host | default(false)
                  or incus_container_host | default(false))
 
-    - name: Check rathole binary exists on the Ansible controller
+    - name: Check rathole binary exists on buildhost
       stat:
-        path: "{{ rathole_binary_src | default('/tmp/rathole/target/release/rathole') }}"
+        path: "{{ rathole_binary_src }}"
       register: rathole_bin
-      delegate_to: localhost
+      delegate_to: "{{ buildhost }}"
 
     - name: Fail if rathole binary is missing
       fail:
-        msg: "Rathole binary not found on the controller. Run app/build-rathole.yml first."
+        msg: "Rathole binary not found on buildhost ({{ buildhost }}). Run app/build-rathole.yml first."
       when: not rathole_bin.stat.exists
+
+    - name: Fetch rathole binary from buildhost to controller
+      fetch:
+        src: "{{ rathole_binary_src }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
 
     - name: Read rathole tunnel config from etcd
       command: etcdctl get --print-value-only /cluster/nodes/rathole/config
@@ -53,7 +62,7 @@
 
     - name: Copy rathole binary to the Incus host
       copy:
-        src: "{{ rathole_binary_src | default('/tmp/rathole/target/release/rathole') }}"
+        src: "{{ build_cache_dir }}/{{ rathole_binary_src | basename }}"
         dest: /usr/local/bin/rathole
         mode: '0755'
 

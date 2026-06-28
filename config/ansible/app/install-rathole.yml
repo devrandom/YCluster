@@ -6,23 +6,31 @@
   vars:
     rathole_binary_path: "/usr/local/bin/rathole"
     # Binary stays in the cargo build output dir (see build-rathole.yml).
-    rathole_binary_src: "/tmp/rathole/target/release/rathole"
+    rathole_binary_src: "/opt/src/rathole/target/release/rathole"
 
   tasks:
-    - name: Check if rathole binary exists on ansible host
+    - name: Check if rathole binary exists on buildhost
       stat:
         path: "{{ rathole_binary_src }}"
-      register: rathole_binary_ansible_host
-      delegate_to: localhost
+      register: rathole_binary_buildhost
+      delegate_to: "{{ buildhost }}"
 
     - name: Fail if rathole binary not found
       fail:
-        msg: "Rathole binary not found at {{ rathole_binary_src }}. Please run build-rathole.yml first."
-      when: not rathole_binary_ansible_host.stat.exists
+        msg: "Rathole binary not found at {{ rathole_binary_src }} on {{ buildhost }}. Please run build-rathole.yml first."
+      when: not rathole_binary_buildhost.stat.exists
 
-    - name: Copy rathole binary from ansible host
-      copy:
+    - name: Fetch rathole binary from buildhost to controller
+      fetch:
         src: "{{ rathole_binary_src }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Copy rathole binary to target
+      copy:
+        src: "{{ build_cache_dir }}/{{ rathole_binary_src | basename }}"
         dest: "{{ rathole_binary_path }}"
         mode: '0755'
         owner: root
