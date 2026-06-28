@@ -23,6 +23,9 @@
 #   ./system-test.sh                 # up + provision + assert (idempotent)
 #   ./system-test.sh --assert-only   # skip dev-cluster.sh up + playbooks
 #   ./system-test.sh --no-disruptive # skip failover tests (leader/VIP moves)
+#   ./system-test.sh -s 15           # run only section 15
+#   ./system-test.sh -s 1-5,15       # run sections 1-5 and 15
+#   ./system-test.sh -s acme         # run sections matching "acme"
 #
 # Sections run independently: a failed section is recorded and the test
 # moves on, so one broken seam doesn't hide the state of the others.
@@ -57,12 +60,17 @@ E='set -a; . /etc/ycluster/etcd-client.env; set +a;'
 
 ASSERT_ONLY=false
 DISRUPTIVE=true
-for arg in "$@"; do
-  case "$arg" in
+SECTION_FILTER=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --assert-only)   ASSERT_ONLY=true ;;
     --no-disruptive) DISRUPTIVE=false ;;
-    *) echo "usage: $0 [--assert-only] [--no-disruptive]" >&2; exit 1 ;;
+    -s|--section)    SECTION_FILTER="$2"; shift ;;
+    -s*)             SECTION_FILTER="${1#-s}" ;;
+    --section=*)     SECTION_FILTER="${1#--section=}" ;;
+    *) echo "usage: $0 [--assert-only] [--no-disruptive] [-s <secs>]" >&2; exit 1 ;;
   esac
+  shift
 done
 
 log()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -824,26 +832,87 @@ sec_backup() {
 }
 
 # --------------------------------------------------------------------------
+# Section registry: maps section number to "name|func".  Number is 1-based.
+# To add a section, append "N.name|sec_func" here and define sec_func above.
+SECTION_REGISTRY=(
+  "1.substrate + etcd quorum (mTLS)|sec_etcd"
+  "2.ycluster CLI round-trips|sec_cli"
+  "3.frontend management|sec_frontend"
+  "4.admin-api (core + non-core) + inventory|sec_admin_api"
+  "5.base infra: DNS, NTP, squid, gateway VIP|sec_base_infra"
+  "6.adhoc node join via DHCP|sec_adhoc"
+  "7.storage leader + VIP + leader services|sec_leader"
+  "8.dhcp leader election|sec_dhcp_election"
+  "9.postgres + authentik + user management|sec_authentik"
+  "10.incus vm lifecycle (c1)|sec_vm"
+  "11.usage accounting -> postgres|sec_usage"
+  "12.rathole tunnels via f1|sec_rathole"
+  "13.admin web forward-auth gate|sec_admin_web"
+  "14.local-ai-proxy inference path|sec_inference"
+  "15.ACME via pebble (certbot + tunnel)|sec_acme"
+  "16.leadership + VIP failover/failback|sec_failover"
+  "17.backup + verify-restore|sec_backup"
+)
+
+# Parse a section filter spec (e.g. "15", "1-5,15", "acme") into a list of
+# section numbers.  Each comma-separated token is either:
+#   - a number (matched against section number)
+#   - a range "N-M" (expands to N..M)
+#   - a name substring (matched case-insensitively against the section name)
+# Output: sets SECTION_NUMS array (empty if no filter).
+parse_section_filter() {
+  SECTION_NUMS=()
+  [ -z "$SECTION_FILTER" ] && return 0
+  local IFS=,
+  for token in $SECTION_FILTER; do
+    if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      for ((n = ${BASH_REMATCH[1]}; n <= ${BASH_REMATCH[2]}; n++)); do
+        SECTION_NUMS+=($n)
+      done
+    elif [[ "$token" =~ ^[0-9]+$ ]]; then
+      SECTION_NUMS+=($token)
+    else
+      # Name substring match (case-insensitive)
+      local lower_token="${token,,}" matched=0
+      for entry in "${SECTION_REGISTRY[@]}"; do
+        local num="${entry%%.*}"
+        local rest="${entry#*.}"
+        local name="${rest%%|*}"
+        local lower_name="${name,,}"
+        if [[ "$lower_name" == *"$lower_token"* ]]; then
+          SECTION_NUMS+=($num)
+          matched=1
+        fi
+      done
+      [ $matched -eq 0 ] && die "no section matches '$token'"
+    fi
+  done
+}
+
+# Check if a section number should run given the current filter.
+# Always true when SECTION_FILTER is empty (run all).
+should_run_section() {
+  local num=$1
+  [ -z "$SECTION_FILTER" ] && return 0
+  for n in "${SECTION_NUMS[@]}"; do
+    [ "$n" = "$num" ] && return 0
+  done
+  return 1
+}
+
+# --------------------------------------------------------------------------
 main() {
+  parse_section_filter
   $ASSERT_ONLY || provision
 
-  section "1. substrate + etcd quorum (mTLS)"            sec_etcd
-  section "2. ycluster CLI round-trips"                  sec_cli
-  section "3. frontend management"                       sec_frontend
-  section "4. admin-api (core + non-core) + inventory"   sec_admin_api
-  section "5. base infra: DNS, NTP, squid, gateway VIP"  sec_base_infra
-  section "6. adhoc node join via DHCP"                  sec_adhoc
-  section "7. storage leader + VIP + leader services"    sec_leader
-  section "8. dhcp leader election"                      sec_dhcp_election
-  section "9. postgres + authentik + user management"    sec_authentik
-  section "10. incus vm lifecycle (c1)"                  sec_vm
-  section "11. usage accounting -> postgres"             sec_usage
-  section "12. rathole tunnels via f1"                   sec_rathole
-  section "13. admin web forward-auth gate"              sec_admin_web
-  section "14. local-ai-proxy inference path"            sec_inference
-  section "15. ACME via pebble (certbot + tunnel)"       sec_acme
-  section "16. leadership + VIP failover/failback"       sec_failover
-  section "17. backup + verify-restore"                  sec_backup
+  for entry in "${SECTION_REGISTRY[@]}"; do
+    local num="${entry%%.*}"
+    local rest="${entry#*.}"
+    local name="${rest%%|*}"
+    local func="${rest#*|}"
+    should_run_section "$num" || continue
+    section "$num. $name" "$func"
+  done
 
   log "SUMMARY"
   if [ ${#FAILED[@]} -eq 0 ]; then
