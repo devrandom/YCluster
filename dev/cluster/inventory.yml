@@ -32,6 +32,9 @@ all:
     # Production runs on bare metal / properly privileged LXC where runc
     # 1.3.x works fine, so this flag is only set in the dev inventory.
     docker_runc_downgrade: true
+    # VRRP multicast doesn't work in Incus containers, so use unicast peers.
+    # Prod runs on bare metal where multicast works; this flag is dev-only.
+    vrrp_unicast_peer: true
     # Dev has no real domain or cluster TLS certs in etcd, so force nginx into
     # local (HTTP-only) mode even on storage nodes (s1-s3 are in the storage
     # group here for delegation). Without this, certbot-manager update-nginx

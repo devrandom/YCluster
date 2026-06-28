@@ -111,11 +111,13 @@
               priority {{ 90 + (inventory_hostname[-1] | int) }}
               preempt
               advert_int 1
-              {% for peer in groups['storage'] | reject('equalto', inventory_hostname) -%}
-              unicast_peer {
-                  {{ hostvars[peer]['ansible_host'] }}
-              }
-              {% endfor -%}
+           {% if vrrp_unicast_peer | default(false) -%}
+           {% for peer in groups['storage'] | reject('equalto', inventory_hostname) -%}
+           unicast_peer {
+               {{ hostvars[peer]['ansible_host'] }}
+           }
+           {% endfor -%}
+           {% endif -%}
               authentication {
                   auth_type PASS
                   auth_pass ycluster
