@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream stdin through, showing the first and last N lines and eliding the middle.
+"""Stream input through, showing the first and last N lines and eliding the middle.
 
 Head lines are printed live as they arrive. Once lines actually start falling out
 of the tail buffer, an opening "..." marker is emitted immediately, so a
@@ -13,6 +13,10 @@ long-running command shows:
 
 The "[<count> lines]" and closing "..." can only appear at EOF, since the count
 and the identity of the last N lines aren't known until the stream ends.
+
+Input sources (read in order, concatenated):
+  * FILE positional arguments (use '-' for stdin, the default when none given)
+  * stdin (always, unless a FILE arg is '-' — then stdin is the only source)
 
 With -l/--log FILE, the complete un-elided input is teed to FILE (flushed per
 line) so it can be followed in detail, e.g. with `tail -f`.
@@ -36,17 +40,30 @@ def _expand_bare_count(argv):
     return out
 
 
+def _chain_lines(sources):
+    """Yield lines from each source in turn (files are closed when exhausted)."""
+    for src in sources:
+        try:
+            for line in src:
+                yield line
+        finally:
+            if src is not sys.stdin:
+                src.close()
+
+
 def main():
     p = argparse.ArgumentParser(
-        description="Show the first and last N lines of stdin, eliding the middle.")
+        description="Show the first and last N lines of input, eliding the middle.")
     p.add_argument("-n", type=int, default=20, metavar="N",
-                   help="lines to show at each end (default: 20); also accepted bare as -N")
+                   help="lines to show at each end (default: 20)")
     p.add_argument("-H", "--head", type=int, metavar="N",
                    help="head lines to show (overrides -n)")
     p.add_argument("-T", "--tail", type=int, metavar="N",
                    help="tail lines to show (overrides -n)")
     p.add_argument("-l", "--log", metavar="FILE",
                    help="tee the full, un-elided input to FILE")
+    p.add_argument("files", nargs="*", metavar="FILE",
+                   help="input file(s); '-' or none means stdin")
     args = p.parse_args(_expand_bare_count(sys.argv[1:]))
 
     head = args.head if args.head is not None else args.n
@@ -60,7 +77,13 @@ def main():
     seen = 0
 
     try:
-        for line in iter(sys.stdin.readline, ""):
+        sources = []
+        for f in (args.files or ["-"]):
+            try:
+                sources.append(sys.stdin if f == "-" else open(f))
+            except OSError as e:
+                sys.exit(f"headtail: {e}")
+        for line in _chain_lines(sources):
             if log:
                 log.write(line)
                 log.flush()
