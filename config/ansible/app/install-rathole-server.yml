@@ -1,25 +1,28 @@
 ---
 - name: Install rathole server configuration
   hosts: frontend
-  become: yes
+  # No `become` for compatibility with unprivileged controller user (the
+  # delegate_to: localhost stat must run as the controller, not sudo).
   vars:
     rathole_binary_path: "/usr/local/bin/rathole"
+    # Binary stays in the cargo build output dir (see build-rathole.yml).
+    rathole_binary_src: "/tmp/rathole/target/release/rathole"
 
   tasks:
     - name: Check if rathole binary exists on ansible host
       stat:
-        path: /usr/local/bin/rathole
+        path: "{{ rathole_binary_src }}"
       register: rathole_binary_ansible_host
       delegate_to: localhost
 
     - name: Fail if rathole binary not found
       fail:
-        msg: "Rathole binary not found. Please run build-rathole.yml first."
+        msg: "Rathole binary not found at {{ rathole_binary_src }}. Please run build-rathole.yml first."
       when: not rathole_binary_ansible_host.stat.exists
 
     - name: Copy rathole binary from ansible host
       copy:
-        src: /usr/local/bin/rathole
+        src: "{{ rathole_binary_src }}"
         dest: "{{ rathole_binary_path }}"
         mode: '0755'
         owner: root

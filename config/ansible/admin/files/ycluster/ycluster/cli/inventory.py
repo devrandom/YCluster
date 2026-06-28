@@ -84,7 +84,8 @@ def _show(args):
         else:
             for r in rows:
                 alloc = r['allocation'] or {}
-                _print_node(alloc.get('hostname', '?'), r['hardware'], r['asset'])
+                hostname = r.get('hostname') or alloc.get('hostname', '?')
+                _print_node(hostname, r['hardware'], r['asset'])
                 print()
 
 

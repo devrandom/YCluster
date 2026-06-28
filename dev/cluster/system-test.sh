@@ -44,6 +44,7 @@ mkdir -p "$LOGDIR"
 # (incus via ycluster) read a non-TTY stdin to EOF and hang an interactive run.
 SSH="ssh -n -F .ssh/config"
 PLAYBOOK="../../venv/bin/ansible-playbook"
+[ -x "$PLAYBOOK" ] || PLAYBOOK="$(command -v ansible-playbook)"
 CORE=(s1 s2 s3)
 declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [f1]=10.0.0.41 )
 VIP=10.0.0.100
@@ -79,6 +80,7 @@ retry() {
 }
 
 app_leader() { $SSH s1 "$E etcdctl get /cluster/leader/app --print-value-only" 2>/dev/null | tr -d '[:space:]'; }
+etcd_domain() { $SSH s1 "$E etcdctl get /cluster/https/domain --print-value-only" 2>/dev/null | tr -d '[:space:]'; }
 
 # dns_q <node> <server> <name> — A record straight from a DNS server,
 # bypassing nsswitch//etc/hosts (which carries many of the same names).
@@ -315,16 +317,16 @@ sys.exit(1 if bad else 0)' || die "base-infra services not all healthy on s1"
 # --------------------------------------------------------------------------
 sec_adhoc() {
   local n=x1 ip=10.0.0.151
-  sudo incus delete -f $n >/dev/null 2>&1 || true   # stale runs
+  incus delete -f $n >/dev/null 2>&1 || true   # stale runs
   $SSH s1 "$E etcdctl del /cluster/nodes/by-hostname/$n" >/dev/null
 
   # An adhoc node is "any box that sets its hostname and DHCPs" — no
   # ansible, no registration call. The stock image's cloud-init netplan
   # does exactly that on first boot.
-  sudo incus launch images:ubuntu/24.04 $n --profile yc-node >/dev/null \
+  incus launch images:ubuntu/24.04 $n --profile yc-node >/dev/null \
     || die "launch $n"
   retry 30 2 "$n gets its conventional adhoc IP via DHCP" \
-    sudo incus exec $n -- sh -c "ip -br addr show eth0 | grep -q $ip/"
+    incus exec $n -- sh -c "ip -br addr show eth0 | grep -q $ip/"
   ok "$n DHCP'd $ip (hostname-based allocation by the cluster DHCP server)"
 
   $SSH s1 "$E etcdctl get /cluster/nodes/by-hostname/$n --print-value-only" \
@@ -338,8 +340,8 @@ sec_adhoc() {
   ok "$n pingable and resolvable as $n.xc (etcd -> static-hosts tick)"
 
   local mac
-  mac=$(sudo incus config get $n volatile.eth0.hwaddr)
-  sudo incus delete -f $n
+  mac=$(incus config get $n volatile.eth0.hwaddr)
+  incus delete -f $n
   $SSH s1 "$E etcdctl del /cluster/nodes/by-hostname/$n" >/dev/null
   $SSH s1 "$E etcdctl del /cluster/nodes/by-mac/${mac//:/}" >/dev/null
   ok "cleaned up ($n deleted, etcd records removed)"
@@ -575,8 +577,14 @@ sec_rathole() {
 
   # The leader's rathole client carries f1:80 to the leader's public vhost
   # (127.0.0.2:80). /status is a public page served by admin-api.
+  # /status is behind forward-auth, so it needs the admin.<domain> Host
+  # header — exactly what a browser sends on the real cluster.
+  local domain
+  domain=$($SSH s1 "$E etcdctl get /cluster/https/domain --print-value-only" | tr -d '[:space:]')
+  [ -n "$domain" ] || die "no external domain in etcd (app-dev fixture missing)"
+  local admin_host="admin.$domain"
   retry 15 2 "http through f1:80 tunnel" \
-    $SSH c1 "curl -fsS --max-time 5 http://${IP[f1]}/status -o /dev/null"
+    $SSH c1 "curl -fsS --max-time 5 -H 'Host: $admin_host' http://${IP[f1]}/status -o /dev/null"
   ok "public http through f1 -> leader public vhost"
 }
 
@@ -728,7 +736,7 @@ sec_failover() {
   ok "registry serving via VIP on $new"
 
   retry 30 3 "public http tunnel re-established via $new" \
-    $SSH c1 "curl -fsS --max-time 5 http://${IP[f1]}/status -o /dev/null"
+    $SSH c1 "curl -fsS --max-time 5 -H 'Host: admin.$(etcd_domain)' http://${IP[f1]}/status -o /dev/null"
   ok "rathole client re-homed: f1:80 serves again"
 
   # State followed leadership: the new leader binds the same shared backing,

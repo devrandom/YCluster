@@ -150,6 +150,11 @@
               priority {{ 100 + (inventory_hostname[-1] | int) }}
               preempt
               advert_int 1
+              {% for peer in groups['core'] | reject('equalto', inventory_hostname) -%}
+              unicast_peer {
+                  {{ hostvars[peer]['ansible_host'] }}
+              }
+              {% endfor -%}
               authentication {
                   auth_type PASS
                   auth_pass ycluster

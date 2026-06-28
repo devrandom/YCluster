@@ -120,6 +120,12 @@
         state: "{{ (pebble_config.changed or pebble_unit.changed) | ternary('restarted', 'started') }}"
         daemon_reload: yes
 
+    - name: Open firewall for pebble HTTPS listener
+      ufw:
+        rule: allow
+        port: '14000'
+        proto: tcp
+
     - name: Read pebble listener certificate
       slurp:
         src: /etc/pebble/cert.pem

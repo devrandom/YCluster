@@ -25,6 +25,13 @@ all:
     # Normally from config/ansible/group_vars (deliberately not loaded here).
     # Supply the non-secret ones the container-safe playbooks need:
     cluster_interface: eth0                          # core.yml value is bare-metal
+    # runc 1.3.x has a regression (fd reopening fails in unprivileged nested
+    # containers — see CVE-2025-52881) that breaks Docker inside Incus. The
+    # dev cluster runs Docker nested in rootless Incus, so downgrade runc to
+    # 1.1.12 (the last 1.1.x release, which predates the fd-reopening code).
+    # Production runs on bare metal / properly privileged LXC where runc
+    # 1.3.x works fine, so this flag is only set in the dev inventory.
+    docker_runc_downgrade: true
     # Dev has no real domain or cluster TLS certs in etcd, so force nginx into
     # local (HTTP-only) mode even on storage nodes (s1-s3 are in the storage
     # group here for delegation). Without this, certbot-manager update-nginx
@@ -37,7 +44,7 @@ all:
     registry_docker_packages: [docker.io, docker-compose-v2]
     # Host Go for the local-ai-proxy control-node build (Debian has no
     # golang-1.24 package; >=1.21 auto-fetches the go.mod toolchain).
-    local_ai_proxy_go_bin: /usr/lib/go-1.23/bin/go
+    local_ai_proxy_go_bin: /usr/lib/go-1.24/bin/go
     # setup-gateway-vip.yml (imported by base-infra-dev.yml). Containers
     # have one NIC, so the "uplink" is the cluster interface; the health
     # check still proves real egress through it.

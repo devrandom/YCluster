@@ -28,7 +28,7 @@
 
     - name: Check rathole binary exists on the Ansible controller
       stat:
-        path: /usr/local/bin/rathole
+        path: "{{ rathole_binary_src | default('/tmp/rathole/target/release/rathole') }}"
       register: rathole_bin
       delegate_to: localhost
 
@@ -53,7 +53,7 @@
 
     - name: Copy rathole binary to the Incus host
       copy:
-        src: /usr/local/bin/rathole
+        src: "{{ rathole_binary_src | default('/tmp/rathole/target/release/rathole') }}"
         dest: /usr/local/bin/rathole
         mode: '0755'
 

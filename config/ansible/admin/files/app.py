@@ -1368,7 +1368,7 @@ def inventory_list():
         for r in rows:
             alloc = r['allocation'] or {}
             out.append({
-                'hostname': alloc.get('hostname'),
+                'hostname': r.get('hostname') or alloc.get('hostname'),
                 'type': alloc.get('type'),
                 'ip': alloc.get('ip'),
                 'hardware': r['hardware'],

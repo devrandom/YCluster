@@ -78,7 +78,7 @@ def list_all():
             alloc = json.loads(value.decode())
             hostname = alloc.get('hostname')
             if hostname and not hostname.startswith('dhcp-'):
-                nodes[hostname] = {'allocation': alloc, 'hardware': None, 'asset': {}}
+                nodes[hostname] = {'allocation': alloc, 'hardware': None, 'asset': {}, 'hostname': hostname}
         except Exception:
             pass
 
@@ -90,7 +90,7 @@ def list_all():
             if hostname in nodes:
                 nodes[hostname]['hardware'] = hw
             else:
-                nodes[hostname] = {'allocation': None, 'hardware': hw, 'asset': {}}
+                nodes[hostname] = {'allocation': None, 'hardware': hw, 'asset': {}, 'hostname': hostname}
         except Exception:
             pass
 
@@ -102,7 +102,7 @@ def list_all():
             if hostname in nodes:
                 nodes[hostname]['asset'] = asset
             else:
-                nodes[hostname] = {'allocation': None, 'hardware': None, 'asset': asset}
+                nodes[hostname] = {'allocation': None, 'hardware': None, 'asset': asset, 'hostname': hostname}
         except Exception:
             pass
 

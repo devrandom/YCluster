@@ -230,10 +230,13 @@ ensure_profile() {
     INCUS profile device add "$PROFILE" root disk path=/ pool=default
     INCUS profile device add "$PROFILE" eth0 nic network="$net"
   fi
-  # security.ipv4_filtering on the profile eth0 lets instances set
-  # ipv4.address on a DHCP-off bridge (incusbr-* in rootless mode, ycdev0
-  # with DHCP disabled in the sudo path). Set it unconditionally — idempotent.
-  INCUS profile device set "$PROFILE" eth0 security.ipv4_filtering=true
+    # security.ipv4_filtering on the profile eth0 lets instances set
+    # ipv4.address on a DHCP-off bridge (incusbr-* in rootless mode, ycdev0
+    # with DHCP disabled in the sudo path). Set it unconditionally — idempotent.
+    # NOTE: Disabled because ipv4_filtering drops ARP for secondary IPs
+    # (keepalived VIPs like 10.0.0.100/10.0.0.254) that aren't in the NIC
+    # config, making the VIPs unreachable from other containers.
+    INCUS profile device set "$PROFILE" eth0 security.ipv4_filtering=false
   # docker-in-container (app-dev.yml: authentik). Applies on node (re)start.
   if [ "$(INCUS profile get "$PROFILE" security.nesting)" != "true" ]; then
     echo "[*] enable security.nesting on $PROFILE"
@@ -332,7 +335,6 @@ ensure_cache() {
   if ! INCUS info "$CACHE" >/dev/null 2>&1; then
     echo "[*] create $CACHE ($CACHE_IP) — persistent apt cache"
     INCUS init "$IMAGE" "$CACHE" --profile "$PROFILE"
-    INCUS config device override "$CACHE" eth0 ipv4.address="$CACHE_IP"
     INCUS start "$CACHE"
   elif [ "$(INCUS list "$CACHE" -c s -f csv)" != RUNNING ]; then
     INCUS start "$CACHE"
@@ -359,10 +361,9 @@ ensure_rbd_backing() {
 
 ensure_node() {
   local n=$1 ip="10.0.0.${OCTET[$1]}"
-  if ! INCUS info "$n" >/dev/null 2>&1; then
+    if ! INCUS info "$n" >/dev/null 2>&1; then
     echo "[*] create $n ($ip)"
     INCUS init "$IMAGE" "$n" --profile "$PROFILE"
-    INCUS config device override "$n" eth0 ipv4.address="$ip"
     INCUS start "$n"
   elif [ "$(INCUS list "$n" -c s -f csv)" != RUNNING ]; then
     INCUS start "$n"
