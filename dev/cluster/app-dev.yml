@@ -63,7 +63,6 @@
           ExecStart=/bin/sh -c 'ip addr show docker0 | grep -q "172.17.0.1" || ip addr add 172.17.0.1/16 dev docker0'
           [Install]
           WantedBy=multi-user.target
-      notify: reload systemd
 
     - name: Enable docker-bridge-fix service
       systemd:
