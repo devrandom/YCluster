@@ -83,7 +83,9 @@
       when: is_storage_leader
 
     - name: Check whether the recipient is already registered
-      command: ycluster backup recipients show "{{ recipient_name }}"
+      command: >-
+        bash -c 'set -a; . /etc/ycluster/etcd-client.env; set +a;
+        ycluster backup recipients show "{{ recipient_name }}"'
       register: recipient_show
       failed_when: false
       changed_when: false
@@ -91,8 +93,9 @@
 
     - name: Register restore identity as a backup recipient
       command: >-
+        bash -c 'set -a; . /etc/ycluster/etcd-client.env; set +a;
         ycluster backup recipients add "{{ recipient_name }}" "{{ restore_pubkey.stdout }}"
-        --description "Nightly verify-restore drill identity (storage leader)"
+        --description "Nightly verify-restore drill identity (storage leader)"'
       when: is_storage_leader and recipient_show.rc != 0
 
     # --- verify-restore service + timer: every storage node, self-gates --------
