@@ -200,6 +200,29 @@ start_authentik() {
 
     cd /etc/authentik
     docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
+
+    # Wait for the server to be ready, then sync the bootstrap token:
+    # set its key to the etcd value and its expiry to never (authentik
+    # creates bootstrap tokens with a 48h expiry by default).
+    local token_key="$bootstrap_token"
+    for i in $(seq 1 30); do
+        docker exec authentik-server curl -sS -o /dev/null \
+            http://127.0.0.1:9000/-/health/live/ 2>/dev/null || { sleep 2; continue; }
+        docker exec -e DJANGO_SETTINGS_MODULE=authentik.root.settings \
+            authentik-server python3 -c "
+import django; django.setup()
+from authentik.core.models import Token
+try:
+    t = Token.objects.get(identifier='authentik-bootstrap-token')
+except Token.DoesNotExist:
+    pass
+else:
+    t.key = '$token_key'
+    t.expires = None
+    t.save()
+" 2>/dev/null && break
+        sleep 2
+    done
 }
 
 stop_authentik() {
