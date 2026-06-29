@@ -106,3 +106,22 @@
           nameserver 10.0.0.254
           nameserver 1.1.1.1
           search xc
+
+# Core nodes use the local dnsmasq (127.0.0.1) as primary, with the
+# gateway VIP as fallback.  This mirrors admin/tasks/configure-managed-dns.yml
+# but is needed here because setup-base-compute.yml is not imported by
+# the dev base-infra playbook.
+- name: Point core resolvers at the local dnsmasq
+  hosts: core
+  become: yes
+  tasks:
+    - name: resolv.conf -> local dnsmasq + gateway fallback
+      copy:
+        dest: /etc/resolv.conf
+        mode: '0644'
+        content: |
+          # Managed by Ansible — dev/cluster/base-infra-dev.yml
+          nameserver 127.0.0.1
+          nameserver 10.0.0.254
+          search xc
+          options timeout:1

@@ -286,6 +286,10 @@ configure_net() {
   iface="${iface:-eth0}"
   iface="${iface%@*}"  # strip @ifN suffix from veth pairs
   INCUS exec "$n" -- sh -c 'rm -f /etc/netplan/*.yaml /run/systemd/network/*netplan*'
+  # No DNS= lines here — we want systemd-networkd to leave /etc/resolv.conf
+  # alone so the base-infra playbook can set it (127.0.0.1 for core, gateway
+  # VIP for compute).  The DNS= lines get re-read on every networkd restart,
+  # overwriting whatever the playbook wrote.
   INCUS exec "$n" -- sh -c "cat > /etc/systemd/network/10-yc.network" <<EOF
 [Match]
 Name=$iface
@@ -293,7 +297,6 @@ Name=$iface
 [Network]
 Address=${ip}/24
 Gateway=10.0.0.1
-$(for d in $DNS; do echo "DNS=$d"; done)
 EOF
   INCUS exec "$n" -- ip addr flush dev "$iface" scope global
   INCUS exec "$n" -- systemctl enable systemd-networkd

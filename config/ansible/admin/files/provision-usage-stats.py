@@ -40,6 +40,10 @@ def main():
     # truncate) the statement.
     pw_literal = password.replace("'", "''")
     psql(f"CREATE USER usage_stats WITH PASSWORD '{pw_literal}';")
+    # CREATE USER fails if the user exists (from a previous leader).  Always
+    # ALTER to sync the password with etcd — the user is shared via RBD, so
+    # a stale password on a new leader breaks collect-vm-stats auth.
+    psql(f"ALTER USER usage_stats WITH PASSWORD '{pw_literal}';")
     psql("CREATE DATABASE usage_stats OWNER usage_stats;")
 
     psql("""CREATE TABLE IF NOT EXISTS model_usage (

@@ -45,6 +45,33 @@
         name: [docker.io, docker-compose-v2, iptables, python3-docker]
         state: present
 
+    # Rootless Incus doesn't bring up Docker's docker0 bridge with its
+    # 172.17.0.1 gateway IP (the bridge stays NO-CARRIER with no IP),
+    # so host.docker.internal inside containers is unreachable.  Add a
+    # systemd oneshot that runs after docker.service to fix this.
+    - name: Ensure docker0 bridge gets its gateway IP (rootless Incus workaround)
+      copy:
+        dest: /etc/systemd/system/docker-bridge-fix.service
+        content: |
+          [Unit]
+          Description=Fix docker0 bridge IP (rootless Incus workaround)
+          After=docker.service
+          Requires=docker.service
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c 'ip addr show docker0 | grep -q "172.17.0.1" || ip addr add 172.17.0.1/16 dev docker0'
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload systemd
+
+    - name: Enable docker-bridge-fix service
+      systemd:
+        name: docker-bridge-fix.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
     # The qdrant data dir is created here (not by install-qdrant.yml) because
     # it must exist on whatever node mounts /rbd/user next, at mount time.
     # uid/gid 1001 = the fixed qdrant user from install-qdrant.yml.
