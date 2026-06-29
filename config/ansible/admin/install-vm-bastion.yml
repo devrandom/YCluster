@@ -2,7 +2,8 @@
 # Deploys a bastion container on the Incus VM bridge. The bastion runs a
 # jump-only sshd plus a rathole client, giving external SSH access to GPU
 # VMs via:  ssh -J jump@<rathole-host>:<port> ubuntu@<vm-name>
-# (port = 2212 for nv2, 2213 for nv3 — see app/templates/rathole-server.toml.j2)
+# (public port is derived per node type in app/templates/rathole-server.toml.j2:
+#  idx 1-3 keep legacy 2211-2216; idx>3 use nvidia 2220+idx, compute(c) 2240+idx)
 #
 # The bastion sits on incusbr0, so it is confined exactly like the VMs: it
 # can reach the VMs and the internet, but not nv2's sshd or the cluster.
