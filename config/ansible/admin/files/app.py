@@ -1326,9 +1326,41 @@ def inventory_get_asset(hostname):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/inventory/asset/<hostname>', methods=['PUT', 'POST'])
+@validated_hostname
+def inventory_set_asset(hostname):
+    """Set asset metadata fields for a node (admin only).
+
+    Re-applied from pre-S2 with authentik admin gating: forward-auth sets
+    X-Authentik-Email / X-Authentik-Groups on the external vhost; internal
+    callers carry no headers and are root-equivalent. Non-admins get 403.
+    """
+    _, is_admin = _authentik_identity()
+    if not is_admin:
+        return jsonify({'error': 'admin only'}), 403
+    try:
+        from ycluster.utils.inventory import put_asset
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({'error': 'No JSON body'}), 400
+        allowed = {'vendor', 'purchased_at', 'warranty_expires',
+                   'cost', 'cost_currency', 'location', 'notes'}
+        filtered = {k: v for k, v in data.items() if k in allowed}
+        if not filtered:
+            return jsonify({'error': 'No valid fields in request'}), 400
+        result = put_asset(hostname, filtered)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/inventory')
 def inventory_list():
-    """Return full inventory (hardware + asset) for all nodes (internal only)"""
+    """Return full inventory (hardware + asset) for all nodes (internal only).
+
+    Response shape: ``{"inventory": [...], "is_admin": bool, "email": str}``.
+    ``is_admin`` lets the page decide whether to render edit widgets.
+    """
+    email, is_admin = _authentik_identity()
     try:
         from ycluster.utils.inventory import list_all
         rows = list_all()
@@ -1343,7 +1375,7 @@ def inventory_list():
                 'asset': r['asset'],
             })
         out.sort(key=lambda x: x['hostname'] or '')
-        return jsonify(out)
+        return jsonify({'inventory': out, 'is_admin': is_admin, 'email': email})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

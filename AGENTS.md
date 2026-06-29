@@ -20,16 +20,14 @@ YCluster is a self-bootstrapping infrastructure platform for small AI clusters. 
 ## Common Commands
 
 ### Reaching the cluster over SSH
-`s3.yc` is the documented entry point: SSH to it lands you on a core node
-with `/etc/ansible` and the vault password available. The `.yc` names are
-**operator-local ssh_config aliases** (with ProxyJump set up on the operator's
-machine) — they live in `~/.ssh/config`, not in this repo. `s3` is an arbitrary
-but settled choice; don't assume an arbitrary `<host>.yc` alias exists
-(e.g. `s4.yc` may not). To reach another node deterministically, hop through the
-entry node using cluster-internal names, which always resolve cluster-side:
+The entry host is whatever `.envrc`'s `YC_SYNC_HOST` resolves to (run
+`bash dev-sync.sh --check` to see it). SSH to it lands you on a core node
+with `/etc/ansible` and the vault password available. To reach another
+node deterministically, hop through the entry node using cluster-internal
+names, which always resolve cluster-side:
 ```bash
-ssh s3.yc 'ssh s4 systemctl status etcd'      # internal name, resolved on the cluster
-ssh s3.yc 'ssh f1.xc uptime'                   # frontend nodes resolve by .xc too (see below)
+ssh "$YC_SYNC_HOST" 'ssh s4 systemctl status etcd'   # internal name, resolved on the cluster
+ssh "$YC_SYNC_HOST" 'ssh f1.xc uptime'               # frontend nodes resolve by .xc too (see below)
 ```
 
 ### Running Ansible Playbooks
@@ -37,8 +35,8 @@ From a core node via SSH — preferred for development:
 ```bash
 # /etc/ansible is a symlink to /opt/infrastructure/config/ansible
 # run-playbook.sh sources /etc/ansible/env.sh (sets LC_ALL and ANSIBLE_VAULT_PASSWORD_FILE)
-ssh s3.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml"
-ssh s3.yc "cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit s3"
+ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh <playbook>.yml"
+ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit s3"
 ```
 
 Always use ansible instead of ad-hoc copying files to the cluster.
@@ -51,7 +49,7 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 ```
 
 ### Dev Workflow (syncing local changes to cluster)
-`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `s3.yc:/opt/infrastructure/`. The watchman trigger lives in the watchman daemon, so the watcher runs in the background independently of any terminal. Run it once (outside of agent sessions) to keep changes flowing while you develop:
+`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `$YC_SYNC_HOST:/opt/infrastructure/`. The watchman trigger lives in the watchman daemon, so the watcher runs in the background independently of any terminal. Run it once (outside of agent sessions) to keep changes flowing while you develop:
 ```bash
 bash dev-sync.sh --start   # initial sync + register the watchman trigger, then returns
 bash dev-sync.sh --stop    # tear the trigger down
@@ -142,7 +140,7 @@ Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.y
 - Do not create commits unless explicitly asked by the user
 - Run the relevant tests/build before committing. If the local toolchain
   doesn't have what's needed, run tests on a cluster node that does
-  (`ssh s3.yc 'cd /opt/infrastructure/local-ai-proxy && go test ./...'`)
+  (`ssh "$YC_SYNC_HOST" 'cd /opt/infrastructure/local-ai-proxy && go test ./...'`)
   or stop and tell the user — never commit untested code.
 - Keep scripts in `config/ansible/scripts/` directory, installed by playbooks
 - Prefer Python libraries over subprocess for mainstream tasks
