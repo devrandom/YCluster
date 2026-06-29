@@ -86,6 +86,20 @@ ensure_daemon() {
   fi
 }
 
+# Docker inside unprivileged Incus containers creates a session keyring per
+# container start. The default kernel quota (200 keys) fills up after ~200
+# container starts, breaking Docker with "disk quota exceeded". Raise the
+# non-root quota so the dev cluster doesn't hit this wall.
+ensure_keyring_quota() {
+  local cur
+  cur=$(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 0)
+  if [ "$cur" -lt 1000 ]; then
+    log "raising kernel.keys.maxkeys ($cur -> 1000)"
+    sysctl -w kernel.keys.maxkeys=1000
+    sysctl -w kernel.keys.maxbytes=100000
+  fi
+}
+
 ensure_pool() {
   if ! incus storage show "$POOL" >/dev/null 2>&1; then
     log "create storage pool $POOL (dir)"
@@ -308,6 +322,7 @@ fi
 
 ensure_installed
 ensure_daemon
+ensure_keyring_quota
 ensure_pool
 ensure_network
 ensure_firewall

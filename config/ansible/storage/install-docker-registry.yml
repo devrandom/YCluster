@@ -13,6 +13,17 @@
         name: "{{ docker_packages }}"
         state: present
 
+    - name: Downgrade runc (1.3.x breaks Docker in unprivileged LXC/Incus containers)
+      shell: |
+        current=$(dpkg-query -W -f='${Version}' runc 2>/dev/null || echo none)
+        if [ "$current" != "1.1.12-0ubuntu3" ]; then
+          apt-get install -y --allow-downgrades runc=1.1.12-0ubuntu3
+          apt-mark hold runc
+        fi
+      args:
+        executable: /bin/bash
+      when: docker_runc_downgrade | default(false)
+
     - name: Start and enable Docker service
       systemd:
         name: docker
