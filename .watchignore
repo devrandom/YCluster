@@ -1,4 +1,4 @@
-.git/
+.git
 .aider*
 AGENTS.local.md
 config/ansible/vault/

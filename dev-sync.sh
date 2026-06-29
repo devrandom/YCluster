@@ -99,11 +99,21 @@ setup_trigger() {
     # Use JSON trigger spec — the CLI `-- trigger` shorthand has issues with
     # watchman 4.9 (stdout/stderr redirect fields not supported, * glob
     # only matches root-level files). The JSON spec is explicit and reliable.
+    #
+    # The match expression MUST exclude tmp/ : the trigger appends rsync output
+    # to tmp/dev-sync.log, which lives inside the watched tree. Without this
+    # exclusion every sync's own log write re-fires the trigger, an infinite
+    # feedback loop that piles up hundreds of concurrent rsync/ssh processes
+    # (worse when the target is unreachable and each attempt fails fast, spamming
+    # the log). This list is separate from .watchignore (which only filters the
+    # rsync *transfer*); keep tmp/ in both.
     watchman -j <<EOF >/dev/null
 ["trigger", "$REPO", {
   "name": "dev-sync",
   "expression": ["allof", ["type", "f"], ["not", ["anyof",
+    ["match", ".git", "wholename"],
     ["match", ".git/**", "wholename"],
+    ["match", "tmp/**", "wholename"],
     ["match", "**/__pycache__/**", "wholename"],
     ["match", "**/.venv/**", "wholename"],
     ["match", "**/venv/**", "wholename"]
