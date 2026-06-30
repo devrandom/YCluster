@@ -47,7 +47,16 @@ MODEL_HOST="${MODEL_HOST:-{{ glm52_model_dir }}}"
 CONTAINER="${CONTAINER:-glm52-b12x}"
 PORT="${PORT:-9212}"
 TP="${TP:-4}"
-DCP="${DCP:-4}"
+# Decode-context-parallel degree. DCP shards the MLA KV across the group along the
+# sequence dim - more KV/concurrency capacity, but every attention step pays a
+# cross-GPU KV gather (ag_rs) over PCIe. On this no-NVLink box that comms tax is
+# steep: measured 2026-06-30, dropping DCP 4->1 lifts single-stream decode 39->52
+# t/s (+33%) and 64k prefill 1405->3864 t/s (+175%, TTFT 38s->14s) - and 1M context
+# still fits (KV pool 1.16M tok, ~1.1x concurrency at full 1M; ~18 concurrent at
+# 64k). DCP=1 is the default for this low-concurrency / interactive cluster; raise
+# it (2 or 4) to trade single-stream latency for concurrency headroom at long
+# context. See the speedup section in the design doc.
+DCP="${DCP:-1}"
 # Pipeline-parallel degree. PP=2 x TP=4 across the full box beats flat TP=8 on
 # this no-NVLink hardware (~2.2x prefill, validated): PP trades TP's per-layer
 # allreduce for one point-to-point hop between two stages, and prefill has the

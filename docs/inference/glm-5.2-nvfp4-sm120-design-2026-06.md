@@ -49,8 +49,10 @@ overrides the REAP-specific recipe/layout/plan sections that follow:
   which is untested. The start script exposes both as passthroughs anyway.
 
 Launch is now just `~/bin/glm52-b12x-start.sh` with no overrides — the wrapper
-defaults to this layout (`PP=2 TP=4 DCP=4`, all 8 GPUs, `MEM=110g` for the larger
-warmup peak, MTP off). The `PP`/`DISABLE_MTP`/`MOE_SPEC_BACKEND`/`EXTRA_VLLM_ARGS`
+defaults to this layout (`PP=2 TP=4 DCP=1`, all 8 GPUs, `MEM=110g` for the larger
+warmup peak, MTP off). (`DCP=1`, not 4, since the 2026-06-30 measurement — see the
+single-stream speedup section below; raise `DCP` for concurrency-heavy long
+context.) The `PP`/`DCP`/`DISABLE_MTP`/`MOE_SPEC_BACKEND`/`EXTRA_VLLM_ARGS`
 knobs remain for A/B. The crash-safety machinery (fastsafetensors, checkpoint
 dedup, `--memory` cap, indexer workspace) carries over unchanged and is still
 load-bearing — read the incident section before touching it.
@@ -395,20 +397,50 @@ prefill). Three real levers, ranked:
    as a precision fallback (verify that checkpoint ships the MTP layer — the
    GLM-4.6-FP8 one reportedly doesn't).
 
-3. **Lower DCP if we don't need extreme context — a pure-config A/B we can run
-   today.** `DCP_SIZE` is already an exposed knob in the start script. 0xSero's
-   SM120 ablation (REAP-469B, 4 GPUs) shows decode trades against DCP: **DCP=1
-   ~81 t/s** (but max ctx ~131k, OOMs beyond), DCP=2 ~49, **DCP=4 ~60** (our
-   setting, 250k ctx, ~3× concurrency). The table is non-monotonic (concurrency
-   differs per row, so there are confounds) — so this is a "bench it on our full
-   744B," not a guaranteed win — but DCP=4 exists to make **250k+ context** fit by
-   sharding MLA KV along the sequence dim, and each decode step pays a cross-GPU
-   KV gather for it. If our real context ceiling is well under 250k, a lower DCP
-   may buy meaningful decode at the cost of max context (and KV-pool headroom).
-   Zero-cost to try: `DCP=2` / `DCP=1` vs our `DCP=4`, same image, watch decode t/s
-   and the max-context/OOM boundary. (Note: 0xSero uses `--kv-cache-dtype
-   fp8_ds_mla`; we settled on plain `fp8` — worth re-confirming which the current
-   b12x image wants, since it interacts with the DSA indexer cache.)
+3. **Lower DCP — DONE: DCP=1 is the new default (measured 2026-06-30), the
+   biggest single-stream win found.** DCP shards the MLA KV across the group along
+   the sequence dim for context/concurrency capacity, but on this no-NVLink box
+   every attention step pays a cross-GPU KV gather (`ag_rs`) over PCIe. Measured
+   A/B on the live nv4 full-744B deployment (single-stream direct to `:9212`):
+
+   | DCP | KV pool | conc @1M | decode @4k | decode @64k | prefill @64k | TTFT @64k |
+   |----:|--------:|---------:|-----------:|------------:|-------------:|---------:|
+   | 4 (old default) | 4.55M | 4.34× | 40.0 | 39.0 | 1405 | 38.2 s |
+   | 2 | 2.31M | 2.20× | 43.8 | 43.0 | 2404 | 22.4 s |
+   | **1 (new default)** | 1.16M | 1.10× | **52.5** | **51.9** | **3864** | **13.9 s** |
+
+   Monotonic: lower DCP is faster on **both** phases. DCP=1 gives **+33% decode,
+   +175% 64k-prefill, 2.7× faster TTFT**, and the full **1M context still fits**
+   (1.16M-tok pool ⇒ ~1.1× concurrency at 1M, but ≈18 concurrent at 64k / ≈4 at
+   250k — ample for a low-concurrency cluster). The only thing traded away is
+   concurrency headroom at extreme context, which we don't use. Changed the
+   start-script default 4→1; raise it back for a concurrency-heavy long-context
+   workload. (This corrects 0xSero's REAP ablation, which hinted at the direction
+   but reported a non-monotonic, confounded table and an OOM at low DCP we don't
+   hit on the full checkpoint.)
+
+   **Why this tax is so large here — it's a no-NVLink artifact.** DCP=4's cost is
+   the per-step KV gather over **PCIe**; on NVLink/NVSwitch datacenter cards
+   (B200/GB200/H200) that collective is ~10–20× the bandwidth and a fraction of
+   the latency, so the DCP tradeoff nearly vanishes and high DCP is "free"
+   capacity — which is why the official datacenter GLM-5.2 recipe shards happily
+   over NVLink and doesn't sweat this. Same root cause as choosing PP=2×TP=4 over
+   flat TP=8 (06-26 update): on this box, *any* cross-GPU collective on the
+   critical path (TP allreduce, DCP KV gather) is the bottleneck, so the wins come
+   from removing them. The DCP=1 default is **SM120/RTX-PRO-6000-specific**; do not
+   copy it to an NVLink deployment.
+
+   **`fp8_ds_mla` settled (measured 2026-06-30) — no-op on this backend, keep
+   `fp8`.** A/B on the live nv4 full-744B deployment, single-stream direct to
+   `:9212`: `fp8` → decode 40.0 t/s @4k / 39.0 @64k, KV pool 4,550,144 tok;
+   `fp8_ds_mla` → 40.0 / 38.8, KV pool 4,614,656 tok — identical within noise.
+   The override was confirmed applied (vLLM argparse last-wins resolves the
+   duplicate `--kv-cache-dtype` to `fp8_ds_mla`; the run was coherent). Reason:
+   `fp8_ds_mla` is the FlashMLA/DeepGEMM packed-latent layout; on the
+   `B12X_MLA_SPARSE` MLA backend, plain `fp8` *already* stores the compressed
+   latent in fp8, so the two land on the same physical KV path (same bytes/token,
+   same decode kernel). The 0xSero recipe writing `fp8_ds_mla` is harmless but not
+   a win here. Don't re-chase this.
 
 **Confirmed dead ends (don't re-litigate):** EP on b12x (already a `ValueError`);
 `max_num_batched_tokens` tuning (zero single-stream effect, measured); fp4 KV
