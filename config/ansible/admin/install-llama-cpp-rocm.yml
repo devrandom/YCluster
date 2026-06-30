@@ -29,6 +29,13 @@
           - libcurl4-openssl-dev
         state: present
 
+    - name: Mark llama.cpp directory as safe for git
+      git_config:
+        name: safe.directory
+        value: "{{ llama_cpp_dir }}"
+        scope: global
+      become: yes
+
     - name: Clone llama.cpp repository
       git:
         repo: https://github.com/ggerganov/llama.cpp.git
