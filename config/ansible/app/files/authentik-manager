@@ -179,6 +179,11 @@ start_authentik() {
     mkdir -p "$AUTHENTIK_DATA_DIR"/{media,custom-templates,certs}
     chown -R 1000:1000 "$AUTHENTIK_DATA_DIR"
 
+    # Rootless Incus workaround: docker0 may be NO-CARRIER with no IP
+    # after a Docker restart, breaking host.docker.internal. Re-add it.
+    ip addr show docker0 2>/dev/null | grep -q '172.17.0.1' \
+        || ip addr add 172.17.0.1/16 dev docker0 2>/dev/null || true
+
     local secret_key=$(get_or_generate_secret secret-key gen_secret_key)
     local bootstrap_password=$(get_or_generate_secret bootstrap-password gen_password)
     local bootstrap_token=$(get_or_generate_secret bootstrap-token gen_token)
@@ -199,7 +204,7 @@ start_authentik() {
     echo "AUTHENTIK_DB_NAME=authentik" >> "$env_file"
 
     cd /etc/authentik
-    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up -d
 
     # Wait for the server to be ready, then sync the bootstrap token:
     # set its key to the etcd value and its expiry to never (authentik
@@ -223,6 +228,10 @@ else:
 " 2>/dev/null && break
         sleep 2
     done
+
+    # Re-attach in the foreground so systemd sees the service alive.
+    # On SIGTERM, stop_authentik runs `docker compose down`.
+    exec docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
 }
 
 stop_authentik() {

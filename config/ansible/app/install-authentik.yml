@@ -250,6 +250,16 @@
         daemon_reload: yes
       when: is_storage_leader
 
+    # Non-leaders must not run authentik (the leader election owns it).
+    # Stop and disable it so a stale instance from a previous leader tenure
+    # doesn't survive a re-provision.
+    - name: Stop authentik on non-leaders
+      systemd:
+        name: authentik.service
+        state: stopped
+        enabled: no
+      when: not is_storage_leader
+
     # Rewrite the domain-dependent blueprints (the worker auto-applies) so a
     # manager update lands without restarting authentik. Leader-only: that's
     # where authentik and the watched blueprint dir live.

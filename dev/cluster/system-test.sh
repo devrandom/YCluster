@@ -20,12 +20,16 @@
 # monitoring stack.
 #
 # Usage:
-#   ./system-test.sh                 # up + provision + assert (idempotent)
-#   ./system-test.sh --assert-only   # skip dev-cluster.sh up + playbooks
-#   ./system-test.sh --no-disruptive # skip failover tests (leader/VIP moves)
-#   ./system-test.sh -s 15           # run only section 15
-#   ./system-test.sh -s 1-5,15       # run sections 1-5 and 15
-#   ./system-test.sh -s acme         # run sections matching "acme"
+#   ./system-test.sh                       # up + provision + assert (idempotent)
+#   ./system-test.sh --background          # same, but detached (caller returns)
+#   ./system-test.sh --assert-only         # skip dev-cluster.sh up + playbooks
+#   ./system-test.sh --no-disruptive       # skip failover tests (leader/VIP moves)
+#   ./system-test.sh -s 15                 # run only section 15
+#   ./system-test.sh -s 1-5,15             # run sections 1-5 and 15
+#   ./system-test.sh -s acme               # run sections matching "acme"
+#
+# --background must be the first arg.  It re-execs the script via setsid
+# with all std streams redirected, so the caller's shell returns at once.
 #
 # Sections run independently: a failed section is recorded and the test
 # moves on, so one broken seam doesn't hide the state of the others.
@@ -37,7 +41,10 @@
 # the failover section asserts that survival explicitly.
 set -uo pipefail
 
-cd "$(dirname "$0")"
+# Resolve script to an absolute path before cd so the --background
+# re-exec (which uses $0) works regardless of the caller's cwd.
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(dirname "$SCRIPT_PATH")"
 
 # Repo-root tmp/ (gitignored) for section logs — never /tmp.
 LOGDIR="$(cd ../.. && pwd)/tmp"
@@ -61,19 +68,44 @@ E='set -a; . /etc/ycluster/etcd-client.env; set +a;'
 ASSERT_ONLY=false
 DISRUPTIVE=true
 SECTION_FILTER=""
+LOGFILE=""
+
+# --background must be the first arg.  Re-exec ourselves fully detached
+# so the caller's shell returns immediately: subshell redirects all three
+# std streams away from the caller's pipe, then setsid+& detaches into a
+# new session.  The caller sees the subshell exit and doesn't wait.
+if [ "$1" = "--background" ]; then
+  shift
+  LOGFILE="${LOGFILE:-$(cd ../.. && pwd)/tmp/system-test.log}"
+  mkdir -p "$(dirname "$LOGFILE")"
+  setsid bash -c "\"$SCRIPT_PATH\" --no-bg --log \"$LOGFILE\" $*" \
+    >"$LOGFILE" 2>&1 < /dev/null &
+  disown
+  echo "PID: $!  log: $LOGFILE"
+  exit 0
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --assert-only)   ASSERT_ONLY=true ;;
     --no-disruptive) DISRUPTIVE=false ;;
+    --no-bg)         ;;  # internal: re-exec marker, already backgrounded
+    --log)           LOGFILE="$2"; shift ;;
+    --log=*)         LOGFILE="${1#--log=}" ;;
     -s|--section)    SECTION_FILTER="$2"; shift ;;
     -s*)             SECTION_FILTER="${1#-s}" ;;
     --section=*)     SECTION_FILTER="${1#--section=}" ;;
-    *) echo "usage: $0 [--assert-only] [--no-disruptive] [-s <secs>]" >&2; exit 1 ;;
+    *) echo "usage: $0 [--background [--log FILE]] [--assert-only] [--no-disruptive] [-s <secs>]" >&2; exit 1 ;;
   esac
   shift
 done
 
-log()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
+# Background-safe: never inherit the terminal's stdin.  Without this,
+# incus exec / ssh (without -n) etc. read the TTY and the whole backgrounded
+# test gets SIGTTIN→SIGSTOP.  Redirect once, globally.
+exec 0</dev/null
+
+log()  { printf '\n\033[1;36m[%(%H:%M:%S)T] == %s\033[0m\n' -1 "$*"; }
 ok()   { printf '   \033[1;32mPASS\033[0m %s\n' "$*"; }
 die()  { printf '   \033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -81,7 +113,7 @@ die()  { printf '   \033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 retry() {
   local tries=$1 pause=$2 label=$3 i; shift 3
   for ((i = 1; i <= tries; i++)); do
-    if "$@" >/dev/null 2>&1; then return 0; fi
+    if "$@" </dev/null >/dev/null 2>&1; then return 0; fi
     sleep "$pause"
   done
   die "$label (gave up after $tries x ${pause}s)"
@@ -102,10 +134,15 @@ SECTIONS=0
 section() {  # $1=name $2=fn — run fn in a subshell; record, don't abort
   local name=$1 fn=$2
   SECTIONS=$((SECTIONS + 1))
+  local start_ts=$EPOCHSECONDS
   log "$name"
   if ! ( set -e; "$fn" ); then
     FAILED+=("$name")
-    printf '   \033[1;31m== SECTION FAILED:\033[0m %s\n' "$name" >&2
+    printf '   \033[1;31m== SECTION FAILED:\033[0m %s (after %ds)\n' \
+      "$name" "$(( EPOCHSECONDS - start_ts ))" >&2
+  else
+    printf '   \033[1;32m== SECTION OK:\033[0m %s (%ds)\n' \
+      "$name" "$(( EPOCHSECONDS - start_ts ))"
   fi
 }
 
@@ -115,15 +152,15 @@ section() {  # $1=name $2=fn — run fn in a subshell; record, don't abort
 provision() {
   log "PROVISION: dev-cluster.sh up + site-dev + collect-hw + app-dev"
   ./dev-cluster.sh up
+  log "PROVISION: site-dev.yml (this takes a few minutes)"
   $PLAYBOOK site-dev.yml      > "$LOGDIR/system-test-site-dev.log" 2>&1 \
     || die "site-dev.yml failed (see $LOGDIR/system-test-site-dev.log)"
   ok "site-dev.yml"
+  log "PROVISION: collect-hw-dev.yml"
   $PLAYBOOK collect-hw-dev.yml > "$LOGDIR/system-test-collect-hw.log" 2>&1 \
     || die "collect-hw-dev.yml failed (see $LOGDIR/system-test-collect-hw.log)"
   ok "collect-hw-dev.yml"
-  # -e: setup-gateway-vip.yml/configure-ntp.yml are top-level config/ansible
-  # playbooks, so they load the prod group_vars/core.yml whose interface
-  # names are bare-metal; extra-vars outrank them (see base-infra-dev.yml).
+  log "PROVISION: base-infra-dev.yml"
   $PLAYBOOK base-infra-dev.yml -e cluster_interface=eth0 -e uplink_interface=eth0 \
       > "$LOGDIR/system-test-base-infra.log" 2>&1 \
     || die "base-infra-dev.yml failed (see $LOGDIR/system-test-base-infra.log)"
@@ -133,9 +170,11 @@ provision() {
   for n in "${CORE[@]}"; do
     $SSH s1 "$E etcdctl del /cluster/nodes/$n/drain" >/dev/null 2>&1 || true
   done
+  log "PROVISION: app-dev.yml"
   $PLAYBOOK app-dev.yml       > "$LOGDIR/system-test-app-dev.log" 2>&1 \
     || die "app-dev.yml failed (see $LOGDIR/system-test-app-dev.log)"
   ok "app-dev.yml"
+  log "PROVISION: acme-dev.yml"
   $PLAYBOOK acme-dev.yml      > "$LOGDIR/system-test-acme.log" 2>&1 \
     || die "acme-dev.yml failed (see $LOGDIR/system-test-acme.log)"
   ok "acme-dev.yml"
@@ -438,14 +477,14 @@ sec_authentik() {
   ok "authentik database present on leader postgres"
 
   # Retried: after a leadership change the apps target takes ~a minute.
-  retry 20 3 "authentik health via auth.xc (VIP)" \
+  retry 40 3 "authentik health via auth.xc (VIP)" \
     $SSH c1 "curl -fsS --max-time 10 http://auth.xc/-/health/live/ -o /dev/null"
   ok "authentik live via auth.xc"
 
   # The bootstrap token is seeded into the DB by authentik's blueprint
   # apply, which lags /-/health/live/ by a while on a fresh database —
   # wait until an authenticated call succeeds before judging user mgmt.
-  retry 40 3 "authentik API accepts the bootstrap token" \
+  retry 60 5 "authentik API accepts the bootstrap token" \
     $SSH "$leader" "$E ycluster user list"
   ok "bootstrap token accepted by the IdP API"
 
@@ -616,8 +655,13 @@ sec_admin_web() {
 
   # The outpost start endpoint must itself be served (proxied to authentik
   # on the leader) and hand the browser on to the IdP's login flow.
+  # Retried: the outpost comes up a few seconds after authentik health turns green.
   local code
-  code=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $admin_host' 'http://${IP[f1]}/outpost.goauthentik.io/start?rd=http://$admin_host/admin/'")
+  for i in $(seq 1 30); do
+    code=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $admin_host' 'http://${IP[f1]}/outpost.goauthentik.io/start?rd=http://$admin_host/admin/'")
+    [ "$code" = 302 ] && break
+    sleep 2
+  done
   [ "$code" = 302 ] || die "outpost start returned $code"
   ok "outpost endpoint proxied to authentik (login redirect works)"
 
@@ -905,6 +949,7 @@ main() {
   parse_section_filter
   $ASSERT_ONLY || provision
 
+  log "RUNNING SECTIONS"
   for entry in "${SECTION_REGISTRY[@]}"; do
     local num="${entry%%.*}"
     local rest="${entry#*.}"
