@@ -231,7 +231,7 @@ def fetch_cluster_status() -> dict[str, Any]:
     """Fetch aggregated cluster status from the storage VIP admin API."""
     try:
         url = f"http://{STORAGE_VIP}:{ADMIN_API_PORT}/api/cluster-status"
-        with urllib.request.urlopen(url, timeout=5) as response:
+        with urllib.request.urlopen(url, timeout=15) as response:
             data: dict[str, Any] = json.loads(response.read().decode())
             return data
     except Exception as e:
