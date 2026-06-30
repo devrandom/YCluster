@@ -204,6 +204,7 @@
       changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Enable nginx site
       file:
