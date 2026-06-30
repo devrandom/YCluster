@@ -181,6 +181,42 @@ a top-level `reasoning_effort` field — confirmed by capturing the outbound
 request body. (The provider's `small_model` call correctly omits it; the option
 is per-model.)
 
+### Overthinking investigation (2026-06-30): quant refuted, budget-forcing inert
+
+GLM-5.2 still produces very long chain-of-thought even at `reasoning_effort:
+"high"`. Findings from a multi-source research pass + empirical tests against our
+deployment:
+
+- **It's inherent to GLM-5.2, not our quant.** A/B against the official
+  full-precision endpoint (OpenRouter `z-ai/glm-5.2`, provider **Z.AI fp8**) on
+  identical neutral prompts: our **NVFP4 (fp4)** reasons *less*, not more — total
+  reasoning ~6973 chars vs fp8's ~11092 (**~0.63×**); shorter on code/math, tie
+  on logic. So the 4-bit weights and fp8 KV cache are **not** the cause of
+  overthinking — the official model overthinks at least as much. (Measures
+  reasoning *length*, not quality; single-sample at temp 1.0, but the direction
+  is consistent across all three prompts.)
+- **`high` is genuinely the floor.** GLM-5.2 ships only two trained effort
+  levels, High and Max (default Max); `low`/`medium`/`minimal` are protocol
+  remappings, not trained tiers (Z.ai docs; confirmed against the chat template
+  above). Below High there is only thinking-off.
+- **vLLM budget-forcing does NOT work on our build** (the otherwise-ideal hard
+  CoT cap). Tested via the gateway, streaming: `thinking_token_budget` → HTTP 400
+  (*"reasoning_config is not configured"* — glm45 is unsupported for it);
+  `reasoning_budget` (PR #37112) → accepted but **inert** (budget=50 still
+  produced ~974 reasoning tokens). Matches the known GLM token-ID mismatch
+  (SGLang #20274). A vLLM build where budget-forcing fires for the `glm45`/`glm47`
+  parsers is the highest-value future lever — it would bound CoT while keeping
+  thinking on.
+- **Reasoning separation is healthy.** Through the gateway/streaming path
+  `reasoning_content` populates correctly (~62–80% of generated tokens are
+  reasoning on simple puzzles). Note: probing the **raw backend non-streaming**
+  shows empty `reasoning_content` — a measurement artifact, not a real defect;
+  always test reasoning via the streaming gateway path.
+
+Net: the only effective levers today are `reasoning_effort: "high"` (the floor)
+and `enable_thinking: false` (hard off, per-task). There is no working
+token-budget cap until the vLLM image is bumped to one with GLM budget-forcing.
+
 ## Why it overlaps M3 so heavily
 
 It is the same class of system as M3 (see
