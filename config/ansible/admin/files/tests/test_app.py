@@ -217,5 +217,96 @@ class ScheduleDataTests(SchedTestBase):
         self.assertEqual(self.get("/admin/vm-schedule/data").status_code, 503)
 
 
+class ResourcesDataTests(SchedTestBase):
+    """Tests for /admin/resources/data — per-compute-host models + VMs."""
+
+    def setUp(self):
+        super().setUp()
+        # The resources endpoint reads etcd via get_all_hosts() (app module)
+        # and inventory.list_all() (inventory module), which each import
+        # get_etcd_client separately. Patch all three so the FakeEtcd is
+        # used everywhere.
+        import ycluster.utils.inventory as inv_mod
+        self._orig_app_etcd = appmod.get_etcd_client
+        self._orig_inv_etcd = inv_mod.get_etcd_client
+        appmod.get_etcd_client = lambda: self.etcd
+        inv_mod.get_etcd_client = lambda: self.etcd
+        # Mock get_inference_status so no HTTP call is made.
+        self._orig_inference = appmod.get_inference_status
+        appmod.get_inference_status = lambda: None
+
+    def tearDown(self):
+        import ycluster.utils.inventory as inv_mod
+        appmod.get_etcd_client = self._orig_app_etcd
+        inv_mod.get_etcd_client = self._orig_inv_etcd
+        appmod.get_inference_status = self._orig_inference
+        super().tearDown()
+
+    def _seed_host(self, hostname, htype, ip):
+        """Seed a node allocation in etcd."""
+        self.etcd.seed_json(
+            f"/cluster/nodes/by-hostname/{hostname}",
+            {"hostname": hostname, "type": htype, "ip": ip,
+             "mac": "00:00:00:00:00:00"})
+
+    def _seed_hardware(self, hostname, gpus=None, cpu="x86_64", ram_gb=64):
+        """Seed hardware facts in etcd."""
+        self.etcd.seed_json(
+            f"/cluster/nodes/hardware/{hostname}",
+            {"gpus": gpus or [], "cpu": cpu, "ram_gb": ram_gb})
+
+    def test_only_compute_hosts_returned(self):
+        self._seed_host("s1", "storage", "10.0.0.11")
+        self._seed_host("c1", "compute", "10.0.0.51")
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        data = self.get("/admin/resources/data").get_json()
+        hostnames = [h["hostname"] for h in data["hosts"]]
+        self.assertIn("c1", hostnames)
+        self.assertIn("nv1", hostnames)
+        self.assertNotIn("s1", hostnames)
+
+    def test_vms_grouped_by_host(self):
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self._seed_host("c1", "compute", "10.0.0.51")
+        self.vm("vm-a", owner="alice@x", gpus=2, host="nv1")
+        self.vm("vm-b", owner="bob@x", gpus=1, host="c1")
+        data = self.get("/admin/resources/data").get_json()
+        by_host = {h["hostname"]: [v["name"] for v in h["vms"]]
+                   for h in data["hosts"]}
+        self.assertEqual(sorted(by_host["nv1"]), ["vm-a"])
+        self.assertEqual(sorted(by_host["c1"]), ["vm-b"])
+
+    def test_gpu_count_from_hardware(self):
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self._seed_hardware("nv1", gpus=[
+            {"vendor": "NVIDIA", "model": "H100", "vram_mb": 81920},
+            {"vendor": "NVIDIA", "model": "H100", "vram_mb": 81920},
+        ])
+        data = self.get("/admin/resources/data").get_json()
+        host = [h for h in data["hosts"] if h["hostname"] == "nv1"][0]
+        self.assertEqual(host["gpu_count"], 2)
+
+    def test_scheduled_now_on(self):
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("v", owner="alice@x", gpus=1, host="nv1")
+        self.desired("v", "on")
+        data = self.get("/admin/resources/data").get_json()
+        vm = data["hosts"][0]["vms"][0]
+        self.assertTrue(vm["scheduled_now"])
+
+    def test_scheduled_now_off(self):
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("v", owner="alice@x", gpus=1, host="nv1")
+        self.desired("v", "off")
+        data = self.get("/admin/resources/data").get_json()
+        vm = data["hosts"][0]["vms"][0]
+        self.assertFalse(vm["scheduled_now"])
+
+    def test_inference_status_included(self):
+        appmod.get_inference_status = lambda: {"status": "ok", "models": []}
+        data = self.get("/admin/resources/data").get_json()
+        self.assertEqual(data["inference"]["status"], "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

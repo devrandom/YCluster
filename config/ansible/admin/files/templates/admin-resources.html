@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Compute Resources</title>
+  <script src="/static/nav.js" defer></script>
+  <script src="/static/alpine-3.14.1.min.js" defer></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+    h1 { color: #333; text-align: center; margin-bottom: 0.25rem; }
+    .explainer { color: #666; font-size: 0.85rem; text-align: center; margin-bottom: 1.5rem; }
+    .card { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1rem;
+            border-left: 4px solid #ccc; }
+    .type-compute { border-left-color: #28a745; }
+    .type-nvidia  { border-left-color: #76b900; }
+    .type-macos   { border-left-color: #ffc107; }
+    .host-head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+    .host-name { font-size: 1.15rem; font-weight: bold; }
+    .host-meta { color: #666; font-size: 0.85rem; }
+    .section { margin-top: 0.75rem; }
+    .section-label { font-size: 0.75rem; font-weight: 600; color: #555;
+                     text-transform: uppercase; letter-spacing: 0.04em;
+                     margin-bottom: 0.35rem; }
+    .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 10px;
+            font-size: 0.75rem; font-weight: 600; margin: 0.1rem; }
+    .pill-healthy   { background: #d4edda; color: #166534; }
+    .pill-down      { background: #f8d7da; color: #721c24; }
+    .pill-disabled  { background: #e5e7eb; color: #6b7280; }
+    .pill-unknown   { background: #fff3cd; color: #856404; }
+    .pill-scheduled { background: #d1e7dd; color: #0f5132; }
+    .pill-unsched   { background: #fff3cd; color: #664d03; }
+    .vm-row, .ct-row { display: flex; gap: 0.6rem; align-items: center;
+                       padding: 0.25rem 0; font-size: 0.85rem; flex-wrap: wrap; }
+    .vm-row.not-scheduled { background: #fffbeb; border-radius: 4px;
+                            padding: 0.25rem 0.4rem; }
+    .vm-name { font-weight: 600; }
+    .gpu-badge { display: inline-block; background: #76b900; color: white;
+                 padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.7rem;
+                 font-weight: 700; }
+    .muted { color: #999; }
+    .empty { color: #999; font-style: italic; font-size: 0.8rem; }
+    .models-grid { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+    .model-chip { background: #e0e7ff; border: 1px solid #c7d2fe;
+                  border-radius: 4px; padding: 0.1rem 0.5rem;
+                  font-size: 0.75rem; color: #3730a3; }
+    .model-chip.down { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+    .model-chip.disabled { background: #f3f4f6; border-color: #e5e7eb; color: #6b7280; }
+    .refresh-btn { float: right; }
+    table { width: 100%; border-collapse: collapse; background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 6px;
+            overflow: hidden; margin-top: 1rem; }
+    th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #eee; }
+    th { background: #f8f9fa; font-size: 0.75rem; text-transform: uppercase;
+         letter-spacing: 0.04em; color: #555; }
+    .summary-bar { display: flex; gap: 1rem; justify-content: center;
+                   flex-wrap: wrap; margin-bottom: 1rem; }
+    .summary-stat { background: white; padding: 0.4rem 0.9rem; border-radius: 6px;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.1); font-size: 0.8rem; }
+    .summary-stat strong { font-size: 1.1rem; display: block; }
+  </style>
+</head>
+<body x-data="resourcesPage()" x-init="load()">
+  <h1>Compute Resources</h1>
+  <p class="explainer">
+    Per compute machine: models served and VMs/containers hosted.
+    VMs not currently scheduled to run are highlighted.
+  </p>
+
+  <div class="summary-bar" x-show="!loading && hosts.length > 0">
+    <div class="summary-stat">Hosts<strong x-text="hosts.length"></strong></div>
+    <div class="summary-stat">GPUs<strong x-text="totalGpus"></strong></div>
+    <div class="summary-stat">Models<strong x-text="totalModels"></strong></div>
+    <div class="summary-stat">VMs<strong x-text="totalVms"></strong></div>
+    <div class="summary-stat">Unscheduled<strong x-text="totalUnscheduled"></strong></div>
+  </div>
+
+  <template x-if="loading"><p class="empty">Loading…</p></template>
+  <template x-if="!loading && hosts.length === 0">
+    <p class="empty">No compute machines found.</p>
+  </template>
+
+  <template x-for="h in hosts" :key="h.hostname">
+    <div class="card" :class="'type-' + h.type">
+      <div class="host-head">
+        <span class="host-name" x-text="h.hostname"></span>
+        <span class="host-meta" x-text="h.type + ' · ' + h.ip"></span>
+        <span class="host-meta" x-show="h.gpu_count > 0"
+              x-text="h.gpu_count + ' GPU' + (h.gpu_count > 1 ? 's' : '')"></span>
+        <span class="host-meta" x-show="h.hardware && h.hardware.cpu"
+              x-text="h.hardware.cpu"></span>
+        <span class="host-meta" x-show="h.hardware && h.hardware.ram_gb"
+              x-text="h.hardware.ram_gb + ' GB RAM'"></span>
+      </div>
+
+      <div class="section" x-show="modelsForHost(h.hostname).length > 0">
+        <div class="section-label">Models served</div>
+        <div class="models-grid">
+          <template x-for="m in modelsForHost(h.hostname)" :key="m.name">
+            <span class="model-chip" :class="modelClass(m.state)"
+                  x-text="m.name + (m.state && m.state !== 'healthy' ? ' (' + m.state + ')' : '')"
+                  :title="m.state || ''"></span>
+          </template>
+        </div>
+      </div>
+
+      <div class="section" x-show="h.vms.length > 0">
+        <div class="section-label">VMs &amp; containers</div>
+        <template x-for="vm in h.vms" :key="vm.name">
+          <div class="vm-row" :class="{'not-scheduled': !vm.scheduled_now}">
+            <span class="vm-name" x-text="vm.name"></span>
+            <span class="gpu-badge" x-show="vm.gpus > 0" x-text="vm.gpus + ' GPU'"></span>
+            <span class="pill" :class="statePill(vm.state)"
+                  x-text="vm.state"></span>
+            <span class="pill" :class="vm.scheduled_now ? 'pill-scheduled' : 'pill-unsched'"
+                  x-text="vm.scheduled_now ? 'scheduled' : 'not scheduled'"></span>
+            <span class="muted" x-show="vm.owner" x-text="vm.owner"></span>
+            <span class="muted" x-show="vm.type === 'container'">container</span>
+          </div>
+        </template>
+      </div>
+
+      <div class="section" x-show="h.vms.length === 0 && modelsForHost(h.hostname).length === 0">
+        <span class="empty">No models or VMs registered</span>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    function resourcesPage() {
+      return {
+        hosts: [],
+        inference: null,
+        isAdmin: false,
+        loading: true,
+
+        async load() {
+          try {
+            const r = await fetch('/admin/resources/data');
+            if (!r.ok) return;
+            const data = await r.json();
+            this.hosts = data.hosts || [];
+            this.inference = data.inference;
+            this.isAdmin = data.is_admin;
+          } catch (e) {
+            console.warn('Resources fetch failed:', e);
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        get totalGpus() {
+          return this.hosts.reduce((s, h) => s + (h.gpu_count || 0), 0);
+        },
+        get totalModels() {
+          if (!this.inference || !this.inference.models) return 0;
+          return this.inference.models.length;
+        },
+        get totalVms() {
+          return this.hosts.reduce((s, h) => s + h.vms.length, 0);
+        },
+        get totalUnscheduled() {
+          return this.hosts.reduce((s, h) =>
+            s + h.vms.filter(v => !v.scheduled_now).length, 0);
+        },
+
+        backendHost(url) {
+          try {
+            const h = new URL(url).hostname;
+            return h.replace(/\.xc$/, '').replace(/\..*$/, '');
+          } catch {
+            return '';
+          }
+        },
+
+        modelsForHost(hostname) {
+          if (!this.inference || !this.inference.models) return [];
+          return this.inference.models.filter(m =>
+            (m.backends || []).some(b => this.backendHost(b) === hostname)
+          );
+        },
+
+        modelClass(state) {
+          if (state === 'down') return 'down';
+          if (state === 'disabled') return 'disabled';
+          return '';
+        },
+
+        statePill(state) {
+          const s = (state || '').toLowerCase();
+          if (s === 'running') return 'pill-healthy';
+          if (s === 'stopped' || s === 'off') return 'pill-down';
+          return 'pill-unknown';
+        },
+      };
+    }
+  </script>
+</body>
+</html>

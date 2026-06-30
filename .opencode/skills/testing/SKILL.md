@@ -27,7 +27,7 @@ The ycluster package's `__init__.py` imports `etcd3`, so each
 paths, not package-name `discover`:
 
 ```bash
-# both suites at once (uses ./venv/bin/python if present)
+# both suites at once (uses ./.venv/bin/python if present)
 ./run-tests.sh
 
 # ycluster package tests only (4 files: backup_status, clock_skew,
@@ -52,7 +52,7 @@ checks, conflict logic). The pure-function tests under
 so they don't pull in the package's `__init__`.
 
 Deps come from apt (`python3-etcd3`, `python3-flask`, `python3-requests`,
-`python3-protobuf`); `run-tests.sh` auto-uses `./venv/bin/python` when
+`python3-protobuf`); `run-tests.sh` auto-uses `./.venv/bin/python` when
 present, otherwise falls back to `python3` (which needs the apt deps
 installed to even import).
 
@@ -160,7 +160,7 @@ or templates, it's `admin/setup-web-services.yml --limit managed`.
 
 - **Python tests fail to import etcd3** — apt deps aren't installed
   locally. `apt install python3-etcd3 python3-flask python3-requests
-  python3-protobuf`, or use a venv with them (`./venv/bin/python` is
+  python3-protobuf`, or use a venv with them (`./.venv/bin/python` is
   auto-detected by `run-tests.sh`).
 - **Section fails mid-run** — section logs at `./tmp/system-test-<playbook>.log`.
   SSH into the failing node via `dev/cluster/.ssh/config` to inspect

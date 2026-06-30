@@ -2593,6 +2593,90 @@ def inventory_page_legacy():
     signed-in pages (its /api/inventory* data endpoints did not move)."""
     return redirect('/admin/inventory', code=301)
 
+
+@app.route('/admin/resources')
+def resources_page():
+    """Per-compute-machine view of models and VMs/containers."""
+    return render_template('admin-resources.html')
+
+
+@app.route('/admin/resources/data')
+def resources_data():
+    """JSON for the Resources page: per compute host, the models it serves
+    (from inference backends) and the VMs/containers registered to it (with
+    GPU counts). VMs not currently scheduled to run are flagged so the page
+    can highlight them."""
+    email, is_admin = _authentik_identity()
+    from ycluster.utils.inventory import list_all as inventory_list_all
+    from ycluster.utils import vm_manager as vmm
+    from urllib.parse import urlparse
+
+    hosts = get_all_hosts()
+    inv = {r['hostname']: r for r in inventory_list_all()}
+
+    try:
+        registry = vmm.vms_all()
+        desired_all = vmm.desired_all()
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+
+    now = datetime.now(UTC)
+    compute_types = {'compute', 'nvidia', 'macos'}
+
+    # Group VMs by host
+    vms_by_host = {}
+    for name, rec in registry.items():
+        host = rec.get('host')
+        if not host:
+            continue
+        vms_by_host.setdefault(host, []).append(name)
+
+    # Build per-host data
+    result_hosts = []
+    for h in hosts:
+        if h['type'] not in compute_types:
+            continue
+        hostname = h['hostname']
+        inv_rec = inv.get(hostname, {})
+        hardware = inv_rec.get('hardware') or {}
+        gpus = hardware.get('gpus') or []
+
+        host_vms = []
+        for vm_name in vms_by_host.get(hostname, []):
+            rec = registry.get(vm_name, {})
+            desired = desired_all.get(vm_name) or {}
+            mode = desired.get('mode', 'unmanaged')
+            # A VM is "scheduled now" if desired_on says it should be up.
+            scheduled_now = vmm.desired_on(desired, now) if desired else False
+            host_vms.append({
+                'name': vm_name,
+                'owner': rec.get('owner'),
+                'gpus': rec.get('gpus', 0),
+                'type': rec.get('type', 'vm'),
+                'state': rec.get('state', 'unknown'),
+                'mode': mode,
+                'windows': desired.get('windows', []),
+                'scheduled_now': scheduled_now,
+            })
+
+        result_hosts.append({
+            'hostname': hostname,
+            'type': h['type'],
+            'ip': h['ip'],
+            'hardware': hardware,
+            'gpu_count': len(gpus),
+            'gpus': gpus,
+            'vms': host_vms,
+        })
+
+    return jsonify({
+        'hosts': result_hosts,
+        'inference': get_inference_status(),
+        'is_admin': is_admin,
+        'email': email,
+    })
+
+
 @app.route('/admin/model-usage')
 def model_usage_page():
     """Model usage stats page backed by cached PostgreSQL data."""

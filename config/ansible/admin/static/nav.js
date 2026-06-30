@@ -30,6 +30,7 @@
         ['Status', '/status'],
         ['Utilization', '/admin/utilization'],
         ['Inventory', '/admin/inventory'],
+        ['Resources', '/admin/resources'],
         ['VM Schedule', '/admin/vm-schedule'],
         ['VM Usage', '/admin/vm-usage'],
         ['Model Usage', '/admin/model-usage'],
