@@ -95,10 +95,10 @@ curl -s -X POST "$OPENAI_BASE_URL/audio/translations" \
 
 ## Sample script
 
-[`contrib/whisperx-test.py`](../../contrib/whisperx-test.py) is a
-~50-line Python smoke test that POSTs an audio file with
-`diarize=true` and prints per-segment `[start-end] SPEAKER text` lines.
-Endpoint + bearer token come from `config.yml` at the repo root (see
+[`contrib/inference`](../../contrib/inference) is the inference CLI. Its
+`transcribe` subcommand POSTs an audio file with optional `--diarize`
+and prints per-segment `[start-end] SPEAKER text` lines. Endpoint +
+bearer token come from `config.yml` at the repo root (see
 [`contrib/_cluster_config.py`](../../contrib/_cluster_config.py)).
 
 ```bash
@@ -106,7 +106,8 @@ Endpoint + bearer token come from `config.yml` at the repo root (see
 #   endpoint: https://your-cluster.example/
 #   api_token_file: my.token
 
-python3 contrib/whisperx-test.py audio-samples/sample.wav
+python3 contrib/inference transcribe audio-samples/sample.wav
+python3 contrib/inference transcribe audio-samples/sample.wav --diarize
 ```
 
 ## Limits worth knowing about

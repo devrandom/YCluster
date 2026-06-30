@@ -6,6 +6,8 @@ Subcommands:
                     Reasoning streams in dim gray, the answer at normal weight,
                     then prints ttft / tok/s / total stats. (default)
   models            List model ids available on the gateway.
+  transcribe <file> POST an audio file to /v1/audio/transcriptions and print
+                    the transcript. Optional --diarize adds speaker labels.
 
 Endpoint + bearer token come from config.yml at the repo root via
 contrib/_cluster_config.py. The model id comes from the first positional
@@ -14,11 +16,15 @@ argument or the MODEL env var.
 Usage:
   ./inference chat MiniMaxAI/MiniMax-M2.7
   ./inference models
+  ./inference transcribe tmp/ES2002d.Mix-Headset.wav
+  ./inference transcribe tmp/ES2002d.Mix-Headset.wav --diarize
   MODEL=<id> ./inference chat
   ./inference MiniMaxAI/MiniMax-M2.7      # defaults to chat
 """
+import argparse
 import json
 import os
+import secrets
 import sys
 import time
 import urllib.error
@@ -30,10 +36,6 @@ import _cluster_config
 
 DIM = "\033[2m"
 RESET = "\033[0m"
-
-
-def _usage(stream=sys.stdout):
-    print(__doc__, file=stream)
 
 
 def _load_config():
@@ -179,17 +181,130 @@ def cmd_chat(args):
     return 0
 
 
+def cmd_transcribe(args):
+    """Transcribe an audio file via /v1/audio/transcriptions."""
+    parser = argparse.ArgumentParser(
+        prog=f"{sys.argv[0]} transcribe",
+        description="Transcribe an audio file via the gateway.",
+    )
+    parser.add_argument("audio", help="path to the audio file")
+    parser.add_argument(
+        "--model", default=os.environ.get("WHISPER_MODEL", "whisper-1"),
+        help="model id (default: whisper-1 or $WHISPER_MODEL)",
+    )
+    parser.add_argument(
+        "--format", default="verbose_json",
+        help="response_format (default: verbose_json)",
+    )
+    parser.add_argument(
+        "--diarize", action="store_true",
+        help="request speaker diarization",
+    )
+    a = parser.parse_args(args)
+
+    audio = Path(a.audio)
+    if not audio.is_file():
+        print(f"not a file: {audio}", file=sys.stderr)
+        return 2
+
+    base, key = _load_config()
+
+    # multipart/form-data upload built by hand; the stdlib does not
+    # expose a multipart writer, so we assemble the body manually.
+    boundary = "----ycluster-inference-" + secrets.token_hex(8)
+    fields = {
+        "model": a.model,
+        "response_format": a.format,
+    }
+    if a.diarize:
+        fields["diarize"] = "true"
+
+    parts = []
+    for name, value in fields.items():
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        )
+        parts.append(f"{value}\r\n".encode())
+    with audio.open("rb") as f:
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(
+            'Content-Disposition: form-data; name="file"; '
+            f'filename="{audio.name}"\r\n'.encode()
+        )
+        parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+        parts.append(f.read())
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+
+    req = urllib.request.Request(
+        base + "/v1/audio/transcriptions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+
+    size = audio.stat().st_size
+    print(f"Endpoint: {base}/v1/audio/transcriptions")
+    print(f"Model:    {a.model}")
+    print(f"File:      {audio} ({size} bytes)")
+    print(f"Format:    {a.format}")
+    print(f"Diarize:   {a.diarize}")
+    print()
+
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        print(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')}", file=sys.stderr)
+        return 1
+
+    elapsed = (time.monotonic() - started) * 1000
+    print(f"Done in {elapsed:.0f}ms")
+    print()
+
+    text = data.get("text") or ""
+    segments = data.get("segments") or []
+    if text:
+        chars = len(text)
+        words = len(text.split())
+        segs = len(segments) if segments else "n/a"
+        print(f"Transcript: {chars} chars, ~{words} words, {segs} segments")
+        print()
+        print("--- First 500 chars ---")
+        print(text[:500])
+        print()
+        if a.diarize and segments:
+            print("--- Diarized segments ---")
+            for seg in segments:
+                speaker = seg.get("speaker", "?")
+                seg_text = seg.get("text", "").strip()
+                print(
+                    f"  [{seg.get('start', 0):6.2f}-{seg.get('end', 0):6.2f}] "
+                    f"{speaker:11} {seg_text}"
+                )
+    else:
+        print("--- Response ---")
+        print(json.dumps(data, indent=2))
+    return 0
+
+
 def main():
     # Default to `chat` when the first arg is a model id, not a subcommand.
-    if len(sys.argv) >= 2 and sys.argv[1] in ("chat", "models"):
+    if len(sys.argv) >= 2 and sys.argv[1] in ("chat", "models", "transcribe"):
         sub = sys.argv[1]
         rest = sys.argv[2:]
     elif len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
-        _usage()
+        print(__doc__)
         return 0
     elif len(sys.argv) >= 2 and sys.argv[1].startswith("-"):
         print(f"unknown option: {sys.argv[1]}", file=sys.stderr)
-        _usage(sys.stderr)
+        print(__doc__, file=sys.stderr)
         return 2
     else:
         sub = "chat"
@@ -199,6 +314,8 @@ def main():
         return cmd_models(rest)
     if sub == "chat":
         return cmd_chat(rest)
+    if sub == "transcribe":
+        return cmd_transcribe(rest)
     return 0
 
 
