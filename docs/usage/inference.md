@@ -113,20 +113,21 @@ that don't.
 
 ## Sample script
 
-[`contrib/test-inference.py`](../../contrib/test-inference.py) is a
-streaming smoke test: it does a tokenizer round-trip, streams a short
-completion (reasoning in dim gray, answer at normal weight), and prints
-ttft / tok-s / total at the end. Endpoint + bearer token come from
-`config.yml` at the repo root (see
-[`contrib/_cluster_config.py`](../../contrib/_cluster_config.py)).
+[`contrib/inference`](../../contrib/inference) is a streaming smoke test:
+it does a tokenizer round-trip, streams a short completion (reasoning in
+dim gray, answer at normal weight), and prints ttft / tok-s / total at
+the end. Endpoint + bearer token come from `config.yml` at the repo root
+(see [`contrib/_cluster_config.py`](../../contrib/_cluster_config.py)).
 
 ```bash
 # config.yml at the repo root:
 #   endpoint: https://your-cluster.example/
 #   api_token_file: my.token
 
-python3 contrib/test-inference.py <model-id>
-# or: MODEL=<model-id> python3 contrib/test-inference.py
+python3 contrib/inference chat <model-id>
+# or: MODEL=<model-id> python3 contrib/inference chat
+# list available models:
+python3 contrib/inference models
 ```
 </content>
 </invoke>

@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Inference CLI — quick smoke tests against the cluster gateway.
+
+Subcommands:
+  chat <model>      Stream a one-shot chat completion + tokenizer round-trip.
+                    Reasoning streams in dim gray, the answer at normal weight,
+                    then prints ttft / tok/s / total stats. (default)
+  models            List model ids available on the gateway.
+
+Endpoint + bearer token come from config.yml at the repo root via
+contrib/_cluster_config.py. The model id comes from the first positional
+argument or the MODEL env var.
+
+Usage:
+  ./inference chat MiniMaxAI/MiniMax-M2.7
+  ./inference models
+  MODEL=<id> ./inference chat
+  ./inference MiniMaxAI/MiniMax-M2.7      # defaults to chat
+"""
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _cluster_config
+
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+
+def _usage(stream=sys.stdout):
+    print(__doc__, file=stream)
+
+
+def _load_config():
+    cfg = _cluster_config.load()
+    return cfg.endpoint, cfg.token
+
+
+def _get(base, key, path, timeout=30):
+    req = urllib.request.Request(
+        base + path, headers={"Authorization": f"Bearer {key}"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _post(base, key, path, body, timeout=30):
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def cmd_models(args):
+    """List model ids available on the gateway."""
+    base, key = _load_config()
+    data = _get(base, key, "/v1/models")
+    for m in data.get("data", []):
+        print(m.get("id"))
+
+
+def cmd_chat(args):
+    """Streaming chat-completion smoke test (default)."""
+    model = (args[0] if args else None) or os.environ.get("MODEL")
+    if not model:
+        print(
+            f"usage: {sys.argv[0]} chat <model>   (or set MODEL env var)",
+            file=sys.stderr,
+        )
+        return 2
+    base, key = _load_config()
+
+    print(f"Endpoint: {base}")
+    print(f"Model:    {model}")
+    print()
+
+    # Tokenizer round-trip via the proxy's /v1/tokenize and /v1/detokenize
+    # passthrough (llama.cpp native; vLLM accepts the same paths).
+    sample = "hello world"
+    try:
+        tok_body = _post(base, key, "/v1/tokenize",
+                         {"model": model, "prompt": sample}, 60)
+        tokens_list = tok_body.get("tokens") or []
+        print(f"tokenize:   {sample!r} -> {tokens_list}")
+
+        detok_body = _post(base, key, "/v1/detokenize",
+                           {"model": model, "tokens": tokens_list}, 60)
+        roundtrip = detok_body.get("prompt") or detok_body.get("content", "")
+        ok = "ok" if roundtrip.strip() == sample else f"MISMATCH: {roundtrip!r}"
+        print(f"detokenize: {tokens_list} -> {roundtrip!r}  [{ok}]")
+    except urllib.error.HTTPError as e:
+        print(f"tokenize: HTTP {e.code} — {e.read().decode('utf-8', 'replace').strip()}")
+    print()
+
+    # Stream a one-shot chat completion.
+    payload = json.dumps({
+        "model": model,
+        "stream": True,
+        "messages": [{"role": "user", "content": "Say hello in one word"}],
+    }).encode()
+
+    req = urllib.request.Request(
+        base + "/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        method="POST",
+    )
+
+    started = time.monotonic()
+    ttft = None
+    in_reasoning = False
+    bytes_in = 0
+    tokens = 0  # count of SSE deltas that carried reasoning or content
+
+    with urllib.request.urlopen(req) as resp:
+        for raw in resp:
+            bytes_in += len(raw)
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if not line.startswith("data: "):
+                continue
+            payload = line[len("data: "):]
+            if payload == "[DONE]":
+                break
+            try:
+                ev = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            delta = ev.get("choices", [{}])[0].get("delta", {}) or {}
+            reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
+            content = delta.get("content") or ""
+
+            if reasoning:
+                if ttft is None:
+                    ttft = time.monotonic() - started
+                if not in_reasoning:
+                    sys.stdout.write(DIM)
+                    in_reasoning = True
+                sys.stdout.write(reasoning)
+                sys.stdout.flush()
+                tokens += 1
+
+            if content:
+                if ttft is None:
+                    ttft = time.monotonic() - started
+                if in_reasoning:
+                    sys.stdout.write(RESET)
+                    in_reasoning = False
+                sys.stdout.write(content)
+                sys.stdout.flush()
+                tokens += 1
+
+    if in_reasoning:
+        sys.stdout.write(RESET)
+    total = time.monotonic() - started
+    print()
+    print(
+        f"ttft: {ttft * 1000:.0f}ms   "
+        f"tok/s: {(tokens - 1) / (total - ttft) if ttft and total > ttft else 0:.1f}   "
+        f"tokens: {tokens}   "
+        f"total: {total * 1000:.0f}ms   "
+        f"bytes: {bytes_in}"
+    )
+    return 0
+
+
+def main():
+    # Default to `chat` when the first arg is a model id, not a subcommand.
+    if len(sys.argv) >= 2 and sys.argv[1] in ("chat", "models"):
+        sub = sys.argv[1]
+        rest = sys.argv[2:]
+    elif len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+        _usage()
+        return 0
+    elif len(sys.argv) >= 2 and sys.argv[1].startswith("-"):
+        print(f"unknown option: {sys.argv[1]}", file=sys.stderr)
+        _usage(sys.stderr)
+        return 2
+    else:
+        sub = "chat"
+        rest = sys.argv[1:]
+
+    if sub == "models":
+        return cmd_models(rest)
+    if sub == "chat":
+        return cmd_chat(rest)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
