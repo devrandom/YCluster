@@ -29,9 +29,12 @@
     rocm_version: "7.0.2"
     # gid of the host's 'render' group (owns /dev/kfd, /dev/dri/renderD*).
     # On Ubuntu 24.04 with rocm-* packages this is 993; on stock distros
-    # without ROCm it's often 992. Override per-host in host_vars if a
-    # particular machine differs.
-    incus_render_gid: 993
+    # without ROCm it's often 992. Override per-host by setting
+    # incus_render_gid in host_vars/<node>.yml — the set_fact below folds
+    # that host var over this default. It deliberately is NOT a play var of
+    # the same name: a play var outranks host_vars and would shadow the
+    # override (same reason incus_passthrough_gpu_pci isn't defaulted here).
+    incus_render_gid_default: 993
     incus_bridge: incusbr0
     incus_bridge_cidr: "10.100.0.1/24"
     incus_storage_pool: local
@@ -65,6 +68,12 @@
       meta: end_host
       when: not (incus_vm_host | default(false)
                  or incus_container_host | default(false))
+
+    # Fold the optional per-host override (host_vars/<node>.yml) over the
+    # default. All downstream tasks/templates reference incus_render_gid.
+    - name: Resolve effective render gid
+      set_fact:
+        incus_render_gid: "{{ incus_render_gid | default(incus_render_gid_default) }}"
 
     - name: Install Incus and jq (shared base)
       apt:
@@ -276,7 +285,10 @@
           shell: |
             sed -i '/^root:992:1$/d' /etc/subgid
           changed_when: false
-          when: incus_render_gid != 992
+          # `| int`: incus_render_gid arrives as a string (set_fact / host_var),
+          # and a bare `!= 992` would compare str to int and always be true,
+          # pruning the root:992:1 entry the task above just added.
+          when: incus_render_gid | int != 992
         # The gpu-ct profile also maps uid/gid 1000 straight through (the
         # ubuntu user == the Samba uid the CIFS-backed /data share pins),
         # so the bind-mounted NAS dir is writable without an idmapped

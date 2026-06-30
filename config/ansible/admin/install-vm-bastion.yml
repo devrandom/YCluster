@@ -141,6 +141,18 @@
       when: rathole_binary_needs_push
       changed_when: false
 
+    # On a freshly-launched bastion the rathole-bastion unit doesn't exist
+    # yet — it is created (and the service first started) by the setup script
+    # below, which also restarts on an atomic-replaced binary. So check first
+    # and only bounce here when the unit is already present.
+    - name: Check whether the rathole unit exists in the bastion
+      command: >
+        incus exec {{ vm_bastion_container }} --
+        systemctl cat rathole-bastion.service
+      register: rathole_unit_present
+      changed_when: false
+      failed_when: false
+
     # The mv above swaps the on-disk inode; the running rathole keeps the
     # old inode open until restarted. Bounce it explicitly here rather
     # than having the setup script chase inodes inside the container.
@@ -148,7 +160,7 @@
       command: >
         incus exec {{ vm_bastion_container }} --
         systemctl restart rathole-bastion.service
-      when: rathole_binary_needs_push
+      when: rathole_binary_needs_push and rathole_unit_present.rc == 0
       changed_when: rathole_binary_needs_push
 
     - name: Render the bastion setup script
