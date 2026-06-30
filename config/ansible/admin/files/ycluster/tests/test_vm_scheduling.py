@@ -336,5 +336,28 @@ class SelectHealthyGpusTests(unittest.TestCase):
         self.assertEqual(len(picked), 4)
 
 
+class BastionPublicPortTests(unittest.TestCase):
+    """Must mirror app/templates/rathole-server.toml.j2's port math."""
+
+    def test_low_index_contiguous(self):
+        # idx 1-3 keep historical ports: nvidia 2210+idx, compute 2213+idx.
+        self.assertEqual(vm.bastion_public_port("nv1"), 2211)
+        self.assertEqual(vm.bastion_public_port("nv2"), 2212)
+        self.assertEqual(vm.bastion_public_port("nv3"), 2213)
+        self.assertEqual(vm.bastion_public_port("c1"), 2214)
+        self.assertEqual(vm.bastion_public_port("c2"), 2215)
+        self.assertEqual(vm.bastion_public_port("c3"), 2216)
+
+    def test_high_index_disjoint_blocks(self):
+        # idx > 3: nvidia 2220+idx, compute 2240+idx (never collide).
+        self.assertEqual(vm.bastion_public_port("nv4"), 2224)
+        self.assertEqual(vm.bastion_public_port("c4"), 2244)
+        self.assertEqual(vm.bastion_public_port("c5"), 2245)
+
+    def test_unrecognised_returns_none(self):
+        for bad in (None, "", "bastion", "dhcp-201", "c", "3"):
+            self.assertIsNone(vm.bastion_public_port(bad))
+
+
 if __name__ == "__main__":
     unittest.main()

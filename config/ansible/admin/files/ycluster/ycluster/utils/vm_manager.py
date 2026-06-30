@@ -1434,6 +1434,28 @@ def vm_sync_keys(user):
 # --------------------------------------------------------------------------
 # bastion access list
 # --------------------------------------------------------------------------
+def bastion_public_port(host):
+    """Public rathole port the VM host's bastion is exposed on.
+
+    MUST stay in sync with the port math in
+    app/templates/rathole-server.toml.j2 (that template is what actually
+    binds the port on the rathole server; this only predicts it). Index =
+    the numeric suffix of the host name. idx 1-3 keep historical contiguous
+    ports (nvidia 2210+idx, compute 2213+idx); idx > 3 lands in a per-type
+    disjoint block (nvidia 2220+idx, compute 2240+idx) so adding a host of
+    one type never shifts another type's ports. Returns None if `host`
+    isn't a recognised <type><index> VM-host name.
+    """
+    m = re.fullmatch(r'([a-z]+)(\d+)', host or '')
+    if not m:
+        return None
+    is_nv = m.group(1) == 'nv'
+    idx = int(m.group(2))
+    if idx <= 3:
+        return (2210 if is_nv else 2213) + idx
+    return (2220 if is_nv else 2240) + idx
+
+
 def _bastion_authorized_keys():
     """Render the jump user's authorized_keys from the etcd registries.
 

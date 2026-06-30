@@ -31,6 +31,16 @@
     .saved { color: #166534; font-size: 0.85rem; margin-left: 0.5rem; }
     .error { color: #b91c1c; font-size: 0.85rem; margin-left: 0.5rem; }
     .empty { color: #666; font-style: italic; padding: 2rem; text-align: center; }
+    .caret { display: inline-block; margin-left: 0.4rem; font-size: 0.7em; transition: transform 0.15s ease; }
+    .caret.open { transform: rotate(90deg); }
+    .ssh { margin-top: 0.6rem; }
+    .ssh-row { display: flex; align-items: flex-start; gap: 0.4rem; }
+    .ssh pre { background: #1e293b; color: #e2e8f0; padding: 0.6rem 0.8rem; border-radius: 4px; font-size: 0.8rem; overflow-x: auto; margin: 0; width: fit-content; max-width: 100%; }
+    .iconbtn { background: none; border: none; cursor: pointer; color: #475569; padding: 0.3rem; border-radius: 4px; }
+    .iconbtn:hover { background: #e5e7eb; color: #1e293b; }
+    .iconbtn svg { display: block; }
+    .ic.ok { color: #166534; }
+    .ssh-foot { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-top: 0.4rem; }
   </style>
 </head>
 <body x-data="schedApp()" x-init="load()">
@@ -77,8 +87,40 @@
         <span class="meta" x-show="locked(row)">admin-managed</span>
         <span class="saved" x-show="row.saved" x-text="row.saved"></span>
         <span class="error" x-show="row.error" x-text="row.error"></span>
+        <button class="minor" @click="row.showSsh = !row.showSsh"
+                :aria-expanded="row.showSsh">SSH config<span
+                class="caret" :class="{open: row.showSsh}">▸</span></button>
       </div>
       <div class="error" x-show="row.issue" x-text="issueText(row)"></div>
+      <template x-if="row.showSsh">
+        <div class="ssh">
+          <div class="ssh-row">
+            <pre x-text="sshConfig(row)"></pre>
+            <button class="iconbtn" @click="copySsh(row)" aria-label="Copy"
+                    :title="row.copied ? 'Copied' : 'Copy to clipboard'">
+              <svg class="ic" x-show="!row.copied" viewBox="0 0 24 24" width="15" height="15"
+                   fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+              <svg class="ic ok" x-show="row.copied" viewBox="0 0 24 24" width="15" height="15"
+                   fill="none" stroke="currentColor" stroke-width="2.5"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </button>
+          </div>
+          <div class="ssh-foot">
+            <span class="error" x-show="row.copyErr">copy failed</span>
+            <span class="meta">Add to <code>~/.ssh/config</code>, then
+              <code x-text="`ssh ${row.vm}`"></code> (needs your SSH key
+              registered for VM access).</span>
+            <span class="error" x-show="!ssh.rathole_host">set the public
+              SSH host: replace &lt;rathole-host&gt;</span>
+          </div>
+        </div>
+      </template>
       <template x-if="row.mode === 'schedule'">
         <div>
           <template x-for="(w, wi) in row.windows" :key="wi">
@@ -125,6 +167,7 @@
       return {
         rows: [],
         hosts: [],
+        ssh: {},
         isAdmin: false,
         loading: false,
         graceSeconds: 300,
@@ -158,8 +201,9 @@
                     const sp = this.parts(s), ep = this.parts(e)
                     return {startDate: sp.date, startHour: sp.hour, endDate: ep.date, endHour: ep.hour}
                   }),
-                saved: '', error: ''}))
+                saved: '', error: '', showSsh: false, copied: false, copyErr: false}))
               this.hosts = data.hosts || []
+              this.ssh = data.ssh || {}
               this.isAdmin = data.is_admin
               this.graceSeconds = data.grace_seconds || this.graceSeconds
               this.loading = false
@@ -218,6 +262,29 @@
               else row.error = d.error || 'failed'
             })
             .catch(() => { row.error = 'request failed' })
+        },
+
+        // ~/.ssh/config entry reaching the VM through its host's jump
+        // bastion. The VM name resolves on the bastion's bridge, so no
+        // HostName is needed. Falls back to placeholders when the server
+        // couldn't supply the public host / port.
+        sshConfig(row) {
+          const host = this.ssh.rathole_host || '<rathole-host>'
+          const port = row.port || '<port>'
+          const jump = this.ssh.jump_user || 'jump'
+          const user = this.ssh.vm_user || 'ubuntu'
+          return `Host ${row.vm}\n`
+               + `    User ${user}\n`
+               + `    ProxyJump ${jump}@${host}:${port}`
+        },
+
+        copySsh(row) {
+          row.copyErr = false
+          navigator.clipboard.writeText(this.sshConfig(row))
+            .then(() => { row.copied = true
+                          setTimeout(() => { row.copied = false }, 1500) })
+            .catch(() => { row.copyErr = true
+                           setTimeout(() => { row.copyErr = false }, 2500) })
         },
 
         fmtStamp(d) {

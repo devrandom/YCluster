@@ -2762,6 +2762,9 @@ def vm_schedule_data():
             'owner': rec.get('owner'),
             'host': rec.get('host'),
             'gpus': rec.get('gpus'),
+            # Public rathole port the host's jump bastion is exposed on, so
+            # the page can render a ready-to-paste ~/.ssh/config ProxyJump.
+            'port': vmm.bastion_public_port(rec.get('host')),
             'status': status,
             'mode': mode,
             'windows': (desired or {}).get('windows', []),
@@ -2794,7 +2797,29 @@ def vm_schedule_data():
         })
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
                     'hosts': hosts, 'email': email, 'is_admin': is_admin,
-                    'grace_seconds': vmm.SCHEDULED_STOP_GRACE_S})
+                    'grace_seconds': vmm.SCHEDULED_STOP_GRACE_S,
+                    # Everything the page needs to render an ~/.ssh/config
+                    # entry: the public jump host (None → page shows a
+                    # <rathole-host> placeholder) plus the well-known users.
+                    'ssh': {'rathole_host': _rathole_public_host(),
+                            'jump_user': vmm.BASTION_JUMP_USER,
+                            'vm_user': vmm.VM_GUEST_USER}})
+
+
+def _rathole_public_host():
+    """Public host clients reach the rathole frontend (and thus the VM jump
+    bastions) on — the host part of the tunnel's `remote_addr` in etcd. The
+    same config also holds the rathole token, so we parse it here and return
+    only the host, never the secret. None if unset/unparseable."""
+    try:
+        raw, _ = get_etcd_client().get('/cluster/nodes/rathole/config')
+        if not raw:
+            return None
+        remote = json.loads(raw.decode()).get('remote_addr', '')
+        # remote_addr is "host:port"; rsplit so IPv6 literals survive.
+        return remote.rsplit(':', 1)[0] or None
+    except Exception:
+        return None
 
 
 def _parse_windows(windows):
