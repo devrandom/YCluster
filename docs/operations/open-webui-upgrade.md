@@ -8,9 +8,9 @@ using the `stage` instance as a dress rehearsal before touching prod.
 Two instances run on the storage leader, fully isolated:
 
 | Instance | Container       | Port | Postgres DB        | Data dir                      | Image tag |
-|----------|-----------------|------|--------------------|-------------------------------|-----------|
-| prod     | open-webui      | 8380 | `openwebui`        | `/rbd/misc/app/open-webui-data`       | `:latest` |
-| stage    | open-webui-stage| 8381 | `openwebui-stage`  | `/rbd/misc/app-stage/open-webui-data` | `:stage`  |
+|----------|----------------|------|--------------------|-------------------------------|-----------|
+| prod     | open-webui     | 8380 | `openwebui`        | `/rbd/misc/app/open-webui-data`       | `:latest` |
+| stage    | open-webui-stage | 8381 | `openwebui-stage`  | `/rbd/misc/app-stage/open-webui-data` | `:stage`  |
 
 Postgres runs natively on the storage leader (not in a container).
 Both DBs live in the same cluster, so cloning is a local
@@ -19,6 +19,27 @@ Both DBs live in the same cluster, so cloning is a local
 The build playbook checks out `webui_repo` into
 `/opt/src/open-webui-build{,-stage}/open-webui` and builds an image
 into the cluster registry.
+
+## Two hosts
+
+```bash
+# Entry host — has /etc/ansible, vault, and can reach all cluster nodes.
+# Set in .envrc as YC_SYNC_HOST.
+
+# Storage leader — where open-webui, postgres, and /rbd live.
+LEADER=$(ssh "$YC_SYNC_HOST" 'ycluster cluster leader')
+```
+
+Commands below either run on the entry host (`ssh "$YC_SYNC_HOST" …`)
+or assume you have a shell on the storage leader. The leader shell is
+where docker exec, systemctl, pg_dump, and psql run — so the snippets
+show them directly rather than nesting SSH.
+
+To get a shell on the leader:
+
+```bash
+ssh -J "$YC_SYNC_HOST" "$LEADER"
+```
 
 ## Approach
 
@@ -38,12 +59,13 @@ into the cluster registry.
 Before touching anything, capture:
 
 - Currently deployed version. `package.json` only tells you the
-  frontend version — the source of truth is the alembic head:
+  frontend version — the source of truth is the alembic head. On the
+  storage leader:
   ```bash
-  ssh s2.yc 'docker exec open-webui sh -c "cd /app/backend && \
-    python -c \"from open_webui.internal.db import engine; \
-    from sqlalchemy import text; \
-    print(list(engine.connect().execute(text(\\\"select version_num from alembic_version\\\"))))\""'
+  docker exec open-webui python -c "
+  from open_webui.internal.db import engine
+  from sqlalchemy import text
+  print(list(engine.connect().execute(text('select version_num from alembic_version'))))"
   ```
   Cross-reference the revision id against
   `backend/open_webui/migrations/versions/` upstream to find the
@@ -66,13 +88,15 @@ Before touching anything, capture:
 
 ### 1. Stop stage
 
+On the storage leader:
+
 ```bash
-ssh s2.yc systemctl stop open-webui-stage
+systemctl stop open-webui-stage
 ```
 
 ### 2. Clone prod DB into stage DB
 
-Run on the storage leader (s2 at time of writing).
+All commands run on the storage leader as root unless noted.
 
 **2a. Dump prod.** The redirect runs as the root shell, so the dump
 file lands in `/rbd/misc/backups/` regardless of its perms:
@@ -91,7 +115,7 @@ something else is holding one open — investigate, don't just force.
 
 ```bash
 sudo -u postgres dropdb openwebui-stage
-sudo -u postgres createdb -O "openwebui-stage" openwebui-stage
+sudo -u postgres createdb -O openwebui-stage openwebui-stage
 ```
 
 **2c. Restore.** Pipe the dump through stdin — `/rbd/misc/backups/`
@@ -110,7 +134,7 @@ instead:
 
 ```bash
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d openwebui-stage <<'SQL'
-ALTER SCHEMA public OWNER TO "openwebui-stage";
+ALTER SCHEMA public OWNER TO openwebui-stage;
 DO $$
 DECLARE r record;
 BEGIN
@@ -153,13 +177,11 @@ done
 The Postgres DB references files and embeddings that live under
 the data dir (chroma vectors, uploads, etc.). If you skip this,
 RAG / uploads / chat-attachment views in stage will 404 on rows
-that came from prod. To make stage fully representative:
+that came from prod. On the storage leader:
 
 ```bash
-ssh s2.yc 'systemctl stop open-webui-stage'  # already stopped, just to be safe
-ssh s2.yc 'rsync -aH --delete \
-  /rbd/misc/app/open-webui-data/ \
-  /rbd/misc/app-stage/open-webui-data/'
+systemctl stop open-webui-stage  # already stopped, just to be safe
+rsync -aH --delete /rbd/misc/app/open-webui-data/ /rbd/misc/app-stage/open-webui-data/
 ```
 
 ### 4. Point the build at the target version
@@ -179,26 +201,30 @@ task fails, blow away the checkout and re-run.
 
 ### 5. Build the `:stage` image
 
+On the entry host:
+
 ```bash
-ssh s3.yc 'cd /etc/ansible && \
+ssh "$YC_SYNC_HOST" 'cd /etc/ansible && \
   ./run-playbook.sh app/open-webui-stage.yml --tags build,never'
 ```
 
 ### 6. Start stage and watch the migration
 
+On the storage leader:
+
 ```bash
-ssh s2.yc systemctl start open-webui-stage
-ssh s2.yc journalctl -u open-webui-stage -f
+systemctl start open-webui-stage
+journalctl -u open-webui-stage -f
 ```
 
 Migrations run on container start. Confirm the alembic head
 matches what you expect for the target version:
 
 ```bash
-ssh s2.yc 'docker exec open-webui-stage sh -c "cd /app/backend && \
-  python -c \"from open_webui.internal.db import engine; \
-  from sqlalchemy import text; \
-  print(list(engine.connect().execute(text(\\\"select version_num from alembic_version\\\"))))\""'
+docker exec open-webui-stage python -c "
+from open_webui.internal.db import engine
+from sqlalchemy import text
+print(list(engine.connect().execute(text('select version_num from alembic_version'))))"
 ```
 
 ### 7. Kick the tires on stage (port 8381)
@@ -219,20 +245,20 @@ ssh s2.yc 'docker exec open-webui-stage sh -c "cd /app/backend && \
 Once stage is happy:
 
 ```bash
-# Backup prod DB
-ssh s2.yc 'sudo -u postgres pg_dump --no-owner --no-acl openwebui \
-  > /rbd/misc/backups/owui-prod-precutover-$(date +%Y%m%d-%H%M%S).sql'
+# Backup prod DB (on the storage leader)
+sudo -u postgres pg_dump --no-owner --no-acl openwebui \
+  > /rbd/misc/backups/owui-prod-precutover-$(date +%Y%m%d-%H%M%S).sql
 
-# Build :latest with the same target version
-ssh s3.yc 'cd /etc/ansible && \
+# Build :latest with the same target version (on the entry host)
+ssh "$YC_SYNC_HOST" 'cd /etc/ansible && \
   ./run-playbook.sh app/build-open-webui.yml'
 
-# Cutover
-ssh s2.yc systemctl restart open-webui
-ssh s2.yc journalctl -u open-webui -f
+# Cutover (on the storage leader)
+systemctl restart open-webui
+journalctl -u open-webui -f
 ```
 
-### If migration is interrupted mid-flight
+## If migration is interrupted mid-flight
 
 If the container is stopped while alembic is running (signal, manual
 restart, ycluster-apps.target churn), the open transaction rolls
@@ -242,29 +268,28 @@ holding the lock from its half-run DDL. The next container start
 will hang on `Running upgrade ... -> ...` with no further log
 output, blocked on a relation lock.
 
-Diagnose:
+Diagnose on the storage leader:
 
 ```bash
-ssh s2.yc 'sudo -u postgres psql -d openwebui -c "
+sudo -u postgres psql -d openwebui -c "
   SELECT pid, state, wait_event_type, wait_event,
          age(clock_timestamp(), query_start) AS age,
          substring(query, 1, 100)
   FROM pg_stat_activity
-  WHERE datname = '\''openwebui'\'' AND state != '\''idle'\'';"'
+  WHERE datname = 'openwebui' AND state != 'idle';"
 ```
 
 Look for a long-`age` backend holding `Lock`/`relation` with an
 `ALTER TABLE ...` query — that's the orphan. Terminate it:
 
 ```bash
-ssh s2.yc 'sudo -u postgres psql -d openwebui -c \
-  "SELECT pg_terminate_backend(<PID>);"'
+sudo -u postgres psql -d openwebui -c "SELECT pg_terminate_backend(<PID>);"
 ```
 
 The blocked migration will then proceed within seconds. Sanity-check
 the alembic head and row counts afterwards.
 
-### Rollback
+## Rollback
 
 Additive migrations have downgrade scripts, but anything that
 drops columns is not safely reversible via `alembic downgrade` —

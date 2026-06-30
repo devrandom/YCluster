@@ -40,7 +40,7 @@ Provisioning is fully Ansible-managed by `macos/setup-exo.yml` (part of
   exo mac.
 
 ```bash
-ssh s3.yc "cd /etc/ansible && ./run-playbook.sh macos/setup-exo.yml"
+ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh macos/setup-exo.yml"
 ```
 
 To bump exo, change `exo_version` in `macos/setup-exo.yml` and re-run;
@@ -195,7 +195,7 @@ automated by the `macos/setup-thunderbolt-rdma.yml` playbook, which
 installs a `com.ycluster.tb-rdma` LaunchDaemon per mac:
 
 ```bash
-ssh s3.yc 'cd /etc/ansible && ./run-playbook.sh macos/setup-thunderbolt-rdma.yml --limit m1'
+ssh "$YC_SYNC_HOST" 'cd /etc/ansible && ./run-playbook.sh macos/setup-thunderbolt-rdma.yml --limit m1'
 ```
 
 The daemon runs `tb-rdma-setup.sh` at boot. That script does *not*

@@ -53,7 +53,7 @@ gfx900..gfx1151/gfx1201 but only Strix Halo has been validated here).
 
 ```bash
 # From a core node:
-ssh s3.yc "cd /etc/ansible && ./run-playbook.sh app/install-whisperx.yml --limit <host>"
+ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh app/install-whisperx.yml --limit <host>"
 ```
 
 The playbook is idempotent. It rebuilds the container image only if

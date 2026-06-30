@@ -83,7 +83,7 @@ microceph cluster join <token>
 ## 7. Run Ansible
 
 ```bash
-ssh s3.yc "cd /etc/ansible && ./run-playbook.sh site.yml --limit s4"
+ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh site.yml --limit s4"
 ```
 
 The ceph disk (`/dev/mapper/vg0-ceph`) will be added automatically by the storage playbook.
