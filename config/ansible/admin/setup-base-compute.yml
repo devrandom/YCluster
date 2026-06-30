@@ -50,17 +50,11 @@
         owner: root
         group: root
 
-    # bind-dynamic lets the dnsmasq on whichever core node currently holds
-    # the gateway VIP auto-bind 10.0.0.254 — that node becomes the cluster
-    # resolver. Non-core nodes never hold the VIP, so for them the flag is
-    # functionally a no-op (inherited for symmetry).
-    #
-    # On any Incus host (VM or container), the 'incus' package drops in
-    # /etc/dnsmasq.d/incus with 'bind-interfaces' + 'except-interface=incusbr0'
-    # so the host dnsmasq does not fight the Incus-internal dnsmasq on
-    # incusbr0. dnsmasq refuses to combine bind-interfaces with
-    # bind-dynamic, so on those hosts we drop bind-dynamic and let the
-    # Incus drop-in win.
+    # Compute nodes don't hold the gateway VIP, so they don't need
+    # bind-dynamic.  All compute hosts run Incus, whose package drops
+    # /etc/dnsmasq.d/incus with 'bind-interfaces' + 'except-interface=incusbr0'.
+    # dnsmasq refuses to combine bind-interfaces with bind-dynamic, so
+    # we use bind-interfaces here to match the Incus drop-in.
     - name: Create dnsmasq configuration (DNS only)
       copy:
         dest: /etc/dnsmasq.d/dns.conf
@@ -72,14 +66,7 @@
           domain=xc
           domain-needed
 
-          {% if not (incus_vm_host | default(false)
-                     or incus_container_host | default(false)) %}
-          # Dynamic binding for VIP support
-          bind-dynamic
-          {% else %}
-          # bind-interfaces is supplied by /etc/dnsmasq.d/incus (incus pkg);
-          # bind-dynamic would conflict with it and refuse to start.
-          {% endif %}
+          bind-interfaces
           # DNS only, no DHCP
           port=53
           # Only answer queries from clients on a directly-attached subnet.
