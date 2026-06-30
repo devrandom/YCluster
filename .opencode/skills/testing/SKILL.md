@@ -92,6 +92,25 @@ cd dev/cluster
 ./system-test.sh --no-disruptive   # skip section 16 (leadership failover)
 ```
 
+**Always run `system-test.sh` in the background with a log file** — a
+full run takes ~5 min and produces thousands of lines. Use the built-in
+`--background` flag (re-execs via `setsid`, returns immediately) plus
+redirect the detached output to a log under `tmp/` (gitignored):
+
+```bash
+mkdir -p tmp
+./system-test.sh --background --no-disruptive 2>&1 > tmp/system-test.log
+tail -f tmp/system-test.log        # watch progress
+grep -E '^(== SECTION|PASS|FAIL)' tmp/system-test.log   # summary
+```
+
+Alternatively, run it foreground but pipe to a log so the start and end
+are both visible:
+
+```bash
+./system-test.sh --no-disruptive 2>&1 | tee tmp/system-test.log
+```
+
 Sections run **independently** — a failed section is recorded and the
 run continues (one broken seam doesn't hide the state of the others).
 Exit code is non-zero if any section failed. Per-section playbook logs
