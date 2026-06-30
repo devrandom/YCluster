@@ -103,6 +103,39 @@ M2.7's MoE uses a working backend), (b) the MSA sparse-attention backend, and
 Things to watch: a stock vLLM release picking up #45381 **and** #43814 (→ path 1,
 retire the fork); the b12x branch picking up #45381 (→ path 2).
 
+### Upstream status of the two b12x halves (2026-06-30 survey)
+
+b12x is two separable pieces, and they're upstreaming at very different rates.
+This matters because **M3 needs only the first; GLM-5.2 needs both.**
+
+- **SM120 NVFP4 MoE kernels — mostly landed in mainline.** Native NVFP4 MoE
+  CUTLASS for SM120 is in stock vLLM (commits `e502098` "[Kernel] Add NVFP4 MoE
+  CUTLASS support for SM120", `c0dfc89` "SM120/NVFP4 device guard + runtime SM
+  dispatch"; `cutlass_scaled_mm_supports_fp4(120)` → True). The backend-*selection*
+  bugs that forced a Marlin fallback (family check rejecting SM12.0) are being
+  closed — **#33416 closed via merged #33417**, **#31085** tracks the rest. Our
+  watched **#43814 is still open but is now the wrong PR to wait on**: it's *FP8*
+  grouped GEMM (~7% over Triton), not NVFP4, and is blocked on CUTLASS #3280. The
+  NVFP4 MoE path got there via other commits. Consistent with the M2.7 scope-check
+  above (stock NVFP4 MoE already works on SM120).
+- **DSA / sparse-MLA on SM120 — NOT upstream; this is the GLM-5.2 blocker.**
+  `B12X_MLA_SPARSE` has no stock equivalent on SM120: sparse MLA in
+  FlashMLA/FlashInfer is hand-written for **SM90a / SM100f only**, and SM120 hits
+  `AssertionError requiring FlashMLA sparse kernel`. Open gap issue **#45317**
+  ("DSA models — GLM-5.1 / DeepSeek-V3.2-family, `use_sparse=True` — cannot select
+  any attention backend on SM121/SM120"). Only a slow Triton fallback exists
+  (`VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH=1`, CUDA-graph-disabled by default).
+  fp4 KV stays hardware-blocked (DSA fp4 indexer asserts SM100). The official vLLM
+  GLM-5.2 recipe lists **only datacenter GPUs** (H200/B200/B300/MI300X, TP=8,
+  vLLM 0.23.0) — no RTX 6000 Pro / SM120.
+
+**Net:** M3 is close to a stock cutover (its sparse-attn is MSA, and the MoE half
+is the blocker that's now mostly resolved — re-test stock on a node). **GLM-5.2
+cannot leave b12x yet** — its DSA sparse-MLA half has no SM120 kernel upstream.
+The GLM-5.2 issue to watch is **#45317**, not #43814. (Version caveat: these
+threads reference vLLM 0.13–0.23, ahead of our pinned `0.11.2.dev` image — confirm
+exact mainline state on an nv node before acting.)
+
 ## Build plan (fallback — resolution path 2)
 
 Only needed until a stock vLLM release can serve M3 on SM120 (path 1 above).

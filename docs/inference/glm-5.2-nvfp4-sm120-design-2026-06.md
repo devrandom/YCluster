@@ -312,3 +312,105 @@ endgame ("drop b12x for stock vLLM"): once a stock vLLM release carries the open
 SM120 NVFP4 MoE-kernel fixes (e.g. #43814), `uv tool install vllm` could serve
 GLM-5.2 natively with tool calling and no fork. The b12x image is the bridge,
 not the destination — for GLM-5.2 even more clearly than for M3.
+
+## Single-stream speedup options (2026-06-30 web survey)
+
+Prompted by a "someone got 100+ tok/s on RTX 6000 Pro" report, against our
+measured **~39.5 tok/s single-stream decode** at PP=2×TP=4. This section is
+single-stream only — aggregate/concurrency tuning (`max_num_seqs`) is a separate,
+untested axis and not covered here.
+
+**Provenance of the "100 tok/s" number — it's an unverified forum rec, not a
+measurement.** It traces to the `lukealonso/GLM-5-NVFP4` HF discussion (same b12x
+kernel author we run): one poster got **31 tok/s** on 6× RTX 6000 Pro under
+SGLang `--tp 2 --pp-size 3` (modelopt_fp4, flashinfer + flashinfer_cutlass, bf16
+KV), another got **24 tok/s single-request** on 6 GPUs and hit `Pipeline
+parallelism is not compatible with overlap schedule, speculative decoding` — and
+the reply was *"upgrade to 8 and you can get 100 tokens per second."* No measured
+8-GPU number backs it. Its entire premise is **8 GPUs + no PP so speculative
+decoding turns back on** — i.e. exactly the TP=8+MTP experiment this doc already
+ran and rejected above. So it adds no new information on its own; the decisive
+variable is whether the speculative **draft** is efficient.
+
+**Reframe: the impressive community numbers are aggregate, not single-stream.**
+The other widely-cited figure — `lukealonso/GLM-5.1-NVFP4` discussion #4, "From
+Doesn't Work to 641 tok/s" — is **641 aggregate at batch=128, where per-request
+is only 7.6 t/s**; its **single-stream (batch=1) was 33 t/s** (TP=2/PP=3, dense
+attn, `--enforce-eager`, no MTP) — *slower than our 39.5*. So the real
+single-stream band on 6–8× RTX 6000 Pro for GLM-5.x is roughly **33–81 t/s**, and
+our 39.5 sits squarely in it. **100+ t/s single-stream on the full 744B is very
+likely not reachable on this hardware** — that target conflates batched aggregate
+with per-stream. Treat ~60–85 t/s single-stream as the realistic ceiling and size
+effort accordingly; if the actual need is *aggregate* throughput, raise
+concurrency instead (separate axis, untested here).
+
+The gap between our 39.5 and the realistic single-stream ceiling reduces mostly to
+**an efficient spec-decode draft**, plus one config lever (DCP). Everything else
+is already optimal here (NVFP4, fp8 KV, B12X sparse MLA, chunked prefill, prefix
+caching, async scheduling), and the generic "go TP=8" advice is wrong for our
+no-NVLink box (see the 06-26 update: TP=8 is comms-bound and *loses* 2.2×
+prefill). Three real levers, ranked:
+
+1. **An NVFP4-quantized MTP draft layer — highest leverage, stays on our stack.**
+   This is the "revisit if an NVFP4 MTP checkpoint appears" condition from the
+   06-26 MTP note — and as of this survey it has **partly appeared**. Today's MTP
+   loss is *only* because our `nvidia/GLM-5.2-NVFP4` layer 78 ships bf16/unquantized
+   (the stock ModelOpt quantizer rejects the nextn-layer experts) and b12x is
+   NVFP4-only, forcing the slow 256-expert triton draft (~26 t/s even at ~85%
+   acceptance). If layer 78 were NVFP4 the b12x draft kernel applies and MTP flips
+   to net-positive. What the survey found:
+   - **`lukealonso/GLM-5.1-NVFP4-MTP` exists** — same b12x author, explicitly "an
+     experimental update … that includes a **quantized NVFP4 MTP model**" (84
+     shards, dtypes incl. U8 = packed FP4). This is exactly the artifact we wanted,
+     but for **5.1, not 5.2** — no `GLM-5.2-NVFP4-MTP` located yet.
+   - **`0xSero/glm-5.2-sm120` already runs MTP on our exact stack** (`B12X_MLA_SPARSE`
+     + `--moe-backend b12x` + `modelopt_fp4` + `--speculative-config mtp,3`) at
+     **~60 t/s decode short / ~45 @ 64k–100k** — a direct counterexample to "MTP is
+     a net loss on b12x." Caveats: it's the **REAP-469B** variant (smaller → cheaper
+     draft) on **4 GPUs TP=4/DCP=4**, not our full 744B at PP=2×TP=4, and it uses
+     `--kv-cache-dtype fp8_ds_mla` (we settled on plain `fp8`). So ~60 t/s is not a
+     full-744B number — but it proves the mechanism.
+
+   Action: (a) ask lukealonso for / watch for a `GLM-5.2-NVFP4-MTP`; (b) failing
+   that, quantize layer 78 of our checkpoint with ModelOpt ourselves (pin the
+   nextn experts to NVFP4 explicitly); (c) inspect 0xSero's REAP checkpoint for how
+   its MTP layer is stored. Then re-run the MTP A/B (`DISABLE_MTP=0
+   MOE_SPEC_BACKEND=b12x`). At ~85% acceptance a working NVFP4 draft is ~2–2.4× →
+   **~80–95 t/s** realistic ceiling. (Open question: whether MTP can run under PP
+   at all — `DeepSeekMTPModel` lacks `SupportsPP`, so this likely still forces TP=8
+   and trades away prefill; bench both.)
+
+2. **Benchmark SGLang head-to-head — biggest unexplored lever, but not a sure
+   win here.** vLLM issue #26838 (RTX 6000 Pro) measured **SGLang 133 t/s vs vLLM
+   78 t/s** on GLM-4.5-Air-FP8 at TP=4. SGLang's GLM-5.2 cookbook runs pure
+   `--tp 8` with **EAGLE** spec (`--speculative-num-steps 5
+   --speculative-eagle-topk 1 --speculative-num-draft-tokens 6`) and a **V2 spec
+   engine** (`SGLANG_ENABLE_SPEC_V2=True` — "absolutely required" or it silently
+   downgrades NEXTN→EAGLE and loads a second model copy as draft). EAGLE may
+   sidestep the bf16-MTP-draft problem entirely. **Caveat that bites us
+   specifically:** SGLang's NVFP4 MoE backends (flashinfer_cutlass / trtllm) have
+   open garbage-output/OOM bugs on SM120 in early 2026 (flashinfer #2485, sglang
+   #17955) — and we're on b12x *precisely because* cutlass/flashinfer NaN on
+   SM120. So this needs an empirical bench on an nv node, with `zai-org/GLM-5.2-FP8`
+   as a precision fallback (verify that checkpoint ships the MTP layer — the
+   GLM-4.6-FP8 one reportedly doesn't).
+
+3. **Lower DCP if we don't need extreme context — a pure-config A/B we can run
+   today.** `DCP_SIZE` is already an exposed knob in the start script. 0xSero's
+   SM120 ablation (REAP-469B, 4 GPUs) shows decode trades against DCP: **DCP=1
+   ~81 t/s** (but max ctx ~131k, OOMs beyond), DCP=2 ~49, **DCP=4 ~60** (our
+   setting, 250k ctx, ~3× concurrency). The table is non-monotonic (concurrency
+   differs per row, so there are confounds) — so this is a "bench it on our full
+   744B," not a guaranteed win — but DCP=4 exists to make **250k+ context** fit by
+   sharding MLA KV along the sequence dim, and each decode step pays a cross-GPU
+   KV gather for it. If our real context ceiling is well under 250k, a lower DCP
+   may buy meaningful decode at the cost of max context (and KV-pool headroom).
+   Zero-cost to try: `DCP=2` / `DCP=1` vs our `DCP=4`, same image, watch decode t/s
+   and the max-context/OOM boundary. (Note: 0xSero uses `--kv-cache-dtype
+   fp8_ds_mla`; we settled on plain `fp8` — worth re-confirming which the current
+   b12x image wants, since it interacts with the DSA indexer cache.)
+
+**Confirmed dead ends (don't re-litigate):** EP on b12x (already a `ValueError`);
+`max_num_batched_tokens` tuning (zero single-stream effect, measured); fp4 KV
+(hardware-blocked on SM120). A web survey's attempts to claim EP helps on PCIe or
+that GLM-5 can't run on vLLM/SM120 did **not** survive verification.
