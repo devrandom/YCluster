@@ -18,7 +18,8 @@ import (
 // fakeHealthy is a Healthy double with a fixed per-URL allowlist.
 type fakeHealthy struct{ healthy map[string]bool }
 
-func (f *fakeHealthy) IsHealthy(u string) bool { return f.healthy[u] }
+func (f *fakeHealthy) IsHealthy(u string) bool                  { return f.healthy[u] }
+func (f *fakeHealthy) ServesModel(u, model string) bool         { return f.healthy[u] }
 
 // TestModelRouterPicksLeastLoaded verifies that with multiple healthy
 // backends, the router picks the one with the lowest in-flight count.
@@ -358,5 +359,55 @@ func TestLoadCounterIncDecRoundTrip(t *testing.T) {
 	lc.Dec("x")
 	if c := lc.Count("x"); c != 1 {
 		t.Errorf("after Dec: count = %d; want 1", c)
+	}
+}
+
+// TestModelRouterSkipsBackendThatDoesntServeModel verifies the
+// end-to-end stale-entry path: a backend is healthy and reports its
+// /v1/models list, but a model is mapped to it that it doesn't serve.
+// The router should exclude that backend from candidates, and if no
+// candidates remain, return ErrNoHealthyBackend so the handler
+// surfaces a 503 instead of forwarding to a backend that will return
+// "model not found".
+func TestModelRouterSkipsBackendThatDoesntServeModel(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"alpha"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	upURL := mustURL(t, up.URL)
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {upURL},
+		"beta":  {upURL}, // stale — backend doesn't serve beta
+	}}
+
+	hc := NewHealthChecker(src, time.Hour, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	hc.checkAll(context.Background())
+
+	r := NewModelRouter(src)
+	r.Healthy = hc
+
+	// "alpha" should route successfully
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"alpha"}`))
+	res, err := r.Route(req)
+	if err != nil {
+		t.Fatalf("Route(alpha) err = %v", err)
+	}
+	if len(res.Candidates) != 1 || res.Candidates[0].String() != upURL.String() {
+		t.Errorf("Route(alpha) candidates = %v; want [%s]", res.Candidates, upURL)
+	}
+
+	// "beta" should fail — the backend doesn't serve it
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"beta"}`))
+	_, err = r.Route(req)
+	if !errors.Is(err, ErrNoHealthyBackend) {
+		t.Errorf("Route(beta) err = %v; want ErrNoHealthyBackend", err)
 	}
 }

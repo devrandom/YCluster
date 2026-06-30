@@ -230,3 +230,56 @@ func TestHealthCheckerDeduplicatesURLsAcrossModels(t *testing.T) {
 		t.Errorf("got %d state entries; want 1", len(hc.Snapshot()))
 	}
 }
+
+// TestHealthCheckerServesModelDetectsStaleEntries verifies that when a
+// backend's /v1/models response lists specific model IDs, ServesModel
+// returns false for a model mapped to that backend that the backend
+// doesn't actually serve — the stale etcd-entry case.
+func TestHealthCheckerServesModelDetectsStaleEntries(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"alpha"},{"id":"beta"}]}`))
+	}))
+	defer up.Close()
+
+	u := mustURL(t, up.URL)
+	hc := newTestHealthChecker(t, map[string][]*url.URL{
+		"alpha": {u},
+		"gamma": {u}, // stale — backend doesn't serve gamma
+	})
+	hc.checkAll(context.Background())
+
+	bh := hc.Snapshot()[up.URL]
+	if bh.State != StateHealthy {
+		t.Fatalf("state = %v; want healthy", bh.State)
+	}
+	if !hc.ServesModel(up.URL, "alpha") {
+		t.Error("ServesModel(alpha) = false; want true (backend serves alpha)")
+	}
+	if hc.ServesModel(up.URL, "gamma") {
+		t.Error("ServesModel(gamma) = true; want false (backend doesn't serve gamma)")
+	}
+}
+
+// TestHealthCheckerServesModelUnknownListAllowsAll verifies that when
+// the backend's model list can't be determined (e.g. 401), ServesModel
+// returns true for any model so the router doesn't filter out a
+// reachable backend we couldn't interrogate.
+func TestHealthCheckerServesModelUnknownListAllowsAll(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer up.Close()
+
+	hc := newTestHealthChecker(t, map[string][]*url.URL{
+		"alpha": {mustURL(t, up.URL)},
+	})
+	hc.checkAll(context.Background())
+
+	if !hc.ServesModel(up.URL, "alpha") {
+		t.Error("ServesModel(alpha) = false; want true (model list unknown)")
+	}
+	if !hc.ServesModel(up.URL, "anything") {
+		t.Error("ServesModel(anything) = false; want true (model list unknown)")
+	}
+}

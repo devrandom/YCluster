@@ -403,10 +403,11 @@ func removeURL(s []*url.URL, u *url.URL) []*url.URL {
 // as alerts): ok | degraded | down | unknown.
 func writeHealthz(w http.ResponseWriter, snap map[string]BackendHealth, models map[string][]*url.URL) {
 	type entry struct {
-		URL       string `json:"url"`
-		State     string `json:"state"`
-		LastCheck string `json:"last_check"`
-		Err       string `json:"err,omitempty"`
+		URL       string   `json:"url"`
+		State     string   `json:"state"`
+		LastCheck string   `json:"last_check"`
+		Err       string   `json:"err,omitempty"`
+		Models    []string `json:"models,omitempty"`
 	}
 	type modelEntry struct {
 		Name     string   `json:"name"`
@@ -435,6 +436,7 @@ func writeHealthz(w http.ResponseWriter, snap map[string]BackendHealth, models m
 			URL:       u,
 			State:     bh.State.String(),
 			LastCheck: bh.LastCheck.UTC().Format(time.RFC3339),
+			Models:    bh.Models,
 		}
 		if bh.Err != "" {
 			e.Err = bh.Err

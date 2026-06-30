@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -39,6 +41,14 @@ type BackendHealth struct {
 	State     BackendState
 	LastCheck time.Time
 	Err       string // set when state is Down
+
+	// Models is the list of model IDs the backend reported serving via
+	// /v1/models. nil means the list couldn't be determined (e.g. 401,
+	// non-JSON body) — ServesModel returns true in that case so the
+	// router doesn't filter out a reachable backend. An empty (non-nil)
+	// slice means the backend reported no models, so every model mapped
+	// to it is stale and ServesModel returns false.
+	Models []string
 }
 
 // DisabledLookup returns true when the given backend URL is operator-
@@ -161,6 +171,27 @@ func (hc *HealthChecker) IsHealthy(urlStr string) bool {
 	return ok && bh.State == StateHealthy
 }
 
+// ServesModel reports whether the given backend URL is known to serve
+// the given model ID. Returns true when the model list couldn't be
+// determined (Models is nil) so the router doesn't filter out a
+// reachable backend we couldn't interrogate. Returns false when the
+// backend reported a model list that doesn't contain the model — the
+// stale-entry case this method exists to catch.
+func (hc *HealthChecker) ServesModel(urlStr, model string) bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	bh, ok := hc.states[urlStr]
+	if !ok || bh.Models == nil {
+		return true
+	}
+	for _, m := range bh.Models {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
 // Snapshot returns a copy of the current per-backend states.
 func (hc *HealthChecker) Snapshot() map[string]BackendHealth {
 	hc.mu.RLock()
@@ -223,7 +254,7 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 
 	for k, u := range urls {
 		if hc.Disabled != nil && hc.Disabled.IsDisabled(k) {
-			hc.record(u, StateDisabled, "")
+			hc.record(u, StateDisabled, "", nil)
 			continue
 		}
 		hc.checkOne(ctx, u)
@@ -249,7 +280,7 @@ func (hc *HealthChecker) checkOne(ctx context.Context, u *url.URL) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checkURL.String(), nil)
 	if err != nil {
-		hc.record(u, StateDown, fmt.Sprintf("build request: %v", err))
+		hc.record(u, StateDown, fmt.Sprintf("build request: %v", err), nil)
 		return
 	}
 	resp, err := hc.client.Do(req)
@@ -257,22 +288,44 @@ func (hc *HealthChecker) checkOne(ctx context.Context, u *url.URL) {
 		if ctx.Err() != nil {
 			return // shutting down
 		}
-		hc.record(u, StateDown, err.Error())
+		hc.record(u, StateDown, err.Error(), nil)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	// Treat any HTTP response as "backend is reachable" — a 4xx from
 	// auth or a missing endpoint still means the server is up. 5xx is
 	// counted as down.
 	if resp.StatusCode >= 500 {
-		hc.record(u, StateDown, fmt.Sprintf("HTTP %d", resp.StatusCode))
+		hc.record(u, StateDown, fmt.Sprintf("HTTP %d", resp.StatusCode), nil)
 		return
 	}
-	hc.record(u, StateHealthy, "")
+
+	// Parse the /v1/models response to learn which model IDs the backend
+	// serves. Cap the body at 1 MiB — backends like exo expose ~120 models
+	// but no /v1/models response should be megabytes. If the body isn't
+	// valid JSON or doesn't match the OpenAI shape, leave Models nil so
+	// ServesModel returns true (don't filter a reachable backend we
+	// couldn't interrogate).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var models []string
+	if err == nil {
+		var parsed struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &parsed) == nil && parsed.Data != nil {
+			models = make([]string, 0, len(parsed.Data))
+			for _, m := range parsed.Data {
+				models = append(models, m.ID)
+			}
+		}
+	}
+	hc.record(u, StateHealthy, "", models)
 }
 
-func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string) {
+func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string, models []string) {
 	hc.mu.Lock()
 	prev, had := hc.states[u.String()]
 	next := BackendHealth{
@@ -280,6 +333,7 @@ func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string) {
 		State:     state,
 		LastCheck: time.Now(),
 		Err:       errMsg,
+		Models:    models,
 	}
 	hc.states[u.String()] = next
 	hc.mu.Unlock()

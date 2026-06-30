@@ -20,11 +20,13 @@ import (
 // handler converts this into a 503 rather than a 400.
 var ErrNoHealthyBackend = errors.New("no healthy backend for model")
 
-// Healthy reports whether a backend URL is currently known-healthy.
-// Used by ModelRouter to filter candidate backends. A nil Healthy
-// means "trust the source list as-is" (used in tests / passthrough).
+// Healthy reports whether a backend URL is currently known-healthy
+// and whether it serves a given model. Used by ModelRouter to filter
+// candidate backends. A nil Healthy means "trust the source list
+// as-is" (used in tests / passthrough).
 type Healthy interface {
 	IsHealthy(urlStr string) bool
+	ServesModel(urlStr, model string) bool
 }
 
 // maxRoutingBodyBytes caps how much of a JSON request body we'll read to
@@ -214,7 +216,7 @@ func (m *ModelRouter) candidatesFor(model string) ([]*url.URL, error) {
 	}
 	filtered := make([]*url.URL, 0, len(urls))
 	for _, u := range urls {
-		if m.Healthy.IsHealthy(u.String()) {
+		if m.Healthy.IsHealthy(u.String()) && m.Healthy.ServesModel(u.String(), model) {
 			filtered = append(filtered, u)
 		}
 	}
