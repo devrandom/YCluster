@@ -140,3 +140,12 @@
         name: backup-verify-restore.timer
         enabled: yes
         state: started
+
+    # NOTE: the first drill after this playbook runs will fail with
+    # `age: error: no identity matched any of the recipients` if the newest
+    # encrypted backups predate the `restore-verify` recipient (i.e. they
+    # were only encrypted to `devrandom`). The fix is to take a fresh backup
+    # (`backup-databases backup`) so it's encrypted to both recipients, then
+    # re-run `backup-databases verify-restore`. The metrics flip to `1` for
+    # all three components and the `BackupRestoreFailed` alert clears on the
+    # next scrape.
