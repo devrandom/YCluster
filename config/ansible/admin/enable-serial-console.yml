@@ -3,8 +3,14 @@
   hosts: storage
   become: yes
   tasks:
+    - name: Check whether /dev/ttyS4 exists
+      stat:
+        path: /dev/ttyS4
+      register: ttys4_dev
+
     - name: Enable serial-getty@ttyS4.service
       systemd:
         name: serial-getty@ttyS4.service
         enabled: yes
         state: started
+      when: ttys4_dev.stat.exists
