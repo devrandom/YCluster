@@ -1,6 +1,8 @@
 ---
 - name: Build Open WebUI with plugins
-  hosts: "{{ buildhost }}"
+  # Run on localhost so import_playbook can resolve `hosts` statically;
+  # each task delegates to the buildhost.
+  hosts: localhost
   gather_facts: false
   vars:
     instance: "{{ openwebui_instance | default('') }}"
@@ -12,56 +14,58 @@
     image_name: "registry.xc:5000/open-webui-with-plugins"
     image_tag: "{{ instance if instance else 'latest' }}"
   tasks:
-    - name: Verify registry is ready for push operations
-      uri:
-        url: "http://registry.xc:5000/v2/_catalog"
-        method: GET
-        timeout: 10
-      register: registry_catalog
-      failed_when: registry_catalog.status != 200
+    - block:
+        - name: Verify registry is ready for push operations
+          uri:
+            url: "http://registry.xc:5000/v2/_catalog"
+            method: GET
+            timeout: 10
+          register: registry_catalog
+          failed_when: registry_catalog.status != 200
 
-    - name: Create build directory
-      file:
-        path: "{{ build_dir }}"
-        state: directory
-        mode: '0755'
+        - name: Create build directory
+          file:
+            path: "{{ build_dir }}"
+            state: directory
+            mode: '0755'
 
-    - name: Check out open-webui-plugins repository
-      git:
-        repo: "{{ plugins_repo }}"
-        dest: "{{ build_dir }}/open-webui-plugins"
-        update: "{{ instance == '' }}"
+        - name: Check out open-webui-plugins repository
+          git:
+            repo: "{{ plugins_repo }}"
+            dest: "{{ build_dir }}/open-webui-plugins"
+            update: "{{ instance == '' }}"
 
-    - name: Check out open-webui repository
-      git:
-        repo: "{{ webui_repo }}"
-        dest: "{{ build_dir }}/open-webui"
-        version: "{{ webui_version }}"
-        force: yes
-        update: "{{ instance == '' }}"
+        - name: Check out open-webui repository
+          git:
+            repo: "{{ webui_repo }}"
+            dest: "{{ build_dir }}/open-webui"
+            version: "{{ webui_version }}"
+            force: yes
+            update: "{{ instance == '' }}"
 
-    - name: Patch upstream Kagi web search (fixes 401; upstream sends Bearer/POST instead of Bot/GET)
-      copy:
-        src: files/kagi.py
-        dest: "{{ build_dir }}/open-webui/backend/open_webui/retrieval/web/kagi.py"
-        mode: '0644'
+        - name: Patch upstream Kagi web search (fixes 401; upstream sends Bearer/POST instead of Bot/GET)
+          copy:
+            src: files/kagi.py
+            dest: "{{ build_dir }}/open-webui/backend/open_webui/retrieval/web/kagi.py"
+            mode: '0644'
 
-    - name: Build and push with buildx using registry cache
-      shell: |
-        docker buildx build \
-          --build-arg http_proxy=http://10.0.0.254:3128 \
-          --build-arg USE_SLIM=true \
-          --cache-from type=registry,ref={{ image_name }}:cache \
-          --cache-to type=registry,ref={{ image_name }}:cache,mode=max \
-          --build-context plugins=open-webui-plugins \
-          --progress plain \
-          --tag {{ image_name }}:{{ image_tag }} \
-          --push \
-          ./open-webui | tee /tmp/build-open-webui.log 2>&1
-      args:
-        chdir: "{{ build_dir }}"
-      no_log: false
+        - name: Build and push with buildx using registry cache
+          shell: |
+            docker buildx build \
+              --build-arg http_proxy=http://10.0.0.254:3128 \
+              --build-arg USE_SLIM=true \
+              --cache-from type=registry,ref={{ image_name }}:cache \
+              --cache-to type=registry,ref={{ image_name }}:cache,mode=max \
+              --build-context plugins=open-webui-plugins \
+              --progress plain \
+              --tag {{ image_name }}:{{ image_tag }} \
+              --push \
+              ./open-webui | tee /tmp/build-open-webui.log 2>&1
+          args:
+            chdir: "{{ build_dir }}"
+          no_log: false
 
-    - name: Display build completion message
-      debug:
-        msg: "Docker image {{ image_name }}:{{ image_tag }} built and pushed to registry successfully"
+        - name: Display build completion message
+          debug:
+            msg: "Docker image {{ image_name }}:{{ image_tag }} built and pushed to registry successfully"
+      delegate_to: "{{ buildhost }}"
