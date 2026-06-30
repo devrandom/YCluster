@@ -83,7 +83,7 @@ DISABLE_MTP="${DISABLE_MTP:-1}"
 # requests"; --override-generation-config merges it onto the model's auto config
 # (default sampling preserved). GLM-5.2's reasoning_content is ordinary generated
 # output, so this bounds reasoning + answer together, not just the visible answer.
-MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-10000}"
+MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-50000}"
 
 # Optional recipe-env overrides, forwarded to serve-glm52.sh's same-named knobs
 # only when set (left to the recipe's own defaults otherwise, so the image owns

@@ -131,7 +131,55 @@ HF under `zai-org` ~06-17): a **~744B / ~40B-active MoE**, 1M-token context,
 131K max output, with **IndexShare sparse attention** and **MTP** (multi-token
 prediction) speculative decode. Coding/agentic focus rather than chat. Thinking
 is on by default (DeepSeek-V4-style `reasoning_effort`; toggle off via chat
-template kwargs).
+template kwargs). See [Reasoning effort / thinking control](#reasoning-effort--thinking-control)
+for the exact, coarser-than-it-looks semantics.
+
+## Reasoning effort / thinking control
+
+Thinking is on by default and runs at the **highest** effort. The deployed
+`chat_template.jinja` exposes a deliberately coarse knob — verified by rendering
+the template directly (2026-06-30):
+
+```jinja
+{%- set effective_reasoning_effort = 'high' if reasoning_effort is defined and reasoning_effort == 'high' else 'max' -%}
+```
+
+| request sends | template emits | effect |
+|---|---|---|
+| (nothing) | `Reasoning Effort: Max` | **default** — full overthinking |
+| `reasoning_effort: "high"` | `Reasoning Effort: High` | one notch down (the *only* reduction available) |
+| `reasoning_effort: "low"` / `"medium"` / `"minimal"` | `Reasoning Effort: Max` | **silently ignored** — maps to max |
+| `chat_template_kwargs: {"enable_thinking": false}` | (no effort line; emits empty `<think></think>`) | thinking off entirely |
+
+Practical consequences:
+
+- The graded `reasoning_effort` lever has exactly **two states for this
+  checkpoint**: `high`, or everything-else→`max`. Don't expect `low`/`medium`
+  to do anything.
+- To curb overthinking the real choices are `reasoning_effort: "high"` (mild) or
+  `enable_thinking: false` (off). There is no native thinking-token *budget*.
+- Server-wide off: `serve-glm52.sh` honors `ENABLE_THINKING=0`, but
+  `glm52-b12x-start.sh` does not currently plumb it through (image default = on),
+  so today this is a per-request choice.
+- Sampling defaults from the checkpoint's `generation_config.json` are healthy
+  (`temperature 1.0, top_p 0.95, do_sample true`), so "getting stuck" is the
+  effort level, not a greedy-decode loop.
+- **Output cap is separate**: `MAX_OUTPUT_TOKENS` in `glm52-b12x-start.sh`
+  (`--override-generation-config max_new_tokens`, default 50000) bounds
+  reasoning **+** answer together, since GLM's `reasoning_content` is ordinary
+  generated output.
+
+**opencode:** set it per-model in `opencode.jsonc`:
+
+```jsonc
+"nvidia/GLM-5.2-NVFP4": { "name": "GLM-5.2", "options": { "reasoningEffort": "high" } }
+```
+
+Despite older upstream bug reports about model-level options being dropped for
+`@ai-sdk/openai-compatible` providers, opencode 1.17.11 **does** forward this as
+a top-level `reasoning_effort` field — confirmed by capturing the outbound
+request body. (The provider's `small_model` call correctly omits it; the option
+is per-model.)
 
 ## Why it overlaps M3 so heavily
 
