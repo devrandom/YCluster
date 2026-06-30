@@ -3006,6 +3006,79 @@ def users_action():
         return jsonify({'error': str(e)}), 400
 
 
+@app.route('/admin/settings')
+def settings_page():
+    """Self-service settings — the logged-in user's own SSH keys for VM
+    access. Served on the app.<domain> vhost (see ycluster_app.conf.j2)."""
+    return render_template('admin-settings.html')
+
+
+@app.route('/admin/settings/data')
+def settings_data():
+    email, is_admin = _authentik_identity()
+    if not email:
+        # No forward-auth identity (internal / direct :12723) → there is no
+        # "logged-in user" to self-manage; operators use `ycluster vm ssh`.
+        return jsonify({'error': 'no authenticated user'}), 403
+    try:
+        rec = vmm.user_get(email) or {}
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+    return jsonify({'email': email, 'is_admin': is_admin,
+                    'keys': rec.get('ssh_keys', [])})
+
+
+# Mutating, forward-auth gated. ALWAYS scoped to the caller's own
+# /cluster/users/<email> record — the email comes from the auth header, never
+# from the request body, so a user can only edit their own keys. We touch only
+# etcd here: the per-host `vm bastion-watch` services watch /cluster/users and
+# re-sync the jump bastions + running VMs on change. Calling bastion_sync() /
+# vm_sync_keys() inline would fail — this runs on a core node with no incus.
+@app.route('/admin/settings/keys/add', methods=['POST'])
+def settings_keys_add():
+    email, _ = _authentik_identity()
+    if not email:
+        return jsonify({'error': 'no authenticated user'}), 403
+    key = (request.get_json(silent=True) or {}).get('key', '')
+    if not isinstance(key, str) or not key.strip():
+        return jsonify({'error': 'no key provided'}), 400
+    try:
+        vmm.user_add_key(email, key)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400        # bad key format
+    except Exception as e:
+        return jsonify({'error': f'etcd write failed: {e}'}), 503
+    return _settings_keys_response(email)
+
+
+@app.route('/admin/settings/keys/remove', methods=['POST'])
+def settings_keys_remove():
+    email, _ = _authentik_identity()
+    if not email:
+        return jsonify({'error': 'no authenticated user'}), 403
+    key = (request.get_json(silent=True) or {}).get('key', '')
+    if not isinstance(key, str) or not key.strip():
+        return jsonify({'error': 'no key provided'}), 400
+    try:
+        rec = vmm.user_get(email) or {}
+        if key not in rec.get('ssh_keys', []):
+            return jsonify({'error': 'key not found'}), 404
+        # Pass the full key line so the substring match removes exactly it
+        # (distinct keys have distinct material, never a substring of each).
+        vmm.user_remove_key(email, key)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'etcd write failed: {e}'}), 503
+    return _settings_keys_response(email)
+
+
+def _settings_keys_response(email):
+    """Fresh key list for `email`, re-read after a mutation."""
+    rec = vmm.user_get(email) or {}
+    return jsonify({'keys': rec.get('ssh_keys', [])})
+
+
 @app.route('/admin/vm-usage')
 def vm_usage_page():
     """VM GPU-hour accounting: billable/tracked (events) vs observed (samples)."""

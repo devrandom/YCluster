@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings</title>
+  <script src="/static/nav.js" defer></script>
+  <script src="/static/alpine-3.14.1.min.js" defer></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+    h1 { color: #333; text-align: center; margin-bottom: 0.5rem; }
+    h2 { color: #333; font-size: 1.05rem; margin: 0 0 0.25rem; }
+    .explainer { color: #666; font-size: 0.85rem; text-align: center; margin-bottom: 1.5rem; }
+    .card { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1rem; max-width: 920px; margin-left: auto; margin-right: auto; }
+    .meta { color: #666; font-size: 0.85rem; }
+    .keylist { margin: 0.75rem 0; }
+    .key { display: flex; gap: 0.6rem; align-items: center; padding: 0.5rem 0; border-top: 1px solid #eee; }
+    .key:first-child { border-top: none; }
+    .ktype { font-weight: bold; font-size: 0.8rem; background: #eef2ff; color: #3730a3; border-radius: 4px; padding: 0.1rem 0.4rem; }
+    .kcomment { font-size: 0.9rem; }
+    .kfp { color: #888; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.78rem; }
+    .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    textarea { width: 100%; box-sizing: border-box; padding: 0.5rem; border-radius: 4px; border: 1px solid #ccc; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8rem; resize: vertical; }
+    .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
+    button { padding: 0.35rem 0.9rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    button:disabled { background: #9ca3af; cursor: default; }
+    .iconbtn { background: none; border: none; cursor: pointer; color: #b91c1c; padding: 0.3rem; border-radius: 4px; }
+    .iconbtn:hover { background: #fee2e2; }
+    .iconbtn svg { display: block; }
+    .saved { color: #166534; font-size: 0.85rem; }
+    .error { color: #b91c1c; font-size: 0.85rem; }
+    .empty { color: #666; font-style: italic; padding: 1rem 0; }
+    code { background: #f3f4f6; border-radius: 3px; padding: 0.05rem 0.3rem; font-size: 0.85em; }
+  </style>
+</head>
+<body x-data="settingsApp()" x-init="load()">
+  <h1>Settings</h1>
+  <p class="explainer">
+    Manage the SSH public keys that grant <b>you</b> access to your VMs.
+    Keys take effect on each VM host within ~1&nbsp;minute; then connect using
+    the <b>SSH config</b> shown on the <a href="/admin/vm-schedule">VM
+    Schedule</a> page.
+  </p>
+
+  <template x-if="fatal">
+    <div class="card"><span class="error" x-text="fatal"></span></div>
+  </template>
+
+  <template x-if="!fatal">
+    <div class="card">
+      <h2>SSH keys for VM access</h2>
+      <div class="meta" x-show="email">Signed in as <code x-text="email"></code></div>
+
+      <template x-if="loading"><div class="empty">Loading…</div></template>
+
+      <div class="keylist" x-show="!loading">
+        <template x-if="keys.length === 0">
+          <div class="empty">No SSH keys yet — add one below to reach your VMs.</div>
+        </template>
+        <template x-for="k in keys" :key="k">
+          <div class="key">
+            <span class="ktype" x-text="keyType(k)"></span>
+            <div class="grow">
+              <span class="kcomment" x-text="keyComment(k)"></span>
+              <span class="kfp" x-text="keyShort(k)"></span>
+            </div>
+            <button class="iconbtn" @click="removeKey(k)" aria-label="Remove key"
+                    title="Remove this key">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                   stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="!loading">
+        <textarea rows="2" x-model="newKey"
+                  placeholder="ssh-ed25519 AAAA… you@laptop"></textarea>
+        <div class="row">
+          <button @click="addKey()" :disabled="adding || !newKey.trim()">Add key</button>
+          <span class="saved" x-show="flash" x-text="flash"></span>
+          <span class="error" x-show="addError" x-text="addError"></span>
+          <span class="error" x-show="error" x-text="error"></span>
+        </div>
+        <div class="meta" style="margin-top:0.5rem">
+          Paste a public key (the contents of e.g. <code>~/.ssh/id_ed25519.pub</code>),
+          not your private key.
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    function settingsApp() {
+      return {
+        email: '', keys: [], newKey: '',
+        loading: false, adding: false,
+        fatal: '', addError: '', error: '', flash: '',
+
+        load() {
+          this.loading = true
+          fetch('/admin/settings/data')
+            .then(r => r.json())
+            .then(d => {
+              if (d.error) { this.fatal = d.error; this.loading = false; return }
+              this.email = d.email
+              this.keys = d.keys || []
+              this.loading = false
+            })
+            .catch(() => { this.fatal = 'failed to load settings'; this.loading = false })
+        },
+
+        // Display helpers: an authorized_keys line is "<type> <base64> [comment]".
+        keyType(k) { return (k.trim().split(/\s+/)[0]) || 'key' },
+        keyComment(k) {
+          const c = k.trim().split(/\s+/).slice(2).join(' ')
+          return c || '(no comment)'
+        },
+        keyShort(k) {
+          const b = k.trim().split(/\s+/)[1] || ''
+          return b.length > 28 ? b.slice(0, 14) + '…' + b.slice(-10) : b
+        },
+
+        addKey() {
+          this.addError = ''; this.flash = ''
+          // Quick client-side checks for instant feedback; the server
+          // re-validates authoritatively (single line, type, base64).
+          const key = this.newKey.trim()
+          if (!key) { this.addError = 'Paste a public key first.'; return }
+          if (/[\r\n]/.test(key)) {
+            this.addError = 'Paste a single key on one line.'; return }
+          // Shape check only (type token, then a base64 blob) — the server
+          // does the authoritative validation; we don't gatekeep algorithms.
+          if (!/^\S+\s+[A-Za-z0-9+/]{16,}={0,3}(\s|$)/.test(key)) {
+            this.addError = "That doesn't look like an SSH public key."; return }
+          this.adding = true
+          fetch('/admin/settings/keys/add', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key: this.newKey}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              this.adding = false
+              if (ok) { this.keys = d.keys || []; this.newKey = ''
+                        this.flash = '✓ key added'
+                        setTimeout(() => { this.flash = '' }, 2000) }
+              else this.addError = d.error || 'failed to add key'
+            })
+            .catch(() => { this.adding = false; this.addError = 'request failed' })
+        },
+
+        removeKey(k) {
+          this.error = ''
+          fetch('/admin/settings/keys/remove', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key: k}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              if (ok) this.keys = d.keys || []
+              else this.error = d.error || 'failed to remove key'
+            })
+            .catch(() => { this.error = 'request failed' })
+        },
+      }
+    }
+  </script>
+</body>
+</html>

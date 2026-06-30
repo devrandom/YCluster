@@ -23,6 +23,7 @@
 
     const items = isApp ? [
         ['VM Schedule', '/admin/vm-schedule'],
+        ['Settings', '/admin/settings'],
         ['Account', authHref],
     ] : [
         ['Home', '/'],

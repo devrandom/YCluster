@@ -1,8 +1,8 @@
-# app.<domain> — user-facing self-service surface (VM scheduling), gated by
-# the cluster IdP's "YCluster" application (no group policy → open to every
-# enrolled user; the Flask app owner-scopes each VM). Only the vm-schedule
-# paths are served here, so admin-only pages (inventory, model-usage, user
-# management on admin.<domain>) are NOT reachable via this host even though
+# app.<domain> — user-facing self-service surface (VM scheduling + Settings),
+# gated by the cluster IdP's "YCluster" application (no group policy → open to
+# every enrolled user; the Flask app scopes each VM/SSH-key to its owner).
+# Only the self-service paths are served here, so admin-only pages (inventory,
+# model-usage, user management on admin.<domain>) are NOT reachable even though
 # the same outpost fronts both. Rendered by certbot-manager from this
 # `*_app.conf.j2` template (the `_app` suffix sets domain=app.<primary> and
 # adds it to the certificate SAN). External users reach it through the
@@ -36,6 +36,15 @@ server {
     # The scheduling page + its data/set/stop-now APIs — forward-authed, then
     # owner-scoped in Flask. POST covers the desired-state and stop-now writes.
     location ^~ /admin/vm-schedule {
+        limit_except GET HEAD POST { deny all; }
+        limit_req zone=public_status burst=20 nodelay;
+        include /etc/nginx/admin-api-authentik-proxy.conf;
+    }
+
+    # Self-service Settings (the logged-in user's own SSH keys for VM
+    # access) — forward-authed, then scoped to that user's etcd record in
+    # Flask. POST covers the add/remove key writes.
+    location ^~ /admin/settings {
         limit_except GET HEAD POST { deny all; }
         limit_req zone=public_status burst=20 nodelay;
         include /etc/nginx/admin-api-authentik-proxy.conf;

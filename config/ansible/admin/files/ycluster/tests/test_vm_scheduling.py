@@ -359,5 +359,58 @@ class BastionPublicPortTests(unittest.TestCase):
             self.assertIsNone(vm.bastion_public_port(bad))
 
 
+class SshKeyValidationTests(unittest.TestCase):
+    """Pure validation (no etcd) — guards the authorized_keys injection path."""
+
+    VALID = ("ssh-ed25519 "
+             "AAAAC3NzaC1lZDI1NTE5AAAAIGtestKeyMaterial0123456789abcd user@host")
+
+    def test_accepts_any_well_formed_type(self):
+        # We don't gatekeep the algorithm — any plain-token type is fine.
+        for t in ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256",
+                  "sk-ssh-ed25519@openssh.com", "ssh-some-future-type"):
+            k = f"{t} AAAAC3NzaC1lZDI1NTE5AAAAIGtestKeyMaterial0123 me@h"
+            self.assertEqual(vm.validate_ssh_key(k), k)
+
+    def test_strips_surrounding_whitespace(self):
+        self.assertEqual(vm.validate_ssh_key(f"  {self.VALID}  \n"), self.VALID)
+
+    def test_rejects_embedded_newline(self):
+        # The authorized_keys injection vector: a second line would be an
+        # entry WITHOUT the restrict/port-forwarding options.
+        with self.assertRaises(ValueError):
+            vm.validate_ssh_key(self.VALID + "\nssh-rsa AAAAB3NzaInjected attacker")
+
+    def test_rejects_tab_and_controls(self):
+        with self.assertRaises(ValueError):
+            vm.validate_ssh_key("ssh-ed25519\tAAAAC3NzaC1lZDI1NTE5AAAAIGtest0123 x")
+
+    def test_rejects_type_with_special_chars(self):
+        # Shape check still rejects shell-ish junk in the type token.
+        with self.assertRaises(ValueError):
+            vm.validate_ssh_key("ssh-rsa;evil AAAAC3NzaC1lZDI1NTE5AAAAIGtest0123 x")
+
+    def test_rejects_non_base64_material(self):
+        with self.assertRaises(ValueError):
+            vm.validate_ssh_key("ssh-ed25519 not-valid-base64!! x")
+
+    def test_rejects_short_material(self):
+        with self.assertRaises(ValueError):
+            vm.validate_ssh_key("ssh-ed25519 AAAA x")
+
+    def test_rejects_missing_material(self):
+        with self.assertRaises(ValueError):
+            vm.validate_ssh_key("ssh-ed25519")
+
+    def test_rejects_empty(self):
+        for bad in ("", "   ", None):
+            with self.assertRaises(ValueError):
+                vm.validate_ssh_key(bad)
+
+    def test_rejects_too_long(self):
+        with self.assertRaises(ValueError):
+            vm.validate_ssh_key("ssh-ed25519 " + "A" * 5000 + " x")
+
+
 if __name__ == "__main__":
     unittest.main()

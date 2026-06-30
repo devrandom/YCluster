@@ -610,15 +610,58 @@ def users_all():
     return _all_json(USERS_PREFIX)
 
 
+# Per-user key cap: bounds the etcd value and the bastion authorized_keys
+# regenerated from it. Generous — real users have a handful.
+MAX_SSH_KEYS_PER_USER = 25
+# A real OpenSSH public-key line is well under this; the cap stops an
+# oversized blob from being smuggled into etcd / authorized_keys.
+MAX_SSH_KEY_LEN = 4096
+# Shape checks only — we don't gatekeep the key algorithm, just that the
+# tokens are well-formed (the type a plain identifier, the material base64).
+_SSH_KEY_TYPE_RE = re.compile(r"^[A-Za-z0-9@._-]+$")
+_SSH_KEY_B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,3}$")
+
+
+def validate_ssh_key(key):
+    """Validate a single SSH public-key line; return the cleaned string.
+
+    Security-critical: the value is later emitted verbatim into the jump
+    bastion's authorized_keys (see _bastion_authorized_keys), so a stray
+    newline or control char could split the line and smuggle in an entry
+    WITHOUT the restrict/port-forwarding options. We check shape/characters,
+    not the algorithm: a single '<type> <base64> [comment]' line of
+    printable text, type a plain token, material valid base64."""
+    if not isinstance(key, str):
+        raise ValueError("That does not look like an SSH public key.")
+    key = key.strip()
+    if not key:
+        raise ValueError("No SSH key provided.")
+    if len(key) > MAX_SSH_KEY_LEN:
+        raise ValueError("SSH key is too long.")
+    # \n \r \t (and other C0 controls) and DEL: an embedded newline is the
+    # injection vector; a single line of printable text is all that's valid.
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in key):
+        raise ValueError("An SSH key must be a single line of printable text.")
+    parts = key.split(None, 2)             # type, base64, [comment]
+    if len(parts) < 2:
+        raise ValueError("That does not look like an SSH public key.")
+    if not _SSH_KEY_TYPE_RE.match(parts[0]):
+        raise ValueError("That does not look like an SSH public key.")
+    if len(parts[1]) < 16 or not _SSH_KEY_B64_RE.match(parts[1]):
+        raise ValueError("That does not look like an SSH public key.")
+    return key
+
+
 def user_add_key(user, key):
     _valid_user(user)
-    key = key.strip()
-    if not re.match(r"^(ssh-|ecdsa-|sk-)", key):
-        raise ValueError("That does not look like an SSH public key.")
+    key = validate_ssh_key(key)
     rec = user_get(user) or {"ssh_keys": []}
     if key in rec["ssh_keys"]:
         print(f"Key already registered for '{user}'.")
         return
+    if len(rec["ssh_keys"]) >= MAX_SSH_KEYS_PER_USER:
+        raise ValueError(
+            f"Too many SSH keys ({MAX_SSH_KEYS_PER_USER} max) — remove one first.")
     rec["ssh_keys"].append(key)
     _put_json(USERS_PREFIX + user, rec)
     print(f"Added SSH key for '{user}' ({len(rec['ssh_keys'])} total).")
