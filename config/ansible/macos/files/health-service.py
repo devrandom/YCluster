@@ -413,4 +413,4 @@ def get_time():
 
 if __name__ == '__main__':
     print(f"Starting macOS health service on {platform.node()}")
-    app.run(host='0.0.0.0', port=12723)
+    app.run(host='0.0.0.0', port=12724)

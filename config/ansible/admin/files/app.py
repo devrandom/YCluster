@@ -2229,14 +2229,13 @@ def get_all_hosts():
     except Exception:
         return []
 
-def get_host_health(host_ip, host_type=None, timeout=10):
+def get_host_health(host_ip, timeout=10):
     """Get health status from a specific host"""
-    # macOS nodes run their own lite health-service on the legacy 12723
-    # port (predates the admin-api / health-api split). Everything else
-    # serves on the new 12724 health-api port.
-    port = 12723 if host_type == 'macos' else 12724
+    # Every managed host (storage, compute, nvidia, nas, macos) serves its
+    # own /api/health on the unified 12724 health-api port. admin-api (on
+    # 12723) is separate and storage-only — never queried for health.
     try:
-        response = requests.get(f"http://{host_ip}:{port}/api/health", timeout=timeout)
+        response = requests.get(f"http://{host_ip}:12724/api/health", timeout=timeout)
         if response.status_code in [200, 503]:
             # Both 200 (healthy) and 503 (unhealthy) contain valid health data
             return response.json()
@@ -2523,7 +2522,7 @@ def get_all_host_health(hosts):
             host_health[h['hostname']] = {'status': 'disabled', 'services': []}
 
     with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(get_host_health, h['ip'], h.get('type')): h['hostname'] for h in active}
+        futures = {executor.submit(get_host_health, h['ip']): h['hostname'] for h in active}
         for future in as_completed(futures):
             name = futures[future]
             result = future.result()
