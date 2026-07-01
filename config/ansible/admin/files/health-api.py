@@ -1169,4 +1169,9 @@ def prometheus_metrics():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=HEALTH_API_PORT)
+    # Bind on all interfaces so admin-api on storage peers can fetch
+    # each node's health cross-node via http://<ip>:12724/api/health.
+    # The endpoint exposes only read-only health data + Prometheus
+    # metrics (no auth, no mutations); firewall scopes who can reach
+    # the cluster network.
+    app.run(host="0.0.0.0", port=HEALTH_API_PORT)
