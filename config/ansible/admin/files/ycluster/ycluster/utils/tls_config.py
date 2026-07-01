@@ -7,12 +7,19 @@ import json
 import sys
 import argparse
 import datetime
+from typing import cast
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from ..common.etcd_utils import get_etcd_client
+
+# types-cryptography's Encoding/PrivateFormat stubs declare members as `str`;
+# cast through to the real Enum class so we can pass them where the stubs
+# require Encoding/PrivateFormat.
+_PEM: serialization.Encoding = cast(serialization.Encoding, serialization.Encoding.PEM)
+_PKCS8: serialization.PrivateFormat = cast(serialization.PrivateFormat, serialization.PrivateFormat.PKCS8)
 
 def generate_self_signed_cert(common_name="cluster.local", san_list=None):
     """Generate a self-signed certificate"""
@@ -64,10 +71,10 @@ def generate_self_signed_cert(common_name="cluster.local", san_list=None):
     ).sign(private_key, hashes.SHA256())
     
     # Serialize certificate and key
-    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    cert_pem = cert.public_bytes(_PEM)
     key_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
+        encoding=_PEM,
+        format=_PKCS8,
         encryption_algorithm=serialization.NoEncryption()
     )
     

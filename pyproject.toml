@@ -31,6 +31,7 @@ dev-dependencies = [
     "types-PyYAML",
     "types-protobuf",
     "types-netifaces",
+    "types-cryptography",
 ]
 
 # Also run once for ycluster import resolution:

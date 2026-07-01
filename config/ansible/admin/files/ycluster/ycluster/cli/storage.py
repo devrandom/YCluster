@@ -3,7 +3,7 @@ Storage and RBD management commands
 """
 
 import sys
-from ..storage import user_rbd
+from ..storage import user_rbd  # type: ignore[reportMissingImports]  # noqa: F401
 
 def register_storage_commands(subparsers):
     """Register storage management commands"""

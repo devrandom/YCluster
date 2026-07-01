@@ -8,11 +8,18 @@ import sys
 import json
 import datetime
 import ipaddress
+from typing import cast
 from pathlib import Path
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+
+# types-cryptography's Encoding/PrivateFormat stubs declare members as `str`,
+# which mismatches the actual Enum class the runtime expects. These aliases
+# carry the correct type for the PEM/PKCS8 values we use everywhere.
+_PEM: serialization.Encoding = cast(serialization.Encoding, serialization.Encoding.PEM)
+_PKCS8: serialization.PrivateFormat = cast(serialization.PrivateFormat, serialization.PrivateFormat.PKCS8)
 
 # The unified cluster CA, replicated to core nodes by setup-etcd-tls.yml
 # (also the etcd CA — see docs/design/etcd-access-hardening.md).
@@ -99,12 +106,12 @@ def generate_ca():
     
     # Write CA certificate and key
     with open(CA_CERT_PATH, 'wb') as f:
-        f.write(ca_cert.public_bytes(serialization.Encoding.PEM))
-    
+        f.write(ca_cert.public_bytes(_PEM))
+
     with open(CA_KEY_PATH, 'wb') as f:
         f.write(ca_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
+            encoding=_PEM,
+            format=_PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ))
     
@@ -222,12 +229,12 @@ def generate_server_cert(hostname, san_list=None):
     ).sign(ca_key, hashes.SHA256())
     
     with open(cert_file, 'wb') as f:
-        f.write(server_cert.public_bytes(serialization.Encoding.PEM))
-    
+        f.write(server_cert.public_bytes(_PEM))
+
     with open(key_file, 'wb') as f:
         f.write(server_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
+            encoding=_PEM,
+            format=_PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ))
     
@@ -254,11 +261,11 @@ def list_certificates():
     
     print("Generated certificates:")
     for cert_file in sorted(cert_files):
+        hostname = cert_file.stem
         try:
             with open(cert_file, 'rb') as f:
                 cert = x509.load_pem_x509_certificate(f.read())
-            
-            hostname = cert_file.stem
+
             subject_cn = None
             for attr in cert.subject:
                 if attr.oid == NameOID.COMMON_NAME:

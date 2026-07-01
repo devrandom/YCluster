@@ -134,11 +134,14 @@ def _incus(*args, check=True, stdin=None):
     # The incus CLI reads instance config from a non-TTY stdin until EOF,
     # so it must never inherit ours (`ssh host 'ycluster vm launch ...'`
     # keeps stdin open and incus init blocks forever).
-    stdin_kw = ({"input": stdin} if stdin is not None
-                else {"stdin": subprocess.DEVNULL})
-    r = subprocess.run(
-        ["incus", *args], text=True, capture_output=True, **stdin_kw
-    )
+    if stdin is not None:
+        r = subprocess.run(
+            ["incus", *args], input=stdin, text=True, capture_output=True
+        )
+    else:
+        r = subprocess.run(
+            ["incus", *args], stdin=subprocess.DEVNULL, text=True, capture_output=True
+        )
     if check and r.returncode != 0:
         raise RuntimeError(f"incus {' '.join(args)} failed: {r.stderr.strip()}")
     return r
@@ -1569,6 +1572,7 @@ def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1,
             )
+            assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.strip()
                 if not line:

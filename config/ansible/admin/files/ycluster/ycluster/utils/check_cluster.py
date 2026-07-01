@@ -85,14 +85,15 @@ def check_etcd_host(host_port):
                 break
         
         # Check if this specific member is the leader
-        is_leader = current_member_id == status.leader.id if current_member_id else False
-        
+        leader_id = status.leader.id if status.leader else None
+        is_leader = current_member_id == leader_id if current_member_id else False
+
         return {
             'host': host_port,
             'healthy': True,
             'version': status.version,
             'db_size': status.db_size,
-            'leader_id': status.leader.id,
+            'leader_id': leader_id,
             'is_leader': is_leader,
             'raft_index': status.raft_index,
             'member_count': len(members)

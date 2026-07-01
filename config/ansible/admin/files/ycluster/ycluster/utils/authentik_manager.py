@@ -62,7 +62,8 @@ class AuthentikAPI:
         resp = self.session.request(method, self.base + path, timeout=30, **kwargs)
         if resp.status_code >= 400:
             raise RuntimeError(f"authentik API {method} {path}: {resp.status_code} {resp.text}")
-        return resp.json() if resp.text else None
+        # returns Any (not Optional): we always have a non-empty body on success.
+        return resp.json()
 
     def get(self, path, **kwargs):
         return self._request('GET', path, **kwargs)

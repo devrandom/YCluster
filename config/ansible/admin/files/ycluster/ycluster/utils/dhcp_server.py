@@ -13,8 +13,11 @@ import logging
 import subprocess
 import yaml
 from datetime import datetime, timedelta
+from typing import TypedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from scapy.all import *
+from typing import cast
+from etcd3.client import KVMetadata
+from scapy.all import sniff, sendp, get_if_hwaddr
 from scapy.layers.dhcp import DHCP, BOOTP
 from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import Ether
@@ -31,7 +34,11 @@ NTP_SERVER = '10.0.0.254'
 HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 
 # IP allocation configuration (same as Flask app)
-IP_RANGES = {
+class IPRange(TypedDict):
+    base: int
+    max: int
+
+IP_RANGES: dict[str, IPRange] = {
     's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
@@ -291,7 +298,8 @@ class DHCPServer:
         
         if prefix is None:
             return None
-        
+        assert num is not None  # narrowed by the loop+break: prefix set only when num set
+
         config = IP_RANGES[prefix]
         
         # Validate number is within range
@@ -349,10 +357,16 @@ class DHCPServer:
     def get_next_dynamic_ip(self):
         """Get the next available IP from the dynamic range 200-249"""
         client = self.get_etcd_client()
+        assert client is not None
 
         # Get all allocated IPs from etcd nodes
         allocated_ips = set()
-        for value, metadata in client.get_prefix(f"/cluster/nodes/by-hostname/"):
+        # etcd3's get_prefix returns Optional[Generator] per its inferred type
+        # (the @_handle_errors wrapper drops the return annotation), but
+        # at runtime it always yields (value, metadata) tuples.
+        entries = cast("list[tuple[bytes, KVMetadata]]",
+                       list(client.get_prefix(f"/cluster/nodes/by-hostname/") or ()))
+        for value, metadata in entries:
             if value:
                 try:
                     allocation = json.loads(value.decode())
@@ -484,9 +498,10 @@ class DHCPServer:
             if ip_address:
                 # Check if hostname is already taken by another MAC
                 existing_hostname_data = client.get(f"/cluster/nodes/by-hostname/{requested_hostname}")
-                if existing_hostname_data[0]:
-                    existing_allocation = json.loads(existing_hostname_data[0].decode())
-                    if existing_allocation['mac'] != normalized_mac:
+                existing_value, existing_metadata = existing_hostname_data
+                if existing_value:
+                    existing_allocation = json.loads(existing_value.decode())
+                    if existing_allocation['mac'] != mac_address:
                         logger.warning(f"Hostname {requested_hostname} already taken by {existing_allocation['mac']}")
                         # Fall back to auto-allocation
                         requested_hostname = None
@@ -496,7 +511,8 @@ class DHCPServer:
                         # Same MAC, update allocation
                         hostname = requested_hostname
                         machine_type = self.determine_type_from_hostname(hostname)
-                        hostname_mod_revision = existing_hostname_data[1].mod_revision
+                        assert existing_metadata is not None
+                        hostname_mod_revision = existing_metadata.mod_revision
                 else:
                     # Hostname available, use it
                     hostname = requested_hostname
@@ -542,6 +558,7 @@ class DHCPServer:
             # state we validated. A concurrent allocator makes the
             # transaction fail instead of silently double-assigning.
             if existing_data[0]:
+                assert existing_data[1] is not None
                 compare = [client.transactions.mod(
                     f"/cluster/nodes/by-mac/{normalized_mac}")
                     == existing_data[1].mod_revision]
@@ -556,7 +573,7 @@ class DHCPServer:
                 compare.append(client.transactions.version(
                     f"/cluster/nodes/by-hostname/{hostname}") == 0)
 
-            success = [
+            success: list = [
                 client.transactions.put(f"/cluster/nodes/by-mac/{normalized_mac}", allocation_json),
                 client.transactions.put(f"/cluster/nodes/by-hostname/{hostname}", allocation_json)
             ]
@@ -760,7 +777,8 @@ class DHCPServer:
         if not offered_ip:
             logger.error(f"No IP available for {mac}{client_info}")
             return
-        
+        assert hostname is not None
+
         # Create DHCP OFFER
         offer = self.create_dhcp_offer(packet, offered_ip, hostname)
         interface = self.get_interface_for_ip(self.server_ip)
