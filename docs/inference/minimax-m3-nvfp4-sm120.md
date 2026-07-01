@@ -271,6 +271,54 @@ after any image bump) covers three suites, all green on the b12x image:
 serve`): [../benchmarks/minimax-m3-nvfp4-vllm-serve.md](../benchmarks/minimax-m3-nvfp4-vllm-serve.md)
 — ~75 tok/s single-stream, ~437 output tok/s saturated at conc 16.
 
+## Speculative decoding — MTP unavailable, EAGLE3 the viable path
+
+Single-stream decode (~75–89 tok/s) is near the no-NVLink TP=4 memory-bandwidth
+floor for a 23B-active model; the only lever with step-change (~1.5–2.5×) upside
+is speculative decoding. Investigated 2026-07-01.
+
+**MTP is ruled out — the head does not exist in any M3 checkpoint.** M3's config
+declares `num_nextn_predict_layers: 1`, but the *weights were never released*.
+Verified directly off the on-disk checkpoint (`model.safetensors.index.json`) and
+against HF: all 12 published M3 NVFP4 quants — including `nvidia/MiniMax-M3-NVFP4`
+and `lukealonso/MiniMax-M3-NVFP4` (the b12x kernel author's own) — carry exactly
+layers 0–59 and **zero** `nextn`/`eh_proj`/`enorm`/`hnorm`/`shared_head` tensors,
+as does the **official base `MiniMaxAI/MiniMax-M3`** itself. So `--speculative-config
+mtp,N` has nothing to load, and it is *not* recoverable by swapping quants (none
+ship it) nor by quantizing it ourselves (the base has no MTP weights to quantize).
+This is a stronger "no" than GLM-5.2, where the MTP layer at least exists as bf16
+(see [glm-5.2-nvfp4-sm120-design-2026-06.md](glm-5.2-nvfp4-sm120-design-2026-06.md)).
+
+**EAGLE3 is the live path — it needs no MTP layer.** `Inferact/MiniMax-M3-EAGLE3`
+is a separately-trained draft: a **1-layer dense Llama (~3.3 B, bf16**, `hidden_size
+6144`, shares embeddings + LM head with the target), trained via TorchSpec, with an
+**official vLLM+NVIDIA day-0 M3 integration**. Because the draft is a single *dense*
+layer — not a 256-expert MoE — its bf16 per-token cost is negligible against M3's
+60-layer forward, so the GLM bf16-draft trap (a bf16 MoE draft costing ≈ a full main
+forward) **does not apply here**. Correctness holds regardless of target quant (the
+target verifies every token). Published acceptance (TP=4, `num_speculative_tokens 3`):
+GSM8K mean-accept-len 3.52 (83.9%), HumanEval 3.50 (83.3%), MT-Bench 2.70 (56.6%) —
+i.e. big on code/math, modest on free-form chat. Reference recipe (stock vLLM):
+
+```
+--speculative-config '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3",
+                       "num_speculative_tokens":3,"attention_backend":"FLASH_ATTN"}'
+```
+
+**Open question — unproven on *this* stack.** The reference runs stock vLLM +
+`FLASH_ATTN` + MXFP8; we run the b12x fork on SM120 with **MSA sparse attention
+(`B12X_ATTN`) + NVFP4**. The b12x authors' own spec-decode wiki
+(`local-inference-lab/rtx6kpro`) documents EAGLE3 only for **Kimi** (MLA-based draft)
+and DFlash for MiMo/Qwen — **not M3** — so whether EAGLE3's multi-query verify step
+composes with the MSA backend on b12x is untested. Two ways to land it: (a) mount the
+~6.6 GB draft and extend `serve-minimax-m3-named.sh` to inject the `eagle3`
+speculative-config (mirror the served-name sed-patch), then A/B acceptance + tok/s;
+or (b) fold it into the **stock-vLLM migration** — stock carries the official
+M3+EAGLE3 integration *and* native tool calling (#45381) *and* drops the opaque b12x
+image, gated only on stock's SM120 NVFP4 MoE kernels being coherent (the original
+reason for the fork). Draft trained vs M3-preview/MXFP8; NVFP4 target may lower
+acceptance vs the published numbers, not correctness.
+
 ## 5. Register with the inference gateway
 
 Once verified, add the backend so `local-ai-proxy` routes to it
