@@ -1,5 +1,4 @@
 .PHONY: init dev-setup dev-dnsmasq-start dev-dnsmasq-stop dev-dnsmasq-watch dev-tftpboot
-.PHONY: test test-system test-system-fresh help
 
 init: ./data/ubuntu-24.04.3-live-server-amd64.iso ./data/dnsmasq.leases ./data/ansible_ssh_key
 
@@ -88,22 +87,28 @@ dev-tftpboot: ./dev/tftpboot/ubuntu/vmlinuz ./dev/tftpboot/EFI/BOOT/grubx64.efi 
 #
 # Logs land in ./tmp/ (gitignored). Watch with `tail -f ./tmp/<file>.log`.
 
+.PHONY: test test-system-quick test-system test-system-fresh clear-dev-cluster help
+
 test:
 	./run-tests.sh
+	(cd local-ai-proxy ; make test)
 
 TEST_LOG := ./tmp/system-test.log
 
+test-system-quick:
+	@mkdir -p ./tmp
+	./dev/cluster/system-test.sh --assert-only
+
 test-system:
 	@mkdir -p ./tmp
-	./dev/cluster/system-test.sh --background --assert-only 2>&1 | tee -a ./tmp/system-test-launch.log
+	./dev/cluster/system-test.sh --background
 	@echo
 	@echo "log: $(TEST_LOG)  (tail -f to watch; grep -E '^(== SECTION|PASS|FAIL)' for summary)"
 
-test-system-fresh:
-	@mkdir -p ./tmp
-	./dev/cluster/system-test.sh --background 2>&1 | tee -a ./tmp/system-test-launch.log
-	@echo
-	@echo "log: $(TEST_LOG)  (tail -f to watch; grep -E '^(== SECTION|PASS|FAIL)' for summary)"
+clear-dev-cluster:
+	./dev/cluster/dev-cluster.sh down
+
+test-system-fresh: clear-dev-cluster test-system
 
 help:
 	@echo "Targets:"
@@ -111,4 +116,5 @@ help:
 	@echo "  test                  run all server-free unit tests (Python + Go)"
 	@echo "  test-system           run dev-cluster system tests (background, --assert-only)"
 	@echo "  test-system-fresh     run dev-cluster system tests with full provisioning"
+	@echo "  test-system-quick     run dev-cluster system test assertions"
 	@echo "  help                  show this help"
