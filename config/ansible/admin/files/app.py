@@ -106,6 +106,11 @@ for node_type in list(NODE_TYPE_INTERFACES.keys()):
 # etcd configuration
 ETCD_PREFIX = '/cluster/nodes'
 
+# Cluster VIPs (follow the storage leader via keepalived). Used to render
+# bootstrap script callbacks that must land on the leader regardless of
+# which managed node served the bootstrap page.
+STORAGE_VIP = '10.0.0.100'
+
 # Core nodes are derived dynamically from etcd allocations (see
 # get_core_nodes()) so adding a new storage node doesn't require a code
 # change. The inventory plugin treats any s\d+ hostname as a core node;
@@ -1596,7 +1601,7 @@ PUBLIC_BOOTSTRAP_TYPES = {'wg', 'wg-macos'}
 @app.route('/bootstrap/')
 def serve_bootstrap_index():
     """Serve bootstrap usage hints"""
-    api_server = f"http://{request.host}"
+    api_server = f"http://{STORAGE_VIP}"
     text = f"""YCluster Bootstrap
 
 Available types:
@@ -1631,7 +1636,9 @@ def serve_bootstrap(node_type):
     # the public admin subdomain (reverse proxy exposes only a whitelist
     # of paths there). The WG tunnel endpoint is separate and rendered
     # into the client wg config itself. Local node bootstraps (macos/
-    # nas/nvidia) keep using the host header.
+    # nas/nvidia) target the storage VIP so callbacks (/api/allocate,
+    # /api/wg/register) land on the storage leader regardless of which
+    # managed node served the bootstrap page.
     if node_type in PUBLIC_BOOTSTRAP_TYPES:
         try:
             etcd = get_etcd_client()
@@ -1645,7 +1652,7 @@ def serve_bootstrap(node_type):
             }), 503
         api_server = f"https://admin.{domain_value.decode().strip()}"
     else:
-        api_server = f"http://{request.host}"
+        api_server = f"http://{STORAGE_VIP}"
 
     # Get SSH public key content
     ssh_key_path = '/opt/bootstrap-files/ansible_ssh_key.pub'

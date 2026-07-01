@@ -137,11 +137,11 @@
           }
 
           menuentry "Ubuntu 24.04 Server Autoinstall" --id autoinstall {
-              linux (http,10.0.0.254)/ubuntu/vmlinuz ip=dhcp url=http://10.0.0.254/ubuntu/ubuntu-24.04.3-live-server-amd64.iso autoinstall cloud-config-url=http://10.0.0.254/autoinstall/user-data
-              initrd (http,10.0.0.254)/ubuntu/initrd
+              linux (http,${net_default_server})/ubuntu/vmlinuz ip=dhcp url=http://${net_default_server}/ubuntu/ubuntu-24.04.3-live-server-amd64.iso autoinstall cloud-config-url=http://${net_default_server}/autoinstall/user-data
+              initrd (http,${net_default_server})/ubuntu/initrd
           }
 
           menuentry "Ubuntu 24.04 Server Manual Install" --id manual {
-              linux (http,10.0.0.254)/ubuntu/vmlinuz ip=dhcp url=http://10.0.0.254/ubuntu/ubuntu-24.04.3-live-server-amd64.iso cloud-init=disabled
-              initrd (http,10.0.0.254)/ubuntu/initrd
+              linux (http,${net_default_server})/ubuntu/vmlinuz ip=dhcp url=http://${net_default_server}/ubuntu/ubuntu-24.04.3-live-server-amd64.iso cloud-init=disabled
+              initrd (http,${net_default_server})/ubuntu/initrd
           }
