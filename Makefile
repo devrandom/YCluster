@@ -69,6 +69,37 @@ dev-tftpboot: ./dev/tftpboot/ubuntu/vmlinuz ./dev/tftpboot/EFI/BOOT/grubx64.efi 
 	ssh-keygen -t ed25519 -f ./data/ansible_ssh_key -N "" -C "ansible@pxe-server"
 
 
+# ---- completions ----------------------------------------------------------
+#
+# Install bash completion for contrib/inference into the user completion
+# dir (bash-completion's XDG default of
+# $HOME/.local/share/bash-completion/completions). Override with
+# BASH_COMPLETION_USER_DIR.
+
+.PHONY: install-completions uninstall-completions
+
+ifdef BASH_COMPLETION_USER_DIR
+COMPLETION_DIR := $(BASH_COMPLETION_USER_DIR)
+else
+COMPLETION_DIR := $(HOME)/.local/share/bash-completion/completions
+endif
+COMPLETION_SRC := $(abspath contrib/inference-completion.bash)
+COMPLETION_DST := $(COMPLETION_DIR)/inference
+
+install-completions:
+	@mkdir -p $(COMPLETION_DIR)
+	ln -sf $(COMPLETION_SRC) $(COMPLETION_DST)
+	@echo "linked $(COMPLETION_DST) -> $(COMPLETION_SRC)"
+
+uninstall-completions:
+	@target=$$(readlink $(COMPLETION_DST) 2>/dev/null); \
+	if [ "$$target" = "$(COMPLETION_SRC)" ]; then \
+		rm -f $(COMPLETION_DST) && echo "removed $(COMPLETION_DST)"; \
+	else \
+		echo "$(COMPLETION_DST) is not a symlink to $(COMPLETION_SRC) (skipping)"; \
+	fi
+
+
 # ---- tests ---------------------------------------------------------------
 #
 # Two test surfaces, ordered by isolation cost:
@@ -113,6 +144,8 @@ test-system-fresh: clear-dev-cluster test-system
 help:
 	@echo "Targets:"
 	@echo "  init, dev-setup, dev-tftpboot, dev-dnsmasq-{start,stop,watch}"
+	@echo "  install-completions   symlink bash completion into user bash-completion dir"
+	@echo "  uninstall-completions remove the bash completion symlink"
 	@echo "  test                  run all server-free unit tests (Python + Go)"
 	@echo "  test-system           run dev-cluster system tests (background, --assert-only)"
 	@echo "  test-system-fresh     run dev-cluster system tests with full provisioning"
