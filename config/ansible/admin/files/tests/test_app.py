@@ -106,7 +106,9 @@ class ScheduleSetTests(SchedTestBase):
         self.vm("v", owner="alice@x")
         r = self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "off"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")["mode"], "off")
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        assert rec is not None
+        self.assertEqual(rec["mode"], "off")
 
     def test_nonadmin_cannot_set_unmanaged(self):
         self.vm("v", owner="alice@x")
@@ -143,6 +145,7 @@ class ScheduleSetTests(SchedTestBase):
         self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "schedule", "windows": w})
         self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "off", "windows": w})
         rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        assert rec is not None
         self.assertEqual(rec["mode"], "off")
         self.assertEqual(len(rec["windows"]), 1)         # preserved, not cleared
 
@@ -177,6 +180,7 @@ class StopNowTests(SchedTestBase):
         r = self.post("/admin/vm-schedule/stop-now", {"vm": "v"})
         self.assertEqual(r.status_code, 200)
         g = self.etcd.get_json(vmm.VM_GRACE_PREFIX + "v")
+        assert g is not None
         self.assertTrue(g["immediate"])
 
     def test_no_pending_stop_when_wants_on(self):

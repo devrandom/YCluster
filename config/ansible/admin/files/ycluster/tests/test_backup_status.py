@@ -17,7 +17,9 @@ import unittest
 
 _MOD = pathlib.Path(__file__).resolve().parents[1] / "ycluster" / "utils" / "backup_status.py"
 _spec = importlib.util.spec_from_file_location("backup_status", _MOD)
+assert _spec is not None
 bs = importlib.util.module_from_spec(_spec)
+assert _spec.loader is not None
 _spec.loader.exec_module(bs)
 
 

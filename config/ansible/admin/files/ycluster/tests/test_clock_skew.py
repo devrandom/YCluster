@@ -13,7 +13,9 @@ import unittest
 
 _MOD = pathlib.Path(__file__).resolve().parents[1] / "ycluster" / "utils" / "clock_skew.py"
 _spec = importlib.util.spec_from_file_location("clock_skew", _MOD)
+assert _spec is not None
 cs = importlib.util.module_from_spec(_spec)
+assert _spec.loader is not None
 _spec.loader.exec_module(cs)
 
 

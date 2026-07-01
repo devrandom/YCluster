@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# vLLM imports below resolve inside the vLLM runtime environment (the file is
+# loaded via --reasoning-parser-plugin), not from the admin-api venv pyright
+# sees here.
+# pyright: reportMissingImports=false
+
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 

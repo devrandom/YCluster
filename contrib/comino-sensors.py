@@ -135,7 +135,7 @@ def get_data(device: str) -> tuple[dict, dict]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[1])
     ap.add_argument("--device", default="/dev/ttyACM0")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of table")
     ap.add_argument("--retries", type=int, default=5,

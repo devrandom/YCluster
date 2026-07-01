@@ -12,6 +12,7 @@ or a single module:
 
 import unittest
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from ycluster.utils import vm_manager as vm
 
@@ -61,7 +62,9 @@ class ParseWindowTests(unittest.TestCase):
     def test_offset_normalized_to_utc(self):
         # +02:00 10:00 == 08:00 UTC.
         plus2 = timezone(timedelta(hours=2))
-        s, e = vm._parse_window(win(dt(h=10, tz=plus2), dt(h=14, tz=plus2)))
+        parsed = vm._parse_window(win(dt(h=10, tz=plus2), dt(h=14, tz=plus2)))
+        assert parsed is not None
+        s, e = parsed
         self.assertEqual(s, dt(h=8))
         self.assertEqual(e, dt(h=12))
         self.assertEqual(s.tzinfo, UTC)
@@ -131,7 +134,7 @@ class PendingStateTests(unittest.TestCase):
                                            self.NOW))
 
 
-def vmrec(host="nv2", gpus=2, owner="a@x", type="vm"):
+def vmrec(host: Optional[str] = "nv2", gpus=2, owner="a@x", type="vm"):
     return {"host": host, "gpus": gpus, "owner": owner, "type": type}
 
 
@@ -197,7 +200,7 @@ class ConflictTests(unittest.TestCase):
     def test_always_held_overcommit_detected_at_lo(self):
         # 2 held continuously, pool 3, candidate wants 2 -> only 1 free.
         worst = vm.gpu_conflict([commit(2)], 2, 3, dt(h=10), dt(h=14))
-        self.assertIsNotNone(worst)
+        assert worst is not None
         when, free, holders = worst
         self.assertEqual(when, dt(h=10))
         self.assertEqual(free, 1)
@@ -208,7 +211,7 @@ class ConflictTests(unittest.TestCase):
         # candidate's [10,14) range -> conflict surfaces at 12, not 10.
         c = commit(2, [(dt(h=12), dt(h=16))])
         worst = vm.gpu_conflict([c], 2, 3, dt(h=10), dt(h=14))
-        self.assertIsNotNone(worst)
+        assert worst is not None
         self.assertEqual(worst[0], dt(h=12))
 
     def test_disjoint_windows_fit(self):
@@ -222,6 +225,7 @@ class ConflictTests(unittest.TestCase):
         commits = [commit(1, [(dt(h=10), dt(h=18))]),
                    commit(2, [(dt(h=12), dt(h=18))])]
         worst = vm.gpu_conflict(commits, 1, 3, dt(h=10), dt(h=16))
+        assert worst is not None
         self.assertEqual(worst[0], dt(h=12))
         self.assertEqual(worst[1], 0)            # 3 - 1 - 2
 
@@ -251,7 +255,9 @@ class DesiredConflictTests(unittest.TestCase):
         self.assertIsNotNone(vm.desired_conflict({"mode": "on"}, "stop", self.NOW))
         # in-window schedule also wants ON
         d = self.sched((dt(h=10), dt(h=14)))
-        self.assertIn("scheduled ON", vm.desired_conflict(d, "stop", self.NOW))
+        conflict = vm.desired_conflict(d, "stop", self.NOW)
+        assert conflict is not None
+        self.assertIn("scheduled ON", conflict)
 
     def test_stop_ok_when_off(self):
         self.assertIsNone(vm.desired_conflict({"mode": "off"}, "stop", self.NOW))
@@ -260,8 +266,9 @@ class DesiredConflictTests(unittest.TestCase):
         self.assertIsNone(vm.desired_conflict(d, "stop", self.NOW))
 
     def test_start_conflicts_when_off(self):
-        self.assertIn("scheduled OFF",
-                      vm.desired_conflict({"mode": "off"}, "start", self.NOW))
+        conflict = vm.desired_conflict({"mode": "off"}, "start", self.NOW)
+        assert conflict is not None
+        self.assertIn("scheduled OFF", conflict)
         d = self.sched((dt(h=15), dt(h=18)))      # out of window -> wants off
         self.assertIsNotNone(vm.desired_conflict(d, "start", self.NOW))
 

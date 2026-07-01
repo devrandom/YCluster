@@ -66,6 +66,7 @@ def fetch_journal_logs(since_ts: float):
         "--no-pager",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdout is not None
     entries = []
     for line in proc.stdout:
         line = line.decode("utf-8", errors="replace").strip()
@@ -161,8 +162,10 @@ def main():
 
     buckets = aggregate_logs(entries)
     if buckets:
-        password_bytes = client.get(ETCD_CREDS_KEY)[0]
-        upsert_to_db(buckets, password_bytes.decode())
+        password_value = client.get(ETCD_CREDS_KEY)[0]
+        if password_value is None:
+            return
+        upsert_to_db(buckets, password_value.decode())
 
     latest_ts = max(
         datetime.datetime.fromisoformat(e.get("time", "").replace("Z", "+00:00")).timestamp()
