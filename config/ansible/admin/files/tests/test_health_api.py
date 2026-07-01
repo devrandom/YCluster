@@ -164,12 +164,30 @@ class HealthRouteTests(unittest.TestCase):
     def test_non_storage_node_health_route(self):
         ha = _load_as("c1")
         client = ha.app.test_client()
-        with self._patch_etcd(etcd=FakeEtcd()):
+        # Speed the route up by stubbing the slow/IO-heavy checks. The
+        # test isn't validating those checks (they're exercised on real
+        # nodes); it's validating that the route is wired, returns JSON
+        # with the expected service count, and keeps the is_core_node
+        # logic consistent for keepalived on non-storage nodes.
+        #   - check_service_status: subprocess.run on systemctl (fails
+        #     fast but slow when no dbus in the test env). Default False
+        #     so non-storage keepalived reads as 'standby', not split-
+        #     brain.
+        #   - check_port_open / check_dns_status / check_clock_skew: each
+        #     has multi-second timeouts (DNS=5s, NTP=2s) that blow up the
+        #     suite without these stubs.
+        with mock.patch.object(ha, "check_service_status", return_value=False), \
+             mock.patch.object(ha, "check_port_open", return_value=False), \
+             mock.patch.object(ha, "check_dns_status",
+                              return_value={"status": "healthy", "details": {}}), \
+             mock.patch.object(ha, "check_clock_skew",
+                              return_value={"status": "healthy", "details": {}}), \
+             self._patch_etcd(etcd=FakeEtcd()):
             r1 = client.get("/api/health")
             r2 = client.get("/api/health")
-        # Two requests, each well-formed (200 or 503 — the test env
-        # lacks dnsmasq/squid/ntp so overall can be unhealthy, but
-        # the route must always respond with JSON).
+        # Two requests, each well-formed (200 or 503). Test env lacks the
+        # real services so overall can be unhealthy; the route must
+        # always respond with JSON.
         for r in (r1, r2):
             self.assertIn(r.status_code, (200, 503))
             data = r.get_json()

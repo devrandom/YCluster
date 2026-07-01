@@ -1,9 +1,14 @@
 """Web-app tests for the admin VM-schedule endpoints.
 
 Drives the Flask app through its test client with a dict-backed fake etcd
-patched over vm_manager's DAL (get_etcd_client). No etcd/postgres server,
-no DB drivers — psycopg2 is a lazy import the schedule endpoints don't
-touch, and the etcd client is faked at the DAL seam.
+patched over the DAL seam (ycluster.utils.vm_manager.get_etcd_client).
+No etcd/postgres server, no DB drivers — psycopg2 is a lazy import the
+schedule endpoints don't touch, and the etcd client is faked.
+
+Both vm_manager and app.py do `from ... import get_etcd_client`, which
+binds the name separately in each module's namespace. Patching just one
+isn't enough — routes in app.py that call `get_etcd_client()` need the
+patched version too, so setUp rebinds both.
 
 Run from config/ansible/admin/files:
     PYTHONPATH=.:ycluster python3 -m unittest discover -s tests
@@ -35,12 +40,19 @@ def _iso(dt):
 class SchedTestBase(unittest.TestCase):
     def setUp(self):
         self.etcd = FakeEtcd()
-        self._orig = vmm.get_etcd_client
+        # Both modules import get_etcd_client at module load — they each
+        # have their own name binding. Patch both so routes in app.py
+        # that call get_etcd_client() hit the FakeEtcd instead of
+        # trying to connect to localhost:2379.
+        self._vmm_orig = vmm.get_etcd_client
+        self._app_orig = appmod.get_etcd_client
         vmm.get_etcd_client = lambda: self.etcd
+        appmod.get_etcd_client = lambda: self.etcd
         self.http = appmod.app.test_client()
 
     def tearDown(self):
-        vmm.get_etcd_client = self._orig
+        vmm.get_etcd_client = self._vmm_orig
+        appmod.get_etcd_client = self._app_orig
 
     # --- seeding ---
     def vm(self, name, owner="alice@x", gpus=0, host="nv2", type="vm"):
@@ -122,7 +134,11 @@ class ScheduleSetTests(SchedTestBase):
 
     def test_windows_preserved_across_off(self):
         self.vm("v", owner="alice@x")
-        s, e = datetime(2026, 7, 1, 10, tzinfo=UTC), datetime(2026, 7, 1, 14, tzinfo=UTC)
+        # Future dates so the windows aren't filtered as "fully elapsed" by
+        # _parse_windows (which drops windows whose end <= now).
+        base = datetime.now(UTC) + timedelta(days=2)
+        s = base.replace(hour=10, minute=0, second=0, microsecond=0)
+        e = s + timedelta(hours=4)
         w = [{"start": _iso(s), "end": _iso(e)}]
         self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "schedule", "windows": w})
         self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "off", "windows": w})
