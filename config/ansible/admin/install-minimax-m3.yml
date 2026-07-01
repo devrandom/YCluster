@@ -21,6 +21,11 @@
     # Prefixed with the quant author to flag this is a community NVFP4 quant,
     # not MiniMax's official M3.
     minimax_m3_served_name: "brandonmusic/minimax-m3-nvfp4"
+    # EAGLE3 speculative-decode draft head (experimental, default OFF in the start
+    # script - M3_EAGLE3=1 to enable). 1-layer dense bf16 draft; MTP is unavailable
+    # for M3 (no released nextn weights). See docs/inference/minimax-m3-nvfp4-sm120.md.
+    minimax_m3_eagle3_repo: "Inferact/MiniMax-M3-EAGLE3"
+    minimax_m3_eagle3_dir: "/home/dev/models/MiniMax-M3-EAGLE3"
   tasks:
     # Same guard as install-vllm.yml: skip nodes with no host-visible NVIDIA
     # GPU (no NVIDIA hardware, or all cards bound to vfio-pci for passthrough).

@@ -35,6 +35,19 @@ GPUS="${GPUS:-0 1 2 3}"
 # too for a seamless cutover and direct-by-image-name access.
 SERVED_NAMES="${SERVED_NAMES:-{{ minimax_m3_served_name }} MiniMax-M3-NVFP4}"
 NAMED_WRAPPER="${NAMED_WRAPPER:-/opt/inference/minimax-m3/serve-minimax-m3-named.sh}"
+# EAGLE3 speculative decoding (experimental, default OFF). Set M3_EAGLE3=1 to mount
+# the draft head and turn on speculative decode; the flag rides into the vendor
+# recipe via EXTRA_VLLM_ARGS (see serve-minimax-m3-named.sh). Draft is
+# Inferact/MiniMax-M3-EAGLE3 (1-layer dense, bf16) - download it first with:
+#   hf download {{ minimax_m3_eagle3_repo }} --local-dir {{ minimax_m3_eagle3_dir }}
+# Whether b12x wires EAGLE3 through the MSA attention path is UNPROVEN; if it errors
+# at startup, leave M3_EAGLE3 unset (the hook is inert) and see
+# docs/inference/minimax-m3-nvfp4-sm120.md. First knobs to tweak: NUM_SPECULATIVE_TOKENS
+# and attention_backend (or override the whole JSON with SPECULATIVE_CONFIG).
+M3_EAGLE3="${M3_EAGLE3:-0}"
+EAGLE3_DIR="${EAGLE3_DIR:-{{ minimax_m3_eagle3_dir }}}"
+EAGLE3_REPO="{{ minimax_m3_eagle3_repo }}"
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-3}"
 # Fresh cache dir for this image family (the dark-devotion build's compile/JIT
 # cache layout differs from the old verdictai image; don't mix them). Survives the
 # podman rm; CUDA-graph capture still runs cold each start.
@@ -80,6 +93,23 @@ extra_env=()
 [ -n "${OMP_NUM_THREADS:-}" ] && extra_env+=(-e "OMP_NUM_THREADS=${OMP_NUM_THREADS}")
 [ -n "${INDUCTOR_COMPILE_THREADS:-}" ] && extra_env+=(-e "TORCHINDUCTOR_COMPILE_THREADS=${INDUCTOR_COMPILE_THREADS}")
 
+# EAGLE3 draft mount + spec-config, gated on M3_EAGLE3 (default off -> array empty,
+# so the podman run below is unchanged). The vendor recipe forwards EXTRA_VLLM_ARGS
+# after --served-model-name (word-split on the single space; the compact JSON has
+# no internal spaces). model= points at the in-container mount, not an HF id.
+eagle_args=()
+if [ "$M3_EAGLE3" != 0 ]; then
+  [ -f "$EAGLE3_DIR/config.json" ] \
+    || { echo "M3_EAGLE3 set but draft missing at $EAGLE3_DIR - run: hf download $EAGLE3_REPO --local-dir $EAGLE3_DIR" >&2; exit 1; }
+  if [ -n "${SPECULATIVE_CONFIG:-}" ]; then
+    spec_cfg="$SPECULATIVE_CONFIG"
+  else
+    spec_cfg='{"method":"eagle3","model":"/models/MiniMax-M3-EAGLE3","num_speculative_tokens":'"$NUM_SPECULATIVE_TOKENS"',"attention_backend":"FLASH_ATTN"}'
+  fi
+  eagle_args=(-v "$EAGLE3_DIR":/models/MiniMax-M3-EAGLE3:ro
+              -e "EXTRA_VLLM_ARGS=--speculative-config $spec_cfg")
+fi
+
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 # The baked recipe pins MODEL_PATH=/models/MiniMax-M3-NVFP4 (mount the checkpoint
@@ -100,11 +130,13 @@ podman run -d --name "$CONTAINER" \
   -e SERVED_MODEL_NAMES="$SERVED_NAMES" \
   -e M3_PROFILE=off \
   "${extra_env[@]}" \
+  "${eagle_args[@]}" \
   -v "$MODEL_HOST":/models/MiniMax-M3-NVFP4 \
   -v "$CACHE_DIR":/cache \
   -v "$NAMED_WRAPPER":/usr/local/bin/serve-minimax-m3-named.sh:ro \
   "$IMAGE" serve-minimax-m3-named.sh
 
-echo "Started '$CONTAINER' on :$PORT (model ids: $SERVED_NAMES), GPUs [$GPUS]. First load ~15-20 min."
+eagle_state=$([ "$M3_EAGLE3" != 0 ] && echo "on (eagle3, spec=$NUM_SPECULATIVE_TOKENS)" || echo off)
+echo "Started '$CONTAINER' on :$PORT (model ids: $SERVED_NAMES), GPUs [$GPUS], spec-decode $eagle_state. First load ~15-20 min."
 echo "  watch:  podman logs -f $CONTAINER"
 echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"

@@ -305,19 +305,56 @@ i.e. big on code/math, modest on free-form chat. Reference recipe (stock vLLM):
                        "num_speculative_tokens":3,"attention_backend":"FLASH_ATTN"}'
 ```
 
-**Open question — unproven on *this* stack.** The reference runs stock vLLM +
-`FLASH_ATTN` + MXFP8; we run the b12x fork on SM120 with **MSA sparse attention
-(`B12X_ATTN`) + NVFP4**. The b12x authors' own spec-decode wiki
-(`local-inference-lab/rtx6kpro`) documents EAGLE3 only for **Kimi** (MLA-based draft)
-and DFlash for MiMo/Qwen — **not M3** — so whether EAGLE3's multi-query verify step
-composes with the MSA backend on b12x is untested. Two ways to land it: (a) mount the
-~6.6 GB draft and extend `serve-minimax-m3-named.sh` to inject the `eagle3`
-speculative-config (mirror the served-name sed-patch), then A/B acceptance + tok/s;
-or (b) fold it into the **stock-vLLM migration** — stock carries the official
-M3+EAGLE3 integration *and* native tool calling (#45381) *and* drops the opaque b12x
-image, gated only on stock's SM120 NVFP4 MoE kernels being coherent (the original
-reason for the fork). Draft trained vs M3-preview/MXFP8; NVFP4 target may lower
-acceptance vs the published numbers, not correctness.
+**Tested on this stack (2026-07-01) — it works but is a net loss; kept OFF.** The
+reference runs stock vLLM + `FLASH_ATTN` + MXFP8; we run the b12x fork on SM120 with
+**MSA sparse attention (`B12X_ATTN`) + NVFP4**. Empirically, driving it through the
+`M3_EAGLE3` hook (below):
+
+- **The draft's `attention_backend: FLASH_ATTN` crashes the b12x worker at init** —
+  FLASH_ATTN isn't registered in this build; the draft can only use `TRITON_ATTN`
+  (`Loading drafter model... Using TRITON_ATTN ... out of potential backends: ['TRITON_ATTN']`).
+  Drop `attention_backend` from the spec-config and vLLM picks TRITON_ATTN for the
+  draft (target stays `B12X_ATTN`); it then loads cleanly. Wiring is correct (shares
+  target embeddings, keeps its own lm_head) and output is coherent (17×24 → 408).
+- **Acceptance is excellent**: 80% (959/1197 drafted at spec=3), mean accept length
+  ≈ 3.4 tok/forward (per-position 91/80/70%) — matching published EAGLE3 quality.
+- **But single-stream is ~2× *slower*, not faster**: ~33–35 tok/s (code/count) vs the
+  ~75–89 baseline. Cause, from the startup log: `CUDAGraphMode FULL_AND_PIECEWISE is
+  not supported with spec-decode for B12XPagedAttentionBackend ... setting
+  cudagraph_mode=PIECEWISE`. Losing FULL decode graphs reintroduces per-layer launch
+  overhead across 60 layers × TP=4, and that penalty dwarfs the 3.4× acceptance gain.
+  The draft is cheap and accurate; the b12x attention backend just can't run
+  spec-decode under FULL graphs.
+
+**Conclusion: keep EAGLE3 OFF on b12x** — a net loss for a *different* reason than
+GLM's MTP (there, an expensive bf16 MoE draft; here, a fine draft killed by a
+cudagraph downgrade).
+
+**The unblock is specific and not fundamental — FULL-cudagraph spec-decode is already
+solved in b12x for the MLA family, just not for M3's MSA path.** `lukealonso/b12x`
+[#11](https://github.com/lukealonso/b12x/pull/11) (merged 2026-06-09) added
+`FULL_AND_PIECEWISE` MTP cudagraph capture for *compressed-MLA* (GLM DSA, DeepSeek-V4;
+it raised the decode-split row threshold 64→256 so the `1+draft_tokens`-row verify
+graph captures cleanly). But `B12X_ATTN` / `B12XPagedAttentionBackend` — M3's MSA
+backend — still declares only `AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE`, so the
+spec-decode verify batch can't be graph-captured and drops to PIECEWISE. The concrete
+fix is a b12x change extending FULL-cudagraph support to `B12X_ATTN`'s multi-token
+verify, mirroring #11 for compressed-MLA — **worth raising with lukealonso** (the b12x
+author). (Separately, vLLM
+[#33341](https://github.com/vllm-project/vllm/issues/33341) tracks FULL graphs for the
+*drafter* itself — a smaller, additional overhead.)
+
+The other route is the **stock-vLLM migration**, where a FLASH_ATTN target already has
+FULL-cudagraph+spec-decode (plus the official M3+EAGLE3 integration, native tool
+calling #45381, and dropping the opaque b12x image; gated only on stock's SM120 NVFP4
+MoE kernels being coherent) — so the payoff comes from FLASH_ATTN as the target
+backend, not from stock per se.
+
+The plumbing is in place and inert: `M3_EAGLE3=1` on `minimax-m3-b12x-start.sh` mounts
+the draft and injects the spec-config (default OFF, draft at
+`/home/dev/models/MiniMax-M3-EAGLE3`); enable it only to re-test once `B12X_ATTN` gains
+FULL-cudagraph spec-decode support (or on stock vLLM). **When re-testing, omit
+`attention_backend` (or set `TRITON_ATTN`) — `FLASH_ATTN` hard-fails here.**
 
 ## 5. Register with the inference gateway
 

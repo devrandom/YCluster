@@ -28,8 +28,12 @@ grep -qF -- "$exec_flag" "$VENDOR" \
   || { echo "serve-minimax-m3-named: served-name flag not in $VENDOR; refusing (image changed?)" >&2; exit 1; }
 
 # 1) replace the pinned scalar with our list; 2) unquote the flag so the list
-#    expands into multiple --served-model-name values.
+#    expands into multiple --served-model-name values, and append ${EXTRA_VLLM_ARGS}
+#    right after it - an inert hook for injecting extra vllm flags (e.g. the EAGLE3
+#    --speculative-config) from the start script, without needing a second anchor
+#    in the vendor recipe. The :- keeps it safe under the recipe's set -u when the
+#    env is unset (the default), so normal launches are byte-for-byte unchanged.
 sed -i "s|^${pin_line}\$|SERVED_MODEL_NAME=\"${NAMES}\"|" "$VENDOR"
-sed -i 's|--served-model-name "${SERVED_MODEL_NAME}"|--served-model-name ${SERVED_MODEL_NAME}|' "$VENDOR"
+sed -i 's|--served-model-name "${SERVED_MODEL_NAME}"|--served-model-name ${SERVED_MODEL_NAME} ${EXTRA_VLLM_ARGS:-}|' "$VENDOR"
 
 exec "$VENDOR" "$@"
