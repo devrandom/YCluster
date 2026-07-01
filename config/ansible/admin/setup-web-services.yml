@@ -130,10 +130,12 @@
         content: |
           [Unit]
           Description=Health API Service (lite)
-          After=network.target
+          After=network.target etcd.service
+          Wants=etcd.service
 
           [Service]
           Type=simple
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/bin/python3 {{ admin_services_dir }}/health-api.py
           StandardOutput=journal
           StandardError=journal
