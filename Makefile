@@ -141,6 +141,46 @@ clear-dev-cluster:
 
 test-system-fresh: clear-dev-cluster test-system
 
+
+# ---- lint ---------------------------------------------------------------
+#
+# Static checks across the surfaces pyright / yamllint / go vet cover.
+# Run `make lint` before committing.
+#
+#   make lint             aggregate (lint-yaml lint-python lint-go)
+#   make lint-yaml        yamllint (config/ansible/**/*.yml + root yamls)
+#   make lint-python      pyright (admin-api + ycluster package + contrib/)
+#   make lint-go          go vet on local-ai-proxy
+#
+# ansible-lint is intentionally not wired up: it needs cluster inventory +
+# a vault password to syntax-check our plays, so it's not runnable from a
+# fresh checkout. Add a target when that's solvable (probably a stub
+# playbook set + a `--exclude` for vault-using roles).
+
+.PHONY: lint lint-yaml lint-python lint-go
+
+# yamllint default rules are too strict (line-length 80, document-start
+# required, indentation style mandated) for the codebase as it stands;
+# relax them to "syntax + key hygiene" — yamllint still catches syntax
+# errors, duplicate keys, broken indentation, mismatched braces/brackets.
+# Trailing-whitespace is left to editor tooling (lots of legacy in-tree).
+# Override with `YAMLLINT_EXTRA_ARGS=...`.
+YAMLLINT_ARGS := -d '{extends: relaxed, rules: {line-length: disable, indentation: disable, comments-indentation: disable, comments: disable, truthy: disable, braces: disable, octal-values: disable, empty-lines: disable, empty-values: disable, quoted-strings: disable, trailing-spaces: disable}}' $(YAMLLINT_EXTRA_ARGS)
+
+lint: lint-yaml lint-python lint-go
+
+lint-yaml:
+	yamllint $(YAMLLINT_ARGS) \
+		config/ansible \
+		config.yml docker-compose.yaml opencode.json secrets.yml \
+		pyrightconfig.json
+
+lint-python:
+	pyright
+
+lint-go:
+	$(MAKE) -C local-ai-proxy vet
+
 help:
 	@echo "Targets:"
 	@echo "  init, dev-setup, dev-tftpboot, dev-dnsmasq-{start,stop,watch}"
@@ -150,4 +190,6 @@ help:
 	@echo "  test-system           run dev-cluster system tests (background, --assert-only)"
 	@echo "  test-system-fresh     run dev-cluster system tests with full provisioning"
 	@echo "  test-system-quick     run dev-cluster system test assertions"
+	@echo "  lint                  run yamllint + pyright + go vet"
+	@echo "  lint-{yaml,python,go} run a single linter"
 	@echo "  help                  show this help"
