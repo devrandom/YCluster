@@ -1,6 +1,9 @@
 {
   "venvPath": ".",
   "venv": ".venv",
+  "extraPaths": [
+    "config/ansible/admin/files/ycluster"
+  ],
   "reportMissingModuleSource": false,
   "reportMissingTypeStubs": false
 }

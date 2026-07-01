@@ -43,7 +43,7 @@
 
     - name: Download Ubuntu ISO from local server (fallback)
       get_url:
-        url: http://10.0.0.254/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
+        url: http://{{ gateway_vip }}/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         dest: /var/lib/tftpboot/ubuntu/ubuntu-24.04.3-live-server-amd64.iso
         checksum: "sha256:{{ ubuntu_iso_sha256 }}"
         mode: '0644'

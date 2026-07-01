@@ -3,6 +3,11 @@
 Completed work, moved out of `TODO.md`. Newest first. One line per change;
 detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
+## 2026-07-01
+
+- **PXE follow-the-server.** All four PXE/autoinstall hardcodes on `10.0.0.254` are now template-driven: GRUB kernel/initrd/cloud-config URLs use `$net_default_server` (Option 66); the Ansible ISO fallback and `user-data.j2`'s date-sync + `/etc/hosts` lines render through `{{ gateway_vip }}` — so a future restructure of the gateway-VIP/tftp roles is one config change, not four.
+- **Admin-API surface split.** `health-api.service` (lite, :12724) now serves `/api/health` + `/metrics` on every managed node; `admin-api` (and nginx) is storage-only; bootstrap scripts repointed to the storage VIP so PXE/TFTP clients no longer assume `admin-api` runs locally. See `docs/design/admin-api-surface-split.md`.
+
 ## 2026-06-26
 
 - **GLM-5.2 defaults to PP=2×TP=4 on the full nvidia checkpoint.** `install-glm52.yml` now points at `nvidia/GLM-5.2-NVFP4` (full 744B; the REAP 504B was retired) and the start script defaults to a PP=2×TP=4 full-box layout — ~2.2× prefill over flat TP=8 on this no-NVLink hardware, validated by the smoke test (A 14/14, B 7/7 to 200k). Adds a `PP` knob and a `DISABLE_MTP` toggle (MTP weights are present but gated off pending validation).

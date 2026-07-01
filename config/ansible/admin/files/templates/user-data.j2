@@ -7,7 +7,7 @@ autoinstall:
   version: 1
   early-commands:
     # Sync time from HTTP server (apt rejects future-dated release files)
-    - date -s "$(curl -sI http://10.0.0.254/ | grep -i '^date:' | cut -d' ' -f2-)" || true
+    - date -s "$(curl -sI http://{{ gateway_vip }}/ | grep -i '^date:' | cut -d' ' -f2-)" || true
   identity:
     hostname: {{ hostname }}
     username: ubuntu
@@ -139,7 +139,7 @@ autoinstall:
     # Configure proxy hostname resolution
     - |
       cat >> /target/etc/hosts << 'EOF'
-      10.0.0.254 proxy.xc
+      {{ gateway_vip }} proxy.xc
       EOF
     # Configure proxy environment variables
     - |

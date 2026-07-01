@@ -40,6 +40,7 @@ import functools
 import json
 import re
 import sys
+from typing import TypedDict
 
 from flask import Flask, request, jsonify, redirect, render_template, send_from_directory, send_file
 import os
@@ -110,6 +111,7 @@ ETCD_PREFIX = '/cluster/nodes'
 # bootstrap script callbacks that must land on the leader regardless of
 # which managed node served the bootstrap page.
 STORAGE_VIP = '10.0.0.100'
+GATEWAY_VIP = '10.0.0.254'
 
 # Core nodes are derived dynamically from etcd allocations (see
 # get_core_nodes()) so adding a new storage node doesn't require a code
@@ -138,7 +140,11 @@ def validated_hostname(view):
     return wrapper
 
 # IP allocation configuration (avoiding DHCP range 10.0.0.100-200)
-IP_RANGES = {
+class IPRange(TypedDict):
+    base: int
+    max: int
+
+IP_RANGES: dict[str, IPRange] = {
     's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
     'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
     'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
@@ -174,7 +180,7 @@ def determine_ip_from_hostname(hostname, via_wg=False):
             except ValueError:
                 continue
 
-    if prefix is None:
+    if prefix is None or num is None:
         return None
 
     config = IP_RANGES[prefix]
@@ -1489,7 +1495,8 @@ def get_mac_from_ip(client_ip):
                     print(f"MAC validation failed", file=sys.stderr)
     except json.JSONDecodeError as e:
         print(f"neighbor table JSON parse error: {e}", file=sys.stderr)
-        print(f"Raw stdout was: {result.stdout}", file=sys.stderr)
+        assert result is not None
+        print(f"Raw stdout was: {result.stdout or ''}", file=sys.stderr)
     except Exception as e:
         print(f"neighbor table lookup failed for {client_ip}: {e}", file=sys.stderr)
 
@@ -1551,7 +1558,7 @@ def serve_user_data():
         if not ubuntu_password:
             raise Exception("Ubuntu user not found in /etc/shadow - set UBUNTU_PASSWORD_HASH env var")
 
-    proxy_url = 'http://10.0.0.254:3128'
+    proxy_url = f'http://{GATEWAY_VIP}:3128'
 
     # Log template variables
     print(f"Generating user-data for {hostname}:", file=sys.stderr)
@@ -1579,7 +1586,8 @@ def serve_user_data():
         amt_interface=interfaces['amt_interface'],
         ssh_key_content=ssh_key_content,
         ubuntu_password=ubuntu_password,
-        proxy_url=proxy_url
+        proxy_url=proxy_url,
+        gateway_vip=GATEWAY_VIP
     )
     
     return rendered_content, 200, {'Content-Type': 'text/plain'}
@@ -2710,10 +2718,11 @@ def model_usage_data():
     conn, since_dt, err = _usage_stats_cursor(since_days)
     if err:
         return jsonify({'error': err}), 500
+    assert conn is not None
 
     with conn:
         with conn.cursor() as cur:
-            params = [since_dt]
+            params: list = [since_dt]
             where = 'WHERE period_start >= %s'
             if user_filter:
                 where += ' AND user_id = %s'
@@ -3191,6 +3200,7 @@ def vm_usage_data():
     conn, since_dt, err = _usage_stats_cursor(since_days)
     if err:
         return jsonify({'error': err}), 500
+    assert conn is not None
     now = datetime.now(UTC)
 
     with conn:
@@ -3303,6 +3313,7 @@ def model_usage_options():
     conn, since_dt, err = _usage_stats_cursor(since_days)
     if err:
         return jsonify({'error': err}), 500
+    assert conn is not None
 
     with conn:
         with conn.cursor() as cur:
