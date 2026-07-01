@@ -124,7 +124,7 @@ def check_dhcp_service_on_host(host_ip):
     """Check if DHCP server is running on a specific host using health monitoring endpoint"""
     try:
         url = f"http://{host_ip}:{DHCP_HEALTH_PORT}/health"
-        with urllib.request.urlopen(url, timeout=5) as response:
+        with urllib.request.urlopen(url, timeout=1) as response:
             health_data = json.loads(response.read().decode())
             
             if response.status == 200 and health_data.get('status') == 'healthy':
@@ -156,8 +156,8 @@ def check_dnsmasq_service_on_host(host_ip, hostname):
         import dns.resolver
         resolver = dns.resolver.Resolver()
         resolver.nameservers = [host_ip]
-        resolver.timeout = 3
-        resolver.lifetime = 3
+        resolver.timeout = 1
+        resolver.lifetime = 1
         
         # Try to resolve the hostname and its AMT counterpart
         results = {'host': host_ip, 'hostname': hostname, 'running': True, 'dns_working': True, 'method': 'dns_query'}
@@ -260,31 +260,73 @@ def _d(val: Any) -> dict[str, Any]:
     return val if isinstance(val, dict) else {}
 
 
-def main(verbose=False):
+def _make_marker(enabled: bool):
+    """Return a ``mark(label)`` callable that records phase boundaries.
+
+    When ``enabled`` is False the returned callable is a no-op so callers
+    can call it unconditionally without paying the dict-store overhead.
+    """
+    if not enabled:
+        return lambda label: None
+    import time
+    timings: list[tuple[str, float]] = []
+    t0 = [time.monotonic()]
+    last = [t0[0]]
+
+    def mark(label: str) -> None:
+        now = time.monotonic()
+        timings.append((label, (now - last[0]) * 1000.0))
+        last[0] = now
+
+    mark._total_ms = lambda: (time.monotonic() - t0[0]) * 1000.0  # type: ignore[attr-defined]
+    mark._timings = timings  # type: ignore[attr-defined]
+    return mark
+
+
+def _print_profile(mark) -> None:
+    """Print collected phase timings to stderr."""
+    timings = mark._timings  # type: ignore[attr-defined]
+    total = mark._total_ms()  # type: ignore[attr-defined]
+    print('\n[profile] phase timings (ms):', file=sys.stderr)
+    for label, ms in timings:
+        print(f'  {label:<28} {ms:>8.1f}', file=sys.stderr)
+    print(f'  {"TOTAL":<28} {total:>8.1f}', file=sys.stderr)
+
+
+def main(verbose=False, profile=False):
     """Main entry point.  Prints results as they are collected."""
     os.environ.pop('http_proxy', None)
     os.environ.pop('https_proxy', None)
 
+    mark = _make_marker(profile)
+    mark('start')
+
     if verbose:
-        _run_verbose()
+        _run_verbose(mark=mark)
     else:
-        _run_compact()
+        _run_compact(mark=mark)
+
+    mark('total')
+    if profile:
+        _print_profile(mark)
 
 
 # ---------------------------------------------------------------------------
 # Compact output -- streams one line per subsystem, problems at the end
 # ---------------------------------------------------------------------------
 
-def _run_compact():
+def _run_compact(mark):
     problems = []
     print("Cluster Health")
 
     # -- etcd (blocking, fast) --
     etcd_hosts = get_cluster_members(INITIAL_ETCD_HOST)
+    mark('get_cluster_members')
     etcd_results = []
     with ThreadPoolExecutor(max_workers=len(etcd_hosts)) as executor:
         for result in executor.map(check_etcd_host, etcd_hosts):
             etcd_results.append(result)
+    mark('etcd_health_checks')
 
     healthy = [r for r in etcd_results if r['healthy']]
     unhealthy = [r for r in etcd_results if not r['healthy']]
@@ -302,6 +344,7 @@ def _run_compact():
         client = get_etcd_client(etcd_hosts)
     except Exception:
         client = None
+    mark('etcd_client')
 
     # -- cluster-status (kick off early, read result later) --
     bg = ThreadPoolExecutor(max_workers=1)
@@ -313,10 +356,12 @@ def _run_compact():
     else:
         nodes = []
         non_amt_nodes = []
+    mark('get_all_nodes')
 
     # -- VIP + ceph + storage (from cluster-status) --
     cs = cs_future.result()
     bg.shutdown(wait=False)
+    mark('cluster_status_fetch')
     cs_error = cs.get('_error')
 
     vip_info = _d(cs.get('vipStatus'))
@@ -391,6 +436,7 @@ def _run_compact():
                 result = future.result()
                 result['_node'] = dns_futures[future]
                 dns_results.append(result)
+    mark('dhcp_dns_per_node')
 
     n_dhcp = len(dhcp_running)
     if n_dhcp == 0:
@@ -426,6 +472,7 @@ def _run_compact():
     # -- nodes --
     visible_nodes = [n for n in nodes if not n.get('hostname', '').endswith('a')]
     print(f"  nodes          {len(visible_nodes)} registered")
+    mark('render_output')
 
     # -- problems --
     if problems:
@@ -440,12 +487,13 @@ def _run_compact():
 # Verbose output -- detailed per-host information, printed as collected
 # ---------------------------------------------------------------------------
 
-def _run_verbose():
+def _run_verbose(mark):
     print("=" * 60)
     print("ETCD Cluster Health Check")
     print("=" * 60)
 
     etcd_hosts = get_cluster_members(INITIAL_ETCD_HOST)
+    mark('get_cluster_members')
     print(f"Discovered cluster members: {', '.join(etcd_hosts)}")
     print()
 
@@ -453,6 +501,7 @@ def _run_verbose():
     with ThreadPoolExecutor(max_workers=len(etcd_hosts)) as executor:
         for result in executor.map(check_etcd_host, etcd_hosts):
             etcd_results.append(result)
+    mark('etcd_health_checks')
 
     print("Host Health Status:")
     print("-" * 60)
@@ -467,6 +516,7 @@ def _run_verbose():
         client = get_etcd_client(etcd_hosts)
     except Exception:
         client = None
+    mark('etcd_client')
 
     # kick off cluster-status fetch in background
     bg = ThreadPoolExecutor(max_workers=1)
@@ -498,6 +548,7 @@ def _run_verbose():
                 result = future.result()
                 result['_node'] = dns_futures[future]
                 dns_results.append(result)
+        mark('dhcp_dns_per_node')
 
         # Print DHCP (only the running server is interesting; per-node
         # "not running" is the expected state under leader election)
@@ -544,6 +595,7 @@ def _run_verbose():
     # Storage health from cluster-status API
     cs = cs_future.result()
     bg.shutdown(wait=False)
+    mark('cluster_status_fetch')
     cs_error = cs.get('_error')
 
     print("\n" + "=" * 60)

@@ -2229,7 +2229,7 @@ def get_all_hosts():
     except Exception:
         return []
 
-def get_host_health(host_ip, timeout=10):
+def get_host_health(host_ip, timeout=2):
     """Get health status from a specific host"""
     # Every managed host (storage, compute, nvidia, nas, macos) serves its
     # own /api/health on the unified 12724 health-api port. admin-api (on
@@ -2522,7 +2522,10 @@ def get_all_host_health(hosts):
             host_health[h['hostname']] = {'status': 'disabled', 'services': []}
 
     with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(get_host_health, h['ip']): h['hostname'] for h in active}
+        # Use hostname, not IP — etcd's IP field can be stale (e.g. after a
+        # DHCP renewal moves the host to a different /24) but cluster DNS
+        # (dnsmasq) is authoritative and always reflects the current address.
+        futures = {executor.submit(get_host_health, h['hostname']): h['hostname'] for h in active}
         for future in as_completed(futures):
             name = futures[future]
             result = future.result()

@@ -16,11 +16,13 @@ def register_cluster_commands(subparsers):
 
     # Status command (verbose by default for backward compat)
     status_parser = cluster_subparsers.add_parser('status', help='Detailed cluster status (verbose)')
+    status_parser.add_argument('--profile', action='store_true', help='Print per-phase timings to stderr')
     status_parser.set_defaults(func=cluster_status_verbose)
 
     # Health command (compact by default)
     health_parser = cluster_subparsers.add_parser('health', help='Compact cluster health summary')
     health_parser.add_argument('-v', '--verbose', action='store_true', help='Show full detailed output')
+    health_parser.add_argument('--profile', action='store_true', help='Print per-phase timings to stderr')
     health_parser.set_defaults(func=cluster_health)
 
     # Leader command — print the storage leader hostname (for scripts)
@@ -64,7 +66,8 @@ def register_health_alias(subparsers):
 
 def cluster_health(args):
     """Execute compact cluster health check"""
-    check_cluster.main(verbose=getattr(args, 'verbose', False))
+    check_cluster.main(verbose=getattr(args, 'verbose', False),
+                       profile=getattr(args, 'profile', False))
 
 
 def cluster_leader(args):
@@ -80,7 +83,8 @@ def cluster_leader(args):
 
 def cluster_status_verbose(args):
     """Execute verbose cluster status check"""
-    check_cluster.main(verbose=True)
+    check_cluster.main(verbose=True,
+                       profile=getattr(args, 'profile', False))
 
 
 def cluster_populate_local_node(args):
