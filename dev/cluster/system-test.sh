@@ -275,45 +275,41 @@ sec_frontend() {
 # 4. admin-api (core + non-core) + inventory
 # --------------------------------------------------------------------------
 sec_admin_api() {
-  # From the NON-core node c1: its own nginx (local mode) and the VIP.
-  # /api/status returns allocation counts per node type.
-  for url in "http://localhost/api/status" "http://admin.xc/api/status"; do
-    $SSH c1 "curl -fsS --max-time 10 $url" | grep -q '"compute"' \
-      || die "GET $url from c1"
-  done
-  ok "/api/status via c1-local nginx and via admin.xc (VIP)"
+  # admin-api runs only on storage nodes; everything goes through admin.xc
+  # (the storage VIP), not via c1's local nginx (c1 has none — the lite
+  # health-api on :12724 only serves /api/health + /metrics).
+  $SSH c1 "curl -fsS --max-time 10 http://admin.xc/api/status" | grep -q '"compute"' \
+    || die "GET admin.xc/api/status from c1"
+  ok "/api/status via admin.xc (VIP)"
 
   # /api/health legitimately reports unhealthy (503) in dev: ntp/dns/squid
   # come from base-infrastructure, which is deliberately not container-safe.
-  # Assert the health document itself, not the verdict.
-  retry 5 2 "/api/health on c1" \
-    $SSH c1 "curl -sS --max-time 10 http://localhost/api/health | grep -q '\"overall\"'"
-  # /metrics is scraped straight off the Flask port, not through nginx.
-  retry 5 2 "/metrics on c1 (flask :12723)" \
-    $SSH c1 "curl -fsS --max-time 10 http://127.0.0.1:12723/metrics | grep -q ycluster"
-  ok "/api/health + /metrics on c1"
+  # Assert the health document itself, not the verdict. Hit health-api
+  # directly on c1 — Prometheus does the same.
+  retry 5 2 "/api/health on c1 (health-api direct)" \
+    $SSH c1 "curl -sS --max-time 10 http://127.0.0.1:12724/api/health | grep -q '\"overall\"'"
+  retry 5 2 "/metrics on c1 (flask :12724)" \
+    $SSH c1 "curl -fsS --max-time 10 http://127.0.0.1:12724/metrics | grep -q ycluster"
+  ok "/api/health + /metrics on c1 (via health-api :12724)"
 
-  # Allocation from a non-core node — the exact etcd write path the
-  # hardening work gates. Allocate, verify registration, then free it.
+  # Allocation via the VIP — same path bootstrap clients take. Allocate,
+  # verify registration, then free it.
   local mac="02:de:ad:00:00:09"
   local out hostname
-  out=$($SSH c1 "curl -fsS --max-time 10 'http://localhost/api/allocate?mac=$mac&type=compute'") \
-    || die "/api/allocate from c1"
+  out=$($SSH c1 "curl -fsS --max-time 10 'http://admin.xc/api/allocate?mac=$mac&type=compute'") \
+    || die "/api/allocate from c1 via admin.xc"
   hostname=$(echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hostname"])') \
     || die "allocate response unparsable: $out"
-  # The stored record holds the normalized (colon-less) MAC.
   $SSH s1 "$E etcdctl get /cluster/nodes/by-hostname/$hostname --print-value-only" \
     | grep -q "${mac//:/}" || die "allocation not in etcd"
-  # One key per del — a second arg to etcdctl del is a RANGE END.
-  # by-mac keys use the normalized (colon-less) MAC.
   $SSH s1 "$E etcdctl del /cluster/nodes/by-hostname/$hostname" >/dev/null
   $SSH s1 "$E etcdctl del /cluster/nodes/by-mac/${mac//:/}" >/dev/null
   ok "/api/allocate from c1 ($hostname) registered in etcd, cleaned up"
 
   # Inventory: collect-hw-dev.yml pushed hardware facts during provisioning.
   $SSH s1 "$E ycluster inventory show" | grep -q c1 || die "ycluster inventory show lists c1"
-  $SSH c1 "curl -fsS --max-time 10 http://localhost/api/inventory" | grep -q '"c1"' \
-    || die "/api/inventory lists c1"
+  $SSH c1 "curl -fsS --max-time 10 http://admin.xc/api/inventory" | grep -q '"c1"' \
+    || die "/api/inventory via admin.xc lists c1"
   ok "hardware inventory in etcd, CLI and API agree"
 }
 
@@ -344,9 +340,10 @@ sec_base_infra() {
   ok "cluster DNS serves etcd-rendered service names (locally + via gateway VIP)"
 
   # dns/squid/ntp/clock-skew were c1's only health gaps — with base infra
-  # in place the node must report fully healthy (HTTP 200).
+  # in place the node must report fully healthy (HTTP 200). Hit health-api
+  # directly on :12724 (Prometheus does the same — c1 has no nginx).
   retry 20 3 "/api/health fully healthy on c1" \
-    $SSH c1 "curl -fsS --max-time 10 http://localhost/api/health -o /dev/null"
+    $SSH c1 "curl -fsS --max-time 10 http://127.0.0.1:12724/api/health -o /dev/null"
   ok "c1 /api/health overall healthy (dns, squid, ntp, clock skew green)"
 
   # Core nodes stay 503 (no Ceph in containers) — assert the base-infra

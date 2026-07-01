@@ -4,7 +4,7 @@
   become: yes
   vars:
     admin_services_dir: /opt/admin-services
-    
+
   tasks:
     - name: Install net-tools package for arp command
       apt:
@@ -42,6 +42,13 @@
         dest: "{{ admin_services_dir }}/app.py"
         mode: '0644'
       notify: restart admin-api
+
+    - name: Copy lite health API
+      copy:
+        src: "files/health-api.py"
+        dest: "{{ admin_services_dir }}/health-api.py"
+        mode: '0644'
+      notify: restart health-api
 
     # Admin API now uses the YCluster package directly
     # No need to link common utilities
@@ -117,6 +124,32 @@
           WantedBy=multi-user.target
       notify: restart admin-api
 
+    - name: Create systemd service for health API
+      copy:
+        dest: /etc/systemd/system/health-api.service
+        content: |
+          [Unit]
+          Description=Health API Service (lite)
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 {{ admin_services_dir }}/health-api.py
+          StandardOutput=journal
+          StandardError=journal
+          Restart=always
+          RestartSec=5
+          User=admin-api
+          Group=admin-api
+          NoNewPrivileges=yes
+          ProtectSystem=strict
+          ProtectHome=yes
+          PrivateTmp=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart health-api
+
     - name: Create SSL directory for nginx
       file:
         path: /etc/nginx/ssl
@@ -124,6 +157,7 @@
         mode: '0700'
         owner: root
         group: root
+      when: "'storage' in group_names"
 
     - name: Create TLS certificate fetch wrapper script
       copy:
@@ -134,6 +168,7 @@
         content: |
           #!/bin/bash
           exec ycluster tls fetch-certs "$@"
+      when: "'storage' in group_names"
 
     - name: Create nginx template directory
       file:
@@ -142,64 +177,74 @@
         mode: '0755'
         owner: root
         group: root
+      when: "'storage' in group_names"
 
     - name: Configure nginx with HTTPS support (template only)
       copy:
         src: admin-api.conf.j2
         dest: /etc/nginx/templates/admin-api.conf.j2
       register: nginx_template_changed
+      when: "'storage' in group_names"
 
     - name: Install app.<domain> vhost template (user-facing scheduling page)
       copy:
         src: ycluster_app.conf.j2
         dest: /etc/nginx/templates/ycluster_app.conf.j2
+      when: "'storage' in group_names"
 
     - name: Configure nginx shared locations
       copy:
-        src: admin-api-locations.conf
+        src: files/admin-api-locations.conf
         dest: /etc/nginx/admin-api-locations.conf
       register: nginx_locations_changed
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Configure nginx public (internet-facing) locations
       copy:
-        src: admin-api-public-locations.conf
+        src: files/admin-api-public-locations.conf
         dest: /etc/nginx/admin-api-public-locations.conf
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Configure nginx authenticated locations (IdP forward-auth)
       copy:
-        src: admin-api-authed-locations.conf
+        src: files/admin-api-authed-locations.conf
         dest: /etc/nginx/admin-api-authed-locations.conf
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Install shared IdP forward-auth proxy snippet
       copy:
-        src: admin-api-authentik-proxy.conf
+        src: files/admin-api-authentik-proxy.conf
         dest: /etc/nginx/admin-api-authentik-proxy.conf
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Install shared authentik outpost-plumbing snippet
       copy:
         src: admin-api-authentik-outpost.conf
         dest: /etc/nginx/admin-api-authentik-outpost.conf
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Install shared grafana proxy snippet
       copy:
         src: admin-api-grafana-proxy.conf
         dest: /etc/nginx/admin-api-grafana-proxy.conf
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Install nginx rate-limit zones for public paths
       copy:
         src: admin-api-ratelimit.conf
         dest: /etc/nginx/conf.d/admin-api-ratelimit.conf
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Update nginx configuration with certbot-manager
-      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) or 'storage' not in group_names %} --local{% endif %}"
-      environment: "{{ etcd_client_env }}"
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
+      environment: "{{ etcd_client_env | default({}) }}"
       register: nginx_update_result
       changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
@@ -212,6 +257,7 @@
         dest: /etc/nginx/sites-enabled/admin-api
         state: link
       notify: restart nginx
+      when: "'storage' in group_names"
 
     # Rendered by certbot-manager update-nginx (above) from the
     # ycluster_app.conf.j2 template; enable it as its own site.
@@ -221,12 +267,14 @@
         dest: /etc/nginx/sites-enabled/ycluster_app
         state: link
       notify: restart nginx
+      when: "'storage' in group_names"
 
     - name: Remove default nginx site
       file:
         path: /etc/nginx/sites-enabled/default
         state: absent
       notify: restart nginx
+      when: "'storage' in group_names"
 
     # Fetch certs from etcd before nginx restarts; otherwise on a fresh
     # storage node nginx fails to start because /etc/nginx/ssl/key.pem
@@ -248,39 +296,78 @@
         path: /var/www/html/autoinstall
         state: directory
         mode: '0755'
+      when: "'storage' in group_names"
 
     - name: Copy all assets to web directory
       copy:
         src: "assets/"
         dest: /var/www/html/assets/
         mode: preserve
+      when: "'storage' in group_names"
 
     - name: Copy index.html for web interface
       copy:
         src: "index.html"
         dest: /var/www/html/index.html
         mode: '0644'
+      when: "'storage' in group_names"
 
     - name: Copy ansible SSH public key
       copy:
         src: "{{ bootstrap_files_dir }}/ansible_ssh_key.pub"
         dest: /var/www/html/ansible_ssh_key.pub
         mode: '0644'
+      when: "'storage' in group_names"
 
-    - name: Enable and start common web services
+    - name: Enable and start health-api (every managed node)
       systemd:
-        name: "{{ item }}"
+        name: health-api
         enabled: yes
         state: started
         daemon_reload: yes
-      loop:
-        - admin-api
-        - nginx
+
+    - name: Enable and start nginx (storage only)
+      systemd:
+        name: nginx
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      when: "'storage' in group_names"
+
+    - name: Disable and stop nginx on non-storage nodes
+      systemd:
+        name: nginx
+        enabled: no
+        state: stopped
+        daemon_reload: yes
+      when: "'storage' not in group_names"
+
+    - name: Enable and start admin API (storage only)
+      systemd:
+        name: admin-api
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      when: "'storage' in group_names"
+
+    - name: Disable admin API on non-storage nodes
+      systemd:
+        name: admin-api
+        enabled: no
+        state: stopped
+        daemon_reload: yes
+      when: "'storage' not in group_names"
 
   handlers:
     - name: restart admin-api
       systemd:
         name: admin-api
+        state: restarted
+        daemon_reload: yes
+
+    - name: restart health-api
+      systemd:
+        name: health-api
         state: restarted
         daemon_reload: yes
 

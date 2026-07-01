@@ -59,7 +59,7 @@ scrape_configs:
     scrape_interval: 60s
     static_configs:
 {% for host in groups['core'] %}
-      - targets: ['{{ hostvars[host]['ansible_host'] }}:12723']
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:12724']
         labels:
           node: '{{ host }}'
           node_type: 'core'

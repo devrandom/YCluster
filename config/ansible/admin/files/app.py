@@ -2232,7 +2232,7 @@ def get_all_hosts():
 def get_host_health(host_ip, timeout=10):
     """Get health status from a specific host"""
     try:
-        response = requests.get(f"http://{host_ip}:12723/api/health", timeout=timeout)
+        response = requests.get(f"http://{host_ip}:12724/api/health", timeout=timeout)
         if response.status_code in [200, 503]:
             # Both 200 (healthy) and 503 (unhealthy) contain valid health data
             return response.json()

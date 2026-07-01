@@ -42,7 +42,7 @@ def get_cluster_health():
     
     try:
         # Check local health API
-        response = requests.get('http://localhost:12723/api/health', timeout=10)
+        response = requests.get('http://localhost:12724/api/health', timeout=10)
         if response.status_code in [200, 503]:
             local_health = response.json()
             health_data['services'] = local_health.get('services', {})

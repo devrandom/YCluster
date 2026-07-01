@@ -16,7 +16,7 @@
   tasks:
     - name: Ensure health API metrics endpoint is accessible
       uri:
-        url: "http://localhost:12723/metrics"
+        url: "http://localhost:12724/metrics"
         method: GET
         status_code: [200, 404]
       register: metrics_check

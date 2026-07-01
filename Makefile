@@ -1,4 +1,5 @@
 .PHONY: init dev-setup dev-dnsmasq-start dev-dnsmasq-stop dev-dnsmasq-watch dev-tftpboot
+.PHONY: test test-system test-system-fresh help
 
 init: ./data/ubuntu-24.04.3-live-server-amd64.iso ./data/dnsmasq.leases ./data/ansible_ssh_key
 
@@ -67,3 +68,47 @@ dev-tftpboot: ./dev/tftpboot/ubuntu/vmlinuz ./dev/tftpboot/EFI/BOOT/grubx64.efi 
 
 ./data/ansible_ssh_key:
 	ssh-keygen -t ed25519 -f ./data/ansible_ssh_key -N "" -C "ansible@pxe-server"
+
+
+# ---- tests ---------------------------------------------------------------
+#
+# Two test surfaces, ordered by isolation cost:
+#
+#   make test              server-free unit tests (Python + Go), ~30s.
+#                          Use this during a dev cycle, before every commit.
+#
+#   make test-system       dev-cluster system tests (background + log).
+#                          Requires a running dev cluster (Incus containers
+#                          s1-s3, c1, c2, f1). Re-runs the assertions only
+#                          (--assert-only) — use test-system-fresh to also
+#                          re-run the provisioning plays.
+#
+#   make test-system-fresh dev-cluster system tests with full provisioning
+#                          (~5 min — site-dev + base-infra-dev + app-dev).
+#
+# Logs land in ./tmp/ (gitignored). Watch with `tail -f ./tmp/<file>.log`.
+
+test:
+	./run-tests.sh
+
+TEST_LOG := ./tmp/system-test.log
+
+test-system:
+	@mkdir -p ./tmp
+	./dev/cluster/system-test.sh --background --assert-only 2>&1 | tee -a ./tmp/system-test-launch.log
+	@echo
+	@echo "log: $(TEST_LOG)  (tail -f to watch; grep -E '^(== SECTION|PASS|FAIL)' for summary)"
+
+test-system-fresh:
+	@mkdir -p ./tmp
+	./dev/cluster/system-test.sh --background 2>&1 | tee -a ./tmp/system-test-launch.log
+	@echo
+	@echo "log: $(TEST_LOG)  (tail -f to watch; grep -E '^(== SECTION|PASS|FAIL)' for summary)"
+
+help:
+	@echo "Targets:"
+	@echo "  init, dev-setup, dev-tftpboot, dev-dnsmasq-{start,stop,watch}"
+	@echo "  test                  run all server-free unit tests (Python + Go)"
+	@echo "  test-system           run dev-cluster system tests (background, --assert-only)"
+	@echo "  test-system-fresh     run dev-cluster system tests with full provisioning"
+	@echo "  help                  show this help"

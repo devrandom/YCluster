@@ -15,6 +15,25 @@ Three test surfaces, ordered by isolation cost:
 | Go system (tagged) | proxy as subprocess + real HTTP backends | `local-ai-proxy/system_test.go` | seconds | `make build` |
 | Dev cluster system | end-to-end integration | `dev/cluster/system-test.sh` | minutes | Incus containers |
 
+The root `Makefile` exposes the two wrappers you'll use day-to-day:
+
+```bash
+make test              # server-free: Python + Go unit tests (~30s)
+make test-system       # dev-cluster integration, --assert-only, background
+make test-system-fresh # dev-cluster integration with full provisioning
+make help              # list targets
+```
+
+`make test` runs `run-tests.sh` (Python unit tests for the ycluster
+package and admin web app) plus `local-ai-proxy`'s `make test` for the
+Go side. Use this during a dev cycle and before every commit.
+
+`make test-system` kicks off the dev-cluster system tests in the
+background (log at `./tmp/system-test.log`). It defaults to
+`--assert-only` (skips provisioning), so the cluster must already be up
+— use `make test-system-fresh` to also re-run `site-dev.yml`,
+`base-infra-dev.yml`, etc.
+
 Pick the narrowest surface that exercises the change. Reserve the dev
 cluster for cross-component integration seams; it's slow and edits
 on the dev nodes only become visible after a `dev/cluster/system-test.sh`

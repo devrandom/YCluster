@@ -269,3 +269,26 @@ docker compose -f docker-compose.dev.yaml up -d
 
 - **etcd**: localhost:2379
 - **Admin API**: localhost:12723
+
+### Tests
+
+Three test surfaces, ordered by isolation cost:
+
+```bash
+make test              # server-free unit tests (Python + Go), ~30s
+make test-system       # dev-cluster system tests (background + log)
+make test-system-fresh # system tests with full provisioning (~5 min)
+make help              # list all targets
+```
+
+`make test` runs the Python unit suites (`config/ansible/admin/files/{,ycluster}/tests`)
+plus `local-ai-proxy`'s Go tests. Both layers are server-free — etcd is
+faked at the DAL seam, the Go side uses `make test` inside `local-ai-proxy/`.
+Use this during a dev cycle, before every commit.
+
+`make test-system` runs the dev-cluster integration tests in the background
+(see `dev/cluster/system-test.sh` and `.opencode/skills/testing/SKILL.md` for
+the section list). Requires the dev cluster to be up; use
+`make test-system-fresh` to also re-run the provisioning plays. Logs land
+in `./tmp/system-test.log`; `tail -f` to watch, `grep -E '^(== SECTION|PASS|FAIL)'`
+for the summary.
