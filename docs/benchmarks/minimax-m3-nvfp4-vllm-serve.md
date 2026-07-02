@@ -1,5 +1,11 @@
 # MiniMax-M3 NVFP4 (b12x) — vLLM serving throughput on SM120
 
+> **Historical baseline.** As of 2026-07-02 prod moved to stock vLLM 0.24 +
+> MXFP4 + EAGLE3 (~117–169 tok/s single-stream vs the ~75 here; see
+> [../inference/minimax-m3-nvfp4-sm120.md](../inference/minimax-m3-nvfp4-sm120.md)).
+> These are the b12x-stack numbers that stack is compared against; a
+> concurrency sweep of the new stack hasn't been run yet.
+
 Online serving benchmark of the MiniMax-M3 NVFP4 deployment (see
 [../inference/minimax-m3-nvfp4-sm120.md](../inference/minimax-m3-nvfp4-sm120.md)).
 A concurrency sweep characterising interactive latency and saturation

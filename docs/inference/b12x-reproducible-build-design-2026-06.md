@@ -1,8 +1,11 @@
 # Reproducible build of the b12x SM120 vLLM image — design
 
-Status: **plan** (not yet implemented). Motivation, recipe, and the build plan
-for replacing the third-party prebuilt inference image with one we build from
-pinned sources and host ourselves.
+Status: **plan** (not yet implemented). **2026-07-02 update: largely mooted
+for MiniMax-M3** — M3 prod now runs the *official* `vllm/vllm-openai:v0.24.0`
+image (auditable, upstream-published) with a 3-line source patch derived
+on-node; b12x is fallback-only there (see
+[minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md)). The plan remains
+relevant for **GLM-5.2**, which still serves on the b12x image family.
 
 ## Problem
 

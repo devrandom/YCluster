@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# One-time / per-release setup for the stock-vLLM MiniMax-M3 MXFP4 stack:
+# pull the pinned vllm-openai image and derive the clamp-limit patch file
+# from it. Run as the dev user (no sudo). Managed by install-minimax-m3.yml -
+# edit there. See docs/inference/minimax-m3-nvfp4-sm120.md.
+#
+# The patch: vLLM 0.24's compressed-tensors W4A4-MXFP4 MoE path drops the
+# model's clamped-SwiGLU parameters (swiglu_limit/alpha/beta) on the floor -
+# MarlinExperts then asserts "SWIGLUOAI_UNINTERLEAVE requires clamp_limit" at
+# the first forward. The 3-line fix threads layer.swiglu_* into
+# make_mxfp4_moe_quant_config (all plumbing below already exists upstream).
+# We extract the file from the image and patch it here, with a hard assert on
+# the anchor: if a future image bump changes the code (e.g. upstream fixes
+# it), this script fails loudly instead of silently shipping a stale patch.
+set -euo pipefail
+
+IMAGE="{{ minimax_m3_stock_image }}"
+PATCH_DIR="${PATCH_DIR:-{{ minimax_m3_stock_patch_dir }}}"
+TARGET_IN_IMAGE=/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_mxfp4.py
+
+podman pull "$IMAGE"
+
+mkdir -p "$PATCH_DIR"
+podman run --rm --entrypoint cat "$IMAGE" "$TARGET_IN_IMAGE" \
+  > "$PATCH_DIR/compressed_tensors_moe_w4a4_mxfp4.py.orig"
+
+PATCH_DIR="$PATCH_DIR" python3 - <<'PY'
+import os, pathlib, py_compile
+d = pathlib.Path(os.environ["PATCH_DIR"])
+src = (d / "compressed_tensors_moe_w4a4_mxfp4.py.orig").read_text()
+old = """            return make_mxfp4_moe_quant_config(
+                mxfp4_backend=self.mxfp4_backend,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )"""
+new = """            return make_mxfp4_moe_quant_config(
+                mxfp4_backend=self.mxfp4_backend,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                gemm1_alpha=layer.swiglu_alpha,
+                gemm1_beta=layer.swiglu_beta,
+                swiglu_limit=layer.swiglu_limit,
+            )"""
+n = src.count(old)
+assert n == 1, (
+    f"clamp-patch anchor matched {n} times (expected 1) - upstream changed; "
+    "re-verify the fix against the new image (maybe it's fixed upstream)"
+)
+out = d / "compressed_tensors_moe_w4a4_mxfp4.py"
+tmp = out.with_suffix(".py.tmp")
+tmp.write_text(src.replace(old, new))
+py_compile.compile(str(tmp), doraise=True)
+tmp.rename(out)
+print(f"clamp patch written: {out}")
+PY
+
+echo "setup done: image $IMAGE pulled, patch in $PATCH_DIR"

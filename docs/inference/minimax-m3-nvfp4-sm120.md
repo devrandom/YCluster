@@ -1,18 +1,28 @@
-# MiniMax-M3 NVFP4 on RTX PRO 6000 (SM120)
+# MiniMax-M3 4-bit on RTX PRO 6000 (SM120)
 
-Serving MiniMax-M3 (NVFP4 quant, 428B total / 23B active multimodal MoE,
+Serving MiniMax-M3 (4-bit quant, 428B total / 23B active multimodal MoE,
 MiniMax Sparse Attention, up to 1M context) on a node with 4× NVIDIA RTX PRO
 6000 Blackwell (compute capability 12.0, "SM120").
 
 ## TL;DR
 
-The stock SGLang/cutlass NVFP4 MoE path is **broken on SM120** — it loads and
-serves but produces NaN logits → garbage tokens. The working path is
+**Current prod (2026-07-02): stock vLLM 0.24 + MXFP4 + EAGLE3** — see
+"Stock vLLM MXFP4 + EAGLE3" below. `docker.io/vllm/vllm-openai:v0.24.0` with
+the `olka-fi/MiniMax-M3-MXFP4` checkpoint, one 3-line clamp patch
+(auto-derived by `~dev/bin/minimax-m3-stock-setup.sh`), `--block-size 128`,
+and EAGLE3 speculative decoding ON: coherent on SM120 at **117–169 tok/s
+single-stream** (1.5–2.2× the b12x baseline). Managed by
+`install-minimax-m3.yml`; start with `~dev/bin/minimax-m3-stock-start.sh`.
+
+The previous prod stack — and the fallback if stock misbehaves — is
 lukealonso's **b12x** kernel family (CuTe DSL NVFP4 grouped-GEMM for SM120),
 packaged in the `verdictai/minimax-m3-nvfp4-b12x` image, paired with the
 `brandonmusic/MiniMax-M3-NVFP4` checkpoint, with the KV cache forced to
-`bfloat16`. Runs as a rootless-podman container under the `dev` user, TP=4,
-OpenAI-compatible on port 9211.
+`bfloat16` (`~dev/bin/minimax-m3-b12x-start.sh`). The stock SGLang/cutlass
+*NVFP4* MoE path remains **broken on SM120** — it loads and serves but
+produces NaN/garbage tokens (details below); MXFP4 via Marlin weight-only is
+the format that works on stock. Both stacks run as rootless-podman containers
+under the `dev` user, TP=4, OpenAI-compatible on port 9211.
 
 ## Why the obvious path fails
 
@@ -328,7 +338,10 @@ reference runs stock vLLM + `FLASH_ATTN` + MXFP8; we run the b12x fork on SM120 
 
 **Conclusion: keep EAGLE3 OFF on b12x** — a net loss for a *different* reason than
 GLM's MTP (there, an expensive bf16 MoE draft; here, a fine draft killed by a
-cudagraph downgrade).
+cudagraph downgrade). **On the stock MXFP4 stack this resolved exactly as
+predicted** — stock's MSA backend keeps FULL decode graphs under spec-decode and
+EAGLE3 is a 1.5–2.2× win there (see "Stock vLLM MXFP4 + EAGLE3" below); it is ON
+in prod.
 
 **The unblock is specific and not fundamental — FULL-cudagraph spec-decode is already
 solved in b12x for the MLA family, just not for M3's MSA path.** `lukealonso/b12x`
@@ -349,6 +362,133 @@ FULL-cudagraph+spec-decode (plus the official M3+EAGLE3 integration, native tool
 calling #45381, and dropping the opaque b12x image; gated only on stock's SM120 NVFP4
 MoE kernels being coherent) — so the payoff comes from FLASH_ATTN as the target
 backend, not from stock per se.
+
+### Stock vLLM 0.24 on SM120 — tested 2026-07-01, loads but incoherent
+
+Full serve test of `vllm/vllm-openai:v0.24.0` (torch 2.11+cu130, sm_120 in the arch
+list) on the 4× RTX PRO 6000 node, TP=4. Everything initializes; the output is
+deterministic garbage. What the test established:
+
+- **Checkpoint must be `nvidia/MiniMax-M3-NVFP4`** (233 GB, the VL variant —
+  `MiniMaxM3SparseForConditionalGeneration`, `hidden_act: swigluoai`,
+  `language_model.model.*` weight keys). The `brandonmusic` quant we serve on b12x
+  does **not** load on stock: its config mislabels `hidden_act: silu` and its weights
+  are keyed `model.language_model.*` (packaged for the b12x loader).
+- **`--block-size 128` is required.** M3's MSA backend declares
+  `get_supported_kernel_block_sizes() == [128]` (one sparse block per KV page); the
+  default (16) and 64 both die in KV-cache init with `ValueError: No common block
+  size`. The selector only rounds down, so 128 is the single valid value.
+- **On SM120 every GEMM falls back to Marlin weight-only.** The FlashInfer NVFP4
+  kernels hard-gate to SM100 (`Using 'MARLIN' NvFp4 MoE backend out of potential
+  backends: ['FLASHINFER_TRTLLM', 'FLASHINFER_CUTLASS', 'MARLIN']`, plus the
+  `marlin_utils_fp4` "no native FP4" warning). No Blackwell FP4 tensor-core use at all.
+- With that, init is clean: FLASH_ATTN attention, **FULL decode cudagraphs** (the MSA
+  backend supports them on stock — the exact property b12x's `B12X_ATTN` lacks),
+  17.6 GiB/GPU KV (416k tokens), 126 s engine init.
+- **But generation is pure garbage**: at temperature 0, every prompt returns one
+  repeated token (`지적했다`) to the token cap. Deterministic, prompt-independent —
+  numerics corruption, almost certainly in the Marlin NVFP4 dequant path (the only
+  untested kernel in play). Garbage decodes at ~71 tok/s single-stream, i.e. the
+  Marlin path's *speed* would be acceptable if it were correct.
+  (`--enforce-eager` bisect not run; logs on the node at `~/stock024-nvidia-test*.log`.)
+
+**Verdict: stock 0.24 cannot serve M3 *NVFP4* on SM120.** The Marlin *NVFP4*
+dequant path is broken; the FlashInfer NVFP4 kernels gate to SM100. What broke
+the logjam (next section) was switching *quant format*: the 0.24 release notes
+tie M3 support to **MXFP4** (#45896), and Marlin's MXFP4 path — the GPT-OSS
+lineage, battle-tested on consumer Blackwell — is coherent.
+
+### Stock vLLM MXFP4 + EAGLE3 — tested 2026-07-02, CURRENT PROD
+
+The working stock recipe, now prod (managed by `install-minimax-m3.yml`;
+`~dev/bin/minimax-m3-stock-setup.sh` then `~dev/bin/minimax-m3-stock-start.sh`):
+
+- **Checkpoint `olka-fi/MiniMax-M3-MXFP4`** (221 GB): routed experts MXFP4,
+  shared expert/attention MXFP8, built with qstream from MiniMaxAI's official
+  MXFP8 release (GSM8K 92.9%, ppl 5.32 per the card). All four
+  `--trust-remote-code` `.py` files verified byte-identical to the official
+  `MiniMaxAI/MiniMax-M3-MXFP8`. Same recipe validated independently on this
+  exact hardware by `0xSero/minimax-m3-sm120`.
+- **One 3-line patch** on `compressed_tensors_moe_w4a4_mxfp4.py`: upstream
+  drops the model's clamped-SwiGLU params, so `MarlinExperts` asserts
+  `SWIGLUOAI_UNINTERLEAVE requires clamp_limit` at first forward. The fix
+  threads `layer.swiglu_{alpha,beta,limit}` into `make_mxfp4_moe_quant_config`
+  (all downstream plumbing exists). The setup script derives the patched file
+  from the image with an anchored replace that fails loudly if upstream
+  changes. **Candidate for an upstream vLLM PR.**
+- Flags: `--block-size 128` (MSA page size, mandatory), `--kv-cache-dtype
+  bfloat16`, `--linear-backend marlin` (+~2 tok/s), `--max-model-len 256000`,
+  `--max-num-seqs 64`, `--limit-mm-per-prompt '{"image":0,"video":0}'`,
+  `--default-chat-template-kwargs '{"thinking_mode":"enabled"}'`,
+  `VLLM_MARLIN_USE_ATOMIC_ADD=1` (no measured change; harmless), TP=4 —
+  each non-obvious one earned its place via a distinct failure (sharp edges
+  below).
+- **EAGLE3 ON by default** (`num_speculative_tokens 3`, no `attention_backend`
+  in the spec-config). Stock's MSA backend keeps **FULL decode cudagraphs
+  under spec-decode** — exactly what b12x's `B12X_ATTN` couldn't — so the 80%
+  draft acceptance finally converts into wall-clock speed.
+- Served ids: `brandonmusic/minimax-m3-nvfp4` (gateway compat — id predates
+  the quant switch), `MiniMax-M3-NVFP4` (b12x-era alias), `minimax-m3`
+  (generic).
+
+Single-stream decode, temp 0, TP=4 (b12x NVFP4 baseline ~75–89 tok/s):
+
+| config | tok/s |
+|---|---|
+| stock MXFP4, no spec-decode | 76.6–78.5 |
+| + EAGLE3, free-form essay | 117 |
+| + EAGLE3, technical explanation | 130 |
+| + EAGLE3, code generation | **169** |
+
+Known sharp edges (each was a real startup/serving failure at 256k):
+
+- **Host-RAM OOM on 31 GiB nodes** (`--max-num-seqs 64` + cgroup caps): vLLM
+  v1 preallocates *pinned* CPU buffers scaling with `max_num_seqs ×
+  max_model_len` per worker — at 0.24's default seqs and 256k that's ~6 GiB
+  anon per worker, and pinned pages can't swap, so the kernel OOM-kills a
+  worker *silently* (only symptom: `Worker proc VllmWorker-N died
+  unexpectedly`; check `journalctl -k` for `oom-kill`). Capping seqs at 64
+  (b12x ran 4!) plus the start script's `--memory 26g --memory-swap -1`
+  absorbs the startup spike.
+- **GPU KV starvation from the vision tower**
+  (`--limit-mm-per-prompt '{"image":0,"video":0}'`): the checkpoint is the VL
+  variant, and the multimodal *encoder cache* scales with context — ~15 GiB
+  GPU at 256k (budget 192k tokens, profiled with a max-size video), leaving
+  only 2.7 GiB for KV ("estimated maximum model length is 54144"). We serve
+  text-only; zeroing image/video skips the encoder entirely.
+- **Streamed responses leak raw `<mm:think>` into `content`**
+  (`--default-chat-template-kwargs '{"thinking_mode":"enabled"}'`): M3's
+  default "adaptive" system prompt *literally contains*
+  `<mm:think></mm:think>` as instructional text, tokenized as the real marker
+  tokens. The reasoning parser's prompt back-scan hits that closer, decides
+  reasoning already ended, and bypasses parsing for the whole stream (OWUI
+  then renders tag spam; non-streaming is unaffected, which is why simple
+  probes pass). `thinking_mode=enabled` prefills `<mm:think>` at the prompt
+  end so the scan lands on a start marker and streaming parses correctly.
+  Side effect: thinking is always on, not adaptive (per-request
+  `chat_template_kwargs` still override). **Upstream vLLM bug** — `main`'s
+  `is_reasoning_end` has the same last-marker semantics; worth filing.
+- Reasoning + tool-call parsing use 0.24's built-in `minimax_m3` pair
+  (`--reasoning-parser minimax_m3 --enable-auto-tool-choice --tool-call-parser
+  minimax_m3`): `<mm:think>` goes to the reasoning field, `tool_choice: auto`
+  returns structured `tool_calls` (verified streaming and non-streaming —
+  Open-WebUI native tool calling works). Without these flags OWUI errors with
+  "auto tool choice requires --enable-auto-tool-choice and --tool-call-parser
+  to be set".
+- The checkpoint's `generation_config.json` sets default sampling
+  `temperature 1.0, top_p 0.95` (MiniMax's recommendation) for requests that
+  don't specify their own.
+- Load is ~5 min warm (no torch.compile pass, unlike b12x's ~15–20 min cold).
+
+**Verify after any restart or image bump** with `./contrib/inference chat
+minimax-m3` (from a machine with gateway config): it streams a completion and
+then explicitly checks for think-tag leaks in streamed content and for working
+streamed `tool_choice: auto` tool calls, exiting non-zero on failure.
+
+Remaining watch-items: upstream the clamp fix (removes the patch); FlashInfer
+MXFP4/NVFP4 kernels gaining SM120 (native FP4 tensor cores would lift
+prefill/batch throughput above Marlin weight-only, which is decode-friendly
+but compute-poor).
 
 The plumbing is in place and inert: `M3_EAGLE3=1` on `minimax-m3-b12x-start.sh` mounts
 the draft and injects the spec-config (default OFF, draft at
@@ -374,3 +514,9 @@ ycluster inference add http://nvN.xc:9211
 | `MSA sparse backend v1 is bf16-KV only (got fp8_e4m3)` | KV cache resolved to fp8 | append `--kv-cache-dtype bfloat16` |
 | `invalid choice: 'bf16'` | wrong spelling | use `bfloat16` |
 | Coherent-looking 200 but empty/`\0` content | broken cutlass NVFP4 MoE (wrong image) | use the b12x image, not the stock SGLang/0xSero one |
+| `ValueError: No common block size for 16` (or 64) in KV-cache init | MSA requires KV page size 128 exactly | pass `--block-size 128` |
+| One token repeated to the cap, temp 0, any prompt (stock vLLM) | Marlin **NVFP4** fallback incoherent on SM120 | use the **MXFP4** checkpoint (works via Marlin) — or b12x for NVFP4 |
+| `AssertionError: SWIGLUOAI_UNINTERLEAVE requires clamp_limit` at first forward (stock + MXFP4) | compressed-tensors MoE path drops the clamped-SwiGLU params | run `~dev/bin/minimax-m3-stock-setup.sh` (derives the clamp patch); start script mounts it |
+| `Worker proc VllmWorker-N died unexpectedly` during startup, no traceback | host-RAM OOM (kernel kill) — pinned CPU buffers scale with `max_num_seqs × max_model_len` | use the start script (`--max-num-seqs 64` + cgroup cap + unlimited swap); check `journalctl -k` for `oom-kill` |
+| `To serve at least one request with the model's max seq len ... available KV cache memory (2.7 GiB)` at 256k | vision encoder cache scales with context (~15 GiB GPU) on the VL checkpoint | `--limit-mm-per-prompt '{"image":0,"video":0}'` (text-only serving) |
+| Streamed `content` contains raw `<mm:think>` tags but non-streaming is clean | M3's adaptive system prompt embeds literal think markers, defeating the reasoning parser's prompt scan | `--default-chat-template-kwargs '{"thinking_mode":"enabled"}'`; verify with `./contrib/inference chat` |

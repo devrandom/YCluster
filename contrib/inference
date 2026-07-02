@@ -4,7 +4,11 @@
 Subcommands:
   chat <model>      Stream a one-shot chat completion + tokenizer round-trip.
                     Reasoning streams in dim gray, the answer at normal weight,
-                    then prints ttft / tok/s / total stats.
+                    then prints ttft / tok/s / total stats. Also checks that
+                    no raw think tags (<mm:think>, <think>) leak into streamed
+                    content (a reasoning-parser regression OWUI hits hard) and
+                    that a streamed tool_choice=auto request yields structured
+                    tool_calls. Exits non-zero if either check fails.
   bench <model>     Sweep prefill + decode tok/s across prompt depths.
                     Streams each request with ignore_eos + temperature 0
                     (deterministic decode). --lens/--gen/--prompt/--json.
@@ -132,6 +136,8 @@ def cmd_chat(args):
     in_reasoning = False
     bytes_in = 0
     tokens = 0  # count of SSE deltas that carried reasoning or content
+    content_parts = []
+    reasoning_parts = []
 
     with urllib.request.urlopen(req) as resp:
         for raw in resp:
@@ -158,6 +164,7 @@ def cmd_chat(args):
                     in_reasoning = True
                 sys.stdout.write(reasoning)
                 sys.stdout.flush()
+                reasoning_parts.append(reasoning)
                 tokens += 1
 
             if content:
@@ -168,6 +175,7 @@ def cmd_chat(args):
                     in_reasoning = False
                 sys.stdout.write(content)
                 sys.stdout.flush()
+                content_parts.append(content)
                 tokens += 1
 
     if in_reasoning:
@@ -181,7 +189,90 @@ def cmd_chat(args):
         f"total: {total * 1000:.0f}ms   "
         f"bytes: {bytes_in}"
     )
-    return 0
+    print()
+
+    failed = False
+
+    # Check 1: no raw think tags in streamed *content*. If the backend's
+    # reasoning parser is working, thinking arrives via the reasoning delta
+    # field; literal tags in content mean the parser was bypassed (this is
+    # what OWUI renders as visible <mm:think> spam). Reasoning presence
+    # itself is informational: a model may legitimately skip thinking.
+    full_content = "".join(content_parts)
+    leaked = [t for t in ("<mm:think>", "</mm:think>", "<think>", "</think>")
+              if t in full_content]
+    if leaked:
+        print(f"think-tag leak:   {RED}FAIL{RESET} — {', '.join(leaked)} in streamed content")
+        failed = True
+    else:
+        print(f"think-tag leak:   {GREEN}ok{RESET}"
+              + ("  (reasoning streamed separately)" if reasoning_parts
+                 else "  (no reasoning emitted)"))
+
+    # Check 2: streamed tool calling (tool_choice=auto), the other half of
+    # OWUI "native" mode. Expects structured tool_calls deltas and a
+    # tool_calls finish_reason; a backend without --enable-auto-tool-choice
+    # errors here, and a broken tool parser leaves tool_calls empty.
+    tool_req = urllib.request.Request(
+        base + "/v1/chat/completions",
+        data=json.dumps({
+            "model": model,
+            "stream": True,
+            "max_tokens": 800,
+            "temperature": 0,
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a city",
+                "parameters": {"type": "object",
+                               "properties": {"city": {"type": "string"}},
+                               "required": ["city"]}}}],
+            "tool_choice": "auto",
+            "messages": [{"role": "user",
+                          "content": "What is the weather in Paris right now? Use the tool."}],
+        }).encode(),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        method="POST",
+    )
+    tc_name, tc_args, finish = None, [], None
+    try:
+        with urllib.request.urlopen(tool_req, timeout=180) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                try:
+                    ev = json.loads(line[len("data: "):])
+                except json.JSONDecodeError:
+                    continue
+                choice = ev.get("choices", [{}])[0] if ev.get("choices") else {}
+                finish = choice.get("finish_reason") or finish
+                for tc in (choice.get("delta") or {}).get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    tc_name = fn.get("name") or tc_name
+                    if fn.get("arguments"):
+                        tc_args.append(fn["arguments"])
+        args_ok = False
+        try:
+            args_ok = isinstance(json.loads("".join(tc_args) or "{}"), dict) and bool(tc_args)
+        except json.JSONDecodeError:
+            pass
+        if tc_name and args_ok and finish == "tool_calls":
+            print(f"tool-call stream: {GREEN}ok{RESET} — "
+                  f"{tc_name}({''.join(tc_args)})")
+        else:
+            print(f"tool-call stream: {RED}FAIL{RESET} — "
+                  f"name={tc_name!r} args={''.join(tc_args)!r} finish={finish!r}")
+            failed = True
+    except urllib.error.HTTPError as e:
+        print(f"tool-call stream: {RED}FAIL{RESET} — HTTP {e.code}: "
+              f"{e.read().decode('utf-8', 'replace')[:200]}")
+        failed = True
+
+    return 1 if failed else 0
 
 
 def _bench_build_prompt(target_tokens):

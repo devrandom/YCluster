@@ -1,16 +1,37 @@
 ---
-# Deploy MiniMax-M3 NVFP4 (b12x) inference scripts to Nvidia GPU nodes.
-# Companion to docs/inference/minimax-m3-nvfp4-sm120.md. Two dev scripts
+# Deploy MiniMax-M3 inference scripts to Nvidia GPU nodes. Companion to
+# docs/inference/minimax-m3-nvfp4-sm120.md. Two stacks, four dev scripts
 # (the dev user has no sudo, and needs none for these):
+#
+# Stock stack (CURRENT prod - stock vLLM + MXFP4 + EAGLE3 spec-decode):
+#   ~dev/bin/minimax-m3-stock-setup.sh - pull the image + derive the clamp patch
+#   ~dev/bin/minimax-m3-stock-start.sh - (re)launch the server, e.g. after reboot
+#
+# b12x stack (previous prod - NVFP4 CuTe fork; kept as the fallback until the
+# stock stack has soaked):
 #   ~dev/bin/minimax-m3-b12x-setup.sh  - pull the image (first run and after a
 #                                        new image release)
 #   ~dev/bin/minimax-m3-b12x-start.sh  - (re)launch the server, e.g. after reboot
+#
 # Host prerequisites (podman + nvidia CDI) are generic and live in
-# setup-gpu-podman.yml. The image tag is a var here - bump it to ship a release.
-- name: Deploy MiniMax-M3 b12x inference scripts
+# setup-gpu-podman.yml. Image tags are vars here - bump one to ship a release.
+- name: Deploy MiniMax-M3 inference scripts
   hosts: nvidia
   become: yes
   vars:
+    # --- stock stack (prod) ---
+    minimax_m3_stock_image: "docker.io/vllm/vllm-openai:v0.24.0"
+    # Community MXFP4 quant (routed experts MXFP4, rest MXFP8; built with
+    # qstream from MiniMaxAI's official MXFP8 release). Coherent on SM120 via
+    # Marlin weight-only kernels once the clamp patch is applied - see the doc.
+    minimax_m3_mxfp4_repo: "olka-fi/MiniMax-M3-MXFP4"
+    minimax_m3_mxfp4_dir: "/home/dev/models/MiniMax-M3-MXFP4-olka"
+    # First id is the established gateway id, kept across the quant change so
+    # existing clients don't break; then the b12x-era alias; then the generic id.
+    minimax_m3_stock_served_names: "brandonmusic/minimax-m3-nvfp4 MiniMax-M3-NVFP4 minimax-m3"
+    minimax_m3_stock_patch_dir: "/home/dev/vllm-patches"
+
+    # --- b12x stack (fallback) ---
     # dark-devotion b12x build: ships upstream's built-in minimax_m3 reasoning AND
     # tool-call parsers (the old verdictai image had neither - tool calling was
     # off), and serves coherent on SM120 with the recipe's fp8 kv-cache (the old
@@ -24,6 +45,9 @@
     # EAGLE3 speculative-decode draft head (experimental, default OFF in the start
     # script - M3_EAGLE3=1 to enable). 1-layer dense bf16 draft; MTP is unavailable
     # for M3 (no released nextn weights). See docs/inference/minimax-m3-nvfp4-sm120.md.
+    # EAGLE3 draft head is shared by both stacks (default ON for stock, OFF for
+    # b12x - stock's MSA backend keeps FULL decode cudagraphs under spec-decode,
+    # b12x's drops to PIECEWISE and loses more than acceptance gains).
     minimax_m3_eagle3_repo: "Inferact/MiniMax-M3-EAGLE3"
     minimax_m3_eagle3_dir: "/home/dev/models/MiniMax-M3-EAGLE3"
   tasks:
@@ -49,6 +73,8 @@
         group: dev
         mode: '0755'
       loop:
+        - minimax-m3-stock-setup.sh
+        - minimax-m3-stock-start.sh
         - minimax-m3-b12x-setup.sh
         - minimax-m3-b12x-start.sh
 
