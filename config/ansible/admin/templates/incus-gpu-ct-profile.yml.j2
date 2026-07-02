@@ -3,6 +3,12 @@ description: GPU-sharing LXC container (host kernel, /dev/kfd + /dev/dri)
 config:
   limits.cpu: "8"
   limits.memory: 32GiB
+  # ROCm's HSA runtime pins GPU queue scratch via mlock(); the default
+  # 8 MiB RLIMIT_MEMLOCK on unprivileged Incus containers is too low and
+  # libhsa-runtime64.so segfaults in GpuAgent::ReleaseQueueMainScratch
+  # during queue creation instead of returning an error. 'unlimited'
+  # matches AMD's recommendation for memory-intensive ROCm workloads.
+  limits.kernel.memlock: unlimited
   # Map the host's 'render' group (gid {{ incus_render_gid }}) into the
   # container with the same gid, so the bind-mounted /dev/kfd and
   # /dev/dri/renderD128 (mode 660 root:render on the host) appear as
