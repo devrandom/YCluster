@@ -612,15 +612,111 @@ verify_restore_postgres() {
 verify_restore_qdrant() {
     local enc; enc=$(latest_encrypted qdrant)
     if [ -z "$enc" ]; then log "verify qdrant: no backup found (skipped)"; return 2; fi
-    # Shallow check: decrypt + archive integrity. A deep load into a temp qdrant
-    # instance is a documented follow-up (disaster-recovery.md).
-    local tmp rc=0; tmp=$(mktemp /tmp/verify-qdrant.XXXXXX.snapshot)
-    if decrypt_stream "$enc" > "$tmp" && tar -tf "$tmp" >/dev/null 2>&1; then
-        log "verify qdrant: snapshot decrypts and is a valid archive (shallow check)"
-    else
-        log "verify qdrant: FAILED"; rc=1
+    # Deep check: decrypt the snapshot, extract it, spin up a scratch qdrant on
+    # non-default ports (16333/16334, distinct from the live 6333/6334 the
+    # leader is also holding), probe /health and /collections, then tear down.
+    # This catches snapshot corruption that the old archive-integrity-only
+    # check missed (e.g. an index or payload file the tar accepted but qdrant
+    # would refuse to load). The scratch runs as the qdrant user, matching the
+    # live service, so any perms bug surfaces here too. On any error path the
+    # trap kills the scratch process and removes the temp dir.
+    local qdrant_bin=/usr/bin/qdrant
+    if [ ! -x "$qdrant_bin" ]; then
+        log "verify qdrant: $qdrant_bin not installed on this node; skipping deep verify"
+        log "                (install via storage/install-qdrant.yml if this is the leader)"
+        return 2
     fi
-    rm -f "$tmp"
+    local scratch pid_file rc=0
+    scratch=$(mktemp -d /tmp/verify-qdrant.XXXXXX)
+    pid_file="$scratch/qdrant.pid"
+    cleanup_scratch() {
+        if [ -f "$pid_file" ]; then
+            local pid; pid=$(cat "$pid_file" 2>/dev/null || true)
+            if [ -n "$pid" ]; then
+                kill -TERM "$pid" 2>/dev/null || true
+                for _ in 1 2 3 4 5; do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 1
+                done
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        fi
+        rm -rf "$scratch"
+    }
+    trap cleanup_scratch RETURN
+
+    # Decrypt + extract. The full-storage snapshot is a tar of the storage dir
+    # (see backup_qdrant); extracted under $scratch/storage. Ownership of the
+    # live service is qdrant:qdrant, so chown before launching the scratch
+    # (which runs as that user too) — a real perms bug would fail here.
+    local snapshot="$scratch/snapshot.tar"
+    if ! decrypt_stream "$enc" > "$snapshot"; then
+        log "verify qdrant: decrypt FAILED"; return 1
+    fi
+    if ! tar -xf "$snapshot" -C "$scratch"; then
+        log "verify qdrant: extract FAILED"; return 1
+    fi
+    mkdir -p "$scratch/snapshots"
+    chown -R qdrant:qdrant "$scratch"
+    rm -f "$snapshot"
+
+    # Render a minimal config: distinct ports so the live qdrant (6333/6334)
+    # on the leader doesn't collide; telemetry off so the verify doesn't
+    # leave traces on the gateway. static_content_dir is omitted — qdrant
+    # defaults it to the binary directory, which always exists.
+    local cfg="$scratch/config.yaml"
+    cat > "$cfg" <<EOF
+storage:
+  storage_path: $scratch/storage
+  snapshots_path: $scratch/snapshots
+service:
+  host: 127.0.0.1
+  http_port: 16333
+  grpc_port: 16334
+log_level: WARN
+telemetry_disabled: true
+EOF
+    chown qdrant:qdrant "$cfg"
+
+    # Launch as the qdrant user; capture pid so the trap can reap it.
+    sudo -u qdrant -- "$qdrant_bin" --config-path "$cfg" >"$scratch/qdrant.log" 2>&1 &
+    echo $! > "$pid_file"
+
+    # Wait up to 20s for /healthz to come up.
+    local up=0
+    for _ in $(seq 1 20); do
+        if curl -fsS --max-time 2 "http://127.0.0.1:16333/healthz" >/dev/null 2>&1; then
+            up=1; break
+        fi
+        sleep 1
+    done
+    if [ "$up" -ne 1 ]; then
+        log "verify qdrant: scratch did not become healthy in 20s"
+        log "                last log lines:"
+        tail -n 10 "$scratch/qdrant.log" 2>/dev/null | sed 's/^/                  /' || true
+        rc=1
+    else
+        # /healthz up; now /collections must return a parseable JSON object
+        # whose `.result.collections` is an array. An empty array is fine
+        # (source cluster had no collections at backup time); a non-empty
+        # array is the strong signal the data actually loaded, not just
+        # that the archive was valid.
+        local cols
+        cols=$(curl -fsS --max-time 5 "http://127.0.0.1:16333/collections" 2>/dev/null || true)
+        if [ -z "$cols" ]; then
+            log "verify qdrant: /collections returned empty"; rc=1
+        elif ! echo "$cols" | jq -e '.result.collections | type == "array"' >/dev/null 2>&1; then
+            log "verify qdrant: /collections did not return the expected shape"
+            log "                response: $cols"
+            rc=1
+        else
+            local n
+            n=$(echo "$cols" | jq -r '.result.collections | length' 2>/dev/null || echo "?")
+            log "verify qdrant: scratch loaded cleanly ($n collection(s) visible)"
+        fi
+    fi
+    trap - RETURN
+    cleanup_scratch
     return $rc
 }
 

@@ -399,22 +399,24 @@ through open-webui.
 
 ## Ceph off-cluster backup story
 
-**Current state (gap):** RBD pools `rbd/user` and `rbd/misc` are the *primary*
-copy of their data and are **not** snapshotted or replicated off-cluster. The
-database backups (pg/qdrant/etcd) are pushed offsite and cover the *stateful
-services*, but non-DB files on RBD are not — concretely the docker registry
-blobs (`/rbd/misc/docker-registry`, the built images; rebuildable but costly)
-and anything parked on the volumes by hand outside a backed-up engine.
+**Decision (postponed by design, 2026-07-02):** RBD pools `rbd/user` and
+`rbd/misc` are the *primary* copy of their data and remain unsnapshotted
+off-cluster. The database backups (pg/qdrant/etcd) cover every irreplaceable
+stateful workload — postgres (OWUI, authentik, …), qdrant (vector store), and
+etcd itself (all cluster state, including the docker registry config + the
+wiring for every service). The remaining RBD content is rebuildable:
+`/rbd/misc/docker-registry` (the built images; re-push from upstream),
+authentik branding (Ansible-deployed), and any hand-placed files. A full-volume
+`rbd export-diff` → age → rsync path is reserved here if the rebuild cost ever
+becomes unacceptable, but it adds storage pressure (full first export, sized
+for the volume) and operational complexity (snapshot chains across two pools)
+that the rebuild path avoids.
 
-**Decision / recommended path:** add off-cluster RBD protection via
-`rbd export-diff` to an offsite target (incremental, snapshot-based, native to
-Ceph), scheduled alongside `backup-databases` on the storage leader, encrypted
-with the same age recipients. `rbd snap create` → `rbd export-diff` against the
-prior snapshot → `age` → rsync to destinations; prune old snapshots on the
-retention window. This is heavier than the DB backups (full-volume first
-export) and needs an offsite target sized for the volumes, so it is tracked as
-its own item rather than bundled here. Interim mitigation: anything truly
-important on RBD should also exist in a backed-up database or in Ansible.
+**If the rebuild cost becomes unacceptable later:** `rbd snap create` →
+`rbd export-diff` against the prior snapshot → `age` → rsync to destinations;
+prune old snapshots on the retention window. Scheduled alongside
+`backup-databases` on the storage leader, encrypted with the same age
+recipients.
 
 ---
 
@@ -425,10 +427,12 @@ A backup you have never restored is a hypothesis. Two layers:
 - **Nightly automated** (`backup-databases verify-restore`, on the storage
   leader, `setup-backup-verify.yml`). Loads the newest pg dump into a scratch
   PostgreSQL cluster, restores the etcd snapshot to a scratch data-dir, and
-  archive-checks the qdrant snapshot, then emits the freshness/restorability
-  metrics above. Catches dump corruption and broken encryption without touching
-  live services. *Follow-up:* deepen the qdrant check from archive-integrity to
-  a load into a temp qdrant instance. The dev-cluster system test
+  extracts the qdrant snapshot into a **scratch qdrant instance** on
+  non-default ports (16333/16334, distinct from the live 6333/6334 the leader
+  also holds) and probes `/health` + `/collections`. The scratch is torn down
+  on every return path via a `trap`. Then emits the freshness/restorability
+  metrics above. Catches dump / snapshot / index corruption and broken
+  encryption without touching live services. The dev-cluster system test
   (`dev/cluster/system-test.sh`, section 17) exercises this whole path —
   `backup` → `verify-restore` → success metrics — on every run.
 
