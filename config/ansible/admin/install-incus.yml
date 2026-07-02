@@ -24,9 +24,13 @@
     uv_version: "0.11.13"
     uv_sha256: "e23ddb47f7a317979cf1945cf9ed89d2639f60f7d06164f9ff1ad292c4cc5b3c"
     # ROCm userspace version baked into the 'ubuntu-rocm' container
-    # image. ROCm 7 userspace works against older kernel amdgpu/amdkfd
-    # (host runs ROCm 6.4.4); the kfd ioctl ABI is back-compatible.
-    rocm_version: "7.0.2"
+    # image. Must match the host's rocm-hip-runtime package
+    # (install-rocm.yml) — mismatched userspace caused ACQUIRE_VM
+    # ioctls to be rejected by the kernel's amdkfd on Strix Halo
+    # (segfault in libhsa-runtime64.so:ReleaseQueueMainScratch).
+    # Note: AMD's apt repo URL uses major.minor only (e.g. "7.2"),
+    # while package versions are major.minor.patch (e.g. 7.2.0.70200).
+    rocm_version: "7.2"
     # gid of the host's 'render' group (owns /dev/kfd, /dev/dri/renderD*).
     # On Ubuntu 24.04 with rocm-* packages this is 993; on stock distros
     # without ROCm it's often 992. Override per-host by setting
