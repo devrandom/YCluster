@@ -354,6 +354,7 @@
 
     - name: Install incus image-build helpers (VM hosts only)
       when: incus_vm_host | default(false)
+      tags: [build-images]
       block:
         - name: Install incus-build-gpu-image helper
           template:
@@ -372,6 +373,7 @@
 
     - name: Install incus-build-rocm-image helper (container hosts only)
       when: incus_container_host | default(false)
+      tags: [build-images]
       template:
         src: incus-build-rocm-image.sh.j2
         dest: /usr/local/bin/incus-build-rocm-image
