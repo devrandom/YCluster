@@ -155,6 +155,11 @@ body. See [`docs/usage/transcription.md`](../usage/transcription.md)
 for the API surface, and [`transcription.md`](transcription.md) for
 the WhisperX deployment on AMD Strix Halo (gfx1151).
 
+Embeddings (`/v1/embeddings`, model `BAAI/bge-m3`) ride the same
+gateway with the same `model` routing key. See
+[`embeddings.md`](embeddings.md) for the TEI deployment on the macOS
+inference nodes (Apple Silicon Metal backend).
+
 The proxy routes by `model` and forwards the request path verbatim, so
 backends that natively speak the Anthropic Messages API are reachable at
 `/v1/messages` with no translation layer. The Kimi models on exo do; see

@@ -15,10 +15,11 @@ request/response shapes. See
 [`docs/operations/inference.md`](../operations/inference.md) for the
 deployment and ops side.
 
-> Anthropic Messages API (`/v1/messages`) and audio transcription
-> (`/v1/audio/…`) ride the same gateway with the same auth. See
-> [`anthropic-messages.md`](anthropic-messages.md) and
-> [`transcription.md`](transcription.md) for those surfaces.
+> Anthropic Messages API (`/v1/messages`), audio transcription
+> (`/v1/audio/…`), and embeddings (`/v1/embeddings`) all ride the same
+> gateway with the same auth. See [`anthropic-messages.md`](anthropic-messages.md),
+> [`transcription.md`](transcription.md), and
+> [`embeddings.md`](../operations/embeddings.md) for those surfaces.
 
 ## Authentication
 

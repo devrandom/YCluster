@@ -1,0 +1,128 @@
+---
+# Productionize TEI (text-embeddings-inference) on the macOS inference
+# nodes (m1+). Runs the Metal backend via the Apple Silicon Homebrew
+# formula (see docs/design/tei.md and TEI's README; ops playbook at
+# docs/operations/embeddings.md). Listens on :8080 with no API key —
+# cluster-internal auth is handled upstream by local-ai-proxy + nginx
+# (Open-WebUI api_key table). Register each TEI node with:
+#
+#   ycluster inference add http://m<N>.xc:8080 BAAI/bge-m3
+#
+# Clients then hit https://inference.xc/v1/embeddings as for any other
+# model; the proxy routes by the model field in the body.
+#
+# - installs text-embeddings-inference via brew (Apple Silicon prebuilt,
+#   Metal via Candle — no Docker required, so no Docker-on-Mac VM/Metal
+#   problem)
+# - stages a run-tei.sh launcher and a com.ycluster.tei LaunchDaemon so
+#   the service auto-starts on boot
+#
+# Run after setup-macos.yml (Homebrew, dev user) and ideally after
+# setup-exo.yml (the inference stack TEI is part of).
+#
+# Gated on the per-host `tei_enabled` opt-in (host_vars/<node>.yml), so
+# the play is a no-op on macs that aren't designated as embeddings
+# hosts. See install-whisperx.yml for the same pattern.
+- name: Setup TEI on macOS inference nodes
+  hosts: macos
+  become: yes
+  vars:
+    tei_model_id: BAAI/bge-m3
+    tei_port: 8080
+    tei_hf_cache: /Users/dev/tei-models
+    tei_log_file: /opt/homebrew/var/log/tei.log
+    homebrew_bin: /opt/homebrew/bin
+
+  tasks:
+    - name: End play for nodes that have not opted into tei
+      meta: end_host
+      when: not (tei_enabled | default(false))
+
+    - name: Ensure Homebrew log directory exists
+      file:
+        path: /opt/homebrew/var/log
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+
+    - name: Install text-embeddings-inference via Homebrew (Apple Silicon, Metal)
+      homebrew:
+        name: text-embeddings-inference
+        state: present
+      become_user: dev
+      environment:
+        PATH: "{{ homebrew_bin }}:{{ ansible_facts['env']['PATH'] }}"
+
+    - name: Ensure TEI HF cache directory exists
+      file:
+        path: "{{ tei_hf_cache }}"
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+
+    # Cleanup from an earlier design that ran TEI with --api-key; the
+    # current design leaves auth to local-ai-proxy and runs TEI without
+    # an API key. Idempotent — no-op when the file is already gone.
+    - name: Remove stale TEI API key file from prior design
+      file:
+        path: /Users/dev/tei-api-key
+        state: absent
+
+    - name: Install run-tei.sh
+      copy:
+        src: files/tei/run-tei.sh
+        dest: /Users/dev/run-tei.sh
+        owner: dev
+        group: admin
+        mode: '0755'
+      notify: restart tei service
+
+    - name: Create TEI LaunchDaemon plist
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList.dtd">
+          <plist version="1.0">
+          <dict>
+          	<key>KeepAlive</key>
+          	<true/>
+          	<key>Label</key>
+          	<string>com.ycluster.tei</string>
+          	<key>ProgramArguments</key>
+          	<array>
+          		<string>/Users/dev/run-tei.sh</string>
+          	</array>
+          	<key>UserName</key>
+          	<string>dev</string>
+          	<key>GroupName</key>
+          	<string>admin</string>
+          	<key>EnvironmentVariables</key>
+          	<dict>
+          		<key>HOME</key>
+          		<string>/Users/dev</string>
+          		<key>PATH</key>
+          		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+          	</dict>
+          	<key>RunAtLoad</key>
+          	<true/>
+          	<key>StandardErrorPath</key>
+          	<string>{{ tei_log_file }}</string>
+          	<key>StandardOutPath</key>
+          	<string>{{ tei_log_file }}</string>
+          	<key>WorkingDirectory</key>
+          	<string>/Users/dev</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.ycluster.tei.plist
+        mode: '0644'
+      become: yes
+      notify: restart tei service
+
+  handlers:
+    - name: restart tei service
+      shell: |
+        launchctl stop com.ycluster.tei || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.tei.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.tei.plist
