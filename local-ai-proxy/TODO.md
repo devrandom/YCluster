@@ -124,6 +124,26 @@ Attack surface against backends (authenticated clients → backend):
       will fetch vs. which are data: URIs it decodes locally).
       Document this in the deploy notes so operators restrict backend
       egress at the network layer.
+- [ ] **Backend response bodies can leak internal cluster URLs.**
+      The proxy forwards response bodies verbatim, so a backend that
+      embeds absolute URLs in its JSON (e.g. MinerU's `/file_parse`
+      response includes `status_url: http://<host>.xc:8000/tasks/<id>`
+      and `result_url: http://<host>.xc:8000/tasks/<id>/result`)
+      exposes the cluster's internal topology — hostnames, ports,
+      services — to external API clients. Worst case is SSRF: a
+      malicious client follows those URLs and probes the backends
+      directly, bypassing the gateway's auth_request. Defense:
+      (a) rewrite in the proxy — strip or rewrite known-internal URL
+      fields before forwarding, with a per-backend etcd config
+      (MinerU strips `status_url`/`result_url`; vLLM keeps URLs in
+      chat responses since users expect them); (b) strip at the
+      backend, can't enforce; (c) document and tell clients not to
+      follow, doesn't defend against malicious clients.
+      Recommend (a). Trade-off: every backend needs a config row.
+      Open question: which fields count as "internal" — only
+      status/result URLs, or also model_id fields that name an
+      internal host? Same-shaped concern for any future backend that
+      embeds absolute URLs in its response.
 - [ ] **Per-user inflight cap** keyed by `X-User-Id` (soft cap, return
       429). One authenticated user shouldn't be able to starve the rest.
       Ties into quotas.
