@@ -350,17 +350,23 @@ func TestHandlerUnknownPathReturns404(t *testing.T) {
 	}
 }
 
-// TestHandlerRewritesTokenizePaths verifies that /v1/tokenize and
-// /v1/detokenize are accepted (so external clients can reach them via
-// the standard /v1/ surface) and rewritten to the backend's native
-// non-/v1/ paths, which is what both llama.cpp and vLLM actually
-// serve.
-func TestHandlerRewritesTokenizePaths(t *testing.T) {
+// TestHandlerRewritesPathAliases verifies that /v1/-prefixed
+// endpoints whose backend natively serves at a non-/v1/ path are
+// accepted and rewritten before dispatch:
+//
+//   - /v1/tokenize, /v1/detokenize: llama.cpp and vLLM serve at the
+//     bare /tokenize and /detokenize paths.
+//   - /v1/file_parse: MinerU's mineru-api serves at the bare /file_parse
+//     path.
+//
+// In all cases external clients use the standard /v1/ surface; we strip
+// the prefix so the upstream call lands on the backend's real endpoint.
+func TestHandlerRewritesPathAliases(t *testing.T) {
 	var seenPath string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"tokens":[1,2,3]}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer upstream.Close()
 
@@ -373,6 +379,7 @@ func TestHandlerRewritesTokenizePaths(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"/v1/tokenize", "/tokenize"},
 		{"/v1/detokenize", "/detokenize"},
+		{"/v1/file_parse", "/file_parse"},
 	}
 	for _, c := range cases {
 		seenPath = ""

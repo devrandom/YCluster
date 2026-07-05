@@ -182,11 +182,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// clients can reach them through the same external surface as the
 	// rest of the OpenAI-compatible API, then rewrite to the backend's
 	// native path before dispatching.
+	//
+	// /v1/file_parse: MinerU's mineru-api serves at the bare
+	// /file_parse (no /v1/ prefix). Same rewrite convention as the
+	// tokenizer endpoints above — external clients use /v1/, we strip
+	// it before dispatching. See docs/design/mineru.md.
 	switch r.URL.Path {
 	case "/v1/tokenize":
 		r.URL.Path = "/tokenize"
 	case "/v1/detokenize":
 		r.URL.Path = "/detokenize"
+	case "/v1/file_parse":
+		r.URL.Path = "/file_parse"
 	}
 
 	route, err := h.router.Route(r)

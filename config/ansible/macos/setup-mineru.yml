@@ -1,0 +1,172 @@
+---
+# Productionize MinerU (opendatalab/MinerU 3.4.x) on the macOS
+# inference nodes (m1+). Listens on :8000 with no API key — cluster
+# auth is handled upstream by local-ai-proxy + nginx (Open-WebUI
+# api_key table). Register each MinerU node with:
+#
+#   ycluster inference add http://m<N>.xc:8000 document-parse
+#   ycluster inference add http://m<N>.xc:8000 mineru-parse
+#
+# Clients then hit https://inference.xc/v1/file_parse like any other
+# model; local-ai-proxy rewrites the path to MinerU's native /file_parse
+# and routes by the `model` form field. See docs/design/mineru.md for
+# the technology choice and architecture; ops playbook at
+# docs/operations/document-extraction.md.
+#
+# - installs mineru[all] via uv pip into a dedicated venv (darwin meta
+#   extra auto-picks core + s3 + mlx → Metal/MLX acceleration, no Docker
+#   required, so no Docker-on-Mac VM/Metal problem)
+# - pre-downloads model weights into the HF cache on first install so
+#   --enable-vlm-preload at startup is fast on every subsequent boot
+# - stages a run-mineru.sh launcher and a com.ycluster.mineru LaunchDaemon
+#   so the service auto-starts on boot
+#
+# Run after setup-macos.yml (Homebrew, dev user) and after setup-tei.yml
+# (same Mac in our deployment — both services share m2.xc).
+#
+# Gated on the per-host `mineru_enabled` opt-in (host_vars/<node>.yml),
+# so the play is a no-op on macs that aren't designated as document-
+# parsing hosts. See setup-tei.yml for the same pattern.
+- name: Setup MinerU on macOS inference nodes
+  hosts: macos
+  become: yes
+  vars:
+    mineru_venv: /Users/dev/mineru-venv
+    mineru_port: 8000
+    mineru_hf_cache: /Users/dev/mineru-models
+    mineru_log_file: /opt/homebrew/var/log/mineru.log
+    mineru_max_concurrent: 3
+    homebrew_bin: /opt/homebrew/bin
+
+  tasks:
+    - name: End play for nodes that have not opted into mineru
+      meta: end_host
+      when: not (mineru_enabled | default(false))
+
+    - name: Ensure Homebrew log directory exists
+      file:
+        path: /opt/homebrew/var/log
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+
+    - name: Install uv via Homebrew (faster pip resolver for mineru[all])
+      homebrew:
+        name: uv
+        state: present
+      become_user: dev
+      environment:
+        PATH: "{{ homebrew_bin }}:{{ ansible_facts['env']['PATH'] }}"
+
+    - name: Create MinerU virtual environment
+      command: "{{ homebrew_bin }}/uv venv {{ mineru_venv }}"
+      args:
+        creates: "{{ mineru_venv }}/bin/python"
+      become_user: dev
+      environment:
+        PATH: "{{ homebrew_bin }}:{{ ansible_facts['env']['PATH'] }}"
+
+    - name: Install mineru[all] into the venv (idempotent)
+      # mineru[all] is a meta-extra that auto-picks core + s3 + mlx on
+      # darwin. uv's resolver is much faster than stock pip for this
+      # dependency set (torch + transformers + mlx + paddle/ppocr).
+      command: "{{ homebrew_bin }}/uv pip install --python {{ mineru_venv }}/bin/python mineru[all]"
+      become_user: dev
+      environment:
+        PATH: "{{ homebrew_bin }}:{{ ansible_facts['env']['PATH'] }}"
+      register: mineru_pip_install
+      changed_when: "'No changes' not in mineru_pip_install.stdout"
+      # ~10 min on a cold cache; subsequent runs are no-ops.
+
+    - name: Ensure MinerU HF cache directory exists
+      file:
+        path: "{{ mineru_hf_cache }}"
+        state: directory
+        owner: dev
+        group: admin
+        mode: '0755'
+
+    # mineru-models-download is a one-shot fetch (~22 GB: 20 GB pipeline
+    # weights + 2.2 GB VLM). Idempotent: skips when the cache already
+    # contains the VLM model directory. Subsequent boots then use
+    # MINERU_MODEL_SOURCE=local to skip the network re-check.
+    #
+    # The CLI prompts for two values interactively:
+    #   1. model download source (auto/huggingface/modelscope)
+    #   2. model type to download (pipeline/vlm/all)
+    # Pipe `auto` and `all` (the defaults) so the playbook stays
+    # non-interactive. `auto` tries Hugging Face first, falls back to
+    # ModelScope.
+    - name: Check if MinerU VLM model is already cached
+      stat:
+        path: "{{ mineru_hf_cache }}/hub/models--opendatalab--MinerU2.5-Pro-2605-1.2B"
+      register: mineru_vlm_cache
+      become: no
+
+    - name: Pre-download MinerU model weights on first install
+      shell: printf 'auto\nall\n' | {{ mineru_venv }}/bin/mineru-models-download
+      become_user: dev
+      environment:
+        HOME: /Users/dev
+        HF_HOME: "{{ mineru_hf_cache }}"
+      when: not mineru_vlm_cache.stat.exists
+      # Long-running on cold cache (~20-30 min depending on bandwidth);
+      # skipped on subsequent playbook runs.
+
+    - name: Install run-mineru.sh
+      copy:
+        src: files/mineru/run-mineru.sh
+        dest: /Users/dev/run-mineru.sh
+        owner: dev
+        group: admin
+        mode: '0755'
+      notify: restart mineru service
+
+    - name: Create MinerU LaunchDaemon plist
+      copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          	<key>KeepAlive</key>
+          	<true/>
+          	<key>Label</key>
+          	<string>com.ycluster.mineru</string>
+          	<key>ProgramArguments</key>
+          	<array>
+          		<string>/Users/dev/run-mineru.sh</string>
+          	</array>
+          	<key>UserName</key>
+          	<string>dev</string>
+          	<key>GroupName</key>
+          	<string>admin</string>
+          	<key>EnvironmentVariables</key>
+          	<dict>
+          		<key>HOME</key>
+          		<string>/Users/dev</string>
+          		<key>PATH</key>
+          		<string>/opt/homebrew/bin:/Users/dev/mineru-venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+          	</dict>
+          	<key>RunAtLoad</key>
+          	<true/>
+          	<key>StandardErrorPath</key>
+          	<string>{{ mineru_log_file }}</string>
+          	<key>StandardOutPath</key>
+          	<string>{{ mineru_log_file }}</string>
+          	<key>WorkingDirectory</key>
+          	<string>/Users/dev</string>
+          </dict>
+          </plist>
+        dest: /Library/LaunchDaemons/com.ycluster.mineru.plist
+        mode: '0644'
+      become: yes
+      notify: restart mineru service
+
+  handlers:
+    - name: restart mineru service
+      shell: |
+        launchctl stop com.ycluster.mineru || true
+        launchctl unload /Library/LaunchDaemons/com.ycluster.mineru.plist || true
+        launchctl load /Library/LaunchDaemons/com.ycluster.mineru.plist
