@@ -15,9 +15,14 @@ Subcommands:
   models            List model ids available on the gateway.
   transcribe <file> POST an audio file to /v1/audio/transcriptions and print
                     the transcript. Optional --diarize adds speaker labels.
+  ocr <file>...     POST document(s) / image(s) to /v1/file_parse (MinerU)
+                    and print the extracted markdown. Layout-aware parsing
+                    of PDF, DOCX, PPTX, XLSX, images. --format md|json|zip,
+                    --model document-parse|mineru-parse.
 
 Endpoint + bearer token come from config.yml at the repo root via
-contrib/_cluster_config.py. The model id is the first positional argument.
+contrib/_cluster_config.py. The model id is the first positional argument
+(except for `transcribe` and `ocr` which take a file path).
 
 Usage:
   ./inference chat MiniMaxAI/MiniMax-M2.7
@@ -25,6 +30,8 @@ Usage:
   ./inference models
   ./inference transcribe tmp/ES2002d.Mix-Headset.wav
   ./inference transcribe tmp/ES2002d.Mix-Headset.wav --diarize
+  ./inference ocr tmp/report.pdf
+  ./inference ocr tmp/scan.png tmp/contract.pdf --format zip --output out.zip
 """
 import argparse
 import json
@@ -534,13 +541,151 @@ def cmd_transcribe(args):
     return 0
 
 
+def cmd_ocr(args):
+    """OCR / document extraction via /v1/file_parse (MinerU).
+
+    Backed by MinerU 3.4.x running on the macOS inference nodes. Supports
+    PDF, DOCX, PPTX, XLSX, and images. Layout-aware parsing — headings,
+    tables, equations, code blocks, and reading-order text blocks all
+    preserved in the markdown output.
+    """
+    parser = argparse.ArgumentParser(
+        prog=f"{sys.argv[0]} ocr",
+        description="OCR / document extraction via the gateway (MinerU).",
+    )
+    parser.add_argument(
+        "files", nargs="+",
+        help="path(s) to document(s) or image(s); accepts PDF, DOCX, PPTX, XLSX, images",
+    )
+    parser.add_argument(
+        "--model", default="document-parse",
+        help="model id (default: document-parse; also: mineru-parse)",
+    )
+    parser.add_argument(
+        "--format", choices=["md", "json", "zip"], default="md",
+        help="output format: md (print markdown), json (full response), "
+             "zip (download result ZIP; requires --output)",
+    )
+    parser.add_argument(
+        "--output", help="output file path (required for --format zip)",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=300,
+        help="request timeout in seconds (default: 300)",
+    )
+    a = parser.parse_args(args)
+
+    paths = [Path(f) for f in a.files]
+    for p in paths:
+        if not p.is_file():
+            print(f"not a file: {p}", file=sys.stderr)
+            return 2
+
+    if a.format == "zip" and not a.output:
+        print("--format zip requires --output FILE", file=sys.stderr)
+        return 2
+
+    base, key = _load_config()
+
+    # multipart/form-data upload built by hand; the stdlib does not
+    # expose a multipart writer, so we assemble the body manually.
+    # Mirrors the construction in cmd_transcribe, but with `files`
+    # repeated per upload (MinerU accepts multiple documents in one
+    # request).
+    boundary = "----ycluster-inference-" + secrets.token_hex(8)
+    fields = {"model": a.model, "return_md": "true"}
+    if a.format == "zip":
+        fields["response_format_zip"] = "true"
+
+    parts = []
+    for name, value in fields.items():
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        )
+        parts.append(f"{value}\r\n".encode())
+    for path in paths:
+        with path.open("rb") as f:
+            parts.append(f"--{boundary}\r\n".encode())
+            parts.append(
+                'Content-Disposition: form-data; name="files"; '
+                f'filename="{path.name}"\r\n'.encode()
+            )
+            parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+            parts.append(f.read())
+            parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+
+    req = urllib.request.Request(
+        base + "/v1/file_parse",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+
+    total_size = sum(p.stat().st_size for p in paths)
+    print(f"Endpoint: {base}/v1/file_parse")
+    print(f"Model:    {a.model}")
+    print(f"Files:    {len(paths)} ({total_size} bytes total)")
+    for p in paths:
+        print(f"          {p} ({p.stat().st_size} bytes)")
+    print(f"Format:   {a.format}")
+    print()
+
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=a.timeout) as resp:
+            if a.format == "zip":
+                Path(a.output).write_bytes(resp.read())
+                elapsed = (time.monotonic() - started) * 1000
+                print(f"Done in {elapsed:.0f}ms — wrote {a.output} "
+                      f"({Path(a.output).stat().st_size} bytes)")
+                return 0
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        print(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')}",
+              file=sys.stderr)
+        return 1
+
+    elapsed = (time.monotonic() - started) * 1000
+    print(f"Done in {elapsed:.0f}ms")
+    print()
+
+    if a.format == "json":
+        print(json.dumps(data, indent=2))
+        return 0
+
+    # md format: print results.<file>.md_content for each uploaded file.
+    results = data.get("results") or {}
+    if not results:
+        print("--- Response (no results key) ---")
+        print(json.dumps(data, indent=2))
+        return 0
+
+    for name, content in results.items():
+        md = content.get("md_content", "")
+        if md:
+            print(f"=== {name} ===")
+            print(md)
+            print()
+        else:
+            print(f"=== {name} (no md_content) ===")
+            print(json.dumps(content, indent=2))
+            print()
+    return 0
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
         print(__doc__)
         return 0
     if (
         len(sys.argv) < 2
-        or sys.argv[1] not in ("chat", "bench", "models", "transcribe")
+        or sys.argv[1] not in ("chat", "bench", "models", "transcribe", "ocr")
     ):
         print(__doc__, file=sys.stderr)
         return 2
@@ -555,6 +700,8 @@ def main():
         return cmd_bench(rest)
     if sub == "transcribe":
         return cmd_transcribe(rest)
+    if sub == "ocr":
+        return cmd_ocr(rest)
 
 
 if __name__ == "__main__":

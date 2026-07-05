@@ -45,7 +45,7 @@ _inference_completion() {
     fi
 
     if (( cword == 1 )); then
-        COMPREPLY=( $(compgen -W "chat bench models transcribe" -- "$cur") )
+        COMPREPLY=( $(compgen -W "chat bench models transcribe ocr" -- "$cur") )
         return
     fi
 
@@ -67,6 +67,14 @@ _inference_completion() {
         transcribe)
             if [[ $cur == -* ]]; then
                 COMPREPLY=( $(compgen -W "--diarize --model --format -h --help" -- "$cur") )
+            else
+                local IFS=$'\n'
+                COMPREPLY=( $(compgen -f -- "$cur") )
+            fi
+            ;;
+        ocr)
+            if [[ $cur == -* ]]; then
+                COMPREPLY=( $(compgen -W "--model --format --output --timeout -h --help" -- "$cur") )
             else
                 local IFS=$'\n'
                 COMPREPLY=( $(compgen -f -- "$cur") )
