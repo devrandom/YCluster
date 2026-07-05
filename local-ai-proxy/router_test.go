@@ -625,3 +625,139 @@ func TestPassthroughProxiesModelsUpstream(t *testing.T) {
 		t.Errorf("got %q; want upstream response (not synthesized)", body)
 	}
 }
+
+// TestModelRouterHeaderOverridesBodyModel covers the JSON path: when
+// the request has both an X-Model header and a `model` body field with
+// conflicting values, the header wins.
+func TestModelRouterHeaderOverridesBodyModel(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, "http://a.example:8000")},
+		"beta":  {mustURL(t, "http://b.example:8000")},
+	}}
+	r := NewModelRouter(src)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"alpha","messages":[]}`))
+	req.Header.Set("X-Model", "beta")
+
+	got, err := r.Route(req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got.Model != "beta" {
+		t.Errorf("Model = %q; want beta (header must override body)", got.Model)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].String() != "http://b.example:8000" {
+		t.Errorf("Candidates = %v; want [http://b.example:8000]", got.Candidates)
+	}
+	if !strings.Contains(string(got.Body), `"model":"alpha"`) {
+		t.Errorf("buffered body must keep original (header does not rewrite body); got %q", got.Body)
+	}
+}
+
+// TestModelRouterHeaderAloneWorksJSON covers the JSON path: when the
+// X-Model header is set and the body has no `model` field, the header
+// is the sole source of routing truth.
+func TestModelRouterHeaderAloneWorksJSON(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, "http://a.example:8000")},
+	}}
+	r := NewModelRouter(src)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"messages":[]}`))
+	req.Header.Set("X-Model", "alpha")
+
+	got, err := r.Route(req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got.Model != "alpha" {
+		t.Errorf("Model = %q; want alpha", got.Model)
+	}
+}
+
+// TestModelRouterHeaderOverridesFormModel covers the multipart path:
+// X-Model header wins over the multipart `model` form field.
+func TestModelRouterHeaderOverridesFormModel(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"whisper-1": {mustURL(t, "http://w1.example:9000")},
+		"whisper-2": {mustURL(t, "http://w2.example:9000")},
+	}}
+	r := NewModelRouter(src)
+
+	bodyBytes, ct := buildAudioMultipart(t, "whisper-1", []byte("RIFFfake"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions",
+		bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("X-Model", "whisper-2")
+
+	got, err := r.Route(req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got.Model != "whisper-2" {
+		t.Errorf("Model = %q; want whisper-2 (header must override form field)", got.Model)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].String() != "http://w2.example:9000" {
+		t.Errorf("Candidates = %v; want [http://w2.example:9000]", got.Candidates)
+	}
+}
+
+// TestModelRouterHeaderAloneWorksMultipart covers the multipart path:
+// X-Model header is set and the multipart body has no `model` form
+// field. The body must still be buffered for upstream replay.
+func TestModelRouterHeaderAloneWorksMultipart(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"whisper-1": {mustURL(t, "http://w.example:9000")},
+	}}
+	r := NewModelRouter(src)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fh := make(textproto.MIMEHeader)
+	fh.Set("Content-Disposition", `form-data; name="file"; filename="audio.wav"`)
+	fh.Set("Content-Type", "audio/wav")
+	fp, err := mw.CreatePart(fh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fp.Write([]byte("RIFFfake")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions",
+		bytes.NewReader(buf.Bytes()))
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-Model", "whisper-1")
+
+	got, err := r.Route(req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got.Model != "whisper-1" {
+		t.Errorf("Model = %q; want whisper-1", got.Model)
+	}
+	if !bytes.Equal(got.Body, buf.Bytes()) {
+		t.Errorf("buffered body bytes differ (got %d, want %d)", len(got.Body), buf.Len())
+	}
+}
+
+// TestModelRouterUnknownModelFromHeader ensures the unknown-model
+// error path works the same way when the model comes from the header.
+func TestModelRouterUnknownModelFromHeader(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{"alpha": {mustURL(t, "http://a:8000")}}}
+	r := NewModelRouter(src)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"messages":[]}`))
+	req.Header.Set("X-Model", "ghost")
+
+	_, err := r.Route(req)
+	if err == nil || !strings.Contains(err.Error(), "unknown model") {
+		t.Errorf("want unknown model error, got %v", err)
+	}
+}

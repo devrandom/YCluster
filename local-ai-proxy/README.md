@@ -12,7 +12,11 @@ Written in Go, `net/http`, no framework.
 
 - **Model-name routing.** Each request's `model` field selects the
   backend via an in-memory map rebuilt from YAML config or an etcd
-  prefix (hot-reloaded on changes).
+  prefix (hot-reloaded on changes). The `X-Model` header overrides
+  any `model` field in the body (JSON `model`, multipart `model`
+  form field), so clients that can't easily embed `model` in the
+  body — raw curl uploads, multipart-only clients — can pin the
+  model in a header instead.
 - **Transparent passthrough.** Reasoning fields, token IDs, logprobs,
   vendor-specific params — all flow through unchanged, so new backend
   features work without waiting for a schema update.

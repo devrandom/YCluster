@@ -168,6 +168,11 @@ rewrite for llama.cpp/vLLM). See
 [`document-extraction.md`](document-extraction.md) for the MinerU
 deployment on macOS (MLX on M3 Ultra).
 
+Clients that can't easily embed `model` in the body (raw curl uploads,
+binary-only clients) can pin it in the `X-Model` header instead — the
+header overrides any `model` field in the JSON body or multipart form,
+for every endpoint the proxy routes.
+
 The proxy routes by `model` and forwards the request path verbatim, so
 backends that natively speak the Anthropic Messages API are reachable at
 `/v1/messages` with no translation layer. The Kimi models on exo do; see

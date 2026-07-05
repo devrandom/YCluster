@@ -112,18 +112,25 @@ func (m *ModelRouter) Route(r *http.Request) (*RouteResult, error) {
 		return nil, errors.New("request has no body; cannot determine model")
 	}
 
+	// X-Model header overrides any model field in the body. Useful when
+	// the client can't easily embed `model` in the body (e.g. raw curl
+	// uploads, or clients that want to keep one model value pinned in
+	// headers while the body varies). Body is still buffered (for
+	// fan-out retry replay) but its `model` field is ignored.
+	headerModel := strings.TrimSpace(r.Header.Get("X-Model"))
+
 	// Branch by Content-Type. Multipart bodies (OpenAI audio endpoints)
 	// can't be JSON-parsed; we parse the form just enough to find the
 	// `model` field and then replay the original bytes upstream.
 	ct := r.Header.Get("Content-Type")
 	if mediaType, params, err := mime.ParseMediaType(ct); err == nil &&
 		strings.HasPrefix(mediaType, "multipart/") {
-		return m.routeMultipart(r, params["boundary"])
+		return m.routeMultipart(r, params["boundary"], headerModel)
 	}
-	return m.routeJSON(r)
+	return m.routeJSON(r, headerModel)
 }
 
-func (m *ModelRouter) routeJSON(r *http.Request) (*RouteResult, error) {
+func (m *ModelRouter) routeJSON(r *http.Request, headerModel string) (*RouteResult, error) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRoutingBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read request body: %w", err)
@@ -139,22 +146,27 @@ func (m *ModelRouter) routeJSON(r *http.Request) (*RouteResult, error) {
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("request body is not valid JSON: %w", err)
 	}
-	if env.Model == "" {
-		return nil, errors.New("request body missing model field")
+
+	model := headerModel
+	if model == "" {
+		if env.Model == "" {
+			return nil, errors.New("request body missing model field")
+		}
+		model = env.Model
 	}
 
-	candidates, err := m.candidatesFor(env.Model)
+	candidates, err := m.candidatesFor(model)
 	if err != nil {
 		return nil, err
 	}
-	return &RouteResult{Model: env.Model, Candidates: candidates, Body: body, Stream: env.Stream}, nil
+	return &RouteResult{Model: model, Candidates: candidates, Body: body, Stream: env.Stream}, nil
 }
 
 // routeMultipart reads the request body once, locates the `model` form
 // field by scanning multipart parts in order, and returns the original
 // raw body for replay. The file part is never decoded — we read it as
 // opaque bytes so binary uploads pass through unchanged.
-func (m *ModelRouter) routeMultipart(r *http.Request, boundary string) (*RouteResult, error) {
+func (m *ModelRouter) routeMultipart(r *http.Request, boundary string, headerModel string) (*RouteResult, error) {
 	if boundary == "" {
 		return nil, errors.New("multipart Content-Type missing boundary")
 	}
@@ -167,29 +179,33 @@ func (m *ModelRouter) routeMultipart(r *http.Request, boundary string) (*RouteRe
 		return nil, errors.New("request body too large")
 	}
 
-	mr := multipart.NewReader(bytes.NewReader(body), boundary)
 	var model string
-	for {
-		part, err := mr.NextRawPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("parse multipart body: %w", err)
-		}
-		if part.FormName() == "model" && part.FileName() == "" {
-			val, readErr := io.ReadAll(io.LimitReader(part, maxFormFieldBytes+1))
+	if headerModel != "" {
+		model = headerModel
+	} else {
+		mr := multipart.NewReader(bytes.NewReader(body), boundary)
+		for {
+			part, err := mr.NextRawPart()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("parse multipart body: %w", err)
+			}
+			if part.FormName() == "model" && part.FileName() == "" {
+				val, readErr := io.ReadAll(io.LimitReader(part, maxFormFieldBytes+1))
+				part.Close()
+				if readErr != nil {
+					return nil, fmt.Errorf("read model form field: %w", readErr)
+				}
+				if len(val) > maxFormFieldBytes {
+					return nil, errors.New("model form field too large")
+				}
+				model = strings.TrimSpace(string(val))
+				break
+			}
 			part.Close()
-			if readErr != nil {
-				return nil, fmt.Errorf("read model form field: %w", readErr)
-			}
-			if len(val) > maxFormFieldBytes {
-				return nil, errors.New("model form field too large")
-			}
-			model = strings.TrimSpace(string(val))
-			break
 		}
-		part.Close()
 	}
 
 	if model == "" {
