@@ -192,6 +192,19 @@ If `ceph -s` works but `snap logs microceph` shows dqlite errors, check the `sna
 sudo systemctl restart snap.microceph.daemon.service
 ```
 
+### Always check the storage leader before tailing logs
+Leader-elected services (`local-ai-proxy`, PostgreSQL, Qdrant, DHCP) only
+run on the storage leader — `journalctl -u <service>` on a non-leader shows
+nothing. The leader can shift via ceph/mon election between sessions, so
+always resolve it first:
+```bash
+LEADER=$(ssh "$YC_SYNC_HOST" 'ycluster cluster leader')
+ssh "$YC_SYNC_HOST" "ssh $LEADER 'journalctl -u local-ai-proxy --since \"10 minutes ago\" --no-pager'"
+```
+A common trap: the playbook's smoke check passed on the leader at deploy
+time, but by the time you tail logs the leader has shifted. Re-check
+before assuming "the proxy isn't logging".
+
 ### Docker SDK Errors
 "Not supported URL scheme http+docker" means `requests >= 2.32` is installed via pip and shadowing the apt package. Check `/usr/local/lib/python3.12/dist-packages/` for pip-installed packages that shouldn't be there.
 
