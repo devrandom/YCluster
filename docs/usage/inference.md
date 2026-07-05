@@ -16,10 +16,13 @@ request/response shapes. See
 deployment and ops side.
 
 > Anthropic Messages API (`/v1/messages`), audio transcription
-> (`/v1/audio/…`), and embeddings (`/v1/embeddings`) all ride the same
-> gateway with the same auth. See [`anthropic-messages.md`](anthropic-messages.md),
-> [`transcription.md`](transcription.md), and
-> [`embeddings.md`](../operations/embeddings.md) for those surfaces.
+> (`/v1/audio/…`), embeddings (`/v1/embeddings`), and document
+> extraction (`/v1/file_parse`) all ride the same gateway with the
+> same auth. See [`anthropic-messages.md`](anthropic-messages.md),
+> [`transcription.md`](transcription.md),
+> [`embeddings.md`](../operations/embeddings.md), and
+> [`document-extraction.md`](document-extraction.md) for those
+> surfaces.
 
 ## Authentication
 

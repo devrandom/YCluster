@@ -160,6 +160,14 @@ gateway with the same `model` routing key. See
 [`embeddings.md`](embeddings.md) for the TEI deployment on the macOS
 inference nodes (Apple Silicon Metal backend).
 
+Document extraction (`/v1/file_parse`, models `document-parse` and
+`mineru-parse`) rides the same gateway too, with the proxy routing by
+the `model` form field in the multipart body and rewriting the path to
+MinerU's native `/file_parse` (parallels the `/v1/tokenize → /tokenize`
+rewrite for llama.cpp/vLLM). See
+[`document-extraction.md`](document-extraction.md) for the MinerU
+deployment on macOS (MLX on M3 Ultra).
+
 The proxy routes by `model` and forwards the request path verbatim, so
 backends that natively speak the Anthropic Messages API are reachable at
 `/v1/messages` with no translation layer. The Kimi models on exo do; see
