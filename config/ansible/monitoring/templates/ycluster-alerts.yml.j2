@@ -419,26 +419,29 @@ groups:
           description: "The newest {{ $labels.component }} backup did not load cleanly in the nightly drill on {{ $labels.node }} — restorability is not guaranteed"
 
       # The drill itself stopped running (timer broken, leader stuck, RBD
-      # unmounted) — restorability is no longer being checked.
+      # unmounted) — restorability is no longer being checked. Gated on
+      # storage leadership so a stale timestamp on a demoted node (which
+      # correctly skips the drill) doesn't fire.
       - alert: BackupVerifyStale
-        expr: time() - ycluster_backup_restore_timestamp_seconds > 172800
+        expr: (time() - ycluster_backup_restore_timestamp_seconds > 172800) and on(node) (ycluster_storage_leader == 1)
         for: 1h
         labels:
           severity: warning
         annotations:
           summary: "Backup verify-restore has not run in over 2 days"
-          description: "No verify-restore drill has completed on {{ $labels.node }} in over 48h — backups may be unverified"
+          description: "No verify-restore drill has completed on {{ $labels.node }} (storage leader) in over 48h — backups may be unverified"
 
       # Backups themselves are no longer being produced/synced (the daily backup
-      # timer is broken) — the newest encrypted backup is too old.
+      # timer is broken) — the newest encrypted backup is too old. Also gated
+      # on leadership: only the leader runs the backup, so only its age matters.
       - alert: BackupStale
-        expr: ycluster_backup_age_seconds > 172800
+        expr: (ycluster_backup_age_seconds > 172800) and on(node) (ycluster_storage_leader == 1)
         for: 1h
         labels:
           severity: warning
         annotations:
           summary: "{{ $labels.component }} backup is stale (>2 days old)"
-          description: "The newest encrypted {{ $labels.component }} backup on {{ $labels.node }} is over 48h old — the daily backup may be failing"
+          description: "The newest encrypted {{ $labels.component }} backup on {{ $labels.node }} (storage leader) is over 48h old — the daily backup may be failing"
 
   - name: ycluster-external
     rules:
