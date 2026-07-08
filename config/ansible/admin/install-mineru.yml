@@ -1,0 +1,175 @@
+---
+# Install MinerU (opendatalab/MinerU 3.4.x) on Linux/Nvidia GPU nodes
+# (nv*). Listens on :8000 with no API key — cluster auth is handled
+# upstream by local-ai-proxy + nginx (Open-WebUI api_key table).
+# Register each MinerU node with:
+#
+#   ycluster inference add http://nv<N>.xc:8000 document-parse
+#   ycluster inference add http://nv<N>.xc:8000 mineru-parse
+#
+# Clients then hit https://inference.xc/v1/file_parse like any other
+# model; local-ai-proxy rewrites the path to MinerU's native /file_parse
+# and routes by the `model` form field. See docs/design/mineru.md for
+# the technology choice and architecture; ops playbook at
+# docs/operations/document-extraction.md.
+#
+# Installs `mineru[vlm]` (not `[all]` / `[core]`). Pure VLM mode is
+# enough for typical documents — the VLM treats every page as an
+# image (text PDFs render the same as scanned PDFs), so output
+# quality on normal docs is essentially the same as hybrid mode.
+# Trade-offs:
+#   - disk: ~2.2 GB model + ~5 GB deps (vs ~22 GB for hybrid)
+#   - startup: fast, no pipeline init
+#   - memory: lower
+#   - quality on complex docs (handwriting, dense tables, formulas):
+#     may miss edge cases; hybrid's specialised OCR/layout pass
+#     catches more
+# Pure VLM is the right default for "normal use"; flip to hybrid by
+# changing `[vlm]` → `[all]` if quality on edge-case docs becomes
+# a problem.
+#
+# Gated on the per-host `mineru_enabled` opt-in (host_vars/<node>.yml),
+# so the play is a no-op on Nvidia hosts that aren't designated as
+# document-parsing nodes. The macos install (macos/setup-mineru.yml)
+# uses the same opt-in key for the same reason.
+- name: Install MinerU on Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    mineru_venv: /home/dev/mineru-venv
+    mineru_port: 8000
+    mineru_hf_cache: /home/dev/.cache/huggingface
+    mineru_log_file: /var/log/mineru.log
+    mineru_max_concurrent: 3
+    uv_bin: /snap/bin/uv
+
+  tasks:
+    # Skip hosts with no host-usable NVIDIA GPU — either no NVIDIA
+    # hardware at all, or every NVIDIA card is bound to vfio-pci for
+    # guest passthrough (nv3 case). mineru[all] pulls torch which
+    # fails to import CUDA when no GPU is visible to the host driver.
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: End play for nodes that have not opted into mineru
+      meta: end_host
+      when: not (mineru_enabled | default(false))
+
+    - name: Ensure uv is installed
+      command: "{{ uv_bin }} --version"
+      register: uv_check
+      changed_when: false
+      failed_when: uv_check.rc != 0
+
+    - name: Create MinerU virtual environment
+      command: "{{ uv_bin }} venv {{ mineru_venv }}"
+      args:
+        creates: "{{ mineru_venv }}/bin/python"
+      become_user: dev
+      environment:
+        HOME: /home/dev
+
+    - name: Install mineru[vlm] into the venv (idempotent)
+      # Pure VLM mode: torch + transformers + accelerate. On Linux
+      # the wheel pulls CUDA-enabled torch, no separate engine
+      # needed. uv's resolver is much faster than stock pip for
+      # this dependency set.
+      command: "{{ uv_bin }} pip install --python {{ mineru_venv }}/bin/python 'mineru[vlm]'"
+      become_user: dev
+      environment:
+        HOME: /home/dev
+      register: mineru_pip_install
+      changed_when: "'No changes' not in mineru_pip_install.stdout"
+      # ~5 min on a cold cache (vs ~10 min for [all]); subsequent
+      # runs are no-ops.
+
+    - name: Ensure MinerU HF cache directory exists
+      file:
+        path: "{{ mineru_hf_cache }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    # mineru-models-download is a one-shot fetch (~22 GB: 20 GB pipeline
+    # weights + 2.2 GB VLM). Idempotent: skips when the cache already
+    # contains the VLM model directory. Subsequent boots then use
+    # MINERU_MODEL_SOURCE=local to skip the network re-check.
+    #
+    # The CLI prompts for two values interactively:
+    #   1. model download source (auto/huggingface/modelscope)
+    #   2. model type to download (pipeline/vlm/all)
+    # Pipe `auto` and `all` (the defaults) so the playbook stays
+    # non-interactive. `auto` tries Hugging Face first, falls back to
+    # ModelScope.
+    - name: Check if MinerU VLM model is already cached
+      stat:
+        path: "{{ mineru_hf_cache }}/hub/models--opendatalab--MinerU2.5-Pro-2605-1.2B"
+      register: mineru_vlm_cache
+
+    - name: Pre-download MinerU model weights on first install
+      shell: printf 'auto\nall\n' | {{ mineru_venv }}/bin/mineru-models-download
+      become_user: dev
+      environment:
+        HOME: /home/dev
+        HF_HOME: "{{ mineru_hf_cache }}"
+      when: not mineru_vlm_cache.stat.exists
+      # Long-running on cold cache (~20-30 min depending on bandwidth);
+      # skipped on subsequent playbook runs.
+
+    - name: Install run-mineru.sh
+      copy:
+        src: files/mineru/run-mineru.sh
+        dest: /home/dev/run-mineru.sh
+        owner: dev
+        group: dev
+        mode: '0755'
+      notify: restart mineru service
+
+    - name: Install mineru systemd unit
+      copy:
+        src: files/mineru/mineru.service
+        dest: /etc/systemd/system/mineru.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart mineru service
+
+    - name: Ensure /var/log/mineru.log exists and is writable by dev
+      copy:
+        content: ""
+        dest: "{{ mineru_log_file }}"
+        owner: dev
+        group: dev
+        mode: '0644'
+        force: no
+
+    - name: Enable and start mineru service
+      systemd:
+        name: mineru.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Wait for MinerU /health to return ok
+      uri:
+        url: "http://127.0.0.1:{{ mineru_port }}/health"
+        status_code: 200
+        timeout: 30
+      register: mineru_health
+      until: mineru_health.status == 200
+      retries: 30
+      delay: 10
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart mineru service
+      service:
+        name: mineru.service
+        state: restarted

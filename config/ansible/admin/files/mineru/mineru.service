@@ -1,0 +1,27 @@
+[Unit]
+Description=MinerU document parsing API (opendatalab/MinerU 3.4.x)
+# The CUDA driver must be initialised before mineru-api imports torch;
+# nvidia-persistenced keeps the driver resident but we still wait for
+# the device nodes to appear so the first request doesn't race.
+After=network.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=dev
+Group=dev
+WorkingDirectory=/home/dev
+Environment="HOME=/home/dev"
+Environment="PATH=/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="MINERU_LOG_FILE=/var/log/mineru.log"
+ExecStart=/home/dev/run-mineru.sh
+Restart=always
+RestartSec=5
+# mineru-models-download + VLM preload runs at startup; on Blackwell
+# the VLM weights (~22 GB) plus the pipeline working set need to settle
+# into VRAM before the service answers. Give systemd plenty of headroom
+# before it decides the service is wedged.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

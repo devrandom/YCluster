@@ -14,3 +14,9 @@
 # Inference gateway. After open-webui: the auth sidecar validates API keys
 # against open-webui's database.
 - import_playbook: install-local-ai-proxy.yml
+
+# Document parsing backend (MinerU). Per-host opt-in via mineru_enabled
+# in host_vars/<node>.yml — Linux/Nvidia (nv*) hosts only. The macos
+# variant is in macos/setup-mineru.yml. Both write to the same proxy
+# model names (document-parse, mineru-parse).
+- import_playbook: install-mineru.yml
