@@ -6,7 +6,8 @@ special configuration.
 
 Behind the scenes the cluster runs **MinerU 3.4.x** — on Apple
 Silicon via MLX (hybrid engine: VLM + layout/OCR/table/formula
-pipeline), on Nvidia Blackwell via torch+CUDA (pure VLM). See
+pipeline), on Nvidia Blackwell via torch+CUDA + vLLM (all three
+backends runtime-switchable). See
 [`docs/operations/document-extraction.md`](../operations/document-extraction.md)
 for the deployment side and [`docs/design/mineru.md`](../design/mineru.md)
 for the technology choice.
@@ -46,11 +47,20 @@ curl -s -X POST "$OPENAI_BASE_URL/file_parse" \
   -F "backend=vlm-engine" \
   -F "return_md=true"
 
-Send `backend=vlm-engine` explicitly — MinerU's API default is
-`hybrid-engine`, which requires the pipeline dependencies (only
-installed on the macOS path via `[all]`). The Nvidia install uses
-`[vlm]` only. The `contrib/inference ocr` CLI sends `vlm-engine` by
-default.
+Send `backend=vlm-engine` explicitly — it's the right default for
+speed on text-heavy docs. MinerU's API default is `hybrid-engine`
+(`mineru/cli/backend_options.py:DEFAULT_BACKEND`), which is slower
+(~30 s extra pipeline overhead at `medium` effort). The proxy
+doesn't inject anything; it forwards the form field unchanged.
+The `contrib/inference ocr` CLI sends `vlm-engine` by default.
+
+All three backends are runtime-switchable:
+
+- `backend=pipeline` — pure OCR/layout, no VLM (fastest, but lower
+  quality on complex layouts).
+- `backend=vlm-engine` — VLM only (fast, good for text-heavy docs).
+- `backend=hybrid-engine` — VLM + pipeline sidecars (best quality
+  on edge cases; ~30 s slower than `vlm-engine`).
 ```
 
 The response is JSON with `results.<file>.md_content` containing the
@@ -168,17 +178,20 @@ unzip -l report-parse.zip
   macOS; ~0.2-0.3 s on Nvidia Blackwell (limited by Python/FastAPI
   overhead, not GPU). Longer docs scale with page count — a 2-page
   real document with images/tables takes ~10 min on macOS (MLX)
-  and ~2-3 min on Nvidia Blackwell (torch+CUDA).
+  and ~3 min on Nvidia Blackwell (vLLM-async-engine, ~2:58 wall
+  clock on the current install).
+- **Cold model download**: ~2.2 GB VLM + ~2.5 GB pipeline on first
+  Nvidia install; ~22 GB on first macOS install. Cached at
+  `~/.cache/huggingface` (Linux, bind-mounted into the container)
+  or `~/mineru-models/` (macOS) thereafter. `MINERU_MODEL_SOURCE=local`
+  skips the network re-check on subsequent boots.
 - **In-process task state**: MinerU tracks results in memory only.
   Service restart loses pending tasks (404 on old `task_id`s). For
   long docs (>1000 pages) the recommended pattern is sync `/file_parse`
   with a generous client-side timeout.
 - **CJK fonts**: macOS already ships them (no install needed).
-  Linux nodes need `fonts-noto-cjk` or similar.
-- **Cold model download**: ~2.2 GB on first install (VLM only);
-  cached at `~/.cache/huggingface` (Linux) or `~/mineru-models/` (macOS)
-  thereafter. `MINERU_MODEL_SOURCE=local` skips the network re-check
-  on subsequent boots.
+  Linux nodes need `fonts-noto-cjk` or similar (baked into the
+  container image).
 
 ## See also
 

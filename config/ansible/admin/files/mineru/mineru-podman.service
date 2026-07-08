@@ -1,0 +1,85 @@
+[Unit]
+Description=MinerU document parsing API (opendatalab/MinerU 3.4.x, podman)
+# Same prerequisites as the venv-based mineru.service: the CUDA
+# driver must be initialised before mineru-api imports torch, and
+# nvidia-persistenced keeps the driver resident. Podman + NVIDIA
+# CDI are required for `--device nvidia.com/gpu=all` — set up by
+# setup-gpu-podman.yml (runs before this play in the app chain).
+After=network.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+# Run podman as root, then map the container's UID to dev's
+# (1002) via `--userns=keep-id`. The reason for this oddity:
+# podman under systemd's User=dev can't do CLONE_NEWUSER for its
+# re-exec path (sudo/systemd-restricted caps strip the capability
+# that lets podman fork into a fresh user namespace). Running
+# podman as root avoids the re-exec failure; --userns=keep-id
+# keeps host UIDs 1:1 inside the container, so bind-mounted
+# /home/dev/* (owned by UID 1002) is writable by the container
+# process.
+User=root
+Group=root
+WorkingDirectory=/home/dev
+# Delegate=true lets podman create user namespaces (CLONE_NEWUSER)
+# under systemd. Same setting as the upstream
+# /usr/lib/systemd/system/podman.service.
+Delegate=true
+Environment="HOME=/home/dev"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# mineru-api reads these via the ENTRYPOINT/CMD in the Containerfile.
+# MINERU_MODEL_SOURCE=local skips the network re-check on every boot
+# (cache is pre-populated by install-mineru.yml's warmup step; the
+# bind-mount makes that cache persistent across restarts).
+Environment="HF_HOME=/home/dev/.cache/huggingface"
+Environment="MINERU_MODEL_SOURCE=local"
+Environment="MINERU_API_MAX_CONCURRENT_REQUESTS=3"
+# Bind-mounts:
+#   /home/dev/.cache       — HF model weights + compiled CUDA kernels
+#                            (vllm, flashinfer, torch). With this
+#                            bind-mount the VLM (~2.2 GB) and
+#                            pipeline (~2.5 GB) weights are reused
+#                            across every redeploy — the image
+#                            itself never bakes them.
+#   /home/dev/mineru.json  — mineru config (models-dir snapshot
+#                            paths). Without this bind-mount, the
+#                            container re-resolves snapshot paths
+#                            on first request and re-downloads the
+#                            template on every cold start.
+# Logging: podman's default log driver is journald; journalctl
+# -u mineru-podman captures stdout/stderr. To grep without
+# journalctl, `journalctl -u mineru-podman > file`.
+#
+# podman under systemd's User=dev can't do CLONE_NEWUSER for its
+# re-exec path (Delegate=yes isn't enough on this kernel/buildah
+# combo — the re-exec happens in a fresh process without the
+# delegated cgroup). Wrap in `systemd-run --scope` so the podman
+# process gets a transient unit with full caps; the wrapper
+# process exits, leaving the inner podman to run normally.
+#
+# ExecStartPre pulls the image into dev's podman storage. The
+# pull is a no-op when the image is already present at the right
+# digest (~5 s warm cache). Skipping the pull and assuming the
+# image is already there is risky on a fresh host, so we always
+# do it.
+ExecStartPre=/usr/bin/systemd-run --scope --unit=mineru-pull /usr/bin/podman pull registry.xc:5000/mineru:3.4.3-all-vllm
+ExecStart=/usr/bin/systemd-run --scope --unit=mineru-run /usr/bin/podman run --rm --name mineru \
+    --userns=keep-id \
+    --device nvidia.com/gpu=all \
+    -p 8000:8000 \
+    -v /home/dev/.cache:/home/dev/.cache \
+    -v /home/dev/mineru.json:/home/dev/mineru.json \
+    registry.xc:5000/mineru:3.4.3-all-vllm
+Restart=always
+RestartSec=5
+# Cold start runs VLM preload (~22 GB weights settle into VRAM) +
+# vLLM init. On Blackwell the VLM weights need ~30 s, vLLM CUDA
+# graph compile another ~60 s. Give systemd plenty of headroom
+# before it decides the service is wedged.
+TimeoutStartSec=600
+# In-flight requests get 30 s to drain before SIGKILL.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

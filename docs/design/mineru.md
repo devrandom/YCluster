@@ -7,19 +7,29 @@
   structured markdown + per-page layout JSON.
 - **Server**: built-in `mineru-api` FastAPI server (since 3.0.0) on port 8000.
   No community wrapper needed; the official server supersedes all of them.
-- **Compute**: Apple Silicon via the `mlx` extra (since 3.0). MLX gives
-  ~220% speedup on text PDFs vs. MPS. M3 Ultra (512 GB unified memory, 80 GPU
-  cores) hosts both TEI (bge-m3 embeddings) and MinerU (document parsing).
+- **Compute**: two deploy paths:
+  - **Apple Silicon** via the `mlx` extra (since 3.0). MLX gives ~220%
+    speedup on text PDFs vs. MPS. M3 Ultra (512 GB unified memory, 80 GPU
+    cores) hosts both TEI (bge-m3 embeddings) and MinerU (document parsing).
+    Daemonised as a native Python venv service under LaunchDaemon
+    `com.ycluster.mineru`.
+  - **NVIDIA** via the `vllm` extra in a podman container
+    ([`docs/design/mineru-podman.md`](mineru-podman.md)). Image ships
+    `mineru[all] + torchvision + vllm`; all three backends
+    (pipeline / vlm / hybrid) runtime-switchable via the `backend`
+    form field. vLLM gives proper concurrent page processing.
 - **Routing**: registered as a backend with `local-ai-proxy`; clients hit
   `https://inference.xc/v1/file_parse` like any other model. The proxy
   reads the `model` form field from the multipart body and rewrites the
   path to MinerU's native `/file_parse` (parallels the existing
-  `/v1/tokenize → /tokenize` rewrite).
+  `/v1/tokenize → /tokenize` rewrite). The proxy is transparent —
+  `backend` and `parse_method` are forwarded unchanged.
 - **Auth**: same gateway `auth_request` as the rest of inference (master
   key + Open-WebUI api_key). MinerU itself listens with no API key.
-- **Deployment**: `config/ansible/macos/setup-mineru.yml`, gated on
-  `mineru_enabled: true` in `host_vars/<node>.yml`. Daemonised via
-  LaunchDaemon `com.ycluster.mineru`.
+- **Deployment**: per-platform playbooks, gated on
+  `mineru_enabled: true` in `host_vars/<node>.yml`. macOS:
+  `macos/setup-mineru.yml` (LaunchDaemon). Linux/Nvidia:
+  `admin/install-mineru.yml` (podman, see below).
 
 For the deployment playbook, host opt-in, registration, and ops/troubleshooting,
 see [`docs/operations/document-extraction.md`](../operations/document-extraction.md).
@@ -58,6 +68,15 @@ disabled and inference falls back to CPU. We stay with `uv pip install
 "mineru[all]"` (the `[all]` meta-extra auto-picks `core + s3 + mlx` on
 darwin) and run it as a native Python service under a LaunchDaemon, same
 pattern as `setup-tei.yml`.
+
+On NVIDIA we do use containers — but podman (rootless + CDI), not
+docker. The MinerU image is built locally from a Containerfile
+(`config/ansible/admin/files/mineru/Containerfile`), pushed to the
+cluster registry (`registry.xc:5000/mineru:VERSION`), and run via a
+systemd unit wrapping `podman run`. See
+[`docs/design/mineru-podman.md`](mineru-podman.md) for the rationale
+(single artifact, version-pinned, cache bind-mount, GPU passthrough via
+NVIDIA CDI).
 
 ## API shape
 
@@ -177,14 +196,26 @@ Defaults that we accept as-is:
 
 ## Current deployment
 
-- **Host**: m2 (Apple M3 Ultra, 512 GB unified memory, 80 GPU cores, Metal 4)
-  — same Mac as the TEI embeddings endpoint.
-- **Provisioner**: `config/ansible/macos/setup-mineru.yml` (wired in via `site.yml`).
-- **Daemon**: `com.ycluster.mineru` LaunchDaemon under user `dev`.
-- **Backend registration**:
+- **Hosts**:
+  - **macOS** (m2 — Apple M3 Ultra, 512 GB unified memory, 80 GPU cores,
+    Metal 4): same Mac as the TEI embeddings endpoint. Native Python venv
+    + LaunchDaemon (`com.ycluster.mineru`). The MinerU URL for this host
+    is currently disabled in `local-ai-proxy` (`ycluster inference
+    disable http://m2.xc:8000`) — Nvidia is the primary path; macOS is
+    the fallback.
+  - **Linux/Nvidia** (an Nvidia host with `mineru_enabled: true` —
+    gated by `host_vars/<node>.yml`): containerised via podman
+    (`registry.xc:5000/mineru:3.4.3-all-vllm`), managed by systemd
+    unit `mineru-podman.service`. The old venv-based `mineru.service`
+    is left installed as a one-command rollback target.
+- **Provisioner**:
+  - macOS: `config/ansible/macos/setup-mineru.yml` (wired in via `site.yml`).
+  - Linux/Nvidia: `config/ansible/admin/install-mineru.yml`
+    (wired in via `app/app.yml`).
+- **Backend registration** (per host):
   ```bash
-  ycluster inference add http://m2.xc:8000 document-parse
-  ycluster inference add http://m2.xc:8000 mineru-parse
+  ycluster inference add http://<host>.xc:8000 document-parse
+  ycluster inference add http://<host>.xc:8000 mineru-parse
   ```
 - **Reachability**: `https://inference.xc/v1/file_parse` (cluster-internal:
   `http://inference.xc/v1/file_parse`).
@@ -217,17 +248,23 @@ Defaults that we accept as-is:
 
 ## Future work
 
-- **NVIDIA node** (`nv1–nv5`) — drop-in for higher throughput. Same
-  `ycluster inference add` pattern. Worth it if `MINERU_API_MAX_CONCURRENT_REQUESTS=3`
-  on the Mac becomes a bottleneck under sustained load.
-- **Multi-instance via `mineru-router`** — when more than one host runs
-  MinerU, register a `mineru-router` (port 8002) as the local-ai-proxy
-  backend instead of individual `mineru-api` instances. Provides
-  load balancing across workers/GPUs.
+- **More Nvidia hosts** — adding a second Nvidia box is now
+  `host_vars/<host>.yml: mineru_enabled: true` + run
+  `install-mineru.yml --limit <host>`. The playbook pulls the
+  pre-built image from `registry.xc:5000/mineru:VERSION` (~5 s),
+  bind-mounts `/home/dev/.cache` (already on Ceph-rbd), starts the
+  service. ~2 min per host vs ~15 min if rebuilding.
+- **Multi-instance via `mineru-router`** — when more than one host
+  runs MinerU, register a `mineru-router` (port 8002) as the
+  local-ai-proxy backend instead of individual `mineru-api` instances.
+  Provides load balancing across workers/GPUs.
 - **Async `/tasks` for very long docs** — add a thin client wrapper
   that submits via `/tasks`, polls `/tasks/{id}`, and downloads the
   result ZIP. Useful for >1000-page documents where `/file_parse` would
   hit the nginx `proxy_read_timeout`.
+- **vLLM + MLX parity test** — confirm that `backend=vlm-engine`
+  produces equivalent output across vllm-async-engine (Linux) and
+  mlx-engine (macOS). Sample a few real docs through both paths.
 - **Custom body-size tuning** — default `client_max_body_size` is
   200 MiB. Large textbooks can exceed this; bump nginx
   (`inference-internal.conf`) and `local-ai-proxy/router.go`

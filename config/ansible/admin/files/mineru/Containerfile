@@ -1,0 +1,100 @@
+# MinerU 3.4.x on Ubuntu 24.04 (matches prod hosts). The image
+# ships mineru[all] + torchvision + vllm so all three MinerU
+# backends (pipeline / vlm / hybrid) are runtime-switchable via
+# the `backend` form field, and the VLM auto-resolves to
+# vllm-async-engine on Linux (`get_vlm_engine('auto',
+# is_async=True)`) for proper concurrent page processing.
+#
+# The image deliberately does NOT bake MinerU model weights — those
+# are reused at runtime via bind-mount. The systemd unit
+# (mineru-podman.service) bind-mounts /home/dev/.cache from the host
+# so the VLM (~2.2 GB) and pipeline (~2.5 GB) weights survive every
+# redeploy and don't need re-downloading.
+#
+# Build with: buildah bud -f Containerfile -t mineru:VERSION .
+# Push with:  podman push mineru:VERSION registry.xc:5000/mineru:VERSION
+# (Both run from install-mineru.yml on the first Nvidia host.)
+
+FROM docker.io/library/ubuntu:24.04
+
+# System deps. ffmpeg is for media preprocessing, libgl*/glib are
+# OpenCV/Pillow deps, fonts-noto-cjk matches the macOS install
+# (CJK rendering in the layout pass). python3.12-venv is a fallback
+# (uv manages its own envs; not strictly required).
+#
+# gcc + build-essential + python3-dev are needed by triton to
+# JIT-compile CUDA kernels on first run (vllm uses triton internally).
+# Without gcc: "RuntimeError: Failed to find C compiler".
+# Without python3-dev: "fatal error: Python.h: No such file".
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        fonts-noto-cjk \
+        gcc \
+        libgl1 \
+        libglib2.0-0 \
+        python3.12-dev \
+        python3.12-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (single small layer). UV_INSTALL_DIR puts the binary on PATH
+# so the next layer can call `uv pip install --system` directly.
+ADD https://astral.sh/uv/install.sh /uv-install.sh
+RUN env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=/usr/local/bin sh /uv-install.sh \
+    && rm /uv-install.sh \
+    && uv --version
+
+# The big layer — caches well across rebuilds because uv's resolver
+# produces deterministic wheels. vllm 0.10.x–0.11.x is the version
+# range MinerU upstream tests against (3.0 changelog: "base image
+# has been upgraded to vllm0.11.2 + torch2.9.0"). Pin below 0.12.0
+# so future vllm breaking changes don't surprise us.
+#
+# mineru[all] on Linux = core (vlm + pipeline + gradio) + s3 + vllm.
+# torchvision is pulled by mineru[pipeline] already, but pinning it
+# explicitly so the AutoProcessor Video class is satisfied at
+# mineru-api startup (see install-mineru.yml for the same fix on
+# the venv install).
+#
+# Ubuntu 24.04 marks /usr as externally managed (PEP 668), so
+# --system refuses to install. Use --break-system-packages —
+# the container is a single-purpose image, no other Python users
+# share /usr.
+RUN uv pip install --system --break-system-packages \
+        'mineru[all]' \
+        torchvision \
+        'vllm>=0.10.1.1,<0.12.0'
+
+# Sanity check — fails the build if mineru-api is missing.
+RUN mineru-api --help >/dev/null
+
+# Run as the host `dev` user (UID 1002 on the cluster) so
+# bind-mounts of /home/dev/* are writable. The systemd unit pairs
+# this with `--userns=keep-id` so the container UID matches the
+# host UID 1:1 (no remap). HOME=/home/dev matches the bind-mount
+# layout and lets mineru read ~/mineru.json without an explicit
+# MINERU_TOOLS_CONFIG_JSON override.
+#
+# Note: buildah creates this user with a fixed UID; if the host
+# user `dev` ever changes UID, both this Containerfile and any
+# already-built images need a rebuild (image UIDs are baked at
+# build time, not mapped at run).
+RUN groupadd --gid 1002 dev \
+    && useradd --uid 1002 --gid 1002 --home-dir /home/dev --shell /bin/bash dev \
+    && mkdir -p /home/dev \
+    && chown -R dev:dev /home/dev
+USER dev
+ENV HOME=/home/dev
+WORKDIR /home/dev
+
+# mineru-api is the FastAPI entrypoint. The systemd unit passes
+# --host / --port / --enable-vlm-preload via `podman run` args.
+# The defaults below match what we run on the cluster.
+# MINERU_MODEL_SOURCE=local avoids the network re-check on every
+# boot (cache is pre-populated by the warmup step in the playbook;
+# the bind-mount makes that cache persistent across restarts).
+ENV MINERU_MODEL_SOURCE=local
+ENTRYPOINT ["mineru-api"]
+CMD ["--host", "0.0.0.0", "--port", "8000", "--enable-vlm-preload", "true"]

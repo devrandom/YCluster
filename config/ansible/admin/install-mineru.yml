@@ -1,47 +1,62 @@
 ---
 # Install MinerU (opendatalab/MinerU 3.4.x) on Linux/Nvidia GPU nodes
-# (nv*). Listens on :8000 with no API key — cluster auth is handled
-# upstream by local-ai-proxy + nginx (Open-WebUI api_key table).
-# Register each MinerU node with:
+# (nv*) as a podman container, fronted by local-ai-proxy + nginx.
+# Listens on :8000 with no API key — cluster auth is handled upstream
+# by local-ai-proxy + nginx (Open-WebUI api_key table). Register each
+# MinerU node with:
 #
 #   ycluster inference add http://nv<N>.xc:8000 document-parse
 #   ycluster inference add http://nv<N>.xc:8000 mineru-parse
 #
 # Clients then hit https://inference.xc/v1/file_parse like any other
 # model; local-ai-proxy rewrites the path to MinerU's native /file_parse
-# and routes by the `model` form field. See docs/design/mineru.md for
-# the technology choice and architecture; ops playbook at
-# docs/operations/document-extraction.md.
+# and routes by the `model` form field (or X-Model header). See
+# docs/design/mineru.md for the technology choice and architecture,
+# docs/design/mineru-podman.md for the container refactor rationale,
+# and docs/operations/document-extraction.md for ops + troubleshooting.
 #
-# Installs `mineru[vlm]` (not `[all]` / `[core]`). Pure VLM mode is
-# enough for typical documents — the VLM treats every page as an
-# image (text PDFs render the same as scanned PDFs), so output
-# quality on normal docs is essentially the same as hybrid mode.
-# Trade-offs:
-#   - disk: ~2.2 GB model + ~5 GB deps (vs ~22 GB for hybrid)
-#   - startup: fast, no pipeline init
-#   - memory: lower
-#   - quality on complex docs (handwriting, dense tables, formulas):
-#     may miss edge cases; hybrid's specialised OCR/layout pass
-#     catches more
-# Pure VLM is the right default for "normal use"; flip to hybrid by
-# changing `[vlm]` → `[all]` if quality on edge-case docs becomes
-# a problem.
+# Container ships `mineru[all]` + torchvision + vllm so all three
+# MinerU backends (pipeline / vlm / hybrid) are runtime-switchable
+# via the `backend` form field. vllm is auto-selected on Linux for
+# the VLM engine (`get_vlm_engine('auto', is_async=True)`), giving
+# proper concurrent page processing instead of stepping through
+# blocks one at a time.
+#
+# Image is built once on the first Nvidia host and pushed to the
+# cluster registry (registry.xc:5000/mineru:VERSION). Future hosts
+# pull instead of rebuild (~2 min vs ~10 min). Cache bind-mounts
+# (/home/dev/.cache, /home/dev/mineru.json) reuse the VLM (~2.2 GB)
+# and pipeline (~2.5 GB) weights across every redeploy — the image
+# itself never bakes them.
+#
+# Old mineru.service (venv-based) is stopped but left on disk as a
+# one-command rollback target. Re-enabling it puts the host back on
+# the previous behavior without reinstalling anything.
 #
 # Gated on the per-host `mineru_enabled` opt-in (host_vars/<node>.yml),
 # so the play is a no-op on Nvidia hosts that aren't designated as
 # document-parsing nodes. The macos install (macos/setup-mineru.yml)
-# uses the same opt-in key for the same reason.
-- name: Install MinerU on Nvidia GPU nodes
+# uses the same opt-in key for the same reason. macOS is not in scope
+# for the podman refactor — Apple Silicon stays on MLX + uv venv.
+- name: Install MinerU on Nvidia GPU nodes (podman)
   hosts: nvidia
   become: yes
   vars:
-    mineru_venv: /home/dev/mineru-venv
+    # Bump VERSION to ship a release (the design doc suggests
+    # MAJOR.MINOR.PATCH-all-vllm, e.g. mineru:3.4.3-all-vllm). The
+    # build step is keyed on this tag — changing VERSION forces a
+    # rebuild + push even if the Containerfile hasn't changed.
+    mineru_image_tag: "3.4.3-all-vllm"
+    mineru_image_local: "mineru:{{ mineru_image_tag }}"
+    mineru_image_registry: "registry.xc:5000/mineru:{{ mineru_image_tag }}"
+    mineru_containerfile_src: files/mineru/Containerfile
+    mineru_containerfile_dest: /home/dev/.mineru-build/Containerfile
+    mineru_service_unit_src: files/mineru/mineru-podman.service
+    mineru_service_unit_dest: /etc/systemd/system/mineru-podman.service
     mineru_port: 8000
     mineru_hf_cache: /home/dev/.cache/huggingface
-    mineru_log_file: /var/log/mineru.log
+    mineru_mineru_json: /home/dev/mineru.json
     mineru_max_concurrent: 3
-    uv_bin: /snap/bin/uv
 
   tasks:
     # Skip hosts with no host-usable NVIDIA GPU — either no NVIDIA
@@ -56,40 +71,76 @@
       meta: end_host
       when: not (mineru_enabled | default(false))
 
-    - name: Ensure uv is installed
-      command: "{{ uv_bin }} --version"
-      register: uv_check
-      changed_when: false
-      failed_when: uv_check.rc != 0
+    # Podman + NVIDIA CDI are required for `--device nvidia.com/gpu=all`.
+    # setup-gpu-podman.yml runs before this in the app chain, but check
+    # defensively in case the play is run standalone.
+    - name: Ensure podman is installed
+      apt:
+        name: podman
+        state: present
+        update_cache: yes
 
-    - name: Create MinerU virtual environment
-      command: "{{ uv_bin }} venv {{ mineru_venv }}"
+    - name: Ensure NVIDIA CDI spec exists
+      command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
       args:
-        creates: "{{ mineru_venv }}/bin/python"
-      become_user: dev
-      environment:
-        HOME: /home/dev
+        creates: /etc/cdi/nvidia.yaml
+      changed_when: true
 
-    - name: Install mineru[vlm] + torchvision into the venv (idempotent)
-      # Pure VLM mode: torch + transformers + accelerate. On Linux
-      # the wheel pulls CUDA-enabled torch, no separate engine
-      # needed. uv's resolver is much faster than stock pip for
-      # this dependency set.
-      #
-      # torchvision is added separately — mineru[vlm] does NOT pull
-      # it (only [pipeline] / [all] do), but AutoProcessor.from_pretrained
-      # requires it even for image-only models (the "Video" processor
-      # class is loaded unconditionally during model init). Without
-      # it mineru-api exits 3/NOTIMPLEMENTED on startup.
-      command: "{{ uv_bin }} pip install --python {{ mineru_venv }}/bin/python 'mineru[vlm]' torchvision"
-      become_user: dev
-      environment:
-        HOME: /home/dev
-      register: mineru_pip_install
-      changed_when: "'No changes' not in mineru_pip_install.stdout"
-      # ~5 min on a cold cache (vs ~10 min for [all]); subsequent
-      # runs are no-ops.
+    # podman 4.9.3 (Ubuntu 24.04) can't parse the toolkit's CDI 0.7.0
+    # spec — it rejects the unknown `additionalGids` field, so every
+    # `--device nvidia.com/gpu=N` fails with "unresolvable CDI devices".
+    # Same workaround as setup-gpu-podman.yml.
+    - name: Pin CDI spec to 0.6.0 if needed
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '^cdiVersion: 0\.7\.0$'
+        replace: 'cdiVersion: 0.6.0'
 
+    - name: Strip unparseable additionalGids field from CDI spec
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '(?m)^[ \t]*additionalGids:\n(?:[ \t]*- \d+\n)+'
+        replace: ''
+
+    # registry.xc:5000 is the cluster's insecure (HTTP) registry on
+    # the storage VIP. podman defaults to HTTPS, so without this
+    # config every push/pull fails with "server gave HTTP response
+    # to HTTPS client". Drop-in to /etc/containers/registries.conf.d/
+    # so it survives podman upgrades.
+    - name: Configure registry.xc as an insecure registry
+      copy:
+        dest: /etc/containers/registries.conf.d/registry.xc.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [[registry]]
+          location = "registry.xc:5000"
+          insecure = true
+
+    - name: Ensure systemd lingering for dev (rootless podman survives logout)
+      command: loginctl enable-linger dev
+      args:
+        creates: /var/lib/systemd/linger/dev
+
+    # Verify the registry is reachable. Podman push to an unreachable
+    # host hangs and is hard to debug from the playbook recap — fail
+    # fast with a clear error.
+    - name: Verify registry is reachable for push
+      uri:
+        url: "http://registry.xc:5000/v2/_catalog"
+        method: GET
+        timeout: 10
+      register: registry_catalog
+      failed_when: registry_catalog.status != 200
+      run_once: true
+      delegate_to: "{{ groups['nvidia'][0] }}"
+
+    # Pre-create cache dirs so the bind-mount targets exist with
+    # correct ownership before the container starts. /home/dev/.cache
+    # already exists (uv + HF cache are populated by previous installs),
+    # but /home/dev/.cache/huggingface may not — the existing venv
+    # install uses HF_HOME=/home/dev/.cache/huggingface (default).
     - name: Ensure MinerU HF cache directory exists
       file:
         path: "{{ mineru_hf_cache }}"
@@ -98,64 +149,131 @@
         group: dev
         mode: '0755'
 
-    # mineru-models-download is a one-shot fetch (~22 GB: 20 GB pipeline
-    # weights + 2.2 GB VLM). Idempotent: skips when the cache already
-    # contains the VLM model directory. Subsequent boots then use
+    # Stage the Containerfile on the host. The build context is the
+    # directory containing the Containerfile; buildah reads it
+    # locally (no daemon). We build from /home/dev/.mineru-build so
+    # the build context is small and self-contained.
+    - name: Stage Containerfile for buildah
+      copy:
+        src: "{{ mineru_containerfile_src }}"
+        dest: "{{ mineru_containerfile_dest }}"
+        owner: dev
+        group: dev
+        mode: '0644'
+
+    # Build the image only if the registry doesn't already have
+    # this tag. The registry is the source of truth — once an
+    # image is pushed, all subsequent runs on this host (and other
+    # Nvidia hosts) just pull from there. Skipping the build+push
+    # when the registry has the tag is what makes this idempotent.
+    #
+    # `buildah bud` runs as root because dev's CLONE_NEWUSER is
+    # blocked on this kernel/buildah combo; root's buildah storage
+    # is at /var/lib/containers/storage. The push is also as root
+    # (same storage). dev's podman storage at
+    # /home/dev/.local/share/containers/storage is populated by
+    # the explicit `podman pull` below, which the service uses.
+    #
+    # ~10 min on a cold cache (uv pip install of mineru[all] +
+    # torchvision + vllm pulls ~5 GB of wheels). Subsequent runs
+    # are no-ops unless the Containerfile or VERSION changes.
+    - name: Check if mineru image is already in registry
+      # buildah pushes OCI manifests by default (Content-Type
+      # application/vnd.oci.image.manifest.v1+json). A bare HEAD
+      # without Accept returns 404 because the registry can't pick
+      # a manifest format to return. List both formats in Accept
+      # so the check matches either buildah or skopeo/docker pushes.
+      uri:
+        url: "http://registry.xc:5000/v2/mineru/manifests/{{ mineru_image_tag }}"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json"
+        status_code: 200
+        timeout: 10
+      register: mineru_registry_exists
+      failed_when: false
+
+    - name: Build mineru image with buildah (root)
+      command: buildah bud -f {{ mineru_containerfile_dest }} -t {{ mineru_image_local }} /home/dev/.mineru-build
+      when: mineru_registry_exists.status != 200
+      # ~10 min cold. Skipped on subsequent runs when the registry
+      # already has the tag.
+
+    - name: Push mineru image to cluster registry (root)
+      command: buildah push {{ mineru_image_local }} {{ mineru_image_registry }}
+      when: mineru_registry_exists.status != 200
+      # First-time push can take ~1-2 min (the image is ~10 GB and
+      # the registry has no auth but the upload is non-trivial).
+      # Skipped on subsequent runs.
+
+    # The mineru-podman.service does `podman pull` as part of its
+    # ExecStartPre (under User=dev — the only context where
+    # CLONE_NEWUSER is allowed on this kernel/buildah combo).
+    # Pulling from the playbook via become_user: dev fails with
+    # "cannot re-exec process" because sudo strips CLONE_NEWUSER,
+    # so the pull is delegated to systemd. ~5 s on a warm cache.
+
+    # Warmup: trigger paddle/VLM weight download into the bind-
+    # mounted cache. mineru-models-download prompts interactively
+    # for source + model_type; pipe `auto\nall\n` (the defaults)
+    # so the playbook stays non-interactive. `auto` tries HuggingFace
+    # first, falls back to ModelScope.
+    #
+    # The CLI downloads both VLM (~2.2 GB) and pipeline (~2.5 GB)
+    # weights into the bind-mounted HF cache. Idempotent: skips if
+    # the VLM model is already cached. Subsequent boots use
     # MINERU_MODEL_SOURCE=local to skip the network re-check.
     #
-    # The CLI prompts for two values interactively:
-    #   1. model download source (auto/huggingface/modelscope)
-    #   2. model type to download (pipeline/vlm/all)
-    # Pipe `auto` and `all` (the defaults) so the playbook stays
-    # non-interactive. `auto` tries Hugging Face first, falls back to
-    # ModelScope.
+    # First-time downloads can take ~30 min (cold cache + slow link).
+    # Skipped on subsequent runs.
     - name: Check if MinerU VLM model is already cached
       stat:
         path: "{{ mineru_hf_cache }}/hub/models--opendatalab--MinerU2.5-Pro-2605-1.2B"
       register: mineru_vlm_cache
 
-    - name: Pre-download MinerU model weights on first install
-      shell: printf 'auto\nall\n' | {{ mineru_venv }}/bin/mineru-models-download
+    # mineru-models-download needs to run inside the container so
+    # the resolved snapshot paths in mineru.json match the in-
+    # container HF_HOME layout. Use the same image + bind-mounts
+    # the service uses, but with --rm and the download CLI as the
+    # command override.
+    - name: Pre-download MinerU weights via container warmup
+      command: >-
+        podman run --rm --userns=keep-id
+        -v {{ mineru_hf_cache }}:{{ mineru_hf_cache }}
+        -e HF_HOME={{ mineru_hf_cache }}
+        {{ mineru_image_registry }}
+        bash -c 'printf "auto\nall\n" | mineru-models-download'
       become_user: dev
-      environment:
-        HOME: /home/dev
-        HF_HOME: "{{ mineru_hf_cache }}"
       when: not mineru_vlm_cache.stat.exists
-      # Long-running on cold cache (~20-30 min depending on bandwidth);
-      # skipped on subsequent playbook runs.
+      # Long-running on cold cache; skipped when VLM is already
+      # cached. ~22 GB total downloaded into the bind-mounted cache.
 
-    - name: Install run-mineru.sh
+    - name: Install mineru-podman systemd unit
       copy:
-        src: files/mineru/run-mineru.sh
-        dest: /home/dev/run-mineru.sh
-        owner: dev
-        group: dev
-        mode: '0755'
-      notify: restart mineru service
-
-    - name: Install mineru systemd unit
-      copy:
-        src: files/mineru/mineru.service
-        dest: /etc/systemd/system/mineru.service
+        src: "{{ mineru_service_unit_src }}"
+        dest: "{{ mineru_service_unit_dest }}"
         owner: root
         group: root
         mode: '0644'
       notify:
         - reload systemd
-        - restart mineru service
+        - restart mineru-podman service
 
-    - name: Ensure /var/log/mineru.log exists and is writable by dev
-      copy:
-        content: ""
-        dest: "{{ mineru_log_file }}"
-        owner: dev
-        group: dev
-        mode: '0644'
-        force: no
-
-    - name: Enable and start mineru service
+    # Tear down the old venv-based mineru.service. The unit file
+    # and the venv are left on disk for one-command rollback (see
+    # the design doc). Stop and disable — don't delete.
+    - name: Stop and disable old venv-based mineru.service
       systemd:
         name: mineru.service
+        state: stopped
+        enabled: no
+      failed_when: false
+      # Old service may already be inactive on a fresh host — don't
+      # fail the playbook if it is.
+
+    - name: Enable and start mineru-podman service
+      systemd:
+        name: mineru-podman.service
         enabled: yes
         state: started
         daemon_reload: yes
@@ -175,7 +293,7 @@
       systemd:
         daemon_reload: yes
 
-    - name: restart mineru service
+    - name: restart mineru-podman service
       service:
-        name: mineru.service
+        name: mineru-podman.service
         state: restarted
