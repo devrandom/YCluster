@@ -70,12 +70,18 @@
       environment:
         HOME: /home/dev
 
-    - name: Install mineru[vlm] into the venv (idempotent)
+    - name: Install mineru[vlm] + torchvision into the venv (idempotent)
       # Pure VLM mode: torch + transformers + accelerate. On Linux
       # the wheel pulls CUDA-enabled torch, no separate engine
       # needed. uv's resolver is much faster than stock pip for
       # this dependency set.
-      command: "{{ uv_bin }} pip install --python {{ mineru_venv }}/bin/python 'mineru[vlm]'"
+      #
+      # torchvision is added separately — mineru[vlm] does NOT pull
+      # it (only [pipeline] / [all] do), but AutoProcessor.from_pretrained
+      # requires it even for image-only models (the "Video" processor
+      # class is loaded unconditionally during model init). Without
+      # it mineru-api exits 3/NOTIMPLEMENTED on startup.
+      command: "{{ uv_bin }} pip install --python {{ mineru_venv }}/bin/python 'mineru[vlm]' torchvision"
       become_user: dev
       environment:
         HOME: /home/dev
