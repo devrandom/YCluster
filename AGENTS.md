@@ -137,6 +137,8 @@ Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.y
 ## Coding Conventions
 
 - No commit message prefixes (no "feat:", "fix:", etc.)
+- Be terse. Short commit subjects; no rationale essays in bodies.
+  Rationale that needs to survive goes in `docs/`.
 - Do not create commits unless explicitly asked by the user
 - Run the relevant tests/build before committing. If the local toolchain
   doesn't have what's needed, run tests on a cluster node that does
