@@ -74,7 +74,7 @@ _inference_completion() {
             ;;
         ocr)
             if [[ $cur == -* ]]; then
-                COMPREPLY=( $(compgen -W "--model --format --output --timeout -h --help" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--model --backend --format --output --timeout -h --help" -- "$cur") )
             else
                 local IFS=$'\n'
                 COMPREPLY=( $(compgen -f -- "$cur") )

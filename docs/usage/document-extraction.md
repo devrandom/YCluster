@@ -4,8 +4,9 @@ YCluster exposes a layout-aware document parsing API. Clients reach it
 through the same gateway as the LLM and embedding endpoints — no
 special configuration.
 
-Behind the scenes the cluster runs **MinerU 3.4.x** (VLM +
-layout/OCR/table/formula pipeline) on Apple Silicon via MLX. See
+Behind the scenes the cluster runs **MinerU 3.4.x** — on Apple
+Silicon via MLX (hybrid engine: VLM + layout/OCR/table/formula
+pipeline), on Nvidia Blackwell via torch+CUDA (pure VLM). See
 [`docs/operations/document-extraction.md`](../operations/document-extraction.md)
 for the deployment side and [`docs/design/mineru.md`](../design/mineru.md)
 for the technology choice.
@@ -19,10 +20,15 @@ for the technology choice.
   per-page layout JSON, flat content-list JSON.
 
 The cluster registers two model names that both point at the same
-backend:
+backends:
 
 - `document-parse` — the semantic name (use this from client code).
 - `mineru-parse` — the implementation-specific alias.
+
+Both names currently route to **MinerU on Linux/Nvidia Blackwell**
+(nv2) — the macOS backend (m2) is disabled while Blackwell is the
+primary. See [`document-extraction.md`](../operations/document-extraction.md)
+for the routing state and how to re-enable the macOS path.
 
 ## Quick start
 
@@ -37,7 +43,14 @@ curl -s -X POST "$OPENAI_BASE_URL/file_parse" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -F "files=@report.pdf" \
   -F "model=document-parse" \
+  -F "backend=vlm-engine" \
   -F "return_md=true"
+
+Send `backend=vlm-engine` explicitly — MinerU's API default is
+`hybrid-engine`, which requires the pipeline dependencies (only
+installed on the macOS path via `[all]`). The Nvidia install uses
+`[vlm]` only. The `contrib/inference ocr` CLI sends `vlm-engine` by
+default.
 ```
 
 The response is JSON with `results.<file>.md_content` containing the
@@ -65,7 +78,8 @@ with open("report.pdf", "rb") as f:
         "http://inference.xc/v1/file_parse",
         headers={"Authorization": f"Bearer {token}"},
         files={"files": ("report.pdf", f, "application/pdf")},
-        data={"model": "document-parse", "return_md": "true"},
+        data={"model": "document-parse", "backend": "vlm-engine",
+              "return_md": "true"},
         timeout=180,
     )
 r.raise_for_status()
@@ -130,6 +144,7 @@ curl -s -X POST "$OPENAI_BASE_URL/file_parse" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -F "files=@report.pdf" \
   -F "model=document-parse" \
+  -F "backend=vlm-engine" \
   -F "response_format_zip=true" \
   -F "return_md=true" \
   -o report-parse.zip
@@ -141,21 +156,29 @@ unzip -l report-parse.zip
 - **Upload size**: 200 MiB max per request (nginx `client_max_body_size`
   + proxy `maxMultipartBodyBytes`). Large textbooks may exceed — bump
   both in lockstep, or chunk client-side.
-- **Concurrency**: 1 concurrent request on macOS hosts (MinerU clamps
-  to 1 when listening on `0.0.0.0` to mitigate SSRF risk). Expect
-  linear queueing under load. NVIDIA nodes are faster but Docker-only
-  on Linux.
+- **Concurrency**:
+  - macOS hosts (m*): clamped to **1 concurrent request** (MinerU
+    hard-clamps on `is_mac_environment()`, not on bind — see
+    `mineru/cli/fast_api.py`). Expect linear queueing under load.
+  - Linux/Nvidia hosts (nv*): full configured concurrency
+    (`MINERU_API_MAX_CONCURRENT_REQUESTS=3` by default). Multiple
+    requests can be in flight simultaneously.
 - **First request after a redeploy or boot**: ~14 s while the
-  hybrid-engine warms up. Subsequent requests are ~0.7 s for short
-  docs; longer docs scale with page count.
+  VLM warms up. Subsequent requests are ~0.7 s for short docs on
+  macOS; ~0.2-0.3 s on Nvidia Blackwell (limited by Python/FastAPI
+  overhead, not GPU). Longer docs scale with page count — a 2-page
+  real document with images/tables takes ~10 min on macOS (MLX)
+  and ~2-3 min on Nvidia Blackwell (torch+CUDA).
 - **In-process task state**: MinerU tracks results in memory only.
   Service restart loses pending tasks (404 on old `task_id`s). For
   long docs (>1000 pages) the recommended pattern is sync `/file_parse`
   with a generous client-side timeout.
 - **CJK fonts**: macOS already ships them (no install needed).
-- **Cold model download**: ~22 GB on first install; cached at
-  `~/mineru-models/` thereafter. `MINERU_MODEL_SOURCE=local` skips
-  the network re-check on subsequent boots.
+  Linux nodes need `fonts-noto-cjk` or similar.
+- **Cold model download**: ~2.2 GB on first install (VLM only);
+  cached at `~/.cache/huggingface` (Linux) or `~/mineru-models/` (macOS)
+  thereafter. `MINERU_MODEL_SOURCE=local` skips the network re-check
+  on subsequent boots.
 
 ## See also
 
@@ -165,4 +188,5 @@ unzip -l report-parse.zip
 - [`docs/operations/document-extraction.md`](../operations/document-extraction.md)
   — deployment, opt-in, troubleshooting.
 - [`docs/design/mineru.md`](../design/mineru.md) — technology choice,
-  MLX-on-Mac rationale, why not Docker.
+  MLX-on-Mac rationale, why not Docker, alternative architectures
+  considered.

@@ -544,10 +544,18 @@ def cmd_transcribe(args):
 def cmd_ocr(args):
     """OCR / document extraction via /v1/file_parse (MinerU).
 
-    Backed by MinerU 3.4.x running on the macOS inference nodes. Supports
-    PDF, DOCX, PPTX, XLSX, and images. Layout-aware parsing — headings,
-    tables, equations, code blocks, and reading-order text blocks all
-    preserved in the markdown output.
+    Backed by MinerU 3.4.x running on the macOS and Nvidia inference
+    nodes. Supports PDF, DOCX, PPTX, XLSX, and images. Layout-aware
+    parsing — headings, tables, equations, code blocks, and reading-
+    order text blocks all preserved in the markdown output.
+
+    Default backend is `vlm-engine` (pure VLM, no specialised OCR
+    pipeline). Both the macOS install (mineru[all]) and the Nvidia
+    install (mineru[vlm]) support this — MinerU's API default is
+    `hybrid-engine`, which requires the pipeline dependencies, so we
+    override it here. Use `--backend hybrid-engine` if you've installed
+    `[pipeline]` / `[all]` and want OCR-augmented parsing on edge-case
+    docs (handwriting, dense tables, formulas).
     """
     parser = argparse.ArgumentParser(
         prog=f"{sys.argv[0]} ocr",
@@ -568,6 +576,12 @@ def cmd_ocr(args):
     )
     parser.add_argument(
         "--output", help="output file path (required for --format zip)",
+    )
+    parser.add_argument(
+        "--backend", default="vlm-engine",
+        choices=["vlm-engine", "hybrid-engine", "pipeline"],
+        help="MinerU backend (default: vlm-engine). hybrid-engine and "
+             "pipeline require mineru[all] / mineru[pipeline] on the host.",
     )
     parser.add_argument(
         "--timeout", type=int, default=300,
@@ -593,7 +607,7 @@ def cmd_ocr(args):
     # repeated per upload (MinerU accepts multiple documents in one
     # request).
     boundary = "----ycluster-inference-" + secrets.token_hex(8)
-    fields = {"model": a.model, "return_md": "true"}
+    fields = {"model": a.model, "backend": a.backend, "return_md": "true"}
     if a.format == "zip":
         fields["response_format_zip"] = "true"
 
@@ -630,6 +644,7 @@ def cmd_ocr(args):
     total_size = sum(p.stat().st_size for p in paths)
     print(f"Endpoint: {base}/v1/file_parse")
     print(f"Model:    {a.model}")
+    print(f"Backend:  {a.backend}")
     print(f"Files:    {len(paths)} ({total_size} bytes total)")
     for p in paths:
         print(f"          {p} ({p.stat().st_size} bytes)")
