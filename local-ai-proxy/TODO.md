@@ -104,36 +104,6 @@ HTTP server:
 
 Attack surface against backends (authenticated clients → backend):
 
-- [ ] **[HIGH] Sandbox MinerU's outbound at the OS layer.**
-      Today the only SSRF mitigation on `m2.xc:8000` is MinerU's
-      application-level disable of `*-http-client` backends when bound
-      to 0.0.0.0 (see `mineru/cli/public_http_client_policy.py`). That
-      blocks attacker-supplied `server_url` / `backend: *-http-client`
-      fields, but does not stop a crafted PDF from triggering outbound
-      fetches via other parts of the pipeline (pypdf / pdfplumber
-      resolving external image URIs, etc.). The user explicitly asked
-      for "definitely block any outbound requests from mineru" — we
-      keep the 0.0.0.0 bind by convention (proxy reaches the backend
-      cluster-internal, low risk for inbound) but add a hard OS-level
-      outbound block.
-      Plan: wrap the launchd `ProgramArguments` with
-      `sandbox-exec -f sandbox.sb` and a Seatbelt profile that denies
-      all `network-out` except loopback. Files:
-      - `config/ansible/macos/files/mineru/run-mineru.sh` — already
-        binds `--host 0.0.0.0`, leave as-is.
-      - new `config/ansible/macos/files/mineru/sandbox.sb` —
-        `(version 1) (deny default) (allow network-bind (local ip
-        "127.0.0.1:*")) (allow network-in (local ip "127.0.0.1:*"))
-        (deny network-out)` plus the resource access rules MinerU
-        needs (filesystem reads of model cache, HF home, etc.).
-      - `config/ansible/macos/setup-mineru.yml` — change the
-        `ProgramArguments` to
-        `["/usr/bin/sandbox-exec", "-f", "/usr/local/etc/mineru.sb",
-         "/Users/dev/mineru-venv/bin/mineru-api", ...]`, copy
-        `sandbox.sb` to `/usr/local/etc/mineru.sb`.
-      Test before commit: model is already pre-downloaded so the venv
-      and HF cache lookups must work under the sandbox. If a path is
-      missing, allow it explicitly in the profile.
 - [ ] **Header forwarding should be an allowlist, not a blocklist.** Today
       we strip hop-by-hop + Content-Length and pass everything else
       through. Switch to: `Accept`, `Accept-Encoding`, `Authorization`,
