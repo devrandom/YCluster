@@ -655,5 +655,40 @@ class LoopbackGuardTests(SchedTestBase):
         self.assertEqual(r.status_code, 403)
 
 
+class AuthentikAPIEmptyBodyTests(unittest.TestCase):
+    """Authentik's /core/groups/<pk>/add_user|remove_user endpoints return
+    204 No Content on success. AuthentikAPI._request must not raise
+    JSONDecodeError on the empty body (regression: surfaced as a 400
+    `{"error":"Expecting value: line 1 column 1 (char 0)"}` from
+    /admin/users/action while the membership change did land)."""
+
+    def _api(self, resp):
+        from unittest.mock import MagicMock
+        from ycluster.utils.authentik_manager import AuthentikAPI
+        api = AuthentikAPI.__new__(AuthentikAPI)
+        api.base = 'http://x/api/v3'
+        api.session = MagicMock()
+        api.session.request.return_value = resp
+        return api
+
+    def test_empty_body_returns_none(self):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.status_code = 204
+        resp.content = b''
+        resp.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+        api = self._api(resp)
+        self.assertIsNone(api._request('POST', '/core/groups/x/add_user/'))
+
+    def test_nonempty_body_parses_json(self):
+        from unittest.mock import MagicMock
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b'{"results": [{"pk": "x"}]}'
+        resp.json.return_value = {"results": [{"pk": "x"}]}
+        api = self._api(resp)
+        self.assertEqual(api._request('GET', '/core/users/'), {"results": [{"pk": "x"}]})
+
+
 if __name__ == "__main__":
     unittest.main()

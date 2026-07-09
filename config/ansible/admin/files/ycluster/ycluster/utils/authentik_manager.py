@@ -12,6 +12,7 @@ as JSON); the `ycluster user` CLI wrappers do the printing.
 
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import requests
 
@@ -59,11 +60,17 @@ class AuthentikAPI:
         self.session = requests.Session()
         self.session.headers['Authorization'] = f'Bearer {_api_token()}'
 
-    def _request(self, method, path, **kwargs):
+    def _request(self, method, path, **kwargs) -> Any:
         resp = self.session.request(method, self.base + path, timeout=30, **kwargs)
         if resp.status_code >= 400:
             raise RuntimeError(f"authentik API {method} {path}: {resp.status_code} {resp.text}")
-        # returns Any (not Optional): we always have a non-empty body on success.
+        # 204 No Content (e.g. core/groups/<pk>/add_user|remove_user) has an
+        # empty body; resp.json() would raise. Return None so callers that
+        # don't need the response can ignore it. GET callers always get
+        # content; the declared Any return type keeps existing
+        # `result['key']` indexing valid.
+        if not resp.content:
+            return None
         return resp.json()
 
     def get(self, path, **kwargs):
