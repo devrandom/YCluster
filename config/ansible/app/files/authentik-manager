@@ -89,6 +89,8 @@ EOF
 # outpost + application gated to the ycluster-admins group. Written here
 # for the same reason as the OWUI blueprint (needs the external domain).
 # Keep flow slugs / shared settings in sync with write_owui_blueprint.
+# ycluster-managers is the view-only counterpart — created alongside
+# admins so a fresh install doesn't need a separate bootstrap step.
 write_admin_blueprint() {
     local external_domain="$1"
     local bp=/etc/authentik/blueprints/ycluster-admin.yaml
@@ -102,6 +104,10 @@ entries:
     id: group-admins
     identifiers:
       name: ycluster-admins
+  - model: authentik_core.group
+    id: group-managers
+    identifiers:
+      name: ycluster-managers
   - model: authentik_providers_proxy.proxyprovider
     id: provider-admin
     identifiers:

@@ -1345,9 +1345,10 @@ def inventory_set_asset(hostname):
     Re-applied from pre-S2 with authentik admin gating: forward-auth sets
     X-Authentik-Email / X-Authentik-Groups on the external vhost; internal
     callers carry no headers and are root-equivalent. Non-admins get 403.
+    Managers (view-only) also get 403 — they can browse the inventory but
+    cannot edit asset fields.
     """
-    _, is_admin = _authentik_identity()
-    if not is_admin:
+    if not _authentik_identity().is_admin:
         return jsonify({'error': 'admin only'}), 403
     try:
         from ycluster.utils.inventory import put_asset
@@ -1368,10 +1369,12 @@ def inventory_set_asset(hostname):
 def inventory_list():
     """Return full inventory (hardware + asset) for all nodes (internal only).
 
-    Response shape: ``{"inventory": [...], "is_admin": bool, "email": str}``.
-    ``is_admin`` lets the page decide whether to render edit widgets.
+    Response shape: ``{"inventory": [...], "is_admin": bool, "is_manager":
+    bool, "email": str}``. ``is_admin`` lets the page render edit widgets;
+    ``is_manager`` is exposed for future UI use (today the page already
+    treats ``!is_admin`` as read-only, which covers managers too).
     """
-    email, is_admin = _authentik_identity()
+    id = _authentik_identity()
     try:
         from ycluster.utils.inventory import list_all
         rows = list_all()
@@ -1386,7 +1389,10 @@ def inventory_list():
                 'asset': r['asset'],
             })
         out.sort(key=lambda x: x['hostname'] or '')
-        return jsonify({'inventory': out, 'is_admin': is_admin, 'email': email})
+        return jsonify({'inventory': out,
+                        'is_admin': id.is_admin,
+                        'is_manager': id.is_manager,
+                        'email': id.email})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2627,7 +2633,7 @@ def resources_data():
     (from inference backends) and the VMs/containers registered to it (with
     GPU counts). VMs not currently scheduled to run are flagged so the page
     can highlight them."""
-    email, is_admin = _authentik_identity()
+    id = _authentik_identity()
     from ycluster.utils.inventory import list_all as inventory_list_all
     from ycluster.utils import vm_manager as vmm
     from urllib.parse import urlparse
@@ -2693,8 +2699,9 @@ def resources_data():
     return jsonify({
         'hosts': result_hosts,
         'inference': get_inference_status(),
-        'is_admin': is_admin,
-        'email': email,
+        'is_admin': id.is_admin,
+        'is_manager': id.is_manager,
+        'email': id.email,
     })
 
 
@@ -2776,19 +2783,68 @@ def _usage_stats_cursor(since_days):
 # vm_manager (the writer/owner of these prefixes) — the VM endpoints below
 # go through its domain functions, never the raw etcd client; the admin
 # group name to authentik_manager (which manages it).
+import ipaddress
+from collections import namedtuple
+
 from ycluster.utils import vm_manager as vmm
-from ycluster.utils.authentik_manager import ADMIN_GROUP
+from ycluster.utils.authentik_manager import ADMIN_GROUP, MANAGER_GROUP
+
+
+Identity = namedtuple('Identity', ['uid', 'email', 'is_admin', 'is_manager'])
 
 
 def _authentik_identity():
     """Identity from the forward-auth headers (set only by nginx on the
     external vhost; authentik joins groups with '|'). Internal callers
     (admin.xc, direct :12723) carry no headers and are root-equivalent
-    operator space — treated as admin with no email."""
+    operator space — treated as admin with no email.
+
+    Identity signal priority: ``X-Authentik-UID`` (always present for any
+    authenticated user, including OAuth-sourced accounts without a
+    verified email) is the primary "is this authenticated?" check.
+    ``X-Authentik-Email`` is optional metadata — it can be missing for
+    external-source users and shouldn't drive authorization.
+
+    Belt-and-suspenders: admin-api binds 0.0.0.0:12723 today, so a remote
+    cluster node could in principle hit the Flask app directly without
+    going through nginx. Two tiers:
+
+    1. The "no headers → admin" operator-space shortcut requires
+       ``remote_addr`` to be EXACTLY ``127.0.0.1`` AND no UID set. A
+       nginx upstream from the public rathole-tunnel vhost (listen
+       ``127.0.0.2:443``) may arrive on ``127.0.0.2``; a public request
+       that has somehow bypassed forward-auth would land here headerless,
+       and we don't want that treated as admin. An OAuth-authenticated
+       user without a verified email still has a UID set, so they're
+       correctly routed through the group check (not the shortcut).
+
+    2. The forward-auth group check requires loopback (``127.0.0.0/8``)
+       so a remote cluster node can't smuggle admin headers either.
+
+    Returns an ``Identity(uid, email, is_admin, is_manager)``: admins
+    implicitly pass the manager check (a manager is "an admin minus the
+    mutations")."""
     email = request.headers.get('X-Authentik-Email') or None
+    uid = request.headers.get('X-Authentik-UID') or None
     groups = [g for g in (request.headers.get('X-Authentik-Groups') or '').split('|') if g]
-    is_admin = email is None or ADMIN_GROUP in groups
-    return email, is_admin
+    try:
+        remote = ipaddress.ip_address(request.remote_addr or '')
+    except ValueError:
+        remote = None
+    is_loopback = remote is not None and remote.is_loopback
+    is_local = request.remote_addr == "127.0.0.1"
+    # The headerless shortcut is the dangerous path — require the caller
+    # to be definitively on the same host (not just any loopback) AND
+    # have no UID at all (a UID means an authenticated user is on the
+    # other end, even if email is missing).
+    is_admin = (is_local and uid is None) \
+        or (is_loopback and ADMIN_GROUP in groups)
+    # Manager: same loopback guard as admin (a remote cluster node
+    # smuggling MANAGER_GROUP headers must not be treated as manager),
+    # plus admins implicitly pass.
+    is_manager = is_admin \
+        or (is_loopback and uid is not None and MANAGER_GROUP in groups)
+    return Identity(uid, email, is_admin, is_manager)
 
 
 def _gpu_admission_error(name, rec, mode, windows):
@@ -2837,7 +2893,7 @@ def vm_schedule_page():
 
 @app.route('/admin/vm-schedule/data')
 def vm_schedule_data():
-    email, is_admin = _authentik_identity()
+    id = _authentik_identity()
     try:
         states = vmm.state_all()
         desired_all = vmm.desired_all()
@@ -2857,7 +2913,10 @@ def vm_schedule_data():
     now = datetime.now(UTC)
     rows = []
     for name, rec in registry.items():
-        if not is_admin and rec.get('owner') != email:
+        # Admins and managers (view-only) see every VM; plain users only
+        # their own. Manager-scoped data is un-redacted: managers need to
+        # see who owns what to answer questions without acting on it.
+        if not id.is_manager and rec.get('owner') != id.email:
             continue
         desired = desired_all.get(name)
         mode = (desired or {}).get('mode', 'unmanaged')
@@ -2884,7 +2943,7 @@ def vm_schedule_data():
 
     # Capacity commitments per host, so users can see what's free before
     # composing a schedule. VM names are shown to everyone (capacity is
-    # shared knowledge); owners only to admins.
+    # shared knowledge); owners to admins and managers (plain users redacted).
     commitments = vmm.gpu_commitments(registry, desired_all, now)
     hosts = []
     for host in sorted(set(commitments) | set(pools)):
@@ -2895,14 +2954,17 @@ def vm_schedule_data():
             'pool': pools.get(host),
             'commitments': [
                 {'vm': c['vm'], 'gpus': c['gpus'], 'mode': c['mode'],
-                 'owner': c['owner'] if is_admin else None,
+                 'owner': c['owner'] if id.is_manager else None,
                  'windows': None if c['windows'] is None else
                      [{'start': s.isoformat(), 'end': e.isoformat()}
                       for s, e in c['windows']]}
                 for c in commitments.get(host, [])],
         })
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
-                    'hosts': hosts, 'email': email, 'is_admin': is_admin,
+                    'hosts': hosts,
+                    'email': id.email,
+                    'is_admin': id.is_admin,
+                    'is_manager': id.is_manager,
                     'grace_seconds': vmm.SCHEDULED_STOP_GRACE_S,
                     # Everything the page needs to render an ~/.ssh/config
                     # entry: the public jump host (None → page shows a
@@ -2961,9 +3023,13 @@ def _parse_windows(windows):
 # Mutating endpoint by design (unlike the S2-removed admin mutations):
 # externally it is only reachable through the forward-auth gate, so the
 # identity headers are nginx-enforced; internal callers are operator space.
+# Managers (view-only) are blocked here — they can browse the schedule but
+# not edit it, including VMs they happen to own.
 @app.route('/admin/vm-schedule/set', methods=['POST'])
 def vm_schedule_set():
-    email, is_admin = _authentik_identity()
+    id = _authentik_identity()
+    if not id.is_admin and id.is_manager:
+        return jsonify({'error': 'view-only role'}), 403
     data = request.get_json(silent=True) or {}
     name = data.get('vm', '')
     if not re.fullmatch(r'[a-z0-9-]+', name):
@@ -2974,7 +3040,7 @@ def vm_schedule_set():
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
     if not rec:
         return jsonify({'error': 'no such VM'}), 404
-    if not is_admin and rec.get('owner') != email:
+    if not id.is_admin and rec.get('owner') != id.email:
         return jsonify({'error': 'not your VM'}), 403
 
     mode = data.get('mode')
@@ -2985,7 +3051,7 @@ def vm_schedule_set():
     # unmanaged. A VM with no record yet is its implicit default (also shown
     # as 'unmanaged') and stays schedulable by its owner — only an explicit
     # record locks it.
-    if not is_admin:
+    if not id.is_admin:
         cur = vmm.desired_get(name)
         cur_mode = cur.get('mode') if cur else None
         if mode == 'unmanaged':
@@ -3016,7 +3082,12 @@ def vm_schedule_set():
     vmm.desired_set(name, {
         'mode': mode,
         'windows': windows,
-        'updated_by': email or 'internal',
+        # updated_by is for audit: prefer email (human-readable), fall
+        # back to the UID (always present for an authenticated user),
+        # and finally 'internal' for the operator-space shortcut. A user
+        # authenticated via OAuth without a verified email will be
+        # recorded by UID — readable via the audit log mapping table.
+        'updated_by': id.email or id.uid or 'internal',
         'updated_at': datetime.now(UTC).isoformat(timespec='seconds'),
     })
     return jsonify({'ok': True, 'mode': mode})
@@ -3025,9 +3096,12 @@ def vm_schedule_set():
 # Mutating, forward-auth/owner gated like vm_schedule_set. Stamps an
 # `immediate` grace marker so the next reconciler tick stops the VM without
 # waiting out the remaining grace (the guest has effectively been warned).
+# Managers (view-only) are blocked here, including on VMs they own.
 @app.route('/admin/vm-schedule/stop-now', methods=['POST'])
 def vm_schedule_stop_now():
-    email, is_admin = _authentik_identity()
+    id = _authentik_identity()
+    if not id.is_admin and id.is_manager:
+        return jsonify({'error': 'view-only role'}), 403
     data = request.get_json(silent=True) or {}
     name = data.get('vm', '')
     if not re.fullmatch(r'[a-z0-9-]+', name):
@@ -3038,7 +3112,7 @@ def vm_schedule_stop_now():
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
     if not rec:
         return jsonify({'error': 'no such VM'}), 404
-    if not is_admin and rec.get('owner') != email:
+    if not id.is_admin and rec.get('owner') != id.email:
         return jsonify({'error': 'not your VM'}), 403
 
     # Only meaningful as a pending-stop bypass: the schedule must currently
@@ -3057,29 +3131,35 @@ def vm_schedule_stop_now():
 
 @app.route('/admin/users')
 def users_page():
-    """Account management against the cluster IdP (admin-only)."""
+    """Account management against the cluster IdP. Admins see and act;
+    managers see the same list (read-only)."""
     return render_template('admin-users.html')
 
 
 @app.route('/admin/users/data')
 def users_data():
-    _, is_admin = _authentik_identity()
-    if not is_admin:
+    # Admins and managers (view-only) see the roster; plain users get 403.
+    id = _authentik_identity()
+    if not id.is_manager:
         return jsonify({'error': 'admin only'}), 403
     from ycluster.utils import authentik_manager
     try:
         return jsonify({'users': authentik_manager.users_data(),
-                        'invitations': authentik_manager.invitations_data()})
+                        'invitations': authentik_manager.invitations_data(),
+                        # Tell the page whether the caller can mutate (admin)
+                        # or is just a viewer (manager) — drives the action
+                        # menu and the manager-badge rendering.
+                        'is_admin': id.is_admin})
     except Exception as e:
         return jsonify({'error': str(e)}), 502
 
 
 # Mutating, admin-only (same forward-auth reasoning as vm_schedule_set);
-# every action maps onto a `ycluster user` operation.
+# every action maps onto a `ycluster user` operation. Managers can see the
+# list but not act — the UI hides the action menu when is_admin is false.
 @app.route('/admin/users/action', methods=['POST'])
 def users_action():
-    email_id, is_admin = _authentik_identity()
-    if not is_admin:
+    if not _authentik_identity().is_admin:
         return jsonify({'error': 'admin only'}), 403
     from ycluster.utils import authentik_manager
     data = request.get_json(silent=True) or {}
@@ -3099,6 +3179,9 @@ def users_action():
             return jsonify({'ok': True, 'url': authentik_manager.recovery_link(email)})
         if action in ('admin_add', 'admin_remove'):
             msg = authentik_manager.set_admin(email, remove=(action == 'admin_remove'))
+            return jsonify({'ok': True, 'message': msg})
+        if action in ('manager_add', 'manager_remove'):
+            msg = authentik_manager.set_manager(email, remove=(action == 'manager_remove'))
             return jsonify({'ok': True, 'message': msg})
         if action in ('activate', 'deactivate'):
             msg = authentik_manager.set_active(email, active=(action == 'activate'))
@@ -3121,16 +3204,18 @@ def settings_page():
 
 @app.route('/admin/settings/data')
 def settings_data():
-    email, is_admin = _authentik_identity()
-    if not email:
+    id = _authentik_identity()
+    if not id.email:
         # No forward-auth identity (internal / direct :12723) → there is no
         # "logged-in user" to self-manage; operators use `ycluster vm ssh`.
         return jsonify({'error': 'no authenticated user'}), 403
     try:
-        rec = vmm.user_get(email) or {}
+        rec = vmm.user_get(id.email) or {}
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
-    return jsonify({'email': email, 'is_admin': is_admin,
+    return jsonify({'email': id.email,
+                    'is_admin': id.is_admin,
+                    'is_manager': id.is_manager,
                     'keys': rec.get('ssh_keys', [])})
 
 
@@ -3142,41 +3227,41 @@ def settings_data():
 # vm_sync_keys() inline would fail — this runs on a core node with no incus.
 @app.route('/admin/settings/keys/add', methods=['POST'])
 def settings_keys_add():
-    email, _ = _authentik_identity()
-    if not email:
+    id = _authentik_identity()
+    if not id.email:
         return jsonify({'error': 'no authenticated user'}), 403
     key = (request.get_json(silent=True) or {}).get('key', '')
     if not isinstance(key, str) or not key.strip():
         return jsonify({'error': 'no key provided'}), 400
     try:
-        vmm.user_add_key(email, key)
+        vmm.user_add_key(id.email, key)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400        # bad key format
     except Exception as e:
         return jsonify({'error': f'etcd write failed: {e}'}), 503
-    return _settings_keys_response(email)
+    return _settings_keys_response(id.email)
 
 
 @app.route('/admin/settings/keys/remove', methods=['POST'])
 def settings_keys_remove():
-    email, _ = _authentik_identity()
-    if not email:
+    id = _authentik_identity()
+    if not id.email:
         return jsonify({'error': 'no authenticated user'}), 403
     key = (request.get_json(silent=True) or {}).get('key', '')
     if not isinstance(key, str) or not key.strip():
         return jsonify({'error': 'no key provided'}), 400
     try:
-        rec = vmm.user_get(email) or {}
+        rec = vmm.user_get(id.email) or {}
         if key not in rec.get('ssh_keys', []):
             return jsonify({'error': 'key not found'}), 404
         # Pass the full key line so the substring match removes exactly it
         # (distinct keys have distinct material, never a substring of each).
-        vmm.user_remove_key(email, key)
+        vmm.user_remove_key(id.email, key)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
         return jsonify({'error': f'etcd write failed: {e}'}), 503
-    return _settings_keys_response(email)
+    return _settings_keys_response(id.email)
 
 
 def _settings_keys_response(email):

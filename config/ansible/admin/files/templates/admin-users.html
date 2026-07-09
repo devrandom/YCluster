@@ -17,6 +17,7 @@
     tr:hover { background-color: #f8f9fa; }
     .badge { font-size: 0.7rem; font-weight: 600; border-radius: 999px; padding: 0.05rem 0.55rem; white-space: nowrap; }
     .badge.admin { color: #6b5300; background: #fff3c4; }
+    .badge.manager { color: #1e3a8a; background: #dbeafe; }
     .badge.active { color: #14532d; background: #d1fae5; }
     .badge.inactive { color: #721c24; background: #f8d7da; }
     button { padding: 0.3rem 0.7rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; font-size: 0.8rem; }
@@ -61,7 +62,8 @@
     Accounts live in the cluster IdP. <b>Invite</b> creates a single-use
     enrollment link for a <i>new</i> account (hand it over out-of-band — no
     email is sent); <b>reset link</b> issues a one-time password (re)set for
-    an existing one. <b>Admin</b> grants access to these admin pages.
+    an existing one. <b>Admin</b> grants access to these admin pages;
+    <b>Manager</b> grants view-only access (no invites or mutations).
   </p>
 
   <template x-if="error"><div class="error" x-text="error"></div></template>
@@ -75,18 +77,22 @@
     </div>
   </template>
 
-  <h2>Invite a new user</h2>
-  <form class="invite-form" @submit.prevent="act('invite', invite.email, {name: invite.name, days: invite.days}, 'Invitation for ' + invite.email + ':')">
-    <input type="text" x-model="invite.email" placeholder="email" size="28" required>
-    <input type="text" x-model="invite.name" placeholder="display name (optional)" size="22">
-    <label>expires <input type="number" x-model="invite.days" min="1" max="90" style="width:4rem"> d</label>
-    <button type="submit">Create invitation</button>
-  </form>
+  <template x-if="isAdmin">
+    <div>
+      <h2>Invite a new user</h2>
+      <form class="invite-form" @submit.prevent="act('invite', invite.email, {name: invite.name, days: invite.days}, 'Invitation for ' + invite.email + ':')">
+        <input type="text" x-model="invite.email" placeholder="email" size="28" required>
+        <input type="text" x-model="invite.name" placeholder="display name (optional)" size="22">
+        <label>expires <input type="number" x-model="invite.days" min="1" max="90" style="width:4rem"> d</label>
+        <button type="submit">Create invitation</button>
+      </form>
+    </div>
+  </template>
 
   <h2>Accounts</h2>
   <template x-if="!loading && users.length === 0"><p class="empty">No accounts</p></template>
   <table x-show="users.length > 0">
-    <thead><tr><th>Email</th><th>Name</th><th></th><th>Last login</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Email</th><th>Name</th><th></th><th>Last login</th><template x-if="isAdmin"><th>Actions</th></template></tr></thead>
     <tbody>
       <template x-for="u in users" :key="u.email">
         <tr>
@@ -94,27 +100,33 @@
           <td x-text="u.name"></td>
           <td>
             <span class="badge admin" x-show="u.is_admin">admin</span>
+            <span class="badge manager" x-show="u.is_manager && !u.is_admin">manager</span>
             <span class="badge active" x-show="u.active">active</span>
             <span class="badge inactive" x-show="!u.active">inactive</span>
           </td>
           <td x-text="u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'never'"></td>
-          <td>
-            <div class="menu" x-data="{open: false}" @click.outside="open = false">
-              <button class="minor menu-trigger" @click="open = !open" :aria-expanded="open">…</button>
-              <ul class="menu-list" x-show="open" x-cloak>
-                <li><button type="button" class="menu-item"
-                    @click="open=false; act('recovery', u.email, {}, 'Password (re)set link for ' + u.email + ':')">Reset link</button></li>
-                <li><button type="button" class="menu-item"
-                    @click="open=false; act(u.is_admin ? 'admin_remove' : 'admin_add', u.email, {}, '')"
-                    x-text="u.is_admin ? 'Revoke admin' : 'Make admin'"></button></li>
-                <li><button type="button" class="menu-item"
-                    @click="open=false; editTarget = {email: u.email, name: u.name || ''}">Edit name…</button></li>
-                <li><button type="button" class="menu-item"
-                    @click="open=false; act(u.active ? 'deactivate' : 'activate', u.email, {}, '')"
-                    x-text="u.active ? 'Disable' : 'Enable'"></button></li>
-              </ul>
-            </div>
-          </td>
+          <template x-if="isAdmin">
+            <td>
+              <div class="menu" x-data="{open: false}" @click.outside="open = false">
+                <button class="minor menu-trigger" @click="open = !open" :aria-expanded="open">…</button>
+                <ul class="menu-list" x-show="open" x-cloak>
+                  <li><button type="button" class="menu-item"
+                      @click="open=false; act('recovery', u.email, {}, 'Password (re)set link for ' + u.email + ':')">Reset link</button></li>
+                  <li><button type="button" class="menu-item"
+                      @click="open=false; act(u.is_admin ? 'admin_remove' : 'admin_add', u.email, {}, '')"
+                      x-text="u.is_admin ? 'Revoke admin' : 'Make admin'"></button></li>
+                  <li><button type="button" class="menu-item"
+                      @click="open=false; act(u.is_manager ? 'manager_remove' : 'manager_add', u.email, {}, '')"
+                      x-text="u.is_manager ? 'Revoke manager' : 'Make manager'"></button></li>
+                  <li><button type="button" class="menu-item"
+                      @click="open=false; editTarget = {email: u.email, name: u.name || ''}">Edit name…</button></li>
+                  <li><button type="button" class="menu-item"
+                      @click="open=false; act(u.active ? 'deactivate' : 'activate', u.email, {}, '')"
+                      x-text="u.active ? 'Disable' : 'Enable'"></button></li>
+                </ul>
+              </div>
+            </td>
+          </template>
         </tr>
       </template>
     </tbody>
@@ -132,7 +144,9 @@
           <td><span class="url" x-text="inv.url"></span></td>
           <td>
             <button class="minor" @click="navigator.clipboard.writeText(inv.url)">copy</button>
-            <button class="minor" @click="act('uninvite', inv.email, {}, '')">revoke</button>
+            <template x-if="isAdmin">
+              <button class="minor" @click="act('uninvite', inv.email, {}, '')">revoke</button>
+            </template>
           </td>
         </tr>
       </template>
@@ -162,6 +176,11 @@
       return {
         users: [],
         invitations: [],
+        // isAdmin drives the action menu, the invite form, and the
+        // invitation-revoke button — managers see the same list but no
+        // mutation controls. is_manager-only callers hit /admin/users/data
+        // successfully; is_admin implies is_manager.
+        isAdmin: false,
         loading: false,
         error: '',
         result: null,
@@ -174,7 +193,11 @@
             .then(r => r.json())
             .then(d => {
               if (d.error) { this.error = d.error }
-              else { this.users = d.users; this.invitations = d.invitations }
+              else {
+                this.users = d.users
+                this.invitations = d.invitations
+                this.isAdmin = !!d.is_admin
+              }
               this.loading = false
             })
             .catch(() => { this.error = 'failed to load'; this.loading = false })

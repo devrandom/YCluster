@@ -28,6 +28,12 @@ def register_user_commands(subparsers):
     admin_parser.add_argument('--remove', action='store_true', help='Revoke instead of grant')
     admin_parser.set_defaults(func=user_admin)
 
+    manager_parser = user_subparsers.add_parser(
+        'manager', help='Grant (or revoke) view-only access to admin pages (ycluster-managers group)')
+    manager_parser.add_argument('email', help='Account email')
+    manager_parser.add_argument('--remove', action='store_true', help='Revoke instead of grant')
+    manager_parser.set_defaults(func=user_manager)
+
     disable_parser = user_subparsers.add_parser(
         'disable', help='Disable an account (block login without removing)')
     disable_parser.add_argument('email', help='Account email')
@@ -87,6 +93,11 @@ def user_admin(args):
     print(authentik_manager.set_admin(args.email, args.remove))
 
 
+def user_manager(args):
+    from ..utils import authentik_manager
+    print(authentik_manager.set_manager(args.email, args.remove))
+
+
 def user_disable(args):
     from ..utils import authentik_manager
     print(authentik_manager.set_active(args.email, active=False))
@@ -127,11 +138,12 @@ def user_import_owui(args):
 
 def user_list(args):
     from ..utils import authentik_manager
-    fmt = "{:<40} {:<26} {:<8} {:<7} {:<6} {}"
-    print(fmt.format('EMAIL', 'NAME', 'TYPE', 'ACTIVE', 'ADMIN', 'LAST LOGIN'))
+    fmt = "{:<40} {:<26} {:<8} {:<7} {:<7} {:<6} {}"
+    print(fmt.format('EMAIL', 'NAME', 'TYPE', 'ACTIVE', 'MANAGER', 'ADMIN', 'LAST LOGIN'))
     for u in authentik_manager.users_data():
         print(fmt.format(u['email'], u['name'], u['type'],
                          'yes' if u['active'] else 'no',
+                         'yes' if u['is_manager'] else '',
                          'yes' if u['is_admin'] else '',
                          u['last_login'] or 'never'))
 

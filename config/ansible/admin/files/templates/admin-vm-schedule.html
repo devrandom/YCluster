@@ -61,7 +61,7 @@
 
   <template x-if="loading"><p class="empty">Loading...</p></template>
   <template x-if="!loading && rows.length === 0">
-    <p class="empty">No VMs registered to you</p>
+    <p class="empty" x-text="(isAdmin || isManager) ? 'No VMs registered' : 'No VMs registered to you'"></p>
   </template>
 
   <template x-for="row in rows" :key="row.vm">
@@ -71,19 +71,20 @@
         <span :class="row.status === 'Running' ? 'running' : 'stopped'"
               x-text="row.status"></span>
         <span class="pending" x-show="row.pending" :title="pendingText(row)">⏳</span>
-        <button class="warn" x-show="row.pending === 'stop'"
+        <button class="warn" x-show="row.pending === 'stop' && isAdmin"
                 @click="stopNow(row)" x-text="stopNowLabel(row)"></button>
-        <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + (isAdmin ? ` · ${row.owner}` : '')"></span>
-        <select x-model="row.mode" :disabled="locked(row)">
+        <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + ((isAdmin || isManager) ? ` · ${row.owner}` : '')"></span>
+        <select x-model="row.mode" :disabled="!isAdmin || locked(row)">
           <!-- unmanaged is admin-only; shown (disabled) so an admin-set
                value still displays for users, but they can't select it.
-               An explicit admin-set unmanaged locks the whole row. -->
+               An explicit admin-set unmanaged locks the whole row.
+               Managers (view-only) cannot change modes at all. -->
           <option value="unmanaged" :disabled="!isAdmin">unmanaged</option>
           <option value="on">always on</option>
           <option value="off">off</option>
           <option value="schedule">schedule</option>
         </select>
-        <button @click="save(row)" :disabled="locked(row)">Save</button>
+        <button @click="save(row)" :disabled="!isAdmin || locked(row)">Save</button>
         <span class="meta" x-show="locked(row)">admin-managed</span>
         <span class="saved" x-show="row.saved" x-text="row.saved"></span>
         <span class="error" x-show="row.error" x-text="row.error"></span>
@@ -169,6 +170,7 @@
         hosts: [],
         ssh: {},
         isAdmin: false,
+        isManager: false,
         loading: false,
         graceSeconds: 300,
         poller: null,
@@ -204,7 +206,8 @@
                 saved: '', error: '', showSsh: false, copied: false, copyErr: false}))
               this.hosts = data.hosts || []
               this.ssh = data.ssh || {}
-              this.isAdmin = data.is_admin
+              this.isAdmin = !!data.is_admin
+              this.isManager = !!data.is_manager
               this.graceSeconds = data.grace_seconds || this.graceSeconds
               this.loading = false
               // Refresh volatile state (status / pending / grace) on a

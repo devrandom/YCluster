@@ -20,6 +20,7 @@ from ..common.etcd_utils import get_etcd_client
 ENROLLMENT_FLOW_SLUG = 'enrollment-invitation'
 TOKEN_ETCD_KEY = '/cluster/config/authentik/bootstrap-token'
 ADMIN_GROUP = 'ycluster-admins'
+MANAGER_GROUP = 'ycluster-managers'
 
 
 def _base_url():
@@ -193,7 +194,7 @@ def invite_user(email, name=None, days=7):
 
 def users_data():
     """Accounts as a list of dicts (email, name, type, active, last_login,
-    is_admin), service accounts excluded."""
+    is_admin, is_manager), service accounts excluded."""
     api = AuthentikAPI()
     users = api.get('/core/users/', params={'page_size': 500})['results']
     rows = []
@@ -208,6 +209,7 @@ def users_data():
             'active': bool(u['is_active']),
             'last_login': u['last_login'],
             'is_admin': ADMIN_GROUP in group_names,
+            'is_manager': MANAGER_GROUP in group_names,
         })
     return sorted(rows, key=lambda r: r['email'])
 
@@ -227,15 +229,37 @@ def invitations_data():
 def set_admin(email, remove=False):
     """Add (or remove) an account to the ycluster-admins group, which gates
     the forward-auth'd admin web pages. Returns the action performed."""
+    return _set_group_membership(email, ADMIN_GROUP, remove=remove)
+
+
+def set_manager(email, remove=False):
+    """Add (or remove) an account to the ycluster-managers group, which grants
+    view-only access to the admin web pages. Returns the action performed."""
+    return _set_group_membership(email, MANAGER_GROUP, remove=remove)
+
+
+def _set_group_membership(email, group, remove=False):
     api = AuthentikAPI()
     user = _get_user(api, email)
-    groups = api.get('/core/groups/', params={'name': ADMIN_GROUP})['results']
+    groups = api.get('/core/groups/', params={'name': group})['results']
     if not groups:
         raise RuntimeError(
-            f"group {ADMIN_GROUP} not found — has authentik applied the admin blueprint?")
+            f"group {group} not found — has authentik applied the ycluster blueprint?")
     action = 'remove_user' if remove else 'add_user'
     api.post(f"/core/groups/{groups[0]['pk']}/{action}/", json={'pk': user['pk']})
-    return f"{'removed' if remove else 'added'} {email} {'from' if remove else 'to'} {ADMIN_GROUP}"
+    return f"{'removed' if remove else 'added'} {email} {'from' if remove else 'to'} {group}"
+
+
+def ensure_group(name):
+    """Create the named group if it doesn't already exist. Idempotent.
+    Used by the install playbook to bootstrap the manager group alongside
+    the admin group (which the blueprint creates)."""
+    api = AuthentikAPI()
+    existing = api.get('/core/groups/', params={'name': name})['results']
+    if existing:
+        return {'name': name, 'pk': existing[0]['pk'], 'created': False}
+    group = api.post('/core/groups/', json={'name': name, 'is_superuser': False})
+    return {'name': name, 'pk': group['pk'], 'created': True}
 
 
 def set_active(email, active):

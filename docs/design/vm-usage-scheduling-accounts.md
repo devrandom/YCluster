@@ -172,6 +172,86 @@ binding to localhost / VIP-internal). Existing
 unauthenticated read-only pages (`/status`, `/inventory`) can stay open or
 move behind auth — decide at implementation.
 
+#### Loopback guard (belt-and-suspenders)
+
+`admin-api` binds `0.0.0.0:12723` (waits on every interface) so it can
+serve both nginx and same-host Prometheus/alertmanager without re-routing.
+That means anyone on the cluster network who can reach `:12723` directly
+is also inside the trust boundary today — but the Flask app doesn't have
+to assume that. Two tiers in `_authentik_identity()`:
+
+1. The "no headers → admin" operator-space shortcut requires
+   `request.remote_addr` to be **exactly** `127.0.0.1` AND no
+   `X-Authentik-UID` set. The UID is always present for any
+   authentik-authenticated user (including OAuth-sourced accounts
+   without a verified email) — using it instead of email for the
+   "is this a headerless request?" check means an OAuth user without a
+   verified email isn't accidentally promoted to admin via the
+   shortcut. nginx upstream from the public rathole-tunnel vhost
+   (listen `127.0.0.2:443`) may arrive on `127.0.0.2` if the kernel
+   picks that loopback address; a public request that bypassed
+   forward-auth would land here headerless, and we don't want it
+   treated as admin.
+2. The forward-auth group check (admin AND manager) requires loopback
+   (`127.0.0.0/8`) AND a UID set, so a remote cluster node can't
+   smuggle admin/manager headers either. nginx may pick either
+   `127.0.0.1` (cluster-internal vhost) or `127.0.0.2` (public vhost)
+   as upstream source — accepting the whole `/8` covers both.
+
+A remote cluster node reaching the Flask app directly — even one
+smuggling `X-Authentik-Groups` headers — gets `is_admin=False` and falls
+through the same 403s a plain user would.
+
+#### UID as primary identity signal
+
+Authentik's proxy outpost sets eight headers (per the [Proxy provider
+docs](https://docs.goauthentik.io/add-secure-apps/providers/proxy/)):
+`X-Authentik-Username`, `X-Authentik-Email`, `X-Authentik-Name`,
+`X-Authentik-UID`, `X-Authentik-Groups`, `X-Authentik-Entitlements`,
+`X-Authentik-Meta-{Outpost,Provider,App,Version}`. nginx forwards only
+three to the Flask app: **UID** (always present, stable across email
+renames), **Email** (optional — OAuth-sourced accounts without verified
+email will have this missing), **Groups** (pipe-joined).
+
+`X-Authentik-UID` is the primary "is this authenticated?" signal in
+`_authentik_identity()` because it's the only one guaranteed to be
+present for every authenticated user. `X-Authentik-Email` is treated as
+optional metadata: when missing (OAuth user without verified email), the
+user can still authenticate and be granted roles via groups, but cannot
+manage VMs (ownership filter requires email) or SSH keys (per-user
+etcd records are keyed by email). The audit log's `updated_by` field
+falls back to UID when email is missing, so the record is still
+identifiable.
+
+### Two roles: admin and manager
+
+### Two roles: admin and manager
+
+Two Authentik groups gate the admin web pages:
+
+- `ycluster-admins` — full access. Sees every VM (with owner emails), every
+  page, and can run every mutation (invite users, edit inventory, schedule
+  VMs, stop-now, disable accounts).
+- `ycluster-managers` — view-only counterpart. Sees every admin page the
+  same way an admin does, including the VM roster with owner emails and the
+  user roster. Every mutation endpoint returns 403, including on VMs the
+  manager happens to own.
+
+`_authentik_identity()` returns `(email, is_admin, is_manager)` with
+`is_admin = email is None or ADMIN_GROUP in groups` and
+`is_manager = is_admin or MANAGER_GROUP in groups` — admins implicitly
+satisfy the manager check, so the same page can drive both roles from a
+single pair of booleans (`isAdmin` controls, `isManager` visibility).
+
+The groups are bootstrap-created by `authentik-manager`'s admin blueprint
+(`ycluster-admin.yaml`), alongside each other, so a fresh install doesn't
+need a separate step. `ycluster user manager add/remove` (mirrors
+`ycluster user admin`) toggles membership on the IdP side; the Flask app
+reads group membership live, no caching.
+
+Operational details and per-endpoint behaviour live in
+[`docs/operations/users.md`](../operations/users.md).
+
 ## Phase 2 — VM usage tracking
 
 Two record streams into the existing `usage_stats` Postgres database

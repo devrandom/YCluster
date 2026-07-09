@@ -69,16 +69,42 @@ class SchedTestBase(unittest.TestCase):
             snap["gpu_pool"] = pool
         self.etcd.seed_json(vmm.VM_STATE_PREFIX + host, snap)
 
-    # --- requests (admin = internal, no forward-auth headers) ---
-    def _headers(self, admin, email):
-        return {} if admin else {"X-Authentik-Email": email,
-                                 "X-Authentik-Groups": "users"}
+    # --- requests (admin = internal, no forward-auth headers; manager =
+    # authenticated user whose X-Authentik-Groups carries ycluster-managers
+    # but not ycluster-admins) ---
+    # UID is the primary identity signal in _authentik_identity — set
+    # for every authenticated user (including OAuth-sourced accounts
+    # without a verified email). Tests that simulate an OAuth-no-email
+    # user pass uid=True without email; everything else gets both.
+    def _headers(self, admin, email, manager=False, uid=True):
+        if admin:
+            return {}                                            # operator space
+        h = {"X-Authentik-Groups": (
+            "ycluster-managers" if manager else "users")}
+        if uid:
+            h["X-Authentik-UID"] = "uid-" + (email or "anon")
+        if email:
+            h["X-Authentik-Email"] = email
+        return h
 
-    def post(self, path, body, admin=False, email="alice@x"):
-        return self.http.post(path, json=body, headers=self._headers(admin, email))
+    # Flask's test client sets REMOTE_ADDR via environ_overrides (not via
+    # the headers dict, which becomes HTTP_* entries). Default is 127.0.0.1
+    # — explicit `remote_addr` lets belt-and-suspenders tests simulate a
+    # non-loopback caller.
+    def _environ(self, remote_addr):
+        return {"REMOTE_ADDR": remote_addr} if remote_addr else {}
 
-    def get(self, path, admin=False, email="alice@x"):
-        return self.http.get(path, headers=self._headers(admin, email))
+    def post(self, path, body, admin=False, email="alice@x", manager=False,
+             remote_addr="127.0.0.1"):
+        return self.http.post(path, json=body,
+                              headers=self._headers(admin, email, manager),
+                              environ_overrides=self._environ(remote_addr))
+
+    def get(self, path, admin=False, email="alice@x", manager=False,
+            remote_addr="127.0.0.1"):
+        return self.http.get(path,
+                             headers=self._headers(admin, email, manager),
+                             environ_overrides=self._environ(remote_addr))
 
 
 class ScheduleSetTests(SchedTestBase):
@@ -326,6 +352,307 @@ class ResourcesDataTests(SchedTestBase):
         appmod.get_inference_status = lambda: {"status": "ok", "models": []}
         data = self.get("/admin/resources/data").get_json()
         self.assertEqual(data["inference"]["status"], "ok")
+
+
+class ManagerRoleTests(SchedTestBase):
+    """ycluster-managers: view-only counterpart to ycluster-admins.
+
+    Managers see all VMs (with owner emails un-redacted), the inventory
+    table, and the user roster — but every mutation endpoint returns 403.
+    Admins implicitly pass every manager check; plain users do not."""
+
+    def setUp(self):
+        super().setUp()
+        # Mirror ResourcesDataTests's setUp so /admin/resources/data works
+        # without a real etcd or HTTP inference lookup.
+        import ycluster.utils.inventory as inv_mod
+        appmod.get_etcd_client = lambda: self.etcd
+        inv_mod.get_etcd_client = lambda: self.etcd
+        appmod.get_inference_status = lambda: None
+
+    def _seed_host(self, hostname, htype, ip):
+        self.etcd.seed_json(
+            f"/cluster/nodes/by-hostname/{hostname}",
+            {"hostname": hostname, "type": htype, "ip": ip,
+             "mac": "00:00:00:00:00:00"})
+
+    # --- VM schedule: data visibility ---
+    def test_manager_sees_all_vms(self):
+        self.vm("a", owner="alice@x")
+        self.vm("b", owner="bob@x")
+        rows = self.get("/admin/vm-schedule/data",
+                        manager=True, email="carol@x").get_json()["rows"]
+        self.assertEqual([r["vm"] for r in rows], ["a", "b"])
+
+    def test_manager_sees_owner_emails(self):
+        self.vm("a", owner="alice@x")
+        self.vm("b", owner="bob@x")
+        rows = self.get("/admin/vm-schedule/data",
+                        manager=True, email="carol@x").get_json()["rows"]
+        owners = {r["vm"]: r["owner"] for r in rows}
+        self.assertEqual(owners, {"a": "alice@x", "b": "bob@x"})
+
+    def test_manager_sees_commitment_owners(self):
+        self.vm("a", owner="alice@x", gpus=2, host="nv2")
+        self.desired("a", "on")
+        d = self.get("/admin/vm-schedule/data", manager=True).get_json()
+        commits = d["hosts"][0]["commitments"]
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(commits[0]["owner"], "alice@x")     # not redacted
+
+    def test_plain_user_redaction_unchanged(self):
+        # Sanity: the pre-existing user-only view is unaffected — managers
+        # are additive, not a regression for plain users.
+        self.vm("a", owner="alice@x")
+        self.vm("b", owner="bob@x")
+        rows = self.get("/admin/vm-schedule/data", email="alice@x").get_json()["rows"]
+        self.assertEqual([r["vm"] for r in rows], ["a"])     # bob's still hidden
+
+    def test_data_response_flags(self):
+        d = self.get("/admin/vm-schedule/data", manager=True).get_json()
+        self.assertTrue(d["is_manager"])
+        self.assertFalse(d["is_admin"])
+
+    # --- VM schedule: mutations blocked ---
+    def test_manager_cannot_set(self):
+        self.vm("a", owner="alice@x")
+        r = self.post("/admin/vm-schedule/set", {"vm": "a", "mode": "off"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    def test_manager_cannot_set_own_vm(self):
+        # Even on a VM a manager happens to own, the role still blocks.
+        self.vm("a", owner="carol@x")
+        r = self.post("/admin/vm-schedule/set", {"vm": "a", "mode": "off"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    def test_manager_cannot_set_unmanaged(self):
+        self.vm("a", owner="alice@x")
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "a", "mode": "unmanaged"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    def test_manager_cannot_stop_now(self):
+        self.vm("a", owner="alice@x")
+        self.desired("a", "off")
+        r = self.post("/admin/vm-schedule/stop-now", {"vm": "a"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    # --- inventory ---
+    def test_manager_cannot_edit_asset(self):
+        r = self.post("/api/inventory/asset/s1", {"location": "rack 7"},
+                      manager=True)
+        self.assertEqual(r.status_code, 403)
+
+    def test_admin_can_edit_asset(self):
+        # Sanity: the admin path is unchanged.
+        r = self.post("/api/inventory/asset/s1", {"location": "rack 7"},
+                      admin=True)
+        self.assertEqual(r.status_code, 200)
+
+    # --- /admin/users/data ---
+    def test_manager_can_list_users(self):
+        # Manager sees the roster (read-only). We stub authentik_manager to
+        # return canned data — no real IdP in unit tests.
+        from ycluster.utils import authentik_manager as am
+        am.users_data = lambda: [{"email": "alice@x", "name": "Alice",
+                                  "type": "internal", "active": True,
+                                  "last_login": None,
+                                  "is_admin": False, "is_manager": False}]
+        am.invitations_data = lambda: []
+        d = self.get("/admin/users/data", manager=True).get_json()
+        self.assertEqual(d["users"][0]["email"], "alice@x")
+        # is_admin in the response is false for a manager caller; the page
+        # uses this to hide the action menu.
+        self.assertFalse(d["is_admin"])
+
+    def test_admin_user_data_includes_is_admin_true(self):
+        from ycluster.utils import authentik_manager as am
+        am.users_data = lambda: []
+        am.invitations_data = lambda: []
+        d = self.get("/admin/users/data", admin=True).get_json()
+        self.assertTrue(d["is_admin"])
+
+    def test_plain_user_cannot_list_users(self):
+        d = self.get("/admin/users/data", email="alice@x").get_json()
+        self.assertEqual(d, {"error": "admin only"})
+
+    def test_manager_cannot_act_on_user(self):
+        for action in ('invite', 'admin_add', 'manager_add',
+                       'admin_remove', 'manager_remove', 'activate',
+                       'deactivate', 'edit', 'recovery'):
+            r = self.post("/admin/users/action",
+                          {"action": action, "email": "bob@x"},
+                          manager=True)
+            self.assertEqual(r.status_code, 403,
+                             f"action {action!r} should be 403 for manager")
+
+    # --- resources data response carries both flags ---
+    def test_resources_data_flags(self):
+        self._seed_host("c1", "compute", "10.0.0.51")
+        d = self.get("/admin/resources/data", manager=True).get_json()
+        self.assertTrue(d["is_manager"])
+        self.assertFalse(d["is_admin"])
+
+    # --- inventory data response carries both flags ---
+    def test_inventory_data_flags(self):
+        # Inventory returns no rows in unit tests; just check the flags.
+        d = self.get("/api/inventory", manager=True).get_json()
+        self.assertTrue(d["is_manager"])
+        self.assertFalse(d["is_admin"])
+
+
+class LoopbackGuardTests(SchedTestBase):
+    """Belt-and-suspenders: every identity check requires that the
+    TCP source is loopback. admin-api listens on 0.0.0.0:12723, so a
+    remote cluster node could otherwise hit the Flask app directly and
+    pass as admin via the "no headers = operator space" shortcut."""
+
+    def setUp(self):
+        super().setUp()
+        # Stub authentik_manager so /admin/users/data tests don't hit
+        # the real IdP API (not available in unit tests).
+        from ycluster.utils import authentik_manager as am
+        self._orig_users_data = am.users_data
+        self._orig_invitations_data = am.invitations_data
+        am.users_data = lambda: [{"email": "alice@x", "name": "Alice",
+                                  "type": "internal", "active": True,
+                                  "last_login": None,
+                                  "is_admin": False, "is_manager": False}]
+        am.invitations_data = lambda: []
+        # Patch inventory's etcd client too — /api/inventory reads via
+        # ycluster.utils.inventory which imports get_etcd_client separately
+        # from vm_manager and app.py (same caveat as ResourcesDataTests).
+        import ycluster.utils.inventory as inv_mod
+        self._orig_inv_etcd = inv_mod.get_etcd_client
+        inv_mod.get_etcd_client = lambda: self.etcd
+
+    def tearDown(self):
+        from ycluster.utils import authentik_manager as am
+        am.users_data = self._orig_users_data
+        am.invitations_data = self._orig_invitations_data
+        import ycluster.utils.inventory as inv_mod
+        inv_mod.get_etcd_client = self._orig_inv_etcd
+        super().tearDown()
+
+    # --- /admin/users/data is a clean probe (returns is_admin) ---
+    def test_loopback_headerless_is_admin(self):
+        # No headers, 127.0.0.1 → admin (operator space, the original design).
+        # admin=True in our request helper means "no X-Authentik-* headers".
+        d = self.get("/admin/users/data", admin=True,
+                     remote_addr="127.0.0.1").get_json()
+        self.assertTrue(d["is_admin"])
+
+    def test_headerless_from_127_0_0_2_not_admin(self):
+        # Belt-and-suspenders tightening: the "no headers → admin" shortcut
+        # is the dangerous path — it requires the caller to be EXACTLY
+        # 127.0.0.1, not just any loopback. nginx's upstream from the
+        # public rathole-tunnel vhost (listen 127.0.0.2:443) may arrive
+        # here; if forward-auth was bypassed, the request would be
+        # headerless, and we don't want it treated as admin.
+        d = self.get("/admin/users/data", admin=True,
+                     remote_addr="127.0.0.2").get_json()
+        self.assertEqual(d, {"error": "admin only"})
+
+    def test_non_loopback_headerless_not_admin(self):
+        # A remote cluster node hitting admin-api directly with no
+        # forward-auth headers is NOT admin.
+        d = self.get("/admin/users/data", admin=True,
+                     remote_addr="10.0.0.51").get_json()
+        self.assertEqual(d, {"error": "admin only"})
+
+    def test_non_loopback_with_admin_headers_not_admin(self):
+        # Even if a non-loopback caller somehow smuggles admin headers
+        # (e.g. forged X-Authentik-Groups), the loopback guard denies.
+        # We can't reach /admin/users/data here (it'd 403), so probe via
+        # /api/inventory which is open to any authed user.
+        d = self.get("/api/inventory", remote_addr="10.0.0.51",
+                     admin=True).get_json()
+        self.assertFalse(d["is_admin"])
+
+    def test_loopback_with_admin_headers_is_admin(self):
+        # Forward-auth via the public vhost: nginx proxies from loopback
+        # with X-Authentik-Groups=ycluster-admins set.
+        d = self.get("/admin/users/data", remote_addr="127.0.0.1",
+                     admin=True).get_json()
+        self.assertTrue(d["is_admin"])
+
+    def test_forward_auth_from_127_0_0_2_with_admin_headers_is_admin(self):
+        # nginx upstream from the public rathole-tunnel vhost may arrive
+        # on 127.0.0.2; the forward-auth group check accepts any loopback
+        # (the headers were set by nginx, so we trust them).
+        # admin=True in our helper = "no headers" — instead set headers
+        # explicitly to ADMIN_GROUP.
+        r = self.http.get("/admin/users/data",
+                          headers={"X-Authentik-Email": "alice@x",
+                                   "X-Authentik-UID": "uid-alice",
+                                   "X-Authentik-Groups": "ycluster-admins"},
+                          environ_overrides={"REMOTE_ADDR": "127.0.0.2"})
+        d = r.get_json()
+        self.assertTrue(d["is_admin"])
+
+    def test_oauth_user_without_email_is_not_admin(self):
+        # OAuth-sourced accounts (e.g., GitHub users with private emails)
+        # have a UID but no email. They must NOT trigger the "no headers
+        # → admin" shortcut (email is None), and they must NOT be admin
+        # via the group check either (no ycluster-admins group).
+        r = self.http.get("/admin/users/data",
+                          headers={"X-Authentik-UID": "uid-github-9001",
+                                   "X-Authentik-Groups": "users"},
+                          environ_overrides={"REMOTE_ADDR": "127.0.0.1"})
+        d = r.get_json()
+        self.assertEqual(d, {"error": "admin only"})
+
+    def test_oauth_user_without_email_with_manager_group_is_manager(self):
+        # An OAuth-sourced user granted the manager group should pass
+        # the manager check even without email. The UID is the
+        # "is this authenticated?" signal — not email.
+        d = self.http.get("/api/inventory",
+                          headers={"X-Authentik-UID": "uid-github-9001",
+                                   "X-Authentik-Groups": "ycluster-managers"},
+                          environ_overrides={"REMOTE_ADDR": "127.0.0.1"}).get_json()
+        self.assertTrue(d["is_manager"])
+        self.assertFalse(d["is_admin"])
+
+    def test_uid_present_without_email_blocks_opspace_shortcut(self):
+        # Belt-and-suspenders specifically for the OAuth-no-email case:
+        # a UID without email must NOT be mistaken for an operator-space
+        # headerless request. /api/inventory returns is_admin/is_manager
+        # and email (which can be null) so we can assert the identity
+        # shape directly.
+        d = self.http.get("/api/inventory",
+                          headers={"X-Authentik-UID": "uid-anon",
+                                   "X-Authentik-Groups": "users"},
+                          environ_overrides={"REMOTE_ADDR": "127.0.0.1"}).get_json()
+        self.assertFalse(d["is_admin"])
+        self.assertFalse(d["is_manager"])
+        # email is null in the response (None in the Identity), which
+        # is the key signal that this isn't the operator-space shortcut.
+        self.assertIsNone(d["email"])
+
+    def test_non_loopback_inventory_mutation_blocked(self):
+        # Belt-and-suspenders also blocks mutations from non-loopback
+        # callers even when they have admin headers.
+        r = self.post("/api/inventory/asset/s1", {"location": "rack 7"},
+                      remote_addr="10.0.0.51", admin=True)
+        self.assertEqual(r.status_code, 403)
+
+    def test_non_loopback_vm_schedule_set_blocked(self):
+        # A remote cluster node with admin headers can't edit schedules.
+        self.vm("a", owner="alice@x")
+        r = self.post("/admin/vm-schedule/set", {"vm": "a", "mode": "off"},
+                      remote_addr="10.0.0.51", admin=True)
+        self.assertEqual(r.status_code, 403)
+
+    def test_non_loopback_users_action_blocked(self):
+        # Mutations on users likewise blocked from non-loopback.
+        r = self.post("/admin/users/action",
+                      {"action": "invite", "email": "bob@x"},
+                      remote_addr="10.0.0.51", admin=True)
+        self.assertEqual(r.status_code, 403)
 
 
 if __name__ == "__main__":

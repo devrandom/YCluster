@@ -164,6 +164,7 @@
             return {
                 inventory: [],
                 isAdmin: false,
+                isManager: false,
                 editingAsset: null,
                 assetDraft: {},
                 statusMessage: '',
@@ -179,12 +180,15 @@
                         const data = await r.json();
                         // Backward-compat: endpoint may return a bare array
                         // (legacy) or {inventory, is_admin, email} (current).
+                        // Current also returns is_manager.
                         if (Array.isArray(data)) {
                             this.inventory = data;
                             this.isAdmin = false;
+                            this.isManager = false;
                         } else {
                             this.inventory = data.inventory || [];
                             this.isAdmin = !!data.is_admin;
+                            this.isManager = !!data.is_manager;
                         }
                     } catch (e) {
                         console.warn('Inventory fetch failed:', e);
