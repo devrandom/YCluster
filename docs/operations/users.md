@@ -7,7 +7,11 @@ its admin blueprint (`ycluster-admin.yaml`, written by `authentik-manager`)
 creates two groups the web app cares about:
 
 - `ycluster-admins` — full access to every admin page and mutation.
-- `ycluster-managers` — view-only access to every admin page (no mutations).
+- `ycluster-managers` — view access to every admin page (same visibility
+  as an admin), and the same owner-edit rights as a plain user on VMs
+  they happen to own. Cannot edit other users' VMs, set any VM
+  unmanaged, change inventory, or manage accounts/SSH-keys for users
+  other than themselves.
 
 Both groups are bootstrap-created; re-running the install playbook is a
 no-op when they already exist.
@@ -48,14 +52,18 @@ Users → edit).
 |---|---|---|---|
 | `/admin/utilization`, `/admin/inventory`, `/admin/resources`, `/admin/model-usage`, `/admin/vm-usage` | full | full | read-only (some) / 403 |
 | `/admin/vm-schedule` view all VMs + owner emails | yes | yes | own VMs only, owners redacted |
-| `/admin/vm-schedule/set`, `stop-now` | yes | **403** | owner-only |
+| `/admin/vm-schedule/set` (on|off|schedule), `stop-now` | yes | **owner-only** | owner-only |
+| `/admin/vm-schedule/set mode=unmanaged` (admin escape hatch) | yes | **403** | 403 |
 | `/admin/users` (roster + invitations) | yes | read-only | 403 |
 | `/admin/users/action` (invite, role changes, edit, disable) | yes | **403** | 403 |
 | `/api/inventory/asset/<host>` PUT/POST | yes | **403** | 403 |
 | `/admin/settings` (own SSH keys for VM access) | self | self | self |
 
-A manager is "an admin minus the mutations" — admins implicitly pass every
-manager check (single boolean inheritance, no double bookkeeping).
+A manager is "an admin for visibility, a user for mutations" — sees
+every admin page the same way an admin does, but on the mutation side
+inherits the same owner-only constraints as a plain user. Admins
+implicitly pass every manager check (single boolean inheritance, no
+double bookkeeping).
 
 ## Granting / revoking roles
 

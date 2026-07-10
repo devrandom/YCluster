@@ -232,10 +232,13 @@ Two Authentik groups gate the admin web pages:
 - `ycluster-admins` — full access. Sees every VM (with owner emails), every
   page, and can run every mutation (invite users, edit inventory, schedule
   VMs, stop-now, disable accounts).
-- `ycluster-managers` — view-only counterpart. Sees every admin page the
-  same way an admin does, including the VM roster with owner emails and the
-  user roster. Every mutation endpoint returns 403, including on VMs the
-  manager happens to own.
+- `ycluster-managers` — admin visibility, user mutation rights. Sees
+  every admin page the same way an admin does (VM roster with owner
+  emails, user roster, inventory, utilization, usage stats). On
+  mutations, inherits the same owner-only constraints as a plain user:
+  can edit / stop-now a VM they happen to own, but not other users'
+  VMs, can't set any VM unmanaged (admin escape hatch), can't change
+  inventory, can't manage other accounts.
 
 `_authentik_identity()` returns `(email, is_admin, is_manager)` with
 `is_admin = email is None or ADMIN_GROUP in groups` and

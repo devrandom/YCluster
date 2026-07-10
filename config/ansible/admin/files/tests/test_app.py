@@ -16,6 +16,7 @@ Run from config/ansible/admin/files:
 """
 
 import os
+import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -414,32 +415,70 @@ class ManagerRoleTests(SchedTestBase):
         self.assertFalse(d["is_admin"])
 
     # --- VM schedule: mutations blocked ---
-    def test_manager_cannot_set(self):
+    def test_manager_cannot_set_others_vm(self):
+        # Manager viewing other users' VMs but can't edit them.
         self.vm("a", owner="alice@x")
         r = self.post("/admin/vm-schedule/set", {"vm": "a", "mode": "off"},
                       manager=True, email="carol@x")
         self.assertEqual(r.status_code, 403)
 
-    def test_manager_cannot_set_own_vm(self):
-        # Even on a VM a manager happens to own, the role still blocks.
+    def test_manager_can_set_own_vm(self):
+        # Manager gets the same owner-edit rights as a plain user.
         self.vm("a", owner="carol@x")
         r = self.post("/admin/vm-schedule/set", {"vm": "a", "mode": "off"},
                       manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 200)
+
+    def test_manager_can_set_own_vm_to_schedule(self):
+        self.vm("a", owner="carol@x")
+        base = datetime.now(UTC) + timedelta(days=2)
+        s = base.replace(hour=10, minute=0, second=0, microsecond=0)
+        e = base.replace(hour=20, minute=0, second=0, microsecond=0)
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "a", "mode": "schedule",
+                       "windows": [{"start": s.isoformat(), "end": e.isoformat()}]},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 200)
+
+    def test_manager_cannot_set_unmanaged_on_own_vm(self):
+        # 'unmanaged' is admin-only even for managers on their own VMs.
+        self.vm("a", owner="carol@x")
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "a", "mode": "unmanaged"},
+                      manager=True, email="carol@x")
         self.assertEqual(r.status_code, 403)
 
-    def test_manager_cannot_set_unmanaged(self):
+    def test_manager_cannot_set_unmanaged_on_others_vm(self):
         self.vm("a", owner="alice@x")
         r = self.post("/admin/vm-schedule/set",
                       {"vm": "a", "mode": "unmanaged"},
                       manager=True, email="carol@x")
         self.assertEqual(r.status_code, 403)
 
-    def test_manager_cannot_stop_now(self):
+    def test_manager_cannot_change_admin_set_unmanaged(self):
+        # Same lock as plain user: admin-set unmanaged VM is locked to
+        # its owner, even if the owner is a manager.
+        self.vm("a", owner="carol@x")
+        self.desired("a", "unmanaged")
+        r = self.post("/admin/vm-schedule/set", {"vm": "a", "mode": "off"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    def test_manager_cannot_stop_now_others_vm(self):
         self.vm("a", owner="alice@x")
         self.desired("a", "off")
         r = self.post("/admin/vm-schedule/stop-now", {"vm": "a"},
                       manager=True, email="carol@x")
         self.assertEqual(r.status_code, 403)
+
+    def test_manager_can_stop_now_own_vm(self):
+        # Stop-now needs a pending scheduled stop. Set mode='off' on a
+        # VM the manager owns — same setup as test_pending_stop_stamps_immediate.
+        self.vm("a", owner="carol@x")
+        self.desired("a", "off")
+        r = self.post("/admin/vm-schedule/stop-now", {"vm": "a"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 200)
 
     # --- inventory ---
     def test_manager_cannot_edit_asset(self):
@@ -688,6 +727,87 @@ class AuthentikAPIEmptyBodyTests(unittest.TestCase):
         resp.json.return_value = {"results": [{"pk": "x"}]}
         api = self._api(resp)
         self.assertEqual(api._request('GET', '/core/users/'), {"results": [{"pk": "x"}]})
+
+
+class VMScheduleCanEditTests(SchedTestBase):
+    """Server-computed `can_edit` per row in /admin/vm-schedule/data.
+    The JS template binds `:disabled="!row.can_edit"` to the mode
+    <select> + Save button — so the disable logic is server-authoritative
+    and mirrors the rules vm_schedule_set enforces. Regression: the
+    manager-role commit added `!isAdmin ||` to the JS binding, which
+    disabled the dropdown for ALL non-admin users (including owners
+    of their own VMs). Users reported being unable to schedule VMs
+    from 'off' to 'on'/'schedule'. These tests assert the API field
+    directly — no template rendering."""
+
+    def _row(self, vm, **desired):
+        self.vm(vm)
+        if desired:
+            self.desired(vm, **desired)
+
+    def test_non_admin_owner_off_mode_can_edit(self):
+        # Regression case: non-admin owner of 'off' VM must be able to
+        # change the mode. Before the fix this was disabled because
+        # the JS binding had `!isAdmin ||`.
+        self._row('a', mode='off')
+        rows = self.get("/admin/vm-schedule/data",
+                        email="alice@x").get_json()["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["can_edit"],
+                        "non-admin owner of their own 'off' VM must can_edit=True")
+
+    def test_non_admin_owner_schedule_mode_can_edit(self):
+        self._row('a', mode='schedule', windows=[])
+        rows = self.get("/admin/vm-schedule/data",
+                        email="alice@x").get_json()["rows"]
+        self.assertTrue(rows[0]["can_edit"])
+
+    def test_non_admin_owner_no_record_can_edit(self):
+        # No desired record (implicit unmanaged) — owner can schedule.
+        self.vm('a')
+        rows = self.get("/admin/vm-schedule/data",
+                        email="alice@x").get_json()["rows"]
+        self.assertTrue(rows[0]["can_edit"])
+
+    def test_non_admin_owner_admin_set_unmanaged_cannot_edit(self):
+        # Existing behavior: non-admin can't touch admin-set unmanaged.
+        self._row('a', mode='unmanaged')
+        rows = self.get("/admin/vm-schedule/data",
+                        email="alice@x").get_json()["rows"]
+        self.assertFalse(rows[0]["can_edit"])
+        self.assertTrue(rows[0]["admin_locked"])
+
+    def test_admin_can_edit_anything(self):
+        # Admin can edit even admin-set unmanaged.
+        self._row('a', mode='unmanaged')
+        rows = self.get("/admin/vm-schedule/data", admin=True).get_json()["rows"]
+        self.assertTrue(rows[0]["can_edit"])
+
+    def test_manager_can_edit_own_vm(self):
+        # Manager gets the same owner-edit rights as a plain user.
+        self._row('a', mode='off')
+        rows = self.get("/admin/vm-schedule/data",
+                        manager=True, email="alice@x").get_json()["rows"]
+        self.assertTrue(rows[0]["can_edit"],
+                        "manager who owns their own VM must can_edit=True")
+
+    def test_manager_cannot_edit_others_vm(self):
+        # Managers see every VM but can only edit their own. The data
+        # endpoint still includes the row (manager visibility), but
+        # can_edit=False keeps the controls disabled.
+        self.vm('a', owner='bob@x')
+        rows = self.get("/admin/vm-schedule/data",
+                        manager=True, email="alice@x").get_json()["rows"]
+        self.assertFalse(rows[0]["can_edit"])
+
+    def test_manager_cannot_edit_own_admin_set_unmanaged(self):
+        # Same lock as plain user: admin-set unmanaged VM is locked
+        # to its owner even if the owner is a manager.
+        self._row('a', mode='unmanaged')
+        rows = self.get("/admin/vm-schedule/data",
+                        manager=True, email="alice@x").get_json()["rows"]
+        self.assertFalse(rows[0]["can_edit"])
+        self.assertTrue(rows[0]["admin_locked"])
 
 
 if __name__ == "__main__":

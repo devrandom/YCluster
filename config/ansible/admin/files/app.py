@@ -2884,6 +2884,28 @@ def _gpu_admission_error(name, rec, mode, windows):
     return None
 
 
+def _can_edit_vm(id, rec, desired):
+    """Whether the caller may change this VM's mode via
+    /admin/vm-schedule/set. Encodes the same rules the POST endpoint
+    enforces, so the schedule page can disable the controls in JS
+    without re-deriving them. Returned in each row's `can_edit` field;
+    the template binds `:disabled="!row.can_edit"` to the mode <select>
+    + Save button. Mirrors vm_schedule_set:
+      - admin: yes (any VM)
+      - non-admin owner (manager or user): yes, unless admin-set
+        unmanaged
+      - non-admin non-owner (manager or user): no — managers see other
+        users' VMs but can't edit them; the page filters them out via
+        the ownership check below.
+    Note: an owner can't select the 'unmanaged' option itself (admin
+    escape hatch) — handled by the option's `:disabled="!isAdmin"`."""
+    if id.is_admin:
+        return True
+    if rec.get('owner') != id.email:
+        return False
+    return not (desired is not None and desired.get('mode') == 'unmanaged')
+
+
 @app.route('/admin/vm-schedule')
 def vm_schedule_page():
     """Schedule VMs to be up: desired-state editor, converged by the
@@ -2939,6 +2961,15 @@ def vm_schedule_data():
             # Distinguishes an explicit admin-set 'unmanaged' record (locked
             # to non-admins) from the no-record default (user-schedulable).
             'has_desired': desired is not None,
+            # Pre-computed editability: server-side mirror of the rules in
+            # vm_schedule_set so the JS template can disable the dropdown +
+            # Save button without re-deriving them. See _can_edit_vm.
+            'can_edit': _can_edit_vm(id, rec, desired),
+            # True when the VM is locked by an explicit admin-set unmanaged
+            # record. Drives the 'admin-managed' badge — shown to the owner
+            # so they understand why they can't edit (admins / managers see
+            # it too, harmlessly).
+            'admin_locked': desired is not None and desired.get('mode') == 'unmanaged',
         })
 
     # Capacity commitments per host, so users can see what's free before
@@ -3023,13 +3054,11 @@ def _parse_windows(windows):
 # Mutating endpoint by design (unlike the S2-removed admin mutations):
 # externally it is only reachable through the forward-auth gate, so the
 # identity headers are nginx-enforced; internal callers are operator space.
-# Managers (view-only) are blocked here — they can browse the schedule but
-# not edit it, including VMs they happen to own.
+# A manager can edit a VM they own (same as a plain user); they can't
+# edit other users' VMs — the ownership check below covers both cases.
 @app.route('/admin/vm-schedule/set', methods=['POST'])
 def vm_schedule_set():
     id = _authentik_identity()
-    if not id.is_admin and id.is_manager:
-        return jsonify({'error': 'view-only role'}), 403
     data = request.get_json(silent=True) or {}
     name = data.get('vm', '')
     if not re.fullmatch(r'[a-z0-9-]+', name):
@@ -3096,12 +3125,10 @@ def vm_schedule_set():
 # Mutating, forward-auth/owner gated like vm_schedule_set. Stamps an
 # `immediate` grace marker so the next reconciler tick stops the VM without
 # waiting out the remaining grace (the guest has effectively been warned).
-# Managers (view-only) are blocked here, including on VMs they own.
+# A manager can stop-now their own VM (same as a plain user).
 @app.route('/admin/vm-schedule/stop-now', methods=['POST'])
 def vm_schedule_stop_now():
     id = _authentik_identity()
-    if not id.is_admin and id.is_manager:
-        return jsonify({'error': 'view-only role'}), 403
     data = request.get_json(silent=True) or {}
     name = data.get('vm', '')
     if not re.fullmatch(r'[a-z0-9-]+', name):

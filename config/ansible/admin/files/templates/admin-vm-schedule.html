@@ -71,21 +71,21 @@
         <span :class="row.status === 'Running' ? 'running' : 'stopped'"
               x-text="row.status"></span>
         <span class="pending" x-show="row.pending" :title="pendingText(row)">⏳</span>
-        <button class="warn" x-show="row.pending === 'stop' && isAdmin"
+        <button class="warn" x-show="row.pending === 'stop' && row.can_edit"
                 @click="stopNow(row)" x-text="stopNowLabel(row)"></button>
         <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + ((isAdmin || isManager) ? ` · ${row.owner}` : '')"></span>
-        <select x-model="row.mode" :disabled="!isAdmin || locked(row)">
+        <select x-model="row.mode" :disabled="!row.can_edit">
           <!-- unmanaged is admin-only; shown (disabled) so an admin-set
                value still displays for users, but they can't select it.
-               An explicit admin-set unmanaged locks the whole row.
-               Managers (view-only) cannot change modes at all. -->
+               Managers (view-only) and owners of admin-set unmanaged
+               VMs have can_edit=false — handled in the :disabled above. -->
           <option value="unmanaged" :disabled="!isAdmin">unmanaged</option>
           <option value="on">always on</option>
           <option value="off">off</option>
           <option value="schedule">schedule</option>
         </select>
-        <button @click="save(row)" :disabled="!isAdmin || locked(row)">Save</button>
-        <span class="meta" x-show="locked(row)">admin-managed</span>
+        <button @click="save(row)" :disabled="!row.can_edit">Save</button>
+        <span class="meta" x-show="row.admin_locked">admin-managed</span>
         <span class="saved" x-show="row.saved" x-text="row.saved"></span>
         <span class="error" x-show="row.error" x-text="row.error"></span>
         <button class="minor" @click="row.showSsh = !row.showSsh"
@@ -234,11 +234,11 @@
             .catch(() => {})
         },
 
-        // Non-admins can't touch a VM an admin explicitly set unmanaged.
-        // (A no-record VM also shows mode 'unmanaged' but stays editable.)
-        locked(row) {
-          return !this.isAdmin && row.mode === 'unmanaged' && row.has_desired
-        },
+        // Editability comes from the server: row.can_edit (mirrors
+        // _can_edit_vm in app.py — admin yes, manager no, non-admin
+        // owner of admin-set unmanaged no, non-admin owner otherwise
+        // yes). row.admin_locked is true when the desired record is an
+        // explicit admin-set 'unmanaged' — drives the badge.
 
         pendingText(row) {
           if (row.pending === 'start') return 'starting'
