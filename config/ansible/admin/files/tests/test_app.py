@@ -176,6 +176,64 @@ class ScheduleSetTests(SchedTestBase):
         self.assertEqual(rec["mode"], "off")
         self.assertEqual(len(rec["windows"]), 1)         # preserved, not cleared
 
+    def test_owner_off_to_on(self):
+        # Regression: a VM that's already in 'off' state must be editable
+        # by its owner (POST /admin/vm-schedule/set returns 200, not 403).
+        # The original UI bug was a disabled dropdown; this is the API
+        # counterpart — both must agree.
+        self.vm("v", owner="alice@x")
+        self.desired("v", "off")
+        r = self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "on"},
+                      email="alice@x")
+        self.assertEqual(r.status_code, 200,
+                         "owner must be able to flip off->on via Save")
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        assert rec is not None
+        self.assertEqual(rec["mode"], "on")
+
+    def test_owner_off_to_schedule(self):
+        # Same regression: off -> schedule (with windows) must succeed.
+        self.vm("v", owner="alice@x")
+        self.desired("v", "off")
+        base = datetime.now(UTC) + timedelta(days=2)
+        s = base.replace(hour=10, minute=0, second=0, microsecond=0)
+        e = s + timedelta(hours=4)
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "v", "mode": "schedule",
+                       "windows": [{"start": _iso(s), "end": _iso(e)}]},
+                      email="alice@x")
+        self.assertEqual(r.status_code, 200,
+                         "owner must be able to flip off->schedule via Save")
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        assert rec is not None
+        self.assertEqual(rec["mode"], "schedule")
+
+    def test_owner_on_to_off(self):
+        # The reverse transition (on -> off) — same regression coverage.
+        self.vm("v", owner="alice@x")
+        self.desired("v", "on")
+        r = self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "off"},
+                      email="alice@x")
+        self.assertEqual(r.status_code, 200)
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        assert rec is not None
+        self.assertEqual(rec["mode"], "off")
+
+    def test_can_edit_matches_api_save_succeeds(self):
+        # Belt-and-suspenders: when the UI says the dropdown is enabled
+        # (can_edit=True on a row), the corresponding POST must also
+        # succeed — otherwise the page lies to the user.
+        self.vm("v", owner="alice@x")
+        self.desired("v", "off")
+        rows = self.get("/admin/vm-schedule/data",
+                        email="alice@x").get_json()["rows"]
+        self.assertTrue(rows[0]["can_edit"])
+        r = self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "on"},
+                      email="alice@x")
+        self.assertEqual(r.status_code, 200,
+                         "can_edit=True must imply POST /set returns 200 "
+                         "for a mode that doesn't require admin")
+
     def test_schedule_invalid_windows_rejected(self):
         self.vm("v", owner="alice@x")
         bad = [{"start": "not-a-date", "end": "nope"}]
