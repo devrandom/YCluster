@@ -84,7 +84,7 @@ a shell command on an internal host via the two-hop SSH pattern above) and
 `cetail` (render the tail of the JSONL log as a human-readable transcript).
 It runs as a streamable-HTTP daemon on `http://127.0.0.1:4003/mcp` and is
 registered in `opencode.json` as a `remote` MCP. Manage it with
-`bash mcp/cluster-exec/daemon --start|--stop|--status|--restart`; start is
+`bash mcp/cluster-exec/cedaemon --start|--stop|--status|--restart`; start is
 idempotent and waits until the port is bound before returning, stop uses
 SIGTERM with a 5s SIGKILL escalation. State lives in
 `./tmp/cluster-exec.{pid,log}`.
@@ -102,7 +102,7 @@ The MCP server uses generic `CE_*` env vars (`CE_BASTION`, `CE_LOG_PATH`,
 `CE_HTTP_HOST`, `CE_HTTP_PORT`, `CE_TIMEOUT_S`, …) and is not
 ycluster-specific. Our project's `BASTION` shell var (which resolves to
 the cluster entry host) maps to `CE_BASTION` via the wrapper script; see
-`mcp/cluster-exec/daemon` for the wiring. The `run` tool grants root SSH
+`mcp/cluster-exec/cedaemon` for the wiring. The `run` tool grants root SSH
 access — use sparingly, prefer ansible for stateful changes.
 
 ### Held Packages

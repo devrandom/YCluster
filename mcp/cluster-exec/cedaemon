@@ -25,7 +25,7 @@
 #   CE_TIMEOUT_S, CE_PROGRESS_INTERVAL_S, CE_PROGRESS_TAIL_LINES
 #
 # This script does not inherit CE_* into the spawned server. Pass them through
-# the shell (e.g. `CE_BASTION=s3.rat bash mcp/cluster-exec/daemon --start`)
+# the shell (e.g. `CE_BASTION=s3.rat bash mcp/cluster-exec/cedaemon --start`)
 # or wire them in your .envrc before calling.
 
 set -euo pipefail

@@ -25,19 +25,19 @@ Exposes two tools:
 
 ## Transport
 
-Streamable HTTP at `http://127.0.0.1:4003/mcp` (configurable via `CE_HTTP_HOST` / `CE_HTTP_PORT` / `CE_HTTP_PATH`). The server runs as a long-lived daemon managed by `bash mcp/cluster-exec/daemon`:
+Streamable HTTP at `http://127.0.0.1:4003/mcp` (configurable via `CE_HTTP_HOST` / `CE_HTTP_PORT` / `CE_HTTP_PATH`). The server runs as a long-lived daemon managed by `bash mcp/cluster-exec/cedaemon`:
 
 ```bash
-bash mcp/cluster-exec/daemon --start    # idempotent; waits until port is bound
-bash mcp/cluster-exec/daemon --stop     # SIGTERM, SIGKILL after 5s
-bash mcp/cluster-exec/daemon --status   # is it up?
-bash mcp/cluster-exec/daemon --restart  # stop + start
+bash mcp/cluster-exec/cedaemon --start    # idempotent; waits until port is bound
+bash mcp/cluster-exec/cedaemon --stop     # SIGTERM, SIGKILL after 5s
+bash mcp/cluster-exec/cedaemon --status   # is it up?
+bash mcp/cluster-exec/cedaemon --restart  # stop + start
 ```
 
 State lives in `./tmp/cluster-exec.{pid,log}`. The server runs in its own session (`setsid`) so it survives the parent shell exiting. Env vars (`CE_BASTION`, …) are read at startup; pass them through the shell:
 
 ```bash
-CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/daemon --start
+CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/cedaemon --start
 ```
 
 ## Security warning
@@ -117,6 +117,6 @@ uv run --project . python -m unittest discover tests -v
 Smoke-test the daemon (then trigger `run` from opencode):
 
 ```bash
-CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/daemon --start
-bash mcp/cluster-exec/daemon --status
+CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/cedaemon --start
+bash mcp/cluster-exec/cedaemon --status
 ```
