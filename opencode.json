@@ -3,13 +3,9 @@
   "instructions": ["AGENTS.md", "AGENTS.local.md"],
   "mcp": {
     "cluster_exec": {
-      "type": "local",
-      "command": ["bash", "mcp/cluster-exec/run.sh"],
-      "cwd": "/data/home/dev/proj/ycluster",
-      "enabled": true,
-      "environment": {
-        "PYTHONUNBUFFERED": "1"
-      }
+      "type": "remote",
+      "url": "http://127.0.0.1:4003/mcp",
+      "enabled": true
     }
   }
 }

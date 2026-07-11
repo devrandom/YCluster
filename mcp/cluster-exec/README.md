@@ -10,22 +10,39 @@ Exposes two tools:
   1. Takes a `command` (str) and a `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Whatever the bastion can reach via its `ssh_config`.
   2. Runs the command via a two-hop SSH pattern:
      ```
-     ssh -t "$CE_BASTION" 'ssh <hostname> "<command>"'
+     ssh "$CE_BASTION" 'ssh <hostname> "<command>"'
      ```
-     The outer ssh uses `-t` so SIGTERM from cancellation propagates to the inner command.
   3. Captures stdout and stderr as separate streams (chronologically merged in the result), with stderr lines tagged `[stderr]`.
   4. Truncates the result to the first `head_lines` and last `tail_lines` of merged output (defaults 25/25), inserting a `… [N lines elided] …` marker between them.
   5. Returns the result as MCP text content, prefixed with a status line:
      - `OK exit=0 duration=4.2s`
      - `FAILED exit=2 duration=4.2s`
-     - `CANCELLED after 12.3s (partial output below)`
+     - `CANCELLED after 12.3s (timeout)` — server-side timeout fired
+     - `CANCELLED after 12.3s (cancelled by client)` — `notifications/cancelled` from the client
      - `ERROR: <message>` (could not start)
 
 - **`cetail`** — render the tail of the JSONL log (see [Logging](#logging)) as a human-readable transcript. Takes `tail_lines` (default 50) and an optional `session` filter. Useful for inspecting what just ran or recovering output that was truncated in a `run` result.
 
+## Transport
+
+Streamable HTTP at `http://127.0.0.1:4003/mcp` (configurable via `CE_HTTP_HOST` / `CE_HTTP_PORT` / `CE_HTTP_PATH`). The server runs as a long-lived daemon managed by `bash mcp/cluster-exec/daemon`:
+
+```bash
+bash mcp/cluster-exec/daemon --start    # idempotent; waits until port is bound
+bash mcp/cluster-exec/daemon --stop     # SIGTERM, SIGKILL after 5s
+bash mcp/cluster-exec/daemon --status   # is it up?
+bash mcp/cluster-exec/daemon --restart  # stop + start
+```
+
+State lives in `./tmp/cluster-exec.{pid,log}`. The server runs in its own session (`setsid`) so it survives the parent shell exiting. Env vars (`CE_BASTION`, …) are read at startup; pass them through the shell:
+
+```bash
+CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/daemon --start
+```
+
 ## Security warning
 
-This tool grants the LLM **whatever SSH access your local `ssh` config has to `$CE_BASTION` and from there to `<hostname>`**. There are no allowlists, denylists, or confirmation steps. The privilege is intentional — the human running opencode is the admin.
+This tool grants the LLM **whatever SSH access your local `ssh` config has to `$CE_BASTION` and from there to `<hostname>`**. There are no allowlists, denylists, or confirmation steps. The privilege is intentional — the human running opencode is the admin. The HTTP transport binds to `127.0.0.1` only; do not change `CE_HTTP_HOST` to expose it.
 
 ## Logging
 
@@ -73,13 +90,16 @@ CE_LOG_PATH=/path/to/x.log bash mcp/cluster-exec/cetail
 ## Cancellation & timeouts
 
 - **Server-side timeout**: enforced at `CE_TIMEOUT_S` (default 60s). If the command runs longer, SIGTERM is sent, then SIGKILL after 2s grace.
-- **Client cancellation**: registered via the MCP cancellation hook when the client sends `notifications/cancelled`. The Python MCP SDK does not always emit these reliably (see modelcontextprotocol/python-sdk#2507), so the timeout is the primary kill mechanism.
+- **Client cancellation**: wired through `ctx.cancel_requested` (anyio event the SDK sets when it receives `notifications/cancelled`). Triggers the same SIGTERM/SIGKILL path. The Python MCP SDK does not always emit these reliably (see modelcontextprotocol/python-sdk#2507), so the timeout remains the primary backstop.
 
 ## Configuration (env vars)
 
 | Var | Default | Purpose |
 |---|---|---|
 | `CE_BASTION` | (required) | Entry host the outer ssh hops through. Should resolve in your local `~/.ssh/config`. |
+| `CE_HTTP_HOST` | `127.0.0.1` | Bind address for the streamable-HTTP transport. Loopback only by default — admin tool grants root SSH. |
+| `CE_HTTP_PORT` | `4003` | Bind port. |
+| `CE_HTTP_PATH` | `/mcp` | MCP endpoint path. |
 | `CE_LOG_PATH` | `tmp/cluster.log` | JSONL log path (relative to MCP server CWD). |
 | `CE_TIMEOUT_S` | `60` | Per-call hard timeout in seconds. |
 | `CE_PROGRESS_INTERVAL_S` | `1.0` | Progress notification cadence in seconds. |
@@ -94,8 +114,9 @@ cd mcp/cluster-exec
 uv run --project . python -m unittest discover tests -v
 ```
 
-Smoke-test the server (then trigger `run` from opencode):
+Smoke-test the daemon (then trigger `run` from opencode):
 
 ```bash
-uv run --project mcp/cluster-exec python -m cluster_exec
+CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/daemon --start
+bash mcp/cluster-exec/daemon --status
 ```

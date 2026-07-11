@@ -1,3 +1,4 @@
+import asyncio
 import os
 import secrets
 from pathlib import Path
@@ -83,22 +84,41 @@ async def run(
     session_id = secrets.token_hex(4)
     cwd = os.getcwd()
 
+    cancel = asyncio.Event()
+
     async def report(progress: int, message: str) -> None:
         await ctx.report_progress(progress, message=message or None)
 
-    text = await exec.run(
-        bastion=_BASTION,
-        target_host=hostname,
-        command=command,
-        session_id=session_id,
-        timeout_s=_TIMEOUT_S,
-        progress_interval_s=_PROGRESS_INTERVAL_S,
-        progress_tail_lines=_PROGRESS_TAIL_LINES,
-        head_lines=head_lines,
-        tail_lines=tail_lines,
-        cwd=cwd,
-        on_progress=report,
-    )
+    async def bridge_cancel() -> None:
+        try:
+            await ctx.cancel_requested.wait()  # type: ignore[attr-defined]
+        except Exception:
+            return
+        cancel.set()
+
+    bridge_task = asyncio.create_task(bridge_cancel())
+
+    try:
+        text = await exec.run(
+            bastion=_BASTION,
+            target_host=hostname,
+            command=command,
+            session_id=session_id,
+            timeout_s=_TIMEOUT_S,
+            progress_interval_s=_PROGRESS_INTERVAL_S,
+            progress_tail_lines=_PROGRESS_TAIL_LINES,
+            head_lines=head_lines,
+            tail_lines=tail_lines,
+            cwd=cwd,
+            on_progress=report,
+            cancel=cancel,
+        )
+    finally:
+        bridge_task.cancel()
+        try:
+            await bridge_task
+        except BaseException:
+            pass
     return [TextContent(type="text", text=text)]
 
 
@@ -133,7 +153,10 @@ async def cetail(
 
 
 def main() -> None:
-    SERVER.run(transport="stdio")
+    host = os.environ.get("CE_HTTP_HOST", "127.0.0.1")
+    port = _env_int("CE_HTTP_PORT", 4003)
+    path = os.environ.get("CE_HTTP_PATH", "/mcp")
+    SERVER.run(transport="streamable-http", host=host, port=port, streamable_http_path=path)
 
 
 if __name__ == "__main__":

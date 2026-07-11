@@ -74,11 +74,9 @@ async def run(
 
         progress_task = asyncio.create_task(emit_progress())
 
-    timed_out = False
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
-    except TimeoutError:
-        timed_out = True
+    async def terminate_proc() -> None:
+        if proc.returncode is not None:
+            return
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=2.0)
@@ -86,7 +84,40 @@ async def run(
             proc.kill()
             await proc.wait()
 
-    cancel.set()
+    async def cancel_watcher() -> None:
+        try:
+            await cancel.wait()
+        except asyncio.CancelledError:
+            return
+        await terminate_proc()
+
+    watcher_task = asyncio.create_task(cancel_watcher())
+
+    timed_out = False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+    except TimeoutError:
+        timed_out = True
+        await terminate_proc()
+
+    external_cancel = cancel.is_set() and not timed_out
+    if external_cancel:
+        try:
+            await asyncio.wait_for(watcher_task, timeout=3.0)
+        except TimeoutError:
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except BaseException:
+                pass
+    else:
+        cancel.set()
+        watcher_task.cancel()
+        try:
+            await watcher_task
+        except BaseException:
+            pass
+
     try:
         await asyncio.wait_for(asyncio.gather(r_out, r_err), timeout=2.0)
     except TimeoutError:
@@ -112,9 +143,13 @@ async def run(
         status = "error"
         status_line = "ERROR: process did not exit cleanly"
         exit_code: int | None = None
+    elif external_cancel:
+        status = "cancelled"
+        status_line = f"CANCELLED after {duration:.1f}s (cancelled by client)"
+        exit_code = proc.returncode
     elif timed_out:
         status = "cancelled"
-        status_line = f"CANCELLED after {duration:.1f}s (partial output below)"
+        status_line = f"CANCELLED after {duration:.1f}s (timeout)"
         exit_code = proc.returncode
     elif proc.returncode == 0:
         status = "ok"

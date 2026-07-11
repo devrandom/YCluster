@@ -1,0 +1,160 @@
+#!/bin/bash
+# Manage the cluster-exec MCP server (streamable HTTP transport).
+#
+# Commands (run with no args for usage):
+#   --start   Launch the server in the background and wait until the HTTP port
+#             is bound. Returns when the server is reachable. Idempotent:
+#             refuses to start a second instance while one is running.
+#   --stop    Send SIGTERM to the running server, escalate to SIGKILL after 5s.
+#   --status  Report whether the server is up and where its URL is.
+#   --restart --stop + --start.
+#
+# State files (under tmp/, gitignored):
+#   tmp/cluster-exec.pid   PID of the running server (uvicorn)
+#   tmp/cluster-exec.log   stdout/stderr of the server
+#
+# Env vars (read by the server itself, not by this script — set them before
+# invoking --start):
+#   CE_HTTP_HOST           bind address (default 127.0.0.1)
+#   CE_HTTP_PORT           bind port (default 4003)
+#   CE_HTTP_PATH           MCP endpoint path (default /mcp)
+#   CE_BASTION             SSH bastion host (required; the run tool fails
+#                          fast at startup if unset)
+#   CE_LOG_PATH            JSONL log path for run output (default
+#                          tmp/cluster.log)
+#   CE_TIMEOUT_S, CE_PROGRESS_INTERVAL_S, CE_PROGRESS_TAIL_LINES
+#
+# This script does not inherit CE_* into the spawned server. Pass them through
+# the shell (e.g. `CE_BASTION=s3.rat bash mcp/cluster-exec/daemon --start`)
+# or wire them in your .envrc before calling.
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+PID="$REPO/tmp/cluster-exec.pid"
+LOG="$REPO/tmp/cluster-exec.log"
+HOST="${CE_HTTP_HOST:-127.0.0.1}"
+PORT="${CE_HTTP_PORT:-4003}"
+PATH_="${CE_HTTP_PATH:-/mcp}"
+URL="http://$HOST:$PORT$PATH_"
+
+mkdir -p "$(dirname "$PID")"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command>
+
+Manage the cluster-exec MCP server (streamable HTTP transport at $URL).
+
+Commands:
+  --start    Launch in the background, wait until the port is bound.
+  --stop     Send SIGTERM (SIGKILL after 5s if still alive).
+  --status   Print whether the server is up and the URL.
+  --restart  --stop + --start.
+EOF
+}
+
+pid_alive() {
+    [[ -f "$PID" ]] || return 1
+    local pid
+    pid=$(cat "$PID")
+    [[ -n "$pid" ]] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+wait_for_port() {
+    local timeout_s=15
+    local start
+    start=$(date +%s)
+    while true; do
+        if ! pid_alive; then
+            echo "server died during startup — see $LOG" >&2
+            tail -n 40 "$LOG" >&2 || true
+            return 1
+        fi
+        # Bash's /dev/tcp is the cheapest port check and works without
+        # requiring curl/nc/python.
+        if (echo > "/dev/tcp/$HOST/$PORT") 2>/dev/null; then
+            return 0
+        fi
+        if (( $(date +%s) - start > timeout_s )); then
+            echo "server did not bind $HOST:$PORT within ${timeout_s}s" >&2
+            tail -n 40 "$LOG" >&2 || true
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+
+do_start() {
+    if pid_alive; then
+        echo "already running (pid $(cat "$PID"), url $URL)"
+        exit 0
+    fi
+    : > "$LOG"
+    unset VIRTUAL_ENV
+    # setsid puts the child in its own session so it survives the parent
+    # shell exiting — we don't want to hang on to a tty.
+    setsid uv run --project "$REPO/mcp/cluster-exec" \
+        python -m cluster_exec \
+        >> "$LOG" 2>&1 < /dev/null &
+    echo $! > "$PID"
+    wait_for_port
+    echo "started — pid $(cat "$PID"), url $URL, log $LOG"
+    echo "stop with: $(basename "$0") --stop"
+}
+
+do_stop() {
+    if ! pid_alive; then
+        rm -f "$PID"
+        echo "not running"
+        exit 0
+    fi
+    local pid
+    pid=$(cat "$PID")
+    kill -TERM "$pid"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$PID"
+            echo "stopped (pid $pid)"
+            return
+        fi
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+    rm -f "$PID"
+    echo "force-killed (pid $pid)"
+}
+
+do_status() {
+    if pid_alive; then
+        echo "running — pid $(cat "$PID"), url $URL, log $LOG"
+    else
+        rm -f "$PID"
+        echo "not running — start with: $(basename "$0") --start"
+    fi
+}
+
+case "${1:-}" in
+    --start)
+        do_start
+        ;;
+    --stop)
+        do_stop
+        ;;
+    --status)
+        do_status
+        ;;
+    --restart)
+        do_stop
+        do_start
+        ;;
+    -h|--help|"")
+        usage
+        ;;
+    *)
+        echo "unknown option: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

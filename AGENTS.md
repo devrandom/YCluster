@@ -82,21 +82,28 @@ ycluster certbot obtain --test
 `mcp/cluster-exec` is a local MCP server exposing two tools: `run` (execute
 a shell command on an internal host via the two-hop SSH pattern above) and
 `cetail` (render the tail of the JSONL log as a human-readable transcript).
-It's registered in `opencode.json` and invoked via
-`bash mcp/cluster-exec/run.sh`. Full stdout/stderr is logged (untruncated)
-to `./tmp/cluster.log` as JSONL events; the LLM-facing tool result returns
-only the head/tail (defaults 25/25) of the chronologically merged stream
-with `[stderr]` tags. Progress notifications tick every second while a long
-command runs. Server-side timeout (60s default) is the primary kill
-mechanism — the Python MCP SDK does not reliably emit
-`notifications/cancelled`, so do not rely on UI cancel for runaway commands.
+It runs as a streamable-HTTP daemon on `http://127.0.0.1:4003/mcp` and is
+registered in `opencode.json` as a `remote` MCP. Manage it with
+`bash mcp/cluster-exec/daemon --start|--stop|--status|--restart`; start is
+idempotent and waits until the port is bound before returning, stop uses
+SIGTERM with a 5s SIGKILL escalation. State lives in
+`./tmp/cluster-exec.{pid,log}`.
+
+Full stdout/stderr is logged (untruncated) to `./tmp/cluster.log` as JSONL
+events; the LLM-facing tool result returns only the head/tail (defaults
+25/25) of the chronologically merged stream with `[stderr]` tags. Progress
+notifications tick every second while a long command runs. Server-side
+timeout (60s default, `CE_TIMEOUT_S`) is the primary kill mechanism;
+client-driven cancel (`notifications/cancelled` → `ctx.cancel_requested`)
+works in streamable-HTTP and terminates the running command, but the
+timeout remains the backstop in case the cancel message never arrives.
 
 The MCP server uses generic `CE_*` env vars (`CE_BASTION`, `CE_LOG_PATH`,
-`CE_TIMEOUT_S`, …) and is not ycluster-specific. Our project's `BASTION`
-shell var (which resolves to the cluster entry host) maps to `CE_BASTION`
-via the wrapper script; see `mcp/cluster-exec/run.sh` for the wiring.
-The `run` tool grants root SSH access — use sparingly, prefer ansible for
-stateful changes.
+`CE_HTTP_HOST`, `CE_HTTP_PORT`, `CE_TIMEOUT_S`, …) and is not
+ycluster-specific. Our project's `BASTION` shell var (which resolves to
+the cluster entry host) maps to `CE_BASTION` via the wrapper script; see
+`mcp/cluster-exec/daemon` for the wiring. The `run` tool grants root SSH
+access — use sparingly, prefer ansible for stateful changes.
 
 ### Held Packages
 Some packages are deliberately held from auto-upgrade (apt: `postgresql-16`;
