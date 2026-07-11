@@ -2,12 +2,14 @@
 # Manage the cluster-exec MCP server (streamable HTTP transport).
 #
 # Commands (run with no args for usage):
-#   --start   Launch the server in the background and wait until the HTTP port
-#             is bound. Returns when the server is reachable. Idempotent:
-#             refuses to start a second instance while one is running.
-#   --stop    Send SIGTERM to the running server, escalate to SIGKILL after 5s.
-#   --status  Report whether the server is up and where its URL is.
-#   --restart --stop + --start.
+#   --start    Launch the server in the background and wait until the HTTP
+#              port is bound. Returns when the server is reachable.
+#              Idempotent: refuses to start a second instance while one is
+#              running.
+#   --stop     SIGTERM the server and every direct child (backgrounded SSH
+#              sessions), escalate to SIGKILL after 5s. No orphans.
+#   --status   Report whether the server is up and where its URL is.
+#   --restart  --stop + --start.
 #
 # State files (under tmp/, gitignored):
 #   tmp/cluster-exec.pid   PID of the running server (uvicorn)
@@ -22,7 +24,10 @@
 #                          fast at startup if unset)
 #   CE_LOG_PATH            JSONL log path for run output (default
 #                          tmp/cluster.log)
-#   CE_TIMEOUT_S, CE_PROGRESS_INTERVAL_S, CE_PROGRESS_TAIL_LINES
+#   CE_TIMEOUT_S           hard timeout per run, seconds (default 1800)
+#   CE_AUTO_BG_TIMEOUT_S   soft auto-bg threshold, seconds (default 30;
+#                          set 0 to disable backgrounding)
+#   CE_PROGRESS_INTERVAL_S, CE_PROGRESS_TAIL_LINES
 #
 # This script does not inherit CE_* into the spawned server. Pass them through
 # the shell (e.g. `CE_BASTION=s3.rat bash mcp/cluster-exec/cedaemon --start`)
@@ -48,7 +53,8 @@ Manage the cluster-exec MCP server (streamable HTTP transport at $URL).
 
 Commands:
   --start    Launch in the background, wait until the port is bound.
-  --stop     Send SIGTERM (SIGKILL after 5s if still alive).
+  --stop     SIGTERM the server and every direct child (backgrounded SSH
+             sessions), SIGKILL after 5s. No orphans.
   --status   Print whether the server is up and the URL.
   --restart  --stop + --start.
 EOF
@@ -112,7 +118,8 @@ do_stop() {
     fi
     local pid
     pid=$(cat "$PID")
-    kill -TERM "$pid"
+    kill_bg_children "$pid"
+    kill -TERM "$pid" 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.5
         if ! kill -0 "$pid" 2>/dev/null; then
@@ -124,6 +131,49 @@ do_stop() {
     kill -KILL "$pid" 2>/dev/null || true
     rm -f "$PID"
     echo "force-killed (pid $pid)"
+}
+
+# SIGTERM every process in $1's session (the daemon was started via setsid
+# and is its own session leader). This catches the uvicorn worker and any
+# backgrounded SSH grandchildren — no orphans. Escalate to SIGKILL after 5s.
+kill_bg_children() {
+    local leader_pid="$1"
+    # Find all processes sharing this session, excluding the leader itself
+    # (it's handled separately by do_stop) and excluding any already-dead PIDs.
+    local pids
+    pids=$(pgrep -s "$leader_pid" 2>/dev/null | grep -v "^${leader_pid}$" || true)
+    if [[ -z "$pids" ]]; then
+        echo "no children to kill"
+        return
+    fi
+    local count=0
+    for cpid in $pids; do
+        # Identify the process by command so the output distinguishes the
+        # kinds of children we're cleaning up.
+        local cmd
+        cmd=$(ps -o args= -p "$cpid" 2>/dev/null | awk '{print $1}')
+        local label="child"
+        case "$cmd" in
+            ssh|ssh-*) label="bg-ssh" ;;
+            python*|*/python*) label="uvicorn-worker" ;;
+            uv|*/uv) label="uv-wrapper" ;;
+        esac
+        kill -TERM "$cpid" 2>/dev/null || continue
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            sleep 0.5
+            if ! kill -0 "$cpid" 2>/dev/null; then
+                echo "killed $label pid=$cpid"
+                count=$((count + 1))
+                break
+            fi
+        done
+        if kill -0 "$cpid" 2>/dev/null; then
+            kill -KILL "$cpid" 2>/dev/null || true
+            echo "force-killed $label pid=$cpid"
+            count=$((count + 1))
+        fi
+    done
+    echo "killed $count child(ren)"
 }
 
 do_status() {

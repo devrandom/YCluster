@@ -79,23 +79,31 @@ ycluster certbot obtain --test
 
 ### Cluster exec via MCP
 
-`mcp/cluster-exec` is a local MCP server exposing two tools: `run` (execute
-a shell command on an internal host via the two-hop SSH pattern above) and
-`cetail` (render the tail of the JSONL log as a human-readable transcript).
-It runs as a streamable-HTTP daemon on `http://127.0.0.1:4003/mcp` and is
-registered in `opencode.json` as a `remote` MCP. Manage it with
+`mcp/cluster-exec` is a local MCP server exposing four tools: `run` (execute
+a shell command on an internal host via the two-hop SSH pattern above),
+`tail` (render the tail of the JSONL log as a human-readable transcript),
+`status` (list or inspect backgrounded runs), and `kill` (terminate a
+backgrounded run by session_id). It runs as a streamable-HTTP daemon on
+`http://127.0.0.1:4003/mcp` and is registered in `opencode.json` as a
+`remote` MCP. Manage it with
 `bash mcp/cluster-exec/cedaemon --start|--stop|--status|--restart`; start is
 idempotent and waits until the port is bound before returning, stop uses
-SIGTERM with a 5s SIGKILL escalation. State lives in
+SIGTERM with a 5s SIGKILL escalation and always cleans up backgrounded SSH
+sessions in the same process group (no orphans). State lives in
 `./tmp/cluster-exec.{pid,log}`.
 
 Full stdout/stderr is logged (untruncated) to `./tmp/cluster.log` as JSONL
 events; the LLM-facing tool result returns only the head/tail (defaults
 25/25) of the chronologically merged stream with `[stderr]` tags. Progress
-notifications tick every second while a long command runs. Server-side
-timeout (60s default, `CE_TIMEOUT_S`) is the primary kill mechanism;
-client-driven cancel (`notifications/cancelled` → `ctx.cancel_requested`)
-works in streamable-HTTP and terminates the running command, but the
+notifications tick every second while a long command runs. **Two-tier
+timeout model**: soft `auto_bg_after_s` (default 30s, `CE_AUTO_BG_TIMEOUT_S`)
+auto-backgrounds a long-running command and returns
+`BACKGROUNDED session=<id>` for polling via `tail -s <id>`; hard
+`timeout_s` (default 1800s, `CE_TIMEOUT_S`) is the backstop that SIGTERMs
+the process. Both overridable per call on `run` — set `timeout_s` greater
+than `auto_bg_after_s`, or both to 0 to disable timeouts entirely.
+Client-driven cancel (`notifications/cancelled` → `ctx.cancel_requested`)
+works in streamable-HTTP and terminates the running command; the hard
 timeout remains the backstop in case the cancel message never arrives.
 
 The MCP server uses generic `CE_*` env vars (`CE_BASTION`, `CE_LOG_PATH`,

@@ -11,7 +11,7 @@ from . import log
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="cetail",
+        prog="tail",
         description="Tail the cluster-exec JSONL log as a human-readable transcript.",
     )
     parser.add_argument(
@@ -87,7 +87,7 @@ def follow(
         time.sleep(interval)
 
     sys.stdout.write(
-        f"[cetail] following {path} (tail={n}) — Ctrl-C to stop\n\n"
+        f"[tail] following {path} (tail={n}) — Ctrl-C to stop\n\n"
     )
     sys.stdout.flush()
 
@@ -120,7 +120,7 @@ def follow(
                 else:
                     time.sleep(interval)
         except KeyboardInterrupt:
-            sys.stdout.write("\n[cetail] stopped\n")
+            sys.stdout.write("\n[tail] stopped\n")
             sys.stdout.flush()
             return 0
     return 0

@@ -1,7 +1,7 @@
 [project]
 name = "cluster-exec"
 version = "0.1.0"
-description = "Local MCP server for running shell commands on ycluster internal nodes"
+description = "Local MCP server for running shell commands on internal hosts via SSH bastion"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.0.0a1",

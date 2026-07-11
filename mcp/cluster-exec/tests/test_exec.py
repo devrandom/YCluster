@@ -61,7 +61,7 @@ class _FakeProcess:
             self._returncode = -9  # SIGKILL
 
 
-def _patched_run(proc: _FakeProcess, *, timeout_s: float, progress_interval_s: float = 10.0, **kwargs):
+def _patched_run(proc: _FakeProcess, *, timeout_s: float, auto_bg_after_s: float = 0.0, progress_interval_s: float = 10.0, **kwargs):
     async def _create(*a, **kw):
         return proc
     with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
@@ -72,6 +72,7 @@ def _patched_run(proc: _FakeProcess, *, timeout_s: float, progress_interval_s: f
                 command="dummy-cmd",
                 session_id="abcd1234",
                 timeout_s=timeout_s,
+                auto_bg_after_s=auto_bg_after_s,
                 progress_interval_s=progress_interval_s,
                 progress_tail_lines=50,
                 head_lines=kwargs.get("head_lines", 100),
@@ -187,6 +188,7 @@ class ExecTests(unittest.TestCase):
                 command="dummy-cmd",
                 session_id="abcd1234",
                 timeout_s=10,
+                auto_bg_after_s=0.0,
                 progress_interval_s=10.0,
                 progress_tail_lines=50,
                 head_lines=100,
@@ -237,6 +239,140 @@ class ExecTests(unittest.TestCase):
         self.assertTrue(text.startswith("CANCELLED"))
         self.assertIn("timeout", text)
         self.assertNotIn("cancelled by client", text)
+
+    def test_auto_bg_fires_before_proc_exits(self):
+        proc = _FakeProcess(
+            stdout_lines=[b"first\n"],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=10.0,
+        )
+        text = _patched_run(proc, timeout_s=30, auto_bg_after_s=0.2)
+        self.assertTrue(text.startswith("BACKGROUNDED"))
+        self.assertIn("session=abcd1234", text)
+        self.assertIn("tail", text)
+        self.assertIn("first", text)
+        self.assertEqual(proc._returncode, None)
+        self.assertFalse(proc._terminated)
+        self.assertFalse(proc._killed)
+        self.assertIn("abcd1234", exec_mod.list_backgrounded())
+        try:
+            exec_mod.kill_backgrounded("abcd1234")
+        finally:
+            exec_mod._BACKGROUNDED.clear()
+
+    def test_bg_proc_outlives_exec_run(self):
+        proc = _FakeProcess(
+            stdout_lines=[],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=10.0,
+        )
+
+        async def runner():
+            async def _create(*a, **kw):
+                return proc
+            with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+                return await exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="dummy-target",
+                    command="dummy-cmd",
+                    session_id="outlive01",
+                    timeout_s=30,
+                    auto_bg_after_s=0.1,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                )
+
+        text = asyncio.run(runner())
+        self.assertTrue(text.startswith("BACKGROUNDED"))
+        self.assertEqual(proc._returncode, None)
+        self.assertFalse(proc._terminated)
+        self.assertFalse(proc._killed)
+        self.assertIn("outlive01", exec_mod.list_backgrounded())
+        try:
+            exec_mod.kill_backgrounded("outlive01")
+        finally:
+            exec_mod._BACKGROUNDED.clear()
+
+    def test_hard_timeout_kills_bg_session(self):
+        proc = _FakeProcess(
+            stdout_lines=[b"alive\n"],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=10.0,
+        )
+
+        async def runner():
+            async def _create(*a, **kw):
+                return proc
+            with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+                text = await exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="dummy-target",
+                    command="dummy-cmd",
+                    session_id="hards01",
+                    timeout_s=0.3,
+                    auto_bg_after_s=0.1,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                )
+            await asyncio.sleep(0.4)
+            return text, proc._returncode
+
+        text, rc = asyncio.run(runner())
+        self.assertTrue(text.startswith("BACKGROUNDED"))
+        self.assertIn("alive", text)
+        self.assertIsNotNone(rc)
+        self.assertTrue(proc._terminated or proc._killed)
+        try:
+            exec_mod.kill_backgrounded("hards01")
+        finally:
+            exec_mod._BACKGROUNDED.clear()
+
+    def test_invalid_timeout_ordering_raises(self):
+        proc = _FakeProcess(
+            stdout_lines=[],
+            stderr_lines=[],
+            exit_code=0,
+        )
+        async def _create(*a, **kw):
+            return proc
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            with self.assertRaises(ValueError):
+                asyncio.run(
+                    exec_mod.run(
+                        bastion="dummy-bastion",
+                        target_host="dummy-target",
+                        command="dummy-cmd",
+                        session_id="badcfg01",
+                        timeout_s=10.0,
+                        auto_bg_after_s=20.0,
+                        progress_interval_s=10.0,
+                        progress_tail_lines=50,
+                        head_lines=100,
+                        tail_lines=100,
+                        cwd="/cwd",
+                    )
+                )
+
+    def test_auto_bg_disabled_when_zero(self):
+        proc = _FakeProcess(
+            stdout_lines=[b"hi\n"],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=0.1,
+        )
+        text = _patched_run(proc, timeout_s=10, auto_bg_after_s=0)
+        self.assertTrue(text.startswith("OK"))
+        self.assertIn("hi", text)
+        self.assertEqual(exec_mod.list_backgrounded(), [])
 
 
 if __name__ == "__main__":

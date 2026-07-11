@@ -137,14 +137,14 @@ class TailTests(unittest.TestCase):
 class RenderTests(unittest.TestCase):
     def test_no_events(self):
         text = log.render([], path=Path("x"), requested=10)
-        self.assertIn("[cetail] 0 events", text)
+        self.assertIn("[tail] 0 events", text)
         self.assertIn("(no events)", text)
 
     def test_singular_label(self):
         events = [{"ts": "2026-01-01T00:00:00.000Z", "event": "start",
                    "session": "abc", "host": "s4", "cmd": "uptime", "cwd": "/cwd"}]
         text = log.render(events, path=Path("x"), requested=10)
-        self.assertIn("[cetail] 1 event ", text)
+        self.assertIn("[tail] 1 event ", text)
 
     def test_header_includes_path_and_tail(self):
         events = [{"ts": "2026-01-01T00:00:00.000Z", "event": "start",

@@ -84,7 +84,7 @@ def render(events: Iterable[dict], path: Path, requested: int) -> str:
     events = list(events)
     n = len(events)
     label = "event" if n == 1 else "events"
-    header = f"[cetail] {n} {label} from {path} (tail={requested})"
+    header = f"[tail] {n} {label} from {path} (tail={requested})"
     if not events:
         return f"{header}\n\n(no events)"
     body = "\n".join(render_event(e) for e in events)

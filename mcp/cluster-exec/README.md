@@ -4,7 +4,7 @@ Local MCP server for running shell commands on internal hosts through an SSH bas
 
 ## What it does
 
-Exposes two tools:
+Exposes four tools:
 
 - **`run`** — run a command on an internal host:
   1. Takes a `command` (str) and a `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Whatever the bastion can reach via its `ssh_config`.
@@ -17,11 +17,21 @@ Exposes two tools:
   5. Returns the result as MCP text content, prefixed with a status line:
      - `OK exit=0 duration=4.2s`
      - `FAILED exit=2 duration=4.2s`
-     - `CANCELLED after 12.3s (timeout)` — server-side timeout fired
+     - `CANCELLED after 12.3s (timeout)` — hard timeout fired
      - `CANCELLED after 12.3s (cancelled by client)` — `notifications/cancelled` from the client
+     - `BACKGROUNDED session=<id> after 30.0s` — soft auto-bg timeout fired; poll with `tail -s <id>`
+     - `KILLED session=<id>` — returned by the `kill` tool
      - `ERROR: <message>` (could not start)
 
-- **`cetail`** — render the tail of the JSONL log (see [Logging](#logging)) as a human-readable transcript. Takes `tail_lines` (default 50) and an optional `session` filter. Useful for inspecting what just ran or recovering output that was truncated in a `run` result.
+  **Two-tier timeouts** (overridable per call):
+  - `auto_bg_after_s` (default 30s, `CE_AUTO_BG_TIMEOUT_S`) — soft timeout. When it fires, the run transitions to background and returns `BACKGROUNDED session=<id>`. Set to 0 to disable.
+  - `timeout_s` (default 1800s, `CE_TIMEOUT_S`) — hard timeout. SIGTERM, then SIGKILL after 2s. Set to 0 to disable. Must be greater than `auto_bg_after_s` when both are enabled.
+
+- **`tail`** — render the tail of the JSONL log (see [Logging](#logging)) as a human-readable transcript. Takes `tail_lines` (default 50) and an optional `session` filter. Useful for inspecting what just ran, recovering output that was truncated in a `run` result, or watching a backgrounded session.
+
+- **`status`** — list or inspect backgrounded runs. With no argument, lists all active sessions (session_id, target_host, command, elapsed, line count, hard-timeout countdown). With a `session_id`, shows detailed state for that session including whether the process is still running or has exited.
+
+- **`kill`** — terminate a backgrounded run by `session_id`. SIGTERM, then SIGKILL after 2s. Returns how many lines of output were captured before the kill.
 
 ## Transport
 
@@ -29,15 +39,15 @@ Streamable HTTP at `http://127.0.0.1:4003/mcp` (configurable via `CE_HTTP_HOST` 
 
 ```bash
 bash mcp/cluster-exec/cedaemon --start    # idempotent; waits until port is bound
-bash mcp/cluster-exec/cedaemon --stop     # SIGTERM, SIGKILL after 5s
+bash mcp/cluster-exec/cedaemon --stop     # SIGTERM, SIGKILL after 5s; cleans up bg children
 bash mcp/cluster-exec/cedaemon --status   # is it up?
 bash mcp/cluster-exec/cedaemon --restart  # stop + start
 ```
 
-State lives in `./tmp/cluster-exec.{pid,log}`. The server runs in its own session (`setsid`) so it survives the parent shell exiting. Env vars (`CE_BASTION`, …) are read at startup; pass them through the shell:
+`--stop` always kills any backgrounded SSH children in the same session (no orphans). State lives in `./tmp/cluster-exec.{pid,log}`. The server runs in its own session (`setsid`) so it survives the parent shell exiting. Env vars (`CE_BASTION`, …) are read at startup; pass them through the shell:
 
 ```bash
-CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/cedaemon --start
+CE_BASTION="bastion.example.com" bash mcp/cluster-exec/cedaemon --start
 ```
 
 ## Security warning
@@ -64,10 +74,10 @@ jq -c 'select(.event=="end" and .status=="cancelled")' ./tmp/cluster.log
 jq -r 'select(.event=="start") | "\(.ts) \(.host) \(.cmd)"' ./tmp/cluster.log
 ```
 
-Or call the `cetail` MCP tool — same idea, but the events are pre-rendered as a human-readable transcript (one line per event with timestamp, session, type, and body) instead of raw JSON. Output looks like:
+Or call the `tail` MCP tool — same idea, but the events are pre-rendered as a human-readable transcript (one line per event with timestamp, session, type, and body) instead of raw JSON. Output looks like:
 
 ```
-[cetail] 4 events from tmp/cluster.log (tail=50)
+[tail] 4 events from tmp/cluster.log (tail=50)
 
 2026-07-11T12:54:23.123Z  [a1b2c3d4]  start   host=s4 cmd='journalctl -u etcd' cwd=/...
 2026-07-11T12:54:23.456Z  [a1b2c3d4]  line    ● s1: etcd running
@@ -87,10 +97,18 @@ CE_LOG_PATH=/path/to/x.log bash mcp/cluster-exec/cetail
 
 `-f` waits for the file if it doesn't exist yet, prints the initial tail, then polls (default 0.25s, override with `--interval`) and prints each new event as it arrives. Combines with `-s` to watch one session.
 
-## Cancellation & timeouts
+## Backgrounded runs
 
-- **Server-side timeout**: enforced at `CE_TIMEOUT_S` (default 60s). If the command runs longer, SIGTERM is sent, then SIGKILL after 2s grace.
-- **Client cancellation**: wired through `ctx.cancel_requested` (anyio event the SDK sets when it receives `notifications/cancelled`). Triggers the same SIGTERM/SIGKILL path. The Python MCP SDK does not always emit these reliably (see modelcontextprotocol/python-sdk#2507), so the timeout remains the primary backstop.
+Long-running commands auto-background after `auto_bg_after_s`. They keep executing on the cluster (the SSH session is alive on the cluster node) and continue emitting lines to the JSONL log. To work with them:
+
+```text
+run    → returns "BACKGROUNDED session=abcd1234 after 30.0s"
+tail   → render the latest transcript (pass session=abcd1234 to filter)
+status → see all active sessions, with elapsed time and hard-timeout countdown
+kill   → terminate by session_id
+```
+
+Backgrounded runs are still subject to `timeout_s` (the hard timeout). The `timeout_watcher` is registered when a run backgrounds; when it fires, the proc + readers are terminated and the session is removed from the registry.
 
 ## Configuration (env vars)
 
@@ -101,7 +119,8 @@ CE_LOG_PATH=/path/to/x.log bash mcp/cluster-exec/cetail
 | `CE_HTTP_PORT` | `4003` | Bind port. |
 | `CE_HTTP_PATH` | `/mcp` | MCP endpoint path. |
 | `CE_LOG_PATH` | `tmp/cluster.log` | JSONL log path (relative to MCP server CWD). |
-| `CE_TIMEOUT_S` | `60` | Per-call hard timeout in seconds. |
+| `CE_TIMEOUT_S` | `1800` | Per-call hard timeout in seconds. Set to 0 to disable. |
+| `CE_AUTO_BG_TIMEOUT_S` | `30` | Per-call soft auto-backgrounding timeout in seconds. Set to 0 to disable. Must be less than `CE_TIMEOUT_S` when both are enabled. |
 | `CE_PROGRESS_INTERVAL_S` | `1.0` | Progress notification cadence in seconds. |
 | `CE_PROGRESS_TAIL_LINES` | `50` | Lines of cumulative tail shown in each progress notification. |
 
@@ -111,12 +130,12 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-uv run --project . python -m unittest discover tests -v
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):
 
 ```bash
-CE_BASTION="$YC_SYNC_HOST" bash mcp/cluster-exec/cedaemon --start
+CE_BASTION="bastion.example.com" bash mcp/cluster-exec/cedaemon --start
 bash mcp/cluster-exec/cedaemon --status
 ```
