@@ -2,11 +2,13 @@
   "venvPath": ".",
   "venv": ".venv",
   "extraPaths": [
-    "config/ansible/admin/files/ycluster"
+    "config/ansible/admin/files/ycluster",
+    "mcp/cluster-exec/src"
   ],
   "include": [
     "config/ansible/admin/files",
-    "contrib"
+    "contrib",
+    "mcp/cluster-exec"
   ],
   "exclude": [
     "**/__pycache__",

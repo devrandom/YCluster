@@ -1,4 +1,15 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "instructions": ["AGENTS.md", "AGENTS.local.md"]
+  "instructions": ["AGENTS.md", "AGENTS.local.md"],
+  "mcp": {
+    "cluster_exec": {
+      "type": "local",
+      "command": ["bash", "mcp/cluster-exec/run.sh"],
+      "cwd": "/data/home/dev/proj/ycluster",
+      "enabled": true,
+      "environment": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  }
 }

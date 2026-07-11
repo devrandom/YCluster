@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Tail the cluster-exec JSONL log as a human-readable transcript.
+#
+# Usage:
+#   bash mcp/cluster-exec/cetail                     # last 50 events
+#   bash mcp/cluster-exec/cetail -n 100              # last 100
+#   bash mcp/cluster-exec/cetail -s a1b2c3d4         # one session only
+#   bash mcp/cluster-exec/cetail -f                  # follow new events
+#   CE_LOG_PATH=/path/to/x.log bash mcp/cluster-exec/cetail
+set -euo pipefail
+unset VIRTUAL_ENV
+exec uv run --project "$(dirname "$(readlink -f "$0")")" \
+    python -m cluster_exec.cli "$@"
