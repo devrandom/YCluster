@@ -418,7 +418,9 @@ The working stock recipe, now prod (managed by `install-minimax-m3.yml`;
   changes. **Candidate for an upstream vLLM PR.**
 - Flags: `--block-size 128` (MSA page size, mandatory), `--kv-cache-dtype
   bfloat16`, `--linear-backend marlin` (+~2 tok/s), `--max-model-len 256000`,
-  `--max-num-seqs 64`, `--limit-mm-per-prompt '{"image":0,"video":0}'`,
+  `--max-num-seqs 64`, `--max-num-batched-tokens 1024` (decode latency under
+  long prefills — sharp edge below),
+  `--limit-mm-per-prompt '{"image":0,"video":0}'`,
   `--default-chat-template-kwargs '{"thinking_mode":"enabled"}'`,
   `VLLM_MARLIN_USE_ATOMIC_ADD=1` (no measured change; harmless), TP=4 —
   each non-obvious one earned its place via a distinct failure (sharp edges
@@ -450,6 +452,33 @@ Known sharp edges (each was a real startup/serving failure at 256k):
   unexpectedly`; check `journalctl -k` for `oom-kill`). Capping seqs at 64
   (b12x ran 4!) plus the start script's `--memory 26g --memory-swap -1`
   absorbs the startup spike.
+- **Generation collapses to ~1 tok/s during long prefills**
+  (`--max-num-batched-tokens 1024`, `MAXBATCH` in the start script): vLLM v1's
+  chunked-prefill scheduler co-schedules decodes with prefill chunks — every
+  running generation gets exactly one iteration per engine step, so decode
+  speed during a prefill is 1/step-time (× EAGLE3 acceptance). At the v1
+  default of 8192, one Marlin prefill chunk takes ~0.5–1 s (Marlin is
+  decode-friendly but compute-poor, and attention cost grows with context
+  depth), so every concurrent generation drops to ~1–3 tok/s for the duration.
+  Agentic clients that mutate earlier context (opencode) make this chronic:
+  prefix-cache hit rates stay high (~96%), but each mutation invalidates the
+  cache from the mutation point and forces a multi-10k-token re-prefill.
+  Capping the chunk at 1024 measured out (concurrent-stream test, 40k-token
+  cold prefill fired mid-generation): generation holds ~5–15 tok/s through
+  the prefill window instead of ~1–3, recovering fully the moment prefill
+  ends. Don't expect more from smaller chunks: cold prefill ran ~2k tok/s at
+  1024 — steps are still ~0.5 s because Marlin MoE prefill has a large fixed
+  per-step cost (a 1024-token chunk already routes to essentially all
+  experts, so every step re-reads/dequantizes the full expert weights).
+  Halving the chunk again would halve prefill throughput for little decode
+  gain, and 512 would collide with spec-decode's reserved draft slots
+  (`max_num_seqs 64` × 4 = 256 of the budget; vLLM warns about this at
+  startup already). There is no better knob in 0.24: v1
+  already schedules decodes first each step, and
+  `--long-prefill-token-threshold`/`--max-num-partial-prefills` only arbitrate
+  prefill-vs-prefill, not prefill-vs-decode. FlashInfer FP4 on SM120 (see
+  watch-items) is the real fix — cheap prefill compute shrinks the trade to
+  nothing.
 - **GPU KV starvation from the vision tower**
   (`--limit-mm-per-prompt '{"image":0,"video":0}'`): the checkpoint is the VL
   variant, and the multimodal *encoder cache* scales with context — ~15 GiB
