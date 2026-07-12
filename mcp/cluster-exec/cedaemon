@@ -22,6 +22,10 @@
 #   CE_HTTP_PATH           MCP endpoint path (default /mcp)
 #   CE_BASTION             SSH bastion host (required; the run tool fails
 #                          fast at startup if unset)
+#   CE_BEARER_PATH         bearer token file (default
+#                          ~/.config/cluster-exec/bearer, mode 0600)
+#   CE_ENVRC               .envrc to auto-export CE_BEARER into (default
+#                          $REPO/.envrc)
 #   CE_LOG_PATH            JSONL log path for run output (default
 #                          tmp/cluster.log)
 #   CE_TIMEOUT_S           hard timeout per run, seconds (default 1800)
@@ -42,6 +46,8 @@ HOST="${CE_HTTP_HOST:-127.0.0.1}"
 PORT="${CE_HTTP_PORT:-4003}"
 PATH_="${CE_HTTP_PATH:-/mcp}"
 URL="http://$HOST:$PORT$PATH_"
+BEARER_PATH="${CE_BEARER_PATH:-$HOME/.config/cluster-exec/bearer}"
+ENVRC="${CE_ENVRC:-$REPO/.envrc}"
 
 mkdir -p "$(dirname "$PID")"
 
@@ -50,6 +56,10 @@ usage() {
 Usage: $(basename "$0") <command>
 
 Manage the cluster-exec MCP server (streamable HTTP transport at $URL).
+
+The server requires HTTP Bearer authentication. The token file is at
+$BEARER_PATH (mode 0600). On --start, CE_BEARER is auto-exported in
+$ENVRC so opencode's {env:CE_BEARER} header picks it up.
 
 Commands:
   --start    Launch in the background, wait until the port is bound.
@@ -107,7 +117,32 @@ do_start() {
     echo $! > "$PID"
     wait_for_port
     echo "started — pid $(cat "$PID"), url $URL, log $LOG"
+    echo "bearer token file: $BEARER_PATH (mode 0600)"
+    ensure_bearer_in_envrc "$BEARER_PATH" "$ENVRC"
     echo "stop with: $(basename "$0") --stop"
+}
+
+# Append `export CE_BEARER=$(cat <bearer_path>)` to $2 unless it's already
+# present, so opencode's `{env:CE_BEARER}` header substitution picks up the
+# token. Skipped silently if the envrc file is missing — the user can wire
+# it manually in that case.
+ensure_bearer_in_envrc() {
+    local token_path="$1"
+    local envrc="$2"
+    if [[ ! -f "$envrc" ]]; then
+        echo "note: $envrc not found — to wire opencode, export CE_BEARER=\$(cat '$token_path')"
+        return
+    fi
+    if grep -qF 'export CE_BEARER=' "$envrc"; then
+        echo "CE_BEARER already exported in $envrc"
+        return
+    fi
+    {
+        echo ""
+        echo "# Auto-managed by mcp/cluster-exec/cedaemon — bearer for cluster_exec MCP"
+        echo "export CE_BEARER=\"\$(cat '$token_path')\""
+    } >> "$envrc"
+    echo "added CE_BEARER export to $envrc (direnv will reload)"
 }
 
 do_stop() {
@@ -178,7 +213,7 @@ kill_bg_children() {
 
 do_status() {
     if pid_alive; then
-        echo "running — pid $(cat "$PID"), url $URL, log $LOG"
+        echo "running — pid $(cat "$PID"), url $URL, log $LOG, bearer $BEARER_PATH"
     else
         rm -f "$PID"
         echo "not running — start with: $(basename "$0") --start"

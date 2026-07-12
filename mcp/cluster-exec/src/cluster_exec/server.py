@@ -4,31 +4,13 @@ import secrets
 import time
 from pathlib import Path
 
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.types import TextContent
+from pydantic import AnyHttpUrl
 
-from . import exec, log
-
-SERVER = MCPServer(
-    "cluster-exec",
-    instructions=(
-        "Four tools: `run` executes shell commands on internal hosts via "
-        "SSH through a bastion (grants the configured SSH user full remote "
-        "code execution \u2014 use sparingly); `tail` renders the tail of "
-        "the JSONL log at $CE_LOG_PATH (default ./tmp/cluster.log) as a "
-        "human-readable transcript; `status` reports the state of "
-        "backgrounded runs (list all, or detail by session_id); `kill` "
-        "terminates a backgrounded run by session_id. `run` auto-"
-        "backgrounds after `auto_bg_after_s` (default 30s; set to 0 to "
-        "disable) and hard-kills after `timeout_s` (default 1800s). "
-        "Backgrounded runs return `BACKGROUNDED session=<id>` \u2014 poll "
-        "with `tail -s <id>`, inspect with `status`, terminate with "
-        "`kill`. Full `run` output is logged to the same JSONL file; the "
-        "returned text is the head/tail-truncated merged stream with "
-        "`[stderr]` tags on stderr lines."
-    ),
-)
+from . import auth, exec, log
 
 
 def _env_float(name: str, default: float) -> float:
@@ -49,6 +31,42 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+_HOST = os.environ.get("CE_HTTP_HOST", "127.0.0.1")
+_PORT = _env_int("CE_HTTP_PORT", 4003)
+_URL_BASE = f"http://{_HOST}:{_PORT}"
+
+_BEARER_PATH = auth.default_token_path()
+_BEARER_TOKEN = auth.load_or_create_token(_BEARER_PATH)
+
+SERVER = MCPServer(
+    "cluster-exec",
+    instructions=(
+        "Four tools: `run` executes shell commands on internal hosts via "
+        "SSH through a bastion (grants the configured SSH user full remote "
+        "code execution \u2014 use sparingly); `tail` renders the tail of "
+        "the JSONL log at $CE_LOG_PATH (default ./tmp/cluster.log) as a "
+        "human-readable transcript; `status` reports the state of "
+        "backgrounded runs (list all, or detail by session_id); `kill` "
+        "terminates a backgrounded run by session_id. `run` auto-"
+        "backgrounds after `auto_bg_after_s` (default 30s; set to 0 to "
+        "disable) and hard-kills after `timeout_s` (default 1800s). "
+        "Backgrounded runs return `BACKGROUNDED session=<id>` \u2014 poll "
+        "with `tail -s <id>`, inspect with `status`, terminate with "
+        "`kill`. Full `run` output is logged to the same JSONL file; the "
+        "returned text is the head/tail-truncated merged stream with "
+        "`[stderr]` tags on stderr lines. The server requires HTTP Bearer "
+        "authentication on every request; the token lives in the file "
+        "logged at startup (default `~/.config/cluster-exec/bearer`, mode "
+        "0600)."
+    ),
+    auth=AuthSettings(
+        issuer_url=AnyHttpUrl(_URL_BASE),
+        resource_server_url=AnyHttpUrl(_URL_BASE),
+    ),
+    token_verifier=auth.StaticTokenVerifier(_BEARER_TOKEN),
+)
 
 
 _LOG_PATH = Path(os.environ.get("CE_LOG_PATH", "tmp/cluster.log"))
@@ -286,6 +304,8 @@ def main() -> None:
     host = os.environ.get("CE_HTTP_HOST", "127.0.0.1")
     port = _env_int("CE_HTTP_PORT", 4003)
     path = os.environ.get("CE_HTTP_PATH", "/mcp")
+    print(f"bearer token file: {_BEARER_PATH} (mode 0600)", flush=True)
+    print(f"listening: http://{host}:{port}{path}", flush=True)
     SERVER.run(transport="streamable-http", host=host, port=port, streamable_http_path=path)
 
 

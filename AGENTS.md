@@ -106,6 +106,16 @@ Client-driven cancel (`notifications/cancelled` → `ctx.cancel_requested`)
 works in streamable-HTTP and terminates the running command; the hard
 timeout remains the backstop in case the cancel message never arrives.
 
+**Bearer auth**: every request must include `Authorization: Bearer <token>`.
+The token lives in a single file (default `~/.config/cluster-exec/bearer`,
+mode 0600, override with `CE_BEARER_PATH`) and is printed on `--start` plus
+logged at server startup. The file is created on first start with a 256-bit
+random token and reused across restarts (deleting it rotates the token).
+`--start` also auto-appends `export CE_BEARER="$(cat '<path>')"` to
+`.envrc` (default `$REPO/.envrc`, override with `CE_ENVRC`) so opencode's
+`{env:CE_BEARER}` header substitution in `opencode.json` picks it up via
+direnv on reload.
+
 The MCP server uses generic `CE_*` env vars (`CE_BASTION`, `CE_LOG_PATH`,
 `CE_HTTP_HOST`, `CE_HTTP_PORT`, `CE_TIMEOUT_S`, …) and is not
 ycluster-specific. Our project's `BASTION` shell var (which resolves to

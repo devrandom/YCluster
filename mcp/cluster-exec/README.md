@@ -54,6 +54,24 @@ CE_BASTION="bastion.example.com" bash mcp/cluster-exec/cedaemon --start
 
 This tool grants the LLM **whatever SSH access your local `ssh` config has to `$CE_BASTION` and from there to `<hostname>`**. There are no allowlists, denylists, or confirmation steps. The privilege is intentional — the human running opencode is the admin. The HTTP transport binds to `127.0.0.1` only; do not change `CE_HTTP_HOST` to expose it.
 
+### Bearer authentication
+
+Every request must include `Authorization: Bearer <token>`. The token is read from a single file (default `~/.config/cluster-exec/bearer`, mode 0600) — the path is printed on `--start` and logged at server startup. The file is created with a fresh 256-bit random token on first startup and reused across restarts (deleting the file rotates the token on the next start).
+
+`cedaemon --start` auto-adds `export CE_BEARER="$(cat '<bearer_path>')"` to `.envrc` (default `$REPO/.envrc`, override with `CE_ENVRC`) so opencode's `{env:CE_BEARER}` header substitution picks it up — see `opencode.json`:
+
+```json
+{
+  "mcp": {
+    "cluster_exec": {
+      "type": "remote",
+      "url": "http://127.0.0.1:4003/mcp",
+      "headers": { "Authorization": "Bearer {env:CE_BEARER}" }
+    }
+  }
+}
+```
+
 ## Logging
 
 Every call writes its full stdout + stderr (untruncated) to `./tmp/cluster.log` as JSONL events:
@@ -118,6 +136,8 @@ Backgrounded runs are still subject to `timeout_s` (the hard timeout). The `time
 | `CE_HTTP_HOST` | `127.0.0.1` | Bind address for the streamable-HTTP transport. Loopback only by default — admin tool grants root SSH. |
 | `CE_HTTP_PORT` | `4003` | Bind port. |
 | `CE_HTTP_PATH` | `/mcp` | MCP endpoint path. |
+| `CE_BEARER_PATH` | `~/.config/cluster-exec/bearer` | Bearer token file (mode 0600). Created on first start; survives restarts. |
+| `CE_ENVRC` | `$REPO/.envrc` | `.envrc` file that `--start` auto-appends `export CE_BEARER=…` to. |
 | `CE_LOG_PATH` | `tmp/cluster.log` | JSONL log path (relative to MCP server CWD). |
 | `CE_TIMEOUT_S` | `1800` | Per-call hard timeout in seconds. Set to 0 to disable. |
 | `CE_AUTO_BG_TIMEOUT_S` | `30` | Per-call soft auto-backgrounding timeout in seconds. Set to 0 to disable. Must be less than `CE_TIMEOUT_S` when both are enabled. |
@@ -130,7 +150,7 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):
