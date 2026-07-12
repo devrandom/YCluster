@@ -7,10 +7,14 @@ Local MCP server for running shell commands on internal hosts through an SSH bas
 Exposes four tools:
 
 - **`run`** — run a command on an internal host:
-  1. Takes a `command` (str) and a `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Whatever the bastion can reach via its `ssh_config`.
+  1. Takes a `command` (str) and a `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Whatever the bastion can reach via its `ssh_config`. Pass `hostname="localhost"` to skip the inner ssh and run the command directly on the bastion itself (useful for ansible playbooks — see [Ansible](#ansible)).
   2. Runs the command via a two-hop SSH pattern:
      ```
      ssh "$CE_BASTION" 'ssh <hostname> "<command>"'
+     ```
+     For `hostname="localhost"` this collapses to a single hop:
+     ```
+     ssh "$CE_BASTION" "<command>"
      ```
   3. Captures stdout and stderr as separate streams (chronologically merged in the result), with stderr lines tagged `[stderr]`.
   4. Truncates the result to the first `head_lines` and last `tail_lines` of merged output (defaults 25/25), inserting a `… [N lines elided] …` marker between them.
@@ -127,6 +131,17 @@ kill   → terminate by session_id
 ```
 
 Backgrounded runs are still subject to `timeout_s` (the hard timeout). The `timeout_watcher` is registered when a run backgrounds; when it fires, the proc + readers are terminated and the session is removed from the registry.
+
+## Ansible
+
+Run playbooks via `hostname="localhost"` to skip the inner ssh and land directly on the bastion (which is also `$YC_SYNC_HOST` and typically the dev-sync host). `/etc/ansible` is mounted on every core node — the entry has it too:
+
+```bash
+run(command="cd /etc/ansible && ./run-playbook.sh admin/install-ycluster-package.yml", hostname="localhost")
+run(command="cd /etc/ansible && ansible-playbook admin/install-ycluster-package.yml --limit s3", hostname="localhost")
+```
+
+`./run-playbook.sh` sources `env.sh` (vault password + LC_ALL) and is the preferred entry point per the project's AGENTS.md. Playbooks likely to exceed 30s should bump `auto_bg_after_s` (e.g. `auto_bg_after_s: 120`) or set it to 0 to disable auto-bg mid-deploy. `timeout_s` defaults to 1800s — fine for most deploys.
 
 ## Configuration (env vars)
 

@@ -115,14 +115,23 @@ async def run(
             f"timeout_s ({timeout_s}) must be greater than auto_bg_after_s ({auto_bg_after_s})"
         )
 
-    inner = f"ssh {shlex.quote(target_host)} {shlex.quote(command)}"
-    proc = await asyncio.create_subprocess_exec(
-        "ssh",
-        bastion,
-        inner,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    if target_host == "localhost":
+        proc = await asyncio.create_subprocess_exec(
+            "ssh",
+            bastion,
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    else:
+        inner = f"ssh {shlex.quote(target_host)} {shlex.quote(command)}"
+        proc = await asyncio.create_subprocess_exec(
+            "ssh",
+            bastion,
+            inner,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
     assert proc.stdout is not None and proc.stderr is not None
 
     stdout_buf: list[tuple[float, str]] = []

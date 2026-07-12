@@ -61,14 +61,14 @@ class _FakeProcess:
             self._returncode = -9  # SIGKILL
 
 
-def _patched_run(proc: _FakeProcess, *, timeout_s: float, auto_bg_after_s: float = 0.0, progress_interval_s: float = 10.0, **kwargs):
+def _patched_run(proc: _FakeProcess, *, timeout_s: float, auto_bg_after_s: float = 0.0, progress_interval_s: float = 10.0, target_host: str = "dummy-target", **kwargs):
     async def _create(*a, **kw):
         return proc
     with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
         return asyncio.run(
             exec_mod.run(
                 bastion="dummy-bastion",
-                target_host="dummy-target",
+                target_host=target_host,
                 command="dummy-cmd",
                 session_id="abcd1234",
                 timeout_s=timeout_s,
@@ -113,6 +113,67 @@ class ExecTests(unittest.TestCase):
         text = _patched_run(proc, timeout_s=10)
         self.assertTrue(text.startswith("FAILED exit=2"))
         self.assertIn("err msg", text)
+
+    def test_localhost_skips_inner_ssh(self):
+        proc = _FakeProcess(stdout_lines=[b"ok\n"], stderr_lines=[], exit_code=0)
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            asyncio.run(
+                exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="localhost",
+                    command="dummy-cmd",
+                    session_id="abcd1234",
+                    timeout_s=10,
+                    auto_bg_after_s=0.0,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                )
+            )
+        self.assertEqual(len(captured), 1)
+        args = captured[0]
+        self.assertEqual(args[0], "ssh")
+        self.assertEqual(args[1], "dummy-bastion")
+        self.assertEqual(args[2], "dummy-cmd")
+        self.assertNotIn("ssh localhost", args[2])
+
+    def test_remote_target_wraps_inner_ssh(self):
+        proc = _FakeProcess(stdout_lines=[b"ok\n"], stderr_lines=[], exit_code=0)
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            asyncio.run(
+                exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="app1",
+                    command="echo hello world",
+                    session_id="abcd1234",
+                    timeout_s=10,
+                    auto_bg_after_s=0.0,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                )
+            )
+        self.assertEqual(len(captured), 1)
+        args = captured[0]
+        self.assertEqual(args[0], "ssh")
+        self.assertEqual(args[1], "dummy-bastion")
+        self.assertEqual(args[2], "ssh app1 'echo hello world'")
 
     def test_stderr_tagged(self):
         proc = _FakeProcess(

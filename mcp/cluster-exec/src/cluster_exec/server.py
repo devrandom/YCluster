@@ -56,10 +56,13 @@ SERVER = MCPServer(
         "with `tail -s <id>`, inspect with `status`, terminate with "
         "`kill`. Full `run` output is logged to the same JSONL file; the "
         "returned text is the head/tail-truncated merged stream with "
-        "`[stderr]` tags on stderr lines. The server requires HTTP Bearer "
-        "authentication on every request; the token lives in the file "
-        "logged at startup (default `~/.config/cluster-exec/bearer`, mode "
-        "0600)."
+        "`[stderr]` tags on stderr lines. The `run` tool accepts "
+        "`hostname=\"localhost\"` to skip the inner ssh and run directly "
+        "on the bastion (e.g. for ansible playbooks via "
+        "`cd /etc/ansible && ./run-playbook.sh ...`). The server requires "
+        "HTTP Bearer authentication on every request; the token lives in "
+        "the file logged at startup (default `~/.config/cluster-exec/bearer`, "
+        "mode 0600)."
     ),
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(_URL_BASE),
@@ -90,7 +93,10 @@ _PROGRESS_TAIL_LINES = _env_int("CE_PROGRESS_TAIL_LINES", 50)
         "`BACKGROUNDED session=<id>` for polling via `tail -s <id>`; "
         "hard `timeout_s` (default 1800s) SIGTERMs the process. Both "
         "overridable per call \u2014 set `timeout_s` greater than "
-        "`auto_bg_after_s` (or both to 0)."
+        "`auto_bg_after_s` (or both to 0). Pass `hostname=\"localhost\"` "
+        "to skip the inner ssh and run the command directly on the "
+        "bastion (useful for ansible playbooks via "
+        "`cd /etc/ansible && ./run-playbook.sh ...`)."
     ),
 )
 async def run(

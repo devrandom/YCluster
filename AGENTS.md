@@ -116,6 +116,17 @@ random token and reused across restarts (deleting it rotates the token).
 `{env:CE_BEARER}` header substitution in `opencode.json` picks it up via
 direnv on reload.
 
+**`hostname="localhost"` shortcut**: collapses the two-hop to a single
+`ssh "$CE_BASTION" "<command>"` — use it for anything that should run on the
+bastion itself, e.g. ansible playbooks:
+```text
+run(command="cd /etc/ansible && ./run-playbook.sh admin/install-ycluster-package.yml",
+    hostname="localhost")
+```
+`/etc/ansible` is mounted on every core node; the bastion is one of them
+(typically also `$YC_SYNC_HOST`). Bump `auto_bg_after_s` (or set to 0) for
+playbooks likely to exceed the 30s default.
+
 The MCP server uses generic `CE_*` env vars (`CE_BASTION`, `CE_LOG_PATH`,
 `CE_HTTP_HOST`, `CE_HTTP_PORT`, `CE_TIMEOUT_S`, …) and is not
 ycluster-specific. Our project's `BASTION` shell var (which resolves to
