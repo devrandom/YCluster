@@ -43,26 +43,31 @@ _BEARER_TOKEN = auth.load_or_create_token(_BEARER_PATH)
 SERVER = MCPServer(
     "cluster-exec",
     instructions=(
-        "Four tools: `run` executes shell commands on internal hosts via "
+        "Six tools: `run` executes shell commands on internal hosts via "
         "SSH through a bastion (grants the configured SSH user full remote "
-        "code execution \u2014 use sparingly); `tail` renders the tail of "
-        "the JSONL log at $CE_LOG_PATH (default ./tmp/cluster.log) as a "
-        "human-readable transcript; `status` reports the state of "
-        "backgrounded runs (list all, or detail by session_id); `kill` "
-        "terminates a backgrounded run by session_id. `run` auto-"
-        "backgrounds after `auto_bg_after_s` (default 30s; set to 0 to "
-        "disable) and hard-kills after `timeout_s` (default 1800s). "
-        "Backgrounded runs return `BACKGROUNDED session=<id>` \u2014 poll "
-        "with `tail -s <id>`, inspect with `status`, terminate with "
-        "`kill`. Full `run` output is logged to the same JSONL file; the "
-        "returned text is the head/tail-truncated merged stream with "
-        "`[stderr]` tags on stderr lines. The `run` tool accepts "
-        "`hostname=\"localhost\"` to skip the inner ssh and run directly "
-        "on the bastion (e.g. for ansible playbooks via "
-        "`cd /etc/ansible && ./run-playbook.sh ...`). The server requires "
-        "HTTP Bearer authentication on every request; the token lives in "
-        "the file logged at startup (default `~/.config/cluster-exec/bearer`, "
-        "mode 0600)."
+        "code execution \u2014 use sparingly); `put` uploads a local file "
+        "to a target host via SSH (binary-safe, foreground only); `get` "
+        "downloads a remote file from a target host to the local "
+        "filesystem via SSH (binary-safe, foreground only); `tail` "
+        "renders the tail of the JSONL log at $CE_LOG_PATH (default "
+        "./tmp/cluster.log) as a human-readable transcript; `status` "
+        "reports the state of backgrounded runs (list all, or detail by "
+        "session_id); `kill` terminates a backgrounded run by session_id. "
+        "`run` auto-backgrounds after `auto_bg_after_s` (default 30s; "
+        "set to 0 to disable) and hard-kills after `timeout_s` (default "
+        "1800s). Backgrounded runs return `BACKGROUNDED session=<id>` "
+        "\u2014 poll with `tail -s <id>`, inspect with `status`, "
+        "terminate with `kill`. Full `run` output is logged to the same "
+        "JSONL file; the returned text is the head/tail-truncated merged "
+        "stream with `[stderr]` tags on stderr lines. `put` and `get` "
+        "are foreground only (no auto-backgrounding) and honor the same "
+        "hard `timeout_s` (default 1800s; set to 0 to disable). All three "
+        "exec tools accept `hostname=\"localhost\"` to skip the inner "
+        "ssh and run directly on the bastion (e.g. for ansible "
+        "playbooks via `cd /etc/ansible && ./run-playbook.sh ...`). The "
+        "server requires HTTP Bearer authentication on every request; "
+        "the token lives in the file logged at startup (default "
+        "`~/.config/cluster-exec/bearer`, mode 0600)."
     ),
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(_URL_BASE),
@@ -163,6 +168,166 @@ async def run(
             tail_lines=tail_lines,
             cwd=cwd,
             on_progress=report,
+            cancel=cancel,
+        )
+    finally:
+        bridge_task.cancel()
+        try:
+            await bridge_task
+        except BaseException:
+            pass
+    return [TextContent(type="text", text=text)]
+
+
+@SERVER.tool(
+    name="put",
+    description=(
+        "Upload a local file to a target host via SSH (binary-safe, "
+        "foreground only \u2014 never auto-backgrounds). Streams bytes "
+        "through SSH stdin so the payload is never staged on the "
+        "bastion. Takes a `local_path` (str), `remote_path` (str), and "
+        "`hostname` (str) \u2014 the latter is an internal host name "
+        "(e.g. `app1`, `db2`, \u2026). Pass `hostname=\"localhost\"` to "
+        "skip the inner ssh and write directly on the bastion. Honors "
+        "`timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to "
+        "disable) as a hard timeout (SIGTERM, then SIGKILL after 2s). "
+        "Returns a status line: `OK bytes=N -> <host>:<path> "
+        "duration=X.Xs` on success, `FAILED exit=<code> duration=X.Xs` "
+        "on non-zero exit, `CANCELLED after X.Xs (timeout)` on hard "
+        "timeout, `CANCELLED after X.Xs (cancelled by client)` on "
+        "`notifications/cancelled`, or `ERROR: <message>` if the local "
+        "file is missing or not a regular file. Full stderr is logged "
+        "to ./tmp/cluster.log as JSONL."
+    ),
+)
+async def put(
+    local_path: str,
+    remote_path: str,
+    hostname: str,
+    timeout_s: float = _TIMEOUT_S,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> list[TextContent]:
+    if not local_path:
+        return [TextContent(type="text", text="ERROR: local_path must not be empty")]
+    if not remote_path:
+        return [TextContent(type="text", text="ERROR: remote_path must not be empty")]
+    if not hostname:
+        return [TextContent(type="text", text="ERROR: hostname must not be empty")]
+    if not _BASTION:
+        return [
+            TextContent(
+                type="text",
+                text="ERROR: CE_BASTION is not set. Export it before starting opencode.",
+            )
+        ]
+    if timeout_s < 0:
+        return [TextContent(type="text", text=f"ERROR: timeout_s must be non-negative, got {timeout_s}")]
+
+    log.init(_LOG_PATH)
+    session_id = secrets.token_hex(4)
+    cwd = os.getcwd()
+
+    cancel = asyncio.Event()
+
+    async def bridge_cancel() -> None:
+        try:
+            await ctx.cancel_requested.wait()  # type: ignore[attr-defined]
+        except Exception:
+            return
+        cancel.set()
+
+    bridge_task = asyncio.create_task(bridge_cancel())
+
+    try:
+        text = await exec.put_file(
+            bastion=_BASTION,
+            target_host=hostname,
+            local_path=local_path,
+            remote_path=remote_path,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            cwd=cwd,
+            cancel=cancel,
+        )
+    finally:
+        bridge_task.cancel()
+        try:
+            await bridge_task
+        except BaseException:
+            pass
+    return [TextContent(type="text", text=text)]
+
+
+@SERVER.tool(
+    name="get",
+    description=(
+        "Download a file from a target host to the local filesystem "
+        "via SSH (binary-safe, foreground only \u2014 never auto-"
+        "backgrounds). Streams bytes through SSH stdout and writes "
+        "them to `local_path` as they arrive. Takes a `remote_path` "
+        "(str), `local_path` (str), and `hostname` (str) \u2014 the "
+        "latter is an internal host name (e.g. `app1`, `db2`, \u2026). "
+        "Pass `hostname=\"localhost\"` to skip the inner ssh and read "
+        "directly from the bastion. Honors `timeout_s` (default "
+        "1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout "
+        "(SIGTERM, then SIGKILL after 2s). Returns a status line: "
+        "`OK bytes=N <host>:<path> -> <local> duration=X.Xs` on "
+        "success, `FAILED exit=<code> duration=X.Xs` on non-zero exit, "
+        "`CANCELLED after X.Xs (timeout)` on hard timeout, "
+        "`CANCELLED after X.Xs (cancelled by client)` on "
+        "`notifications/cancelled`, or `ERROR: <message>` if the "
+        "local parent directory is missing or `local_path` is not a "
+        "regular file. Full stderr is logged to ./tmp/cluster.log as "
+        "JSONL."
+    ),
+)
+async def get(
+    remote_path: str,
+    local_path: str,
+    hostname: str,
+    timeout_s: float = _TIMEOUT_S,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> list[TextContent]:
+    if not remote_path:
+        return [TextContent(type="text", text="ERROR: remote_path must not be empty")]
+    if not local_path:
+        return [TextContent(type="text", text="ERROR: local_path must not be empty")]
+    if not hostname:
+        return [TextContent(type="text", text="ERROR: hostname must not be empty")]
+    if not _BASTION:
+        return [
+            TextContent(
+                type="text",
+                text="ERROR: CE_BASTION is not set. Export it before starting opencode.",
+            )
+        ]
+    if timeout_s < 0:
+        return [TextContent(type="text", text=f"ERROR: timeout_s must be non-negative, got {timeout_s}")]
+
+    log.init(_LOG_PATH)
+    session_id = secrets.token_hex(4)
+    cwd = os.getcwd()
+
+    cancel = asyncio.Event()
+
+    async def bridge_cancel() -> None:
+        try:
+            await ctx.cancel_requested.wait()  # type: ignore[attr-defined]
+        except Exception:
+            return
+        cancel.set()
+
+    bridge_task = asyncio.create_task(bridge_cancel())
+
+    try:
+        text = await exec.get_file(
+            bastion=_BASTION,
+            target_host=hostname,
+            remote_path=remote_path,
+            local_path=local_path,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            cwd=cwd,
             cancel=cancel,
         )
     finally:

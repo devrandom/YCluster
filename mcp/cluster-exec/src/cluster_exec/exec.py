@@ -1,6 +1,7 @@
 import asyncio
 import shlex
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -316,4 +317,419 @@ async def run(
     log.end(session_id, exit_code, duration, status, lines=len(out_lines))
 
     body = truncate(out_lines, head_lines, tail_lines)
+    return f"{status_line}\n\n{body}" if body else status_line
+
+
+# ---------------------------------------------------------------------------
+# File transfer (put / get) — foreground only, no auto-backgrounding.
+#
+# Stream bytes through SSH stdin/stdout using ``cat`` on the remote end so the
+# payload is binary-safe and never staged on the bastion. Hard timeout via
+# ``timeout_s`` (SIGTERM, then SIGKILL after 2s) — but no soft auto-bg
+# transition, since file transfers are bounded and we want an immediate
+# success/failure answer.
+#
+# The remote command (``cat > <path>`` for put, ``cat <path>`` for get) is
+# passed as a single shlex-quoted argv entry to ``ssh``. ssh concatenates its
+# argv with spaces and sends the joined string to the bastion shell, which
+# re-parses it; the single-quote wrapping keeps the ``>`` redirect intact so
+# the bastion shell doesn't redirect its own ssh's stdout.
+# ---------------------------------------------------------------------------
+
+
+async def put_file(
+    *,
+    bastion: str,
+    target_host: str,
+    local_path: str,
+    remote_path: str,
+    session_id: str,
+    timeout_s: float,
+    cwd: str,
+    cancel: asyncio.Event | None = None,
+) -> str:
+    """Upload ``local_path`` to ``target_host:remote_path`` via SSH bastion.
+
+    Streams the file contents through SSH stdin (``cat > file`` on the
+    remote end) so the file is never staged on the bastion. Binary-safe.
+    Foreground only — never auto-backgrounds. Hard timeout via
+    ``timeout_s`` (SIGTERM, then SIGKILL after 2s).
+    """
+    if cancel is None:
+        cancel = asyncio.Event()
+
+    local = Path(local_path)
+    if not local.exists():
+        return f"ERROR: local file not found: {local_path}"
+    if not local.is_file():
+        return f"ERROR: local path is not a regular file: {local_path}"
+
+    # The command the *target* host should run. ``dd of=<path>`` reads stdin
+    # and writes to the file (binary-safe). We use ``dd`` rather than
+    # ``cat > <path>`` because the redirect ``>`` would be interpreted by
+    # the bastion's shell on the two-hop path, not the target's — wrapping
+    # it in single quotes to dodge that breaks the target shell, which then
+    # treats the whole quoted string as one command name. ``dd`` has no
+    # shell metacharacters, so the command string is safe to pass through
+    # both hops without quoting tricks. ``dd`` writes its ``N+M records``
+    # status to stderr — we drain stderr so the caller sees it via the
+    # ``tail`` tool's transcript.
+    target_cmd_str = f"dd of={shlex.quote(remote_path)}"
+    quoted_target_cmd = target_cmd_str
+
+    if target_host == "localhost":
+        ssh_argv: list[str] = ["ssh", bastion, quoted_target_cmd]
+    else:
+        ssh_argv = [
+            "ssh", bastion,
+            "ssh", shlex.quote(target_host), "--", quoted_target_cmd,
+        ]
+
+    cat_proc = await asyncio.create_subprocess_exec(
+        "cat",
+        str(local),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    # Use stdin=PIPE and pump bytes from cat_proc.stdout to ssh_proc.stdin
+    # ourselves. Passing ``cat_proc.stdout`` (a StreamReader) directly as
+    # stdin doesn't work — asyncio's create_subprocess_exec tries to call
+    # ``fileno()`` on the stdin argument and StreamReader has none.
+    ssh_proc = await asyncio.create_subprocess_exec(
+        *ssh_argv,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    cat_out: asyncio.StreamReader = cat_proc.stdout  # type: ignore[assignment]
+    ssh_in: asyncio.StreamWriter = ssh_proc.stdin  # type: ignore[assignment]
+    cat_err: asyncio.StreamReader = cat_proc.stderr  # type: ignore[assignment]
+    ssh_err: asyncio.StreamReader = ssh_proc.stderr  # type: ignore[assignment]
+    assert cat_out is not None and ssh_in is not None and cat_err is not None and ssh_err is not None
+
+    started = time.monotonic()
+    log.start(session_id, target_host, f"PUT {local_path} -> {remote_path}", cwd)
+
+    bytes_sent = 0
+
+    async def pump() -> None:
+        nonlocal bytes_sent
+        try:
+            while True:
+                chunk = await cat_out.read(8192)
+                if not chunk:
+                    break
+                ssh_in.write(chunk)
+                await ssh_in.drain()
+                bytes_sent += len(chunk)
+        except Exception:
+            pass
+        finally:
+            try:
+                if not ssh_in.is_closing():
+                    ssh_in.close()
+            except Exception:
+                pass
+
+    pump_task = asyncio.create_task(pump())
+
+    async def drain(stream: asyncio.StreamReader, tag: str, buf: list[str]) -> None:
+        while True:
+            raw = await stream.readline()
+            if not raw:
+                return
+            text = raw.decode("utf-8", errors="replace").rstrip("\n")
+            buf.append(text)
+            log.line(session_id, tag, text)
+
+    cat_err_buf: list[str] = []
+    ssh_err_buf: list[str] = []
+    drain_cat = asyncio.create_task(drain(cat_err, "stderr", cat_err_buf))
+    drain_ssh = asyncio.create_task(drain(ssh_err, "stderr", ssh_err_buf))
+
+    async def terminate_all() -> None:
+        if ssh_proc.returncode is None:
+            ssh_proc.terminate()
+            try:
+                await asyncio.wait_for(ssh_proc.wait(), timeout=2.0)
+            except TimeoutError:
+                ssh_proc.kill()
+                await ssh_proc.wait()
+        if cat_proc.returncode is None:
+            cat_proc.terminate()
+            try:
+                await asyncio.wait_for(cat_proc.wait(), timeout=2.0)
+            except TimeoutError:
+                cat_proc.kill()
+                await cat_proc.wait()
+
+    async def cancel_watcher() -> None:
+        try:
+            await cancel.wait()
+        except asyncio.CancelledError:
+            return
+        await terminate_all()
+
+    watcher_task = asyncio.create_task(cancel_watcher())
+    wait_task = asyncio.create_task(ssh_proc.wait())
+    timeout_task: asyncio.Task | None = (
+        asyncio.create_task(asyncio.sleep(timeout_s)) if timeout_s > 0 else None
+    )
+
+    race_set: list[asyncio.Task] = [wait_task, watcher_task]
+    if timeout_task is not None:
+        race_set.append(timeout_task)
+
+    done, _ = await asyncio.wait(race_set, return_when=asyncio.FIRST_COMPLETED)
+
+    timed_out = timeout_task is not None and timeout_task in done
+    external_cancel = cancel.is_set() and not timed_out
+
+    if not external_cancel:
+        cancel.set()
+    watcher_task.cancel()
+    try:
+        await watcher_task
+    except BaseException:
+        pass
+
+    if timed_out:
+        await terminate_all()
+
+    try:
+        await asyncio.wait_for(pump_task, timeout=2.0)
+    except TimeoutError:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except BaseException:
+            pass
+
+    try:
+        await asyncio.wait_for(asyncio.gather(drain_cat, drain_ssh), timeout=2.0)
+    except TimeoutError:
+        drain_cat.cancel()
+        drain_ssh.cancel()
+        await asyncio.gather(drain_cat, drain_ssh, return_exceptions=True)
+
+    duration = time.monotonic() - started
+    all_err = [f"[cat] {t}" for t in cat_err_buf] + ssh_err_buf
+
+    if ssh_proc.returncode is None:
+        status = "error"
+        status_line = "ERROR: ssh process did not exit cleanly"
+        exit_code: int | None = None
+    elif external_cancel:
+        status = "cancelled"
+        status_line = f"CANCELLED after {duration:.1f}s (cancelled by client)"
+        exit_code = ssh_proc.returncode
+    elif timed_out:
+        status = "cancelled"
+        status_line = f"CANCELLED after {duration:.1f}s (timeout)"
+        exit_code = ssh_proc.returncode
+    elif ssh_proc.returncode == 0:
+        status = "ok"
+        status_line = (
+            f"OK bytes={bytes_sent} -> {target_host}:{remote_path} duration={duration:.1f}s"
+        )
+        exit_code = 0
+    else:
+        status = "failed"
+        status_line = (
+            f"FAILED bytes={bytes_sent} -> {target_host}:{remote_path} "
+            f"exit={ssh_proc.returncode} duration={duration:.1f}s"
+        )
+        exit_code = ssh_proc.returncode
+
+    log.end(session_id, exit_code, duration, status, lines=len(all_err))
+
+    body = truncate(all_err, 25, 25)
+    return f"{status_line}\n\n{body}" if body else status_line
+
+
+async def get_file(
+    *,
+    bastion: str,
+    target_host: str,
+    remote_path: str,
+    local_path: str,
+    session_id: str,
+    timeout_s: float,
+    cwd: str,
+    cancel: asyncio.Event | None = None,
+) -> str:
+    """Download ``remote_path`` from ``target_host`` to ``local_path`` via SSH bastion.
+
+    Streams the file contents through SSH stdout (``cat <path>`` on the
+    remote end) and writes them to ``local_path`` as bytes arrive.
+    Binary-safe. Foreground only — never auto-backgrounds. Hard timeout via
+    ``timeout_s``.
+    """
+    if cancel is None:
+        cancel = asyncio.Event()
+
+    local = Path(local_path)
+    parent = local.parent
+    if not parent.exists():
+        return f"ERROR: local parent directory does not exist: {parent}"
+    if local.exists() and not local.is_file():
+        return f"ERROR: local path exists but is not a regular file: {local_path}"
+
+    target_cmd_str = f"cat {shlex.quote(remote_path)}"
+    quoted_target_cmd = shlex.quote(target_cmd_str)
+
+    if target_host == "localhost":
+        ssh_argv: list[str] = ["ssh", bastion, quoted_target_cmd]
+    else:
+        ssh_argv = [
+            "ssh", bastion,
+            "ssh", shlex.quote(target_host), "--", quoted_target_cmd,
+        ]
+
+    ssh_proc = await asyncio.create_subprocess_exec(
+        *ssh_argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    ssh_out: asyncio.StreamReader = ssh_proc.stdout  # type: ignore[assignment]
+    ssh_err: asyncio.StreamReader = ssh_proc.stderr  # type: ignore[assignment]
+    assert ssh_out is not None and ssh_err is not None
+
+    started = time.monotonic()
+    log.start(session_id, target_host, f"GET {remote_path} -> {local_path}", cwd)
+
+    try:
+        local_file = local.open("wb")
+    except OSError as e:
+        ssh_proc.kill()
+        await ssh_proc.wait()
+        return f"ERROR: cannot open local file for writing: {local_path} ({e})"
+
+    bytes_written = 0
+
+    async def pump() -> None:
+        nonlocal bytes_written
+        try:
+            while True:
+                chunk = await ssh_out.read(8192)
+                if not chunk:
+                    break
+                local_file.write(chunk)
+                bytes_written += len(chunk)
+        except Exception:
+            pass
+        finally:
+            try:
+                local_file.close()
+            except Exception:
+                pass
+
+    pump_task = asyncio.create_task(pump())
+
+    ssh_err_buf: list[str] = []
+
+    async def drain_ssh_err() -> None:
+        while True:
+            raw = await ssh_err.readline()
+            if not raw:
+                return
+            text = raw.decode("utf-8", errors="replace").rstrip("\n")
+            ssh_err_buf.append(text)
+            log.line(session_id, "stderr", text)
+
+    drain_ssh = asyncio.create_task(drain_ssh_err())
+
+    async def terminate_proc() -> None:
+        if ssh_proc.returncode is not None:
+            return
+        ssh_proc.terminate()
+        try:
+            await asyncio.wait_for(ssh_proc.wait(), timeout=2.0)
+        except TimeoutError:
+            ssh_proc.kill()
+            await ssh_proc.wait()
+
+    async def cancel_watcher() -> None:
+        try:
+            await cancel.wait()
+        except asyncio.CancelledError:
+            return
+        await terminate_proc()
+
+    watcher_task = asyncio.create_task(cancel_watcher())
+    wait_task = asyncio.create_task(ssh_proc.wait())
+    timeout_task: asyncio.Task | None = (
+        asyncio.create_task(asyncio.sleep(timeout_s)) if timeout_s > 0 else None
+    )
+
+    race_set: list[asyncio.Task] = [wait_task, watcher_task]
+    if timeout_task is not None:
+        race_set.append(timeout_task)
+
+    done, _ = await asyncio.wait(race_set, return_when=asyncio.FIRST_COMPLETED)
+
+    timed_out = timeout_task is not None and timeout_task in done
+    external_cancel = cancel.is_set() and not timed_out
+
+    if not external_cancel:
+        cancel.set()
+    watcher_task.cancel()
+    try:
+        await watcher_task
+    except BaseException:
+        pass
+
+    if timed_out:
+        await terminate_proc()
+
+    try:
+        await asyncio.wait_for(pump_task, timeout=2.0)
+    except TimeoutError:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except BaseException:
+            pass
+
+    try:
+        await asyncio.wait_for(drain_ssh, timeout=2.0)
+    except TimeoutError:
+        drain_ssh.cancel()
+        try:
+            await drain_ssh
+        except BaseException:
+            pass
+
+    duration = time.monotonic() - started
+
+    if ssh_proc.returncode is None:
+        status = "error"
+        status_line = "ERROR: ssh process did not exit cleanly"
+        exit_code: int | None = None
+    elif external_cancel:
+        status = "cancelled"
+        status_line = f"CANCELLED after {duration:.1f}s (cancelled by client)"
+        exit_code = ssh_proc.returncode
+    elif timed_out:
+        status = "cancelled"
+        status_line = f"CANCELLED after {duration:.1f}s (timeout)"
+        exit_code = ssh_proc.returncode
+    elif ssh_proc.returncode == 0:
+        status = "ok"
+        status_line = (
+            f"OK bytes={bytes_written} {target_host}:{remote_path} -> {local_path} "
+            f"duration={duration:.1f}s"
+        )
+        exit_code = 0
+    else:
+        status = "failed"
+        status_line = (
+            f"FAILED bytes={bytes_written} {target_host}:{remote_path} -> {local_path} "
+            f"exit={ssh_proc.returncode} duration={duration:.1f}s"
+        )
+        exit_code = ssh_proc.returncode
+
+    log.end(session_id, exit_code, duration, status, lines=len(ssh_err_buf))
+
+    body = truncate(ssh_err_buf, 25, 25)
     return f"{status_line}\n\n{body}" if body else status_line

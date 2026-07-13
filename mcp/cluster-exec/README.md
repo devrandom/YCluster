@@ -4,7 +4,7 @@ Local MCP server for running shell commands on internal hosts through an SSH bas
 
 ## What it does
 
-Exposes four tools:
+Exposes six tools:
 
 - **`run`** — run a command on an internal host:
   1. Takes a `command` (str) and a `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Whatever the bastion can reach via its `ssh_config`. Pass `hostname="localhost"` to skip the inner ssh and run the command directly on the bastion itself (useful for ansible playbooks — see [Ansible](#ansible)).
@@ -30,6 +30,22 @@ Exposes four tools:
   **Two-tier timeouts** (overridable per call):
   - `auto_bg_after_s` (default 30s, `CE_AUTO_BG_TIMEOUT_S`) — soft timeout. When it fires, the run transitions to background and returns `BACKGROUNDED session=<id>`. Set to 0 to disable.
   - `timeout_s` (default 1800s, `CE_TIMEOUT_S`) — hard timeout. SIGTERM, then SIGKILL after 2s. Set to 0 to disable. Must be greater than `auto_bg_after_s` when both are enabled.
+
+- **`put`** — upload a local file to an internal host. Takes `local_path` (str), `remote_path` (str), and `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Pass `hostname="localhost"` to skip the inner ssh and write directly on the bastion. Streams bytes through SSH stdin (`cat > file` on the remote end) so the payload is binary-safe and never staged on the bastion. Foreground only — never auto-backgrounds. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout. Returns a status line:
+  - `OK bytes=N -> <host>:<path> duration=X.Xs` on success
+  - `FAILED exit=<code> duration=X.Xs` on non-zero exit
+  - `CANCELLED after X.Xs (timeout)` on hard timeout
+  - `CANCELLED after X.Xs (cancelled by client)` on `notifications/cancelled`
+  - `ERROR: <message>` if `local_path` is missing or not a regular file
+
+- **`get`** — download a file from an internal host to the local filesystem. Takes `remote_path` (str), `local_path` (str), and `hostname` (str) — the latter is an internal host name. Pass `hostname="localhost"` to skip the inner ssh and read directly from the bastion. Streams bytes through SSH stdout (`cat <path>` on the remote end) and writes them to `local_path` as they arrive — binary-safe, never staged on the bastion. Foreground only — never auto-backgrounds. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout. Returns a status line:
+  - `OK bytes=N <host>:<path> -> <local> duration=X.Xs` on success
+  - `FAILED exit=<code> duration=X.Xs` on non-zero exit
+  - `CANCELLED after X.Xs (timeout)` on hard timeout
+  - `CANCELLED after X.Xs (cancelled by client)` on `notifications/cancelled`
+  - `ERROR: <message>` if `local_path`'s parent directory is missing or `local_path` is not a regular file
+
+  Both `put` and `get` log their full stderr to `./tmp/cluster.log` as JSONL (queryable with `tail -s <session>`).
 
 - **`tail`** — render the tail of the JSONL log (see [Logging](#logging)) as a human-readable transcript. Takes `tail_lines` (default 50) and an optional `session` filter. Useful for inspecting what just ran, recovering output that was truncated in a `run` result, or watching a backgrounded session.
 
@@ -165,7 +181,7 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth tests.test_file_transfer
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):
