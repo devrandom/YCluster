@@ -17,6 +17,24 @@ YCluster is a self-bootstrapping infrastructure platform for small AI clusters. 
   - hostnames with indexes > 3 (e.g. c4, s5)
 - keep track of deployment specific tasks in NOTES.md (gitignored)
 
+## Sandbox restrictions (Codex CLI and similar harnesses)
+
+When the agent runs in a sandboxed harness like Codex CLI, the
+following operations may be blocked by the sandbox and need
+sandbox_permissions: "require_escalated" (or the harness's
+equivalent escalation mechanism) plus a short justification:
+
+- Network access: anything that reaches outside the sandbox
+  (curl, ssh, git fetch, bash dev-sync.sh --check, etc.).
+  A failed network command does NOT mean the task is impossible --
+  re-run with escalation and let the user approve. Symptoms
+  include Operation not permitted on SSH control sockets
+  (e.g. dev-sync.sh --check).
+
+For privileged cluster operations, prefer mcp__cluster_exec__run
+(see "Cluster exec via MCP" below) -- it has its own two-tier
+timeout model and bearer auth and doesn't need escalation.
+
 ## Common Commands
 
 ### Reaching the cluster over SSH
