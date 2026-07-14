@@ -36,6 +36,14 @@ Env config (read at startup):
   WHISPERX_DIARIZE        true|false; preloads diarizer at startup (default: true)
   WHISPERX_HOST           default: 0.0.0.0
   WHISPERX_PORT           default: 9000
+  WHISPERX_MODEL_ALIASES  comma-separated extra model IDs to advertise
+                          in /v1/models alongside the loaded model
+                          (default: empty). The proxy uses /v1/models
+                          to filter candidates per-model, so aliases
+                          here let the proxy route requests for those
+                          names to this backend. Inference still uses
+                          the loaded model -- the client's `model`
+                          field remains informational.
 """
 from __future__ import annotations
 
@@ -60,6 +68,7 @@ log = logging.getLogger("whisperx-server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 MODEL_ID = os.environ.get("WHISPERX_MODEL", "large-v3")
+MODEL_ALIASES = [a.strip() for a in os.environ.get("WHISPERX_MODEL_ALIASES", "").split(",") if a.strip()]
 DEVICE = os.environ.get("WHISPERX_DEVICE", "cuda")
 COMPUTE_TYPE = os.environ.get("WHISPERX_COMPUTE_TYPE", "float16")
 DIARIZE_MODEL_ID = os.environ.get("WHISPERX_DIARIZE_MODEL", "pyannote/speaker-diarization-community-1")
@@ -222,7 +231,22 @@ async def _run(
             if temperature:
                 asr_kwargs["temperature"] = temperature
 
-            result = asr.transcribe(audio, **asr_kwargs)
+            try:
+                result = asr.transcribe(audio, **asr_kwargs)
+            except IndexError as e:
+                # whisperx bug, unfixed upstream as of v3.8.6: the
+                # pipeline dereferences inputs[0] when silero VAD
+                # returned no segments (silent audio, very short clip,
+                # or pure noise). Return an empty transcription so the
+                # client gets the OpenAI-compatible "no speech" result
+                # instead of a 500. Other exceptions still propagate so
+                # real failures stay visible.
+                log.warning(
+                    "transcribe IndexError (likely empty VAD segments): "
+                    "audio=%ss language=%s err=%s; returning empty",
+                    round(len(audio) / 16000.0, 1), language, e,
+                )
+                result = {"language": language or "en", "segments": []}
             detected_language = result.get("language") or language or "en"
 
             if align:
@@ -299,7 +323,15 @@ async def translations(
 
 @app.get("/v1/models")
 def models():
-    return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "whisperx"}]}
+    # Loaded model first, then aliases (deduped). Inference always uses
+    # MODEL_ID regardless of what the client sends; this list is just
+    # what we advertise so the proxy can route requests for these
+    # names here.
+    ids = [MODEL_ID]
+    for alias in MODEL_ALIASES:
+        if alias != MODEL_ID and alias not in ids:
+            ids.append(alias)
+    return {"object": "list", "data": [{"id": mid, "object": "model", "owned_by": "whisperx"} for mid in ids]}
 
 
 @app.get("/healthz")

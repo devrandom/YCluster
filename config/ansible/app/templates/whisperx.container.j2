@@ -34,6 +34,7 @@ Environment=WHISPERX_DEVICE={{ whisperx_device }}
 Environment=WHISPERX_COMPUTE_TYPE={{ whisperx_compute_type }}
 Environment=WHISPERX_DIARIZE={{ whisperx_diarize | string | lower }}
 Environment=WHISPERX_DIARIZE_MODEL={{ whisperx_diarize_model }}
+Environment=WHISPERX_MODEL_ALIASES={{ whisperx_model_aliases | join(",") }}
 
 [Service]
 Restart=on-failure

@@ -23,6 +23,10 @@
     whisperx_compute_type: float16
     whisperx_diarize: true
     whisperx_diarize_model: pyannote/speaker-diarization-community-1
+    # Additional model IDs advertised by /v1/models (inference always
+    # uses whisperx_model -- see docs/operations/transcription.md).
+    # `whisper-1` is the canonical OpenAI alias for large-v3.
+    whisperx_model_aliases: ["whisper-1"]
   tasks:
     - name: End play for nodes without AMD GPU
       meta: end_host
