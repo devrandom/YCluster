@@ -38,6 +38,14 @@ timeout model and bearer auth and doesn't need escalation.
 ## Common Commands
 
 ### Reaching the cluster over SSH
+
+> **From an agent session**, prefer the cluster-exec MCP
+> (mcp__cluster_exec__run; see "Cluster exec via MCP" below)
+> over direct SSH. The MCP does the two-hop SSH internally with
+> bearer auth and timeouts, and isn't blocked by the sandbox's
+> network restrictions. The patterns below are for human
+> operators running outside an agent session.
+
 The entry host is whatever `.envrc`'s `YC_SYNC_HOST` resolves to (run
 `bash dev-sync.sh --check` to see it). SSH to it lands you on a core node
 with `/etc/ansible` and the vault password available. To reach another
@@ -49,6 +57,14 @@ ssh "$YC_SYNC_HOST" 'ssh f1.xc uptime'               # frontend nodes resolve by
 ```
 
 ### Running Ansible Playbooks
+
+> **From an agent session**, run playbooks via the cluster-exec
+> MCP (mcp__cluster_exec__run) with hostname="localhost" (the
+> bastion, where /etc/ansible lives) and auto_bg_after_s=0 for
+> image-rebuild plays that can exceed the 30s default. Direct
+> SSH from inside the sandbox needs sandbox_permissions:
+> require_escalated. The patterns below are for human operators.
+
 From a core node via SSH — preferred for development:
 ```bash
 # /etc/ansible is a symlink to /opt/infrastructure/config/ansible
@@ -333,3 +349,8 @@ tar cz ycluster tests | ssh -F /…/dev/cluster/.ssh/config s1 \
   'rm -rf /root/yctest && mkdir /root/yctest && tar xz -C /root/yctest && cd /root/yctest && \
    python3 -m unittest tests.test_gateway_health tests.test_clock_skew tests.test_backup_status tests.test_vm_scheduling'
 ```
+> network restrictions. The two-hop ssh pattern below is what
+> the MCP does internally -- use it only as a reference or
+> fallback when the MCP isn't available.
+> require_escalated. The ssh examples below show the underlying
+> commands the MCP runs.
