@@ -37,45 +37,18 @@ timeout model and bearer auth and doesn't need escalation.
 
 ## Common Commands
 
-### Reaching the cluster over SSH
-
-> **From an agent session**, prefer the cluster-exec MCP
-> (mcp__cluster_exec__run; see "Cluster exec via MCP" below)
-> over direct SSH. The MCP does the two-hop SSH internally with
-> bearer auth and timeouts, and isn't blocked by the sandbox's
-> network restrictions. The patterns below are for human
-> operators running outside an agent session.
-
-The entry host is whatever `.envrc`'s `YC_SYNC_HOST` resolves to (run
-`bash dev-sync.sh --check` to see it). SSH to it lands you on a core node
-with `/etc/ansible` and the vault password available. To reach another
-node deterministically, hop through the entry node using cluster-internal
-names, which always resolve cluster-side:
-```bash
-ssh "$YC_SYNC_HOST" 'ssh s4 systemctl status etcd'   # internal name, resolved on the cluster
-ssh "$YC_SYNC_HOST" 'ssh f1.xc uptime'               # frontend nodes resolve by .xc too (see below)
-```
-
 ### Running Ansible Playbooks
 
-> **From an agent session**, run playbooks via the cluster-exec
-> MCP (mcp__cluster_exec__run) with hostname="localhost" (the
-> bastion, where /etc/ansible lives) and auto_bg_after_s=0 for
-> image-rebuild plays that can exceed the 30s default. Direct
-> SSH from inside the sandbox needs sandbox_permissions:
-> require_escalated. The patterns below are for human operators.
-
-From a core node via SSH — preferred for development:
-```bash
-# /etc/ansible is a symlink to /opt/infrastructure/config/ansible
-# run-playbook.sh sources /etc/ansible/env.sh (sets LC_ALL and ANSIBLE_VAULT_PASSWORD_FILE)
-ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh <playbook>.yml"
-ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit s3"
-```
+**From an agent session**, run playbooks via the cluster-exec MCP
+(`mcp__cluster_exec__run`) with `hostname="localhost"` (the bastion,
+where `/etc/ansible` lives) and `auto_bg_after_s=0` for image-rebuild
+plays that can exceed the 30s default. See `### Cluster exec via MCP`
+below for the full tool reference. Direct SSH from inside the sandbox
+needs `sandbox_permissions: require_escalated`.
 
 Always use ansible instead of ad-hoc copying files to the cluster.
 
-From a core node directly:
+From a core node directly (operator already on a core node):
 ```bash
 source /etc/ansible/env.sh  # sets LC_ALL=C.UTF-8 and ANSIBLE_VAULT_PASSWORD_FILE=/run/shm/.vault-pass
 ansible-playbook site.yml
@@ -88,7 +61,7 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 bash dev-sync.sh --start   # initial sync + register the watchman trigger, then returns
 bash dev-sync.sh --stop    # tear the trigger down
 ```
-Running with no args prints usage. Then run the playbook via SSH as above.
+Running with no args prints usage. Then run the playbook (see Running Ansible Playbooks below).
 
 **Confirming a sync landed (don't hash files by hand).** Trust the watcher by
 default; for a routine confirmation, `tail ./tmp/dev-sync.log` for a `done` line
@@ -349,8 +322,3 @@ tar cz ycluster tests | ssh -F /…/dev/cluster/.ssh/config s1 \
   'rm -rf /root/yctest && mkdir /root/yctest && tar xz -C /root/yctest && cd /root/yctest && \
    python3 -m unittest tests.test_gateway_health tests.test_clock_skew tests.test_backup_status tests.test_vm_scheduling'
 ```
-> network restrictions. The two-hop ssh pattern below is what
-> the MCP does internally -- use it only as a reference or
-> fallback when the MCP isn't available.
-> require_escalated. The ssh examples below show the underlying
-> commands the MCP runs.
