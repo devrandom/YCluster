@@ -3,6 +3,12 @@
 Completed work, moved out of `TODO.md`. Newest first. One line per change;
 detail lives in commits and code. Items with residual work stay in `TODO.md`.
 
+## 2026-07-17
+
+### Security
+
+- **macOS MinerU hard-aborted; sandboxing rolled out on Nvidia only.** `config/ansible/macos/setup-mineru.yml` now `fail`s at the top of the play on every macOS host — the Seatbelt outbound profile is not yet in place, so the macOS MinerU service can't safely run with only the application-level SSRF mitigation (a crafted PDF can still trigger outbound fetches via pypdf / pdfplumber / font resolution). Re-open by deleting the `fail` task once the Seatbelt profile is built. The macOS sandbox item moves to `todo/archive/`. The Linux/Nvidia deployment is sandboxed via `--network=none` + UDS bridge in `e5ecb1b` / `0f8729a` (Unix-socket bound inside the netns-less podman container, `socat` sidecar bridging to host TCP:8000); details + post-deploy fixes (RuntimeDirectory chown, Containerfile COPY --chown, wrapper shebang, vllm spawn guard, dev UID pre-flight, BrokenProcessPool fix #6, layer-squash fix #7) in `docs/design/mineru-podman.md`.
+
 ## 2026-07-01
 
 - **PXE follow-the-server.** All four PXE/autoinstall hardcodes on `10.0.0.254` are now template-driven: GRUB kernel/initrd/cloud-config URLs use `$net_default_server` (Option 66); the Ansible ISO fallback and `user-data.j2`'s date-sync + `/etc/hosts` lines render through `{{ gateway_vip }}` — so a future restructure of the gateway-VIP/tftp roles is one config change, not four.

@@ -43,6 +43,21 @@
       meta: end_host
       when: not (mineru_enabled | default(false))
 
+    - name: Abort: macOS MinerU is not sandboxed yet
+      fail:
+        msg: |
+          macOS MinerU is disabled because the Seatbelt outbound sandbox
+          (see `todo/archive/sandbox-mineru-outbound.md`) is not yet in
+          place. Until the Seatbelt profile lands, MinerU on macOS relies
+          only on its application-level SSRF mitigation, and a crafted
+          PDF can still trigger outbound fetches via pypdf / pdfplumber /
+          font resolution. The Linux/Nvidia deployment is sandboxed via
+          `--network=none` + UDS bridge (commits `e5ecb1b` / `0f8729a`),
+          details in `docs/design/mineru-podman.md`; the macOS path needs
+          a parallel Seatbelt profile before this play can run. Remove
+          this `fail` task once the Seatbelt sandbox lands.
+      when: mineru_enabled | default(false)
+
     - name: Ensure Homebrew log directory exists
       file:
         path: /opt/homebrew/var/log

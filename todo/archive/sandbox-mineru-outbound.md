@@ -52,11 +52,17 @@ maintained.
 
 ## Status
 
-DONE for Linux/Nvidia (commit `e5ecb1b`). The post-deployment fixes
-(RuntimeDirectory chown, Containerfile COPY --chown, wrapper shebang, vllm
-spawn guard, dev UID pre-flight) are documented in
-`docs/design/mineru-podman.md` so the next operator doesn't re-debug them.
-**macOS Seatbelt profile still TBD.**
+CLOSED OUT for now.
+
+- **Linux/Nvidia** — done. `--network=none` + UDS bridge in commits
+  `e5ecb1b` / `0f8729a`; details + post-deploy fixes (RuntimeDirectory
+  chown, Containerfile COPY --chown, wrapper shebang, vllm spawn guard,
+  dev UID pre-flight, BrokenProcessPool fix #6, layer-squash fix #7) in
+  `docs/design/mineru-podman.md`.
+- **macOS** — deferred. `setup-mineru.yml` now hard-aborts at the top of
+  the play because the Seatbelt outbound sandbox is not in place; the
+  macOS service can't safely run with only the application-level SSRF
+  mitigation. Re-open this item when the Seatbelt profile is built.
 
 ## Follow-up regressions found after the redeploy
 

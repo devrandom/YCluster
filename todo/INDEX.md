@@ -18,7 +18,6 @@ Categories: [security](#security) ·
 [authentik](#authentik)
 
 ## Security
-- **[HIGH]** [Sandbox MinerU's outbound](security/sandbox-mineru-outbound.md) (Linux/Nvidia done, macOS Seatbelt TBD)
 - [Vendor account cleanup](security/vendor-account-cleanup.md)
 - [Sudo-user consistency](security/sudo-user-consistency.md)
 - [SSH-key rotation](security/ssh-key-rotation.md)
@@ -117,4 +116,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [Drop bcrypt hasher](authentik/drop-bcrypt-hasher.md)
 
 ## Archive
-Completed or no-longer-relevant items. Currently empty.
+Completed or no-longer-relevant items. Re-open by moving back to a
+subject-matter folder.
+
+- [Sandbox MinerU's outbound](archive/sandbox-mineru-outbound.md) — Linux/Nvidia done (`e5ecb1b` / `0f8729a`); macOS deferred, `setup-mineru.yml` now hard-aborts until the Seatbelt profile lands.
