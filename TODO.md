@@ -59,6 +59,30 @@ firewall rules need to be maintained.
 - `config/ansible/admin/install-mineru.yml` — install `socat` apt
   dep, install proxy unit, pre-create `/run/mineru/`.
 
+DONE for Linux/Nvidia (commit `e5ecb1b`). The post-deployment
+fixes (RuntimeDirectory chown, Containerfile COPY --chown, wrapper
+shebang, vllm spawn guard, dev UID pre-flight) are documented in
+`docs/design/mineru-podman.md` so the next operator doesn't
+re-debug them. macOS Seatbelt profile still TBD.
+
+Two follow-up regressions found after the redeploy was declared
+done, both fixed and rolled into the next redeploy:
+
+- **BrokenProcessPool on `/file_parse`** (fix #6): the UDS
+  pre-flight ran at module-import time and killed mineru's render
+  executor spawn workers (whose re-import of the wrapper hits the
+  "UDS already in use → exit 3" branch). Fix: move the pre-flight
+  inside the `if __name__ == "__main__":` guard. Verified by live
+  `/file_parse` returning `status=completed` in ~0.5 s
+  (`backend=pipeline`) and ~18 s (`backend=vlm-engine`).
+
+- **Layer squash pushes 11 GB on every wrapper tweak** (fix #7):
+  `buildah bud` in 1.33 squashes by default, so the wrapper change
+  invalidated the entire ~11 GB final layer. Fix:
+  `buildah bud --layers …` in `install-mineru.yml`. Image now has
+  ~9 OCI layers; a wrapper-only change pushes layers 6-8 (a few KB)
+  in seconds instead of ~6 min for the whole 11 GB tarball.
+
 Test before commit: model is already pre-downloaded so the venv
 and HF cache lookups must work under the sandbox. If a path is
 missing, allow it explicitly in the profile / wrapper.
@@ -76,6 +100,20 @@ Completed work has moved to `CHANGELOG.md`.
 
 **Later (hygiene, docs, breadth):**
 - Ansible hygiene H1-H3; remaining Monitoring gaps; Docker pruning; CI/lint.
+- `install-mineru.yml` rebuild detection: today the `Check if
+  mineru image is already in registry` task HEADs the registry
+  tag and skips rebuild if present. That misses Containerfile /
+  UDS wrapper / Containerfile changes — the first redeploy shipped
+  the new entrypoint only after we manually deleted the tag,
+  because the registry still had the old digest under the same
+  tag. Switch to digest comparison: after build, compare
+  `buildah images --format '{{.Digest}}'` (root storage) vs.
+  `skopeo inspect --raw docker://registry.xc:5000/mineru:TAG`
+  → `Digest` header; different → rebuild flag, same → skip. Note
+  that the new image still pushes under the same tag (operators
+  don't see a version bump), and the systemd unit's
+  `ExecStartPre=podman pull` will pick up the new digest on next
+  start — no manual tag gymnastics required for routine changes.
 - Dev-cluster system tests — script the incus DNS host-record verification as the first one (see item below).
 - Node-lifecycle + scaling/capacity runbooks; secrets/SSH-key rotation; audit-log story; vendor-account cleanup.
 - Minor review items; exo prompt-logging upstream; vllm-mlx operational gaps.

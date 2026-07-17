@@ -101,19 +101,79 @@ System deps rationale:
 - `python3.12-venv` — fallback in case uv needs it; not strictly
   required since uv manages its own envs.
 
-### Networking: port mapping (`-p 8000:8000`), not `--network=host`
+### Networking: `--network=none` + Unix domain socket + host socat bridge
 
-Port mapping:
+The container has **no netns interfaces at all** — no AF_INET socket
+can ever bind, so a crafted PDF that triggers an external fetch (pypdf
+/ pdfplumber resolving external image URIs, font loaders, etc.)
+fails at the syscall layer instead of relying on mineru's
+application-level SSRF mitigation in
+`mineru/cli/public_http_client_policy.py` (which only blocks
+attacker-supplied `server_url` / `*-http-client` backends).
 
-- Keeps container network isolated from the host (defense in depth).
-- nginx / systemd-resolved on the host still work normally.
-- Easier to swap: stop one container, start another, no host network
-  state to manage.
-- Allows future migration to rootless podman with slirp4netns without
-  changing the unit file.
+Flow:
 
-`--network=host` would skip the port mapping but loses isolation and
-makes future moves to other runtimes harder. Not worth the convenience.
+```
+client → http://<host>.xc:8000/file_parse
+       → socat TCP-LISTEN:8000,reuseaddr,fork
+       → /run/mineru/mineru.sock (UDS, filesystem bind, no AF_INET)
+       → mineru-api inside the container
+```
+
+Why this works under `--network=none`:
+
+- UDS bind is `bind(AF_UNIX, ...)` — filesystem syscall, no
+  netns required.
+- mineru-api's only network listener is the UDS; outbound
+  `socket(AF_INET, ...)` calls fail with `ENETUNREACH` (no netns
+  interfaces), so any external fetch attempt by the parser dies
+  immediately.
+- A host-side `socat` bridge (`mineru-podman-proxy.service`)
+  forwards host TCP:8000 to the UDS. The cluster-internal reach
+  model is unchanged — `local-ai-proxy` + nginx still hit
+  `http://<host>.xc:8000`.
+
+Why not just `-p 8000:8000` with the default bridge:
+
+- Bridge networking would expose the container's network namespace,
+  defeating the SSRF hardening goal.
+- `--network=host` shares the host's interfaces — same problem,
+  worse blast radius (the container could probe any host the host
+  can reach, including the cluster's storage VIP, etcd, etc.).
+- UDS + socat is kernel-enforced: nothing to maintain beyond the
+  service unit. No firewall rules, no iptables, no nftables.
+
+The UDS path (`/run/mineru/mineru.sock`) is owned by `dev` (UID
+1002) — `install-mineru.yml` pre-creates `/run/mineru/` so the
+container's mineru process (also running as dev via
+`--userns=keep-id`) can create the socket file there. The socat
+process runs as root, connects with the default 0644 socket mode.
+
+Trade-offs:
+
+- **Two services instead of one** (container + proxy). The proxy is
+  thin (one socat child per connection) and Restart= keeps it alive
+  across mineru-podman restarts.
+- **UDS path collision on restart** (stale socket from a crash).
+  `/run/mineru/` is host-side tmpfs bind-mounted into the container
+  (so the UDS survives across container starts). A crash that exits
+  before uvicorn cleans up the socket leaves a stale file on the
+  host — the next `podman run` would hit a bind collision. uvicorn
+  0.51.0 silently hangs at "Waiting for application startup" on UDS
+  collision rather than raising EADDRINUSE (it doesn't surface this
+  in a useful way for systemd to react), so the wrapper
+  (`run-mineru-uds.py`) does a pre-flight check: `connect()` to the
+  existing socket, unlink it if no one's listening (stale file from
+  a crash), exit 3 with `ss -lx | grep mineru.sock` if another
+  listener is active. Non-socket files at the path are refused
+  outright — the wrapper never unlinks non-sockets (silent data
+  loss is worse than a loud failure).
+- **`--network=none` blocks the warmup step too** — the first-time
+  weight download via `mineru-models-download` needs to reach
+  HF/ModelScope. The warmup is run as a separate `podman run` that
+  deliberately does NOT pass `--network=none` (it's a one-shot CLI
+  with no AF_INET bind, no SSRF surface). Subsequent restarts use
+  `MINERU_MODEL_SOURCE=local` and never need network.
 
 ### GPU access: `--device nvidia.com/gpu=all`
 
@@ -199,21 +259,28 @@ wanting `vlm-engine` must send `backend=vlm-engine` explicitly
 │  /home/dev/.cache/huggingface/  ──┐  (HF model cache, ~2.2 GB)│
 │  /home/dev/.cache/paddleocr/   ──┤                            │
 │                                  │                            │
-│  mineru-podman.service            │  systemd unit              │
-│    └─ podman run ...              │                            │
+│  /run/mineru/mineru.sock      ──┐ │  (UDS, owned by dev)       │
+│                                 │ │                            │
+│  mineru-podman-proxy.service   │ │  systemd unit (socat)      │
+│    └─ socat TCP-LISTEN:8000,reuseaddr,fork   │ │              │
+│         └─ UNIX-CONNECT:/run/mineru/mineru.sock               │
+│                                 │ │                            │
+│  mineru-podman.service          │ │  systemd unit              │
+│    └─ podman run --network=none │ │                            │
 │         ├─ image: registry.xc:5000/mineru:3.4.3-all-vllm      │
-│         ├─ -p 8000:8000           │                            │
 │         ├─ --device nvidia.com/gpu=all                        │
 │         ├─ -v /home/dev/.cache/huggingface ──┐                │
 │         ├─ -v /home/dev/.cache/paddleocr ────┤                │
-│         └─ entrypoint: mineru-api            │                │
+│         ├─ -v /run/mineru:/run/mineru ──────┘                │
+│         └─ entrypoint: run-mineru-uds.py (uvicorn UDS patch) │
 │                                               │                │
-│         ┌────────────────────────────────────┘                │
+│         ┌─────────────────────────────────────┘                │
 │         ▼                                                     │
 │  ┌──────────────────────────────────────────┐                │
-│  │ Container                                 │                │
+│  │ Container (--network=none, no netns)      │                │
 │  │                                           │                │
-│  │  mineru-api (FastAPI) on 0.0.0.0:8000     │                │
+│  │  mineru-api (FastAPI) on UDS              │                │
+│  │    /run/mineru/mineru.sock                │                │
 │  │    ├─ MinerUClient (VLM)                  │                │
 │  │    │   backend=vllm-async-engine         │                │
 │  │    │   batching_mode=concurrent          │                │
@@ -266,6 +333,171 @@ Adding additional Nvidia boxes becomes:
    bind-mounts `/home/dev/.cache` (already on Ceph-rbd), starts
    the service. ~2 min per host vs ~15 min if rebuilding.
 
+## Post-deployment fixes (rolled up into the redeploy)
+
+The initial redeploy hit five bugs in sequence, each masked by the
+previous one. They are listed here so the next operator doesn't
+re-debug them, and so the playbook's invariants stay visible. A
+sixth bug surfaced after the redeploy was declared done — it's
+listed at the bottom of this section as "Found after redeploy".
+
+### 1. `/run/mineru` ownership under systemd (`install -d` vs `RuntimeDirectory=`)
+
+systemd 255.4 (Ubuntu 24.04) doesn't honour `RuntimeDirectoryUser=`
+/ `RuntimeDirectoryGroup=` (logs `Unknown key name` and silently
+ignores them), so `RuntimeDirectory=mineru` creates `/run/mineru`
+owned by the unit's `User=root`. The original `ExecStartPre=
+/usr/bin/install -d -o dev -g dev -m 0755 /run/mineru` was supposed
+to fix that, but empirically on this host the dir stays `root:root`
+under systemd — `install -d` skips `-o/-g` on a pre-existing
+directory (it only applies ownership on creation), and a later
+`systemd-run --scope` (the pull/run ExecStartPre/ExecStart)
+triggers an internal re-check that re-pins ownership to root.
+
+Fix: drop `RuntimeDirectory=` entirely; let the `ExecStartPre=
+/usr/bin/install -d -o dev -g dev -m 0755 /run/mineru` create the
+dir itself (so `-o/-g` is honoured on creation). `/run` is tmpfs,
+so this fires on every boot automatically.
+
+### 2. Containerfile `chmod` EPERM as `USER dev`
+
+`COPY run-mineru-uds.py /usr/local/bin/mineru-api-uds` then
+`RUN chmod 0755 …` after `USER dev`. `COPY` defaults to
+`root:root` ownership, so `dev` can't `chmod` it (`EACCES`).
+
+Fix: `COPY --chown=dev:dev …` — the wrapper then belongs to `dev`
+and the `chmod` runs cleanly.
+
+### 3. Wrapper shebang `#!/usr/bin/env python3` → no `python3` in image
+
+The Containerfile installs `python3.12-dev` and `python3.12-venv`
+but not the `python3` meta-package, so there is no `/usr/bin/python3`
+symlink. `#!/usr/bin/env python3` fails with `env: 'python3': No
+such file or directory`, exits 127.
+
+Fix: `#!/usr/bin/python3.12` (absolute path — `python3.12` is
+always present from the `python3.12-dev` install).
+
+### 4. Python spawn guard on vllm `AsyncLLM`
+
+vllm's `AsyncLLM` uses `multiprocessing.spawn` to launch the
+`EngineCoreProc` subprocess. Spawn re-imports the parent's
+`__main__` module to obtain the target callable. The wrapper ran
+`main()` unconditionally at module load (no `if __name__ ==
+"__main__":` guard), so re-importing the wrapper re-ran `main()`
+→ `preload_vlm_model()` → `AsyncLLM.__init__()` → spawn again —
+infinite recursion, detected by Python's `_check_not_importing_main()`
+as `RuntimeError: An attempt has been made to start a new process
+before the current process has finished its bootstrapping phase.`
+
+Fix: wrap `main()` in `if __name__ == "__main__":`. The pre-flight
+check and the uvicorn monkey-patch still run at import time, which
+is what we want — any process that imports the wrapper (including
+vllm-spawned children that happen to start a uvicorn for their own
+serving API) gets the patched uvicorn and binds the UDS instead of
+TCP.
+
+### 5. Deploy-time invariant: host `dev` UID must be 1002
+
+The Containerfile bakes `useradd --uid 1002 dev`, and the systemd
+unit bind-mounts `/home/dev/*` from the host. `--userns=keep-id`
+maps container UIDs 1:1 to host UIDs, so the in-container mineru
+process (running as UID 1002) can only read `/home/dev/*` if the
+host's `dev` user is also UID 1002 — otherwise it sees `EACCES`
+on every HF cache read and `mineru.json` parse. The bootstrap
+endpoint (`/bootstrap/nvidia`) creates the user with a fixed UID;
+`install-mineru.yml` enforces this at deploy time with a
+`Pre-flight check that host dev user is UID 1002` task (runs
+`id -u dev`, fails loudly with a pointer to the bootstrap step).
+
+### 6. Found after redeploy: `BrokenProcessPool` on `/file_parse`
+
+After fixes 1-5 were deployed and `/health` + the validation paths
+(422 / MIME 400) returned 200, the first real PDF parse failed in
+~28ms with `HTTP 409` and an error like:
+
+```
+A process in the process pool was terminated abruptly while the
+future was running or pending.
+```
+
+Stack:
+
+```
+mineru/cli/common.py:717 do_parse → _process_pipeline →
+pipeline_analyze.py:240 doc_analyze_streaming →
+load_images_from_pdf_doc → _load_images_from_pdf_bytes_range:324
+    images_list = future.result()  # raises BrokenProcessPool
+```
+
+Root cause: the UDS pre-flight check (added in fix #1 above) runs
+at module-import time. mineru's render executor is created lazily
+on the first `/file_parse`, and when it spawns a worker the
+worker re-imports the wrapper via Python's spawn import-protection
+machinery. By that point the parent's uvicorn has already bound
+`/run/mineru/mineru.sock`, so the pre-flight's "connect succeeds →
+sys.exit(3)" branch fires and the worker dies silently — the
+parent sees BrokenProcessPool. The macOS deployment didn't hit
+this because macOS uses Python 3.13 (no vllm, no ProcessPoolExecutor
+spawn flow for render — different code path). Operator
+verification: 1000+ PDF parses on macOS worked; the first real
+PDF parse on Linux failed.
+
+(The earlier "force spawn" hypothesis — `multiprocessing.set_start_method("spawn", force=True)` —
+turned out to be unnecessary on top of the pre-flight fix. The
+parent's render executor works fine on spawn, fork, or forkserver;
+what kills the worker is the pre-flight running at import time
+inside the worker. The spawn-set line was tried first and left a
+useful breadcrumb in git history, but the actual fix is the
+pre-flight guard below.)
+
+Fix: move `_preflight_uds(UDS_PATH)` inside the `if __name__ ==
+"__main__":` guard in `run-mineru-uds.py`. The uvicorn monkey-patch
+stays at import time (so any child process that starts a uvicorn
+for its own serving API still binds the UDS). The pre-flight only
+runs in the FastAPI server process where it actually matters
+(rejecting a duplicate-start). Verified by the live `/file_parse`
+POST against `nv2` after the rebuild returning `status=completed`
+in ~2 s.
+
+### 7. Layer separation so wrapper changes don't push 11 GB
+
+The wrapper sits at the very end of the Containerfile (the last
+`COPY --chown=dev:dev run-mineru-uds.py …` step, then a tiny
+`chmod`), but `buildah bud` in 1.33 squashes by default — the
+resulting image has just two OCI layers (ubuntu base + a single
+~11 GB layer that contains everything else, wrapper included). Any
+change to the wrapper therefore invalidates the whole ~11 GB layer
+and the push to `registry.xc` re-uploads all of it (~5-6 min over
+the cluster network).
+
+Fix: `buildah bud --layers …` in `install-mineru.yml`. `--layers`
+keeps each Containerfile step as its own OCI layer; the resulting
+manifest has ~9 layers (verified):
+
+```
+layer 0:  30 MB   ubuntu:24.04 base
+layer 1: 372 MB   apt deps (ffmpeg, libgl*, fonts-noto-cjk, gcc, python3.12-dev)
+layer 2:   ~0 MB  uv installer
+layer 3:  26 MB   (uv pip install warmup)
+layer 4: 5430 MB  mineru[all] + torchvision + vllm 0.11.x  (the big one)
+layer 5:  12 MB   groupadd/useradd --uid 1002 dev
+layer 6:  ~0 MB   COPY --chown=dev:dev run-mineru-uds.py
+layer 7:  ~0 MB   chmod 0755 + ENV MINERU_MODEL_SOURCE
+layer 8:  ~0 MB   ENTRYPOINT + CMD  (metadata)
+```
+
+Now a wrapper-only change invalidates layers 6-8 (a few KB total)
+and the push is essentially instant. The big vllm/mineru layer
+(layer 4) is reused from the registry on the next `podman pull` in
+ExecStartPre.
+
+The OCI spec already deduplicates layers by content hash; this
+change just makes the per-step layers visible to that dedup. The
+playbook's rebuild-detect task (HEAD on the manifest tag) still
+needs a manual manifest digest delete to force a rebuild — the
+follow-up TODO is to compare layer digests instead.
+
 ## Rollback
 
 If the container fails on a host:
@@ -288,8 +520,10 @@ venv-based service also exposes) and routes to the healthy backend.
 | Action | Path | Purpose |
 |---|---|---|
 | new | `config/ansible/admin/files/mineru/Containerfile` | Ubuntu 24.04 + uv-installed `mineru[all] torchvision vllm` |
-| new | `config/ansible/admin/files/mineru/mineru-podman.service` | systemd unit wrapping `podman run` |
-| edit | `config/ansible/admin/install-mineru.yml` | build image, push, warmup, start container |
+| new | `config/ansible/admin/files/mineru/run-mineru-uds.py` | uvicorn monkey-patch launcher; binds the API on `/run/mineru/mineru.sock` instead of TCP; pre-flight checks the UDS path for stale files vs. live listeners (uvicorn 0.51.0 silently hangs on UDS collision, so the wrapper fails fast with a diagnostic) |
+| new | `config/ansible/admin/files/mineru/mineru-podman.service` | systemd unit wrapping `podman run --network=none ...` |
+| new | `config/ansible/admin/files/mineru/mineru-podman-proxy.service` | systemd unit running `socat TCP-LISTEN:8000,fork UNIX-CONNECT:/run/mineru/mineru.sock` |
+| edit | `config/ansible/admin/install-mineru.yml` | apt `socat`, pre-create `/run/mineru/`, install + start proxy unit, stage UDS wrapper |
 | keep | `config/ansible/admin/files/mineru/run-mineru.sh` | unused after refactor; leave for reference |
 | keep | `config/ansible/admin/files/mineru/mineru.service` | rollback path; not auto-started on Nvidia hosts after refactor |
 | edit | `docs/operations/document-extraction.md` | deployment notes: podman, three backends, registry, HF bind-mount |
@@ -305,6 +539,9 @@ venv-based service also exposes) and routes to the healthy backend.
 | Registry disk fills (~10 GB image × N versions) | playbook prunes tags older than 30 days; monitor via Prometheus |
 | vLLM + MinerU version skew (vllm pins a torch version MinerU dislikes) | pin vllm version to one known-good combo; document in Containerfile |
 | Podman rootless vs rootful (image needs root for some paddle init) | run unit as `dev` (rootless); if paddle needs root, document the fallback |
+| Stale UDS after container crash blocks restart | The wrapper (`run-mineru-uds.py`) does a pre-flight check: `connect()` to the existing socket, unlink if no one's listening (stale), exit 3 with `ss -lx` diagnostic if another listener is active. Necessary because uvicorn 0.51.0 silently hangs on UDS bind collision rather than raising EADDRINUSE, which would otherwise wedge systemd's `Restart=always` loop. Non-socket files at the UDS path are refused outright (wrapper never unlinks non-sockets — fails loudly to avoid silent data loss). |
+| socat dies and mineru-podman stays up | proxy unit has `Restart=always` and `After=mineru-podman.service`; orchestrator restart covers the reverse |
+| Container crashes silently (no AF_INET, no external probe) | `/health` polling via the proxy's TCP:8000 still surfaces 503 on UDS miss; operator-visible from `journalctl -u mineru-podman-proxy` |
 
 ## Open questions / future work
 

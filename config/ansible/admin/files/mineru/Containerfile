@@ -89,12 +89,32 @@ USER dev
 ENV HOME=/home/dev
 WORKDIR /home/dev
 
-# mineru-api is the FastAPI entrypoint. The systemd unit passes
-# --host / --port / --enable-vlm-preload via `podman run` args.
-# The defaults below match what we run on the cluster.
-# MINERU_MODEL_SOURCE=local avoids the network re-check on every
-# boot (cache is pre-populated by the warmup step in the playbook;
-# the bind-mount makes that cache persistent across restarts).
+# mineru-api is the FastAPI entrypoint. Under podman's --network=none
+# (set in mineru-podman.service) the container has no netns interfaces,
+# so a TCP socket(AF_INET, ...) bind would fail with ENETUNREACH. We
+# invoke mineru-api via run-mineru-uds.py, a tiny launcher that
+# monkey-patches uvicorn.Config.__init__ to bind a Unix domain socket
+# instead. UDS binds use filesystem syscalls — they work under
+# --network=none because no AF_INET socket is ever created.
+#
+# The systemd unit on the host bridges host TCP:8000 to this UDS via
+# socat (mineru-podman-proxy.service), so the cluster-internal reach
+# model is unchanged (local-ai-proxy + nginx still hit <host>.xc:8000).
+# The only thing that changes is the container's outbound capability:
+# with --network=none, a crafted PDF that triggers an external fetch
+# (pypdf / pdfplumber / font loaders / etc.) fails at the syscall layer
+# instead of relying on mineru's application-level SSRF mitigation in
+# mineru/cli/public_http_client_policy.py.
+#
+# The wrapper accepts the same CLI args the unit passes (--host,
+# --port, --enable-vlm-preload) — host/port are used in the startup
+# banner / SSRF policy warning, but uvicorn ignores them when uds is
+# set. MINERU_UDS_PATH is set by the unit via `podman run -e`.
+# --chown=dev:dev so the chmod below runs as USER dev without EPERM
+# (buildah COPY defaults to root:root when --chown is omitted, and
+#  `chmod` needs the caller to own the file).
+COPY --chown=dev:dev run-mineru-uds.py /usr/local/bin/mineru-api-uds
+RUN chmod 0755 /usr/local/bin/mineru-api-uds
 ENV MINERU_MODEL_SOURCE=local
-ENTRYPOINT ["mineru-api"]
+ENTRYPOINT ["/usr/local/bin/mineru-api-uds"]
 CMD ["--host", "0.0.0.0", "--port", "8000", "--enable-vlm-preload", "true"]

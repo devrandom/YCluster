@@ -22,6 +22,30 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/home/dev
+# /run/mineru is the bind-mount source for the container's UDS
+# (-v /run/mineru:/run/mineru in ExecStart below). /run is tmpfs
+# and disappears on every reboot, so the unit must recreate the
+# dir at every start. We do NOT use RuntimeDirectory= here because
+# (empirically on this host, systemd 255.4 / Ubuntu 24.04) the
+# RuntimeDirectory ends up owned by root:root and our subsequent
+# chown ExecStartPre does not stick — a later systemd-internal
+# re-check (triggered by systemd-run --scope in the pull/run
+# ExecStartPre/ExecStart) silently resets the ownership back to
+# root:root. The workaround is to own the dir ourselves with an
+# explicit install -d in ExecStartPre, no RuntimeDirectory
+# involvement.
+#
+# Owned by dev:dev (UID 1002) because the container's mineru
+# process runs as dev via --userns=keep-id and creates the socket
+# file here. Mode 0755: dev rwx (can create the socket), everyone
+# else rx (so root-run socat in mineru-podman-proxy.service can
+# connect).
+#
+# install-mineru.yml also has a `file:` task creating this dir at
+# install time (belt-and-suspenders + makes the ownership visible
+# in the playbook recap). The ExecStartPre below is the
+# authoritative recovery path at every boot/restart.
+ExecStartPre=/usr/bin/install -d -o dev -g dev -m 0755 /run/mineru
 # Delegate=true lets podman create user namespaces (CLONE_NEWUSER)
 # under systemd. Same setting as the upstream
 # /usr/lib/systemd/system/podman.service.
@@ -47,6 +71,17 @@ Environment="MINERU_API_MAX_CONCURRENT_REQUESTS=3"
 #                            container re-resolves snapshot paths
 #                            on first request and re-downloads the
 #                            template on every cold start.
+#   /run/mineru            — Unix domain socket that mineru-api
+#                            binds inside the container (see
+#                            run-mineru-uds.py + --network=none
+#                            below). The container's UID matches
+#                            the host's dev (1002) via --userns=
+#                            keep-id, so the UDS file is created
+#                            by the same UID that owns the
+#                            directory (the ExecStartPre above
+#                            creates it owned by dev). socat in
+#                            mineru-podman-proxy.service bridges
+#                            host TCP:8000 to this UDS.
 # Logging: podman's default log driver is journald; journalctl
 # -u mineru-podman captures stdout/stderr. To grep without
 # journalctl, `journalctl -u mineru-podman > file`.
@@ -63,13 +98,28 @@ Environment="MINERU_API_MAX_CONCURRENT_REQUESTS=3"
 # digest (~5 s warm cache). Skipping the pull and assuming the
 # image is already there is risky on a fresh host, so we always
 # do it.
+#
+# --network=none is the SSRF hardening: the container has no
+# netns interfaces, so no socket(AF_INET, ...) syscall can
+# succeed. A crafted PDF that triggers an external fetch
+# (pypdf / pdfplumber / font loaders / etc.) fails at the
+# syscall layer instead of relying on mineru's application-
+# level SSRF mitigation in
+# mineru/cli/public_http_client_policy.py (which only blocks
+# attacker-supplied server_url / *-http-client backends).
+# mineru-api itself listens on a Unix socket at
+# /run/mineru/mineru.sock (filesystem bind, not AF_INET);
+# mineru-podman-proxy.service bridges host TCP:8000 to that
+# UDS so the cluster-internal reach model is unchanged.
 ExecStartPre=/usr/bin/systemd-run --scope --unit=mineru-pull /usr/bin/podman pull registry.xc:5000/mineru:3.4.3-all-vllm
 ExecStart=/usr/bin/systemd-run --scope --unit=mineru-run /usr/bin/podman run --rm --name mineru \
     --userns=keep-id \
+    --network=none \
     --device nvidia.com/gpu=all \
-    -p 8000:8000 \
     -v /home/dev/.cache:/home/dev/.cache \
     -v /home/dev/mineru.json:/home/dev/mineru.json \
+    -v /run/mineru:/run/mineru \
+    -e MINERU_UDS_PATH=/run/mineru/mineru.sock \
     registry.xc:5000/mineru:3.4.3-all-vllm
 Restart=always
 RestartSec=5

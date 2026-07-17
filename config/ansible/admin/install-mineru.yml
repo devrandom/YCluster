@@ -51,8 +51,20 @@
     mineru_image_registry: "registry.xc:5000/mineru:{{ mineru_image_tag }}"
     mineru_containerfile_src: files/mineru/Containerfile
     mineru_containerfile_dest: /home/dev/.mineru-build/Containerfile
+    mineru_uds_wrapper_src: files/mineru/run-mineru-uds.py
+    mineru_uds_wrapper_dest: /home/dev/.mineru-build/run-mineru-uds.py
     mineru_service_unit_src: files/mineru/mineru-podman.service
     mineru_service_unit_dest: /etc/systemd/system/mineru-podman.service
+    mineru_proxy_unit_src: files/mineru/mineru-podman-proxy.service
+    mineru_proxy_unit_dest: /etc/systemd/system/mineru-podman-proxy.service
+    # mineru-api inside the container (--network=none) binds a Unix
+    # domain socket at this path; the host's socat bridge listens on
+    # TCP:{{ mineru_port }} and forwards to it. The directory must be
+    # owned by `dev` (UID 1002) because the container's mineru process
+    # runs as dev via --userns=keep-id and creates the socket file
+    # there. See TODO.md "Sandbox MinerU's outbound at the OS layer".
+    mineru_uds_path: /run/mineru/mineru.sock
+    mineru_uds_dir: /run/mineru
     mineru_port: 8000
     mineru_hf_cache: /home/dev/.cache/huggingface
     mineru_mineru_json: /home/dev/mineru.json
@@ -71,12 +83,33 @@
       meta: end_host
       when: not (mineru_enabled | default(false))
 
+    # Pre-flight: the Containerfile bakes `useradd --uid 1002 dev`
+    # (line 84), and the systemd unit bind-mounts /home/dev/* from the
+    # host. `--userns=keep-id` maps container UIDs 1:1 to host UIDs,
+    # so the in-container mineru process (running as UID 1002) can
+    # only read /home/dev/* if the host's `dev` user is also UID
+    # 1002 — otherwise it sees EACCES on every HF cache read and
+    # mineru.json parse. The bootstrap endpoint (/bootstrap/nvidia)
+    # creates the user with a fixed UID; this task is the deploy-time
+    # guard that catches a divergence before it becomes a production
+    # outage. Fail with a clear pointer to the bootstrap step.
+    - name: Pre-flight check that host dev user is UID 1002
+      command: id -u dev
+      register: dev_uid
+      changed_when: false
+      failed_when: dev_uid.stdout != "1002"
+
     # Podman + NVIDIA CDI are required for `--device nvidia.com/gpu=all`.
-    # setup-gpu-podman.yml runs before this in the app chain, but check
-    # defensively in case the play is run standalone.
-    - name: Ensure podman is installed
+    # socat is the TCP→UDS bridge that fronts the container's UDS
+    # listener (see mineru-podman-proxy.service + TODO.md "Sandbox
+    # MinerU's outbound at the OS layer"). setup-gpu-podman.yml runs
+    # before this in the app chain, but check defensively in case the
+    # play is run standalone.
+    - name: Ensure podman + socat are installed
       apt:
-        name: podman
+        name:
+          - podman
+          - socat
         state: present
         update_cache: yes
 
@@ -149,6 +182,23 @@
         group: dev
         mode: '0755'
 
+    # Pre-create /run/mineru for the container's UDS bind-mount.
+    # mineru-api inside the container binds /run/mineru/mineru.sock;
+    # with --network=none there is no TCP listener — a host socat
+    # process (mineru-podman-proxy.service) bridges host TCP:8000 to
+    # this UDS. Owned by `dev` (UID 1002) because the container runs
+    # mineru-api as dev via --userns=keep-id and creates the socket
+    # file in this directory. /run is tmpfs — recreated on every
+    # boot, so this task must run on every install (not idempotent
+    # via creates; that's fine — it's cheap).
+    - name: Ensure MinerU UDS directory exists
+      file:
+        path: "{{ mineru_uds_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
     # Stage the Containerfile on the host. The build context is the
     # directory containing the Containerfile; buildah reads it
     # locally (no daemon). We build from /home/dev/.mineru-build so
@@ -160,6 +210,19 @@
         owner: dev
         group: dev
         mode: '0644'
+
+    # Stage the UDS wrapper alongside the Containerfile. The
+    # Containerfile does `COPY run-mineru-uds.py /usr/local/bin/...`,
+    # so the wrapper must be in the build context directory. Mode
+    # 0755 here is irrelevant (the Containerfile's RUN chmod is what
+    # sets the in-image mode); we just need the file present.
+    - name: Stage UDS wrapper for buildah
+      copy:
+        src: "{{ mineru_uds_wrapper_src }}"
+        dest: "{{ mineru_uds_wrapper_dest }}"
+        owner: dev
+        group: dev
+        mode: '0755'
 
     # Build the image only if the registry doesn't already have
     # this tag. The registry is the source of truth — once an
@@ -194,10 +257,17 @@
       failed_when: false
 
     - name: Build mineru image with buildah (root)
-      command: buildah bud -f {{ mineru_containerfile_dest }} -t {{ mineru_image_local }} /home/dev/.mineru-build
+      command: buildah bud --layers -f {{ mineru_containerfile_dest }} -t {{ mineru_image_local }} /home/dev/.mineru-build
       when: mineru_registry_exists.status != 200
       # ~10 min cold. Skipped on subsequent runs when the registry
       # already has the tag.
+      # `--layers` keeps each Containerfile step as a separate OCI
+      # layer (buildah 1.33 squashes by default → one giant final
+      # layer of ~11 GB that gets re-uploaded on every wrapper /
+      # Containerfile tweak). With --layers, the wrapper COPY at
+      # the end of the Containerfile is its own ~5 KB layer, so a
+      # wrapper change pushes just that layer + a new manifest
+      # instead of the whole 11 GB tarball.
 
     - name: Push mineru image to cluster registry (root)
       command: buildah push {{ mineru_image_local }} {{ mineru_image_registry }}
@@ -236,6 +306,13 @@
     # container HF_HOME layout. Use the same image + bind-mounts
     # the service uses, but with --rm and the download CLI as the
     # command override.
+    #
+    # Warmup deliberately does NOT pass --network=none: it needs
+    # to reach HF/ModelScope to fetch the weights on first install.
+    # The hardened --network=none mode is only applied to the
+    # long-running mineru-podman.service; the warmup is a one-shot
+    # CLI run, no AF_INET socket is bound, and no SSRF surface is
+    # exposed to network input.
     - name: Pre-download MinerU weights via container warmup
       command: >-
         podman run --rm --userns=keep-id
@@ -259,6 +336,24 @@
         - reload systemd
         - restart mineru-podman service
 
+    # The proxy unit bridges host TCP:{{ mineru_port }} to the
+    # container's Unix socket at {{ mineru_uds_path }} — see the
+    # unit file for the rationale (the container runs under
+    # --network=none, so we need a host-side bridge for the API to
+    # be reachable on its usual port). Started before
+    # mineru-podman.service in the dependency chain is fine because
+    # socat's `fork` mode retries per-client on ECONNREFUSED.
+    - name: Install mineru-podman-proxy systemd unit
+      copy:
+        src: "{{ mineru_proxy_unit_src }}"
+        dest: "{{ mineru_proxy_unit_dest }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart mineru-podman-proxy service
+
     # Tear down the old venv-based mineru.service. The unit file
     # and the venv are left on disk for one-command rollback (see
     # the design doc). Stop and disable — don't delete.
@@ -274,6 +369,17 @@
     - name: Enable and start mineru-podman service
       systemd:
         name: mineru-podman.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # The proxy is a thin bridge — start it before the container so
+    # socat is already listening by the time mineru-podman.service
+    # creates the UDS. Health-check below hits TCP:{{ mineru_port }}
+    # (the proxy port), so the proxy needs to be up first.
+    - name: Enable and start mineru-podman-proxy service
+      systemd:
+        name: mineru-podman-proxy.service
         enabled: yes
         state: started
         daemon_reload: yes
@@ -296,4 +402,9 @@
     - name: restart mineru-podman service
       service:
         name: mineru-podman.service
+        state: restarted
+
+    - name: restart mineru-podman-proxy service
+      service:
+        name: mineru-podman-proxy.service
         state: restarted

@@ -1,0 +1,42 @@
+[Unit]
+Description=MinerU TCP→UDS proxy (socat bridge for --network=none)
+# mineru-podman.service binds the API on a Unix domain socket at
+# /run/mineru/mineru.sock (no AF_INET — the container runs under
+# --network=none as SSRF hardening; see TODO.md "Sandbox MinerU's
+# outbound at the OS layer"). This unit bridges host TCP:8000 to
+# that UDS so the cluster-internal reach model is unchanged —
+# local-ai-proxy + nginx still hit http://<host>.xc:8000.
+#
+# Ordering: start after mineru-podman so the directory /run/mineru
+# exists (it is pre-created by install-mineru.yml at install time,
+# so this is a no-op warmup rather than a runtime dependency).
+# Want= is a soft preference, not a hard dependency — socat with
+# `fork` retries per-client, so clients that arrive before the
+# UDS exists just see ECONNREFUSED and retry.
+After=network.target mineru-podman.service
+Wants=mineru-podman.service
+
+[Service]
+Type=simple
+# Run as root so socat can connect to the UDS (the UDS is created
+# by the container's dev user — UID 1002 via --userns=keep-id —
+# with the default umask giving 0644 mode; root can connect).
+User=root
+Group=root
+# `reuseaddr` lets a quick restart bind the same port without
+# TIME_WAIT interference. `fork` gives each TCP client its own
+# socat child that bridges to a fresh UDS connection — mirrors
+# what systemd's socket-activation does, but explicitly per-
+# connection so a stale UDS doesn't kill the listener.
+#
+# If /run/mineru/mineru.sock is missing (container not yet
+# started, or just restarted), socat's connect attempt fails
+# and the per-client child exits; the listener stays up and
+# accepts the next connection. systemd's Restart= then keeps
+# the bridge alive even across mineru-podman restarts.
+ExecStart=/usr/bin/socat -d TCP-LISTEN:8000,reuseaddr,fork UNIX-CONNECT:/run/mineru/mineru.sock
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
