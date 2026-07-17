@@ -252,9 +252,10 @@ docker compose -f docker-compose.dev.yaml up -d etcd
 Run ansible from the `dev/ansible/` directory:
 
 ```bash
+source .venv/bin/activate
 cd dev/ansible
-../../.venv/bin/ansible-inventory --list
-../../.venv/bin/ansible-playbook ../../config/ansible/site.yml --check
+ansible-inventory --list
+ansible-playbook ../../config/ansible/site.yml --check
 ```
 
 The dev ansible.cfg uses `localhost:2379` for etcd inventory.
@@ -292,3 +293,10 @@ the section list). Requires the dev cluster to be up; use
 `make test-system-fresh` to also re-run the provisioning plays. Logs land
 in `./tmp/system-test.log`; `tail -f` to watch, `grep -E '^(== SECTION|PASS|FAIL)'`
 for the summary.
+
+## Tools
+
+```bash
+uv tool install --from git+https://github.com/oraios/serena serena-agent
+uv tool install jedi-language-server
+```

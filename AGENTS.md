@@ -17,23 +17,11 @@ YCluster is a self-bootstrapping infrastructure platform for small AI clusters. 
   - hostnames with indexes > 3 (e.g. c4, s5)
 - keep track of deployment specific tasks in NOTES.md (gitignored)
 
-## Sandbox restrictions (Codex CLI and similar harnesses)
+## Guidelines
 
-When the agent runs in a sandboxed harness like Codex CLI, the
-following operations may be blocked by the sandbox and need
-sandbox_permissions: "require_escalated" (or the harness's
-equivalent escalation mechanism) plus a short justification:
-
-- Network access: anything that reaches outside the sandbox
-  (curl, ssh, git fetch, bash dev-sync.sh --check, etc.).
-  A failed network command does NOT mean the task is impossible --
-  re-run with escalation and let the user approve. Symptoms
-  include Operation not permitted on SSH control sockets
-  (e.g. dev-sync.sh --check).
-
-For privileged cluster operations, prefer mcp__cluster_exec__run
-(see "Cluster exec via MCP" below) -- it has its own two-tier
-timeout model and bearer auth and doesn't need escalation.
+- Keep this document concise.  Only use for orientation and information relevant to most sessions.  Keep
+more specific knowledge in ./docs/ .
+- Avoid doing things "manually" in prod if there is a best-practice way of doing it (e.g. running a playbook)
 
 ## Common Commands
 
@@ -41,8 +29,7 @@ timeout model and bearer auth and doesn't need escalation.
 
 **From an agent session**, run playbooks via the cluster-exec MCP
 (`mcp__cluster_exec__run`) with `hostname="localhost"` (the bastion,
-where `/etc/ansible` lives) and `auto_bg_after_s=0` for image-rebuild
-plays that can exceed the 30s default. See `### Cluster exec via MCP`
+where `/etc/ansible` lives).  See `### Cluster exec via MCP`
 below for the full tool reference. Direct SSH from inside the sandbox
 needs `sandbox_permissions: require_escalated`.
 
@@ -56,90 +43,31 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 ```
 
 ### Dev Workflow (syncing local changes to cluster)
-`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `$YC_SYNC_HOST:/opt/infrastructure/`. The watchman trigger lives in the watchman daemon, so the watcher runs in the background independently of any terminal. Run it once (outside of agent sessions) to keep changes flowing while you develop:
-```bash
-bash dev-sync.sh --start   # initial sync + register the watchman trigger, then returns
-bash dev-sync.sh --stop    # tear the trigger down
-```
-Running with no args prints usage. Then run the playbook (see Running Ansible Playbooks below).
+`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `$YC_SYNC_HOST:/opt/infrastructure/`.
+The user will take care of starting this process.
 
 **Confirming a sync landed (don't hash files by hand).** Trust the watcher by
 default; for a routine confirmation, `tail ./tmp/dev-sync.log` for a `done` line
 stamped after your edit (the trigger only logs `done` on rsync exit 0, so
 partial syncs show as `rsync failed`). When you want certainty (before a
-high-stakes playbook run, or you suspect drift), run `bash dev-sync.sh --check`
+high-stakes playbook run, or you suspect drift), run `./dev-sync.sh --check`
 — a dry-run checksum compare against the cluster using the same exclude set; it
 also reports whether the watcher is running. Empty diff + exit 0 means in sync,
-exit 1 lists the files that differ (~4s, all SSH round-trip). Never per-file
+exit 1 lists the files that differ. Never per-file
 `cmp`/`sha256` over SSH (noisy), and don't rely on a git-hash check — the synced
 set is defined by `.watchignore` and includes untracked scratch dirs that a
 tracked-files-only hash can't see.
 
+When sandboxed, this requires permission escalation due to network access.
+
 ### Cluster Management
 The `ycluster` CLI is installed on core nodes:
+
 ```bash
 ycluster cluster status
-ycluster dhcp list all
-ycluster tls generate --common-name your-domain.com
-ycluster certbot obtain --test
+ycluster inference ls
+...
 ```
-
-### Cluster exec via MCP
-
-`mcp/cluster-exec` is a local MCP server exposing four tools: `run` (execute
-a shell command on an internal host via the two-hop SSH pattern above),
-`tail` (render the tail of the JSONL log as a human-readable transcript),
-`status` (list or inspect backgrounded runs), and `kill` (terminate a
-backgrounded run by session_id). It runs as a streamable-HTTP daemon on
-`http://127.0.0.1:4003/mcp` and is registered in `opencode.json` as a
-`remote` MCP. Manage it with
-`bash mcp/cluster-exec/cedaemon --start|--stop|--status|--restart`; start is
-idempotent and waits until the port is bound before returning, stop uses
-SIGTERM with a 5s SIGKILL escalation and always cleans up backgrounded SSH
-sessions in the same process group (no orphans). State lives in
-`./tmp/cluster-exec.{pid,log}`.
-
-Full stdout/stderr is logged (untruncated) to `./tmp/cluster.log` as JSONL
-events; the LLM-facing tool result returns only the head/tail (defaults
-25/25) of the chronologically merged stream with `[stderr]` tags. Progress
-notifications tick every second while a long command runs. **Two-tier
-timeout model**: soft `auto_bg_after_s` (default 30s, `CE_AUTO_BG_TIMEOUT_S`)
-auto-backgrounds a long-running command and returns
-`BACKGROUNDED session=<id>` for polling via `tail -s <id>`; hard
-`timeout_s` (default 1800s, `CE_TIMEOUT_S`) is the backstop that SIGTERMs
-the process. Both overridable per call on `run` — set `timeout_s` greater
-than `auto_bg_after_s`, or both to 0 to disable timeouts entirely.
-Client-driven cancel (`notifications/cancelled` → `ctx.cancel_requested`)
-works in streamable-HTTP and terminates the running command; the hard
-timeout remains the backstop in case the cancel message never arrives.
-
-**Bearer auth**: every request must include `Authorization: Bearer <token>`.
-The token lives in a single file (default `~/.config/cluster-exec/bearer`,
-mode 0600, override with `CE_BEARER_PATH`) and is printed on `--start` plus
-logged at server startup. The file is created on first start with a 256-bit
-random token and reused across restarts (deleting it rotates the token).
-`--start` also auto-appends `export CE_BEARER="$(cat '<path>')"` to
-`.envrc` (default `$REPO/.envrc`, override with `CE_ENVRC`) so opencode's
-`{env:CE_BEARER}` header substitution in `opencode.json` picks it up via
-direnv on reload.
-
-**`hostname="localhost"` shortcut**: collapses the two-hop to a single
-`ssh "$CE_BASTION" "<command>"` — use it for anything that should run on the
-bastion itself, e.g. ansible playbooks:
-```text
-run(command="cd /etc/ansible && ./run-playbook.sh admin/install-ycluster-package.yml",
-    hostname="localhost")
-```
-`/etc/ansible` is mounted on every core node; the bastion is one of them
-(typically also `$YC_SYNC_HOST`). Bump `auto_bg_after_s` (or set to 0) for
-playbooks likely to exceed the 30s default.
-
-The MCP server uses generic `CE_*` env vars (`CE_BASTION`, `CE_LOG_PATH`,
-`CE_HTTP_HOST`, `CE_HTTP_PORT`, `CE_TIMEOUT_S`, …) and is not
-ycluster-specific. Our project's `BASTION` shell var (which resolves to
-the cluster entry host) maps to `CE_BASTION` via the wrapper script; see
-`mcp/cluster-exec/cedaemon` for the wiring. The `run` tool grants root SSH
-access — use sparingly, prefer ansible for stateful changes.
 
 ### Held Packages
 Some packages are deliberately held from auto-upgrade (apt: `postgresql-16`;
@@ -183,6 +111,8 @@ See `docs/operations/packages.md`.
   - NAS (nas1-nas10): 10.0.0.131-140
   - Adhoc (x1-x49): 10.0.0.151-199
   - Dynamic (dhcp-NNN): 10.0.0.200-249
+- **.xc**: the cluster-internal domain
+- The local machine is not inside the cluster, so cannot resolve this.
 
 ### Directory Structure
 - `config/ansible/` - All Ansible playbooks and configuration
@@ -194,6 +124,7 @@ See `docs/operations/packages.md`.
   - `inventory_plugins/etcd_nodes.py` - Dynamic inventory from etcd
 - `config/ansible/admin/files/ycluster/` - Python CLI tool source
   - `app/` - Application deployments (Open-WebUI, local-ai-proxy, Rathole)
+- `docs/` - documentation
 
 ### Inventory
 Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.yml`. The `etcd_nodes` inventory plugin dynamically discovers nodes.
@@ -204,26 +135,26 @@ Ansible inventory is auto-loaded from `inventory_boot.yml` and `inventory_etcd.y
 - Be terse. Short commit subjects; no rationale essays in bodies.
   Rationale that needs to survive goes in `docs/`.
 - Do not create commits unless explicitly asked by the user
+- Amend when fixing code that was recently committed
 - Run the relevant tests/build before committing. If the local toolchain
-  doesn't have what's needed, run tests on a cluster node that does
-  (`ssh "$YC_SYNC_HOST" 'cd /opt/infrastructure/local-ai-proxy && go test ./...'`)
-  or stop and tell the user — never commit untested code.
+  doesn't have what's needed, stop and tell the user — never commit untested code.
 - Keep scripts in `config/ansible/scripts/` directory, installed by playbooks
 - Prefer Python libraries over subprocess for mainstream tasks
-- Playbooks must be idempotent
+- Playbooks must be idempotent and minimize suprious change detection
 - Do not swallow errors or stderr output
 - Use `git mv` for file renames
 - **Use `./tmp/` not `/tmp/`** for local scratch files (logs, system-test
   output, temp configs). `./tmp/` is gitignored. The system-test logs at
   `./tmp/system-test-<section>.log` follow this convention.
-- **Pipe long command output through `headtail`** (on PATH at
+- **Pipe long command output locally through `headtail`** (on PATH at
   `~/bin/headtail`) instead of `head`/`tail` so the start and end of the
   output are both visible without truncating either. Use `headtail -l FILE`
   to also tee the full un-elided output to a log file.
+- Do not use `headtail` inside the cluster-exec tool.  It already trims long output.
 - Use JSON format for command output when available (e.g., `rbd --format json`)
 - Add JSON output format to custom scripts used by other scripts
 - **NEVER run `rm -rf` on mount points or paths that could contain user data without confirming with the user first** - use `rmdir` for empty directories or verify unmounted state first
-- `research/`, `bench-results/`, `go-bench`, and `env.sh` are local/personal files — do not commit them
+- `research/`, `bench-results/`, `go-bench`, and `env.sh` are local files — do not commit them
 
 ## Ansible Patterns
 
@@ -264,12 +195,9 @@ run on the storage leader — `journalctl -u <service>` on a non-leader shows
 nothing. The leader can shift via ceph/mon election between sessions, so
 always resolve it first:
 ```bash
-LEADER=$(ssh "$YC_SYNC_HOST" 'ycluster cluster leader')
-ssh "$YC_SYNC_HOST" "ssh $LEADER 'journalctl -u local-ai-proxy --since \"10 minutes ago\" --no-pager'"
+cluster_exec.run(command="ycluster cluster leader", hostname="localhost")
+cluster_exec.run(command="journalctl -u local-ai-proxy --since '10 minutes ago' --no-pager", hostname="LEADER")
 ```
-A common trap: the playbook's smoke check passed on the leader at deploy
-time, but by the time you tail logs the leader has shifted. Re-check
-before assuming "the proxy isn't logging".
 
 ### Docker SDK Errors
 "Not supported URL scheme http+docker" means `requests >= 2.32` is installed via pip and shadowing the apt package. Check `/usr/local/lib/python3.12/dist-packages/` for pip-installed packages that shouldn't be there.
@@ -303,22 +231,78 @@ For usage and operations (adding models, API keys, etc.), see `docs/operations/i
 
 `dev/cluster/` stands up a throwaway local ycluster on Incus system containers
 (s1-s3 core, c1, f1) for testing infra changes without touching prod — see
-`docs/design/virtual-test-environment.md`. It is the preferred place to run the
-`ycluster` unit tests when the local machine lacks the apt deps (etcd3, flask,
-…) or prod is unreachable; the dev nodes already have them installed.
+`docs/design/virtual-test-environment.md`.
 
 ```bash
 dev/cluster/dev-cluster.sh status            # is it up? (up/down/reset/exec are operator-run)
 ssh -F dev/cluster/.ssh/config s1 <cmd>      # ssh into a dev node (key/config generated by `up`)
 ```
 
-Run the unit suite against your working-tree code by copying the package onto a
-node (the repo is not mounted in the containers) — `tests/` has no
-`__init__.py`, so invoke modules by dotted name, not `discover`:
+## Codex CLI Specific Guidance
 
-```bash
-cd config/ansible/admin/files/ycluster
-tar cz ycluster tests | ssh -F /…/dev/cluster/.ssh/config s1 \
-  'rm -rf /root/yctest && mkdir /root/yctest && tar xz -C /root/yctest && cd /root/yctest && \
-   python3 -m unittest tests.test_gateway_health tests.test_clock_skew tests.test_backup_status tests.test_vm_scheduling'
+### `exec_command`
+
+When `exec_command` returns a `session_id` (or the response body says
+"Process running with session ID N"), the shell is still running in the
+background. Reuse it via `write_stdin(session_id=N)` to read more output
+or send input, or terminate it via `thread/backgroundTerminals/terminate`.
+Do not re-run the same command — that leaks the background process.
+
+An empty `output` field does not mean the command finished. Check
+`session_id` and `exit_code` (or the "Process running"/"Process exited"
+line) before deciding.
+
+Background terminals persist across turns. If you started one earlier in
+the session, you can find it in the active-background-terminals fragment
+injected into your context.
+
+## Sandbox restrictions (Codex CLI and similar harnesses)
+
+When the agent runs in a sandboxed harness like Codex CLI, the
+following operations may be blocked by the sandbox and need
+sandbox_permissions: "require_escalated" (or the harness's
+equivalent escalation mechanism) plus a short justification:
+
+- Network access: anything that reaches outside the sandbox
+  (curl, git fetch, ./dev-sync.sh --check, etc.).
+  A failed network command does NOT mean the task is impossible --
+  re-run with escalation and let the user approve. Symptoms
+  include Operation not permitted on SSH control sockets
+  (e.g. dev-sync.sh --check).
+
+For privileged cluster operations, prefer cluster_exec.run
+(see "Cluster exec via MCP" below) -- it has its own two-tier
+timeout model and bearer auth and doesn't need escalation.
+
+When sandboxed, avoid the use of `ssh`, see next section.
+
+### Cluster exec via MCP
+
+`mcp/cluster-exec` is a local MCP server exposing four tools: `run` (execute
+a shell command on an internal host via the two-hop SSH pattern above),
+`tail` (render the tail of the JSONL log as a human-readable transcript),
+`status` (list or inspect backgrounded runs), and `kill` (terminate a
+backgrounded run by session_id). It runs as a streamable-HTTP daemon on
+`http://127.0.0.1:4003/mcp` and is registered in `opencode.json` as a
+`remote` MCP.  The user will handle starting it.
+
+Full stdout/stderr is logged (untruncated) to `./tmp/cluster.log` as JSONL
+events; the LLM-facing tool result returns only the head/tail (defaults
+25/25) of the chronologically merged stream with `[stderr]` tags. Progress
+notifications tick every second while a long command runs. **Two-tier
+timeout model**: soft `auto_bg_after_s` (default 30s)
+auto-backgrounds a long-running command and returns
+`BACKGROUNDED session=<id>` for polling via `tail -s <id>`; hard
+`timeout_s` (default 1800s) is the backstop that SIGTERMs
+the process. Both overridable per call on `run` — set `timeout_s` greater
+than `auto_bg_after_s`.
+
+**`hostname="localhost"` shortcut**: use it for anything
+that should run on the bastion itself, e.g. ansible playbooks:
+```text
+run(command="cd /etc/ansible && ./run-playbook.sh admin/install-ycluster-package.yml",
+    hostname="localhost")
 ```
+
+Avoid the use of ssh in the command - specify the hostname as a tool call argument instead.
+

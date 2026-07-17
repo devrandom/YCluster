@@ -4,6 +4,7 @@
 AGENTS.local.md
 NOTES.md
 /config/ansible/vault/
+/ext
 data/dnsmasq.leases
 data/*.iso
 data/*_key
