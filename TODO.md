@@ -2,7 +2,12 @@
 
 ## Critical
 
-See AGENTS.md for rules related to deployment-specific information.
+- Switch the rathole tunnel layer to frp: rathole 0.5.0 has an unfixed TCP
+  socket leak (upstream issue [#367](https://github.com/rathole-org/rathole/issues/367))
+  that flaps external HTTPS when the FIN-WAIT-2 / CLOSE-WAIT backlog grows.
+  Upstream is dormant (last release 2023-10-01, last commit on `main`
+  2025-07-29, ownership transferred in 2025-06 with no further activity).
+  Detail: the **Switch rathole → frp** bullet under "Next" below.
 
 ## Security
 
@@ -96,6 +101,7 @@ Completed work has moved to `CHANGELOG.md`.
 - DR runbooks, esp. etcd quorum loss (only unrecoverable failure mode) + a `restore` path; Ceph off-cluster backup story.
 - Incus storage `dir`→`zfs` migration — runaway-guest root-fs fill (nv3 cascade).
 - WG inbound ingress that follows the leader; rathole PROXY protocol for real client IPs.
+- **Switch rathole → frp.** Rathole upstream is dormant — latest release is still v0.5.0 (2023-10-01), last commit on `main` is 2025-07-29 (~12 months ago), ownership transferred to @fernvenue/@sjtrny in 2025-06 ([discussion #416](https://github.com/rathole-org/rathole/discussions/416)) with no further activity. **[Issue #367](https://github.com/rathole-org/rathole/issues/367)** ("TCP connection floods overwhelm the client") describes exactly the bug we hit — CLOSE_WAIT / FIN_WAIT-2 socket accumulation — and has no merged fix. It caused a real external HTTPS outage 2026-07-17 (~8 h flap; detail in `private/incidents/dev1-rathole-flap-2026-07-17.md`). **[frp](https://github.com/fatedier/frp)** is the replacement: actively maintained (v0.70.0 shipped 2026-07-11), Go-based, supports the same use case (TCP tunnels, token auth, hot-reload, per-service bind ports), and includes PROXY protocol natively — so this migration also picks up the PROXY-protocol item above for free. Scope (full rewrite): `app/build-rathole.yml`, `app/install-rathole.yml`, `app/install-rathole-server.yml`, `admin/install-vm-bastion.yml`; all `*client-config.toml.j2` / `*server.toml.j2` / start scripts / systemd units in `app/files/` and `app/templates/`; the Python helpers (`admin/files/ycluster/ycluster/utils/rathole_config.py` + `ycluster/cli/rathole.py`); the etcd schema (`/cluster/nodes/rathole/config` token and the analog frp key). Plan: (1) stand up frp on the dev cluster first, one rathole service replaced at a time and monitored end-to-end; (2) keep the public port layout identical (frontends keep `0.0.0.0:{http,https,vm-bastion-*}`); (3) update `ycluster` CLI + etcd schema with backward compatibility during cutover; (4) roll to prod dev1a/b → bastions → s1–s3 rathole clients; (5) remove rathole playbooks, configs, units, helpers, and the standalone PROXY-protocol item.
 - Architecture A1-A4 (bootstrap trust model, plaintext keys, setup-time RBD `--exclusive`, Go-proxy watch resilience).
 
 **Later (hygiene, docs, breadth):**
