@@ -221,7 +221,7 @@ disabling streaming extraction (raw tags leak to every frontend). Forcing
 **every** turn (frontends can still override per request). The proper fix is to
 override `is_reasoning_end` in our plugin to ignore the empty
 `<mm:think></mm:think>` instruction pair and restore adaptive thinking — see
-TODO.md.
+[`todo/inference/m3-reasoning-parser.md`](../../todo/inference/m3-reasoning-parser.md).
 
 ### Tool calling — unsupported on this image
 
@@ -240,7 +240,7 @@ tool-using clients (opencode, etc.) to a tool-capable model** (e.g.
 `nvidia/MiniMax-M2.7-NVFP4` or the Nemotron models). The real fix is rebuilding
 on a vLLM that carries #45381 (our fork point predates it) — see
 [b12x-reproducible-build-design-2026-06.md](b12x-reproducible-build-design-2026-06.md).
-Tracked in TODO.md.
+Tracked in [`todo/inference/b12x-reproducible-build.md`](../../todo/inference/b12x-reproducible-build.md).
 
 ## 4. Verify it actually works
 

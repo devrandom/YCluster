@@ -2,8 +2,7 @@
 Description=MinerU TCP→UDS proxy (socat bridge for --network=none)
 # mineru-podman.service binds the API on a Unix domain socket at
 # /run/mineru/mineru.sock (no AF_INET — the container runs under
-# --network=none as SSRF hardening; see TODO.md "Sandbox MinerU's
-# outbound at the OS layer"). This unit bridges host TCP:8000 to
+# --network=none as SSRF hardening; see todo/archive/sandbox-mineru-outbound.md). This unit bridges host TCP:8000 to
 # that UDS so the cluster-internal reach model is unchanged —
 # local-ai-proxy + nginx still hit http://<host>.xc:8000.
 #

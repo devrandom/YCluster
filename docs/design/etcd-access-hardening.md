@@ -83,7 +83,7 @@ Phase 1 changes:
 
 A standing principle came out of this: avoid unnecessary etcd calls in
 general. The core-node health path still makes ~6 reads per scrape — tracked
-as a perf follow-up in `TODO.md`.
+as a perf follow-up in `todo/operations/consolidate-etcd-reads.md`.
 
 ## Problem
 etcd is the single source of truth for cluster state and secrets, yet it

@@ -62,7 +62,7 @@
     # TCP:{{ mineru_port }} and forwards to it. The directory must be
     # owned by `dev` (UID 1002) because the container's mineru process
     # runs as dev via --userns=keep-id and creates the socket file
-    # there. See TODO.md "Sandbox MinerU's outbound at the OS layer".
+    # there. See todo/archive/sandbox-mineru-outbound.md.
     mineru_uds_path: /run/mineru/mineru.sock
     mineru_uds_dir: /run/mineru
     mineru_port: 8000
@@ -101,8 +101,7 @@
 
     # Podman + NVIDIA CDI are required for `--device nvidia.com/gpu=all`.
     # socat is the TCP→UDS bridge that fronts the container's UDS
-    # listener (see mineru-podman-proxy.service + TODO.md "Sandbox
-    # MinerU's outbound at the OS layer"). setup-gpu-podman.yml runs
+    # listener (see mineru-podman-proxy.service + todo/archive/sandbox-mineru-outbound.md). setup-gpu-podman.yml runs
     # before this in the app chain, but check defensively in case the
     # play is run standalone.
     - name: Ensure podman + socat are installed

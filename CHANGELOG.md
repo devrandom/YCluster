@@ -1,7 +1,7 @@
 # Changelog
 
-Completed work, moved out of `TODO.md`. Newest first. One line per change;
-detail lives in commits and code. Items with residual work stay in `TODO.md`.
+Completed work, moved out of `./todo/`. Newest first. One line per change;
+detail lives in commits and code. Items with residual work stay in `./todo/`.
 
 ## 2026-07-17
 

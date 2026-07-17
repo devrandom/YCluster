@@ -73,7 +73,7 @@ server {
 # returns 404. Real client IPs are NOT preserved (rathole 0.5.0 has no
 # PROXY protocol support) — all requests appear to come from 127.0.0.1,
 # so rate limits act as global buckets rather than per-client. See
-# TODO.md for the rathole rebuild follow-up.
+# todo/networking/switch-rathole-to-frp.md for the rathole rebuild follow-up.
 server {
     {% if use_tls %}
     listen 127.0.0.2:443 ssl http2;

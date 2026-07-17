@@ -94,7 +94,7 @@ compound, and it is the DHCP/PXE/bootstrap brain of the cluster:
   adjacent etcd namespaces. Fix: validate with `^[a-z]+[0-9]+$` (or per-type
   regex) before use.
 
-## 3. Architectural risks (not already tracked in TODO.md)
+## 3. Architectural risks (not already tracked in `./todo/`)
 
 - [ ] **A1. Bootstrap is trust-on-first-use keyed to MAC addresses.**
   A rogue device on the provisioning VLAN can spoof a storage-range MAC, PXE
@@ -154,7 +154,7 @@ compound, and it is the DHCP/PXE/bootstrap brain of the cluster:
   unauthenticated on the cluster network (recon value only; fine under the
   LAN trust model once stated).
 
-## 6. Already acknowledged in TODO.md (not re-litigated here)
+## 6. Already acknowledged in `./todo/` (not re-litigated here)
 
 etcd quorum-loss DR runbook, gateway VIP health-check brittleness, s4 VIP
 priority bug, Ceph/RBD backup story, WG ingress failover, rathole PROXY
@@ -179,5 +179,5 @@ and test coverage; secrets properly gitignored.
 3. A3 + B8 follow-ons; A4 watch resilience.
 4. A1: document the LAN/TOFU trust model; bootstrap integrity checking when
    convenient.
-5. TODO.md items as already triaged — etcd DR runbook first (only
+5. `./todo/` items as already triaged — [etcd DR runbook](../../todo/lifecycle/dr-runbooks.md) first (only
    unrecoverable failure mode).

@@ -177,4 +177,5 @@ Building from the vLLM fork is also the lever to close both M3 parser gaps —
 upstream #45381 (2026-06-15) ships the built-in `minimax_m3` reasoning parser
 (drop our injected plugin) and the Rust-backed tool-call parser (close the
 tool-calling gap). See the "Fork currency" section above for the b12x-+-#45381
-path, plus [minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md) and TODO.md.
+path, plus [minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md) and
+[`todo/inference/b12x-reproducible-build.md`](../../todo/inference/b12x-reproducible-build.md).
