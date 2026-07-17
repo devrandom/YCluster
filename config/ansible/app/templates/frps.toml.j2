@@ -1,0 +1,76 @@
+# frp server configuration
+# Parallel run alongside rathole on disjoint ports. See
+# docs/design/frp-migration.md for the port allocation rationale.
+bindAddr = "0.0.0.0"
+bindPort = {{ frp_bind_port | default(7000) }}
+
+auth.method = "token"
+auth.token = "{{ frp_token | default('change_me_secret_token') }}"
+
+# PROXY protocol v2 from day one — the alt nginx vhost picks up real
+# client IPs and rate-limit zones can drop back to per-client semantics
+# (folded-in rathole-PROXY-protocol item, validated here before the
+# production vhost gets flipped).
+transport.proxyProtocolVersion = "v2"
+
+[[proxies]]
+name = "http"
+type = "tcp"
+listenPort = 17080
+
+[[proxies]]
+name = "https"
+type = "tcp"
+listenPort = 17443
+
+# One SSH ingress endpoint per core node (idx N -> port 17200+N), reached
+# with: ssh -J jump@host.ycluster.net:1720N ... . Generated from the core
+# group so it scales as core nodes are added (s4+), matching the client
+# side in frp_config.py. Bound to localhost — same two-hop bastion pattern
+# as rathole-server.toml.j2: external SSH lands on f1's public :22, the
+# user authenticates to the bastion, then SSHes to localhost:1720N which
+# the tunnel forwards to sN:22.
+{% for host in groups['core'] | sort %}
+{% set idx = host[1:] | int %}
+[[proxies]]
+name = "ssh{{ idx }}"
+type = "tcp"
+bindAddr = "127.0.0.1"
+listenPort = {{ 17200 + idx }}
+
+{% endfor %}
+
+[[proxies]]
+name = "admin1"
+type = "tcp"
+bindAddr = "127.0.0.1"
+listenPort = 17821
+
+[[proxies]]
+name = "admin2"
+type = "tcp"
+bindAddr = "127.0.0.1"
+listenPort = 17822
+
+# VM-access bastions (one public port per Incus VM host). Each VM host
+# runs its own bastion container on its own incusbr0 and registers a
+# distinct service name so the tunnels do not collide on the frps
+# server. Reach VMs with: ssh -J jump@<this-host>:<port> user@<vm-name>
+#
+# Per-host service name is set via `vm_bastion_service` in host_vars; the
+# public port is DERIVED here from node type + index. Disjoint from the
+# rathole layout (2210+idx / 2213+idx / 2220+idx / 2240+idx) by 5000.
+# nvidia is a child of compute, so one loop covers both; scales without
+# naming any node here.
+{% for h in groups['compute'] | default([]) | sort %}
+{% if hostvars[h].vm_bastion_service is defined %}
+{% set idx = h | regex_replace('^[a-z]+', '') | int %}
+{% set is_nv = h.startswith('nv') %}
+{% set port = ((17210 if is_nv else 17213) + idx) if idx <= 3 else ((17220 if is_nv else 17240) + idx) %}
+[[proxies]]
+name = "{{ hostvars[h].vm_bastion_service }}"
+type = "tcp"
+listenPort = {{ port }}
+
+{% endif %}
+{% endfor %}

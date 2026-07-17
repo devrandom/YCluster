@@ -41,6 +41,7 @@ def create_parser():
     from .https import register_https_commands
     from .certbot import register_certbot_commands
     from .rathole import register_rathole_commands
+    from .frp import register_frp_commands
     from .frontend import register_frontend_commands
     from .backup import register_backup_commands
     from .healthchecks import register_healthchecks_commands
@@ -57,6 +58,7 @@ def create_parser():
     register_https_commands(subparsers)
     register_certbot_commands(subparsers)
     register_rathole_commands(subparsers)
+    register_frp_commands(subparsers)
     register_frontend_commands(subparsers)
     register_backup_commands(subparsers)
     register_healthchecks_commands(subparsers)

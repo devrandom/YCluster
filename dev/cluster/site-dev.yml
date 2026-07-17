@@ -86,3 +86,24 @@
 
 - import_playbook: ../../config/ansible/app/build-rathole.yml
 - import_playbook: ../../config/ansible/app/install-rathole-server.yml
+
+# frp parallel-run fixture: seed an frp tunnel config in etcd alongside
+# the rathole config, then build + install the frp server on f1 and the
+# frp client on the core nodes. Both daemons live on disjoint ports
+# (17080/17443/etc.) so neither takes the other's traffic. See
+# docs/design/frp-migration.md.
+- name: Seed frp tunnel config (dev fixture, parallel with rathole)
+  hosts: s1
+  become: yes
+  tasks:
+    - name: Seed an frp tunnel config in etcd
+      command: >
+        etcdctl put /cluster/nodes/frp/config
+        '{"remote_addr":"f1.xc:7000","token":"dev-frp-token"}'
+      environment: "{{ etcd_client_env }}"
+      changed_when: true
+      no_log: true
+
+- import_playbook: ../../config/ansible/app/build-frp.yml
+- import_playbook: ../../config/ansible/app/install-frp-server.yml
+- import_playbook: ../../config/ansible/app/install-frp.yml

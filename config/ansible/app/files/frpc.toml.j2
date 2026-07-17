@@ -1,0 +1,27 @@
+# frp client configuration (generated from etcd)
+# Parallel run alongside rathole — disjoint port range.
+serverAddr = "{{ remote_addr.split(':')[0] }}"
+serverPort = {{ remote_addr.split(':')[1] }}
+
+auth.method = "token"
+auth.token = "{{ token }}"
+
+transport.heartbeatInterval = 40
+transport.heartbeatTimeout = 40
+
+# Forward to 127.0.0.2 so the alt nginx vhost (admin-api-alt.conf) can
+# serve a separate "public alt" vhost bound to that address. 127.0.0.1
+# stays reserved for local health checks + cluster-internal traffic.
+# PROXY protocol v2 is enabled on the server side (frps.toml.j2), so the
+# alt vhost sees real client IPs via `real_ip_header proxy_protocol;`.
+[[proxies]]
+name = "http"
+type = "tcp"
+localIP = "127.0.0.2"
+localPort = 17080
+
+[[proxies]]
+name = "https"
+type = "tcp"
+localIP = "127.0.0.2"
+localPort = 17443

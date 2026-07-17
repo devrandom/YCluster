@@ -1,0 +1,204 @@
+---
+# Install frp server (frps) on frontend nodes. Runs alongside rathole
+# during the parallel-run soak on disjoint ports (17080/17443/etc.).
+#
+# frps listens on bindPort (default 7000) for frpc connections, and on
+# the per-proxy listenPort values for forwarded traffic. PROXY protocol
+# v2 is enabled from day one so the alt nginx vhost can pick up real
+# client IPs — this validates the folded-in rathole-PROXY-protocol item
+# in parallel with the current global-bucket rate-limit behavior on the
+# rathole-side public vhost.
+- name: Install frp server configuration
+  hosts: frontend
+  # No `become` for compatibility with unprivileged controller user (the
+  # delegate_to: localhost stat must run as the controller, not sudo).
+  vars:
+    frp_server_binary: "/usr/local/bin/frps"
+    frp_server_binary_src: "/opt/src/frp/bin/frps"
+    # Control port (frpc <-> frps). Distinct from any rathole port.
+    frp_bind_port: 7000
+
+  tasks:
+    - name: Check if frps binary exists on buildhost
+      stat:
+        path: "{{ frp_server_binary_src }}"
+      register: frp_server_binary_buildhost
+      delegate_to: "{{ buildhost }}"
+
+    - name: Fail if frps binary not found
+      fail:
+        msg: "frps binary not found at {{ frp_server_binary_src }} on {{ buildhost }}. Run app/build-frp.yml first."
+      when: not frp_server_binary_buildhost.stat.exists
+
+    - name: Fetch frps binary from buildhost to controller
+      fetch:
+        src: "{{ frp_server_binary_src }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Copy frps binary to target
+      copy:
+        src: "{{ build_cache_dir }}/{{ frp_server_binary_src | basename }}"
+        dest: "{{ frp_server_binary }}"
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create frp config directory
+      file:
+        path: /etc/frp
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    # Read the token from etcd at task time (no_log) rather than carrying it
+    # as an inventory var, so `ansible-inventory --host <frontend>` can't print
+    # it. Same pattern as install-rathole-server.yml. Frontends have no etcd
+    # access, so delegate the read to a core node.
+    - name: Read frp tunnel config from etcd
+      command: etcdctl get --print-value-only /cluster/nodes/frp/config
+      delegate_to: "{{ groups['core'][0] }}"
+      environment: "{{ etcd_client_env }}"
+      register: frp_cfg_raw
+      changed_when: false
+      no_log: true
+
+    - name: Parse frp token
+      set_fact:
+        frp_token: "{{ (frp_cfg_raw.stdout | from_json).token }}"
+      no_log: true
+
+    - name: Create frps server configuration
+      template:
+        src: frps.toml.j2
+        dest: /etc/frp/server.toml
+        mode: '0644'
+        owner: root
+        group: root
+      notify: restart frps
+      no_log: true
+
+    - name: Create frps systemd service
+      copy:
+        dest: /etc/systemd/system/frps.service
+        mode: '0644'
+        owner: root
+        group: root
+        content: |
+          [Unit]
+          Description=frp server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=root
+          ExecStart=/usr/local/bin/frps -c /etc/frp/server.toml
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - reload systemd
+        - restart frps
+
+    - name: Enable and start frps service
+      systemd:
+        name: frps
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # Frontend nodes are public, so run a host firewall (ufw) with
+    # least-privilege openings rather than relying on an implicit cloud
+    # security group. SSH is allowed before enabling so a run can't lock us
+    # out, and the frps public ports are parsed from the rendered config so
+    # the rules track the template as proxies are added.
+    # Install the alt vhost alongside the production admin-api.conf.j2
+    # rendering. This is the experimental twin of the public vhost on
+    # 127.0.0.2:443 — same paths (admin-api-public-locations.conf), but
+    # bound to the alt ports (17080 / 17443) and configured for PROXY
+    # protocol v2 from frps. Removed wholesale at cleanup step 6 of the
+    # frp migration plan.
+
+    # Frontend nodes are public, so run a host firewall (ufw) with
+    # least-privilege openings rather than relying on an implicit cloud
+    # security group. SSH is allowed before enabling so a run can't lock us
+    # out, and the frps public ports are parsed from the rendered config so
+    # the rules track the template as proxies are added.
+    - name: Install ufw
+      apt:
+        name: ufw
+        state: present
+
+    - name: Determine public frps ports from the rendered config
+      shell: "grep -oE 'listenPort = [0-9]+' /etc/frp/server.toml | grep -oE '[0-9]+' | sort -un"
+      register: frp_public_ports
+      changed_when: false
+
+    - name: Allow SSH through ufw (before enabling, to avoid lockout)
+      community.general.ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: Allow public frps ports through ufw
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ frp_public_ports.stdout_lines }}"
+
+    - name: Set default-deny incoming and enable ufw
+      community.general.ufw:
+        state: enabled
+        direction: incoming
+        policy: deny
+
+    - name: Default-allow outgoing
+      community.general.ufw:
+        direction: outgoing
+        policy: allow
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart frps
+      systemd:
+        name: frps
+        state: restarted
+
+# Alt nginx vhost lives on the storage leader, not the frontend —
+# frpc forwards external traffic to 127.0.0.2:17080 on the leader
+# where nginx serves it with PROXY-protocol-real client IPs. See
+# config/ansible/admin/files/admin-api-alt.conf.
+- name: Install frp alt nginx vhost (storage leader)
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Install alt nginx vhost for frp PROXY protocol
+      copy:
+        src: ../../admin/files/admin-api-alt.conf
+        dest: /etc/nginx/sites-available/admin-api-alt
+        mode: '0644'
+        owner: root
+        group: root
+      notify: reload nginx
+
+    - name: Enable alt nginx vhost
+      file:
+        src: /etc/nginx/sites-available/admin-api-alt
+        dest: /etc/nginx/sites-enabled/admin-api-alt
+        state: link
+      notify: reload nginx
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded

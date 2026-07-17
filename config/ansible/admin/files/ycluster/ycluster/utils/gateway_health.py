@@ -31,6 +31,7 @@ import sys
 import threading
 
 DEFAULT_RATHOLE_PORT = 2333
+DEFAULT_FRP_PORT = 7000
 PROBE_TIMEOUT = 2.0   # seconds, per frontend TCP probe
 ETCD_TIMEOUT = 3.0    # seconds, hard ceiling on the live etcd read
 
@@ -53,6 +54,16 @@ def parse_rathole_port(config_value, default=DEFAULT_RATHOLE_PORT):
     if sep and host and port.isdigit():
         return int(port)
     return default
+
+
+def parse_frp_port(config_value, default=DEFAULT_FRP_PORT):
+    """Extract the frp control port from the etcd frp config value.
+
+    Parallel-run companion to parse_rathole_port. Same shape
+    ({remote_addr, token} JSON), different default port. Read from
+    /cluster/nodes/frp/config, not /cluster/nodes/rathole/config.
+    """
+    return parse_rathole_port(config_value, default=default)
 
 
 def frontend_probe_ips(nodes):

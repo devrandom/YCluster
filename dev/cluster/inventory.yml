@@ -48,7 +48,12 @@ all:
     # Host Go for the local-ai-proxy control-node build (Debian has no
     # golang-1.24 package; >=1.21 auto-fetches the go.mod toolchain).
     local_ai_proxy_go_bin: /usr/lib/go-1.24/bin/go
-    # Build host for compiling binaries (rathole, open-webui). Defaults to s1;
+    # frp source — pinned to a specific SHA. Update both URL + SHA
+    # together when bumping. v0.70.0 is the current target; SHA below
+    # is the v0.70.0 release commit on main.
+    frp_repo_url: "https://github.com/fatedier/frp.git"
+    frp_repo_sha: "v0.70.0"
+    # Build host for compiling binaries (rathole, open-webui, frp). Defaults to s1;
     # the build playbooks run here and install playbooks fetch artifacts from
     # here via the controller.
     buildhost: s1

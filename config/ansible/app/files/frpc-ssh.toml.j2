@@ -1,0 +1,19 @@
+# frp SSH-only client configuration (generated from etcd)
+# Parallel run alongside rathole — disjoint port range.
+serverAddr = "{{ remote_addr.split(':')[0] }}"
+serverPort = {{ remote_addr.split(':')[1] }}
+
+auth.method = "token"
+auth.token = "{{ token }}"
+
+transport.heartbeatInterval = 40
+transport.heartbeatTimeout = 40
+
+# One SSH proxy per core node. The server side (frps.toml.j2) exposes
+# `ssh{{ idx }}` on listenPort 17200+idx; this client picks the one
+# matching this host's index. The idx comes from the hostname `s<N>`.
+[[proxies]]
+name = "ssh{{ idx }}"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22

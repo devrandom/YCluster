@@ -633,6 +633,63 @@ sec_rathole() {
 }
 
 # --------------------------------------------------------------------------
+# 12b. frp parallel-run tunnel via f1 (next to rathole, disjoint ports)
+# --------------------------------------------------------------------------
+sec_frp() {
+  # frpc-ssh must be active on every core node, mirroring rathole-ssh.
+  for n in "${CORE[@]}"; do
+    $SSH "$n" "systemctl is-active --quiet frpc-ssh" || die "frpc-ssh not active on $n"
+  done
+  ok "frpc-ssh clients active on all core nodes"
+
+  # Each core node's sshd is reachable through f1's per-node frp tunnel
+  # port (17201..17203, bound to f1 localhost) — read the banner through
+  # the tunnel. Disjoint from the rathole 2201..2203 range.
+  for n in "${CORE[@]}"; do
+    local port=$((17200 + ${n#s}))
+    $SSH f1 "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$port; head -c 7 <&3'" \
+      | grep -q '^SSH-2.0' || die "no ssh banner via f1:$port (frp tunnel for $n)"
+  done
+  ok "ssh banners via f1 frp ports 17201-17203"
+
+  # /cluster/nodes/frp/config must be set (seeded by the site-dev fixture).
+  local cfg
+  cfg=$($SSH s1 "$E etcdctl get /cluster/nodes/frp/config --print-value-only" | tr -d '[:space:]')
+  [ -n "$cfg" ] || die "/cluster/nodes/frp/config unset (site-dev fixture missing)"
+  ok "etcd /cluster/nodes/frp/config populated"
+
+  # frps control port (7000) must be reachable from inside the cluster.
+  retry 10 2 "frps control port" \
+    $SSH c1 "timeout 5 bash -c 'exec 3<>/dev/tcp/${IP[f1]}/7000 && echo ok'"
+  ok "frps control port 7000 reachable from cluster"
+
+  # PROXY protocol end-to-end: a request to f1:17080 from c1 must reach
+  # the alt vhost on 127.0.0.2:17080 and serve the public whitelist.
+  # /status is a public page served by admin-api, the same path the
+  # rathole-side test uses — so the alt vhost's path coverage is
+  # verified to match the production vhost.
+  local domain admin_host
+  domain=$($SSH s1 "$E etcdctl get /cluster/https/domain --print-value-only" | tr -d '[:space:]')
+  [ -n "$domain" ] || die "no external domain in etcd (app-dev fixture missing)"
+  admin_host="admin.$domain"
+  retry 15 2 "http through f1:17080 (frp alt port)" \
+    $SSH c1 "curl -fsS --max-time 5 -H 'Host: $admin_host' http://${IP[f1]}:17080/status -o /dev/null"
+  ok "public http through f1:17080 -> alt vhost (PROXY protocol)"
+
+  # Verify PROXY protocol actually delivers the client IP: the alt
+  # vhost's nginx access log should show c1's cluster IP, not 127.0.0.1.
+  # This is the validation the rathole-PROXY-protocol item was waiting
+  # for — folded into the frp migration plan.
+  local log_line
+  log_line=$($SSH f1 "grep -E 'GET /status HTTP' /var/log/nginx/access.log | tail -5")
+  # The PROXY protocol delivers c1's IP (10.0.0.51) into nginx's
+  # $binary_remote_addr; without it we'd see 127.0.0.1.
+  echo "$log_line" | grep -q "10\\.0\\.0\\.51" \
+    || die "alt vhost access log missing real client IP (PROXY protocol not delivering)"
+  ok "PROXY protocol delivers c1 IP to alt vhost access log"
+}
+
+# --------------------------------------------------------------------------
 # 13. admin web UI forward-auth gate (nginx auth_request -> authentik outpost)
 # --------------------------------------------------------------------------
 sec_admin_web() {
@@ -893,6 +950,7 @@ SECTION_REGISTRY=(
   "15.ACME via pebble (certbot + tunnel)|sec_acme"
   "16.leadership + VIP failover/failback|sec_failover"
   "17.backup + verify-restore|sec_backup"
+  "18.frp parallel-run tunnel via f1 (disjoint ports + PROXY protocol)|sec_frp"
 )
 
 # Parse a section filter spec (e.g. "15", "1-5,15", "acme") into a list of

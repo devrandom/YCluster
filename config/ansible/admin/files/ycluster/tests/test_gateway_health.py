@@ -50,6 +50,33 @@ class ParseRatholePortTests(unittest.TestCase):
         self.assertEqual(gh.parse_rathole_port(None, default=9), 9)
 
 
+class ParseFrpPortTests(unittest.TestCase):
+    """parse_frp_port is the parallel-run companion to parse_rathole_port.
+    Same JSON shape, different default port (7000)."""
+
+    def test_str_value(self):
+        self.assertEqual(
+            gh.parse_frp_port('{"remote_addr": "host.ycluster.net:7000"}'), 7000)
+
+    def test_bytes_value(self):
+        self.assertEqual(
+            gh.parse_frp_port(b'{"remote_addr": "host:17000"}'), 17000)
+
+    def test_missing_value_uses_default(self):
+        self.assertEqual(gh.parse_frp_port(None), gh.DEFAULT_FRP_PORT)
+        self.assertEqual(gh.parse_frp_port(b''), gh.DEFAULT_FRP_PORT)
+
+    def test_malformed_json_uses_default(self):
+        self.assertEqual(gh.parse_frp_port('not json'), gh.DEFAULT_FRP_PORT)
+
+    def test_no_remote_addr_uses_default(self):
+        self.assertEqual(gh.parse_frp_port('{"token": "x"}'),
+                         gh.DEFAULT_FRP_PORT)
+
+    def test_explicit_default(self):
+        self.assertEqual(gh.parse_frp_port(None, default=9), 9)
+
+
 class FrontendProbeIpsTests(unittest.TestCase):
     def test_extracts_ips(self):
         nodes = [{"name": "f1", "ip": "1.1.1.1"}, {"name": "f2", "ip": "2.2.2.2"}]

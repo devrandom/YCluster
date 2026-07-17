@@ -1,0 +1,141 @@
+---
+# Install frp client (frpc) on core nodes. Runs alongside rathole during
+# the parallel-run soak; frp units are enabled but the disjoint port
+# layout (17080/17443/etc.) means rathole traffic is unaffected.
+#
+# The frpc-start wrapper reads /cluster/nodes/frp/config from etcd at
+# startup and renders the client TOML from a jinja template — same
+# pattern as the rathole client.
+- name: Install frp client configuration and service
+  hosts: core
+  # No `become` for compatibility with unprivileged controller user (the
+  # delegate_to: localhost stat must run as the controller, not sudo).
+  vars:
+    frp_server_binary: "/usr/local/bin/frps"
+    frp_client_binary: "/usr/local/bin/frpc"
+    frp_server_binary_src: "/opt/src/frp/bin/frps"
+    frp_client_binary_src: "/opt/src/frp/bin/frpc"
+
+  tasks:
+    - name: Check if frp binaries exist on buildhost
+      stat:
+        path: "{{ item }}"
+      register: frp_binary_buildhost
+      loop:
+        - "{{ frp_server_binary_src }}"
+        - "{{ frp_client_binary_src }}"
+      delegate_to: "{{ buildhost }}"
+
+    - name: Fail if frp binaries not found
+      fail:
+        msg: "frp binaries not found at {{ frp_server_binary_src }} / {{ frp_client_binary_src }} on {{ buildhost }}. Run app/build-frp.yml first."
+      when: frp_binary_buildhost.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+
+    - name: Fetch frp binaries from buildhost to controller
+      fetch:
+        src: "{{ item }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      loop:
+        - "{{ frp_server_binary_src }}"
+        - "{{ frp_client_binary_src }}"
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Copy frpc binary to target
+      copy:
+        src: "{{ build_cache_dir }}/{{ frp_client_binary_src | basename }}"
+        dest: "{{ frp_client_binary }}"
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create frp config directory
+      file:
+        path: /etc/frp
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Install frpc config template
+      copy:
+        src: frpc.toml.j2
+        dest: /etc/frp/client-config.toml.j2
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Install frpc SSH-only config template
+      copy:
+        src: frpc-ssh.toml.j2
+        dest: /etc/frp/ssh-client-config.toml.j2
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Install frpc config-generator helper (ycluster subcommand)
+      copy:
+        src: "{{ item }}"
+        dest: "/usr/local/bin/{{ item | basename | regex_replace('\\.py$', '') }}"
+        mode: '0755'
+        owner: root
+        group: root
+      loop:
+        - frp_config.py
+
+    - name: Create frpc client startup script
+      copy:
+        src: frpc-start
+        dest: /usr/local/bin/frpc-start
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create frpc SSH client startup script
+      copy:
+        src: frpc-ssh-start
+        dest: /usr/local/bin/frpc-ssh-start
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create frpc systemd service
+      copy:
+        src: frpc.service
+        dest: /etc/systemd/system/frpc.service
+        mode: '0644'
+        owner: root
+        group: root
+      notify: reload systemd
+
+    - name: Create frpc SSH systemd service
+      copy:
+        src: frpc-ssh.service
+        dest: /etc/systemd/system/frpc-ssh.service
+        mode: '0644'
+        owner: root
+        group: root
+      notify: reload systemd
+
+    # frpc runs as a regular service on every core node (not leader-gated
+    # like the rathole client), since the parallel-run soak wants frp
+    # traffic to be reachable from any core node for failover testing.
+    - name: Enable and start frpc service
+      systemd:
+        name: frpc
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Enable and start frpc SSH service
+      systemd:
+        name: frpc-ssh
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes

@@ -1,0 +1,22 @@
+[Unit]
+Description=frp client - reverse proxy for NAT traversal (parallel run with rathole)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/ycluster/etcd-client.env
+ExecStart=/usr/local/bin/frpc-start
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log /etc/frp
+
+[Install]
+WantedBy=multi-user.target

@@ -3021,6 +3021,21 @@ def _rathole_public_host():
         return None
 
 
+def _frp_public_host():
+    """Public host clients reach the frp frontend on — the host part of the
+    frp tunnel's `remote_addr` in /cluster/nodes/frp/config. Parallel-run
+    companion to _rathole_public_host (same JSON shape, different key).
+    Returns only the host, never the secret. None if unset/unparseable."""
+    try:
+        raw, _ = get_etcd_client().get('/cluster/nodes/frp/config')
+        if not raw:
+            return None
+        remote = json.loads(raw.decode()).get('remote_addr', '')
+        return remote.rsplit(':', 1)[0] or None
+    except Exception:
+        return None
+
+
 def _parse_windows(windows):
     """Validate one-shot scheduling windows and normalize them to UTC ISO
     strings, sorted, with fully-elapsed windows dropped. Each window is
