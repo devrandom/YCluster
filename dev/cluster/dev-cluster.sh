@@ -377,11 +377,13 @@ ensure_node() {
   if ! INCUS info "$n" >/dev/null 2>&1; then
     echo "[*] create $n ($ip)"
     if [ "$n" = "c2" ]; then
-      if [ -x /usr/bin/qemu-system-x86_64 ]; then
-        # VM: full kernel, nested incus works natively
+      if [ -e /dev/kvm ]; then
+        # KVM available: VM (full kernel, nested incus works natively)
         INCUS init images:ubuntu/24.04/cloud "$n" --profile "$PROFILE" --vm
       else
-        # No QEMU: privileged container (security.privileged allows nesting)
+        # No KVM (QEMU may still be installed): privileged container
+        # (security.privileged allows nesting)
+        echo "[*] no /dev/kvm — c2 falling back to privileged container"
         INCUS init "$IMAGE" "$n" --profile "$PROFILE"
         INCUS config set "$n" security.privileged=true
       fi
