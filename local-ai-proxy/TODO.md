@@ -173,8 +173,6 @@ Supply chain (done):
 - [x] `go mod verify` on every build; `-trimpath -buildvcs=false`
 - [x] `go 1.25.9` (stdlib CVE fixes; govulncheck clean)
 - [x] `vulncheck` / `check` Makefile targets (opt-in govulncheck)
-- [x] `.syncignore` excludes `bin/` so deploys never ship a stale local
-      artifact
 
 ## Good-citizen: upstream cancellation fix to llama-swap
 
