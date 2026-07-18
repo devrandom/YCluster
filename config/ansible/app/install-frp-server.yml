@@ -135,7 +135,13 @@
         state: present
 
     - name: Determine public frps ports from the rendered config
-      shell: "grep -oE 'listenPort = [0-9]+' /etc/frp/server.toml | grep -oE '[0-9]+' | sort -un"
+      # frps has bindPort (control plane, static) plus any listenPort lines
+      # under [[proxies]]. In v0.70.0 the proxies are registered dynamically
+      # by clients (see frps.toml.j2 header), so the only static port here
+      # is bindPort — but the regex covers both shapes for forward
+      # compatibility if the template ever re-introduces server-side
+      # [[proxies]] blocks.
+      shell: "grep -oE 'bindPort = [0-9]+|listenPort = [0-9]+' /etc/frp/server.toml | grep -oE '[0-9]+' | sort -un"
       register: frp_public_ports
       changed_when: false
 

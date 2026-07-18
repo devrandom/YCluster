@@ -9,11 +9,12 @@ auth.token = "{{ token }}"
 transport.heartbeatInterval = 40
 transport.heartbeatTimeout = 40
 
-# One SSH proxy per core node. The server side (frps.toml.j2) exposes
-# `ssh{{ idx }}` on listenPort 17200+idx; this client picks the one
-# matching this host's index. The idx comes from the hostname `s<N>`.
+# One SSH proxy per core node. The remote port follows the rathole
+# parallel-run convention (17200+idx) so the public listener mapping
+# matches across both daemons. The idx comes from the hostname `s<N>`.
 [[proxies]]
 name = "ssh{{ idx }}"
 type = "tcp"
+remotePort = {{ 17200 + idx }}
 localIP = "127.0.0.1"
 localPort = 22

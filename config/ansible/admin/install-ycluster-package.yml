@@ -90,6 +90,7 @@
         - { script: 'certbot-manager', command: 'certbot' }
         - { script: 'tls-config', command: 'tls' }
         - { script: 'rathole-config', command: 'rathole' }
+        - { script: 'frp-config', command: 'frp' }
 
     - name: Remove obsolete wrapper scripts
       file:
@@ -99,6 +100,7 @@
         - lease-manager
         - https-config
         - frontend-manager
+        - frp_config
 
     - name: Ensure /etc/ycluster exists
       file:

@@ -12,16 +12,20 @@ transport.heartbeatTimeout = 40
 # Forward to 127.0.0.2 so the alt nginx vhost (admin-api-alt.conf) can
 # serve a separate "public alt" vhost bound to that address. 127.0.0.1
 # stays reserved for local health checks + cluster-internal traffic.
-# PROXY protocol v2 is enabled on the server side (frps.toml.j2), so the
-# alt vhost sees real client IPs via `real_ip_header proxy_protocol;`.
+# Only the storage leader should register http/https — running this
+# template on every core node would cause tunnel-name collisions.
 [[proxies]]
 name = "http"
 type = "tcp"
+remotePort = 17080
 localIP = "127.0.0.2"
 localPort = 17080
+transport.proxyProtocolVersion = "v2"
 
 [[proxies]]
 name = "https"
 type = "tcp"
+remotePort = 17443
 localIP = "127.0.0.2"
 localPort = 17443
+transport.proxyProtocolVersion = "v2"

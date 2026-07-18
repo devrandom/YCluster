@@ -5,8 +5,9 @@
 # `hosts` statically) and each task delegates to the buildhost.
 #
 # No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
-# Source is vendored under /opt/src/frp/ and pinned to a git SHA declared
-# in group_vars/all/main.yml (frp_repo_url + frp_repo_sha).
+# Source is vendored under /opt/src/frp/ and pinned to a git SHA in the
+# vars below (matches the rathole/open-webui pattern of inlining the
+# repo URL + SHA in the build playbook itself).
 - name: Build frp from source
   hosts: localhost
   vars:
@@ -14,10 +15,13 @@
     frp_binary_dir: "{{ frp_build_dir }}/bin"
     frp_server_binary: "{{ frp_binary_dir }}/frps"
     frp_client_binary: "{{ frp_binary_dir }}/frpc"
+    # frp v0.70.0 = fdaff3d674606b0ae4706a0f2eaca58ebbce0dfa.
+    frp_repo_url: "https://github.com/fatedier/frp.git"
+    frp_repo_sha: "fdaff3d674606b0ae4706a0f2eaca58ebbce0dfa"
     # Go toolchain. Installed via apt (golang-1.24) on the buildhost when
     # a rebuild is needed; local_ai_proxy_go_bin overrides the path for
     # hosts that already have go elsewhere.
-    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/local/go/bin/go') }}"
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
   tasks:
     - name: Check if frp binaries already exist
       stat:

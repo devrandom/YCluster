@@ -74,16 +74,6 @@
         owner: root
         group: root
 
-    - name: Install frpc config-generator helper (ycluster subcommand)
-      copy:
-        src: "{{ item }}"
-        dest: "/usr/local/bin/{{ item | basename | regex_replace('\\.py$', '') }}"
-        mode: '0755'
-        owner: root
-        group: root
-      loop:
-        - frp_config.py
-
     - name: Create frpc client startup script
       copy:
         src: frpc-start

@@ -21,8 +21,7 @@ YCluster is a self-bootstrapping infrastructure platform for small AI clusters. 
   - **snap** (held, upgraded via playbooks — see `docs/operations/packages.md`)
   - **Build from source** in a dedicated `app/build-<name>.yml` or
     `admin/build-<name>.yml` playbook, source vendored under `/opt/src/`,
-    pinned to a git SHA in `group_vars/all/main.yml`
-    (e.g. `app/build-rathole.yml`, `app/build-open-webui.yml`)
+    pinned to a git SHA (e.g. `app/build-rathole.yml`, `app/build-open-webui.yml`)
   - **Docker images** built in-cluster, pushed to `registry.xc:5000`
   No `get_url`/`curl`/`wget` of compiled artifacts, no PyPI C-extension
   wheels, no `curl | bash`. If a third-party binary is genuinely needed,
