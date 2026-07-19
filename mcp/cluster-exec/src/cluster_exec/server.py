@@ -7,10 +7,39 @@ from pathlib import Path
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
 from mcp.types import TextContent
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, ConfigDict, create_model
 
 from . import auth, exec, log
+
+
+# All tools must reject unknown arguments. The Pydantic default is
+# `extra="ignore"`, which silently drops unknown keys (and lets typos like
+# `yield_time_ms` masquerade as no-ops). We rebuild each tool's arg model on
+# a base that sets `extra="forbid"` and also stamp `additionalProperties: false`
+# on the advertised JSON schema so spec-compliant MCP clients reject unknown
+# keys before sending.
+_STRICT_ARG_BASE = type(
+    "StrictArgModelBase",
+    (ArgModelBase,),
+    {"model_config": ConfigDict(arbitrary_types_allowed=True, extra="forbid")},
+)
+
+
+def _lock_down_tool_schemas() -> None:
+    for tool in SERVER._tool_manager.list_tools():
+        tool.parameters["additionalProperties"] = False
+        old = tool.fn_metadata.arg_model
+        new = create_model(
+            old.__name__,
+            __base__=_STRICT_ARG_BASE,
+            **{
+                name: (field.annotation, field)
+                for name, field in old.model_fields.items()
+            },
+        )
+        tool.fn_metadata.arg_model = new
 
 
 def _env_float(name: str, default: float) -> float:
@@ -478,6 +507,9 @@ def main() -> None:
     print(f"bearer token file: {_BEARER_PATH} (mode 0600)", flush=True)
     print(f"listening: http://{host}:{port}{path}", flush=True)
     SERVER.run(transport="streamable-http", host=host, port=port, streamable_http_path=path)
+
+
+_lock_down_tool_schemas()
 
 
 if __name__ == "__main__":

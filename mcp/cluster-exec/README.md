@@ -181,7 +181,7 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth tests.test_file_transfer
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):
