@@ -158,6 +158,22 @@
         proto: tcp
       loop: "{{ frp_public_ports.stdout_lines }}"
 
+    # frp v0.70.0's ProxyBindAddr is global, so all dynamically-registered
+    # proxy listeners bind to 0.0.0.0 (see frps.toml.j2 header). The SSH
+    # tunnel ports (17201-17204) are intentionally NOT allowed here so they
+    # remain bastion-only (reachable from the local sshd jump on dev1a/b
+    # via 127.0.0.1, not from the WAN). The alt vhost ports (17080, 17443)
+    # match the alt ports in frpc.toml.j2 and are public for parallel-run
+    # validation against the production traffic pattern.
+    - name: Allow public frp alt vhost ports through ufw
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '17080'
+        - '17443'
+
     - name: Set default-deny incoming and enable ufw
       community.general.ufw:
         state: enabled

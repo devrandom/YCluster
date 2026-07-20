@@ -108,14 +108,16 @@
         group: root
       notify: reload systemd
 
-    # frpc runs as a regular service on every core node (not leader-gated
-    # like the rathole client), since the parallel-run soak wants frp
-    # traffic to be reachable from any core node for failover testing.
-    - name: Enable and start frpc service
+    # frpc (the general client with http/https proxies) is leader-gated
+    # just like rathole, because the http/https tunnel names collide at
+    # frps — only one frpc can register a given name at a time, and the
+    # leader is the one that owns the admin-api vhost. storage-leader-election
+    # starts/stops it. frpc-ssh stays enabled on every core node, since
+    # each core node owns a unique ssh tunnel name (ssh1..sshN).
+    - name: frpc service is controlled by storage leader election
       systemd:
         name: frpc
-        enabled: yes
-        state: started
+        enabled: no
         daemon_reload: yes
 
     - name: Enable and start frpc SSH service

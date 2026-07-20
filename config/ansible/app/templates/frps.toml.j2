@@ -11,12 +11,15 @@
 # on the client side, see ProxyTransport in proxy.go).
 bindAddr = "0.0.0.0"
 bindPort = {{ frp_bind_port | default(7000) }}
-# Bind dynamically-registered proxy listeners to loopback only — SSH / admin
-# / alt-vhost tunnels are reached via the local bastion jump, not the public
-# net (matching rathole's 127.0.0.1 SSH bind and the rathole "two-hop"
-# pattern). Without this, each frpc-ssh would expose its core node's sshd
-# on the WAN. See pkg/config/v1/server.go: ProxyBindAddr.
-proxyBindAddr = "127.0.0.1"
+# frp v0.70.0's ProxyBindAddr is global (server-side, applies to every
+# dynamically-registered proxy — see pkg/config/v1/server.go), so we
+# can't replicate rathole's per-service bind_addr pattern here. Instead
+# all listeners bind to 0.0.0.0 and the firewall (UFW) lets HTTP/HTTPS
+# through while keeping SSH tunnels reachable only from the local
+# bastion jump. The alt vhost (17080/17443) is intentionally public for
+# parallel-run validation against the public traffic pattern; the SSH
+# tunnels (17201-17204) are blocked externally by the install playbook's
+# UFW rules.
 
 auth.method = "token"
 auth.token = "{{ frp_token | default('change_me_secret_token') }}"
