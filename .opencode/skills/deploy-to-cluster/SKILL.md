@@ -25,6 +25,17 @@ description: Deploy admin-area code changes to the cluster (let the watcher sync
 - The storage leader can shift. `ycluster cluster leader` prints just
   the hostname — machine-readable, no awk on human output.
 
+## Before deploying
+
+Run tests on the **local dev cluster** first — see the `testing` skill for the right surface:
+
+- Pure-function or single-component change → `make test` (Python + Go unit, ~30s).
+- Cross-component change (etcd, leader election, nginx, ACME, anything spanning subsystems) → `make test-system` on the dev cluster.
+
+A green run is the gate before the prod deploy below (the `--limit managed` step). A failed section means the deploy hides the bug rather than fixing it — fix the test first.
+
+For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--assert-only` vs full-provisioning trade-off, see `testing`'s `references/system-test.md`.
+
 ## Deployment flow
 
 1. **Commit locally** (no prefixes; match repo style).
