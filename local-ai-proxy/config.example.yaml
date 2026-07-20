@@ -32,6 +32,15 @@ backend:
 # or `etcd`.
 # health_check_interval: 30s
 
+# Max JSON request-body size the router will buffer to find the
+# `model` field (bytes). Defaults to 33554432 (32 MiB) when unset.
+# Sized for multimodal chat-completion requests with base64-encoded
+# images; the previous hard-coded 8 MiB cap routinely hit for
+# multi-image prompts. Increase further if you serve heavier
+# payloads. Multipart audio uploads have a separate 200 MiB cap
+# (see README).
+# max_routing_body_bytes: 33554432
+
 # --- Option 3: etcd-backed mappings (hot-reloading) ---
 # The proxy watches the etcd prefix; each key under it is a model name
 # and the JSON value is {"backends":[{"api_base":"..."},...]}. Edits to

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -132,7 +133,11 @@ func TestModelRouterMissingModelField(t *testing.T) {
 func TestModelRouterBodyTooLarge(t *testing.T) {
 	src := &fakeSource{m: map[string][]*url.URL{}}
 	r := NewModelRouter(src)
-	big := strings.NewReader(strings.Repeat("x", maxRoutingBodyBytes+1))
+	// Pin a small cap so the test stays cheap. Default (32 MiB) would
+	// force the test to allocate ~33 MiB.
+	const cap = 4096
+	r.MaxRoutingBodyBytes = cap
+	big := strings.NewReader(strings.Repeat("x", cap+1))
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", big)
 	_, err := r.Route(req)
 	if err == nil || !strings.Contains(err.Error(), "too large") {
@@ -140,6 +145,105 @@ func TestModelRouterBodyTooLarge(t *testing.T) {
 	}
 }
 
+// TestModelRouterBodyTooLargeIncludesSize verifies the rejection error
+// surfaces the actual body size and the cap, so operators can tell
+// from the log how close the client was to the limit.
+func TestModelRouterBodyTooLargeIncludesSize(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{}}
+	r := NewModelRouter(src)
+	const cap = 1024
+	r.MaxRoutingBodyBytes = cap
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(strings.Repeat("x", cap+1)))
+	_, err := r.Route(req)
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "too large") {
+		t.Errorf("error should mention 'too large'; got %q", msg)
+	}
+	if !strings.Contains(msg, "cap 1024") {
+		t.Errorf("error should mention cap; got %q", msg)
+	}
+}
+
+// TestModelRouterDefaultCapApplied confirms the router falls back to
+// DefaultMaxRoutingBodyBytes when MaxRoutingBodyBytes is left at zero.
+func TestModelRouterDefaultCapApplied(t *testing.T) {
+	r := NewModelRouter(&fakeSource{m: map[string][]*url.URL{}})
+	if got := r.maxJSONBodyBytes(); got != DefaultMaxRoutingBodyBytes {
+		t.Errorf("maxJSONBodyBytes = %d; want default %d", got, DefaultMaxRoutingBodyBytes)
+	}
+}
+
+// TestModelRouterCustomCapHonored verifies a configured MaxRoutingBodyBytes
+// overrides the default.
+func TestModelRouterCustomCapHonored(t *testing.T) {
+	r := NewModelRouter(&fakeSource{m: map[string][]*url.URL{}})
+	r.MaxRoutingBodyBytes = 16 << 20
+	if got := r.maxJSONBodyBytes(); got != 16<<20 {
+		t.Errorf("maxJSONBodyBytes = %d; want %d", got, 16<<20)
+	}
+}
+
+// TestModelRouterLogsNearCap confirms the router emits a warning when
+// the request body crosses nearCapFraction of the configured cap. We
+// route the slog handler to a buffer and grep for the warning.
+func TestModelRouterLogsNearCap(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, "http://a.example:8000")},
+	}}
+	r := NewModelRouter(src)
+	const cap = 1000
+	r.MaxRoutingBodyBytes = cap
+	var logBuf bytes.Buffer
+	r.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// 90% of cap — above nearCapFraction (0.8), well below the reject
+	// threshold. The leading JSON is padded with trailing whitespace
+	// so the total size lands where we want it (JSON tolerates trailing
+	// whitespace; json.Unmarshal still parses it).
+	body := `{"model":"alpha","messages":[]}`
+	padding := cap - len(body)
+	if padding <= 0 {
+		t.Fatalf("test setup error: cap %d smaller than body %d", cap, len(body))
+	}
+	bodyBytes := append([]byte(body), bytes.Repeat([]byte{' '}, padding)...)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(bodyBytes))
+	if _, err := r.Route(req); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, `msg="routing body near cap"`) {
+		t.Errorf("expected near-cap warning in log; got: %s", out)
+	}
+	if !strings.Contains(out, `cap=1000`) {
+		t.Errorf("expected cap in log attrs; got: %s", out)
+	}
+}
+
+// TestModelRouterQuietUnderNearCap ensures a body well below the
+// nearCapFraction does not produce a warning (no spurious noise).
+func TestModelRouterQuietUnderNearCap(t *testing.T) {
+	src := &fakeSource{m: map[string][]*url.URL{
+		"alpha": {mustURL(t, "http://a.example:8000")},
+	}}
+	r := NewModelRouter(src)
+	const cap = 10000
+	r.MaxRoutingBodyBytes = cap
+	var logBuf bytes.Buffer
+	r.Logger = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"alpha","messages":[]}`))
+	if _, err := r.Route(req); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "routing body near cap") {
+		t.Errorf("small body should not log near-cap warning; got: %s", logBuf.String())
+	}
+}
 func TestModelRouterModelsReturnsSortedKnownNames(t *testing.T) {
 	src := &fakeSource{m: map[string][]*url.URL{
 		"charlie": {mustURL(t, "http://c:1")},

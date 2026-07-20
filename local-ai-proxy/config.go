@@ -45,6 +45,15 @@ type Config struct {
 	// default="allow" and no model rules), the proxy is fully open.
 	// See acl.go for semantics.
 	ACL *ACLConfig `yaml:"acl,omitempty"`
+
+	// MaxRoutingBodyBytes caps the size of a JSON request body the
+	// router will buffer to find the `model` field. Defaults to
+	// DefaultMaxRoutingBodyBytes (32 MiB). Sized for multimodal
+	// chat-completion requests with base64-encoded images; the
+	// previous hard-coded 8 MiB cap routinely hit for multi-image
+	// prompts. Increase further if you serve heavier payloads.
+	// Multipart audio uploads have a separate cap (see router.go).
+	MaxRoutingBodyBytes int64 `yaml:"max_routing_body_bytes,omitempty"`
 }
 
 // DefaultTrustedProxies applies when trusted_proxies is unset in YAML.
@@ -103,6 +112,9 @@ func LoadConfigOrDefault(configPath, addr, backendURL string) (Config, error) {
 		cfg.Backend.URL = backendURL
 		cfg.Backends = nil
 		cfg.Etcd = nil
+	}
+	if cfg.MaxRoutingBodyBytes <= 0 {
+		cfg.MaxRoutingBodyBytes = DefaultMaxRoutingBodyBytes
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err

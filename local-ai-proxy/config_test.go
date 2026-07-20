@@ -211,3 +211,41 @@ listen: ":4000"
 		t.Errorf("validation error expected, got %v", err)
 	}
 }
+
+// TestLoadConfigOrDefaultAppliesMaxRoutingBodyBytesDefault confirms that
+// an unset MaxRoutingBodyBytes is filled in with DefaultMaxRoutingBodyBytes
+// (32 MiB). This is the field operators rely on for raising the cap; a
+// silent zero would mean the router falls back to the same default but
+// in a less observable place (router.maxJSONBodyBytes).
+func TestLoadConfigOrDefaultAppliesMaxRoutingBodyBytesDefault(t *testing.T) {
+	path := writeTempFile(t, "c.yaml", `
+listen: ":4000"
+backend:
+  url: "http://localhost:8080"
+`)
+	cfg, err := LoadConfigOrDefault(path, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MaxRoutingBodyBytes != DefaultMaxRoutingBodyBytes {
+		t.Errorf("MaxRoutingBodyBytes = %d; want default %d", cfg.MaxRoutingBodyBytes, DefaultMaxRoutingBodyBytes)
+	}
+}
+
+// TestLoadConfigOrDefaultHonorsMaxRoutingBodyBytes verifies an explicit
+// YAML value is preserved through LoadConfigOrDefault.
+func TestLoadConfigOrDefaultHonorsMaxRoutingBodyBytes(t *testing.T) {
+	path := writeTempFile(t, "c.yaml", `
+listen: ":4000"
+backend:
+  url: "http://localhost:8080"
+max_routing_body_bytes: 67108864
+`)
+	cfg, err := LoadConfigOrDefault(path, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MaxRoutingBodyBytes != 67108864 {
+		t.Errorf("MaxRoutingBodyBytes = %d; want 67108864", cfg.MaxRoutingBodyBytes)
+	}
+}

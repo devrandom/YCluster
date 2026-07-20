@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"mime"
 	"mime/multipart"
@@ -29,9 +30,18 @@ type Healthy interface {
 	ServesModel(urlStr, model string) bool
 }
 
-// maxRoutingBodyBytes caps how much of a JSON request body we'll read to
-// find the model field. Anything larger is rejected.
-const maxRoutingBodyBytes = 8 << 20 // 8 MiB
+// DefaultMaxRoutingBodyBytes is the JSON request-body cap used when
+// Config.MaxRoutingBodyBytes is unset or non-positive. Sized for
+// base64-encoded multimodal chat completions: a handful of images
+// plus a prompt envelope blow past 8 MiB, so 32 MiB is the practical
+// floor. Raise via Config if you serve heavier payloads.
+const DefaultMaxRoutingBodyBytes = 32 << 20 // 32 MiB
+
+// nearCapFraction is the body-size ratio (relative to the cap) at
+// which the router logs a warning. The router buffers up to the cap
+// to find the `model` field, so warnings mean "this client is close
+// to hitting the limit; consider raising it."
+const nearCapFraction = 0.8
 
 // maxMultipartBodyBytes caps how much of a multipart request body we'll
 // buffer. Multipart is used by OpenAI's audio endpoints, where the body
@@ -101,10 +111,37 @@ type ModelRouter struct {
 	// Load, if set, is consulted to pick the least-loaded candidate
 	// among healthy backends. Leave nil to pick randomly.
 	Load Load
+
+	// MaxRoutingBodyBytes caps how much of a JSON request body we'll
+	// read to find the model field. Anything larger is rejected.
+	// Zero or negative falls back to DefaultMaxRoutingBodyBytes.
+	// Set from Config.MaxRoutingBodyBytes by the caller (main.go).
+	MaxRoutingBodyBytes int64
+
+	// Logger receives the "routing body near cap" warning. Nil-safe
+	// (slog.Default when unset).
+	Logger *slog.Logger
 }
 
 func NewModelRouter(source Source) *ModelRouter {
 	return &ModelRouter{source: source}
+}
+
+// maxJSONBodyBytes returns the effective JSON body cap, falling back
+// to DefaultMaxRoutingBodyBytes when the field is unset.
+func (m *ModelRouter) maxJSONBodyBytes() int64 {
+	if m.MaxRoutingBodyBytes > 0 {
+		return m.MaxRoutingBodyBytes
+	}
+	return DefaultMaxRoutingBodyBytes
+}
+
+// logger returns the configured logger or slog.Default when unset.
+func (m *ModelRouter) logger() *slog.Logger {
+	if m.Logger != nil {
+		return m.Logger
+	}
+	return slog.Default()
 }
 
 func (m *ModelRouter) Route(r *http.Request) (*RouteResult, error) {
@@ -131,12 +168,25 @@ func (m *ModelRouter) Route(r *http.Request) (*RouteResult, error) {
 }
 
 func (m *ModelRouter) routeJSON(r *http.Request, headerModel string) (*RouteResult, error) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRoutingBodyBytes+1))
+	maxBytes := m.maxJSONBodyBytes()
+	// Read cap+1 so a body that exactly hits the cap is still accepted;
+	// only `len(body) > maxBytes` triggers the reject (the +1 byte is
+	// the tell).
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read request body: %w", err)
 	}
-	if len(body) > maxRoutingBodyBytes {
-		return nil, errors.New("request body too large")
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("request body too large: %d bytes (cap %d)", len(body), maxBytes)
+	}
+	if int64(len(body)) >= int64(float64(maxBytes)*nearCapFraction) {
+		m.logger().Warn(
+			"routing body near cap",
+			"bytes", len(body),
+			"cap", maxBytes,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
 	}
 
 	var env struct {

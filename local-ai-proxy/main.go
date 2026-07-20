@@ -193,8 +193,11 @@ func buildRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
 		if err := src.Start(context.Background()); err != nil {
 			return nil, nil, err
 		}
-		logger.Info("local-ai-proxy starting", "mode", "yaml", "listen", cfg.Listen, "models", len(cfg.Backends))
-		return NewModelRouter(src), src, nil
+		logger.Info("local-ai-proxy starting", "mode", "yaml", "listen", cfg.Listen, "models", len(cfg.Backends), "max_routing_body_bytes", cfg.MaxRoutingBodyBytes)
+		r := NewModelRouter(src)
+		r.MaxRoutingBodyBytes = cfg.MaxRoutingBodyBytes
+		r.Logger = logger
+		return r, src, nil
 
 	case cfg.Etcd != nil && cfg.Etcd.Prefix != "":
 		src, err := NewEtcdSource(*cfg.Etcd, logger)
@@ -209,8 +212,11 @@ func buildRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
 		}
 		// Log the resolved endpoints (ETCD_HOSTS env wins over YAML), not the
 		// raw YAML field, which is usually empty in production.
-		logger.Info("local-ai-proxy starting", "mode", "etcd", "listen", cfg.Listen, "endpoints", etcdEndpoints(cfg.Etcd), "prefix", cfg.Etcd.Prefix)
-		return NewModelRouter(src), src, nil
+		logger.Info("local-ai-proxy starting", "mode", "etcd", "listen", cfg.Listen, "endpoints", etcdEndpoints(cfg.Etcd), "prefix", cfg.Etcd.Prefix, "max_routing_body_bytes", cfg.MaxRoutingBodyBytes)
+		r := NewModelRouter(src)
+		r.MaxRoutingBodyBytes = cfg.MaxRoutingBodyBytes
+		r.Logger = logger
+		return r, src, nil
 	}
 
 	return nil, nil, errors.New("no routing source configured (this is a bug; Validate should have caught it)")

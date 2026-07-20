@@ -150,8 +150,8 @@ Attack surface against backends (authenticated clients → backend):
 
 Multimodal:
 
-- [ ] **Raise `maxRoutingBodyBytes` to a config field**, default ~32 MiB.
-      Base64-encoded images bloat request bodies; the current 8 MiB cap
+- [x] **Raise `maxRoutingBodyBytes` to a config field**, default ~32 MiB.
+      Base64-encoded images bloat request bodies; the old 8 MiB cap
       hits for multi-image requests. Log a warning when a request
       approaches the cap. Streaming-parse-for-model is a bigger change
       (breaks body replay for retry) — not worth unless the 32 MiB
