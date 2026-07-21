@@ -79,8 +79,6 @@
         content: |
           [Unit]
           Description=Automount NAS Share {{ samba_share_name }}
-          After=network-online.target
-          Wants=network-online.target
 
           [Automount]
           Where={{ mount_point }}
