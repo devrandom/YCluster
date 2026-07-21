@@ -1,0 +1,11 @@
+# Allow ssh invocations without approval prompts.
+# Used by the operator workflow to reach cluster nodes (see the
+# deploy-to-cluster and testing skills in ycluster).
+
+prefix_rule(
+    pattern = ["ssh"],
+    justification = "operator workflow frequently SSHes to cluster nodes",
+    match = [
+        ["ssh", "-F", "dev/cluster/.ssh/config", "s1"],
+    ],
+)

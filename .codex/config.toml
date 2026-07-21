@@ -1,0 +1,19 @@
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+writable_roots = ["/home/user/proj/ycluster/.git"]
+network_access = true
+
+
+[mcp_servers.mcp_fstools]
+command = "mcp-fstools"
+default_tools_approval_mode = "approve"
+
+[mcp_servers.cluster-exec]
+url = "http://localhost:4003/mcp"
+bearer_token_env_var = "CE_BEARER"
+default_tools_approval_mode = "approve"
+
+[mcp_servers.serena]
+command = "serena"
+args = ["start-mcp-server", "--context=codex", "--project-from-cwd"]

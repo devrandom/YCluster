@@ -1,0 +1,1 @@
+prefix_rule(pattern=["/bin/bash", "-lc", "dev/cluster/dev-cluster.sh"], decision="allow")

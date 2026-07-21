@@ -1,6 +1,5 @@
 .claude
 .aider*
-.codex
 AGENTS.local.md
 NOTES.md
 /config/ansible/vault/

@@ -1,0 +1,1 @@
+export PATH=$PWD/.venv/bin:$PWD/mcp/cluster-exec:$HOME/.opencode/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin
