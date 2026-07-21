@@ -104,6 +104,37 @@
         name: nvidia-container-toolkit
         state: present
 
+    - name: Read driver version baked into existing CDI spec
+      shell: grep -oP 'libEGL_nvidia\.so\.\K\d+\.\d+\.\d+' /etc/cdi/nvidia.yaml | head -1
+      register: cdi_driver_version
+      changed_when: false
+      failed_when: false
+
+    - name: Read installed driver version from on-disk libs
+      shell: readlink -f /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0 2>/dev/null | grep -oP 'libEGL_nvidia\.so\.\K\d+\.\d+\.\d+'
+      register: installed_driver_version
+      changed_when: false
+      failed_when: false
+
+    - name: Regenerate CDI spec if stale
+      command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+      when: cdi_driver_version.stdout != installed_driver_version.stdout
+      changed_when: true
+
+    - name: Pin CDI spec to 0.6.0 for podman 4.9.3 compat
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '^cdiVersion: 0\.7\.0$'
+        replace: 'cdiVersion: 0.6.0'
+      when: cdi_driver_version.stdout != installed_driver_version.stdout
+
+    - name: Strip additionalGids field (podman 4.9.3 can't parse it)
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '(?m)^[ \t]*additionalGids:\n(?:[ \t]*- \d+\n)+'
+        replace: ''
+      when: cdi_driver_version.stdout != installed_driver_version.stdout
+
     - name: Configure CUDA PATH for all users
       copy:
         dest: /etc/profile.d/cuda.sh
