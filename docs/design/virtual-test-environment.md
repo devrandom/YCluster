@@ -379,8 +379,9 @@ dev/cluster/
                    #   container-safe subset (so prod group_vars aren't loaded)
 ```
 Run Ansible from `dev/cluster/` with the repo venv:
-`../../venv/bin/ansible-playbook site-dev.yml`. (`Makefile` targets can wrap
-these later.)
+`../../venv/bin/ansible-playbook site-dev.yml`. (`just test-system`
+runs site-dev + base-infra-dev + app-dev end-to-end against this
+cluster.)
 
 ## Phasing
 1. **Substrate (now):** install Incus, create `ycdev0`, launch s1-s3/c1,

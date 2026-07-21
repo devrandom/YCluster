@@ -107,8 +107,8 @@ or templates, it's `admin/setup-web-services.yml --limit managed`.
 - **Section fails mid-run** — section logs at `./tmp/system-test-<playbook>.log`.
   SSH into the failing node via `dev/cluster/.ssh/config` to inspect
   (e.g. `ssh -F dev/cluster/.ssh/config s1 'journalctl -u postgresql@16-main -n 50'`).
-- **`make test-system` fails** with "binary not found" — needs
-  `make build` first; the test invokes `bin/local-ai-proxy`.
+- **`just test-system` fails** with "binary not found" — needs
+  `make build` first (in `local-ai-proxy/`); the test invokes `bin/local-ai-proxy`.
 - **Dev cluster drift / partial state** — `dev-cluster.sh reset`
   (down + recreate, warm apt cache reused) or `purge` to nuke the
   cache too. State is volatile on the AppVM root, persistent on `/rw`

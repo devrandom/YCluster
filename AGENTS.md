@@ -238,7 +238,7 @@ For usage and operations (adding models, API keys, etc.), see `docs/operations/i
 
 ## Dev PXE Environment
 
-`dev/` has a local PXE boot setup for testing autoinstall. Run `make dev-tftpboot` then `sudo make dev-dnsmasq-watch`. See `dev/` files for details.
+`dev/` has a local PXE boot setup for testing autoinstall. Run `just dev-tftpboot` then `sudo just dev-dnsmasq-watch`. See `dev/` files for details.
 
 ## Dev Cluster (local Incus)
 

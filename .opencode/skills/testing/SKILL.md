@@ -19,9 +19,9 @@ step or a manual rsync/playbook re-run).
 Day-to-day wrappers:
 
 ```bash
-make test              # Python + Go unit, ~30s — run during the dev cycle and before every commit
-make test-system       # dev cluster, --assert-only, background
-make test-system-fresh # dev cluster with full provisioning (slow first time)
+just test              # Python + Go unit, ~30s — run during the dev cycle and before every commit
+just test-system       # dev cluster, --assert-only, background
+just test-system-fresh # dev cluster with full provisioning (slow first time)
 ```
 
 For the dev-cluster lifecycle, the 17-section list, troubleshooting,

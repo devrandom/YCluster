@@ -29,8 +29,8 @@ description: Deploy admin-area code changes to the cluster (let the watcher sync
 
 Run tests on the **local dev cluster** first — see the `testing` skill for the right surface:
 
-- Pure-function or single-component change → `make test` (Python + Go unit, ~30s).
-- Cross-component change (etcd, leader election, nginx, ACME, anything spanning subsystems) → `make test-system` on the dev cluster.
+- Pure-function or single-component change → `just test` (Python + Go unit, ~30s).
+- Cross-component change (etcd, leader election, nginx, ACME, anything spanning subsystems) → `just test-system` on the dev cluster.
 
 A green run is the gate before the prod deploy below (the `--limit managed` step). A failed section means the deploy hides the bug rather than fixing it — fix the test first.
 

@@ -21,7 +21,7 @@ exclude = [
 # Installation"). The venv has only ansible + dev tooling; deps like
 # psycopg2 / waitress / uvicorn live in apt packages and the mineru
 # container image. Tell ty to ignore missing imports — they'd otherwise
-# be a noisy false-positive every time someone runs `make lint-python`
+# be a noisy false-positive every time someone runs `just lint-python`
 # without first apt-installing the full runtime.
 [rules]
 unresolved-import = "ignore"
