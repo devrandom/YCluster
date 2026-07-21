@@ -28,6 +28,7 @@ YCluster is a self-bootstrapping infrastructure platform for small AI clusters. 
   add a `build-<name>.yml` playbook — never `get_url` a binary into an
   install play.
 - do not make changes to prod that affect security (e.g. firewall) or stability without checking with the user
+- do not reboot any prod machine without explicit authorization
 
 ## Guidelines
 

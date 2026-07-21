@@ -104,6 +104,37 @@
         name: nvidia-container-toolkit
         state: present
 
+    - name: Read loaded kernel module version
+      shell: awk '{print $8}' /proc/driver/nvidia/version 2>/dev/null
+      register: loaded_kernel_version
+      changed_when: false
+      failed_when: false
+
+    - name: Read installed userspace driver version
+      shell: readlink -f /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0 2>/dev/null | grep -oP 'libEGL_nvidia\.so\.\K\d+\.\d+\.\d+'
+      register: installed_userspace_version
+      changed_when: false
+      failed_when: false
+
+    - name: Reboot to load new kernel module if version mismatch
+      reboot:
+        reboot_timeout: 600
+      when:
+        - loaded_kernel_version.stdout != installed_userspace_version.stdout
+        - allow_reboot | default(false) | bool
+
+    - name: Fail if reboot required but not authorized
+      fail:
+        msg: >-
+          Driver userspace ({{ installed_userspace_version.stdout }}) was upgraded
+          but kernel module is still {{ loaded_kernel_version.stdout }}.
+          Reboot required before CDI spec can be regenerated.
+          Re-run with -e allow_reboot=true to auto-reboot,
+          or reboot manually then re-run.
+      when:
+        - loaded_kernel_version.stdout != installed_userspace_version.stdout
+        - not (allow_reboot | default(false) | bool)
+
     - name: Read driver version baked into existing CDI spec
       shell: grep -oP 'libEGL_nvidia\.so\.\K\d+\.\d+\.\d+' /etc/cdi/nvidia.yaml | head -1
       register: cdi_driver_version
