@@ -43,7 +43,7 @@
       meta: end_host
       when: not (mineru_enabled | default(false))
 
-    - name: Abort: macOS MinerU is not sandboxed yet
+    - name: "Abort: macOS MinerU is not sandboxed yet"
       fail:
         msg: |
           macOS MinerU is disabled because the Seatbelt outbound sandbox

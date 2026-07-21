@@ -144,12 +144,12 @@ test-system-fresh: clear-dev-cluster test-system
 
 # ---- lint ---------------------------------------------------------------
 #
-# Static checks across the surfaces pyright / yamllint / go vet cover.
+# Static checks across the surfaces ty / yamllint / go vet cover.
 # Run `make lint` before committing.
 #
 #   make lint             aggregate (lint-yaml lint-python lint-go)
 #   make lint-yaml        yamllint (config/ansible/**/*.yml + root yamls)
-#   make lint-python      pyright (admin-api + ycluster package + contrib/)
+#   make lint-python      ty (admin-api + ycluster package + contrib/)
 #   make lint-go          go vet on local-ai-proxy
 #
 # ansible-lint is intentionally not wired up: it needs cluster inventory +
@@ -172,14 +172,15 @@ lint: lint-yaml lint-python lint-go
 lint-yaml:
 	yamllint $(YAMLLINT_ARGS) \
 		config/ansible \
-		config.yml docker-compose.yaml opencode.json secrets.yml \
+		config.yml docker-compose.yaml opencode.json \
 		pyrightconfig.json
+	@test -f secrets.yml && yamllint $(YAMLLINT_ARGS) secrets.yml || true
 
 lint-python:
-	pyright
+	if command -v ty >/dev/null 2>&1; then ty; else echo "ty not installed; skipping lint-python (install with 'pip install ty' or 'uv tool install ty')"; fi
 
 lint-go:
-	$(MAKE) -C local-ai-proxy vet
+	GOCACHE=$(CURDIR)/tmp/go-cache $(MAKE) -C local-ai-proxy vet
 
 help:
 	@echo "Targets:"
@@ -190,6 +191,6 @@ help:
 	@echo "  test-system           run dev-cluster system tests (background, --assert-only)"
 	@echo "  test-system-fresh     run dev-cluster system tests with full provisioning"
 	@echo "  test-system-quick     run dev-cluster system test assertions"
-	@echo "  lint                  run yamllint + pyright + go vet"
+	@echo "  lint                  run yamllint + ty + go vet"
 	@echo "  lint-{yaml,python,go} run a single linter"
 	@echo "  help                  show this help"

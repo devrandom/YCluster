@@ -1,0 +1,37 @@
+[environment]
+extra-paths = [
+    "config/ansible/admin/files/ycluster",
+    "mcp/cluster-exec/src",
+]
+
+[src]
+include = [
+    "config/ansible/admin/files",
+    "contrib",
+    "mcp/cluster-exec",
+]
+exclude = [
+    "**/__pycache__",
+    "**/node_modules",
+    "**/.venv",
+    "**/venv",
+]
+
+# Python deps come from apt, not pip (see AGENTS.md "Python Package
+# Installation"). The venv has only ansible + dev tooling; deps like
+# psycopg2 / waitress / uvicorn live in apt packages and the mineru
+# container image. Tell ty to ignore missing imports — they'd otherwise
+# be a noisy false-positive every time someone runs `make lint-python`
+# without first apt-installing the full runtime.
+[rules]
+unresolved-import = "ignore"
+
+# Test files monkey-patch module-level functions (get_etcd_client,
+# get_inference_status, check_gateway, etc.) to swap in fakes — that's
+# the whole point of the FakeEtcd DAL seam. Type checkers can't infer
+# that the test's lambda matches the production signature (they're
+# stubs returning Unknown), so every monkey-patch line flags
+# invalid-assignment. Suppress for the tests/ directories only.
+[[overrides]]
+include = ["config/ansible/admin/files/tests/**", "config/ansible/admin/files/ycluster/tests/**"]
+rules = { invalid-assignment = "ignore" }

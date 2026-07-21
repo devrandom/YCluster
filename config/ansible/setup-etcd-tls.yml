@@ -180,7 +180,7 @@
             group: "{{ item.group | default('root') }}"
             mode: "{{ item.mode }}"
           loop:
-            - { src: "{{ pki_dir }}/ca.crt",   dest: ca.crt,     mode: '0644' }
+            - { src: "{{ pki_dir }}/ca.crt", dest: ca.crt, mode: '0644' }
             - { src: "{{ pki_dir }}/core.crt", dest: server.crt, mode: '0644' }
             - { src: "{{ pki_dir }}/core.key", dest: server.key, owner: etcd, group: etcd, mode: '0600' }
             - { src: "{{ pki_dir }}/core.crt", dest: client.crt, mode: '0644' }
@@ -237,7 +237,7 @@
             group: "{{ item.group | default('root') }}"
             mode: "{{ item.mode }}"
           loop:
-            - { src: "{{ pki_dir }}/ca.crt",     dest: ca.crt,     mode: '0644' }
+            - { src: "{{ pki_dir }}/ca.crt", dest: ca.crt, mode: '0644' }
             - { src: "{{ pki_dir }}/client.crt", dest: client.crt, mode: '0644' }
             - { src: "{{ pki_dir }}/client.key", dest: client.key, group: etcd-client, mode: '0640' }
           no_log: true
