@@ -1,7 +1,7 @@
 sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]
-writable_roots = ["/home/user/proj/ycluster/.git"]
+writable_roots = ["~/proj/ycluster/.git", "~/proj/ycluster-private/.git"]
 network_access = true
 
 
