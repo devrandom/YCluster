@@ -2,6 +2,7 @@
 Cluster status and health management commands
 """
 
+import json
 import sys
 
 from ..common.etcd_utils import get_etcd_client
@@ -55,6 +56,19 @@ def register_cluster_commands(subparsers):
     undrain_parser = cluster_subparsers.add_parser('undrain', help='Undrain a node (re-enable leader election)')
     undrain_parser.add_argument('hostname', help='Hostname to undrain (e.g., s2)')
     undrain_parser.set_defaults(func=cluster_undrain_host)
+
+    # BMC MAC management
+    bmc_parser = cluster_subparsers.add_parser('bmc', help='BMC MAC management')
+    bmc_subparsers = bmc_parser.add_subparsers(dest='bmc_command', help='BMC commands')
+
+    bmc_get_parser = bmc_subparsers.add_parser('get', help='Get BMC MAC for a host (or all hosts)')
+    bmc_get_parser.add_argument('hostname', nargs='?', help='Hostname (omit for all)')
+    bmc_get_parser.set_defaults(func=cluster_bmc_get)
+
+    bmc_set_parser = bmc_subparsers.add_parser('set', help='Set BMC MAC for a host')
+    bmc_set_parser.add_argument('hostname', help='Hostname (e.g., nv6)')
+    bmc_set_parser.add_argument('mac', help='BMC MAC address')
+    bmc_set_parser.set_defaults(func=cluster_bmc_set)
 
 
 def register_health_alias(subparsers):
@@ -141,3 +155,41 @@ def cluster_drain_host(args):
 def cluster_undrain_host(args):
     """Undrain a node to re-enable leader election"""
     _set_drain_state(args.hostname, drain=False)
+
+
+def cluster_bmc_get(args):
+    """Get BMC MAC for a host (or all hosts) from the hardware record in etcd."""
+    client = get_etcd_client()
+    if not args.hostname:
+        for value, meta in client.get_prefix('/cluster/nodes/hardware/'):
+            hostname = meta.key.decode().rsplit('/', 1)[-1]
+            hw = json.loads(value.decode())
+            mac = hw.get('bmc_mac')
+            if mac:
+                print(f"{hostname}: {mac}")
+        return
+    key = f'/cluster/nodes/hardware/{args.hostname}'
+    result = client.get(key)
+    if result[0] is None:
+        print(f"No hardware record for {args.hostname}", file=sys.stderr)
+        sys.exit(1)
+    hw = json.loads(result[0].decode())
+    mac = hw.get('bmc_mac')
+    if mac:
+        print(mac)
+    else:
+        print(f"No BMC MAC recorded for {args.hostname}")
+
+
+def cluster_bmc_set(args):
+    """Set BMC MAC for a host in the hardware record in etcd."""
+    client = get_etcd_client()
+    key = f'/cluster/nodes/hardware/{args.hostname}'
+    result = client.get(key)
+    if result[0] is None:
+        print(f"No hardware record for {args.hostname}", file=sys.stderr)
+        sys.exit(1)
+    hw = json.loads(result[0].decode())
+    hw['bmc_mac'] = args.mac
+    client.put(key, json.dumps(hw))
+    print(f"Set BMC MAC for {args.hostname}: {args.mac}")

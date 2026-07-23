@@ -117,6 +117,36 @@ def _run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
+def _parse_ipmi_mac(output):
+    """Extract the MAC Address from `ipmitool lan print` output."""
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith('MAC Address'):
+            parts = line.split(':', 1)
+            if len(parts) == 2:
+                return parts[1].strip()
+    return None
+
+
+def _collect_bmc_mac_linux():
+    """Best-effort read of the BMC MAC via ipmitool. Returns MAC or None."""
+    for mod in ('ipmi_devintf', 'ipmi_si'):
+        try:
+            _run(['modprobe', mod], timeout=5)
+        except Exception:
+            pass
+    for channel in (1, 8):
+        try:
+            r = _run(['ipmitool', 'lan', 'print', str(channel)], timeout=10)
+            if r.returncode == 0:
+                mac = _parse_ipmi_mac(r.stdout)
+                if mac:
+                    return mac
+        except Exception:
+            continue
+    return None
+
+
 def collect_hardware():
     """
     Collect hardware facts for the local node and return a dict.
@@ -141,6 +171,7 @@ def _collect_hardware_darwin():
         'bios_version': None,
         'os': None,
         'kernel': None,
+        'bmc_mac': None,
     }
 
     # OS / kernel
@@ -259,6 +290,7 @@ def _collect_hardware_linux():
         'bios_version': None,
         'os': None,
         'kernel': None,
+        'bmc_mac': None,
     }
 
     # OS / kernel
@@ -421,5 +453,8 @@ def _collect_hardware_linux():
                 facts['gpus'].extend(nvidia_gpus)
     except Exception:
         pass
+
+    # BMC MAC via ipmitool (best-effort; None if no BMC or ipmitool missing)
+    facts['bmc_mac'] = _collect_bmc_mac_linux()
 
     return facts

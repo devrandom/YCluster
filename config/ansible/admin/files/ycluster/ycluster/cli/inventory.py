@@ -111,6 +111,7 @@ def _print_node(hostname, hw, asset):
         if nics:
             nic_str = ', '.join(f"{n['name']}" + (f" {n['speed']}" if n.get('speed') else '') for n in nics)
             print(f"  NICs:      {nic_str}")
+        print(f"  BMC:       {hw.get('bmc_mac') or '-'}")
         print(f"  OS:        {hw.get('os') or '-'}  kernel {hw.get('kernel') or '-'}")
         print(f"  BIOS:      {hw.get('bios_version') or '-'}")
         print(f"  Collected: {hw.get('collected_at', '-')[:19]}")
