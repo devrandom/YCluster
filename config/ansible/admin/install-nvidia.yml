@@ -105,7 +105,7 @@
         state: present
 
     - name: Read loaded kernel module version
-      shell: awk '{print $8}' /proc/driver/nvidia/version 2>/dev/null
+      shell: grep -oP '\d+\.\d+\.\d+' /proc/driver/nvidia/version | head -1
       register: loaded_kernel_version
       changed_when: false
       failed_when: false
@@ -235,7 +235,7 @@
     - name: Reboot required notice
       debug:
         msg: "NOTICE: Reboot required to load NVIDIA kernel modules"
-      when: driver_install.changed or cuda_install.changed
+      when: (driver_install.changed | default(false)) or (cuda_install.changed | default(false))
 
   handlers:
     - name: Reload systemd
