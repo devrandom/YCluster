@@ -1,0 +1,19 @@
+# Nvidia (GPU) node configuration
+# ================================
+# Targets the `nvidia` group: hosts running Ubuntu + NVIDIA drivers +
+# podman, registered via the /bootstrap/nvidia endpoint.
+
+# Comino CRPS power-supply redundancy. The CRPS controller aggregates
+# per-PSU telemetry (Vin/Vout/I/P/temp/fan) over PMBus on Comino
+# workstation-class chassis. Default mode is 3+1 (workQty=3,
+# reserveQty=1, crEnable=true) — three PSUs share the load, the fourth
+# stands by. Override per-host in host_vars/<node>.yml, e.g.
+# `comino_crps_redundancy: "2+2"` on a chassis where 3+1 isn't wanted.
+#
+# See admin/setup-crps-redundancy.yml and
+# docs/design/comino-crps-power-monitoring.md.
+comino_crps_redundancy: "3+1"
+
+# Set to `false` in host_vars for nvidia hosts that don't have Comino
+# CRPS hardware (e.g. non-Comino GPU boxes). Defaults to managed.
+comino_crps_managed: true

@@ -1,0 +1,117 @@
+---
+# Configure the Comino CRPS power-supply controller's redundancy mode.
+#
+# Targets the `crps>` STM32 USB-CDC device that aggregates per-PSU telemetry
+# on Comino workstation-class GPU chassis (see
+# docs/design/comino-crps-power-monitoring.md). Default mode is 3+1
+# (workQty=3, reserveQty=1, crEnable=true) — 3 PSUs share the load, the
+# 4th stands by. Override per-host via `comino_crps_redundancy` in
+# host_vars/<node>.yml (e.g. "2+2" on a chassis where 3+1 isn't wanted).
+#
+# This is the *write* counterpart to monitoring/install-crps.yml. The
+# monitoring collector deliberately never issues `setup`; this playbook
+# runs at provisioning time and verifies via `show params`.
+#
+# Idempotent: skips hosts already at the desired config. Uses TIOCEXCL +
+# EBUSY retry to coexist with the monitoring collector on the same
+# /dev/ttyACM* bus.
+#
+# Usage:
+#   ./run-playbook.sh admin/setup-crps-redundancy.yml
+#   ./run-playbook.sh admin/setup-crps-redundancy.yml --limit nv6
+#
+# Group gate: `nvidia` only (CRPS hardware is Comino-specific). Per-host
+# opt-out via `comino_crps_managed: false` in host_vars.
+#
+# Pre-flight (handled by `admin.yml`'s monitoring import chain):
+#   - pyserial installed (monitoring/install-crps.yml)
+#   - /dev/ttyACM* udev rules + dialout group membership
+
+- name: Configure CRPS power-supply redundancy on nvidia (comino) hosts
+  hosts: nvidia
+  become: yes
+  gather_facts: no
+  vars:
+    # Default 3+1. Override per-host with `comino_crps_redundancy: "2+2"`.
+    comino_crps_redundancy: "3+1"
+    # Per-host opt-out (e.g. non-comino nvidia chassis without CRPS hw).
+    comino_crps_managed: true
+  tasks:
+    - name: Skip hosts where CRPS isn't managed
+      meta: end_host
+      when: not comino_crps_managed | bool
+
+    - name: Parse desired workQty/reserveQty from redundancy spec
+      set_fact:
+        crps_work_qty: "{{ comino_crps_redundancy.split('+')[0] | int }}"
+        crps_reserve_qty: "{{ comino_crps_redundancy.split('+')[1] | int }}"
+
+    - name: Validate the spec sums to a positive integer pair
+      assert:
+        that:
+          - crps_work_qty | int > 0
+          - crps_reserve_qty | int >= 0
+          - (crps_work_qty | int) + (crps_reserve_qty | int) >= 2
+        fail_msg: >-
+          comino_crps_redundancy={{ comino_crps_redundancy }} is invalid;
+          expected "<work>+<reserve>" with both non-negative.
+
+    - name: Install CRPS setup helper to /usr/local/lib/cluster
+      copy:
+        src: "{{ playbook_dir }}/../scripts/setup-crps-redundancy.py"
+        dest: /usr/local/lib/cluster/setup-crps-redundancy
+        mode: '0755'
+        owner: root
+        group: root
+
+    # Run the helper as root — the script needs TIOCEXCL on /dev/ttyACM*,
+    # which requires either root or dialout-group membership. Most nvidia
+    # hosts have a dialout rule installed by monitoring/install-crps.yml,
+    # but running as root is the safe default.
+    - name: Probe CRPS controller (read-only — discover + current params)
+      command:
+        cmd: >-
+          /usr/local/lib/cluster/setup-crps-redundancy
+          --work-qty {{ crps_work_qty }}
+          --reserve-qty {{ crps_reserve_qty }}
+          --probe-only
+      register: crps_probe
+      changed_when: false
+      failed_when: crps_probe.rc not in [0, 2]
+
+    - name: Skip hosts without a CRPS controller (no_comino_hw)
+      meta: end_host
+      when: crps_probe.rc == 2
+
+    # Apply only if probe shows the config isn't already at the desired
+    # state. The helper itself is idempotent, but gating here avoids
+    # a serial-port open + write attempt on already-configured boxes.
+    - name: Check if CRPS is already at the desired redundancy
+      set_fact:
+        crps_already_configured: "{{ 'already_at_desired_config' in crps_probe.stdout }}"
+
+    - name: Apply CRPS redundancy configuration
+      command:
+        cmd: >-
+          /usr/local/lib/cluster/setup-crps-redundancy
+          --work-qty {{ crps_work_qty }}
+          --reserve-qty {{ crps_reserve_qty }}
+      register: crps_setup
+      changed_when: >-
+        crps_setup.rc == 0
+        and 'noop' not in crps_setup.stdout
+        and 'ok' in crps_setup.stdout
+      failed_when: crps_setup.rc != 0
+      when: not crps_already_configured | bool
+
+    - name: Ensure node-exporter textfile dir exists for CRPS metric
+      file:
+        path: /var/lib/prometheus/node-exporter
+        state: directory
+        mode: '0755'
+
+    - name: Record CRPS configuration state for monitoring
+      copy:
+        dest: /var/lib/prometheus/node-exporter/crps_redundancy.prom
+        content: "# HELP ycluster_crps_redundancy_configured 1 if CRPS is at the desired redundancy, 0 otherwise\n# TYPE ycluster_crps_redundancy_configured gauge\nycluster_crps_redundancy_configured{work=\"{{ crps_work_qty }}\",reserve=\"{{ crps_reserve_qty }}\"} {{ 1 if crps_already_configured or (crps_setup.rc | default(0) == 0) else 0 }}\n"
+        mode: '0644'
