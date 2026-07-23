@@ -236,6 +236,7 @@ def render_server_config():
             "[Peer]",
             f"PublicKey = {peer['pubkey']}",
             f"AllowedIPs = {node['ip']}/32",
+            "PersistentKeepalive = 25",
             "",
         ]
     return '\n'.join(lines)
