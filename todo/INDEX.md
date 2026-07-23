@@ -18,6 +18,7 @@ Categories: [security](#security) ·
 [authentik](#authentik)
 
 ## Security
+- **[HIGH]** [etcd RBAC by client cert](security/etcd-rbac-by-cert.md) — one shared `etcd-client` cert today; an Incus-host compromise leaks every secret in etcd. Split identity into `etcd-storage` (all s*) and `etcd-compute` (c*/nv*/nas*), turn on RBAC, consolidate secret prefixes under `/cluster/config/`.
 - **[HIGH]** [Vendor account cleanup](security/vendor-account-cleanup.md) — vendor preinstalls ship with full sudo + lxd membership + populated authorized_keys; fresh vendor image comes up unmitigated.
 - **[MEDIUM]** [Sudo-user consistency](security/sudo-user-consistency.md) — paired with vendor cleanup; privileged set drifts node-to-node today.
 - **[MEDIUM]** [SSH-key rotation](security/ssh-key-rotation.md) — no procedure; full cluster compromise if the Ansible key leaks.
