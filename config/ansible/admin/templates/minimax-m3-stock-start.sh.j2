@@ -57,6 +57,11 @@ MAXBATCH="${MAXBATCH:-1024}"
 GPU_UTIL="${GPU_UTIL:-0.90}"
 PATCH_FILE="${PATCH_FILE:-{{ minimax_m3_stock_patch_dir }}/compressed_tensors_moe_w4a4_mxfp4.py}"
 PATCH_TARGET=/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_mxfp4.py
+# Patched chat template (fixes orphaned tool message 400s). Bind-mounted over
+# the image's built-in template; --chat-template overrides the checkpoint's
+# tokenizer_config.json template.
+CHAT_TEMPLATE="${CHAT_TEMPLATE:-/opt/inference/minimax-m3/chat-template.jinja}"
+CHAT_TEMPLATE_TARGET="${CHAT_TEMPLATE_TARGET:-/opt/inference/minimax-m3/chat-template.jinja}"
 
 # EAGLE3 speculative decoding - default ON (proven net win on this stack).
 # M3_EAGLE3=0 to disable; SPECULATIVE_CONFIG overrides the whole JSON. Do NOT
@@ -87,6 +92,8 @@ podman image exists "$IMAGE" \
   || { echo "checkpoint missing at $MODEL_HOST - run: hf download {{ minimax_m3_mxfp4_repo }} --local-dir $MODEL_HOST" >&2; exit 1; }
 [ -f "$PATCH_FILE" ] \
   || { echo "clamp patch missing at $PATCH_FILE - run: ~/bin/minimax-m3-stock-setup.sh" >&2; exit 1; }
+[ -f "$CHAT_TEMPLATE" ] \
+  || { echo "chat template missing at $CHAT_TEMPLATE - run install-minimax-m3.yml" >&2; exit 1; }
 
 # EAGLE3 args split by side: the mount is a podman flag (before the image),
 # the spec-config is a vllm flag (after "serve"). Both empty when disabled.
@@ -127,6 +134,7 @@ podman run -d --name "$CONTAINER" \
   -v "$MODEL_HOST":/models/MiniMax-M3-MXFP4:ro \
   "${eagle_mount_args[@]}" \
   -v "$PATCH_FILE":"$PATCH_TARGET":ro \
+  -v "$CHAT_TEMPLATE":"$CHAT_TEMPLATE_TARGET":ro \
   --entrypoint vllm \
   "$IMAGE" \
   serve /models/MiniMax-M3-MXFP4 \
@@ -138,6 +146,7 @@ podman run -d --name "$CONTAINER" \
   --gpu-memory-utilization "$GPU_UTIL" \
   --limit-mm-per-prompt '{"image":0,"video":0}' \
   --default-chat-template-kwargs '{"thinking_mode":"enabled"}' \
+  --chat-template "$CHAT_TEMPLATE_TARGET" \
   --reasoning-parser minimax_m3 \
   --enable-auto-tool-choice --tool-call-parser minimax_m3 \
   --linear-backend marlin \

@@ -95,3 +95,9 @@
         src: serve-minimax-m3-named.sh
         dest: /opt/inference/minimax-m3/serve-minimax-m3-named.sh
         mode: '0755'
+
+    - name: Install M3 patched chat template
+      copy:
+        src: minimax-m3-chat-template.jinja
+        dest: /opt/inference/minimax-m3/chat-template.jinja
+        mode: '0755'

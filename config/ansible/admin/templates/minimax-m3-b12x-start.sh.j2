@@ -35,6 +35,10 @@ GPUS="${GPUS:-0 1 2 3}"
 # too for a seamless cutover and direct-by-image-name access.
 SERVED_NAMES="${SERVED_NAMES:-{{ minimax_m3_served_name }} MiniMax-M3-NVFP4}"
 NAMED_WRAPPER="${NAMED_WRAPPER:-/opt/inference/minimax-m3/serve-minimax-m3-named.sh}"
+# Patched chat template (fixes orphaned tool message 400s). Bind-mounted over
+# the image's built-in template; passed to vllm via EXTRA_VLLM_ARGS.
+CHAT_TEMPLATE="${CHAT_TEMPLATE:-/opt/inference/minimax-m3/chat-template.jinja}"
+CHAT_TEMPLATE_TARGET="${CHAT_TEMPLATE_TARGET:-/opt/inference/minimax-m3/chat-template.jinja}"
 # EAGLE3 speculative decoding (experimental, default OFF). Set M3_EAGLE3=1 to mount
 # the draft head and turn on speculative decode; the flag rides into the vendor
 # recipe via EXTRA_VLLM_ARGS (see serve-minimax-m3-named.sh). Draft is
@@ -78,6 +82,8 @@ podman image exists "$IMAGE" \
   || { echo "checkpoint missing at $MODEL_HOST - run: hf download {{ minimax_m3_repo }} --local-dir $MODEL_HOST" >&2; exit 1; }
 [ -x "$NAMED_WRAPPER" ] \
   || { echo "served-name wrapper missing/not executable at $NAMED_WRAPPER - run install-minimax-m3.yml" >&2; exit 1; }
+[ -f "$CHAT_TEMPLATE" ] \
+  || { echo "chat template missing at $CHAT_TEMPLATE - run install-minimax-m3.yml" >&2; exit 1; }
 
 mkdir -p "$CACHE_DIR"
 dev_args=()
@@ -97,6 +103,9 @@ extra_env=()
 # so the podman run below is unchanged). The vendor recipe forwards EXTRA_VLLM_ARGS
 # after --served-model-name (word-split on the single space; the compact JSON has
 # no internal spaces). model= points at the in-container mount, not an HF id.
+# Always include the patched chat template in EXTRA_VLLM_ARGS; append
+# --speculative-config when EAGLE3 is on.
+extra_vllm_args="--chat-template $CHAT_TEMPLATE_TARGET"
 eagle_args=()
 if [ "$M3_EAGLE3" != 0 ]; then
   [ -f "$EAGLE3_DIR/config.json" ] \
@@ -106,8 +115,8 @@ if [ "$M3_EAGLE3" != 0 ]; then
   else
     spec_cfg='{"method":"eagle3","model":"/models/MiniMax-M3-EAGLE3","num_speculative_tokens":'"$NUM_SPECULATIVE_TOKENS"',"attention_backend":"FLASH_ATTN"}'
   fi
-  eagle_args=(-v "$EAGLE3_DIR":/models/MiniMax-M3-EAGLE3:ro
-              -e "EXTRA_VLLM_ARGS=--speculative-config $spec_cfg")
+  eagle_args=(-v "$EAGLE3_DIR":/models/MiniMax-M3-EAGLE3:ro)
+  extra_vllm_args="$extra_vllm_args --speculative-config $spec_cfg"
 fi
 
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -129,11 +138,13 @@ podman run -d --name "$CONTAINER" \
   -e HOST=0.0.0.0 -e PORT="$PORT" \
   -e SERVED_MODEL_NAMES="$SERVED_NAMES" \
   -e M3_PROFILE=off \
+  -e "EXTRA_VLLM_ARGS=$extra_vllm_args" \
   "${extra_env[@]}" \
   "${eagle_args[@]}" \
   -v "$MODEL_HOST":/models/MiniMax-M3-NVFP4 \
   -v "$CACHE_DIR":/cache \
   -v "$NAMED_WRAPPER":/usr/local/bin/serve-minimax-m3-named.sh:ro \
+  -v "$CHAT_TEMPLATE":"$CHAT_TEMPLATE_TARGET":ro \
   "$IMAGE" serve-minimax-m3-named.sh
 
 eagle_state=$([ "$M3_EAGLE3" != 0 ] && echo "on (eagle3, spec=$NUM_SPECULATIVE_TOKENS)" || echo off)
