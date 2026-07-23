@@ -88,6 +88,12 @@ def register_vm_commands(subparsers):
         'sample', help='Snapshot local incus state to etcd (vm-state-sampler timer)')
     smp.set_defaults(func=lambda a: vm.sample_state())
 
+    slp = sub.add_parser(
+        'sync-limits',
+        help='Backfill cpu/mem from local incus into VMS_PREFIX '
+             '(one-shot; new launches persist them automatically)')
+    slp.set_defaults(func=lambda a: vm.vm_sync_limits())
+
     rcp = sub.add_parser(
         'reconcile', help='Converge local instances to desired power state (vm-reconciler timer)')
     rcp.set_defaults(func=lambda a: vm.reconcile())

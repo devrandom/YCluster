@@ -56,9 +56,14 @@ class SchedTestBase(unittest.TestCase):
         appmod.get_etcd_client = self._app_orig
 
     # --- seeding ---
-    def vm(self, name, owner="alice@x", gpus=0, host="nv2", type="vm"):
-        self.etcd.seed_json(vmm.VMS_PREFIX + name,
-                            {"owner": owner, "gpus": gpus, "host": host, "type": type})
+    def vm(self, name, owner="alice@x", gpus=0, host="nv2", type="vm",
+           cpu=None, mem=None):
+        rec = {"owner": owner, "gpus": gpus, "host": host, "type": type}
+        if cpu is not None:
+            rec["cpu"] = cpu
+        if mem is not None:
+            rec["mem"] = mem
+        self.etcd.seed_json(vmm.VMS_PREFIX + name, rec)
 
     def desired(self, name, mode, windows=None):
         self.etcd.seed_json(vmm.VM_DESIRED_PREFIX + name,
@@ -347,12 +352,12 @@ class ResourcesDataTests(SchedTestBase):
         appmod.get_inference_status = self._orig_inference
         super().tearDown()
 
-    def _seed_host(self, hostname, htype, ip):
+    def _seed_host(self, hostname, htype, ip, disabled=False):
         """Seed a node allocation in etcd."""
         self.etcd.seed_json(
             f"/cluster/nodes/by-hostname/{hostname}",
             {"hostname": hostname, "type": htype, "ip": ip,
-             "mac": "00:00:00:00:00:00"})
+             "mac": "00:00:00:00:00:00", "disabled": disabled})
 
     def _seed_hardware(self, hostname, gpus=None, cpu="x86_64", ram_gb=64):
         """Seed hardware facts in etcd."""
@@ -406,6 +411,33 @@ class ResourcesDataTests(SchedTestBase):
         data = self.get("/admin/resources/data").get_json()
         vm = data["hosts"][0]["vms"][0]
         self.assertFalse(vm["scheduled_now"])
+
+    def test_disabled_host_flagged(self):
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self._seed_host("nv2", "nvidia", "10.0.0.112", disabled=True)
+        data = self.get("/admin/resources/data").get_json()
+        by_name = {h["hostname"]: h for h in data["hosts"]}
+        self.assertFalse(by_name["nv1"]["disabled"])
+        self.assertTrue(by_name["nv2"]["disabled"])
+
+    def test_vm_cpu_mem_exposed(self):
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("v", owner="alice@x", host="nv1", cpu="8", mem="32GiB")
+        data = self.get("/admin/resources/data").get_json()
+        vm = data["hosts"][0]["vms"][0]
+        self.assertEqual(vm["cpu"], "8")
+        self.assertEqual(vm["mem"], "32GiB")
+
+    def test_vm_cpu_mem_optional(self):
+        # Pre-existing VMs (launched before vm_launch persisted limits)
+        # have no cpu/mem in the record — endpoint returns None, template
+        # hides the badges via x-show.
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("v", owner="alice@x", host="nv1")
+        data = self.get("/admin/resources/data").get_json()
+        vm = data["hosts"][0]["vms"][0]
+        self.assertIsNone(vm["cpu"])
+        self.assertIsNone(vm["mem"])
 
     def test_inference_status_included(self):
         appmod.get_inference_status = lambda: {"status": "ok", "models": []}

@@ -1116,6 +1116,37 @@ def sample_state():
     print(f"sampled {len(instances)} instance(s)")
 
 
+def vm_sync_limits():
+    """Backfill cpu/mem from incus into VMS_PREFIX for VMs on this host.
+
+    Runs locally on each compute host (no SSH needed — `_incus` is local).
+    Only touches VMs already registered in VMS_PREFIX with `host == self`;
+    updates the record only when cpu/mem are missing, so re-runs are no-ops
+    once everything is backfilled. Use to migrate VMs launched before
+    vm_launch started persisting limits (the Resources page needs them)."""
+    me = socket.gethostname()
+    vms = vms_all()
+    updated = 0
+    for name, rec in vms.items():
+        if rec.get("host") != me:
+            continue
+        if rec.get("cpu") and rec.get("mem"):
+            continue
+        r = _incus("config", "get", name, "limits.cpu", check=False)
+        if r.returncode != 0 or not r.stdout.strip():
+            continue
+        cpu = r.stdout.strip()
+        r = _incus("config", "get", name, "limits.memory", check=False)
+        if r.returncode != 0 or not r.stdout.strip():
+            continue
+        mem = r.stdout.strip()
+        rec["cpu"] = cpu
+        rec["mem"] = mem
+        _put_json(VMS_PREFIX + name, rec)
+        updated += 1
+    print(f"synced cpu/mem for {updated} VM(s) on {me}")
+
+
 def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
               instance_type=None, billable=False):
     """Launch a GPU instance (VM or container).
@@ -1194,6 +1225,8 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     record = {
         "owner": owner,
         "gpus": gpus,
+        "cpu": cpu,
+        "mem": mem,
         "type": instance_type,
         "host": socket.gethostname(),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),

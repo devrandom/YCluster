@@ -13,6 +13,9 @@
     .card { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1rem;
             border-left: 4px solid #ccc; }
+    .card.disabled { background: #f3f4f6; opacity: 0.6;
+                     border-left-color: #d1d5db; }
+    .card.disabled .host-name { color: #6b7280; }
     .type-compute { border-left-color: #28a745; }
     .type-nvidia  { border-left-color: #76b900; }
     .type-macos   { border-left-color: #ffc107; }
@@ -82,10 +85,11 @@
   </template>
 
   <template x-for="h in hosts" :key="h.hostname">
-    <div class="card" :class="'type-' + h.type">
+    <div class="card" :class="['type-' + h.type, h.disabled ? 'disabled' : '']">
       <div class="host-head">
         <span class="host-name" x-text="h.hostname"></span>
         <span class="host-meta" x-text="h.type + ' · ' + h.ip"></span>
+        <span class="pill pill-disabled" x-show="h.disabled">disabled</span>
         <span class="host-meta" x-show="h.gpu_count > 0"
               x-text="h.gpu_count + ' GPU' + (h.gpu_count > 1 ? 's' : '')"></span>
         <span class="host-meta" x-show="h.hardware && h.hardware.cpu"
@@ -111,6 +115,10 @@
           <div class="vm-row" :class="{'not-scheduled': !vm.scheduled_now}">
             <span class="vm-name" x-text="vm.name"></span>
             <span class="gpu-badge" x-show="vm.gpus > 0" x-text="vm.gpus + ' GPU'"></span>
+            <span class="muted" x-show="vm.cpu"
+                  x-text="vm.cpu + ' CPU'"></span>
+            <span class="muted" x-show="vm.mem"
+                  x-text="vm.mem + ' RAM'"></span>
             <span class="pill" :class="statePill(vm.state)"
                   x-text="vm.state"></span>
             <span class="pill" :class="vm.scheduled_now ? 'pill-scheduled' : 'pill-unsched'"
