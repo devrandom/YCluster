@@ -129,7 +129,7 @@ groups:
         expr: rate(node_network_receive_bytes_total{device="enp87s0"}[5m]) * 8 > 800000000
         for: 1m
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: "Critical external network ingress on {{ $labels.node }}"
           description: "External network ingress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps - approaching gigabit limit"
