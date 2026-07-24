@@ -47,8 +47,7 @@ to the prod cluster only — it is **not** a path to the dev cluster
 (`dev/cluster/`, local Incus) or to `system-test.sh`; use `ssh -F
 dev/cluster/.ssh/config` or local ansible for those (see `## Dev Cluster
 (local Incus)`). See `### Cluster exec via MCP` below for the full tool
-reference. Direct SSH from inside the sandbox needs
-`sandbox_permissions: require_escalated`.
+reference.
 
 Always use ansible instead of ad-hoc copying files to the cluster.
 
@@ -74,8 +73,6 @@ exit 1 lists the files that differ. Never per-file
 `cmp`/`sha256` over SSH (noisy), and don't rely on a git-hash check — the synced
 set is defined by `.watchignore` and includes untracked scratch dirs that a
 tracked-files-only hash can't see.
-
-When sandboxed, this requires permission escalation due to network access.
 
 ### Cluster Management
 The `ycluster` CLI is installed on core nodes:
@@ -283,26 +280,6 @@ line) before deciding.
 Background terminals persist across turns. If you started one earlier in
 the session, you can find it in the active-background-terminals fragment
 injected into your context.
-
-## Sandbox restrictions (Codex CLI and similar harnesses)
-
-When the agent runs in a sandboxed harness like Codex CLI, the
-following operations may be blocked by the sandbox and need
-sandbox_permissions: "require_escalated" (or the harness's
-equivalent escalation mechanism) plus a short justification:
-
-- Network access: anything that reaches outside the sandbox
-  (curl, git fetch, ./dev-sync.sh --check, etc.).
-  A failed network command does NOT mean the task is impossible --
-  re-run with escalation and let the user approve. Symptoms
-  include Operation not permitted on SSH control sockets
-  (e.g. dev-sync.sh --check).
-
-For privileged cluster operations, prefer cluster_exec.run
-(see "Cluster exec via MCP" below) -- it has its own two-tier
-timeout model and bearer auth and doesn't need escalation.
-
-When sandboxed, avoid the use of `ssh`, see next section.
 
 ### Cluster exec via MCP
 
