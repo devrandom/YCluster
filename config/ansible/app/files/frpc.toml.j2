@@ -22,18 +22,18 @@ localIP = "127.0.0.2"
 localPort = 17080
 transport.proxyProtocolVersion = "v2"
 
-# Primary HTTPS — validate frp end-to-end on the alt port. The alt
-# vhost (admin-api-alt.conf.j2) listens on 127.0.0.2:17443 with
-# proxy_protocol already enabled, and serves the full surface — admin-api
-# public whitelist + authed locations + authentik forward-auth, plus
-# open-webui + ycluster_app — so this tunnel exercises login flows,
-# the IdP outpost, and OWUI's /v1/ inference API. Rathole stays on :443
-# as the production primary until frp is fully validated; remotePort=17443
-# keeps the tunnels disjoint.
+# Primary HTTPS — served on :443 (the production primary port) after the
+# step-5 port swap. frps dynamically binds :443 for this tunnel (v0.70.0+
+# registers proxy listeners from client registrations, so no server-side
+# listenPort change is needed). localPort stays :17443, so traffic still
+# lands on the existing admin-api-alt.conf.j2 vhost (127.0.0.2:17443 with
+# proxy_protocol). rathole stays alive on :14443 as the rollback path —
+# revert is just flipping this remotePort back to 17443 and rathole's
+# bind_addr back to :443.
 [[proxies]]
 name = "https"
 type = "tcp"
-remotePort = 17443
+remotePort = 443
 localIP = "127.0.0.2"
 localPort = 17443
 transport.proxyProtocolVersion = "v2"

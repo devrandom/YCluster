@@ -162,17 +162,19 @@
     # proxy listeners bind to 0.0.0.0 (see frps.toml.j2 header). The SSH
     # tunnel ports (17201-17204) are intentionally NOT allowed here so they
     # remain bastion-only (reachable from the local sshd jump on dev1a/b
-    # via 127.0.0.1, not from the WAN). The alt vhost ports (17080, 17443)
-    # match the alt ports in frpc.toml.j2 and are public for parallel-run
-    # validation against the production traffic pattern.
-    - name: Allow public frp alt vhost ports through ufw
+    # via 127.0.0.1, not from the WAN). After the step-5 port swap, frp
+    # https serves the production primary on :443 (was :17443 in the
+    # parallel-run phase); frp http stays on :17080 alt for the same
+    # reason. rathole's new :14443 is auto-tracked from the rendered
+    # /etc/rathole/server.toml by install-rathole-server.yml.
+    - name: Allow public frp ports through ufw
       community.general.ufw:
         rule: allow
         port: "{{ item }}"
         proto: tcp
       loop:
         - '17080'
-        - '17443'
+        - '443'
 
     - name: Set default-deny incoming and enable ufw
       community.general.ufw:
