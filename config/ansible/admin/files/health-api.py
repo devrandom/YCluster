@@ -1173,5 +1173,8 @@ if __name__ == "__main__":
     # each node's health cross-node via http://<ip>:12724/api/health.
     # The endpoint exposes only read-only health data + Prometheus
     # metrics (no auth, no mutations); firewall scopes who can reach
-    # the cluster network.
-    app.run(host="0.0.0.0", port=HEALTH_API_PORT)
+    # the cluster network. waitress (python3-waitress, installed by
+    # setup-web-services.yml) is the production WSGI server — matches
+    # what admin-api (app.py) already uses.
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=HEALTH_API_PORT, threads=8)
