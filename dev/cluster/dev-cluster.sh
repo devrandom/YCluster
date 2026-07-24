@@ -411,7 +411,20 @@ cmd_up() {
   ensure_persist; ensure_daemon; ensure_sshkey; ensure_sshconfig; ensure_network; ensure_firewall; ensure_profile
   ensure_rbd_backing
   ensure_cache   # before nodes — they apt through it
-  for n in "${NODES[@]}"; do ensure_node "$n"; done
+  # Each ensure_node spawns ~12 incus execs (apt update, ssh install,
+  # authorized_keys, etc.); 7 nodes sequentially is the bulk of `up`. The
+  # ops are container-scoped and only contend on apt-cacher-ng fetches
+  # (http-cached per package — same openssh-server download serves all
+  # nodes after the first). Background + wait -n surfaces the first
+  # failure with the original exit code.
+  local pids=()
+  for n in "${NODES[@]}"; do
+    ensure_node "$n" &
+    pids+=($!)
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || { echo "[!] ensure_node failed (pid $pid)" >&2; exit 1; }
+  done
   echo; cmd_status
 }
 

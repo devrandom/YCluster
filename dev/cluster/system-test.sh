@@ -53,8 +53,11 @@ mkdir -p "$LOGDIR"
 # -n: remote commands must not inherit the terminal's stdin — some of them
 # (incus via ycluster) read a non-TTY stdin to EOF and hang an interactive run.
 SSH="ssh -n -F .ssh/config"
-PLAYBOOK="../../venv/bin/ansible-playbook"
+PLAYBOOK="../../.venv/bin/ansible-playbook"
 [ -x "$PLAYBOOK" ] || PLAYBOOK="$(command -v ansible-playbook)"
+if [ -z "$PLAYBOOK" ] || ! [ -x "$PLAYBOOK" ]; then
+  die "ansible-playbook not found (looked for ../../.venv/bin/ansible-playbook and \$PATH)"
+fi
 CORE=(s1 s2 s3)
 declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [c2]=10.0.0.52 [f1]=10.0.0.41 [pebble]=10.0.0.42 )
 VIP=10.0.0.100

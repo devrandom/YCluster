@@ -551,11 +551,13 @@
 # /cluster/vms-events/ + /cluster/vm-state/ into postgres.
 - import_playbook: ../../config/ansible/admin/admin-stats.yml
 
-# The inference gateway, unmodified: builds the Go binary on this machine
-# (local_ai_proxy_go_bin in the dev inventory points at the host Go, which
-# auto-fetches the go.mod toolchain), deploys proxy + auth sidecar + the
-# inference.xc vhost on all storage nodes. The system test routes the
-# dev-echo model at c1's stub backend via etcd.
+# The inference gateway: build-local-ai-proxy.yml compiles the Go binary
+# on {{ buildhost }} (s1) following the same pattern as build-rathole.yml /
+# build-frp.yml; install-local-ai-proxy.yml fetches the artifact and
+# deploys proxy + auth sidecar + the inference.xc vhost on all storage
+# nodes. The system test routes the dev-echo model at c1's stub backend
+# via etcd.
+- import_playbook: ../../config/ansible/app/build-local-ai-proxy.yml
 - import_playbook: ../../config/ansible/app/install-local-ai-proxy.yml
 
 # Backup + verify-restore drill. In prod the backup script ships with

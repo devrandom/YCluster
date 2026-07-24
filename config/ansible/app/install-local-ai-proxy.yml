@@ -17,10 +17,10 @@
 #    The proxy forwards the full client path (including /v1/...) to
 #    the backend, so backend_url is host-only — no /v1 suffix.
 #
-# The playbook builds the Go binary once on the control node (where
-# /opt/infrastructure/local-ai-proxy/ already has the source via
-# dev-sync) and then pushes it to each target. Requires Go at
-# /usr/lib/go-1.24/bin/go on the control node (`apt install golang-1.24`).
+# Build follows the rathole/frp pattern: build-local-ai-proxy.yml builds
+# on {{ buildhost }} at /opt/src/local-ai-proxy/bin/; this play fetches the
+# artifact to the controller cache and copies it to each target. Run
+# build-local-ai-proxy.yml first if you haven't already.
 
 - name: Install local-ai-proxy
   hosts: storage
@@ -29,16 +29,10 @@
     use_etcd: true
     backend_url: "http://nv1.xc:8000"
     proxy_listen: ":4001"
-    # Repo root relative to this playbook (config/ansible/app/), so the
-    # build works from any checkout location (/opt/infrastructure on the
-    # cluster, the developer's clone for the dev container cluster).
-    proxy_src_dir: "{{ playbook_dir }}/../../../local-ai-proxy"
-    proxy_bin_src: "{{ proxy_src_dir }}/bin/local-ai-proxy"
+    # Binary stays in the build output dir on the buildhost (see
+    # build-local-ai-proxy.yml).
+    proxy_binary_src: /opt/src/local-ai-proxy/bin/local-ai-proxy
     proxy_bin_dst: /usr/local/bin/local-ai-proxy
-    # Overridable (local_ai_proxy_go_bin) for control nodes without the
-    # golang-1.24 apt package; any Go >= 1.21 auto-fetches the toolchain
-    # go.mod asks for.
-    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
   tasks:
     # The etcd client key is distributed mode 0640, group etcd-client (see
     # setup-etcd-tls.yml). Both the Go proxy and the Python auth sidecar run as
@@ -67,36 +61,28 @@
         group: local-ai-proxy
         mode: '0755'
 
-    - name: Check for Go toolchain on control node
+    - name: Check if proxy binary exists on buildhost
       stat:
-        path: "{{ go_bin }}"
-      delegate_to: localhost
-      become: no
-      run_once: yes
-      register: go_stat
+        path: "{{ proxy_binary_src }}"
+      register: proxy_binary_buildhost
+      delegate_to: "{{ buildhost }}"
 
-    - name: Install Go toolchain on control node
-      apt:
-        name: golang-1.24
-        state: present
-      delegate_to: localhost
-      become: yes
-      run_once: yes
-      when: not go_stat.stat.exists
+    - name: Fail if proxy binary not found on buildhost
+      fail:
+        msg: "local-ai-proxy binary not found at {{ proxy_binary_src }} on {{ buildhost }}. Run app/build-local-ai-proxy.yml first."
+      when: not proxy_binary_buildhost.stat.exists
 
-    - name: Build local-ai-proxy binary on control node
-      make:
-        chdir: "{{ proxy_src_dir }}"
-        target: build
-      environment:
-        GO: "{{ go_bin }}"
-      delegate_to: localhost
-      become: no
-      run_once: yes
+    - name: Fetch proxy binary from buildhost to controller
+      fetch:
+        src: "{{ proxy_binary_src }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
 
     - name: Install local-ai-proxy binary on targets
       copy:
-        src: "{{ proxy_bin_src }}"
+        src: "{{ build_cache_dir }}/{{ proxy_binary_src | basename }}"
         dest: "{{ proxy_bin_dst }}"
         owner: root
         group: root

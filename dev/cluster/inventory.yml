@@ -45,12 +45,9 @@ all:
     # Dev has no Docker apt repo; install-docker-registry.yml falls back to
     # these for its docker + compose-v2 requirement.
     registry_docker_packages: [docker.io, docker-compose-v2]
-    # Host Go for the local-ai-proxy control-node build (Debian has no
-    # golang-1.24 package; >=1.21 auto-fetches the go.mod toolchain).
-    local_ai_proxy_go_bin: /usr/lib/go-1.24/bin/go
-    # Build host for compiling binaries (rathole, open-webui, frp). Defaults to s1;
-    # the build playbooks run here and install playbooks fetch artifacts from
-    # here via the controller.
+    # Build host for compiling binaries (rathole, open-webui, frp,
+    # local-ai-proxy). Defaults to s1; the build playbooks run here and
+    # install playbooks fetch artifacts from here via the controller.
     buildhost: s1
     build_cache_dir: ./tmp/build-cache
     # setup-gateway-vip.yml (imported by base-infra-dev.yml). Containers

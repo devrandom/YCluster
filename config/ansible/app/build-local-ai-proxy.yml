@@ -1,0 +1,71 @@
+---
+# Build local-ai-proxy from source on the buildhost (default s1). The
+# binary stays in /opt/src/local-ai-proxy/bin/; install-local-ai-proxy.yml
+# fetches it from there via the controller.
+#
+# Unlike build-rathole.yml/build-frp.yml/build-open-webui.yml, the source
+# isn't vendored from an external git repo — local-ai-proxy lives in this
+# repo at the top level (../local-ai-proxy relative to config/ansible/),
+# synced to the controller via dev-sync. We push it from there to the
+# buildhost with synchronize (delete: yes for a clean tree, excludes
+# bin/ + .git/ + tests + docs so a prior build doesn't get clobbered
+# into the new tree).
+#
+# The play targets {{ buildhost }} directly (not localhost with
+# delegate_to) because the synchronize module resolves its rsync target
+# from the play's inventory_hostname — with hosts: localhost + delegate_to:
+# s1, it would target localhost (no sshd) instead of s1. Targeting the
+# buildhost directly is the standard pattern for build-* plays.
+- name: Build local-ai-proxy from source
+  hosts: "{{ buildhost }}"
+  vars:
+    proxy_build_dir: "/opt/src/local-ai-proxy"
+    proxy_binary_path: "{{ proxy_build_dir }}/bin/local-ai-proxy"
+    # Repo root on the controller (dev-sync target) — pushed to the buildhost.
+    proxy_repo_dir: "{{ playbook_dir }}/../../../local-ai-proxy"
+    # Go toolchain. Installed via apt (golang-1.24) on the buildhost when
+    # a rebuild is needed; local_ai_proxy_go_bin overrides the path for
+    # hosts that already have go elsewhere (>= 1.21 auto-fetches the
+    # go.mod toolchain).
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
+  tasks:
+    - name: Check if proxy binary already exists on buildhost
+      stat:
+        path: "{{ proxy_binary_path }}"
+      register: proxy_binary
+
+    - name: Install build dependencies (go + git) on buildhost
+      apt:
+        name:
+          - golang-1.24
+          - git
+        state: present
+      become: yes
+      when: not proxy_binary.stat.exists
+
+    - name: Push source from controller to buildhost
+      synchronize:
+        src: "{{ proxy_repo_dir }}/"
+        dest: "{{ proxy_build_dir }}/"
+        delete: yes
+        recursive: yes
+        rsync_opts:
+          - "--exclude=bin/"
+          - "--exclude=.git/"
+          - "--exclude=*.test"
+          - "--exclude=docs/"
+      when: not proxy_binary.stat.exists
+
+    - name: Build local-ai-proxy binary on buildhost
+      make:
+        chdir: "{{ proxy_build_dir }}"
+        target: build
+      environment:
+        GO: "{{ go_bin }}"
+      when: not proxy_binary.stat.exists
+
+    - name: Verify proxy binary was produced
+      stat:
+        path: "{{ proxy_binary_path }}"
+      register: proxy_binary_verify
+      failed_when: not proxy_binary_verify.stat.exists
