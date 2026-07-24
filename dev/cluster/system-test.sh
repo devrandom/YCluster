@@ -727,6 +727,60 @@ sec_admin_web() {
   code=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $admin_host' http://${IP[f1]}/api/inventory")
   [ "$code" = 302 ] || die "/api/inventory not gated on public vhost (got $code)"
   ok "/api/inventory: open internally, gated publicly"
+
+  # ----------------------------------------------------------------------
+  # Redirect-chain port-leak checks. The alt vhost listens on :17080 here
+  # (prod: :17443) — nginx's default absolute_redirect bakes $server_port
+  # into Location headers from relative `return 30x /path`, and the
+  # browser then dials a non-public port and hangs. The four assertions
+  # below cover each hop in the auth round-trip, on both paths.
+  # ----------------------------------------------------------------------
+
+  local app_host auth_host
+  app_host="app.$domain"
+  auth_host="auth.$domain"
+
+  # RATHOLLE PATH — /admin/ redirect Location must have no port. Same
+  # bug shape as the frp path; prod's HTTP vhost is on :80 so a leak
+  # would still work (browsers drop :80), but tightening the check
+  # means a future port change can't silently reintroduce the hang.
+  loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' http://${IP[f1]}/admin/")
+  echo "$loc" | grep -qE '^302 https?://[^/:]+/outpost\.goauthentik\.io/start' \
+    || die "/admin/ (rathole) redirect leaks port (got: $loc)"
+  ok "/admin/ via rathole: Location has no port"
+
+  # FRP PATH — /admin/ through the alt port (:17080 / :17443 in prod).
+  # This is the exact path the production browser takes; the leak here
+  # is what made admin./app. hang for users.
+  local frp_loc
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' http://${IP[f1]}:17080/admin/")
+  echo "$frp_loc" | grep -qE '^302 https?://[^/:]+/outpost\.goauthentik\.io/start' \
+    || die "/admin/ (frp) redirect leaks port (got: $frp_loc)"
+  ok "/admin/ via frp alt port: Location has no port"
+
+  # FRP PATH — app.<domain> catch-all must redirect to /admin/vm-schedule
+  # without a port. Same root cause as @authentik_signin (relative
+  # `return 302 /admin/vm-schedule` in ycluster_app-locations.conf).
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{redirect_url}' -H 'Host: $app_host' http://${IP[f1]}:17080/")
+  echo "$frp_loc" | grep -qE '^https?://[^/:]+/admin/vm-schedule' \
+    || die "/ (frp, app.) catch-all leaks port (got: $frp_loc)"
+  ok "/ via frp alt port (app.): Location has no port"
+
+  # FRP PATH — outpost start: authentik's authorize redirect must point
+  # at auth.<domain> with no port. Without the matching auth.<domain>
+  # vhost on the alt port, requests either hang (port leak) or 404
+  # (missing vhost) and the OAuth round-trip dies here.
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' 'http://${IP[f1]}:17080/outpost.goauthentik.io/start?rd=http://$admin_host/admin/'")
+  echo "$frp_loc" | grep -qE '^302 https?://[^/:]+/application/o/authorize' \
+    || die "outpost start (frp) leaks port in authorize URL (got: $frp_loc)"
+  ok "outpost start via frp alt port: authorize URL has no port"
+
+  # FRP PATH — auth.<domain> itself must be reachable through the alt
+  # port. This catches the missing-vhost class of bug independently
+  # of the Location-header checks above.
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $auth_host' http://${IP[f1]}:17080/-/health/live/")
+  [ "$frp_loc" = 200 ] || die "auth.<domain> not served on frp alt port (got $frp_loc)"
+  ok "auth.<domain> reachable through frp alt port"
 }
 
 # --------------------------------------------------------------------------
