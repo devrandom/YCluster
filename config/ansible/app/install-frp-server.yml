@@ -218,7 +218,10 @@
         group: root
 
     - name: Render alt nginx vhost with certbot-manager
-      command: /usr/local/bin/certbot-manager update-nginx
+      # Mirror setup-web-services.yml / install-authentik.yml: pass --local
+      # in dev (web_services_force_local) where /cluster/https/domain isn't
+      # seeded yet — same pattern the other certbot-manager callers use.
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
       environment: "{{ etcd_client_env | default({}) }}"
       register: nginx_update_result
       changed_when: "'configuration updated' in nginx_update_result.stdout"
