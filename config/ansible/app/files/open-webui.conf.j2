@@ -1,11 +1,17 @@
 # HTTPS/HTTP - Open WebUI
 #
 # Listens on both the wildcard address (cluster-internal access) and
-# 127.0.0.2 (rathole public tunnel endpoint). The admin-api public vhost
-# has its own explicit `listen 127.0.0.2:443` with server_name `_` as a
-# 404 fallback; since open-webui sets an explicit server_name below,
-# nginx routes main-domain traffic here and admin.* traffic to the
-# admin-api public vhost on the same address.
+# 127.0.0.2 (rathole public tunnel endpoint, shared with admin-api +
+# ycluster_app nginx vhosts — see admin-api.conf.j2). The admin-api
+# public vhost has its own explicit `listen 127.0.0.2:443` with
+# server_name `_` as a 404 fallback; since open-webui sets an explicit
+# server_name below, nginx routes main-domain traffic here and admin.*
+# / app.* traffic to their respective vhosts on the same address.
+# External traffic on dev1.<domain> arrives via rathole → 127.0.0.2:443
+# (no PROXY protocol — rathole 0.5.0 doesn't speak it), so real client
+# IPs are not preserved on this path; rate-limit zones act as global
+# buckets. The frp-side equivalent lives on 127.0.0.2:17443 and is
+# served by the alt vhost (admin-api-alt.conf.j2) with proxy_protocol.
 server {
     {% if use_tls %}
     listen 443 ssl http2;
@@ -22,90 +28,24 @@ server {
     # SSL configuration
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
-    
+
     # SSL security settings
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
     ssl_prefer_server_ciphers off;
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
-    
+
     # Security headers
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     {% endif %}
     add_header X-Frame-Options SAMEORIGIN always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
-    
-    # Internal auth subrequest: validates the client's Authorization
-    # against master key + Open-WebUI api_key table, returns X-User-Id
-    # and X-User-Groups (comma-separated OWUI group names).
-    location = /__auth {
-        internal;
-        proxy_pass http://127.0.0.1:4002/auth;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-        proxy_set_header Authorization $http_authorization;
 
-        # Subrequests inherit client_max_body_size from this block, not
-        # from the parent location. Without this, large /v1/ uploads
-        # (audio transcription) hit 413 in the auth subrequest before
-        # the body is ever proxied upstream.
-        client_max_body_size 200M;
-    }
-
-    # OpenAI-compatible inference API via local-ai-proxy.
-    # Users access this at https://<domain>/v1/ with their Open-WebUI API key.
-    location /v1/ {
-        auth_request /__auth;
-        auth_request_set $user_id $upstream_http_x_user_id;
-        auth_request_set $user_groups $upstream_http_x_user_groups;
-
-        # Strip client bearer; local-ai-proxy trusts identity headers from us.
-        proxy_set_header Authorization "";
-        proxy_set_header X-User-Id $user_id;
-        proxy_set_header X-User-Groups $user_groups;
-
-        proxy_pass http://127.0.0.1:4001/v1/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Required for streaming (SSE / chunked transfer)
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_buffering off;
-        proxy_cache off;
-
-        # Long timeouts for inference requests. 30m accommodates audio
-        # transcription of multi-hour files (whisperx returns one JSON
-        # blob at the end — proxy_read_timeout caps the whole job).
-        proxy_connect_timeout 30m;
-        proxy_send_timeout 30m;
-        proxy_read_timeout 30m;
-
-        # Allow large inputs (embeddings, long prompts, audio uploads to
-        # /v1/audio/transcriptions). Matches inference-internal.conf.
-        client_max_body_size 200M;
-    }
-
-    # Proxy to Open WebUI
-    location / {
-        proxy_pass http://127.0.0.1:(( port ))/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # WebSocket support
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Increase timeouts for long-running requests
-        proxy_connect_timeout 10m;
-        proxy_send_timeout 10m;
-        proxy_read_timeout 10m;
-    }
+    # Location bodies (auth subrequest, /v1/, /) live in a shared include
+    # so the alt vhost (admin-api-alt.conf.j2) can serve open-webui on
+    # 127.0.0.2:17443 without duplicating them. `(( port ))` is the open-
+    # webui port, substituted by the install-open-webui.yml render step.
+    include /etc/nginx/open-webui-locations.conf;
 }

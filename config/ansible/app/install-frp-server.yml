@@ -203,13 +203,24 @@
   hosts: storage
   become: yes
   tasks:
-    - name: Install alt nginx vhost for frp PROXY protocol
+    # Alt vhost template lives in /etc/nginx/templates/ — same pattern as
+    # admin-api.conf.j2 / ycluster_app.conf.j2. certbot-manager renders it
+    # with `domain=<primary>` (read from /cluster/https/domain in etcd) so
+    # the alt vhost tracks the prod domain without leaking it into repo code.
+    - name: Install alt nginx vhost template
       copy:
-        src: ../../admin/files/admin-api-alt.conf
-        dest: /etc/nginx/sites-available/admin-api-alt
+        src: ../../admin/files/admin-api-alt.conf.j2
+        dest: /etc/nginx/templates/admin-api-alt.conf.j2
         mode: '0644'
         owner: root
         group: root
+
+    - name: Render alt nginx vhost with certbot-manager
+      command: /usr/local/bin/certbot-manager update-nginx
+      environment: "{{ etcd_client_env | default({}) }}"
+      register: nginx_update_result
+      changed_when: "'configuration updated' in nginx_update_result.stdout"
+      failed_when: nginx_update_result.rc != 0
       notify: reload nginx
 
     - name: Enable alt nginx vhost

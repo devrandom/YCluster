@@ -49,6 +49,7 @@
         mode: '0755'
         owner: root
         group: root
+      notify: restart frpc
 
     - name: Create frp config directory
       file:
@@ -65,6 +66,7 @@
         mode: '0644'
         owner: root
         group: root
+      notify: restart frpc
 
     - name: Install frpc SSH-only config template
       copy:
@@ -73,6 +75,7 @@
         mode: '0644'
         owner: root
         group: root
+      notify: restart frpc-ssh
 
     - name: Create frpc client startup script
       copy:
@@ -81,6 +84,7 @@
         mode: '0755'
         owner: root
         group: root
+      notify: restart frpc
 
     - name: Create frpc SSH client startup script
       copy:
@@ -89,6 +93,7 @@
         mode: '0755'
         owner: root
         group: root
+      notify: restart frpc-ssh
 
     - name: Create frpc systemd service
       copy:
@@ -97,7 +102,9 @@
         mode: '0644'
         owner: root
         group: root
-      notify: reload systemd
+      notify:
+        - reload systemd
+        - restart frpc
 
     - name: Create frpc SSH systemd service
       copy:
@@ -106,14 +113,27 @@
         mode: '0644'
         owner: root
         group: root
-      notify: reload systemd
+      notify:
+        - reload systemd
+        - restart frpc-ssh
 
-    # frpc (the general client with http/https proxies) is leader-gated
-    # just like rathole, because the http/https tunnel names collide at
-    # frps — only one frpc can register a given name at a time, and the
-    # leader is the one that owns the admin-api vhost. storage-leader-election
-    # starts/stops it. frpc-ssh stays enabled on every core node, since
-    # each core node owns a unique ssh tunnel name (ssh1..sshN).
+    # frpc is leader-gated: frps only accepts one registration per tunnel
+    # name, so http/https must come from the leader. storage-leader-election
+    # starts/stops it. The notify handlers below pick up config changes only
+    # on the leader (matching the open-webui pattern), since a restart on a
+    # non-leader would fail to start (frpc service is enabled=no there).
+    # frpc-ssh stays enabled on every core node since each one owns a unique
+    # ssh tunnel name, so it gets a separate unconditional handler.
+    - name: Detect storage leader (frpc is leader-gated, see storage-leader-election)
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
     - name: frpc service is controlled by storage leader election
       systemd:
         name: frpc
@@ -130,4 +150,24 @@
   handlers:
     - name: reload systemd
       systemd:
+        daemon_reload: yes
+
+    # Leader-only: frpc is enabled=no on non-leaders (storage-leader-election
+    # starts it on the leader only), so a restart there would fail. Picks up
+    # binary / config / startup-script / unit changes on the leader instead
+    # of leaving the running frpc on stale config. Same pattern as
+    # install-open-webui.yml.
+    - name: restart frpc
+      systemd:
+        name: frpc
+        state: restarted
+        daemon_reload: yes
+      when: is_storage_leader
+
+    # frpc-ssh runs on every core node (each owns a unique ssh tunnel name),
+    # so its restart is unconditional.
+    - name: restart frpc-ssh
+      systemd:
+        name: frpc-ssh
+        state: restarted
         daemon_reload: yes

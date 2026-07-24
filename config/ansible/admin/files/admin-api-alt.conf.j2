@@ -1,0 +1,167 @@
+# Alt vhost for the parallel frp run. frpc forwards external traffic
+# to 127.0.0.2 on the alt ports (17080 / 17443), and frps uses PROXY
+# protocol v2 — so unlike the rathole-side public vhost, this one
+# picks up real client IPs and rate-limit zones can drop back to
+# per-client semantics. See todo/networking/switch-rathole-to-frp.md
+# and docs/design/frp-migration.md.
+#
+# The HTTPS section now serves the full surface — admin-api (public
+# whitelist + authed locations + authentik forward-auth), open-webui,
+# and ycluster_app — so the frp tunnel exercises login flows and the
+# IdP outpost end-to-end, validating the migration plan before
+# rathole is decommissioned. Removed wholesale at cleanup step 6.
+
+# HTTP - PUBLIC ALT (frp tunnel endpoint on 127.0.0.2:17080).
+# Public whitelist + authed locations — same scope as the rathole-side
+# public vhost so frp-served HTTP exercises the same paths (including
+# forward-auth via the cluster IdP). See the HTTPS section below for the
+# per-hostname open-webui / ycluster_app blocks.
+server {
+    listen 127.0.0.2:17080 proxy_protocol;
+    server_name _;
+
+    # PROXY protocol v2 from frps — picks up real client IPs. Trust
+    # the loopback bind: only the local frpc can reach 127.0.0.2.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    # Public whitelist (wg bootstrap flow + read-only status dashboard).
+    include /etc/nginx/admin-api-public-locations.conf;
+
+    # Authenticated pages (forward-auth via the cluster IdP).
+    include /etc/nginx/admin-api-authed-locations.conf;
+
+    location / {
+        return 404;
+    }
+}
+
+# HTTPS - PUBLIC ALT (frp tunnel endpoint on 127.0.0.2:17443).
+# Multiple server blocks differentiated by server_name, all sharing
+# the same listen address. Each block mirrors its main-vhost
+# counterpart (admin-api.conf.j2, open-webui.conf.j2,
+# ycluster_app.conf.j2) so frp-served traffic reaches the same Flask /
+# OWUI / IdP backends as rathole-served traffic does.
+
+# Default server (server_name _) — 404 fallback for unmatched hosts.
+server {
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    server_name _;
+
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    location / {
+        return 404;
+    }
+}
+
+# Open-WebUI — main-domain traffic reaches Open WebUI's
+# location bodies via the shared include. OWUI listens on 127.0.0.1
+# at the port substituted into open-webui-locations.conf by the
+# setup-web-services render step.
+server {
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    server_name {{ domain | default('_') }};
+
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    client_max_body_size 20M;
+
+    include /etc/nginx/open-webui-locations.conf;
+}
+
+# Admin-API — full surface including forward-auth.
+# admin-api-authed-locations.conf already includes the authentik outpost
+# plumbing, so this block only needs to include both admin-api-* files.
+server {
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    server_name admin.{{ domain | default('_') }};
+
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    limit_req_status 429;
+
+    # Public whitelist (wg bootstrap flow + read-only status dashboard).
+    include /etc/nginx/admin-api-public-locations.conf;
+
+    # Authenticated pages (forward-auth via the cluster IdP) + their data APIs.
+    include /etc/nginx/admin-api-authed-locations.conf;
+
+    location / {
+        return 404;
+    }
+}
+
+# YCluster App — VM scheduling + Settings, forward-authed.
+# The outpost plumbing (login redirect + OAuth callback + auth subrequest)
+# must be included BEFORE the location bodies so @authentik_signin is in
+# scope when the location handlers reference it via error_page 401.
+server {
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    server_name app.{{ domain | default('_') }};
+
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+
+    client_max_body_size 1M;
+
+    include /etc/nginx/admin-api-authentik-outpost.conf;
+    include /etc/nginx/ycluster_app-locations.conf;
+}

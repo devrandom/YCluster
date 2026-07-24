@@ -9,8 +9,8 @@ auth.token = "{{ token }}"
 transport.heartbeatInterval = 40
 transport.heartbeatTimeout = 40
 
-# Forward to 127.0.0.2 so the alt nginx vhost (admin-api-alt.conf) can
-# serve a separate "public alt" vhost bound to that address. 127.0.0.1
+# Forward to 127.0.0.2 so the alt nginx vhost (admin-api-alt.conf.j2)
+# can serve the frp tunnel on disjoint ports from rathole. 127.0.0.1
 # stays reserved for local health checks + cluster-internal traffic.
 # Only the storage leader should register http/https — running this
 # template on every core node would cause tunnel-name collisions.
@@ -22,6 +22,14 @@ localIP = "127.0.0.2"
 localPort = 17080
 transport.proxyProtocolVersion = "v2"
 
+# Primary HTTPS — validate frp end-to-end on the alt port. The alt
+# vhost (admin-api-alt.conf.j2) listens on 127.0.0.2:17443 with
+# proxy_protocol already enabled, and serves the full surface — admin-api
+# public whitelist + authed locations + authentik forward-auth, plus
+# open-webui + ycluster_app — so this tunnel exercises login flows,
+# the IdP outpost, and OWUI's /v1/ inference API. Rathole stays on :443
+# as the production primary until frp is fully validated; remotePort=17443
+# keeps the tunnels disjoint.
 [[proxies]]
 name = "https"
 type = "tcp"
