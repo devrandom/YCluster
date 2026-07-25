@@ -1,0 +1,97 @@
+---
+# NVMe APST/ASPM/port-PM/runtime-PM mitigation.
+#
+# Mitigates the Samsung 990 EVO Plus 2TB (FW 2B2QKXG7) controller-hang
+# pattern (ext4 emergency_ro when the controller drops off the PCIe bus).
+# See incidents/INDEX.md#2026-06-20 and docs/comino-setup.md § "NVMe".
+#
+# Layered mitigation:
+#   - nvme_core.default_ps_max_latency_us=0   disable APST at init (the
+#                                             drive rejects runtime
+#                                             `nvme set-feature -f 0x0c`)
+#   - pcie_aspm.policy=performance            disable ASPM via the
+#                                             kernel driver (NOT
+#                                             `pcie_aspm=off`, which leaves
+#                                             firmware ASPM live)
+#   - pcie_port_pm=off                        stop the root port from
+#                                             pushing the endpoint to D3cold
+#   - /etc/udev/rules.d/99-nvme-runtime-pm.rules
+#                                             reassert `power/control=on` on
+#                                             every device add (handles
+#                                             hot-plug, KVM reset, driver
+#                                             rebind). Catch-all `nvme*` is
+#                                             always installed; per-host PCI
+#                                             addresses are added when
+#                                             `nvme_pci_runtime_pin` is set.
+#
+# Opt-in per host: set `nvme_apply_pm_mitigation: true` in host_vars.
+# Per-host PCI addresses for the runtime-PM pin:
+#   `nvme_pci_runtime_pin: ["0000:44:00.0"]`
+#
+# Does nothing on hosts without the flag — `meta: end_host` bails before
+# any task runs. Idempotent: the grub edit only appends args that aren't
+# already present; update-grub only runs when the file changed.
+
+- name: NVMe APST/ASPM/port-PM/runtime-PM mitigation
+  hosts: nvidia
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Skip hosts that haven't opted in
+      meta: end_host
+      when: nvme_apply_pm_mitigation | default(false) | bool != true
+
+    - name: Read current /etc/default/grub
+      slurp:
+        src: /etc/default/grub
+      register: grub_file
+
+    - name: Parse current GRUB_CMDLINE_LINUX_DEFAULT args
+      set_fact:
+        current_grub_args: >-
+          {{ (grub_file.content | b64decode
+              | regex_search('GRUB_CMDLINE_LINUX_DEFAULT="([^"]*)"', '\1')
+              | first).split() }}
+
+    - name: Set required cmdline args
+      set_fact:
+        nvme_required_grub_args:
+          - "nvme_core.default_ps_max_latency_us=0"
+          - "pcie_aspm.policy=performance"
+          - "pcie_port_pm=off"
+
+    - name: Compute missing cmdline args
+      set_fact:
+        missing_grub_args: "{{ nvme_required_grub_args | difference(current_grub_args) }}"
+
+    - name: Append missing args to GRUB_CMDLINE_LINUX_DEFAULT
+      replace:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT="([^"]*)"$'
+        replace: 'GRUB_CMDLINE_LINUX_DEFAULT="\1 {{ missing_grub_args | join(" ") }}"'
+      when: missing_grub_args | length > 0
+
+    - name: Regenerate grub config
+      command: update-grub
+      when: missing_grub_args | length > 0
+
+    - name: Install nvme runtime-PM-pin udev rule
+      copy:
+        dest: /etc/udev/rules.d/99-nvme-runtime-pm.rules
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Pin nvme runtime PM to "on" — kernel cmdline disables APST/ASPM, but
+          # runtime PM can still push the device toward D3cold. Reassert on every
+          # device add (handles hot-plug, KVM reset, driver rebind).
+          ACTION=="add", SUBSYSTEM=="nvme", KERNEL=="nvme*", ATTR{device/power/control}="on"
+          {% for addr in nvme_pci_runtime_pin | default([]) %}
+          ACTION=="add", SUBSYSTEM=="pci", KERNEL=="{{ addr }}", ATTR{power/control}="on"
+          {% endfor %}
+      notify: reload udev
+
+  handlers:
+    - name: reload udev
+      shell: udevadm control --reload-rules && udevadm trigger
