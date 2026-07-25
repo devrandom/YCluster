@@ -28,6 +28,26 @@ incus_passthrough_gpu_pci:
 A GPU passes through together with its HD-Audio function (`.1`): they
 share an IOMMU group, so vfio requires the whole group.
 
+### BIOS: enable AMD-Vi (IOMMU)
+
+Whole-GPU passthrough needs AMD-Vi / IOMMU groups; without them
+`vfio-pci` probe fails (`error -22`). On AMD EPYC hosts with AMI
+Aptio (ASRock Rack boards, e.g. Comino ONYX) the toggle is **not** in
+plain CPU Configuration — it's under AMD CBS:
+
+- **Advanced → AMD CBS → NBIO Common Options → IOMMU** → Enabled
+- SVM Mode (a separate CPU-virt toggle) is in the same CBS tree.
+
+After enabling, reboot and verify:
+
+- `cat /sys/firmware/acpi/tables/IVRS | wc -c` — non-zero
+- `dmesg | grep -i amd-vi` — `IOMMU performance counters supported` per I/O die
+- `ls /sys/kernel/iommu_groups/` — populated
+
+Without an exposed IVRS table, no kernel cmdline (`amd_iommu=on`,
+`iommu=force`, etc.) will enable it — the BIOS has to publish the
+hardware description.
+
 ### How the split is applied
 
 `gpu-passthrough.service` runs `/usr/local/sbin/gpu-passthrough-bind`
