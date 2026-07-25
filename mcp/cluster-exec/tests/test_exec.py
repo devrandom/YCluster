@@ -175,6 +175,76 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(args[1], "dummy-bastion")
         self.assertEqual(args[2], "ssh app1 'echo hello world'")
 
+    def test_remote_target_with_user_prefixes_inner_ssh(self):
+        """`user="admin"` produces `ssh admin@app1 ...` on the inner hop.
+
+        Needed for macOS nodes (and similar) where the bastion's ssh_config
+        default User is `root` but root login is denied — the caller can
+        override per-call without editing the config.
+        """
+        proc = _FakeProcess(stdout_lines=[b"ok\n"], stderr_lines=[], exit_code=0)
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            asyncio.run(
+                exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="app1",
+                    command="echo hello world",
+                    session_id="abcd1234",
+                    timeout_s=10,
+                    auto_bg_after_s=0.0,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                    user="admin",
+                )
+            )
+        self.assertEqual(len(captured), 1)
+        args = captured[0]
+        self.assertEqual(args[0], "ssh")
+        self.assertEqual(args[1], "dummy-bastion")
+        self.assertEqual(args[2], "ssh admin@app1 'echo hello world'")
+
+    def test_localhost_skips_inner_ssh_with_user(self):
+        """`user` is a no-op for `hostname="localhost"` — the command runs
+        directly on the bastion, so there's no inner ssh to prefix."""
+        proc = _FakeProcess(stdout_lines=[b"ok\n"], stderr_lines=[], exit_code=0)
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            asyncio.run(
+                exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="localhost",
+                    command="dummy-cmd",
+                    session_id="abcd1234",
+                    timeout_s=10,
+                    auto_bg_after_s=0.0,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                    user="admin",
+                )
+            )
+        self.assertEqual(len(captured), 1)
+        args = captured[0]
+        self.assertEqual(args[0], "ssh")
+        self.assertEqual(args[1], "dummy-bastion")
+        self.assertEqual(args[2], "dummy-cmd")
+
     def test_stderr_tagged(self):
         proc = _FakeProcess(
             stdout_lines=[b"ok\n"],

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import secrets
+import signal
 import time
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
 from mcp.types import TextContent
 from pydantic import AnyHttpUrl, ConfigDict, create_model
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from . import auth, exec, log
 
@@ -93,10 +96,12 @@ SERVER = MCPServer(
         "hard `timeout_s` (default 1800s; set to 0 to disable). All three "
         "exec tools accept `hostname=\"localhost\"` to skip the inner "
         "ssh and run directly on the bastion (e.g. for ansible "
-        "playbooks via `cd /etc/ansible && ./run-playbook.sh ...`). The "
-        "server requires HTTP Bearer authentication on every request; "
-        "the token lives in the file logged at startup (default "
-        "`~/.config/cluster-exec/bearer`, mode 0600)."
+        "playbooks via `cd /etc/ansible && ./run-playbook.sh ...`), and "
+        "accept `user` to force a specific SSH login on the target "
+        "(e.g. `user=\"admin\"` for macOS nodes where root login is "
+        "denied). The server requires HTTP Bearer authentication on "
+        "every request; the token lives in the file logged at startup "
+        "(default `~/.config/cluster-exec/bearer`, mode 0600)."
     ),
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(_URL_BASE),
@@ -130,7 +135,10 @@ _PROGRESS_TAIL_LINES = _env_int("CE_PROGRESS_TAIL_LINES", 50)
         "`auto_bg_after_s` (or both to 0). Pass `hostname=\"localhost\"` "
         "to skip the inner ssh and run the command directly on the "
         "bastion (useful for ansible playbooks via "
-        "`cd /etc/ansible && ./run-playbook.sh ...`)."
+        "`cd /etc/ansible && ./run-playbook.sh ...`). Pass `user` to "
+        "force a specific SSH login on the target (e.g. `user=\"admin\"` "
+        "for macOS nodes where root login is denied); defaults to "
+        "whatever the bastion's ssh_config says for the host."
     ),
 )
 async def run(
@@ -140,6 +148,7 @@ async def run(
     tail_lines: int = 25,
     auto_bg_after_s: float = _AUTO_BG_S,
     timeout_s: float = _TIMEOUT_S,
+    user: str | None = None,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     if not command:
@@ -196,6 +205,7 @@ async def run(
             head_lines=head_lines,
             tail_lines=tail_lines,
             cwd=cwd,
+            user=user,
             on_progress=report,
             cancel=cancel,
         )
@@ -217,10 +227,13 @@ async def run(
         "bastion. Takes a `local_path` (str), `remote_path` (str), and "
         "`hostname` (str) \u2014 the latter is an internal host name "
         "(e.g. `app1`, `db2`, \u2026). Pass `hostname=\"localhost\"` to "
-        "skip the inner ssh and write directly on the bastion. Honors "
-        "`timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to "
-        "disable) as a hard timeout (SIGTERM, then SIGKILL after 2s). "
-        "Returns a status line: `OK bytes=N -> <host>:<path> "
+        "skip the inner ssh and write directly on the bastion. Pass "
+        "`user` to force a specific SSH login on the target (e.g. "
+        "`user=\"admin\"` for macOS nodes where root login is denied); "
+        "defaults to whatever the bastion's ssh_config says for the "
+        "host. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to "
+        "0 to disable) as a hard timeout (SIGTERM, then SIGKILL after "
+        "2s). Returns a status line: `OK bytes=N -> <host>:<path> "
         "duration=X.Xs` on success, `FAILED exit=<code> duration=X.Xs` "
         "on non-zero exit, `CANCELLED after X.Xs (timeout)` on hard "
         "timeout, `CANCELLED after X.Xs (cancelled by client)` on "
@@ -234,6 +247,7 @@ async def put(
     remote_path: str,
     hostname: str,
     timeout_s: float = _TIMEOUT_S,
+    user: str | None = None,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     if not local_path:
@@ -276,6 +290,7 @@ async def put(
             session_id=session_id,
             timeout_s=timeout_s,
             cwd=cwd,
+            user=user,
             cancel=cancel,
         )
     finally:
@@ -297,8 +312,11 @@ async def put(
         "(str), `local_path` (str), and `hostname` (str) \u2014 the "
         "latter is an internal host name (e.g. `app1`, `db2`, \u2026). "
         "Pass `hostname=\"localhost\"` to skip the inner ssh and read "
-        "directly from the bastion. Honors `timeout_s` (default "
-        "1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout "
+        "directly from the bastion. Pass `user` to force a specific "
+        "SSH login on the target (e.g. `user=\"admin\"` for macOS nodes "
+        "where root login is denied); defaults to whatever the "
+        "bastion's ssh_config says for the host. Honors `timeout_s` "
+        "(default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout "
         "(SIGTERM, then SIGKILL after 2s). Returns a status line: "
         "`OK bytes=N <host>:<path> -> <local> duration=X.Xs` on "
         "success, `FAILED exit=<code> duration=X.Xs` on non-zero exit, "
@@ -315,6 +333,7 @@ async def get(
     local_path: str,
     hostname: str,
     timeout_s: float = _TIMEOUT_S,
+    user: str | None = None,
     ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     if not remote_path:
@@ -357,6 +376,7 @@ async def get(
             session_id=session_id,
             timeout_s=timeout_s,
             cwd=cwd,
+            user=user,
             cancel=cancel,
         )
     finally:
@@ -507,6 +527,25 @@ def main() -> None:
     print(f"bearer token file: {_BEARER_PATH} (mode 0600)", flush=True)
     print(f"listening: http://{host}:{port}{path}", flush=True)
     SERVER.run(transport="streamable-http", host=host, port=port, streamable_http_path=path)
+
+
+# Admin endpoint used by `cedaemon --stop` to ask the server to terminate
+# itself without relying on the pid file (which is unreliable across PID
+# namespaces). FastMCP's custom_route does not require authorization, so we
+# enforce bearer auth manually. The handler kills any backgrounded SSH
+# sessions, schedules a SIGTERM to self (uvicorn catches it and shuts down
+# gracefully — no in-flight requests are dropped), and returns 200.
+@SERVER.custom_route("/stop", methods=["POST"])
+async def _stop(request: Request) -> JSONResponse:
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[len("Bearer "):] if auth_header.startswith("Bearer ") else ""
+    if not token or not secrets.compare_digest(token, _BEARER_TOKEN):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    killed = exec.kill_all_backgrounded()
+    # Defer SIGTERM until after the response is flushed.
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM))
+    return JSONResponse({"stopping": True, "killed_backgrounded": killed})
 
 
 _lock_down_tool_schemas()

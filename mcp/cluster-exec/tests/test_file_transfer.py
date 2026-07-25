@@ -141,6 +141,7 @@ class PutTests(unittest.TestCase):
         timeout_s: float = kwargs.get("timeout_s", 10.0)
         cwd: str = kwargs.get("cwd", "/cwd")
         cancel: asyncio.Event | None = kwargs.get("cancel", None)
+        user: str | None = kwargs.get("user", None)
 
         with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
             text = asyncio.run(
@@ -152,6 +153,7 @@ class PutTests(unittest.TestCase):
                     session_id=session_id,
                     timeout_s=timeout_s,
                     cwd=cwd,
+                    user=user,
                     cancel=cancel,
                 )
             )
@@ -192,6 +194,24 @@ class PutTests(unittest.TestCase):
         self.assertEqual(ssh_argv[1], "dummy-bastion")
         self.assertEqual(ssh_argv[2], "ssh")
         self.assertEqual(ssh_argv[3], shlex.quote("app1"))
+        self.assertEqual(ssh_argv[4], "--")
+
+    def test_remote_target_with_user_prefixes_inner_ssh(self):
+        """`user="admin"` produces `ssh admin@app1 ... -- dd of=...` on the
+        inner hop."""
+        local = self._make_local(content=b"x")
+        cat = _FakeProc(stdout_data=b"x")
+        ssh = _FakeProc(exit_code=0)
+        text, argv_lists, _ = self._run_with(
+            procs=[cat, ssh],
+            local_path=str(local),
+            remote_path="/tmp/dst",
+            user="admin",
+        )
+        self.assertTrue(text.startswith("OK bytes=1"))
+        ssh_argv = argv_lists[1]
+        self.assertEqual(ssh_argv[2], "ssh")
+        self.assertEqual(ssh_argv[3], shlex.quote("admin@app1"))
         self.assertEqual(ssh_argv[4], "--")
 
     def test_ssh_subprocess_uses_stdin_pipe_not_streamreader(self):
@@ -378,6 +398,7 @@ class GetTests(unittest.TestCase):
             timeout_s: float = kwargs.get("timeout_s", 10.0)
             cwd: str = kwargs.get("cwd", "/cwd")
             cancel: asyncio.Event | None = kwargs.get("cancel", None)
+            user: str | None = kwargs.get("user", None)
             with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
                 text = asyncio.run(
                     exec_mod.get_file(
@@ -388,6 +409,7 @@ class GetTests(unittest.TestCase):
                         session_id=session_id,
                         timeout_s=timeout_s,
                         cwd=cwd,
+                        user=user,
                         cancel=cancel,
                     )
                 )
@@ -414,6 +436,15 @@ class GetTests(unittest.TestCase):
         self.assertEqual(argv_lists[0][1], "dummy-bastion")
         self.assertEqual(argv_lists[0][2], "ssh")
         self.assertEqual(argv_lists[0][3], shlex.quote("app1"))
+
+    def test_remote_target_with_user_prefixes_inner_ssh(self):
+        """`user="admin"` produces `ssh admin@app1 ... -- cat ...` on the
+        inner hop."""
+        ssh = _FakeProc(stdout_data=b"hello")
+        text, argv_lists, content = self._run_with(ssh, user="admin")
+        self.assertTrue(text.startswith("OK bytes=5"))
+        self.assertEqual(argv_lists[0][2], "ssh")
+        self.assertEqual(argv_lists[0][3], shlex.quote("admin@app1"))
         self.assertEqual(argv_lists[0][4], "--")
 
     def test_parent_dir_missing_returns_error(self):

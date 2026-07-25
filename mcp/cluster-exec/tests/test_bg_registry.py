@@ -79,6 +79,19 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(proc._terminated)
         self.assertEqual(exec_mod.list_backgrounded(), [])
 
+    def test_kill_all_terminates_every_session(self):
+        procs = [_StubProcess(), _StubProcess(), _StubProcess()]
+        for i, p in enumerate(procs):
+            self._register(f"reg{i:05d}", p)
+        count = exec_mod.kill_all_backgrounded()
+        self.assertEqual(count, 3)
+        for p in procs:
+            self.assertTrue(p._terminated)
+        self.assertEqual(exec_mod.list_backgrounded(), [])
+
+    def test_kill_all_on_empty_registry_returns_zero(self):
+        self.assertEqual(exec_mod.kill_all_backgrounded(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

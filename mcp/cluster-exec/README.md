@@ -8,17 +8,18 @@ Exposes six tools:
 
 - **`run`** — run a command on an internal host:
   1. Takes a `command` (str) and a `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Whatever the bastion can reach via its `ssh_config`. Pass `hostname="localhost"` to skip the inner ssh and run the command directly on the bastion itself (useful for ansible playbooks — see [Ansible](#ansible)).
-  2. Runs the command via a two-hop SSH pattern:
+  2. Optionally takes a `user` (str) — overrides the SSH login on the inner hop (e.g. `user="admin"` for macOS nodes where root login is denied). Defaults to whatever the bastion's `ssh_config` says for the host. No-op when `hostname="localhost"`.
+  3. Runs the command via a two-hop SSH pattern:
      ```
-     ssh "$CE_BASTION" 'ssh <hostname> "<command>"'
+     ssh "$CE_BASTION" 'ssh [<user>@]<hostname> "<command>"'
      ```
      For `hostname="localhost"` this collapses to a single hop:
      ```
      ssh "$CE_BASTION" "<command>"
      ```
-  3. Captures stdout and stderr as separate streams (chronologically merged in the result), with stderr lines tagged `[stderr]`.
-  4. Truncates the result to the first `head_lines` and last `tail_lines` of merged output (defaults 25/25), inserting a `… [N lines elided] …` marker between them.
-  5. Returns the result as MCP text content, prefixed with a status line:
+  4. Captures stdout and stderr as separate streams (chronologically merged in the result), with stderr lines tagged `[stderr]`.
+  5. Truncates the result to the first `head_lines` and last `tail_lines` of merged output (defaults 25/25), inserting a `… [N lines elided] …` marker between them.
+  6. Returns the result as MCP text content, prefixed with a status line:
      - `OK exit=0 duration=4.2s`
      - `FAILED exit=2 duration=4.2s`
      - `CANCELLED after 12.3s (timeout)` — hard timeout fired
@@ -31,14 +32,14 @@ Exposes six tools:
   - `auto_bg_after_s` (default 30s, `CE_AUTO_BG_TIMEOUT_S`) — soft timeout. When it fires, the run transitions to background and returns `BACKGROUNDED session=<id>`. Set to 0 to disable.
   - `timeout_s` (default 1800s, `CE_TIMEOUT_S`) — hard timeout. SIGTERM, then SIGKILL after 2s. Set to 0 to disable. Must be greater than `auto_bg_after_s` when both are enabled.
 
-- **`put`** — upload a local file to an internal host. Takes `local_path` (str), `remote_path` (str), and `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Pass `hostname="localhost"` to skip the inner ssh and write directly on the bastion. Streams bytes through SSH stdin (`cat > file` on the remote end) so the payload is binary-safe and never staged on the bastion. Foreground only — never auto-backgrounds. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout. Returns a status line:
+- **`put`** — upload a local file to an internal host. Takes `local_path` (str), `remote_path` (str), and `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Pass `hostname="localhost"` to skip the inner ssh and write directly on the bastion. Pass `user` (str) to override the SSH login on the inner hop (e.g. `user="admin"` for macOS nodes); defaults to the bastion's `ssh_config`. Streams bytes through SSH stdin (`cat > file` on the remote end) so the payload is binary-safe and never staged on the bastion. Foreground only — never auto-backgrounds. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout. Returns a status line:
   - `OK bytes=N -> <host>:<path> duration=X.Xs` on success
   - `FAILED exit=<code> duration=X.Xs` on non-zero exit
   - `CANCELLED after X.Xs (timeout)` on hard timeout
   - `CANCELLED after X.Xs (cancelled by client)` on `notifications/cancelled`
   - `ERROR: <message>` if `local_path` is missing or not a regular file
 
-- **`get`** — download a file from an internal host to the local filesystem. Takes `remote_path` (str), `local_path` (str), and `hostname` (str) — the latter is an internal host name. Pass `hostname="localhost"` to skip the inner ssh and read directly from the bastion. Streams bytes through SSH stdout (`cat <path>` on the remote end) and writes them to `local_path` as they arrive — binary-safe, never staged on the bastion. Foreground only — never auto-backgrounds. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout. Returns a status line:
+- **`get`** — download a file from an internal host to the local filesystem. Takes `remote_path` (str), `local_path` (str), and `hostname` (str) — the latter is an internal host name. Pass `hostname="localhost"` to skip the inner ssh and read directly from the bastion. Pass `user` (str) to override the SSH login on the inner hop (e.g. `user="admin"` for macOS nodes); defaults to the bastion's `ssh_config`. Streams bytes through SSH stdout (`cat <path>` on the remote end) and writes them to `local_path` as they arrive — binary-safe, never staged on the bastion. Foreground only — never auto-backgrounds. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout. Returns a status line:
   - `OK bytes=N <host>:<path> -> <local> duration=X.Xs` on success
   - `FAILED exit=<code> duration=X.Xs` on non-zero exit
   - `CANCELLED after X.Xs (timeout)` on hard timeout
@@ -59,12 +60,13 @@ Streamable HTTP at `http://127.0.0.1:4003/mcp` (configurable via `CE_HTTP_HOST` 
 
 ```bash
 bash mcp/cluster-exec/cedaemon --start    # idempotent; waits until port is bound
-bash mcp/cluster-exec/cedaemon --stop     # SIGTERM, SIGKILL after 5s; cleans up bg children
+bash mcp/cluster-exec/cedaemon --stop     # POST /stop with bearer; the daemon kills its
+                                          # bg SSH sessions and signals itself to exit
 bash mcp/cluster-exec/cedaemon --status   # is it up?
 bash mcp/cluster-exec/cedaemon --restart  # stop + start
 ```
 
-`--stop` always kills any backgrounded SSH children in the same session (no orphans). State lives in `./tmp/cluster-exec.{pid,log}`. The server runs in its own session (`setsid`) so it survives the parent shell exiting. Env vars (`CE_BASTION`, …) are read at startup; pass them through the shell:
+`--stop` sends a bearer-authenticated POST to `/stop` on the server's HTTP port; the handler kills any backgrounded SSH children and schedules SIGTERM on itself, then returns 200. Liveness and stop both work over the network port, so they're robust across PID namespaces (e.g. codex/bwrap `--unshare-pid`) where pid tracking is unreliable. State lives in `./tmp/cluster-exec.{pid,log}` (the pid file is diagnostic only — never read for liveness or killing). The server runs in its own session (`setsid`) so it survives the parent shell exiting. Env vars (`CE_BASTION`, …) are read at startup; pass them through the shell:
 
 ```bash
 CE_BASTION="bastion.example.com" bash mcp/cluster-exec/cedaemon --start
@@ -181,7 +183,7 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema tests.test_stop_endpoint
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):

@@ -57,6 +57,15 @@ def kill_backgrounded(session_id: str, grace_s: float = 2.0) -> bool:
     return True
 
 
+def kill_all_backgrounded(grace_s: float = 2.0) -> int:
+    # Snapshot keys: kill_backgrounded mutates the dict as it pops.
+    count = 0
+    for sid in list(_BACKGROUNDED.keys()):
+        if kill_backgrounded(sid, grace_s=grace_s):
+            count += 1
+    return count
+
+
 def await_cancelled(task: asyncio.Task) -> None:
     loop = asyncio.get_event_loop()
     if loop.is_running():
@@ -106,6 +115,7 @@ async def run(
     head_lines: int,
     tail_lines: int,
     cwd: str,
+    user: str | None = None,
     on_progress: ProgressFn | None = None,
     cancel: asyncio.Event | None = None,
 ) -> str:
@@ -125,7 +135,8 @@ async def run(
             stderr=asyncio.subprocess.PIPE,
         )
     else:
-        inner = f"ssh {shlex.quote(target_host)} {shlex.quote(command)}"
+        ssh_target = f"{user}@{target_host}" if user else target_host
+        inner = f"ssh {shlex.quote(ssh_target)} {shlex.quote(command)}"
         proc = await asyncio.create_subprocess_exec(
             "ssh",
             bastion,
@@ -346,6 +357,7 @@ async def put_file(
     session_id: str,
     timeout_s: float,
     cwd: str,
+    user: str | None = None,
     cancel: asyncio.Event | None = None,
 ) -> str:
     """Upload ``local_path`` to ``target_host:remote_path`` via SSH bastion.
@@ -380,9 +392,10 @@ async def put_file(
     if target_host == "localhost":
         ssh_argv: list[str] = ["ssh", bastion, quoted_target_cmd]
     else:
+        ssh_target = f"{user}@{target_host}" if user else target_host
         ssh_argv = [
             "ssh", bastion,
-            "ssh", shlex.quote(target_host), "--", quoted_target_cmd,
+            "ssh", shlex.quote(ssh_target), "--", quoted_target_cmd,
         ]
 
     cat_proc = await asyncio.create_subprocess_exec(
@@ -556,6 +569,7 @@ async def get_file(
     session_id: str,
     timeout_s: float,
     cwd: str,
+    user: str | None = None,
     cancel: asyncio.Event | None = None,
 ) -> str:
     """Download ``remote_path`` from ``target_host`` to ``local_path`` via SSH bastion.
@@ -581,9 +595,10 @@ async def get_file(
     if target_host == "localhost":
         ssh_argv: list[str] = ["ssh", bastion, quoted_target_cmd]
     else:
+        ssh_target = f"{user}@{target_host}" if user else target_host
         ssh_argv = [
             "ssh", bastion,
-            "ssh", shlex.quote(target_host), "--", quoted_target_cmd,
+            "ssh", shlex.quote(ssh_target), "--", quoted_target_cmd,
         ]
 
     ssh_proc = await asyncio.create_subprocess_exec(
