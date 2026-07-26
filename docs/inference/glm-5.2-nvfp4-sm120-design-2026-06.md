@@ -57,6 +57,28 @@ knobs remain for A/B. The crash-safety machinery (fastsafetensors, checkpoint
 dedup, `--memory` cap, indexer workspace) carries over unchanged and is still
 load-bearing — read the incident section before touching it.
 
+## FullKD-504B at TP=4 — dead end (2026-07-26)
+
+`0xSero/GLM-5.2-504B-FullKD` (Router-KD variant, 504B, ~293 GB on disk) was
+attempted at TP=4 on the free 4-GPU slice. Structural dead end: per-GPU static
+memory at TP=4 is ~91.5 GiB (vs ~45 GiB at TP=8), leaving ~3–5 GiB for the KV
+pool that vLLM sizes to ~7.6 GiB regardless of `MAX_MODEL_LEN` — OOMs at
+`initialize_kv_cache` after every lever tried: `MAX_MODEL_LEN` 131k→65k,
+`DCP` 1→4, `MAX_CUDAGRAPH_CAPTURE_SIZE` 8→4, `PYTORCH_CUDA_ALLOC_CONF`
+expandable_segments, `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`. The binding
+constraint is ~4.8 GiB of b12x/MTP overhead (MTP draft model + per-worker
+workspace) that vLLM's KV profiler doesn't account for, so vLLM plans a pool
+~3 GiB larger than what actually fits. 0xSero's HF card recipe for FullKD
+assumes `tensor-parallel-size 8`; he doesn't publish a TP=4 FullKD recipe
+(only REAP-469B at TP=4 is validated). Three real options on a 4-GPU box —
+`--enforce-eager` (30–50% runtime cost, otherwise free), `DISABLE_MTP=1`
+(loses the ~5–10% MTP speedup), or ktransformers + CPU RAM offload (different
+stack) — none were tried here because none of them changes the conclusion:
+FullKD-504B at TP=4 is not a vLLM path. Don't re-litigate; if FullKD is the
+required model, the answer is TP=8 (which needs the other 4 GPUs back from
+vfio) or ktransformers. Detail + attempt log: `tmp/glm52-fullkd-b12x-start.sh`
+and the playbook time-stamped in NOTES.md when this section is written.
+
 ## First-attempt incident and resolution (2026-06-21)
 
 First bring-up of `0xSero/GLM-5.2-504B` on the free 4-GPU slice cleared two boot
@@ -276,8 +298,11 @@ occupies four of them; four are free.
   it can sit on the free GPUs **alongside** M3, or replace it. *Lighter* prune
   than the 469B → more experts retained → higher quality. REAP is still lossy
   (below full GLM-5.2), but it's the way onto a 4-GPU footprint, and being
-  0xSero's own checkpoint it matches the validated recipe below. **This is what
-  we pull.**
+  0xSero's own checkpoint it matches the validated recipe below. **Was deployed
+  2026-06; retired 2026-06-26** for factual-knowledge damage (REAP-pruning ~doubles
+  loop rate per 0xSero's REPORT.md n=2000 eval; community confirms REAP
+  "lobotomizes" non-coding tasks). See the 06-26 update at the top for the
+  replacement (full 744B at PP=2×TP=4 across all 8 GPUs).
 
 ### Validated recipe (0xSero `launch.sh`, verbatim)
 
