@@ -3,9 +3,11 @@
 Status: **plan** (not yet implemented). **2026-07-02 update: largely mooted
 for MiniMax-M3** — M3 prod now runs the *official* `vllm/vllm-openai:v0.24.0`
 image (auditable, upstream-published) with a 3-line source patch derived
-on-node; b12x is fallback-only there (see
-[minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md)). The plan remains
-relevant for **GLM-5.2**, which still serves on the b12x image family.
+on-node; b12x is no longer in use for M3 (see
+[minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md) and the archived
+[minimax-m3-b12x-stack.md](../archive/minimax-m3-b12x-stack.md) for the
+historical b12x runbook). The plan remains relevant for **GLM-5.2**, which
+still serves on the b12x image family.
 
 ## Problem
 
@@ -178,4 +180,4 @@ upstream #45381 (2026-06-15) ships the built-in `minimax_m3` reasoning parser
 (drop our injected plugin) and the Rust-backed tool-call parser (close the
 tool-calling gap). See the "Fork currency" section above for the b12x-+-#45381
 path, plus [minimax-m3-nvfp4-sm120.md](minimax-m3-nvfp4-sm120.md) and
-[`todo/inference/b12x-reproducible-build.md`](../../todo/inference/b12x-reproducible-build.md).
+[`todo/archive/b12x-reproducible-build.md`](../../todo/archive/b12x-reproducible-build.md) (moot — we dropped b12x for stock vLLM `0.24`).

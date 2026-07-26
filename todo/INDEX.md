@@ -4,7 +4,7 @@ One file per issue, grouped by subject matter. Items within each section
 are ordered by priority — top is "do this next". Items flagged **[HIGH]**
 caused real outages, are cross-cutting and unblock other items, or are
 otherwise urgent. Completed or no-longer-relevant items move to
-`archive/`.
+`archive/` and are listed in `DONE.md`.
 
 Categories: [security](#security) ·
 [networking](#networking) ·
@@ -105,8 +105,6 @@ DR, backups, node lifecycle, scaling/capacity.
 - [/api/allocations + /api/health unauth](code-quality/api-allocations-health-unauth.md)
 
 ## Inference
-- **[MEDIUM]** [Reproducible build of b12x SM120 inference image](inference/b12x-reproducible-build.md) — supply chain; running an unaudited third-party image on a GPU node long-term.
-- [MiniMax-M3 reasoning parser](inference/m3-reasoning-parser.md)
 - [vllm-mlx on m1 ops gaps](inference/vllm-mlx-ops.md)
 - [Upstream exo prompt-logging fix](inference/upstream-exo-prompt-logging.md)
 - [GPU-VM DKMS → Canonical-signed modules](inference/gpu-dkms-canonical.md)
@@ -115,9 +113,3 @@ DR, backups, node lifecycle, scaling/capacity.
 ## Authentik
 - [Split passwords frontend from general](authentik/split-passwords-frontend.md)
 - [Drop bcrypt hasher](authentik/drop-bcrypt-hasher.md)
-
-## Archive
-Completed or no-longer-relevant items. Re-open by moving back to a
-subject-matter folder.
-
-- [Sandbox MinerU's outbound](archive/sandbox-mineru-outbound.md) — Linux/Nvidia done (`e5ecb1b` / `0f8729a`); macOS deferred, `setup-mineru.yml` now hard-aborts until the Seatbelt profile lands.

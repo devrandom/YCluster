@@ -13,9 +13,10 @@ deployment-agnostic — no node names, IPs, or account specifics.
 
 - [MiniMax-M3 4-bit on RTX PRO 6000 / SM120](minimax-m3-nvfp4-sm120.md) —
   current prod (2026-07): stock vLLM 0.24 + MXFP4 checkpoint + EAGLE3
-  spec-decode (117–169 tok/s single-stream, 1.5–2.2× the b12x baseline), with
-  one auto-derived 3-line clamp patch. The b12x NVFP4 stack stays as
-  fallback; stock *NVFP4* paths remain broken on SM120.
+  spec-decode (117–169 tok/s single-stream), with one auto-derived 3-line
+  clamp patch. Stock *NVFP4* paths remain broken on SM120 (MXFP4 is the
+  format that works). The retired b12x NVFP4 stack is at
+  [../archive/minimax-m3-b12x-stack.md](../archive/minimax-m3-b12x-stack.md).
   Background/investigation: [minimax-m3-design-2026-06.md](minimax-m3-design-2026-06.md)
   (superseded — documents the path that turned out not to work).
 

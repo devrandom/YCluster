@@ -43,6 +43,15 @@ Keep running the prebuilt image (rootless, non-sudo `dev`). Also the
 lever to drop our reasoning-parser plugin and pick up the upstream tool
 parser.
 
+## Status
+
+MOOT. We never built a reproducible b12x image — instead we dropped
+b12x for stock vLLM `0.24`, per the todo's own "Preferred resolution".
+The fork image, the b12x podman templates, and the local
+`minimax_m3_reasoning_parser.py` plugin are now historical; current
+prod state is in `docs/inference/minimax-m3-nvfp4-sm120.md` and the
+b12x material was moved to `docs/archive/minimax-m3-b12x-stack.md`.
+
 Refs:
 - `docs/inference/b12x-reproducible-build-design-2026-06.md` (full design
   + pinned-SHA table)
