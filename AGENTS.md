@@ -306,7 +306,11 @@ auto-backgrounds a long-running command and returns
 `BACKGROUNDED session=<id>` for polling via `tail -s <id>`; hard
 `timeout_s` (default 1800s) is the backstop that SIGTERMs
 the process. Both overridable per call on `run` — set `timeout_s` greater
-than `auto_bg_after_s`.
+than `auto_bg_after_s`. If the HTTP client disconnects mid-`run` (e.g.
+the turn is interrupted), the SSH proc is registered as a backgrounded
+session (`status` no-args / `tail -s <id>` to recover, `kill` to stop)
+instead of being orphaned — the MCP response is already gone, so the
+session ID won't appear in your UI.
 
 **`hostname="localhost"` shortcut**: use it for anything
 that should run on the bastion itself, e.g. ansible playbooks:

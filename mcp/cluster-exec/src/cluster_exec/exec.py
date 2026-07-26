@@ -21,6 +21,7 @@ class _Backgrounded:
     proc: asyncio.subprocess.Process
     readers: tuple[asyncio.Task, asyncio.Task]
     timeout_watcher: asyncio.Task | None = None
+    orphaned: bool = False
 
 
 _BACKGROUNDED: dict[str, _Backgrounded] = {}
@@ -85,6 +86,7 @@ def register_backgrounded(
     proc: asyncio.subprocess.Process,
     readers: tuple[asyncio.Task, asyncio.Task],
     timeout_watcher: asyncio.Task,
+    orphaned: bool = False,
 ) -> None:
     _BACKGROUNDED[session_id] = _Backgrounded(
         session_id=session_id,
@@ -95,6 +97,7 @@ def register_backgrounded(
         proc=proc,
         readers=readers,
         timeout_watcher=timeout_watcher,
+        orphaned=orphaned,
     )
 
 
@@ -219,7 +222,61 @@ async def run(
     if timeout_task is not None:
         race_set.append(timeout_task)
 
-    done, _ = await asyncio.wait(race_set, return_when=asyncio.FIRST_COMPLETED)
+    try:
+        done, _ = await asyncio.wait(race_set, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        # Outer cancellation = HTTP client disconnected mid-run. The MCP
+        # notifications/cancelled path sets the `cancel` Event instead, which
+        # the cancel_watcher handles by calling terminate_proc (that path is
+        # unchanged because we re-raise). Here we register the SSH proc as a
+        # backgrounded session so the user can pick it up via `status` /
+        # `tail -s <id>` / `kill` instead of orphaning the child on the
+        # bastion. The HTTP response won't reach the client (the request is
+        # gone) — the session ID lands in the JSONL end event and in `status`
+        # (no args), which is how the user discovers it after interrupting.
+        if proc.returncode is None and not cancel.is_set():
+
+            async def timeout_watcher_fn() -> None:
+                elapsed = time.monotonic() - started
+                remaining = timeout_s - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                if proc.returncode is None:
+                    await terminate_proc()
+
+            timeout_watcher = asyncio.create_task(timeout_watcher_fn())
+
+            register_backgrounded(
+                session_id=session_id,
+                target_host=target_host,
+                command=command,
+                started=started,
+                timeout_s=timeout_s,
+                proc=proc,
+                readers=readers,
+                timeout_watcher=timeout_watcher,
+                orphaned=True,
+            )
+
+            duration = time.monotonic() - started
+            merged = sorted(
+                [(ts, False, t) for ts, t in stdout_buf]
+                + [(ts, True, t) for ts, t in stderr_buf],
+                key=lambda x: x[0],
+            )
+            out_lines = [f"[stderr] {t}" if is_stderr else t for _, is_stderr, t in merged]
+            log.end(
+                session_id,
+                None,
+                duration,
+                "orphaned-by-disconnect",
+                lines=len(out_lines),
+                error=(
+                    "HTTP client disconnected mid-run; pick up with "
+                    "status/tail -s <id>/kill"
+                ),
+            )
+        raise
 
     backgrounded = bg_task is not None and bg_task in done
     timed_out = timeout_task is not None and timeout_task in done

@@ -89,7 +89,10 @@ SERVER = MCPServer(
         "set to 0 to disable) and hard-kills after `timeout_s` (default "
         "1800s). Backgrounded runs return `BACKGROUNDED session=<id>` "
         "\u2014 poll with `tail -s <id>`, inspect with `status`, "
-        "terminate with `kill`. Full `run` output is logged to the same "
+        "terminate with `kill`. If the HTTP client disconnects mid-`run` "
+        "(e.g. the turn is interrupted), the SSH proc is also registered "
+        "as a backgrounded session \u2014 the response is gone, so find it "
+        "with `status` (no args) and recover with `tail`/`kill`. Full `run` output is logged to the same "
         "JSONL file; the returned text is the head/tail-truncated merged "
         "stream with `[stderr]` tags on stderr lines. `put` and `get` "
         "are foreground only (no auto-backgrounding) and honor the same "
@@ -132,7 +135,11 @@ _PROGRESS_TAIL_LINES = _env_int("CE_PROGRESS_TAIL_LINES", 50)
         "`BACKGROUNDED session=<id>` for polling via `tail -s <id>`; "
         "hard `timeout_s` (default 1800s) SIGTERMs the process. Both "
         "overridable per call \u2014 set `timeout_s` greater than "
-        "`auto_bg_after_s` (or both to 0). Pass `hostname=\"localhost\"` "
+        "`auto_bg_after_s` (or both to 0). If the HTTP client disconnects "
+        "mid-run (e.g. the turn is interrupted), the proc is registered as "
+        "a backgrounded session \u2014 the response is already gone, so "
+        "discover it with `status` (no args) or `tail -s <id>`, terminate "
+        "it with `kill`. Pass `hostname=\"localhost\"` "
         "to skip the inner ssh and run the command directly on the "
         "bastion (useful for ansible playbooks via "
         "`cd /etc/ansible && ./run-playbook.sh ...`). Pass `user` to "
@@ -469,6 +476,8 @@ def _session_state(bg, log_path: Path) -> str:
         state = f"running elapsed={elapsed:.1f}s lines={line_count} hard_timeout_in={remaining:.1f}s"
     else:
         state = f"exited exit={rc} elapsed={elapsed:.1f}s lines={line_count}"
+    if bg.orphaned:
+        state = "orphaned-by-disconnect " + state
     return state
 
 

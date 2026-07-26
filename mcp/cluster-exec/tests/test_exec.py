@@ -467,6 +467,168 @@ class ExecTests(unittest.TestCase):
         finally:
             exec_mod._BACKGROUNDED.clear()
 
+    def test_outer_cancel_orphans_proc_as_backgrounded(self):
+        # Simulates an HTTP client disconnect mid-run: the outer task is
+        # cancelled (asyncio.wait_for cancels after `timeout`). The SSH proc
+        # must end up registered as a backgrounded session (orphaned=True),
+        # not terminated, so the user can pick it up via status/tail/kill.
+        proc = _FakeProcess(
+            stdout_lines=[b"hello\n"],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=10.0,
+        )
+
+        async def runner():
+            async def _create(*a, **kw):
+                return proc
+            with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+                # auto_bg_after_s=0 disables the soft auto-bg path so the
+                # only way to background is the orphan-on-disconnect branch.
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        exec_mod.run(
+                            bastion="dummy-bastion",
+                            target_host="dummy-target",
+                            command="dummy-cmd",
+                            session_id="orphn001",
+                            timeout_s=30.0,
+                            auto_bg_after_s=0.0,
+                            progress_interval_s=10.0,
+                            progress_tail_lines=50,
+                            head_lines=100,
+                            tail_lines=100,
+                            cwd="/cwd",
+                        ),
+                        timeout=0.3,
+                    )
+
+        asyncio.run(runner())
+
+        # Proc was NOT terminated/killed — orphan keeps it alive.
+        self.assertEqual(proc._returncode, None)
+        self.assertFalse(proc._terminated)
+        self.assertFalse(proc._killed)
+        # Session registered with orphaned=True.
+        self.assertIn("orphn001", exec_mod.list_backgrounded())
+        bg = exec_mod.get_backgrounded("orphn001")
+        self.assertIsNotNone(bg)
+        self.assertTrue(bg.orphaned)
+        # Log end event emitted with orphan status and an error hint.
+        events = log.tail(self.path, n=100, session="orphn001")
+        end_events = [e for e in events if e.get("event") == "end"]
+        self.assertEqual(len(end_events), 1)
+        self.assertEqual(end_events[0]["status"], "orphaned-by-disconnect")
+        self.assertIn("disconnected", end_events[0].get("error", ""))
+
+        try:
+            exec_mod.kill_backgrounded("orphn001")
+        finally:
+            exec_mod._BACKGROUNDED.clear()
+
+    def test_outer_cancel_after_proc_exited_does_not_orphan(self):
+        # If the proc has already exited by the time the outer task is
+        # cancelled, nothing should be registered as backgrounded — there
+        # is no live SSH child to recover.
+        proc = _FakeProcess(
+            stdout_lines=[b"done\n"],
+            stderr_lines=[],
+            exit_code=0,
+        )
+
+        async def runner():
+            async def _create(*a, **kw):
+                return proc
+            with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+                # Drive exec.run inside a task we cancel *after* proc has
+                # completed. wait_delay=0 means proc finishes immediately.
+                task = asyncio.create_task(
+                    exec_mod.run(
+                        bastion="dummy-bastion",
+                        target_host="dummy-target",
+                        command="dummy-cmd",
+                        session_id="postxt01",
+                        timeout_s=30.0,
+                        auto_bg_after_s=0.0,
+                        progress_interval_s=10.0,
+                        progress_tail_lines=50,
+                        head_lines=100,
+                        tail_lines=100,
+                        cwd="/cwd",
+                    )
+                )
+                # Give exec.run a moment to finish (proc exited).
+                await asyncio.sleep(0.2)
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        asyncio.run(runner())
+        self.assertEqual(exec_mod.list_backgrounded(), [])
+        exec_mod._BACKGROUNDED.clear()
+
+    def test_outer_cancel_with_cancel_already_set_terminates(self):
+        # If the MCP notifications/cancelled path has already set the cancel
+        # Event (terminate_proc has been called), outer cancellation must
+        # NOT register the proc as backgrounded — the user explicitly asked
+        # to stop it.
+        proc = _FakeProcess(
+            stdout_lines=[b"started\n"],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=10.0,
+        )
+        cancel = asyncio.Event()
+
+        async def runner():
+            async def fire():
+                await asyncio.sleep(0.05)
+                cancel.set()
+
+            fire_task = asyncio.create_task(fire())
+            task = asyncio.create_task(
+                exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="dummy-target",
+                    command="dummy-cmd",
+                    session_id="notify01",
+                    timeout_s=30.0,
+                    auto_bg_after_s=0.0,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                    cancel=cancel,
+                )
+            )
+            # Give the cancel fire time to set, and exec.run time to react.
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            fire_task.cancel()
+            try:
+                await fire_task
+            except BaseException:
+                pass
+
+        async def _create(*a, **kw):
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            asyncio.run(runner())
+
+        # Proc was terminated via the notifications/cancelled path.
+        self.assertTrue(proc._terminated or proc._killed)
+        # Not registered as backgrounded.
+        self.assertNotIn("notify01", exec_mod.list_backgrounded())
+        exec_mod._BACKGROUNDED.clear()
+
     def test_invalid_timeout_ordering_raises(self):
         proc = _FakeProcess(
             stdout_lines=[],
