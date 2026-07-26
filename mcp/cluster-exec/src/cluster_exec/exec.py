@@ -216,6 +216,56 @@ async def run(
         asyncio.create_task(asyncio.sleep(timeout_s)) if timeout_s > 0 else None
     )
 
+    async def finalize_backgrounded() -> None:
+        # Drop the session so `status` no longer lists it, and cancel the
+        # leak-prone watchdogs (cancel_watcher waits on cancel forever if
+        # nothing sets it; progress_task emits MCP notifications every
+        # progress_interval_s even though the request stream is closed).
+        # Idempotent — safe to call from either timeout_watcher_fn branch.
+        _drop_backgrounded(session_id)
+        cancel.set()
+        watcher_task.cancel()
+        try:
+            await watcher_task
+        except BaseException:
+            pass
+        if progress_task is not None:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except BaseException:
+                pass
+
+    async def timeout_watcher_fn() -> None:
+        # Race the hard timeout against the proc exiting naturally. When
+        # either fires, terminate the proc if still alive (hard-timeout
+        # path) and finalize the session (drop + cancel watchdogs). The
+        # wait_task is the one already running in the background — it
+        # completes when proc.wait() returns, i.e. when the SSH child
+        # exits for any reason (clean exit, SIGTERM/SIGKILL from us).
+        elapsed = time.monotonic() - started
+        remaining = timeout_s - elapsed
+        if remaining > 0:
+            timeout_inner = asyncio.create_task(asyncio.sleep(remaining))
+            done, _ = await asyncio.wait(
+                {timeout_inner, wait_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            timeout_inner.cancel()
+            try:
+                await timeout_inner
+            except BaseException:
+                pass
+            if wait_task in done:
+                # Proc exited naturally before the hard timeout.
+                await finalize_backgrounded()
+                return
+        # Hard timeout fired (or remaining <= 0). Proc is still alive
+        # here (else wait_task would have been in done).
+        if proc.returncode is None:
+            await terminate_proc()
+        await finalize_backgrounded()
+
     race_set: list[asyncio.Task] = [wait_task]
     if bg_task is not None:
         race_set.append(bg_task)
@@ -235,15 +285,6 @@ async def run(
         # gone) — the session ID lands in the JSONL end event and in `status`
         # (no args), which is how the user discovers it after interrupting.
         if proc.returncode is None and not cancel.is_set():
-
-            async def timeout_watcher_fn() -> None:
-                elapsed = time.monotonic() - started
-                remaining = timeout_s - elapsed
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                if proc.returncode is None:
-                    await terminate_proc()
-
             timeout_watcher = asyncio.create_task(timeout_watcher_fn())
 
             register_backgrounded(
@@ -282,15 +323,6 @@ async def run(
     timed_out = timeout_task is not None and timeout_task in done
 
     if backgrounded:
-
-        async def timeout_watcher_fn() -> None:
-            elapsed = time.monotonic() - started
-            remaining = timeout_s - elapsed
-            if remaining > 0:
-                await asyncio.sleep(remaining)
-            if proc.returncode is None:
-                await terminate_proc()
-
         timeout_watcher = asyncio.create_task(timeout_watcher_fn())
 
         register_backgrounded(

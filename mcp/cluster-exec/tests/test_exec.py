@@ -629,6 +629,85 @@ class ExecTests(unittest.TestCase):
         self.assertNotIn("notify01", exec_mod.list_backgrounded())
         exec_mod._BACKGROUNDED.clear()
 
+    def test_bg_session_dropped_on_natural_exit(self):
+        # After a soft auto-bg fires, the proc is registered as a
+        # backgrounded session. When the SSH child exits on its own
+        # (before the hard timeout), the session must be dropped from
+        # `_BACKGROUNDED` so `status` doesn't list it as a stale
+        # `exited exit=0` entry.
+        proc = _FakeProcess(
+            stdout_lines=[b"running\n"],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=0.5,  # exits quickly after auto-bg
+        )
+
+        async def runner():
+            async def _create(*a, **kw):
+                return proc
+            with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+                text = await exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="dummy-target",
+                    command="dummy-cmd",
+                    session_id="natex01",
+                    timeout_s=30,
+                    auto_bg_after_s=0.1,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                )
+            self.assertTrue(text.startswith("BACKGROUNDED"))
+            self.assertIn("natex01", exec_mod.list_backgrounded())
+            # Wait long enough for the proc to exit naturally and the
+            # timeout_watcher to observe it and finalize the session.
+            await asyncio.sleep(1.0)
+            self.assertNotIn("natex01", exec_mod.list_backgrounded())
+
+        asyncio.run(runner())
+        exec_mod._BACKGROUNDED.clear()
+
+    def test_orphan_session_dropped_on_natural_exit(self):
+        # Same as above but for the orphan-on-disconnect path.
+        proc = _FakeProcess(
+            stdout_lines=[b"hello\n"],
+            stderr_lines=[],
+            exit_code=0,
+            wait_delay=0.5,
+        )
+
+        async def runner():
+            async def _create(*a, **kw):
+                return proc
+            with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        exec_mod.run(
+                            bastion="dummy-bastion",
+                            target_host="dummy-target",
+                            command="dummy-cmd",
+                            session_id="orphnx01",
+                            timeout_s=30.0,
+                            auto_bg_after_s=0.0,
+                            progress_interval_s=10.0,
+                            progress_tail_lines=50,
+                            head_lines=100,
+                            tail_lines=100,
+                            cwd="/cwd",
+                        ),
+                        timeout=0.3,
+                    )
+            self.assertIn("orphnx01", exec_mod.list_backgrounded())
+            # Wait for the proc to exit and the timeout_watcher to
+            # observe it.
+            await asyncio.sleep(1.0)
+            self.assertNotIn("orphnx01", exec_mod.list_backgrounded())
+
+        asyncio.run(runner())
+        exec_mod._BACKGROUNDED.clear()
+
     def test_invalid_timeout_ordering_raises(self):
         proc = _FakeProcess(
             stdout_lines=[],
