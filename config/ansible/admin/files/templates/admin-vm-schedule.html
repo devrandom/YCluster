@@ -117,6 +117,12 @@
             <span class="meta">Add to <code>~/.ssh/config</code>, then
               <code x-text="`ssh ${row.vm}`"></code> (needs your SSH key
               registered for VM access).</span>
+            <span class="meta"><code>IdentityFile</code> in your
+              <code>Host &lt;vm&gt;</code> block only auths the VM hop —
+              the ProxyJump step (the bastion) needs the same
+              <code>IdentityFile</code> in a separate
+              <code x-text="`Host ${ssh.rathole_host || '<rathole-host>'}`"></code>
+              block, or the key loaded into your ssh-agent.</span>
             <span class="error" x-show="!ssh.rathole_host">set the public
               SSH host: replace &lt;rathole-host&gt;</span>
           </div>
