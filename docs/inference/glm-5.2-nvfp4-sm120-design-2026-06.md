@@ -665,3 +665,86 @@ diagnostics before the env-var parity was restored).
 `max_num_batched_tokens` tuning (zero single-stream effect, measured); fp4 KV
 (hardware-blocked on SM120). A web survey's attempts to claim EP helps on PCIe
 or that GLM-5 can't run on vLLM/SM120 did **not** survive verification.
+
+## Productionized path (2026-07-28)
+
+The EXL3 TR3 setup above was hand-rolled (operator-launched dr-g2 + manually
+downgraded the in-VM driver + manually mounted NFS + ad-hoc podman invocation).
+Moved to the ansible-managed pattern alongside the b12x deployment. Files:
+
+- `config/ansible/admin/templates/glm52-exl3-tr3-vm-setup.sh.j2` —
+  nv4-side; pulls the image inside the VM, smoke-tests `/dev/nvidia0..3`
+  (the vfio-pci passthrough contract), checks the in-VM driver
+  (`libcuda.so.{{ exl3_tr3_driver_lib_version }}`), checks the NFS model
+  mount, and prints the NFS+download commands if anything is missing.
+- `config/ansible/admin/templates/glm52-exl3-tr3-vm-start.sh.j2` —
+  nv4-side; pushes the inner launch script into the VM via
+  `incus file push`, then `incus exec`'s it. The inner script carries
+  60+ env vars + vllm serve flags from 0xSero's bundled
+  `docker-compose.yml`; mounted via `incus file push` (one source of
+  truth) rather than heredoc'd, so the env-var JSON survives intact.
+- `config/ansible/admin/templates/glm52-exl3-tr3-inner-start.sh.j2` —
+  inside the VM; the actual podman run with the full env matrix. Default
+  `ENABLE_MTP=1` matches 0xSero's recipe.
+- `config/ansible/admin/install-glm52-exl3-tr3.yml` — two plays:
+  (1) `nvidia` group, gated on `exl3_tr3_enabled: true` + the same
+  host-GPU guard `install-glm52.yml` uses; deploys the three scripts
+  to `/home/dev/bin/`, launches the VM via `ycluster vm launch` if
+  missing, starts it if stopped, attaches an incus proxy device
+  (`exl3-tr3-proxy`, `listen=tcp:0.0.0.0:9214 connect=tcp:127.0.0.1:9214`).
+  (2) `storage` group, leader-gated (`mountpoint -q /rbd/user` per
+  the local-ai-proxy install convention); calls
+  `ycluster inference add http://nv<N>.xc:9214 GLM-5.2-EXL3-TR3-3.0bpw`
+  on the storage leader — proxy hot-reloads from etcd, no restart
+  needed.
+- `config/ansible/host_vars/nv4.yml` — opt-in + per-host overrides:
+  `exl3_tr3_enabled: true`, `exl3_tr3_vm_name: dr-g2`, sizes, etc.
+  Other nvidia hosts stay a no-op unless they set `exl3_tr3_enabled`.
+
+**Network exposure: incus proxy device (port-forward), not ACL change.**
+The VM is on `incusbr0` (10.100.0.0/24); the cluster LAN (10.0.0.0/16) is
+on a different subnet, and the gpu-vm-isolation ACL explicitly denies
+10.0.0.0/16 from the VM (intentional — VMs should not reach cluster
+LAN). So the proxy can't route to the VM's bridge IP directly. Two paths:
+
+1. **incus proxy device** (chosen): the playbook attaches
+   `incus config device add <vm> exl3-tr3-proxy proxy
+   listen=tcp:0.0.0.0:9214 connect=tcp:127.0.0.1:9214`. The proxy
+   listens on the **host**'s external NIC, so any cluster host reaches
+   the API at `http://nv4.xc:9214`. Declarative, no host firewall
+   surgery, and survives a VM restart.
+2. Add a static route on every storage node (`10.100.0.0/24 via nv4`)
+   + DNS for `dr-g2.incus` — rejected: cluster-wide route change for
+   one inference path.
+
+**Operator one-time setup (NOT in the playbook):** launch the VM via
+`ycluster vm launch dr-g2 --owner dev --gpus 4 --mem 64GiB --cpu 16`;
+downgrade the in-VM driver to `nvidia-driver-580-open` (host 610 hits
+CUDA 803); install `nfs-kernel-server` on nv4 and add
+`/etc/exports.d/ycluster-models.conf` with
+`/home/dev/models 10.100.0.0/24(ro,sync,no_subtree_check,no_root_squash)`;
+`exportfs -ra`; install `nfs-common` inside dr-g2 and mount the model
+at `/mnt/nv4-models` + symlink to `/model`; download the checkpoint to
+`/home/dev/models/GLM-5.2-EXL3-TR3-3.0bpw` on the host (XET disabled —
+this node's egress can't reach the Xet CAS endpoint, the classic HF CDN
+works ~200 MB/s).
+
+**Bring-up sequence** (after the operator one-time setup):
+
+```bash
+# From any cluster node:
+ycluster cluster leader                            # find the storage VIP
+ssh nv4.yc
+~/bin/glm52-exl3-tr3-vm-setup.sh                   # pull image + smoke-test
+~/bin/glm52-exl3-tr3-vm-start.sh                   # launch (idempotent)
+curl -fsS http://nv4.xc:9214/v1/models             # via the proxy device
+curl -fsS http://inference.xc/v1/models \
+  -H "Authorization: Bearer $OPENAI_API_KEY"       # via the gateway
+```
+
+**Tunable knobs** (env-var overrides on the start script — defaults are
+1-1 with 0xSero's recipe): `TP`/`DCP`/`MAX_MODEL_LEN`/`GPU_UTIL`/
+`MAX_NUM_SEQS`/`MAX_NUM_BATCHED_TOKENS`/`KV_CACHE_DTYPE`/
+`DCP_KV_CACHE_INTERLEAVE_SIZE`/`NUM_SPECULATIVE_TOKENS`/
+`SPEC_MOE_BACKEND`/`ENABLE_MTP`/`SERVED_NAME`/`INDEX_TOPK_PATTERN`/
+`MEM`.

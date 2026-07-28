@@ -1,0 +1,297 @@
+---
+# Deploy GLM-5.2 EXL3 TR3 3-bpw inference scripts to Nvidia GPU hosts and
+# register the backend with local-ai-proxy. Companion to
+# docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md, "EXL3 TR3 attempt"
+# section (80–83 tok/s reproduction on 4× RTX PRO 6000, validated 2026-07-28).
+#
+# Two dev scripts on the nvidia host (run as dev, no sudo, no root in the VM):
+#   ~dev/bin/glm52-exl3-tr3-vm-setup.sh   - pull the EXL3 image (inside VM),
+#                                           smoke-test vfio-pci passthrough,
+#                                           check the in-VM driver version,
+#                                           check the NFS model mount at /model
+#   ~dev/bin/glm52-exl3-tr3-vm-start.sh   - (re)launch the server: pushes the
+#                                           inner podman launch script into
+#                                           the VM via incus file push, then
+#                                           incus exec's it. The inner script
+#                                           carries 60+ env vars + vllm serve
+#                                           flags from 0xSero's bundled
+#                                           docker-compose.yml; mounted by
+#                                           incus file push (one source of
+#                                           truth) rather than heredoc'd.
+#
+# Host prerequisites (operator-managed one-time setup; NOT part of this play):
+#   - {{ exl3_tr3_vm_name }} VM exists with 4 GPUs passed through via vfio-pci:
+#       ycluster vm launch {{ exl3_tr3_vm_name }} \
+#         --owner {{ exl3_tr3_vm_owner }} --gpus {{ exl3_tr3_vm_gpus }} \
+#         --mem {{ exl3_tr3_vm_mem }} --cpu {{ exl3_tr3_vm_cpu }}
+#   - Driver downgraded inside the VM to nvidia-driver-{{ exl3_tr3_driver_pkg }}
+#     (the EXL3 image's bundled CUDA 13.2.75 rejects host driver 610 with
+#     CUDA error 803; driver 580 is the highest it accepts).
+#   - NFS model mount at /model inside the VM:
+#       host: apt install -y nfs-kernel-server; add /etc/exports.d/ycluster-models.conf;
+#             exportfs -ra
+#       VM:   apt install -y nfs-common;
+#             mount -t nfs -o ro,vers=4 <host IP>:/home/dev/models /mnt/nv4-models;
+#             ln -sfn /mnt/nv4-models/{{ exl3_tr3_repo_basename }} /model
+#   - Checkpoint on the host at {{ exl3_tr3_model_dir }}:
+#       HF_HUB_DISABLE_XET=1 hf download {{ exl3_tr3_repo }} \
+#         --local-dir {{ exl3_tr3_model_dir }}
+#
+# Network exposure:
+#   The container listens on 0.0.0.0:{{ exl3_tr3_port }} inside the VM
+#   (--network=host). The playbook adds an incus proxy device on the host
+#   listening on tcp:0.0.0.0:{{ exl3_tr3_port }} → tcp:127.0.0.1:{{ exl3_tr3_port }}
+#   inside the VM, so the API is reachable at
+#   http://{{ inventory_hostname }}.xc:{{ exl3_tr3_port }} from any cluster
+#   host. That's the URL the storage leader's local-ai-proxy registers.
+#
+# Gating:
+#   Per-host `exl3_tr3_enabled: true` in host_vars/<node>.yml opts into this
+#   play. Same pattern as mineru_enabled (see app/install-mineru.yml) — the
+#   play is a no-op on Nvidia hosts that aren't designated EXL3 TR3 nodes.
+#   Same skip as install-glm52.yml when the host has no host-visible NVIDIA
+#   GPU (the host driver is irrelevant for the VM path, but we mirror the
+#   guard so a node with no GPU at all isn't misclassified).
+#
+# Run after install-incus.yml (Incus + bridge + gpu-vm profile) and after the
+# operator has launched the VM and set up the NFS model mount. To bring the
+# server up:
+#   ssh nv4.yc
+#   ~/bin/glm52-exl3-tr3-vm-setup.sh        # pull image + smoke-test
+#   ~/bin/glm52-exl3-tr3-vm-start.sh        # launch (idempotent)
+
+- name: Deploy GLM-5.2 EXL3 TR3 inference scripts to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # ---- Cluster-wide (not per-host overridable) -----------------------
+    # EXL3 TR3 image: 0xSero's custom vLLM (VerdictAI-derived Sparkinfer
+    # runtime). EXL3 Trellis MoE + B12X sparse MLA + MTP spec-decode with a
+    # quantized EXL3 layer-78 draft. Bundled CUDA 13.2.75 → driver ≤ 580.x.
+    exl3_tr3_image: "docker.io/verdictai/glm52-exl3-sparkinfer:v31-gg-v20-sic3828fd-vllm0c79e41-cu132-sm120a"
+    # Source weights: 0xSero's brandonmusic TP4 rank-sliced EXL3 build, ~300 GB.
+    exl3_tr3_repo: "brandonmusic/GLM-5.2-EXL3-TR3-3.0bpw"
+    exl3_tr3_repo_basename: "GLM-5.2-EXL3-TR3-3.0bpw"
+    exl3_tr3_model_dir: "/home/dev/models/GLM-5.2-EXL3-TR3-3.0bpw"
+    # Gateway routing key — matches the upstream HF repo id verbatim (no
+    # lowercasing, no namespace prefix). This is what clients pass as
+    # `model:` in API calls.
+    exl3_tr3_served_name: "GLM-5.2-EXL3-TR3-3.0bpw"
+    # API port (host-side via incus proxy device; VM-internal via --network=host).
+    # 9212 = full 744B NVFP4 b12x, 9213 = FullKD, 9214 = EXL3 TR3.
+    exl3_tr3_port: 9214
+    # Driver version inside the VM. Two forms — pkg is the apt package name
+    # suffix (for the install hint), lib_version is the file suffix for
+    # libcuda.so.<lib_version> (the actual pre-flight check). Driver 610
+    # (Ubuntu 24.04 default) hits CUDA error 803 against the image's CUDA
+    # 13.2.75; 580.173.02 is the highest package in the 580 series that the
+    # image accepts.
+    exl3_tr3_driver_pkg: "580-open"
+    exl3_tr3_driver_lib_version: "580.173.02"
+    # NFS export CIDR (must cover the VM bridge subnet). Default matches
+    # incus_bridge_cidr in install-incus.yml (10.100.0.0/24).
+    exl3_tr3_nfs_cidr: "10.100.0.0/24"
+    # Paths the start script uses to find the inner launch script (on host)
+    # and where to stage it inside the VM (ephemeral, /tmp is fine).
+    exl3_tr3_inner_script_path: "/home/dev/bin/glm52-exl3-tr3-inner-start.sh"
+    exl3_tr3_remote_script_path: "/tmp/glm52-exl3-tr3-inner-start.sh"
+    # Incus proxy device name (the proxy device forwards the host port to
+    # the VM-internal port).
+    exl3_tr3_proxy_device: "exl3-tr3-proxy"
+    # ---- VM lifecycle (per-host overridable in host_vars/<host>.yml) ----
+    # NOT set at the play level: Ansible precedence puts play vars above
+    # host_vars, so setting these here would shadow host_vars. Every EXL3
+    # TR3-enabled host must set the four below in host_vars/<host>.yml.
+    # The values documented in host_vars/nv4.yml match the cluster's `dev`
+    # user and the 4-GPU slice on an RTX PRO 6000 node — copy that block
+    # into other nvidia host_vars files when opting them in.
+  tasks:
+    # Mirror install-glm52.yml's guard: a node with no host-visible NVIDIA
+    # GPU either has no NVIDIA hardware at all or every card is bound to
+    # vfio-pci. The VM path bypasses the host driver entirely, but we keep
+    # the guard so a no-GPU node isn't misclassified.
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    # Per-host opt-in: only EXL3 TR3-designated nodes run this play. Same
+    # pattern as mineru_enabled.
+    - name: End play for nodes that have not opted into EXL3 TR3
+      meta: end_host
+      when: not (exl3_tr3_enabled | default(false))
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install EXL3 TR3 dev inference scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - glm52-exl3-tr3-vm-setup.sh
+        - glm52-exl3-tr3-vm-start.sh
+        # Inner launch script (pushed into the VM by the outer start script).
+        # Lives on the host too, so the outer script can find it via
+        # {{ exl3_tr3_inner_script_path }}.
+        - glm52-exl3-tr3-inner-start.sh
+
+    # ---- VM lifecycle -------------------------------------------------
+    # If the VM doesn't exist, launch it. ycluster vm launch is the canonical
+    # path (sets up vfio-pci GPU attachment, dns sync, ip pin); see
+    # ycluster/utils/vm_manager.py:vm_launch. The operator must have already
+    # added an SSH key for the owner user via `ycluster vm ssh add` — the
+    # launch fails fast if not.
+
+    - name: Check if the EXL3 TR3 VM exists
+      command: incus list --format csv {{ exl3_tr3_vm_name }}
+      register: exl3_tr3_vm_check
+      changed_when: false
+      failed_when: false
+      # `incus list --format csv <name>` returns rc=0 with empty stdout when
+      # the VM doesn't exist — gate on stdout, not rc.
+
+    - name: Launch the EXL3 TR3 VM if missing
+      command: >-
+        ycluster vm launch {{ exl3_tr3_vm_name }}
+        --owner {{ exl3_tr3_vm_owner }}
+        --gpus {{ exl3_tr3_vm_gpus }}
+        --mem {{ exl3_tr3_vm_mem }}
+        --cpu {{ exl3_tr3_vm_cpu }}
+      when: exl3_tr3_vm_check.stdout == ""
+      # Single-command launch (~30 s on a warm cache, faster than manual
+      # incus init + device add). Idempotent on subsequent runs: the check
+      # above gates this.
+
+    - name: Start the EXL3 TR3 VM if stopped
+      command: incus start {{ exl3_tr3_vm_name }}
+      register: exl3_tr3_vm_start
+      changed_when: exl3_tr3_vm_start.rc == 0
+      failed_when: false
+      # No pre-check — `incus start` is a no-op when already running (rc 0,
+      # no change). failed_when: false tolerates a "VM has GPUs from another
+      # launch" race; the smoke check at the end of the play catches that.
+
+    # ---- Network exposure ---------------------------------------------
+    # Incus proxy device forwards the host's tcp:0.0.0.0:{{ exl3_tr3_port }}
+    # to the VM's tcp:127.0.0.1:{{ exl3_tr3_port }} (the container's
+    # --network=host listener). The proxy listens on the host's external
+    # NIC, so any cluster host can reach the API at
+    # http://{{ inventory_hostname }}.xc:{{ exl3_tr3_port }}.
+
+    - name: Check whether the EXL3 TR3 proxy device is already attached
+      command: incus config device show {{ exl3_tr3_vm_name }} {{ exl3_tr3_proxy_device }}
+      register: exl3_tr3_proxy_check
+      changed_when: false
+      failed_when: false
+
+    - name: Attach the EXL3 TR3 proxy device (host port → VM port)
+      command: >-
+        incus config device add {{ exl3_tr3_vm_name }} {{ exl3_tr3_proxy_device }} proxy
+        listen=tcp:{{ ansible_host }}:{{ exl3_tr3_port }}
+        connect=tcp:{{ hostvars[inventory_hostname]['exl3_tr3_vm_ip'] }}:{{ exl3_tr3_port }}
+        nat=true
+      when: exl3_tr3_proxy_check.rc != 0
+      # Incus requires NAT mode for proxy devices on VM instances (the
+      # listen-on-wildcard forwarding mode only works on containers).
+      # `listen` must be a specific host IP (not 0.0.0.0) — use the
+      # cluster-LAN IP from inventory (this is what resolves as nv<N>.xc
+      # and what the proxy registration will hit). `connect` must be one
+      # of the VM's static IPv4 addresses — host_vars/<host>.yml sets
+      # exl3_tr3_vm_ip (the incusbr0 address, e.g. 10.100.0.12 for dr-g2
+      # on nv4).
+
+- name: Register the EXL3 TR3 backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    # The EXL3 TR3 backend URL is the nvidia host that owns the VM, on the
+    # incus-proxy-forwarded port. local-ai-proxy's etcd-based model registry
+    # watches /cluster/config/inference/models/ and hot-reloads — no proxy
+    # restart needed for add/remove. Today exactly one nvidia host opts in
+    # (host_vars/nv4.yml); if more opt in later, register each one separately
+    # — the proxy is fan-out-ready (see docs/operations/inference.md).
+    # Defaults to nv4 (the cluster's EXL3 TR3 node today) when no host in
+    # host_vars sets exl3_tr3_enabled. The set_fact below overrides if a
+    # different host opts in.
+    exl3_tr3_nvidia_host: nv4
+    exl3_tr3_backend_url: "http://{{ exl3_tr3_nvidia_host }}.xc:{{ hostvars[exl3_tr3_nvidia_host]['exl3_tr3_port'] | default(9214) }}"
+    exl3_tr3_served_name: "{{ hostvars[exl3_tr3_nvidia_host]['exl3_tr3_served_name'] | default('GLM-5.2-EXL3-TR3-3.0bpw') }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+      # local-ai-proxy.service is part of ycluster-apps.target — see
+      # app/install-local-ai-proxy.yml. Leader-elects via etcd; only the
+      # storage leader has the proxy listening on 127.0.0.1:4001.
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Resolve the EXL3 TR3-enabled nvidia host
+      set_fact:
+        exl3_tr3_nvidia_host: >-
+          {{ (groups['nvidia']
+              | select('in', hostvars.keys())
+              | list)
+             | map('extract', hostvars, 'exl3_tr3_enabled')
+             | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+             | selectattr(0, 'defined')
+             | selectattr(0, 'equalto', true)
+             | map(attribute=1)
+             | first
+             | default('nv4') }}
+      when: is_storage_leader
+      # Picks the first nvidia host that defines exl3_tr3_enabled=true in
+      # host_vars. Defaults to nv4 (today's cluster) so a future host that
+      # only sets the opt-in without overriding the URL will register
+      # correctly. Computed on the storage leader once, then used by the
+      # register/smoke tasks below.
+
+    - name: Register the EXL3 TR3 backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ exl3_tr3_backend_url }} {{ exl3_tr3_served_name }}
+      register: exl3_tr3_proxy_register
+      changed_when: "'added' in exl3_tr3_proxy_register.stdout or 'registered' in exl3_tr3_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+      # Idempotent on subsequent runs: local-ai-proxy models add is a
+      # no-op when the (backend, model) pair is already registered. The
+      # changed_when is conservative — proxy output may vary by version.
+      # Skipped in --check mode: the proxy registration writes to etcd
+      # and we don't want check runs to leave phantom registrations.
+
+    - name: Smoke check the EXL3 TR3 backend through local-ai-proxy
+      uri:
+        url: "http://127.0.0.1:4001/v1/models"
+        return_content: no
+        status_code: [200, 401, 404]
+      register: proxy_smoke
+      failed_when: false
+      retries: 5
+      delay: 1
+      until: proxy_smoke.status is defined
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+
+    - name: Report smoke check
+      debug:
+        msg: >-
+          local-ai-proxy on {{ inventory_hostname }}:4001 replied
+          {{ proxy_smoke.status | default('unreachable') }};
+          EXL3 TR3 backend registered at {{ exl3_tr3_backend_url }}
+      when:
+        - is_storage_leader
+        - not ansible_check_mode

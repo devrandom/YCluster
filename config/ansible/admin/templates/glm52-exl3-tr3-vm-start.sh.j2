@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# (Re)start the GLM-5.2 EXL3 TR3 3-bpw inference server inside {{ exl3_tr3_vm_name }}.
+# Run as the dev user (no sudo) on the nvidia host that owns the VM:
+#
+#   ~/bin/glm52-exl3-tr3-vm-start.sh
+#
+# Idempotent: replaces any existing container inside the VM. The outer script
+# pushes the inner podman launch script (with all 60+ env vars and vllm serve
+# flags from 0xSero's bundled docker-compose.yml) into the VM via
+# `incus file push`, then `incus exec`'s it. The VM is reached over its bridge
+# IP (10.100.0.<N>) and listens on 0.0.0.0:{{ exl3_tr3_port }} inside the VM;
+# the playbook installs an incus proxy device on the host so
+# http://{{ inventory_hostname }}.xc:{{ exl3_tr3_port }} reaches the container.
+#
+# Tunable knobs (env-var overrides — defaults match 0xSero's recipe):
+#  TP / DCP / MAX_MODEL_LEN / GPU_UTIL / MAX_NUM_SEQS / MAX_NUM_BATCHED_TOKENS
+#  KV_CACHE_DTYPE / DCP_KV_CACHE_INTERLEAVE_SIZE / NUM_SPECULATIVE_TOKENS
+#  SPEC_MOE_BACKEND / ENABLE_MTP / SERVED_NAME / INDEX_TOPK_PATTERN / MEM
+#
+# Defaults are 1-1 with the EXL3 TR3 reference recipe (validated 80–83 tok/s
+# single-stream on this hardware — see the design doc). The image's bundled
+# CUDA 13.2.75 requires driver ≤ 580.x, which is why the server runs inside a
+# VM (the host driver is 610). Managed by admin/install-glm52-exl3-tr3.yml —
+# edit there.
+set -euo pipefail
+
+VM="{{ exl3_tr3_vm_name }}"
+INNER_SCRIPT="{{ exl3_tr3_inner_script_path }}"
+REMOTE_SCRIPT="{{ exl3_tr3_remote_script_path }}"
+
+command -v incus >/dev/null \
+  || { echo "incus missing - an operator must run admin/install-incus.yml" >&2; exit 1; }
+
+incus info "$VM" | grep -q "^Status: Running$" \
+  || { echo "VM '$VM' is not running. Start it: incus start $VM" >&2; exit 1; }
+
+[ -f "$INNER_SCRIPT" ] \
+  || { echo "inner launch script missing at $INNER_SCRIPT - re-run admin/install-glm52-exl3-tr3.yml" >&2; exit 1; }
+
+# Stage the inner podman launch script inside the VM, then exec it.
+# incus file push is the canonical way to write a file into a VM from the
+# host (no need to pipe through bash -c with quote-escaping); the inner script
+# is ~200 lines of env vars + vllm serve flags and would be fragile as a
+# heredoc. /tmp is fine — the VM is ephemeral.
+incus file push "$INNER_SCRIPT" "$VM$REMOTE_SCRIPT" \
+  || { echo "incus file push $INNER_SCRIPT -> $VM:$REMOTE_SCRIPT failed" >&2; exit 1; }
+
+# Run as root inside the VM (the VM's default user; libcuda bind-mounts +
+# /dev/nvidia* injections require it). The dev user on the host does not need
+# sudo for incus exec because of the incus-admin group.
+incus exec "$VM" -- bash "$REMOTE_SCRIPT"

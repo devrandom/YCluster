@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Start the GLM-5.2 EXL3 TR3 3-bpw inference server inside {{ exl3_tr3_vm_name }}.
+# This script is pushed into the VM by glm52-exl3-tr3-vm-start.sh and run as
+# root (the VM's default user; libcuda bind-mounts + /dev/nvidia* injections
+# require it).
+#
+# Recipe source: 0xSero's bundled docker-compose.yml for
+# `brandonmusic/GLM-5.2-EXL3-TR3-3.0bpw` on the `verdictai/glm52-exl3-sparkinfer`
+# image. All env vars below are taken verbatim — do NOT omit B12X_*, DCP_*, or
+# the speculative-config JSON; the image's vLLM silently misroutes rank-sliced
+# EXL3 experts if --quantization exl3 is not passed, and the MTP draft must be
+# wired through --speculative-config (not --spec-method/--spec-model).
+#
+# Reproduces 80–83 tok/s single-stream on 4× RTX PRO 6000 — see
+# docs/inference/glm-5.2-nvfp4-sm120-design-2026-06.md, "EXL3 TR3 attempt".
+set -euo pipefail
+
+IMAGE="${IMAGE:-{{ exl3_tr3_image }}}"
+MODEL_BASE="${MODEL_BASE:-/model}"
+CONTAINER="${CONTAINER:-glm52-exl3-tr3}"
+PORT="${PORT:-{{ exl3_tr3_port }}}"
+TP="${TP:-4}"
+DCP="${DCP:-4}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
+GPU_UTIL="${GPU_UTIL:-0.96}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-3072}"
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-nvfp4_ds_mla}"
+DCP_KV_CACHE_INTERLEAVE_SIZE="${DCP_KV_CACHE_INTERLEAVE_SIZE:-64}"
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-3}"
+MTP_DRAFT_SAMPLE_METHOD="${MTP_DRAFT_SAMPLE_METHOD:-greedy}"
+# 0xSero's bundled compose omits both attention_backend and kv_cache_dtype from
+# spec_config — empty by default to match.
+SPEC_ATTENTION_BACKEND="${SPEC_ATTENTION_BACKEND:-}"
+SPEC_MOE_BACKEND="${SPEC_MOE_BACKEND:-triton}"
+SPEC_KV_CACHE_DTYPE="${SPEC_KV_CACHE_DTYPE:-}"
+ENABLE_MTP="${ENABLE_MTP:-1}"
+SERVED_NAME="${SERVED_NAME:-{{ exl3_tr3_served_name }}}"
+INDEX_TOPK_PATTERN="${INDEX_TOPK_PATTERN:-FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS}"
+MEM="${MEM:-80g}"
+
+# Host NVIDIA libs to bind-mount. The EXL3 image is built without bundled
+# libcuda/libnvidia-ml (these come from the host driver at runtime via
+# nvidia-container-toolkit/CDI). Our podman 4.9.3's CDI is broken (every
+# nvidia.com/gpu lookup errors "unresolvable"), so we bind-mount the libs
+# ourselves. With libcuda + libnvidia-ml + LD_LIBRARY_PATH pointing at them,
+# vLLM's NVML-based platform detection succeeds.
+HOST_LIBCUDA_DIR="${HOST_LIBCUDA_DIR:-/usr/lib/x86_64-linux-gnu}"
+HOST_LIBCUDA_VERSION="${HOST_LIBCUDA_VERSION:-{{ exl3_tr3_driver_lib_version }}}"
+
+# pre-flight (root needed for podman device mounts)
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - run: podman pull $IMAGE" >&2; exit 1; }
+[ -f "$MODEL_BASE/config.json" ] && [ -f "$MODEL_BASE/model.safetensors.index.json" ] \
+  || { echo "EXL3 TR3 base checkpoint missing or incomplete at $MODEL_BASE" >&2; exit 1; }
+{% raw %}
+[ "${#INDEX_TOPK_PATTERN}" -eq 78 ] \
+  || { echo "GLM-5.2 index_topk_pattern must cover all 78 layers (got ${#INDEX_TOPK_PATTERN})" >&2; exit 1; }
+{% endraw %}
+[ -f "$HOST_LIBCUDA_DIR/libcuda.so.$HOST_LIBCUDA_VERSION" ] \
+  || { echo "host libcuda not found at $HOST_LIBCUDA_DIR/libcuda.so.$HOST_LIBCUDA_VERSION" >&2; exit 1; }
+for d in /dev/nvidia0 /dev/nvidia1 /dev/nvidia2 /dev/nvidia3 /dev/nvidia-uvm /dev/nvidiactl; do
+  [ -e "$d" ] || { echo "missing device $d - is vfio-pci passthrough working?" >&2; exit 1; }
+done
+
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+# Manual /dev/nvidia* injection (CDI doesn't work in podman 4.9.3 with full
+# PCI slot usage from GPU passthrough). Plus host libcuda bind-mount + LD path.
+# Build spec_config dynamically. With ENABLE_MTP=0, skip --speculative-config
+# entirely (no draft model loaded); with ENABLE_MTP=1, build the JSON omitting
+# empty fields (vLLM rejects "", it must either be a valid value or the key
+# absent).
+SPEC_ARGS=()
+if [ "$ENABLE_MTP" = "1" ]; then
+  spec_json_parts=("\"method\":\"mtp\"" "\"num_speculative_tokens\":$NUM_SPECULATIVE_TOKENS" "\"moe_backend\":\"$SPEC_MOE_BACKEND\"" "\"draft_sample_method\":\"$MTP_DRAFT_SAMPLE_METHOD\"")
+  [ -n "$SPEC_ATTENTION_BACKEND" ] && spec_json_parts+=("\"attention_backend\":\"$SPEC_ATTENTION_BACKEND\"")
+  [ -n "$SPEC_KV_CACHE_DTYPE" ]   && spec_json_parts+=("\"kv_cache_dtype\":\"$SPEC_KV_CACHE_DTYPE\"")
+  SPEC_JSON="{$(IFS=,; echo "${spec_json_parts[*]}")}"
+  SPEC_ARGS=(--speculative-config "$SPEC_JSON")
+fi
+
+podman run -d --name "$CONTAINER" \
+  --device /dev/nvidia0:/dev/nvidia0:rwm \
+  --device /dev/nvidia1:/dev/nvidia1:rwm \
+  --device /dev/nvidia2:/dev/nvidia2:rwm \
+  --device /dev/nvidia3:/dev/nvidia3:rwm \
+  --device /dev/nvidia-uvm:/dev/nvidia-uvm:rwm \
+  --device /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools:rwm \
+  --device /dev/nvidiactl:/dev/nvidiactl:rwm \
+  -v "$HOST_LIBCUDA_DIR/libcuda.so.$HOST_LIBCUDA_VERSION":/usr/lib/x86_64-linux-gnu/libcuda.so.$HOST_LIBCUDA_VERSION:ro \
+  -v "$HOST_LIBCUDA_DIR/libcuda.so.1":/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro \
+  -v "$HOST_LIBCUDA_DIR/libcuda.so":/usr/lib/x86_64-linux-gnu/libcuda.so:ro \
+  -v "$HOST_LIBCUDA_DIR/libnvidia-ml.so.$HOST_LIBCUDA_VERSION":/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.$HOST_LIBCUDA_VERSION:ro \
+  -v "$HOST_LIBCUDA_DIR/libnvidia-ml.so.1":/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro \
+  -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
+  -e HF_HUB_DISABLE_XET=1 \
+  -e CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
+  -e CUDA_DEVICE_MAX_CONNECTIONS=32 \
+  -e CUTE_DSL_ARCH=sm_120a \
+  -e TORCH_CUDA_ARCH_LIST=12.0a \
+  -e FLASHINFER_CUDA_ARCH_LIST=12.0f \
+  -e FLASHINFER_DISABLE_VERSION_CHECK=1 \
+  -e OMP_NUM_THREADS=16 \
+  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  -e SAFETENSORS_FAST_GPU=1 \
+  -e NCCL_IB_DISABLE=1 \
+  -e NCCL_P2P_LEVEL=SYS \
+  -e NCCL_PROTO=LL,LL128,Simple \
+  -e VLLM_USE_FLASHINFER_SAMPLER=1 \
+  -e VLLM_USE_B12X_FP8_GEMM=1 \
+  -e VLLM_USE_B12X_SPARSE_INDEXER=1 \
+  -e VLLM_USE_B12X_MOE=1 \
+  -e VLLM_USE_V2_MODEL_RUNNER=1 \
+  -e VLLM_ENABLE_PCIE_ALLREDUCE=1 \
+  -e VLLM_PCIE_ALLREDUCE_BACKEND=b12x \
+  -e VLLM_PCIE_ONESHOT_ALLREDUCE_MAX_SIZE=64KB \
+  -e VLLM_PCIE_ONESHOT_FUSED_ADD_RMS_NORM_MAX_SIZE=84KB \
+  -e VLLM_PCIE_DMA_FP8=ag \
+  -e B12X_PCIE_DMA_FP8=ag \
+  -e VLLM_CPP_AR_1STAGE_NCCL_CUTOFF=56KB \
+  -e VLLM_CPP_AR_IGNORE_CUTOFF_MAX_ROWS=0 \
+  -e VLLM_RTX6K_FUSED_ALLREDUCE_ADD=0 \
+  -e VLLM_RTX6K_FUSED_ALLREDUCE_ADD_END_BARRIER=0 \
+  -e VLLM_USE_AOT_COMPILE=1 \
+  -e VLLM_USE_BREAKABLE_CUDAGRAPH=0 \
+  -e VLLM_USE_FUSED_MOE_GROUPED_TOPK=1 \
+  -e VLLM_USE_B12X_MHC=1 \
+  -e B12X_MHC_MAX_TOKENS=16384 \
+  -e VLLM_USE_B12X_WO_PROJECTION=1 \
+  -e VLLM_EXL3_TRELLIS_MAX_M=32 \
+  -e VLLM_EXL3_TRELLIS_BLOCK_M=8 \
+  -e VLLM_B12X_MLA_SPEC_EXTEND_AS_DECODE=0 \
+  -e B12X_MLA_SM120_UNIFIED=1 \
+  -e B12X_DENSE_SPLITK_TURBO=1 \
+  -e B12X_W4A16_TC_DECODE=1 \
+  -e B12X_MOE_FORCE_A16=1 \
+  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 \
+  -e VLLM_DISABLED_KERNELS=MarlinFP8ScaledMMLinearKernel \
+  -e VLLM_DCP_GLOBAL_TOPK=1 \
+  -e VLLM_DCP_SHARD_DRAFT=1 \
+  -e VLLM_DCP_QUERY_SPLIT=1 \
+  -e VLLM_B12X_MLA_CKV_GATHER=1 \
+  -e VLLM_DCP_TOPK_OWNER_MERGE=1 \
+  -e VLLM_DCP_INDEXER_SHARDS=0 \
+  -e VLLM_B12X_MLA_CKV_PREFETCH_DEPTH=1 \
+  -e VLLM_B12X_MLA_CKV_PREFETCH_WORKSPACE_MIB=1024 \
+  -e VLLM_DCP_PROJECT_BEFORE_MERGE=1 \
+  -e VLLM_DCP_PROJECT_BEFORE_MERGE_MIN_PREFILL_TOKENS=1024 \
+  -e VLLM_B12X_MLA_DCP_GATHER_IN_WORKSPACE=1 \
+  -e VLLM_B12X_MLA_CKV_GATHER_MIN_TOKENS=512 \
+  -e VLLM_B12X_MLA_CKV_GATHER_MAX_TOKENS=16384 \
+  -e VLLM_B12X_MLA_SPEC_DECODE_MAX_Q=8 \
+  -e VLLM_USE_B12X_DCP_A2A=1 \
+  -e VLLM_DCP_A2A_MAX_TOKENS=16 \
+  -e VLLM_DCP_A2A_LARGE_BACKEND=ag_rs \
+  -e VLLM_MEMORY_PROFILE_INCLUDE_ATTN=1 \
+  -e VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 \
+  -e VLLM_CACHE_DIR=/cache/jit/vllm \
+  -e TRITON_CACHE_DIR=/cache/jit/triton \
+  -e TORCH_EXTENSIONS_DIR=/cache/jit/torch_extensions \
+  -e TORCHINDUCTOR_CACHE_DIR=/cache/jit/torchinductor \
+  -e FLASHINFER_WORKSPACE_BASE=/cache/jit/flashinfer \
+  -e XDG_CACHE_HOME=/cache/jit \
+  -e TVM_FFI_CACHE_DIR=/cache/jit/tvm-ffi \
+  -e VLLM_EXL3_PREFILL_CHUNK=128 \
+  --network=host \
+  --shm-size=32g \
+  --security-opt seccomp=unconfined \
+  --memory "$MEM" --memory-swap "$MEM" \
+  -v "$MODEL_BASE":/model:ro \
+  -v glm52-tr3-jit:/cache \
+  "$IMAGE" vllm serve /model \
+    --served-model-name "$SERVED_NAME" \
+    --host 0.0.0.0 --port "$PORT" --trust-remote-code \
+    --tensor-parallel-size "$TP" \
+    --decode-context-parallel-size "$DCP" \
+    --dcp-comm-backend a2a \
+    --dcp-kv-cache-interleave-size "$DCP_KV_CACHE_INTERLEAVE_SIZE" \
+    --seed 0 \
+    --quantization exl3 \
+    --kv-cache-dtype "$KV_CACHE_DTYPE" \
+    --attention-backend B12X_MLA_SPARSE \
+    --moe-backend b12x \
+    --load-format safetensors \
+    --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"custom_ops":["all"],"pass_config":{"fuse_allreduce_rms":true}}' \
+    --gpu-memory-utilization "$GPU_UTIL" \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "$MAX_NUM_SEQS" \
+    --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
+    --max-cudagraph-capture-size 32 \
+    --enable-chunked-prefill \
+    --enable-prefix-caching \
+    --enable-auto-tool-choice \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --default-chat-template-kwargs '{"reasoning_effort":"high"}' \
+    --hf-overrides "{\"use_index_cache\":true,\"index_topk_pattern\":\"$INDEX_TOPK_PATTERN\"}" \
+    "${SPEC_ARGS[@]}"
+
+mtp_state=$([ "$ENABLE_MTP" = 1 ] && echo on || echo off)
+echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), TP=$TP DCP=$DCP, MTP $mtp_state, max_model_len=$MAX_MODEL_LEN, gpu_util=$GPU_UTIL."
+echo "  watch:  incus exec {{ exl3_tr3_vm_name }} -- podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"
