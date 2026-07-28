@@ -748,3 +748,11 @@ curl -fsS http://inference.xc/v1/models \
 `DCP_KV_CACHE_INTERLEAVE_SIZE`/`NUM_SPECULATIVE_TOKENS`/
 `SPEC_MOE_BACKEND`/`ENABLE_MTP`/`SERVED_NAME`/`INDEX_TOPK_PATTERN`/
 `MEM`.
+
+**Served model name.** vLLM 0.11.2-dev registers only the last
+`--served-model-name` flag as the canonical id; earlier flags are
+silently dropped (requests under them return 404). So the playbook
+and template use a single served name (`glm-5.2` by default,
+overrideable in host_vars via `exl3_tr3_served_name`). The earlier
+HF-repo-id registration (`GLM-5.2-EXL3-TR3-3.0bpw`) was a 404-side
+ghost; it's been removed from local-ai-proxy.

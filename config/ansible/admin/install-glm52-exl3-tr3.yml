@@ -76,7 +76,7 @@
     # Gateway routing key — matches the upstream HF repo id verbatim (no
     # lowercasing, no namespace prefix). This is what clients pass as
     # `model:` in API calls.
-    exl3_tr3_served_name: "GLM-5.2-EXL3-TR3-3.0bpw"
+    exl3_tr3_served_name: "glm-5.2"
     # API port (host-side via incus proxy device; VM-internal via --network=host).
     # 9212 = full 744B NVFP4 b12x, 9213 = FullKD, 9214 = EXL3 TR3.
     exl3_tr3_port: 9214
@@ -187,10 +187,16 @@
     # http://{{ inventory_hostname }}.xc:{{ exl3_tr3_port }}.
 
     - name: Check whether the EXL3 TR3 proxy device is already attached
-      command: incus config device show {{ exl3_tr3_vm_name }} {{ exl3_tr3_proxy_device }}
+      command: incus config device get {{ exl3_tr3_vm_name }} {{ exl3_tr3_proxy_device }} type
       register: exl3_tr3_proxy_check
       changed_when: false
       failed_when: false
+      # `incus config device get <vm> <device> type` returns rc=0 when the
+      # device exists, rc=1 with "Device doesn't exist" otherwise. The
+      # previous `incus config device show <vm> <device>` syntax was
+      # invalid (incus treats the second arg as a no-op and prints help,
+      # always rc=1), which made this gate always trip → re-run of the
+      # playbook failed with "The device already exists".
 
     - name: Attach the EXL3 TR3 proxy device (host port → VM port)
       command: >-
@@ -223,7 +229,7 @@
     # different host opts in.
     exl3_tr3_nvidia_host: nv4
     exl3_tr3_backend_url: "http://{{ exl3_tr3_nvidia_host }}.xc:{{ hostvars[exl3_tr3_nvidia_host]['exl3_tr3_port'] | default(9214) }}"
-    exl3_tr3_served_name: "{{ hostvars[exl3_tr3_nvidia_host]['exl3_tr3_served_name'] | default('GLM-5.2-EXL3-TR3-3.0bpw') }}"
+    exl3_tr3_served_name: "{{ hostvars[exl3_tr3_nvidia_host]['exl3_tr3_served_name'] | default('glm-5.2') }}"
   tasks:
     - name: Check if this host is the storage leader
       shell: mountpoint -q /rbd/user
@@ -292,6 +298,7 @@
           local-ai-proxy on {{ inventory_hostname }}:4001 replied
           {{ proxy_smoke.status | default('unreachable') }};
           EXL3 TR3 backend registered at {{ exl3_tr3_backend_url }}
+          (served: {{ exl3_tr3_served_name }})
       when:
         - is_storage_leader
         - not ansible_check_mode

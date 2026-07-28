@@ -34,8 +34,9 @@ DRIVER_LIB_VERSION="{{ exl3_tr3_driver_lib_version }}"
 command -v incus >/dev/null \
   || { echo "incus missing - an operator must run admin/install-incus.yml" >&2; exit 1; }
 
-# VM must be running. `incus info` returns Status: Running | Stopped.
-incus info "$VM" | grep -q "^Status: Running$" \
+# VM must be running. `incus info` returns Status: RUNNING | STOPPED
+# (all caps, not Running — case-sensitive grep).
+incus info "$VM" | grep -q "^Status: RUNNING$" \
   || { echo "VM '$VM' is not running. Start it: incus start $VM" >&2; exit 1; }
 
 # Helper: run a command inside the VM as root (root is the default user for

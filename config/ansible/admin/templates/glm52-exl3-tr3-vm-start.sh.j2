@@ -31,7 +31,7 @@ REMOTE_SCRIPT="{{ exl3_tr3_remote_script_path }}"
 command -v incus >/dev/null \
   || { echo "incus missing - an operator must run admin/install-incus.yml" >&2; exit 1; }
 
-incus info "$VM" | grep -q "^Status: Running$" \
+incus info "$VM" | grep -q "^Status: RUNNING$" \
   || { echo "VM '$VM' is not running. Start it: incus start $VM" >&2; exit 1; }
 
 [ -f "$INNER_SCRIPT" ] \
