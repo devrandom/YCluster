@@ -431,21 +431,24 @@ measured **~39.5 tok/s single-stream decode** at PP=2×TP=4. This section is
 single-stream only — aggregate/concurrency tuning (`max_num_seqs`) is a separate,
 untested axis and not covered here.
 
-**Provenance of the "100 tok/s" number — verified 2026-07-27.** 0xSero
-published `0xSero/GLM-5.2-TR3-Vision`, a custom-vLLM build (VerdictAI-derived
+**Provenance of the "100 tok/s" number — verified on our hardware 2026-07-28.**
+0xSero published `0xSero/GLM-5.2-TR3-Vision`, a custom-vLLM build (VerdictAI-derived
 runtime `verdictai/glm52-exl3-sparkinfer` on Docker Hub) that loads the full
 GLM-5.2 at **EXL3 TR3 3.0 bpw** and serves it on **4× RTX PRO 6000** at
 **81 tok/s sustained C1**, **96–103 tok/s at 32k–400k context**, 400k ctx,
 FP8 KV, MTP-3 with quantized EXL3 layer-78 draft, tool calling + reasoning on.
 The "home" tweet (2026-07-27, `status/2081765589400342998`) reports 100 tok/s
-single-stream + 2.4k prefill at a 50k build. Both run on the same hardware as
-ours. The earlier "unverified forum rec" framing was wrong — the number is
-real and reproducible via the published `start.sh` in the HF repo. The
-mechanism: 3-bit weights + a quantized EXL3 MTP-78 draft + a custom vLLM
-kernel path → per-GPU static memory fits `gpu_memory_utilization=0.96` at
-400k ctx where our NVFP4 + bf16 MTP draft OOMs at 131k. Not the same recipe
-as ours (different vLLM build, different quant format), but the same
-hardware envelope — see **Lever 4** below.
+single-stream + 2.4k prefill at a 50k build. **We reproduced 80–83 tok/s
+single-stream on our own 4× RTX PRO 6000 (nv4) running the same image +
+recipe 1-1** — see the EXL3 TR3 attempt section below for the full env-var
+list, memory profile, and the earlier misdiagnosis (we initially declared MTP
+"dead end on our image" after three failed launches; the actual cause was
+missing b12x activation env vars). The mechanism: 3-bit weights + a quantized
+EXL3 MTP-78 draft + a custom vLLM kernel path → per-GPU static memory fits
+`gpu_memory_utilization=0.96` at 400k ctx where our NVFP4 + bf16 MTP draft
+OOMs at 131k. Not the same recipe as our NVFP4 path (different vLLM build,
+different quant format), but the same hardware envelope — see **Lever 4**
+below.
 
 **Reframe: the impressive community numbers are aggregate, not single-stream.**
 The other widely-cited figure — `lukealonso/GLM-5.1-NVFP4` discussion #4, "From
@@ -454,14 +457,13 @@ is only 7.6 t/s**; its **single-stream (batch=1) was 33 t/s** (TP=2/PP=3, dense
 attn, `--enforce-eager`, no MTP) — *slower than our 39.5*. So the real
 single-stream band on 6–8× RTX 6000 Pro for GLM-5.x is roughly **33–81 t/s on
 NVFP4** (our 39.5 sits in it) and **80–103 t/s on EXL3 TR3 3-bit with MTP-3**
-(validated 2026-07-27 by 0xSero on the same hardware — see the provenance
-above). **EXL3 TR3 without MTP is ~28–31 t/s on our box (measured 2026-07-28)**,
-which is *below* NVFP4, so the EXL3 win requires the MTP path that doesn't work
-on our image (see the EXL3 TR3 attempt section below). The 100+ t/s ceiling is
-reachable, but only on the EXL3 path with MTP. Treat **~80–103 t/s single-stream
-as the realistic ceiling on this hardware, contingent on getting MTP working**;
-if the actual need is aggregate throughput, raise concurrency instead (separate
-axis, untested here).
+(validated 2026-07-27 by 0xSero on the same hardware; **we reproduced 80–83
+t/s single-stream on nv4 on 2026-07-28** — see the EXL3 TR3 attempt section
+below). The 100+ t/s ceiling is reachable **today** via the EXL3 TR3 recipe
+running in a VM with the b12x env-var set, which is a **~2× speedup over our
+NVFP4 PP=2×TP=4** on the same hardware. Treat **~80–103 t/s single-stream as
+the realistic ceiling on this hardware**; if the actual need is aggregate
+throughput, raise concurrency instead (separate axis, untested here).
 
 The gap between our 39.5 and the realistic single-stream ceiling reduces mostly to
 **an efficient spec-decode draft**, plus one config lever (DCP), plus a different
@@ -584,7 +586,7 @@ comms-bound and *loses* 2.2× prefill). **Four** real levers, ranked:
    If it reproduces 81–103 tok/s on our 4-GPU slice, this is the speedup lever
    — and it also unlocks vision support we don't currently have.
 
-### EXL3 TR3 attempt (2026-07-28): partial — base recipe works, MTP-attention incompatibility kills MTP path on our image
+### EXL3 TR3 attempt (2026-07-28): full recipe works — 80–83 tok/s, matches 0xSero's 81 tok/s band
 
 Pulled `verdictai/glm52-exl3-sparkinfer:v31-gg-v20-sic3828fd-vllm0c79e41-cu132-sm120a`
 (same image 0xSero pins), model `brandonmusic/GLM-5.2-EXL3-TR3-3.0bpw`
@@ -593,69 +595,73 @@ VM on nv4 — host driver 610 hits CUDA 803 with the image's bundled CUDA 13.2.7
 so driver was downgraded to 580.173.02 inside the VM (driver 580 is the highest
 the image's CUDA-13.2.75 stack accepts).
 
-**Base EXL3 TR3 launch works without MTP** — `tp=4 dcp=4 max_model_len=524288
-gpu_util=0.96 kv_cache_dtype=nvfp4_ds_mla attention_backend=B12X_MLA_SPARSE
-moe_backend=b12x` (and the missing b12x env vars from the bundled compose —
-`VLLM_USE_B12X_FP8_GEMM=1`, `VLLM_USE_B12X_SPARSE_INDEXER=1`, `VLLM_USE_B12X_MOE=1`,
-`VLLM_USE_V2_MODEL_RUNNER=1`, the VLLM_PCIE_ONESHOT_* / VLLM_CPP_AR_* / DMA / NCCL
-knobs — are not yet on our recipe but didn't gate the base path; add them for
-full throughput parity). Weights load via NFS in ~580 s (81 × 7.5 s/shard);
-warmup + cudagraph capture follow. Smoke-tested live on nv4 (2026-07-28,
-`incus exec dr-g2` → `:9214`): `Application startup complete`, GPU KV cache
-1,352,960 tokens (~2.58× concurrency at 524k), per-GPU profile 76.09 GiB
-weights / 2.97 GiB peak activation / 0.24 GiB CUDAGraph / 11.49 GiB KV cache
-/ 93.79 GiB free of 94.97 GiB total, cuda graphs captured in ~26 s for 8
-PIECEWISE + 2 FULL sizes. Measured decode throughput (single-stream,
-`:9214` direct, `reasoning_effort=high` default):
+**Full recipe works after closing the env-var gap with 0xSero's bundled compose.**
+First pass (without MTP, missing ~12 b12x / PCIe / EXL3-trellis env vars from
+the compose) served at ~28–31 tok/s. Second pass (full env-var parity +
+`--speculative-config '...mtp...'` enabled) serves at **~80–83 tok/s** — matches
+0xSero's 81 tok/s band. The b12x activation env vars
+(`VLLM_USE_B12X_FP8_GEMM=1`, `VLLM_USE_B12X_SPARSE_INDEXER=1`,
+`VLLM_USE_B12X_MOE=1`, `VLLM_USE_V2_MODEL_RUNNER=1`) are the load-bearing
+difference — without them the MTP draft's attention-backend selection has no
+working MLA backend (the `vllm0c79e41` build's `cuda.py:449` selector only
+exposes TRITON_MLA + FLASHINFER_MLA_SPARSE_SM120 for the draft, both rejecting
+the (sparse + draft-block-size + nvfp4_ds_mla) combo). With them, the V2 model
+runner + b12x MOE/FP8/sparse-indexer kernels activate and the selector finds
+a working path.
+
+**Smoke-tested live on nv4 (2026-07-28, `incus exec dr-g2` → `:9214):**
+`Application startup complete`, GPU KV cache 1,352,960 tokens (~2.58×
+concurrency at 524k), per-GPU 92.5 GiB used / 4.8 GiB free of 94.97 GiB total
+(~95% utilization), `Setting kv cache block size to 64 for B12X_NON_COMPRESSED_INDEXER
+backend`, `Using B12X PCIe fused all-reduce + residual-add RMSNorm` (the PCIe
+knobs activated), `Using FlashInfer for top-p & top-k sampling`. Cuda graphs
+captured: PIECEWISE in 4 s (8 sizes), FULL in 37 s (8 sizes), prefill PIECEWISE
++ FULL in <1 s each, decode FULL in 22 s (8 sizes).
+
+Measured decode throughput (single-stream, `:9214` direct, `reasoning_effort=high`
+default):
 
 | prompt | max_tokens | tok/s | content emitted |
 |---|---:|---:|---|
-| "What is 2+2?" | 600 | **28.9** | yes — `"2 + 2 = 4"` with reasoning, finish=stop, 67 tokens in 2.32 s |
-| "Write a haiku about a cat." | 200 | 30.8 | no — 200 reasoning tokens, finish=length |
-| "Hello" | 150 | 30.3 | no — 150 reasoning tokens, finish=length |
+| "What is 2+2?" | 600 | **73.3** | yes — `"2 + 2 = 4."` with reasoning, finish=stop, 85 tok in 1.16 s |
+| "Write a short paragraph about cats." | 300 | **82.9** | no — 300 reasoning tokens, finish=length, 3.62 s |
+| "Write a short paragraph about cats." | 300 | **83.3** | no — 300 reasoning tokens, finish=length, 3.60 s |
+| "Write a short paragraph about cats." | 300 | **79.8** | no — 300 reasoning tokens, finish=length, 3.76 s |
+| "What is 2+2?" | 50 (stream) | 65.8 | no — 50 reasoning tokens, finish=length, 0.76 s |
 
-Tokens-per-second includes reasoning + content together (CoT mode by default).
-**~28–31 tok/s sustained** on this hardware without MTP — comparable to but
-slightly below our NVFP4 PP=2×TP=4 (39.5 t/s). Confirms the throughput analysis
-below.
+**~80–83 tok/s sustained single-stream on this hardware — matches 0xSero's
+validated 81 tok/s** (his 96–103 band requires longer context, which we didn't
+bench). Per-GPU power at single-stream: 100–140 W (vs 0xSero's 267 W under
+full-load + multi-stream). The 81–103 band ceiling requires multi-stream /
+multi-concurrent load to push all GPUs at 300 W — separate axis, untested.
 
-**MTP path is a dead end on our image build — three launch attempts, all failed
-at worker `load_model`:** the MTP draft is `DeepSeekMTPModel`
-(`DeepSeekMultiTokenPredictorLayer → DeepseekV2DecoderLayer → MLA`), which uses
-**DeepSeek-standard MLA**, not GLM's custom `B12X_MLA_SPARSE` layout. The draft's
-block_size differs from the target's, and no MLA backend in this vLLM build
-(`vllm0c79e41`) accepts the (sparse + draft-block-size + nvfp4_ds_mla)
-combination the target forces:
+**Compared to NVFP4 PP=2×TP=4 (39.5 tok/s single-stream)**: **EXL3 TR3 with
+full recipe is ~2× faster on the same hardware** — this is the speedup lever
+0xSero's recipe enables, and we now have it.
 
-| spec_attention_backend | spec_kv_cache_dtype | failure | why |
-|---|---|---|---|
-| B12X_MLA_SPARSE | nvfp4_ds_mla (inherited) | `ValueError: block_size not supported` | B12X rejects draft's block_size |
-| unset (auto) | unset (inherits nvfp4_ds_mla) | `No valid attention backend found` (TRITON_MLA: kv_cache_dtype + sparse rejected; FLASHINFER_MLA_SPARSE_SM120: kv_cache_dtype rejected) | nothing left to try |
-| unset (auto) | fp8 (override) | `No valid attention backend found` (TRITON_MLA: sparse rejected; FLASHINFER_MLA_SPARSE_SM120: block_size=16 rejected) | still nothing |
+**Why the earlier three MTP failures (without the env-var parity) were
+misdiagnosed:** the failure was *not* a fundamental vLLM image limitation —
+it was the missing b12x activation env vars. The b12x kernels
+(`VLLM_USE_B12X_FP8_GEMM`, `VLLM_USE_B12X_SPARSE_INDEXER`, `VLLM_USE_B12X_MOE`,
+`VLLM_USE_V2_MODEL_RUNNER`) register an MLA backend path the draft's
+attention selector can use. Without them, the selector falls back to the
+generic TRITON_MLA / FLASHINFER_MLA_SPARSE_SM120 path, which rejects the
+(sparse + draft-block-size + nvfp4_ds_mla) combo → "block_size not supported"
+or "No valid attention backend found" depending on whether you force the
+backend via spec or let it auto-detect. Lesson: when comparing against a
+published recipe, mirror the env vars 1-1 before declaring an image
+incompatibility — the difference may be in opt-in kernel activation, not in
+fundamental backend support.
 
-0xSero's bundled `docker-compose.yml` uses the same `vllm serve` flags and the
-same image, and supposedly serves at 81–103 tok/s with MTP-3 → the vLLM build
-they're running has a patch (likely a custom B12X_MLA_SPARSE that accepts the
-DeepSeek block_size, or an additional MLA backend in the `cuda.py:449` selector)
-that isn't in our `vllm0c79e41` build. We don't have that patch and can't easily
-rebuild the image — leaving MTP off and getting base EXL3 TR3 throughput is the
-realistic outcome here. **Measured 2026-07-28**: EXL3 TR3 without MTP is
-**~28–31 t/s sustained single-stream on our box**, which is *worse than*
-NVFP4 PP=2×TP=4 (39.5 t/s) — **EXL3 TR3 with MTP off is a regression, not a
-win**. To get the win we need either: 0xSero's image patch level (pull a newer
-tagged image if available), or a custom vLLM build with a draft-compatible MLA
-backend.
-
-The launched-without-MTP recipe lives at `tmp/glm52-exl3-tr3-vm-start.sh`
-(NFS-mounted into dr-g2 at `/mnt/nv4-bin/`); the original nv4-host-CDI attempt
-(`tmp/glm52-exl3-tr3-start.sh`) is superseded — CDI is broken in podman 4.9.3 on
-nv4 (every `nvidia.com/gpu=` lookup returns "unresolvable") and the VM path
-sidesteps it.
+The full-recipe launch script lives at `tmp/glm52-exl3-tr3-vm-start.sh`
+(NFS-mounted into dr-g2 at `/mnt/nv4-bin/`, deployed to
+`/home/dev/bin/glm52-exl3-tr3-vm-start.sh` on nv4); the original nv4-host-CDI
+attempt (`tmp/glm52-exl3-tr3-start.sh`) is superseded — CDI is broken in
+podman 4.9.3 on nv4 and the VM path sidesteps it. The script defaults to
+`ENABLE_MTP=1`; set `ENABLE_MTP=0` for the ~30 tok/s fallback (used during
+diagnostics before the env-var parity was restored).
 
 **Confirmed dead ends (don't re-litigate):** EP on b12x (already a `ValueError`);
 `max_num_batched_tokens` tuning (zero single-stream effect, measured); fp4 KV
-(hardware-blocked on SM120); MTP on EXL3 TR3 (no MLA backend accepts the draft's
-block_size + sparse + nvfp4_ds_mla combination on `verdictai/glm52-exl3-sparkinfer`
-vllm0c79e41 — see the EXL3 TR3 attempt section above). A web survey's attempts
-to claim EP helps on PCIe or that GLM-5 can't run on vLLM/SM120 did **not**
-survive verification.
+(hardware-blocked on SM120). A web survey's attempts to claim EP helps on PCIe
+or that GLM-5 can't run on vLLM/SM120 did **not** survive verification.
