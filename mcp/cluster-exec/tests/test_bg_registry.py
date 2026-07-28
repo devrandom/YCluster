@@ -37,7 +37,7 @@ class RegistryTests(unittest.TestCase):
     def tearDown(self):
         exec_mod._BACKGROUNDED.clear()
 
-    def _register(self, session_id: str, proc: _StubProcess) -> asyncio.Task:
+    def _register(self, session_id: str, proc: _StubProcess, principal: str | None = None) -> asyncio.Task:
         async def setup():
             watcher = asyncio.create_task(asyncio.sleep(0))
             exec_mod.register_backgrounded(
@@ -49,6 +49,7 @@ class RegistryTests(unittest.TestCase):
                 proc=_stub_as_proc(proc),
                 readers=(asyncio.create_task(asyncio.sleep(0)), asyncio.create_task(asyncio.sleep(0))),
                 timeout_watcher=watcher,
+                principal=principal,
             )
             return watcher
         return _run(setup())
@@ -91,6 +92,74 @@ class RegistryTests(unittest.TestCase):
 
     def test_kill_all_on_empty_registry_returns_zero(self):
         self.assertEqual(exec_mod.kill_all_backgrounded(), 0)
+
+    def test_list_filtered_by_principal(self):
+        # Two clients, each with their own session. list_backgrounded
+        # scoped to a principal only returns that client's sessions.
+        self._register("cl1s00001", _StubProcess(), principal="client-1")
+        self._register("cl1s00002", _StubProcess(), principal="client-1")
+        self._register("cl2s00001", _StubProcess(), principal="client-2")
+        self._register("anons0001", _StubProcess(), principal=None)
+
+        self.assertEqual(
+            sorted(exec_mod.list_backgrounded(principal="client-1")),
+            ["cl1s00001", "cl1s00002"],
+        )
+        self.assertEqual(
+            exec_mod.list_backgrounded(principal="client-2"),
+            ["cl2s00001"],
+        )
+        # Unfiltered (admin / legacy) sees everything.
+        self.assertEqual(
+            sorted(exec_mod.list_backgrounded()),
+            ["anons0001", "cl1s00001", "cl1s00002", "cl2s00001"],
+        )
+        # Filtering for an unknown principal returns empty.
+        self.assertEqual(exec_mod.list_backgrounded(principal="client-9"), [])
+
+    def test_get_filtered_by_principal(self):
+        proc = _StubProcess()
+        self._register("ownd00001", proc, principal="client-1")
+        self._register("othrd0001", _StubProcess(), principal="client-2")
+
+        # Owner sees their own session.
+        self.assertIsNotNone(exec_mod.get_backgrounded("ownd00001", principal="client-1"))
+        # Other client gets None (no enumeration via session_id).
+        self.assertIsNone(exec_mod.get_backgrounded("ownd00001", principal="client-2"))
+        # Unfiltered (admin) sees all.
+        self.assertIsNotNone(exec_mod.get_backgrounded("ownd00001"))
+        self.assertIsNotNone(exec_mod.get_backgrounded("othrd0001"))
+
+    def test_kill_filtered_by_principal_does_not_cross_clients(self):
+        # A client trying to kill another client's session gets False
+        # (session is still alive and in the registry).
+        own_proc = _StubProcess()
+        other_proc = _StubProcess()
+        self._register("ownd00002", own_proc, principal="client-1")
+        self._register("othrd0002", other_proc, principal="client-2")
+
+        # Wrong principal: kill_backgrounded returns False, proc untouched.
+        self.assertFalse(exec_mod.kill_backgrounded("othrd0002", principal="client-1"))
+        self.assertFalse(other_proc._terminated)
+        self.assertIn("othrd0002", exec_mod.list_backgrounded())
+
+        # Right principal: kill_backgrounded returns True, proc terminated.
+        self.assertTrue(exec_mod.kill_backgrounded("ownd00002", principal="client-1"))
+        self.assertTrue(own_proc._terminated)
+        self.assertNotIn("ownd00002", exec_mod.list_backgrounded())
+
+    def test_kill_all_backgrounded_bypasses_principal_filter(self):
+        # /stop endpoint is an admin op — it must clean up sessions owned
+        # by any principal (including disconnected clients' orphans).
+        procs = [_StubProcess(), _StubProcess(), _StubProcess()]
+        self._register("admns0001", procs[0], principal="client-1")
+        self._register("admns0002", procs[1], principal="client-2")
+        self._register("admns0003", procs[2], principal=None)
+        count = exec_mod.kill_all_backgrounded()
+        self.assertEqual(count, 3)
+        for p in procs:
+            self.assertTrue(p._terminated)
+        self.assertEqual(exec_mod.list_backgrounded(), [])
 
 
 if __name__ == "__main__":

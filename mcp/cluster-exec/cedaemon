@@ -34,10 +34,19 @@
 #                          $REPO/.envrc)
 #   CE_LOG_PATH            JSONL log path for run output (default
 #                          tmp/cluster.log)
-#   CE_TIMEOUT_S           hard timeout per run, seconds (default 1800)
-#   CE_AUTO_BG_TIMEOUT_S   soft auto-bg threshold, seconds (default 30;
-#                          set 0 to disable backgrounding)
+#   CE_TIMEOUT_S           hard timeout per backgrounded run, seconds
+#                          (default 1800)
+#   CE_AUTO_BG_TIMEOUT_S   auto-bg threshold, seconds (default 10; bump
+#                          for deployments where a known-long command
+#                          should hold the foreground rather than
+#                          auto-backgrounding; set 0 to disable)
 #   CE_PROGRESS_INTERVAL_S, CE_PROGRESS_TAIL_LINES
+#   CE_CAPTURE_REQUESTS    debug-only: path to a JSONL file that will
+#                          receive one line per incoming HTTP request
+#                          (ts, method, path, headers, body). Bearer
+#                          tokens and project-identifying fields are
+#                          redacted before write. Use to inspect what
+#                          MCP clients send on the wire.
 #
 # This script does not inherit CE_* into the spawned server. Pass them through
 # the shell (e.g. `CE_BASTION=s3.rat bash mcp/cluster-exec/cedaemon --start`)

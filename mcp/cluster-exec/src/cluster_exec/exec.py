@@ -1,9 +1,9 @@
 import asyncio
 import shlex
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Awaitable, Callable
 
 from . import log
 from .truncate import truncate
@@ -22,20 +22,61 @@ class _Backgrounded:
     readers: tuple[asyncio.Task, asyncio.Task]
     timeout_watcher: asyncio.Task | None = None
     orphaned: bool = False
+    # `principal` ties the session to the client that started it (the MCP
+    # session ID from `mcp-session-id`). `status` / `kill` filter by it so
+    # one client cannot see or terminate another client's runs — only the
+    # `/stop` admin endpoint and `kill_all_backgrounded` bypass the filter.
+    # `None` is allowed (legacy callers and tests); filtered reads with a
+    # `None` principal match only `None`-owned sessions.
+    principal: str | None = None
 
 
 _BACKGROUNDED: dict[str, _Backgrounded] = {}
 
 
-def list_backgrounded() -> list[str]:
-    return list(_BACKGROUNDED.keys())
+def _visible(principal: str | None) -> Callable[["_Backgrounded"], bool]:
+    """Build a predicate that gates `_BACKGROUNDED` entries by `principal`.
+
+    `principal=None` means "no filter" (admin / internal use — returns all
+    entries). A non-None `principal` matches entries with the same value
+    only; entries with `principal=None` are hidden, since they belong to
+    legacy callers (no MCP session ID) and should not leak into a
+    filtered listing.
+    """
+    if principal is None:
+        return lambda bg: True
+    return lambda bg: bg.principal == principal
 
 
-def get_backgrounded(session_id: str) -> _Backgrounded | None:
-    return _BACKGROUNDED.get(session_id)
+def list_backgrounded(principal: str | None = None) -> list[str]:
+    pred = _visible(principal)
+    return [sid for sid, bg in _BACKGROUNDED.items() if pred(bg)]
 
 
-def kill_backgrounded(session_id: str, grace_s: float = 2.0) -> bool:
+def get_backgrounded(session_id: str, principal: str | None = None) -> _Backgrounded | None:
+    bg = _BACKGROUNDED.get(session_id)
+    if bg is None:
+        return None
+    if not _visible(principal)(bg):
+        return None
+    return bg
+
+
+def kill_backgrounded(
+    session_id: str, grace_s: float = 2.0, principal: str | None = None
+) -> bool:
+    bg = _BACKGROUNDED.get(session_id)
+    if bg is None or not _visible(principal)(bg):
+        return False
+    return _kill_unconditionally(session_id, grace_s)
+
+
+def _kill_unconditionally(session_id: str, grace_s: float = 2.0) -> bool:
+    """Terminate and remove the session without checking `principal`.
+
+    Used by `kill_all_backgrounded` (admin) and after we've already
+    verified the principal in `kill_backgrounded`.
+    """
     bg = _BACKGROUNDED.pop(session_id, None)
     if bg is None:
         return False
@@ -59,10 +100,11 @@ def kill_backgrounded(session_id: str, grace_s: float = 2.0) -> bool:
 
 
 def kill_all_backgrounded(grace_s: float = 2.0) -> int:
-    # Snapshot keys: kill_backgrounded mutates the dict as it pops.
+    # Snapshot keys: _kill_unconditionally mutates the dict as it pops.
+    # Admin endpoint — bypasses principal filtering on purpose.
     count = 0
     for sid in list(_BACKGROUNDED.keys()):
-        if kill_backgrounded(sid, grace_s=grace_s):
+        if _kill_unconditionally(sid, grace_s=grace_s):
             count += 1
     return count
 
@@ -87,6 +129,7 @@ def register_backgrounded(
     readers: tuple[asyncio.Task, asyncio.Task],
     timeout_watcher: asyncio.Task,
     orphaned: bool = False,
+    principal: str | None = None,
 ) -> None:
     _BACKGROUNDED[session_id] = _Backgrounded(
         session_id=session_id,
@@ -98,6 +141,7 @@ def register_backgrounded(
         readers=readers,
         timeout_watcher=timeout_watcher,
         orphaned=orphaned,
+        principal=principal,
     )
 
 
@@ -121,6 +165,7 @@ async def run(
     user: str | None = None,
     on_progress: ProgressFn | None = None,
     cancel: asyncio.Event | None = None,
+    principal: str | None = None,
 ) -> str:
     if cancel is None:
         cancel = asyncio.Event()
@@ -297,6 +342,7 @@ async def run(
                 readers=readers,
                 timeout_watcher=timeout_watcher,
                 orphaned=True,
+                principal=principal,
             )
 
             duration = time.monotonic() - started
@@ -334,6 +380,7 @@ async def run(
             proc=proc,
             readers=readers,
             timeout_watcher=timeout_watcher,
+            principal=principal,
         )
         cancel.set()
         watcher_task.cancel()

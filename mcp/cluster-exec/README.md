@@ -24,13 +24,13 @@ Exposes six tools:
      - `FAILED exit=2 duration=4.2s`
      - `CANCELLED after 12.3s (timeout)` — hard timeout fired
      - `CANCELLED after 12.3s (cancelled by client)` — `notifications/cancelled` from the client
-     - `BACKGROUNDED session=<id> after 30.0s` — soft auto-bg timeout fired; poll with `tail -s <id>`
+     - `BACKGROUNDED session=<id> after 10.0s` — soft auto-bg timeout fired; poll with `tail -s <id>`
      - `KILLED session=<id>` — returned by the `kill` tool
      - `ERROR: <message>` (could not start)
 
-  **Two-tier timeouts** (overridable per call):
-  - `auto_bg_after_s` (default 30s, `CE_AUTO_BG_TIMEOUT_S`) — soft timeout. When it fires, the run transitions to background and returns `BACKGROUNDED session=<id>`. Set to 0 to disable.
-  - `timeout_s` (default 1800s, `CE_TIMEOUT_S`) — hard timeout. SIGTERM, then SIGKILL after 2s. Set to 0 to disable. Must be greater than `auto_bg_after_s` when both are enabled.
+  **Two-tier timeouts**:
+  - `auto_bg_after_s` is fixed at **10s** server-side — there is no per-call argument. Override globally via `CE_AUTO_BG_TIMEOUT_S` (e.g. `CE_AUTO_BG_TIMEOUT_S=120 bash mcp/cluster-exec/cedaemon --start`) for deployments where a known-long command should hold the foreground rather than auto-backgrounding. Anything still running at the threshold is handed off as `BACKGROUNDED session=<id>` and the tool call returns — known-long commands are expected to be polled with `status` + `tail -s <id>` / `kill` rather than held in the foreground.
+  - `timeout_s` (default 1800s, `CE_TIMEOUT_S`) — hard timeout on the backgrounded process itself. SIGTERM, then SIGKILL after 2s. Set to 0 to disable. Must be greater than the auto-bg threshold when enabled.
 
 - **`put`** — upload a local file to an internal host. Takes `local_path` (str), `remote_path` (str), and `hostname` (str) — the latter is an internal host name (e.g. `app1`, `db2`, …). Pass `hostname="localhost"` to skip the inner ssh and write directly on the bastion. Pass `user` (str) to override the SSH login on the inner hop (e.g. `user="admin"` for macOS nodes); defaults to the bastion's `ssh_config`. Streams bytes through SSH stdin (`cat > file` on the remote end) so the payload is binary-safe and never staged on the bastion. Foreground only — never auto-backgrounds. Honors `timeout_s` (default 1800s, `CE_TIMEOUT_S`; set to 0 to disable) as a hard timeout. Returns a status line:
   - `OK bytes=N -> <host>:<path> duration=X.Xs` on success
@@ -50,9 +50,9 @@ Exposes six tools:
 
 - **`tail`** — render the tail of the JSONL log (see [Logging](#logging)) as a human-readable transcript. Takes `tail_lines` (default 50) and an optional `session` filter. Useful for inspecting what just ran, recovering output that was truncated in a `run` result, or watching a backgrounded session.
 
-- **`status`** — list or inspect backgrounded runs. With no argument, lists all active sessions (session_id, target_host, command, elapsed, line count, hard-timeout countdown). With a `session_id`, shows detailed state for that session including whether the process is still running or has exited.
+- **`status`** — list or inspect backgrounded runs **owned by the caller's MCP session** (filtered by the caller's `_meta.threadId`, falling back to the `mcp-session-id` header). With no argument, lists all active sessions (session_id, target_host, command, elapsed, line count, hard-timeout countdown). With a `session_id`, shows detailed state for that session including whether the process is still running or has exited. Other clients' sessions are not enumerable — the bearer token alone authenticates the connection, but per-client visibility is scoped by the caller's stable identifier.
 
-- **`kill`** — terminate a backgrounded run by `session_id`. SIGTERM, then SIGKILL after 2s. Returns how many lines of output were captured before the kill.
+- **`kill`** — terminate a backgrounded run by `session_id`. Only kills sessions owned by the caller's MCP session; attempts on other clients' sessions return `ERROR: session not found`. SIGTERM, then SIGKILL after 2s. Returns how many lines of output were captured before the kill.
 
 ## Transport
 
@@ -159,7 +159,7 @@ run(command="cd /etc/ansible && ./run-playbook.sh admin/install-ycluster-package
 run(command="cd /etc/ansible && ansible-playbook admin/install-ycluster-package.yml --limit s3", hostname="localhost")
 ```
 
-`./run-playbook.sh` sources `env.sh` (vault password + LC_ALL) and is the preferred entry point per the project's AGENTS.md. Playbooks likely to exceed 30s should bump `auto_bg_after_s` (e.g. `auto_bg_after_s: 120`) or set it to 0 to disable auto-bg mid-deploy. `timeout_s` defaults to 1800s — fine for most deploys.
+`./run-playbook.sh` sources `env.sh` (vault password + LC_ALL) and is the preferred entry point per the project's AGENTS.md. Playbooks that legitimately run longer than 10s will be returned as `BACKGROUNDED session=<id>`; poll with `tail -s <id>` until the end event lands, or `status` to see the hard-timeout countdown. To hold a specific deploy in the foreground instead, restart the daemon with `CE_AUTO_BG_TIMEOUT_S=120` (or whatever fits). `timeout_s` defaults to 1800s — fine for most deploys.
 
 ## Configuration (env vars)
 
@@ -172,10 +172,11 @@ run(command="cd /etc/ansible && ansible-playbook admin/install-ycluster-package.
 | `CE_BEARER_PATH` | `~/.config/cluster-exec/bearer` | Bearer token file (mode 0600). Created on first start; survives restarts. |
 | `CE_ENVRC` | `$REPO/.envrc` | `.envrc` file that `--start` auto-appends `export CE_BEARER=…` to. |
 | `CE_LOG_PATH` | `tmp/cluster.log` | JSONL log path (relative to MCP server CWD). |
-| `CE_TIMEOUT_S` | `1800` | Per-call hard timeout in seconds. Set to 0 to disable. |
-| `CE_AUTO_BG_TIMEOUT_S` | `30` | Per-call soft auto-backgrounding timeout in seconds. Set to 0 to disable. Must be less than `CE_TIMEOUT_S` when both are enabled. |
+| `CE_TIMEOUT_S` | `1800` | Per-call hard timeout in seconds on backgrounded runs (SIGTERM, then SIGKILL after 2s). Set to 0 to disable. Must be greater than `CE_AUTO_BG_TIMEOUT_S` when enabled. |
+| `CE_AUTO_BG_TIMEOUT_S` | `10` | Auto-bg threshold in seconds — `run` tool calls return with `BACKGROUNDED session=<id>` after this many seconds of foreground time. Bump (e.g. `120`) for known-long commands; set to 0 to disable auto-backgrounding (foreground blocks until `timeout_s`). |
 | `CE_PROGRESS_INTERVAL_S` | `1.0` | Progress notification cadence in seconds. |
 | `CE_PROGRESS_TAIL_LINES` | `50` | Lines of cumulative tail shown in each progress notification. |
+| `CE_CAPTURE_REQUESTS` | unset | Debug-only: when set to a file path, every incoming HTTP request is appended to that path as one JSONL line (ts, method, path, headers, body). The bearer token is redacted to `Bearer ***` before write; codex `x-codex-turn-metadata.workspaces[*].associated_remote_urls` is reduced to hostname only and `latest_git_commit_hash` to `***`. Use to inspect what an MCP client actually sends on the wire. |
 
 ## Development
 

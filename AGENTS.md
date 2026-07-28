@@ -300,17 +300,40 @@ directly.
 Full stdout/stderr is logged (untruncated) to `./tmp/cluster.log` as JSONL
 events; the LLM-facing tool result returns only the head/tail (defaults
 25/25) of the chronologically merged stream with `[stderr]` tags. Progress
-notifications tick every second while a long command runs. **Two-tier
-timeout model**: soft `auto_bg_after_s` (default 30s)
-auto-backgrounds a long-running command and returns
-`BACKGROUNDED session=<id>` for polling via `tail -s <id>`; hard
-`timeout_s` (default 1800s) is the backstop that SIGTERMs
-the process. Both overridable per call on `run` — set `timeout_s` greater
-than `auto_bg_after_s`. If the HTTP client disconnects mid-`run` (e.g.
-the turn is interrupted), the SSH proc is registered as a backgrounded
-session (`status` no-args / `tail -s <id>` to recover, `kill` to stop)
-instead of being orphaned — the MCP response is already gone, so the
-session ID won't appear in your UI.
+notifications tick every second while a long command runs. **Foreground
+is capped at 10s by default** (`CE_AUTO_BG_TIMEOUT_S`) — the `run` tool
+call always returns within 10s, either with the result or with
+`BACKGROUNDED session=<id>`. Bump the env var (e.g.
+`CE_AUTO_BG_TIMEOUT_S=120 bash mcp/cluster-exec/cedaemon --start`) for
+deployments where a known-long command should hold the foreground
+rather than auto-backgrounding; the default workflow is to poll with
+`status` + `tail -s <id>` / `kill` after it backgrounds. The hard
+backstop on the backgrounded process itself is `timeout_s` (default
+1800s, `CE_TIMEOUT_S`; SIGTERM, then SIGKILL after 2s). If the HTTP
+client disconnects mid-`run` (e.g. the turn is interrupted), the SSH
+proc is also registered as a backgrounded session — the response is
+gone, so find it with `status` (no args) or `tail -s <id>` and recover
+with `kill`.
+
+`status` and `kill` only see the caller's own backgrounded runs (filtered
+by the caller's `_meta.threadId`, falling back to the `mcp-session-id`
+header); other clients' sessions are not enumerable. The bearer token
+alone authenticates the connection, but per-client visibility is scoped
+by the caller's stable identifier — one client cannot `status` or `kill`
+another's runs. The JSONL log remains the source of truth for everything
+(read-only via `tail -s <id>`).
+
+`_meta.threadId` is the conventional MCP slot for a stable per-process
+session identifier — codex puts its thread ID there on every `tools/call`,
+so the principal survives a transport-level reconnect within the same
+codex invocation. Clients that don't populate `_meta.threadId` (e.g.
+opencode) fall back to the `mcp-session-id` header, which is
+**per-connection** — the streamable-HTTP client reuses the same ID
+across reconnects within one process, but the server's session manager
+can expire it independently, and a fresh process invocation (opencode
+restart, codex resume) gets a new ID and cannot see prior orphans.
+Either way, orphans are still readable via `tail -s <id>` and get
+cleaned up by the hard `timeout_s` watcher or by `cedaemon --stop`.
 
 **`hostname="localhost"` shortcut**: use it for anything
 that should run on the bastion itself, e.g. ansible playbooks:

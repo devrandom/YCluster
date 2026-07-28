@@ -51,6 +51,17 @@ class SchemaLockDownTests(unittest.TestCase):
             )
         self.assertEqual(cm.exception.errors()[0]["type"], "extra_forbidden")
 
+    def test_run_tool_no_longer_accepts_auto_bg_after_s(self) -> None:
+        """`auto_bg_after_s` was removed when the foreground cap was
+        fixed at 10s. Rejecting it loudly prevents silent no-ops if a
+        caller (or an older prompt) still passes it."""
+        run_tool = SERVER._tool_manager.get_tool("run")
+        with self.assertRaises(ValidationError) as cm:
+            run_tool.fn_metadata.arg_model.model_validate(
+                {"command": "ls", "hostname": "s1", "auto_bg_after_s": 0}
+            )
+        self.assertEqual(cm.exception.errors()[0]["type"], "extra_forbidden")
+
     def test_run_tool_still_accepts_valid_arguments(self) -> None:
         run_tool = SERVER._tool_manager.get_tool("run")
         parsed = run_tool.fn_metadata.arg_model.model_validate(

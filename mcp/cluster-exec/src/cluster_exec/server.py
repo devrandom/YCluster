@@ -1,8 +1,10 @@
 import asyncio
+import json
 import os
 import secrets
 import signal
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.auth.settings import AuthSettings
@@ -85,26 +87,32 @@ SERVER = MCPServer(
         "./tmp/cluster.log) as a human-readable transcript; `status` "
         "reports the state of backgrounded runs (list all, or detail by "
         "session_id); `kill` terminates a backgrounded run by session_id. "
-        "`run` auto-backgrounds after `auto_bg_after_s` (default 30s; "
-        "set to 0 to disable) and hard-kills after `timeout_s` (default "
-        "1800s). Backgrounded runs return `BACKGROUNDED session=<id>` "
-        "\u2014 poll with `tail -s <id>`, inspect with `status`, "
-        "terminate with `kill`. If the HTTP client disconnects mid-`run` "
-        "(e.g. the turn is interrupted), the SSH proc is also registered "
-        "as a backgrounded session \u2014 the response is gone, so find it "
-        "with `status` (no args) and recover with `tail`/`kill`. Full `run` output is logged to the same "
-        "JSONL file; the returned text is the head/tail-truncated merged "
-        "stream with `[stderr]` tags on stderr lines. `put` and `get` "
-        "are foreground only (no auto-backgrounding) and honor the same "
-        "hard `timeout_s` (default 1800s; set to 0 to disable). All three "
-        "exec tools accept `hostname=\"localhost\"` to skip the inner "
-        "ssh and run directly on the bastion (e.g. for ansible "
-        "playbooks via `cd /etc/ansible && ./run-playbook.sh ...`), and "
-        "accept `user` to force a specific SSH login on the target "
-        "(e.g. `user=\"admin\"` for macOS nodes where root login is "
-        "denied). The server requires HTTP Bearer authentication on "
-        "every request; the token lives in the file logged at startup "
-        "(default `~/.config/cluster-exec/bearer`, mode 0600)."
+        "`run` auto-backgrounds after 10s (default, override via "
+        "`CE_AUTO_BG_TIMEOUT_S` for known-long commands) and "
+        "hard-kills after `timeout_s` (default 1800s, `CE_TIMEOUT_S`; "
+        "set to 0 to disable). Backgrounded runs return `BACKGROUNDED "
+        "session=<id>` \u2014 poll with `tail -s <id>`, inspect with "
+        "`status`, terminate with `kill`. `status` and `kill` only see "
+        "the caller's own backgrounded runs (filtered by the caller's "
+        "`_meta.threadId`, falling back to the `mcp-session-id` header); "
+        "other clients' runs are not enumerable. If the HTTP client "
+        "disconnects mid-`run` (e.g. the turn is interrupted), the SSH "
+        "proc is also registered as a backgrounded session \u2014 the "
+        "response is gone, so find it with `status` (no args) and "
+        "recover with `tail`/`kill`. Full "
+        "`run` output is logged to the same JSONL file; the returned "
+        "text is the head/tail-truncated merged stream with `[stderr]` "
+        "tags on stderr lines. `put` and `get` are foreground only (no "
+        "auto-backgrounding) and honor the same hard `timeout_s` (default "
+        "1800s; set to 0 to disable). All three exec tools accept "
+        "`hostname=\"localhost\"` to skip the inner ssh and run directly "
+        "on the bastion (e.g. for ansible playbooks via `cd /etc/ansible "
+        "&& ./run-playbook.sh ...`), and accept `user` to force a "
+        "specific SSH login on the target (e.g. `user=\"admin\"` for "
+        "macOS nodes where root login is denied). The server requires "
+        "HTTP Bearer authentication on every request; the token lives in "
+        "the file logged at startup (default `~/.config/cluster-exec/"
+        "bearer`, mode 0600)."
     ),
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(_URL_BASE),
@@ -117,9 +125,148 @@ SERVER = MCPServer(
 _LOG_PATH = Path(os.environ.get("CE_LOG_PATH", "tmp/cluster.log"))
 _BASTION = os.environ.get("CE_BASTION")
 _TIMEOUT_S = _env_float("CE_TIMEOUT_S", 1800.0)
-_AUTO_BG_S = _env_float("CE_AUTO_BG_TIMEOUT_S", 30.0)
+# Foreground cap on the `run` tool call — 10s by default, overridable via
+# `CE_AUTO_BG_TIMEOUT_S` for deployments where a known-long command
+# (ansible deploy, big journalctl dump) should hold the foreground
+# rather than auto-backgrounding. The MCP SDK's streamable-HTTP client
+# keeps the same `mcp-session-id` across reconnects within one process,
+# so a long-running call that survives a network blip can still be polled
+# by the same client; setting this higher is mainly useful when the agent
+# knows up front that a particular call will exceed 10s and would rather
+# wait than deal with the BACKGROUNDED dance.
+_AUTO_BG_S = _env_float("CE_AUTO_BG_TIMEOUT_S", 10.0)
 _PROGRESS_INTERVAL_S = _env_float("CE_PROGRESS_INTERVAL_S", 1.0)
 _PROGRESS_TAIL_LINES = _env_int("CE_PROGRESS_TAIL_LINES", 50)
+
+
+# Redaction helpers used by the debug-only request capture middleware
+# (`CE_CAPTURE_REQUESTS=<path>` in `main()`). The capture log on disk
+# must not leak the bearer token or project-specific details like git
+# remote URLs or commit hashes — those go through `request_capture`
+# below. Pure functions so they're easy to unit-test without spinning
+# up a starlette app.
+
+_SENSITIVE_HEADERS = {"authorization"}
+
+
+def _redact_authorization(headers: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Replace `Authorization` header values with `Bearer ***`.
+
+    Header lookups are case-insensitive on the wire, but Starlette's
+    `request.headers.items()` yields the original-case names, so we
+    match case-insensitively here to be safe.
+    """
+    return [(k, "Bearer ***" if k.lower() in _SENSITIVE_HEADERS else v) for k, v in headers]
+
+
+def _scrub_git_remote(url: object) -> object:
+    """Reduce a git remote URL to just the hostname.
+
+    Accepts `user@host:path`, `https://host/...`, `ssh://user@host/...`,
+    etc., and returns the bare hostname so the on-disk capture doesn't
+    leak project identity or repo paths. Non-strings pass through.
+    """
+    if not isinstance(url, str):
+        return url
+    tail = url.split("@", 1)[-1]  # strip user@
+    head = tail.split("://", 1)[-1]  # strip scheme://
+    host = head.split(":", 1)[0].split("/", 1)[0]
+    return host
+
+
+def _scrub_body_json(obj: object) -> object:
+    """Walk a parsed JSON body and redact known sensitive fields.
+
+    Currently handles codex's `x-codex-turn-metadata.workspaces[*]`:
+    reduces `associated_remote_urls` to hostname only and replaces
+    `latest_git_commit_hash` with `***`. Unknown shapes pass through.
+    """
+    if not isinstance(obj, dict):
+        return obj
+    try:
+        turn_md = obj.get("params", {}).get("_meta", {}).get("x-codex-turn-metadata")  # type: ignore[union-attr]
+    except AttributeError:
+        turn_md = None
+    if isinstance(turn_md, dict):
+        workspaces = turn_md.get("workspaces")
+        if isinstance(workspaces, dict):
+            for ws in workspaces.values():
+                if not isinstance(ws, dict):
+                    continue
+                remote = ws.get("associated_remote_urls")
+                if isinstance(remote, dict):
+                    for k, url in list(remote.items()):
+                        remote[k] = _scrub_git_remote(url)
+                ws["latest_git_commit_hash"] = "***"
+    return obj
+
+
+def _redact_body_text(text: str) -> str:
+    """Try to parse `text` as JSON and redact sensitive fields.
+
+    Non-JSON bodies (e.g. plain GET requests) pass through unchanged.
+    Returns the redacted JSON re-serialised in the original form so
+    the capture log still reads naturally.
+    """
+    if not text:
+        return text
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return text
+    obj = _scrub_body_json(obj)
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _principal_from_ctx(ctx: Context) -> str | None:
+    """Return a stable identifier for the calling client.
+
+    Used as the `principal` on backgrounded sessions so `status` and `kill`
+    only see the caller's own runs. Preference order:
+
+      1. `params._meta.threadId` from the JSON-RPC request body. The MCP
+         `_meta` object is the conventional slot for protocol-level
+         metadata; clients that want a stable session identifier across
+         reconnects within one process (e.g. codex, which sends its
+         thread ID here on every `tools/call`) populate `threadId` at
+         the top of `_meta`. This survives a transport-level reconnect
+         where the `mcp-session-id` header would rotate.
+      2. `mcp-session-id` header. Transport-level identifier — the same
+         client reuses it across reconnects within one process but the
+         server's session manager can expire it independently. Falls
+         back to this for clients that don't populate `_meta`.
+
+    Returns `None` if neither is present — those sessions are still
+    recorded but won't surface in any filtered listing.
+    """
+    try:
+        request_ctx = ctx.request_context
+    except (AttributeError, ValueError):
+        return None
+
+    # 1. Prefer the MCP `_meta.threadId`. FastMCP exposes the request's
+    #    `_meta` object as `request_context.meta`; it's a TypedDict with
+    #    extra_items=Any, so non-standard keys round-trip here.
+    meta = getattr(request_ctx, "meta", None)
+    if meta is not None:
+        try:
+            thread_id = meta.get("threadId")
+        except Exception:
+            thread_id = None
+        if thread_id:
+            return str(thread_id)
+
+    # 2. Fall back to the transport-level `mcp-session-id` header.
+    request = getattr(request_ctx, "request", None)
+    if request is None:
+        return None
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    try:
+        return headers.get("mcp-session-id")
+    except Exception:
+        return None
 
 
 @SERVER.tool(
@@ -130,22 +277,21 @@ _PROGRESS_TAIL_LINES = _env_int("CE_PROGRESS_TAIL_LINES", 50)
         "`head_lines` and last `tail_lines` of merged stdout/stderr "
         "(defaults 25/25), prefixed with a status line. Full output is "
         "logged to ./tmp/cluster.log as JSONL. "
-        "Two-tier timeouts: soft `auto_bg_after_s` (default 30s, set to 0 "
-        "to disable) transitions the run to the background and returns "
-        "`BACKGROUNDED session=<id>` for polling via `tail -s <id>`; "
-        "hard `timeout_s` (default 1800s) SIGTERMs the process. Both "
-        "overridable per call \u2014 set `timeout_s` greater than "
-        "`auto_bg_after_s` (or both to 0). If the HTTP client disconnects "
-        "mid-run (e.g. the turn is interrupted), the proc is registered as "
-        "a backgrounded session \u2014 the response is already gone, so "
-        "discover it with `status` (no args) or `tail -s <id>`, terminate "
-        "it with `kill`. Pass `hostname=\"localhost\"` "
-        "to skip the inner ssh and run the command directly on the "
-        "bastion (useful for ansible playbooks via "
-        "`cd /etc/ansible && ./run-playbook.sh ...`). Pass `user` to "
-        "force a specific SSH login on the target (e.g. `user=\"admin\"` "
-        "for macOS nodes where root login is denied); defaults to "
-        "whatever the bastion's ssh_config says for the host."
+        "`run` auto-backgrounds after 10s (default, override via "
+        "`CE_AUTO_BG_TIMEOUT_S` for known-long commands) and returns "
+        "`BACKGROUNDED session=<id>` for polling via `tail -s <id>`. "
+        "Hard `timeout_s` (default 1800s, `CE_TIMEOUT_S`) SIGTERMs the "
+        "process if it hasn't exited by then. If the HTTP client "
+        "disconnects mid-run (e.g. the turn is interrupted), the proc "
+        "is also registered as a backgrounded session \u2014 the "
+        "response is already gone, so discover it with `status` (no args) "
+        "or `tail -s <id>`, terminate it with `kill`. Pass "
+        "`hostname=\"localhost\"` to skip the inner ssh and run the "
+        "command directly on the bastion (useful for ansible playbooks "
+        "via `cd /etc/ansible && ./run-playbook.sh ...`). Pass `user` "
+        "to force a specific SSH login on the target (e.g. "
+        "`user=\"admin\"` for macOS nodes where root login is denied); "
+        "defaults to whatever the bastion's ssh_config says for the host."
     ),
 )
 async def run(
@@ -153,7 +299,6 @@ async def run(
     hostname: str,
     head_lines: int = 25,
     tail_lines: int = 25,
-    auto_bg_after_s: float = _AUTO_BG_S,
     timeout_s: float = _TIMEOUT_S,
     user: str | None = None,
     ctx: Context = None,  # type: ignore[assignment]
@@ -169,21 +314,20 @@ async def run(
                 text="ERROR: CE_BASTION is not set. Export it before starting opencode.",
             )
         ]
-    if auto_bg_after_s < 0:
-        return [TextContent(type="text", text=f"ERROR: auto_bg_after_s must be non-negative, got {auto_bg_after_s}")]
     if timeout_s < 0:
         return [TextContent(type="text", text=f"ERROR: timeout_s must be non-negative, got {timeout_s}")]
-    if auto_bg_after_s > 0 and timeout_s > 0 and timeout_s <= auto_bg_after_s:
+    if timeout_s > 0 and timeout_s <= _AUTO_BG_S:
         return [
             TextContent(
                 type="text",
-                text=f"ERROR: timeout_s ({timeout_s}) must be greater than auto_bg_after_s ({auto_bg_after_s})",
+                text=f"ERROR: timeout_s ({timeout_s}) must be greater than the auto-bg threshold ({_AUTO_BG_S}s; CE_AUTO_BG_TIMEOUT_S)",
             )
         ]
 
     log.init(_LOG_PATH)
     session_id = secrets.token_hex(4)
     cwd = os.getcwd()
+    principal = _principal_from_ctx(ctx)
 
     cancel = asyncio.Event()
 
@@ -206,7 +350,7 @@ async def run(
             command=command,
             session_id=session_id,
             timeout_s=timeout_s,
-            auto_bg_after_s=auto_bg_after_s,
+            auto_bg_after_s=_AUTO_BG_S,
             progress_interval_s=_PROGRESS_INTERVAL_S,
             progress_tail_lines=_PROGRESS_TAIL_LINES,
             head_lines=head_lines,
@@ -215,6 +359,7 @@ async def run(
             user=user,
             on_progress=report,
             cancel=cancel,
+            principal=principal,
         )
     finally:
         bridge_task.cancel()
@@ -429,19 +574,25 @@ async def tail(
     name="kill",
     description=(
         "Terminate a backgrounded run by its `session_id` (the value "
-        "returned by the `run` tool when it auto-backgrounded). Sends "
-        "SIGTERM, escalates to SIGKILL after 2s. Returns how many lines "
-        "of output were captured before the kill \u2014 fetch the full "
-        "transcript with `tail -s <session_id>`."
+        "returned by the `run` tool when it auto-backgrounded). Only "
+        "kills sessions owned by the caller's MCP session (filtered by "
+        "`_meta.threadId`, falling back to `mcp-session-id`) \u2014 "
+        "attempts on other clients' sessions "
+        "return `ERROR: session not found` so they cannot be enumerated. "
+        "Sends SIGTERM, escalates to SIGKILL after 2s. Returns how many "
+        "lines of output were captured before the kill \u2014 fetch the "
+        "full transcript with `tail -s <session_id>`."
     ),
 )
 async def kill(
     session_id: str,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     if not session_id:
         return [TextContent(type="text", text="ERROR: session_id must not be empty")]
     log.init(_LOG_PATH)
-    bg = exec.get_backgrounded(session_id)
+    principal = _principal_from_ctx(ctx)
+    bg = exec.get_backgrounded(session_id, principal=principal)
     if bg is None:
         return [
             TextContent(
@@ -450,7 +601,7 @@ async def kill(
             )
         ]
     started = bg.started
-    killed = exec.kill_backgrounded(session_id)
+    killed = exec.kill_backgrounded(session_id, principal=principal)
     if not killed:
         return [TextContent(type="text", text=f"ERROR: failed to kill session {session_id!r}")]
     line_count = sum(
@@ -484,22 +635,27 @@ def _session_state(bg, log_path: Path) -> str:
 @SERVER.tool(
     name="status",
     description=(
-        "Report the state of backgrounded runs. With no argument, lists all "
-        "active sessions (session_id, target_host, command, elapsed, lines, "
-        "hard-timeout countdown). With a `session_id`, shows detailed state "
-        "for that session including whether the process is still running "
-        "or has exited, line count so far, and remaining time before the "
-        "hard timeout kills it."
+        "Report the state of backgrounded runs owned by the caller's MCP "
+        "session (filtered by `_meta.threadId`, falling back to "
+        "`mcp-session-id`) \u2014 other clients' "
+        "sessions are not enumerable. With no argument, lists all active "
+        "sessions (session_id, target_host, command, elapsed, lines, "
+        "hard-timeout countdown). With a `session_id`, shows detailed "
+        "state for that session including whether the process is still "
+        "running or has exited, line count so far, and remaining time "
+        "before the hard timeout kills it."
     ),
 )
 async def status(
     session_id: str | None = None,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     log.init(_LOG_PATH)
+    principal = _principal_from_ctx(ctx)
     if session_id is not None and not session_id:
         return [TextContent(type="text", text="ERROR: session_id must not be empty when provided")]
     if session_id:
-        bg = exec.get_backgrounded(session_id)
+        bg = exec.get_backgrounded(session_id, principal=principal)
         if bg is None:
             return [
                 TextContent(
@@ -512,13 +668,13 @@ async def status(
             f"timeout_s={bg.timeout_s} {_session_state(bg, _LOG_PATH)}"
         )
     else:
-        sessions = exec.list_backgrounded()
+        sessions = exec.list_backgrounded(principal=principal)
         if not sessions:
             text = "no backgrounded sessions"
         else:
             lines = [f"{len(sessions)} backgrounded session(s):"]
             for sid in sessions:
-                bg_item = exec.get_backgrounded(sid)
+                bg_item = exec.get_backgrounded(sid, principal=principal)
                 if bg_item is None:
                     continue
                 lines.append(
@@ -535,6 +691,48 @@ def main() -> None:
     path = os.environ.get("CE_HTTP_PATH", "/mcp")
     print(f"bearer token file: {_BEARER_PATH} (mode 0600)", flush=True)
     print(f"listening: http://{host}:{port}{path}", flush=True)
+
+    capture_path = os.environ.get("CE_CAPTURE_REQUESTS")
+    if capture_path:
+        # Debug-only: log every incoming HTTP request (method, path,
+        # headers, body) to a JSONL file. Used to observe what clients
+        # actually send on the wire — set CE_CAPTURE_REQUESTS=<path>
+        # (e.g. `./tmp/cluster-exec-requests.jsonl`) before --start.
+        # Sensitive fields are redacted before write: bearer tokens
+        # become `Bearer ***`, and codex `x-codex-turn-metadata.workspaces`
+        # has git remote URLs reduced to hostname and commit hashes
+        # replaced with `***`.
+        import uvicorn
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        class _RequestCapture(BaseHTTPMiddleware):
+            def __init__(self, app, path: str) -> None:
+                super().__init__(app)
+                self._path = path
+
+            async def dispatch(self, request: Request, call_next):
+                body_bytes = await request.body()
+                entry = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "method": request.method,
+                    "path": request.url.path,
+                    "query": request.url.query,
+                    "headers": _redact_authorization(list(request.headers.items())),
+                    "body": _redact_body_text(body_bytes.decode("utf-8", errors="replace")),
+                }
+                with open(self._path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                return await call_next(request)
+
+        starlette_app = SERVER.streamable_http_app(
+            streamable_http_path=path,
+            host=host,
+        )
+        starlette_app.add_middleware(_RequestCapture, path=capture_path)
+        print(f"capturing requests to {capture_path}", flush=True)
+        uvicorn.run(starlette_app, host=host, port=port, log_level="warning")
+        return
+
     SERVER.run(transport="streamable-http", host=host, port=port, streamable_http_path=path)
 
 
