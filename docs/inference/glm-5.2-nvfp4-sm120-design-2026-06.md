@@ -453,12 +453,15 @@ Doesn't Work to 641 tok/s" — is **641 aggregate at batch=128, where per-reques
 is only 7.6 t/s**; its **single-stream (batch=1) was 33 t/s** (TP=2/PP=3, dense
 attn, `--enforce-eager`, no MTP) — *slower than our 39.5*. So the real
 single-stream band on 6–8× RTX 6000 Pro for GLM-5.x is roughly **33–81 t/s on
-NVFP4** (our 39.5 sits in it) and **80–103 t/s on EXL3 TR3 3-bit** (validated
-2026-07-27 by 0xSero on the same hardware — see the provenance above). The
-100+ t/s ceiling is reachable, but only on the EXL3 path — not via NVFP4
-levers. Treat **~80–103 t/s single-stream as the realistic ceiling on this
-hardware with the EXL3 TR3 recipe**; if the actual need is aggregate
-throughput, raise concurrency instead (separate axis, untested here).
+NVFP4** (our 39.5 sits in it) and **80–103 t/s on EXL3 TR3 3-bit with MTP-3**
+(validated 2026-07-27 by 0xSero on the same hardware — see the provenance
+above). **EXL3 TR3 without MTP is ~28–31 t/s on our box (measured 2026-07-28)**,
+which is *below* NVFP4, so the EXL3 win requires the MTP path that doesn't work
+on our image (see the EXL3 TR3 attempt section below). The 100+ t/s ceiling is
+reachable, but only on the EXL3 path with MTP. Treat **~80–103 t/s single-stream
+as the realistic ceiling on this hardware, contingent on getting MTP working**;
+if the actual need is aggregate throughput, raise concurrency instead (separate
+axis, untested here).
 
 The gap between our 39.5 and the realistic single-stream ceiling reduces mostly to
 **an efficient spec-decode draft**, plus one config lever (DCP), plus a different
@@ -597,7 +600,24 @@ moe_backend=b12x` (and the missing b12x env vars from the bundled compose —
 `VLLM_USE_V2_MODEL_RUNNER=1`, the VLLM_PCIE_ONESHOT_* / VLLM_CPP_AR_* / DMA / NCCL
 knobs — are not yet on our recipe but didn't gate the base path; add them for
 full throughput parity). Weights load via NFS in ~580 s (81 × 7.5 s/shard);
-warmup + cudagraph capture follow. Full throughput not yet measured on our box.
+warmup + cudagraph capture follow. Smoke-tested live on nv4 (2026-07-28,
+`incus exec dr-g2` → `:9214`): `Application startup complete`, GPU KV cache
+1,352,960 tokens (~2.58× concurrency at 524k), per-GPU profile 76.09 GiB
+weights / 2.97 GiB peak activation / 0.24 GiB CUDAGraph / 11.49 GiB KV cache
+/ 93.79 GiB free of 94.97 GiB total, cuda graphs captured in ~26 s for 8
+PIECEWISE + 2 FULL sizes. Measured decode throughput (single-stream,
+`:9214` direct, `reasoning_effort=high` default):
+
+| prompt | max_tokens | tok/s | content emitted |
+|---|---:|---:|---|
+| "What is 2+2?" | 600 | **28.9** | yes — `"2 + 2 = 4"` with reasoning, finish=stop, 67 tokens in 2.32 s |
+| "Write a haiku about a cat." | 200 | 30.8 | no — 200 reasoning tokens, finish=length |
+| "Hello" | 150 | 30.3 | no — 150 reasoning tokens, finish=length |
+
+Tokens-per-second includes reasoning + content together (CoT mode by default).
+**~28–31 tok/s sustained** on this hardware without MTP — comparable to but
+slightly below our NVFP4 PP=2×TP=4 (39.5 t/s). Confirms the throughput analysis
+below.
 
 **MTP path is a dead end on our image build — three launch attempts, all failed
 at worker `load_model`:** the MTP draft is `DeepSeekMTPModel`
@@ -619,12 +639,12 @@ they're running has a patch (likely a custom B12X_MLA_SPARSE that accepts the
 DeepSeek block_size, or an additional MLA backend in the `cuda.py:449` selector)
 that isn't in our `vllm0c79e41` build. We don't have that patch and can't easily
 rebuild the image — leaving MTP off and getting base EXL3 TR3 throughput is the
-realistic outcome here. The throughput ceiling without MTP is roughly **half**
-of 0xSero's validated 81–103 t/s, i.e. ~40–50 t/s sustained C1 — comparable to
-our current NVFP4 PP=2×TP=4 (39.5 t/s), so **EXL3 TR3 with MTP off is not a
-meaningful win over NVFP4 on this box today**. To get the win we need either:
-0xSero's image patch level (pull a newer tagged image if available), or a
-custom vLLM build with a draft-compatible MLA backend.
+realistic outcome here. **Measured 2026-07-28**: EXL3 TR3 without MTP is
+**~28–31 t/s sustained single-stream on our box**, which is *worse than*
+NVFP4 PP=2×TP=4 (39.5 t/s) — **EXL3 TR3 with MTP off is a regression, not a
+win**. To get the win we need either: 0xSero's image patch level (pull a newer
+tagged image if available), or a custom vLLM build with a draft-compatible MLA
+backend.
 
 The launched-without-MTP recipe lives at `tmp/glm52-exl3-tr3-vm-start.sh`
 (NFS-mounted into dr-g2 at `/mnt/nv4-bin/`); the original nv4-host-CDI attempt
