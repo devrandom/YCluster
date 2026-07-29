@@ -133,6 +133,28 @@ ycluster user disable alice@x
 ycluster user enable  alice@x
 ```
 
+## Per-user metadata
+
+Three fields are surfaced on the accounts table (`/admin/users`):
+
+- **Created** — read-only, from authentik's `date_joined`.
+- **Project** — free-text, admin-editable. Useful for billing/cost
+  allocation.
+- **Notes** — free-text (multi-line), admin-editable. Internal admin
+  notes about the account.
+
+Both writable fields live in authentik's per-user `attributes` JSON
+(under `project_name` and `admin_notes`). Edit via the Edit… action in
+the row menu, or from the CLI:
+
+```
+ycluster user edit alice@x --project "acme-demo" --notes "VIP customer"
+ycluster user edit alice@x --name "Alice Doe"     # name still editable too
+```
+
+Visible to anyone who can view `/admin/users` (admins and managers —
+same scope as the rest of the page).
+
 ## Internal space (operators)
 
 Cluster-internal callers (`admin.xc`, direct `:12723`) carry no

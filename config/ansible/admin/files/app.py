@@ -3232,8 +3232,14 @@ def users_action():
             msg = authentik_manager.set_active(email, active=(action == 'activate'))
             return jsonify({'ok': True, 'message': msg})
         if action == 'edit':
-            name = (data.get('name') or '').strip()
-            msg = authentik_manager.update_user(email, name=name or None)
+            # `data.get(k)` returns None when the key is absent, which
+            # update_user() treats as "skip this field" — so omitting a
+            # field from the request leaves it unchanged. Passing '' clears.
+            msg = authentik_manager.update_user(
+                email,
+                name=(data.get('name') or '').strip() or None,
+                project_name=data.get('project_name'),
+                admin_notes=data.get('admin_notes'))
             return jsonify({'ok': True, 'message': msg})
         return jsonify({'error': 'unknown action'}), 400
     except Exception as e:

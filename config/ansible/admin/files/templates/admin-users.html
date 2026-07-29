@@ -51,8 +51,9 @@
              box-shadow: 0 20px 50px rgba(0,0,0,0.25); }
     .modal h3 { margin: 0 0 1rem; font-size: 1rem; }
     .modal label { display: block; font-size: 0.8rem; color: #555; margin-bottom: 0.75rem; }
-    .modal input { display: block; width: 100%; margin-top: 0.25rem; padding: 0.4rem 0.5rem;
-                   border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box; }
+    .modal input, .modal textarea { display: block; width: 100%; margin-top: 0.25rem; padding: 0.4rem 0.5rem;
+                   border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box;
+                   font-family: inherit; resize: vertical; }
     .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.5rem; }
   </style>
 </head>
@@ -92,7 +93,7 @@
   <h2>Accounts</h2>
   <template x-if="!loading && users.length === 0"><p class="empty">No accounts</p></template>
   <table x-show="users.length > 0">
-    <thead><tr><th>Email</th><th>Name</th><th></th><th>Last login</th><template x-if="isAdmin"><th>Actions</th></template></tr></thead>
+    <thead><tr><th>Email</th><th>Name</th><th></th><th>Project</th><th>Notes</th><th>Created</th><th>Last login</th><template x-if="isAdmin"><th>Actions</th></template></tr></thead>
     <tbody>
       <template x-for="u in users" :key="u.email">
         <tr>
@@ -104,6 +105,9 @@
             <span class="badge active" x-show="u.active">active</span>
             <span class="badge inactive" x-show="!u.active">inactive</span>
           </td>
+          <td x-text="u.project_name || ''"></td>
+          <td x-text="u.admin_notes || ''"></td>
+          <td x-text="u.date_joined ? u.date_joined.slice(0, 16).replace('T', ' ') : 'never'"></td>
           <td x-text="u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'never'"></td>
           <template x-if="isAdmin">
             <td>
@@ -119,7 +123,7 @@
                       @click="open=false; act(u.is_manager ? 'manager_remove' : 'manager_add', u.email, {}, '')"
                       x-text="u.is_manager ? 'Revoke manager' : 'Make manager'"></button></li>
                   <li><button type="button" class="menu-item"
-                      @click="open=false; editTarget = {email: u.email, name: u.name || ''}">Edit name…</button></li>
+                      @click="open=false; editTarget = {email: u.email, name: u.name || '', project_name: u.project_name || '', admin_notes: u.admin_notes || ''}">Edit…</button></li>
                   <li><button type="button" class="menu-item"
                       @click="open=false; act(u.active ? 'deactivate' : 'activate', u.email, {}, '')"
                       x-text="u.active ? 'Disable' : 'Enable'"></button></li>
@@ -162,6 +166,12 @@
         </label>
         <label>Display name
           <input type="text" x-model="editTarget.name" required>
+        </label>
+        <label>Project name
+          <input type="text" x-model="editTarget.project_name">
+        </label>
+        <label>Admin notes
+          <textarea x-model="editTarget.admin_notes" rows="3"></textarea>
         </label>
         <div class="modal-actions">
           <button type="button" class="minor" @click="editTarget = null">Cancel</button>
@@ -223,7 +233,10 @@
 
         saveEdit() {
           if (!this.editTarget) return
-          this.act('edit', this.editTarget.email, {name: this.editTarget.name},
+          this.act('edit', this.editTarget.email, {
+                   name: this.editTarget.name,
+                   project_name: this.editTarget.project_name,
+                   admin_notes: this.editTarget.admin_notes},
                    'Updated ' + this.editTarget.email + ':')
           this.editTarget = null
         }

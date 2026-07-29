@@ -48,6 +48,8 @@ def register_user_commands(subparsers):
         'edit', help='Update mutable fields of an existing account')
     edit_parser.add_argument('email', help='Account email')
     edit_parser.add_argument('--name', help='New display name')
+    edit_parser.add_argument('--project', help='Project name (stored in user attributes)')
+    edit_parser.add_argument('--notes', help='Admin notes (stored in user attributes)')
     edit_parser.set_defaults(func=user_edit)
 
     recovery_parser = user_subparsers.add_parser(
@@ -110,7 +112,9 @@ def user_enable(args):
 
 def user_edit(args):
     from ..utils import authentik_manager
-    print(authentik_manager.update_user(args.email, name=args.name))
+    print(authentik_manager.update_user(args.email, name=args.name,
+                                        project_name=args.project,
+                                        admin_notes=args.notes))
 
 
 def user_recovery(args):
@@ -138,13 +142,17 @@ def user_import_owui(args):
 
 def user_list(args):
     from ..utils import authentik_manager
-    fmt = "{:<40} {:<26} {:<8} {:<7} {:<7} {:<6} {}"
-    print(fmt.format('EMAIL', 'NAME', 'TYPE', 'ACTIVE', 'MANAGER', 'ADMIN', 'LAST LOGIN'))
+    fmt = "{:<40} {:<26} {:<8} {:<7} {:<7} {:<6} {:<16} {}"
+    print(fmt.format('EMAIL', 'NAME', 'TYPE', 'ACTIVE', 'MANAGER', 'ADMIN',
+                     'CREATED', 'LAST LOGIN'))
     for u in authentik_manager.users_data():
+        dj = u['date_joined'] or ''
+        created = dj[:16].replace('T', ' ') if dj else 'never'
         print(fmt.format(u['email'], u['name'], u['type'],
                          'yes' if u['active'] else 'no',
                          'yes' if u['is_manager'] else '',
                          'yes' if u['is_admin'] else '',
+                         created,
                          u['last_login'] or 'never'))
 
 

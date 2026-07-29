@@ -589,7 +589,8 @@ class ManagerRoleTests(SchedTestBase):
         from ycluster.utils import authentik_manager as am
         am.users_data = lambda: [{"email": "alice@x", "name": "Alice",
                                   "type": "internal", "active": True,
-                                  "last_login": None,
+                                  "last_login": None, "date_joined": None,
+                                  "project_name": "", "admin_notes": "",
                                   "is_admin": False, "is_manager": False}]
         am.invitations_data = lambda: []
         d = self.get("/admin/users/data", manager=True).get_json()
@@ -618,6 +619,64 @@ class ManagerRoleTests(SchedTestBase):
                           manager=True)
             self.assertEqual(r.status_code, 403,
                              f"action {action!r} should be 403 for manager")
+
+    def test_admin_edit_user_with_project_and_notes(self):
+        # Edit action forwards project_name and admin_notes through to
+        # authentik_manager.update_user(); omitting either keeps it
+        # unchanged (None means "don't touch this field").
+        from ycluster.utils import authentik_manager as am
+        captured = {}
+        am.update_user = lambda email, name=None, project_name=None, admin_notes=None: (
+            captured.update(email=email, name=name,
+                            project_name=project_name,
+                            admin_notes=admin_notes)
+            or f"updated {email}")
+        r = self.post("/admin/users/action",
+                      {"action": "edit", "email": "bob@x.org",
+                       "name": "Bob", "project_name": "demo",
+                       "admin_notes": "VIP customer"},
+                      admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured, {"email": "bob@x.org", "name": "Bob",
+                                    "project_name": "demo",
+                                    "admin_notes": "VIP customer"})
+
+    def test_admin_edit_user_omits_optional_fields(self):
+        # An edit request without project_name/admin_notes must not touch
+        # them (None = skip in update_user) — only the provided fields
+        # change.
+        from ycluster.utils import authentik_manager as am
+        captured = {}
+        am.update_user = lambda email, name=None, project_name=None, admin_notes=None: (
+            captured.update(email=email, name=name,
+                            project_name=project_name,
+                            admin_notes=admin_notes)
+            or f"updated {email}")
+        r = self.post("/admin/users/action",
+                      {"action": "edit", "email": "bob@x.org",
+                       "name": "Bob"},
+                      admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(captured["project_name"])
+        self.assertIsNone(captured["admin_notes"])
+
+    def test_users_data_includes_metadata_fields(self):
+        # users_data() (and therefore /admin/users/data) carries
+        # date_joined, project_name, admin_notes for the page to render.
+        from ycluster.utils import authentik_manager as am
+        am.users_data = lambda: [{"email": "alice@x", "name": "Alice",
+                                  "type": "internal", "active": True,
+                                  "last_login": None,
+                                  "date_joined": "2026-01-02T03:04:05Z",
+                                  "project_name": "demo",
+                                  "admin_notes": "VIP",
+                                  "is_admin": False, "is_manager": False}]
+        am.invitations_data = lambda: []
+        d = self.get("/admin/users/data", admin=True).get_json()
+        u = d["users"][0]
+        self.assertEqual(u["date_joined"], "2026-01-02T03:04:05Z")
+        self.assertEqual(u["project_name"], "demo")
+        self.assertEqual(u["admin_notes"], "VIP")
 
     # --- resources data response carries both flags ---
     def test_resources_data_flags(self):
@@ -649,7 +708,8 @@ class LoopbackGuardTests(SchedTestBase):
         self._orig_invitations_data = am.invitations_data
         am.users_data = lambda: [{"email": "alice@x", "name": "Alice",
                                   "type": "internal", "active": True,
-                                  "last_login": None,
+                                  "last_login": None, "date_joined": None,
+                                  "project_name": "", "admin_notes": "",
                                   "is_admin": False, "is_manager": False}]
         am.invitations_data = lambda: []
         # Patch inventory's etcd client too — /api/inventory reads via

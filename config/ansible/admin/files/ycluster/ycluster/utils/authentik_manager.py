@@ -201,7 +201,8 @@ def invite_user(email, name=None, days=7):
 
 def users_data():
     """Accounts as a list of dicts (email, name, type, active, last_login,
-    is_admin, is_manager), service accounts excluded."""
+    is_admin, is_manager, date_joined, project_name, admin_notes),
+    service accounts excluded."""
     api = AuthentikAPI()
     users = api.get('/core/users/', params={'page_size': 500})['results']
     rows = []
@@ -209,6 +210,7 @@ def users_data():
         if u['type'] not in ('internal', 'external'):
             continue
         group_names = [g.get('name') for g in (u.get('groups_obj') or [])]
+        attrs = u.get('attributes') or {}
         rows.append({
             'email': u['email'] or u['username'],
             'name': u['name'],
@@ -217,6 +219,9 @@ def users_data():
             'last_login': u['last_login'],
             'is_admin': ADMIN_GROUP in group_names,
             'is_manager': MANAGER_GROUP in group_names,
+            'date_joined': u['date_joined'],
+            'project_name': attrs.get('project_name') or '',
+            'admin_notes': attrs.get('admin_notes') or '',
         })
     return sorted(rows, key=lambda r: r['email'])
 
@@ -278,14 +283,26 @@ def set_active(email, active):
     return f"{'enabled' if active else 'disabled'} {email}"
 
 
-def update_user(email, name=None):
+def update_user(email, name=None, project_name=None, admin_notes=None):
     """Update mutable user fields. Only provided fields are changed;
-    a field passed as None is skipped (so CLI can pass only what was set)."""
+    a field passed as None is skipped (so CLI can pass only what was set).
+    project_name and admin_notes are stored in authentik's user attributes
+    JSON; pass '' to clear, a string to set."""
     api = AuthentikAPI()
     user = _get_user(api, email)
     payload = {}
     if name is not None:
         payload['name'] = name
+    if project_name is not None or admin_notes is not None:
+        # Read-modify-write on attributes: we only own the keys we set
+        # (project_name, admin_notes), so merging preserves anything
+        # authentik or other tools have written.
+        attrs = dict(user.get('attributes') or {})
+        if project_name is not None:
+            attrs['project_name'] = project_name
+        if admin_notes is not None:
+            attrs['admin_notes'] = admin_notes
+        payload['attributes'] = attrs
     if not payload:
         raise RuntimeError("no updates specified")
     api.patch(f"/core/users/{user['pk']}/", json=payload)
