@@ -2243,7 +2243,7 @@ def get_all_hosts():
     except Exception:
         return []
 
-def get_host_health(host_ip, timeout=2):
+def get_host_health(host_ip, timeout=5):
     """Get health status from a specific host"""
     # Every managed host (storage, compute, nvidia, nas, macos) serves its
     # own /api/health on the unified 12724 health-api port. admin-api (on
