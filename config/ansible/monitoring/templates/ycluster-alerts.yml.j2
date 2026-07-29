@@ -404,6 +404,42 @@ groups:
           summary: "smartmon textfile collector stale on {{ $labels.node }}"
           description: "smartmon.prom on {{ $labels.node }} has not been updated in over an hour — SMART metrics may be stale"
 
+      # NVMe controller detached from the PCIe bus — kernel removed
+      # the device from /sys/class/nvme/ (typically "nvme nvme0: Removing
+      # after probe failure status: -19"). The failure surfaces in two
+      # stages, both of which this alert catches:
+      #
+      #   1. Read-only remount: ext4 with default `errors=remount-ro`
+      #      calls ext4_remount(MS_RDONLY) on the first metadata I/O
+      #      error. /proc/self/mounts still shows the mount, but with
+      #      `ro` in the options. node_filesystem_readonly goes to 1.
+      #
+      #   2. Forced unmount: eventually systemd / the kernel tears
+      #      down the mount entirely, and the filesystem metrics
+      #      stop being scraped. `count by (node) (...) == 0` catches
+      #      that per-node.
+      #
+      # Both selectors carry `node!~"m.*"` to exclude macOS nodes —
+      # macOS's signed system volume mounts / read-only by design, so
+      # the readonly check is meaningless there. Other nodes (s*, c*,
+      # nv*, nas*, x*, f*) boot from a local read-write ext4 root,
+      # so `node_filesystem_readonly==1` is a genuine failure signal
+      # for them.
+      #
+      # Note: `absent()` is global — if any node has the metric, it
+      # returns empty — so it can't catch per-node disappearance.
+      # `count by (node) (...) == 0` is the per-node equivalent.
+      - alert: NVMeControllerOffline
+        expr: |
+          node_filesystem_readonly{mountpoint="/", node!~"m.*"} == 1
+          or count by (node) (node_filesystem_avail_bytes{mountpoint="/", node!~"m.*"}) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Boot drive failure on {{ $labels.node }}"
+          description: "Root filesystem on {{ $labels.node }} is no longer writable — NVMe boot drive failing. Check `dmesg | grep -i nvme` and verify drive / cable state."
+
   - name: ycluster-backup
     rules:
       # The nightly verify-restore drill loaded a backup that did NOT restore
