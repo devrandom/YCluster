@@ -2248,19 +2248,49 @@ def get_host_health(host_ip, timeout=5):
     # Every managed host (storage, compute, nvidia, nas, macos) serves its
     # own /api/health on the unified 12724 health-api port. admin-api (on
     # 12723) is separate and storage-only — never queried for health.
+    # Heartbeat flaps on slow/flaky nodes motivated the diagnostic fields
+    # below (elapsed_ms, exception, phase) — without them a timeout vs
+    # connect-refused vs DNS failure all collapse to "Connection failed".
+    import time
+    start = time.monotonic()
+    def _elapsed():
+        return round((time.monotonic() - start) * 1000, 1)
     try:
         response = requests.get(f"http://{host_ip}:12724/api/health", timeout=timeout)
         if response.status_code in [200, 503]:
             # Both 200 (healthy) and 503 (unhealthy) contain valid health data
-            return response.json()
+            result = response.json()
+            result['_fetch_elapsed_ms'] = _elapsed()
+            return result
         else:
-            return {'overall': 'error', 'services': {}, 'error': f'HTTP {response.status_code}'}
-    except requests.exceptions.Timeout:
-        return {'overall': 'timeout', 'services': {}, 'error': 'Request timeout'}
-    except requests.exceptions.ConnectionError:
-        return {'overall': 'unreachable', 'services': {}, 'error': 'Connection failed'}
+            return {'overall': 'error', 'services': {},
+                    'error': f'HTTP {response.status_code}',
+                    'exception': 'HTTPError',
+                    'elapsed_ms': _elapsed()}
+    # ConnectTimeout is a subclass of both Timeout and ConnectionError, so it
+    # must be checked before either parent — otherwise it lands in the wrong
+    # bucket and we lose the connect-vs-read distinction.
+    except requests.exceptions.ConnectTimeout as e:
+        return {'overall': 'unreachable', 'phase': 'connect', 'services': {},
+                'error': 'Connect timeout', 'exception': type(e).__name__,
+                'elapsed_ms': _elapsed()}
+    except requests.exceptions.ReadTimeout as e:
+        return {'overall': 'timeout', 'phase': 'read', 'services': {},
+                'error': 'Read timeout', 'exception': type(e).__name__,
+                'elapsed_ms': _elapsed()}
+    except requests.exceptions.ConnectionError as e:
+        return {'overall': 'unreachable', 'phase': 'connect', 'services': {},
+                'error': str(e) or 'Connection failed',
+                'exception': type(e).__name__,
+                'elapsed_ms': _elapsed()}
+    except requests.exceptions.Timeout as e:
+        return {'overall': 'timeout', 'phase': 'unknown', 'services': {},
+                'error': 'Request timeout', 'exception': type(e).__name__,
+                'elapsed_ms': _elapsed()}
     except Exception as e:
-        return {'overall': 'error', 'services': {}, 'error': str(e)}
+        return {'overall': 'error', 'services': {},
+                'error': str(e), 'exception': type(e).__name__,
+                'elapsed_ms': _elapsed()}
 
 def check_vip_status():
     """Check VIP status using keepalived and ip commands"""

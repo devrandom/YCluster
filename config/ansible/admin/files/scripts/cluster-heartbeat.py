@@ -118,6 +118,29 @@ def get_cluster_health():
             
             if unhealthy_services_by_node:
                 health_data['unhealthy_services_by_node'] = unhealthy_services_by_node
+
+            # Per-host diagnostic detail for unreachable/timeout nodes.
+            # get_host_health now records elapsed_ms + exception class +
+            # connect/read phase so the heartbeat body shows *why* a flap
+            # happened (e.g. "m3(3000.2ms ConnectTimeout)") instead of just
+            # the hostname. Cluster-status already populates these fields.
+            unreachable_details_by_node = {}
+            for hostname in unreachable_node_names:
+                node_health = cluster_status.get('hostHealth', {}).get(hostname, {})
+                parts = []
+                elapsed = node_health.get('elapsed_ms')
+                exc = node_health.get('exception')
+                err = node_health.get('error')
+                if elapsed is not None:
+                    parts.append(f"{elapsed}ms")
+                if exc:
+                    parts.append(exc)
+                if err:
+                    parts.append(err)
+                if parts:
+                    unreachable_details_by_node[hostname] = '; '.join(parts)
+            if unreachable_details_by_node:
+                health_data['unreachable_details_by_node'] = unreachable_details_by_node
             
             # Local services
             local_health = cluster_status.get('hostHealth', {}).get(socket.gethostname(), {})
@@ -184,7 +207,12 @@ def format_health_message(health_data, status):
         if nodes.get('unhealthy_names'):
             lines.append(f"  Unhealthy: {', '.join(nodes['unhealthy_names'])}")
         if nodes.get('unreachable_names'):
-            lines.append(f"  Unreachable: {', '.join(nodes['unreachable_names'])}")
+            details = health_data.get('unreachable_details_by_node', {})
+            rendered = [
+                f"{h}({details[h]})" if h in details else h
+                for h in nodes['unreachable_names']
+            ]
+            lines.append(f"  Unreachable: {', '.join(rendered)}")
     
     # Unhealthy services by node
     unhealthy_by_node = health_data.get('unhealthy_services_by_node', {})

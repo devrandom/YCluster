@@ -370,6 +370,15 @@
         name: ntplib
         virtualenv: "{{ health_service_dir }}/venv"
       become: yes
+
+    - name: Install waitress in virtual environment
+      # Production WSGI server; matches health-api.py on Linux nodes.
+      # Flask's dev server is single-threaded — under concurrent cluster-status
+      # fan-out, queued requests blow past the 5s per-host timeout and flap.
+      pip:
+        name: waitress
+        virtualenv: "{{ health_service_dir }}/venv"
+      become: yes
     
     - name: Create launchd plist for health service
       copy:

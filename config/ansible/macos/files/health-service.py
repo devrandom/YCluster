@@ -11,11 +11,27 @@ import socket
 import platform
 import time
 import ntplib
+import logging
+import sys
 from datetime import datetime, timezone
 from flask import Flask, jsonify
 import os
 
 app = Flask(__name__)
+
+# Per-request + per-check timing. Logs go to stderr, which launchd pipes
+# to /var/log/ycluster-health.log (StandardErrorPath in the plist).
+# Without these the macOS service has zero visibility into *which* check
+# is slow when /api/health crosses the timeout budget — the storage
+# leader's cluster-status fan-out only sees the total elapsed time.
+log = logging.getLogger('ycluster.health')
+log.setLevel(logging.INFO)
+log.propagate = False  # waitress installs a root handler with its own formatter;
+                       # without this, every record is written twice.
+if not log.handlers:
+    _h = logging.StreamHandler(sys.stderr)
+    _h.setFormatter(logging.Formatter('%(asctime)s health %(message)s'))
+    log.addHandler(_h)
 
 def check_service_status(service_name):
     """Check if a launchd service is running on macOS"""
@@ -39,84 +55,60 @@ def check_port_open(host, port, timeout=3):
         return False
 
 def check_ntp_status():
-    """Check NTP configuration and synchronization on macOS"""
+    """Check NTP configuration on macOS.
+
+    Sync state is reported separately by check_clock_skew, which queries
+    the same NTP server in-process via ntplib (and returns the actual
+    offset_ms / stratum). Calling sntp here too would be a redundant
+    ~800ms roundtrip per /api/health request on every macOS node.
+    """
     try:
         # Check NTP server configuration
-        ntp_server_result = subprocess.run(['systemsetup', '-getnetworktimeserver'], 
+        ntp_server_result = subprocess.run(['systemsetup', '-getnetworktimeserver'],
                                          capture_output=True, text=True, timeout=2)
-        
+
         # Check if automatic time setting is enabled
-        auto_time_result = subprocess.run(['systemsetup', '-getusingnetworktime'], 
+        auto_time_result = subprocess.run(['systemsetup', '-getusingnetworktime'],
                                         capture_output=True, text=True, timeout=2)
-        
+
         ntp_server_configured = ntp_server_result.returncode == 0
         auto_time_enabled = auto_time_result.returncode == 0 and 'On' in auto_time_result.stdout
-        
-        # Try to get NTP server from output
+
+        # Parse "Network Time Server: 10.0.0.254" format
         ntp_server = 'unknown'
         if ntp_server_configured and ntp_server_result.stdout:
-            # Parse "Network Time Server: 10.0.0.254" format
             lines = ntp_server_result.stdout.strip().split('\n')
             for line in lines:
                 if 'Network Time Server:' in line:
                     ntp_server = line.split(':', 1)[1].strip()
                     break
-        
-        # Test NTP sync with configured server
-        ntp_sync_working = False
-        ntp_sync_error = None
-        
-        if ntp_server and ntp_server != 'unknown':
-            try:
-                sync_result = subprocess.run(['sntp', ntp_server],
-                                           capture_output=True, text=True, timeout=2)
-                ntp_sync_working = sync_result.returncode == 0
-                if not ntp_sync_working:
-                    ntp_sync_error = sync_result.stderr.strip()
-            except Exception as e:
-                ntp_sync_error = f'NTP sync test failed: {str(e)}'
-        
-        # Overall status
-        if ntp_server_configured and auto_time_enabled and ntp_sync_working:
+
+        if ntp_server_configured and auto_time_enabled:
             status = 'healthy'
-            message = f'NTP configured and syncing with {ntp_server}'
-        elif ntp_server_configured and auto_time_enabled:
+            message = f'NTP configured for {ntp_server}, auto time enabled'
+        elif ntp_server_configured and not auto_time_enabled:
             status = 'degraded'
-            message = f'NTP configured but sync test failed: {ntp_sync_error}'
+            message = 'NTP configured but auto time disabled'
+        elif auto_time_enabled and not ntp_server_configured:
+            status = 'degraded'
+            message = 'Auto time enabled but NTP server not configured'
         else:
             status = 'unhealthy'
-            message = 'NTP not properly configured'
-        
+            message = 'NTP not configured'
+
         return {
             'status': status,
             'details': {
                 'ntp_server': ntp_server,
                 'auto_time_enabled': auto_time_enabled,
-                'sync_working': ntp_sync_working,
                 'message': message,
-                'error': ntp_sync_error
             }
         }
-        
     except Exception as e:
         return {
             'status': 'error',
             'details': {'message': f'NTP check failed: {str(e)}'}
         }
-
-def resolves(name):
-    """Return (ok, error) for whether `name` resolves via the system resolver.
-
-    Uses getaddrinfo, not nslookup/dig: those bypass macOS /etc/resolver/ split
-    DNS and query the default resolver directly, so they'd miss .xc names that
-    only the cluster resolver knows. getaddrinfo honors the full resolver stack,
-    i.e. it tests the same path applications actually use.
-    """
-    try:
-        socket.getaddrinfo(name, None)
-        return True, None
-    except Exception as e:
-        return False, str(e)
 
 
 def check_dns_status():
@@ -156,26 +148,42 @@ def check_dns_status():
         }
 
 def check_network_connectivity():
-    """Check network connectivity to cluster services"""
+    """Check network connectivity to cluster services.
+
+    Probes run in parallel — sequential shell-outs took up to 6s when any
+    of the 3 services was unreachable (each timeout=2). With 3 workers in
+    parallel the worst case is ~2s, which keeps the macOS /api/health
+    response comfortably under the 5s per-host cluster-status budget
+    (the recent m3 flap root cause: network_connectivity alone spiked to
+    1.6s, stacked on ntp's ~1s shell-outs to push the request past 3s).
+    """
+    from concurrent.futures import ThreadPoolExecutor
     cluster_services = {
         'gateway': ('10.0.0.254', 80),
         'storage': ('10.0.0.100', 5000),
         'dns': ('10.0.0.254', 53)
     }
-    
+
+    def _probe(service_name, host, port):
+        return service_name, check_port_open(host, port, timeout=2)
+
     connectivity_status = {}
     overall_healthy = True
-    
-    for service_name, (host, port) in cluster_services.items():
-        is_reachable = check_port_open(host, port, timeout=2)
-        connectivity_status[service_name] = {
-            'host': host,
-            'port': port,
-            'reachable': is_reachable
-        }
-        if not is_reachable:
-            overall_healthy = False
-    
+
+    with ThreadPoolExecutor(max_workers=len(cluster_services)) as ex:
+        futures = [ex.submit(_probe, name, host, port)
+                   for name, (host, port) in cluster_services.items()]
+        for fut in futures:
+            service_name, is_reachable = fut.result()
+            host, port = cluster_services[service_name]
+            connectivity_status[service_name] = {
+                'host': host,
+                'port': port,
+                'reachable': is_reachable,
+            }
+            if not is_reachable:
+                overall_healthy = False
+
     return {
         'status': 'healthy' if overall_healthy else 'degraded',
         'details': {
@@ -337,6 +345,9 @@ def check_clock_skew():
 @app.route('/api/health')
 def health():
     """Comprehensive health check endpoint for macOS nodes"""
+    t_total = time.monotonic()
+    log.info('request: start')
+
     health_status = {
         'overall': 'healthy',
         'services': {},
@@ -344,55 +355,72 @@ def health():
         'hostname': platform.node(),
         'platform': platform.platform()
     }
-    
+
+    def _timed(name, fn):
+        """Run a check and log its elapsed time + resulting status."""
+        t = time.monotonic()
+        try:
+            r = fn()
+        except Exception as e:
+            elapsed_ms = (time.monotonic() - t) * 1000
+            log.warning(f'check {name}: crashed in {elapsed_ms:.1f}ms: {e}')
+            raise
+        elapsed_ms = (time.monotonic() - t) * 1000
+        status = r.get('status') if isinstance(r, dict) else '?'
+        log.info(f'check {name}: {elapsed_ms:.1f}ms status={status}')
+        return r
+
     # Check NTP
-    ntp_health = check_ntp_status()
+    ntp_health = _timed('ntp', check_ntp_status)
     health_status['services']['ntp'] = ntp_health
     if ntp_health['status'] in ['unhealthy', 'critical']:
         health_status['overall'] = 'unhealthy'
     elif ntp_health['status'] in ['degraded', 'warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
-    
+
     # Check DNS
-    dns_health = check_dns_status()
+    dns_health = _timed('dns', check_dns_status)
     health_status['services']['dns'] = dns_health
     if dns_health['status'] in ['unhealthy', 'critical']:
         health_status['overall'] = 'unhealthy'
     elif dns_health['status'] in ['degraded', 'warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
-    
+
     # Check network connectivity
-    network_health = check_network_connectivity()
+    network_health = _timed('network_connectivity', check_network_connectivity)
     health_status['services']['network_connectivity'] = network_health
     if network_health['status'] in ['unhealthy', 'critical']:
         health_status['overall'] = 'unhealthy'
     elif network_health['status'] in ['degraded', 'warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
-    
+
     # Check disk space
-    disk_health = check_disk_space()
+    disk_health = _timed('disk_space', check_disk_space)
     health_status['services']['disk_space'] = disk_health
     if disk_health['status'] in ['critical']:
         health_status['overall'] = 'unhealthy'
     elif disk_health['status'] in ['warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
-    
+
     # Check system load
-    load_health = check_system_load()
+    load_health = _timed('system_load', check_system_load)
     health_status['services']['system_load'] = load_health
     if load_health['status'] in ['critical']:
         health_status['overall'] = 'unhealthy'
     elif load_health['status'] in ['warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
-    
+
     # Check clock skew
-    clock_skew = check_clock_skew()
+    clock_skew = _timed('clock_skew', check_clock_skew)
     health_status['services']['clock_skew'] = clock_skew
     if clock_skew['status'] in ['critical', 'error']:
         health_status['overall'] = 'unhealthy'
     elif clock_skew['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
-    
+
+    elapsed_total_ms = (time.monotonic() - t_total) * 1000
+    log.info(f'request: done in {elapsed_total_ms:.1f}ms overall={health_status["overall"]}')
+
     # Return appropriate HTTP status code
     status_code = 200 if health_status['overall'] == 'healthy' else 503
     return jsonify(health_status), status_code
@@ -413,4 +441,10 @@ def get_time():
 
 if __name__ == '__main__':
     print(f"Starting macOS health service on {platform.node()}")
-    app.run(host='0.0.0.0', port=12724)
+    # waitress matches what health-api.py uses on Linux nodes (storage,
+    # compute, nvidia, nas): production WSGI server with thread pool.
+    # Flask's dev server is single-threaded and not for production —
+    # without this, concurrent requests on the cluster-status fan-out
+    # queue up and the slowest one trips the 5s per-host timeout.
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=12724, threads=8)
