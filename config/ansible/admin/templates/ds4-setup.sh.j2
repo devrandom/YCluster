@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Pull the DeepSeek-V4-Flash runtime image (voipmonitor/vllm:lucifer), smoke-test
+# GPU passthrough via CDI, and check that the checkpoint is staged at
+# {{ ds4_model_dir }}. Run as the dev user (no sudo) for first deploy and
+# after a new image release:
+#
+#   ~/bin/ds4-setup.sh
+#
+# The image bundles vLLM + CUTLASS + FlashInfer + DeepGEMM + patched NCCL,
+# all compiled for sm_120a (RTX Pro 6000 / Blackwell). It runs on driver 610
+# (unlike the older EXL3 TR3 verdictai image, which needs driver ≤580 inside
+# a VM — see install-glm52-exl3-tr3.yml for that path). Host provisioning
+# (podman, CDI, lingering) is generic and lives in setup-gpu-podman.yml.
+# Managed by admin/install-deepseek-v4-flash.yml — edit there.
+# Recipe + validated 2×96GB throughput numbers (~210 t/s single-stream,
+# ~700 t/s at C10, ~10k t/s prefill aggregate): see the design doc reference
+# at the bottom of the playbook.
+set -euo pipefail
+
+IMAGE="{{ ds4_image }}"
+MODEL_HOST="${MODEL_HOST:-{{ ds4_model_dir }}}"
+
+command -v podman >/dev/null \
+  || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+echo "== pull $IMAGE =="
+podman pull "$IMAGE"
+
+echo "== GPU passthrough smoke test (CDI) =="
+# Same goal as install-glm52.yml's test (CDI injects a host-visible GPU into a
+# container; nvidia-smi inside the image must see it) — but the GPU index is
+# picked automatically rather than hardcoded to 0. b12x may be holding GPU 0,
+# `ds4_gpus` may be overridden to "2 3", and on a host with mixed cards the
+# "first" index isn't always the right one to probe. Pick the first idle GPU
+# (util < 5%); fall back to index 0 only if every card is busy — the CDI
+# test itself doesn't allocate memory, so a busy GPU still proves CDI works.
+smoke_gpu="$(nvidia-smi --query-gpu=index,utilization.gpu --format=csv,noheader,nounits \
+  | awk -F, '$2+0 < 5 {print $1; exit}')"
+[ -n "$smoke_gpu" ] || smoke_gpu="0"
+podman run --rm --entrypoint nvidia-smi \
+  --device "nvidia.com/gpu=$smoke_gpu" --group-add keep-groups "$IMAGE" -L | head -1 \
+  || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml + ds4_enabled host_vars" >&2; exit 1; }
+echo "  (probed GPU $smoke_gpu)"
+
+echo
+echo "Image ready."
+if [ ! -f "$MODEL_HOST/config.json" ]; then
+  echo "Checkpoint not found at $MODEL_HOST (~160 GB) - download it, then re-run this script:"
+  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
+  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
+  echo "  HF_HUB_DISABLE_XET=1 hf download {{ ds4_repo }} --local-dir $MODEL_HOST"
+  exit 0
+fi
+
+# light checkpoint sanity (the inner script verifies config.json + index.json
+# before launching; just confirm the index is here so a typo'd path surfaces
+# here, not after the 5-min warmup).
+[ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+  || { echo "index missing at $MODEL_HOST/model.safetensors.index.json - re-run the hf download" >&2; exit 1; }
+
+echo
+echo "Start the server:  ~/bin/ds4-start.sh"

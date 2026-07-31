@@ -1,0 +1,201 @@
+---
+# Deploy DeepSeek-V4-Flash (0731) inference scripts to Nvidia GPU nodes.
+# Companion to docs/inference/deepseek-v4-flash-2026-07.md (TBD). Two dev
+# scripts (the dev user has no sudo, and needs none for these):
+#   ~dev/bin/ds4-setup.sh   - pull the voipmonitor/vllm:lucifer image, smoke-test
+#                             GPU passthrough (CDI), check the model mount
+#   ~dev/bin/ds4-start.sh   - (re)launch the server, e.g. after reboot
+#
+# Model: deepseek-ai/DeepSeek-V4-Flash (the 0731 update is the same weights,
+# only the post-training changed). Native FP4+FP8 mix — MoE experts are FP4,
+# attention/norm/router are FP8. ~160GB on disk. We do NOT use
+# nvidia/DeepSeek-V4-Flash-NVFP4: the voipmonitor/vllm:lucifer fork has native
+# kernels for the DeepSeek FP4 MoE layout and runs the upstream mixed-precision
+# checkpoint directly (the NVIDIA re-quantization buys nothing on this fork).
+#
+# Image: voipmonitor/vllm:lucifer (Blackwell sm_120 fork of vLLM, CUTLASS +
+# FlashInfer + DeepGEMM + patched NCCL, pinned to a CUDA 13.2 stack that
+# accepts driver 610 — see install-glm52.yml for the parallel pattern). The
+# validated 2×96GB recipe is from Ovidiu Dan's "700 tok/s on 2x RTX Pro 6000"
+# write-up (Jun 2026), which uses this exact image at TP=2 with MTP on, FP8
+# KV, --max-model-len 262144, and reports ~210 t/s single-stream and ~700 t/s
+# aggregate at C10.
+#
+# Host prerequisites (podman + nvidia CDI) are generic and live in
+# setup-gpu-podman.yml. Unlike GLM-5.2 b12x, the DS4 model has its own
+# tokenizer/reasoning/tool modes built into the fork (--tokenizer-mode
+# deepseek_v4, --reasoning-parser deepseek_v4, --tool-call-parser deepseek_v4)
+# so there is nothing extra to ship.
+#
+# Gating:
+#   Per-host `ds4_enabled: true` in host_vars/<node>.yml opts into this play.
+#   Same pattern as glm52_enabled (install-glm52.yml). The play is a no-op on
+#   nvidia hosts that don't opt in, and on nvidia hosts with no host-visible
+#   GPU (all cards bound to vfio-pci — those go to install-glm52-exl3-tr3.yml
+#   instead, which uses a VM).
+#
+#   Per-host `ds4_gpus: "<space-separated CDI indices>"` (default "0 1") picks
+#   the GPUs this container uses. Default is the first two host-visible GPUs;
+#   set explicitly on multi-GPU hosts where you want a different pair.
+#
+#   Per-host `ds4_port: <port>` (default 9216) overrides the listening port.
+#
+#   Per-host `ds4_served_name: "<name>"` (default "deepseek-v4-flash") is the
+#   gateway routing key (what clients pass as `model:` in API calls). The
+#   inner vllm serve also takes it via --served-model-name.
+#
+# Run after install-incus.yml (Incus + bridge), setup-gpu-podman.yml (podman +
+# CDI), and after an operator has downloaded the checkpoint to
+# {{ ds4_model_dir }}. To bring the server up:
+#   ssh <host>.yc
+#   ~/bin/ds4-setup.sh          # pull image + smoke-test (one-time)
+#   ~/bin/ds4-start.sh          # launch (idempotent)
+
+- name: Deploy DeepSeek-V4-Flash inference scripts to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # ---- Cluster-wide (not per-host overridable) -----------------------
+    # voipmonitor/vllm:lucifer — Blackwell sm_120 fork with CUTLASS/FlashInfer/
+    # DeepGEMM kernels for DS-V4-Flash. CUDA 13.2 stack, accepts driver 610
+    # (unlike the older verdictai EXL3 TR3 image which needs driver ≤580 —
+    # that's the whole reason EXL3 TR3 runs in a VM; lucifer runs on the bare
+    # host). Pin: the local-inference-lab/rtx6kpro wiki carries an exact tag
+    # (lucifer-vllm7c6bbf4-fi3395b41aa8d-dg324aced12c-tk9801a7-cu132-20260609,
+    # sha256:76f5f2cb4942d5b175908192ac07be81df077fe28cd5d3f8c7c92611895e14d4)
+    # but the floating :lucifer tag is what the upstream article pins to;
+    # we follow the article for parity with the validated recipe.
+    ds4_image: "voipmonitor/vllm:lucifer"
+    # Native FP4+FP8 mixed checkpoint. The 0731 release is a post-training
+    # update on the same weights; the model id stays deepseek-ai/DeepSeek-V4-Flash.
+    ds4_repo: "deepseek-ai/DeepSeek-V4-Flash"
+    ds4_repo_basename: "DeepSeek-V4-Flash"
+    ds4_model_dir: "/home/dev/models/DeepSeek-V4-Flash"
+    # Gateway routing key. Lowercased (proxy convention; GLM-5.2 EXL3 TR3 also
+    # uses "glm-5.2" not the upstream repo id).
+    ds4_served_name: "deepseek-v4-flash"
+    # Port the container listens on inside the host (--network=host, so the
+    # host's port 9216 is the API endpoint reachable at http://<host>.xc:9216).
+    # 9212=b12x, 9213=FullKD (retired), 9214=EXL3 TR3, 9215=spare, 9216=DS4.
+    ds4_port: 9216
+    # Persistent JIT/autotune cache. The lucifer fork writes FlashInfer
+    # autotune tables, DeepGEMM warmup, and CUDA-graph capture artifacts here
+    # on first run (~5 min warmup); reusing the volume avoids the recompile
+    # on subsequent launches. Mounted at /cache inside the container.
+    ds4_cache_dir: "/home/dev/.cache/ds4-lucifer"
+    # GPU list is sourced from host_vars (<node>.yml: ds4_gpus). No play-level
+    # default here — Ansible precedence puts play vars above host_vars, so a
+    # play-level `ds4_default_gpus` would silently shadow any host_vars
+    # override. The template's `{{ ds4_gpus | default('0 1') }}` provides the
+    # fallback when a host doesn't set ds4_gpus.
+  tasks:
+    # Same guard as install-glm52.yml: skip nodes with no host-visible NVIDIA
+    # GPU (no NVIDIA hardware, or all cards bound to vfio-pci for passthrough).
+    # DS4 runs on the bare host like b12x — those nvidia hosts go to
+    # install-glm52-exl3-tr3.yml (the VM path) instead.
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    # Per-host opt-in: only DS4-designated nodes run this play.
+    - name: End play for nodes that have not opted into DS4
+      meta: end_host
+      when: not (ds4_enabled | default(false))
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install DS4 dev inference scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - ds4-setup.sh
+        - ds4-start.sh
+
+- name: Register the DS4 backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    # Mirror the EXL3 TR3 storage play: local-ai-proxy etcd-watches
+    # /cluster/config/inference/models/ and hot-reloads on add/remove — no
+    # proxy restart needed. The backend URL is the opted-in nvidia host on
+    # its DS4 port. Default host is nv4 (today's b12x + EXL3 TR3 node, and
+    # the most likely DS4 host once an operator sets ds4_enabled there); a
+    # different opted-in host overrides via the set_fact below.
+    ds4_nvidia_host: nv4
+    ds4_backend_url: "http://{{ ds4_nvidia_host }}.xc:{{ hostvars[ds4_nvidia_host]['ds4_port'] | default(9216) }}"
+    ds4_served_name: "{{ hostvars[ds4_nvidia_host]['ds4_served_name'] | default('deepseek-v4-flash') }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Resolve the DS4-enabled nvidia host
+      set_fact:
+        ds4_nvidia_host: >-
+          {{ (groups['nvidia']
+              | select('in', hostvars.keys())
+              | list)
+             | map('extract', hostvars, 'ds4_enabled')
+             | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+             | selectattr(0, 'defined')
+             | selectattr(0, 'equalto', true)
+             | map(attribute=1)
+             | first
+             | default('nv4') }}
+      when: is_storage_leader
+      # Picks the first nvidia host that defines ds4_enabled=true in
+      # host_vars. Defaults to nv4 (today's cluster) so a future host that
+      # only sets the opt-in without overriding the URL will register
+      # correctly.
+
+    - name: Register the DS4 backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ ds4_backend_url }} {{ ds4_served_name }}
+      register: ds4_proxy_register
+      changed_when: "'added' in ds4_proxy_register.stdout or 'registered' in ds4_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+      # Idempotent on subsequent runs: local-ai-proxy models add is a
+      # no-op when the (backend, model) pair is already registered.
+
+    - name: Smoke check the DS4 backend through local-ai-proxy
+      uri:
+        url: "http://127.0.0.1:4001/v1/models"
+        return_content: no
+        status_code: [200, 401, 404]
+      register: proxy_smoke
+      failed_when: false
+      retries: 5
+      delay: 1
+      until: proxy_smoke.status is defined
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+
+    - name: Report smoke check
+      debug:
+        msg: >-
+          local-ai-proxy on {{ inventory_hostname }}:4001 replied
+          {{ proxy_smoke.status | default('unreachable') }};
+          DS4 backend registered at {{ ds4_backend_url }}
+          (served: {{ ds4_served_name }})
+      when:
+        - is_storage_leader
+        - not ansible_check_mode

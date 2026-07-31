@@ -51,12 +51,17 @@ echo "== GPU passthrough smoke test =="
 # CDI is broken in podman 4.9.3 with full PCI slot usage from vfio-pci
 # passthrough (`nvidia.com/gpu=0` errors "unresolvable"); the launch script
 # injects /dev/nvidia* manually + bind-mounts the host libcuda. Here we just
-# verify the passthrough contract: every passthrough GPU's char device is
-# visible inside the VM. A missing device here means the host's
-# gpu-passthrough.service failed to bind the GPU to vfio-pci, or the VM was
-# launched without --gpus.
-for d in /dev/nvidia0 /dev/nvidia1 /dev/nvidia2 /dev/nvidia3 \
-         /dev/nvidia-uvm /dev/nvidiactl; do
+# verify the passthrough contract: the expected number of GPUs are visible
+# inside the VM, plus nvidia-uvm/nvidiactl (required for vLLM to use them).
+# The exact /dev/nvidiaN indices depend on PCI enumeration order inside the
+# VM and aren't guaranteed to be 0..N-1, so probe via nvidia-smi rather than
+# checking fixed device paths (a VM launched with --gpus 2 would fail the
+# old /dev/nvidia0..3 check even though passthrough is fine).
+gpu_count="$(in_vm nvidia-smi -L 2>/dev/null | grep -c '^GPU ')"
+[ "$gpu_count" -ge "{{ exl3_tr3_vm_gpus }}" ] \
+  || { echo "expected at least {{ exl3_tr3_vm_gpus }} GPUs inside VM, found $gpu_count - vfio-pci passthrough broken?" >&2; exit 1; }
+echo "  (found $gpu_count GPUs inside VM, expected {{ exl3_tr3_vm_gpus }})"
+for d in /dev/nvidia-uvm /dev/nvidiactl; do
   in_vm test -e "$d" \
     || { echo "missing device $d inside VM - vfio-pci passthrough broken?" >&2; exit 1; }
 done
