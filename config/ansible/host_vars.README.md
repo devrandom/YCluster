@@ -13,7 +13,7 @@ git clone <private-url> ycluster-private
 ln -s ../../../ycluster-private/host_vars ycluster/config/ansible/host_vars
 ```
 
-The symlink path is gitignored here. `dev-sync.sh` uses `rsync
+The symlink path is gitignored here. `dev-sync` uses `rsync
 --copy-unsafe-links`, which dereferences this out-of-tree symlink so the real
 files land at `config/ansible/host_vars/` on the cluster and Ansible auto-loads
 them. In-tree symlinks (`dev/ansible/prod`, `CLAUDE.md`) are unaffected.

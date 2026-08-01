@@ -39,11 +39,11 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
 ## Deployment flow
 
 1. **Commit locally** (no prefixes; match repo style).
-2. **Files sync automatically** — `dev-sync.sh`'s watchman trigger is
+2. **Files sync automatically** — `dev-sync`'s inotify daemon is
    started once per machine by direnv (outside agent sessions) and
    rsyncs the working tree to the cluster on every edit. The agent
    doesn't run `--once`; it just commits.
-   - If unsure whether edits landed, run `bash dev-sync.sh --check`
+   - If unsure whether edits landed, run `dev-sync --check`
      — dry-run checksum compare, exits 0 on in-sync, prints differing
      files otherwise.
 3. **SSH to any cluster node** (the operator-local entry alias is set
@@ -100,15 +100,15 @@ ssh <entry> "ssh $LEADER 'ls -l /opt/admin-services/app.py'"
 `changed=N` in the playbook recap counts tasks that mutated state
 (file copies, service restarts). `changed=0` means the cluster was
 already up-to-date — if you expected a change, verify with
-`bash dev-sync.sh --check` that the sync actually landed.
+`dev-sync --check` that the sync actually landed.
 
 ## Gotchas
 
-- **`dev-sync.sh` overwrites files, not git state.** The cluster's
+- **`dev-sync` overwrites files, not git state.** The cluster's
   `/opt/infrastructure/` working tree is rsync'd but its `.git/`
   stays at the last `git pull`. Don't expect `git log` on the cluster
   to match local.
-- **The watchman watcher syncs to whatever `YC_SYNC_HOST` direnv
+- **The inotify daemon syncs to whatever `YC_SYNC_HOST` direnv
   set.** If you've overridden it for a flaky route, files may go
   elsewhere — `--check` shows what the watcher thinks is in sync.
 - **Ansible handlers only fire on changed files.** If `restart

@@ -59,14 +59,14 @@ ansible-playbook storage/storage.yml --tags setup-volumes
 ```
 
 ### Dev Workflow (syncing local changes to cluster)
-`dev-sync.sh` uses rsync + watchman to continuously sync the local repo to `$YC_SYNC_HOST:/opt/infrastructure/`.
+`dev-sync` uses rsync + an inotify daemon (Python) to continuously sync the local repo to `$YC_SYNC_HOST:/opt/infrastructure/`.
 The user will take care of starting this process.
 
 **Confirming a sync landed (don't hash files by hand).** Trust the watcher by
 default; for a routine confirmation, `tail ./tmp/dev-sync.log` for a `done` line
 stamped after your edit (the trigger only logs `done` on rsync exit 0, so
 partial syncs show as `rsync failed`). When you want certainty (before a
-high-stakes playbook run, or you suspect drift), run `./dev-sync.sh --check`
+high-stakes playbook run, or you suspect drift), run `./dev-sync --check`
 — a dry-run checksum compare against the cluster using the same exclude set; it
 also reports whether the watcher is running. Empty diff + exit 0 means in sync,
 exit 1 lists the files that differ. Never per-file

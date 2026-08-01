@@ -82,7 +82,7 @@ a `sec_xxx()` function; lines 818-834 in `system-test.sh` list them.
 ## When dev cluster tests won't see your change
 
 The repo is not mounted in the containers — code lives on the cluster
-nodes at `/opt/infrastructure/` (managed by `dev-sync.sh` on prod, by
+nodes at `/opt/infrastructure/` (managed by `dev-sync` on prod, by
 the playbooks on dev). Two paths to update dev nodes:
 
 1. **Use prod's deploy pattern**: commit, let the watcher sync, run

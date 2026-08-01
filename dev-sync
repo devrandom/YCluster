@@ -9,7 +9,7 @@ daemon using python3-pyinotify. Single source of truth for the rsync options
 Subcommands:
   --start   Spawn the daemon in the background (start_new_session so it
             survives shell exit), run an initial sync, exit.
-  --stop    SIGTERM the daemon (clears its PID file).
+  --stop    Tell the daemon to stop (via control socket).
   --status  Print 'running' or 'not running'.
   --check   Dry-run checksum compare against the cluster: list files whose
             content differs (exit 1 if any) and report daemon state.
@@ -18,8 +18,8 @@ Subcommands:
             cleanly on SIGTERM/SIGINT. Not meant to be called directly —
             --start spawns it.
 
-PID file:  tmp/dev-sync.pid
-Log file:  tmp/dev-sync.log
+Control socket:  tmp/dev-sync.sock
+Log file:       tmp/dev-sync.log
 
 Events under these paths are ignored (same set watchman skipped):
   .git/, tmp/, any __pycache__/, .venv/, venv/
@@ -27,12 +27,13 @@ The tmp/ exclusion in particular breaks the feedback loop where the daemon's
 own log writes re-fire the watcher.
 """
 
-import errno
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -40,7 +41,7 @@ import pyinotify
 
 REPO = Path(__file__).resolve().parent
 LOG = REPO / 'tmp' / 'dev-sync.log'
-PID = REPO / 'tmp' / 'dev-sync.pid'
+SOCK = REPO / 'tmp' / 'dev-sync.sock'
 DEBOUNCE_S = 0.2
 
 DEST = os.environ.get('YC_SYNC_HOST', 's1.yc') + ':/opt/infrastructure/'
@@ -67,32 +68,52 @@ def log(line):
         os.fsync(f.fileno())
 
 
-def write_pid():
-    PID.parent.mkdir(parents=True, exist_ok=True)
-    PID.write_text(str(os.getpid()))
-
-
-def clear_pid():
-    try:
-        PID.unlink()
-    except FileNotFoundError:
-        pass
-
-
 def is_running():
-    if not PID.exists():
+    """Check if the daemon is alive by connecting to its control socket."""
+    if not SOCK.exists():
         return False
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        pid = int(PID.read_text().strip())
-    except (ValueError, OSError):
+        sock.settimeout(2)
+        sock.connect(str(SOCK))
+        sock.sendall(b'\x00')  # ping
+        resp = sock.recv(1)
+        return resp == b'\x00'
+    except (FileNotFoundError, ConnectionRefusedError, OSError, socket.timeout):
         return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def socket_loop(state):
+    """Accept connections on the control socket. Runs in a daemon thread."""
+    SOCK.unlink(missing_ok=True)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(SOCK))
+    sock.listen(5)
+    sock.settimeout(1)
     try:
-        os.kill(pid, 0)
-    except OSError as e:
-        if e.errno == errno.ESRCH:
-            return False  # stale
-        raise
-    return True
+        while not state.get('stop', False):
+            try:
+                conn, _ = sock.accept()
+                data = conn.recv(1)
+                if data == b'\x01':  # stop
+                    state['stop'] = True
+                    conn.sendall(b'\x01')
+                else:
+                    conn.sendall(b'\x00')  # ping response
+                conn.close()
+            except socket.timeout:
+                continue
+    finally:
+        sock.close()
+        try:
+            SOCK.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def should_skip(path):
@@ -164,29 +185,36 @@ def cmd_start():
 
 
 def cmd_stop():
-    if not is_running():
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(5)
+        sock.connect(str(SOCK))
+        sock.sendall(b'\x01')  # stop
+        resp = sock.recv(1)
+        if resp == b'\x01':
+            print('stopped')
+            return 0
+        print(f'unexpected response: {resp!r}')
+        return 1
+    except (FileNotFoundError, ConnectionRefusedError, OSError, socket.timeout):
         print('not running')
         return 0
-    pid = int(PID.read_text().strip())
-    try:
-        os.kill(pid, signal.SIGTERM)
-        print(f'sent SIGTERM to pid {pid}')
-    except OSError as e:
-        if e.errno == errno.ESRCH:
-            print(f'pid {pid} not alive (stale pid file)')
-            clear_pid()
-        else:
-            raise
-    return 0
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def main_daemon():
     if is_running():
-        sys.exit(f'dev-sync already running (pid {PID.read_text().strip()})')
-    write_pid()
+        sys.exit(f'dev-sync already running (socket {SOCK} exists)')
     log('daemon started')
 
     state = {'dirty': False, 'stop': False}
+
+    t = threading.Thread(target=socket_loop, args=(state,), daemon=True)
+    t.start()
 
     def on_event(event):
         if not should_skip(event.pathname):
@@ -207,11 +235,6 @@ def main_daemon():
 
     try:
         while not state['stop']:
-            # process_events() drains any queued events (no-op when empty);
-            # check_events() blocks up to DEBOUNCE_S for more. When the quiet
-            # window expires with no new events, fire rsync if anything
-            # changed -- the debounce that coalesces a burst of edits into a
-            # single transfer.
             notifier.process_events()
             if notifier.check_events(timeout=DEBOUNCE_S):
                 notifier.read_events()
@@ -220,7 +243,10 @@ def main_daemon():
                     state['dirty'] = False
                     run_rsync_quiet()
     finally:
-        clear_pid()
+        try:
+            SOCK.unlink()
+        except FileNotFoundError:
+            pass
         log('daemon stopped')
 
 
@@ -231,7 +257,7 @@ Sync local repo to {DEST} using rsync + an inotify daemon.
 Commands:
   --start   Spawn the daemon (detached) and run an initial sync.
             Log: {LOG}
-  --stop    SIGTERM the daemon.
+  --stop    Tell the daemon to stop (via control socket).
   --check   Dry-run checksum compare against the cluster: list files whose
             content differs (exit 1 if any), and report if the daemon is up.
   --once    Do a single sync and exit (no daemon).
