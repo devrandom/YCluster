@@ -23,21 +23,6 @@
       command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
       changed_when: true
 
-    # podman 4.9.3 (Ubuntu 24.04) can't parse the toolkit's CDI 0.7.0 spec:
-    # it rejects the unknown `additionalGids` field, so every
-    # `--device nvidia.com/gpu=N` fails with "unresolvable CDI devices".
-    - name: Pin CDI spec to 0.6.0
-      replace:
-        path: /etc/cdi/nvidia.yaml
-        regexp: '^cdiVersion: 0\.7\.0$'
-        replace: 'cdiVersion: 0.6.0'
-
-    - name: Strip unparseable additionalGids field
-      replace:
-        path: /etc/cdi/nvidia.yaml
-        regexp: '(?m)^[ \t]*additionalGids:\n(?:[ \t]*- \d+\n)+'
-        replace: ''
-
     - name: Remove stale runtime CDI spec
       file:
         path: /var/run/cdi/nvidia.yaml

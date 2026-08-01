@@ -152,20 +152,6 @@
       when: cdi_driver_version.stdout != installed_driver_version.stdout
       changed_when: true
 
-    - name: Pin CDI spec to 0.6.0 for podman 4.9.3 compat
-      replace:
-        path: /etc/cdi/nvidia.yaml
-        regexp: '^cdiVersion: 0\.7\.0$'
-        replace: 'cdiVersion: 0.6.0'
-      when: cdi_driver_version.stdout != installed_driver_version.stdout
-
-    - name: Strip additionalGids field (podman 4.9.3 can't parse it)
-      replace:
-        path: /etc/cdi/nvidia.yaml
-        regexp: '(?m)^[ \t]*additionalGids:\n(?:[ \t]*- \d+\n)+'
-        replace: ''
-      when: cdi_driver_version.stdout != installed_driver_version.stdout
-
     - name: Configure CUDA PATH for all users
       copy:
         dest: /etc/profile.d/cuda.sh

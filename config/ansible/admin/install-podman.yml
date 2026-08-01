@@ -1,0 +1,60 @@
+---
+# Install the custom-built podman binary, replacing the distro package
+# binary. The apt package stays installed so its runtime dependencies (crun,
+# netavark, aardvark-dns, containers-common, etc.) remain managed normally.
+# Only /usr/bin/podman is swapped.
+#
+# Run admin/build-podman.yml first to produce the binary on the buildhost.
+- name: Install custom podman binary
+  hosts: compute
+  become: yes
+  vars:
+    podman_binary_src: "/opt/src/podman/bin/podman"
+    podman_binary: "/usr/bin/podman"
+    podman_binary_distrib: "/usr/bin/podman.distrib"
+
+  tasks:
+    - name: Check if podman binary exists on buildhost
+      stat:
+        path: "{{ podman_binary_src }}"
+      register: podman_buildhost
+      delegate_to: "{{ buildhost }}"
+
+    - name: Fail if podman binary not found on buildhost
+      fail:
+        msg: >
+          Podman binary not found at {{ podman_binary_src }} on
+          {{ buildhost }}. Run admin/build-podman.yml first.
+      when: not podman_buildhost.stat.exists
+
+    - name: Fetch podman binary from buildhost to controller
+      fetch:
+        src: "{{ podman_binary_src }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Divert distro podman binary out of the way
+      command:
+        cmd: dpkg-divert --divert {{ podman_binary_distrib }}
+                         --rename
+                         --add {{ podman_binary }}
+        creates: "{{ podman_binary_distrib }}"
+
+    - name: Copy custom podman binary into place
+      copy:
+        src: "{{ build_cache_dir }}/podman"
+        dest: "{{ podman_binary }}"
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Verify installed podman version
+      command: "{{ podman_binary }} --version"
+      register: podman_version
+      changed_when: false
+
+    - name: Display podman version
+      debug:
+        msg: "Installed {{ podman_version.stdout }}"
