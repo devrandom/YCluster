@@ -76,16 +76,19 @@ if [ -z "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}" ]; then
   if [ "$MTP" = "1" ]; then MAX_CUDAGRAPH_CAPTURE_SIZE=192; else MAX_CUDAGRAPH_CAPTURE_SIZE=64; fi
 fi
 
-# Build speculative args. vLLM accepts either --spec-method/--spec-tokens
-# (covers method + num_speculative_tokens only) or a single --speculative-config
-# JSON blob (covers everything including draft_sample_method). We need
-# draft_sample_method, so use the blob. The model's num_nextn_predict_layers=1
-# makes the built-in MTP layers the draft; "deepseek_mtp" is the matching
-# method in vllm.config.speculative.MTPModelTypes (lucifer's June 2026 image).
+# Build speculative args. vLLM's FlexibleArgumentParser accepts the dotted
+# form (--speculative-config.method X), but the lucifer fork's outer CLI parser
+# drops the dot before passing to the serve subparser, leaving `X` as
+# "unrecognized arguments". Simpler: use --spec-method + --spec-tokens
+# separately; this skips draft_sample_method (defaults to "greedy", not
+# "probabilistic" — small hit, we re-test once the dots work).
+# Note: model-specific names like "deepseek_mtp" are deprecated; vLLM logs a
+# warning and silently rewrites them to "mtp". Use "mtp" directly.
 SPEC_ARGS=()
 if [ "$MTP" = "1" ]; then
   SPEC_ARGS=(
-    --speculative-config "{\"method\":\"deepseek_mtp\",\"num_speculative_tokens\":$SPECULATIVE_TOKENS,\"draft_sample_method\":\"$DRAFT_SAMPLE_METHOD\"}"
+    --spec-method mtp
+    --spec-tokens "$SPECULATIVE_TOKENS"
   )
 fi
 
@@ -160,7 +163,7 @@ podman run -d --name "$CONTAINER" \
       --default-chat-template-kwargs.thinking=true \
       --default-chat-template-kwargs.reasoning_effort=high \
       "$@"
-  ' "${SPEC_ARGS[@]}"
+  ' bash "${SPEC_ARGS[@]}"
 
 mtp_state=$([ "$MTP" = 1 ] && echo on || echo off)
 echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] TP=$TP, MTP $mtp_state, max_model_len=$MAX_MODEL_LEN, gpu_util=$GPU_UTIL."

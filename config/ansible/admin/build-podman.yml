@@ -1,0 +1,101 @@
+---
+# Build podman from source on the buildhost (default s1). The binary stays
+# in the build output dir; install-podman.yml fetches it from there via the
+# controller. Run after admin/install-ycluster-package.yml.
+#
+# Why build from source: Ubuntu 24.04 ships podman 4.9.3, which can't parse
+# the CDI v0.7.0 spec that recent nvidia-container-toolkit generates by
+# default. CDI 0.7.0 support landed in podman 5.1.0. Building a current
+# 5.x release removes the CDI-version pin/strip hacks in setup-gpu-podman.yml
+# and install-nvidia.yml. See docs/operations/packages.md.
+#
+# No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
+# Source is vendored under /opt/src/podman/ and pinned to a git SHA in the
+# vars below (matches the frp/rathole pattern of inlining the repo URL + SHA
+# in the build playbook itself).
+#
+# The play runs on localhost (so import_playbook can resolve `hosts`
+# statically) and each task delegates to the buildhost — same shape as
+# build-frp.yml. The Makefile auto-detects build tags from the installed
+# dev headers (libseccomp, libgpgme, libsystemd, libapparmor, libbtrfs,
+# libsqlite3, libsubid), giving feature parity with the distro package.
+- name: Build podman from source
+  hosts: localhost
+  vars:
+    podman_build_dir: "/opt/src/podman"
+    podman_binary: "{{ podman_build_dir }}/bin/podman"
+    # podman v5.8.0 = 07efc23e05c3d9aa15a0f30d57194737bfc4b6b1.
+    podman_repo_url: "https://github.com/containers/podman.git"
+    podman_repo_sha: "07efc23e05c3d9aa15a0f30d57194737bfc4b6b1"
+    # Go toolchain. Installed via apt (golang-1.24) on the buildhost when
+    # a rebuild is needed; local_ai_proxy_go_bin overrides the path for
+    # hosts that already have go elsewhere.
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
+  tasks:
+    - name: Check if podman binary already exists
+      stat:
+        path: "{{ podman_binary }}"
+      register: podman_binary_stat
+      delegate_to: "{{ buildhost }}"
+
+    - name: Install build dependencies on buildhost
+      apt:
+        name:
+          - golang-1.24
+          - git
+          - build-essential
+          - pkg-config
+          - libseccomp-dev
+          - libgpgme-dev
+          - libsystemd-dev
+          - libapparmor-dev
+          - libbtrfs-dev
+          - libsqlite3-dev
+          - libsubid-dev
+          - libdevmapper-dev
+        state: present
+      become: yes
+      when: not podman_binary_stat.stat.exists
+      delegate_to: "{{ buildhost }}"
+
+    - name: Remove existing build directory (clean rebuild)
+      file:
+        path: "{{ podman_build_dir }}"
+        state: absent
+      when: not podman_binary_stat.stat.exists
+      delegate_to: "{{ buildhost }}"
+
+    - name: Clone podman repository at pinned SHA
+      git:
+        repo: "{{ podman_repo_url }}"
+        dest: "{{ podman_build_dir }}"
+        version: "{{ podman_repo_sha }}"
+        depth: 1
+      when: not podman_binary_stat.stat.exists
+      delegate_to: "{{ buildhost }}"
+
+    - name: Build podman binary
+      make:
+        chdir: "{{ podman_build_dir }}"
+        target: podman
+      environment:
+        PATH: "{{ go_bin | dirname }}:{{ ansible_env.PATH | default('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin') }}"
+      when: not podman_binary_stat.stat.exists
+      delegate_to: "{{ buildhost }}"
+
+    - name: Verify podman binary was produced
+      stat:
+        path: "{{ podman_binary }}"
+      register: podman_binary_verify
+      failed_when: not podman_binary_verify.stat.exists
+      delegate_to: "{{ buildhost }}"
+
+    - name: Show built podman version
+      command: "{{ podman_binary }} --version"
+      register: podman_version
+      changed_when: false
+      delegate_to: "{{ buildhost }}"
+
+    - name: Print podman version
+      debug:
+        var: podman_version.stdout

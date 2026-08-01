@@ -344,3 +344,15 @@ run(command="cd /etc/ansible && ./run-playbook.sh admin/install-ycluster-package
 
 Avoid the use of ssh in the command - specify the hostname as a tool call argument instead.
 
+**`sudo -u <user>` quirk on nvidia hosts**: cluster-exec lands as root, so
+`sudo -u dev podman …` would normally work, but sudo's `env_reset` tries
+to chdir to the invoker's home (`/root`), which fails with
+`cannot chdir to /root: Permission denied`. Workaround: prefix the
+command with `cd /` so sudo has nowhere to chdir. Example:
+```text
+run(command="cd / && sudo -u dev podman ps --filter name=ds4",
+    hostname="nv4")
+```
+Applies to any prod host where the target user (e.g. `dev`) doesn't have
+read access to the invoker's home.
+
