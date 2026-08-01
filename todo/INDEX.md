@@ -76,7 +76,8 @@ DR, backups, node lifecycle, scaling/capacity.
 ## Operations
 - **[HIGH]** [Storage-leader election: graceful teardown](operations/storage-leader-graceful-teardown.md) — every routine failover today takes the aggressive path; postgres crash-stops on every drain.
 - **[HIGH]** [admin-api etcd client failover](operations/admin-api-etcd-failover.md) — cached client pinned to first reachable host; on drain the health surface goes blank with a fresh timestamp, looking like a stuck failover.
-- **[HIGH]** [Clean up searxng-docker stack](operations/searxng-cleanup.md) — caused the 2026-06-11 tunnel outage; one `compose up` resurrects caddy (the dir is still on disk).
+- [Clean up searxng-docker stack](operations/searxng-cleanup.md) — stack removed 2026-08-01; remaining sub-items are certbot warts + container-state alerting.
+- **[MEDIUM]** [Move storage-node services from docker to podman](operations/move-docker-to-podman.md) — grafana, buildkitd, open-webui, authentik, docker-registry, valkey still on docker; podman is already standard elsewhere.
 - [Consolidate redundant etcd reads](operations/consolidate-etcd-reads.md)
 - [s4: validate as storage-leader](operations/s4-leader-validation.md)
 - [Periodic Docker image pruning](operations/docker-image-pruning.md)

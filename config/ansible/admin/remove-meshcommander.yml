@@ -1,0 +1,48 @@
+---
+# Remove MeshCommander from storage nodes.
+#
+# MeshCommander was a node:16-alpine web UI for out-of-band management of
+# mesh/Intel AMT nodes; the cluster no longer relies on it (the AMT path
+# uses amtterm directly). This playbook reverses install-meshcommander.yml:
+# stops the systemd unit, removes the docker container, deletes the build
+# directory and unit file. Idempotent — safe to run on hosts that never
+# had it installed.
+#
+# Note: docker itself is kept; only meshcommander is gone. Removing docker
+# from storage is tracked in todo/operations/move-docker-to-podman.md.
+- name: Remove MeshCommander
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Stop and disable meshcommander.service
+      systemd:
+        name: meshcommander.service
+        enabled: no
+        state: stopped
+      failed_when: false
+
+    - name: Remove meshcommander systemd unit
+      file:
+        path: /etc/systemd/system/meshcommander.service
+        state: absent
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Stop and remove meshcommander docker container
+      docker_container:
+        name: meshcommander
+        state: absent
+      failed_when: false
+
+    - name: Remove meshcommander docker image
+      docker_image:
+        name: meshcommander
+        state: absent
+      failed_when: false
+
+    - name: Remove /opt/meshcommander build directory
+      file:
+        path: /opt/meshcommander
+        state: absent
