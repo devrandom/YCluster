@@ -1397,28 +1397,52 @@ def vm_destroy(name):
     print(f"Destroyed '{name}' and removed its registration.")
 
 
+def _strip_tz(ts: str) -> str:
+    """Drop the timezone suffix from an ISO 8601 timestamp for display."""
+    if not ts:
+        return ""
+    # Handle Z suffix.
+    if ts.endswith("Z"):
+        return ts[:-1]
+    # Handle ±HH:MM offset (6 chars at the end).
+    if len(ts) > 6 and ts[-6] in ("+", "-") and ts[-3] == ":":
+        return ts[:-6]
+    return ts
+
+
 def vm_list():
     vms = vms_all()
     if not vms:
         print("No VMs registered.")
         return
     local = socket.gethostname()
-    states = {i["name"]: i.get("status", "?")
-              for i in _incus_json("list", "--format", "json")}
+    # Live state from local incus (always authoritative for this host).
+    try:
+        live_states = {i["name"]: i.get("status", "?")
+                       for i in _incus_json("list", "--format", "json")}
+    except FileNotFoundError:
+        live_states = {}
+    # Sampled state from every host's etcd snapshot (vm-state-sampler timer).
+    sampled = {}
+    for host, snap in state_all().items():
+        for inst in snap.get("instances", []):
+            name = inst.get("name")
+            if name:
+                sampled[name] = inst.get("status", "?")
     print(f"{'NAME':<20} {'OWNER':<24} {'HOST':<8} {'GPUS':<5} "
           f"{'STATE':<14} CREATED")
     for name, rec in sorted(vms.items()):
         host = rec.get("host")
         if rec.get("state") == "provisioning":
             state = "provisioning"        # launch did not complete
-        elif host is None or host == local:
-            # Incus state is only visible for VMs on this host.
-            state = states.get(name, "(absent)")
+        elif host == local:
+            state = live_states.get(name, "(absent)")
         else:
-            state = "(remote)"
+            # Prefer the etcd snapshot over "(remote)" when available.
+            state = sampled.get(name, "(remote)")
         print(f"{name:<20} {rec.get('owner', '?'):<24} {host or '?':<8} "
               f"{str(rec.get('gpus', '?')):<5} {state:<14} "
-              f"{rec.get('created', '')}")
+              f"{_strip_tz(rec.get('created', ''))}")
 
 
 def pin_existing_vms():
