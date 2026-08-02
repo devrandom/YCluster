@@ -57,6 +57,7 @@ def get_pg():
     conn = _state["pg"]
     if conn is None or conn.closed:
         conn = psycopg2.connect(OWUI_DSN)
+        conn.autocommit = True
         _state["pg"] = conn
     return conn
 
