@@ -1,31 +1,38 @@
 ---
-# Deploy DeepSeek-V4-Flash (0731) inference scripts to Nvidia GPU nodes.
-# Companion to docs/inference/deepseek-v4-flash-2026-07.md (TBD). Two dev
-# scripts (the dev user has no sudo, and needs none for these):
-#   ~dev/bin/ds4-setup.sh   - pull the voipmonitor/vllm:lucifer image, smoke-test
-#                             GPU passthrough (CDI), check the model mount
-#   ~dev/bin/ds4-start.sh   - (re)launch the server, e.g. after reboot
+# Deploy DeepSeek-V4-Flash-0731 DSpark inference scripts to Nvidia GPU nodes.
+# The release and its validation gate are documented at:
+#   https://github.com/local-inference-lab/rtx6kpro/blob/master/models/ds4dspark-v20.md
+# Two dev scripts (the dev user has no sudo, and needs none for these):
+#   ~dev/bin/ds4-setup.sh   - pull the Gilded Gnosis r16 image, smoke-test
+#                             GPU passthrough (CDI), stage/verify the 0731
+#                             checkpoint. Flags:
+#                               --download     pull the 0731 checkpoint (~160 GB)
+#                               --verify-only  just check the staged revision
+#   ~dev/bin/ds4-start.sh   - (re)launch the DSpark server, e.g. after reboot
 #
-# Model: deepseek-ai/DeepSeek-V4-Flash (the 0731 update is the same weights,
-# only the post-training changed). Native FP4+FP8 mix — MoE experts are FP4,
-# attention/norm/router are FP8. ~160GB on disk. We do NOT use
-# nvidia/DeepSeek-V4-Flash-NVFP4: the voipmonitor/vllm:lucifer fork has native
-# kernels for the DeepSeek FP4 MoE layout and runs the upstream mixed-precision
-# checkpoint directly (the NVIDIA re-quantization buys nothing on this fork).
+# Model: deepseek-ai/DeepSeek-V4-Flash-0731 at the r16-pinned SHA
+# (ds4_revision). Native FP4+FP8 mix — MoE experts are FP4, attention/norm/
+# router are FP8. ~160GB on disk. The 0731 release is NOT the same weights
+# as the standard deepseek-ai/DeepSeek-V4-Flash — it drops `enorm`/`hnorm`
+# keys and adds DSpark config fields, which the r16 image's DSpark
+# speculator's load_weights is keyed against. Sticking to the pinned SHA is
+# required (different revisions break the r16 gate). We do NOT use
+# nvidia/DeepSeek-V4-Flash-NVFP4: the fork we use runs the upstream
+# mixed-precision checkpoint directly (the NVIDIA re-quantization buys
+# nothing on this fork).
 #
-# Image: voipmonitor/vllm:lucifer (Blackwell sm_120 fork of vLLM, CUTLASS +
-# FlashInfer + DeepGEMM + patched NCCL, pinned to a CUDA 13.2 stack that
-# accepts driver 610 — see install-glm52.yml for the parallel pattern). The
-# validated 2×96GB recipe is from Ovidiu Dan's "700 tok/s on 2x RTX Pro 6000"
-# write-up (Jun 2026), which uses this exact image at TP=2 with MTP on, FP8
-# KV, --max-model-len 262144, and reports ~210 t/s single-stream and ~700 t/s
-# aggregate at C10.
+# Image: voipmonitor/vllm:gilded-gnosis-v20-...-r16 — the Gilded Gnosis r16
+# DSpark release. Composes vLLM + SparkInfer (B12X backend) + CUTLASS +
+# FlashInfer + DeepGEMM + InstantTensor + LMCache + patched NCCL, all compiled
+# for sm_120a Blackwell on CUDA 13.2 (driver 610). The validated K5 DSpark
+# profile delivers ~218 t/s sustained single-stream decode, ~290 t/s coding
+# median on the 2×RTX PRO 6000 topology (TP2/DCP1). Defaults: 5 draft tokens,
+# InstantTensor (BUFFERED) loader, 128K context, 0.975 GPU util.
 #
 # Host prerequisites (podman + nvidia CDI) are generic and live in
-# setup-gpu-podman.yml. Unlike GLM-5.2 b12x, the DS4 model has its own
-# tokenizer/reasoning/tool modes built into the fork (--tokenizer-mode
-# deepseek_v4, --reasoning-parser deepseek_v4, --tool-call-parser deepseek_v4)
-# so there is nothing extra to ship.
+# setup-gpu-podman.yml. The r16 image's built-in launcher bundles
+# tokenizer/reasoning/tool modes (deepseek_v4) so there is nothing extra
+# to ship.
 #
 # Gating:
 #   Per-host `ds4_enabled: true` in host_vars/<node>.yml opts into this play.
@@ -45,31 +52,37 @@
 #   inner vllm serve also takes it via --served-model-name.
 #
 # Run after install-incus.yml (Incus + bridge), setup-gpu-podman.yml (podman +
-# CDI), and after an operator has downloaded the checkpoint to
-# {{ ds4_model_dir }}. To bring the server up:
+# CDI). To bring the server up:
 #   ssh <host>.yc
-#   ~/bin/ds4-setup.sh          # pull image + smoke-test (one-time)
-#   ~/bin/ds4-start.sh          # launch (idempotent)
+#   ~/bin/ds4-setup.sh --download   # pull image + CDI smoke + 0731 checkpoint
+#   ~/bin/ds4-setup.sh              # subsequent runs: just image pull + smoke
+#   ~/bin/ds4-start.sh              # launch (idempotent)
 
 - name: Deploy DeepSeek-V4-Flash inference scripts to Nvidia GPU nodes
   hosts: nvidia
   become: yes
   vars:
     # ---- Cluster-wide (not per-host overridable) -----------------------
-    # voipmonitor/vllm:lucifer — Blackwell sm_120 fork with CUTLASS/FlashInfer/
-    # DeepGEMM kernels for DS-V4-Flash. CUDA 13.2 stack, accepts driver 610
-    # (unlike the older verdictai EXL3 TR3 image which needs driver ≤580 —
-    # that's the whole reason EXL3 TR3 runs in a VM; lucifer runs on the bare
-    # host). Pin: the local-inference-lab/rtx6kpro wiki carries an exact tag
-    # (lucifer-vllm7c6bbf4-fi3395b41aa8d-dg324aced12c-tk9801a7-cu132-20260609,
-    # sha256:76f5f2cb4942d5b175908192ac07be81df077fe28cd5d3f8c7c92611895e14d4)
-    # but the floating :lucifer tag is what the upstream article pins to;
-    # we follow the article for parity with the validated recipe.
-    ds4_image: "voipmonitor/vllm:lucifer"
-    # Native FP4+FP8 mixed checkpoint. The 0731 release is a post-training
-    # update on the same weights; the model id stays deepseek-ai/DeepSeek-V4-Flash.
-    ds4_repo: "deepseek-ai/DeepSeek-V4-Flash"
-    ds4_repo_basename: "DeepSeek-V4-Flash"
+    # voipmonitor/vllm:gilded-gnosis-v20-...-r16 — the Gilded Gnosis r16 DSpark
+    # release. Ships vLLM + SparkInfer (B12X) + CUTLASS + FlashInfer + DeepGEMM
+    # + InstantTensor + LMCache + patched NCCL on CUDA 13.2 (driver 610).
+    # Pinned tag + sha256 from the release document
+    # (ds4dspark-v20.md in the rtx6kpro wiki). The r16 gate validates K5 DSpark,
+    # InstantTensor (BUFFERED), native offload, and full source-provenance
+    # reproduction.
+    ds4_image: "docker.io/voipmonitor/vllm:gilded-gnosis-v20-vllm1e9c9c3-sieec30ff-fi801d57a-cu132-20260731-r16"
+    # Native FP4+FP8 mixed checkpoint. The 0731 release is the r16 validation
+    # target (K5 DSpark profile, ~218 t/s sustained decode on the 2×RTX PRO
+    # 6000 Blackwell topology). The release SHA is pinned — different
+    # revisions can rename weight keys or change config.json fields, breaking
+    # the r16 image's DSpark speculator's load_weights (we hit this once with
+    # `mtp.0.enorm.weight` disappearing from the 0731 release's safetensors).
+    ds4_repo: "deepseek-ai/DeepSeek-V4-Flash-0731"
+    ds4_revision: "9e165c30e2704aec5d9d593cce3eebd58bbef1cb"
+    # Local dir basename stays `DeepSeek-V4-Flash` (no `-0731` suffix) so the
+    # r16 launcher's /root/models scan finds it under the standard name. The
+    # HF repo name and the local dir name are decoupled — ds4-setup.sh's
+    # `hf download` writes the HF repo's files into this dir directly.
     ds4_model_dir: "/home/dev/models/DeepSeek-V4-Flash"
     # Gateway routing key. Lowercased (proxy convention; GLM-5.2 EXL3 TR3 also
     # uses "glm-5.2" not the upstream repo id).
@@ -78,11 +91,11 @@
     # host's port 9216 is the API endpoint reachable at http://<host>.xc:9216).
     # 9212=b12x, 9213=FullKD (retired), 9214=EXL3 TR3, 9215=spare, 9216=DS4.
     ds4_port: 9216
-    # Persistent JIT/autotune cache. The lucifer fork writes FlashInfer
-    # autotune tables, DeepGEMM warmup, and CUDA-graph capture artifacts here
-    # on first run (~5 min warmup); reusing the volume avoids the recompile
-    # on subsequent launches. Mounted at /cache inside the container.
-    ds4_cache_dir: "/home/dev/.cache/ds4-lucifer"
+    # Persistent JIT/autotune cache. The r16 launcher writes FlashInfer autotune
+    # tables, DeepGEMM warmup, and CUDA-graph capture artifacts here on first
+    # run (~5 min warmup); reusing the volume avoids the recompile on subsequent
+    # launches. Mounted at /cache (and /container-tmp) inside the container.
+    ds4_cache_dir: "/home/dev/.cache/ds4-r16"
     # GPU list is sourced from host_vars (<node>.yml: ds4_gpus). No play-level
     # default here — Ansible precedence puts play vars above host_vars, so a
     # play-level `ds4_default_gpus` would silently shadow any host_vars

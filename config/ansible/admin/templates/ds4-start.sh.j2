@@ -1,171 +1,126 @@
 #!/usr/bin/env bash
-# (Re)start the DeepSeek-V4-Flash inference server on the
-# voipmonitor/vllm:lucifer image. Run as the dev user (no sudo), e.g. after
-# a reboot:
+# (Re)start the DeepSeek-V4-Flash-0731 inference server on the Gilded Gnosis
+# r16 DSpark image. Run as the dev user (no sudo), e.g. after a reboot:
 #
 #   ~/bin/ds4-start.sh
 #
-# Idempotent: replaces any existing container. Defaults are 1-1 with the
-# validated 2×96GB recipe (Ovidiu Dan, "700 tok/s on 2x RTX Pro 6000",
-# Jun 2026): TP=2, MTP on (probabilistic draft, 2 speculative tokens),
-# FP8 KV, --max-model-len 262144, attention-backend SPARSE_MLA_SM120,
-# moe-backend flashinfer_cutlass. Measured ~210 t/s single-stream, ~700 t/s
-# aggregate at C10, ~10k t/s prefill aggregate. Managed by
-# admin/install-deepseek-v4-flash.yml — edit there.
+# Idempotent: replaces any existing container. Defaults match the verified r16
+# K5 DSpark profile: TP2/DCP1, 5 draft tokens, InstantTensor loading, 128K
+# context, 0.975 GPU memory target, FP8 KV, no native offload.
 #
 # Tunable knobs (env-var overrides):
-#   GPUS / TP / MAX_MODEL_LEN / GPU_UTIL / MAX_NUM_SEQS / MAX_NUM_BATCHED_TOKENS
-#   MTP / SPECULATIVE_TOKENS / DRAFT_SAMPLE_METHOD / SERVED_NAME / PORT / MEM
+#   GPUS / TP_SIZE / DCP_SIZE / MAX_MODEL_LEN / GPU_UTIL / MAX_NUM_SEQS
+#   MAX_NUM_BATCHED_TOKENS / DSPARK_TOKENS / DSPARK_DEPTH_MODE / MODE / BACKEND
+#   KV_OFFLOADING_SIZE / PORT / SERVED_NAME / MEM
 #
-# The image is a Blackwell sm_120 fork with FP4-native MoE kernels
-# (SPARSE_MLA_SM120 + flashinfer_cutlass); it runs the native FP4+FP8 mix
-# weights directly — we do NOT use nvidia/DeepSeek-V4-Flash-NVFP4 (the
-# NVIDIA re-quantization buys nothing on this fork).
+# Release reference: https://github.com/local-inference-lab/rtx6kpro/blob/master/models/ds4dspark-v20.md
 set -euo pipefail
 
 IMAGE="${IMAGE:-{{ ds4_image }}}"
 MODEL_HOST="${MODEL_HOST:-{{ ds4_model_dir }}}"
-CONTAINER="${CONTAINER:-ds4}"
+CONTAINER="${CONTAINER:-ds4-dspark}"
 PORT="${PORT:-{{ ds4_port }}}"
 # CDI GPU indices — the host-visible ones (DS4 runs on the bare host, so this
 # host must have at least 2 free host-visible cards; the rest may be bound to
 # vfio-pci for a GPU VM). Override per-host via ds4_gpus in host_vars/<node>.yml.
 GPUS="${GPUS:-{{ ds4_gpus | default('0 1') }}}"
-TP="${TP:-2}"
-MTP="${MTP:-1}"
-SPECULATIVE_TOKENS="${SPECULATIVE_TOKENS:-2}"
-DRAFT_SAMPLE_METHOD="${DRAFT_SAMPLE_METHOD:-probabilistic}"
-# Lucifer validated defaults (2×96GB): FP8 KV, 256K context, 64 concurrent,
-# 8K batched, 0.90 GPU util, graph cap 192 with MTP (64 without — auto below).
-KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
-BLOCK_SIZE="${BLOCK_SIZE:-256}"
-GPU_UTIL="${GPU_UTIL:-0.90}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 SERVED_NAME="${SERVED_NAME:-{{ ds4_served_name }}}"
-# Persistent JIT/autotune cache (FlashInfer autotune tables, DeepGEMM warmup,
-# CUDA-graph capture). First run writes here (~5 min warmup); reusing the
-# volume avoids the recompile.
-CACHE_DIR="${CACHE_DIR:-{{ ds4_cache_dir | default('/home/dev/.cache/ds4-lucifer') }}}"
-# Cgroup cap. The 160GB weights stream from disk (vLLM's safetensors loader
-# reads shard-by-shard), so host RAM stays well under this ceiling; the cap
-# is just to keep a runaway load from OOM-killing the host, not a real
-# memory budget. The 744B GLM-5.2 b12x path uses 110g; we need ~80g for
-# peak warmup (JIT compile + cudagraph capture working set).
+
+# ---- r16 launcher defaults ----
+# K5 DSpark profile: TP2/DCP1, 5 draft tokens, InstantTensor loading, 128K
+# context, 0.975 GPU memory target, FP8 KV, no native offload. Matches the
+# r16 release's K5 profile on the 2×RTX PRO 6000 Blackwell topology.
+# Requires the 0731 checkpoint (config.json has the DSpark fields;
+# safetensors don't have the stale `mtp.0.enorm.weight` key the r16
+# speculator's load_weights can't map). See ds4-setup.sh --download.
+MODE="${MODE:-dspark}"
+BACKEND="${BACKEND:-b12x-a8}"
+TP_SIZE="${TP_SIZE:-2}"
+DCP_SIZE="${DCP_SIZE:-1}"
+DSPARK_DEPTH_MODE="${DSPARK_DEPTH_MODE:-fixed}"
+DSPARK_TOKENS="${DSPARK_TOKENS:-5}"
+GPU_UTIL="${GPU_UTIL:-0.975}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+LOAD_FORMAT="${LOAD_FORMAT:-instanttensor}"
+INSTANTTENSOR_BACKEND="${INSTANTTENSOR_BACKEND:-BUFFERED}"
+# Native CPU KV offload (GiB across all TP ranks). 0 disables it.
+KV_OFFLOADING_SIZE="${KV_OFFLOADING_SIZE:-0}"
+# Persistent JIT/autotune cache (FlashInfer autotune, DeepGEMM warmup,
+# CUDA-graph capture). First run writes here; reuse avoids the recompile.
+CACHE_DIR="${CACHE_DIR:-{{ ds4_cache_dir | default('/home/dev/.cache/ds4-r16') }}}"
+# Cgroup cap. Peak warmup (JIT + cudagraph + model load) can spike high;
+# InstantTensor (BUFFERED) reuses page-cache pages rather than host-RAM
+# copies of the checkpoint, so peak stays manageable.
 MEM="${MEM:-80g}"
 
 # pre-flight (no root needed)
 podman image exists "$IMAGE" \
   || { echo "image $IMAGE missing - run: ~/bin/ds4-setup.sh" >&2; exit 1; }
 [ -f "$MODEL_HOST/config.json" ] && [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
-  || { echo "checkpoint missing or incomplete at $MODEL_HOST - run: ~/bin/ds4-setup.sh" >&2; exit 1; }
+  || { echo "checkpoint missing or incomplete at $MODEL_HOST - run: ~/bin/ds4-setup.sh --download" >&2; exit 1; }
 
-mkdir -p "$CACHE_DIR"
+mkdir -p "$CACHE_DIR" "$CACHE_DIR/tmp"
 dev_args=()
 ngpu=0
 for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); ngpu=$((ngpu + 1)); done
-# CDI renumbers the injected GPUs to a 0-based range. lucifer's internal
-# defaults assume the full first pair; we set it explicitly so a host that
-# passes "2 3" still gets a contiguous in-container numbering.
 cvd="$(seq -s, 0 $((ngpu - 1)))"
 
-# Graph cap: 192 with MTP (the lucifer fork's MTP path captures up to 192
-# shapes), 64 without. The wiki hardcodes 192 for the MTP-on case; mirror.
-if [ -z "${MAX_CUDAGRAPH_CAPTURE_SIZE:-}" ]; then
-  if [ "$MTP" = "1" ]; then MAX_CUDAGRAPH_CAPTURE_SIZE=192; else MAX_CUDAGRAPH_CAPTURE_SIZE=64; fi
-fi
+# Model parent dir — the r16 entrypoint scans /root/models/ for an HF-style
+# model directory. Our checkpoint is at DeepSeek-V4-Flash under the parent;
+# mount so it appears at /root/models/DeepSeek-V4-Flash.
+MODEL_PARENT="$(dirname "$MODEL_HOST")"
 
-# Build speculative args. vLLM's FlexibleArgumentParser accepts the dotted
-# form (--speculative-config.method X), but the lucifer fork's outer CLI parser
-# drops the dot before passing to the serve subparser, leaving `X` as
-# "unrecognized arguments". Simpler: use --spec-method + --spec-tokens
-# separately; this skips draft_sample_method (defaults to "greedy", not
-# "probabilistic" — small hit, we re-test once the dots work).
-# Note: model-specific names like "deepseek_mtp" are deprecated; vLLM logs a
-# warning and silently rewrites them to "mtp". Use "mtp" directly.
-SPEC_ARGS=()
-if [ "$MTP" = "1" ]; then
-  SPEC_ARGS=(
-    --spec-method mtp
-    --spec-tokens "$SPECULATIVE_TOKENS"
-  )
-fi
-
+# Stop the previous-generation container (lucifer, named "ds4") so the port
+# is free, but leave it in place as a fallback. Remove any prior run of the
+# new container.
+podman stop ds4 >/dev/null 2>&1 || true
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
-# --unsetenv NCCL_GRAPH_FILE / NCCL_GRAPH_DUMP_FILE: the lucifer image bakes
-# these empty, which crashes the patched NCCL's ncclCommInitRank. The
-# entrypoint bash also unsets them (and several B12X-related vars that the
-# lucifer fork doesn't expect) — both belts and braces.
-# --unsetenv VLLM_CACHE_DIR: lucifer wants /cache (mounted), not the image's
-# baked default. Same rationale as the b12x path.
+# Deviations from the r16 Compose recipe (offline-cluster workarounds):
+#   SERVED_MODEL_NAME=deepseek-v4-flash — our gateway routing key;
+#     without this, MODE=dspark serves the model as "DeepSeek-V4-Flash-0731"
+#     and local-ai-proxy (which expects "deepseek-v4-flash") can't route.
+#   MODEL_PATH=/root/models/DeepSeek-V4-Flash — the launcher otherwise
+#     picks "deepseek-ai/DeepSeek-V4-Flash-0731" and tries to fetch from
+#     HF (this cluster has no HF egress). Pointing at the local mount
+#     bypasses the HF lookup.
+#   HF_HUB_OFFLINE=1 — belt-and-suspenders so vllm fails fast on any
+#     stray HF call rather than stalling.
 podman run -d --name "$CONTAINER" \
+  --entrypoint /usr/local/bin/serve-ds4-flash.sh \
   "${dev_args[@]}" \
-  --network=host --shm-size 32g \
+  --network=host \
+  --ipc=host --init \
   --security-opt seccomp=unconfined --group-add keep-groups \
   --ulimit memlock=-1:-1 \
+  --ulimit nofile=1048576:1048576 \
   --ulimit stack=67108864:67108864 \
   --memory "$MEM" --memory-swap "$MEM" \
-  --unsetenv NCCL_GRAPH_FILE --unsetenv NCCL_GRAPH_DUMP_FILE \
-  --unsetenv VLLM_CACHE_DIR \
   -e CUDA_VISIBLE_DEVICES="$cvd" \
-  -e SERVED_MODEL_NAME="$SERVED_NAME" \
   -e PORT="$PORT" \
-  -e TP_SIZE="$TP" \
-  -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
-  -e BLOCK_SIZE="$BLOCK_SIZE" \
-  -e GPU_MEMORY_UTILIZATION="$GPU_UTIL" \
-  -e MAX_MODEL_LEN="$MAX_MODEL_LEN" \
+  -e MODE="$MODE" \
+  -e BACKEND="$BACKEND" \
+  -e TP_SIZE="$TP_SIZE" \
+  -e DCP_SIZE="$DCP_SIZE" \
+  -e DSPARK_DEPTH_MODE="$DSPARK_DEPTH_MODE" \
+  -e DSPARK_TOKENS="$DSPARK_TOKENS" \
   -e MAX_NUM_SEQS="$MAX_NUM_SEQS" \
+  -e MAX_MODEL_LEN="$MAX_MODEL_LEN" \
   -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
-  -e MAX_CUDAGRAPH_CAPTURE_SIZE="$MAX_CUDAGRAPH_CAPTURE_SIZE" \
-  -e CUTE_DSL_ARCH=sm_120a \
+  -e GPU_MEMORY_UTILIZATION="$GPU_UTIL" \
+  -e LOAD_FORMAT="$LOAD_FORMAT" \
+  -e INSTANTTENSOR_BACKEND="$INSTANTTENSOR_BACKEND" \
+  -e KV_OFFLOADING_SIZE="$KV_OFFLOADING_SIZE" \
+  -e SERVED_MODEL_NAME="$SERVED_NAME" \
+  -e MODEL_PATH="/root/models/DeepSeek-V4-Flash" \
   -e HF_HUB_OFFLINE=1 \
-  -e NCCL_P2P_LEVEL=SYS \
-  -e NCCL_PROTO=LL,LL128,Simple \
-  -e NCCL_IB_DISABLE=1 \
-  -e VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096 \
-  -v "$MODEL_HOST":/model:ro \
+  -v "$MODEL_PARENT":/root/models:ro \
   -v "$CACHE_DIR":/cache \
-  "$IMAGE" /bin/bash -lc '
-    set -euo pipefail
-    unset NCCL_GRAPH_FILE NCCL_GRAPH_DUMP_FILE
-    unset VLLM_ENABLE_PCIE_ALLREDUCE VLLM_PCIE_ALLREDUCE_BACKEND
-    unset VLLM_CPP_AR_1STAGE_NCCL_CUTOFF VLLM_CPP_AR_IGNORE_CUTOFF_MAX_ROWS
-    unset VLLM_RTX6K_FUSED_ALLREDUCE_ADD VLLM_RTX6K_FUSED_ALLREDUCE_ADD_END_BARRIER
-    unset VLLM_CACHE_DIR
-    exec vllm serve /model \
-      --served-model-name "$SERVED_MODEL_NAME" \
-      --trust-remote-code \
-      --host 0.0.0.0 --port "$PORT" \
-      --load-format auto \
-      --tensor-parallel-size "$TP_SIZE" \
-      --kv-cache-dtype "$KV_CACHE_DTYPE" \
-      --block-size "$BLOCK_SIZE" \
-      --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
-      --max-model-len "$MAX_MODEL_LEN" \
-      --max-num-seqs "$MAX_NUM_SEQS" \
-      --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
-      --max-cudagraph-capture-size "$MAX_CUDAGRAPH_CAPTURE_SIZE" \
-      --compilation-config '\''{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'\'' \
-      --async-scheduling \
-      --no-scheduler-reserve-full-isl \
-      --enable-chunked-prefill \
-      --enable-prefix-caching \
-      --enable-flashinfer-autotune \
-      --attention-backend SPARSE_MLA_SM120 \
-      --kernel-config.moe_backend flashinfer_cutlass \
-      --tokenizer-mode deepseek_v4 \
-      --tool-call-parser deepseek_v4 \
-      --enable-auto-tool-choice \
-      --reasoning-parser deepseek_v4 \
-      --default-chat-template-kwargs.thinking=true \
-      --default-chat-template-kwargs.reasoning_effort=high \
-      "$@"
-  ' bash "${SPEC_ARGS[@]}"
+  -v "$CACHE_DIR/tmp":/container-tmp \
+  "$IMAGE"
 
-mtp_state=$([ "$MTP" = 1 ] && echo on || echo off)
-echo "Started '$CONTAINER' on :$PORT (model id: $SERVED_NAME), GPUs [$GPUS] TP=$TP, MTP $mtp_state, max_model_len=$MAX_MODEL_LEN, gpu_util=$GPU_UTIL."
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=$TP_SIZE DCP=$DCP_SIZE MODE=$MODE DSPARK_TOKENS=$DSPARK_TOKENS max_model_len=$MAX_MODEL_LEN gpu_util=$GPU_UTIL"
 echo "  watch:  podman logs -f $CONTAINER"
 echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"

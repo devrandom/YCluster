@@ -1,62 +1,129 @@
 #!/usr/bin/env bash
-# Pull the DeepSeek-V4-Flash runtime image (voipmonitor/vllm:lucifer), smoke-test
-# GPU passthrough via CDI, and check that the checkpoint is staged at
-# {{ ds4_model_dir }}. Run as the dev user (no sudo) for first deploy and
-# after a new image release:
+# Pull the DeepSeek-V4-Flash-0731 DSpark runtime image, smoke-test GPU
+# passthrough via CDI, and stage / verify the 0731 checkpoint. Run as the
+# dev user (no sudo):
 #
-#   ~/bin/ds4-setup.sh
+#   ~/bin/ds4-setup.sh                # image pull + CDI smoke + checkpoint check
+#   ~/bin/ds4-setup.sh --download     # also pull the 0731 checkpoint (~160 GB)
+#   ~/bin/ds4-setup.sh --verify-only  # just verify an already-staged checkpoint
 #
-# The image bundles vLLM + CUTLASS + FlashInfer + DeepGEMM + patched NCCL,
-# all compiled for sm_120a (RTX Pro 6000 / Blackwell). It runs on driver 610
-# (unlike the older EXL3 TR3 verdictai image, which needs driver ≤580 inside
-# a VM — see install-glm52-exl3-tr3.yml for that path). Host provisioning
-# (podman, CDI, lingering) is generic and lives in setup-gpu-podman.yml.
+# The image bundles the Gilded Gnosis r16 build: vLLM + SparkInfer (DSpark) +
+# CUTLASS + FlashInfer + DeepGEMM + InstantTensor + patched NCCL, all compiled
+# for sm_120a (RTX PRO 6000 / Blackwell). It runs on driver 610 (unlike the
+# older EXL3 TR3 verdictai image, which needs driver ≤580 inside a VM — see
+# install-glm52-exl3-tr3.yml for that path). Host provisioning (podman, CDI,
+# lingering) is generic and lives in setup-gpu-podman.yml.
 # Managed by admin/install-deepseek-v4-flash.yml — edit there.
-# Recipe + validated 2×96GB throughput numbers (~210 t/s single-stream,
-# ~700 t/s at C10, ~10k t/s prefill aggregate): see the design doc reference
-# at the bottom of the playbook.
-set -euo pipefail
+# Release reference: https://github.com/local-inference-lab/rtx6kpro/blob/master/models/ds4dspark-v20.md
+# No `pipefail`: a pipeline's exit is the last command's exit, so closing
+# pipes (e.g. head -1 exiting after one line, cluster-exec truncating output)
+# can't kill the script via SIGPIPE. `set -eu` still catches real errors.
+set -eu
 
 IMAGE="{{ ds4_image }}"
+REPO="{{ ds4_repo }}"
+REVISION="{{ ds4_revision }}"
 MODEL_HOST="${MODEL_HOST:-{{ ds4_model_dir }}}"
+
+# ---- flags ----
+action="setup"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --download)     action="download"; shift ;;
+    --verify-only)  action="verify-only"; shift ;;
+    -h|--help)
+      sed -n '2,9p' "$0"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
 
 command -v podman >/dev/null \
   || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
 
-echo "== pull $IMAGE =="
-podman pull "$IMAGE"
+# ---- image pull + CDI smoke test (skip for --verify-only) ----
+if [ "$action" != "verify-only" ]; then
+  echo "== pull $IMAGE =="
+  podman pull "$IMAGE"
 
-echo "== GPU passthrough smoke test (CDI) =="
-# Same goal as install-glm52.yml's test (CDI injects a host-visible GPU into a
-# container; nvidia-smi inside the image must see it) — but the GPU index is
-# picked automatically rather than hardcoded to 0. b12x may be holding GPU 0,
-# `ds4_gpus` may be overridden to "2 3", and on a host with mixed cards the
-# "first" index isn't always the right one to probe. Pick the first idle GPU
-# (util < 5%); fall back to index 0 only if every card is busy — the CDI
-# test itself doesn't allocate memory, so a busy GPU still proves CDI works.
-smoke_gpu="$(nvidia-smi --query-gpu=index,utilization.gpu --format=csv,noheader,nounits \
-  | awk -F, '$2+0 < 5 {print $1; exit}')"
-[ -n "$smoke_gpu" ] || smoke_gpu="0"
-podman run --rm --entrypoint nvidia-smi \
-  --device "nvidia.com/gpu=$smoke_gpu" --group-add keep-groups "$IMAGE" -L | head -1 \
-  || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml + ds4_enabled host_vars" >&2; exit 1; }
-echo "  (probed GPU $smoke_gpu)"
-
-echo
-echo "Image ready."
-if [ ! -f "$MODEL_HOST/config.json" ]; then
-  echo "Checkpoint not found at $MODEL_HOST (~160 GB) - download it, then re-run this script:"
-  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
-  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
-  echo "  HF_HUB_DISABLE_XET=1 hf download {{ ds4_repo }} --local-dir $MODEL_HOST"
-  exit 0
+  echo "== GPU passthrough smoke test (CDI) =="
+  # CDI injects a host-visible GPU into a container; nvidia-smi inside the image
+  # must see it. Pick the first idle GPU (util < 5%); fall back to index 0
+  # only if every card is busy — the CDI test doesn't allocate memory, so a busy
+  # GPU still proves CDI works. We verify by exit code, not stdout (nvidia-smi
+  # keeps writing after the first line; piping through head -1 with pipefail
+  # triggers SIGPIPE and kills the script).
+  smoke_gpu="$(nvidia-smi --query-gpu=index,utilization.gpu --format=csv,noheader,nounits \
+    | awk -F, '$2+0 < 5 {print $1; exit}')"
+  [ -n "$smoke_gpu" ] || smoke_gpu="0"
+  podman run --rm --entrypoint nvidia-smi \
+    --device "nvidia.com/gpu=$smoke_gpu" --group-add keep-groups "$IMAGE" -L > /dev/null \
+    || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml + ds4_enabled host_vars" >&2; exit 1; }
+  echo "  (probed GPU $smoke_gpu)"
+  echo
+  echo "Image ready."
 fi
 
-# light checkpoint sanity (the inner script verifies config.json + index.json
-# before launching; just confirm the index is here so a typo'd path surfaces
-# here, not after the 5-min warmup).
-[ -f "$MODEL_HOST/model.safetensors.index.json" ] \
-  || { echo "index missing at $MODEL_HOST/model.safetensors.index.json - re-run the hf download" >&2; exit 1; }
+# ---- checkpoint download (--download only) ----
+if [ "$action" = "download" ]; then
+  echo "== download $REPO @ $REVISION -> $MODEL_HOST =="
+  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
+  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
+  # `uv tool run hf …` (not bare `hf …`) — the dev user installed huggingface_hub
+  # as a uv tool, so the binary lives in ~/.local/share/uv/tools/.../bin/ and
+  # isn't on PATH. uv is on PATH (/snap/bin/uv) and resolves the tool for us.
+  HF_HUB_DISABLE_XET=1 uv tool run hf download "$REPO" \
+    --revision "$REVISION" \
+    --local-dir "$MODEL_HOST"
+  echo
+fi
 
-echo
-echo "Start the server:  ~/bin/ds4-start.sh"
+# ---- revision verification (after download, or on demand) ----
+if [ "$action" = "download" ] || [ "$action" = "verify-only" ]; then
+  echo "== verify checkpoint revision =="
+  # The trees file's filename IS the HF revision SHA — HF writes one per
+  # revision under .cache/huggingface/trees/. A mismatch means dspark mode
+  # will load the wrong weights (the r16 speculator's load_weights is keyed
+  # on the 0731-era weight names; older revisions have stale enorm/hnorm keys
+  # that crash with KeyError).
+  trees_dir="$MODEL_HOST/.cache/huggingface/trees"
+  if [ ! -d "$trees_dir" ]; then
+    echo "no trees metadata at $trees_dir — run --download first" >&2
+    exit 1
+  fi
+  got="$(ls "$trees_dir"/*.json 2>/dev/null \
+        | xargs -n1 basename \
+        | sed 's/\.json$//' \
+        | sort -u \
+        | head -1)"
+  if [ -z "$got" ]; then
+    echo "no trees metadata files at $trees_dir" >&2
+    exit 1
+  fi
+  if [ "$got" != "$REVISION" ]; then
+    echo "revision mismatch: expected $REVISION, got '$got'" >&2
+    echo "  $MODEL_HOST contains a different HF revision" >&2
+    exit 1
+  fi
+  echo "  revision OK: $got"
+  echo
+fi
+
+# ---- checkpoint readiness (default setup path only) ----
+if [ "$action" = "setup" ]; then
+  if [ ! -f "$MODEL_HOST/config.json" ]; then
+    echo "Checkpoint not found at $MODEL_HOST (~160 GB) - download it, then re-run this script:"
+    echo "  ~/bin/ds4-setup.sh --download"
+    exit 0
+  fi
+
+  # light checkpoint sanity (the inner script verifies config.json + index.json
+  # before launching; just confirm the index is here so a typo'd path surfaces
+  # here, not after the warmup).
+  [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+    || { echo "index missing at $MODEL_HOST/model.safetensors.index.json - re-run ~/bin/ds4-setup.sh --download" >&2; exit 1; }
+
+  echo
+  echo "Start the server:  ~/bin/ds4-start.sh"
+fi
