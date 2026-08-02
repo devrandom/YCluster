@@ -11,7 +11,8 @@ Subcommands:
                     tool_calls. Exits non-zero if either check fails.
   bench <model>     Sweep prefill + decode tok/s across prompt depths.
                     Streams each request with ignore_eos + temperature 0
-                    (deterministic decode). --lens/--gen/--prompt/--json.
+                    (deterministic decode). Repeats each depth and reports
+                    median + min/max. --lens/--gen/--repeats/--prompt/--json.
   models            List model ids available on the gateway.
   transcribe <file> POST an audio file to /v1/audio/transcriptions and print
                     the transcript. Optional --diarize adds speaker labels.
@@ -27,6 +28,7 @@ contrib/_cluster_config.py. The model id is the first positional argument
 Usage:
   ./inference chat MiniMaxAI/MiniMax-M2.7
   ./inference bench MiniMaxAI/MiniMax-M2.7 --gen 128 --json
+  ./inference bench model --repeats 5
   ./inference models
   ./inference transcribe tmp/ES2002d.Mix-Headset.wav
   ./inference transcribe tmp/ES2002d.Mix-Headset.wav --diarize
@@ -37,6 +39,7 @@ import argparse
 import json
 import os
 import secrets
+import statistics
 import sys
 import time
 import urllib.error
@@ -331,7 +334,9 @@ def _bench_stream(base, key, messages, model, gen, timeout):
     )
     t0 = time.monotonic()
     t_first = None
+    t_last = None
     usage = {}
+    timings = {}
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             for raw in resp:
@@ -344,44 +349,173 @@ def _bench_stream(base, key, messages, model, gen, timeout):
                 obj = json.loads(data)
                 if obj.get("usage"):
                     usage = obj["usage"]
+                # Backend-provided timings live either on the chunk (llama-server
+                # style `timings`) or nested inside usage. Not all backends emit
+                # them, so presence is optional and callers fall back to client
+                # wall-clock timing.
+                for src in (obj, obj.get("usage") or {}):
+                    t = src.get("timings")
+                    if isinstance(t, dict):
+                        timings = t
                 choices = obj.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta") or {}
-                    if t_first is None and (delta.get("content")
-                                            or delta.get("reasoning_content")
-                                            or delta.get("reasoning")):
-                        t_first = time.monotonic()
+                    if delta.get("content") or delta.get("reasoning_content") \
+                            or delta.get("reasoning"):
+                        now = time.monotonic()
+                        if t_first is None:
+                            t_first = now
+                        t_last = now
     except urllib.error.HTTPError as e:
         return {"error": f"HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}"}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
-    return {"t0": t0, "t_first": t_first, "t_end": time.monotonic(), "usage": usage}
+    return {"t0": t0, "t_first": t_first, "t_last": t_last,
+            "t_end": time.monotonic(), "usage": usage, "timings": timings}
 
 
-def _bench_run(base, key, model, items, gen, timeout, mml=None):
+def _server_tps(timings):
+    """Backend-provided prefill/decode tok/s from a `timings` object (e.g.
+    llama-server), or (None, None) when absent/non-numeric. Client-side timing
+    is the fallback when a backend does not report these."""
+    if not isinstance(timings, dict):
+        return None, None
+
+    def num(v):
+        return v if isinstance(v, (int, float)) else None
+
+    pre = num(timings.get("prompt_per_second") or timings.get("prompt_per_sec"))
+    dec = num(timings.get("predicted_per_second") or timings.get("predicted_per_sec"))
+    if pre is None:
+        pn = num(timings.get("prompt_n"))
+        pm = num(timings.get("prompt_ms"))
+        if pm is None:
+            pm = num(timings.get("t_prompt_ms"))  # older llama.cpp key
+        if pn and pm:
+            pre = pn / (pm / 1000.0)
+    if dec is None:
+        dn = num(timings.get("predicted_n"))
+        dm = num(timings.get("predicted_ms"))
+        if dm is None:
+            dm = num(timings.get("t_predicted_ms"))
+        if dn and dm:
+            dec = dn / (dm / 1000.0)
+    return pre, dec
+
+
+def _agg(name, samples):
+    """Median + (min, max) of a list of floats, or (None, None) if empty."""
+    vals = [s for s in samples if s is not None]
+    if not vals:
+        return None, (None, None)
+    return statistics.median(vals), (min(vals), max(vals))
+
+
+def _bench_run(base, key, model, items, gen, timeout, mml=None, repeats=3):
     print(f"Endpoint: {base}\nModel:    {model}"
-          + (f"  (max_model_len {mml})" if mml else "") + f"\nDecode:   {gen} tokens\n")
-    print(f"  {'ptok':>8}  {'TTFT':>7}  {'prefill':>11}  {'decode':>10}")
+          + (f"  (max_model_len {mml})" if mml else "")
+          + f"\nDecode:   {gen} tokens   Warmup: on   Repeats: {repeats}\n")
+    print(f"  {'ptok':>8}  {'TTFT':>7}  {'prefill t/s (med [min-max])':>26}  "
+          f"{'decode t/s (med [min-max])':>24}  {'cached':>7}")
     rows = []
-    for label, prompt in items:
-        r = _bench_stream(base, key, [{"role": "user", "content": prompt}], model, gen, timeout)
+    last_ptok = None
+    pre_src, dec_src = set(), set()
+    # One throwaway request warms up the backend (model load, GPU init,
+    # connection setup, page tables) before any measured sample.
+    if items:
+        wp_payload, wp_target = items[0][1]
+        wp = _bench_build_prompt(wp_payload) if wp_target else wp_payload
+        r = _bench_stream(base, key, [{"role": "user", "content": wp}],
+                          model, gen, timeout)
         if r.get("error"):
-            print(f"  {RED}ERR {RESET} {label:>8}  {r['error']}")
-            rows.append({"label": label, "error": r["error"]})
+            print(f"  {RED}warmup ERR{RESET}: {r['error']}")
+    for label, (payload, is_target) in items:
+        prefill, dec_tps, ttfts, ptoks, cached = [], [], [], [], []
+        errors = []
+        for _ in range(repeats):
+            # Fresh nonce per sample: identical prompts across repeats would
+            # trip vLLM's prefix cache, inflating prefill and decode on the
+            # cached samples. A unique prefix forces cold prefill every time.
+            content = _bench_build_prompt(payload) if is_target else payload
+            r = _bench_stream(base, key,
+                              [{"role": "user", "content": content}],
+                              model, gen, timeout)
+            if r.get("error"):
+                errors.append(r["error"])
+                continue
+            usage = r["usage"] or {}
+            ptok = usage.get("prompt_tokens")
+            ctok = usage.get("completion_tokens") or gen
+            cached.append((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+            ttft = (r["t_first"] - r["t0"]) if r["t_first"] else None
+            # Prefer backend-reported tok/s when the server provides them
+            # (llama-server etc.); otherwise fall back to client timing.
+            srv_pre, srv_dec = _server_tps(r.get("timings"))
+            if srv_pre is not None:
+                prefill.append(srv_pre)
+                pre_src.add("server")
+            else:
+                prefill.append((ptok / ttft) if (ptok and ttft) else None)
+                pre_src.add("client")
+            if srv_dec is not None:
+                dec_tps.append(srv_dec)
+                dec_src.add("server")
+            else:
+                # Decode window is bounded by first->last *content* chunk, so
+                # the trailing usage SSE and any idle tail do not deflate it.
+                dec = (r["t_last"] - r["t_first"]) if (r["t_first"] and r["t_last"]) else None
+                dec_tps.append(((ctok - 1) / dec) if (dec and dec > 0 and ctok > 1) else None)
+                dec_src.add("client")
+            ttfts.append(ttft)
+            if ptok:
+                ptoks.append(ptok)
+        if errors and not prefill:
+            print(f"  {RED}ERR {RESET} {label:>8}  {errors[0]}")
+            rows.append({"label": label, "error": errors[0]})
             continue
-        usage = r["usage"] or {}
-        ptok = usage.get("prompt_tokens")
-        ctok = usage.get("completion_tokens") or gen
-        ttft = (r["t_first"] - r["t0"]) if r["t_first"] else None
-        dec = (r["t_end"] - r["t_first"]) if r["t_first"] else None
-        prefill_tps = (ptok / ttft) if (ptok and ttft) else None
-        decode_tps = ((ctok - 1) / dec) if (dec and dec > 0 and ctok > 1) else None
-        print(f"  {(ptok or label):>8}  {ttft or 0:6.2f}s  "
-              f"{(f'{prefill_tps:7.0f} t/s' if prefill_tps else '      n/a'):>11}  "
-              f"{(f'{decode_tps:5.1f} t/s' if decode_tps else '   n/a'):>10}")
-        rows.append({"label": label, "prompt_tokens": ptok, "completion_tokens": ctok,
-                     "ttft_s": ttft, "prefill_tps": prefill_tps, "decode_tps": decode_tps})
-    return {"model": model, "max_model_len": mml, "decode_tokens": gen, "rows": rows}
+        ptok = statistics.median(ptoks) if ptoks else last_ptok
+        last_ptok = ptok
+        ttft_med, _ = _agg("ttft", ttfts)
+        pre_med, pre_rng = _agg("prefill", prefill)
+        dec_med, dec_rng = _agg("decode", dec_tps)
+        cache_med = statistics.median(cached)
+        pre_s = (f"{pre_med:5.0f} [{pre_rng[0]:.0f}-{pre_rng[1]:.0f}]"
+                 if pre_med else "      n/a")
+        dec_s = (f"{dec_med:6.1f} [{dec_rng[0]:.1f}-{dec_rng[1]:.1f}]"
+                 if dec_med else "   n/a")
+        print(f"  {(ptok or label):>8}  {ttft_med or 0:6.2f}s  {pre_s:>26}  "
+              f"{dec_s:>24}  {cache_med:>7.0f}")
+        rows.append({
+            "label": label, "repeats": repeats - len(errors),
+            "prompt_tokens": ptok, "completion_tokens": gen,
+            "ttft_median_s": ttft_med,
+            "prefill_tps_median": pre_med, "prefill_tps_range": pre_rng,
+            "prefill_source": _src_label(pre_src),
+            "decode_tps_median": dec_med, "decode_tps_range": dec_rng,
+            "decode_source": _src_label(dec_src),
+            "cached_tokens_median": cache_med,
+            "samples": [{"ttft_s": t, "prefill_tps": p, "decode_tps": d,
+                         "cached_tokens": c}
+                        for t, p, d, c in zip(ttfts, prefill, dec_tps, cached)],
+        })
+    print(f"\n  timing source: prefill={_src_label(pre_src)}, "
+          f"decode={_src_label(dec_src)}  (server=backend-reported, "
+          f"client=measured client-side)")
+    return {"model": model, "max_model_len": mml, "decode_tokens": gen,
+            "warmup": bool(items), "repeats": repeats,
+            "prefill_source": _src_label(pre_src),
+            "decode_source": _src_label(dec_src), "rows": rows}
+
+
+def _src_label(srcs):
+    """Collapse per-sample source flags to one label for reporting."""
+    if srcs == {"server"}:
+        return "server"
+    if srcs == {"client"}:
+        return "client"
+    if srcs:
+        return "mixed"
+    return "n/a"
 
 
 def cmd_bench(args):
@@ -397,6 +531,10 @@ def cmd_bench(args):
     )
     parser.add_argument("--gen", type=int, default=64, help="decode tokens per request")
     parser.add_argument(
+        "--repeats", type=int, default=3,
+        help="how many times to run each prompt depth (median + min/max, default 3)",
+    )
+    parser.add_argument(
         "--prompt",
         help="custom user message (decode-only; skips the depth sweep)",
     )
@@ -406,22 +544,26 @@ def cmd_bench(args):
     if not a.model:
         print(
             f"usage: {sys.argv[0]} bench <model> [--lens ...] [--gen N] "
-            "[--prompt S] [--json]",
+            "[--repeats N] [--prompt S] [--json]",
             file=sys.stderr,
         )
         return 2
 
     base, key = _load_config()
     if a.prompt is not None:
-        items, mml = [("custom", a.prompt)], None
+        # Custom prompt is passed through verbatim (decode-only); no fresh-nonce
+        # regeneration, no depth sweep.
+        items, mml = [("custom", (a.prompt, False))], None
     else:
         mml = _bench_model_max_len(base, key, a.model)
         lens = [int(x) for x in a.lens.split(",")]
-        items = [(str(t), _bench_build_prompt(t)) for t in lens
+        # (label, (target_tokens, is_target)): target prompts get a fresh nonce
+        # per repeat so consecutive samples never share a prefix and hit cache.
+        items = [(str(t), (t, True)) for t in lens
                  if not (mml and t > mml - 2000)]
 
     sys.stdout.reconfigure(line_buffering=True)
-    result = _bench_run(base, key, a.model, items, a.gen, a.timeout, mml)
+    result = _bench_run(base, key, a.model, items, a.gen, a.timeout, mml, a.repeats)
     if a.json:
         print()
         print(json.dumps(result, indent=2))
