@@ -10,7 +10,7 @@
     build_dir: "/opt/src/open-webui-build{{ instance_suffix }}"
     plugins_repo: "https://github.com/devrandom/open-webui-plugins.git"
     webui_repo: "https://github.com/open-webui/open-webui.git"
-    webui_version: "v0.9.6"
+    webui_version: "v0.11.0"
     image_name: "registry.xc:5000/open-webui-with-plugins"
     image_tag: "{{ instance if instance else 'latest' }}"
   tasks:

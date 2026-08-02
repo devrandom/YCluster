@@ -21,14 +21,7 @@ services:
       - 'ENABLE_API_KEYS=True'
       # Forward user identity headers downstream for per-user attribution
       - 'ENABLE_FORWARD_USER_INFO_HEADERS=True'
-      - 'OPEN_WEBUI_PLUGINS=open_webui_plugins'
-      - 'MEM_QDRANT_URL=host.docker.internal'
-      # mem0 plugin: keep ollama provider for now until a suitable model is
-      # configured in the inference gateway for memory operations and embeddings.
-      - 'MEM_LLM_PROVIDER=ollama'
-      - 'MEM_EMBEDDER_PROVIDER=ollama'
-      - 'MEM_OLLAMA_LLM_MODEL=deepseek-r1:70b'
-      - 'MEM_VECTOR_STORE_QDRANT_DIMS=768'
+      # mem0 plugin disabled — not used. No OPEN_WEBUI_PLUGINS / MEM_* vars here.
       # OIDC login via the cluster IdP — values come from the manager's env
       # file (set only on the main instance once authentik is live); empty
       # client id leaves OAuth disabled.
