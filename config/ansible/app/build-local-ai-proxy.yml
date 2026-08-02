@@ -17,7 +17,7 @@
 # s1, it would target localhost (no sshd) instead of s1. Targeting the
 # buildhost directly is the standard pattern for build-* plays.
 - name: Build local-ai-proxy from source
-  hosts: "{{ buildhost }}"
+  hosts: "{{ buildhost | default('s1') }}"
   vars:
     proxy_build_dir: "/opt/src/local-ai-proxy"
     proxy_binary_path: "{{ proxy_build_dir }}/bin/local-ai-proxy"
