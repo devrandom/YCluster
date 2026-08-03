@@ -24,6 +24,7 @@
     const items = isApp ? [
         ['VM Schedule', '/admin/vm-schedule'],
         ['Settings', '/admin/settings'],
+        ['API Keys', '/admin/settings/api-keys'],
         ['Account', authHref],
     ] : [
         ['Home', '/'],

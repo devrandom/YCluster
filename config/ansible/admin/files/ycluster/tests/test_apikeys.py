@@ -182,6 +182,28 @@ class MigrateTests(ApiKeysTestBase):
         rows = [("sk-1", "a@x", "user", []), ("sk-2", "b@x", "user", [])]
         self.assertEqual(self._run_migrate(rows), 2)
 
+    def test_migrate_is_idempotent(self):
+        rows = [("sk-same", "alice@x", "user", ["g1"])]
+        self.assertEqual(self._run_migrate(rows), 1)
+        # Re-running does not mint a duplicate key-id for the same token.
+        self.assertEqual(self._run_migrate(rows), 0)
+        recs = ak.list_keys("alice@x")["alice@x"]
+        self.assertEqual(len(recs), 1)
+        # The original token still authenticates.
+        self.assertEqual(ak.validate_key("sk-same", hasher=self.hasher),
+                         ("alice@x", ["g1"]))
+
+    def test_migrate_backfills_partial_run(self):
+        rows = [("sk-a", "a@x", "user", []), ("sk-b", "b@x", "user", [])]
+        self.assertEqual(self._run_migrate(rows), 2)
+        # On a re-run, only rows that still lack a migrated record are copied.
+        rows2 = [("sk-a", "a@x", "user", []), ("sk-b", "b@x", "user", []),
+                 ("sk-c", "c@x", "user", [])]
+        self.assertEqual(self._run_migrate(rows2), 1)
+        self.assertEqual(len(ak.list_keys("a@x")["a@x"]), 1)
+        self.assertEqual(len(ak.list_keys("b@x")["b@x"]), 1)
+        self.assertEqual(len(ak.list_keys("c@x")["c@x"]), 1)
+
     def _run_migrate(self, rows):
         orig = ak._import_psycopg2
         try:

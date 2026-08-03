@@ -148,6 +148,24 @@ def validate_key(presented, hasher=None):
     return None
 
 
+def _has_owner_token(email, plaintext, hasher):
+    """True if an existing etcd key-record for `email` hashes to `plaintext`.
+
+    Argon2 uses a per-key salt, so two hashes of the same plaintext differ;
+    detecting an already-migrated token therefore means verifying the
+    presented secret against each stored hash, exactly as the auth path
+    does."""
+    prefix = USERS_PREFIX + email + KEYS_SUFFIX
+    for val, _meta in get_etcd_client().get_prefix(prefix):
+        data = json.loads(val.decode())
+        try:
+            if hasher.verify(data["hash"], plaintext):
+                return True
+        except (exceptions.VerifyMismatchError, exceptions.InvalidHashError):
+            continue
+    return False
+
+
 def migrate_owui_keys(hasher=None, owui_dsn=None):
     """Copy Open-WebUI API keys into the etcd store, re-hashed in place.
 
@@ -155,10 +173,13 @@ def migrate_owui_keys(hasher=None, owui_dsn=None):
     the legacy validator used), and for each row writes an etcd key record
     holding the argon2id hash of the existing `sk-...` value together with
     the owner's groups. The plaintext is never written to etcd, so the
-    user keeps their same token — no rotation. Idempotent: re-running
-    re-creates records under new key-ids.
+    user keeps their same token — no rotation.
 
-    Returns a count of keys copied."""
+    Idempotent: a token that already exists for its owner (whose stored
+    hash verifies) is skipped instead of minting a duplicate, so re-running
+    after an interrupted or partial run only backfills what's missing.
+
+    Returns a count of keys newly copied."""
     psycopg2 = _import_psycopg2()
     dsn = owui_dsn or "dbname=openwebui user=openwebui password=openwebui host=localhost"
     hasher = hasher or PasswordHasher()
@@ -186,6 +207,12 @@ def migrate_owui_keys(hasher=None, owui_dsn=None):
                 if role == "admin" and "admin" not in groups:
                     groups.append("admin")
                 _valid_user(email)
+                if _has_owner_token(email, plaintext, hasher):
+                    # Already migrated under a previous key-id; just keep the
+                    # owner's groups reconciled.
+                    if groups:
+                        _put(USERS_PREFIX + email + GROUPS_SUFFIX, groups)
+                    continue
                 key_id = str(uuid.uuid4())
                 now = datetime.now(timezone.utc).isoformat()
                 rec = {"hash": hasher.hash(plaintext),
