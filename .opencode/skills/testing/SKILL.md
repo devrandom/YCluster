@@ -60,6 +60,16 @@ not package-name `discover`:
 falls back to `python3` (which needs the apt deps installed — see the
 references file if `etcd3` fails to import).
 
+**argon2 exception-surface drift.** The validator
+(`local-ai-proxy-auth.py`) uses argon2's `VerificationError` and
+`InvalidHash` names, which exist on both the apt `python3-argon2`
+(21.1.0, what prod runs) and newer pip argon2-cffi (≥25). Avoid the
+`InvalidHashError` / `VerifyMismatchError` aliases — `InvalidHashError`
+does not exist on apt 21.1.0 and a bare reference to it 500s on prod.
+Unit tests run on the dev host's argon2 version, so version-specific
+exception regressions are only caught by the dev-cluster system test
+(section 14, which runs the validator against apt argon2).
+
 ## Go unit (what `just test` runs)
 
 ```bash

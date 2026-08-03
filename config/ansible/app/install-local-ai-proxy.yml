@@ -143,9 +143,17 @@
     - name: Install auth-validator apt deps
       apt:
         name:
+          # The validator imports all of these directly (see
+          # files/local-ai-proxy-auth.py). Keep them here rather than
+          # relying on install-ycluster-package.yml having run, so the
+          # validator is self-contained on any storage node. argon2 must be
+          # the apt version (python3-argon2) — pip argon2-cffi exposes a
+          # different exception surface.
           - python3-flask
           - python3-psycopg2
           - python3-etcd3
+          - python3-argon2
+          - python3-yaml
         state: present
 
     - name: Install auth-validator script

@@ -847,6 +847,14 @@ sec_inference() {
     $SSH c1 "curl -fsS --max-time 5 -H 'Authorization: Bearer $sk' http://inference.xc/v1/models -o /dev/null"
   ok "per-user key authenticates through nginx auth_request"
 
+  # A *wrong* bearer against a still-existing key must be a clean 401, not a
+  # 500. The validator exercises argon2's verify-mismatch path here, which
+  # only exists when a hash is actually present (the revoke case below
+  # removes the hash and would miss it).
+  code=$($SSH c1 "curl -s --max-time 5 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer sk-wrong' http://inference.xc/v1/models")
+  [ "$code" = 401 ] || die "wrong token on live key got $code (want 401, not 500)"
+  ok "wrong token on live key rejected cleanly (no 500)"
+
   key_id=$($SSH s1 "$E ycluster inference key list --owner $owner" \
     | awk '$1 ~ /^[0-9a-f-]{36}$/ {print $1; exit}')
   [ -n "$key_id" ] || die "inference key list found no key for $owner"

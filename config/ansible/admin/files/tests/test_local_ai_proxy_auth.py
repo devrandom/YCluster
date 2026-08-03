@@ -143,6 +143,15 @@ class UserStoreTests(ValidatorTestBase):
         self.assertIsNone(store.auth_user("not-a-key"))
         self.assertIsNone(store.auth_user(""))
 
+    def test_auth_user_malformed_stored_hash(self):
+        # A stored hash that argon2 can't parse raises InvalidHash (both the
+        # apt python3-argon2 and newer pip surface this name); the store must
+        # treat it as "no match", never propagate.
+        rec = {"hash": "not-an-argon2-hash", "created_at": "t", "label": ""}
+        self.etcd.seed_json(ak.USERS_PREFIX + "alice@x" + ak.KEYS_SUFFIX + "k1", rec)
+        store = self.validator.UserStore(self.etcd, hasher=self.hasher)
+        self.assertIsNone(store.auth_user("sk-anything"))
+
     def test_auth_user_empty_store(self):
         store = self.validator.UserStore(self.etcd, hasher=self.hasher)
         self.assertIsNone(store.auth_user("sk-anything"))

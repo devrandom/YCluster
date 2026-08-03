@@ -76,7 +76,7 @@ ssh -F dev/cluster/.ssh/config s1 'systemctl status postgresql@16-main'
 | 11 | usage accounting → postgres | `vm_events` drained, `/cluster/vms-events/` empty, `vm_samples` rows |
 | 12 | rathole tunnels via f1 | ssh banners through f1:2201-2203, http via f1:80 → leader public vhost |
 | 13 | admin web forward-auth | anonymous `/admin/` → 302 to authentik outpost; `/api/inventory` open internally, gated publicly |
-| 14 | local-ai-proxy | all storage nodes run it, `ycluster inference add` hot-reloads, chat completion proxied through nginx auth, missing/wrong bearer → 401 |
+| 14 | local-ai-proxy | all storage nodes run it, `ycluster inference add` hot-reloads, chat completion proxied through nginx auth, missing/wrong bearer → 401, wrong token on a live per-user key → clean 401 (argon2 verify-mismatch path) |
 | 15 | ACME via Pebble | Pebble directory via `pebble.xc`, certbot obtain against pebble, certificate in etcd, nginx restored to dev local mode |
 | 16 | leadership + VIP failover | drain leader → leadership moves → VIP follows → registry/authentik re-bound → state preserved → failback — **disruptive** |
 | 17 | backup + verify-restore | encrypted backups produced, verify-restore loaded into scratch, metrics report success |

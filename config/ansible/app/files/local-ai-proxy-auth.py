@@ -161,7 +161,13 @@ class UserStore:
                     try:
                         if self._hasher.verify(h, token):
                             return email, list(self._groups.get(email, []))
-                    except (exceptions.VerifyMismatchError, exceptions.InvalidHashError):
+                    # Catch base names that exist across argon2 versions: on
+                    # Ubuntu's apt python3-argon2 (21.1.0) the names are
+                    # VerificationError + InvalidHash (no InvalidHashError),
+                    # while newer releases alias InvalidHash as
+                    # InvalidHashError. VerificationError covers the
+                    # VerifyMismatchError subclass on both.
+                    except (exceptions.InvalidHash, exceptions.VerificationError):
                         continue
         return None
 
@@ -266,6 +272,10 @@ def auth():
     if load_allow_owui_fallback():
         email, groups = lookup_openwebui_user(token)
         if email:
+            # Distinguishes the migration fallback path from a normal etcd
+            # hit so ops can watch for the last user still authing via OWUI
+            # and flip allow_owui_fallback off once it goes quiet.
+            log.info("auth via owui fallback: %s", email)
             resp = Response(status=200)
             resp.headers["X-User-Id"] = email
             resp.headers["X-User-Groups"] = ",".join(groups)
