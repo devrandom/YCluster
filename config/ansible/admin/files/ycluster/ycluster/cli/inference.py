@@ -64,6 +64,29 @@ def register_inference_commands(subparsers):
     reload_parser = sub.add_parser('reload', help='Restart local-ai-proxy (picks up YAML config changes; model edits are hot)')
     reload_parser.set_defaults(func=lambda args: inference_manager.reload_proxy())
 
+    # ycluster inference key ... — gateway API-key ownership (etcd system of
+    # record, not Open-WebUI). See docs/design/api-key-ownership.md.
+    key_parser = sub.add_parser('key', help='Manage inference gateway API keys (etcd-backed)')
+    key_parser.set_defaults(func=lambda args: args.parser.print_help(), parser=key_parser)
+    key_sub = key_parser.add_subparsers(dest='key_command', help='Key commands')
+
+    key_create = key_sub.add_parser('create', help='Mint a new gateway API key (prints the secret once)')
+    key_create.add_argument('--owner', required=True, help='Owner email (cluster identity key)')
+    key_create.add_argument('--group', action='append', default=[], help='Group to grant (repeatable)')
+    key_create.add_argument('--label', default=None, help='Human-readable label')
+    key_create.set_defaults(func=_cmd_key_create)
+
+    key_list = key_sub.add_parser('list', help='List key metadata (never the secret)')
+    key_list.add_argument('--owner', default=None, help='Only this owner (default: all)')
+    key_list.set_defaults(func=_cmd_key_list)
+
+    key_revoke = key_sub.add_parser('revoke', help='Revoke a key by its key-id (idempotent)')
+    key_revoke.add_argument('key_id', help='Key id (from `ycluster inference key list`)')
+    key_revoke.set_defaults(func=_cmd_key_revoke)
+
+    key_migrate = key_sub.add_parser('migrate', help='One-time: copy Open-WebUI keys into etcd (same token keeps working, no rotation)')
+    key_migrate.set_defaults(func=_cmd_key_migrate)
+
 
 def _forward(*args):
     """Exec local-ai-proxy with the given arguments and exit with its code."""
@@ -111,3 +134,66 @@ def _cmd_status(args):
         inference_manager.show_status(args.proxy_url)
     else:
         inference_manager.show_status()
+
+
+def _cmd_key_create(args):
+    from ..common import apikeys
+    try:
+        secret = apikeys.create_key(args.owner, groups=args.group, label=args.label)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:
+        print(f"error: etcd write failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Created key for {args.owner}. Copy it now — it is shown only once:")
+    print(f"  {secret}")
+    if args.group:
+        print(f"Groups: {', '.join(args.group)}")
+
+
+def _cmd_key_list(args):
+    from ..common import apikeys
+    try:
+        data = apikeys.list_keys(args.owner)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:
+        print(f"error: etcd read failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    fmt = "{:<36} {:<40} {:<14} {}"
+    print(fmt.format('KEY ID', 'OWNER', 'CREATED', 'LABEL'))
+    for email in sorted(data):
+        for rec in data[email]:
+            print(fmt.format(rec['key_id'], email,
+                             rec['created_at'][:13].replace('T', ' '),
+                             rec['label']))
+        if not data[email]:
+            print(fmt.format('', email, '', '(no keys)'))
+
+
+def _cmd_key_revoke(args):
+    from ..common import apikeys
+    try:
+        removed = apikeys.revoke_key(args.key_id)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:
+        print(f"error: etcd write failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    if removed:
+        print(f"Revoked key {args.key_id}.")
+    else:
+        print(f"No key with id {args.key_id} (no-op).")
+
+
+def _cmd_key_migrate(args):
+    from ..common import apikeys
+    try:
+        count = apikeys.migrate_owui_keys()
+    except Exception as e:
+        print(f"error: migration failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Migrated {count} key(s) from Open-WebUI into etcd (same tokens keep working).")

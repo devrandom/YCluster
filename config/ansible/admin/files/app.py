@@ -2819,6 +2819,7 @@ def _usage_stats_cursor(since_days):
 import ipaddress
 from collections import namedtuple
 
+from ycluster.common import apikeys
 from ycluster.utils import vm_manager as vmm
 from ycluster.utils.authentik_manager import ADMIN_GROUP, MANAGER_GROUP
 
@@ -3349,6 +3350,69 @@ def _settings_keys_response(email):
     """Fresh key list for `email`, re-read after a mutation."""
     rec = vmm.user_get(email) or {}
     return jsonify({'keys': rec.get('ssh_keys', [])})
+
+
+@app.route('/admin/settings/api-keys')
+def settings_api_keys_page():
+    """Self-service page for the logged-in user's inference gateway API
+    keys. Mint-once / present-once — the plaintext is only returned in the
+    create response and never re-displayed."""
+    return render_template('admin-api-keys.html')
+
+
+@app.route('/admin/settings/api-keys/data')
+def settings_api_keys_data():
+    id = _authentik_identity()
+    if not id.email:
+        return jsonify({'error': 'no authenticated user'}), 403
+    try:
+        data = apikeys.list_keys(id.email)
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+    return jsonify({'email': id.email,
+                    'keys': data.get(id.email, [])})
+
+
+@app.route('/admin/settings/api-keys/create', methods=['POST'])
+def settings_api_keys_create():
+    id = _authentik_identity()
+    if not id.email:
+        return jsonify({'error': 'no authenticated user'}), 403
+    body = request.get_json(silent=True) or {}
+    label = body.get('label', '') or ''
+    if not isinstance(label, str):
+        return jsonify({'error': 'invalid label'}), 400
+    try:
+        secret = apikeys.create_key(id.email, label=label)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'etcd write failed: {e}'}), 503
+    # The plaintext is returned exactly once; it is not stored and there is
+    # no re-display endpoint.
+    return jsonify({'secret': secret, 'label': label})
+
+
+@app.route('/admin/settings/api-keys/revoke', methods=['POST'])
+def settings_api_keys_revoke():
+    id = _authentik_identity()
+    if not id.email:
+        return jsonify({'error': 'no authenticated user'}), 403
+    body = request.get_json(silent=True) or {}
+    key_id = body.get('key_id', '') or ''
+    if not isinstance(key_id, str) or not key_id.strip():
+        return jsonify({'error': 'no key id provided'}), 400
+    try:
+        # Scoped: only revoke if the key is owned by the caller.
+        mine = {r['key_id'] for r in apikeys.list_keys(id.email).get(id.email, [])}
+        if key_id not in mine:
+            return jsonify({'error': 'key not found'}), 404
+        apikeys.revoke_key(key_id)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'etcd write failed: {e}'}), 503
+    return jsonify({'ok': True})
 
 
 @app.route('/admin/vm-usage')

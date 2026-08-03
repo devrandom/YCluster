@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API Keys</title>
+  <script src="/static/nav.js" defer></script>
+  <script src="/static/alpine-3.14.1.min.js" defer></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+    h1 { color: #333; text-align: center; margin-bottom: 0.5rem; }
+    h2 { color: #333; font-size: 1.05rem; margin: 0 0 0.25rem; }
+    .explainer { color: #666; font-size: 0.85rem; text-align: center; margin-bottom: 1.5rem; }
+    .card { background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 6px; padding: 1rem 1.25rem; margin-bottom: 1rem; max-width: 920px; margin-left: auto; margin-right: auto; }
+    .meta { color: #666; font-size: 0.85rem; }
+    .keylist { margin: 0.75rem 0; }
+    .key { display: flex; gap: 0.6rem; align-items: center; padding: 0.5rem 0; border-top: 1px solid #eee; }
+    .key:first-child { border-top: none; }
+    .grow { flex: 1; min-width: 0; }
+    .klabel { font-size: 0.9rem; }
+    .kmeta { color: #888; font-size: 0.78rem; }
+    .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-top: 0.5rem; }
+    button { padding: 0.35rem 0.9rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    button:disabled { background: #9ca3af; cursor: default; }
+    .iconbtn { background: none; border: none; cursor: pointer; color: #b91c1c; padding: 0.3rem; border-radius: 4px; }
+    .iconbtn:hover { background: #fee2e2; }
+    .iconbtn svg { display: block; }
+    .saved { color: #166534; font-size: 0.85rem; }
+    .error { color: #b91c1c; font-size: 0.85rem; }
+    .empty { color: #666; font-style: italic; padding: 1rem 0; }
+    code { background: #f3f4f6; border-radius: 3px; padding: 0.05rem 0.3rem; font-size: 0.85em; }
+    .secretbox { display: flex; gap: 0.6rem; align-items: center; margin-top: 0.75rem; padding: 0.75rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
+    .secretval { flex: 1; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8rem; word-break: break-all; }
+  </style>
+</head>
+<body x-data="apiKeysApp()" x-init="load()">
+  <h1>API Keys</h1>
+  <p class="explainer">
+    These keys let <b>you</b> talk to the cluster's inference gateway
+    (<code>Authorization: Bearer &lt;sk-…&gt;</code>), e.g. from a local client
+    or from Open-WebUI's Connections page. Keys are shown <b>once</b> at
+    creation — if you lose it, revoke and create a new one.
+  </p>
+
+  <template x-if="fatal">
+    <div class="card"><span class="error" x-text="fatal"></span></div>
+  </template>
+
+  <template x-if="!fatal">
+    <div class="card">
+      <h2>Inference API keys</h2>
+      <div class="meta" x-show="email">Signed in as <code x-text="email"></code></div>
+
+      <template x-if="loading"><div class="empty">Loading…</div></template>
+
+      <!-- One-shot presentation: the fresh secret is only in memory after a
+           create; refresh shows only metadata. -->
+      <div class="secretbox" x-show="newSecret">
+        <div class="secretval" x-text="newSecret"></div>
+        <button @click="copySecret()" :disabled="copied">Copy</button>
+        <span class="saved" x-text="copied ? 'copied' : ''"></span>
+      </div>
+      <span class="saved" x-show="newSecret">This key is shown only once — save it now.</span>
+
+      <div class="keylist" x-show="!loading">
+        <template x-if="keys.length === 0 && !newSecret">
+          <div class="empty">No API keys yet — create one below.</div>
+        </template>
+        <template x-for="k in keys" :key="k.key_id">
+          <div class="key">
+            <div class="grow">
+              <span class="klabel" x-text="k.label || '(no label)'"></span>
+              <span class="kmeta" x-text="shortId(k.key_id) + ' · created ' + created(k.created_at)"></span>
+            </div>
+            <button class="iconbtn" @click="revokeKey(k.key_id)" aria-label="Revoke key"
+                    title="Revoke this key">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                   stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
+          </div>
+        </template>
+      </div>
+
+      <div x-show="!loading">
+        <div class="row">
+          <input type="text" x-model="label" placeholder="Label (e.g. laptop)"
+                 style="flex:1; padding:0.5rem; border:1px solid #ccc; border-radius:4px; box-sizing:border-box;"/>
+          <button @click="createKey()" :disabled="creating">Create key</button>
+        </div>
+        <span class="error" x-show="createError" x-text="createError"></span>
+        <span class="error" x-show="error" x-text="error"></span>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    function apiKeysApp() {
+      return {
+        email: '', keys: [], label: '',
+        loading: false, creating: false, copied: false,
+        fatal: '', createError: '', error: '',
+        newSecret: '',
+
+        load() {
+          this.loading = true
+          fetch('/admin/settings/api-keys/data')
+            .then(r => r.json())
+            .then(d => {
+              if (d.error) { this.fatal = d.error; this.loading = false; return }
+              this.email = d.email
+              this.keys = d.keys || []
+              this.loading = false
+            })
+            .catch(() => { this.fatal = 'failed to load API keys'; this.loading = false })
+        },
+
+        shortId(id) { return id ? id.slice(0, 8) : '' },
+        created(iso) { return iso ? iso.slice(0, 10) : '' },
+
+        createKey() {
+          this.createError = ''; this.error = ''; this.newSecret = ''; this.copied = false
+          this.creating = true
+          fetch('/admin/settings/api-keys/create', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({label: this.label}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              this.creating = false
+              if (!ok) { this.createError = d.error || 'failed to create key'; return }
+              this.newSecret = d.secret
+              this.label = ''
+              this.loadedKeys()
+            })
+            .catch(() => { this.creating = false; this.createError = 'request failed' })
+        },
+
+        loadedKeys() {
+          fetch('/admin/settings/api-keys/data')
+            .then(r => r.json())
+            .then(d => { if (!d.error) this.keys = d.keys || [] })
+            .catch(() => {})
+        },
+
+        copySecret() {
+          navigator.clipboard.writeText(this.newSecret).then(() => {
+            this.copied = true
+            setTimeout(() => { this.copied = false }, 2000)
+          }).catch(() => { this.createError = 'copy failed — select the text manually' })
+        },
+
+        revokeKey(keyId) {
+          this.error = ''
+          fetch('/admin/settings/api-keys/revoke', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key_id: keyId}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              if (ok) this.loadedKeys()
+              else this.error = d.error || 'failed to revoke key'
+            })
+            .catch(() => { this.error = 'request failed' })
+        },
+      }
+    }
+  </script>
+</body>
+</html>

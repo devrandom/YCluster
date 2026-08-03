@@ -11,7 +11,8 @@ dependencies = [
     "etcd3>=0.12.0",
     "protobuf>=3.20.0,<4.0.0",  # etcd3 requires older protobuf
 
-    # ycluster CLI dependencies
+    # ycluster CLI dependencies (mirror of the apt runtime deps — keep the
+    # matching python3-<pkg> in install-ycluster-package.yml in step)
     "flask>=2.0.0",
     "requests>=2.25.0",
     "dnspython>=2.1.0",
@@ -21,6 +22,7 @@ dependencies = [
     "ntplib>=0.3.0",
     "netifaces>=0.11.0",
     "pyyaml>=5.4.0",
+    "argon2-cffi>=21.1.0",   # API-key hashing (production: apt python3-argon2)
 ]
 
 [tool.uv]

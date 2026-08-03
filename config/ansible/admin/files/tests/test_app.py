@@ -29,9 +29,18 @@ for p in (_HERE, _FILES, os.path.join(_FILES, "ycluster")):
 
 from fake_etcd import FakeEtcd                           # noqa: E402
 import app as appmod                                     # noqa: E402
+from ycluster.common import apikeys                      # noqa: E402
 from ycluster.utils import vm_manager as vmm             # noqa: E402
 
 UTC = timezone.utc
+
+
+def _fast_hasher():
+    """A PasswordHasher subclass with low cost — still argon2id, per-key
+    salt, just fast enough for a handful of creates in a test run."""
+    from argon2 import PasswordHasher as _PH
+    return type("FastPH", (_PH,), {})(time_cost=1, memory_cost=1024,
+                                      hash_len=16, salt_len=8)
 
 
 def _iso(dt):
@@ -42,18 +51,24 @@ class SchedTestBase(unittest.TestCase):
     def setUp(self):
         self.etcd = FakeEtcd()
         # Both modules import get_etcd_client at module load — they each
-        # have their own name binding. Patch both so routes in app.py
-        # that call get_etcd_client() hit the FakeEtcd instead of
-        # trying to connect to localhost:2379.
+        # have their own name binding. Patch all so routes in app.py
+        # that call get_etcd_client() hit the FakeEtcd instead of trying
+        # to connect to localhost:2379. The apikeys DAL too.
         self._vmm_orig = vmm.get_etcd_client
         self._app_orig = appmod.get_etcd_client
+        self._ak_orig = apikeys.get_etcd_client
+        self._ph_orig = apikeys.PasswordHasher
         vmm.get_etcd_client = lambda: self.etcd
         appmod.get_etcd_client = lambda: self.etcd
+        apikeys.get_etcd_client = lambda: self.etcd
+        apikeys.PasswordHasher = _fast_hasher
         self.http = appmod.app.test_client()
 
     def tearDown(self):
         vmm.get_etcd_client = self._vmm_orig
         appmod.get_etcd_client = self._app_orig
+        apikeys.get_etcd_client = self._ak_orig
+        apikeys.PasswordHasher = self._ph_orig
 
     # --- seeding ---
     def vm(self, name, owner="alice@x", gpus=0, host="nv2", type="vm",
@@ -958,6 +973,81 @@ class VMScheduleCanEditTests(SchedTestBase):
                         manager=True, email="alice@x").get_json()["rows"]
         self.assertFalse(rows[0]["can_edit"])
         self.assertTrue(rows[0]["admin_locked"])
+
+
+class ApiKeysAppTests(SchedTestBase):
+    """Self-service inference API-key surface (/admin/settings/api-keys).
+
+    Routes are scoped to the caller's own email from the forward-auth
+    headers — a user can only ever see/create/revoke their own keys.
+    """
+
+    def test_no_auth_user_is_403(self):
+        # No forward-auth email (X-Authentik-Email absent) → no user to
+        # self-manage; the route is rejected regardless of UID.
+        r = self.get("/admin/settings/api-keys/data", email=None)
+        self.assertEqual(r.status_code, 403)
+
+    def test_data_lists_own_keys(self):
+        via_http = self.post_json("/admin/settings/api-keys/create",
+                                  {"label": "laptop"}, email="alice@x")
+        self.assertEqual(via_http.status_code, 200)
+        d = self.get("/admin/settings/api-keys/data", email="alice@x").get_json()
+        self.assertEqual(d["email"], "alice@x")
+        self.assertEqual(len(d["keys"]), 1)
+        self.assertEqual(d["keys"][0]["label"], "laptop")
+        self.assertNotIn("hash", d["keys"][0])
+        self.assertNotIn("secret", d["keys"][0])
+
+    def test_create_returns_plaintext_once(self):
+        r = self.post_json("/admin/settings/api-keys/create",
+                           {"label": "cli"}, email="alice@x")
+        body = r.get_json()
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(body["secret"].startswith("sk-"))
+        # Plaintext never lands in etcd.
+        self.assertNotIn(body["secret"], list(self.etcd.store.values()))
+        # No re-display: a subsequent data call exposes only metadata.
+        d = self.get("/admin/settings/api-keys/data", email="alice@x").get_json()
+        self.assertNotIn("secret", str(d))
+
+    def test_create_bad_label_is_400(self):
+        r = self.post_json("/admin/settings/api-keys/create",
+                           {"label": 123}, email="alice@x")
+        self.assertEqual(r.status_code, 400)
+
+    def test_revoke_own_key(self):
+        secret = apikeys.create_key("alice@x", label="test", hasher=_fast_hasher())
+        key_id = apikeys.list_keys("alice@x")["alice@x"][0]["key_id"]
+        r = self.post_json("/admin/settings/api-keys/revoke",
+                           {"key_id": key_id}, email="alice@x")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(apikeys.validate_key(secret, hasher=_fast_hasher()))
+        self.assertEqual(apikeys.list_keys("alice@x")["alice@x"], [])
+
+    def test_cannot_revoke_another_users_key(self):
+        apikeys.create_key("bob@x", label="bob", hasher=_fast_hasher())
+        bob_key = apikeys.list_keys("bob@x")["bob@x"][0]["key_id"]
+        r = self.post_json("/admin/settings/api-keys/revoke",
+                           {"key_id": bob_key}, email="alice@x")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(len(apikeys.list_keys("bob@x")["bob@x"]), 1)
+
+    def test_revoke_missing_id_is_404(self):
+        r = self.post_json("/admin/settings/api-keys/revoke",
+                           {"key_id": "does-not-exist"}, email="alice@x")
+        self.assertEqual(r.status_code, 404)
+
+    def test_page_renders(self):
+        r = self.get("/admin/settings/api-keys", email="alice@x")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"API Keys", r.data)
+
+    # convenience wrapper scoping POSTs to an email
+    def post_json(self, path, body, email):
+        return self.http.post(path, json=body,
+                              headers=self._headers(False, email),
+                              environ_overrides=self._environ("127.0.0.1"))
 
 
 if __name__ == "__main__":
