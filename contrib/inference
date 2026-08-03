@@ -162,7 +162,10 @@ def cmd_chat(args):
                 ev = json.loads(payload)
             except json.JSONDecodeError:
                 continue
-            delta = ev.get("choices", [{}])[0].get("delta", {}) or {}
+            choices = ev.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {}) or {}
             reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
             content = delta.get("content") or ""
 

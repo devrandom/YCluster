@@ -79,18 +79,38 @@ health checker's rotation.
 
 ## Per-User API Keys
 
-Users generate keys in Open-WebUI (Account Settings → API Key →
-Generate). The same `sk-…` key authenticates both Open-WebUI and
-direct API calls to the inference gateway. See
-[`docs/usage/inference.md`](../usage/inference.md) for the
-client-facing API (chat/completions, streaming, model discovery).
+Gateway API keys are etcd-backed and self-service. Users mint keys at
+`https://<admin-domain>/admin/settings/api-keys` (the key is shown once
+at mint and never re-displayed) and manage their own keys there. Ops
+manage keys cluster-wide with the CLI:
 
 ```bash
-export OPENAI_API_KEY=sk-<your-openwebui-key>
+ycluster inference key create --owner alice@example.com --group g1 --label laptop
+ycluster inference key list [--owner alice@example.com]
+ycluster inference key revoke <key-id>
+```
+
+Each key is a distinct `sk-…` value stored as an argon2 hash under
+`/cluster/users/<email>/keys/` in etcd. A single user can hold multiple
+keys (e.g. one per device), each revocable independently.
+
+The same key previously also signed a user into Open-WebUI; OWUI keeps
+its own per-user keys for signing in to OWUI, but they are no longer
+how the gateway authenticates requests. An existing OWUI key's value
+was copied into the new etcd schema during migration, so the token
+keeps working — there is no rotation.
+
+Client setup:
+
+```bash
+export OPENAI_API_KEY=sk-<your-gateway-key>
 export OPENAI_BASE_URL=http://inference.xc/v1         # cluster-internal
 # or
 export OPENAI_BASE_URL=https://your-domain.com/v1     # external
 ```
+
+See [`docs/usage/inference.md`](../usage/inference.md) for the
+client-facing API (chat/completions, streaming, model discovery).
 
 Authentication is enforced at the nginx layer via `auth_request`; the
 proxy itself trusts the `X-User-Id` header that nginx injects after a
@@ -124,7 +144,8 @@ path.
 - **Auth validator**: `local-ai-proxy-auth.service` — small Flask app
   called by nginx `auth_request`. Accepts either the cluster admin
   master key (stored at `/cluster/config/inference/master-key` in
-  etcd) or a row in Open-WebUI's `api_key` PostgreSQL table.
+  etcd) or an etcd per-user key under `/cluster/users/<email>/keys/`
+  (argon2-verified).
 - **Model store**: etcd prefix `/cluster/config/inference/models/`;
   each key is a model name, the JSON value is
   `{"backends":[{"api_base":"…"}, …]}`. The schema is fan-out-ready

@@ -150,10 +150,8 @@
           # the apt version (python3-argon2) — pip argon2-cffi exposes a
           # different exception surface.
           - python3-flask
-          - python3-psycopg2
           - python3-etcd3
           - python3-argon2
-          - python3-yaml
         state: present
 
     - name: Install auth-validator script

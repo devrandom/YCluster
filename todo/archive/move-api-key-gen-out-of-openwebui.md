@@ -197,3 +197,27 @@ down the schema and the OWUI integration story.
 - Replacing OWUI entirely (option b's "OWUI is replacable" goal).
 - mTLS / per-request signing.
 - Per-key rate limits / quotas (separate item if it comes up).
+
+## Status
+
+DONE. Per-user gateway keys are now minted and hashed in etcd
+(`/cluster/users/<email>/keys/`, argon2id) and validated by
+`local-ai-proxy-auth` with no OWUI postgres hop; the CLI
+(`ycluster inference key create|list|revoke|migrate`) is in
+`config/ansible/admin/files/ycluster/`, migration ran on prod and
+copied existing OWUI keys into the new schema (tokens keep working,
+no rotation), docs were updated (`docs/design/api-key-ownership.md`,
+`docs/operations/inference.md`, `docs/usage/inference.md`), and the
+dev-cluster system-test `sec_inference` section covers
+create → auth → revoke → 401 → master key.
+
+Deliberately not done:
+- The OWUI admin-panel lockdown (subtask 6) was dropped by decision —
+  OWUI keeps its own per-user keys for signing into OWUI; OWUI-key
+  generation is intentionally left enabled and is no longer coupled to
+  the gateway auth path.
+- The dual-read window (subtask 5) was implemented then removed by
+  decision — the validator is etcd-only.
+- Secrets-rotation flow (subtask 11) is folded into
+  `todo/security/secrets-rotation.md`, still open; gateway keys are
+  revocable today and the OWUI-side copy means no forced rotation.

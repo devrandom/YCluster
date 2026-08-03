@@ -27,9 +27,10 @@ deployment and ops side.
 ## Authentication
 
 Auth is a per-user bearer token, enforced at the nginx layer. Generate
-one in Open-WebUI (Account Settings → API Key → Generate); the same
-`sk-…` key authenticates both Open-WebUI and direct API calls. The
-cluster admin master key also works.
+a gateway API key at `https://<admin-domain>/admin/settings/api-keys`
+(shown once at mint and never re-displayed). The cluster admin master
+key also works. Keys minted before the gateway moved off Open-WebUI
+keep their original `sk-…` value — there is no rotation.
 
 ## What's available
 
@@ -47,7 +48,7 @@ backends.
 ## Quick start
 
 ```bash
-export OPENAI_API_KEY=sk-<your-openwebui-key>
+export OPENAI_API_KEY=sk-<your-gateway-key>
 export OPENAI_BASE_URL=http://inference.xc/v1   # or https://your-domain.com/v1
 
 curl -s -X POST "$OPENAI_BASE_URL/chat/completions" \

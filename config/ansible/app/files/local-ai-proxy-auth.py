@@ -15,12 +15,6 @@ Validation sources (in order):
      → user = <email>, groups = values read from
        /cluster/users/<email>/groups. This store is hot-reloaded on the
        /cluster/users/ prefix so per-request auth does no etcd round-trip.
-  3. (Optional migration fallback) Open-WebUI's api_key table → user =
-     u.email, groups = comma-separated OWUI group names. Only consulted
-     when auth.allow_owui_fallback is true in /etc/local-ai-proxy/config.yaml
-     (default false), and only when the etcd lookup misses. This lets an
-     existing cluster roll out the new validator while keys are copied
-     over, then be disabled and dropped.
 
 Listens on 127.0.0.1:4002 by default (override with LISTEN_ADDR env).
 """
@@ -33,7 +27,6 @@ import threading
 import time
 from wsgiref.simple_server import make_server
 
-import yaml
 from argon2 import PasswordHasher, exceptions
 from flask import Flask, Response, request
 
@@ -49,15 +42,12 @@ from ycluster.common.apikeys import (
 from ycluster.common.etcd_utils import get_etcd_client
 
 MASTER_KEY_ETCD_PATH = "/cluster/config/inference/master-key"
-PROXY_CONFIG_PATH = "/etc/local-ai-proxy/config.yaml"
-OWUI_DSN = "dbname=openwebui user=openwebui password=openwebui host=localhost"
 
 app = Flask(__name__)
 log = logging.getLogger("auth-validator")
 
 _state = {
     "master_key": None,   # lazily loaded from etcd
-    "pg": None,           # psycopg2 connection, reconnect on failure
     "store": None,        # UserStore snapshot, lazily built
 }
 _store_lock = threading.RLock()
@@ -70,22 +60,6 @@ def get_master_key():
         if value:
             _state["master_key"] = value.decode().strip()
     return _state["master_key"]
-
-
-def load_allow_owui_fallback(path=None):
-    """Read auth.allow_owui_fallback from the proxy config (default false).
-
-    The flag lives in the Ansible-managed YAML so enabling the migration
-    window is a playbook change, not a redeploy. Missing key/file → false.
-    """
-    if path is None:
-        path = PROXY_CONFIG_PATH
-    try:
-        with open(path) as fh:
-            cfg = yaml.safe_load(fh) or {}
-    except OSError:
-        return False
-    return bool((cfg.get("auth") or {}).get("allow_owui_fallback", False))
 
 
 class UserStore:
@@ -187,61 +161,6 @@ def reset_store(store=None):
         _state["store"] = store
 
 
-def get_pg():
-    conn = _state["pg"]
-    if conn is None or conn.closed:
-        import psycopg2
-        conn = psycopg2.connect(OWUI_DSN)
-        conn.autocommit = True
-        _state["pg"] = conn
-    return conn
-
-
-def lookup_openwebui_user(api_key):
-    """Return (email, groups) for an api_key row, or (None, []).
-
-    groups is a list of OWUI group names the user is a member of. Only
-    used during the migration window when auth.allow_owui_fallback is on.
-    """
-    try:
-        conn = get_pg()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT u.email, u.role,
-                       COALESCE(
-                           array_agg(g.name) FILTER (WHERE g.name IS NOT NULL),
-                           '{}'
-                       ) AS groups
-                FROM api_key ak
-                JOIN "user" u ON u.id = ak.user_id
-                LEFT JOIN group_member gm ON gm.user_id = u.id
-                LEFT JOIN "group" g ON g.id = gm.group_id
-                WHERE ak.key = %s
-                GROUP BY u.email, u.role
-                """,
-                (api_key,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                return None, []
-            email, role, groups = row
-            groups = list(groups or [])
-            if role == "admin":
-                groups.append("admin")
-            return email, groups
-    except Exception as e:
-        log.warning("openwebui lookup failed: %s", e)
-        # Force reconnect on next call.
-        try:
-            if _state["pg"]:
-                _state["pg"].close()
-        except Exception:
-            pass
-        _state["pg"] = None
-        return None, []
-
-
 @app.route("/auth")
 def auth():
     auth_header = request.headers.get("Authorization", "")
@@ -268,18 +187,6 @@ def auth():
         resp.headers["X-User-Id"] = email
         resp.headers["X-User-Groups"] = ",".join(groups)
         return resp
-
-    if load_allow_owui_fallback():
-        email, groups = lookup_openwebui_user(token)
-        if email:
-            # Distinguishes the migration fallback path from a normal etcd
-            # hit so ops can watch for the last user still authing via OWUI
-            # and flip allow_owui_fallback off once it goes quiet.
-            log.info("auth via owui fallback: %s", email)
-            resp = Response(status=200)
-            resp.headers["X-User-Id"] = email
-            resp.headers["X-User-Groups"] = ",".join(groups)
-            return resp
 
     return Response(status=401)
 

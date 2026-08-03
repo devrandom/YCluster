@@ -107,7 +107,6 @@ DR, backups, node lifecycle, scaling/capacity.
 - [/api/allocations + /api/health unauth](code-quality/api-allocations-health-unauth.md)
 
 ## Inference
-- **[HIGH]** [Move API key generation out of Open WebUI](inference/move-api-key-gen-out-of-openwebui.md) — per-user `sk-…` keys are minted in the OWUI web UI and stored plaintext in its postgres; the gateway auth validator reads them on every request. Move generation to `ycluster`, store hashed in etcd, hot-reload; pairs with `architecture/a2-api-keys-plaintext.md` (hash-at-rest for the new path) and `security/secrets-rotation.md` (per-user rotation flow).
 - [vllm-mlx on m1 ops gaps](inference/vllm-mlx-ops.md)
 - [Upstream exo prompt-logging fix](inference/upstream-exo-prompt-logging.md)
 - [GPU-VM DKMS → Canonical-signed modules](inference/gpu-dkms-canonical.md)
