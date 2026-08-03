@@ -12,6 +12,12 @@
 #   just test-system-fresh dev-cluster system tests with full provisioning
 #                          (~5 min — site-dev + base-infra-dev + app-dev).
 #
+#   just setup-rootless-incus
+#                          one-time root host prep so the dev cluster can run
+#                          rootless (per-user bridge on 10.0.0.0/16 + egress
+#                          firewall). Requires sudo. Re-run after a reboot.
+#                          Alias for ./dev/cluster/dev-cluster.sh setup.
+#
 # Logs land in ./tmp/ (gitignored). Watch with `tail -f ./tmp/<file>.log`.
 
 TEST_LOG := './tmp/system-test.log'
@@ -35,3 +41,10 @@ clear-dev-cluster:
     ./dev/cluster/dev-cluster.sh down
 
 test-system-fresh: clear-dev-cluster test-system
+
+# Privileged, one-time host prep for rootless dev-cluster runs. Thin alias to
+# ./dev/cluster/dev-cluster.sh setup, which owns the logic (clears a leftover
+# ycdev0 bridge, then reconciles incusbr-<uid> onto 10.0.0.0/16 + installs the
+# yc-dev-firewall egress rules).
+setup-rootless-incus:
+    ./dev/cluster/dev-cluster.sh setup

@@ -9,6 +9,7 @@
 # whole thing from scratch each session.
 #
 # Usage:
+#   ./dev-cluster.sh setup    # one-time root host prep (sudo): rootless bridge + egress firewall
 #   ./dev-cluster.sh up        # init incus + network + apt cache + nodes (idempotent)
 #   ./dev-cluster.sh down      # delete the node containers (keep net/profile/cache)
 #   ./dev-cluster.sh reset     # down + recreate (warm apt cache reused)
@@ -407,6 +408,23 @@ ensure_node() {
 }
 
 # --- commands ------------------------------------------------------------
+# One-time root host prep so `up` can run rootless. Delegate to
+# setup-rootless-incus.sh (creates/reconciles incusbr-<uid> on 10.0.0.0/16,
+# NAT on, DHCP off, plus the yc-dev-firewall egress rules). Needs root even
+# in rootless mode (nftables, /etc/subuid, root-project incus networks), so
+# it's always sudo. A leftover ycdev0 bridge (old SUDO=sudo path) squats on
+# 10.0.0.1 and blocks incusbr-<uid>'s dnsmasq from binding it; its
+# default-project yc-node profile still holds a NIC on it, so detach that
+# first, then drop the bridge. All guarded — no-op on re-runs/fresh hosts.
+cmd_setup() {
+  if sudo incus network show ycdev0 >/dev/null 2>&1; then
+    echo "[*] clearing leftover ycdev0 (old SUDO=sudo path)"
+    sudo incus --project default profile device remove yc-node eth0 2>/dev/null || true
+    sudo incus network delete ycdev0
+  fi
+  sudo "$SCRIPT_DIR/../setup-rootless-incus.sh" "$(id -u)"
+}
+
 cmd_up() {
   # firewall after network: the multicast NAT exemption needs the incus
   # pstrt chain, which exists only once the network does.
@@ -438,11 +456,12 @@ cmd_exec()   { local n=$1; shift || true; INCUS exec "$n" -- "${@:-bash}"; }
 cmd_purge()  { cmd_down; if INCUS info "$CACHE" >/dev/null 2>&1; then INCUS delete -f "$CACHE"; echo "[*] deleted $CACHE"; fi; }
 
 case "${1:-up}" in
+  setup)  cmd_setup ;;
   up)     cmd_up ;;
   down)   cmd_down ;;
   reset)  cmd_reset ;;
   purge)  cmd_purge ;;
   status) cmd_status ;;
   exec)   shift; cmd_exec "$@" ;;
-  *) echo "usage: $0 {up|down|reset|purge|status|exec <node> [cmd...]}" >&2; exit 1 ;;
+  *) echo "usage: $0 {setup|up|down|reset|purge|status|exec <node> [cmd...]}" >&2; exit 1 ;;
 esac

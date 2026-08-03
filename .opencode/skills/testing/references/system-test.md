@@ -24,6 +24,19 @@ cd dev/cluster
 ./system-test.sh --no-disruptive   # skip section 16 (leadership failover)
 ```
 
+**Rootless host prep comes first (once, or after every reboot).** The dev
+cluster runs rootless by default (`SUDO` empty in `dev-cluster.sh`), which
+attaches every node to a pre-created per-user bridge `incusbr-<uid>` on
+`10.0.0.0/16` (NAT on, DHCP off) plus a `yc-dev-firewall` egress oneshot.
+That bridge + firewall are created by **`./dev-cluster.sh setup`** (sudo;
+the `just setup-rootless-incus` target is a thin alias). Without it the
+nodes get a static `10.0.0.x/24` but the bridge is on the wrong subnet
+(e.g. Incus's auto-created `10.90.109.1/24`), so nothing routes out:
+provisioning hangs on the apt cache with `Temporary failure resolving
+'archive.ubuntu.com'`. See Troubleshooting below. `setup` also detaches the
+leftover `ycdev0` bridge from the old `SUDO=sudo` path and passes `$(id -u)`
+explicitly (the underlying script defaults to a `dev` user some hosts lack).
+
 **Always run `system-test.sh` in the background with a log file** — a
 full run takes ~5 min and produces thousands of lines:
 
@@ -74,10 +87,19 @@ stack. These can't run in containers or on a laptop.
 
 ### Running one section
 
-There's no `--only-section` flag. To re-run a single section, edit
-`main()` in `system-test.sh` to comment out the other sections — or
-use `--assert-only` and patch the script temporarily. Each section is
-a `sec_xxx()` function; lines 818-834 in `system-test.sh` list them.
+Pass `-s` / `--section` to `system-test.sh` to run a subset; provisioning
+still runs when not `--assert-only`, so it stays a true end-to-end check:
+
+```bash
+./system-test.sh -s 15                  # run only section 15
+./system-test.sh -s 1-5,15              # sections 1-5 and 15
+./system-test.sh -s acme                # any section whose name contains acme
+./system-test.sh --background -s 14     # background, only local-ai-proxy
+```
+
+Use `-s 14` (local-ai-proxy) to validate auth changes without the ~5 min
+full run. Each section is a `sec_xxx()` function; the registry near the
+bottom of `system-test.sh` maps `"<num>.<name>|sec_xxx"`.
 
 ## When dev cluster tests won't see your change
 
@@ -104,6 +126,17 @@ or templates, it's `admin/setup-web-services.yml --limit managed`.
   locally. `apt install python3-etcd3 python3-flask python3-requests
   python3-protobuf`, or use a venv with them (`./.venv/bin/python` is
   auto-detected by `run-tests.sh`).
+- **Provisioning hangs: aptcache/node can't resolve or reach the internet**
+  — `Temporary failure resolving 'archive.ubuntu.com'`, `ping 10.0.0.1`
+  (the node's gateway) lost, but `incus list` shows the node with a static
+  `10.0.0.x` address. This is the rootless bridge misconfigured, not a
+  DNS problem: `dev-cluster.sh` rootless mode trusts `incusbr-$(id -u)`,
+  so if `setup-rootless-incus.sh` wasn't run (or the bridge was
+  auto-created by Incus on the wrong subnet like `10.90.109.1/24`), there's
+  no NAT/route for the `10.0.0.0/24` source range. Fix with
+  `./dev/cluster/dev-cluster.sh setup` (sudo), then re-run. From the
+  restricted user project you can't reconfigure the bridge (`Error: User
+  does not have permission for project "default"`), so sudo is required.
 - **Section fails mid-run** — section logs at `./tmp/system-test-<playbook>.log`.
   SSH into the failing node via `dev/cluster/.ssh/config` to inspect
   (e.g. `ssh -F dev/cluster/.ssh/config s1 'journalctl -u postgresql@16-main -n 50'`).

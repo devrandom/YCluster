@@ -20,6 +20,7 @@ step or a manual rsync/playbook re-run).
 
 ```bash
 just test              # Python + Go unit, ~30s — run during the dev cycle and before every commit
+./dev/cluster/dev-cluster.sh setup  # one-time root host prep (just setup-rootless-incus alias)
 just test-system       # dev cluster, --assert-only, background
 just test-system-fresh # dev cluster with full provisioning (slow first time)
 ```
@@ -27,6 +28,15 @@ just test-system-fresh # dev cluster with full provisioning (slow first time)
 `just test` runs `./run-tests.sh` (both Python suites) and
 `make -C local-ai-proxy test` (Go unit). Use it as the default before
 every commit; reserve `just test-system*` for cross-component seams.
+
+**Rootless host prep is a hard prerequisite for the dev cluster.** The
+per-user bridge `incusbr-<uid>` (on `10.0.0.0/16`, NAT on, DHCP off) and
+the `yc-dev-firewall` egress rules are created by
+`./dev/cluster/dev-cluster.sh setup` (sudo; `just setup-rootless-incus`
+is an alias). If the bridge wasn't set up the nodes get no outbound
+network: provisioning hangs on the apt cache with `Temporary failure
+resolving 'archive.ubuntu.com'`. See `references/system-test.md` for the
+exact failure mode.
 
 For the dev-cluster lifecycle, the 17-section list, troubleshooting,
 and the deploy→test workflow when dev nodes won't see your change,
