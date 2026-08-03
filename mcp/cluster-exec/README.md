@@ -74,7 +74,14 @@ CE_BASTION="bastion.example.com" bash mcp/cluster-exec/cedaemon --start
 
 ## Security warning
 
-This tool grants the LLM **whatever SSH access your local `ssh` config has to `$CE_BASTION` and from there to `<hostname>`**. There are no allowlists, denylists, or confirmation steps. The privilege is intentional — the human running opencode is the admin. The HTTP transport binds to `127.0.0.1` only; do not change `CE_HTTP_HOST` to expose it.
+This tool grants the LLM **whatever SSH access your local `ssh` config has to `$CE_BASTION` and from there to `<hostname>`**. There are no allowlists or confirmation steps — the privilege is intentional, and the human running opencode is the admin. As a best-effort guard that steers the agent toward the supported primitives, the `run` tool rejects a handful of top-level commands (a message tells the agent what to use instead):
+
+- `ssh` — use the `hostname` argument instead.
+- `head` / `tail` — only `head -1` / `tail -1` are allowed.
+- `headtail` — never allowed.
+- `sleep` longer than 10s.
+
+This is advisory, not adversarial: nested content (quoted strings, `$(...)` subshells, backticks) is not inspected. The HTTP transport binds to `127.0.0.1` only; do not change `CE_HTTP_HOST` to expose it.
 
 ### Bearer authentication
 

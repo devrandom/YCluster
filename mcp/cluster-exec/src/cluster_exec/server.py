@@ -16,7 +16,7 @@ from pydantic import AnyHttpUrl, ConfigDict, create_model
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import auth, exec, log
+from . import auth, exec, log, validate
 
 
 # All tools must reject unknown arguments. The Pydantic default is
@@ -291,7 +291,9 @@ def _principal_from_ctx(ctx: Context) -> str | None:
         "via `cd /etc/ansible && ./run-playbook.sh ...`). Pass `user` "
         "to force a specific SSH login on the target (e.g. "
         "`user=\"admin\"` for macOS nodes where root login is denied); "
-        "defaults to whatever the bastion's ssh_config says for the host."
+        "defaults to whatever the bastion's ssh_config says for the host. "
+        "Rejected at the top level (with guidance): ssh, head/tail other "
+        "than `-1`, headtail, and sleep > 10s."
     ),
 )
 async def run(
@@ -323,6 +325,10 @@ async def run(
                 text=f"ERROR: timeout_s ({timeout_s}) must be greater than the auto-bg threshold ({_AUTO_BG_S}s; CE_AUTO_BG_TIMEOUT_S)",
             )
         ]
+
+    denied = validate.validate_command(command)
+    if denied is not None:
+        return [TextContent(type="text", text=f"ERROR: {denied}")]
 
     log.init(_LOG_PATH)
     session_id = secrets.token_hex(4)
