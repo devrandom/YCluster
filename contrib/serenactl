@@ -1,0 +1,136 @@
+#!/bin/bash
+# Manage the Serena MCP server over streamable-http (TCP) for Codex and other
+# MCP clients. The endpoint is http://127.0.0.1:4004/mcp.
+#
+# Commands (run with no args for usage):
+#   --start    Launch the server in the background and wait until the HTTP
+#              port is bound. Returns when the server is reachable.
+#              Idempotent: refuses to start a second instance while one is
+#              running.
+#   --stop     Signal the running server to terminate and wait for the port
+#              to release.
+#   --status   Report whether the server is up and where its URL is.
+#   --restart  --stop + --start.
+#
+# State files (under tmp/, gitignored):
+#   tmp/serena.pid   PID of the launching shell (diagnostic only — liveness
+#                     and stop use the network port, see cedaemon rationale).
+#   tmp/serena.log   stdout/stderr of the server
+#
+# Env vars:
+#   SERENA_HOST   bind address (default 127.0.0.1)
+#   SERENA_PORT   bind port (default 4004)
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PID="$REPO/tmp/serena.pid"
+LOG="$REPO/tmp/serena.log"
+HOST="${SERENA_HOST:-127.0.0.1}"
+PORT="${SERENA_PORT:-4004}"
+URL="http://$HOST:$PORT/mcp"
+
+mkdir -p "$(dirname "$PID")"
+
+usage() {
+    cat <<USAGE_HELP
+Usage: $(basename "$0") <command>
+
+Manage the Serena MCP server (streamable HTTP transport at $URL).
+
+Commands:
+  --start    Launch in the background, wait until the port is bound.
+  --stop     Signal the running server and wait for the port to release.
+  --status   Print whether the server is up and the URL.
+  --restart  --stop + --start.
+USAGE_HELP
+}
+
+port_bound() {
+    (echo > "/dev/tcp/$HOST/$PORT") 2>/dev/null
+}
+
+wait_for_port() {
+    local timeout_s=15
+    local start
+    start=$(date +%s)
+    while true; do
+        if port_bound; then
+            return 0
+        fi
+        if (( $(date +%s) - start > timeout_s )); then
+            echo "server did not bind $HOST:$PORT within ${timeout_s}s" >&2
+            tail -n 40 "$LOG" >&2 || true
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+
+wait_for_port_release() {
+    local timeout_s=15
+    local start
+    start=$(date +%s)
+    while port_bound; do
+        if (( $(date +%s) - start > timeout_s )); then
+            echo "port $PORT still bound after ${timeout_s}s" >&2
+            return 1
+        fi
+        sleep 0.2
+    done
+    return 0
+}
+
+do_start() {
+    if port_bound; then
+        echo "already running (port $PORT bound, url $URL)"
+        exit 0
+    fi
+    : > "$LOG"
+    # setsid puts the child in its own session so it survives the parent
+    # shell exiting — we don't want to hang on to a tty.
+    setsid serena start-mcp-server \
+        --context=codex \
+        --project-from-cwd \
+        --transport streamable-http \
+        --host "$HOST" \
+        --port "$PORT" \
+        >> "$LOG" 2>&1 < /dev/null &
+    echo $! > "$PID"
+    wait_for_port
+    echo "started — pid $(cat "$PID") (track may not match long-lived worker), url $URL, log $LOG"
+    echo "stop with: $(basename "$0") --stop"
+}
+
+do_stop() {
+    if ! port_bound; then
+        rm -f "$PID"
+        echo "not running"
+        exit 0
+    fi
+    if [[ -s "$PID" ]]; then
+        kill -- "-$(cat "$PID")" 2>/dev/null || kill "$(cat "$PID")" 2>/dev/null || true
+    fi
+    if ! wait_for_port_release; then
+        echo "see log $LOG for details" >&2
+        return 1
+    fi
+    rm -f "$PID"
+    echo "stopped"
+}
+
+do_status() {
+    if port_bound; then
+        echo "running — url $URL, pid $(cat "$PID" 2>/dev/null || echo unknown), log $LOG"
+    else
+        echo "not running — url $URL, log $LOG"
+    fi
+}
+
+case "${1:-}" in
+    --start)   do_start ;;
+    --stop)    do_stop ;;
+    --status)  do_status ;;
+    --restart) do_stop; do_start ;;
+    *)         usage; exit 1 ;;
+esac

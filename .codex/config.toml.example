@@ -15,5 +15,5 @@ bearer_token_env_var = "CE_BEARER"
 default_tools_approval_mode = "approve"
 
 [mcp_servers.serena]
-command = "serena"
-args = ["start-mcp-server", "--context=codex", "--project-from-cwd"]
+url = "http://localhost:4004/mcp"
+default_tools_approval_mode = "approve"
