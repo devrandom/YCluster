@@ -4,12 +4,21 @@
 # fetches it from there via the controller.
 #
 # Unlike build-rathole.yml/build-frp.yml/build-open-webui.yml, the source
-# isn't vendored from an external git repo — local-ai-proxy lives in this
-# repo at the top level (../local-ai-proxy relative to config/ansible/),
+# isn't pinned to an external git SHA — local-ai-proxy lives in this repo
+# at the top level (../local-ai-proxy relative to config/ansible/),
 # synced to the controller via dev-sync. We push it from there to the
 # buildhost with synchronize (delete: yes for a clean tree, excludes
 # bin/ + .git/ + tests + docs so a prior build doesn't get clobbered
 # into the new tree).
+#
+# Sync runs unconditionally: synchronize reports "changed" only when
+# rsync actually transfers files (it preserves mtimes), so a no-op run
+# stays "ok" without spurious change notifications. The build is gated
+# on staleness — it runs only when the binary is missing or older than
+# the newest buildable source file (go sources + go.mod/go.sum/Makefile)
+# — so a no-op rerun reports "ok" and a real source edit reports
+# "changed". No manual binary deletion or force tag needed on rebuild;
+# only the go/git apt deps are gated on the first build.
 #
 # The play targets {{ buildhost }} directly (not localhost with
 # delegate_to) because the synchronize module resolves its rsync target
@@ -54,7 +63,19 @@
           - "--exclude=.git/"
           - "--exclude=*.test"
           - "--exclude=docs/"
-      when: not proxy_binary.stat.exists
+
+    - name: Find newest buildable source mtime on buildhost
+      find:
+        paths: "{{ proxy_build_dir }}"
+        patterns:
+          - "*.go"
+          - "go.mod"
+          - "go.sum"
+          - "Makefile"
+        file_type: file
+        recurse: yes
+      register: proxy_src_files
+      changed_when: false
 
     - name: Build local-ai-proxy binary on buildhost
       make:
@@ -62,7 +83,13 @@
         target: build
       environment:
         GO: "{{ go_bin }}"
-      when: not proxy_binary.stat.exists
+      # Rebuild if the binary is missing or older than the newest
+      # buildable source file. mtimes are preserved by synchronize, so
+      # this is a faithful "is the artifact fresh" check, not a guess.
+      when: >-
+        not proxy_binary.stat.exists or
+        (proxy_src_files.files | map(attribute='mtime') | max | float) >
+        (proxy_binary.stat.mtime | float)
 
     - name: Verify proxy binary was produced
       stat:

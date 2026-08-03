@@ -12,6 +12,12 @@ import (
 // DefaultHealthCheckInterval is used when health_check_interval is unset.
 const DefaultHealthCheckInterval = 30 * time.Second
 
+// DefaultAuthHealthURL is the auth sidecar's /healthz endpoint, on the
+// same host as the proxy (both are leader-elected together). The proxy's
+// /healthz probes it and reports auth status, returning 503 when the
+// auth service is down. The sidecar always listens on 127.0.0.1:4002.
+const DefaultAuthHealthURL = "http://127.0.0.1:4002/healthz"
+
 // Config is the top-level YAML schema. Exactly one of backend, backends,
 // or etcd must be set.
 type Config struct {
@@ -33,6 +39,13 @@ type Config struct {
 	// /v1/models endpoint. Zero disables health checks. Default 30s.
 	// Only meaningful in model-routed modes (backends or etcd).
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
+
+	// AuthHealthURL is the auth service's /healthz endpoint. The proxy's
+	// own /healthz probes it and reports auth status, returning 503 when
+	// the auth service is down. Defaults to the colocated sidecar at
+	// DefaultAuthHealthURL; the yaml field is only for non-default
+	// deployments.
+	AuthHealthURL string `yaml:"auth_health_url,omitempty"`
 
 	// TrustedProxies lists CIDRs whose requests may set X-User-Id
 	// (used by downstream logging and, eventually, per-user routing).
@@ -115,6 +128,9 @@ func LoadConfigOrDefault(configPath, addr, backendURL string) (Config, error) {
 	}
 	if cfg.MaxRoutingBodyBytes <= 0 {
 		cfg.MaxRoutingBodyBytes = DefaultMaxRoutingBodyBytes
+	}
+	if cfg.AuthHealthURL == "" {
+		cfg.AuthHealthURL = DefaultAuthHealthURL
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err

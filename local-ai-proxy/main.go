@@ -114,6 +114,7 @@ func main() {
 
 	h := NewHandler(router)
 	h.Health = health
+	h.AuthHealthURL = cfg.AuthHealthURL
 	h.Metrics = metrics
 	if es, ok := source.(*EtcdSource); ok {
 		// Hot-reloading union: yaml acl ⊎ inline-per-model + etcd default.

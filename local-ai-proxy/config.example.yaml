@@ -1,6 +1,12 @@
 # Listen address for the proxy.
 listen: ":4000"
 
+# Auth sidecar /healthz endpoint, probed by the proxy's own /healthz
+# (which reports auth status and returns 503 when auth is down).
+# Defaults to the colocated sidecar at http://127.0.0.1:4002/healthz.
+# Only set this for a non-default (non-sidecar) auth location.
+# auth_health_url: "http://127.0.0.1:4002/healthz"
+
 # Exactly one of `backend`, `backends`, or `etcd` must be set.
 
 # --- Option 1: single-backend passthrough ---

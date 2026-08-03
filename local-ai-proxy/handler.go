@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -78,6 +80,11 @@ type Handler struct {
 	// of per-backend state.
 	Health *HealthChecker
 
+	// AuthHealthURL is the auth service's /healthz endpoint. GET /healthz
+	// probes it and reports auth status, returning 503 when the auth
+	// service is down. main applies DefaultAuthHealthURL when unset.
+	AuthHealthURL string
+
 	// Load, if set, is incremented around each upstream call so the
 	// router can pick the least-loaded backend.
 	Load LoadTracker
@@ -136,10 +143,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if src := h.Health.source; src != nil {
 				models = src.Snapshot()
 			}
-			writeHealthz(w, h.Health.Snapshot(), models)
+			writeHealthz(w, r, h.Health.Snapshot(), models, h.AuthHealthURL, h.client)
 			return
 		}
-		writeHealthzNoop(w)
+		writeHealthzNoop(w, r, h.AuthHealthURL, h.client)
 		return
 	}
 
@@ -408,7 +415,7 @@ func removeURL(s []*url.URL, u *url.URL) []*url.URL {
 //
 // Overall status is a rollup of model state (disabled models don't count
 // as alerts): ok | degraded | down | unknown.
-func writeHealthz(w http.ResponseWriter, snap map[string]BackendHealth, models map[string][]*url.URL) {
+func writeHealthz(w http.ResponseWriter, r *http.Request, snap map[string]BackendHealth, models map[string][]*url.URL, authURL string, client *http.Client) {
 	type entry struct {
 		URL       string   `json:"url"`
 		State     string   `json:"state"`
@@ -504,18 +511,68 @@ func writeHealthz(w http.ResponseWriter, snap map[string]BackendHealth, models m
 		"backends": backends,
 		"models":   modelEntries,
 	}
+
+	status := http.StatusOK
+	if authURL != "" {
+		auth := checkAuthHealth(r, authURL, client)
+		resp["auth"] = auth
+		if auth["status"] != "ok" {
+			overall = "down"
+			resp["status"] = overall
+			status = http.StatusServiceUnavailable
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeHealthzNoop responds when a Handler has no HealthChecker
-// (passthrough mode, or checks disabled). Proxy-itself-up is 200.
-func writeHealthzNoop(w http.ResponseWriter, ) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+// (passthrough mode, or checks disabled). Proxy-itself-up is 200;
+// a configured auth check can downgrade it to 503.
+func writeHealthzNoop(w http.ResponseWriter, r *http.Request, authURL string, client *http.Client) {
+	resp := map[string]any{
 		"status":  "ok",
 		"message": "health checks disabled",
-	})
+	}
+	status := http.StatusOK
+	if authURL != "" {
+		auth := checkAuthHealth(r, authURL, client)
+		resp["auth"] = auth
+		if auth["status"] != "ok" {
+			resp["status"] = "down"
+			status = http.StatusServiceUnavailable
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// checkAuthHealth probes the auth service's /healthz and returns a
+// small map describing its state. The probe is given a short timeout
+// so the proxy's own /healthz stays fast even when the auth service
+// is unresponsive.
+func checkAuthHealth(r *http.Request, authURL string, client *http.Client) map[string]any {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
+	if err != nil {
+		return map[string]any{"status": "down", "error": "build request: " + err.Error()}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return map[string]any{"status": "down", "error": err.Error()}
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+
+	if resp.StatusCode != http.StatusOK {
+		return map[string]any{"status": "down", "error": fmt.Sprintf("HTTP %d", resp.StatusCode)}
+	}
+	return map[string]any{"status": "ok"}
 }
 
 // servableModels returns the model names that should appear in

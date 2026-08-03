@@ -249,3 +249,39 @@ max_routing_body_bytes: 67108864
 		t.Errorf("MaxRoutingBodyBytes = %d; want 67108864", cfg.MaxRoutingBodyBytes)
 	}
 }
+
+// TestLoadConfigOrDefaultAuthHealthURLDefault confirms an unset
+// AuthHealthURL defaults to the colocated auth sidecar. The proxy's
+// /healthz depends on this by default.
+func TestLoadConfigOrDefaultAuthHealthURLDefault(t *testing.T) {
+	path := writeTempFile(t, "c.yaml", `
+listen: ":4000"
+backend:
+  url: "http://localhost:8080"
+`)
+	cfg, err := LoadConfigOrDefault(path, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AuthHealthURL != DefaultAuthHealthURL {
+		t.Errorf("AuthHealthURL = %q; want default %q", cfg.AuthHealthURL, DefaultAuthHealthURL)
+	}
+}
+
+// TestLoadConfigOrDefaultHonorsAuthHealthURL verifies an explicit YAML
+// auth_health_url is preserved through LoadConfigOrDefault.
+func TestLoadConfigOrDefaultHonorsAuthHealthURL(t *testing.T) {
+	path := writeTempFile(t, "c.yaml", `
+listen: ":4000"
+backend:
+  url: "http://localhost:8080"
+auth_health_url: "http://auth.internal:4002/healthz"
+`)
+	cfg, err := LoadConfigOrDefault(path, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AuthHealthURL != "http://auth.internal:4002/healthz" {
+		t.Errorf("AuthHealthURL = %q; want override", cfg.AuthHealthURL)
+	}
+}

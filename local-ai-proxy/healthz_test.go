@@ -97,3 +97,66 @@ func TestHealthzWithoutCheckerReportsOK(t *testing.T) {
 		t.Errorf("status = %v; want ok", body["status"])
 	}
 }
+
+func TestHealthzFoldsAuthStatus(t *testing.T) {
+	authUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer authUp.Close()
+	authDown := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer authDown.Close()
+
+	// Exercised against both the noop path (no Health) and the
+	// Health-set path, so the auth fold is covered in each writer.
+	run := func(name, authURL string, wantStatus int, wantOverall string, withHealth bool) {
+		t.Run(name, func(t *testing.T) {
+			var h *Handler
+			if withHealth {
+				src := &fakeSource{m: map[string][]*url.URL{
+					"alpha": {mustURL(t, authUp.URL)},
+				}}
+				hc := NewHealthChecker(src, time.Hour, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+				hc.checkAll(context.Background())
+				h = NewHandler(NewModelRouter(src))
+				h.Health = hc
+			} else {
+				h = NewHandler(NewPassthroughRouter(mustURL(t, "http://x:1")))
+			}
+			h.AuthHealthURL = authURL
+			srv := httptest.NewServer(h)
+			defer srv.Close()
+
+			resp, err := http.Get(srv.URL + "/healthz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != wantStatus {
+				t.Fatalf("status = %d; want %d", resp.StatusCode, wantStatus)
+			}
+			var body struct {
+				Status string `json:"status"`
+				Auth   struct {
+					Status string `json:"status"`
+				} `json:"auth"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Status != wantOverall {
+				t.Errorf("status = %q; want %q", body.Status, wantOverall)
+			}
+		})
+	}
+
+	for _, withHealth := range []bool{false, true} {
+		kind := "noop"
+		if withHealth {
+			kind = "health"
+		}
+		run(kind+"-auth-up-200", authUp.URL, http.StatusOK, "ok", withHealth)
+		run(kind+"-auth-down-503", authDown.URL, http.StatusServiceUnavailable, "down", withHealth)
+	}
+}

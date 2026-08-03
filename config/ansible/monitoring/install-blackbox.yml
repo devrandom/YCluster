@@ -66,15 +66,8 @@
               timeout: 10s
               http:
                 preferred_ip_protocol: ip4
-            http_401:
-              # For endpoints that return 401 when probed without auth
-              # (e.g. /v1/models behind nginx auth_request).
-              # Treat 401 as healthy.
-              prober: http
-              timeout: 10s
-              http:
-                preferred_ip_protocol: ip4
-                valid_status_codes: [401]
+            # http_401 module removed: the inference probe now uses the
+            # unauthenticated /healthz passthrough (http_2xx) instead.
             http_ping:
               # App-liveness probe: 200 AND the body must look like the
               # /api/ping payload, so a proxy/static fallback returning

@@ -149,12 +149,12 @@ def get_probe_specs(domain):
             "probe_name": "root",
         },
         {
-            # Inference gateway (local-ai-proxy) served by the
-            # open-webui vhost. nginx auth_request returns 401 when
-            # probed without credentials; http_401 treats that as
-            # healthy.
-            "url": f"https://{domain}/v1/models",
-            "module": "http_401",
+            # Inference stack liveness. /healthz on the open-webui
+            # vhost is an unauthenticated passthrough to the auth
+            # service's own /healthz, so the probe gets a 200 instead
+            # of a 401 from the /v1/ auth subrequest.
+            "url": f"https://{domain}/healthz",
+            "module": "http_2xx",
             "probe_name": "inference-models",
         },
         {
