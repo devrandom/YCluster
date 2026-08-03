@@ -382,10 +382,12 @@ ensure_node() {
         INCUS init images:ubuntu/24.04/cloud "$n" --profile "$PROFILE" --vm
       else
         # No KVM (QEMU may still be installed): privileged container
-        # (security.privileged allows nesting)
-        echo "[*] no /dev/kvm — c2 falling back to privileged container"
+        # (security.privileged allows nesting). Only the root-run path can
+        # set it — the rootless project forbids security.privileged, so
+        # there c2 just runs as a plain container.
+        echo "[*] no /dev/kvm — c2 falling back to container"
         INCUS init "$IMAGE" "$n" --profile "$PROFILE"
-        INCUS config set "$n" security.privileged=true
+        [ -n "$SUDO" ] && INCUS config set "$n" security.privileged=true
       fi
     else
       INCUS init "$IMAGE" "$n" --profile "$PROFILE"

@@ -10,6 +10,13 @@
 # and ycluster_app — so the frp tunnel exercises login flows and the
 # IdP outpost end-to-end, validating the migration plan before
 # rathole is decommissioned. Removed wholesale at cleanup step 6.
+#
+# Like the sibling vhost templates (admin-api.conf.j2, open-webui.conf.j2,
+# ycluster_app.conf.j2), the TLS listeners/certs are gated on `use_tls`.
+# In --local dev mode (use_tls=False, no cluster cert seeded) the HTTPS
+# surface falls back to plain HTTP on the same alt port, so nginx still
+# config-tests and reloads; in prod (use_tls=True) this renders exactly
+# the TLS surface below.
 
 # HTTP - PUBLIC ALT (frp tunnel endpoint on 127.0.0.2:17080).
 # Public whitelist + authed locations — same scope as the rathole-side
@@ -49,9 +56,14 @@ server {
 
 # Default server (server_name _) — 404 fallback for unmatched hosts.
 server {
+    {% if use_tls %}
     listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    {% else %}
+    listen 127.0.0.2:17443 proxy_protocol;
+    {% endif %}
     server_name _;
 
+    {% if use_tls %}
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -60,10 +72,10 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
@@ -78,9 +90,14 @@ server {
 # at the port substituted into open-webui-locations.conf by the
 # setup-web-services render step.
 server {
+    {% if use_tls %}
     listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    {% else %}
+    listen 127.0.0.2:17443 proxy_protocol;
+    {% endif %}
     server_name {{ domain | default('_') }};
 
+    {% if use_tls %}
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -89,10 +106,10 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Frame-Options SAMEORIGIN always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
@@ -106,9 +123,14 @@ server {
 # admin-api-authed-locations.conf already includes the authentik outpost
 # plumbing, so this block only needs to include both admin-api-* files.
 server {
+    {% if use_tls %}
     listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    {% else %}
+    listen 127.0.0.2:17443 proxy_protocol;
+    {% endif %}
     server_name admin.{{ domain | default('_') }};
 
+    {% if use_tls %}
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -117,10 +139,10 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
@@ -143,9 +165,14 @@ server {
 # must be included BEFORE the location bodies so @authentik_signin is in
 # scope when the location handlers reference it via error_page 401.
 server {
+    {% if use_tls %}
     listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    {% else %}
+    listen 127.0.0.2:17443 proxy_protocol;
+    {% endif %}
     server_name app.{{ domain | default('_') }};
 
+    {% if use_tls %}
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -154,10 +181,10 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
 
     client_max_body_size 1M;
@@ -172,9 +199,14 @@ server {
 # this block, requests for auth.<domain> land on the default server
 # (server_name _) and 404, leaving users stuck on the authorize page.
 server {
+    {% if use_tls %}
     listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    {% else %}
+    listen 127.0.0.2:17443 proxy_protocol;
+    {% endif %}
     server_name auth.{{ domain | default('_') }};
 
+    {% if use_tls %}
     ssl_certificate /etc/nginx/ssl/cert.pem;
     ssl_certificate_key /etc/nginx/ssl/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -183,10 +215,10 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
 
     client_max_body_size 10M;
