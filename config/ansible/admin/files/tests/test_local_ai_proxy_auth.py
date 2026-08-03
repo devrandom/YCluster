@@ -1,0 +1,238 @@
+"""Unit tests for the local-ai-proxy auth validator (local-ai-proxy-auth.py).
+
+Loads the validator by file path (it lives under app/files, outside the
+ycluster package) with a dict-backed fake etcd and a fake psycopg2 module
+so nothing touches etcd, postgres, or a socket. psycopg2 is a lazy import
+in the validator, so the module loads cleanly without the driver present.
+
+Run from config/ansible/admin/files:
+    PYTHONPATH=.:ycluster python3 -m unittest discover -s tests
+(via ./run-tests.sh at the repo root).
+"""
+
+import importlib.util
+import os
+import sys
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_FILES = os.path.dirname(_HERE)
+for p in (_HERE, _FILES, os.path.join(_FILES, "ycluster")):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from argon2 import PasswordHasher                      # noqa: E402
+from fake_etcd import FakeEtcd                         # noqa: E402
+
+import ycluster.common.apikeys as ak                   # noqa: E402
+
+_VALIDATOR = os.path.normpath(
+    os.path.join(_FILES, "..", "..", "app", "files", "local-ai-proxy-auth.py"))
+
+
+def _load_validator():
+    spec = importlib.util.spec_from_file_location("local_ai_proxy_auth", _VALIDATOR)
+    assert spec is not None and spec.loader is not None
+    v = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(v)
+    return v
+
+
+def _fast_hasher():
+    return PasswordHasher(time_cost=1, memory_cost=1024, hash_len=16, salt_len=8)
+
+
+class _FakeConn:
+    def __init__(self, row):
+        self._row = row
+        self.autocommit = False
+        self.closed = False
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchone(self):
+        return self._row
+
+    def close(self):
+        self.closed = True
+
+
+class _FakePsycopg2:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def connect(self, dsn):
+        return self._conn
+
+
+class ValidatorTestBase(unittest.TestCase):
+    def setUp(self):
+        self.validator = _load_validator()
+        self.etcd = FakeEtcd()
+        self.hasher = _fast_hasher()
+
+        self._ak_orig = ak.get_etcd_client
+        self._v_orig = self.validator.get_etcd_client
+        ak.get_etcd_client = lambda: self.etcd
+        self.validator.get_etcd_client = lambda: self.etcd
+
+        self.validator.reset_store()
+        self.validator._state["master_key"] = None
+        self.validator._state["pg"] = None
+        # Point at a non-existent path so the flag defaults off.
+        self.validator.PROXY_CONFIG_PATH = os.path.join(
+            os.path.dirname(_HERE), "tests", "no-such-proxy-config.yaml")
+
+        self._pg_snapshot = {}
+        self._pg_conn = None
+
+    def _install_pg(self, row=None):
+        self.validator._state["pg"] = None
+        self._pg_conn = _FakeConn(row)
+        fake = _FakePsycopg2(self._pg_conn)
+        # Back up anything that was already there.
+        self._pg_snapshot = {
+            name: mod for name, mod in sys.modules.items()
+            if name == "psycopg2" or name.startswith("psycopg2.")
+        }
+        sys.modules["psycopg2"] = fake
+
+    def tearDown(self):
+        ak.get_etcd_client = self._ak_orig
+        self.validator.get_etcd_client = self._v_orig
+        sys.modules.pop("psycopg2", None)
+        for name, mod in self._pg_snapshot.items():
+            sys.modules[name] = mod
+
+    # --- seeding ---
+    def seed_key(self, email, token, groups=None, key_id="k1"):
+        rec = {"hash": self.hasher.hash(token), "created_at": "t", "label": ""}
+        self.etcd.seed_json(ak.USERS_PREFIX + email + ak.KEYS_SUFFIX + key_id, rec)
+        if groups is not None:
+            self.etcd.seed_json(ak.USERS_PREFIX + email + ak.GROUPS_SUFFIX, groups)
+
+    def seed_master(self, value="cluster-master"):
+        self.etcd.store[self.validator.MASTER_KEY_ETCD_PATH] = value
+        self.validator._state["master_key"] = None
+
+    def auth(self, token):
+        return self.validator.app.test_client().get(
+            "/auth", headers={"Authorization": "Bearer " + token})
+
+
+class UserStoreTests(ValidatorTestBase):
+    def test_auth_user_matches_by_hash(self):
+        self.seed_key("alice@x", "sk-abc", groups=["g1", "admin"])
+        store = self.validator.UserStore(self.etcd, hasher=self.hasher)
+        self.assertEqual(store.auth_user("sk-abc"), ("alice@x", ["g1", "admin"]))
+
+    def test_auth_user_rejects_bad_and_non_sk(self):
+        self.seed_key("alice@x", "sk-abc")
+        store = self.validator.UserStore(self.etcd, hasher=self.hasher)
+        self.assertIsNone(store.auth_user("sk-bogus"))
+        self.assertIsNone(store.auth_user("not-a-key"))
+        self.assertIsNone(store.auth_user(""))
+
+    def test_auth_user_empty_store(self):
+        store = self.validator.UserStore(self.etcd, hasher=self.hasher)
+        self.assertIsNone(store.auth_user("sk-anything"))
+
+
+class AuthRouteTests(ValidatorTestBase):
+    def test_master_key_returns_root(self):
+        self.seed_master("cluster-master")
+        resp = self.auth("cluster-master")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["X-User-Id"], "root")
+        self.assertEqual(resp.headers["X-User-Groups"], "")
+
+    def test_per_user_key_returns_email_and_groups(self):
+        self.seed_key("alice@x", "sk-alice", groups=["g1", "admin"])
+        self.validator.reset_store(
+            self.validator.UserStore(self.etcd, hasher=self.hasher))
+        resp = self.auth("sk-alice")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["X-User-Id"], "alice@x")
+        self.assertEqual(resp.headers["X-User-Groups"], "g1,admin")
+
+    def test_unknown_key_401_without_fallback(self):
+        self.seed_key("alice@x", "sk-alice")
+        self._install_pg()
+        self.validator.reset_store(
+            self.validator.UserStore(self.etcd, hasher=self.hasher))
+        resp = self.auth("sk-unknown")
+        self.assertEqual(resp.status_code, 401)
+        # Fallback off -> postgres never opened.
+        self.assertIsNone(self.validator._state["pg"])
+
+    def test_no_auth_header_401(self):
+        self.validator.reset_store(
+            self.validator.UserStore(self.etcd, hasher=self.hasher))
+        resp = self.validator.app.test_client().get("/auth")
+        self.assertEqual(resp.status_code, 401)
+
+
+class FallbackTests(ValidatorTestBase):
+    def _proxy_config(self, enabled):
+        path = os.path.join(os.path.dirname(_HERE), "tests", "proxy-config-test.yaml")
+        with open(path, "w") as fh:
+            fh.write("listen: ':4001'\n"
+                     "auth:\n  allow_owui_fallback: %s\n"
+                     % ("true" if enabled else "false"))
+        self.validator.PROXY_CONFIG_PATH = path
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+
+    def test_flag_true(self):
+        self._proxy_config(True)
+        self.assertTrue(self.validator.load_allow_owui_fallback())
+
+    def test_flag_false(self):
+        self._proxy_config(False)
+        self.assertFalse(self.validator.load_allow_owui_fallback())
+
+    def test_flag_defaults_false_on_missing_file(self):
+        self.assertFalse(self.validator.load_allow_owui_fallback())
+
+    def test_etcd_checked_first_then_fallback(self):
+        self._proxy_config(True)
+        self._install_pg(row=("bob@x", "user", ["g9"]))
+        # Key present in etcd -> OWUI fallback must not be consulted.
+        self.seed_key("alice@x", "sk-alice", groups=["g1"])
+        self.validator.reset_store(
+            self.validator.UserStore(self.etcd, hasher=self.hasher))
+        resp = self.auth("sk-alice")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["X-User-Id"], "alice@x")
+        self.assertIsNone(self.validator._state["pg"])
+
+    def test_fallback_consults_owui_on_etcd_miss(self):
+        self._proxy_config(True)
+        self._install_pg(row=("carol@x", "admin", ["g9"]))
+        self.validator.reset_store(
+            self.validator.UserStore(self.etcd, hasher=self.hasher))
+        resp = self.auth("sk-owui-only")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["X-User-Id"], "carol@x")
+        self.assertEqual(resp.headers["X-User-Groups"], "g9,admin")
+
+    def test_fallback_disabled_returns_401_on_etcd_miss(self):
+        self._install_pg(row=("carol@x", "user", ["g9"]))
+        self.validator.reset_store(
+            self.validator.UserStore(self.etcd, hasher=self.hasher))
+        resp = self.auth("sk-owui-only")
+        self.assertEqual(resp.status_code, 401)
+        self.assertIsNone(self.validator._state["pg"])
+
+
+if __name__ == "__main__":
+    unittest.main()

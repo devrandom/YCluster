@@ -8,3 +8,8 @@ etcd:
 backend:
   url: "{{ backend_url }}"
 {% endif %}
+auth:
+  # Read by local-ai-proxy-auth.service. When true, the validator falls back
+  # to Open-WebUI's api_key table on an etcd miss — used only during the
+  # one-time key migration window, then flipped back off (default false).
+  allow_owui_fallback: {{ allow_owui_fallback | default(false) | bool | string | lower }}

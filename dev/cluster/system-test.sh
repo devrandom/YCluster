@@ -828,6 +828,39 @@ sec_inference() {
   retry 10 1 "dev-echo gone from /v1/models (hot reload)" \
     bash -c "! $SSH c1 \"curl -fsS --max-time 5 -H 'Authorization: Bearer $master' http://inference.xc/v1/models\" | grep -q dev-echo"
   ok "model removal hot-reloaded"
+
+  # Per-user gateway API keys — etcd system of record (see
+  # docs/design/api-key-ownership.md). create → auth (hot reload) → revoke
+  # → 401, revoke idempotent, master key unaffected. Open-WebUI itself is
+  # not carried in the dev cluster, so the fallback/migrate paths that read
+  # OWUI's api_key table are exercised against the real cluster instead.
+  local owner="alice@dev.test" sk key_id code
+  # Make re-runs idempotent: revoke any key a prior run left behind.
+  key_id=$($SSH s1 "$E ycluster inference key list --owner $owner" \
+    | awk '$1 ~ /^[0-9a-f-]{36}$/ {print $1; exit}' 2>/dev/null || true)
+  [ -z "$key_id" ] || $SSH s1 "$E ycluster inference key revoke $key_id" >/dev/null
+
+  sk=$($SSH s1 "$E ycluster inference key create --owner $owner --group g1 --group admin --label sys-test" \
+        | sed -n 's/^  \(sk-.*\)$/\1/p')
+  [ -n "$sk" ] || die "inference key create printed no secret"
+  retry 10 1 "per-user key authenticates via inference.xc (etcd hot reload)" \
+    $SSH c1 "curl -fsS --max-time 5 -H 'Authorization: Bearer $sk' http://inference.xc/v1/models -o /dev/null"
+  ok "per-user key authenticates through nginx auth_request"
+
+  key_id=$($SSH s1 "$E ycluster inference key list --owner $owner" \
+    | awk '$1 ~ /^[0-9a-f-]{36}$/ {print $1; exit}')
+  [ -n "$key_id" ] || die "inference key list found no key for $owner"
+  ok "inference key listed by key-id (secret never returned)"
+
+  $SSH s1 "$E ycluster inference key revoke $key_id" >/dev/null || die "inference key revoke"
+  code=$($SSH c1 "curl -s --max-time 5 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $sk' http://inference.xc/v1/models")
+  [ "$code" = 401 ] || die "revoked key got $code (want 401)"
+  $SSH s1 "$E ycluster inference key revoke $key_id" >/dev/null || die "inference key revoke (no-op)"
+  ok "key revoke is idempotent and the key is rejected"
+
+  code=$($SSH c1 "curl -s --max-time 5 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $master' http://inference.xc/v1/models")
+  [ "$code" = 200 ] || die "master key got $code after per-user key ops (want 200)"
+  ok "master key still authenticates"
 }
 
 # --------------------------------------------------------------------------
