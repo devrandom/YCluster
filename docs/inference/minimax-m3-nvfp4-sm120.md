@@ -51,10 +51,9 @@ generated tokens.
 - 4 free RTX PRO 6000 GPUs, NVIDIA open driver + container toolkit
   (`install-nvidia.yml`).
 - Rootless podman as `dev` with a working nvidia CDI spec — provided by
-  `admin/setup-gpu-podman.yml`. (It works around a podman/CDI incompatibility:
-  podman 4.9.3 can't parse nvidia-ctk 1.19's CDI 0.7.0 spec / `additionalGids`,
-  so the playbook pins the spec to 0.6.0 and strips that field; otherwise every
-  `--device nvidia.com/gpu=N` fails with "unresolvable CDI devices".) GPU group
+  `admin/setup-gpu-podman.yml` plus the custom podman 5.8.0 build from
+  `admin/install-podman.yml` (the distro podman 4.9.3 can't parse the CDI
+  0.7.0 spec that recent nvidia-container-toolkit generates). GPU group
   access is preserved at run time by `--group-add keep-groups`.
 - ~240 GB free disk for the MXFP4 checkpoint.
 
@@ -302,7 +301,7 @@ ycluster inference add http://nvN.xc:9211
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `unresolvable CDI devices nvidia.com/gpu=N` | podman 4.9.3 can't parse CDI 0.7.0 / `additionalGids` | downgrade spec to 0.6.0 + strip `additionalGids` (Prerequisites) |
+| `unresolvable CDI devices nvidia.com/gpu=N` | stale CDI spec (device set changed) or the distro podman 4.9.3 still installed | regenerate `/etc/cdi/nvidia.yaml`; ensure custom podman 5.8.0 is installed (`docs/operations/cdi-spec-regen.md`) |
 | `Config not found for minimax-m3-vl` then engine init fails | wrong checkpoint | use `olka-fi/MiniMax-M3-MXFP4` (these `[ERROR]` lines are non-fatal warnings on the correct checkpoint) |
 | `MSA sparse backend v1 is bf16-KV only (got fp8_e4m3)` | KV cache resolved to fp8 | append `--kv-cache-dtype bfloat16` |
 | `invalid choice: 'bf16'` | wrong spelling | use `bfloat16` |

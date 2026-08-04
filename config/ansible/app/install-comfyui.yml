@@ -118,22 +118,6 @@
         creates: /etc/cdi/nvidia.yaml
       changed_when: true
 
-    # podman 4.9.3 (Ubuntu 24.04) can't parse the toolkit's CDI 0.7.0 spec —
-    # it rejects the unknown `additionalGids` field, so every
-    # `--device nvidia.com/gpu=N` fails with "unresolvable CDI devices".
-    # Same workaround as setup-gpu-podman.yml / install-mineru.yml.
-    - name: Pin CDI spec to 0.6.0 if needed
-      replace:
-        path: /etc/cdi/nvidia.yaml
-        regexp: '^cdiVersion: 0\.7\.0$'
-        replace: 'cdiVersion: 0.6.0'
-
-    - name: Strip unparseable additionalGids field from CDI spec
-      replace:
-        path: /etc/cdi/nvidia.yaml
-        regexp: '(?m)^[ \t]*additionalGids:\n(?:[ \t]*- \d+\n)+'
-        replace: ''
-
     # registry.xc:5000 is the cluster's insecure (HTTP) registry on the
     # storage VIP. podman defaults to HTTPS, so without this config every
     # push/pull fails with "server gave HTTP response to HTTPS client".

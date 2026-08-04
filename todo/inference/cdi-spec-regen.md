@@ -60,6 +60,5 @@ last step.
 
 Manual procedure for the operator side until this lands:
 [`../../docs/operations/cdi-spec-regen.md`](../../docs/operations/cdi-spec-regen.md).
-Documents the podman 4.9.3 + nvidia-ctk 0.7.0 incompatibility (the spec
-needs `cdiVersion: 0.6.0` and the `additionalGids` field stripped
-post-generation).
+With the podman 5.8.0 migration it's just a regenerate of
+`/etc/cdi/nvidia.yaml` — no 0.6.0 pin or `additionalGids` strip needed.
