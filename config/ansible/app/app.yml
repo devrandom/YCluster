@@ -20,3 +20,10 @@
 # variant is in macos/setup-mineru.yml. Both write to the same proxy
 # model names (document-parse, mineru-parse).
 - import_playbook: install-mineru.yml
+
+# ComfyUI (MiniMax H3) backend. Per-host opt-in via comfyui_enabled in
+# host_vars/<node>.yml — Linux/Nvidia (nv*) hosts only. This is a
+# device-bound, non-OpenAI service: unlike MinerU it is NOT registered with
+# local-ai-proxy; it is exposed via the frontend/frp reverse proxy. See
+# docs/design/comfyui-h3.md.
+- import_playbook: install-comfyui.yml

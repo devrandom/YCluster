@@ -39,11 +39,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.12-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# uv (single small layer). UV_INSTALL_DIR puts the binary on PATH
+# uv (single small layer) — installed from a pinned, checksum-verified GitHub
+# release tarball, NOT the astral.sh/uv/install.sh bootstrap (running a remote
+# installer script is avoided). Adds the `uv` + `uvx` binaries to /usr/local/bin
 # so the next layer can call `uv pip install --system` directly.
-ADD https://astral.sh/uv/install.sh /uv-install.sh
-RUN env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=/usr/local/bin sh /uv-install.sh \
-    && rm /uv-install.sh \
+ARG UV_VERSION=0.12.1
+ARG UV_SHA256=90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb
+ADD https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz /uv.tar.gz
+RUN echo "${UV_SHA256}  /uv.tar.gz" | sha256sum -c - \
+    && tar -xzf /uv.tar.gz -C /usr/local/bin --strip-components=1 \
+    && rm /uv.tar.gz \
     && uv --version
 
 # The big layer — caches well across rebuilds because uv's resolver

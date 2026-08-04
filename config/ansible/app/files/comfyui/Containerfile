@@ -1,0 +1,142 @@
+# ComfyUI (MiniMax H3) application-only image — Ubuntu 24.04 (matches prod
+# hosts) + Python 3.12 venv (uv) + ComfyUI (pinned git revision that ships
+# the H3 nodes) + torch/torchvision/torchaudio CUDA wheels + ffmpeg (MP4
+# muxing).
+#
+# The image deliberately does NOT bake model weights. ComfyUI is folder-based:
+# it loads models from <comfyui>/models/{diffusion_models,text_encoders,vae}
+# and errors if a file is absent. We bind-mount the seeded host model tree
+# read-only at /opt/comfyui/models (see install-comfyui.yml + comfyui.service),
+# so the image stays small (~12 GB), stays egress-free in steady state, and
+# survives `podman rm` / rebuilds without re-staging ~59 GB of models.
+#
+# Model assets (one-time, pinned, from Comfy-Org/MiniMax-H3) live on the host
+# at /home/dev/comfyui/models and are staged by ~/bin/seed-comfyui-h3.sh, never
+# fetched at runtime.
+#
+# Build with:  buildah bud -f Containerfile -t comfyui:VERSION .
+# Push with:   buildah push comfyui:VERSION registry.xc:5000/comfyui:VERSION
+# (Both run from install-comfyui.yml on the first Nvidia host.)
+
+FROM docker.io/library/ubuntu:24.04
+
+# System deps. ffmpeg is required for MP4 muxing on video output. git is
+# needed to clone ComfyUI at the pinned revision. gcc + build-essential +
+# python3.12-dev let triton JIT-compile CUDA kernels on first run (ComfyUI
+# pulls in triton via torch; without the compiler you get "Failed to find C
+# compiler"). python3.12-venv provides the interpreter the uv venv seeds
+# from.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        git \
+        python3.12-dev \
+        python3.12-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (single small layer) — installed from a pinned, checksum-verified GitHub
+# release tarball, NOT the astral.sh/uv/install.sh bootstrap (running a remote
+# installer script is avoided). Adds the `uv` + `uvx` binaries to /usr/local/bin
+# so the next layer can call `uv pip install` directly.
+ARG UV_VERSION=0.12.1
+ARG UV_SHA256=90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb
+ADD https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz /uv.tar.gz
+RUN echo "${UV_SHA256}  /uv.tar.gz" | sha256sum -c - \
+    && tar -xzf /uv.tar.gz -C /usr/local/bin --strip-components=1 \
+    && rm /uv.tar.gz \
+    && uv --version
+
+# ComfyUI source tree, checked out at the pinned revision and installed at
+# /opt/comfyui so its `models/`, `output/`, `input/`, `user/` subdirs line up
+# with the unit's bind-mount targets (host model root -> /opt/comfyui/models,
+# NAS user-data roots -> /opt/comfyui/{output,input,user}).
+#
+# COMFYUI_REVISION / COMFYUI_REF: ComfyUI has native MiniMax H3 support since
+# 0.30.0 (nodes in comfy_extras/nodes_minimax_h3.py, model in
+# comfy/ldm/minimax/model.py). COMFYUI_REVISION is pinned to the exact commit
+# SHA of the v0.30.0 release (the first release shipping the H3 nodes).
+# buildah's COPY of this ASG layer caches on the literal value, so bumping
+# the SHA forces a rebuild + push. A `--depth 1` clone can't reliably fetch a
+# bare SHA from GitHub, so we fetch by the tag ref (COMFYUI_REF) to bring the
+# commit into the object store, then `git checkout --detach` the pinned SHA.
+ARG COMFYUI_REVISION=b1693ecba9f5b65f8c80ab36b195ab963ec92413
+ARG COMFYUI_REF=v0.30.0
+RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI /opt/comfyui \
+    && git -C /opt/comfyui fetch --depth 1 origin "$COMFYUI_REF" \
+    && git -C /opt/comfyui checkout --detach "$COMFYUI_REVISION"
+
+# Python 3.12 venv (uv). Created first so the torch install below targets it.
+RUN uv venv /opt/comfyui/.venv --python 3.12
+
+# torch CUDA wheel set. Installed before ComfyUI's requirements.txt so the
+# pinned CUDA build wins over whichever torch the requirements file would
+# otherwise resolve (ComfyUI's requirements are mostly pure-python deps once
+# torch is present).
+#
+# TORCH_VERSION / TORCHVISION_VERSION / TORCHAUDIO_VERSION: pin together so
+# the three stay on coherent CUDA builds. Defaults target cu126 (safe on the
+# current NVIDIA driver set); revisit alongside the COMFYUI_REVISION pin when
+# the first host is stood up (open design TODO).
+ARG TORCH_VERSION=2.9.0
+ARG TORCHVISION_VERSION=0.24.0
+ARG TORCHAUDIO_VERSION=2.9.0
+ARG TORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu126
+RUN uv pip install --python /opt/comfyui/.venv/bin/python \
+        --index-url "$TORCH_CUDA_INDEX" \
+        "torch==$TORCH_VERSION" \
+        "torchvision==$TORCHVISION_VERSION" \
+        "torchaudio==$TORCHAUDIO_VERSION"
+
+# ComfyUI's own requirements (the app code).
+RUN uv pip install --python /opt/comfyui/.venv/bin/python \
+        -r /opt/comfyui/requirements.txt
+
+# Sanity check — fails the build if the ComfyUI package is missing. Run from
+# /opt/comfyui so the source tree's `comfy/` package is on sys.path (python -c
+# seeds sys.path[0] with the cwd); WORKDIR is set later, below the USER step.
+RUN cd /opt/comfyui && .venv/bin/python -c 'import comfy; print(comfy.__version__ if hasattr(comfy, "__version__") else "comfy import OK")'
+
+# Run as the host `dev` user so bind-mounts of /home/dev/* and the NAS
+# /near1/comfyui subtree are writable. The systemd unit pairs this with
+# `--userns=keep-id` (container UID maps 1:1 to host UID) and `--group-add
+# 1000` (supplemental group 1000 → group-write class on the gid=1000 /near1
+# CIFS mount).
+#
+# DEV_UID must equal the BUILD HOST's `dev` UID because keep-id maps 1:1 and
+# the image UID is baked at build time — install-comfyui.yml passes the
+# build host's `id -u dev`. The cluster convention is 1002 (nv2/mineru);
+# nv4 is an outlier at 1000 (its ds4 vLLM runs as dev). Because the registry
+# image embeds the build host's dev UID, hosts with a different dev UID need
+# their own build+push (the image tag is shared, so only one dev UID is
+# current in the registry at a time).
+#
+# The ubuntu:24.04 base ships user/group `ubuntu` at uid/gid 1000, which
+# collides with nv4's dev=1000. When DEV_UID is already taken we still create
+# a `dev` user at that UID via --non-unique (keep-id maps the UID 1:1 to the
+# host dev regardless of the passwd entry name), reusing the existing gid; the
+# runtime --group-add 1000 supplies the NAS group-write group. Otherwise we
+# create both the dev group and user at DEV_UID as usual.
+ARG DEV_UID=1002
+RUN if ! id -u dev >/dev/null 2>&1; then \
+        if getent passwd "$DEV_UID" >/dev/null 2>&1; then \
+            useradd --non-unique -u "$DEV_UID" -g "$DEV_UID" -m -d /home/dev -s /bin/bash dev; \
+        else \
+            groupadd -g "$DEV_UID" dev \
+            && useradd -u "$DEV_UID" -g "$DEV_UID" -m -d /home/dev -s /bin/bash dev; \
+        fi; \
+    fi \
+    && mkdir -p /opt/comfyui/models /opt/comfyui/output /opt/comfyui/input /opt/comfyui/user \
+    && chown -R dev:"$DEV_UID" /home/dev /opt/comfyui
+USER dev
+ENV HOME=/home/dev
+WORKDIR /opt/comfyui
+
+# ComfyUI is a single-process HTTP server: graph execution, conditioning,
+# sampling, and VAE decode all happen here. Listen on 0.0.0.0 because the
+# cluster-internal reach model is host TCP (default 8188), reached via the
+# frontend/frp reverse proxy. Model weights are bind-mounted read-only from
+# the host — no runtime model downloads (see design decision 5).
+ENTRYPOINT ["/opt/comfyui/.venv/bin/python", "main.py"]
+CMD ["--listen", "0.0.0.0", "--port", "8188"]

@@ -1,0 +1,379 @@
+---
+# Install ComfyUI (MiniMax H3) on Linux/Nvidia GPU nodes (nv*) as a podman
+# container, serving the MiniMax H3 omni-modal video model on a single pinned
+# GPU. See docs/design/comfyui-h3.md for the technology choice + architecture.
+#
+# Scope: the full ComfyUI backend in one container. All graph execution,
+# conditioning, sampling, and VAE decode happen inside the container; users
+# only need a browser/API client. ComfyUI is a device-bound, NON-OpenAI
+# service — it is exposed via the frontend/frp reverse proxy (HTTP +
+# WebSocket /ws), NOT registered with the local-ai-proxy OpenAI gateway.
+#
+# Image:
+#   Application-only Ubuntu 24.04 image (ComfyUI pinned git SHA + Python 3.12
+#   venv + torch CUDA wheels + ffmpeg). Model weights are NEVER baked into the
+#   image and never fetched at runtime — they are bound-mounted read-only from
+#   /home/dev/comfyui/models (local NVMe, seeded one-time by
+#   ~/bin/seed-comfyui-h3.sh) and the durable user tree from /near1/comfyui
+#   (NAS). The image is built once on the first Nvidia host and pushed to the
+#   cluster registry (registry.xc:5000/comfyui:VERSION); future hosts pull
+#   instead of rebuild.
+#
+# Gating:
+#   Per-host `comfyui_enabled: true` in host_vars/<node>.yml opts into this
+#   play at all. Per-host `comfyui_gpu: <CDI index>` (default 0) pins the one
+#   host-visible GPU the container uses (a host-visible card, NOT a
+#   vfio-pci/passthrough card). The play is a no-op on Nvidia hosts that
+#   don't opt in, and on Nvidia hosts with no host-visible GPU (all cards
+#   bound to vfio-pci — e.g. nv3).
+#
+# NAS group-write (the one real constraint):
+#   /near1 is mounted with uid=1000,gid=1000,file_mode=0664,dir_mode=0775.
+#   The container runs as dev via --userns=keep-id, with the image's dev UID
+#   baked at build time to match the host dev UID (`--build-arg DEV_UID`);
+#   on hosts where dev != 1000 it lands as "other" on the mount → no write.
+#   `--group-add 1000` adds supplemental group 1000 to the container process,
+#   which (with keep-id's 1:1 gid map) puts dev in the group-write class on the
+#   NAS under /near1/comfyui. This play pre-creates /near1/comfyui/{output,input,user}
+#   at 0775 and runs a deploy-time container write smoke test (see task below)
+#   to verify the group propagation before wiring the unit.
+#
+# Rollback: `podman pull registry.xc:5000/comfyui:<prev>` + `systemctl
+# restart comfyui`. Weights live on the host (not the image), so rollback
+# touches only app code; model assets and NAS-resident user data are
+# unchanged.
+- name: Install ComfyUI on Nvidia GPU nodes (podman)
+  hosts: nvidia
+  become: yes
+  vars:
+    # Bump VERSION to ship a release. The image tag matches the ComfyUI
+    # revision `0.30.0` (the first release with native MiniMax H3 nodes); the
+    # Containerfile pins the git SHA behind this tag via COMFYUI_REVISION.
+    # The build step is keyed on this tag — changing VERSION forces a
+    # rebuild + push even if the Containerfile hasn't changed.
+    comfyui_image_tag: "0.30.0"
+    comfyui_image_local: "comfyui:{{ comfyui_image_tag }}"
+    comfyui_image_registry: "registry.xc:5000/comfyui:{{ comfyui_image_tag }}"
+    comfyui_containerfile_src: files/comfyui/Containerfile
+    comfyui_containerfile_dest: /home/dev/.comfyui-build/Containerfile
+    comfyui_service_unit_src: files/comfyui/comfyui.service.j2
+    comfyui_service_unit_dest: /etc/systemd/system/comfyui.service
+    comfyui_seed_src: files/comfyui/seed-comfyui-h3.sh.j2
+    comfyui_seed_dest: /home/dev/bin/seed-comfyui-h3.sh
+    # Model weights: pinned, one-time staging (NOT a runtime fetch). These
+    # come from Comfy-Org's repackaging of MiniMaxAI/MiniMax-H3 into
+    # ComfyUI-loadable quantized single-file formats. Pin REVISION to the
+    # exact HF git revision when the first host is staged (open design TODO);
+    # HEAD lets the initial --download work before the pin is finalized.
+    comfyui_models_repo: "Comfy-Org/MiniMax-H3"
+    comfyui_models_revision: "HEAD"
+    comfyui_model_root: /home/dev/comfyui/models
+    # /near1 is the compute NAS (Samba/CIFS) mount root; comfyui_nas_root is a
+    # subdir created by this play. The mountpoint check below targets the mount
+    # root (which exists), not the subdir (which may not exist yet).
+    comfyui_nas_mount: /near1
+    comfyui_nas_root: /near1/comfyui
+    comfyui_hf_cache: /home/dev/.cache/huggingface
+    comfyui_port: 8188
+    # comfyui_gpu is NOT defined here on purpose: it comes from host_vars
+    # (<node>.yml) and must not be shadowed by a play-level default. The
+    # templates/tasks use `comfyui_gpu | default('0')` for the fallback.
+
+  tasks:
+    # Skip hosts with no host-usable NVIDIA GPU — either no NVIDIA hardware at
+    # all, or every NVIDIA card is bound to vfio-pci for guest passthrough
+    # (nv3 case). ComfyUI + H3 needs a complete GPU (~24 GB VRAM at 768p).
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: End play for nodes that have not opted into ComfyUI
+      meta: end_host
+      when: not (comfyui_enabled | default(false))
+
+    # Pre-flight: the Containerfile bakes the host `dev` user's UID (DEV_UID
+    # build arg, captured below) and the unit bind-mounts /home/dev/* (and the
+    # NAS) owned by dev. --userns=keep-id maps container UIDs 1:1 to host UIDs,
+    # so the image's dev user must share the host dev's UID for reads/writes to
+    # work. The cluster convention is 1002 (nv2/mineru), but nv4's dev is 1000
+    # (its ds4 vLLM runs as dev) — so we read the actual UID and bake it into
+    # the image at build time instead of asserting a fixed value.
+    - name: Read host dev user UID for image build
+      command: id -u dev
+      register: comfyui_dev_uid
+      changed_when: false
+
+    # Podman + NVIDIA CDI are required for `--device nvidia.com/gpu=N`.
+    # setup-gpu-podman.yml runs before this in the app chain, but check
+    # defensively in case the play is run standalone.
+    - name: Ensure podman is installed
+      apt:
+        name: podman
+        state: present
+        update_cache: yes
+
+    - name: Ensure NVIDIA CDI spec exists
+      command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+      args:
+        creates: /etc/cdi/nvidia.yaml
+      changed_when: true
+
+    # podman 4.9.3 (Ubuntu 24.04) can't parse the toolkit's CDI 0.7.0 spec —
+    # it rejects the unknown `additionalGids` field, so every
+    # `--device nvidia.com/gpu=N` fails with "unresolvable CDI devices".
+    # Same workaround as setup-gpu-podman.yml / install-mineru.yml.
+    - name: Pin CDI spec to 0.6.0 if needed
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '^cdiVersion: 0\.7\.0$'
+        replace: 'cdiVersion: 0.6.0'
+
+    - name: Strip unparseable additionalGids field from CDI spec
+      replace:
+        path: /etc/cdi/nvidia.yaml
+        regexp: '(?m)^[ \t]*additionalGids:\n(?:[ \t]*- \d+\n)+'
+        replace: ''
+
+    # registry.xc:5000 is the cluster's insecure (HTTP) registry on the
+    # storage VIP. podman defaults to HTTPS, so without this config every
+    # push/pull fails with "server gave HTTP response to HTTPS client".
+    - name: Configure registry.xc as an insecure registry
+      copy:
+        dest: /etc/containers/registries.conf.d/registry.xc.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [[registry]]
+          location = "registry.xc:5000"
+          insecure = true
+
+    - name: Ensure systemd lingering for dev (rootless podman survives logout)
+      command: loginctl enable-linger dev
+      args:
+        creates: /var/lib/systemd/linger/dev
+
+    # The /near1 NAS (CIFS, gid 1000) holds the durable user tree
+    # /near1/comfyui/{output,input,user}. It is auto-mounted on compute nodes
+    # (nvidia ⊂ compute), but fail fast with a clear error if this host can't
+    # see it, rather than letting the service start with a dead bind-mount.
+    # Check the mount root /near1 (not the /near1/comfyui subdir, which is
+    # created by the pre-create task below and may not exist yet on a new host).
+    - name: Ensure /near1 NAS is mounted
+      command: mountpoint -q {{ comfyui_nas_mount }}
+      failed_when: false
+      changed_when: false
+      register: comfyui_nas_mounted
+
+    - name: Fail if /near1 NAS is not mounted
+      fail:
+        msg: "/near1 is not mounted on this host; the ComfyUI NAS user-data bind-mount requires the compute /near1 CIFS mount (nvidia ⊂ compute)."
+      when: comfyui_nas_mounted.rc != 0
+
+    # Pre-create the NAS user-data dirs (0775, group-writable). /near1 presents
+    # every dir as uid/gid 1000 and mode 0775; we deliberately do NOT set
+    # owner/group here (chown on CIFS fails) — `mode: 0775` is exactly the
+    # group-write class the container's dev user (with --group-add 1000)
+    # needs. See the design doc, decision 4.
+    #
+    # Only output + input live on the NAS. ComfyUI's `user` dir — which holds
+    # its SQLite DB (comfyui.db) since 0.30 — stays on LOCAL host disk (see the
+    # "Ensure ComfyUI local user dir exists" task below): SQLite can't lock
+    # over CIFS and crashes at startup with "database is locked".
+    - name: Pre-create ComfyUI NAS user-data dirs
+      file:
+        path: "{{ comfyui_nas_root }}/{{ item }}"
+        state: directory
+        mode: '0775'
+      loop:
+        - output
+        - input
+
+    # Pre-create the static model tree on local NVMe (owned by dev). Weights
+    # are staged here by ~/bin/seed-comfyui-h3.sh and bind-mounted read-only.
+    - name: Ensure ComfyUI model root subdirs exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - "{{ comfyui_model_root }}"
+        - "{{ comfyui_model_root }}/diffusion_models"
+        - "{{ comfyui_model_root }}/text_encoders"
+        - "{{ comfyui_model_root }}/vae"
+
+    - name: Ensure ComfyUI HF cache directory exists
+      file:
+        path: "{{ comfyui_hf_cache }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    # ComfyUI's `user` dir (settings + SQLite DB) is per-host and local, NOT on
+    # the NAS — SQLite can't lock over the CIFS /near1 mount. Pre-create it
+    # owned by dev so the container's dev user (keep-id, DEV_UID) can write.
+    - name: Ensure ComfyUI local user dir exists
+      file:
+        path: /home/dev/comfyui/user
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    # Pre-create the buildah build context dir. buildah bud runs as root but
+    # reads the Containerfile + context from here (owned by dev).
+    - name: Ensure ComfyUI build context directory exists
+      file:
+        path: /home/dev/.comfyui-build
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0775'
+
+    # Stage the Containerfile on the host. The build context is the directory
+    # containing the Containerfile; buildah reads it locally (no daemon).
+    - name: Stage Containerfile for buildah
+      copy:
+        src: "{{ comfyui_containerfile_src }}"
+        dest: "{{ comfyui_containerfile_dest }}"
+        owner: dev
+        group: dev
+        mode: '0644'
+
+    # Verify the registry is reachable before attempting a build+push.
+    - name: Verify registry is reachable for push
+      uri:
+        url: "http://registry.xc:5000/v2/_catalog"
+        method: GET
+        timeout: 10
+      register: registry_catalog
+      failed_when: registry_catalog.status != 200
+      run_once: true
+      delegate_to: "{{ groups['nvidia'][0] }}"
+
+    # Build the image only if the registry doesn't already have this tag.
+    # `buildah bud` runs as root because dev's CLONE_NEWUSER is blocked on
+    # this kernel/buildah combo (same as install-mineru.yml). dev's podman
+    # storage is populated by the explicit `podman pull` in the service's
+    # ExecStartPre. ~10-20 min on a cold cache (torch + ComfyUI wheels are
+    # several GB); skipped on subsequent runs once the tag is in the registry.
+    - name: Check if comfyui image is already in registry
+      uri:
+        url: "http://registry.xc:5000/v2/comfyui/manifests/{{ comfyui_image_tag }}"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json"
+        status_code: 200
+        timeout: 10
+      register: comfyui_registry_exists
+      failed_when: false
+
+    - name: Build comfyui image with buildah (root)
+      command: >-
+        buildah bud --layers
+        --build-arg DEV_UID={{ comfyui_dev_uid.stdout }}
+        -f {{ comfyui_containerfile_dest }} -t {{ comfyui_image_local }}
+        /home/dev/.comfyui-build
+      when: comfyui_registry_exists.status != 200
+      # DEV_UID is the host dev UID read above; the image is run under
+      # --userns=keep-id (1:1 uid map), so the baked dev UID must match the
+      # host's. --layers keeps each Containerfile step as a separate OCI layer
+      # so a tweak higher up the file (e.g. the entrypoint) pushes just that
+      # layer + a new manifest instead of re-uploading the whole multi-GB image.
+
+    - name: Push comfyui image to cluster registry (root)
+      command: buildah push {{ comfyui_image_local }} {{ comfyui_image_registry }}
+      when: comfyui_registry_exists.status != 200
+
+    # Seed script for the model weights. This is a one-time, operator-run,
+    # pinned asset-staging step (~59 GB) — deliberately NOT an automatic
+    # playbook download, matching the design's "staging, not a per-deploy
+    # runtime fetch". The playbook installs the script and verifies the tree;
+    # the operator runs `~/bin/seed-comfyui-h3.sh --download` once before the
+    # first real workflow. The service can start and pass /system_stats
+    # without models (they are only required when a workflow loads a node).
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install ComfyUI model seed script
+      template:
+        src: "{{ comfyui_seed_src }}"
+        dest: "{{ comfyui_seed_dest }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install comfyui systemd unit
+      template:
+        src: "{{ comfyui_service_unit_src }}"
+        dest: "{{ comfyui_service_unit_dest }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - reload systemd
+        - restart comfyui service
+
+    # Deploy-time verification of the one real constraint (design TODO):
+    # --group-add 1000 + --userns=keep-id must give the container's dev user
+    # group-write on the /near1 CIFS mount. A one-shot container run using the
+    # exact unit flags touch+removes a probe file under the NAS output dir.
+    # Failure (EACCES) here means group propagation is broken and the service
+    # would be unable to write outputs — fix before wiring the unit. Uses the
+    # freshly built/pulled image; bash is present in the ubuntu base.
+    #
+    # Pull first (idempotent) so the run below resolves locally and doesn't
+    # race the build/push task running concurrently on the first Nvidia host.
+    - name: Pull comfyui image for NAS write smoke test
+      command: podman pull {{ comfyui_image_registry }}
+
+    - name: Smoke test NAS group-write via container (--group-add 1000)
+      command: >-
+        podman run --rm --userns=keep-id --group-add 1000
+        --entrypoint /bin/bash
+        -v {{ comfyui_nas_root }}/output:/opt/comfyui/output
+        {{ comfyui_image_registry }}
+        -c 'f=/opt/comfyui/output/.comfyui-nas-write-check; touch "$f" && rm -f "$f"'
+      # Failed_when is not set: a nonzero exit (EACCES on touch) surfaces as a
+      # task failure with podman's stderr, which is exactly what we want —
+      # group propagation didn't work, so stop before enabling the unit.
+
+    - name: Enable and start comfyui service
+      systemd:
+        name: comfyui.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # Health gate: ComfyUI's unauthenticated /system_stats returns 200 once
+    # the server is listening (works without model weights). The design's full
+    # smoke (submit a minimal T2V workflow via /prompt and confirm a video +
+    # audio file lands on the NAS) requires the seeded models, so it is a
+    # post-seed operator step, not part of this idempotent install.
+    - name: Wait for ComfyUI /system_stats to return 200
+      uri:
+        url: "http://127.0.0.1:{{ comfyui_port }}/system_stats"
+        status_code: 200
+        timeout: 30
+      register: comfyui_stats
+      until: comfyui_stats.status == 200
+      retries: 30
+      delay: 10
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart comfyui service
+      service:
+        name: comfyui.service
+        state: restarted

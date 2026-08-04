@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Stage the MiniMax H3 model assets for ComfyUI onto local host NVMe. The
+# container never fetches models at runtime — it bind-mounts this dir
+# read-only at /opt/comfyui/models (see comfyui.service). This is a one-time
+# asset-staging step (the ~59 GB baseline; ~40 GB for FL2VA-only), run by an
+# operator as the dev user:
+#
+#   ~/bin/seed-comfyui-h3.sh                # verify already-staged weights
+#   ~/bin/seed-comfyui-h3.sh --download     # pull the weights (~59 GB)
+#   ~/bin/seed-comfyui-h3.sh --verify-only  # just verify an already-staged tree
+#
+# Managed by app/install-comfyui.yml — edit there.
+#
+# ComfyUI Native H3 nodes (since 0.30.0) load models from
+# <comfyui>/models/{diffusion_models,text_encoders,vae} and error if a file is
+# absent. Comfy-Org repackages the MiniMaxAI/MiniMax-H3 weights into those
+# quantized, ComfyUI-loadable single-file formats; `hf download` writes the
+# repo's files into the same layout the image expects. See
+# docs/design/comfyui-h3.md (model assets table + decision 2).
+#
+# No `pipefail`: a pipeline's exit is the last command's exit, so closing
+# pipes (e.g. head -1 exiting after one line, cluster-exec truncating output)
+# can't kill the script via SIGPIPE. `set -eu` still catches real errors.
+set -eu
+
+REPO="{{ comfyui_models_repo }}"
+REVISION="{{ comfyui_models_revision }}"
+MODEL_HOST="${MODEL_HOST:-{{ comfyui_model_root }}}"
+
+# The five files the image's /opt/comfyui/models layout and the base H3
+# templates reference. Downloaded / verified relative to MODEL_HOST.
+REQUIRED_FILES=(
+  "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+  "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+  "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+  "vae/minimax_h3_video_vae_fp16.safetensors"
+  "vae/minimax_h3_audio_vae_fp32.safetensors"
+)
+
+# ---- flags ----
+action="verify"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --download)     action="download"; shift ;;
+    --verify-only)  action="verify"; shift ;;
+    -h|--help)
+      sed -n '2,13p' "$0"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+# ---- download (--download only) ----
+if [ "$action" = "download" ]; then
+  echo "== download $REPO @ $REVISION -> $MODEL_HOST =="
+  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
+  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
+  # `uv tool run hf …` (not bare `hf …`) — the dev user installed
+  # huggingface_hub as a uv tool, so the binary isn't on PATH; uv is
+  # (/snap/bin/uv) and resolves the tool for us.
+  HF_HUB_DISABLE_XET=1 uv tool run hf download "$REPO" \
+    --revision "$REVISION" \
+    --local-dir "$MODEL_HOST"
+  echo
+fi
+
+# ---- verify required files ----
+echo "== verify required files under $MODEL_HOST =="
+missing=0
+for rel in "${REQUIRED_FILES[@]}"; do
+  if [ -f "$MODEL_HOST/$rel" ]; then
+    echo "  present: $rel"
+  else
+    echo "  MISSING: $rel" >&2
+    missing=1
+  fi
+done
+if [ "$missing" -ne 0 ]; then
+  echo "Incomplete model tree at $MODEL_HOST — re-run ~/bin/seed-comfyui-h3.sh --download" >&2
+  exit 1
+fi
+echo
+echo "Models staged. Start the service with:  systemctl start comfyui"

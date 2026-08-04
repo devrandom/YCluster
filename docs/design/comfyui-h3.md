@@ -63,7 +63,9 @@ NVIDIA_VISIBLE_DEVICES={{ comfyui_gpu }}         # belt + suspenders
 ```
 
 This mirrors the MinerU podman refactor (podman + NVIDIA Container Toolkit +
-CDI on the Nvidia hosts, `--userns=keep-id` running as `dev` UID 1002).
+CDI on the Nvidia hosts, `--userns=keep-id` running as `dev`, whose UID is
+baked into the image (`DEV_UID`, see decision 4); the registry image therefore
+matches the build host's `dev` UID).
 Play is gated on a per-host `comfyui_enabled` opt-in and ends early when
 `nvidia_host_gpu_count` is 0 (same guard as MinerU). A GPU-passthrough Incus
 VM (nv2/nv3-style hosts) is the heavier isolation alternative if a workload later
@@ -90,7 +92,7 @@ runtime fetch, and it keeps the image small and the container egress-free.
 -v /home/dev/comfyui/models:/opt/comfyui/models:ro     # local NVMe, seeded
 -v /near1/comfyui/output:/opt/comfyui/output           # NAS, user data
 -v /near1/comfyui/input:/opt/comfyui/input             # NAS, uploads (I2V/R2V)
--v /near1/comfyui/user:/opt/comfyui/user               # NAS, workflows/settings
+-v /home/dev/comfyui/user:/opt/comfyui/user            # LOCAL, workflows/settings + SQLite DB
 -v /home/dev/.cache/huggingface:/home/dev/.cache/huggingface
 ```
 
@@ -99,16 +101,26 @@ git SHA that includes the H3 nodes) + `torch`/`torchvision`/`torchaudio` CUDA
 wheels + `ffmpeg` for MP4 muxing. Weights/caches stay out of the image, so the
 image survives `podman rm` and rebuilds without re-staging ~40 GB of models.
 
-### 4. User data on the NAS (`/near1/comfyui`)
+### 4. User data: `output`/`input` on the NAS, `user` on local disk
 
-ComfyUI's only genuinely user-visible state is small: generated output
-(`output/`), uploaded inputs for I2V/Ref2VA (`input/`), and per-user workflow
-files (`user/`). That's what we persist — it goes on the **existing `/near1`
-NAS** (Samba/CIFS, already auto-mounted on `compute` nodes; `nvidia` ⊂
-`compute`, so the GPU hosts see it) under
-`/near1/comfyui/{output,input,user}`. Durable, shared, survives `podman rm`,
-rebuilds, and GPU-host replacement. **No new share** — the existing `/near1`
-mount covers it.
+ComfyUI's user-visible state is small: generated output (`output/`), uploaded
+inputs for I2V/Ref2VA (`input/`), and per-user workflow/settings state
+(`user/`). `output` and `input` are plain files, so they live on the existing
+`/near1` NAS (Samba/CIFS, auto-mounted on `compute` nodes; `nvidia` ⊂
+`compute`, so GPU hosts see it) under `/near1/comfyui/{output,input}` —
+durable, shared, and surviving `podman rm`, rebuilds, and GPU-host
+replacement. **No new share** — the existing `/near1` mount covers it.
+
+`user/` is the exception: since ComfyUI 0.30 it also holds a SQLite database
+(`comfyui.db`), and **SQLite cannot take reliable file locks over a CIFS/SMB
+mount** — a NAS-backed `user/` crashes at startup with
+`sqlite3.OperationalError: database is locked`. So `user/` stays on **local
+host disk** (`/home/dev/comfyui/user`), owned by `dev`. It is per-host rather
+than shared: workflows/settings follow a given GPU host instead of roaming,
+which is acceptable for this single-host testing deployment and a noted
+trade-off (see Todo). If multi-host shared `user` is ever needed, the fix is a
+proper local SQLite path on each host plus explicit workflow export/import,
+not raw SQLite over the NAS.
 
 The ~59 GB of model weights are **not** user data: they're static,
 re-seedable, and read on every load, so they stay on fast local host NVMe
@@ -118,15 +130,21 @@ NAS a serving SPOF — is not the default.
 
 **Write permission (the one real constraint).** `/near1` is mounted with
 `uid=1000,gid=1000,file_mode=0664,dir_mode=0775`; our container runs as `dev`
-(UID 1002) via `--userns=keep-id`, which lands as "other" on the mount → no
-write. But the mount presents every directory as gid 1000 / 0775, so the fix
-is to give the container process **supplemental group 1000** — no second share:
+via `--userns=keep-id` with `--group-add 1000`. The container's `dev` UID is
+baked at image build time to match the build host's `dev` UID (`DEV_UID`,
+cluster convention 1002 — nv4 is the 1000 outlier). When the host `dev` UID is
+1002 it lands as "other" on the mount → no write. But the mount presents every
+directory as gid 1000 / 0775, so the fix is to give the container process
+**supplemental group 1000** — no second share:
 
 - Run `podman ... --group-add 1000` alongside `--userns=keep-id`. `dev` stays
   UID 1002; the extra gid 1000 puts the process in the group-write class on
   the mount, so it can create/read its own files under `/near1/comfyui/`.
-- Pre-create `/near1/comfyui/{output,input,user}` (owned by group 1000, i.e.
+- Pre-create `/near1/comfyui/{output,input}` (owned by group 1000, i.e.
   just `0775`) in the play before the unit starts.
+  (On nv4, where `dev` UID 1000 equals the mount's `forceuid=1000`, the
+  container is already the owner and also writes directly; `--group-add 1000`
+  is then belt-and-suspenders.)
 
 No Samba/SMB changes and no change to the shared `near1` mount or its uid.
 Group propagation through `--userns=keep-id` is verified at deploy (see TODO);
@@ -188,8 +206,9 @@ Nvidia host today).
 │      └─ vae/...                                                 │
 │    /home/dev/.cache/huggingface/                                │
 │                                                                 │
-│  NAS (CIFS, gid=1000): /near1/comfyui                │
-│    output/   input/   user/    ← durable user data              │
+│  NAS (CIFS, gid=1000): /near1/comfyui                              │
+│    output/   input/    ← durable user data (NAS)                   │
+│  local NVMe: /home/dev/comfyui/user/ ← workflows/settings + SQLite │
 │                                                                 │
 │  comfyui.service (systemd; --group-add 1000)                    │
 │    └─ podman run --rm --userns=keep-id                          │
@@ -197,7 +216,8 @@ Nvidia host today).
 │         ├─ --device nvidia.com/gpu={{ gpu }}  (single GPU)      │
 │         └─ --group-add 1000  (matches NAS gid)                  │
 │              -v /home/dev/comfyui/models:/opt/comfyui/models:ro │
-│              -v /near1/comfyui/{output,input,user}:/opt/comfyui/…│
+│              -v /near1/comfyui/{output,input}:/opt/comfyui/{output,input} │
+│              -v /home/dev/comfyui/user:/opt/comfyui/user           │
 │              -v /home/dev/.cache/huggingface → /home/dev/...    │
 │              entrypoint: comfyui --listen 0.0.0.0 --port 8188   │
 │                         (no runtime model downloads)            │
@@ -226,12 +246,20 @@ Nvidia host today).
 3. Build image on the first host (`buildah bud` from `files/comfyui/Containerfile`,
    ComfyUI pinned to a git SHA), push `registry.xc:5000/comfyui:VERSION`.
 4. Pre-create the bind-mount targets: local `/home/dev/comfyui/models` and
-   `/near1/comfyui/{output,input,user}` on the NAS (0775, so group 1000 can
-   write). `/near1` is already mounted on the `compute`/`nvidia` hosts.
+   `/home/dev/comfyui/user`, plus `/near1/comfyui/{output,input}` on the NAS
+   (0775, so group 1000 can write). `/near1` is already mounted on the
+   `compute`/`nvidia` hosts. (`user` stays on local disk — its SQLite DB
+   can't lock over CIFS; see decision 4.)
 5. Seed model files (one-time, pinned, from `Comfy-Org/MiniMax-H3`) into
    `/home/dev/comfyui/models` — staging, not runtime download.
 6. Install `comfyui.service` (single GPU via CDI, bind mounts,
-   `--userns=keep-id`, `--group-add 1000` for NAS write access).
+   `--userns=keep-id`, `--group-add 1000` for NAS write access). The unit runs
+   podman through `systemd-run --scope --unit=comfyui-run`, which detaches the
+   container into a transient scope that is not a child of the unit — so a
+   `systemctl restart comfyui` would start a second scope with the same name and
+   fail with "Unit comfyui-run.scope was already loaded". The unit therefore
+   ships an `ExecStop=-podman stop -t 30 comfyui` to stop the named container
+   and free the scope name on every explicit stop/restart.
 7. Start it; smoke test = `GET /system_stats` (200) + submit a minimal T2V
    workflow JSON via `/prompt`, confirm a video + audio file lands on the NAS
    at `/near1/comfyui/output`.
@@ -246,14 +274,34 @@ code; the model assets and the NAS-resident user data are unchanged.
 
 ## Open items / TODO
 
-- [ ] Pick the concrete ComfyUI git SHA that ships the H3 nodes, and the torch
-      CUDA wheel set to pin in the Containerfile.
-- [ ] Decide the first Nvidia host + which GPU index (`comfyui_gpu`) — a
-      host-visible card, not a vfio-pci/passthrough card.
-- [ ] Confirm the frontend/frp WebSocket passthrough for `/ws`.
-- [ ] Optional: `build-sage-attention.yml` source build for the speedup.
-- [ ] Verify `--group-add 1000` + `--userns=keep-id` gives the container group
-      write on the `/near1` CIFS mount at deploy (smoke-test a file write before
-      wiring the unit).
-- [ ] Decide whether multi-host model dedup on `/near1` is ever worth the CIFS
-      read path (optional; fine to stay per-host NVMe with one GPU host).
+Implemented so far (see `config/ansible/app/install-comfyui.yml`,
+`config/ansible/app/files/comfyui/`, and its wiring in `app/app.yml`):
+
+- [x] Containerfile (application-only image: ComfyUI + Python 3.12 venv +
+      torch CUDA wheels + ffmpeg), systemd unit (single CDI GPU via
+      `--device nvidia.com/gpu={{ comfyui_gpu }}`, `--userns=keep-id`,
+      `--group-add 1000`, NAS + model bind-mounts), model seed script
+      (`~/bin/seed-comfyui-h3.sh`), and the `install-comfyui.yml` playbook
+      gated on per-host `comfyui_enabled` / `comfyui_gpu`. Deployed on **nv4**
+      (the first bring-up target), where the image was built and pushed to
+      `registry.xc:5000/comfyui:0.30.0` and `comfyui.service` runs healthy
+      (`/system_stats` → 200).
+- [x] Deploy-time verification that `--group-add 1000` + `--userns=keep-id`
+      gives the container group write on the `/near1` CIFS mount — the play
+      pre-creates `/near1/comfyui/{output,input,user}` (0775) and runs a
+      container write smoke test before enabling the unit.
+
+Still open (blocking first bring-up or external exposure):
+
+- [ ] Confirm the torch CUDA wheel set (defaults: `torch 2.9.0` / `cu126`)
+      and tie the pinned `COMFYUI_REVISION` comment in the Containerfile to the
+      exact SHA it ships (`b1693ecb`, the `v0.30.0` tag that first has native
+      H3 nodes).
+- [ ] Confirm and wire the frontend/frp reverse-proxy rule, incl. the
+      WebSocket upgrade path for `/ws` (a reference nginx snippet is at
+      `config/ansible/app/files/comfyui/comfyui-web.conf`, not yet wired).
+- [ ] Optional: `build-sage-attention.yml` source build for the sampling
+      speedup.
+- [ ] Decide whether multi-host model dedup on `/near1` is ever worth the
+      CIFS read path (optional; fine to stay per-host NVMe with one GPU
+      host).

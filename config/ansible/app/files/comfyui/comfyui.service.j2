@@ -1,0 +1,102 @@
+[Unit]
+Description=ComfyUI (MiniMax H3) backend (podman)
+# Same prerequisites as the MinerU podman unit: the CUDA driver must be
+# initialised before torch imports, and nvidia-persistenced keeps the driver
+# resident. Podman + NVIDIA CDI are required for `--device
+# nvidia.com/gpu={{ comfyui_gpu }}` — set up by setup-gpu-podman.yml (runs
+# before this play in the app chain).
+After=network.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+# Run podman as root, then map the container's UID to dev's (1002) via
+# `--userns=keep-id`. Same rationale as mineru-podman.service: podman under
+# systemd's User=dev can't do CLONE_NEWUSER for its re-exec path, so running
+# podman as root avoids that; --userns=keep-id keeps host UIDs 1:1 inside the
+# container so bind-mounted /home/dev/* (owned by the host dev user, whose UID
+# is baked into the image as DEV_UID — 1002 by convention, 1000 on nv4) is
+# writable by the container process running as dev.
+#
+# `--group-add 1000` adds supplemental group 1000 to the container process.
+# This is what lets the dev user (UID 1002 by convention, or 1000 on nv4) write
+# to the /near1 CIFS mount, which presents every dir as gid 1000 / mode 0775
+# (uid=1000,gid=1000, file_mode=0664,dir_mode=0775). With keep-id, container
+# gid 1000 maps 1:1 to host gid 1000, so dev lands in the group-write class on
+# the NAS — no second Samba share, no change to the shared mount. Verified by
+# install-comfyui.yml's deploy-time NAS write smoke test.
+User=root
+Group=root
+WorkingDirectory=/home/dev
+# Delegate=true lets podman create user namespaces (CLONE_NEWUSER) under
+# systemd. Same setting as the upstream /usr/lib/systemd/system/podman.service.
+Delegate=true
+Environment="HOME=/home/dev"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Belt + suspenders for GPU pinning: the container only sees the one
+# host-visible GPU indexed {{ comfyui_gpu }}. NVIDIA_VISIBLE_DEVICES here is
+# redundant with `-e` in ExecStart; it just makes the pin explicit at the unit
+# level too.
+Environment="NVIDIA_VISIBLE_DEVICES={{ comfyui_gpu }}"
+# Bind-mounts:
+#   /home/dev/comfyui/models           — static model weights on local host
+#                                       NVMe (seeded by ~/bin/seed-comfyui-h3.sh),
+#                                       read-only. Never baked into the image.
+#   /near1/comfyui/{output,input}      — durable user data on the existing
+#                                       /near1 NAS (CIFS, gid 1000). Survives
+#                                       podman rm / rebuilds / host swap.
+#   /home/dev/comfyui/user             — ComfyUI's user dir (settings + SQLite
+#                                       DB, comfyui.db, in 0.30). Kept on LOCAL
+#                                       host disk, NOT the NAS: SQLite can't
+#                                       take proper file locks over the CIFS
+#                                       mount, so a NAS-backed user dir crashes
+#                                       at startup with "database is locked".
+#                                       Per-host, unlike the shared output/input.
+#   /home/dev/.cache/huggingface       — persistent HF cache (bound at
+#                                       /home/dev/.cache/huggingface via
+#                                       keep-id).
+# The bind-mount targets are pre-created by install-comfyui.yml and persist on
+# the host (no RuntimeDirectory needed — unlike the UDS pattern there is no
+# tmpfs /run path here).
+#
+# podman under systemd's User=dev can't do CLONE_NEWUSER for its re-exec path,
+# so wrap in `systemd-run --scope` so the podman process gets a transient
+# unit with full caps; the wrapper process exits, leaving the inner podman to
+# run normally (same pattern as mineru-podman.service).
+#
+# ExecStartPre pulls the image into root's podman storage. The pull is a no-op
+# when the image is already present at the right digest; we always do it so a
+# fresh host converges even if it never built/pushed the image.
+ExecStartPre=/usr/bin/systemd-run --scope --unit=comfyui-pull /usr/bin/podman pull registry.xc:5000/comfyui:{{ comfyui_image_tag }}
+ExecStart=/usr/bin/systemd-run --scope --unit=comfyui-run /usr/bin/podman run --rm --name comfyui \
+    --userns=keep-id \
+    --group-add 1000 \
+    --device nvidia.com/gpu={{ comfyui_gpu }} \
+    -e NVIDIA_VISIBLE_DEVICES={{ comfyui_gpu }} \
+    -v /home/dev/comfyui/models:/opt/comfyui/models:ro \
+    -v /near1/comfyui/output:/opt/comfyui/output \
+    -v /near1/comfyui/input:/opt/comfyui/input \
+    -v /home/dev/comfyui/user:/opt/comfyui/user \
+    -v /home/dev/.cache/huggingface:/home/dev/.cache/huggingface \
+    -p {{ comfyui_port }}:8188 \
+    registry.xc:5000/comfyui:{{ comfyui_image_tag }}
+# systemd-run --scope detaches the podman run into a transient comfyui-run.scope
+# that is NOT a child of this unit. A `systemctl restart comfyui` (or the
+# install playbook's restart handler) would then try to start a NEW
+# comfyui-run.scope and fail with "Unit comfyui-run.scope was already loaded"
+# while the old one is still draining. Stop the named container explicitly so
+# the scope empties and the fixed scope name is free on the next start. `podman
+# stop` SIGTERMs, then SIGKILLs after the grace period; the leading `-` makes
+# the stop a no-op (success) when the container is already gone.
+ExecStop=-/usr/bin/podman stop -t 30 comfyui
+Restart=always
+RestartSec=5
+# ComfyUI cold start imports torch + loads the CUDA runtime into VRAM; give
+# systemd plenty of headroom before it decides the service is wedged.
+TimeoutStartSec=600
+# In-flight requests get 30 s to drain before SIGKILL (ExecStop's podman
+# graceful stop window is the same, so keep this above it).
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
