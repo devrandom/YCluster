@@ -1,0 +1,15 @@
+---
+# Install the burst-write reliability probe onto every cluster machine so
+# `burst-write-reliability.sh` is on PATH. It writes BURST_SIZE of data to
+# a DEVICE MOUNT, verifies it, then idles; see the script header. Source of
+# truth: config/ansible/scripts/burst-write-reliability.sh.
+- name: Install burst-write-reliability on all cluster machines
+  hosts: all
+  become: yes
+  tasks:
+    - name: Copy burst-write-reliability.sh to /usr/local/bin
+      copy:
+        src: ../scripts/burst-write-reliability.sh
+        dest: /usr/local/bin/burst-write-reliability.sh
+        owner: root
+        mode: '0755'
