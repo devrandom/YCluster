@@ -102,3 +102,13 @@ When a storage node (e.g., s2) fails and needs to be replaced, follow these step
 ---
 
 *Note: This procedure assumes the cluster maintains quorum throughout the recovery process. For quorum loss (two of three mons down) and pool corruption, see [disaster-recovery.md → Ceph quorum loss or corruption](disaster-recovery.md#scenario-ceph-quorum-loss-or-corruption).*
+
+## MicroCeph dqlite issues
+
+If `ceph -s` works but `snap logs microceph` shows dqlite errors, check the
+`snap.microceph.daemon` service on all nodes. The dqlite cluster needs 2/3
+nodes for quorum. Restart failed daemons with:
+
+```bash
+sudo systemctl restart snap.microceph.daemon.service
+```

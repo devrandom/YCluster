@@ -1,5 +1,20 @@
 # etcd Operations
 
+## Backing store — not the interface
+
+etcd is the source of truth, but it is **not** how you interact with the
+cluster: change state through the **`ycluster` CLI** and **ansible**, which own
+validation, hot-reload, and leader/serialization semantics. Reaching for
+`etcdctl` (especially to write) is a smell. These keys are listed for
+*understanding and read-only debugging* — each write goes through the tool that
+owns it:
+
+- `/cluster/nodes/by-hostname/<name>` — node registration (written by DHCP/bootstrap; read via `ycluster cluster status`)
+- `/cluster/config/inference/master-key` — cluster admin bearer (validated by local-ai-proxy-auth.service)
+- `/cluster/config/inference/models/<name>` — model→backend map, JSON `{"backends":[{"api_base":"..."}, ...]}`, hot-reloaded — **manage with `ycluster inference add/remove`** (see `docs/operations/inference.md`)
+- `/cluster/config/inference/disabled/<url>` — backends out of rotation — `ycluster inference disable/enable`
+- `/cluster/services/` — service state & leader election (written by the services themselves; read via `ycluster cluster status`)
+
 ## TLS (mTLS)
 
 etcd runs with mutual TLS on both the client and peer ports. Authentication is

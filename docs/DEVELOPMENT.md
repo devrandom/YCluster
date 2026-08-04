@@ -4,6 +4,13 @@
 
 The `./dev` directory provides a local PXE boot environment for testing autoinstall on bare metal machines.
 
+Quick start via the `just` aliases (defined in `just.d/dev-pxe.just`):
+
+```bash
+just dev-tftpboot          # extract/install kernel + GRUB + config
+sudo just dev-dnsmasq-watch  # host dnsmasq for DHCP (needs sudo)
+```
+
 ```bash
 cd dev
 
