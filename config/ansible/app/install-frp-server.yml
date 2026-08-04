@@ -211,11 +211,35 @@
     # the alt vhost tracks the prod domain without leaking it into repo code.
     - name: Install alt nginx vhost template
       copy:
-        src: ../../admin/files/admin-api-alt.conf.j2
+        src: ../admin/files/admin-api-alt.conf.j2
         dest: /etc/nginx/templates/admin-api-alt.conf.j2
         mode: '0644'
         owner: root
         group: root
+
+    # admin-api-alt.conf.j2 references the shared comfyui-locations.conf
+    # (installed below) for its comfy.<domain> block, so it must be present
+    # before certbot-manager renders + nginx reloads. Mirror install-comfyui.yml.
+    - name: Resolve ComfyUI backend from nvidia hosts
+      set_fact:
+        nvidia_comfy_backend: "{{ groups['nvidia'] | default([]) | map('extract', hostvars) | selectattr('comfyui_backend_url', 'defined') | map(attribute='comfyui_backend_url') | list | first | default('', true) }}"
+
+    - name: Resolve ComfyUI backend for shared location include
+      set_fact:
+        comfyui_locations_backend: "{{ (nvidia_comfy_backend | trim | length > 0) | ternary(nvidia_comfy_backend, '127.0.0.1:8188') }}"
+
+    - name: Install ComfyUI locations include (shared with main comfy vhost)
+      template:
+        src: ../admin/files/comfyui-locations.conf
+        dest: /etc/nginx/comfyui-locations.conf
+        owner: root
+        group: root
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      notify: reload nginx
 
     - name: Render alt nginx vhost with certbot-manager
       # Mirror setup-web-services.yml / install-authentik.yml: pass --local

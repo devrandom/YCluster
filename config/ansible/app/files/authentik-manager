@@ -151,6 +151,40 @@ entries:
       name: YCluster
       provider: !KeyOf provider-app
       meta_launch_url: https://app.$external_domain/
+  # ComfyUI (comfy.<domain>): the MiniMax H3 video backend. Access is granted
+  # to the `comfy` group (members added by an admin) plus the ycluster-admins
+  # group; a user in neither sees no entry and the auth subrequest 401s.
+  - model: authentik_core.group
+    id: group-comfy
+    identifiers:
+      name: comfy
+  - model: authentik_providers_proxy.proxyprovider
+    id: provider-comfy
+    identifiers:
+      name: comfy
+    attrs:
+      mode: forward_single
+      external_host: https://comfy.$external_domain
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+  - model: authentik_core.application
+    id: app-comfy
+    identifiers:
+      slug: comfy
+    attrs:
+      name: Comfy
+      provider: !KeyOf provider-comfy
+      meta_launch_url: https://comfy.$external_domain/
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf app-comfy
+      group: !KeyOf group-comfy
+      order: 0
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf app-comfy
+      group: !KeyOf group-admins
+      order: 0
   - model: authentik_outposts.outpost
     identifiers:
       managed: goauthentik.io/outposts/embedded
@@ -158,6 +192,7 @@ entries:
       providers:
         - !KeyOf provider-admin
         - !KeyOf provider-app
+        - !KeyOf provider-comfy
       config:
         authentik_host: https://auth.$external_domain
 EOF

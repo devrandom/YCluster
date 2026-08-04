@@ -361,3 +361,102 @@
       service:
         name: comfyui.service
         state: restarted
+
+# ComfyUI public vhost on the storage leader — comfy.<primary> → the
+# ComfyUI backend (HTTP + WebSocket), gated by the cluster IdP's forward-auth
+# (the embedded-outpost Comfy application, policy-bound to the `comfy` and
+# `ycluster-admins` groups; see the authentik-manager blueprint).
+# certbot-manager renders the vhost on storage nodes (nginx kernel); ComfyUI
+# itself runs on an nvidia host.
+#
+# Backend URL comes from `comfyui_backend_url`, set on the nvidia host that
+# runs ComfyUI (concrete value lives in the private host_vars/<node>.yml,
+# e.g. nv4.xc:8188). The vhost is installed only when such a host defines it;
+# if nothing sets it, the tasks are skipped and no comfy vhost is created.
+# The vhost is harmless while ComfyUI is down (nginx 502), so it installs
+# regardless of per-host `comfyui_enabled`.
+- name: Install ComfyUI nginx vhost (storage leader)
+  hosts: storage
+  become: yes
+
+  tasks:
+    # Resolve the backend URL from any nvidia host that explicitly sets
+    # `comfyui_backend_url`; empty when none do, so the vhost tasks below are
+    # skipped unless a host is actually configured to serve ComfyUI.
+    - name: Resolve ComfyUI backend URL
+      set_fact:
+        comfyui_backend_url: "{{ groups['nvidia'] | default([]) | map('extract', hostvars) | selectattr('comfyui_backend_url', 'defined') | map(attribute='comfyui_backend_url') | list | first | default('', true) }}"
+
+    # `comfyui_locations_backend` is what gets substituted into the shared
+    # comfyui-locations.conf include (installed below and by the frp alt
+    # vhost). It always resolves to a real host:port so nginx keeps loading
+    # even when no nvidia host sets `comfyui_backend_url` yet — in that case
+    # it points at a dead loopback port and the comfy surface is simply
+    # unreachable (no comfy.<domain> cert is issued without a backend).
+    - name: Resolve ComfyUI backend for the shared location include
+      set_fact:
+        comfyui_locations_backend: "{{ (comfyui_backend_url | trim | length > 0) | ternary(comfyui_backend_url, '127.0.0.1:8188') }}"
+
+    # comfyui-locations.conf is included by the main comfyui_comfy.conf.j2
+    # vhost AND by the frp alt vhost admin-api-alt.conf.j2
+    # (install-frp-server.yml), so both tunnels share one location body.
+    # Installed unconditionally so nginx config-test never fails on a missing
+    # include; harmless when comfy isn't deployed.
+    - name: Install ComfyUI locations (shared include for main + alt vhosts)
+      template:
+        src: ../admin/files/comfyui-locations.conf
+        dest: /etc/nginx/comfyui-locations.conf
+        owner: root
+        group: root
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      notify: reload nginx
+
+    - name: Install ComfyUI nginx vhost template
+      # The `_comfy` template suffix makes certbot-manager derive the
+      # comfy.<primary> subdomain + add it to the cert SAN. `(( ... ))`
+      # delimiters render only the backend URL here (ansible side), leaving
+      # the certbot-manager `{{ domain }}` / `{% if use_tls %}` intact —
+      # same convention as install-open-webui.yml.
+      template:
+        src: files/comfyui/comfyui_comfy.conf.j2
+        dest: /etc/nginx/templates/comfyui_comfy.conf.j2
+        owner: root
+        group: root
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      when: comfyui_backend_url | length > 0
+      notify: reload nginx
+
+    - name: Render ComfyUI nginx vhost with certbot-manager
+      # Mirror setup-web-services.yml / install-authentik.yml: --local in dev
+      # (web_services_force_local) where /cluster/https/domain isn't seeded.
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
+      environment: "{{ etcd_client_env | default({}) }}"
+      register: comfyui_nginx_update
+      changed_when: "'configuration updated' in comfyui_nginx_update.stdout"
+      failed_when: comfyui_nginx_update.rc != 0
+      when: comfyui_backend_url | length > 0
+      notify: reload nginx
+
+    # certbot-manager writes the rendered site to sites-available; symlink it
+    # into sites-enabled so nginx (include sites-enabled/*) actually serves it.
+    - name: Enable ComfyUI nginx site
+      file:
+        src: /etc/nginx/sites-available/comfyui_comfy
+        dest: /etc/nginx/sites-enabled/comfyui_comfy
+        state: link
+      when: comfyui_backend_url | length > 0
+      notify: reload nginx
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded

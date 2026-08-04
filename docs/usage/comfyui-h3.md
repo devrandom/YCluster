@@ -6,15 +6,23 @@ workflow. Deployment and design live in
 
 ## Access
 
-External exposure (frontend/frp reverse proxy) is still open, so reach the
-UI by tunneling through the bastion to the ComfyUI host's `8188`:
+ComfyUI is exposed as **`https://comfy.<domain>`** — its own nginx vhost on
+the storage leader, gated by the cluster IdP (authentik). Sign in with your
+cluster account; members of the IdP `comfy` group or `ycluster-admins` get in
+(an admin adds you to `comfy` in authentik). The vhost proxies HTTP +
+WebSocket (`/ws`) to the backend host, so the UI and workflow submission work
+as if local.
 
-```bash
-ssh -L 8188:<comfyui-host>.xc:8188 <bastion>
-# then open http://localhost:8188
-```
+Cluster-internal, without the tunnel, the UI+API is `http://<comfyui-host>.xc:8188`
+(no auth — reachable only from inside the cluster).
 
-Cluster-internal, without the tunnel, the UI+API is `http://<comfyui-host>.xc:8188`.
+> Bring-up fallback: while the public vhost is still being wired, you can
+> tunnel straight to the backend:
+>
+> ```bash
+> ssh -L 8188:<comfyui-host>.xc:8188 <bastion>
+> # then open http://localhost:8188
+> ```
 
 The service must be active and the model tree fully seeded first. Model
 weights (ls under `~/comfyui/models` on the host; `~/bin/seed-comfyui-h3.sh`

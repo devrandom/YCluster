@@ -241,12 +241,22 @@ Nvidia host today).
 ## Exposure
 
 - Cluster-internal: `http://<n>.xc:8188` (UI + JSON/WS API).
-- External: frontend/frp reverse proxy → the same port; must forward both
-  plain HTTP and the WebSocket upgrade path (`/ws`) used by the UI and by the
-  workflow-submission channel. Keep it out of the OpenAI `local-ai-proxy`
-  gateway (H3 is a diffusion/ComfyUI-protocol service, not OpenAI chat).
-- Authentication restraints (if any) belong at the frontend edge, reusing the
-  cluster's existing auth for user-facing services.
+- Public: `https://comfy.<domain>`, its own nginx vhost on the storage leader
+  (`config/ansible/app/files/comfyui/comfyui_comfy.conf.j2`, installed by the
+  "ComfyUI nginx vhost (storage leader)" play in `install-comfyui.yml`). It
+  proxies HTTP **and** the WebSocket upgrade path (`/ws`, used by the UI and by
+  the workflow-submission channel) to the ComfyUI backend, with long
+  proxy-timeouts (3600 s) since video generation + VAE decode can take minutes.
+- The vhost is gated by the cluster IdP via the embedded-outpost forward-auth
+  plumbing (same scheme as admin./app.*): the authentik-manager blueprint
+  creates a proxy provider + application for `comfy.<domain>` policy-bound to
+  a `comfy` group and the `ycluster-admins` group, so only their members can
+  sign in. The backend URL is a
+  configurable `comfyui_backend_url` (concrete value `nv4.xc:8188` in the
+  private `host_vars/nv4.yml`); the vhost is only installed when some nvidia
+  host sets it, and is skipped otherwise.
+- Keep it out of the OpenAI `local-ai-proxy` gateway (H3 is a
+  diffusion/ComfyUI-protocol service, not OpenAI chat).
 
 ## Deployment flow (`app/install-comfyui.yml`, mirroring `install-mineru.yml`)
 
@@ -272,7 +282,9 @@ Nvidia host today).
 7. Start it; smoke test = `GET /system_stats` (200) + submit a minimal T2V
    workflow JSON via `/prompt`, confirm a video + audio file lands on the NAS
    at `/near1/comfyui/output`.
-8. Register the reverse-proxy/frontend rule so users reach the UI.
+8. Register the reverse-proxy/frontend rule so users reach the UI: the
+   `comfy.<domain>` vhost (see Exposure) replaces the earlier manual
+   `comfyui-web.conf` reference snippet.
 
 ## Rollback
 
@@ -317,9 +329,13 @@ Still open (blocking first bring-up or external exposure):
       NVIDIA-SMI 610.43.02 / CUDA UMD 13.3). The Containerfile's
       `COMFYUI_REVISION`/`COMFYUI_REF` pins already tie to `b1693ecb` (the
       `v0.30.0` tag that first has native H3 nodes).
-- [ ] Confirm and wire the frontend/frp reverse-proxy rule, incl. the
-      WebSocket upgrade path for `/ws` (a reference nginx snippet is at
-      `config/ansible/app/files/comfyui/comfyui-web.conf`, not yet wired).
+- [x] Confirm and wire the frontend/frp reverse-proxy rule, incl. the
+      WebSocket upgrade path for `/ws`: the `comfy.<domain>` vhost +
+      authentik forward-auth (`comfy` / `ycluster-admins` groups) described
+      in Exposure. Installed
+      on the storage leader by "Install ComfyUI nginx vhost (storage leader)"
+      in `install-comfyui.yml`; the older manual
+      `config/ansible/app/files/comfyui/comfyui-web.conf` snippet is superseded.
 - [ ] Optional: `build-sage-attention.yml` source build for the sampling
       speedup.
 - [ ] Decide whether multi-host model dedup on `/near1` is ever worth the

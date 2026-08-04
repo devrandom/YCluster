@@ -1,0 +1,52 @@
+# comfy.<domain> — ComfyUI (MiniMax H3) web UI + /prompt API, gated by the
+# cluster IdP's "Comfy" application (policy bound to the `comfy` and
+# `ycluster-admins` groups).
+# ComfyUI is device-bound and NON-OpenAI: it is NOT routed through the
+# local-ai-proxy OpenAI gateway — it speaks plain HTTP + WebSocket (the UI
+# and the workflow-submission channel use /ws and /prompt), so this vhost
+# proxies HTTP and upgrades WebSocket.
+#
+# Rendered by certbot-manager from this `*_comfy.conf.j2` template: the
+# `_comfy` suffix sets domain=comfy.<primary> and adds comfy. to the
+# certificate SAN. Users reach it through the rathole tunnel -> 127.0.0.2.
+# The ComfyUI app itself stays unauthenticated; the IdP edge gate is the
+# boundary (via the shared embedded-outpost plumbing included below).
+#
+# The location body is shared with the frp alt vhost via
+# comfyui-locations.conf; the ComfyUI backend (host:port, e.g. the GPU
+# host .xc:8188) is substituted into that include by the install-comfyui.yml
+# / install-frp-server.yml render steps — the same double-parenthesis
+# convention as install-open-webui.yml.
+server {
+    {% if use_tls %}
+    listen 127.0.0.2:443 ssl http2;
+    {% else %}
+    listen 127.0.0.2:80;
+    {% endif %}
+    server_name {{ domain | default('comfy') }};
+
+    # ComfyUI accepts workflow JSON + uploaded images/video; don't cap small.
+    client_max_body_size 200M;
+
+    {% if use_tls %}
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
+    add_header X-Content-Type-Options nosniff always;
+
+    # IdP outpost plumbing (login redirect, OAuth callback, auth subrequest).
+    include /etc/nginx/admin-api-authentik-outpost.conf;
+
+    # Everything behind this vhost is the ComfyUI app. Forward-auth via the
+    # IdP: the embedded outpost selects the Comfy application by request Host
+    # and enforces membership of the `comfy` or `ycluster-admins` groups.
+    # Identity headers are set for the backend but ComfyUI ignores them —
+    # auth is the edge boundary.
+    include /etc/nginx/comfyui-locations.conf;
+}

@@ -193,6 +193,43 @@ server {
     include /etc/nginx/ycluster_app-locations.conf;
 }
 
+# ComfyUI — comfy.<domain>, gated by the cluster IdP's Comfy application
+# (policy bound to the `comfy` and `ycluster-admins` groups) via the shared
+# embedded-outpost forward-auth. Shares its location body with the main
+# comfyui_comfy.conf.j2 vhost through comfyui-locations.conf, so both the
+# rathole (127.0.0.2:443) and frp (127.0.0.2:17443) paths proxy identically.
+server {
+    {% if use_tls %}
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    {% else %}
+    listen 127.0.0.2:17443 proxy_protocol;
+    {% endif %}
+    server_name comfy.{{ domain | default('_') }};
+
+    {% if use_tls %}
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+    add_header X-Content-Type-Options nosniff always;
+
+    # ComfyUI accepts workflow JSON + uploaded images/video; don't cap small.
+    client_max_body_size 200M;
+
+    # IdP outpost plumbing must precede the location bodies so @authentik_signin
+    # is in scope when the location handler references it via error_page 401.
+    include /etc/nginx/admin-api-authentik-outpost.conf;
+    include /etc/nginx/comfyui-locations.conf;
+}
+
 # authentik Auth — mirrors rathole-side authentik_auth.conf.j2 on the
 # alt port. Required so the OAuth round-trip (auth.<domain>/application/o/authorize
 # and the callback bounce-back) works through the frp tunnel. Without

@@ -32,6 +32,7 @@ Categories: [security](#security) ·
 - **[HIGH]** [WG inbound ingress follows the active leader](networking/wg-inbound-follow-leader.md) — DNAT on a single uplink IP breaks remote access on gateway-VIP failover.
 - **[HIGH]** [Per-node uplink failover watchdog](networking/uplink-failover-watchdog.md) — dead uplink behind a live router blackholes egress (rathole breaks too) while the metric-100 DHCP route stays.
 - **[MEDIUM]** [ycluster wg delete: peer-only variant](networking/wg-delete-cascade.md) — `wg delete` silently drops live allocations; workaround documented (`wg revoke`) but not enforced.
+- [Single source of truth for public vhost configs](networking/single-source-vhosts.md) — per-app vhost templates (rathole `:443`) and the frp aggregator (`127.0.0.2:17443`) drift apart; new vhosts silently 404 on the live public path (comfy).
 - [ycluster https set-domain blast-radius checklist](networking/ycluster-https-set-domain-checklist.md)
 
 ## Lifecycle
