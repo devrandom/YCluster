@@ -54,14 +54,27 @@ done
 # ---- download (--download only) ----
 if [ "$action" = "download" ]; then
   echo "== download $REPO @ $REVISION -> $MODEL_HOST =="
-  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
-  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
-  # `uv tool run hf …` (not bare `hf …`) — the dev user installed
-  # huggingface_hub as a uv tool, so the binary isn't on PATH; uv is
-  # (/snap/bin/uv) and resolves the tool for us.
-  HF_HUB_DISABLE_XET=1 uv tool run hf download "$REPO" \
+  echo "== hf client: $(HF_HUB_DISABLE_XET=1 uv tool run --from huggingface-hub==1.24.0 hf --version 2>&1 | tail -1) =="
+  # Only the required files are fetched. The repo also carries ~45 GB+ bf16
+  # and fp8 variants that Hugging Face now routes through its Xet backend and
+  # refuses via the regular method ("file is too large ... Install hf_xet")
+  # once they exceed the xet threshold. The required files are all < 20 GB and
+  # download cleanly over the classic CDN; the node can't reach the Xet CAS
+  # endpoint anyway (it stalls at 0 B/s), so `--include` keeps us on that path.
+  #
+  # HF_HUB_DISABLE_XET=1: forces the regular CDN (no Xet).
+  # `uv tool run hf` must be version-pinned with `--from`: without it uv pulls
+  # the latest huggingface-hub (>=1.26), which refuses large files even below
+  # the xet threshold. Pinning to 1.24.0 matches the version that fetched the
+  # diffusion models over the regular CDN.
+  include_args=()
+  for rel in "${REQUIRED_FILES[@]}"; do
+    include_args+=(--include "$rel")
+  done
+  HF_HUB_DISABLE_XET=1 uv tool run --from huggingface-hub==1.24.0 hf download "$REPO" \
     --revision "$REVISION" \
-    --local-dir "$MODEL_HOST"
+    --local-dir "$MODEL_HOST" \
+    "${include_args[@]}"
   echo
 fi
 

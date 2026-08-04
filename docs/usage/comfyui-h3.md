@@ -1,0 +1,70 @@
+# ComfyUI MiniMax H3 (usage)
+
+How to reach the ComfyUI H3 sandbox and load a ready-made text/video
+workflow. Deployment and design live in
+[`docs/design/comfyui-h3.md`](../design/comfyui-h3.md).
+
+## Access
+
+External exposure (frontend/frp reverse proxy) is still open, so reach the
+UI by tunneling through the bastion to the ComfyUI host's `8188`:
+
+```bash
+ssh -L 8188:<comfyui-host>.xc:8188 <bastion>
+# then open http://localhost:8188
+```
+
+Cluster-internal, without the tunnel, the UI+API is `http://<comfyui-host>.xc:8188`.
+
+The service must be active and the model tree fully seeded first. Model
+weights (ls under `~/comfyui/models` on the host; `~/bin/seed-comfyui-h3.sh`
+verifies) are bind-mounted into the container and loaded on demand — no
+service restart is needed once a file finishes downloading.
+
+## Loading a pre-built workflow (recommended)
+
+There is no need to wire H3 nodes by hand. Comfy-Org ships official
+T2V / I2V / R2V graphs that reference the exact files we seed.
+
+1. Open the ComfyUI UI in your browser.
+2. Top menu → **Templates** (the browser pulls the
+   `Comfy-Org/workflow_templates` repo).
+3. Search **MiniMax** and pick the matching template:
+   - **MiniMax H3 T2V** — text-to-video (the quick start)
+   - **MiniMax H3 I2V** — image/video to video
+   - **MiniMax H3 R2V** — reference-to-video
+4. Fill in your `prompt` (and keyframes/inputs for I2V/R2V) and hit
+   **Queue**.
+
+The templates resolve the model files locally from the bind-mounted
+`models/` tree, so nothing downloads at runtime.
+
+### Fallback: drag-and-drop the JSON
+
+If the Templates browser is unavailable, drag the raw JSON straight onto
+the canvas:
+
+- T2V: `https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_minimax_h3_t2v.json`
+- I2V: `https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_minimax_h3_i2v.json`
+- R2V: `https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_minimax_h3_r2v.json`
+
+## Prerequisite: seeding must be complete
+
+T2V needs all of these present before a workflow will execute (the largest,
+the text encoder, downloads last):
+
+- `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors`
+- `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`
+- `vae/minimax_h3_video_vae_fp16.safetensors`
+- `vae/minimax_h3_audio_vae_fp32.safetensors`
+
+If the `Load CLIP` / `Load VAE` dropdowns are empty, seeding isn't done yet.
+
+## Output
+
+Generated videos and audio are written to `output/` inside the container,
+which is `/near1/comfyui/output` on the NAS (durable, shared). The UI's
+history/preview shows them as usual.
+
+First sampling run compiles triton CUDA kernels and is slow (minutes of JIT);
+that one-time cost then pays off for subsequent runs.

@@ -122,6 +122,15 @@ trade-off (see Todo). If multi-host shared `user` is ever needed, the fix is a
 proper local SQLite path on each host plus explicit workflow export/import,
 not raw SQLite over the NAS.
 
+**Backup the DB.** Because `user/` (workflows + settings + `comfyui.db`)
+lives only on local host disk, a failing/replaced local disk loses it; the
+service just auto-recovers with a blank DB, silently dropping any workflows
+the operator saved. There is **no automated backup** today — this is a
+single-host testing deployment. Add one before relying on it: periodically
+copy `/home/dev/comfyui/user` (or export workflows) to
+`/near1/comfyui/user-backup` (a NAS path separate from the live `user/`
+mount, so a CIFS-backed DB lock never returns). See Todo.
+
 The ~59 GB of model weights are **not** user data: they're static,
 re-seedable, and read on every load, so they stay on fast local host NVMe
 (`/home/dev/comfyui/models`), not on CIFS. If multi-host model dedup ever
@@ -293,10 +302,21 @@ Implemented so far (see `config/ansible/app/install-comfyui.yml`,
 
 Still open (blocking first bring-up or external exposure):
 
-- [ ] Confirm the torch CUDA wheel set (defaults: `torch 2.9.0` / `cu126`)
-      and tie the pinned `COMFYUI_REVISION` comment in the Containerfile to the
-      exact SHA it ships (`b1693ecb`, the `v0.30.0` tag that first has native
-      H3 nodes).
+- [ ] Add a periodic backup of the local `user/` state: copy
+      `/home/dev/comfyui/user` (workflows + settings + `comfyui.db`) to
+      `/near1/comfyui/user-backup` on the NAS — e.g. an ansible/`systemd.timer`
+      job — since a local disk failure silently resets the DB to blank. See
+      the note in decision 4.
+- [x] Confirm the torch CUDA wheel set: `torch 2.9.0` / `torchvision 0.24.0` /
+      `torchaudio 2.9.0` from the `cu130` index. nv4 is NVIDIA RTX PRO 6000
+      Blackwell (sm_120); the cu126 builds ship kernels only up to sm_90 and
+      fail at runtime with "CUDA error: no kernel image is available for
+      execution on the device". cu130 carries sm_120 kernels and also satisfies
+      comfy-kitchen's "need pytorch with cu130 or higher" for its optimized
+      CUDA backend. Requires a host driver new enough for CUDA 13 (nv4:
+      NVIDIA-SMI 610.43.02 / CUDA UMD 13.3). The Containerfile's
+      `COMFYUI_REVISION`/`COMFYUI_REF` pins already tie to `b1693ecb` (the
+      `v0.30.0` tag that first has native H3 nodes).
 - [ ] Confirm and wire the frontend/frp reverse-proxy rule, incl. the
       WebSocket upgrade path for `/ws` (a reference nginx snippet is at
       `config/ansible/app/files/comfyui/comfyui-web.conf`, not yet wired).

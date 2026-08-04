@@ -76,13 +76,17 @@ RUN uv venv /opt/comfyui/.venv --python 3.12
 # torch is present).
 #
 # TORCH_VERSION / TORCHVISION_VERSION / TORCHAUDIO_VERSION: pin together so
-# the three stay on coherent CUDA builds. Defaults target cu126 (safe on the
-# current NVIDIA driver set); revisit alongside the COMFYUI_REVISION pin when
-# the first host is stood up (open design TODO).
+# the three stay on coherent CUDA builds. The index targets cu130: nv4 (the
+# bring-up host) is NVIDIA RTX PRO 6000 Blackwell (sm_120), and torch cu126
+# builds ship kernels only up to sm_90 → CUDA error: no kernel image is
+# available for execution on the device. The cu130 wheels carry sm_120 kernels
+# and also satisfy comfy-kitchen's requirement ("need pytorch with cu130 or
+# higher") for its optimized CUDA backend. Requires a host driver new enough
+# for CUDA 13 (nv4: NVIDIA-SMI 610.43.02 / CUDA UMD 13.3).
 ARG TORCH_VERSION=2.9.0
 ARG TORCHVISION_VERSION=0.24.0
 ARG TORCHAUDIO_VERSION=2.9.0
-ARG TORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu126
+ARG TORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 RUN uv pip install --python /opt/comfyui/.venv/bin/python \
         --index-url "$TORCH_CUDA_INDEX" \
         "torch==$TORCH_VERSION" \
