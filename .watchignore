@@ -35,3 +35,7 @@ ext/
 .opencode/node_modules
 # local scratch (test logs, sync logs, etc.) — gitignored in .gitignore too.
 tmp/
+# linked git worktrees created by `just worktree` (./trees/<branch>) — gitignored
+# in .gitignore, and must never sync: worktree branch edits would silently
+# overwrite the cluster's main-tree copy of /opt/infrastructure.
+/trees/

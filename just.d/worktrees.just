@@ -8,7 +8,10 @@
 #
 # We symlink individual ignored leaf files, never a tracked directory (.codex,
 # .serena, .opencode are committed) — that would dirty the worktree's status
-# with deletions.
+# with deletions. `config/ansible/host_vars` is likewise ignored, but it is a
+# symlink in the main checkout; we chain the worktree's copy onto that symlink
+# (`.../trees/<branch>/config/ansible/host_vars -> main/config/ansible/host_vars`)
+# so there remains a single reference to the private ycluster-private/host_vars.
 
 WORKTREE_ROOT := './trees'
 
@@ -25,7 +28,12 @@ worktree name:
         rel="$(realpath --relative-to "$(dirname "$link")" "$root/$src")"; \
         ln -sfn "$rel" "$link"; \
         echo "linked $link -> $rel"; \
-    done
+    done; \
+    host_vars="$wt/config/ansible/host_vars"; \
+    mkdir -p "$(dirname "$host_vars")"; \
+    rel="$(realpath --relative-to "$(dirname "$host_vars")" "$root/config/ansible")/host_vars"; \
+    ln -sfn "$rel" "$host_vars"; \
+    echo "linked $host_vars -> $rel"
     @echo "worktree ready: {{WORKTREE_ROOT}}/{{name}}"
 
 # Remove a linked worktree (branch is kept; delete it separately if wanted).

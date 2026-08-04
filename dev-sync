@@ -22,7 +22,7 @@ Control socket:  tmp/dev-sync.sock
 Log file:       tmp/dev-sync.log
 
 Events under these paths are ignored (same set watchman skipped):
-  .git/, tmp/, any __pycache__/, .venv/, venv/
+  .git/, tmp/, any __pycache__/, .venv/, venv/, ./trees/ (linked worktrees)
 The tmp/ exclusion in particular breaks the feedback loop where the daemon's
 own log writes re-fire the watcher.
 """
@@ -57,7 +57,7 @@ RSYNC_CHECK_OPTS = ['-naci', '--copy-unsafe-links', f'--exclude-from={REPO / ".w
 # Match a path component exactly (.git, tmp, ...) at any depth: anchored at
 # either start-of-path or after a slash, and either end-of-path or before a
 # slash -- so ".git" matches ".git", ".git/HEAD", "subdir/.git", "x/.git/y".
-SKIP_RE = re.compile(r'(^|/)(.git|tmp|__pycache__|\.venv|venv)(/|$)')
+SKIP_RE = re.compile(r'(^|/)(\.git|tmp|__pycache__|\.venv|venv|trees)(/|$)')
 
 
 def log(line):
