@@ -18,7 +18,7 @@ dev/tftpboot/
 __pycache__
 .vault_pass
 **/vault*.yml
-.venv/
+.venv
 venv/
 /dev/dhcp-hosts
 /bench-results/
@@ -34,6 +34,9 @@ dev/cluster/.ssh/
 
 # local scratch logs (dev-sync, system-test, etc.) — use ./tmp not /tmp
 /tmp/
+
+# linked git worktrees created by `just worktree`
+/trees/
 
 # Cluster-specific inventory (real values); template is inventory_cluster.yml.example
 config/ansible/inventory_cluster.yml

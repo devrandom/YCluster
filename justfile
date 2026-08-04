@@ -14,6 +14,7 @@ import "just.d/dev-pxe.just"
 import "just.d/completions.just"
 import "just.d/tests.just"
 import "just.d/lint.just"
+import "just.d/worktrees.just"
 import "just.d/python.just"
 
 # Default: list every recipe across modules.
