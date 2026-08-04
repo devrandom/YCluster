@@ -3009,11 +3009,17 @@ def vm_schedule_data():
     # Capacity commitments per host, so users can see what's free before
     # composing a schedule. VM names are shown to everyone (capacity is
     # shared knowledge); owners to admins and managers (plain users redacted).
+    # Plain (non-manager) users only see hosts that host one of their own
+    # VMs — other people's hosts/pools aren't their business. Admins and
+    # managers keep the full roster (they answer capacity questions).
+    visible_hosts = {r['host'] for r in rows if r['host']}
     commitments = vmm.gpu_commitments(registry, desired_all, now)
     hosts = []
     for host in sorted(set(commitments) | set(pools)):
         if not pools.get(host) and not commitments.get(host):
             continue          # container hosts: no passthrough pool
+        if not id.is_manager and host not in visible_hosts:
+            continue
         hosts.append({
             'host': host,
             'pool': pools.get(host),

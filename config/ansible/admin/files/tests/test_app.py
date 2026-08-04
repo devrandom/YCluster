@@ -310,6 +310,24 @@ class ScheduleDataTests(SchedTestBase):
         rows = self.get("/admin/vm-schedule/data", admin=True).get_json()["rows"]
         self.assertEqual([r["vm"] for r in rows], ["a", "b"])
 
+    def test_plain_user_only_sees_own_hosts(self):
+        # alice's VM is on nv2, bob's on nv3, and nv4 is a pool-only host.
+        # A plain user should only see the host block their own VMs are on.
+        self.vm("a", owner="alice@x", host="nv2")
+        self.vm("b", owner="bob@x", host="nv3")
+        self.state("nv2", pool=2)
+        self.state("nv3", pool=4)
+        self.state("nv4", pool=8)                     # no VM at all
+        hosts = self.get("/admin/vm-schedule/data",
+                         email="alice@x").get_json()["hosts"]
+        self.assertEqual([h["host"] for h in hosts], ["nv2"])
+        # Managers (admins included) keep the full roster for capacity
+        # questions.
+        hosts = self.get("/admin/vm-schedule/data",
+                         admin=True).get_json()["hosts"]
+        self.assertEqual({h["host"] for h in hosts},
+                         {"nv2", "nv3", "nv4"})
+
     def test_pending_stop_and_has_desired(self):
         self.vm("v", owner="alice@x")
         self.desired("v", "off")
