@@ -176,6 +176,32 @@
         - '80'
         - '443'
 
+    # VM-access bastions keep their historical public ports (2210+idx /
+    # 2213+idx legacy, 2220+idx / 2240+idx for idx>3), now served by frps
+    # via each Incus host's frpc-bastion tunnel. Allow those same ports
+    # here so the firewall doesn't depend on rathole's config as rathole
+    # retreats. Derivation mirrors the retired rathole template.
+    - name: Build list of VM-bastion public ports
+      set_fact:
+        vm_bastion_public_ports: >-
+          {%- set ns = namespace(ports=[]) -%}
+          {%- for h in groups['compute'] | default([]) | sort -%}
+          {%-   if hostvars[h].vm_bastion_service is defined -%}
+          {%-     set idx = h | regex_replace('^[a-z]+', '') | int -%}
+          {%-     set port = ((2210 if h.startswith('nv') else 2213) + idx) if idx <= 3 else ((2220 if h.startswith('nv') else 2240) + idx) -%}
+          {%-     set _ = ns.ports.append(port) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ ns.ports | unique | sort }}
+      run_once: true
+
+    - name: Allow VM-bastion public ports through ufw
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ vm_bastion_public_ports }}"
+
     - name: Remove retired frp alt http port from ufw
       community.general.ufw:
         rule: allow

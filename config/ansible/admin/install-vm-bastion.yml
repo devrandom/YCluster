@@ -1,18 +1,21 @@
 ---
 # Deploys a bastion container on the Incus VM bridge. The bastion runs a
-# jump-only sshd plus a rathole client, giving external SSH access to GPU
-# VMs via:  ssh -J jump@<rathole-host>:<port> ubuntu@<vm-name>
-# (public port is derived per node type in app/templates/rathole-server.toml.j2:
-#  idx 1-3 keep legacy 2211-2216; idx>3 use nvidia 2220+idx, compute(c) 2240+idx)
+# jump-only sshd plus an frp client, giving external SSH access to GPU
+# VMs via:  ssh -J jump@<frps-host>:<port> ubuntu@<vm-name>
+# (public port is derived per node type, preserving the legacy rathole
+#  numbering so existing ssh -J invocations keep working:
+#  idx 1-3 keep legacy 2210+idx/2213+idx; idx>3 use nvidia 2220+idx,
+#  compute(c) 2240+idx)
 #
 # The bastion sits on incusbr0, so it is confined exactly like the VMs: it
-# can reach the VMs and the internet, but not nv2's sshd or the cluster.
+# can reach the VMs and the internet, but not the host's sshd or the
+# cluster.
 #
 # Per-user access is generated from the etcd registries by
 # `ycluster vm bastion-sync` (run here, and on every VM/key change).
 #
-# Requires the rathole server to expose the matching 'vm-bastion' service
-# (app/templates/rathole-server.toml.j2 — re-run app/install-rathole-server.yml).
+# Requires the frp server to expose the matching service on the derived
+# public port (ufw allowed by app/install-frp-server.yml).
 - name: Deploy the VM-access bastion container
   hosts: compute
   become: yes
@@ -20,50 +23,66 @@
     vm_bastion_container: bastion
     vm_bastion_jump_user: jump
     vm_bastion_image: "images:ubuntu/24.04"
-    rathole_binary_src: /opt/src/rathole/target/release/rathole
+    frp_client_binary_src: /opt/src/frp/bin/frpc
   tasks:
     - name: End play unless this node hosts Incus instances
       meta: end_host
       when: not (incus_vm_host | default(false)
                  or incus_container_host | default(false))
 
-    - name: Check rathole binary exists on buildhost
+    - name: Check frpc binary exists on buildhost
       stat:
-        path: "{{ rathole_binary_src }}"
-      register: rathole_bin
+        path: "{{ frp_client_binary_src }}"
+      register: frpc_bin
       delegate_to: "{{ buildhost }}"
 
-    - name: Fail if rathole binary is missing
+    - name: Fail if frpc binary is missing
       fail:
-        msg: "Rathole binary not found on buildhost ({{ buildhost }}). Run app/build-rathole.yml first."
-      when: not rathole_bin.stat.exists
+        msg: "frpc binary not found on buildhost ({{ buildhost }}). Run app/build-frp.yml first."
+      when: not frpc_bin.stat.exists
 
-    - name: Fetch rathole binary from buildhost to controller
+    - name: Fetch frpc binary from buildhost to controller
       fetch:
-        src: "{{ rathole_binary_src }}"
+        src: "{{ frp_client_binary_src }}"
         dest: "{{ build_cache_dir }}/"
         flat: yes
       delegate_to: "{{ buildhost }}"
       run_once: true
 
-    - name: Read rathole tunnel config from etcd
-      command: etcdctl get --print-value-only /cluster/nodes/rathole/config
+    - name: Read frp tunnel config from etcd
+      command: etcdctl get --print-value-only /cluster/nodes/frp/config
       delegate_to: "{{ groups['core'][0] }}"
       environment: "{{ etcd_client_env }}"
-      register: rathole_cfg_raw
+      register: frp_cfg_raw
       changed_when: false
       no_log: true
 
-    - name: Parse rathole tunnel config
+    - name: Parse frp tunnel config
       set_fact:
-        rathole_remote_addr: "{{ (rathole_cfg_raw.stdout | from_json).remote_addr }}"
-        rathole_token: "{{ (rathole_cfg_raw.stdout | from_json).token }}"
+        frp_remote_addr: "{{ (frp_cfg_raw.stdout | from_json).remote_addr }}"
+        frp_token: "{{ (frp_cfg_raw.stdout | from_json).token }}"
       no_log: true
 
-    - name: Copy rathole binary to the Incus host
+    # Same per-node-type derivation as the retired rathole server template,
+    # so the bastion keeps its historical public port (existing ssh -J
+    # invocations are untouched). nvidia is a child of compute, so the
+    # node-name prefix selects the block; idx comes from the hostname.
+    # `| int` is applied inline because a vars-level templated string stays a
+    # string here, and `<=` between str and int would fail at runtime.
+    - name: Compute the public bastion port for this host
+      vars:
+        bastion_idx: "{{ inventory_hostname | regex_replace('^[a-z]+', '') | int }}"
+      set_fact:
+        bastion_public_port: >-
+          {{ ((2210 if inventory_hostname.startswith('nv') else 2213) + (bastion_idx | int))
+             if (bastion_idx | int) <= 3
+             else ((2220 if inventory_hostname.startswith('nv') else 2240) + (bastion_idx | int)) }}
+
+
+    - name: Copy frpc binary to the Incus host
       copy:
-        src: "{{ build_cache_dir }}/{{ rathole_binary_src | basename }}"
-        dest: /usr/local/bin/rathole
+        src: "{{ build_cache_dir }}/{{ frp_client_binary_src | basename }}"
+        dest: /usr/local/bin/frpc
         mode: '0755'
 
     - name: Check whether the bastion container exists
@@ -101,76 +120,76 @@
       changed_when: false
 
     # Skip the push entirely when the binary content already matches.
-    # Without this, every run swaps the rathole inode (atomic-rename)
-    # and the setup script's restart-on-replace logic would bounce
-    # rathole every site.yml run.
-    - name: Hash the rathole binary on the host
+    # Without this, every run swaps the frpc inode (atomic-rename) and the
+    # setup script's restart-on-replace logic would bounce frpc every
+    # site.yml run.
+    - name: Hash the frpc binary on the host
       stat:
-        path: /usr/local/bin/rathole
+        path: /usr/local/bin/frpc
         checksum_algorithm: sha256
-      register: rathole_host_stat
+      register: frpc_host_stat
 
-    - name: Hash the rathole binary inside the bastion
-      command: incus exec {{ vm_bastion_container }} -- sha256sum /usr/local/bin/rathole
-      register: rathole_bastion_sum
+    - name: Hash the frpc binary inside the bastion
+      command: incus exec {{ vm_bastion_container }} -- sha256sum /usr/local/bin/frpc
+      register: frpc_bastion_sum
       changed_when: false
       failed_when: false
 
-    - name: Decide whether the rathole binary needs replacing
+    - name: Decide whether the frpc binary needs replacing
       set_fact:
-        rathole_binary_needs_push: >-
-          {{ rathole_bastion_sum.rc != 0
-             or rathole_host_stat.stat.checksum != (rathole_bastion_sum.stdout.split() | first) }}
+        frpc_binary_needs_push: >-
+          {{ frpc_bastion_sum.rc != 0
+             or frpc_host_stat.stat.checksum != (frpc_bastion_sum.stdout.split() | first) }}
 
     # Push to a staging path and atomic-rename: overwriting a running
     # binary with `incus file push` (open O_TRUNC) fails with ETXTBSY,
     # but rename(2) over a running executable is fine — the kernel keeps
     # the old inode alive for the running process and links the new one
-    # in place. The setup script restarts rathole afterwards.
-    - name: Push rathole binary into the bastion (staging path)
+    # in place. The setup script restarts frpc afterwards.
+    - name: Push frpc binary into the bastion (staging path)
       command: >
-        incus file push /usr/local/bin/rathole
-        {{ vm_bastion_container }}/usr/local/bin/rathole.new --mode 0755
-      when: rathole_binary_needs_push
+        incus file push /usr/local/bin/frpc
+        {{ vm_bastion_container }}/usr/local/bin/frpc.new --mode 0755
+      when: frpc_binary_needs_push
       changed_when: false
 
-    - name: Atomically replace rathole binary inside the bastion
+    - name: Atomically replace frpc binary inside the bastion
       command: >
         incus exec {{ vm_bastion_container }} --
-        mv /usr/local/bin/rathole.new /usr/local/bin/rathole
-      when: rathole_binary_needs_push
+        mv /usr/local/bin/frpc.new /usr/local/bin/frpc
+      when: frpc_binary_needs_push
       changed_when: false
 
-    # On a freshly-launched bastion the rathole-bastion unit doesn't exist
-    # yet — it is created (and the service first started) by the setup script
+    # On a freshly-launched bastion the frpc-bastion unit doesn't exist yet —
+    # it is created (and the service first started) by the setup script
     # below, which also restarts on an atomic-replaced binary. So check first
     # and only bounce here when the unit is already present.
-    - name: Check whether the rathole unit exists in the bastion
+    - name: Check whether the frpc-bastion unit exists in the bastion
       command: >
         incus exec {{ vm_bastion_container }} --
-        systemctl cat rathole-bastion.service
-      register: rathole_unit_present
+        systemctl cat frpc-bastion.service
+      register: frpc_unit_present
       changed_when: false
       failed_when: false
 
-    # The mv above swaps the on-disk inode; the running rathole keeps the
+    # The mv above swaps the on-disk inode; the running frpc keeps the
     # old inode open until restarted. Bounce it explicitly here rather
     # than having the setup script chase inodes inside the container.
-    - name: Restart rathole after binary replacement
+    - name: Restart frpc after binary replacement
       command: >
         incus exec {{ vm_bastion_container }} --
-        systemctl restart rathole-bastion.service
-      when: rathole_binary_needs_push and rathole_unit_present.rc == 0
-      changed_when: rathole_binary_needs_push
+        systemctl restart frpc-bastion.service
+      when: frpc_binary_needs_push and frpc_unit_present.rc == 0
+      changed_when: frpc_binary_needs_push
 
     - name: Render the bastion setup script
       set_fact:
         bastion_setup_script: "{{ lookup('template', 'bastion-setup.sh.j2') }}"
       no_log: true
 
-    # The staged script (mode 0700) contains the rathole token, so its
-    # *file* mode is the sensitive bit; the parent dir is fine at 0755
-    # (matches install-nvidia.yml so the two plays don't flip-flop it).
+    # The staged script (mode 0700) contains the frp token, so its *file*
+    # mode is the sensitive bit; the parent dir is fine at 0755 (matches
+    # install-nvidia.yml so the two plays don't flip-flop it).
     - name: Ensure /var/cache/ycluster exists for the staged script
       file:
         path: /var/cache/ycluster
@@ -196,8 +215,8 @@
       when: bastion_setup_stage is changed
       changed_when: false
 
-    # Always exec — the script also detects atomic-replaced /usr/local/bin/rathole
-    # (inode diff vs the running rathole process) and restarts on its own.
+    # Always exec — the script also detects atomic-replaced /usr/local/bin/frpc
+    # (inode diff vs the running frpc process) and restarts on its own.
     # With the rewritten template, "Bastion configured" is printed only when
     # the script actually mutated something or restarted a service; on a
     # genuine no-op it prints "Bastion: no changes." and we report ok.

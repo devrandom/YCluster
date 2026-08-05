@@ -62,6 +62,18 @@ etcd schema:
   (`admin-api-alt.conf.j2` on `127.0.0.2:17080`) and `certbot_manager.py`
   gates on `frpc` instead of `rathole`. Stale ufw rules (`14443`
   rathole-https rollback, `17080` frp-alt http) get deleted at apply.
+- **Step 6a — per-core SSH retired**: commit `1137963f`. frpc-ssh
+  (`17200+N`) replaced the rathole 2200+N per-core tunnels; rathole client
+  no longer registers them.
+- **Step 6b — VM-bastion ingress switched to frp**: `admin/install-vm-bastion.yml`
+  + `admin/templates/bastion-setup.sh.j2` now run an in-container
+  `frpc-bastion.service` (`/usr/local/bin/frpc`) reading
+  `/cluster/nodes/frp/config`, publishing each Incus host on its historical
+  22NN port (derived in the playbook, same formula as the retired rathole
+  template) so `ssh -J jump@<host>:<port>` is unchanged. The 22NN ports are
+  allowed through ufw by `app/install-frp-server.yml`, and the matching
+  vm-bastion blocks were removed from `rathole-server.toml.j2` (rathole now
+  carries only admin 8821/8822).
 - **Step 6 — rip out rathole (pending, gated on soak)**: remove
   rathole playbooks/configs/units/helpers, drop the parallel-run
   artifacts (`admin-api-alt.conf.j2`, the location-body includes,
