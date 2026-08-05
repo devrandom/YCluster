@@ -1,0 +1,9 @@
+---
+# ROCm AMD compute nodes
+# ======================
+
+# Pin kernel version compatible with amdgpu DKMS.
+# HWE kernels (6.17+) break amdgpu DKMS builds, so 6.14 is the default for
+# the fleet. Override per-host (e.g. host_vars/c3.yml) where a newer kernel
+# is required — see admin/install-rocm.yml (kernel-pin block).
+rocm_kernel_version: "6.14.0-37-generic"
