@@ -1,7 +1,7 @@
 ---
 # App-layer additions for the dev container cluster: substrate stand-ins
 # (docker, /rbd mounts, qdrant) + the REAL storage leader election, docker
-# registry, storage VIP (keepalived), rathole client, authentik, and the
+# registry, storage VIP (keepalived), authentik, and the
 # incus/fakevm fixture on c1.
 #
 # Run as the TOP-LEVEL playbook from dev/cluster/ (same vault-avoidance rule
@@ -15,7 +15,7 @@
 # Unlike the earlier fixed-leader fixture, the storage leader is now chosen
 # by the real storage-leader-election service: whichever core node wins the
 # /cluster/leader/app lease starts user-rbd/misc-rbd (bind-mount stand-ins),
-# postgresql@16-main, qdrant, docker-registry, rathole, and
+# postgresql@16-main, qdrant, docker-registry, and
 # ycluster-apps.target — exactly the production control flow. The /rbd
 # stand-ins bind-mount a storage volume shared by all core containers
 # (dev-cluster.sh attaches it at /srv/rbd-backing), so postgres / qdrant /
@@ -304,12 +304,11 @@
         name: docker
         state: restarted
 
-# The real registry / rathole-client / qdrant / leader-election / VIP
+# The real registry / qdrant / leader-election / VIP
 # playbooks, in the order the election expects (it starts docker-registry,
-# rathole and qdrant, so their units must exist before the election service
+# qdrant, so its unit must exist before the election service
 # does). registry_docker_packages: dev has docker.io, not the docker-ce repo.
 - import_playbook: ../../config/ansible/storage/install-docker-registry.yml
-- import_playbook: ../../config/ansible/app/install-rathole.yml
 - import_playbook: ../../config/ansible/storage/install-qdrant.yml
 
 # Migration from the earlier qdrant oneshot stand-in: if the leader's

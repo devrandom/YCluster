@@ -6,9 +6,8 @@
 # carries: etcd (mTLS quorum), the ycluster CLI, leader elections (DHCP +
 # storage), keepalived (storage + gateway VIPs), base infrastructure
 # (cluster DNS from etcd, squid, chrony/NTP), adhoc-node DHCP join, the
-# docker registry, postgres, authentik, rathole (ssh/admin ingress: ssh
-# clients on all core nodes, server on f1), frp (public http/https tunnels
-# on f1 via PROXY protocol + frpc-ssh on all core nodes), the admin API
+# docker registry, postgres, authentik, and frp (public http/https + ssh
+# tunnels on f1 via PROXY protocol + frpc-ssh on all core nodes), the admin API
 # (core + non-core), the admin web UI's forward-auth gate, incus VM
 # management (nested incus on c1: launch → sample → desired-state →
 # reconcile), usage accounting (etcd → postgres), local-ai-proxy
@@ -406,10 +405,10 @@ sec_leader() {
 
   $SSH "$leader" "mountpoint -q /rbd/user && mountpoint -q /rbd/misc" \
     || die "leader missing /rbd mounts"
-  for svc in postgresql@16-main docker-registry rathole authentik qdrant user-rbd misc-rbd; do
+  for svc in postgresql@16-main docker-registry authentik qdrant user-rbd misc-rbd; do
     $SSH "$leader" "systemctl is-active --quiet $svc" || die "$svc not active on leader"
   done
-  ok "leader runs postgres, registry, rathole, authentik, qdrant, rbd mounts"
+  ok "leader runs postgres, registry, authentik, qdrant, rbd mounts"
 
   $SSH "$leader" "findmnt -no SOURCE /rbd/user" | grep -q rbd-backing \
     || die "/rbd/user not bound from the shared backing volume"
@@ -606,22 +605,17 @@ sec_usage() {
 }
 
 # --------------------------------------------------------------------------
-# 12. rathole tunnels (ssh/admin ingress; public http/https moved to frp)
+# 12. rathole client retired (ssh/admin ingress via frp)
 # --------------------------------------------------------------------------
 sec_rathole() {
+  # The rathole client (incl. rathole-ssh) is retired cluster-wide; ssh
+  # tunnels moved to frpc-ssh (1720N, checked in sec_frp). Assert the
+  # retirement holds on every core node.
   for n in "${CORE[@]}"; do
-    $SSH "$n" "systemctl is-active --quiet rathole-ssh" || die "rathole-ssh not active on $n"
+    $SSH "$n" "systemctl is-active --quiet rathole" && die "rathole client still active on $n"
+    $SSH "$n" "systemctl is-active --quiet rathole-ssh" && die "rathole-ssh still active on $n"
   done
-  ok "rathole-ssh clients active on all core nodes"
-
-  # Each core node's sshd is reachable through f1's per-node tunnel port
-  # (2201..2203, bound to f1 localhost) — read the banner through the tunnel.
-  for n in "${CORE[@]}"; do
-    local port=$((2200 + ${n#s}))
-    $SSH f1 "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$port; head -c 7 <&3'" \
-      | grep -q '^SSH-2.0' || die "no ssh banner via f1:$port (tunnel for $n)"
-  done
-  ok "ssh banners via f1 tunnel ports 2201-2203"
+  ok "rathole client retired on all core nodes (ssh tunnels via frpc-ssh)"
 }
 
 # --------------------------------------------------------------------------
@@ -1020,7 +1014,7 @@ SECTION_REGISTRY=(
   "9.postgres + authentik + user management|sec_authentik"
   "10.incus vm lifecycle (c1)|sec_vm"
   "11.usage accounting -> postgres|sec_usage"
-  "12.rathole tunnels (ssh/admin via f1)|sec_rathole"
+  "12.rathole client retired (ssh tunnels via frpc-ssh)|sec_rathole"
   "13.admin web forward-auth gate|sec_admin_web"
   "14.local-ai-proxy inference path|sec_inference"
   "15.ACME via pebble (certbot + frp tunnel)|sec_acme"

@@ -631,7 +631,7 @@ def _run_verbose(mark):
         leader_services = _d(_d(_d(cs.get('hostHealth')).get(storage_leader)).get('services'))
         if leader_services:
             print(f"\n  Storage Leader Services ({storage_leader}):")
-            for svc_name in ['ceph', 'postgresql', 'qdrant', 'docker_registry', 'rathole', 'open_webui']:
+            for svc_name in ['ceph', 'postgresql', 'qdrant', 'docker_registry', 'open_webui']:
                 svc = _d(leader_services.get(svc_name))
                 st = svc.get('status', 'unknown')
                 details = _svc_status_str(svc.get('details', ''))

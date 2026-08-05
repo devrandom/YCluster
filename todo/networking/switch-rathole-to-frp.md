@@ -121,6 +121,28 @@ etcd schema:
     `frpc-bastion.service`, and the pushed binary becomes
     `/usr/local/bin/frpc` (mirrors the existing rathole push dance).
 
+- **In progress — rathole client rip-out** (staged, not yet committed):
+  removed `app/install-rathole.yml` + `app/files/rathole-ssh.*`, dropped
+  the imports from `app.yml`/`dev/cluster/app-dev.yml`, dropped `rathole`
+  from the `check_cluster.py` leader-service list, and updated the dev
+  system-test to assert the retired client stays gone.
+- **Still open — rathole server teardown (blocked on admin switchover)**:
+  two admin machines still connect to the rathole server (admin1/admin2,
+  8821/8822, control `:2333`) on the frontends. Until they move to frp,
+  keep: `app/install-rathole-server.yml`,
+  `app/templates/rathole-server.toml.j2`, `app/build-rathole.yml`, the
+  frontend `rathole.service` + ufw `:2333` opening, the
+  `/cluster/nodes/rathole/config` etcd token key (the server reads it via
+  etcdctl), and the `ycluster rathole get/set/delete` token tooling. After
+  the switchover: uninstall the server, close ufw `:2333`, delete the etcd
+  key, and drop those files/playbooks.
+- **Still open — gateway health frp flip**: `gateway_health.py` still reads
+  `/cluster/nodes/rathole/config` and probes the rathole control port
+  `:2333` (`parse_rathole_port`). Flip to `parse_frp_port` on
+  `/cluster/nodes/frp/config` (`:7000`) — independent of the admin machines
+  (frps is live on the frontends too), but it is a keepalived VIP track
+  script, so treat as prod-stability. Design deliverable #7.
+
 ## Soak window
 
 Doc proposes minimum 4 weeks of idle parallel tunnels + 2 weeks of
