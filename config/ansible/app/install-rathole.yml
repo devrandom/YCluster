@@ -100,11 +100,13 @@
         enabled: no
         daemon_reload: yes
 
-    - name: Enable and start rathole SSH service
+    # Per-core SSH moved to frp (frpc-ssh, 17200+idx); the rathole-ssh
+    # client for the retired 2200+idx band is disabled here.
+    - name: Disable and stop rathole SSH service
       systemd:
         name: rathole-ssh
-        enabled: yes
-        state: started
+        enabled: no
+        state: stopped
         daemon_reload: yes
 
   handlers:

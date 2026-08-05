@@ -14,18 +14,9 @@ nodelay = true
 keepalive_secs = 20
 keepalive_interval = 8
 
-# One SSH ingress endpoint per core node (idx N -> port 2200+N), reached
-# with: ssh -J jump@host.ycluster.net:220N ... . Generated from the core
-# group so it scales as core nodes are added (s4+), matching the client
-# side in rathole_config.py.
-{% for host in groups['core'] | sort %}
-{% set idx = host[1:] | int %}
-[server.services.ssh{{ idx }}]
-bind_addr = "127.0.0.1:{{ 2200 + idx }}"
-type = "tcp"
-
-{% endfor %}
-
+# Per-core SSH (rathole 2200+N) was retired — frp's frpc-ssh covers it in
+# parallel on 17200+N. rathole now only carries the admin and VM-bastion
+# services below.
 [server.services.admin1]
 bind_addr = "127.0.0.1:8821"
 type = "tcp"
@@ -44,8 +35,8 @@ type = "tcp"
 # hosts keep their historical, contiguous ports (idx 1-3: nvidia 2210+idx ->
 # 2211-2213, compute 2213+idx -> 2214-2216) so deployed bastions are never
 # renumbered. Every host with idx > 3 lands in a per-type DISJOINT block,
-# clear of both the legacy block and the core-ssh band (2201-2220 above):
-# nvidia 2220+idx (2224-2240), compute(c) 2240+idx (2244-2260). So adding an
+# clear of the legacy block: nvidia 2220+idx (2224-2240), compute(c)
+# 2240+idx (2244-2260). So adding an
 # nv* host can never shift a c* port. nvidia is a child of compute, so one
 # loop covers both; scales without naming any node here.
 {% for h in groups['compute'] | default([]) | sort %}
