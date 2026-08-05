@@ -44,27 +44,15 @@
         owner: root
         group: root
 
-    - name: Install rathole client config template
-      copy:
-        src: rathole-client-config.toml.j2
-        dest: /etc/rathole/client-config.toml.j2
-        mode: '0644'
-        owner: root
-        group: root
-
+    # HTTP/HTTPS, admin, and per-core SSH ingress all moved to frp; the
+    # non-ssh rathole client is retired and uninstalled below. The rathole-ssh
+    # client is still provided here so per-core fallback remains available
+    # (and is disabled below).
     - name: Install rathole SSH client config template
       copy:
         src: rathole-ssh-client-config.toml.j2
         dest: /etc/rathole/ssh-client-config.toml.j2
         mode: '0644'
-        owner: root
-        group: root
-
-    - name: Create rathole client startup script
-      copy:
-        src: rathole-client-start
-        dest: /usr/local/bin/rathole-client-start
-        mode: '0755'
         owner: root
         group: root
 
@@ -76,15 +64,6 @@
         owner: root
         group: root
 
-    - name: Create rathole systemd service
-      copy:
-        src: rathole.service
-        dest: /etc/systemd/system/rathole.service
-        mode: '0644'
-        owner: root
-        group: root
-      notify: reload systemd
-
     - name: Create rathole SSH systemd service
       copy:
         src: rathole-ssh.service
@@ -94,11 +73,28 @@
         group: root
       notify: reload systemd
 
-    - name: rathole service is controlled by storage leader election
+    # The non-ssh rathole client previously carried http/https/admin/bastion
+    # ingress, all of which now run over frp. It has no services left to carry
+    # (an empty [client.services] is invalid to rathole), so uninstall it
+    # rather than leave it disabled.
+    - name: Stop and disable retired non-ssh rathole client service
       systemd:
         name: rathole
+        state: stopped
         enabled: no
-        daemon_reload: yes
+      ignore_errors: yes
+      notify: reload systemd
+
+    - name: Remove retired non-ssh rathole client unit and files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/rathole.service
+        - /usr/local/bin/rathole-client-start
+        - /etc/rathole/client-config.toml.j2
+        - /etc/rathole/client.toml
+      notify: reload systemd
 
     # Per-core SSH moved to frp (frpc-ssh, 17200+idx); the rathole-ssh
     # client for the retired 2200+idx band is disabled here.

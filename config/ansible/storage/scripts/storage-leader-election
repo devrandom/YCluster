@@ -132,13 +132,10 @@ start_all_services() {
     systemctl start docker-registry &
     REGISTRY_START_PID=$!
     
-    systemctl start rathole &
-    RATHOLE_START_PID=$!
-
-    # frpc (general client with http/https proxies) is leader-gated for the
-    # same reason as rathole: frps only accepts one registration per tunnel
-    # name, so http/https must come from the leader. frpc-ssh stays on every
-    # core node since each one owns a unique ssh tunnel name.
+    # frpc (general client with http/https proxies) is leader-gated because
+    # frps only accepts one registration per tunnel name, so http/https must
+    # come from the leader. frpc-ssh stays on every core node since each one
+    # owns a unique ssh tunnel name.
     systemctl start frpc &
     FRPC_START_PID=$!
 
@@ -150,7 +147,7 @@ start_all_services() {
     systemctl start ycluster-apps.target &
     APPS_START_PID=$!
 
-    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Misc PID: $MISC_START_PID, Registry PID: $REGISTRY_START_PID, Rathole PID: $RATHOLE_START_PID, frpc PID: $FRPC_START_PID, Apps PID: $APPS_START_PID)"
+    echo "Services starting in background (PostgreSQL PID: $PG_START_PID, Qdrant PID: $QDRANT_START_PID, Misc PID: $MISC_START_PID, Registry PID: $REGISTRY_START_PID, frpc PID: $FRPC_START_PID, Apps PID: $APPS_START_PID)"
 }
 
 # Function to stop all services
@@ -161,7 +158,6 @@ stop_all_services() {
     echo "Attempting graceful service shutdown (5 second timeout)"
     timeout 5s systemctl stop ycluster-apps.target &
     timeout 5s systemctl stop docker-registry &
-    timeout 5s systemctl stop rathole &
     timeout 5s systemctl stop frpc &
     timeout 5s systemctl stop misc-rbd &
     timeout 5s systemctl stop user-rbd &
@@ -169,7 +165,7 @@ stop_all_services() {
     wait
 
     # Check if services are still running an force cleanup if needed
-    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null || pgrep -f rathole >/dev/null || pgrep -f frpc >/dev/null || docker ps -q --filter "name=docker-registry" | grep -q .; then
+    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null || pgrep -f frpc >/dev/null || docker ps -q --filter "name=docker-registry" | grep -q .; then
         echo "Graceful shutdown failed or timed out - forcing aggressive cleanup"
 
         # Force kill processes immediately
@@ -179,9 +175,6 @@ stop_all_services() {
         echo "Force killing Qdrant processes"
         pkill -9 qdrant || true
         
-        echo "Force killing rathole processes"
-        pkill -9 rathole || true
-
         echo "Force killing frpc processes"
         pkill -9 frpc || true
         
@@ -233,7 +226,7 @@ stop_all_services() {
     rm -f /var/run/user-rbd.lock || true
     
     # Check if services are still running and force cleanup if needed
-    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null || pgrep -f rathole >/dev/null || docker ps -q --filter "name=docker-registry" | grep -q .; then
+    if pgrep -f postgres >/dev/null || pgrep -f qdrant >/dev/null || pgrep -f frpc >/dev/null || docker ps -q --filter "name=docker-registry" | grep -q .; then
         echo "Graceful shutdown failed or timed out - forcing aggressive cleanup"
         
         # Force kill processes immediately
@@ -243,9 +236,6 @@ stop_all_services() {
         echo "Force killing Qdrant processes"
         pkill -9 qdrant || true
         
-        echo "Force killing rathole processes"
-        pkill -9 rathole || true
-
         echo "Force killing frpc processes"
         pkill -9 frpc || true
         

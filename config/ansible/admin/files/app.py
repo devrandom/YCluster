@@ -2000,46 +2000,29 @@ def get_comprehensive_health():
     elif cert_health['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
-    # Check rathole (only required if we are storage leader)
+    # rathole client is retired: http/https, admin, and per-core SSH ingress
+    # moved to frp and the non-ssh client service is uninstalled. Only flag
+    # it as stale if it is somehow still running.
     rathole_running = check_service_status('rathole')
-    rathole_port = check_port_open('localhost', 2333)  # Default rathole client port
-    
-    if is_storage_lead:
-        rathole_healthy = rathole_running
+    if rathole_running:
         health_status['services']['rathole'] = {
-            'status': 'healthy' if rathole_healthy else 'unhealthy',
+            'status': 'unhealthy',
             'details': {
                 'service_active': rathole_running,
-                'port_open': rathole_port,
-                'required': True,
-                'reason': 'storage leader'
+                'required': False,
+                'reason': 'retired: rathole client should be uninstalled'
             }
         }
-        if not rathole_healthy:
-            health_status['overall'] = 'unhealthy'
+        health_status['overall'] = 'unhealthy'
     else:
-        # Not leader but check for split-brain
-        if rathole_running:
-            health_status['services']['rathole'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'service_active': rathole_running,
-                    'port_open': rathole_port,
-                    'required': False,
-                    'reason': 'split-brain: running on non-leader'
-                }
+        health_status['services']['rathole'] = {
+            'status': 'healthy',
+            'details': {
+                'service_active': rathole_running,
+                'required': False,
+                'reason': 'retired: rathole client uninstalled'
             }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['rathole'] = {
-                'status': 'standby',
-                'details': {
-                    'service_active': rathole_running,
-                    'port_open': rathole_port,
-                    'required': False,
-                    'reason': 'not storage leader'
-                }
-            }
+        }
     
     # Check clock skew
     clock_skew = check_clock_skew()
