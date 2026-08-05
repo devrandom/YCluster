@@ -2,7 +2,8 @@
 
 ## Status
 
-**Draft — direction decided, nothing implemented.**
+**Draft — direction decided, nothing implemented. (Refreshed 2026-08-06
+against current repo + upstream Zulip source; see "Confirmed decisions".)**
 
 Decided so far:
 
@@ -23,8 +24,37 @@ Decided so far:
   `build-zulip.yml` playbook; no prebuilt binary downloads (matches
   the cluster's no-third-party-binaries rule — see `AGENTS.md`).
 - Expose internally at `zulip.xc` (storage VIP) and externally at
-  `zulip.<domain>`, behind the same rathole/nginx/certbot pipeline as
-  `app.<domain>` and `admin.<domain>`.
+  `zulip.<domain>`, behind the frp/nginx/certbot pipeline now used by
+  `app.<domain>`, `admin.<domain>`, and `comfy.<domain>` (see
+  `docs/design/frp-migration.md`) — not the retired rathole frontend.
+
+### Confirmed decisions (2026-08-06)
+
+Sorted out with the operator before implementation:
+
+- **Version pin:** docker-zulip release tag `12.1-0` (2026-06-26). The
+  vendored `ext/docker-zulip` clone is a newer *master* SHA, not a
+  release; the build playbook must pin to the tag (`ZULIP_GIT_REF=12.1`
+  in the Dockerfile). Local `ext/` dirs are gitignored clones, not
+  submodules.
+- **Postgres auth:** the `zulip` role connects with `scram-sha-256`
+  password auth. No new `pg_hba.conf` rule is needed — the install
+  playbook (`config/ansible/storage/install-postgres.yml`) already adds
+  `host all all 172.0.0.0/8 scram-sha-256`, and Authentik/Open-WebUI
+  connect the same way via `host.docker.internal`. Only create the
+  `zulip` DB + role.
+- **Collation:** `env.sh`/`configure-locale.yml` set `LC_ALL=C.UTF-8`,
+  so `C.UTF-8` is expected; still verify `SHOW LC_COLLATE` on the
+  leader during step 2 (see the wrinkle below).
+- **Soak:** not a per-user migration requirement. `EmailAuthBackend` is
+  bootstrap-only (create the realm + first owner; Zulip documents that
+  it can be disabled after). SAML matches every account by email at
+  login, so existing/invited users don't each need a prior SAML login.
+  The "soak" is reduced to a short optional safety window. See
+  "Auth integration" and "Account migration".
+
+Next: implementation starts with `build-zulip.yml` +
+`install-zulip.yml` after this design is reviewed.
 
 ## Motivation
 
@@ -65,11 +95,16 @@ deployment:
   documents the property mappings + provider shape and recommends
   the IdP name `authentik` (which determines the cert filename on
   the Zulip side: `/etc/zulip/saml/idps/authentik.crt`).
-- Existing install patterns: `app/install-authentik.yml`,
-  `app/install-open-webui.yml`, `app/files/authentik-manager`
-  (the latter generates the OWUI OIDC provider and the
-  forward-auth blueprints at runtime from
-  `/cluster/https/domain`).
+- Existing install patterns: `config/ansible/app/install-authentik.yml`,
+  `config/ansible/app/install-open-webui.yml`,
+  `config/ansible/app/files/authentik-manager`, and
+  `config/ansible/app/build-open-webui.yml`. The `authentik-manager`
+  generates the OWUI OIDC provider and the forward-auth blueprints at
+  runtime from `/cluster/https/domain`.
+- Verified against current Zulip source: `ext/zulip-server/zproject/backends.py`
+  shows `SocialAuthMixin.get_authenticated_user` resolves accounts by
+  email (`common_get_active_user(email, realm)`), which is what makes
+  the per-account SAML binding non-blocking (see "Account migration").
 
 ## Background
 
@@ -83,8 +118,10 @@ need persistent state:
   Each app gets its own DB + role, provisioned by the install
   playbook's `postgresql_db` / `postgresql_user` / `postgresql_owner`
   tasks. Authentik's `authentik` DB and Open-WebUI's `openwebui` DB
-  both live here; the daily `backup-databases` script (`storage/`)
-  dumps them all.
+  both live here; the daily `backup-databases` script
+  (`config/ansible/storage/scripts/backup-databases`) runs `pg_dumpall`
+  over the cluster's Postgres, so every DB (including the future
+  `zulip` one) is covered with no new wiring.
 - `/rbd/misc/<app>/` — per-app scratch / data. Authentik puts
   `/media`, `/custom-templates`, `/certs` here; Open-WebUI puts its
   container data dir here; both are bind-mounted from docker compose.
@@ -99,7 +136,8 @@ container lifecycle; Open-WebUI has the parallel
 
 ### Authentik today
 
-`app/install-authentik.yml` + `app/files/authentik-manager` set up:
+`config/ansible/app/install-authentik.yml` +
+`config/ansible/app/files/authentik-manager` set up:
 
 - Authentik server + worker + redis containers on the storage leader.
 - Postgres DB `authentik` on the cluster's native Postgres.
@@ -123,27 +161,32 @@ for it is the same `authentik-manager` script — a third
 
 ### What runs on the storage leader
 
-Three containers, owned by a new `zulip.service` unit (sibling of
-`authentik.service` / `open-webui.service`), running under
-`ycluster-apps.target`:
+Four services (one app container + three supporting containers), owned
+by a new `zulip.service` unit (sibling of `authentik.service` /
+`open-webui.service`), running under `ycluster-apps.target`:
 
 - `zulip` — the Django + Tornado app, built locally from source
-  (see "Build" below).
-- `memcached`, `rabbitmq`, `redis` — bundled services from the
-  upstream compose. Memcached is a cache (no persistent state);
+  (see "Build" below). Container runs as root; the entrypoint chowns
+  `/data/uploads` to uid 1000 and manages `/etc/zulip` under `/data`
+  when `LINK_SETTINGS_TO_DATA=True`.
+- `memcached`, `rabbitmq`, `redis` — supporting services, kept from
+  the upstream compose. Memcached is a cache (no persistent state);
   rabbitmq and redis keep ephemeral queues / pubsub state, and
   Zulip tolerates losing them on restart (queues replay from the DB
   on next delivery, per Zulip's standard recovery story).
 - **No `database` service.** The cluster's native Postgres replaces
-  Zulip's bundled `zulip-postgresql:14`.
+  Zulip's bundled `zulip-postgresql:14` — the compose drops the
+  `database` service and points `SETTING_REMOTE_POSTGRES_HOST` at
+  `host.docker.internal` (mirroring how Authentik and Open-WebUI
+  reach the cluster Postgres from containers).
 
 ### RBD layout
 
 | Path | Purpose | Source |
 | --- | --- | --- |
-| `/rbd/misc/zulip/data` | bind-mounted onto the Zulip container's `/data` — holds uploads, the auto-backup `pg_dump` artifacts, and (with `LINK_SETTINGS_TO_DATA=True`) `/etc/zulip/`. | docker-zulip `data-volume.md` |
-| `/rbd/misc/zulip/rabbitmq` | bind-mounted onto rabbitmq's `/var/lib/rabbitmq`. | docker compose `rabbitmq:/var/lib/rabbitmq` |
-| `/rbd/misc/zulip/redis` | bind-mounted onto redis's `/data`. | docker compose `redis:/data` |
+| `/rbd/misc/zulip/data` | bind-mounted onto the Zulip container's `/data` — holds uploads, the auto-backup `pg_dump` artifacts, and (with `LINK_SETTINGS_TO_DATA=True`) `/etc/zulip/`. Owned by uid 1000 (the image's `zulip` user); the entrypoint chowns it. | docker-zulip `data-volume.md` |
+| `/rbd/misc/zulip/rabbitmq` | bind-mounted onto rabbitmq's `/var/lib/rabbitmq`. Owned by the `rabbitmq` container user (uid 999 in `rabbitmq:4.2`). | docker compose `rabbitmq:/var/lib/rabbitmq` |
+| `/rbd/misc/zulip/redis` | bind-mounted onto redis's `/data`. Owned by the `redis` container user (uid 999 in `redis:alpine`). | docker compose `redis:/data` |
 | `/rbd/misc/zulip/saml/idps/authentik.crt` | the IdP public certificate Zulip validates incoming SAMLResponses against. Written once by `install-zulip.yml` after pulling the cert from Authentik via its API. | Zulip auth-methods.md |
 | `/rbd/user/postgres` (existing) | cluster-wide Postgres; gains the `zulip` DB + role. | already exists |
 
@@ -156,7 +199,8 @@ cluster's Postgres the same way Authentik's and Open-WebUI's do, so
 The official compose bundles `zulip-postgresql:14` because most
 operators have no Postgres at all. The cluster already runs Postgres
 16 on the leader, with daily dumps via `backup-databases` and a
-hold-managed upgrade story (`storage/upgrade-held-packages.yml`).
+hold-managed upgrade story
+(`config/ansible/storage/upgrade-held-packages.yml`).
 Adding a second instance means:
 
 - Two Postgres versions to track and upgrade separately.
@@ -211,36 +255,62 @@ only Postgres is a shared service).
 The cluster's third-party-binary rule (`AGENTS.md`) forbids pulling
 Zulip's published image from `ghcr.io`. Build locally instead, via a
 `build-zulip.yml` playbook, vendored under `/opt/src/zulip-build/`,
-pinned to a git SHA:
+pinned to the `12.1-0` release tag:
 
 ```yaml
-# app/build-zulip.yml (sketch)
+# config/ansible/app/build-zulip.yml (sketch)
 - name: Build Zulip container image in-cluster
-  hosts: storage[0]
-  become: yes
+  # Run on localhost so import_playbook can resolve `hosts` statically;
+  # each task delegates to the buildhost (s1, via group_vars) — same
+  # shape as build-open-webui.yml.
+  hosts: localhost
+  gather_facts: false
   vars:
     zulip_repo: https://github.com/zulip/docker-zulip.git
-    zulip_version: "12.1-0"   # git tag / SHA
+    zulip_version: "12.1-0"   # docker-zulip release tag; pins ZULIP_GIT_REF=12.1
     zulip_image_name: registry.xc:5000/zulip
   tasks:
-    - name: Clone docker-zulip at pinned SHA
-      git:
-        repo: "{{ zulip_repo }}"
-        dest: /opt/src/zulip-build/docker-zulip
-        version: "{{ zulip_version }}"
-        force: yes
-    - name: Build Zulip image
-      command: docker build -t {{ zulip_image_name }}:{{ zulip_version }} .
-      args:
-        chdir: /opt/src/zulip-build/docker-zulip
-    - name: Push to cluster registry
-      command: docker push {{ zulip_image_name }}:{{ zulip_version }}
+    - block:
+        - name: Verify registry is ready for push operations
+          uri:
+            url: "http://registry.xc:5000/v2/_catalog"
+            method: GET
+            timeout: 10
+        - name: Create build directory
+          file:
+            path: /opt/src/zulip-build/docker-zulip
+            state: directory
+            mode: '0755'
+        - name: Check out docker-zulip at pinned tag
+          git:
+            repo: "{{ zulip_repo }}"
+            dest: /opt/src/zulip-build/docker-zulip
+            version: "{{ zulip_version }}"
+            force: yes
+        - name: Build and push with buildx using registry cache
+          shell: |
+            docker buildx build \
+              --build-arg http_proxy=http://10.0.0.254:3128 \
+              --cache-from type=registry,ref={{ zulip_image_name }}:cache \
+              --cache-to type=registry,ref={{ zulip_image_name }}:cache,mode=max \
+              --progress plain \
+              --tag {{ zulip_image_name }}:{{ zulip_version }} \
+              --push \
+              . | tee /tmp/build-zulip.log 2>&1
+          args:
+            chdir: /opt/src/zulip-build/docker-zulip
+      delegate_to: "{{ buildhost }}"
 ```
 
 The install playbook pulls `{{ zulip_image_name }}:{{ zulip_version }}`
-from `registry.xc:5000`. Upgrade is a rebuild at a new SHA + restart.
-Pattern matches `app/build-open-webui.yml` and
-`app/build-local-ai-proxy.yml`.
+from `registry.xc:5000`. Upgrade is a rebuild at a new tag + restart.
+Pattern matches `config/ansible/app/build-open-webui.yml` and
+`config/ansible/app/build-local-ai-proxy.yml`. Building the docker-zulip
+Dockerfile runs `apt dist-upgrade`, `git clone`s the upstream Zulip repo
+then `git checkout`s the pin (`ZULIP_GIT_REF=12.1` by default) — that
+clone from github.com plus the apt update needs the cluster proxy, so
+pass `--build-arg http_proxy=http://10.0.0.254:3128` like the OWUI
+buildx args (the long pole in this step).
 
 ## Auth integration (Authentik SAML provider)
 
@@ -250,7 +320,8 @@ on the Zulip side, and matching attribute mappings.
 ### Authentik side
 
 Add a third `write_zulip_blueprint` function to
-`app/files/authentik-manager`, mirroring `write_owui_blueprint`. It
+`config/ansible/app/files/authentik-manager`, mirroring
+`write_owui_blueprint`. It
 generates a blueprint at service start from
 `/cluster/https/domain`:
 
@@ -310,35 +381,56 @@ SOCIAL_AUTH_SAML_ENABLED_IDPS:
   authentik:
     entity_id: https://auth.<domain>/
     url: https://auth.<domain>/application/saml/zulip/sso/binding/redirect/
-    attr_user_permanent_id: http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
+    # For email-change sync, attr_user_permanent_id must point at the
+    # stable Authentik user pk (UUID) emitted by the
+    # ycluster-zulip-user-permanent-id mapping, NOT at the email claim.
+    # The exact claim URI is fixed when write_zulip_blueprint renders
+    # that property mapping; here it is shown as a placeholder.
+    attr_user_permanent_id: <permanent-id-claim-uri>
     attr_full_name: http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name
     attr_username: http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
     attr_email: http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
 ```
 
-Keep `EmailAuthBackend` enabled alongside SAML. Two reasons:
+Keep `EmailAuthBackend` enabled alongside SAML during bring-up, then
+flip to SAML-only (`ZULIP_AUTH_BACKENDS=SAMLAuthBackend`) after the
+operator's first SAML login, as a short optional safety window. Two
+reasons to bootstrap with `EmailAuthBackend`:
 
-1. The first Zulip org must be created by logging in as a
-   realm-owner with `EmailAuthBackend` — Zulip refuses to create the
-   org via SAML on a fresh install (per Zulip auth-methods.md,
-   `EmailAuthBackend` "must be used for creating the initial realm
-   and user"). Once the realm exists, SAML can authenticate the
-   owner too.
-2. Disable after the realm is created (`ZULIP_AUTH_BACKENDS=SAMLAuthBackend`),
-   same pattern as Open-WebUI's `ENABLE_LOGIN_FORM=True→False` soak
-   (see `docs/design/vm-usage-scheduling-accounts.md`).
+1. The first Zulip org must be created with `EmailAuthBackend`. Zulip's
+   docs say `EmailAuthBackend` "must be used for creating the initial
+   realm and user" — that's the reliable bootstrap path. (A fresh
+   install *can* also create the org through the SAML login flow per the
+   same docs, but email-bootstrap is the predictable choice used here.)
+   Once the realm exists, SAML authenticates the owner too.
+2. `EmailAuthBackend` is bootstrap-only / a fallback, **not** a
+   per-user migration requirement. Zulip's
+   `SocialAuthMixin.get_authenticated_user` resolves accounts by email
+   (`common_get_active_user(email, realm)` in `zproject/backends.py`),
+   so every invited account whose email matches their Authentik email
+   can SAML-login on the first try — no prior per-account SAML binding
+   or email login is needed. The `NameID`/`attr_user_permanent_id`
+   binding only matters for email-change sync (see below).
 
-The SAML attribute names above match what Authentik emits when its
-default `Username`, `Email`, `Name` property mappings are selected.
-The `attr_user_permanent_id` claim needs to differ from `attr_email`
-to activate email-change sync (Zulip auth-methods.md § "Synchronizing
-email addresses with SAML"). Authentik's username *is* the email for
-internal accounts (see `authentik_manager.add_user`), so we point
-both at the email claim — that means email-change sync *won't*
-auto-activate. Real sync requires the property mapping above to
-emit the authentik `pk` (UUID) under the
-`…claims/emailaddress` namespace, which is what the sketch blueprint
-does.
+The `attr_full_name`, `attr_username`, and `attr_email` names above
+match what Authentik's default `Name`, `Username`, `Email` property
+mappings emit. `attr_username` points at the email claim because
+Authentik's username *is* the email for internal accounts (see
+`authentik_manager.add_user`).
+
+`attr_user_permanent_id` is the one that intentionally differs from
+the default configuration. Zulip auth-methods.md § "Synchronizing
+email addresses with SAML" says email-change sync activates when
+this claim differs from `attr_email`. The official Authentik Zulip
+guide points it at the email claim (so sync stays off); our blueprint
+instead sends the stable Authentik user `pk` (UUID) via the
+`ycluster-zulip-user-permanent-id` property mapping (wired in through
+`property_mappings` above), so a user renamed in Authentik keeps their
+Zulip identity and Zulip's email updates on their next SAML login —
+matching the user-rename story in `docs/design/user-rename.md`. The
+exact claim URI that mapping emits is fixed when
+`write_zulip_blueprint` renders it; the code sample above shows it
+as a placeholder for that value.
 
 ### The cert
 
@@ -361,9 +453,12 @@ Add a `zulip.<domain>` vhost, following the existing
 `app.<domain>` template-based pattern:
 
 - A Jinja2 template at
-  `app/files/zulip.conf.j2` (mirroring
-  `app/files/open-webui.conf.j2`) with the `(( port ))` marker
-  substituted by the Zulip container's port.
+  `config/ansible/app/files/zulip.conf.j2` (mirroring
+  `config/ansible/app/files/open-webui.conf.j2`): a plain `:443`/`:80`
+  server plus a PROXY-protocol listener on `127.0.0.2:17443` that the
+  frp server lands on, rendered via certbot-manager `update-nginx`,
+  with the shared locations include. The `(( port ))` marker is
+  substituted with the Zulip container's internal port.
 - `install-zulip.yml` drops the template into
   `/etc/nginx/templates/zulip.conf.j2` and runs
   `certbot-manager update-nginx` (same invocation as
@@ -374,12 +469,16 @@ Add a `zulip.<domain>` vhost, following the existing
   `/etc/nginx/sites-available/zulip` (same `notify: restart nginx`
   pattern as the OWUI site).
 - The storage VIP (`10.0.0.100`) already resolves `zulip.xc` once
-  the DNS record is added to the cluster's DNS (a single
-  `ycluster dns add` entry — see the DNS playbook).
+  the DNS record is added to the cluster's DNS. In-cluster DNS is
+  `ycluster dhcp update-hosts` (etcd → dnsmasq), *not* a `ycluster
+  dns` command — see `docs/design/frp-migration.md` for how the
+  current app vhosts register. The external `zulip.<domain>`
+  A/CNAME is handled out-of-band with the domain provider.
 
 Internal access: `zulip.xc` → storage VIP → nginx → Zulip container.
-External access: `zulip.<domain>` → rathole tunnel → nginx → Zulip.
-Same rathole frontend the rest of the cluster uses; no new ingress.
+External access: `zulip.<domain>` → frp PROXY landing on
+`127.0.0.2:17443` → nginx → Zulip. Same frp frontend the rest of the
+cluster uses (see `docs/design/frp-migration.md`); no new ingress.
 
 ## State and backups
 
@@ -392,8 +491,8 @@ Same rathole frontend the rest of the cluster uses; no new ingress.
   `backups/`. Backed up the same way every other
   `/rbd/misc/<app>/` is backed up — RBD snapshots + the daily
   `backup-databases`-style dump of `/rbd/misc/`. Verify the exact
-  mechanism in `storage/install-misc-storage.yml` and the disaster-
-  recovery doc (`docs/operations/disaster-recovery.md`) before
+  mechanism in `config/ansible/storage/install-misc-storage.yml` and the
+  disaster-recovery doc (`docs/operations/disaster-recovery.md`) before
   relying on it for the first Zulip backup.
 - **`/rbd/misc/zulip/{rabbitmq,redis}`**: ephemeral. No backup
   story beyond what RBD gives us for free.
@@ -446,7 +545,7 @@ to `filebased.EmailBackend` with `EMAIL_FILE_PATH` pointing at
   email notifications turn out to be load-bearing, add SMTP later
   — the only thing that changes is one env var.
 - **Password resets**: irrelevant once `ZULIP_AUTH_BACKENDS` is
-  reduced to `SAMLAuthBackend` after the soak. SAML handles auth
+  reduced to `SAMLAuthBackend` (SAML-only). SAML handles auth
   via the IdP, which has its own recovery flow (Authentik's
   `ycluster user recovery` issues a reset link).
 - **Email-address verification on signup**: Zulip normally sends a
@@ -461,13 +560,12 @@ to `filebased.EmailBackend` with `EMAIL_FILE_PATH` pointing at
 ### What still works
 
 - **Inbound email to streams** (Zulip's email-gateway integration):
-  independent of outbound SMTP. The compose stack publishes port
-  25 (`app_protocol: smtp` in the docker compose), so users can
-  email `stream-name@zulip.<domain>` to post into a stream. The
-  `EMAIL_GATEWAY_PATTERN` setting controls which addresses are
-  accepted. This feature is opt-in — leave the setting blank and
-  no inbound email handling happens, which is the safe default for
-  our deployment until someone asks for it.
+  independent of outbound SMTP. The upstream compose publishes port
+  25 (`app_protocol: smtp`), but our compose remaps the app's
+  published ports to internal-only ports behind nginx (see "External
+  exposure"), so port 25 is *not* exposed on the host; inbound email
+  handling stays off until someone explicitly wants
+  `EMAIL_GATEWAY_PATTERN` + a published SMTP port. Safe default.
 - **Desktop / mobile push notifications**: Zulip's mobile apps use
   Zulip's own push-notification relay, not SMTP. Out of scope for
   this design.
@@ -491,20 +589,25 @@ not a migration from somewhere else. The flow on day one:
 
 1. `install-zulip.yml` brings the stack up; SAML is enabled but
    `EmailAuthBackend` is still in `ZULIP_AUTH_BACKENDS`.
-2. An operator logs in via `EmailAuthBackend` with the email +
-   password they set in `app:init` (or via Zulip's first-run flow)
-   to create the realm and the operator's realm-owner account.
+2. An operator opens `zulip.<domain>`, which (with `EmailAuthBackend`
+   enabled) presents Zulip's first-run realm-creation page. They
+   create the realm and the operator's realm-owner account with a
+   new password. Once the realm exists, SAML authenticates the
+   owner too.
 3. An admin issues Zulip invitations to the existing Authentik
    accounts (`ycluster user list` shows who's in the IdP). Each
    invite URL is copied from the Zulip admin UI and delivered
    out-of-band (Slack DM etc.) — see "Outbound email" above.
-4. Each invited user logs in via SAML; their Authentik account
-   binds to the Zulip account via the `NameID`/`attr_user_permanent_id`
-   pairing. Existing chat threads in Zulip start fresh.
-5. After everyone is on SAML, the soak ends and the playbook
-   flips `ZULIP_AUTH_BACKENDS=SAMLAuthBackend` (one variable
-   change in `install-zulip.yml` + restart). Same pattern as the
-   OWUI password-form soak.
+4. Each invited user logs in via SAML. Zulip matches the invited
+   account by email (`common_get_active_user(email, realm)`), so no
+   prior per-user SAML binding is needed on their first login. The
+   `NameID`/`attr_user_permanent_id` pairing only matters for
+   email-change sync. Existing chat threads in Zulip start fresh.
+5. Once the operator has validated their own SAML round trip, the
+   playbook flips `ZULIP_AUTH_BACKENDS=SAMLAuthBackend` (one variable
+   change in `install-zulip.yml` + restart), keeping
+   `EmailAuthBackend` as a fallback until then. This is a short
+   optional safety window — not a per-user migration soak.
 
 No `ycluster user rename`-style cross-system write is needed —
 Authentik owns identity, Zulip is a client. The existing
@@ -529,10 +632,10 @@ shippable; 1-3 don't depend on the others, so the image build and
 the Authentik blueprint can land in parallel with the install
 playbook.
 
-1. `app/build-zulip.yml` — clone docker-zulip, pin a SHA, build +
-   push to `registry.xc:5000`. Pure plumbing; the long pole is
-   getting the Dockerfile's apt sources to play nice behind the
-   cluster's network. — **0.5–1 d**.
+1. `config/ansible/app/build-zulip.yml` — clone docker-zulip, pin the
+   `12.1-0` tag, build + push to `registry.xc:5000`. Pure plumbing; the
+   long pole is getting the Dockerfile's apt sources + upstream Zulip
+   clone to play nice behind the cluster's network. — **0.5–1 d**.
 2. `install-zulip.yml` skeleton — docker compose on the leader,
    RBD bind mounts, systemd unit, postgres DB provisioning. No
    SAML yet, no TLS. Test against
@@ -544,21 +647,22 @@ playbook.
 4. Extend `authentik-manager` with `write_zulip_blueprint` +
    `ycluster-zulip-user-permanent-id` property mapping. Cert
    fetcher writes `/rbd/misc/zulip/saml/idps/authentik.crt`. SAML
-   goes live behind the `EmailAuthBackend` soak. — **1–1.5 d**.
-5. Soak (multi-day, in parallel with normal cluster use). Once
-   everyone is on SAML, flip `ZULIP_AUTH_BACKENDS` to SAML-only.
-   — **0.5 d** of work, plus the soak window.
+   goes live with `EmailAuthBackend` still in as a fallback.
+   — **1–1.5 d**.
+5. Operator's first SAML login validates the round trip, then flip
+   `ZULIP_AUTH_BACKENDS` to SAML-only (a short optional safety
+   window, not a per-user migration soak). — **0.5 d**.
 6. `docs/operations/zulip.md` — operational runbook: upgrade
-   procedure (rebuild at new SHA + restart, like the OWUI upgrade
+   procedure (rebuild at new tag + restart, like the OWUI upgrade
    doc), `app:backup` invocation, restore from
    `/rbd/misc/zulip/data`, what to do when the leader changes
    (everything under `/rbd/misc` follows the leader — nothing new).
    — **0.5 d**, written alongside the install playbook.
 
-Total ≈ **4.5–6.5 d**, dominated by step 2 (RBD layout + systemd +
-docker compose on a leader that already runs three other apps) and
-step 4 (Authentik blueprint iteration against a live SAML round
-trip).
+Total ≈ **4.5–6 d**, dominated by step 2 (RBD layout + systemd +
+docker compose on a leader that already runs four other storage-app
+services) and step 4 (Authentik blueprint iteration against a live
+SAML round trip).
 
 ## Open questions
 
