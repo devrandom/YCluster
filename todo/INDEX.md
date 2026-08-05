@@ -26,6 +26,7 @@ Categories: [security](#security) ·
 - [Audit-log story](security/audit-log-story.md)
 - [Reconsider become usage](security/become-model-audit.md)
 - [core group definition](security/core-group-definition.md)
+- **[HIGH]** [CVE tracking](security/cve-tracking.md) — nothing scans for published CVEs affecting the toolchain; package inventory (apt, held snaps, `/opt/src/` builds, in-cluster images) has no automated advisory feed.
 
 ## Networking
 - **[HIGH]** [Switch rathole → frp](networking/switch-rathole-to-frp.md) — rathole upstream dormant + TCP socket leak; real external HTTPS outage 2026-07-17.
