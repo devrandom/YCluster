@@ -25,8 +25,8 @@ _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 # set and the command's first top-level argument equals it, the command runs.
 _DENY: dict[str, tuple[str, str | None]] = {
     "ssh": ("ssh is not allowed in run() - use the hostname argument to target a host instead", None),
-    "head": ("head is not allowed in run() - use `head -1` to keep just the first line", "-1"),
-    "tail": ("tail is not allowed in run() - use `tail -1` to keep just the last line", "-1"),
+    "head": ("head is not allowed in run() - use the run() `head_lines` arg to keep just the first lines (or `head -1` in-command)", "-1"),
+    "tail": ("tail is not allowed in run() - use the run() `tail_lines` arg to keep just the last lines (or `tail -1` in-command)", "-1"),
     "headtail": ("headtail is not allowed in run()", None),
 }
 

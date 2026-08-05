@@ -21,10 +21,10 @@ class ValidateCommandTests(unittest.TestCase):
         self.denied("echo hi | ssh host", "use the hostname argument")
 
     def test_head_denied_without_minus_one(self) -> None:
-        self.denied("head file", "head -1")
+        self.denied("head file", "head_lines")
 
     def test_tail_denied_without_minus_one(self) -> None:
-        self.denied("tail file", "tail -1")
+        self.denied("tail file", "tail_lines")
 
     def test_head_tail_allowed_with_minus_one(self) -> None:
         self.allowed("head -1 file")
@@ -60,7 +60,7 @@ class ValidateCommandTests(unittest.TestCase):
 
     def test_separators_start_new_command(self) -> None:
         self.denied("ls; ssh host", "use the hostname argument")
-        self.denied("ls && head file", "head -1")
+        self.denied("ls && head file", "head_lines")
         self.allowed("ls; head -1 file")
 
     def test_balanced_command_returns_none(self) -> None:

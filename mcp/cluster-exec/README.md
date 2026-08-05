@@ -77,7 +77,7 @@ CE_BASTION="bastion.example.com" bash mcp/cluster-exec/cedaemon --start
 This tool grants the LLM **whatever SSH access your local `ssh` config has to `$CE_BASTION` and from there to `<hostname>`**. There are no allowlists or confirmation steps — the privilege is intentional, and the human running opencode is the admin. As a best-effort guard that steers the agent toward the supported primitives, the `run` tool rejects a handful of top-level commands (a message tells the agent what to use instead):
 
 - `ssh` — use the `hostname` argument instead.
-- `head` / `tail` — only `head -1` / `tail -1` are allowed.
+- `head` / `tail` — only `head -1` / `tail -1` are allowed in-command; to truncate the returned output use the `run()` `head_lines` / `tail_lines` args instead.
 - `headtail` — never allowed.
 - `sleep` longer than 10s.
 

@@ -293,7 +293,8 @@ def _principal_from_ctx(ctx: Context) -> str | None:
         "`user=\"admin\"` for macOS nodes where root login is denied); "
         "defaults to whatever the bastion's ssh_config says for the host. "
         "Rejected at the top level (with guidance): ssh, head/tail other "
-        "than `-1`, headtail, and sleep > 10s."
+        "than `-1` (use the run() `head_lines`/`tail_lines` args instead), "
+        "headtail, and sleep > 10s."
     ),
 )
 async def run(
