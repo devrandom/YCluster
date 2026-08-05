@@ -163,8 +163,13 @@ Same per-host derivation rules as `app/templates/rathole-server.toml.j2`
    LB flip; rathole keeps running as the rollback target until step
    6.
 6. **Cleanup commit** — gated on soak completion, not cutover
-   success. Removes rathole playbooks, configs, helpers, the old
-   etcd key, and `admin-api-alt.conf`.
+   success. Removes rathole playbooks, configs, helpers, and the old
+   etcd key. The frp alt vhost (`admin-api-alt.conf`) and its PROXY
+   endpoints on `127.0.0.2:17080/17443` stay — they remain the frp
+   tunnel landing (`frpc` `localPort`) — and the main `:443`/`:80`
+   vhost stays a plain non-PROXY listener; PROXY protocol is never
+   enabled on the well-known public ports because real HTTP clients
+   and direct probes don't speak it.
 
 **What this changes from the original cutover plan:**
 - No "service-by-service" cutover on the same ports — both run on

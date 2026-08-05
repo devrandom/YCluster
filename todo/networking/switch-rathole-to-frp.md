@@ -80,17 +80,20 @@ etcd schema:
   today, and it survives the rathole etcd-key deletion). Removed the
   retired rathole public vhost blocks (`127.0.0.2:443` whitelist +
   `127.0.0.2:80` redirect/acme) from `admin-api.conf.j2`; external public
-  traffic stays on the frp alt vhost. Remaining step-6 items (vhost
-  consolidation + PROXY protocol on the main vhost, per-client rate limits,
-  rathole teardown/admin switchover) still open.
+  traffic stays on the frp alt vhost. Remaining step-6 items (per-client
+  rate limits, rathole teardown/admin switchover) still open; the main
+  `:443`/`:80` vhost stays non-PROXY (see step 6 below).
 - **Step 6 — rip out rathole (pending, gated on soak)**: remove
-  rathole playbooks/configs/units/helpers, drop the parallel-run
-  artifacts (`admin-api-alt.conf.j2`, the location-body includes,
-  the alt-port ufw rules, the frpc `remotePort=:443` registration
-  which becomes the only one), enable PROXY protocol on the main
-  `:443` vhost (now safe — no migration risk since frp is the only
-  tunnel left), switch rate-limit zones to per-client semantics,
-  delete the old etcd key `/cluster/nodes/rathole/config`. See
+  rathole playbooks/configs/units/helpers, switch rate-limit zones
+  to per-client semantics, delete the old etcd key
+  `/cluster/nodes/rathole/config`. PROXY protocol is **not** enabled
+  on the main `:443`/`:80` vhost — well-known public ports must stay
+  standard, because real HTTP clients and direct probes (blackbox,
+  local health checks) don't speak PROXY. Instead the PROXY endpoints
+  remain only on the loopback alt ports (`127.0.0.2:17080/17443`),
+  which stay as the frp tunnel landing (`frpc` `localPort`), and the
+  main vhost stays a plain non-PROXY listener so nginx can be hit
+  directly / from inside the cluster. See
   `docs/design/frp-migration.md` "Cleanup" + deliverable #8
   (`_rathole_public_host` → `_frp_public_host` in `admin/files/app.py`).
   **SSH tunnels migrate in step 6 too**: there are two SSH surfaces
