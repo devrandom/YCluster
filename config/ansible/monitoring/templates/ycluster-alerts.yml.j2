@@ -458,6 +458,15 @@ groups:
       # unmounted) — restorability is no longer being checked. Gated on
       # storage leadership so a stale timestamp on a demoted node (which
       # correctly skips the drill) doesn't fire.
+      #
+      # TODO(cluster-wide drill metric): ycluster_backup_restore_timestamp_seconds
+      # is node-local — each node's node-exporter scrapes its own textfile, and the
+      # drill only runs on the current storage leader. When leadership shifts to a
+      # node whose local timestamp is stale, this fires even though the drill ran
+      # fine on the previous leader. The verify-restore result should be published
+      # cluster-wide (e.g. written once to the shared RBD the leader mounts, or to
+      # etcd) so this reflects the latest drill anywhere in the cluster, not
+      # whatever node happens to hold leadership.
       - alert: BackupVerifyStale
         expr: (time() - ycluster_backup_restore_timestamp_seconds > 172800) and on(node) (ycluster_storage_leader == 1)
         for: 1h
