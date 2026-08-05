@@ -1,8 +1,11 @@
 ---
-# Install the custom-built podman binary, replacing the distro package
-# binary. The apt package stays installed so its runtime dependencies (crun,
-# netavark, aardvark-dns, containers-common, etc.) remain managed normally.
-# Only /usr/bin/podman is swapped.
+# Install the custom-built podman binary, replacing the distro package.
+# The distro podman package and its stock units are removed; its runtime
+# dependencies (crun, netavark, aardvark-dns, containers-common, etc.) are
+# kept installed (via `apt install`, which also marks them manually installed)
+# so `apt autoremove` never reclaims them.
+# Only /usr/bin/podman is swapped out for the custom build; the distro
+# binary's dead dpkg diversion is cleaned up after podman is purged.
 #
 # Run admin/build-podman.yml first to produce the binary on the buildhost.
 - name: Install custom podman binary
@@ -12,6 +15,24 @@
     podman_binary_src: "/opt/src/podman/bin/podman"
     podman_binary: "/usr/bin/podman"
     podman_binary_distrib: "/usr/bin/podman.distrib"
+    # Runtime deps pulled in by the distro podman package that the custom
+    # binary still needs. Ensured present with `apt install` (which marks them
+    # manual) so the purge/autoremove pass doesn't reclaim them. (From
+    # `apt-get -s purge podman`.)
+    podman_apt_deps:
+      - aardvark-dns
+      - buildah
+      - catatonit
+      - conmon
+      - containernetworking-plugins
+      - crun
+      - fuse-overlayfs
+      - golang-github-containers-common
+      - golang-github-containers-image
+      - libyajl2
+      - netavark
+      - passt
+      - slirp4netns
 
   tasks:
     - name: Check if podman binary exists on buildhost
@@ -56,12 +77,21 @@
       delegate_to: "{{ buildhost }}"
       run_once: true
 
+    - name: Gather apt package facts (detect distro podman)
+      package_facts:
+        manager: apt
+
+    - name: Record whether the distro podman package is installed
+      set_fact:
+        podman_apt_installed: "{{ 'podman' in ansible_facts.packages }}"
+
     - name: Divert distro podman binary out of the way
       command:
         cmd: dpkg-divert --divert {{ podman_binary_distrib }}
                          --rename
                          --add {{ podman_binary }}
         creates: "{{ podman_binary_distrib }}"
+      when: podman_apt_installed
 
     - name: Copy custom podman binary into place
       copy:
@@ -71,7 +101,7 @@
         owner: root
         group: root
 
-    - name: Verify installed podman version
+    - name: Verify installed custom podman version
       command: "{{ podman_binary }} --version"
       register: podman_version
       changed_when: false
@@ -79,3 +109,37 @@
     - name: Display podman version
       debug:
         msg: "Installed {{ podman_version.stdout }}"
+
+    - name: Ensure podman runtime dependencies are installed (apt install marks them manual)
+      apt:
+        name: "{{ podman_apt_deps }}"
+        state: present
+
+    # Purging podman also removes and stops its package-owned
+    # podman-auto-update.{service,timer} units (the failing nv4 unit), so no
+    # separate systemd stop is needed.
+    - name: Remove the distro podman package (custom binary replaces it)
+      apt:
+        name: podman
+        state: absent
+        purge: yes
+
+    - name: Remove dead diversion of the purged distro podman binary
+      command: "dpkg-divert --remove {{ podman_binary }}"
+      register: podman_divert_remove
+      changed_when: podman_divert_remove.rc == 0
+      failed_when: podman_divert_remove.rc not in [0, 1]
+
+    - name: Ensure leftover distro podman binary is removed
+      file:
+        path: "{{ podman_binary_distrib }}"
+        state: absent
+
+    - name: Confirm custom podman binary is still in place
+      command: "{{ podman_binary }} --version"
+      register: podman_version_final
+      changed_when: false
+
+    - name: Display final podman version
+      debug:
+        msg: "Final custom podman: {{ podman_version_final.stdout }}"
