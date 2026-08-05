@@ -8,6 +8,39 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo "=== YCluster Nvidia Bootstrap $(date) ==="
 
+# --- Vendor-account guard ------------------------------------------------
+# A fresh vendor image can ship a non-baseline UID>=1000 account in `sudo`
+# and/or `lxd` (root-equivalent). Fail here — before we create `admin`,
+# install the SSH key, or register the node — so an unmitigated image is
+# rejected instead of joining the cluster. Only `root` and (once created)
+# `admin` are expected; any other real sudo/lxd member is a preinstall
+# account that must be removed (or the node re-imaged) first.
+echo "Checking for unexpected privileged (sudo/lxd) accounts..."
+OFFENDERS=()
+COUNT=0
+for GRP in sudo lxd; do
+    if ! getent group "$GRP" >/dev/null 2>&1; then
+        continue
+    fi
+    MEMBERS=$(getent group "$GRP" | cut -d: -f4)
+    for MEMBER in ${MEMBERS//,/ }; do
+        [[ "$MEMBER" == "root" || "$MEMBER" == "admin" ]] && continue
+        MEMBER_UID=$(getent passwd "$MEMBER" | cut -d: -f3 || true)
+        [[ -z "$MEMBER_UID" ]] && continue
+        if (( MEMBER_UID >= 1000 )); then
+            OFFENDERS+=("$MEMBER (group $GRP, uid $MEMBER_UID)")
+            COUNT=$((COUNT+1))
+        fi
+    done
+done
+if (( COUNT > 0 )); then
+    echo "ERROR: vendor preinstall account(s) present with sudo/lxd access:" >&2
+    printf '  %s\n' "${OFFENDERS[@]}" >&2
+    echo "Remove the account(s) (homes + authorized_keys) or re-image the node, then re-run bootstrap." >&2
+    exit 1
+fi
+echo "Privileged account check passed"
+
 # API server that served this script
 API_SERVER="{{ api_server }}"
 

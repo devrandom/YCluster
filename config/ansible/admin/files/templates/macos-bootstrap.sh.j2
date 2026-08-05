@@ -8,6 +8,31 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo "=== YCluster macOS Bootstrap $(date) ==="
 
+# --- Vendor-account guard ------------------------------------------------
+# A fresh vendor image can ship a non-baseline account in the macOS `admin`
+# group (sudo-equivalent). Fail here — before we create `admin`, install the
+# SSH key, or register the node — so an unmitigated image is rejected instead
+# of joining the cluster. Only `root`, `admin`, and `dev` are expected;
+# any other admin-group member is a preinstall account that must be removed
+# (or the node re-imaged) first.
+echo "Checking for unexpected admin-group accounts..."
+OFFENDERS=()
+COUNT=0
+MEMBERS=$(dscl . -read /Groups/admin GroupMembership 2>/dev/null | awk '{for(i=2;i<=NF;i++) print $i}' || true)
+while IFS= read -r MEMBER; do
+    [[ "$MEMBER" == "root" || "$MEMBER" == "admin" || "$MEMBER" == "dev" ]] && continue
+    [[ -z "$MEMBER" ]] && continue
+    OFFENDERS+=("$MEMBER")
+    COUNT=$((COUNT+1))
+done <<< "$MEMBERS"
+if (( COUNT > 0 )); then
+    echo "ERROR: vendor preinstall account(s) present with admin access:" >&2
+    printf '  %s\n' "${OFFENDERS[@]}" >&2
+    echo "Remove the account(s) (homes + authorized_keys) or re-image the node, then re-run bootstrap." >&2
+    exit 1
+fi
+echo "Privileged account check passed"
+
 # API server that served this script
 API_SERVER="{{ api_server }}"
 

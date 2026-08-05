@@ -205,6 +205,32 @@ rm -f "$KEY_FILE"
 
 # --- host setup (skipped in --dev mode) -----------------------------------
 if (( DEV == 0 )); then
+    # --- Vendor-account guard -------------------------------------------
+    # A fresh vendor image can ship a non-baseline account in the macOS
+    # `admin` group (sudo-equivalent). Fail before we mutate the host
+    # (hostname, admin user, SSH) so an unmitigated image is rejected instead
+    # of joining the cluster. Skipped in --dev mode (personalised dev box).
+    # Only `root`, `admin`, and `dev` are expected; any other admin-group
+    # member is a preinstall account that must be removed (or the node
+    # re-imaged) first.
+    echo "Checking for unexpected admin-group accounts..."
+    OFFENDERS=()
+    COUNT=0
+    MEMBERS=$(/usr/bin/dscl . -read /Groups/admin GroupMembership 2>/dev/null | /usr/bin/awk '{for(i=2;i<=NF;i++) print $i}' || true)
+    while IFS= read -r MEMBER; do
+        [[ "$MEMBER" == "root" || "$MEMBER" == "admin" || "$MEMBER" == "dev" ]] && continue
+        [[ -z "$MEMBER" ]] && continue
+        OFFENDERS+=("$MEMBER")
+        COUNT=$((COUNT+1))
+    done <<< "$MEMBERS"
+    if (( COUNT > 0 )); then
+        echo "ERROR: vendor preinstall account(s) present with admin access:" >&2
+        printf '  %s\n' "${OFFENDERS[@]}" >&2
+        echo "Remove the account(s) (homes + authorized_keys) or re-image the node, then re-run bootstrap." >&2
+        exit 1
+    fi
+    echo "Privileged account check passed"
+
     echo "Setting hostname to $NEW_HOSTNAME"
     /usr/sbin/scutil --set HostName "$NEW_HOSTNAME"
     /usr/sbin/scutil --set LocalHostName "$NEW_HOSTNAME"
