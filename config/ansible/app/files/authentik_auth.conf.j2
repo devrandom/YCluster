@@ -3,19 +3,30 @@
 # The `_auth` suffix in the template filename makes certbot-manager render
 # this site with the `auth.` subdomain of the primary domain AND include
 # that subdomain in the certificate SAN on the next obtain/renew.
-# 127.0.0.2 is the rathole public tunnel endpoint — external access is
-# required for off-cluster logins (and OAuth callbacks if external login
-# sources are enabled). Cluster-internal access is the separate auth.xc
-# vhost (authentik-internal.conf.j2).
+# External and off-cluster access is required for logins (and OAuth
+# callbacks if external login sources are enabled); cluster-internal
+# access is the separate auth.<domain> vhost (authentik-internal.conf.j2).
+#
+# Single source of truth for the auth.<domain> surface: this server block
+# declares both the cluster-internal / direct listener (plain :443) and
+# the frp tunnel landing (127.0.0.2:17443, PROXY protocol v2), so the
+# OAuth round-trip works over both the tunnel and internal/direct hits.
+# The rathole public endpoint (127.0.0.2:443, no PROXY) is gone.
 server {
     {% if use_tls %}
     listen 443 ssl http2;
-    listen 127.0.0.2:443 ssl http2;
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
     {% else %}
     listen 80;
-    listen 127.0.0.2:80;
+    listen 127.0.0.2:17443 proxy_protocol;
     {% endif %}
     server_name {{ domain | default('_') }};
+
+    # Trust the PROXY protocol header only from loopback (frpc, the sole
+    # source that can reach 127.0.0.2). Plain :443 connections carry no
+    # PROXY header and are unaffected.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
 
     client_max_body_size 10M;
 

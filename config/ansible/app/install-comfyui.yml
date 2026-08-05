@@ -388,8 +388,8 @@
         comfyui_backend_url: "{{ groups['nvidia'] | default([]) | map('extract', hostvars) | selectattr('comfyui_backend_url', 'defined') | map(attribute='comfyui_backend_url') | list | first | default('', true) }}"
 
     # `comfyui_locations_backend` is what gets substituted into the shared
-    # comfyui-locations.conf include (installed below and by the frp alt
-    # vhost). It always resolves to a real host:port so nginx keeps loading
+    # comfyui-locations.conf include (installed below). It always resolves
+    # to a real host:port so nginx keeps loading
     # even when no nvidia host sets `comfyui_backend_url` yet — in that case
     # it points at a dead loopback port and the comfy surface is simply
     # unreachable (no comfy.<domain> cert is issued without a backend).
@@ -397,12 +397,11 @@
       set_fact:
         comfyui_locations_backend: "{{ (comfyui_backend_url | trim | length > 0) | ternary(comfyui_backend_url, '127.0.0.1:8188') }}"
 
-    # comfyui-locations.conf is included by the main comfyui_comfy.conf.j2
-    # vhost AND by the frp alt vhost admin-api-alt.conf.j2
-    # (install-frp-alt-vhost.yml), so both tunnels share one location body.
-    # Installed unconditionally so nginx config-test never fails on a missing
-    # include; harmless when comfy isn't deployed.
-    - name: Install ComfyUI locations (shared include for main + alt vhosts)
+    # comfyui-locations.conf is included by comfyui_comfy.conf.j2 (single
+    # source: plain :443 and frp tunnel landing listeners). Installed
+    # unconditionally so nginx config-test never fails on a missing include;
+    # harmless when comfy isn't deployed.
+    - name: Install ComfyUI locations (shared include for plain + proxy listeners)
       template:
         src: ../admin/files/comfyui-locations.conf
         dest: /etc/nginx/comfyui-locations.conf

@@ -8,22 +8,34 @@
 #
 # Rendered by certbot-manager from this `*_comfy.conf.j2` template: the
 # `_comfy` suffix sets domain=comfy.<primary> and adds comfy. to the
-# certificate SAN. Users reach it through the rathole tunnel -> 127.0.0.2.
-# The ComfyUI app itself stays unauthenticated; the IdP edge gate is the
-# boundary (via the shared embedded-outpost plumbing included below).
+# certificate SAN. The ComfyUI app itself stays unauthenticated; the IdP
+# edge gate is the boundary (via the shared embedded-outpost plumbing
+# included below).
 #
-# The location body is shared with the frp alt vhost via
+# Single source of truth for the comfy.<domain> surface: this server
+# block declares both the cluster-internal / direct listener (plain :443)
+# and the frp tunnel landing (127.0.0.2:17443, PROXY protocol v2). The
+# rathole public endpoint (127.0.0.2:443, no PROXY) is gone.
+#
+# The location body is shared across the plain and proxy listeners via
 # comfyui-locations.conf; the ComfyUI backend (host:port, e.g. the GPU
 # host .xc:8188) is substituted into that include by the install-comfyui.yml
-# / install-frp-alt-vhost.yml render steps — the same double-parenthesis
-# convention as install-open-webui.yml.
+# render step — the same double-parenthesis convention as install-open-webui.yml.
 server {
     {% if use_tls %}
-    listen 127.0.0.2:443 ssl http2;
+    listen 443 ssl http2;
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
     {% else %}
-    listen 127.0.0.2:80;
+    listen 80;
+    listen 127.0.0.2:17443 proxy_protocol;
     {% endif %}
     server_name {{ domain | default('comfy') }};
+
+    # Trust the PROXY protocol header only from loopback (frpc, the sole
+    # source that can reach 127.0.0.2). Plain :443 connections carry no
+    # PROXY header and are unaffected.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
 
     # ComfyUI accepts workflow JSON + uploaded images/video; don't cap small.
     client_max_body_size 200M;

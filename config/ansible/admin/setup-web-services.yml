@@ -237,14 +237,14 @@
       notify: restart nginx
       when: "'storage' in group_names"
 
-    # open-webui-locations.conf is included by open-webui.conf.j2 (main
-    # vhost, certbot-manager-rendered) AND by admin-api-alt.conf (alt
-    # vhost, installed by app/install-frp-alt-vhost.yml). The `(( port ))`
-    # marker is substituted here with the open-webui port — same pattern
-    # as install-open-webui.yml uses for open-webui.conf.j2. Hardcoded
-    # 8380 (the default openwebui_port) — the staged instance is on a
-    # separate nginx site, so this file doesn't need to vary.
-    - name: Install Open WebUI locations (shared include for main + alt vhosts)
+    # open-webui-locations.conf is included by open-webui.conf.j2 (single
+    # source: certbot-manager-rendered for both the plain :443 and the frp
+    # tunnel landing). The `(( port ))` marker is substituted here with the
+    # open-webui port — same pattern as install-open-webui.yml uses for
+    # open-webui.conf.j2. Hardcoded 8380 (the default openwebui_port) — the
+    # staged instance is on a separate nginx site, so this file doesn't
+    # need to vary.
+    - name: Install Open WebUI locations (shared include for plain + proxy listeners)
       template:
         src: files/open-webui-locations.conf
         dest: /etc/nginx/open-webui-locations.conf
@@ -259,9 +259,9 @@
       when: "'storage' in group_names"
 
     # ycluster_app-locations.conf has no Jinja2 markers — plain copy.
-    # Included by ycluster_app.conf.j2 (main vhost, certbot-manager)
-    # AND by admin-api-alt.conf (alt vhost, install-frp-alt-vhost.yml).
-    - name: Install ycluster_app locations (shared include for main + alt vhosts)
+    # Included by ycluster_app.conf.j2 (single source: certbot-manager
+    # renders the plain :443 and frp tunnel landing listeners).
+    - name: Install ycluster_app locations (shared include for plain + proxy listeners)
       copy:
         src: files/ycluster_app-locations.conf
         dest: /etc/nginx/ycluster_app-locations.conf

@@ -1,30 +1,38 @@
 # Alt vhost for the frp tunnel. frpc forwards external traffic to
 # 127.0.0.2 on the backend ports (17080 / 17443), and frps uses PROXY
-# protocol v2 — so unlike the rathole-side public vhost, this one picks
-# up real client IPs and rate-limit zones can drop back to per-client
-# semantics. See todo/networking/switch-rathole-to-frp.md and
+# protocol v2 — so this vhost picks up real client IPs and rate-limit
+# zones can drop back to per-client semantics. See
+# todo/networking/switch-rathole-to-frp.md and
 # docs/design/frp-migration.md.
 #
-# frp now serves the production primary public HTTP/HTTPS (:80 / :443)
-# — rathole's public HTTP (:80) and HTTPS rollback (:14443) are gone.
-# The HTTPS section below serves the full surface — admin-api (public
-# whitelist + authed locations + authentik forward-auth), open-webui,
-# ycluster_app, comfyui, and auth — the tunnel exercises login flows
-# and the IdP outpost end-to-end. rathole still carries SSH/admin/
-# bastion ingress until the cleanup step.
+# frp serves the production primary public HTTP/HTTPS (:80 / :443) —
+# rathole's public HTTP (:80) and HTTPS rollback (:14443) are gone.
 #
-# Like the sibling vhost templates (admin-api.conf.j2, open-webui.conf.j2,
-# ycluster_app.conf.j2), the TLS listeners/certs are gated on `use_tls`.
-# In --local dev mode (use_tls=False, no cluster cert seeded) the HTTPS
-# surface falls back to plain HTTP on the same alt port, so nginx still
-# config-tests and reloads; in prod (use_tls=True) this renders exactly
-# the TLS surface below.
+# This vhost is now the DEFAULT server on the frp proxy ports only. The
+# per-hostname app surfaces (open-webui, app., comfy., auth., and the
+# admin *public* surface) live in their own per-app templates, each of
+# which declares its plain internal listener (:443) alongside the PROXY
+# landing (127.0.0.2:17443). What stays here:
+#   - the HTTP :17080 server (ACME HTTP-01 + the admin public whitelist
+#     / authed locations over plain HTTP),
+#   - the `_` HTTPS default (404 fallback for unmatched hosts),
+#   - the public admin.<domain> HTTPS block. Admin is the one exception to
+#     the single-source model: the internal admin vhost (admin-api.conf.j2)
+#     is a deliberately identity-less operator surface on :443, so the
+#     forward-authed public admin surface must remain a distinct block here.
+#     app/auth/comfy/open-webui are identical behind the IdP on both the
+#     internal and proxy listeners, so they are not duplicated here.
+#
+# Like the sibling vhost templates, TLS listeners/certs are gated on
+# `use_tls`. In --local dev mode (use_tls=False, no cluster cert seeded)
+# the HTTPS surface falls back to plain HTTP on the same alt port, so
+# nginx still config-tests and reloads; in prod (use_tls=True) this
+# renders exactly the TLS surface below.
 
 # HTTP - PUBLIC ALT (frp tunnel endpoint on 127.0.0.2:17080).
-# Public whitelist + authed locations — same scope as the rathole-side
-# public vhost so frp-served HTTP exercises the same paths (including
-# forward-auth via the cluster IdP). See the HTTPS section below for the
-# per-hostname open-webui / ycluster_app blocks.
+# Public whitelist + authed locations — same scope as before so
+# frp-served HTTP exercises the same paths (including forward-auth via
+# the cluster IdP).
 server {
     listen 127.0.0.2:17080 proxy_protocol;
     server_name _;
@@ -38,7 +46,7 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
 
-    # ACME HTTP-01 challenges (certbot --webroot): public HTTP now lands
+    # ACME HTTP-01 challenges (certbot --webroot): public HTTP lands
     # here via the frp tunnel (f1:80 -> frpc -> 127.0.0.2:17080), so the
     # challenge path must be served on this vhost. certbot writes to
     # /var/www/html and must run on the node where the frpc tunnel lands
@@ -60,12 +68,6 @@ server {
 }
 
 # HTTPS - PUBLIC ALT (frp tunnel endpoint on 127.0.0.2:17443).
-# Multiple server blocks differentiated by server_name, all sharing
-# the same listen address. Each block mirrors its main-vhost
-# counterpart (admin-api.conf.j2, open-webui.conf.j2,
-# ycluster_app.conf.j2) so frp-served traffic reaches the same Flask /
-# OWUI / IdP backends as rathole-served traffic does.
-
 # Default server (server_name _) — 404 fallback for unmatched hosts.
 server {
     {% if use_tls %}
@@ -97,43 +99,10 @@ server {
     }
 }
 
-# Open-WebUI — main-domain traffic reaches Open WebUI's
-# location bodies via the shared include. OWUI listens on 127.0.0.1
-# at the port substituted into open-webui-locations.conf by the
-# setup-web-services render step.
-server {
-    {% if use_tls %}
-    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
-    {% else %}
-    listen 127.0.0.2:17443 proxy_protocol;
-    {% endif %}
-    server_name {{ domain | default('_') }};
-
-    {% if use_tls %}
-    ssl_certificate /etc/nginx/ssl/cert.pem;
-    ssl_certificate_key /etc/nginx/ssl/key.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    {% endif %}
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
-    add_header X-Frame-Options SAMEORIGIN always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header X-XSS-Protection "1; mode=block" always;
-
-    client_max_body_size 20M;
-
-    include /etc/nginx/open-webui-locations.conf;
-}
-
-# Admin-API — full surface including forward-auth.
-# admin-api-authed-locations.conf already includes the authentik outpost
-# plumbing, so this block only needs to include both admin-api-* files.
+# Admin-API — public (forward-authed) admin.<domain> surface over the frp
+# tunnel. Distinct from the internal identity-less admin vhost
+# (admin-api.conf.j2 on plain :443): this one enforces the IdP forward-auth
+# for external users and includes the whitelist + authed locations.
 server {
     {% if use_tls %}
     listen 127.0.0.2:17443 ssl http2 proxy_protocol;
@@ -169,124 +138,5 @@ server {
 
     location / {
         return 404;
-    }
-}
-
-# YCluster App — VM scheduling + Settings, forward-authed.
-# The outpost plumbing (login redirect + OAuth callback + auth subrequest)
-# must be included BEFORE the location bodies so @authentik_signin is in
-# scope when the location handlers reference it via error_page 401.
-server {
-    {% if use_tls %}
-    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
-    {% else %}
-    listen 127.0.0.2:17443 proxy_protocol;
-    {% endif %}
-    server_name app.{{ domain | default('_') }};
-
-    {% if use_tls %}
-    ssl_certificate /etc/nginx/ssl/cert.pem;
-    ssl_certificate_key /etc/nginx/ssl/key.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    {% endif %}
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
-    add_header X-Content-Type-Options nosniff always;
-
-    client_max_body_size 1M;
-
-    include /etc/nginx/admin-api-authentik-outpost.conf;
-    include /etc/nginx/ycluster_app-locations.conf;
-}
-
-# ComfyUI — comfy.<domain>, gated by the cluster IdP's Comfy application
-# (policy bound to the `comfy` and `ycluster-admins` groups) via the shared
-# embedded-outpost forward-auth. Shares its location body with the main
-# comfyui_comfy.conf.j2 vhost through comfyui-locations.conf, so both the
-# rathole (127.0.0.2:443) and frp (127.0.0.2:17443) paths proxy identically.
-server {
-    {% if use_tls %}
-    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
-    {% else %}
-    listen 127.0.0.2:17443 proxy_protocol;
-    {% endif %}
-    server_name comfy.{{ domain | default('_') }};
-
-    {% if use_tls %}
-    ssl_certificate /etc/nginx/ssl/cert.pem;
-    ssl_certificate_key /etc/nginx/ssl/key.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    {% endif %}
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
-    add_header X-Content-Type-Options nosniff always;
-
-    # ComfyUI accepts workflow JSON + uploaded images/video; don't cap small.
-    client_max_body_size 200M;
-
-    # IdP outpost plumbing must precede the location bodies so @authentik_signin
-    # is in scope when the location handler references it via error_page 401.
-    include /etc/nginx/admin-api-authentik-outpost.conf;
-    include /etc/nginx/comfyui-locations.conf;
-}
-
-# authentik Auth — mirrors rathole-side authentik_auth.conf.j2 on the
-# alt port. Required so the OAuth round-trip (auth.<domain>/application/o/authorize
-# and the callback bounce-back) works through the frp tunnel. Without
-# this block, requests for auth.<domain> land on the default server
-# (server_name _) and 404, leaving users stuck on the authorize page.
-server {
-    {% if use_tls %}
-    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
-    {% else %}
-    listen 127.0.0.2:17443 proxy_protocol;
-    {% endif %}
-    server_name auth.{{ domain | default('_') }};
-
-    {% if use_tls %}
-    ssl_certificate /etc/nginx/ssl/cert.pem;
-    ssl_certificate_key /etc/nginx/ssl/key.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    {% endif %}
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
-    add_header X-Content-Type-Options nosniff always;
-
-    client_max_body_size 10M;
-
-    # Proxy to the authentik server container.
-    location / {
-        proxy_pass http://127.0.0.1:9300/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # WebSocket support (authentik UI + outpost connections).
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 300s;
-        proxy_read_timeout 300s;
     }
 }

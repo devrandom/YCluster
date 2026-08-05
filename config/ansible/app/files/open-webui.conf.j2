@@ -1,26 +1,29 @@
 # HTTPS/HTTP - Open WebUI
 #
-# Listens on both the wildcard address (cluster-internal access) and
-# 127.0.0.2 (rathole public tunnel endpoint, shared with admin-api +
-# ycluster_app nginx vhosts — see admin-api.conf.j2). The admin-api
-# public vhost has its own explicit `listen 127.0.0.2:443` with
-# server_name `_` as a 404 fallback; since open-webui sets an explicit
-# server_name below, nginx routes main-domain traffic here and admin.*
-# / app.* traffic to their respective vhosts on the same address.
-# External traffic on dev1.<domain> arrives via rathole → 127.0.0.2:443
-# (no PROXY protocol — rathole 0.5.0 doesn't speak it), so real client
-# IPs are not preserved on this path; rate-limit zones act as global
-# buckets. The frp-side equivalent lives on 127.0.0.2:17443 and is
-# served by the alt vhost (admin-api-alt.conf.j2) with proxy_protocol.
+# Single source of truth for the <primary> web surface. This one server
+# block declares both listeners:
+#   - the cluster-internal / direct listener (plain :443/:80), and
+#   - the frp tunnel landing (127.0.0.2:17080/17443, PROXY protocol v2).
+# External traffic arrives via frps -> frpc on the loopback alt address,
+# where frps injects the PROXY header so real client IPs survive; internal
+# or direct hits use the plain listener. The rathole public endpoint
+# (127.0.0.2:443, no PROXY protocol) is gone — frp is the only tunnel, so
+# per-client rate-limit semantics are now possible on the proxy path.
 server {
     {% if use_tls %}
     listen 443 ssl http2;
-    listen 127.0.0.2:443 ssl http2;
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
     {% else %}
     listen 80;
-    listen 127.0.0.2:80;
+    listen 127.0.0.2:17443 proxy_protocol;
     {% endif %}
     server_name {{ domain | default('_') }};
+
+    # Trust the PROXY protocol header only from loopback: frpc is the
+    # sole source that can reach 127.0.0.2. Plain connections on :443/:80
+    # carry no PROXY header and are unaffected.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
 
     client_max_body_size 20M;
 
@@ -44,8 +47,8 @@ server {
     add_header X-XSS-Protection "1; mode=block" always;
 
     # Location bodies (auth subrequest, /v1/, /) live in a shared include
-    # so the alt vhost (admin-api-alt.conf.j2) can serve open-webui on
-    # 127.0.0.2:17443 without duplicating them. `(( port ))` is the open-
-    # webui port, substituted by the install-open-webui.yml render step.
+    # so both the plain and proxy listeners proxy to the same backend.
+    # `(( port ))` is the open-webui port, substituted by the
+    # install-open-webui.yml render step.
     include /etc/nginx/open-webui-locations.conf;
 }
