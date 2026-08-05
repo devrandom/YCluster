@@ -106,4 +106,5 @@
 
 - import_playbook: ../../config/ansible/app/build-frp.yml
 - import_playbook: ../../config/ansible/app/install-frp-server.yml
+- import_playbook: ../../config/ansible/app/install-frp-alt-vhost.yml
 - import_playbook: ../../config/ansible/app/install-frp.yml

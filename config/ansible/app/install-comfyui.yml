@@ -399,7 +399,7 @@
 
     # comfyui-locations.conf is included by the main comfyui_comfy.conf.j2
     # vhost AND by the frp alt vhost admin-api-alt.conf.j2
-    # (install-frp-server.yml), so both tunnels share one location body.
+    # (install-frp-alt-vhost.yml), so both tunnels share one location body.
     # Installed unconditionally so nginx config-test never fails on a missing
     # include; harmless when comfy isn't deployed.
     - name: Install ComfyUI locations (shared include for main + alt vhosts)

@@ -38,7 +38,7 @@ Steps:
    comfy) to add the `127.0.0.2:17443 proxy_protocol` listener.
 3. Trim `admin-api-alt.conf.j2` down to the `_` fallback.
 4. Update both install plays (`setup-web-services.yml` /
-   `install-frp-server.yml`) so the alt surface is derived, not hand-listed.
+   `install-frp-alt-vhost.yml`) so the alt surface is derived, not hand-listed.
 5. Redeploy and verify each `name.<domain>` on `127.0.0.2:17443` returns
    the same 302-to-authentik / proxied response as on `127.0.0.2:443`.
 

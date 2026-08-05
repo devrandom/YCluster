@@ -15,7 +15,7 @@
 # The location body is shared with the frp alt vhost via
 # comfyui-locations.conf; the ComfyUI backend (host:port, e.g. the GPU
 # host .xc:8188) is substituted into that include by the install-comfyui.yml
-# / install-frp-server.yml render steps — the same double-parenthesis
+# / install-frp-alt-vhost.yml render steps — the same double-parenthesis
 # convention as install-open-webui.yml.
 server {
     {% if use_tls %}

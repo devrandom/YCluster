@@ -239,7 +239,7 @@
 
     # open-webui-locations.conf is included by open-webui.conf.j2 (main
     # vhost, certbot-manager-rendered) AND by admin-api-alt.conf (alt
-    # vhost, installed by app/install-frp-server.yml). The `(( port ))`
+    # vhost, installed by app/install-frp-alt-vhost.yml). The `(( port ))`
     # marker is substituted here with the open-webui port — same pattern
     # as install-open-webui.yml uses for open-webui.conf.j2. Hardcoded
     # 8380 (the default openwebui_port) — the staged instance is on a
@@ -260,7 +260,7 @@
 
     # ycluster_app-locations.conf has no Jinja2 markers — plain copy.
     # Included by ycluster_app.conf.j2 (main vhost, certbot-manager)
-    # AND by admin-api-alt.conf (alt vhost, install-frp-server.yml).
+    # AND by admin-api-alt.conf (alt vhost, install-frp-alt-vhost.yml).
     - name: Install ycluster_app locations (shared include for main + alt vhosts)
       copy:
         src: files/ycluster_app-locations.conf

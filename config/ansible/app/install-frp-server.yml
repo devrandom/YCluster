@@ -117,13 +117,12 @@
     # security group. SSH is allowed before enabling so a run can't lock us
     # out, and the frps public ports are parsed from the rendered config so
     # the rules track the template as proxies are added.
-    # The frp alt vhost (admin-api-alt.conf.j2) serves the production
-    # primary public HTTP/HTTPS: frp forwards :80/:443 to the loopback
-    # backend ports (17080 / 17443) with PROXY protocol v2, so this vhost
-    # picks up real client IPs. It replaces rathole's public http/https
-    # vhost (which now only carries ssh/admin via the active rathole
-    # services). Removed wholesale at cleanup step 6 of the frp migration
-    # plan.
+    # The frp alt vhost (admin-api-alt.conf.j2, installed on the storage
+    # leader by install-frp-alt-vhost.yml) serves the production primary
+    # public HTTP/HTTPS: frp forwards :80/:443 to the loopback backend
+    # ports (17080 / 17443) with PROXY protocol v2, so this vhost picks
+    # up real client IPs. It replaces rathole's public http/https vhost.
+    # Removed wholesale at cleanup step 6 of the frp migration plan.
 
     # Frontend nodes are public, so run a host firewall (ufw) with
     # least-privilege openings rather than relying on an implicit cloud
@@ -205,71 +204,3 @@
       systemd:
         name: frps
         state: restarted
-
-# Alt nginx vhost lives on the storage leader, not the frontend —
-# frpc forwards external traffic to 127.0.0.2:17080 on the leader
-# where nginx serves it with PROXY-protocol-real client IPs. See
-# config/ansible/admin/files/admin-api-alt.conf.
-- name: Install frp alt nginx vhost (storage leader)
-  hosts: storage
-  become: yes
-  tasks:
-    # Alt vhost template lives in /etc/nginx/templates/ — same pattern as
-    # admin-api.conf.j2 / ycluster_app.conf.j2. certbot-manager renders it
-    # with `domain=<primary>` (read from /cluster/https/domain in etcd) so
-    # the alt vhost tracks the prod domain without leaking it into repo code.
-    - name: Install alt nginx vhost template
-      copy:
-        src: ../admin/files/admin-api-alt.conf.j2
-        dest: /etc/nginx/templates/admin-api-alt.conf.j2
-        mode: '0644'
-        owner: root
-        group: root
-
-    # admin-api-alt.conf.j2 references the shared comfyui-locations.conf
-    # (installed below) for its comfy.<domain> block, so it must be present
-    # before certbot-manager renders + nginx reloads. Mirror install-comfyui.yml.
-    - name: Resolve ComfyUI backend from nvidia hosts
-      set_fact:
-        nvidia_comfy_backend: "{{ groups['nvidia'] | default([]) | map('extract', hostvars) | selectattr('comfyui_backend_url', 'defined') | map(attribute='comfyui_backend_url') | list | first | default('', true) }}"
-
-    - name: Resolve ComfyUI backend for shared location include
-      set_fact:
-        comfyui_locations_backend: "{{ (nvidia_comfy_backend | trim | length > 0) | ternary(nvidia_comfy_backend, '127.0.0.1:8188') }}"
-
-    - name: Install ComfyUI locations include (shared with main comfy vhost)
-      template:
-        src: ../admin/files/comfyui-locations.conf
-        dest: /etc/nginx/comfyui-locations.conf
-        owner: root
-        group: root
-        mode: '0644'
-        variable_start_string: '(('
-        variable_end_string: '))'
-        block_start_string: '((#'
-        block_end_string: '#))'
-      notify: reload nginx
-
-    - name: Render alt nginx vhost with certbot-manager
-      # Mirror setup-web-services.yml / install-authentik.yml: pass --local
-      # in dev (web_services_force_local) where /cluster/https/domain isn't
-      # seeded yet — same pattern the other certbot-manager callers use.
-      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
-      environment: "{{ etcd_client_env | default({}) }}"
-      register: nginx_update_result
-      changed_when: "'configuration updated' in nginx_update_result.stdout"
-      failed_when: nginx_update_result.rc != 0
-      notify: reload nginx
-
-    - name: Enable alt nginx vhost
-      file:
-        src: /etc/nginx/sites-available/admin-api-alt
-        dest: /etc/nginx/sites-enabled/admin-api-alt
-        state: link
-      notify: reload nginx
-
-  handlers:
-    - name: reload nginx
-      systemd:
-        name: nginx
-        state: reloaded

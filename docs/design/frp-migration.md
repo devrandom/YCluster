@@ -21,6 +21,7 @@ rathole-PROXY-protocol item is folded in here.
   binaries".
 - `app/install-frp.yml` (core nodes, client)
 - `app/install-frp-server.yml` (frontend nodes, server + ufw)
+- `app/install-frp-alt-vhost.yml` (storage leader, frp alt nginx vhost)
 - `admin/install-vm-bastion.yml` → swap `rathole` for `frpc` everywhere;
   bastion unit becomes `frpc-bastion.service`
 
@@ -183,7 +184,8 @@ Same per-host derivation rules as `app/templates/rathole-server.toml.j2`
 3. New `app/build-frp.yml` — clones fatedier/frp at the pinned SHA
    from `group_vars/all/main.yml`, builds via `make` (or `go build`),
    leaves binaries at `/opt/src/frp/bin/{frps,frpc}`
-4. New install playbooks: `install-frp.yml`, `install-frp-server.yml`
+4. New install playbooks: `install-frp.yml`, `install-frp-server.yml`,
+   `install-frp-alt-vhost.yml`
    (fetch the build output from the buildhost, same `fetch:`/`copy:`
    pattern as `install-rathole.yml`)
 5. New start wrappers: `frpc-start`, `frpc-ssh-start` (run the
