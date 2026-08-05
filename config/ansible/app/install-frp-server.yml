@@ -1,13 +1,13 @@
 ---
-# Install frp server (frps) on frontend nodes. Runs alongside rathole
-# during the parallel-run soak on disjoint ports (17080/17443/etc.).
+# Install frp server (frps) on frontend nodes. frps now serves the
+# production primary public http/https (:80/:443) via the frp tunnels;
+# rathole keeps ssh/admin ingress until the cleanup step.
 #
 # frps listens on bindPort (default 7000) for frpc connections, and on
 # the per-proxy listenPort values for forwarded traffic. PROXY protocol
-# v2 is enabled from day one so the alt nginx vhost can pick up real
-# client IPs — this validates the folded-in rathole-PROXY-protocol item
-# in parallel with the current global-bucket rate-limit behavior on the
-# rathole-side public vhost.
+# v2 is enabled so the nginx alt vhost picks up real client IPs — this
+# is the migrated rathole-PROXY-protocol item (rathole's public http/
+# https rollback ports :80/:14443 are gone).
 - name: Install frp server configuration
   hosts: frontend
   # No `become` for compatibility with unprivileged controller user (the
@@ -117,12 +117,13 @@
     # security group. SSH is allowed before enabling so a run can't lock us
     # out, and the frps public ports are parsed from the rendered config so
     # the rules track the template as proxies are added.
-    # Install the alt vhost alongside the production admin-api.conf.j2
-    # rendering. This is the experimental twin of the public vhost on
-    # 127.0.0.2:443 — same paths (admin-api-public-locations.conf), but
-    # bound to the alt ports (17080 / 17443) and configured for PROXY
-    # protocol v2 from frps. Removed wholesale at cleanup step 6 of the
-    # frp migration plan.
+    # The frp alt vhost (admin-api-alt.conf.j2) serves the production
+    # primary public HTTP/HTTPS: frp forwards :80/:443 to the loopback
+    # backend ports (17080 / 17443) with PROXY protocol v2, so this vhost
+    # picks up real client IPs. It replaces rathole's public http/https
+    # vhost (which now only carries ssh/admin via the active rathole
+    # services). Removed wholesale at cleanup step 6 of the frp migration
+    # plan.
 
     # Frontend nodes are public, so run a host firewall (ufw) with
     # least-privilege openings rather than relying on an implicit cloud
@@ -162,10 +163,10 @@
     # proxy listeners bind to 0.0.0.0 (see frps.toml.j2 header). The SSH
     # tunnel ports (17201-17204) are intentionally NOT allowed here so they
     # remain bastion-only (reachable from the local sshd jump on dev1a/b
-    # via 127.0.0.1, not from the WAN). After the step-5 port swap, frp
-    # https serves the production primary on :443 (was :17443 in the
-    # parallel-run phase); frp http stays on :17080 alt for the same
-    # reason. rathole's new :14443 is auto-tracked from the rendered
+    # via 127.0.0.1, not from the WAN). frp now serves the production
+    # primary public HTTP/HTTPS: https on :443 and http on :80 (was the
+    # :17080 alt port during the parallel-run phase). rathole's retired
+    # public HTTP/HTTPS ports (:80 / :14443) are no longer tracked from
     # /etc/rathole/server.toml by install-rathole-server.yml.
     - name: Allow public frp ports through ufw
       community.general.ufw:
@@ -173,8 +174,16 @@
         port: "{{ item }}"
         proto: tcp
       loop:
-        - '17080'
+        - '80'
         - '443'
+
+    - name: Remove retired frp alt http port from ufw
+      community.general.ufw:
+        rule: allow
+        port: '17080'
+        proto: tcp
+        delete: yes
+      failed_when: false
 
     - name: Set default-deny incoming and enable ufw
       community.general.ufw:

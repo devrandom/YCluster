@@ -1,7 +1,8 @@
 ---
-# Install frp client (frpc) on core nodes. Runs alongside rathole during
-# the parallel-run soak; frp units are enabled but the disjoint port
-# layout (17080/17443/etc.) means rathole traffic is unaffected.
+# Install frp client (frpc) on core nodes. frp now serves the production
+# primary public http/https tunnels (:80/:443, leader-gated) plus the
+# per-core ssh tunnels; rathole keeps ssh/admin ingress until the cleanup
+# step.
 #
 # The frpc-start wrapper reads /cluster/nodes/frp/config from etcd at
 # startup and renders the client TOML from a jinja template — same

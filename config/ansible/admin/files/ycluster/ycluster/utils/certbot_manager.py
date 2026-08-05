@@ -340,13 +340,15 @@ def obtain_certificate(test_cert=False, non_interactive=False, server=None):
     primary_domain = config['domain']
     email = config.get('email')
     
-    # HTTP-01 challenges arrive via the rathole tunnel (127.0.0.2) — certbot
-    # must run on the node where the tunnel lands, or the CA never reaches
-    # the webroot this process writes to.
-    rathole = subprocess.run(['systemctl', 'is-active', '--quiet', 'rathole'])
-    if rathole.returncode != 0:
-        print("rathole.service is not active on this node — run this on the "
-              "node holding the public tunnel (normally the storage leader).")
+    # HTTP-01 challenges arrive via the frp tunnel (frontend f1:80 ->
+    # frpc -> alt vhost 127.0.0.2:17080) — certbot must run on the node
+    # where the frpc tunnel lands (the storage leader), or the CA never
+    # reaches the webroot this process writes to. frpc is leader-gated,
+    # so gating on it doubles as the "am I the tunnel host" check.
+    frpc = subprocess.run(['systemctl', 'is-active', '--quiet', 'frpc'])
+    if frpc.returncode != 0:
+        print("frpc.service is not active on this node — run this on the "
+              "node holding the public frp tunnel (normally the storage leader).")
         return False
 
     print(f"Obtaining certificate for domains: {', '.join(domains)}")

@@ -24,10 +24,10 @@ server {
 }
 
 # HTTPS/HTTP - Admin subdomain, cluster-internal.
-# External traffic does NOT reach this block — rathole forwards remote
-# clients to 127.0.0.2:443 (see the public vhost below), so the listen
-# address here is only reachable from the cluster network (or via local
-# health checks on 127.0.0.1:443).
+# External traffic does NOT reach this block — public https now arrives
+# through the frp alt vhost (admin-api-alt.conf.j2 on 127.0.0.2:17443),
+# so the listen address here is only reachable from the cluster network
+# (or via local health checks on 127.0.0.1:443).
 server {
     {% if use_tls %}
     listen 443 ssl http2;
@@ -67,13 +67,13 @@ server {
     }
 }
 
-# HTTPS - PUBLIC whitelist (rathole tunnel endpoint on 127.0.0.2).
-# Rathole-client forwards externally-originated traffic here. Only the
-# paths in admin-api-public-locations.conf are served; everything else
-# returns 404. Real client IPs are NOT preserved (rathole 0.5.0 has no
-# PROXY protocol support) — all requests appear to come from 127.0.0.1,
-# so rate limits act as global buckets rather than per-client. See
-# todo/networking/switch-rathole-to-frp.md for the rathole rebuild follow-up.
+# HTTPS - PUBLIC whitelist (retired rathole tunnel endpoint on 127.0.0.2).
+# rathole no longer carries public http/https — frp serves :80/:443 through
+# the frp alt vhost (admin-api-alt.conf.j2) with PROXY protocol. This block
+# is the old rathole-forwarded vhost and is kept only for step-6 cleanup;
+# it is not externally reachable anymore. Historically rathole 0.5.0 had no
+# PROXY protocol support, so real client IPs were lost and rate limits
+# acted as global buckets — frp fixes that.
 server {
     {% if use_tls %}
     listen 127.0.0.2:443 ssl http2;

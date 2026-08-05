@@ -1,5 +1,6 @@
 # frp server configuration
-# Parallel run alongside rathole on disjoint ports. See
+# Serves the production primary public http/https (:80/:443) tunnels;
+# rathole remains for ssh/admin ingress until the migration cleanup. See
 # docs/design/frp-migration.md for the port allocation rationale.
 #
 # v0.70.0 architecture: frps declares only the control listener + auth;
@@ -16,10 +17,10 @@ bindPort = {{ frp_bind_port | default(7000) }}
 # can't replicate rathole's per-service bind_addr pattern here. Instead
 # all listeners bind to 0.0.0.0 and the firewall (UFW) lets HTTP/HTTPS
 # through while keeping SSH tunnels reachable only from the local
-# bastion jump. The alt vhost (17080/17443) is intentionally public for
-# parallel-run validation against the public traffic pattern; the SSH
-# tunnels (17201-17204) are blocked externally by the install playbook's
-# UFW rules.
+# bastion jump. frp's http/https tunnels listen on :80/:443 (production
+# primary — rathole is out of the public http path); the SSH tunnels
+# (17201-17204) are blocked externally by the install playbook's UFW
+# rules.
 
 auth.method = "token"
 auth.token = "{{ frp_token | default('change_me_secret_token') }}"

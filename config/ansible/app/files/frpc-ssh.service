@@ -1,5 +1,5 @@
 [Unit]
-Description=frp SSH client - reverse proxy for SSH NAT traversal (parallel run with rathole-ssh)
+Description=frp SSH client - reverse proxy for SSH NAT traversal (per-core ssh)
 After=network.target
 Wants=network.target
 

@@ -1,5 +1,6 @@
 # frp client configuration (generated from etcd)
-# Parallel run alongside rathole — disjoint port range.
+# frp now serves the production primary public HTTP/HTTPS (see
+# docs/design/frp-migration.md).
 serverAddr = "{{ remote_addr.split(':')[0] }}"
 serverPort = {{ remote_addr.split(':')[1] }}
 
@@ -10,26 +11,23 @@ transport.heartbeatInterval = 40
 transport.heartbeatTimeout = 40
 
 # Forward to 127.0.0.2 so the alt nginx vhost (admin-api-alt.conf.j2)
-# can serve the frp tunnel on disjoint ports from rathole. 127.0.0.1
+# can serve the frp tunnel with PROXY-protocol-real client IPs. 127.0.0.1
 # stays reserved for local health checks + cluster-internal traffic.
 # Only the storage leader should register http/https — running this
 # template on every core node would cause tunnel-name collisions.
 [[proxies]]
 name = "http"
 type = "tcp"
-remotePort = 17080
+remotePort = 80
 localIP = "127.0.0.2"
 localPort = 17080
 transport.proxyProtocolVersion = "v2"
 
-# Primary HTTPS — served on :443 (the production primary port) after the
-# step-5 port swap. frps dynamically binds :443 for this tunnel (v0.70.0+
-# registers proxy listeners from client registrations, so no server-side
-# listenPort change is needed). localPort stays :17443, so traffic still
-# lands on the existing admin-api-alt.conf.j2 vhost (127.0.0.2:17443 with
-# proxy_protocol). rathole stays alive on :14443 as the rollback path —
-# revert is just flipping this remotePort back to 17443 and rathole's
-# bind_addr back to :443.
+# Primary HTTPS — served on :443 (the production primary port). frps
+# dynamically binds :443 for this tunnel (v0.70.0+ registers proxy
+# listeners from client registrations, so no server-side listenPort change
+# is needed). localPort stays :17443, so traffic lands on the alt
+# admin-api-alt.conf.j2 vhost (127.0.0.2:17443 with proxy_protocol).
 [[proxies]]
 name = "https"
 type = "tcp"

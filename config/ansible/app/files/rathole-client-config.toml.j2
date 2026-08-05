@@ -1,4 +1,5 @@
 # rathole client configuration (generated from etcd)
+# HTTP/HTTPS were moved to frp; rathole only carries SSH/admin/bastion now.
 [client]
 remote_addr = "{{ remote_addr }}"
 default_token = "{{ token }}"
@@ -12,15 +13,3 @@ type = "tcp"
 nodelay = true
 keepalive_secs = 20
 keepalive_interval = 8
-
-# Forward to 127.0.0.2 so nginx can serve a separate "public" vhost bound
-# to that address with the wg bootstrap whitelist only. 127.0.0.1 stays
-# reserved for local health checks + cluster-internal traffic and keeps
-# full admin-api access.
-[client.services.http]
-local_addr = "127.0.0.2:80"
-type = "tcp"
-
-[client.services.https]
-local_addr = "127.0.0.2:443"
-type = "tcp"

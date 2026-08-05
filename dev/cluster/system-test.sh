@@ -6,14 +6,15 @@
 # carries: etcd (mTLS quorum), the ycluster CLI, leader elections (DHCP +
 # storage), keepalived (storage + gateway VIPs), base infrastructure
 # (cluster DNS from etcd, squid, chrony/NTP), adhoc-node DHCP join, the
-# docker registry, postgres, authentik, rathole (client on the storage
-# leader + ssh clients on all core nodes, server on f1), the admin API
+# docker registry, postgres, authentik, rathole (ssh/admin ingress: ssh
+# clients on all core nodes, server on f1), frp (public http/https tunnels
+# on f1 via PROXY protocol + frpc-ssh on all core nodes), the admin API
 # (core + non-core), the admin web UI's forward-auth gate, incus VM
 # management (nested incus on c1: launch → sample → desired-state →
 # reconcile), usage accounting (etcd → postgres), local-ai-proxy
 # (etcd-routed models, nginx auth_request, hot reload), and the ACME
 # certificate path (certbot on the leader → webroot → HTTP-01 through the
-# f1 tunnel → Pebble test CA).
+# f1 frp tunnel → Pebble test CA).
 #
 # Deliberately NOT covered (can't run in system containers / on a laptop):
 # Ceph, the PXE/autoinstall boot path, GPU passthrough, Open-WebUI, the
@@ -605,7 +606,7 @@ sec_usage() {
 }
 
 # --------------------------------------------------------------------------
-# 12. rathole tunnels (client on leader + ssh clients -> server on f1)
+# 12. rathole tunnels (ssh/admin ingress; public http/https moved to frp)
 # --------------------------------------------------------------------------
 sec_rathole() {
   for n in "${CORE[@]}"; do
@@ -621,22 +622,10 @@ sec_rathole() {
       | grep -q '^SSH-2.0' || die "no ssh banner via f1:$port (tunnel for $n)"
   done
   ok "ssh banners via f1 tunnel ports 2201-2203"
-
-  # The leader's rathole client carries f1:80 to the leader's public vhost
-  # (127.0.0.2:80). /status is a public page served by admin-api.
-  # /status is behind forward-auth, so it needs the admin.<domain> Host
-  # header — exactly what a browser sends on the real cluster.
-  local domain
-  domain=$($SSH s1 "$E etcdctl get /cluster/https/domain --print-value-only" | tr -d '[:space:]')
-  [ -n "$domain" ] || die "no external domain in etcd (app-dev fixture missing)"
-  local admin_host="admin.$domain"
-  retry 15 2 "http through f1:80 tunnel" \
-    $SSH c1 "curl -fsS --max-time 5 -H 'Host: $admin_host' http://${IP[f1]}/status -o /dev/null"
-  ok "public http through f1 -> leader public vhost"
 }
 
 # --------------------------------------------------------------------------
-# 12b. frp parallel-run tunnel via f1 (next to rathole, disjoint ports)
+# 12b. frp public http/https + ssh tunnels via f1
 # --------------------------------------------------------------------------
 sec_frp() {
   # frpc-ssh must be active on every core node, mirroring rathole-ssh.
@@ -666,18 +655,16 @@ sec_frp() {
     $SSH c1 "timeout 5 bash -c 'exec 3<>/dev/tcp/${IP[f1]}/7000 && echo ok'"
   ok "frps control port 7000 reachable from cluster"
 
-  # PROXY protocol end-to-end: a request to f1:17080 from c1 must reach
-  # the alt vhost on 127.0.0.2:17080 and serve the public whitelist.
-  # /status is a public page served by admin-api, the same path the
-  # rathole-side test uses — so the alt vhost's path coverage is
-  # verified to match the production vhost.
+  # PROXY protocol end-to-end: a request to f1:80 from c1 must reach
+  # the frp alt vhost on 127.0.0.2:17080 and serve the public whitelist.
+  # /status is a public page served by admin-api.
   local domain admin_host
   domain=$($SSH s1 "$E etcdctl get /cluster/https/domain --print-value-only" | tr -d '[:space:]')
   [ -n "$domain" ] || die "no external domain in etcd (app-dev fixture missing)"
   admin_host="admin.$domain"
-  retry 15 2 "http through f1:17080 (frp alt port)" \
-    $SSH c1 "curl -fsS --max-time 5 -H 'Host: $admin_host' http://${IP[f1]}:17080/status -o /dev/null"
-  ok "public http through f1:17080 -> alt vhost (PROXY protocol)"
+  retry 15 2 "http through f1:80 (frp)" \
+    $SSH c1 "curl -fsS --max-time 5 -H 'Host: $admin_host' http://${IP[f1]}/status -o /dev/null"
+  ok "public http through f1:80 -> frp alt vhost (PROXY protocol)"
 
   # Verify PROXY protocol actually delivers the client IP: the alt
   # vhost's nginx access log should show c1's cluster IP, not 127.0.0.1.
@@ -729,58 +716,49 @@ sec_admin_web() {
   ok "/api/inventory: open internally, gated publicly"
 
   # ----------------------------------------------------------------------
-  # Redirect-chain port-leak checks. The alt vhost listens on :17080 here
-  # (prod: :17443) — nginx's default absolute_redirect bakes $server_port
-  # into Location headers from relative `return 30x /path`, and the
-  # browser then dials a non-public port and hangs. The four assertions
-  # below cover each hop in the auth round-trip, on both paths.
+  # Redirect-chain port-leak checks. frp now serves production public HTTP
+  # on f1:80 (forwarded to the alt vhost on 127.0.0.2:17080) — nginx's
+  # default absolute_redirect bakes $server_port into Location headers
+  # from relative `return 30x /path`, and the browser then dials a
+  # non-public port and hangs. The assertions below cover each hop in the
+  # auth round-trip through the frp path.
   # ----------------------------------------------------------------------
 
   local app_host auth_host
   app_host="app.$domain"
   auth_host="auth.$domain"
 
-  # RATHOLLE PATH — /admin/ redirect Location must have no port. Same
-  # bug shape as the frp path; prod's HTTP vhost is on :80 so a leak
-  # would still work (browsers drop :80), but tightening the check
-  # means a future port change can't silently reintroduce the hang.
-  loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' http://${IP[f1]}/admin/")
-  echo "$loc" | grep -qE '^302 https?://[^/:]+/outpost\.goauthentik\.io/start' \
-    || die "/admin/ (rathole) redirect leaks port (got: $loc)"
-  ok "/admin/ via rathole: Location has no port"
-
-  # FRP PATH — /admin/ through the alt port (:17080 / :17443 in prod).
-  # This is the exact path the production browser takes; the leak here
-  # is what made admin./app. hang for users.
+  # /admin/ — the exact path the production browser takes; the leak
+  # here is what made admin./app. hang for users.
   local frp_loc
-  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' http://${IP[f1]}:17080/admin/")
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' http://${IP[f1]}/admin/")
   echo "$frp_loc" | grep -qE '^302 https?://[^/:]+/outpost\.goauthentik\.io/start' \
     || die "/admin/ (frp) redirect leaks port (got: $frp_loc)"
-  ok "/admin/ via frp alt port: Location has no port"
+  ok "/admin/ via f1:80 (frp): Location has no port"
 
-  # FRP PATH — app.<domain> catch-all must redirect to /admin/vm-schedule
-  # without a port. Same root cause as @authentik_signin (relative
-  # `return 302 /admin/vm-schedule` in ycluster_app-locations.conf).
-  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{redirect_url}' -H 'Host: $app_host' http://${IP[f1]}:17080/")
+  # app.<domain> catch-all must redirect to /admin/vm-schedule without a
+  # port. Same root cause as @authentik_signin (relative `return 302
+  # /admin/vm-schedule` in ycluster_app-locations.conf).
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{redirect_url}' -H 'Host: $app_host' http://${IP[f1]}/")
   echo "$frp_loc" | grep -qE '^https?://[^/:]+/admin/vm-schedule' \
     || die "/ (frp, app.) catch-all leaks port (got: $frp_loc)"
-  ok "/ via frp alt port (app.): Location has no port"
+  ok "/ via f1:80 (frp, app.): Location has no port"
 
-  # FRP PATH — outpost start: authentik's authorize redirect must point
-  # at auth.<domain> with no port. Without the matching auth.<domain>
-  # vhost on the alt port, requests either hang (port leak) or 404
+  # outpost start: authentik's authorize redirect must point at
+  # auth.<domain> with no port. Without the matching auth.<domain>
+  # vhost on the f1:80 path, requests either hang (port leak) or 404
   # (missing vhost) and the OAuth round-trip dies here.
-  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' 'http://${IP[f1]}:17080/outpost.goauthentik.io/start?rd=http://$admin_host/admin/'")
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' 'http://${IP[f1]}/outpost.goauthentik.io/start?rd=http://$admin_host/admin/'")
   echo "$frp_loc" | grep -qE '^302 https?://[^/:]+/application/o/authorize' \
     || die "outpost start (frp) leaks port in authorize URL (got: $frp_loc)"
-  ok "outpost start via frp alt port: authorize URL has no port"
+  ok "outpost start via f1:80 (frp): authorize URL has no port"
 
-  # FRP PATH — auth.<domain> itself must be reachable through the alt
-  # port. This catches the missing-vhost class of bug independently
-  # of the Location-header checks above.
-  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $auth_host' http://${IP[f1]}:17080/-/health/live/")
-  [ "$frp_loc" = 200 ] || die "auth.<domain> not served on frp alt port (got $frp_loc)"
-  ok "auth.<domain> reachable through frp alt port"
+  # auth.<domain> itself must be reachable through the f1:80 path. This
+  # catches the missing-vhost class of bug independently of the
+  # Location-header checks above.
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $auth_host' http://${IP[f1]}/-/health/live/")
+  [ "$frp_loc" = 200 ] || die "auth.<domain> not served on f1:80 (got $frp_loc)"
+  ok "auth.<domain> reachable through f1:80 (frp)"
 }
 
 # --------------------------------------------------------------------------
@@ -887,11 +865,11 @@ sec_acme() {
   $SSH "$leader" "rm -rf /etc/letsencrypt/accounts/pebble.xc*"
 
   # The real obtain path end-to-end: certbot refuses to run off the
-  # rathole node; HTTP-01 goes CA -> f1:80 -> tunnel -> leader 127.0.0.2
-  # public vhost -> /var/www/html webroot.
+  # frpc node; HTTP-01 goes CA -> f1:80 -> frp tunnel -> leader alt vhost
+  # (127.0.0.2:17080) -> /var/www/html webroot.
   $SSH "$leader" "$E REQUESTS_CA_BUNDLE=/etc/dev-pebble-ca.pem ycluster certbot obtain --server https://pebble.xc:14000/dir -n" \
     >/dev/null || die "ycluster certbot obtain via pebble"
-  ok "certificate issued (HTTP-01 through the f1 tunnel, webroot mode)"
+  ok "certificate issued (HTTP-01 through the f1 frp tunnel, webroot mode)"
 
   $SSH s1 "$E etcdctl get /cluster/tls/cert --print-value-only" \
     | openssl x509 -noout -issuer | grep -qi pebble \
@@ -941,7 +919,7 @@ sec_failover() {
 
   retry 30 3 "public http tunnel re-established via $new" \
     $SSH c1 "curl -fsS --max-time 5 -H 'Host: admin.$(etcd_domain)' http://${IP[f1]}/status -o /dev/null"
-  ok "rathole client re-homed: f1:80 serves again"
+  ok "frp client re-homed: f1:80 serves again"
 
   # State followed leadership: the new leader binds the same shared backing,
   # so it serves the SAME postgres — authentik DB, the smoke user created in
@@ -1042,13 +1020,13 @@ SECTION_REGISTRY=(
   "9.postgres + authentik + user management|sec_authentik"
   "10.incus vm lifecycle (c1)|sec_vm"
   "11.usage accounting -> postgres|sec_usage"
-  "12.rathole tunnels via f1|sec_rathole"
+  "12.rathole tunnels (ssh/admin via f1)|sec_rathole"
   "13.admin web forward-auth gate|sec_admin_web"
   "14.local-ai-proxy inference path|sec_inference"
-  "15.ACME via pebble (certbot + tunnel)|sec_acme"
+  "15.ACME via pebble (certbot + frp tunnel)|sec_acme"
   "16.leadership + VIP failover/failback|sec_failover"
   "17.backup + verify-restore|sec_backup"
-  "18.frp parallel-run tunnel via f1 (disjoint ports + PROXY protocol)|sec_frp"
+  "18.frp public http/https + ssh tunnels via f1 (PROXY protocol)|sec_frp"
 )
 
 # Parse a section filter spec (e.g. "15", "1-5,15", "acme") into a list of

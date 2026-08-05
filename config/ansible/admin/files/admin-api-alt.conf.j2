@@ -1,15 +1,17 @@
-# Alt vhost for the parallel frp run. frpc forwards external traffic
-# to 127.0.0.2 on the alt ports (17080 / 17443), and frps uses PROXY
-# protocol v2 — so unlike the rathole-side public vhost, this one
-# picks up real client IPs and rate-limit zones can drop back to
-# per-client semantics. See todo/networking/switch-rathole-to-frp.md
-# and docs/design/frp-migration.md.
+# Alt vhost for the frp tunnel. frpc forwards external traffic to
+# 127.0.0.2 on the backend ports (17080 / 17443), and frps uses PROXY
+# protocol v2 — so unlike the rathole-side public vhost, this one picks
+# up real client IPs and rate-limit zones can drop back to per-client
+# semantics. See todo/networking/switch-rathole-to-frp.md and
+# docs/design/frp-migration.md.
 #
-# The HTTPS section now serves the full surface — admin-api (public
+# frp now serves the production primary public HTTP/HTTPS (:80 / :443)
+# — rathole's public HTTP (:80) and HTTPS rollback (:14443) are gone.
+# The HTTPS section below serves the full surface — admin-api (public
 # whitelist + authed locations + authentik forward-auth), open-webui,
-# and ycluster_app — so the frp tunnel exercises login flows and the
-# IdP outpost end-to-end, validating the migration plan before
-# rathole is decommissioned. Removed wholesale at cleanup step 6.
+# ycluster_app, comfyui, and auth — the tunnel exercises login flows
+# and the IdP outpost end-to-end. rathole still carries SSH/admin/
+# bastion ingress until the cleanup step.
 #
 # Like the sibling vhost templates (admin-api.conf.j2, open-webui.conf.j2,
 # ycluster_app.conf.j2), the TLS listeners/certs are gated on `use_tls`.
@@ -35,6 +37,16 @@ server {
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
+
+    # ACME HTTP-01 challenges (certbot --webroot): public HTTP now lands
+    # here via the frp tunnel (f1:80 -> frpc -> 127.0.0.2:17080), so the
+    # challenge path must be served on this vhost. certbot writes to
+    # /var/www/html and must run on the node where the frpc tunnel lands
+    # (the storage leader) — see ycluster/utils/certbot_manager.py.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+        default_type text/plain;
+    }
 
     # Public whitelist (wg bootstrap flow + read-only status dashboard).
     include /etc/nginx/admin-api-public-locations.conf;

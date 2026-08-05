@@ -1,4 +1,7 @@
 # rathole server configuration
+# HTTP (:80) and HTTPS (:14443) were moved to frp — rathole now only
+# carries control plane + SSH/admin/bastion ingress. See
+# docs/design/frp-migration.md.
 [server]
 bind_addr = "0.0.0.0:2333"
 default_token = "{{ rathole_token | default('change_me_secret_token') }}"
@@ -10,14 +13,6 @@ type = "tcp"
 nodelay = true
 keepalive_secs = 20
 keepalive_interval = 8
-
-[server.services.http]
-bind_addr = "0.0.0.0:80"
-type = "tcp"
-
-[server.services.https]
-bind_addr = "0.0.0.0:14443"
-type = "tcp"
 
 # One SSH ingress endpoint per core node (idx N -> port 2200+N), reached
 # with: ssh -J jump@host.ycluster.net:220N ... . Generated from the core

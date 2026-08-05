@@ -52,6 +52,16 @@ etcd schema:
   Alt vhost on storage (`admin-api-alt.conf.j2`) unchanged — still
   listens on `127.0.0.2:17443` with `proxy_protocol`, frpc `localPort`
   stays `:17443`. Only `remotePort` changed `:17443`→`:443`.
+- **Step 6a — public HTTP/HTTPS cutover (rathole `:80`/`:14443` ripped
+  out)**: rathole `http`/`https` service blocks removed from
+  `rathole-server.toml.j2` and the rathole client `http`/`https` blocks
+  from `rathole-client-config.toml.j2`. frpc http `remotePort` is now
+  `80` (was the `17080` alt), so frp serves the production primary
+  `:80`/`:443`. rathole remains for ssh/admin/bastion ingress pending
+  full step-6 cleanup. ACME HTTP-01 is now served via the frp alt vhost
+  (`admin-api-alt.conf.j2` on `127.0.0.2:17080`) and `certbot_manager.py`
+  gates on `frpc` instead of `rathole`. Stale ufw rules (`14443`
+  rathole-https rollback, `17080` frp-alt http) get deleted at apply.
 - **Step 6 — rip out rathole (pending, gated on soak)**: remove
   rathole playbooks/configs/units/helpers, drop the parallel-run
   artifacts (`admin-api-alt.conf.j2`, the location-body includes,

@@ -130,6 +130,18 @@
         proto: tcp
       loop: "{{ rathole_public_ports.stdout_lines }}"
 
+    # rathole no longer carries the public HTTP/HTTPS tunnels — those moved
+    # to frp (:80 / :443). Remove the stale :14443 (rathole HTTPS rollback)
+    # opening so the retired port is fully closed. :80 stays open, taken over
+    # by frps via install-frp-server.yml.
+    - name: Remove retired rathole https rollback port from ufw
+      community.general.ufw:
+        rule: allow
+        port: '14443'
+        proto: tcp
+        delete: yes
+      failed_when: false
+
     - name: Set default-deny incoming and enable ufw
       community.general.ufw:
         state: enabled
