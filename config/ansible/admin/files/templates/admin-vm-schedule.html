@@ -121,10 +121,10 @@
               <code>Host &lt;vm&gt;</code> block only auths the VM hop —
               the ProxyJump step (the bastion) needs the same
               <code>IdentityFile</code> in a separate
-              <code x-text="`Host ${ssh.rathole_host || '<rathole-host>'}`"></code>
+              <code x-text="`Host ${ssh.frp_host || '<frp-host>'}`"></code>
               block, or the key loaded into your ssh-agent.</span>
-            <span class="error" x-show="!ssh.rathole_host">set the public
-              SSH host: replace &lt;rathole-host&gt;</span>
+            <span class="error" x-show="!ssh.frp_host">set the public
+              SSH host: replace &lt;frp-host&gt;</span>
           </div>
         </div>
       </template>
@@ -278,7 +278,7 @@
         // HostName is needed. Falls back to placeholders when the server
         // couldn't supply the public host / port.
         sshConfig(row) {
-          const host = this.ssh.rathole_host || '<rathole-host>'
+          const host = this.ssh.frp_host || '<frp-host>'
           const port = row.port || '<port>'
           const jump = this.ssh.jump_user || 'jump'
           const user = this.ssh.vm_user || 'ubuntu'

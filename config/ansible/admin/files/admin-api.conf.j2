@@ -1,4 +1,4 @@
-# HTTP - cluster-subnet only (external traffic arrives on 127.0.0.2:80 below)
+# HTTP - cluster-subnet only (external HTTP is served by the frp alt vhost)
 server {
     listen 80;
     server_name _;
@@ -66,83 +66,3 @@ server {
         include /etc/nginx/admin-api-locations.conf;
     }
 }
-
-# HTTPS - PUBLIC whitelist (retired rathole tunnel endpoint on 127.0.0.2).
-# rathole no longer carries public http/https — frp serves :80/:443 through
-# the frp alt vhost (admin-api-alt.conf.j2) with PROXY protocol. This block
-# is the old rathole-forwarded vhost and is kept only for step-6 cleanup;
-# it is not externally reachable anymore. Historically rathole 0.5.0 had no
-# PROXY protocol support, so real client IPs were lost and rate limits
-# acted as global buckets — frp fixes that.
-server {
-    {% if use_tls %}
-    listen 127.0.0.2:443 ssl http2;
-    {% else %}
-    listen 127.0.0.2:80;
-    {% endif %}
-    server_name _;
-
-    {% if use_tls %}
-    ssl_certificate /etc/nginx/ssl/cert.pem;
-    ssl_certificate_key /etc/nginx/ssl/key.pem;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    {% endif %}
-    add_header X-Frame-Options DENY always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header X-XSS-Protection "1; mode=block" always;
-
-    # Return a clean 429 instead of nginx's default HTML page when rate-limited
-    limit_req_status 429;
-
-    {% if not use_tls %}
-    # ACME HTTP-01 challenges (certbot --webroot) for the FIRST certificate:
-    # until TLS exists this block owns the 127.0.0.2:80 tunnel endpoint, so
-    # the challenge path must be served here (the TLS-mode twin lives in the
-    # redirect block below).
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/html;
-        default_type text/plain;
-    }
-    {% endif %}
-
-    # Public whitelist (wg bootstrap flow + read-only status dashboard).
-    include /etc/nginx/admin-api-public-locations.conf;
-
-    # Authenticated pages (forward-auth via the cluster IdP).
-    include /etc/nginx/admin-api-authed-locations.conf;
-
-    # Anything not in the whitelist is not exposed.
-    location / {
-        return 404;
-    }
-}
-
-{% if use_tls %}
-# HTTP - PUBLIC (rathole tunnel endpoint on 127.0.0.2:80) — redirect to HTTPS.
-# Only installed when TLS is enabled, otherwise the public block above
-# already listens on 127.0.0.2:80 itself.
-server {
-    listen 127.0.0.2:80;
-    server_name _;
-
-    # ACME HTTP-01 challenges (certbot --webroot). Must live in THIS block:
-    # explicit 127.0.0.2:80 listeners beat the wildcard :80 server, so
-    # certbot's --nginx authenticator (which injects into wildcard/name-
-    # matched blocks) never answers on the tunnel path.
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/html;
-        default_type text/plain;
-    }
-
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-{% endif %}

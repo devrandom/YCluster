@@ -74,6 +74,15 @@ etcd schema:
   allowed through ufw by `app/install-frp-server.yml`, and the matching
   vm-bastion blocks were removed from `rathole-server.toml.j2` (rathole now
   carries only admin 8821/8822).
+- **Step 6 — pre-admin cleanup (no rathole dependency)**: `app.py`
+  flipped `_rathole_public_host` → `_frp_public_host` (deliverable #8,
+  VM-schedule page now reads `/cluster/nodes/frp/config`; same host value
+  today, and it survives the rathole etcd-key deletion). Removed the
+  retired rathole public vhost blocks (`127.0.0.2:443` whitelist +
+  `127.0.0.2:80` redirect/acme) from `admin-api.conf.j2`; external public
+  traffic stays on the frp alt vhost. Remaining step-6 items (vhost
+  consolidation + PROXY protocol on the main vhost, per-client rate limits,
+  rathole teardown/admin switchover) still open.
 - **Step 6 — rip out rathole (pending, gated on soak)**: remove
   rathole playbooks/configs/units/helpers, drop the parallel-run
   artifacts (`admin-api-alt.conf.j2`, the location-body includes,
@@ -132,3 +141,24 @@ Step 6 lands after.
 Refs:
 - `../ycluster-private/incidents/dev1-rathole-flap-2026-07-17.md`
 - `wg-inbound-follow-leader.md` (the rathole PROXY half is folded in)
+
+## Follow-up (recorded, not started)
+
+- **Bastion: opaque "VM down" error.** During the nv4 smoke test, `ssh -J
+  jump@<host>:<port> ubuntu@<vm>` to a stopped VM (`dr-g1`, powered off)
+  failed with a generic `Stdio forwarding request failed: Session open
+  refused by peer` / `Connection closed by remote host` — nothing indicates
+  the target VM isn't running. OpenSSH's `-W`/direct-tcpip channel-open
+  refusal carries no user-facing reason over the SSH transport, so a
+  friendly message needs a client-side proxy helper or a bastion-side guard
+  (e.g. per-VM health check) rather than relying on sshd's refusal text.
+  Deferred; not part of this migration.
+
+- **Roll out bastion migration to all of `compute`, not just known hosts.**
+  `admin/install-vm-bastion.yml` self-prunes to Incus hosts (`incus_vm_host`
+  / `incus_container_host`), so future or newly-registered VM/container hosts
+  in the `compute`/`nvidia` groups won't be migrated by a `--limit`
+  pointing only at the current bastions. To avoid stale rathole-bastion
+  state piling up, eventually run it against all of `compute` (e.g.
+  `--limit compute`) so any new Incus host is picked up automatically.
+  2026-08-05 rollout covered: nv2, nv4, nv6, c1, c2, c3.
