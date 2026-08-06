@@ -48,5 +48,8 @@ config/ansible/inventory_cluster.yml
 # (the replace spec contains the very strings being scrubbed — never commit it)
 /private/
 
-# host_vars lives in the sibling private repo ycluster-private (symlinked in)
+# host_vars and the storage group_vars live in the sibling private repo
+# ycluster-private (symlinked in; dev-sync dereferences them via
+# rsync --copy-unsafe-links)
 /config/ansible/host_vars
+/config/ansible/group_vars/storage

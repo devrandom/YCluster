@@ -25,7 +25,7 @@ Everything lives under `/etc/zulip`:
 | Data dirs | `/rbd/misc/zulip/{data,rabbitmq,redis}` |
 | systemd | `zulip.service` under `ycluster-apps.target`; `ExecStart=/usr/local/lib/cluster/zulip-manager start` |
 | Secrets | etcd keys under `/cluster/config/zulip/*` (written by `zulip-manager ensure-secrets`) |
-| Egress filter | host `DOCKER-USER` chain pins the stack subnet `172.16.0.0/24` to self + Postgres only |
+| Egress filter | host `ZULIP-EGRESS` chain (jumped from `DOCKER-USER`) pins the stack subnet `172.16.0.0/24` to self + Postgres + `push.zulipchat.com:443`; refreshed by `zulip-egress-refresh.timer` |
 
 Commands below assume you have a shell on the storage leader, or an
 entry host (`YC_SYNC_HOST`) that reaches it. Most live commands run on
@@ -274,10 +274,43 @@ data, the Postgres DB/role, and the service are in place there.
   flip without editing the playbook, e.g.
   `-e zulip_auth_backends='EmailAuthBackend,SAMLAuthBackend'`;
   commit the new value only when it should become the persistent default.
-- The DOCKER-USER egress filter is source-scoped to the Zulip subnet
-  and inert anywhere the stack isn't running. It's gated by
+- The egress filter (a dedicated `ZULIP-EGRESS` chain jumped from
+  `DOCKER-USER`) is source-scoped to the Zulip subnet and inert
+  anywhere the stack isn't running. It's gated by
   `zulip_egress_filter_enabled` in `install-zulip.yml` (a firewall
-  change; set `false` to fall back to ingress-only if desired).
+  change; set `false` to fall back to ingress-only if desired). The
+  push bouncer hole is resolved dynamically and refreshed by
+  `zulip-egress-refresh.timer` (every 15 min), so no IPs are pinned.
+
+## Mobile push
+
+Zulip's mobile apps deliver via Zulip's hosted push service, not SMTP:
+the server registers with `push.zulipchat.com` and forwards device
+tokens there. The playbook enables the client settings
+(`ZULIP_SERVICE_PUSH_NOTIFICATIONS=True`,
+`ZULIP_SERVICE_SUBMIT_USAGE_STATISTICS=False`, bouncer URL pinned) and
+widens the egress hole to `push.zulipchat.com:443`; what remains is an
+operator step because it accepts Zulip's ToS and manages the plan.
+
+```bash
+# on the storage leader, with the service running
+/usr/local/lib/cluster/zulip-manager register-push
+```
+
+- `register-push` runs `manage.py register_server --agree-to-terms-of-service`
+  inside the container, so accepting the ToS is baked into the step.
+- Using `register-push` again after changing the contact email
+  re-registers with the new contact.
+- After registration, **every existing mobile user must log out of the
+  app and log back in** so their device registers — push won't start
+  until they do.
+- `ZULIP_ADMINISTRATOR` (the `zulip_admin_email` var, set in
+  `ycluster-private/group_vars/storage/zulip.yml`) is the contact the
+  push service uses; it must stay a monitored mailbox.
+- Plan: ≤10 users works on the Free plan; YCluster has more users, so
+  the free **Community plan** (non-commercial org) is required. Apply
+  on Zulip's side (separate from this repo); nothing in the playbook
+  changes between plans.
 
 ## Known limitations
 
@@ -286,4 +319,3 @@ data, the Postgres DB/role, and the service are in place there.
   the install playbook. External `zulip.<domain>` is unaffected.
 - **No outbound email** (console backend): confirmation/invite links
   must be pulled from logs or admin UI and delivered out-of-band.
-- **Mobile push** is not configured (Zulip's push-relay service).

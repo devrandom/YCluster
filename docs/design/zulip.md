@@ -230,25 +230,35 @@ reduce Zulip's reach):
   the UDS. Port 25 stays unpublished (outbound SMTP and inbound
   email both off) and 443 is not published to the host
   (nginx terminates TLS).
-- **Limit outgoing, not just ingress.** The `zulip` container's only
-  required egress is the shared Postgres; there is no internet or
-  cluster-service path in the current design (no SMTP, no push
-  relay; SAML is inbound — Zulip never fetches the IdP
-  server-side). So instead of `--network=none`, we enforce that
-  single egress with a **host-side egress filter** — which is what
-  `--network=none` reduces to for a container that still needs TCP
-  to Postgres:
+- **Limit outgoing, not just ingress.** The `zulip` container's
+  required egress is the shared Postgres plus the Zulip-hosted mobile
+  push bouncer; there is no broader internet or cluster-service path
+  in the current design (no SMTP; SAML is inbound — Zulip never
+  fetches the IdP server-side). So instead of `--network=none`, we
+  enforce that small egress set with a **host-side egress filter** —
+  which is what `--network=none` reduces to for a container that
+  still needs TCP to Postgres (and, now, HTTPS to
+  `push.zulipchat.com` for mobile push):
   - Pin the Zulip compose network to a fixed IPAM subnet in the
     compose file (docker otherwise hands the bridge a random
     172.x.y.0/24 per deployment, which the filter can't reference).
-  - In the `DOCKER-USER` iptables chain (docker's preserved,
-    non-flushed hook — the repo already manages iptables via
-    `iptables-persistent`, see `setup-gateway-vip.yml`), allow the
-    Zulip bridge subnet to reach only (a) itself — memcached /
-    rabbitmq / redis — and (b) the leader's Postgres
-    (`172.0.0.0/8` tcp/5432, matching the existing pg_hba scope);
-    **DROP** all other egress. The supporting containers already
-    publish nothing, so nothing else leaves the bridge.
+  - Implement the filter as a dedicated `ZULIP-EGRESS` chain that is
+    flushed and rebuilt on every run, jumped to from docker's
+    preserved, non-flushed `DOCKER-USER` hook (the repo already
+    manages iptables via `iptables-persistent`, see
+    `setup-gateway-vip.yml`). Allow the Zulip bridge subnet to reach
+    (a) itself — memcached / rabbitmq / redis — (b) the leader's
+    Postgres (`172.0.0.0/8` tcp/5432, matching the existing pg_hba
+    scope), and (c) the hosted push bouncer `push.zulipchat.com`
+    tcp/443; **DROP** all other egress. The supporting containers
+    already publish nothing, so nothing else leaves the bridge.
+  - The push bouncer sits behind Akamai and its addresses change, so
+    the bouncer hole is resolved **dynamically at apply time**:
+    `getent ahostsv4 push.zulipchat.com` yields one ACCEPT per returned
+    A record (IPv4 only — the compose bridge is IPv4 and the stack has
+    no IPv6 egress path). A systemd timer (`zulip-egress-refresh.timer`,
+    every 15 min with randomized delay) re-resolves between playbook
+    runs so the hole stays current without hard-coding IPs.
   - Applied **unconditionally on every storage node** — no
     leader-election gating. The rule is source-scoped to the pinned
     Zulip subnet, so on any node where the Zulip stack isn't running
@@ -271,9 +281,10 @@ becomes load-bearing, address it at the Zulip application layer
 (restrict or disable the image proxy), not by widening the network
 filter. Decision: keep the docker-compose bridge + loopback-only
 published web port + nginx/socat ingress, and add the `DOCKER-USER`
-egress filter (pinned subnet → Postgres-only) as the outgoing
-control. Do **not** port `--network=none` + UDS to the Zulip app
-container.
+egress filter (pinned subnet → self + Postgres + `push.zulipchat.com`
+tcp/443) as the outgoing control, kept current by the dynamic
+resolution timer. Do **not** port `--network=none` + UDS to the Zulip
+app container.
 
 ### RBD layout
 
@@ -690,9 +701,14 @@ to `filebased.EmailBackend` with `EMAIL_FILE_PATH` pointing at
   exposure"), so port 25 is *not* exposed on the host; inbound email
   handling stays off until someone explicitly wants
   `EMAIL_GATEWAY_PATTERN` + a published SMTP port. Safe default.
-- **Desktop / mobile push notifications**: Zulip's mobile apps use
-  Zulip's own push-notification relay, not SMTP. Out of scope for
-  this design.
+- **Mobile push notifications**: Zulip's mobile apps use Zulip's own
+  push-notification relay — the self-hosted server registers with the
+  Zulip-hosted bouncer (`push.zulipchat.com`) rather than SMTP. In
+  scope: the container gains an egress hole to the bouncer on 443
+  (see "Limit outgoing"), the server registers via
+  `zulip-manager register-push`, and each mobile user must log out and
+  back in once so their device token registers. Registration and plan
+  management are operator actions, not part of the playbook.
 
 ### Switching back on later
 
@@ -809,10 +825,11 @@ SAML round trip).
   runs one Zulip, so we use the root domain and don't need
   `RelayState` machinery. Revisit if the cluster ever hosts
   multiple Zulip orgs.
-- **Mobile push notifications**: Zulip's mobile apps need a
-  push-notification relay (`zulip-push` or APNs/FCM credentials).
-  Out of scope for this design; revisit when someone asks for the
-  mobile app.
+- **Mobile push plan/limits**: registration itself is config-free and
+  done via `zulip-manager register-push`. The push service allows ≤10
+  users on the Free plan; YCluster has more users, so a free Community
+  plan (non-commercial org) is required — submitted by the operator
+  and applied on Zulip's side. Not a code change.
 - **Storage sizing**: Zulip's `/data/uploads/` grows unbounded
   with attachments. The `/rbd/misc` volume currently has ~30 GB
   free across the cluster. Decide whether to enable Zulip's S3

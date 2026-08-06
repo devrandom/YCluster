@@ -57,6 +57,18 @@
     # leader task below, gated on zulip.service being active (the realm only
     # exists after org bootstrap, so the first fresh-install run skips it).
     zulip_auto_join: true
+    # Mobile push via Zulip's hosted push service (push.zulipchat.com). On by
+    # default; the Zulip container needs this as an extra egress hole on 443.
+    zulip_push_notifications: true
+    # Data we share with Zulip. Off by decision: we get the service without
+    # sending the maintainers usage statistics (basic org metadata is still
+    # sent as part of registering with the service regardless).
+    zulip_push_submit_usage_statistics: false
+    # Contact email for the Zulip server / push service point of contact.
+    # Deployment-specific, so it lives in ycluster-private
+    # (group_vars/storage/zulip.yml -> zulip_admin_email) — deliberately not
+    # defined here. The unit passes it through only when present; zulip-manager
+    # falls back to a derived zulip-admin@<external host> otherwise.
   tasks:
     - name: Check if this host is the storage leader
       shell: mountpoint -q /rbd/user
@@ -127,6 +139,18 @@
           # auto-decides (email-only -> +SAML once the IdP cert is fetchable).
           {% if zulip_auth_backends %}
           Environment=ZULIP_AUTH_BACKENDS={{ zulip_auth_backends }}
+          {% endif %}
+          # Hosted push service: enables push via the Zulip bouncer, and keeps
+          # usage-statistics sharing off (see vars above).
+          Environment=ZULIP_PUSH_NOTIFICATIONS={{ zulip_push_notifications | bool }}
+          Environment=ZULIP_SUBMIT_USAGE_STATISTICS={{ zulip_push_submit_usage_statistics | bool }}
+          # Administrator contact, set in ycluster-private group_vars/storage.
+          # The push service uses it as its point of contact, so when present it
+          # is passed through to SETTING_ZULIP_ADMINISTRATOR. Omitted when the
+          # private var is absent: zulip-manager falls back to the derived
+          # zulip-admin@<external host>.
+          {% if zulip_admin_email | default('') %}
+          Environment=ZULIP_ADMIN_EMAIL={{ zulip_admin_email }}
           {% endif %}
 
           [Install]
@@ -303,36 +327,70 @@
       notify: reload nginx
 
     # DOCKER-USER egress filter: allow the Zulip bridge subnet to reach only
-    # itself (memcached/rabbitmq/redis) and the leader's Postgres, then DROP
-    # the rest. Applied unconditionally on every storage node — source-scoped
-    # to the pinned subnet, so it's inert wherever the Zulip stack isn't
-    # running. The DROP only governs packets *from* the Zulip subnet; return
-    # traffic is sourced elsewhere and flows through docker's normal FORWARD.
-    # A firewall change staged for operator sign-off (AGENTS.md).
+    # itself (memcached/rabbitmq/redis), the leader's Postgres, and the hosted
+    # push bouncer, then DROP the rest. Implemented as a dedicated ZULIP-EGRESS
+    # chain that is flushed and rebuilt on every run (so the push bouncer's
+    # addresses stay current), plus a systemd timer to keep re-resolving
+    # between playbook runs. Applied unconditionally on every storage node —
+    # source-scoped to the pinned subnet, so it's inert wherever the Zulip
+    # stack isn't running. A firewall change staged for operator sign-off
+    # (AGENTS.md).
     - name: Install Zulip egress filter script
       copy:
         dest: /usr/local/lib/cluster/setup-zulip-egress
         mode: '0755'
         content: |
           #!/bin/bash
-          set -e
-          ZS="172.16.0.0/24"   # zulip_egress_subnet — keep in sync with install-zulip.yml
-          POSTGRES="172.0.0.0/8"  # matches the cluster pg_hba rule (tcp/5432)
+          set -euo pipefail
+          ZS="172.16.0.0/24"              # zulip_egress_subnet — keep in sync with install-zulip.yml
+          POSTGRES="172.0.0.0/8"          # matches the cluster pg_hba rule (tcp/5432)
+          PUSH_HOST="push.zulipchat.com"  # hosted push bouncer (Akamai; IPs change)
 
           iptables -N DOCKER-USER 2>/dev/null || true
 
-          # Insert at the top of DOCKER-USER so these precede docker's
-          # trailing RETURN. Reverse order so the DROP ends up last:
-          #   ACCEPT self  ->  ACCEPT Postgres  ->  DROP everything else.
-          iptables -I DOCKER-USER 1 -s "$ZS" -j DROP
-          iptables -I DOCKER-USER 1 -s "$ZS" -d "$POSTGRES" -p tcp --dport 5432 -j ACCEPT
-          iptables -I DOCKER-USER 1 -s "$ZS" -d "$ZS" -p tcp -j ACCEPT
+          # Rebuild the stack's egress policy from scratch each run, in a
+          # dedicated chain, so DNS drift never leaves stale push addresses
+          # behind. Idempotent by construction (flush + repopulate).
+          iptables -N ZULIP-EGRESS 2>/dev/null || true
+          iptables -F ZULIP-EGRESS
+
+          # The Zulip bridge subnet can reach itself (memcached / rabbitmq /
+          # redis) and the leader's Postgres...
+          iptables -A ZULIP-EGRESS -s "$ZS" -d "$ZS" -p tcp -j ACCEPT
+          iptables -A ZULIP-EGRESS -s "$ZS" -d "$POSTGRES" -p tcp --dport 5432 -j ACCEPT
+
+          # ...and the hosted push bouncer on 443. Resolve at apply time to
+          # whatever A records DNS currently returns (IPv4 only — the compose
+          # bridge is IPv4 and the stack has no IPv6 egress path). A systemd
+          # timer re-runs this to stay current as Akamai shuffles addresses.
+          if command -v getent >/dev/null 2>&1; then
+              while read -r ip; do
+                  [ -n "$ip" ] || continue
+                  iptables -A ZULIP-EGRESS -s "$ZS" -d "$ip" -p tcp --dport 443 -j ACCEPT
+              done < <(getent ahostsv4 "$PUSH_HOST" | awk '{print $1}' | sort -u)
+          fi
+
+          # DROP everything else from the Zulip subnet.
+          iptables -A ZULIP-EGRESS -s "$ZS" -j DROP
+
+          # Point DOCKER-USER at our chain, exactly once, at the top (before
+          # docker's trailing RETURN); -D then -I makes the jump idempotent.
+          iptables -D DOCKER-USER -j ZULIP-EGRESS 2>/dev/null || true
+          iptables -I DOCKER-USER 1 -j ZULIP-EGRESS
+
+          # Best-effort drop the legacy flat rules this script used to write
+          # directly into DOCKER-USER, now superseded by the chain above. Done
+          # after the jump is live so there is never a gap where the subnet is
+          # unrestricted.
+          iptables -D DOCKER-USER -s "$ZS" -j DROP 2>/dev/null || true
+          iptables -D DOCKER-USER -s "$ZS" -d "$POSTGRES" -p tcp --dport 5432 -j ACCEPT 2>/dev/null || true
+          iptables -D DOCKER-USER -s "$ZS" -d "$ZS" -p tcp -j ACCEPT 2>/dev/null || true
 
           iptables-save > /etc/iptables/rules.v4
       when: zulip_egress_filter_enabled | bool
 
-    - name: Check whether the Zulip DOCKER-USER egress rule is present
-      command: iptables -C DOCKER-USER -s {{ zulip_egress_subnet }} -d {{ zulip_egress_postgres_scope }} -p tcp --dport 5432 -j ACCEPT
+    - name: Check whether the Zulip egress chain is present in DOCKER-USER
+      command: iptables -C DOCKER-USER -j ZULIP-EGRESS
       register: zulip_egress_check
       failed_when: false
       changed_when: false
@@ -343,6 +401,47 @@
       when:
         - zulip_egress_filter_enabled | bool
         - zulip_egress_check.rc != 0
+
+    # Keep the push bouncer hole current between playbook runs:
+    # push.zulipchat.com sits on Akamai and its addresses change, so re-resolve
+    # and rebuild the egress rules on an interval. Runs on all storage nodes —
+    # the chain is source-scoped and inert where the stack isn't running.
+    - name: Install Zulip egress refresh service
+      copy:
+        dest: /etc/systemd/system/zulip-egress-refresh.service
+        content: |
+          [Unit]
+          Description=Refresh Zulip egress filter (dynamic push bouncer IPs)
+          After=network-online.target docker.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/lib/cluster/setup-zulip-egress
+      when: zulip_egress_filter_enabled | bool
+
+    - name: Install Zulip egress refresh timer
+      copy:
+        dest: /etc/systemd/system/zulip-egress-refresh.timer
+        content: |
+          [Unit]
+          Description=Periodically refresh Zulip egress filter dynamic IPs
+
+          [Timer]
+          OnCalendar=*:0/15
+          RandomizedDelaySec=300
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+      when: zulip_egress_filter_enabled | bool
+
+    - name: Enable Zulip egress refresh timer
+      systemd:
+        name: zulip-egress-refresh.timer
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      when: zulip_egress_filter_enabled | bool
 
   handlers:
     - name: reload nginx

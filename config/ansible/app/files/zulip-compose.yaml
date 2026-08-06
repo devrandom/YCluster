@@ -10,7 +10,8 @@
 #     controlled ingress. Ports 25 and 443 are not published to the host.
 #   - Egress isolation: the stack's default bridge network is pinned to a
 #     fixed subnet so the host DOCKER-USER filter (installed by
-#     install-zulip.yml) can allow Postgres-only outbound. The container must
+#     install-zulip.yml) allows outbound only to self, the leader's Postgres,
+#     and the hosted push bouncer (push.zulipchat.com:443). The container must
 #     still reach the shared Postgres, so we can't use MinerU's --network=none.
 #   - memcached / rabbitmq / redis are kept from upstream (ephemeral; no
 #     cluster-wide backup story). They publish nothing; they only talk on the
@@ -101,7 +102,18 @@ services:
       SETTING_RABBITMQ_HOST: rabbitmq
       SETTING_REDIS_HOST: redis
       SETTING_EXTERNAL_HOST: ${ZULIP_EXTERNAL_HOST:-zulip.xc}
+      # Administrator contact (zulip-manager: the private zulip_admin_email var
+      # when set, else the derived zulip-admin@<external host>). The push
+      # service uses this as its point of contact.
       SETTING_ZULIP_ADMINISTRATOR: ${ZULIP_ADMIN_EMAIL:-zulip-admin@zulip.xc}
+      # Hosted mobile-push service (push.zulipchat.com), enabled via
+      # zulip-manager. The Zulip container reaches the bouncer over 443 through
+      # the widened egress filter (see install-zulip.yml setup-zulip-egress).
+      # Usage-statistics submission is off by decision; the bouncer URL is set
+      # explicitly so the service target is unambiguous.
+      SETTING_ZULIP_SERVICE_PUSH_NOTIFICATIONS: ${ZULIP_PUSH_NOTIFICATIONS:-True}
+      SETTING_ZULIP_SERVICE_SUBMIT_USAGE_STATISTICS: ${ZULIP_SUBMIT_USAGE_STATISTICS:-False}
+      SETTING_PUSH_NOTIFICATION_BOUNCER_URL: "https://push.zulipchat.com"
       # No outbound SMTP: console backend instead of silently hanging on
       # localhost:25 (design decision). See docs/design/zulip.md.
       SETTING_EMAIL_BACKEND: "django.core.mail.backends.console.EmailBackend"

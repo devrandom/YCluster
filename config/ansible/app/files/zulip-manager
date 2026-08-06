@@ -179,7 +179,7 @@ start_zulip() {
     else
         zulip_external_host="zulip.xc"
     fi
-    local admin_email="zulip-admin@$zulip_external_host"
+    local admin_email="${ZULIP_ADMIN_EMAIL:-zulip-admin@$zulip_external_host}"
 
     local env_file=$(mktemp --tmpdir=/dev/shm)
     trap "rm -f '$env_file'" EXIT
@@ -190,6 +190,12 @@ start_zulip() {
     echo "ZULIP_EGRESS_SUBNET=${ZULIP_EGRESS_SUBNET:-172.16.0.0/24}" >> "$env_file"
     echo "ZULIP_EXTERNAL_HOST=$zulip_external_host" >> "$env_file"
     echo "ZULIP_ADMIN_EMAIL=$admin_email" >> "$env_file"
+    # Hosted push service via push.zulipchat.com. On by default; the install
+    # unit passes ZULIP_PUSH_NOTIFICATIONS / ZULIP_SUBMIT_USAGE_STATISTICS
+    # (True/False) so both stay explicit and operator-tunable. Usage-statistics
+    # submission is off by decision.
+    echo "ZULIP_PUSH_NOTIFICATIONS=${ZULIP_PUSH_NOTIFICATIONS:-True}" >> "$env_file"
+    echo "ZULIP_SUBMIT_USAGE_STATISTICS=${ZULIP_SUBMIT_USAGE_STATISTICS:-False}" >> "$env_file"
 
     # SAML (design step 5): fetch the IdP signing cert and, when available,
     # enable the SAML auth backend alongside email. Idempotent on every start
@@ -259,8 +265,19 @@ case "$1" in
         # created with the same password Zulip will read at first boot.
         ensure_secrets
         ;;
+    register-push)
+        # Register this server with the Zulip-hosted push-notification service
+        # (push.zulipchat.com). Requires the stack to be running. Re-running is
+        # idempotent for the same hostname/contact (Zulip re-applies the
+        # registration); if EXTERNAL_HOST ever changes, use Zulip's
+        # --registration-transfer path instead. --agree-to-terms-of-service
+        # skips the interactive prompt so the step is scriptable.
+        cd /etc/zulip
+        docker compose -p "$COMPOSE_PROJECT" exec -T zulip su zulip -c \
+            '/home/zulip/deployments/current/manage.py register_server --agree-to-terms-of-service'
+        ;;
     *)
-        echo "Usage: $0 {start|stop|ensure-secrets}"
+        echo "Usage: $0 {start|stop|ensure-secrets|register-push}"
         exit 1
         ;;
 esac
