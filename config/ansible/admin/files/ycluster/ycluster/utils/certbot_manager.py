@@ -529,11 +529,21 @@ def renew_certificates(non_interactive=False):
             '--cert-path', str(cert_path),
             '--chain-path', str(chain_path)
         ]
-        
+
+        # Registration/TOS flags — without these certbot refuses to run
+        # non-interactively on a fresh account (same flags as obtain_certificate).
+        cmd.extend(['--agree-tos', '--no-eff-email'])
+
         # Add non-interactive flag if requested
         if non_interactive:
             cmd.append('--non-interactive')
-        
+
+        # Add email or register without email
+        if config.get('email'):
+            cmd.extend(['--email', config['email']])
+        else:
+            cmd.append('--register-unsafely-without-email')
+
         result = run_certbot_command(cmd, check=False)
         if result.returncode == 0:
             print("Certificate renewal completed successfully!")
