@@ -223,9 +223,13 @@ data, the Postgres DB/role, and the service are in place there.
   - Both sides derive all URLs from the single `/cluster/https/domain`
     value, so the Zulip-side `SOCIAL_AUTH_SAML_*` settings and the
     Authentik-side provider stay in sync.
-- If SAML needs to be disabled (or just email during an outage), the
-  manual override is `ZULIP_AUTH_BACKENDS=EmailAuthBackend` — the
-  compose file defaults to email-only when the cert isn't present.
+- To go SAML-only after validation, set `zulip_auth_backends:
+  "SAMLAuthBackend"` in `install-zulip.yml` and re-run. That writes
+  `ZULIP_AUTH_BACKENDS=SAMLAuthBackend` on the unit, overriding the
+  manager's auto-detection. Leave it empty on fresh installs (needed
+  for org bootstrap). Break-glass: flip back to
+  `EmailAuthBackend,SAMLAuthBackend` if Authentik degrades — email
+  accounts already exist, nothing is lost.
 - The DOCKER-USER egress filter is source-scoped to the Zulip subnet
   and inert anywhere the stack isn't running. It's gated by
   `zulip_egress_filter_enabled` in `install-zulip.yml` (a firewall

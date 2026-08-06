@@ -36,6 +36,12 @@
     # existing pg_hba rule (host all all 172.0.0.0/8 scram-sha-256).
     zulip_egress_postgres_scope: "172.0.0.0/8"
     zulip_egress_filter_enabled: true
+    # Auth backends. Empty (default) = let zulip-manager auto-decide at start:
+    # EmailAuthBackend only until it can fetch the SAML IdP cert, then
+    # EmailAuthBackend,SAMLAuthBackend. Set this to "SAMLAuthBackend" for
+    # SAML-only once the operator's SAML round trip is validated (break-glass:
+    # flip back to EmailAuthBackend,SAMLAuthBackend if Authentik degrades).
+    zulip_auth_backends: ""
   tasks:
     - name: Check if this host is the storage leader
       shell: mountpoint -q /rbd/user
@@ -102,6 +108,11 @@
           # Local port of the Authentik API on the same leader; zulip-manager
           # uses it to fetch the SAML IdP signing cert.
           Environment=AUTHENTIK_PORT={{ authentik_local_port | default('9300') }}
+          # Explicit auth-backend override; omitted by default so zulip-manager
+          # auto-decides (email-only -> +SAML once the IdP cert is fetchable).
+          {% if zulip_auth_backends %}
+          Environment=ZULIP_AUTH_BACKENDS={{ zulip_auth_backends }}
+          {% endif %}
 
           [Install]
           WantedBy=ycluster-apps.target
