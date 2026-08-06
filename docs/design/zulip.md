@@ -282,7 +282,7 @@ container.
 | `/rbd/misc/zulip/data` | bind-mounted onto the Zulip container's `/data` — holds uploads, the auto-backup `pg_dump` artifacts, and (with `LINK_SETTINGS_TO_DATA=True`) `/etc/zulip/`. Owned by uid 1000 (the image's `zulip` user); the entrypoint chowns it. | docker-zulip `data-volume.md` |
 | `/rbd/misc/zulip/rabbitmq` | bind-mounted onto rabbitmq's `/var/lib/rabbitmq`. Owned by the `rabbitmq` container user (uid 999 in `rabbitmq:4.2`). | docker compose `rabbitmq:/var/lib/rabbitmq` |
 | `/rbd/misc/zulip/redis` | bind-mounted onto redis's `/data`. Owned by the `redis` container user (uid 999 in `redis:alpine`). | docker compose `redis:/data` |
-| `/rbd/misc/zulip/saml/idps/authentik.crt` | the IdP public certificate Zulip validates incoming SAMLResponses against. Written once by `install-zulip.yml` after pulling the cert from Authentik via its API. | Zulip auth-methods.md |
+| `/rbd/misc/zulip/saml/idps/authentik.crt` | the IdP public certificate Zulip validates incoming SAMLResponses against. Fetched by `zulip-manager` (via the Authentik API) on every start, so it follows the RBD on failover. On a fresh install it's available as soon as Authentik is up. | Zulip auth-methods.md |
 | `/rbd/user/postgres` (existing) | cluster-wide Postgres; gains the `zulip` DB + role. | already exists |
 
 The user-volume setup is unchanged — Zulip's DB lives inside the
@@ -421,7 +421,7 @@ generates a blueprint at service start from
 `/cluster/https/domain`:
 
 ```yaml
-# Generated ycluster-zulip.yaml (sketch)
+# Generated ycluster-zulip.yaml
 - model: authentik_providers_saml.samlprovider
   id: provider-zulip
   identifiers:
@@ -429,15 +429,22 @@ generates a blueprint at service start from
   attrs:
     acs_url: https://zulip.$external_domain/complete/saml/
     sls_url: https://zulip.$external_domain/complete/saml/
+    audience: https://zulip.$external_domain/
     issuer: https://auth.$external_domain/
-    sp_entity_id: https://zulip.$external_domain/
-    signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+    signing_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
     verification_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+    # Zulip (python-social-auth) posts the AuthnResponse to /complete/saml/
+    # and requires the response to be signed, so use POST + sign both.
+    sp_binding: POST
+    sign_response: true
+    sign_assertion: true
     property_mappings:
       - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/username]]
       - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/email]]
       - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/name]]
-      - !Find [authentik_providers_saml.samlpropertymapping, [name, ycluster-zulip-user-permanent-id]]
+      # Managed `uid` mapping — emits the user pk (UUID) at
+      # http://schemas.goauthentik.io/2021/02/saml/uid.
+      - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/uid]]
 - model: authentik_core.application
   identifiers:
     slug: zulip
@@ -447,19 +454,22 @@ generates a blueprint at service start from
     meta_launch_url: https://zulip.$external_domain/
 ```
 
-The `ycluster-zulip-user-permanent-id` property mapping is new —
-it sends the user's `pk` (UUID) as `NameID` so
 `attr_user_permanent_id` in Zulip's `SOCIAL_AUTH_SAML_ENABLED_IDPS`
-points at a stable identifier. Per Zulip's auth-methods.md, setting
+points at Authentik's built-in managed **`uid`** mapping (user pk,
+`http://schemas.goauthentik.io/2021/02/saml/uid`) rather than a custom
+property mapping. Per Zulip's auth-methods.md, setting
 `attr_user_permanent_id` to a value different from `attr_email`
 activates automatic email-change sync — a user whose email is
 renamed in Authentik keeps their Zulip identity and Zulip's email
 updates on next login (matches the cluster's user-rename story in
-`docs/design/user-rename.md`).
+`docs/design/user-rename.md`). Using the managed mapping avoids a
+custom SAML property mapping and stays stable across Authentik
+upgrades.
 
 The IdP name in Authentik is `authentik`, which determines the cert
 filename Zulip reads: `/etc/zulip/saml/idps/authentik.crt` — matching
-the official integration guide.
+the official integration guide. `zulip-manager` fetches that keypair's
+public cert from the Authentik API on every start.
 
 ### Zulip side
 
@@ -518,29 +528,32 @@ the default configuration. Zulip auth-methods.md § "Synchronizing
 email addresses with SAML" says email-change sync activates when
 this claim differs from `attr_email`. The official Authentik Zulip
 guide points it at the email claim (so sync stays off); our blueprint
-instead sends the stable Authentik user `pk` (UUID) via the
-`ycluster-zulip-user-permanent-id` property mapping (wired in through
-`property_mappings` above), so a user renamed in Authentik keeps their
-Zulip identity and Zulip's email updates on their next SAML login —
-matching the user-rename story in `docs/design/user-rename.md`. The
-exact claim URI that mapping emits is fixed when
-`write_zulip_blueprint` renders it; the code sample above shows it
-as a placeholder for that value.
+instead sends the stable Authentik user `pk` (UUID) via Authentik's
+built-in managed `uid` property mapping (wired in through
+`property_mappings` above and referenced as
+`http://schemas.goauthentik.io/2021/02/saml/uid`), so a user renamed
+in Authentik keeps their Zulip identity and Zulip's email updates on
+their next SAML login — matching the user-rename story in
+`docs/design/user-rename.md`.
 
 ### The cert
 
-The install playbook fetches the SAML provider's signing cert
-once and writes it to `/rbd/misc/zulip/saml/idps/authentik.crt`,
-which the docker compose binds into the Zulip container at
-`/etc/zulip/saml/idps/authentik.crt`. Authentik exposes the cert
-two ways: via the Admin UI (the "official" path per the
-integrations docs), or via the provider's metadata XML returned
-from `GET /api/v3/providers/saml/<pk>/` (the `<ds:X509Certificate>`
-field). The install playbook should use the API path — same shape
-as `authentik_manager._api_token()`, just hitting the providers
-endpoint with the bootstrap token already in etcd. The cert is on
-RBD so it follows the leader (the RBD is mounted only on the
-leader, same as everything else under `/rbd/misc`).
+`zulip-manager` fetches the SAML provider's signing cert from the
+Authentik API on *every* start and writes it to
+`/rbd/misc/zulip/saml/idps/authentik.crt`, which docker compose binds
+into the Zulip container at `/etc/zulip/saml/idps/authentik.crt`.
+Authentik exposes the cert two ways: via the Admin UI (the "official"
+path per the integrations docs), or via the keypair's
+`view_certificate` download URL from
+`GET /api/v3/crypto/certificatekeypairs/`. The manager uses the API
+path — same authorization as `authentik_manager._api_token()`, with
+the bootstrap token already in etcd — looking up the
+`authentik Self-signed Certificate` keypair by name. The cert is on
+RBD so it follows the leader (the RBD is mounted only on the leader,
+same as everything else under `/rbd/misc`). If Authentik is
+unreachable the manager writes an empty placeholder (keeping the
+bind mount resolvable) and Zulip starts email-only; SAML returns on
+the next start.
 
 ## External exposure
 

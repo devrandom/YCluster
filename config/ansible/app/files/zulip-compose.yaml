@@ -20,9 +20,11 @@
 # /dev/shm (ZULIP__* vars below) and mounted at /run/secrets/zulip__*; the
 # entrypoint copies them into /etc/zulip/zulip-secrets.conf.
 #
-# Future (design step 4, SAML): a read-only bind of the IdP cert at
-#   ${ZULIP_SAML_CERT:-/rbd/misc/zulip/saml/idps/authentik.crt}:/etc/zulip/saml/idps/authentik.crt:ro
-# can be added to the zulip service once write_zulip_blueprint lands.
+# SAML (design step 5): zulip-manager writes ZULIP_SAML_* into the compose
+# env and the SAML provider blueprint into Authentik. The dict values are
+# emitted as Python literals and mounted read-only into the IdP cert path
+# (/etc/zulip/saml/idps/<idp>.crt, where <idp> is the SOCIAL_AUTH_SAML
+# idp key `authentik`). See docs/operations/zulip.md.
 ---
 services:
   memcached:
@@ -101,14 +103,27 @@ services:
       # localhost:25 (design decision). See docs/design/zulip.md.
       SETTING_EMAIL_BACKEND: "django.core.mail.backends.console.EmailBackend"
       # Email bootstrap first (needed to create the initial realm + owner),
-      # flipped to SAML-only in design step 5.
+      # then SAML alongside once the Authentik provider + IdP cert exist
+      # (design step 5; zulip-manager flips this from EmailAuthBackend to
+      # EmailAuthBackend,SAMLAuthBackend when it can reach Authentik).
       ZULIP_AUTH_BACKENDS: ${ZULIP_AUTH_BACKENDS:-EmailAuthBackend}
+      # SAML settings (written by zulip-manager; empty until the SAML cert is
+      # in place). The *_ORG_INFO / *_ENABLED_IDPS values are Python dict
+      # literals — entrypoint setConfigurationValue detects the leading `{`
+      # and writes them verbatim into settings.py.
+      SETTING_SOCIAL_AUTH_SAML_SP_ENTITY_ID: ${ZULIP_SAML_SP_ENTITY_ID:-}
+      SETTING_SOCIAL_AUTH_SAML_ORG_INFO: ${ZULIP_SAML_ORG_INFO:-}
+      SETTING_SOCIAL_AUTH_SAML_ENABLED_IDPS: ${ZULIP_SAML_ENABLED_IDPS:-}
       LINK_SETTINGS_TO_DATA: "True"
       # Host-side nginx (proxying the loopback publish) is the trusted
       # gateway for X-Forwarded-* headers.
       TRUST_GATEWAY_IP: "True"
     volumes:
       - "${ZULIP_DATA_DIR:-/rbd/misc/zulip/data}:/data:rw"
+      # Read-only IdP cert for SAML. The `authentik` filename is load-bearing:
+      # SOCIAL_AUTH_SAML_ENABLED_IDPS uses idp key `authentik`, so
+      # python-social-auth looks it up at /etc/zulip/saml/idps/authentik.crt.
+      - "${ZULIP_SAML_CERT:-/rbd/misc/zulip/saml/idps/authentik.crt}:/etc/zulip/saml/idps/authentik.crt:ro"
     extra_hosts:
       - host.docker.internal:host-gateway
     ulimits:

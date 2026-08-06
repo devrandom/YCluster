@@ -17,8 +17,11 @@
 #     operator sign-off per AGENTS.md; set `zulip_egress_filter_enabled:
 #     false` to veto it and fall back to ingress-only isolation.
 #
-# SAML (Authentik blueprint + IdP cert) is design step 4 and is NOT part of
-# this skeleton; email/password bootstrap is the initial auth (step 3).
+# SAML (design step 5) is part of this install: authentik-manager writes the
+# `zulip` SAML provider blueprint, and zulip-manager fetches the IdP signing
+# cert from Authentik and enables EmailAuthBackend,SAMLAuthBackend once it
+# can reach the API. Email/password remains available for bootstrap + admin
+# recovery; SAML is added alongside it.
 - name: Install Zulip on storage nodes
   hosts: storage
   become: yes
@@ -96,6 +99,9 @@
           Environment=ZULIP_VERSION={{ zulip_version }}
           Environment=ZULIP_PORT={{ zulip_port }}
           Environment=ZULIP_EGRESS_SUBNET={{ zulip_egress_subnet }}
+          # Local port of the Authentik API on the same leader; zulip-manager
+          # uses it to fetch the SAML IdP signing cert.
+          Environment=AUTHENTIK_PORT={{ authentik_local_port | default('9300') }}
 
           [Install]
           WantedBy=ycluster-apps.target

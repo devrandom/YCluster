@@ -200,17 +200,76 @@ EOF
     chmod 600 "$bp"
 }
 
+# Zulip SAML provider (zulip.<domain> -> cluster IdP). Mirrors
+# write_owui_blueprint but for SAML: a provider that signs responses with
+# the shared `authentik Self-signed Certificate`, plus the `zulip`
+# application. Attribute claims reuse Authentik's managed SAML property
+# mappings so the URIs Zulip's SOCIAL_AUTH_SAML_ENABLED_IDPS references are
+# what Authentik actually emits:
+#   - email/name -> the WS .../identity/claims/* URIs
+#   - username   -> schemas.goauthentik.io .../saml/username
+#   - permanent-id (user pk) -> goauthentik.io .../saml/uid (differs from
+#     email, so Zulip keeps email-change sync enabled)
+# The SSO URL Authentik exposes is derived from the application slug
+# (`zulip`) and the IdP base URL (https://auth.<domain>/); zulip-manager
+# reads the same domain so the Zulip-side entity_id/url stay in sync.
+write_zulip_blueprint() {
+    local external_domain="$1"
+    local bp=/etc/authentik/blueprints/ycluster-zulip.yaml
+    cat > "$bp" <<EOF
+# Written by authentik-manager at service start — do not edit.
+version: 1
+metadata:
+  name: ycluster-zulip
+entries:
+  - model: authentik_providers_saml.samlprovider
+    id: provider-zulip
+    identifiers:
+      name: authentik
+    attrs:
+      acs_url: https://zulip.$external_domain/complete/saml/
+      sls_url: https://zulip.$external_domain/complete/saml/
+      audience: https://zulip.$external_domain/
+      issuer: https://auth.$external_domain/
+      signing_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      verification_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      # Zulip (python-social-auth) posts the AuthnResponse to /complete/saml/
+      # and requires the response to be signed (wantMessagesSigned), so send
+      # back over POST and sign both the response and the assertion.
+      sp_binding: POST
+      sign_response: true
+      sign_assertion: true
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      property_mappings:
+        - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/email]]
+        - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/name]]
+        - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/username]]
+        - !Find [authentik_providers_saml.samlpropertymapping, [managed, goauthentik.io/providers/saml/uid]]
+  - model: authentik_core.application
+    identifiers:
+      slug: zulip
+    attrs:
+      name: Zulip
+      provider: !KeyOf provider-zulip
+      meta_launch_url: https://zulip.$external_domain/
+EOF
+    chown 1000:1000 "$bp"
+    chmod 600 "$bp"
+}
+
 # Write the domain-dependent blueprints (OWUI OIDC client + admin/app
-# forward-auth). Only once an external domain exists — redirect URIs and
-# launch URLs are external-only. The authentik worker watches the blueprint
-# dir and auto-applies on change, so refreshing these needs no container
-# restart (see the `write-blueprints` command).
+# forward-auth + Zulip SAML). Only once an external domain exists — redirect
+# URIs and launch URLs are external-only. The authentik worker watches the
+# blueprint dir and auto-applies on change, so refreshing these needs no
+# container restart (see the `write-blueprints` command).
 write_all_blueprints() {
     local external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
     if [ -n "$external_domain" ]; then
         write_owui_blueprint "$external_domain" \
             "$(get_or_generate_secret owui-client-secret gen_token)"
         write_admin_blueprint "$external_domain"
+        write_zulip_blueprint "$external_domain"
     fi
 }
 

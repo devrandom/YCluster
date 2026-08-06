@@ -152,12 +152,13 @@ cd /etc/ansible && ./run-playbook.sh app/install-zulip.yml --limit storage
 
 ### Invite users
 
-Users join via Authentik SAML. Before SAML is wired, the admin creates
-accounts / invitations from the Zulip admin UI. With no SMTP the invite
-email isn't delivered, so the admin copies the invite URL from the
-admin UI and hands it off out-of-band (the same pattern as
+Users join via Authentik SAML (matched by email on first login).
+For users not in the Authentik directory, the admin can create
+accounts / invitations from the Zulip admin UI. With no SMTP the
+invite email isn't delivered, so the admin copies the invite URL from
+the admin UI and hands it off out-of-band (the same pattern as
 `ycluster user invite` for Authentik). Invited accounts are matched by
-email on first login.
+email on first SAML login.
 
 ## Upgrade
 
@@ -197,10 +198,34 @@ data, the Postgres DB/role, and the service are in place there.
 
 ## Configuration & auth lifecycle
 
-- `ZULIP_AUTH_BACKENDS` is `EmailAuthBackend` today (bootstrap-only).
-- Once the owner's SAML round trip is validated (design step 5), set it
-  to `SAMLAuthBackend` in `install-zulip.yml` and re-run. Keep
-  `EmailAuthBackend` as a fallback until then.
+- `ZULIP_AUTH_BACKENDS` is `EmailAuthBackend` during bootstrap, then
+  `EmailAuthBackend,SAMLAuthBackend` once zulip-manager can reach the
+  Authentik API. This is fully automated: on every start the manager
+  fetches the IdP signing cert from Authentik, and only when it gets a
+  valid cert does it enable the SAML backend (see below). Email stays
+  enabled as a bootstrap / admin-recovery fallback.
+- SAML wiring is split across the two managers, both repeatable from
+  playbooks on a fresh install:
+  - `authentik-manager write_zulip_blueprint` writes the Authentik
+    `zulip` SAML provider + application blueprint
+    (`/etc/authentik/blueprints/ycluster-zulip.yaml`), signed with the
+    shared `authentik Self-signed Certificate` (`sp_binding: POST`,
+    `sign_response: true`, `sign_assertion: true`). Attribute claims
+    reuse Authentik's managed SAML mappings, including the `uid` mapping
+    (user pk) for Zulip's `attr_user_permanent_id`.
+  - `zulip-manager` fetches that keypair's public cert from the
+    Authentik API and writes it to
+    `/rbd/misc/zulip/saml/idps/authentik.crt`, which is bind-mounted
+    into the container at `/etc/zulip/saml/idps/authentik.crt` (the
+    filename is the idp key `authentik`). If Authentik is unreachable it
+    writes an empty placeholder and boots email-only; SAML returns on
+    the next start.
+  - Both sides derive all URLs from the single `/cluster/https/domain`
+    value, so the Zulip-side `SOCIAL_AUTH_SAML_*` settings and the
+    Authentik-side provider stay in sync.
+- If SAML needs to be disabled (or just email during an outage), the
+  manual override is `ZULIP_AUTH_BACKENDS=EmailAuthBackend` — the
+  compose file defaults to email-only when the cert isn't present.
 - The DOCKER-USER egress filter is source-scoped to the Zulip subnet
   and inert anywhere the stack isn't running. It's gated by
   `zulip_egress_filter_enabled` in `install-zulip.yml` (a firewall

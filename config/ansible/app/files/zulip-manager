@@ -72,6 +72,89 @@ wait_for_registry() {
     return 1
 }
 
+SAML_IDP_CERT="/rbd/misc/zulip/saml/idps/authentik.crt"
+
+# Fetch the IdP signing certificate from the leader's Authentik API and write
+# it to the RBD path Zulip mounts at /etc/zulip/saml/idps/authentik.crt. The
+# SAML provider (authentik-manager write_zulip_blueprint) signs responses
+# with the `authentik Self-signed Certificate` keypair, so that keypair's
+# public cert is exactly what Zulip validates the responses against.
+#
+# Rerun on every start (and on leader failover) so it follows the RBD like
+# the rest of /rbd/misc/zulip. On a fresh install the keypair exists as soon
+# as Authentik is up — independently of the blueprint being applied — so
+# there is no ordering dependency on the SAML provider. On Authentik
+# being unreachable we write an empty placeholder so the compose bind mount
+# still resolves and Zulip boots with email auth only (SAML comes back on the
+# next restart once Authentik is available).
+ensure_saml_cert() {
+    mkdir -p "$(dirname "$SAML_IDP_CERT")"
+    local token
+    token=$(etcdctl get /cluster/config/authentik/bootstrap-token --print-value-only 2>/dev/null || true)
+    if [ -z "$token" ]; then
+        echo "SAML: authentik bootstrap token unavailable"
+        : > "$SAML_IDP_CERT"
+        return 1
+    fi
+    local auth_port="${AUTHENTIK_PORT:-9300}"
+    local base="http://127.0.0.1:$auth_port/api/v3"
+    local kp_json
+    kp_json=$(curl -sS --max-time 10 -H "Authorization: Bearer $token" \
+        "$base/crypto/certificatekeypairs/?search=authentik%20Self-signed" 2>/dev/null || true)
+    local dl
+    dl=$(printf '%s' "$kp_json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for p in d.get("results", []):
+    if p.get("name") == "authentik Self-signed Certificate" and p.get("certificate_download_url"):
+        print(p["certificate_download_url"])
+        break
+')
+    if [ -z "$dl" ]; then
+        echo "SAML: authentik signing keypair not found"
+        : > "$SAML_IDP_CERT"
+        return 1
+    fi
+    local tmp="$SAML_IDP_CERT.tmp"
+    if ! curl -sS -f --max-time 10 -H "Authorization: Bearer $token" \
+        "http://127.0.0.1:$auth_port$dl" -o "$tmp"; then
+        echo "SAML: IdP cert download failed"
+        : > "$SAML_IDP_CERT"
+        return 1
+    fi
+    if ! grep -q -- "-----BEGIN CERTIFICATE-----" "$tmp"; then
+        echo "SAML: downloaded cert is not a valid PEM"
+        : > "$SAML_IDP_CERT"
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$SAML_IDP_CERT"
+    chown 1000:1000 "$SAML_IDP_CERT"
+    chmod 644 "$SAML_IDP_CERT"
+    return 0
+}
+
+# Render the SAML settings for the compose env file, derived from the same
+# /cluster/https/domain value that authentik-manager's Zulip blueprint uses
+# (single source). The dict values are written as Python literals:
+# docker-zulip's setConfigurationValue treats env starting with `{` as a
+# Python object and appends it verbatim to settings.py. attr_user_permanent_id
+# points at Authentik's managed `uid` mapping (user pk), which differs from
+# attr_email so Zulip keeps email-change sync enabled.
+render_saml_env() {
+    local external_domain="$1"
+    local sp_entity="https://zulip.$external_domain/"
+    local idp_entity="https://auth.$external_domain/"
+    local sso_url="https://auth.$external_domain/application/saml/zulip/sso/binding/redirect/"
+    echo "ZULIP_SAML_SP_ENTITY_ID=$sp_entity"
+    echo "ZULIP_SAML_ORG_INFO={\"en-US\": {\"name\": \"YCluster\", \"displayname\": \"YCluster\"}}"
+    echo "ZULIP_SAML_ENABLED_IDPS={\"authentik\": {\"entity_id\": \"$idp_entity\", \"url\": \"$sso_url\", \"attr_user_permanent_id\": \"http://schemas.goauthentik.io/2021/02/saml/uid\", \"attr_full_name\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name\", \"attr_username\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress\", \"attr_email\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress\", \"auto_signup\": True, \"display_name\": \"YCluster\"}}"
+    echo "ZULIP_SAML_CERT=$SAML_IDP_CERT"
+}
+
 start_zulip() {
     ensure_secrets
 
@@ -105,7 +188,21 @@ start_zulip() {
     echo "ZULIP_EGRESS_SUBNET=${ZULIP_EGRESS_SUBNET:-172.16.0.0/24}" >> "$env_file"
     echo "ZULIP_EXTERNAL_HOST=$zulip_external_host" >> "$env_file"
     echo "ZULIP_ADMIN_EMAIL=$admin_email" >> "$env_file"
-    echo "ZULIP_AUTH_BACKENDS=${ZULIP_AUTH_BACKENDS:-EmailAuthBackend}" >> "$env_file"
+
+    # SAML (design step 5): fetch the IdP signing cert and, when available,
+    # enable the SAML auth backend alongside email. Idempotent on every start
+    # and follows the RBD on leader failover; falls back to email-only if
+    # Authentik is unreachable (SAML comes back on the next restart). An
+    # explicit ZULIP_AUTH_BACKENDS from the unit (e.g. email-only during an
+    # outage) takes precedence over the auto-detected default.
+    ensure_saml_cert || true
+    local auth_backends="${ZULIP_AUTH_BACKENDS:-EmailAuthBackend}"
+    if [ -z "${ZULIP_AUTH_BACKENDS:-}" ] \
+        && grep -q -- "-----BEGIN CERTIFICATE-----" "$SAML_IDP_CERT" 2>/dev/null; then
+        auth_backends="EmailAuthBackend,SAMLAuthBackend"
+        render_saml_env "$external_domain" >> "$env_file"
+    fi
+    echo "ZULIP_AUTH_BACKENDS=$auth_backends" >> "$env_file"
     echo "ZULIP__POSTGRES_PASSWORD=$(get_or_generate_secret postgres_password gen_password)" >> "$env_file"
     echo "ZULIP__MEMCACHED_PASSWORD=$(get_or_generate_secret memcached_password gen_password)" >> "$env_file"
     echo "ZULIP__RABBITMQ_PASSWORD=$(get_or_generate_secret rabbitmq_password gen_password)" >> "$env_file"
