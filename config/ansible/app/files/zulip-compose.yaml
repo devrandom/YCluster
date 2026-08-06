@@ -13,6 +13,9 @@
 #     install-zulip.yml) allows outbound only to self, the leader's Postgres,
 #     and the hosted push bouncer (push.zulipchat.com:443). The container must
 #     still reach the shared Postgres, so we can't use MinerU's --network=none.
+#     DNS egress is also DROPped, so the bouncer's addresses are supplied via a
+#     managed /etc/hosts bind-mount refreshed by the same timer (see the zulip
+#     service volume below) rather than a widened DNS path.
 #   - memcached / rabbitmq / redis are kept from upstream (ephemeral; no
 #     cluster-wide backup story). They publish nothing; they only talk on the
 #     stack's own bridge network.
@@ -140,6 +143,18 @@ services:
       # `authentik` filename is load-bearing only as the source path; Zulip
       # reads it via SOCIAL_AUTH_SAML_ENABLED_IDPS["authentik"]["x509cert_path"].
       - "${ZULIP_SAML_CERT:-/rbd/misc/zulip/saml/idps/authentik.crt}:/opt/saml/authentik.crt:ro"
+      # Managed /etc/hosts source, mounted read-only over /etc/hosts.
+      # setup-zulip-egress (run by the zulip-egress-refresh.timer, and by
+      # zulip-manager on start) rebuilds this file every run with the base
+      # entries — localhost and host.docker.internal (the docker0 host-gateway,
+      # needed for the Postgres connection) — plus the current hosted-push
+      # bouncer addresses. Overriding /etc/hosts here keeps DNS egress fully
+      # shut: the container never queries an upstream resolver for the bouncer,
+      # and bouncer IP rotation reaches the running container without a restart.
+      - "${ZULIP_PUSH_HOSTS_FILE:-/etc/zulip/push-hosts}:/etc/hosts:ro"
+    # Fallback host-gateway mapping for host.docker.internal. Normally shadowed
+    # by the managed /etc/hosts mount above (which carries the same entry), but
+    # kept so the Postgres path survives if that mount is ever absent.
     extra_hosts:
       - host.docker.internal:host-gateway
     ulimits:

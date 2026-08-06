@@ -26,6 +26,7 @@ Everything lives under `/etc/zulip`:
 | systemd | `zulip.service` under `ycluster-apps.target`; `ExecStart=/usr/local/lib/cluster/zulip-manager start` |
 | Secrets | etcd keys under `/cluster/config/zulip/*` (written by `zulip-manager ensure-secrets`) |
 | Egress filter | host `ZULIP-EGRESS` chain (jumped from `DOCKER-USER`) pins the stack subnet `172.16.0.0/24` to self + Postgres + `push.zulipchat.com:443`; refreshed by `zulip-egress-refresh.timer` |
+| Container `/etc/hosts` | managed `/etc/zulip/push-hosts`, bind-mounted read-only at `/etc/hosts`; rewritten with base entries + current bouncer addresses by the same timer |
 
 Commands below assume you have a shell on the storage leader, or an
 entry host (`YC_SYNC_HOST`) that reaches it. Most live commands run on
@@ -281,6 +282,15 @@ data, the Postgres DB/role, and the service are in place there.
   change; set `false` to fall back to ingress-only if desired). The
   push bouncer hole is resolved dynamically and refreshed by
   `zulip-egress-refresh.timer` (every 15 min), so no IPs are pinned.
+- DNS egress is DROPped too, so the same timer run that rebuilds the
+  firewall also rewrites `/etc/zulip/push-hosts` (localhost +
+  `host.docker.internal` via the docker0 host-gateway, then one
+  `push.zulipchat.com` per current A record). The file is bind-mounted
+  read-only at `/etc/hosts` in the `zulip` container, so bouncer IP
+  rotation reaches the running container without a restart. If it looks
+  wrong, run `/usr/local/lib/cluster/setup-zulip-egress` and
+  `systemctl restart zulip`; making the compose change to drop the mount
+  is the break-glass to fall back to docker's own `/etc/hosts`.
 
 ## Mobile push
 

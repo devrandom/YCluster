@@ -335,6 +335,13 @@
     # source-scoped to the pinned subnet, so it's inert wherever the Zulip
     # stack isn't running. A firewall change staged for operator sign-off
     # (AGENTS.md).
+    #
+    # The same run also writes the container /etc/hosts source that the compose
+    # `zulip` service mounts read-only (zulip-compose.yaml): even with the 443
+    # hole open, the container can't resolve push.zulipchat.com because DNS
+    # egress is itself DROPped, so we give it the resolved bouncer addresses
+    # directly. Refreshed on the same timer, so bouncer IP rotation reaches
+    # the running container without a restart and without widening DNS egress.
     - name: Install Zulip egress filter script
       copy:
         dest: /usr/local/lib/cluster/setup-zulip-egress
@@ -345,6 +352,7 @@
           ZS="172.16.0.0/24"              # zulip_egress_subnet — keep in sync with install-zulip.yml
           POSTGRES="172.0.0.0/8"          # matches the cluster pg_hba rule (tcp/5432)
           PUSH_HOST="push.zulipchat.com"  # hosted push bouncer (Akamai; IPs change)
+          PUSH_HOSTS_FILE="${ZULIP_PUSH_HOSTS_FILE:-/etc/zulip/push-hosts}"
 
           iptables -N DOCKER-USER 2>/dev/null || true
 
@@ -359,16 +367,24 @@
           iptables -A ZULIP-EGRESS -s "$ZS" -d "$ZS" -p tcp -j ACCEPT
           iptables -A ZULIP-EGRESS -s "$ZS" -d "$POSTGRES" -p tcp --dport 5432 -j ACCEPT
 
-          # ...and the hosted push bouncer on 443. Resolve at apply time to
-          # whatever A records DNS currently returns (IPv4 only — the compose
-          # bridge is IPv4 and the stack has no IPv6 egress path). A systemd
-          # timer re-runs this to stay current as Akamai shuffles addresses.
+          # Resolve the push bouncer A records once, then consume that same
+          # list for both the firewall hole and the /etc/hosts entries below so
+          # the two can never drift. IPv4 only — the compose bridge is IPv4 and
+          # the stack has no IPv6 egress path. If resolution returns nothing
+          # (transient DNS flap), the hole stays closed and the hosts entries
+          # simply won't list the bouncer; the timer retries in 15 min.
+          PUSH_IPS=()
           if command -v getent >/dev/null 2>&1; then
-              while read -r ip; do
-                  [ -n "$ip" ] || continue
-                  iptables -A ZULIP-EGRESS -s "$ZS" -d "$ip" -p tcp --dport 443 -j ACCEPT
-              done < <(getent ahostsv4 "$PUSH_HOST" | awk '{print $1}' | sort -u)
+              mapfile -t PUSH_IPS < <(getent ahostsv4 "$PUSH_HOST" \
+                  | awk '{print $1}' | sort -u)
           fi
+
+          # ...and the hosted push bouncer on 443, one ACCEPT per current
+          # address, refreshed by the systemd timer as Akamai shuffles IPs.
+          for ip in "${PUSH_IPS[@]}"; do
+              [ -n "$ip" ] || continue
+              iptables -A ZULIP-EGRESS -s "$ZS" -d "$ip" -p tcp --dport 443 -j ACCEPT
+          done
 
           # DROP everything else from the Zulip subnet.
           iptables -A ZULIP-EGRESS -s "$ZS" -j DROP
@@ -385,6 +401,38 @@
           iptables -D DOCKER-USER -s "$ZS" -j DROP 2>/dev/null || true
           iptables -D DOCKER-USER -s "$ZS" -d "$POSTGRES" -p tcp --dport 5432 -j ACCEPT 2>/dev/null || true
           iptables -D DOCKER-USER -s "$ZS" -d "$ZS" -p tcp -j ACCEPT 2>/dev/null || true
+
+          # Rewrite the container /etc/hosts source (bind-mounted read-only at
+          # /etc/hosts in zulip-compose.yaml). Because the mount shadows
+          # docker's generated file, reproduce the base entries the container
+          # otherwise relies on — localhost and host.docker.internal (the docker0
+          # `host-gateway` address, which the Postgres connection uses) — then
+          # append the push bouncer addresses. Refreshing this on the same timer
+          # keeps the container current without a restart and means the stack
+          # never needs DNS egress at all.
+          host_gw="$(ip -4 addr show docker0 | awk '/inet /{print $2}' \
+              | cut -d/ -f1)"
+          # Write to a temp then copy over the destination *in place*. A bind
+          # mount pins the source inode at container start, so mv-swapping the
+          # file would leave the running container reading the old inode; the
+          # truncate-and-rewrite here keeps the same inode and the update is
+          # visible live.
+          tmp="$(mktemp "${PUSH_HOSTS_FILE}.XXXXXX")"
+          {
+              echo "# managed by setup-zulip-egress (zulip-egress-refresh.timer)"
+              printf '127.0.0.1\tlocalhost\n'
+              printf '::1\tlocalhost ip6-localhost ip6-loopback\n'
+              if [ -n "$host_gw" ]; then
+                  printf '%s\thost.docker.internal\n' "$host_gw"
+              fi
+              for ip in "${PUSH_IPS[@]}"; do
+                  [ -n "$ip" ] || continue
+                  printf '%s\t%s\n' "$ip" "$PUSH_HOST"
+              done
+          } > "$tmp"
+          cat "$tmp" > "$PUSH_HOSTS_FILE"
+          rm "$tmp"
+          chmod 644 "$PUSH_HOSTS_FILE"
 
           iptables-save > /etc/iptables/rules.v4
       when: zulip_egress_filter_enabled | bool

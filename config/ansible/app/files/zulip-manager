@@ -235,6 +235,15 @@ start_zulip() {
         return 1
     fi
 
+    # Refresh the egress filter and the managed /etc/hosts source before the
+    # stack comes up, so the bind-mounted file (see zulip-compose.yaml) exists
+    # with current push-bouncer addresses even if the 15-min timer hasn't
+    # fired yet on a fresh leader tenure. Idempotent; a no-op when the egress
+    # filter playbook flag is off (script absent).
+    if [ -x /usr/local/lib/cluster/setup-zulip-egress ]; then
+        /usr/local/lib/cluster/setup-zulip-egress
+    fi
+
     cd /etc/zulip
     docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up --pull=always
     return 0

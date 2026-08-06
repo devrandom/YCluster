@@ -259,6 +259,18 @@ reduce Zulip's reach):
     no IPv6 egress path). A systemd timer (`zulip-egress-refresh.timer`,
     every 15 min with randomized delay) re-resolves between playbook
     runs so the hole stays current without hard-coding IPs.
+  - DNS egress is DROPped too (it's just egress like any other), so the
+    container can't resolve the bouncer on its own. The same timer run
+    that rebuilds the firewall **also rewrites a managed `/etc/hosts`
+    source** (`/etc/zulip/push-hosts`) that the `zulip` service mounts
+    read-only at `/etc/hosts`. That file reproduces the base entries the
+    container relies on — localhost and `host.docker.internal` (the
+    docker0 `host-gateway` address the shared-Postgres connection uses) —
+    plus one `push.zulipchat.com` line per current bouncer A record.
+    Because it's a bind mount, bouncer IP rotation reaches the running
+    container without a restart and the stack never needs a DNS path at
+    all. `zulip-manager start` regenerates it before compose up so a fresh
+    leader tenure doesn't wait for the first timer tick.
   - Applied **unconditionally on every storage node** — no
     leader-election gating. The rule is source-scoped to the pinned
     Zulip subnet, so on any node where the Zulip stack isn't running
@@ -705,10 +717,12 @@ to `filebased.EmailBackend` with `EMAIL_FILE_PATH` pointing at
   push-notification relay — the self-hosted server registers with the
   Zulip-hosted bouncer (`push.zulipchat.com`) rather than SMTP. In
   scope: the container gains an egress hole to the bouncer on 443
-  (see "Limit outgoing"), the server registers via
-  `zulip-manager register-push`, and each mobile user must log out and
-  back in once so their device token registers. Registration and plan
-  management are operator actions, not part of the playbook.
+  (see "Limit outgoing") and its current bouncer addresses in a
+  managed `/etc/hosts` mount (DNS egress stays closed), the server
+  registers via `zulip-manager register-push`, and each mobile user
+  must log out and back in once so their device token registers.
+  Registration and plan management are operator actions, not part of
+  the playbook.
 
 ### Switching back on later
 
