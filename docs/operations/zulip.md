@@ -150,15 +150,45 @@ and the egress filter and (on the leader) restarts the service:
 cd /etc/ansible && ./run-playbook.sh app/install-zulip.yml --limit storage
 ```
 
-### Invite users
+Fresh installs override `zulip_auth_backends` with `-e` for the org
+bootstrap run (no playbook edit), then re-run without the override for
+steady state:
 
-Users join via Authentik SAML (matched by email on first login).
-For users not in the Authentik directory, the admin can create
-accounts / invitations from the Zulip admin UI. With no SMTP the
-invite email isn't delivered, so the admin copies the invite URL from
-the admin UI and hands it off out-of-band (the same pattern as
-`ycluster user invite` for Authentik). Invited accounts are matched by
-email on first SAML login.
+```bash
+# first install: bootstrap the realm + owner (EmailAuthBackend required)
+./run-playbook.sh app/install-zulip.yml --limit <node> \
+  -e zulip_auth_backends='EmailAuthBackend'
+# after the SAML round trip is validated: steady state (committed default)
+./run-playbook.sh app/install-zulip.yml --limit <node>
+```
+
+### Users join (auto-join)
+
+The realm is set to **auto-join**: `zulip_auto_join: true` in
+`install-zulip.yml` turns off Zulip's `invite_required`, so any
+Authentik SAML user whose email isn't in Zulip yet is **auto-registered
+as a MEMBER on first login** — no invitation needed. Previously,
+`invite_required` was on by default (only admins can invite), which made
+a new SAML login bounce back to the login page and made Sign Up report
+"an invitation is required"; this is the setting that blocked
+unprivileged Authentik users from joining.
+
+Re-running `install-zulip.yml` applies (or removes) it via a leader task
+that is idempotent and gated on `zulip.service` being active (the realm
+only exists after org bootstrap, so a truly fresh install skips it):
+
+```bash
+# steady state: SAML users auto-join as MEMBER (committed default)
+./run-playbook.sh app/install-zulip.yml --limit storage
+# invitation-only signup:
+./run-playbook.sh app/install-zulip.yml --limit storage -e zulip_auto_join=false
+```
+
+Roles/default groups aside, a user still has to exist in Authentik to
+log in at all (identity is owned by Authentik); admins can manage roles
+/ deactivate accounts from the Zulip admin UI. If you need an admin to
+also hold a non-admin, non-zulip Authentik account, they log in with
+that account's email and land as a separate Zulip MEMBER.
 
 ## Upgrade
 
@@ -198,12 +228,20 @@ data, the Postgres DB/role, and the service are in place there.
 
 ## Configuration & auth lifecycle
 
-- `ZULIP_AUTH_BACKENDS` is `EmailAuthBackend` during bootstrap, then
-  `EmailAuthBackend,SAMLAuthBackend` once zulip-manager can reach the
-  Authentik API. This is fully automated: on every start the manager
-  fetches the IdP signing cert from Authentik, and only when it gets a
-  valid cert does it enable the SAML backend (see below). Email stays
-  enabled as a bootstrap / admin-recovery fallback.
+- `ZULIP_AUTH_BACKENDS` is pinned by `zulip_auth_backends` in
+  `install-zulip.yml`. The live steady state is `SAMLAuthBackend`
+  (SAML-only). The flip is a **var, not a tag**, and it is overridable per
+  run with `-e` (Ansible extra vars outrank play vars), so fresh installs
+  need **no playbook code change**:
+  - On a fresh install, run the playbook once with
+    `-e zulip_auth_backends='EmailAuthBackend'` (or `''`) to create the
+    realm + owner — Zulip requires `EmailAuthBackend` for the initial
+    realm/owner. With `''`, zulip-manager auto-decides: it runs
+    `EmailAuthBackend` until it can fetch the IdP signing cert from
+    Authentik, at which point it adds the SAML backend.
+  - After the operator's SAML round trip is validated, re-run the playbook
+    with the committed `SAMLAuthBackend` default (no `-e`). Idempotent
+    re-applies stay SAML-only because the default is committed.
 - SAML wiring is split across the two managers, both repeatable from
   playbooks on a fresh install:
   - `authentik-manager write_zulip_blueprint` writes the Authentik
@@ -227,13 +265,15 @@ data, the Postgres DB/role, and the service are in place there.
   - Both sides derive all URLs from the single `/cluster/https/domain`
     value, so the Zulip-side `SOCIAL_AUTH_SAML_*` settings and the
     Authentik-side provider stay in sync.
-- To go SAML-only after validation, set `zulip_auth_backends:
-  "SAMLAuthBackend"` in `install-zulip.yml` and re-run. That writes
-  `ZULIP_AUTH_BACKENDS=SAMLAuthBackend` on the unit, overriding the
-  manager's auto-detection. Leave it empty on fresh installs (needed
-  for org bootstrap). Break-glass: flip back to
-  `EmailAuthBackend,SAMLAuthBackend` if Authentik degrades — email
-  accounts already exist, nothing is lost.
+- The live install is SAML-only: `zulip_auth_backends: "SAMLAuthBackend"`
+  in `install-zulip.yml` writes `ZULIP_AUTH_BACKENDS=SAMLAuthBackend`
+  on the unit, overriding the manager's auto-detection (this was flipped
+  after the operator's SAML round trip was validated). Break-glass: flip
+  back to `EmailAuthBackend,SAMLAuthBackend` if Authentik degrades —
+  email accounts already exist, nothing is lost. Use `-e` for a one-off
+  flip without editing the playbook, e.g.
+  `-e zulip_auth_backends='EmailAuthBackend,SAMLAuthBackend'`;
+  commit the new value only when it should become the persistent default.
 - The DOCKER-USER egress filter is source-scoped to the Zulip subnet
   and inert anywhere the stack isn't running. It's gated by
   `zulip_egress_filter_enabled` in `install-zulip.yml` (a firewall

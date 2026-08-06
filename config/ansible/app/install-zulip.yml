@@ -19,9 +19,14 @@
 #
 # SAML (design step 5) is part of this install: authentik-manager writes the
 # `zulip` SAML provider blueprint, and zulip-manager fetches the IdP signing
-# cert from Authentik and enables EmailAuthBackend,SAMLAuthBackend once it
-# can reach the API. Email/password remains available for bootstrap + admin
-# recovery; SAML is added alongside it.
+# cert from Authentik. Auth backends are pinned by `zulip_auth_backends`
+# below: steady state is SAML-only once the operator's SAML round trip is
+# validated. Email/password is bootstrap-only (create the realm + first
+# owner); matching Zulip's requirement that EmailAuthBackend be present for
+# initial org creation. The flip is purely a var — no code change is needed
+# per install. A fresh install overrides it with `-e` on the bootstrap run
+# (EmailAuthBackend or "" to create the org), then re-runs with the committed
+# SAMLAuthBackend default for steady state.
 - name: Install Zulip on storage nodes
   hosts: storage
   become: yes
@@ -36,12 +41,22 @@
     # existing pg_hba rule (host all all 172.0.0.0/8 scram-sha-256).
     zulip_egress_postgres_scope: "172.0.0.0/8"
     zulip_egress_filter_enabled: true
-    # Auth backends. Empty (default) = let zulip-manager auto-decide at start:
-    # EmailAuthBackend only until it can fetch the SAML IdP cert, then
-    # EmailAuthBackend,SAMLAuthBackend. Set this to "SAMLAuthBackend" for
-    # SAML-only once the operator's SAML round trip is validated (break-glass:
-    # flip back to EmailAuthBackend,SAMLAuthBackend if Authentik degrades).
-    zulip_auth_backends: ""
+    # Auth backends. Steady state is "SAMLAuthBackend" (SAML-only) once the
+    # operator's SAML round trip is validated. Override per run with -e,
+    # e.g. a fresh install bootstraps the org with
+    #   -e zulip_auth_backends='EmailAuthBackend'
+    # (Zulip requires EmailAuthBackend to create the initial realm/owner) and
+    # re-runs with the committed default for steady state. Break-glass: flip
+    # back to "EmailAuthBackend,SAMLAuthBackend" if Authentik degrades.
+    zulip_auth_backends: "SAMLAuthBackend"
+    # Auto-join: Zulip creates a new org with `invite_required` on (only admins
+    # can invite), which blocks SAML users from registering. Set it off so any
+    # Authentik SAML user whose email is not in Zulip yet auto-registers as a
+    # MEMBER on first login — no invitation required. Override per run with
+    # `-e zulip_auto_join=false` to keep invitation-only signup. Applied by a
+    # leader task below, gated on zulip.service being active (the realm only
+    # exists after org bootstrap, so the first fresh-install run skips it).
+    zulip_auto_join: true
   tasks:
     - name: Check if this host is the storage leader
       shell: mountpoint -q /rbd/user
@@ -190,6 +205,41 @@
             new_owner: zulip
             obj_type: database
           become_user: postgres
+
+    # Post-bootstrap realm config. `invite_required` lives in the Zulip DB and
+    # only exists after the org is created, so these are gated on zulip.service
+    # being active — a truly fresh install has no realm/container yet and skips;
+    # the post-bootstrap re-run (e.g. the SAML-only flip re-run) applies it.
+    - name: Check whether Zulip is up (realm config applies post-bootstrap)
+      command: systemctl is-active zulip.service
+      register: zulip_service_active
+      changed_when: false
+      failed_when: false
+      when: is_storage_leader
+
+    - name: Allow SAML users to auto-join Zulip (invite_required off)
+      shell: >
+        docker compose -p zulip exec -T zulip su zulip -c
+        '/home/zulip/deployments/current/manage.py shell'
+      args:
+        chdir: /etc/zulip
+        stdin: |
+          from zerver.models import Realm
+          from zerver.actions.realm_settings import do_set_realm_property
+          r = Realm.objects.filter(string_id="").first()
+          if r is None:
+              print("NO_REALM")
+          elif r.invite_required:
+              do_set_realm_property(r, "invite_required", False, acting_user=None)
+              print("ENABLED")
+          else:
+              print("ALREADY_OFF")
+      register: zulip_autojoin_result
+      changed_when: "'ENABLED' in zulip_autojoin_result.stdout"
+      when:
+        - is_storage_leader
+        - zulip_auto_join | bool
+        - zulip_service_active.stdout == "active"
 
     # Internal vhost: zulip.xc (plain HTTP, restricted to the cluster subnet),
     # served on the storage VIP. Same shape as authentik-internal.conf.j2.

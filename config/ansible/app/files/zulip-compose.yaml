@@ -105,10 +105,11 @@ services:
       # No outbound SMTP: console backend instead of silently hanging on
       # localhost:25 (design decision). See docs/design/zulip.md.
       SETTING_EMAIL_BACKEND: "django.core.mail.backends.console.EmailBackend"
-      # Email bootstrap first (needed to create the initial realm + owner),
-      # then SAML alongside once the Authentik provider + IdP cert exist
-      # (design step 5; zulip-manager flips this from EmailAuthBackend to
-      # EmailAuthBackend,SAMLAuthBackend when it can reach Authentik).
+      # EmailAuthBackend is bootstrap-only (create the initial realm +
+      # owner); zulip-manager normally writes the backend set here, flipping
+      # from EmailAuthBackend to EmailAuthBackend,SAMLAuthBackend once the
+      # IdP cert exists. Steady state is SAMLAuthBackend (SAML-only) via
+      # `zulip_auth_backends: "SAMLAuthBackend"` in install-zulip.yml.
       ZULIP_AUTH_BACKENDS: ${ZULIP_AUTH_BACKENDS:-EmailAuthBackend}
       # SAML settings (written by zulip-manager; empty until the SAML cert is
       # in place). The *_ORG_INFO / *_ENABLED_IDPS values are Python dict

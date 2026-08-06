@@ -195,14 +195,26 @@ start_zulip() {
     # enable the SAML auth backend alongside email. Idempotent on every start
     # and follows the RBD on leader failover; falls back to email-only if
     # Authentik is unreachable (SAML comes back on the next restart). An
-    # explicit ZULIP_AUTH_BACKENDS from the unit (e.g. email-only during an
-    # outage) takes precedence over the auto-detected default.
+    # explicit ZULIP_AUTH_BACKENDS from the unit (e.g. SAML-only, or email-only
+    # during an outage) takes precedence over the auto-detected default for the
+    # backend set, but the SAML IdP settings are still rendered whenever
+    # SAMLAuthBackend is actually active (see below).
     ensure_saml_cert || true
     local auth_backends="${ZULIP_AUTH_BACKENDS:-EmailAuthBackend}"
     if [ -z "${ZULIP_AUTH_BACKENDS:-}" ] \
         && grep -q -- "-----BEGIN CERTIFICATE-----" "$SAML_IDP_CERT" 2>/dev/null; then
         auth_backends="EmailAuthBackend,SAMLAuthBackend"
-        render_saml_env "$external_domain" >> "$env_file"
+    fi
+    # Render the SAML IdP settings whenever SAMLAuthBackend is in the effective
+    # backend set and the IdP cert is in place — not only on the auto-detected
+    # path. Otherwise an explicit SAML-only flip (ZULIP_AUTH_BACKENDS=
+    # SAMLAuthBackend) boots with the backend active but no
+    # SOCIAL_AUTH_SAML_ENABLED_IDPS config, which 500s on SAML logout
+    # (KeyError: 'authentik') and breaks new SAML logins.
+    if grep -q -- "-----BEGIN CERTIFICATE-----" "$SAML_IDP_CERT" 2>/dev/null; then
+        case ",$auth_backends," in
+            *,SAMLAuthBackend,*) render_saml_env "$external_domain" >> "$env_file" ;;
+        esac
     fi
     echo "ZULIP_AUTH_BACKENDS=$auth_backends" >> "$env_file"
     echo "ZULIP__POSTGRES_PASSWORD=$(get_or_generate_secret postgres_password gen_password)" >> "$env_file"

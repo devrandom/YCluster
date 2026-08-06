@@ -484,10 +484,10 @@ Set these via docker env (`SETTING_*` prefix per
 `ext/docker-zulip/docs/reference/environment-vars.md`):
 
 ```yaml
-ZULIP_AUTH_BACKENDS: EmailAuthBackend,SAMLAuthBackend
+# Live steady state is SAML-only; EmailAuthBackend is bootstrap-only.
+ZULIP_AUTH_BACKENDS: SAMLAuthBackend
 SETTING_EXTERNAL_HOST: zulip.<domain>
 SETTING_AUTHENTICATION_BACKENDS: |
-  "zproject.backends.EmailAuthBackend",
   "zproject.backends.SAMLAuthBackend",
 SOCIAL_AUTH_SAML_ENABLED_IDPS:
   authentik:
@@ -504,9 +504,15 @@ SOCIAL_AUTH_SAML_ENABLED_IDPS:
     attr_email: http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress
 ```
 
-Keep `EmailAuthBackend` enabled alongside SAML during bring-up, then
-flip to SAML-only (`ZULIP_AUTH_BACKENDS=SAMLAuthBackend`) after the
-operator's first SAML login, as a short optional safety window. Two
+Keep `EmailAuthBackend` enabled alongside SAML during bring-up only;
+after the operator's first SAML login, flip to SAML-only
+(`ZULIP_AUTH_BACKENDS=SAMLAuthBackend`) — done on the live install by
+re-running `install-zulip.yml` with its committed
+`zulip_auth_backends: "SAMLAuthBackend"` default (or `-e` for a one-off;
+the flip is a var, not a tag). A fresh install bootstraps the org with
+`-e zulip_auth_backends='EmailAuthBackend'`, so the flip never requires
+editing playbook code (a short optional safety window, not a per-user
+migration soak). Two
 reasons to bootstrap with `EmailAuthBackend`:
 
 1. The first Zulip org must be created with `EmailAuthBackend`. Zulip's
@@ -706,26 +712,33 @@ There is no pre-existing Zulip — this is a green-field Zulip org,
 not a migration from somewhere else. The flow on day one:
 
 1. `install-zulip.yml` brings the stack up; SAML is enabled but
-   `EmailAuthBackend` is still in `ZULIP_AUTH_BACKENDS`.
+   `EmailAuthBackend` is still in `ZULIP_AUTH_BACKENDS`. On a fresh
+   install that means running it once with
+   `-e zulip_auth_backends='EmailAuthBackend'` (or `''`) — the flip is a
+   var, not a tag, so no playbook edit is needed.
 2. An operator opens `zulip.<domain>`, which (with `EmailAuthBackend`
    enabled) presents Zulip's first-run realm-creation page. They
    create the realm and the operator's realm-owner account with a
    new password. Once the realm exists, SAML authenticates the
    owner too.
-3. An admin issues Zulip invitations to the existing Authentik
-   accounts (`ycluster user list` shows who's in the IdP). Each
-   invite URL is copied from the Zulip admin UI and delivered
-   out-of-band (Slack DM etc.) — see "Outbound email" above.
-4. Each invited user logs in via SAML. Zulip matches the invited
-   account by email (`common_get_active_user(email, realm)`), so no
-   prior per-user SAML binding is needed on their first login. The
-   `NameID`/`attr_user_permanent_id` pairing only matters for
-   email-change sync. Existing chat threads in Zulip start fresh.
+3. The realm is set up for **auto-join**: `zulip_auto_join: true` in
+   `install-zulip.yml` switches off Zulip's `invite_required` (applied
+   post-bootstrap by a leader task once zulip.service is active), so no
+   admin invitation is needed for existing Authentik accounts.
+4. Any Authentik account that isn't yet in Zulip is **auto-registered as
+   a MEMBER on first SAML login** — matched by email
+   (`common_get_active_user(email, realm)`), so no prior per-user SAML
+   binding is needed on their first login. The `NameID`/
+   `attr_user_permanent_id` pairing only matters for email-change sync.
+   Existing chat threads in Zulip start fresh. Set `-e
+   zulip_auto_join=false` to go back to invitation-only signup.
 5. Once the operator has validated their own SAML round trip, the
-   playbook flips `ZULIP_AUTH_BACKENDS=SAMLAuthBackend` (one variable
-   change in `install-zulip.yml` + restart), keeping
-   `EmailAuthBackend` as a fallback until then. This is a short
-   optional safety window — not a per-user migration soak.
+   playbook flips `ZULIP_AUTH_BACKENDS=SAMLAuthBackend` (re-run with the
+   committed `zulip_auth_backends: "SAMLAuthBackend"` default, or
+   `-e zulip_auth_backends='SAMLAuthBackend'` for a one-off) — now the
+   live steady state. `EmailAuthBackend` stays as a fallback only until
+   then. This is a short optional safety window — not a per-user migration
+   soak. The flip is a var, never a code change.
 
 No `ycluster user rename`-style cross-system write is needed —
 Authentik owns identity, Zulip is a client. The existing
