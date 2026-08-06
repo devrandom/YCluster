@@ -52,6 +52,19 @@ Sorted out with the operator before implementation:
   login, so existing/invited users don't each need a prior SAML login.
   The "soak" is reduced to a short optional safety window. See
   "Auth integration" and "Account migration".
+- **Network isolation:** Zulip does *not* adopt MinerU's full
+  `--network=none` + UDS pattern — the app container needs the
+  shared Postgres plus memcached/rabbitmq/redis, so it can't run
+  with no netns. We instead adopt the ingest *and* egress sides of
+  that pattern separately: no host-wide published ports (loopback-only
+  web port as the sole publish), port 25 and 443 unpublished,
+  host-side nginx as the single controlled ingress, **and** a
+  `DOCKER-USER` host egress filter that pins the compose subnet and
+  allows Postgres-only outbound (applied unconditionally on all
+  storage nodes — source-scoped to the pinned subnet, so it's inert
+  off the leader; a firewall change staged in the playbook and
+  signed off per `AGENTS.md`).
+  See "Network isolation (applying the MinerU sidecar pattern)".
 
 Next: implementation starts with `build-zulip.yml` +
 `install-zulip.yml` after this design is reviewed.
@@ -179,6 +192,88 @@ by a new `zulip.service` unit (sibling of `authentik.service` /
   `database` service and points `SETTING_REMOTE_POSTGRES_HOST` at
   `host.docker.internal` (mirroring how Authentik and Open-WebUI
   reach the cluster Postgres from containers).
+
+### Network isolation (applying the MinerU sidecar pattern)
+
+MinerU runs on `--network=none` with a Unix-domain-socket + host
+`socat` bridge so a parser fed untrusted PDFs can never make an
+outbound `AF_INET` call (`docs/design/mineru-podman.md`). That
+pattern is load-bearing for MinerU specifically: its whole job is to
+consume attacker-influenced documents whose libraries can trigger
+external fetches. Zulip is a different threat model, and the full
+`--network=none` form does **not** fit:
+
+- Zulip is a multi-container stack, not a single self-contained
+  service. The `zulip` container must reach the **cluster's shared
+  Postgres** (host network, `host.docker.internal`) in addition to
+  memcached / rabbitmq / redis. Under `--network=none` it would lose
+  all of those, and you'd have to `socat`-bridge the UDS against
+  web + Tornado + postgres + memcached + rabbitmq + redis — a
+  per-connection forwarder interposed on the DB write path that
+  carries credentials and is latency-sensitive on every page load.
+  That diverges from the upstream compose we deliberately keep, for
+  little blast-radius gain on a trusted first-party app.
+- The supporting containers (memcached / rabbitmq / redis) already
+  expose no host ports — they are reachable only inside the stack's
+  own bridge network, i.e. they already match the "no external
+  interface" property the `--network=none` trick exists to create.
+
+What we **do** adopt from the pattern (the parts that actually
+reduce Zulip's reach):
+
+- **No published host-wide ports.** The upstream compose publishes
+  25 / 80 / 443 to every interface. Our compose publishes *only* the
+  app's internal web port, bound to loopback (`127.0.0.1`), where
+  host-side nginx — and certbot-manager's frp PROXY listener on
+  `127.0.0.2:17443` — is the single controlled ingress. That is the
+  same "incoming-only via a host sidecar" shape MinerU uses, minus
+  the UDS. Port 25 stays unpublished (outbound SMTP and inbound
+  email both off) and 443 is not published to the host
+  (nginx terminates TLS).
+- **Limit outgoing, not just ingress.** The `zulip` container's only
+  required egress is the shared Postgres; there is no internet or
+  cluster-service path in the current design (no SMTP, no push
+  relay; SAML is inbound — Zulip never fetches the IdP
+  server-side). So instead of `--network=none`, we enforce that
+  single egress with a **host-side egress filter** — which is what
+  `--network=none` reduces to for a container that still needs TCP
+  to Postgres:
+  - Pin the Zulip compose network to a fixed IPAM subnet in the
+    compose file (docker otherwise hands the bridge a random
+    172.x.y.0/24 per deployment, which the filter can't reference).
+  - In the `DOCKER-USER` iptables chain (docker's preserved,
+    non-flushed hook — the repo already manages iptables via
+    `iptables-persistent`, see `setup-gateway-vip.yml`), allow the
+    Zulip bridge subnet to reach only (a) itself — memcached /
+    rabbitmq / redis — and (b) the leader's Postgres
+    (`172.0.0.0/8` tcp/5432, matching the existing pg_hba scope);
+    **DROP** all other egress. The supporting containers already
+    publish nothing, so nothing else leaves the bridge.
+  - Applied **unconditionally on every storage node** — no
+    leader-election gating. The rule is source-scoped to the pinned
+    Zulip subnet, so on any node where the Zulip stack isn't running
+    that subnet is empty and the DROP matches nothing; it never
+    touches other containers' traffic. `DOCKER-USER` stays active
+    whenever dockerd runs, and only packets sourced from
+    `172.z.z.0/24` are subject to it. The pinned subnet should not
+    be reused by another stack; once the Zulip network exists,
+    docker's per-daemon subnet-conflict check keeps a second network
+    from claiming it. Per `AGENTS.md` it is still a firewall change,
+    so it ships in the playbook and gets operator sign-off before
+    prod. Fallback if a firewall change is vetoed: rely on "no
+    published ports + loopback-only ingress" alone (weaker: a
+    compromised container could still reach the cluster/172 subnet
+    from inside).
+
+If an SSRF-specific concern about Zulip's server-side image fetching
+(thumbnailer / camo-style proxy for remote images in messages) ever
+becomes load-bearing, address it at the Zulip application layer
+(restrict or disable the image proxy), not by widening the network
+filter. Decision: keep the docker-compose bridge + loopback-only
+published web port + nginx/socat ingress, and add the `DOCKER-USER`
+egress filter (pinned subnet → Postgres-only) as the outgoing
+control. Do **not** port `--network=none` + UDS to the Zulip app
+container.
 
 ### RBD layout
 
@@ -450,7 +545,9 @@ leader, same as everything else under `/rbd/misc`).
 ## External exposure
 
 Add a `zulip.<domain>` vhost, following the existing
-`app.<domain>` template-based pattern:
+`app.<domain>` template-based pattern. The host-side nginx is the
+single controlled ingress — the Zulip stack publishes no host-wide
+ports (see "Network isolation" under Deployment shape):
 
 - A Jinja2 template at
   `config/ansible/app/files/zulip.conf.j2` (mirroring
