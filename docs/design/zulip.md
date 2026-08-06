@@ -432,7 +432,10 @@ generates a blueprint at service start from
     audience: https://zulip.$external_domain/
     issuer: https://auth.$external_domain/
     signing_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
-    verification_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+    # Zulip does not sign its SP AuthnRequest, so SP request verification
+    # must be disabled explicitly (null) — omitting the key leaves the
+    # existing value in place on an additive blueprint re-apply.
+    verification_kp: null
     # Zulip (python-social-auth) posts the AuthnResponse to /complete/saml/
     # and requires the response to be signed, so use POST + sign both.
     sp_binding: POST
@@ -466,10 +469,14 @@ updates on next login (matches the cluster's user-rename story in
 custom SAML property mapping and stays stable across Authentik
 upgrades.
 
-The IdP name in Authentik is `authentik`, which determines the cert
-filename Zulip reads: `/etc/zulip/saml/idps/authentik.crt` — matching
-the official integration guide. `zulip-manager` fetches that keypair's
-public cert from the Authentik API on every start.
+The IdP name in Authentik is `authentik`. Zulip looks the cert up from
+`SOCIAL_AUTH_SAML_ENABLED_IDPS["authentik"]["x509cert_path"]`, pointing at
+the compose bind-mount `/opt/saml/authentik.crt` (`zulip-manager` fetches
+that keypair's public cert from the Authentik API on every start). The
+mount deliberately lives at `/opt/saml`, not under `/etc/zulip/`: with
+`LINK_SETTINGS_TO_DATA=True` docker-zulip's entrypoint runs `rm -rf
+/etc/zulip`, and a bind-mounted file there blocks it with "Device or
+resource busy", crash-looping the container.
 
 ### Zulip side
 
@@ -540,8 +547,9 @@ their next SAML login — matching the user-rename story in
 
 `zulip-manager` fetches the SAML provider's signing cert from the
 Authentik API on *every* start and writes it to
-`/rbd/misc/zulip/saml/idps/authentik.crt`, which docker compose binds
-into the Zulip container at `/etc/zulip/saml/idps/authentik.crt`.
+`/rbd/misc/zulip/saml/idps/authentik.crt`; compose bind-mounts that file
+read-only into the container at `/opt/saml/authentik.crt`, referenced via
+`SOCIAL_AUTH_SAML_ENABLED_IDPS["authentik"]["x509cert_path"]`.
 Authentik exposes the cert two ways: via the Admin UI (the "official"
 path per the integrations docs), or via the keypair's
 `view_certificate` download URL from

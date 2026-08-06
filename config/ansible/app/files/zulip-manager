@@ -75,8 +75,10 @@ wait_for_registry() {
 SAML_IDP_CERT="/rbd/misc/zulip/saml/idps/authentik.crt"
 
 # Fetch the IdP signing certificate from the leader's Authentik API and write
-# it to the RBD path Zulip mounts at /etc/zulip/saml/idps/authentik.crt. The
-# SAML provider (authentik-manager write_zulip_blueprint) signs responses
+# it to the RBD path that compose bind-mounts read-only into the container at
+# /opt/saml/authentik.crt, referenced via SOCIAL_AUTH_SAML_ENABLED_IDPS
+# ["x509cert_path"]. The SAML provider (authentik-manager write_zulip_blueprint)
+# signs responses
 # with the `authentik Self-signed Certificate` keypair, so that keypair's
 # public cert is exactly what Zulip validates the responses against.
 #
@@ -150,8 +152,8 @@ render_saml_env() {
     local idp_entity="https://auth.$external_domain/"
     local sso_url="https://auth.$external_domain/application/saml/zulip/sso/binding/redirect/"
     echo "ZULIP_SAML_SP_ENTITY_ID=$sp_entity"
-    echo "ZULIP_SAML_ORG_INFO={\"en-US\": {\"name\": \"YCluster\", \"displayname\": \"YCluster\"}}"
-    echo "ZULIP_SAML_ENABLED_IDPS={\"authentik\": {\"entity_id\": \"$idp_entity\", \"url\": \"$sso_url\", \"attr_user_permanent_id\": \"http://schemas.goauthentik.io/2021/02/saml/uid\", \"attr_full_name\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name\", \"attr_username\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress\", \"attr_email\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress\", \"auto_signup\": True, \"display_name\": \"YCluster\"}}"
+    echo "ZULIP_SAML_ORG_INFO={\"en-US\": {\"name\": \"YCluster\", \"displayname\": \"YCluster\", \"url\": \"https://zulip.$external_domain/\"}}"
+    echo "ZULIP_SAML_ENABLED_IDPS={\"authentik\": {\"entity_id\": \"$idp_entity\", \"url\": \"$sso_url\", \"x509cert_path\": \"/opt/saml/authentik.crt\", \"attr_user_permanent_id\": \"http://schemas.goauthentik.io/2021/02/saml/uid\", \"attr_full_name\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name\", \"attr_username\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress\", \"attr_email\": \"http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress\", \"auto_signup\": True, \"display_name\": \"YCluster\"}}"
     echo "ZULIP_SAML_CERT=$SAML_IDP_CERT"
 }
 

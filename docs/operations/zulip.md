@@ -214,12 +214,16 @@ data, the Postgres DB/role, and the service are in place there.
     reuse Authentik's managed SAML mappings, including the `uid` mapping
     (user pk) for Zulip's `attr_user_permanent_id`.
   - `zulip-manager` fetches that keypair's public cert from the
-    Authentik API and writes it to
-    `/rbd/misc/zulip/saml/idps/authentik.crt`, which is bind-mounted
-    into the container at `/etc/zulip/saml/idps/authentik.crt` (the
-    filename is the idp key `authentik`). If Authentik is unreachable it
-    writes an empty placeholder and boots email-only; SAML returns on
-    the next start.
+    Authentik API and writes it to `/rbd/misc/zulip/saml/idps/authentik.crt`,
+    which compose bind-mounts read-only into the container at
+    `/opt/saml/authentik.crt` and references via
+    `SOCIAL_AUTH_SAML_ENABLED_IDPS["authentik"]["x509cert_path"]`. The mount
+    sits at `/opt/saml` (not under `/etc/zulip`) on purpose: docker-zulip's
+    entrypoint runs `rm -rf /etc/zulip` when `LINK_SETTINGS_TO_DATA=True`,
+    and a bind-mounted file under `/etc/zulip` blocks it with "Device or
+    resource busy", crash-looping the container. If Authentik is
+    unreachable it writes an empty placeholder and boots email-only; SAML
+    returns on the next start.
   - Both sides derive all URLs from the single `/cluster/https/domain`
     value, so the Zulip-side `SOCIAL_AUTH_SAML_*` settings and the
     Authentik-side provider stay in sync.

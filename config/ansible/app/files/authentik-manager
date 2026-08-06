@@ -232,11 +232,15 @@ entries:
       audience: https://zulip.$external_domain/
       issuer: https://auth.$external_domain/
       signing_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
-      verification_kp: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      # Zulip does not sign its SP AuthnRequest, so SP request verification
+      # must be disabled explicitly (null) — omitting the key leaves the
+      # existing value in place on an additive blueprint re-apply.
+      verification_kp: null
       # Zulip (python-social-auth) posts the AuthnResponse to /complete/saml/
       # and requires the response to be signed (wantMessagesSigned), so send
-      # back over POST and sign both the response and the assertion.
-      sp_binding: POST
+      # back over POST (lowercase per the Authentik serializer) and sign both
+      # the response and the assertion.
+      sp_binding: post
       sign_response: true
       sign_assertion: true
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]

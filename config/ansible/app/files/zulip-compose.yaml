@@ -22,9 +22,12 @@
 #
 # SAML (design step 5): zulip-manager writes ZULIP_SAML_* into the compose
 # env and the SAML provider blueprint into Authentik. The dict values are
-# emitted as Python literals and mounted read-only into the IdP cert path
-# (/etc/zulip/saml/idps/<idp>.crt, where <idp> is the SOCIAL_AUTH_SAML
-# idp key `authentik`). See docs/operations/zulip.md.
+# emitted as Python literals; the IdP cert is bind-mounted read-only and
+# referenced via SOCIAL_AUTH_SAML_ENABLED_IDPS["x509cert_path"]. The mount
+# target is /opt/saml (NOT under /etc/zulip): docker-zulip's entrypoint does
+# `rm -rf /etc/zulip` when LINK_SETTINGS_TO_DATA=True, and a bind-mounted
+# file inside /etc/zulip blocks that with "Device or resource busy". See
+# docs/operations/zulip.md.
 ---
 services:
   memcached:
@@ -120,10 +123,10 @@ services:
       TRUST_GATEWAY_IP: "True"
     volumes:
       - "${ZULIP_DATA_DIR:-/rbd/misc/zulip/data}:/data:rw"
-      # Read-only IdP cert for SAML. The `authentik` filename is load-bearing:
-      # SOCIAL_AUTH_SAML_ENABLED_IDPS uses idp key `authentik`, so
-      # python-social-auth looks it up at /etc/zulip/saml/idps/authentik.crt.
-      - "${ZULIP_SAML_CERT:-/rbd/misc/zulip/saml/idps/authentik.crt}:/etc/zulip/saml/idps/authentik.crt:ro"
+      # IdP cert for SAML, mounted at /opt/saml (outside /etc/zulip). The
+      # `authentik` filename is load-bearing only as the source path; Zulip
+      # reads it via SOCIAL_AUTH_SAML_ENABLED_IDPS["authentik"]["x509cert_path"].
+      - "${ZULIP_SAML_CERT:-/rbd/misc/zulip/saml/idps/authentik.crt}:/opt/saml/authentik.crt:ro"
     extra_hosts:
       - host.docker.internal:host-gateway
     ulimits:
