@@ -1,0 +1,145 @@
+# Zulip on the cluster — Docker Compose stack (docker-zulip 12.1-0).
+#
+# Deliberate differences from upstream docker-zulip compose.yaml (see
+# docs/design/zulip.md, "Network isolation"):
+#   - `database` (the bundled zulip-postgresql:14) is dropped: Zulip uses the
+#     cluster's shared Postgres on the storage leader, reached from the
+#     container via host.docker.internal (same as Authentik / Open-WebUI).
+#   - No host-wide published ports. Only the internal web port is published,
+#     bound to loopback (127.0.0.1), so host-side nginx is the single
+#     controlled ingress. Ports 25 and 443 are not published to the host.
+#   - Egress isolation: the stack's default bridge network is pinned to a
+#     fixed subnet so the host DOCKER-USER filter (installed by
+#     install-zulip.yml) can allow Postgres-only outbound. The container must
+#     still reach the shared Postgres, so we can't use MinerU's --network=none.
+#   - memcached / rabbitmq / redis are kept from upstream (ephemeral; no
+#     cluster-wide backup story). They publish nothing; they only talk on the
+#     stack's own bridge network.
+#
+# Secrets are read from the compose env file written by zulip-manager into
+# /dev/shm (ZULIP__* vars below) and mounted at /run/secrets/zulip__*; the
+# entrypoint copies them into /etc/zulip/zulip-secrets.conf.
+#
+# Future (design step 4, SAML): a read-only bind of the IdP cert at
+#   ${ZULIP_SAML_CERT:-/rbd/misc/zulip/saml/idps/authentik.crt}:/etc/zulip/saml/idps/authentik.crt:ro
+# can be added to the zulip service once write_zulip_blueprint lands.
+---
+services:
+  memcached:
+    image: "memcached:alpine"
+    restart: unless-stopped
+    command:
+      - "sh"
+      - "-euc"
+      - |
+        echo 'mech_list: plain' > "$$SASL_CONF_PATH"
+        echo "zulip@$$HOSTNAME:$$(cat $$MEMCACHED_PASSWORD_FILE)" > "$$MEMCACHED_SASL_PWDB"
+        echo "zulip@localhost:$$(cat $$MEMCACHED_PASSWORD_FILE)" >> "$$MEMCACHED_SASL_PWDB"
+        exec memcached -S
+    secrets:
+      - zulip__memcached_password
+    environment:
+      SASL_CONF_PATH: "/home/memcache/memcached.conf"
+      MEMCACHED_SASL_PWDB: "/home/memcache/memcached-sasl-db"
+      MEMCACHED_PASSWORD_FILE: /run/secrets/zulip__memcached_password
+
+  rabbitmq:
+    image: "rabbitmq:4.2"
+    restart: unless-stopped
+    command:
+      - "sh"
+      - "-euc"
+      - |
+        export RABBITMQ_DEFAULT_PASS="$$(cat $$RABBITMQ_PASSWORD_FILE)"
+        echo 'default_user = $$(RABBITMQ_DEFAULT_USER)' >> /etc/rabbitmq/rabbitmq.conf
+        echo 'default_pass = $$(RABBITMQ_DEFAULT_PASS)' >> /etc/rabbitmq/rabbitmq.conf
+        exec docker-entrypoint.sh rabbitmq-server
+    secrets:
+      - zulip__rabbitmq_password
+    environment:
+      RABBITMQ_DEFAULT_USER: "zulip"
+      RABBITMQ_PASSWORD_FILE: /run/secrets/zulip__rabbitmq_password
+    volumes:
+      - "${ZULIP_RABBITMQ_DIR:-/rbd/misc/zulip/rabbitmq}:/var/lib/rabbitmq:rw"
+
+  redis:
+    image: "redis:alpine"
+    restart: unless-stopped
+    command:
+      - "sh"
+      - "-euc"
+      - '/usr/local/bin/docker-entrypoint.sh --requirepass "$$(cat $$REDIS_PASSWORD_FILE)"'
+    secrets:
+      - zulip__redis_password
+    environment:
+      REDIS_PASSWORD_FILE: /run/secrets/zulip__redis_password
+    volumes:
+      - "${ZULIP_REDIS_DIR:-/rbd/misc/zulip/redis}:/data:rw"
+
+  zulip:
+    image: "${ZULIP_IMAGE:-registry.xc:5000/zulip}:${ZULIP_VERSION}"
+    restart: unless-stopped
+    ports:
+      # Loopback-only web publish; nginx terminates TLS and is the sole
+      # ingress. Nothing is exposed host-wide.
+      - "127.0.0.1:${ZULIP_PORT:-8484}:80"
+    secrets:
+      - zulip__postgres_password
+      - zulip__memcached_password
+      - zulip__rabbitmq_password
+      - zulip__redis_password
+      - zulip__secret_key
+    environment:
+      SETTING_REMOTE_POSTGRES_HOST: host.docker.internal
+      SETTING_REMOTE_POSTGRES_PORT: "5432"
+      SETTING_MEMCACHED_LOCATION: memcached:11211
+      SETTING_RABBITMQ_HOST: rabbitmq
+      SETTING_REDIS_HOST: redis
+      SETTING_EXTERNAL_HOST: ${ZULIP_EXTERNAL_HOST:-zulip.xc}
+      SETTING_ZULIP_ADMINISTRATOR: ${ZULIP_ADMIN_EMAIL:-zulip-admin@zulip.xc}
+      # No outbound SMTP: console backend instead of silently hanging on
+      # localhost:25 (design decision). See docs/design/zulip.md.
+      SETTING_EMAIL_BACKEND: "django.core.mail.backends.console.EmailBackend"
+      # Email bootstrap first (needed to create the initial realm + owner),
+      # flipped to SAML-only in design step 5.
+      ZULIP_AUTH_BACKENDS: ${ZULIP_AUTH_BACKENDS:-EmailAuthBackend}
+      LINK_SETTINGS_TO_DATA: "True"
+      # Host-side nginx (proxying the loopback publish) is the trusted
+      # gateway for X-Forwarded-* headers.
+      TRUST_GATEWAY_IP: "True"
+    volumes:
+      - "${ZULIP_DATA_DIR:-/rbd/misc/zulip/data}:/data:rw"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1048576
+    depends_on:
+      - memcached
+      - rabbitmq
+      - redis
+
+secrets:
+  zulip__postgres_password:
+    environment: ZULIP__POSTGRES_PASSWORD
+  zulip__memcached_password:
+    environment: ZULIP__MEMCACHED_PASSWORD
+  zulip__rabbitmq_password:
+    environment: ZULIP__RABBITMQ_PASSWORD
+  zulip__redis_password:
+    environment: ZULIP__REDIS_PASSWORD
+  zulip__secret_key:
+    environment: ZULIP__SECRET_KEY
+
+# Fixed IPAM subnet for the egress filter. Keep in sync with
+# `zulip_egress_subnet` in install-zulip.yml (single source: the systemd
+# unit passes it to the manager as ZULIP_EGRESS_SUBNET). Picking a subnet
+# outside docker's default 172.17-172.30 bridge pool (172.16.0.0/24) avoids
+# colliding with docker-auto-assigned networks, while staying inside the
+# 172.0.0.0/8 scope of the cluster Postgres pg_hba rule.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${ZULIP_EGRESS_SUBNET:-172.16.0.0/24}

@@ -1,0 +1,155 @@
+#!/bin/bash
+set -e
+
+# etcd client config (endpoints + TLS certs) from the single source; set -a
+# exports the ETCDCTL_* vars so the bare etcdctl calls below pick them up.
+set -a; . /etc/ycluster/etcd-client.env 2>/dev/null || true; set +a
+
+ZULIP_DATA_DIR="/rbd/misc/zulip/data"
+ZULIP_RABBITMQ_DIR="/rbd/misc/zulip/rabbitmq"
+ZULIP_REDIS_DIR="/rbd/misc/zulip/redis"
+COMPOSE_PROJECT="zulip"
+ETCD_KEY_PREFIX="/cluster/config/zulip"
+
+# Get an existing secret from etcd, or generate one and store it atomically
+# (txn: put only if the key doesn't exist, then read back whatever won).
+get_or_generate_secret() {
+    local etcd_key="${ETCD_KEY_PREFIX}/$1"
+    local generator="$2"
+
+    local existing=$(etcdctl get "$etcd_key" --print-value-only 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+        echo "$existing"
+        return 0
+    fi
+
+    local new_value=$($generator)
+    local txn=$(cat <<EOF
+version("$etcd_key") = "0"
+
+put "$etcd_key" "$new_value"
+
+get "$etcd_key" --print-value-only
+EOF
+)
+    # need to echo trailing newlines because here-doc strips them
+    echo -e "$txn\n\n" | etcdctl txn > /dev/null
+
+    etcdctl get "$etcd_key" --print-value-only
+}
+
+gen_secret_key() { openssl rand -base64 48 | tr -d '\n'; }
+gen_password()   { openssl rand -base64 18 | tr -d '\n'; }
+
+# Generate (idempotently) every secret the stack needs into etcd. The
+# Postgres password here must equal the `zulip` role password created by
+# install-zulip.yml — both read the same etcd key.
+ensure_secrets() {
+    get_or_generate_secret postgres_password gen_password >/dev/null
+    get_or_generate_secret memcached_password gen_password >/dev/null
+    get_or_generate_secret rabbitmq_password gen_password >/dev/null
+    get_or_generate_secret redis_password gen_password >/dev/null
+    get_or_generate_secret secret_key gen_secret_key >/dev/null
+}
+
+# Function to wait for the Docker registry to be available
+# This handles the race condition during storage leader failover
+wait_for_registry() {
+    local max_attempts=12  # 12 attempts
+    local delay=5          # 5 seconds between attempts = 60s total
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://registry.xc:5000/v2/" > /dev/null 2>&1; then
+            return 0
+        fi
+        echo "Waiting for registry (attempt $attempt/$max_attempts)..."
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Registry not available after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+start_zulip() {
+    ensure_secrets
+
+    # RBD-backed data dirs (misc-rbd.service dependency ensures /rbd/misc
+    # is mounted). The zulip container runs as uid 1000 (the image's zulip
+    # user); rabbitmq:4.2 and redis:alpine run as uid/gid 999. The entrypoint
+    # chowns /data/uploads itself, but the bind dirs need the right owner up
+    # front so the containers can write.
+    mkdir -p "$ZULIP_DATA_DIR" "$ZULIP_RABBITMQ_DIR" "$ZULIP_REDIS_DIR"
+    chown -R 1000:1000 "$ZULIP_DATA_DIR"
+    chown -R 999:999 "$ZULIP_RABBITMQ_DIR" "$ZULIP_REDIS_DIR"
+
+    # External host: zulip.<domain> once an https domain exists, else the
+    # internal zulip.xc name (no TLS / no external URL yet).
+    local external_domain
+    external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+    local zulip_external_host="$external_domain"
+    if [ -n "$zulip_external_host" ]; then
+        zulip_external_host="zulip.$zulip_external_host"
+    else
+        zulip_external_host="zulip.xc"
+    fi
+    local admin_email="zulip-admin@$zulip_external_host"
+
+    local env_file=$(mktemp --tmpdir=/dev/shm)
+    trap "rm -f '$env_file'" EXIT
+
+    echo "ZULIP_VERSION=${ZULIP_VERSION:?ZULIP_VERSION must be set by the unit}" > "$env_file"
+    echo "ZULIP_IMAGE=registry.xc:5000/zulip" >> "$env_file"
+    echo "ZULIP_PORT=${ZULIP_PORT:-8484}" >> "$env_file"
+    echo "ZULIP_EGRESS_SUBNET=${ZULIP_EGRESS_SUBNET:-172.16.0.0/24}" >> "$env_file"
+    echo "ZULIP_EXTERNAL_HOST=$zulip_external_host" >> "$env_file"
+    echo "ZULIP_ADMIN_EMAIL=$admin_email" >> "$env_file"
+    echo "ZULIP_AUTH_BACKENDS=${ZULIP_AUTH_BACKENDS:-EmailAuthBackend}" >> "$env_file"
+    echo "ZULIP__POSTGRES_PASSWORD=$(get_or_generate_secret postgres_password gen_password)" >> "$env_file"
+    echo "ZULIP__MEMCACHED_PASSWORD=$(get_or_generate_secret memcached_password gen_password)" >> "$env_file"
+    echo "ZULIP__RABBITMQ_PASSWORD=$(get_or_generate_secret rabbitmq_password gen_password)" >> "$env_file"
+    echo "ZULIP__REDIS_PASSWORD=$(get_or_generate_secret redis_password gen_password)" >> "$env_file"
+    echo "ZULIP__SECRET_KEY=$(get_or_generate_secret secret_key gen_secret_key)" >> "$env_file"
+
+    # Wait for registry to be available (handles storage leader failover)
+    if ! wait_for_registry; then
+        echo "Failed to connect to registry, aborting startup"
+        return 1
+    fi
+
+    cd /etc/zulip
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up --pull=always
+    return 0
+}
+
+stop_zulip() {
+    echo "Stopping Zulip"
+    cd /etc/zulip
+    docker compose -p "$COMPOSE_PROJECT" down
+    echo "Zulip stopped"
+}
+
+case "$1" in
+    start)
+        if start_zulip; then
+            echo "Zulip successfully started"
+            exit 0
+        else
+            echo "Failed to start Zulip"
+            exit 1
+        fi
+        ;;
+    stop)
+        stop_zulip
+        ;;
+    ensure-secrets)
+        # Used by install-zulip.yml on the leader so the Postgres role can be
+        # created with the same password Zulip will read at first boot.
+        ensure_secrets
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|ensure-secrets}"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,304 @@
+---
+# Install Zulip on storage nodes (leader-only, like Authentik / Open-WebUI).
+#
+# Scope of this skeleton (docs/design/zulip.md, implementation order steps
+# 1-2, plus the nginx vhost + DOCKER-USER egress filter from the network
+# isolation decision):
+#   - docker compose stack on the storage leader under ycluster-apps.target:
+#     `zulip` + bundled memcached / rabbitmq / redis (no bundled postgres —
+#     Zulip uses the cluster's shared Postgres on the leader).
+#   - RBD bind mounts under /rbd/misc/zulip; systemd unit + manager script.
+#   - Postgres `zulip` DB + role (scram-sha-256, C.UTF-8 collation).
+#   - Internal nginx vhost for zulip.xc and the external zulip.<domain>
+#     surface, rendered via certbot-manager.
+#   - DOCKER-USER egress filter pinning the Zulip bridge subnet, applied
+#     unconditionally on every storage node (source-scoped, inert off the
+#     leader). This is a firewall change and is staged in the playbook for
+#     operator sign-off per AGENTS.md; set `zulip_egress_filter_enabled:
+#     false` to veto it and fall back to ingress-only isolation.
+#
+# SAML (Authentik blueprint + IdP cert) is design step 4 and is NOT part of
+# this skeleton; email/password bootstrap is the initial auth (step 3).
+- name: Install Zulip on storage nodes
+  hosts: storage
+  become: yes
+  vars:
+    zulip_version: "12.1-0"
+    zulip_port: "{{ zulip_local_port | default('8484') }}"
+    # Fixed compose subnet the egress filter references. Single source for
+    # the filter; the systemd unit passes it to zulip-manager, which writes
+    # it into the compose env as ZULIP_EGRESS_SUBNET (file: zulip-compose.yaml).
+    zulip_egress_subnet: "172.16.0.0/24"
+    # Postgres dest scope for the egress filter — matches the cluster's
+    # existing pg_hba rule (host all all 172.0.0.0/8 scram-sha-256).
+    zulip_egress_postgres_scope: "172.0.0.0/8"
+    zulip_egress_filter_enabled: true
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Display config
+      debug:
+        msg: "Installing Zulip {{ zulip_version }} on port {{ zulip_port }}, egress subnet {{ zulip_egress_subnet }}, is_storage_leader: {{ is_storage_leader }}"
+
+    - name: Create Zulip configuration directory
+      file:
+        path: /etc/zulip
+        state: directory
+        mode: '0755'
+
+    - name: Copy Docker Compose file for Zulip
+      copy:
+        src: files/zulip-compose.yaml
+        dest: /etc/zulip/docker-compose.yml
+        mode: '0644'
+      notify: restart zulip
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
+    - name: Create Zulip manager script
+      copy:
+        src: files/zulip-manager
+        dest: /usr/local/lib/cluster/zulip-manager
+        mode: '0755'
+      notify: restart zulip
+
+    - name: Create zulip systemd service
+      copy:
+        dest: /etc/systemd/system/zulip.service
+        content: |
+          [Unit]
+          Description=Zulip (cluster chat)
+          After=network.target docker.service misc-rbd.service
+          Requires=docker.service misc-rbd.service
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/lib/cluster/zulip-manager start
+          ExecStop=/usr/local/lib/cluster/zulip-manager stop
+          TimeoutStartSec=600
+          TimeoutStopSec=90
+          User=root
+          Restart=on-failure
+          RestartSec=10
+          Environment=ZULIP_VERSION={{ zulip_version }}
+          Environment=ZULIP_PORT={{ zulip_port }}
+          Environment=ZULIP_EGRESS_SUBNET={{ zulip_egress_subnet }}
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: zulip_service_file
+      notify: restart zulip
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Re-enable zulip service to update symlinks
+      command: systemctl reenable zulip.service
+      when: zulip_service_file.changed
+
+    - name: Enable zulip service (part of storage-apps target)
+      systemd:
+        name: zulip.service
+        enabled: yes
+
+    - name: Configure PostgreSQL for Zulip
+      when: is_storage_leader
+      block:
+        # Ensure the secrets exist in etcd before reading the Postgres
+        # password, so the role password below matches what Zulip reads at
+        # first boot (both come from /cluster/config/zulip/postgres_password).
+        - name: Ensure Zulip secrets exist in etcd
+          command: /usr/local/lib/cluster/zulip-manager ensure-secrets
+          environment: "{{ etcd_client_env }}"
+          changed_when: false
+
+        - name: Read Zulip Postgres password from etcd
+          command: etcdctl get /cluster/config/zulip/postgres_password --print-value-only
+          environment: "{{ etcd_client_env }}"
+          register: zulip_postgres_password
+          changed_when: false
+
+        - name: Check if the Zulip database exists
+          become_user: postgres
+          command: psql -tAc "SELECT 1 FROM pg_database WHERE datname='zulip'"
+          register: zulip_db_exists
+          changed_when: false
+
+        # Zulip's create-db.sql uses C.UTF-8 collation; the cluster's
+        # initdb runs under LC_ALL=C.UTF-8 so the default usually matches,
+        # but create the DB explicitly so a differing cluster default can't
+        # break the Zulip migrations. See docs/design/zulip.md (collation).
+        - name: Create Zulip database with C.UTF-8 collation
+          become_user: postgres
+          command: createdb -T template0 --lc-collate=C.UTF-8 --lc-ctype=C.UTF-8 zulip
+          when: "'1' not in zulip_db_exists.stdout_lines"
+
+        - name: Create PostgreSQL user for Zulip
+          postgresql_user:
+            name: zulip
+            password: "{{ zulip_postgres_password.stdout | trim }}"
+            db: zulip
+            priv: ALL
+            state: present
+          become_user: postgres
+
+        - name: Grant schema permissions to zulip user
+          postgresql_privs:
+            database: zulip
+            state: present
+            privs: ALL
+            type: schema
+            objs: public
+            roles: zulip
+          become_user: postgres
+
+        - name: Make zulip owner of the database
+          postgresql_owner:
+            db: zulip
+            obj_name: zulip
+            new_owner: zulip
+            obj_type: database
+          become_user: postgres
+
+    # Internal vhost: zulip.xc (plain HTTP, restricted to the cluster subnet),
+    # served on the storage VIP. Same shape as authentik-internal.conf.j2.
+    - name: Install Zulip internal nginx site (zulip.xc)
+      template:
+        src: templates/zulip-internal.conf.j2
+        dest: /etc/nginx/sites-available/zulip-internal
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable Zulip internal nginx site
+      file:
+        src: /etc/nginx/sites-available/zulip-internal
+        dest: /etc/nginx/sites-enabled/zulip-internal
+        state: link
+      notify: reload nginx
+
+    # External vhost: zulip.<domain>, rendered by certbot-manager. The
+    # `_zulip` suffix in the template filename is load-bearing — certbot-manager
+    # derives the external subdomain from everything after the last `_`.
+    - name: Install Zulip nginx vhost template
+      template:
+        src: files/zulip_zulip.conf.j2
+        dest: /etc/nginx/templates/zulip_zulip.conf.j2
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      notify: reload nginx
+
+    # zulip-locations.conf is included by zulip_zulip.conf.j2 (single source:
+    # both the plain and the frp tunnel landing listeners). The `(( port ))`
+    # marker is substituted here by install-zulip.yml.
+    - name: Install Zulip locations (shared include for plain + proxy listeners)
+      template:
+        src: files/zulip-locations.conf
+        dest: /etc/nginx/zulip-locations.conf
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      vars:
+        port: "{{ zulip_port }}"
+      notify: reload nginx
+
+    - name: Generate Zulip nginx configuration from template
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
+      environment: "{{ etcd_client_env | default({}) }}"
+      register: nginx_update_result
+      changed_when: "'configuration updated' in nginx_update_result.stdout"
+      failed_when: nginx_update_result.rc != 0
+      notify: reload nginx
+
+    - name: Enable Zulip nginx site
+      file:
+        src: /etc/nginx/sites-available/zulip_zulip
+        dest: /etc/nginx/sites-enabled/zulip_zulip
+        state: link
+      notify: reload nginx
+
+    # DOCKER-USER egress filter: allow the Zulip bridge subnet to reach only
+    # itself (memcached/rabbitmq/redis) and the leader's Postgres, then DROP
+    # the rest. Applied unconditionally on every storage node — source-scoped
+    # to the pinned subnet, so it's inert wherever the Zulip stack isn't
+    # running. The DROP only governs packets *from* the Zulip subnet; return
+    # traffic is sourced elsewhere and flows through docker's normal FORWARD.
+    # A firewall change staged for operator sign-off (AGENTS.md).
+    - name: Install Zulip egress filter script
+      copy:
+        dest: /usr/local/lib/cluster/setup-zulip-egress
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+          ZS="172.16.0.0/24"   # zulip_egress_subnet — keep in sync with install-zulip.yml
+          POSTGRES="172.0.0.0/8"  # matches the cluster pg_hba rule (tcp/5432)
+
+          iptables -N DOCKER-USER 2>/dev/null || true
+
+          # Insert at the top of DOCKER-USER so these precede docker's
+          # trailing RETURN. Reverse order so the DROP ends up last:
+          #   ACCEPT self  ->  ACCEPT Postgres  ->  DROP everything else.
+          iptables -I DOCKER-USER 1 -s "$ZS" -j DROP
+          iptables -I DOCKER-USER 1 -s "$ZS" -d "$POSTGRES" -p tcp --dport 5432 -j ACCEPT
+          iptables -I DOCKER-USER 1 -s "$ZS" -d "$ZS" -p tcp -j ACCEPT
+
+          iptables-save > /etc/iptables/rules.v4
+      when: zulip_egress_filter_enabled | bool
+
+    - name: Check whether the Zulip DOCKER-USER egress rule is present
+      command: iptables -C DOCKER-USER -s {{ zulip_egress_subnet }} -d {{ zulip_egress_postgres_scope }} -p tcp --dport 5432 -j ACCEPT
+      register: zulip_egress_check
+      failed_when: false
+      changed_when: false
+      when: zulip_egress_filter_enabled | bool
+
+    - name: Apply Zulip egress rules to DOCKER-USER
+      command: /usr/local/lib/cluster/setup-zulip-egress
+      when:
+        - zulip_egress_filter_enabled | bool
+        - zulip_egress_check.rc != 0
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    # Leader-only: the unit Requires=misc-rbd.service and /rbd/misc mounts
+    # only on the leader, so a restart on a non-leader would fail to start.
+    # Picks up compose/manager/unit changes (brief chat outage).
+    - name: restart zulip
+      systemd:
+        name: zulip.service
+        state: restarted
+        daemon_reload: yes
+      when: is_storage_leader
+
+    # Non-leaders must not run zulip (the leader election owns it). Stop and
+    # disable so a stale instance from a previous leader tenure doesn't
+    # survive a re-provision.
+    - name: Stop zulip on non-leaders
+      systemd:
+        name: zulip.service
+        state: stopped
+        enabled: no
+      when: not is_storage_leader

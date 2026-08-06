@@ -1,0 +1,67 @@
+---
+# Build the Zulip server image in-cluster from the official docker-zulip
+# repo (this repo's Dockerfile builds the zulip-server image from the
+# upstream Zulip git tree). The cluster's third-party-binary rule
+# (AGENTS.md) forbids pulling Zulip's published `ghcr.io/zulip/zulip-server`
+# image, so we build + push to the cluster registry instead.
+#
+# Same shape as build-open-webui.yml: run on localhost so import_playbook
+# can resolve `hosts` statically; every task delegates to the buildhost
+# (s1, via group_vars).
+#   docker-zulip release tag: 12.1-0  ->  ZULIP_GIT_REF=12.1
+#     (docker-zulip's 12.1-0 release corresponds to Zulip server 12.1,
+#      which is the Dockerfile's default ZULIP_GIT_REF pin.)
+#
+# The docker-zulip Dockerfile runs apt dist-upgrade and clones the upstream
+# Zulip repo, so the build needs the cluster proxy:
+#   --build-arg http_proxy=http://10.0.0.254:3128
+- name: Build Zulip container image in-cluster
+  hosts: localhost
+  gather_facts: false
+  vars:
+    zulip_repo: "https://github.com/zulip/docker-zulip.git"
+    zulip_version: "12.1-0"
+    zulip_image_name: registry.xc:5000/zulip
+    build_dir: /opt/src/zulip-build
+  tasks:
+    - block:
+        - name: Verify registry is ready for push operations
+          uri:
+            url: "http://registry.xc:5000/v2/_catalog"
+            method: GET
+            timeout: 10
+          register: registry_catalog
+          failed_when: registry_catalog.status != 200
+
+        - name: Create build directory
+          file:
+            path: "{{ build_dir }}/docker-zulip"
+            state: directory
+            mode: '0755'
+
+        - name: Check out docker-zulip at the pinned release tag
+          git:
+            repo: "{{ zulip_repo }}"
+            dest: "{{ build_dir }}/docker-zulip"
+            version: "{{ zulip_version }}"
+            force: yes
+
+        - name: Build and push Zulip image with buildx using registry cache
+          shell: |
+            docker buildx build \
+              --build-arg http_proxy=http://10.0.0.254:3128 \
+              --build-arg ZULIP_GIT_REF=12.1 \
+              --cache-from type=registry,ref={{ zulip_image_name }}:cache \
+              --cache-to type=registry,ref={{ zulip_image_name }}:cache,mode=max \
+              --progress plain \
+              --tag {{ zulip_image_name }}:{{ zulip_version }} \
+              --push \
+              . | tee /tmp/build-zulip.log 2>&1
+          args:
+            chdir: "{{ build_dir }}/docker-zulip"
+          no_log: false
+
+        - name: Display build completion message
+          debug:
+            msg: "Zulip image {{ zulip_image_name }}:{{ zulip_version }} built and pushed to registry successfully"
+      delegate_to: "{{ buildhost }}"
