@@ -1,0 +1,64 @@
+--- a/templates/zerver/app/index.html	2026-08-07 23:00:04.292090001 +0200
++++ b/templates/zerver/app/index.html	2026-08-07 23:00:30.833514846 +0200
+@@ -281,4 +281,61 @@
+     <form id="logout_form" action="/accounts/logout/" method="POST">{{ csrf_input }}
+     </form>
+ </div>
++
++<script nonce="{{ csp_nonce }}">
++    // YCluster home button: a small Y icon in the top-right navbar that links
++    // to the apex-domain home. Zulip is served at a subdomain (e.g.
++    // zulip.<apex>), so we derive the apex home from the current hostname by
++    // dropping the first label. The navbar is rendered client-side into
++    // #header-container after page load, so we append once that column exists.
++    (function () {
++        function ycluster_apex_home() {
++            const labels = window.location.hostname.split(".");
++            if (labels.length <= 1) {
++                return null;
++            }
++            return window.location.protocol + "//" + labels.slice(1).join(".") + "/";
++        }
++        function ycluster_add_home_button() {
++            if (document.getElementById("ycluster-home-button")) {
++                return;
++            }
++            const home = ycluster_apex_home();
++            if (!home) {
++                return;
++            }
++            const column = document.querySelector("#header-container .column-right");
++            if (!column) {
++                return;
++            }
++            const item = document.createElement("div");
++            item.className = "navbar-item";
++            item.id = "ycluster-home-nav-item";
++            item.innerHTML =
++                '<a class="header-button tippy-zulip-delayed-tooltip" id="ycluster-home-button" href="' +
++                home +
++                '" tabindex="0" role="button" aria-label="YCluster home" data-tippy-content="YCluster home">' +
++                '<svg class="ycluster-home-icon" width="20" height="20" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
++                '<rect width="64" height="64" rx="12" fill="#0a5dc2"/>' +
++                '<text x="32" y="45" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="38" font-weight="700" fill="#ffffff">Y</text>' +
++                "</svg></a>";
++            column.appendChild(item);
++        }
++        function ycluster_wire_home_button() {
++            const header = document.getElementById("header-container");
++            if (header) {
++                new MutationObserver(ycluster_add_home_button).observe(header, {
++                    childList: true,
++                    subtree: true,
++                });
++            }
++            ycluster_add_home_button();
++        }
++        if (document.readyState === "loading") {
++            document.addEventListener("DOMContentLoaded", ycluster_wire_home_button);
++        } else {
++            ycluster_wire_home_button();
++        }
++    })();
++</script>
+ {% endblock %}

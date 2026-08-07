@@ -46,6 +46,48 @@
             version: "{{ zulip_version }}"
             force: yes
 
+        - name: Check out upstream Zulip source for the home-button overlay
+          git:
+            repo: "https://github.com/zulip/zulip.git"
+            dest: "{{ build_dir }}/zulip-src"
+            version: "12.1"
+            depth: 1
+            force: yes
+
+        - name: Copy Zulip YCluster home-button index.html patch
+          copy:
+            src: files/zulip-home-icon.patch
+            dest: "{{ build_dir }}/zulip-home-icon.patch"
+            mode: '0644'
+
+        # Applies an additive patch to Zulip 12.1's index.html that injects a
+        # nonce'd inline script adding a Y home icon to the top-right navbar.
+        # custom_zulip_files is copied over the release tree by the docker-zulip
+        # Dockerfile, so a runtime-served Django template like index.html takes
+        # effect on the next container deploy without forking the upstream
+        # Dockerfile or rebuilding the webpack bundle. Idempotent: git apply
+        # --check fails once applied, so stage rebuilds don't re-apply.
+        - name: Apply Zulip YCluster home-button index.html patch
+          shell: |
+            if git apply --check ../zulip-home-icon.patch 2>/dev/null; then
+              git apply ../zulip-home-icon.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/zulip-src"
+
+        - name: Create custom_zulip_files overlay directory for the home-button patch
+          file:
+            path: "{{ build_dir }}/docker-zulip/custom_zulip_files/templates/zerver/app"
+            state: directory
+            mode: '0755'
+
+        - name: Stage patched Zulip index.html into custom_zulip_files
+          copy:
+            src: "{{ build_dir }}/zulip-src/templates/zerver/app/index.html"
+            dest: "{{ build_dir }}/docker-zulip/custom_zulip_files/templates/zerver/app/index.html"
+            mode: '0644'
+            remote_src: yes
+
         - name: Build and push Zulip image with buildx using registry cache
           shell: |
             docker buildx build \
