@@ -51,25 +51,26 @@ Alternative official image if you prefer NGC: `nvcr.io/nvidia/vllm:26.05-py3`
 
 MinerU and Nemotron share the same host-visible GPU (CDI index 0) on nv2.
 MinerU keeps its own pin (`mineru-podman.service` → `--device
-nvidia.com/gpu=0`) and its default `gpu_memory_utilization=0.5`, so it holds
-~48 GB of the 96 GB card. Nemotron is pinned to the same card
-(`nemotron_gpus: "0"`) but launched with a **lowered `gpu-memory-utilization`
-(0.45, ~43 GB budget)** so it lives in the ~48 GB MinerU leaves free. This
-covers ~21 GB NVFP4 weights + a ~15-20 GB FP8 KV pool — still far above the
-real need (~0.38 GiB per 128K seq, ~12 GiB worst case with all 32 slots
-full). GPU 1 stays completely unrestricted. The two never collide because
-each container is pinned to one CDI GPU and both are capped underneath the
-card total — do not fall back to `gpu=all` for either while they share the
-host. Verify with `nvidia-smi` (summed usage < 96 GB) after a live parse +
-Nemotron prompt. See Admin-deployment below for the host_var opt-in.
+nvidia.com/gpu=0`) but its vLLM budget is now lowered from the 0.5
+auto-default to `--gpu-memory-utilization 0.2 --max-model-len 8192`, so
+instead of holding ~48 GB of the 96 GB card it holds ~20 GB idle. Nemotron
+is pinned to the same card (`nemotron_gpus: "0"`) with a **lowered
+`gpu-memory-utilization` (0.45, ~43 GB budget)**: ~21 GB NVFP4 weights + a
+~15-20 GB FP8 KV pool — far above the real need (~0.38 GiB per 128K seq,
+~12 GiB worst case with all 32 slots full). GPU 1 stays completely
+unrestricted. The two never collide because each container is pinned to one
+CDI GPU and both are capped underneath the card total — do not fall back to
+`gpu=all` for either while they share the host. Verify with `nvidia-smi`
+(summed usage < 96 GB) after a live parse + Nemotron prompt. See
+Admin-deployment below for the host_var opt-in.
 
 Measured (nv2, vLLM 0.20.0, `--gpu-memory-utilization 0.45`,
-`--moe-backend flashinfer_cutlass`): model stack ~21.5 GiB, **KV pool ~16.3
-GiB**, Nemotron EngineCore ~47.2 GiB. With MinerU's ~48.0 GiB the card sits at
-~96.8 / 97.9 GiB (**98.8%, ~1.1 GiB headroom**). It serves without OOM, but the
-co-tenant budget is effectively saturated — lower `GPU_UTIL` slightly (e.g.
-0.42) and/or cap `--max-num-seqs` if KV usage climbs, and leave MinerU's
-`gpu_memory_utilization=0.5` as-is.
+`--moe-backend flashinfer_cutlass`): Nemotron model stack ~21.5 GiB, KV pool
+~16.3 GiB, Nemotron EngineCore ~47.2 GiB. MinerU EngineCore with the 0.2
+budget is ~19.8 GiB idle (was ~48 GiB at the 0.5 default). The card sits at
+~68 / 97.9 GiB (**~29 GiB free headroom**), so there is real room to raise
+Nemotron's KV pool or `--max-num-seqs` if needed without touching MinerU.
+GPU 1 stays idle.
 
 ## Launch (vLLM — text / image / video; audio caveat below)
 
@@ -127,5 +128,6 @@ ssh <host>.yc
   `"model": "nemotron-3-nano-omni"` — a reasoning request should stream
   `reasoning_content`, and an image request should actually see the image.
 - `nvidia-smi` on the host: MinerU and Nemotron both live on GPU 0 (summed
-  usage below 96 GB, target ~48 + ~43); GPU 1 stays unrestricted. Both can
+  usage below 96 GB, currently ~20 MinerU + ~47 Nemotron with ~29 GB free);
+  GPU 1 stays unrestricted. Both can
   warm/cold-start without OOM given the summed budget is under the card.

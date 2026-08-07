@@ -111,6 +111,18 @@ Environment="MINERU_API_MAX_CONCURRENT_REQUESTS=3"
 # /run/mineru/mineru.sock (filesystem bind, not AF_INET);
 # mineru-podman-proxy.service bridges host TCP:8000 to that
 # UDS so the cluster-internal reach model is unchanged.
+#
+# VRAM footprint: MinerU's VLM backend auto-defaults to
+# gpu_memory_utilization=0.5 (set_default_gpu_memory_utilization in
+# mineru/backend/vlm/utils.py), which pre-reserves a KV cache far
+# larger than document parsing needs and pins ~48 GB of the 96 GB
+# card. An explicit --gpu-memory-utilization overrides that default
+# (vLM-analyze only fills it in when absent), so we cap it at 0.2 to
+# free the card for a co-tenant. --max-model-len MUST stay <= 8192
+# (this VLM's max_position_embeddings; a larger value is rejected by
+# vLLM unless VLLM_ALLOW_LONG_MAX_MODEL_LEN=1, which we avoid). Both
+# flags are passed to mineru-api (click allow_extra_args) and flow
+# into the AsyncEngineArgs. Tune here (0.2 -> ~20 GB idle, measured).
 ExecStartPre=/usr/bin/systemd-run --scope --unit=mineru-pull /usr/bin/podman pull registry.xc:5000/mineru:3.4.3-all-vllm
 ExecStart=/usr/bin/systemd-run --scope --unit=mineru-run /usr/bin/podman run --rm --name mineru \
     --userns=keep-id \
@@ -121,7 +133,9 @@ ExecStart=/usr/bin/systemd-run --scope --unit=mineru-run /usr/bin/podman run --r
     -v /run/mineru:/run/mineru \
     -e MINERU_UDS_PATH=/run/mineru/mineru.sock \
     -e CUDA_VISIBLE_DEVICES=0 \
-    registry.xc:5000/mineru:3.4.3-all-vllm
+    registry.xc:5000/mineru:3.4.3-all-vllm \
+    --host 0.0.0.0 --port 8000 --enable-vlm-preload true \
+    --gpu-memory-utilization 0.2 --max-model-len 8192
 Restart=always
 RestartSec=5
 # Cold start runs VLM preload (~22 GB weights settle into VRAM) +

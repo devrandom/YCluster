@@ -544,11 +544,15 @@ venv-based service also exposes) and routes to the healthy backend.
 
 ## Open questions / future work
 
-- **vLLM `gpu_memory_utilization`**: actually auto-set to 0.5 by
-  `set_default_gpu_memory_utilization()` in MinerU (0.9 matches only
-  the stale docs; see `todo/inference/mineru-gpu-memory-footprint.md`).
-  With a pinned single GPU that's fine; the reserved-KV-cache size is
-  the open knob if we need to share the same card.
+- **vLLM `gpu_memory_utilization` override**: MinerU auto-defaults to 0.5
+  (`set_default_gpu_memory_utilization()`), which pinned ~48 GB of the 96 GB
+  card to a KV cache far larger than document parsing needs. The unit now
+  overrides it with `--gpu-memory-utilization 0.2 --max-model-len 8192` (both
+  flow through to `AsyncLLM` since `mineru-api` accepts extra CLI args),
+  dropping idle footprint from ~48 GB to ~20 GB and restoring headroom for the
+  Nemotron co-tenant. `--max-model-len` must stay ≤ 8192 (this VLM's
+  `max_position_embeddings`); see
+  `todo/archive/mineru-gpu-memory-footprint.md`.
 - **Cross-page table merge** (`enable_cross_page_table_merge=True`):
   adds an extra vLLM call per doc. May want to disable for short
   docs to skip the overhead.
