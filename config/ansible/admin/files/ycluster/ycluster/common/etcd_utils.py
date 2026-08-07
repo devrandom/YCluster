@@ -71,6 +71,18 @@ def connect_with_retry(hosts, max_retries=3, retry_delay=1, grpc_options=None):
 _CACHED_CLIENT = None
 
 
+def reset_etcd_client():
+    """Drop the cached client so the next get_etcd_client() reconnects.
+
+    Needed when an etcd client's internal watcher thread has died or its
+    cached channel has gone stale (the etcd3 watch thread does not restart
+    itself); the long-running bastion-watch daemon uses this to recover with
+    a fresh client.
+    """
+    global _CACHED_CLIENT
+    _CACHED_CLIENT = None
+
+
 def get_etcd_client(hosts=None, max_retries=3, retry_delay=1, grpc_options=None):
     """Return a cached etcd client, creating it with retries if needed.
 

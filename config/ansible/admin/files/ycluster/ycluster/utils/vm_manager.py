@@ -18,7 +18,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from ..common.etcd_utils import get_etcd_client
+from ..common.etcd_utils import get_etcd_client, reset_etcd_client
 
 USERS_PREFIX = "/cluster/users/"
 VMS_PREFIX = "/cluster/vms/"
@@ -1667,6 +1667,40 @@ def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
         time.sleep(5)                              # backoff before restart
 
 
+def _watch_response_keys(response, prefix):
+    """Return the changed keys (suffix past `prefix`) from an etcd3 watch
+    callback response, or None if the response is a stream-break error.
+
+    etcd3 0.12.x delivers a grpc.RpcError (which has no `.events`) to
+    prefix-watch callbacks when the stream breaks, before clearing every
+    callback without re-arming the watch. A None return signals a dead watch
+    that the caller must recover by re-registering and doing a full resync.
+    """
+    events = getattr(response, "events", None)
+    if events is None:
+        return None
+    keys = []
+    for ev in events:
+        key = ev.key.decode()
+        if key.startswith(prefix):
+            keys.append(key[len(prefix):])
+    return keys
+
+
+def _watcher_healthy(watch_ids, watcher):
+    """True if every expected watch is still armed on an etcd3 Watcher.
+
+    etcd3 clears `_callbacks` (and lets its daemon thread die) after a watch
+    stream error; checking both lets the long-running bastion-watch recover
+    instead of silently dropping future registry changes.
+    """
+    thread = getattr(watcher, "_callback_thread", None)
+    if thread is None or not thread.is_alive():
+        return False
+    callbacks = getattr(watcher, "_callbacks", None) or {}
+    return bool(watch_ids) and all(wid in callbacks for wid in watch_ids)
+
+
 def bastion_watch(debounce=2.0):
     """Watch the user and VM registries; re-sync the bastion and VM keys
     on any change.
@@ -1684,6 +1718,14 @@ def bastion_watch(debounce=2.0):
       * incus instance-started/restarted → vm_sync_keys(<v owner>)
 
     vm_sync_keys acts only on RUNNING VMs that live on this host.
+
+    The etcd3 watch stream can break underneath us (a grpc.RpcError): etcd3
+    0.12.x then clears every callback without re-arming the watch, so the
+    daemon would otherwise stay alive but silently miss *all* future registry
+    changes. We detect that in the callback and via a periodic health check,
+    then re-register both watches and do a full bastion/VM-key resync (the
+    triggering key's identity is lost on a break, so we can't target one
+    owner).
     """
     import threading
 
@@ -1704,28 +1746,35 @@ def bastion_watch(debounce=2.0):
     print(f"bastion-watch: watching {USERS_PREFIX} and {VMS_PREFIX} "
           f"(debounce={debounce}s)", flush=True)
 
+    HEALTH_CHECK_S = 30.0                 # periodic etcd-watch liveness probe
+
     cond = threading.Condition()
     dirty_users = set()                       # users whose records changed
     dirty_vms = set()                         # VM names whose records changed
     bastion_dirty = [False]
+    watch_broken = [False]                    # etcd3 watch stream died
 
     def _on_event(response, prefix, dest_set):
-        try:
-            n = len(response.events) if hasattr(response, "events") else 0
-            print(f"bastion-watch: {n} event(s) on {prefix}", flush=True)
+        # etcd3 (0.12.x) passes a grpc.RpcError to the callback when the watch
+        # stream breaks, then clears every callback *without* re-arming the
+        # watch. A None return means the stream is gone and the triggering
+        # key's identity is lost, so ask the main loop to recover.
+        keys = _watch_response_keys(response, prefix)
+        if keys is None:
+            print(f"bastion-watch: watch on {prefix} broke ({response!r}) — "
+                  f"re-registering and doing a full resync", file=sys.stderr,
+                  flush=True)
             with cond:
-                bastion_dirty[0] = True
-                for ev in (response.events or []):
-                    key = ev.key.decode()
-                    if key.startswith(prefix):
-                        dest_set.add(key[len(prefix):])
-                cond.notify()
-        except Exception as e:
-            print(f"bastion-watch: callback error on {prefix}: {e!r}",
-                  file=sys.stderr, flush=True)
-            with cond:
+                watch_broken[0] = True
                 bastion_dirty[0] = True
                 cond.notify()
+            return
+        with cond:
+            bastion_dirty[0] = True
+            dest_set.update(keys)
+            print(f"bastion-watch: {len(keys)} event(s) on {prefix}",
+                  flush=True)
+            cond.notify()
 
     def on_user_event(response):
         _on_event(response, USERS_PREFIX, dirty_users)
@@ -1734,9 +1783,58 @@ def bastion_watch(debounce=2.0):
         _on_event(response, VMS_PREFIX, dirty_vms)
 
     client = get_etcd_client()
-    w1 = client.add_watch_prefix_callback(USERS_PREFIX, on_user_event)
-    w2 = client.add_watch_prefix_callback(VMS_PREFIX, on_vm_event)
-    print(f"bastion-watch: registered watches w1={w1} w2={w2}", flush=True)
+    watch_ids = []
+
+    def _register_watches():
+        nonlocal client
+        w1 = client.add_watch_prefix_callback(USERS_PREFIX, on_user_event)
+        w2 = client.add_watch_prefix_callback(VMS_PREFIX, on_vm_event)
+        watch_ids[:] = [w1, w2]
+        print(f"bastion-watch: registered watches w1={w1} w2={w2}", flush=True)
+
+    _register_watches()
+
+    def _watch_ok():
+        return _watcher_healthy(watch_ids, client.watcher)
+
+    def _repair_watches():
+        # A dead watcher thread can't be revived by re-adding callbacks (the
+        # new requests would never be consumed) — swap in a fresh client.
+        nonlocal client
+        thread = getattr(client.watcher, "_callback_thread", None)
+        if thread is not None and not thread.is_alive():
+            print("bastion-watch: etcd watch thread died — "
+                  "recreating client", file=sys.stderr, flush=True)
+            reset_etcd_client()
+            client = get_etcd_client()
+            _register_watches()
+            return
+        try:
+            _register_watches()
+        except Exception as e:
+            print(f"bastion-watch: re-register failed ({e!r}) — "
+                  f"recreating client", file=sys.stderr, flush=True)
+            reset_etcd_client()
+            client = get_etcd_client()
+            _register_watches()
+
+    def _full_resync():
+        """Recompute the bastion ACL and every owner's VM keys from scratch.
+
+        Used after a watch-stream break: the failed event no longer carries
+        the changed user, so we can't limit the resync to a single owner.
+        """
+        try:
+            bastion_sync()
+        except Exception as e:
+            print(f"bastion-watch: full_resync bastion_sync failed: {e}",
+                  file=sys.stderr, flush=True)
+        for owner in sorted(_owner_vms()):
+            try:
+                vm_sync_keys(owner)
+            except Exception as e:
+                print(f"bastion-watch: full_resync vm_sync_keys({owner}) "
+                      f"failed: {e}", file=sys.stderr, flush=True)
 
     threading.Thread(
         target=_incus_lifecycle_thread,
@@ -1748,12 +1846,32 @@ def bastion_watch(debounce=2.0):
     while True:
         with cond:
             while not bastion_dirty[0]:
-                cond.wait()
-        time.sleep(debounce)                  # let the burst settle
+                if not cond.wait(timeout=HEALTH_CHECK_S):
+                    break              # periodic liveness probe while idle
+        time.sleep(debounce)           # let the burst settle
         with cond:
             users = set(dirty_users); dirty_users.clear()
             vms = set(dirty_vms); dirty_vms.clear()
+            broken = watch_broken[0]
+            watch_broken[0] = False
+            had_work = bastion_dirty[0]
             bastion_dirty[0] = False
+        if not broken:
+            broken = not _watch_ok()
+        if broken:
+            while True:
+                try:
+                    _repair_watches()
+                    break
+                except Exception as e:
+                    print(f"bastion-watch: watch repair failed: {e!r}; "
+                          f"retrying in {debounce}s", file=sys.stderr,
+                          flush=True)
+                    time.sleep(debounce)
+            _full_resync()
+            continue
+        if not had_work:
+            continue                   # idle wake; watches are healthy
         # VM-record changes can shift ownership; pull each changed VM's
         # current owner into the per-user resync set.
         for name in vms:

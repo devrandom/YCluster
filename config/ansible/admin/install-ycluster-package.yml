@@ -184,6 +184,18 @@
       when: ycluster_sync.changed
       failed_when: false
 
+    - name: Restart ycluster-bastion-watch if package was updated
+      # The bastion-watch daemon loads the vm_manager watcher code at startup;
+      # reinstalling the package (and restarting admin-api) does not restart it,
+      # so the long-running etcd watcher keeps running the old code. Restart it
+      # here so key-propagation fixes actually take effect. Only present on VM
+      # hosts that run the bastion container — absent elsewhere is fine.
+      systemd:
+        name: ycluster-bastion-watch
+        state: restarted
+      when: ycluster_sync.changed
+      failed_when: false
+
     - name: Generate bash completion script
       shell: |
         set -e
