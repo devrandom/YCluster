@@ -221,8 +221,10 @@ def _redact_body_text(text: str) -> str:
 def _principal_from_ctx(ctx: Context) -> str | None:
     """Return a stable identifier for the calling client.
 
-    Used as the `principal` on backgrounded sessions so `status` and `kill`
-    only see the caller's own runs. Preference order:
+    Used as the `principal` on backgrounded sessions so the no-arg `status`
+    listing only shows the caller's own runs. By-ID `status`, `tail`, and
+    `kill` are not scoped by it (an agent that was handed a `session_id` can
+    inspect and terminate another thread's run). Preference order:
 
       1. `params._meta.threadId` from the JSON-RPC request body. The MCP
          `_meta` object is the conventional slot for protocol-level
@@ -581,25 +583,20 @@ async def tail(
     name="kill",
     description=(
         "Terminate a backgrounded run by its `session_id` (the value "
-        "returned by the `run` tool when it auto-backgrounded). Only "
-        "kills sessions owned by the caller's MCP session (filtered by "
-        "`_meta.threadId`, falling back to `mcp-session-id`) \u2014 "
-        "attempts on other clients' sessions "
-        "return `ERROR: session not found` so they cannot be enumerated. "
-        "Sends SIGTERM, escalates to SIGKILL after 2s. Returns how many "
-        "lines of output were captured before the kill \u2014 fetch the "
-        "full transcript with `tail -s <session_id>`."
+        "returned by the `run` tool when it auto-backgrounded). Not scoped "
+        "to the caller's thread \u2014 a `session_id` handed to you by another "
+        "agent can be killed here. Sends SIGTERM, escalates to SIGKILL after "
+        "2s. Returns how many lines of output were captured before the kill "
+        "\u2014 fetch the full transcript with `tail -s <session_id>`."
     ),
 )
 async def kill(
     session_id: str,
-    ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     if not session_id:
         return [TextContent(type="text", text="ERROR: session_id must not be empty")]
     log.init(_LOG_PATH)
-    principal = _principal_from_ctx(ctx)
-    bg = exec.get_backgrounded(session_id, principal=principal)
+    bg = exec.get_backgrounded(session_id)
     if bg is None:
         return [
             TextContent(
@@ -608,7 +605,7 @@ async def kill(
             )
         ]
     started = bg.started
-    killed = exec.kill_backgrounded(session_id, principal=principal)
+    killed = exec.kill_backgrounded(session_id)
     if not killed:
         return [TextContent(type="text", text=f"ERROR: failed to kill session {session_id!r}")]
     line_count = sum(
@@ -642,15 +639,13 @@ def _session_state(bg, log_path: Path) -> str:
 @SERVER.tool(
     name="status",
     description=(
-        "Report the state of backgrounded runs owned by the caller's MCP "
-        "session (filtered by `_meta.threadId`, falling back to "
-        "`mcp-session-id`) \u2014 other clients' "
-        "sessions are not enumerable. With no argument, lists all active "
-        "sessions (session_id, target_host, command, elapsed, lines, "
-        "hard-timeout countdown). With a `session_id`, shows detailed "
-        "state for that session including whether the process is still "
-        "running or has exited, line count so far, and remaining time "
-        "before the hard timeout kills it."
+        "Report the state of backgrounded runs. With no argument, lists the "
+        "active sessions owned by the caller's thread (filtered by "
+        "`_meta.threadId`, falling back to `mcp-session-id`). With a "
+        "`session_id` it reports any run on this server \u2014 including one "
+        "started by another thread/agent that handed you the id \u2014 showing "
+        "whether the process is still running or has exited, line count so "
+        "far, and remaining time before the hard timeout kills it."
     ),
 )
 async def status(
@@ -658,11 +653,10 @@ async def status(
     ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     log.init(_LOG_PATH)
-    principal = _principal_from_ctx(ctx)
     if session_id is not None and not session_id:
         return [TextContent(type="text", text="ERROR: session_id must not be empty when provided")]
     if session_id:
-        bg = exec.get_backgrounded(session_id, principal=principal)
+        bg = exec.get_backgrounded(session_id)
         if bg is None:
             return [
                 TextContent(
@@ -675,13 +669,13 @@ async def status(
             f"timeout_s={bg.timeout_s} {_session_state(bg, _LOG_PATH)}"
         )
     else:
-        sessions = exec.list_backgrounded(principal=principal)
+        sessions = exec.list_backgrounded(principal=_principal_from_ctx(ctx))
         if not sessions:
             text = "no backgrounded sessions"
         else:
             lines = [f"{len(sessions)} backgrounded session(s):"]
             for sid in sessions:
-                bg_item = exec.get_backgrounded(sid, principal=principal)
+                bg_item = exec.get_backgrounded(sid)
                 if bg_item is None:
                     continue
                 lines.append(

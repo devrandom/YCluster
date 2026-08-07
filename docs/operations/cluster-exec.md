@@ -50,13 +50,16 @@ session — find it with `status` (no args) or `tail -s <id>` and recover with
 
 ## Session visibility
 
-`status` and `kill` only see the caller's own backgrounded runs (filtered by
-the caller's `_meta.threadId`, falling back to the `mcp-session-id` header);
-other clients' sessions are not enumerable. The bearer token alone
-authenticates the connection, but per-client visibility is scoped by the
-caller's stable identifier — one client cannot `status` or `kill` another's
-runs. The JSONL log remains the source of truth for everything (read-only via
-`tail -s <id>`).
+Sessions are keyed by their `session_id`, and by-ID access is not scoped to
+the caller's thread: `status -s <id>` reports any run on this server, and
+`kill -s <id>` terminates any run, so an agent that is handed a
+`session_id` (e.g. by a sub-agent) can inspect and kill it. `tail -s <id>`
+is the read-only transcript for any session.
+
+The listing is the one scoped path: `status` with no argument lists only
+the backgrounded runs owned by the caller's thread (filtered by the
+caller's `_meta.threadId`, falling back to the `mcp-session-id` header), so
+you can't enumerate another thread's runs without being handed an id.
 
 `_meta.threadId` is the conventional MCP slot for a stable per-process session
 identifier — codex puts its thread ID there on every `tools/call`, so the
@@ -66,8 +69,8 @@ back to the `mcp-session-id` header, which is per-connection — reused across
 reconnects within one process, but the server's session manager can expire it
 independently, and a fresh process invocation (opencode restart, codex
 resume) gets a new ID and cannot see prior orphans. Either way, orphans are
-still readable via `tail -s <id>` and get cleaned up by the hard `timeout_s`
-watcher or by `cedaemon --stop`.
+still readable via `status`/`tail -s <id>` and get cleaned up by the hard
+`timeout_s` watcher or by `cedaemon --stop`.
 
 ## `sudo -u <user>` quirk on nvidia hosts
 

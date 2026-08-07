@@ -23,9 +23,12 @@ class _Backgrounded:
     timeout_watcher: asyncio.Task | None = None
     orphaned: bool = False
     # `principal` ties the session to the client that started it (the MCP
-    # session ID from `mcp-session-id`). `status` / `kill` filter by it so
-    # one client cannot see or terminate another client's runs — only the
-    # `/stop` admin endpoint and `kill_all_backgrounded` bypass the filter.
+    # session ID from `mcp-session-id`). `list_backgrounded` filters by it
+    # so the no-arg `status` listing only shows the caller's own runs.
+    # By-ID `status`, `tail`, and `kill` are not scoped — an agent handed a
+    # `session_id` can inspect and terminate another thread's run. Only the
+    # `/stop` admin endpoint and `kill_all_backgrounded` bypass the kill
+    # filter path entirely.
     # `None` is allowed (legacy callers and tests); filtered reads with a
     # `None` principal match only `None`-owned sessions.
     principal: str | None = None

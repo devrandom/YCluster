@@ -2,7 +2,11 @@ import asyncio
 import unittest
 from typing import cast
 
+from mcp.server.mcpserver.context import Context
+from starlette.requests import Request
+
 from cluster_exec import exec as exec_mod
+from cluster_exec import server
 
 
 class _StubProcess:
@@ -160,6 +164,87 @@ class RegistryTests(unittest.TestCase):
         for p in procs:
             self.assertTrue(p._terminated)
         self.assertEqual(exec_mod.list_backgrounded(), [])
+
+
+class SessionByIDCrossPrincipalTests(unittest.TestCase):
+    """By-ID `status` and `kill` are not scoped to the caller's thread: an
+    agent handed a `session_id` can inspect and terminate another thread's
+    run. Only the no-arg `status` listing is scoped to the caller's thread."""
+
+    def setUp(self):
+        exec_mod._BACKGROUNDED.clear()
+
+    def tearDown(self):
+        exec_mod._BACKGROUNDED.clear()
+
+    def _register(self, session_id: str, principal: str | None) -> None:
+        async def setup():
+            watcher = asyncio.create_task(asyncio.sleep(0))
+            exec_mod.register_backgrounded(
+                session_id=session_id,
+                target_host="dummy",
+                command="cmd",
+                started=0.0,
+                timeout_s=1800.0,
+                proc=_stub_as_proc(_StubProcess()),
+                readers=(asyncio.create_task(asyncio.sleep(0)), asyncio.create_task(asyncio.sleep(0))),
+                timeout_watcher=watcher,
+                principal=principal,
+            )
+            return watcher
+        _run(setup())
+
+    @staticmethod
+    def _ctx(thread_id: str):
+        # Minimal Context that plumbs `_meta.threadId` through, so
+        # `_principal_from_ctx` resolves the caller's principal.
+        scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": []}
+        request = Request(scope)
+
+        class _RC:
+            request: Request | None = None
+            meta: dict | None = None
+
+        rc = _RC()
+        rc.request = request
+        rc.meta = {"threadId": thread_id}
+        return Context(request_context=rc)
+
+    def test_status_by_id_sees_another_threads_session(self):
+        self._register("statusA0001", "thread-1")
+        self._register("statusB0001", "thread-2")
+        text = _run(server.status("statusB0001"))[0].text
+        self.assertIn("statusB0001", text)
+        self.assertIn("host=dummy", text)
+
+    def test_status_listing_is_scoped_to_own_thread(self):
+        self._register("statusA0002", "thread-1")
+        self._register("statusB0002", "thread-2")
+        text = _run(server.status(ctx=self._ctx("thread-1")))[0].text
+        self.assertIn("1 backgrounded session(s)", text)
+        self.assertIn("statusA0002", text)
+        self.assertNotIn("statusB0002", text)
+
+    def test_kill_cross_thread(self):
+        proc = _StubProcess()
+        async def setup():
+            watcher = asyncio.create_task(asyncio.sleep(0))
+            exec_mod.register_backgrounded(
+                session_id="killerB001",
+                target_host="dummy",
+                command="cmd",
+                started=0.0,
+                timeout_s=1800.0,
+                proc=_stub_as_proc(proc),
+                readers=(asyncio.create_task(asyncio.sleep(0)), asyncio.create_task(asyncio.sleep(0))),
+                timeout_watcher=watcher,
+                principal="thread-2",
+            )
+        _run(setup())
+        text = _run(server.kill("killerB001"))[0].text
+        self.assertTrue(text.startswith("KILLED session=killerB001"), text)
+        self.assertTrue(proc._terminated)
+        self.assertNotIn("killerB001", exec_mod.list_backgrounded())
 
 
 if __name__ == "__main__":
