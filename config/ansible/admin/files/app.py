@@ -2864,6 +2864,23 @@ def _authentik_identity():
     return Identity(uid, email, is_admin, is_manager)
 
 
+def _external_domain():
+    """External `<domain>` suffix used to build cross-subdomain app links
+    (zulip.<domain>, admin.<domain>, the bare <domain> Open WebUI surface).
+    Prefers the canonical value in etcd
+    (/cluster/https/domain); falls back to stripping the `app.` prefix off
+    the request host so a dev/force-local install that hasn't seeded the
+    domain still renders links."""
+    try:
+        value, _ = get_etcd_client().get('/cluster/https/domain')
+        if value:
+            return value.decode().strip()
+    except Exception:
+        pass
+    host = (request.host or '').split(':', 1)[0]
+    return host.split('.', 1)[1] if host.startswith('app.') else None
+
+
 def _gpu_admission_error(name, rec, mode, windows):
     """Admission control for a proposed desired state: None if the VM's
     registered GPU count fits its host's pool against the commitments
@@ -2921,6 +2938,35 @@ def _can_edit_vm(id, rec, desired):
     if rec.get('owner') != id.email:
         return False
     return not (desired is not None and desired.get('mode') == 'unmanaged')
+
+
+@app.route('/')
+def app_landing():
+    """Root of app.<domain>: a landing page linking the user-facing apps.
+
+    Served behind forward-auth (like the other self-service paths), so the
+    page can gate the Admin link on the caller's identity. Individual apps
+    live on sibling subdomains of the primary domain, which we resolve from
+    etcd (or the request host). app.<domain>'s own pages (VM Schedule,
+    Settings, API Keys) are not listed — the app nav bar already links them."""
+    domain = _external_domain()
+    id = _authentik_identity()
+    apps = []
+    if domain:
+        apps += [
+            {'name': 'Open WebUI', 'url': f'https://{domain}/',
+             'logo': '/static/open-webui.svg',
+             'desc': 'Chat, documents, and local models'},
+            {'name': 'Zulip', 'url': f'https://zulip.{domain}/',
+             'logo': '/static/zulip.svg',
+             'desc': 'Team chat and discussions'},
+        ]
+        if id.is_admin or id.is_manager:
+            apps.append({'name': 'YCluster Admin',
+                         'url': f'https://admin.{domain}/',
+                         'logo': '/static/ycluster-favicon.svg',
+                         'desc': 'Inventory, utilization, users, monitoring'})
+    return render_template('app-landing.html', domain=domain or '', apps=apps)
 
 
 @app.route('/admin/vm-schedule')

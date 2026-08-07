@@ -64,7 +64,7 @@
     const here = location.pathname.replace(/\/+$/, '') || '/';
     const nav = document.createElement('nav');
     nav.id = 'yc-nav';
-    nav.innerHTML = '<span class="brand"><img src="/static/ycluster-favicon.svg" alt="">' + brand + '</span>' + items.map(function (it) {
+    nav.innerHTML = '<a class="brand" href="/"><img src="/static/ycluster-favicon.svg" alt="">' + brand + '</a>' + items.map(function (it) {
         const cur = it[1] === here ? ' class="cur"' : '';
         return '<a href="' + it[1] + '"' + cur + '>' + it[0] + '</a>';
     }).join('');

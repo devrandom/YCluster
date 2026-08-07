@@ -1068,5 +1068,73 @@ class ApiKeysAppTests(SchedTestBase):
                               environ_overrides=self._environ("127.0.0.1"))
 
 
+class AppLandingTests(SchedTestBase):
+    """Root of app.<domain> — a landing page linking the user-facing apps.
+
+    Cross-subdomain links (Open WebUI on the bare domain, zulip/admin on
+    their subdomains) are built from the canonical etcd domain; the Admin
+    link is gated on admin/manager identity. Comfy is intentionally hidden
+    from everyone for now."""
+
+    def seed_domain(self, domain="example.com"):
+        self.etcd.put("/cluster/https/domain", domain)
+
+    def test_landing_renders_for_plain_user(self):
+        self.seed_domain()
+        r = self.get("/", admin=False, email="alice@x")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"Open WebUI", r.data)
+        self.assertIn(b"Zulip", r.data)
+        # app.<domain>'s own pages are nav, not apps — not listed here.
+        self.assertNotIn(b"VM Schedule", r.data)
+        self.assertNotIn(b"Settings", r.data)
+        # A plain user is neither admin nor manager -> no Admin link.
+        self.assertNotIn(b"YCluster Admin", r.data)
+
+    def test_landing_links_use_seeded_domain(self):
+        self.seed_domain("example.com")
+        r = self.get("/", admin=False, email="alice@x")
+        self.assertIn(b"https://example.com/", r.data)
+        self.assertIn(b"https://zulip.example.com/", r.data)
+
+    def test_landing_apps_have_logos(self):
+        self.seed_domain("example.com")
+        r = self.get("/", admin=True)
+        self.assertIn(b'src="/static/open-webui.svg"', r.data)
+        self.assertIn(b'src="/static/zulip.svg"', r.data)
+        self.assertIn(b'src="/static/ycluster-favicon.svg"', r.data)
+
+    def test_comfy_is_hidden_from_everyone(self):
+        # Comfy is intentionally not linked on the landing page yet; it is
+        # hidden from all users regardless of role.
+        self.seed_domain()
+        for kwargs in (dict(admin=True), dict(admin=False, manager=True),
+                       dict(admin=False, email="alice@x")):
+            r = self.get("/", **kwargs)
+            self.assertEqual(r.status_code, 200)
+            self.assertNotIn(b"Comfy", r.data)
+
+    def test_admin_sees_admin_link(self):
+        self.seed_domain()
+        r = self.get("/", admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"YCluster Admin", r.data)
+        self.assertIn(b"https://admin.example.com/", r.data)
+
+    def test_manager_sees_admin_link(self):
+        self.seed_domain()
+        r = self.get("/", admin=False, email="alice@x", manager=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"YCluster Admin", r.data)
+
+    def test_landing_without_domain_renders_empty(self):
+        # No /cluster/https/domain and no app. host: no cross-subdomain apps
+        # (and thus no Admin link) can be built — the page still renders, and
+        # app.<domain>'s own pages remain reachable via the nav bar.
+        r = self.get("/", admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(b"YCluster Admin", r.data)
+
+
 if __name__ == "__main__":
     unittest.main()
