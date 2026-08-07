@@ -19,6 +19,11 @@ deployment-agnostic — no node names, IPs, or account specifics.
   [../archive/minimax-m3-b12x-stack.md](../archive/minimax-m3-b12x-stack.md).
   Background/investigation: [minimax-m3-design-2026-06.md](minimax-m3-design-2026-06.md)
   (superseded — documents the path that turned out not to work).
+- [Nemotron-3 Nano Omni 30B-A3B (NVFP4) on RTX PRO 6000 / SM120](nemotron-3-nano-omni-nvfp4.md)
+  — NVIDIA's first-party NVFP4 omni checkpoint on stock vLLM 0.20 (CUDA 13.0),
+  TP=1 on a single 96 GB card, co-tenanted with MinerU on the same host/card by
+  pinning MinerU to one host-visible GPU and running Nemotron at a lowered
+  `--gpu-memory-utilization` so the two share one card without OOM.
 
 ## Design / remediation notes
 

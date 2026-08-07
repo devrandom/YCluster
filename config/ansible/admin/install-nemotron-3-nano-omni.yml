@@ -1,0 +1,204 @@
+---
+# Deploy NVIDIA Nemotron-3 Nano Omni 30B-A3B inference scripts to Nvidia GPU
+# nodes. Two dev scripts (the dev user has no sudo, and needs none for these):
+#   ~dev/bin/nemotron-setup.sh  - pull the image, smoke-test GPU passthrough
+#                                 (CDI), stage/verify the NVFP4 checkpoint.
+#                                 Flags:
+#                                   --download     pull the checkpoint (~22 GB)
+#                                   --verify-only  just check the staged revision
+#   ~dev/bin/nemotron-start.sh  - (re)launch the vLLM server, e.g. after reboot
+#
+# Model: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 at the pinned
+# revision (nemotron_revision). NVIDIA's first-party ModelOpt NVFP4 quant of
+# NVIDIA's own BF16 checkpoint — a Qwen2VL-based omni model (~30B total / ~3B
+# active, CRADIO v4-H vision + Parakeet audio encoders, 256K context). ~22 GB on
+# disk, runs on a single 96 GB RTX PRO 6000 with large headroom (weights ~21 GB;
+# NVIDIA's stated minimum GPU for the NVFP4 checkpoint is a 32 GB card).
+#
+# Image: docker.io/vllm/vllm-openai:v0.20.0 — the vllm-openai image the NVFP4
+# model card pins (CUDA 13.0). vLLM 0.20.x is the first to natively support the
+# Nemotron-3 Nano Omni Qwen2VL-family architecture (NGC 26.04 / vLLM 0.19 needs
+# an --hf-overrides architectures override; avoid it). Runs on Blackwell sm_120.
+# For the NVFP4 quant the MoE backend is flashinfer_cutlass (triton MoE is NOT
+# supported for NvFP4 MoE). Host driver >= R580 required; our driver 610
+# baseline is comfortably above it.
+#   Alternative official image: nvcr.io/nvidia/vllm:26.05-py3 (CUDA 13.2.1,
+#   vLLM 0.20.1, explicitly lists Nemotron-3 Nano Omni support) — use it instead
+#   if you prefer the NVIDIA NGC container and nvcr.io anonymous pull works on
+#   the target host.
+#
+# Host prerequisites (podman + nvidia CDI) are generic and live in
+# setup-gpu-podman.yml.
+#
+# Gating:
+#   Per-host `nemotron_enabled: true` in host_vars/<node>.yml opts into this
+#   play (same pattern as ds4_enabled / mineru_enabled / glm52_enabled). The
+#   play is a no-op on nvidia hosts that don't opt in.
+#
+#   Per-host `nemotron_gpus: "<space-separated CDI indices>"` (default "0")
+#   picks the GPUs this container uses (TP=1 on a single card). On a MinerU
+#   host this SHARES MinerU's card (CDI 0 on nv2) — MinerU is pinned to CDI 0
+#   (app/files/mineru/mineru-podman.service), so Nemotron must run with a
+#   lowered --gpu-memory-utilization (0.45 default in nemotron-start.sh.j2) to
+#   fit in the ~48 GB MinerU leaves free; Nemotron must NOT be given a budget
+#   that, added to MinerU's, exceeds the card. This play's GPU index is purely
+#   a CDI index into the host's host-visible cards.
+#
+#   Per-host `nemotron_port: <port>` (default 9217) overrides the listening port.
+#   Per-host `nemotron_served_name: "<name>"` (default "nemotron-3-nano-omni")
+#   is the gateway routing key (what clients pass as `model:` in API calls).
+#   The inner vllm serve also takes it via --served-model-name.
+#
+# To bring the server up on an opted-in host:
+#   ssh <host>.yc
+#   ~/bin/nemotron-setup.sh --download   # pull image + CDI smoke + checkpoint
+#   ~/bin/nemotron-setup.sh              # later runs: image pull + smoke only
+#   ~/bin/nemotron-start.sh              # launch (idempotent)
+
+- name: Deploy Nemotron-3 Nano Omni inference scripts to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # docker.io/vllm/vllm-openai:v0.20.0 — the vllm-openai image pinned by the
+    # NVFP4 model card (CUDA 13.0). vLLM 0.20.x is the first with native support
+    # for the Nemotron-3 Nano Omni Qwen2VL-family architecture; NVFP4-quantized
+    # MoE requires flashinfer_cutlass (--moe-backend triton is rejected for
+    # NvFP4 MoE). Bonus: it is the same Docker Hub image family the repo already
+    # pulls for MiniMax-M3 stock, so no new registry/auth requirement.
+    nemotron_image: "docker.io/vllm/vllm-openai:v0.20.0"
+    # Official NVIDIA ModelOpt NVFP4 quant of NVIDIA's own BF16 checkpoint;
+    # not gated, licensed under the NVIDIA Open Model Agreement.
+    nemotron_repo: "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4"
+    # Pin to the HF `main` tip SHA verified at repo-authoring time. No stable
+    # release tag exists for this repo; re-verify the SHA at download time
+    # (the setup script cross-checks the trees metadata against it).
+    nemotron_revision: "dc5f0b0bfddf8b6e0f5891475be9af05b80126fe"
+    nemotron_model_dir: "/home/dev/models/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4"
+    # Gateway routing key. Lowercased (proxy convention), serves as the model
+    # id clients pass in `model:`.
+    nemotron_served_name: "nemotron-3-nano-omni"
+    # Port the container listens on inside the host (--network=host, so the
+    # host's port is the API endpoint reachable at http://<host>.xc:<port>).
+    # Port convention: 9212=b12x, 9213=FullKD (retired), 9214=EXL3 TR3,
+    # 9215=spare, 9216=DS4, 9217=Nemotron-3 Omni.
+    nemotron_port: 9217
+  tasks:
+    # Same guard as install-deepseek-v4-flash.yml / install-minimax-m3.yml:
+    # skip nodes with no host-visible NVIDIA GPU (no NVIDIA hardware, or all
+    # cards bound to vfio-pci for passthrough).
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    # Per-host opt-in: only Nemotron-designated nodes run this play.
+    - name: End play for nodes that have not opted into Nemotron
+      meta: end_host
+      when: not (nemotron_enabled | default(false))
+
+    # Guard the co-tenant GPU pinning: never let a node render the start script
+    # without an explicit card, because silently defaulting to CDI 0 would put
+    # Nemotron on top of MinerU (which is pinned to GPU 0 on these hosts).
+    - name: Fail if an opted-in host has no explicit nemotron_gpus
+      fail:
+        msg: >-
+          nemotron_gpus must be set in host_vars/<node>.yml for a
+          nemotron_enabled host. On a MinerU host use the non-MinerU card
+          (e.g. nemotron_gpus: "1"); do not default to CDI 0, which is
+          MinerU's pinned GPU.
+      when: nemotron_gpus is undefined
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install Nemotron dev inference scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - nemotron-setup.sh
+        - nemotron-start.sh
+
+- name: Register the Nemotron backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    # Mirror the DS4 storage play: local-ai-proxy etcd-watches
+    # /cluster/config/inference/models/ and hot-reloads on add/remove — no
+    # proxy restart needed. The backend URL is the opted-in nvidia host on
+    # its Nemotron port. Default host is nv2 (today's MinerU + Nemotron
+    # co-tenant node); a different opted-in host overrides via the set_fact.
+    nemotron_nvidia_host: nv2
+    nemotron_backend_url: "http://{{ nemotron_nvidia_host }}.xc:{{ hostvars[nemotron_nvidia_host]['nemotron_port'] | default(9217) }}"
+    nemotron_served_name: "{{ hostvars[nemotron_nvidia_host]['nemotron_served_name'] | default('nemotron-3-nano-omni') }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Resolve the Nemotron-enabled nvidia host
+      set_fact:
+        nemotron_nvidia_host: >-
+          {{ (groups['nvidia']
+              | select('in', hostvars.keys())
+              | list)
+             | map('extract', hostvars, 'nemotron_enabled')
+             | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+             | selectattr(0, 'defined')
+             | selectattr(0, 'equalto', true)
+             | map(attribute=1)
+             | first
+             | default('nv2') }}
+      when: is_storage_leader
+      # Picks the first nvidia host that defines nemotron_enabled=true in
+      # host_vars. Defaults to nv2 so a future host that only sets the opt-in
+      # without overriding the URL will register correctly.
+
+    - name: Register the Nemotron backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ nemotron_backend_url }} {{ nemotron_served_name }}
+      register: nemotron_proxy_register
+      changed_when: "'added' in nemotron_proxy_register.stdout or 'registered' in nemotron_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+      # Idempotent on subsequent runs: local-ai-proxy models add is a
+      # no-op when the (backend, model) pair is already registered.
+
+    - name: Smoke check the Nemotron backend through local-ai-proxy
+      uri:
+        url: "http://127.0.0.1:4001/v1/models"
+        return_content: no
+        status_code: [200, 401, 404]
+      register: proxy_smoke
+      failed_when: false
+      retries: 5
+      delay: 1
+      until: proxy_smoke.status is defined
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+
+    - name: Report smoke check
+      debug:
+        msg: >-
+          local-ai-proxy on {{ inventory_hostname }}:4001 replied
+          {{ proxy_smoke.status | default('unreachable') }};
+          Nemotron backend registered at {{ nemotron_backend_url }}
+          (served: {{ nemotron_served_name }})
+      when:
+        - is_storage_leader
+        - not ansible_check_mode

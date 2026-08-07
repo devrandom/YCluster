@@ -3,7 +3,7 @@ Description=MinerU document parsing API (opendatalab/MinerU 3.4.x, podman)
 # Same prerequisites as the venv-based mineru.service: the CUDA
 # driver must be initialised before mineru-api imports torch, and
 # nvidia-persistenced keeps the driver resident. Podman + NVIDIA
-# CDI are required for `--device nvidia.com/gpu=all` — set up by
+# CDI are required for the pinned `--device nvidia.com/gpu=0` — set up by
 # setup-gpu-podman.yml (runs before this play in the app chain).
 After=network.target nvidia-persistenced.service
 Wants=nvidia-persistenced.service
@@ -115,11 +115,12 @@ ExecStartPre=/usr/bin/systemd-run --scope --unit=mineru-pull /usr/bin/podman pul
 ExecStart=/usr/bin/systemd-run --scope --unit=mineru-run /usr/bin/podman run --rm --name mineru \
     --userns=keep-id \
     --network=none \
-    --device nvidia.com/gpu=all \
+    --device nvidia.com/gpu=0 \
     -v /home/dev/.cache:/home/dev/.cache \
     -v /home/dev/mineru.json:/home/dev/mineru.json \
     -v /run/mineru:/run/mineru \
     -e MINERU_UDS_PATH=/run/mineru/mineru.sock \
+    -e CUDA_VISIBLE_DEVICES=0 \
     registry.xc:5000/mineru:3.4.3-all-vllm
 Restart=always
 RestartSec=5

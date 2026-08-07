@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# (Re)start the Nemotron-3 Nano Omni 30B-A3B inference server on the NVFP4
+# vLLM image. Run as the dev user (no sudo), e.g. after a reboot:
+#
+#   ~/bin/nemotron-start.sh
+#
+# Idempotent: replaces any existing container. Defaults match the NVFP4 model
+# card recipe: TP=1, --moe-backend flashinfer_cutlass (NVFP4 MoE), FP8 KV
+# cache, 128K context. GPU memory target defaults to 0.45 because the primary
+# deployment co-tenants with MinerU on GPU 0 (~48 GB already held); raise it
+# only on a dedicated card.
+#
+# Tunable knobs (env-var overrides):
+#   GPUS / PORT / SERVED_NAME / MAX_MODEL_LEN / GPU_UTIL / MAX_NUM_SEQS
+#   MAX_NUM_BATCHED_TOKENS / CONTEXT_LENGTH / MEM / MM_IMAGE_LIMIT
+#
+# Model card: https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4
+set -euo pipefail
+
+IMAGE="${IMAGE:-{{ nemotron_image }}}"
+MODEL_HOST="${MODEL_HOST:-{{ nemotron_model_dir }}}"
+CONTAINER="${CONTAINER:-nemotron-3-omni}"
+PORT="${PORT:-{{ nemotron_port }}}"
+# CDI GPU indices. The default deployment SHARES MinerU's card (CDI 0 on nv2);
+# MinerU is pinned to GPU 0 (app/files/mineru/mineru-podman.service) and holds
+# ~48 GB at its hardcoded gpu_memory_utilization=0.5, so Nemotron runs on the
+# same card with a LOW GPU_UTIL to live in the leftover. Override per-host via
+# nemotron_gpus in host_vars/<node>.yml (e.g. "1" to instead use a free
+# non-MinerU card, then raise GPU_UTIL accordingly).
+# NOTE: no `| default('0')` here — a silent default would co-locate onto
+# MinerU's card without the lowered util, i.e. known OOM territory. The play
+# asserts nemotron_gpus is set (see install-nemotron-3-nano-omni.yml).
+GPUS="${GPUS:-{{ nemotron_gpus }}}"
+SERVED_NAME="${SERVED_NAME:-{{ nemotron_served_name }}}"
+
+# ---- vLLM launch defaults (NVFP4 model-card recipe, TP=1) ----
+# The omni model's default context window is 256K; we cap it at 128K so the
+# KV cache fits with the ~21 GB weights. Default GPU_UTIL is set LOW (0.45)
+# because the default deployment shares GPU 0 with MinerU, which already holds
+# ~48 GB of the 96 GB card (its hardcoded gpu_memory_utilization=0.5) — leave
+# that ~48 GB free for Nemotron. The resulting ~15-20 GB FP8 KV pool is still
+# far above the real need (~0.38 GiB per 128K seq, ~12 GiB worst case with all
+# 32 slots full). RAISE GPU_UTIL only on a dedicated card (e.g. 0.80); lower
+# MAX_MODEL_LEN (and drop GPU_UTIL accordingly) if you need longer video.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+GPU_UTIL="${GPU_UTIL:-0.45}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+# Media budget per request (image / video / audio) — vLLM enforces it.
+# IMPORTANT: the image count is CUMULATIVE over the whole conversation prompt,
+# not per user turn. Open-WebUI re-sends every prior image into each new turn,
+# so `image:1` made any 2nd image across turns error ("at most 1 image(s) may
+# be provided in one prompt"). The NVFP4 model supports unlimited images; this
+# is just our own cap. Default 8 balances multi-turn chat against the reserved
+# multimodal-prefill memory on the shared card. Video/audio stay at 1.
+MM_IMAGE_LIMIT="${MM_IMAGE_LIMIT:-8}"
+CONTEXT_LENGTH="${CONTEXT_LENGTH:-0}"
+# Reasoning + tool calling (official recipe): streams thinking into
+# reasoning_content and enables native tool calling for Open-WebUI.
+REASONING_PARSER="${REASONING_PARSER:-nemotron_v3}"
+TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"
+AUTO_TOOL="${AUTO_TOOL:-1}"
+
+# Memory defaults adapt to host RAM (explicit env always overrides) — same
+# rationale as minimax-m3-stock: cap a runaway to the cgroup, not the host.
+host_ram_gib=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo)
+if [ "${host_ram_gib:-0}" -lt 64 ]; then
+  MEM="${MEM:-32g}"
+  MEMSWAP="${MEMSWAP:--1}"
+else
+  MEM="${MEM:-64g}"
+  MEMSWAP="${MEMSWAP:-$MEM}"
+fi
+
+# pre-flight (no root needed)
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - run: ~/bin/nemotron-setup.sh" >&2; exit 1; }
+[ -f "$MODEL_HOST/config.json" ] \
+  || { echo "checkpoint missing at $MODEL_HOST - run: ~/bin/nemotron-setup.sh --download" >&2; exit 1; }
+
+dev_args=()
+ngpu=0
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); ngpu=$((ngpu + 1)); done
+# CDI renumbers injected GPUs to a 0-based range inside the container.
+cvd="$(seq -s, 0 $((ngpu - 1)))"
+# NVFP4-quantized MoE rejects --moe-backend triton (vLLM: "moe_backend='triton'
+# is not supported for NvFP4 MoE"); only CUTLASS/FlashInfer/Marlin MoE backends
+# are valid. flashinfer_cutlass is the model-card default for this quant. TP=1.
+TP=1
+MOE_BACKEND="${MOE_BACKEND:-flashinfer_cutlass}"
+if [ "$ngpu" -gt 1 ]; then
+  >&2 echo "WARNING: Nemotron NVFP4 TP>1 is not supported by this template (TP=1 only); using GPU '$GPUS' with TP=1"
+fi
+
+# Model parent + name inside the container. NVFP4 is a single HF repo (no
+# separate vision/audio repos), so one ro mount is all it needs.
+MODEL_NAME="Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4"
+MODEL_IN="/models/$MODEL_NAME"
+
+# Stop / remove any previous run so the port is free (idempotent).
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+podman run -d --name "$CONTAINER" \
+  "${dev_args[@]}" \
+  --network=host --shm-size 16g \
+  --security-opt seccomp=unconfined --group-add keep-groups \
+  --ulimit memlock=-1:-1 \
+  --ulimit nofile=1048576:1048576 \
+  --ulimit stack=67108864:67108864 \
+  --memory "$MEM" --memory-swap "$MEMSWAP" \
+  -e CUDA_VISIBLE_DEVICES="$cvd" \
+  -e HF_HUB_OFFLINE=1 \
+  -v "$MODEL_HOST":"$MODEL_IN":ro \
+  --entrypoint vllm \
+  "$IMAGE" \
+  serve "$MODEL_IN" \
+  --served-model-name "$SERVED_NAME" \
+  --trust-remote-code \
+  --tensor-parallel-size "$TP" \
+  --max-model-len "$MAX_MODEL_LEN" \
+  --kv-cache-dtype fp8 \
+  --gpu-memory-utilization "$GPU_UTIL" \
+  --max-num-seqs "$MAX_NUM_SEQS" \
+  --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
+  --moe-backend "$MOE_BACKEND" \
+  --reasoning-parser "$REASONING_PARSER" \
+  $( [ "$AUTO_TOOL" != 0 ] && echo --enable-auto-tool-choice --tool-call-parser "$TOOL_PARSER" ) \
+  --limit-mm-per-prompt "{\"image\":${MM_IMAGE_LIMIT},\"video\":1,\"audio\":1}" \
+  $( [ "$CONTEXT_LENGTH" -gt 0 ] && echo --context-length "$CONTEXT_LENGTH" ) \
+  --host 0.0.0.0 --port "$PORT"
+
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=$TP, moe=$MOE_BACKEND, max_model_len=$MAX_MODEL_LEN, gpu_util=$GPU_UTIL"
+echo "  watch:  podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"
+echo "  note:   audio modality needs the 'vllm[audio]' extra in the image; text/image/video work out of the box."

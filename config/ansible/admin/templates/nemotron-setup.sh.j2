@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Pull the Nemotron-3 Nano Omni vLLM image, smoke-test GPU passthrough via
+# CDI, and stage / verify the NVFP4 checkpoint. Run as the dev user (no sudo):
+#
+#   ~/bin/nemotron-setup.sh                # image pull + CDI smoke + checkpoint check
+#   ~/bin/nemotron-setup.sh --download     # also pull the NVFP4 checkpoint (~22 GB)
+#   ~/bin/nemotron-setup.sh --verify-only  # just verify an already-staged checkpoint
+#
+# The image is vllm-openai v0.20.0 (vLLM 0.20.x — the first with native support
+# for the Nemotron-3 Nano Omni Qwen2VL-family architecture). It runs on a
+# Blackwell RTX PRO 6000 via the RTX-Pro-mandated --moe-backend triton (see the
+# NVFP4 model card). Host driver >= R580 required; our driver 610 baseline is
+# fine. Host provisioning (podman, CDI, lingering) is generic and lives in
+# setup-gpu-podman.yml.
+# Managed by admin/install-nemotron-3-nano-omni.yml — edit there.
+# No `pipefail`: a pipeline's exit is the last command's exit, so closing
+# pipes (e.g. head -1 exiting after one line, cluster-exec truncating output)
+# can't kill the script via SIGPIPE. `set -eu` still catches real errors.
+set -eu
+
+IMAGE="{{ nemotron_image }}"
+REPO="{{ nemotron_repo }}"
+REVISION="{{ nemotron_revision }}"
+MODEL_HOST="${MODEL_HOST:-{{ nemotron_model_dir }}}"
+
+# ---- flags ----
+action="setup"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --download)     action="download"; shift ;;
+    --verify-only)  action="verify-only"; shift ;;
+    -h|--help)
+      sed -n '2,10p' "$0"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v podman >/dev/null \
+  || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+# ---- image pull + CDI smoke test (skip for --verify-only) ----
+if [ "$action" != "verify-only" ]; then
+  echo "== pull $IMAGE =="
+  podman pull "$IMAGE"
+
+  echo "== GPU passthrough smoke test (CDI) =="
+  # CDI injects a host-visible GPU into a container; nvidia-smi inside the image
+  # must see it. Pick the first idle GPU (util < 5%); fall back to index 0
+  # only if every card is busy — the CDI test doesn't allocate memory, so a busy
+  # GPU still proves CDI works. We verify by exit code, not stdout (nvidia-smi
+  # keeps writing after the first line; piping through head -1 with pipefail
+  # triggers SIGPIPE and kills the script).
+  smoke_gpu="$(nvidia-smi --query-gpu=index,utilization.gpu --format=csv,noheader,nounits \
+    | awk -F, '$2+0 < 5 {print $1; exit}')"
+  [ -n "$smoke_gpu" ] || smoke_gpu="0"
+  podman run --rm --entrypoint nvidia-smi \
+    --device "nvidia.com/gpu=$smoke_gpu" --group-add keep-groups "$IMAGE" -L > /dev/null \
+    || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml + nemotron_enabled host_vars" >&2; exit 1; }
+  echo "  (probed GPU $smoke_gpu)"
+  echo
+  echo "Image ready."
+fi
+
+# ---- checkpoint download (--download only) ----
+if [ "$action" = "download" ]; then
+  echo "== download $REPO @ $REVISION -> $MODEL_HOST =="
+  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint
+  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s).
+  # `uv tool run hf …` (not bare `hf …`) — the dev user installed huggingface_hub
+  # as a uv tool, so the binary lives in ~/.local/share/uv/tools/.../bin/ and
+  # isn't on PATH. uv is on PATH (/snap/bin/uv) and resolves the tool for us.
+  HF_HUB_DISABLE_XET=1 uv tool run hf download "$REPO" \
+    --revision "$REVISION" \
+    --local-dir "$MODEL_HOST"
+  echo
+fi
+
+# ---- revision verification (after download, or on demand) ----
+if [ "$action" = "download" ] || [ "$action" = "verify-only" ]; then
+  echo "== verify checkpoint revision =="
+  # The trees file's filename IS the HF revision SHA — HF writes one per
+  # revision under .cache/huggingface/trees/. A mismatch means vLLM loads the
+  # wrong weights (the NVFP4 checkpoint is pinned; a different revision can
+  # rename weight keys or config fields).
+  trees_dir="$MODEL_HOST/.cache/huggingface/trees"
+  if [ ! -d "$trees_dir" ]; then
+    echo "no trees metadata at $trees_dir — run --download first" >&2
+    exit 1
+  fi
+  got="$(ls "$trees_dir"/*.json 2>/dev/null \
+        | xargs -n1 basename \
+        | sed 's/\.json$//' \
+        | sort -u \
+        | head -1)"
+  if [ -z "$got" ]; then
+    echo "no trees metadata files at $trees_dir" >&2
+    exit 1
+  fi
+  if [ "$got" != "$REVISION" ]; then
+    echo "revision mismatch: expected $REVISION, got '$got'" >&2
+    echo "  $MODEL_HOST contains a different HF revision" >&2
+    exit 1
+  fi
+  echo "  revision OK: $got"
+  echo
+fi
+
+# ---- checkpoint readiness (default setup path only) ----
+if [ "$action" = "setup" ]; then
+  if [ ! -f "$MODEL_HOST/config.json" ]; then
+    echo "Checkpoint not found at $MODEL_HOST (~22 GB) - download it, then re-run this script:"
+    echo "  ~/bin/nemotron-setup.sh --download"
+    exit 0
+  fi
+
+  # light checkpoint sanity (a safetensors index should be present for a
+  # sharded checkpoint; the start script's vLLM does the full check).
+  [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+    || { echo "no sharded index at $MODEL_HOST/model.safetensors.index.json - re-run ~/bin/nemotron-setup.sh --download" >&2; exit 1; }
+
+  echo
+  echo "Start the server:  ~/bin/nemotron-start.sh"
+fi

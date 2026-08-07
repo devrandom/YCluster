@@ -114,6 +114,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [GPU-VM DKMS → Canonical-signed modules](inference/gpu-dkms-canonical.md)
 - [MiniMax-M3 max-num-seqs knob](inference/m3-max-num-seqs.md)
 - [CDI spec regeneration on GPU host](inference/cdi-spec-regen.md) — stale `/etc/cdi/nvidia.yaml` after driver upgrade or vfio→nvidia rebind; podman CDI fails on ghost devices. Wire into `gpu-passthrough-bind.sh.j2`.
+- [Reduce MinerU GPU memory footprint](inference/mineru-gpu-memory-footprint.md) — MinerU hardcodes `gpu_memory_utilization`; vLLM pre-reserves a KV cache far larger than document parsing needs, blocking a co-tenant on the same GPU.
 
 ## Authentik
 - [Split passwords frontend from general](authentik/split-passwords-frontend.md)
