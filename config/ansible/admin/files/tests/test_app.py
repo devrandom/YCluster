@@ -1069,12 +1069,12 @@ class ApiKeysAppTests(SchedTestBase):
 
 
 class AppLandingTests(SchedTestBase):
-    """Root of app.<domain> — a landing page linking the user-facing apps.
+    """Root of <domain> — a landing page linking the user-facing apps.
 
-    Cross-subdomain links (Open WebUI on the bare domain, zulip/admin on
-    their subdomains) are built from the canonical etcd domain; the Admin
-    link is gated on admin/manager identity. Comfy is intentionally hidden
-    from everyone for now."""
+    Cross-subdomain links (Open WebUI on chat.<domain>, zulip/admin on their
+    subdomains) are built from the canonical etcd domain; the Admin link is
+    gated on admin/manager identity. Comfy is intentionally hidden from
+    everyone for now."""
 
     def seed_domain(self, domain="example.com"):
         self.etcd.put("/cluster/https/domain", domain)
@@ -1085,7 +1085,7 @@ class AppLandingTests(SchedTestBase):
         self.assertEqual(r.status_code, 200)
         self.assertIn(b"Open WebUI", r.data)
         self.assertIn(b"Zulip", r.data)
-        # app.<domain>'s own pages are nav, not apps — not listed here.
+        # The root's own pages are nav, not apps — not listed here.
         self.assertNotIn(b"VM Schedule", r.data)
         self.assertNotIn(b"Settings", r.data)
         # A plain user is neither admin nor manager -> no Admin link.
@@ -1094,7 +1094,7 @@ class AppLandingTests(SchedTestBase):
     def test_landing_links_use_seeded_domain(self):
         self.seed_domain("example.com")
         r = self.get("/", admin=False, email="alice@x")
-        self.assertIn(b"https://example.com/", r.data)
+        self.assertIn(b"https://chat.example.com/", r.data)
         self.assertIn(b"https://zulip.example.com/", r.data)
 
     def test_landing_apps_have_logos(self):

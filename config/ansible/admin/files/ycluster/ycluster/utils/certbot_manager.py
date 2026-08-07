@@ -187,9 +187,9 @@ def update_nginx_configs(local_mode=False):
                 # Production site gets primary domain
                 site_domain = primary_domain
 
-            # Render template with domain and use_tls variables
+            # Render template with domain, primary domain and use_tls variables
             template = Template(template_content)
-            updated_content = template.render(domain=site_domain, use_tls=use_tls)
+            updated_content = template.render(domain=site_domain, primary=primary_domain, use_tls=use_tls)
 
             # Check if config already exists and is the same
             if nginx_config_path.exists():

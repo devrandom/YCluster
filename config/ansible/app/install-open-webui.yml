@@ -5,7 +5,10 @@
   vars:
     instance: "{{ openwebui_instance | default('') }}"
     instance_suffix: "{{ ('-' + instance) if instance else '' }}"
-    config_suffix: "{{ ('_' + instance) if instance else '' }}"
+    # The default instance is served at chat.<domain>; the `_chat` template
+    # suffix makes certbot-manager derive that subdomain and add it to the
+    # cert SAN. Named stages get `<name>.<domain>` as before.
+    config_suffix: "{{ ('_' + instance) if instance else '_chat' }}"
     local_port: "{{ openwebui_port | default('8380') }}"
   tasks:
     - name: Check if this host is the storage leader
@@ -159,6 +162,27 @@
       register: nginx_update_result
       changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
+      notify: reload nginx
+
+    # The default OWUI instance moved from the bare <domain> to chat.<domain>.
+    # Clear the legacy root-domain template + site so the root vhost is free
+    # for the landing page. Named stages (open-webui_stage, ...) are unaffected.
+    - name: Remove legacy root-domain Open WebUI vhost (moved to chat.<domain>)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/templates/open-webui.conf.j2
+        - /etc/nginx/sites-available/open-webui
+        - /etc/nginx/sites-enabled/open-webui
+      notify: reload nginx
+      when: not instance
+
+    - name: Enable chat.<domain> Open WebUI nginx site
+      file:
+        src: /etc/nginx/sites-available/open-webui_chat
+        dest: /etc/nginx/sites-enabled/open-webui_chat
+        state: link
       notify: reload nginx
 
   handlers:

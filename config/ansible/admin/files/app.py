@@ -2866,11 +2866,11 @@ def _authentik_identity():
 
 def _external_domain():
     """External `<domain>` suffix used to build cross-subdomain app links
-    (zulip.<domain>, admin.<domain>, the bare <domain> Open WebUI surface).
-    Prefers the canonical value in etcd
-    (/cluster/https/domain); falls back to stripping the `app.` prefix off
-    the request host so a dev/force-local install that hasn't seeded the
-    domain still renders links."""
+    (chat.<domain>, zulip.<domain>, admin.<domain>). Prefers the canonical
+    value in etcd (/cluster/https/domain); falls back to deriving the domain
+    from the request host so a dev/force-local install that hasn't seeded
+    the domain still renders links. The landing page is served at the bare
+    <domain> (previously app.<domain>), so the fallback accepts both shapes."""
     try:
         value, _ = get_etcd_client().get('/cluster/https/domain')
         if value:
@@ -2878,7 +2878,11 @@ def _external_domain():
     except Exception:
         pass
     host = (request.host or '').split(':', 1)[0]
-    return host.split('.', 1)[1] if host.startswith('app.') else None
+    if host.startswith('app.'):
+        return host.split('.', 1)[1]
+    if host and host != 'localhost':
+        return host
+    return None
 
 
 def _gpu_admission_error(name, rec, mode, windows):
@@ -2942,19 +2946,19 @@ def _can_edit_vm(id, rec, desired):
 
 @app.route('/')
 def app_landing():
-    """Root of app.<domain>: a landing page linking the user-facing apps.
+    """Root of <domain>: a landing page linking the user-facing apps.
 
     Served behind forward-auth (like the other self-service paths), so the
     page can gate the Admin link on the caller's identity. Individual apps
     live on sibling subdomains of the primary domain, which we resolve from
-    etcd (or the request host). app.<domain>'s own pages (VM Schedule,
-    Settings, API Keys) are not listed — the app nav bar already links them."""
+    etcd (or the request host). The root's own pages (VM Schedule, Settings,
+    API Keys) are not listed — the app nav bar already links them."""
     domain = _external_domain()
     id = _authentik_identity()
     apps = []
     if domain:
         apps += [
-            {'name': 'Open WebUI', 'url': f'https://{domain}/',
+            {'name': 'Open WebUI', 'url': f'https://chat.{domain}/',
              'logo': '/static/open-webui.svg',
              'desc': 'Chat, documents, and local models'},
             {'name': 'Zulip', 'url': f'https://zulip.{domain}/',

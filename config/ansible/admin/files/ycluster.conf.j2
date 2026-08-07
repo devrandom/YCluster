@@ -1,0 +1,54 @@
+# <domain> (root) — user-facing self-service surface (VM scheduling +
+# Settings) plus the landing page linking the apps. Replaces the old
+# Open WebUI root vhost and the app.<domain> landing surface. Gated by the
+# cluster IdP's "YCluster" application (no group policy → open to every
+# enrolled user; the Flask app scopes each VM/SSH-key to its owner).
+# Only the self-service paths are served here, so admin-only pages
+# (inventory, model-usage, user management on admin.<domain>) are NOT
+# reachable even though the same outpost fronts both. Rendered by
+# certbot-manager from this template: the `ycluster` filename has no `_`
+# suffix, so it is served at the primary <domain>.
+#
+# Single source of truth for the <domain> surface: this server block
+# declares both the cluster-internal / direct listener (plain :443) and
+# the frp tunnel landing (127.0.0.2:17443, PROXY protocol v2). External
+# users reach it through the frp tunnel; internal/direct hits use the
+# plain listener. HTTP-01 + the :80→:443 redirect are handled by the
+# shared public `_` server in admin-api.conf.j2 / admin-api-alt.conf.j2.
+server {
+    {% if use_tls %}
+    listen 443 ssl http2;
+    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    {% else %}
+    listen 80;
+    listen 127.0.0.2:17443 proxy_protocol;
+    {% endif %}
+    server_name {{ domain | default('_') }};
+
+    # Trust the PROXY protocol header only from loopback (frpc, the sole
+    # source that can reach 127.0.0.2). Plain :443 connections carry no
+    # PROXY header and are unaffected.
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    client_max_body_size 1M;
+
+    {% if use_tls %}
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    {% endif %}
+    add_header X-Content-Type-Options nosniff always;
+
+    # IdP outpost plumbing (login redirect, OAuth callback, auth subrequest).
+    include /etc/nginx/admin-api-authentik-outpost.conf;
+
+    # Self-service paths + landing live in a shared include so the internal
+    # and proxy listeners proxy identically to the same Flask app.
+    include /etc/nginx/ycluster_app-locations.conf;
+}
