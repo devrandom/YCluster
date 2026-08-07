@@ -49,6 +49,24 @@
             dest: "{{ build_dir }}/open-webui/backend/open_webui/retrieval/web/kagi.py"
             mode: '0644'
 
+        - name: Copy Open WebUI YCluster home-icon frontend patch
+          copy:
+            src: files/open-webui-home-icon.patch
+            dest: "{{ build_dir }}/open-webui-home-icon.patch"
+            mode: '0644'
+
+        # Applies a Svelte change (adds a Y icon in the chat navbar top-right that
+        # links to the apex-domain home) to the checked-out frontend before the
+        # docker build. Idempotent: git apply --check fails once applied, so stage
+        # rebuilds over the same checkout don't re-apply.
+        - name: Apply Open WebUI YCluster home-icon frontend patch
+          shell: |
+            if git apply --check ../open-webui-home-icon.patch 2>/dev/null; then
+              git apply ../open-webui-home-icon.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
         - name: Build and push with buildx using registry cache
           shell: |
             docker buildx build \

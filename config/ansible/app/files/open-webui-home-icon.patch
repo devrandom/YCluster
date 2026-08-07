@@ -1,0 +1,60 @@
+diff --git a/src/lib/components/chat/Navbar.svelte b/src/lib/components/chat/Navbar.svelte
+--- a/src/lib/components/chat/Navbar.svelte
++++ b/src/lib/components/chat/Navbar.svelte
+@@ -65,6 +65,19 @@
+ 
+ 	let showShareChatModal = false;
+ 	let showDownloadChatModal = false;
++
++	// Link to the YCluster landing page at the apex domain. Open-WebUI is served
++	// at chat.<domain>, so derive the root home from the current hostname by
++	// dropping the first label; hide the icon when there is no subdomain to strip.
++	const homeHref =
++		typeof window !== 'undefined'
++			? (() => {
++					const labels = window.location.hostname.split('.');
++					return labels.length > 1
++						? `${window.location.protocol}//${labels.slice(1).join('.')}/`
++						: null;
++			  })()
++			: null;
+ </script>
+ 
+ <ShareChatModal bind:show={showShareChatModal} chatId={$chatId} />
+@@ -243,6 +256,36 @@
+ 							</button>
+ 						</Tooltip>
+ 					{/if}
++					{#if homeHref}
++						<Tooltip content="YCluster home">
++							<a
++								class="flex size-6 cursor-pointer items-center justify-center rounded-lg text-gray-500 transition hover:bg-gray-50/40 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800/40 dark:hover:text-gray-200"
++								href={homeHref}
++								draggable="false"
++								aria-label="YCluster home"
++							>
++								<svg
++									xmlns="http://www.w3.org/2000/svg"
++									class="size-4.5"
++									viewBox="0 0 64 64"
++									role="img"
++									aria-label="Y"
++								>
++									<rect width="64" height="64" rx="12" fill="#0a5dc2" />
++									<text
++										x="32"
++										y="45"
++										text-anchor="middle"
++										font-family="Helvetica, Arial, sans-serif"
++										font-size="38"
++										font-weight="700"
++										fill="#ffffff"
++									>Y</text
++								>
++								</svg>
++							</a>
++						</Tooltip>
++					{/if}
+ 				</div>
+ 			</div>
+ 		</div>
