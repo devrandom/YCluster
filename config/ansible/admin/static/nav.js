@@ -13,13 +13,22 @@
     favicon.href = '/static/ycluster-favicon.svg';
     document.head.appendChild(favicon);
 
-    // The user-facing host (app.<domain>) serves only the self-service
-    // scheduling page; the admin host (admin.<domain> / admin.xc) serves the
-    // full set. Show each its own links so app.'s nav doesn't point at admin
-    // pages that just bounce back. Account always targets the auth. sibling.
-    const isApp = location.hostname.startsWith('app.');
-    const authHref = location.protocol + '//' +
-        location.hostname.replace(/^(admin|app)\./, 'auth.') + '/';
+    // The user-facing surface is the bare <domain> (app.<domain> redirects
+    // here); it serves only the landing + self-service pages. The admin host
+    // (admin.<domain> / admin.xc) serves the full set. Show each its own
+    // links so the root nav doesn't point at admin pages that just bounce
+    // back. Account always targets the auth. sibling.
+    const isApp = !location.hostname.startsWith('admin.');
+    const bare = location.hostname.replace(/^(admin|app)\./, '');
+    const authHref = location.protocol + '//auth.' + bare + '/';
+    // The brand links to the overall home. On the user surface that IS the
+    // root landing ('/'); on the admin host the admin app's own root is a
+    // separate "Home" nav item, so the brand points at the sibling root
+    // <domain> landing instead. Internal *.xc aliases don't encode the
+    // external domain, so they can't derive that URL — fall back to '/'.
+    const homeHref = (!isApp && !location.hostname.endsWith('.xc'))
+        ? location.protocol + '//' + bare + '/'
+        : '/';
 
     const items = isApp ? [
         ['VM Schedule', '/admin/vm-schedule'],
@@ -39,7 +48,7 @@
         ['Monitoring', '/grafana/dashboards'],
         ['Account', authHref],
     ];
-    const brand = isApp ? 'YCluster' : 'YCluster Admin';
+    const brand = 'YCluster';
 
     const style = document.createElement('style');
     style.textContent = `
@@ -64,7 +73,7 @@
     const here = location.pathname.replace(/\/+$/, '') || '/';
     const nav = document.createElement('nav');
     nav.id = 'yc-nav';
-    nav.innerHTML = '<a class="brand" href="/"><img src="/static/ycluster-favicon.svg" alt="">' + brand + '</a>' + items.map(function (it) {
+    nav.innerHTML = '<a class="brand" href="' + homeHref + '"><img src="/static/ycluster-favicon.svg" alt="">' + brand + '</a>' + items.map(function (it) {
         const cur = it[1] === here ? ' class="cur"' : '';
         return '<a href="' + it[1] + '"' + cur + '>' + it[0] + '</a>';
     }).join('');
