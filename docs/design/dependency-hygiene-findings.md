@@ -90,10 +90,9 @@ drift. osv-scanner does not emit lockfile sources from the tree by default
 
 ## S7 — frp (pinned source build)
 
-Pin `frp_repo_sha` = `fdaff3d6…`, checkout is **v0.70.0** (`7b6e01f0`) →
-**DRIFT: pin is behind the checked-out upstream tag**. Freshness gap, not a CVE
-finding in our code. **Action (TRACKED):** bump `frp_repo_sha` to `7b6e01f04…`
-(v0.70.0) behind the existing frp-migration work, as its own reviewed change.
+`frp_repo_sha` = `7b6e01f04…` (tag **v0.70.0**), **in sync** with the
+`ext/frp` checkout — no drift. Freshness gap only (not a CVE finding in our
+code); re-pin via `deps-tidy-src` on the next deliberate frp bump.
 
 ## S9 — zulip (pinned source build)
 
@@ -134,7 +133,7 @@ re-run; not tracked in this ledger.
 
 ## Review cadence
 
-- Reassess **ansible-core**, **protobuf (S2/S3)**, and the **S7/S9/S10 pin
+- Reassess **ansible-core**, **protobuf (S2/S3)**, and the **S9/S10 pin
   gaps** on each `just deps-check`, and whenever the blocking upstreams move.
 - `deps-vuln-py` / `deps-vuln-src` report these without failing until the
   accompanied entries stop being accepted (Phase 4).
