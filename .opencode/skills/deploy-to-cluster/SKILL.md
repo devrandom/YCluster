@@ -39,18 +39,23 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
 ## Deployment flow
 
 1. **Commit locally** (no prefixes; match repo style).
-2. **Files sync automatically** — `dev-sync`'s inotify daemon is
-   started once per machine by direnv (outside agent sessions) and
-   rsyncs the working tree to the cluster on every edit. The agent
-   doesn't run `--once`; it just commits.
-   - If unsure whether edits landed, run `dev-sync --check`
-     — dry-run checksum compare, exits 0 on in-sync, prints differing
-     files otherwise.
-3. **SSH to any cluster node** (the operator-local entry alias is set
-   by direnv; use whatever your shell resolves) and run the playbook:
-   ```bash
-   ssh <entry> 'cd /etc/ansible && \
-     ./run-playbook.sh <playbook>.yml --limit managed'
+2. **Files sync automatically — `dev-sync` is user-managed.** Its
+   inotify daemon is started once per machine by the user (via direnv,
+   outside agent sessions) and rsyncs the working tree to the cluster
+   on every edit. The agent doesn't run it and may not even have
+   `dev-sync` on its PATH; the agent just commits and lets the user's
+   watcher sync.
+   - If unsure whether edits landed, don't run `dev-sync --check`
+     yourself — confirm the file is present on the bastion through
+     cluster-exec instead (e.g. `grep`/`test -f` against
+     `/etc/ansible/...`), or ask the user to confirm the sync.
+3. **Run the playbook via cluster-exec** (`run` tool; see
+   `docs/operations/cluster-exec.md` for the full tool reference).
+   Use `hostname="localhost"` for anything that should run on the
+   bastion, where `/etc/ansible` lives:
+   ```
+   run(command="cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit managed",
+       hostname="localhost")
    ```
    `./run-playbook.sh` sources `env.sh` and the vault password; don't
    call `ansible-playbook` directly. `--limit managed` is explicit so
@@ -75,12 +80,13 @@ playbooks under `config/ansible/<area>/`. Pick the one whose
 
 ## Targeting only the leader (dev only)
 
-For a leader-only dev run instead of `managed`:
+For a leader-only dev run instead of `managed`, resolve the leader and
+pass it to the play `--limit` in a single cluster-exec run on the
+bastion (`$(ycluster cluster leader)` is evaluated there):
 
-```bash
-ssh <entry> 'cd /etc/ansible && \
-  LEADER=$(ycluster cluster leader) && \
-  ./run-playbook.sh <playbook>.yml --limit "$LEADER"'
+```
+run(command="cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit $(ycluster cluster leader)",
+    hostname="localhost")
 ```
 
 Other admin-api instances stay on old code during dev. This is fine
@@ -89,18 +95,23 @@ while testing since the public-facing app is the leader; promote to
 
 ## Verification
 
-After the playbook(s) run, sanity-check on the leader:
+After the playbook(s) run, resolve the leader with cluster-exec, then
+sanity-check it by passing the leader as the `hostname` argument — the
+cluster-exec hop target — rather than nesting a shell hop inside the
+command:
 
-```bash
-LEADER=$(ssh <entry> 'ycluster cluster leader')
-ssh <entry> "ssh $LEADER 'systemctl is-active admin-api'"
-ssh <entry> "ssh $LEADER 'ls -l /opt/admin-services/app.py'"
+```
+run(command="ycluster cluster leader", hostname="localhost")  # prints the leader hostname
+run(command="systemctl is-active admin-api", hostname="<leader>")
+run(command="ls -l /opt/admin-services/app.py", hostname="<leader>")
 ```
 
 `changed=N` in the playbook recap counts tasks that mutated state
 (file copies, service restarts). `changed=0` means the cluster was
-already up-to-date — if you expected a change, verify with
-`dev-sync --check` that the sync actually landed.
+already up-to-date — if you expected a change, confirm the synced
+file landed on the bastion via cluster-exec (e.g. `test -f`/`grep`
+in `/etc/ansible/...`) rather than running `dev-sync --check`
+yourself.
 
 ## Gotchas
 
@@ -109,8 +120,8 @@ already up-to-date — if you expected a change, verify with
   stays at the last `git pull`. Don't expect `git log` on the cluster
   to match local.
 - **The inotify daemon syncs to whatever `YC_SYNC_HOST` direnv
-  set.** If you've overridden it for a flaky route, files may go
-  elsewhere — `--check` shows what the watcher thinks is in sync.
+  set.** If it's been overridden for a flaky route, files may go
+  elsewhere. `dev-sync` is user-managed.
 - **Ansible handlers only fire on changed files.** If `restart
   admin-api` doesn't fire on a run you expected it to, the upstream
   copy task reported `ok` (no change) — investigate the playbook,
