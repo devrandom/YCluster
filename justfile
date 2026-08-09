@@ -4,6 +4,7 @@
 #   completions.just  bash completion symlink
 #   tests.just        server-free + dev-cluster system tests
 #   lint.just         yamllint + ty + go vet
+#   deps.just         govulncheck audit + go.mod/go.sum pin maintenance
 #   python.just       uv venv + editable ycluster install
 #
 # `just` with no args lists all recipes. Use `just <recipe>` to run one.
@@ -14,6 +15,7 @@ import "just.d/dev-pxe.just"
 import "just.d/completions.just"
 import "just.d/tests.just"
 import "just.d/lint.just"
+import "just.d/deps.just"
 import "just.d/worktrees.just"
 import "just.d/python.just"
 

@@ -122,6 +122,28 @@ make build       # binary at bin/local-ai-proxy
 Tests use `httptest.NewServer` with deterministic channel
 synchronization — no sleep-based waits.
 
+## Dependency hygiene
+
+From the repo root, `just` exposes three recipes for the Go module here:
+
+- `just vulncheck` — reachability-aware CVE scan via `govulncheck ./...`
+  against the OSV Go vuln DB. Read-only; it never rewrites the pins.
+- `just deps-verify` — `go mod verify` plus a check that `go.sum` is
+  tracked, so the checksummed set that was scanned is the set that ships.
+- `just deps-tidy` — `go mod tidy` + `go mod verify` to re-pin
+  `go.mod`/`go.sum` to the code's real imports.
+
+Auditing and pinning are separate on purpose: pin updates change what a
+future scan covers, so they go in their own reviewed change. Bump flow:
+
+```bash
+just deps-tidy && just deps-verify && just vulncheck
+# then commit local-ai-proxy/go.mod + local-ai-proxy/go.sum together
+```
+
+`govulncheck` is not vendored; install it once with
+`go install golang.org/x/vuln/cmd/govulncheck@latest`.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
