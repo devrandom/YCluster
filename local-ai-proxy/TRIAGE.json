@@ -1,0 +1,209 @@
+{
+  "triage_completed": true,
+  "triage_context": {
+    "mode": "auto",
+    "environment": "The local-ai-proxy /v1 OpenAI-compatible API is fronted by a publicly-exposed nginx auth_request (OIDC/bearer) that injects identity headers and forwards to the proxy on loopback; /v1/* HTTP is treated as untrusted (reachable by authenticated external clients; the proxy itself authenticates nobody). Management surfaces /healthz and /metrics are intended internal-only (owner risk-accepted). etcd and the CLI are operator-controlled and written only by trusted control-plane nodes (insider trust).",
+    "threat_model": [
+      "T5: external authenticated users reach sensitive/cost-heavy models they are not entitled to (ACL integrity)",
+      "T6: etcd config poisoning (models/disabled/ACL writes) changes routing or ACL policy",
+      "T8: internal cluster topology disclosure via /healthz and /metrics",
+      "T9: cleartext or forged reads of routing/ACL config from non-mTLS etcd",
+      "T10: broad /v1/* pass-through exposes backend internal/admin endpoints"
+    ],
+    "scoring": "derived HIGH/MEDIUM/LOW",
+    "noise_tolerance": "precision",
+    "votes_per_finding": 1,
+    "repo": "/home/user/ycluster/local-ai-proxy",
+    "verification_note": "Sequential single-pass verification by the orchestrator (skill fallback: subagent spawns hit the runtime thread limit in this environment)."
+  },
+  "summary": {
+    "input_count": 10,
+    "duplicates": 0,
+    "false_positives": 3,
+    "true_positives": 7,
+    "needs_manual_test": 2,
+    "by_severity": {"HIGH": 0, "MEDIUM": 4, "LOW": 3}
+  },
+  "findings": [
+    {
+      "id": "f001", "source": "VULN-FINDINGS.json#0",
+      "title": "X-Model header vs body model confusion lets a client bypass the per-model ACL",
+      "file": "router.go", "line": 157, "category": "auth-bypass", "claimed_severity": "HIGH",
+      "verdict": "true_positive", "verify_verdict": "needs_manual_test", "confidence": 0.8,
+      "severity": "MEDIUM", "severity_label": "MEDIUM", "severity_alignment": -1,
+      "preconditions": [
+        "Attacker must reach /v1/* through the authenticated nginx front (authenticated remote access)",
+        "The routed (header) backend must itself serve the restricted model named in the body",
+        "Attacker must know a restricted model id and be able to set X-Model + body model independently"
+      ],
+      "access_level": "authenticated_remote",
+      "threat_match": "T5: external authenticated users reach sensitive/cost-heavy models they are not entitled to (ACL integrity)",
+      "rationale": "Router derives route.Model from the client X-Model header (router.go:157, 200-206) while the raw JSON/multipart body is forwarded byte-for-byte (router.go:212; handler.go:303, 312-318). The ACL gate at handler.go:225 checks route.Model only. A client can therefore set X-Model to an allowed model (satisfies routing+ACL) and put a restricted model in the body, which the backend executes. No downstream protection re-parses or syncs the body model. This is the highest-signal finding (authentication/authorization bypass on the primary external ACL control) but is derived MEDIUM rather than the claimed HIGH because exploitation requires the routed backend to actually serve the body model and the attacker to know a valid restricted model id; a runtime call must confirm this. Recommended as the top fix and a human-built PoC.",
+      "vote_breakdown": {"true_positive": 1, "false_positive": 0, "cannot_verify": 0},
+      "refute_reasons": [], "exclusion_rule": null,
+      "first_links": ["handler.go:206 (h.router.Route(r))", "router.go:157 (X-Model header read)", "handler.go:225 (acl.Check(route.Model,...))", "handler.go:303/312-318 (replays route.Body unchanged; forwards raw body)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": "top committer: Devrandom (8/8 recent commits on router.go); no CODEOWNERS entry; component: local-ai-proxy/",
+      "missing_fields": []
+    },
+    {
+      "id": "f002", "source": "VULN-FINDINGS.json#1",
+      "title": "etcd watch drops a model's ACL on an invalid PUT while retaining stale backends",
+      "file": "source.go", "line": 158, "category": "auth-bypass", "claimed_severity": "MEDIUM",
+      "verdict": "true_positive", "verify_verdict": "exploitable", "confidence": 0.6,
+      "severity": "MEDIUM", "severity_label": "MEDIUM", "severity_alignment": 0,
+      "preconditions": [
+        "Write access to the inference etcd prefix (control-plane insider or config-channel writer)",
+        "The written value must fail parseKV validation (malformed/partial write) on an existing restricted model key",
+        "allow-by-default Check must fail open for the now-ruleless model (it does)"
+      ],
+      "access_level": "authenticated_remote",
+      "threat_match": "T6: etcd config poisoning models/disabled/ACL writes",
+      "rationale": "On a PUT whose value fails parseKV (nil acl), the code updates nextM only when ok==true (so stale backends remain at source.go:160-162) but unconditionally deletes nextA when acl==nil (source.go:165-167). A malformed write keeps the model routable while silently clearing its ACL, and Check fails open for a model with no rule (acl.go:73-75). Trigger requires an etcd writer (control-plane insider) and is logged as a warning; severity MEDIUM given the config-integrity impact on an ACL security gate and the T6 match. Fix is cheap (atomic fail-closed watch apply).",
+      "vote_breakdown": {"true_positive": 1, "false_positive": 0, "cannot_verify": 0},
+      "refute_reasons": [], "exclusion_rule": null,
+      "first_links": ["source.go:158 (EventTypePut case)", "source.go:160-162 (nextM updated only when ok)", "source.go:163-167 (acl nil -> delete(nextA,name))", "acl.go:73-75 (no rule -> allow)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": "top committer: Devrandom (6/6 recent commits on source.go); no CODEOWNERS entry; component: local-ai-proxy/",
+      "missing_fields": []
+    },
+    {
+      "id": "f003", "source": "VULN-FINDINGS.json#2",
+      "title": "etcd-derived api_base contacted with client headers (incl. Authorization) forwarded",
+      "file": "source.go", "line": 195, "category": "ssrf", "claimed_severity": "MEDIUM",
+      "verdict": "true_positive", "verify_verdict": "exploitable", "confidence": 0.55,
+      "severity": "MEDIUM", "severity_label": "MEDIUM", "severity_alignment": 0,
+      "preconditions": [
+        "Write access to the inference etcd prefix to set a poisoned api_base",
+        "A legitimate client must call the poisoned model so the proxy forwards to it",
+        "The attacker-chosen internal host must be reachable from the proxy and expose a valuable endpoint",
+        "The client must present an Authorization/identity header worth forwarding"
+      ],
+      "access_level": "authenticated_remote",
+      "threat_match": "T6: etcd config poisoning models/disabled/ACL writes",
+      "rationale": "parseKV builds backend URLs from api_base with url.Parse and no scheme/host allowlist (source.go:189-206); the handler forwards every request with all client headers (handler.go:318, copyHeaders 685-692) and the health checker issues unvalidated GETs (health.go:277-325). A poisoned api_base causes SSRF-like forwarding of the client's Authorization to an arbitrary internal host. Base severity is LOW (many preconditions, insider etcd writer), raised to MEDIUM by the T6 threat-model match. Credible but contingent on etcd write access; recommend schema-validating api_base and not forwarding sensitive headers.",
+      "vote_breakdown": {"true_positive": 1, "false_positive": 0, "cannot_verify": 0},
+      "refute_reasons": [], "exclusion_rule": null,
+      "first_links": ["source.go:195 (url.Parse on api_base, no allowlist)", "handler.go:318 (copyHeaders forwards Authorization)", "health.go:277-325 (probe GET backend/v1/models)", "handler.go:312-318 (upstream forward)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": "top committer: Devrandom (6/6 recent commits on source.go); no CODEOWNERS entry; component: local-ai-proxy/",
+      "missing_fields": []
+    },
+    {
+      "id": "f004", "source": "VULN-FINDINGS.json#3",
+      "title": "ACL is allow-by-default for models with no matching rule",
+      "file": "acl.go", "line": 69, "category": "auth-bypass", "claimed_severity": "MEDIUM",
+      "verdict": "true_positive", "verify_verdict": "exploitable", "confidence": 0.5,
+      "severity": "MEDIUM", "severity_label": "MEDIUM", "severity_alignment": 0,
+      "preconditions": [
+        "Attacker must be an authenticated external user whose identity matches no ACL rule for the requested model",
+        "The requested model must be gated (has rule(s)) or the caller matches neither allow nor deny",
+        "Request must reach the proxy (via loopback nginx in managed deployment)"
+      ],
+      "access_level": "authenticated_remote",
+      "threat_match": "T5: external authenticated users reach sensitive/cost-heavy models they are not entitled to (ACL integrity)",
+      "rationale": "Check is demonstratebly allow-by-default: no rule (acl.go:73-75) or no matching entry (acl.go:77-86) returns nil. The loopback bind (main.go:152) and trusted-proxy stripping (trusted.go:21-28) remove the direct no-identity vector, but an authenticated request matching no ACL rule is still allowed - the residual external ACL gap (T5). Derived MEDIUM at authenticated-remote access. Make ACL fail closed for any model that has rules.",
+      "vote_breakdown": {"true_positive": 1, "false_positive": 0, "cannot_verify": 0},
+      "refute_reasons": [], "exclusion_rule": null,
+      "first_links": ["acl.go:73-75 (no rule for model -> return nil/allow)", "acl.go:77-86 (no matching entry -> allow)", "handler.go:225 (acl gate)", "main.go:152 (API listener loopback-bound)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": "top committer: Devrandom (5/5 recent commits on acl.go); no CODEOWNERS entry; component: local-ai-proxy/",
+      "missing_fields": []
+    },
+    {
+      "id": "f006", "source": "VULN-FINDINGS.json#5",
+      "title": "Unauthenticated /metrics exposes backend URLs and model inventory cluster-wide",
+      "file": "metrics.go", "line": 51, "category": "information-disclosure", "claimed_severity": "MEDIUM",
+      "verdict": "true_positive", "verify_verdict": "mitigated", "confidence": 0.5,
+      "severity": "LOW", "severity_label": "LOW", "severity_alignment": -2,
+      "preconditions": [
+        "Attacker must have network reach to the node's :4010 metrics listener (cluster-internal host)",
+        "No auth or firewall restriction on :4010 in the repo"
+      ],
+      "access_level": "local",
+      "threat_match": "T8: internal cluster topology disclosure via /healthz and /metrics (owner risk-accepted internal-only)",
+      "rationale": "Unauthenticated /metrics on a separate :4010 listener leaks backend URLs and model inventory to any cluster-internal host (metrics.go:51-93; main.go:154-158). The owner risk-accepts internal-only disclosure (T8 deprioritized in THREAT_MODEL section 5), so it is real but low impact for an internal actor and partially mitigated by intent. Derived LOW; claimed MEDIUM is slightly inflated (-2). Residual action: firewall :4010 to observability hosts and confirm nginx never proxies /metrics.",
+      "vote_breakdown": {"true_positive": 1, "false_positive": 0, "cannot_verify": 0},
+      "refute_reasons": [], "exclusion_rule": null,
+      "first_links": ["metrics.go:51-93 (labels carry backend URL + model)", "main.go:154-158 (separate :4010 listener, no auth)", "main.go:144-145 (metrics bypass logging/TrustedHeaders)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": "top committer: Devrandom (8/8 recent commits on metrics.go); no CODEOWNERS entry; component: local-ai-proxy/",
+      "missing_fields": []
+    },
+    {
+      "id": "f008", "source": "VULN-FINDINGS.json#7",
+      "title": "Passthrough mode routes with an empty model, so per-model ACL is never enforced",
+      "file": "handler.go", "line": 222, "category": "auth-bypass", "claimed_severity": "LOW",
+      "verdict": "true_positive", "verify_verdict": "exploitable", "confidence": 0.4,
+      "severity": "LOW", "severity_label": "LOW", "severity_alignment": 0,
+      "preconditions": [
+        "Deployment must run in passthrough (single Backend.URL) mode",
+        "An ACL must be configured (cfg.ACL), which is wired even in passthrough (main.go:124)"
+      ],
+      "access_level": "authenticated_remote",
+      "threat_match": "none",
+      "rationale": "PassthroughRouter.Route returns a route with Model unset (router.go:95-97); the handler still runs acl.Check(route.Model,...) (handler.go:225) which for an empty model finds no rule and allows (acl.go:73-75). ACL is wired from cfg.ACL even in passthrough (main.go:124), so an operator-configured ACL is silently ineffective in that mode. Config-dependent (passthrough + ACL) and operator-shaped, hence LOW. Recommend failing fast when ACL is configured in passthrough or parsing the body model to enforce it.",
+      "vote_breakdown": {"true_positive": 1, "false_positive": 0, "cannot_verify": 0},
+      "refute_reasons": [], "exclusion_rule": null,
+      "first_links": ["router.go:95-97 (PassthroughRouter returns Model=\"\")", "handler.go:225 (acl.Check(route.Model,...))", "acl.go:73-75 (no \"\" rule -> allow)", "main.go:124 (h.ACL = cfg.ACL even in passthrough)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": "top committer: Devrandom (17/17 recent commits on handler.go, 8/8 on router.go); no CODEOWNERS entry; component: local-ai-proxy/",
+      "missing_fields": []
+    },
+    {
+      "id": "f010", "source": "VULN-FINDINGS.json#9",
+      "title": "Broad /v1/* path forwarding and blocklist header pass-through",
+      "file": "handler.go", "line": 318, "category": "header-injection", "claimed_severity": "LOW",
+      "verdict": "true_positive", "verify_verdict": "needs_manual_test", "confidence": 0.35,
+      "severity": "LOW", "severity_label": "LOW", "severity_alignment": 0,
+      "preconditions": [
+        "Attacker must be an authenticated external client reaching /v1/*",
+        "Backend must interpret a forwarded header (e.g. X-Forwarded-For) or a forwarded /v1/* subpath in a security-relevant way"
+      ],
+      "access_level": "authenticated_remote",
+      "threat_match": "T10: broad /v1/* pass-through exposes backend internal/admin endpoints",
+      "rationale": "Any /v1/* path is forwarded verbatim and the client's full header set is copied except hop-by-hop (handler.go:308-318, 685-692); only X-User-Id/X-User-Groups are stripped (trusted.go:21-28), so X-Forwarded-For and other headers reach the backend untouched. Broad forwarding to backend internal/admin paths and header spoofing are real, but concrete impact is entirely backend-dependent and not statically determinable, so this needs a runtime/manual check against the actual backends. Recommend an explicit header/path allowlist.",
+      "vote_breakdown": {"true_positive": 1, "false_positive": 0, "cannot_verify": 0},
+      "refute_reasons": [], "exclusion_rule": null,
+      "first_links": ["handler.go:308-310 (target path joined verbatim)", "handler.go:318 (copyHeaders all except hop-by-hop)", "handler.go:685-692 (blocklist header copy)", "trusted.go:21-28 (only X-User-Id/-Groups stripped)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": "top committer: Devrandom (17/17 recent commits on handler.go); no CODEOWNERS entry; component: local-ai-proxy/",
+      "missing_fields": []
+    },
+    {
+      "id": "f005", "source": "VULN-FINDINGS.json#4",
+      "title": "etcd client silently falls back to plaintext when TLS env vars are unset",
+      "file": "etcdclient.go", "line": 63, "category": "missing-authentication", "claimed_severity": "MEDIUM",
+      "verdict": "false_positive", "verify_verdict": null, "confidence": 0.3,
+      "severity": null, "severity_label": null, "severity_alignment": null,
+      "preconditions": [],
+      "access_level": null, "threat_match": null,
+      "rationale": "The plaintext fallback is real but is a configuration/hardening gap driven entirely by operator-controlled ETCD_* env provisioning; there is no concrete exploit absent a specific adjacent-network attacker position, and the owner records mTLS enforcement as an open question (T6/T9). Under the precision policy this is not actionable as a verification-confirmed vulnerability - it belongs on the hardening/ops backlog.",
+      "vote_breakdown": {"true_positive": 0, "false_positive": 1, "cannot_verify": 0},
+      "refute_reasons": ["not_actionable"], "exclusion_rule": "8",
+      "first_links": ["etcdclient.go:63-69 (nil TLS when env unset)", "etcdclient.go:83 (RootCAs nil when CACERT absent)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": null, "missing_fields": []
+    },
+    {
+      "id": "f007", "source": "VULN-FINDINGS.json#6",
+      "title": "/healthz echoes backend URLs, probe error strings, and model names",
+      "file": "handler.go", "line": 449, "category": "information-disclosure", "claimed_severity": "LOW",
+      "verdict": "false_positive", "verify_verdict": null, "confidence": 0.3,
+      "severity": null, "severity_label": null, "severity_alignment": null,
+      "preconditions": [],
+      "access_level": null, "threat_match": null,
+      "rationale": "writeHealthz does serialize backend URLs and probe errors, but it is served on the main listener which is loopback-bound (main.go:152), reachable only from the node; the owner also risk-accepts internal-only health disclosure. The concrete exploit path (external/other-host reachability) is already closed by the loopback bind, so there is no actionable vulnerability here - the residual risk only materializes if nginx or the listener is misconfigured to expose it.",
+      "vote_breakdown": {"true_positive": 0, "false_positive": 1, "cannot_verify": 0},
+      "refute_reasons": ["already_handled"], "exclusion_rule": "13",
+      "first_links": ["handler.go:449-457 (URL/error serialized)", "handler.go:140-149 (healthz route)", "main.go:152 (API listener loopback-bound)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": null, "missing_fields": []
+    },
+    {
+      "id": "f009", "source": "VULN-FINDINGS.json#8",
+      "title": "CLI-discovered model IDs written as etcd keys after only weak validation",
+      "file": "cli.go", "line": 203, "category": "key-injection", "claimed_severity": "LOW",
+      "verdict": "false_positive", "verify_verdict": null, "confidence": 0.3,
+      "severity": null, "severity_label": null, "severity_alignment": null,
+      "preconditions": [],
+      "access_level": null, "threat_match": null,
+      "rationale": "The model IDs originate from an operator-chosen api-base via the operator-invoked CLI (rule 8: trusted operator CLI/env inputs), and the impact is limited to possibly malformed etcd key strings under a fixed prefix - no adjacent security boundary is crossed. There is no concrete exploit against the cluster or other tenants, so under the precision policy this is not actionable.",
+      "vote_breakdown": {"true_positive": 0, "false_positive": 1, "cannot_verify": 0},
+      "refute_reasons": ["not_actionable"], "exclusion_rule": "8",
+      "first_links": ["cli.go:166/518-549 (discoverModels from api-base)", "cli.go:134-142 (validateModelName, weak)", "cli.go:203 (key = prefix + model)"],
+      "duplicate_of": null, "absorbed": [], "owner_hint": null, "missing_fields": []
+    }
+  ]
+}
