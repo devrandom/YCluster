@@ -155,7 +155,10 @@ path.
   each key is a backend URL, the value is optional JSON metadata.
 - **Runtime config**: `/etc/local-ai-proxy/config.yaml` (listen
   address, etcd endpoints/prefix, trusted-proxy CIDRs, health
-  interval). Model edits are hot; restart only for YAML changes.
+  interval). The API listener binds loopback (`127.0.0.1:4001`) and
+  `/metrics` is served on a separate `inference_proxy_metrics_port`
+  (`4010`) exposed to Prometheus; only nginx / local tools reach the
+  API. Model edits are hot; restart only for YAML changes.
 ### Request Paths
 
 ```

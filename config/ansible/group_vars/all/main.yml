@@ -65,6 +65,13 @@ bootstrap_files_dir: /opt/bootstrap-files
 buildhost: s1
 build_cache_dir: ./tmp/build-cache
 
+# local-ai-proxy splits its listeners: the OpenAI-compatible API binds
+# loopback (127.0.0.1:4001) and only Prometheus scraping needs cross-host
+# reachability, via the dedicated metrics port below. Single source of
+# truth shared by app/install-local-ai-proxy.yml and the prometheus
+# scrape config.
+inference_proxy_metrics_port: 4010
+
 # Cluster gateway VIP — keepalived-managed across core nodes; routes
 # external traffic and runs dnsmasq + squid for joining nodes.
 gateway_vip: "10.0.0.254"

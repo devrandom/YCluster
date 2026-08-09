@@ -285,3 +285,24 @@ auth_health_url: "http://auth.internal:4002/healthz"
 		t.Errorf("AuthHealthURL = %q; want override", cfg.AuthHealthURL)
 	}
 }
+
+// TestLoadConfigOrDefaultMetricsListen verifies an explicit metrics_listen
+// is preserved; empty defaults leave the field empty (metrics on main listener).
+func TestLoadConfigOrDefaultMetricsListen(t *testing.T) {
+	path := writeTempFile(t, "c.yaml", `
+listen: "127.0.0.1:4001"
+metrics_listen: ":4010"
+backend:
+  url: "http://localhost:8080"
+`)
+	cfg, err := LoadConfigOrDefault(path, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:4001" {
+		t.Errorf("Listen = %q; want 127.0.0.1:4001", cfg.Listen)
+	}
+	if cfg.MetricsListen != ":4010" {
+		t.Errorf("MetricsListen = %q; want :4010", cfg.MetricsListen)
+	}
+}

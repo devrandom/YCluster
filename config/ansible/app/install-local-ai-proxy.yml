@@ -1,6 +1,10 @@
 ---
 # Install local-ai-proxy (the cluster's inference gateway).
-# Listens on :4001 and forwards to vLLM/llama-server/whisperx backends.
+# The API listener binds loopback (127.0.0.1:4001) only — nginx, the
+# admin app, and smoke checks all reach it via localhost — and forwards
+# to vLLM/llama-server/whisperx backends. /metrics is exposed to
+# Prometheus cross-host on the separate {{ inference_proxy_metrics_port }}
+# port, so cluster-internal hosts cannot hit the unauth'd /v1 API.
 # Replaced LiteLLM (which previously ran on :4000) and now owns the
 # inference.xc nginx vhost.
 #
@@ -28,7 +32,11 @@
   vars:
     use_etcd: true
     backend_url: "http://nv1.xc:8000"
-    proxy_listen: ":4001"
+    proxy_listen: "127.0.0.1:4001"
+    # Separate metrics listener so Prometheus can scrape cross-host on
+    # {{ inference_proxy_metrics_port }} while the API listener stays
+    # loopback-only (see group_vars/all/main.yml).
+    proxy_metrics_listen: ":{{ inference_proxy_metrics_port }}"
     # Binary stays in the build output dir on the buildhost (see
     # build-local-ai-proxy.yml).
     proxy_binary_src: /opt/src/local-ai-proxy/bin/local-ai-proxy

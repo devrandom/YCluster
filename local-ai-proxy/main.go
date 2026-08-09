@@ -137,16 +137,35 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// /metrics bypasses the proxy handler; everything else goes through
-	// the middleware chain. Metrics are plain Prometheus text and don't
-	// need logging or X-User-Id stripping.
+	// The main listener serves the API chain (including /healthz). /metrics
+	// lives on the main listener by default, but when metrics_listen is
+	// configured it is served from that separate listener instead — this
+	// lets the API listener stay bound to loopback while Prometheus scrapes
+	// cross-host on the exposed metrics port. Metrics are plain Prometheus
+	// text and don't need logging or X-User-Id stripping.
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", metrics.Handler())
+	if cfg.MetricsListen == "" {
+		mux.Handle("/metrics", metrics.Handler())
+	}
 	mux.Handle("/", chained)
 
-	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: mux,
+	servers := []*http.Server{{Addr: cfg.Listen, Handler: mux}}
+
+	if cfg.MetricsListen != "" {
+		mmux := http.NewServeMux()
+		mmux.Handle("/metrics", metrics.Handler())
+		servers = append(servers, &http.Server{Addr: cfg.MetricsListen, Handler: mmux})
+		logger.Info("metrics served on separate listener", "addr", cfg.MetricsListen, "main", cfg.Listen)
+	}
+
+	errCh := make(chan error, len(servers))
+	for _, s := range servers {
+		s := s
+		go func() {
+			if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
 	}
 
 	shutdownDone := make(chan struct{})
@@ -159,16 +178,23 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
-			logger.Warn("graceful shutdown timed out; forcing close", "err", err.Error())
-			_ = srv.Close()
+		for _, s := range servers {
+			if err := s.Shutdown(ctx); err != nil {
+				logger.Warn("graceful shutdown timed out; forcing close", "err", err.Error())
+				_ = s.Close()
+			}
 		}
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	select {
+	case err := <-errCh:
+		logger.Error("listener exited unexpectedly", "err", err)
+		for _, s := range servers {
+			_ = s.Close()
+		}
+		os.Exit(1)
+	case <-shutdownDone:
 	}
-	<-shutdownDone
 	logger.Info("stopped")
 }
 

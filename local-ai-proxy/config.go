@@ -23,6 +23,13 @@ const DefaultAuthHealthURL = "http://127.0.0.1:4002/healthz"
 type Config struct {
 	Listen string `yaml:"listen"`
 
+	// MetricsListen is an optional separate listener (addr) that serves
+	// only /metrics for Prometheus scraping, e.g. ":9101". When set, /metrics
+	// is served from this listener and removed from the main listen address,
+	// letting the API listener bind to loopback only while Prometheus still
+	// scrapes cross-host. Empty (default) keeps /metrics on the main listener.
+	MetricsListen string `yaml:"metrics_listen,omitempty"`
+
 	// Backend: single upstream. All requests forwarded there regardless
 	// of model. Useful for a one-vLLM-many-models setup.
 	Backend Backend `yaml:"backend"`

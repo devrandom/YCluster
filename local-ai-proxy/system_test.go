@@ -45,6 +45,15 @@ func pickFreePort(t *testing.T) int {
 // base URL (e.g. "http://127.0.0.1:12345").
 func startProxy(t *testing.T, cfgYAML string) string {
 	t.Helper()
+	return startProxyAt(t, cfgYAML, "", "")
+}
+
+// startProxyAt is startProxy with explicit control over the generated
+// `listen:` address and extra YAML appended after it (e.g. to set
+// metrics_listen on a separate port). A blank addr lets the helper pick
+// a free ephemeral port.
+func startProxyAt(t *testing.T, cfgYAML, addr, extraYAML string) string {
+	t.Helper()
 
 	// Binary must already be built. Tests run from the package dir.
 	bin, err := filepath.Abs("bin/local-ai-proxy")
@@ -55,11 +64,13 @@ func startProxy(t *testing.T, cfgYAML string) string {
 		t.Fatalf("binary not found at %s — run `make build` first", bin)
 	}
 
-	port := pickFreePort(t)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	if addr == "" {
+		port := pickFreePort(t)
+		addr = fmt.Sprintf("127.0.0.1:%d", port)
+	}
 
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	full := fmt.Sprintf("listen: %q\n%s\n", addr, cfgYAML)
+	full := fmt.Sprintf("listen: %q\n%s%s\n", addr, extraYAML, cfgYAML)
 	if err := os.WriteFile(cfgPath, []byte(full), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +444,72 @@ health_check_interval: 1h
 		if !strings.Contains(text, want) {
 			t.Errorf("/metrics missing standard metric %q", want)
 		}
+	}
+}
+
+// TestSystemMetricsSeparateListener — when metrics_listen points at a
+// separate port, /metrics is no longer served on the main API listener
+// but is available on the metrics listener, while /healthz stays on the
+// main listener.
+func TestSystemMetricsSeparateListener(t *testing.T) {
+	good := newFakeBackend(okModels(`{"ok":true}`))
+	defer good.close()
+
+	cfg := fmt.Sprintf(`backends:
+  - model: m
+    api_base: %q
+health_check_interval: 1h
+`, good.server.URL)
+
+	metricsPort := pickFreePort(t)
+	metricsAddr := fmt.Sprintf("127.0.0.1:%d", metricsPort)
+	base := startProxyAt(t, cfg, "", fmt.Sprintf("metrics_listen: %q\n", metricsAddr))
+
+	// /healthz remains on the main listener (it's served by the API chain,
+	// not the mux-level 404 fallthrough). We only assert that it's served,
+	// since its status reflects real backend health in this harness.
+	resp, err := http.Get(base + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == 404 {
+		t.Fatalf("main /healthz status = 404; want it served on main listener")
+	}
+
+	// /metrics is no longer on the main listener — the default mux 404s it.
+	resp, err = http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("main /metrics status = %d; want 404 (metrics moved off main listener)", resp.StatusCode)
+	}
+
+	// /metrics is served on the metrics listener; /healthz is not.
+	metricsBase := "http://" + metricsAddr
+	resp, err = http.Get(metricsBase + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("metrics /metrics status = %d; want 200", resp.StatusCode)
+	}
+	text := string(body)
+	if !strings.Contains(text, "process_resident_memory_bytes") {
+		t.Errorf("metrics /metrics missing standard metric process_resident_memory_bytes")
+	}
+
+	resp, err = http.Get(metricsBase + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("metrics /healthz status = %d; want 404 (healthz stays on main listener)", resp.StatusCode)
 	}
 }
 
