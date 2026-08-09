@@ -137,24 +137,24 @@ deps-vuln-src:
         "zulip ext/docker-zulip config/ansible/app/build-zulip.yml zulip_version" \
         "open-webui ext/open-webui config/ansible/app/build-open-webui.yml webui_version" \
         "open-webui-plugins ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo"; do \
-        set -- $entry; surf="$$1"; dir="$$2"; pb="$$3"; var="$$4"; \
-        if [ ! -d "$$dir" ]; then \
-            echo "== SRC $$surf: no checkout at $$dir — clone from the $$pb pin first =="; continue; \
+        set -- $entry; surf="$1"; dir="$2"; pb="$3"; var="$4"; \
+        if [ ! -d "$dir" ]; then \
+            echo "== SRC $surf: no checkout at $dir — clone from the $pb pin first =="; continue; \
         fi; \
-        pin=$$(sed -n "s/^[[:space:]]*$${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$$pb" | head -n1); \
-        if [[ "$$pin" == *"://"* ]]; then \
-            echo "== SRC $$surf: repo-URL pin (not yet a SHA) — pin $$var to a SHA per repo rule =="; \
+        pin=$(sed -n "s/^[[:space:]]*${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$pb" | head -n1); \
+        if [[ "$pin" == *"://"* ]]; then \
+            echo "== SRC $surf: repo-URL pin (not yet a SHA) — pin $var to a SHA per repo rule =="; \
         else \
-            head_sha=$$(git -C "$$dir" rev-parse HEAD 2>/dev/null || true); \
-            tag=$$(git -C "$$dir" describe --tags --exact-match HEAD 2>/dev/null || true); \
-            if [ -n "$$pin" ] && [ -n "$$head_sha" ] && [ "$$head_sha" != "$$pin" ] && [ "$$tag" != "$$pin" ]; then \
-                echo "== SRC $$surf: DRIFT — checkout $$head_sha / $$tag vs pin $$pin =="; \
+            head_sha=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true); \
+            tag=$(git -C "$dir" describe --tags --exact-match HEAD 2>/dev/null || true); \
+            if [ -n "$pin" ] && [ -n "$head_sha" ] && [ "$head_sha" != "$pin" ] && [ "$tag" != "$pin" ]; then \
+                echo "== SRC $surf: DRIFT — checkout $head_sha / $tag vs pin $pin =="; \
             else \
-                echo "== SRC $$surf: checkout matches pin ($$pin) =="; \
+                echo "== SRC $surf: checkout matches pin ($pin) =="; \
             fi; \
         fi; \
-        echo "== SRC $$surf: osv-scanner $$dir =="; \
-        osv-scanner "$$dir" 2>&1 || true; \
+        echo "== SRC $surf: osv-scanner $dir =="; \
+        osv-scanner "$dir" 2>&1 || true; \
     done
 
 # Re-pin the Python uv locks (S2 root, S4 mcp/cluster-exec). Write-prone:
@@ -172,9 +172,21 @@ deps-tidy-src:
     @for entry in \
         "podman https://github.com/containers/podman.git config/ansible/admin/build-podman.yml podman_repo_sha" \
         "frp https://github.com/fatedier/frp.git config/ansible/app/build-frp.yml frp_repo_sha"; do \
-        set -- $entry; surf="$$1"; url="$$2"; pb="$$3"; var="$$4"; \
-        cur=$$(sed -n "s/^[[:space:]]*$${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$$pb" | head -n1); \
-        next=$$(git ls-remote "$$url" refs/heads/main 2>/dev/null | cut -f1); \
-        echo "$$surf: ($$pb) current=$$cur proposed=$$next"; \
+        set -- $entry; surf="$1"; url="$2"; pb="$3"; var="$4"; \
+        cur=$(sed -n "s/^[[:space:]]*${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$pb" | head -n1); \
+        next=$(git ls-remote "$url" refs/heads/main 2>/dev/null | cut -f1); \
+        echo "$surf: ($pb) current=$cur proposed=$next"; \
     done
     @echo "tag-pinned surfaces (zulip 12.1-0, open-webui v0.11.0): bump the tag in the playbook and rebuild; no auto-write here."
+
+# Regenerate the full machine-readable baseline into tmp/ (gitignored scratch)
+# and point the reader at the version-controlled accepted-findings ledger.
+# The ledger is the source of truth for consciously accepted items; every time
+# you trim it, update docs/design/dependency-hygiene-findings.md by hand.
+deps-baseline:
+    @mkdir -p ./tmp
+    @osv-scanner --lockfile uv.lock --format json > ./tmp/osv-s2.json || true
+    @osv-scanner --lockfile mcp/cluster-exec/uv.lock --format json > ./tmp/osv-s4.json || true
+    @pip-audit -r config/ansible/admin/files/ycluster/requirements.txt --format json > ./tmp/pip-audit-s3.json || true
+    @echo "baseline written to tmp/osv-s2.json, tmp/osv-s4.json, tmp/pip-audit-s3.json"
+    @echo "accepted findings ledger: docs/design/dependency-hygiene-findings.md"
