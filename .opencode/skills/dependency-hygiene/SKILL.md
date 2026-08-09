@@ -26,7 +26,8 @@ just deps-verify      # go mod verify + confirms go.sum is git-tracked
 
 - `just vulncheck` is static and non-executing; it needs network (or a
   warm vuln DB cache) and `govulncheck` installed. Install once with
-  `go install golang.org/x/vuln/cmd/govulncheck@latest`. It exits
+  `just deps-tools` (which also sets up `osv-scanner` and `pip-audit`;
+  or directly `go install golang.org/x/vuln/cmd/govulncheck@latest`). It exits
   **non-zero (3) when reachable vulnerabilities are found** — treat that
   as a hard fail, not a warning.
 - `just deps-verify` fails if the local module cache no longer matches

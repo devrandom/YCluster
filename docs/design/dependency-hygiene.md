@@ -131,6 +131,7 @@ deps.just
   vulncheck       # S1 govulncheck  (existing)
   deps-vuln-py    # S2/S3/S4 osv + pip-audit + uv lock --check
   deps-vuln-src   # S6, S7, S9, S10 (excl. S8) osv-scanner at each pinned SHA + freshness
+  deps-tools      # one-time machine bootstrap: install govulncheck, osv-scanner, pip-audit
   deps-tidy-go    # go mod tidy (S1)
   deps-tidy-py    # uv lock (S2, S4)
   deps-tidy-src   # emit proposed new SHA/bump for build-*.yml (no auto-write)
@@ -164,7 +165,9 @@ The repo already keeps vulnerability artifacts per component
 
 ### 7. Policy alignment
 
-- **No prebuilt binaries:** `osv-scanner` installed via `go install`;
+- **No prebuilt binaries:** the gate tooling (`govulncheck`, `osv-scanner`,
+  `pip-audit`) is installed once per machine via `just deps-tools` — the Go
+  bits from source via `go install`, `pip-audit` as a `uv tool`;
   nothing else gets downloaded as a binary. Source builds stay pinned to a
   git SHA under `/opt/src` (S8 rathole is excluded — it's being ripped out).
 - **No auto-upgrade:** every `deps-tidy-*` output is a separate reviewed change.
@@ -197,7 +200,7 @@ for that surface's gate.
 | S13 | dev tooling (uv tools) | ❌ | Monitor but exclude from green gate (dev-only); re-pin on `setup-tools` re-run. | not a blocker; documented |
 
 Phase 1 — **unblock & wire** (parallel): S8 removal is tracked separately (not
-here); add osv-scanner tooling +
+here); add the gate tooling via the `deps-tools` bootstrap target +
 aggregate `deps-check` recipes; verify S1 in the aggregate.
 Phase 2 — **baseline** (parallel): run `deps-check`, capture findings into the
 accepted-findings ledger for S2, S3, S4, S6, S7, S9–S11.

@@ -1,1 +1,20 @@
-export PATH=$PWD/.venv/bin:$PWD/mcp/cluster-exec:$HOME/.opencode/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin
+# Codex agent shell environment. Repo-local tool/cache dirs come first so the
+# dependency-hygiene gate (`just deps-check` / `just deps-tools`) can run even
+# in sandboxes where ~/go and ~/.local are read-only.
+#
+#   tmp/gopath/bin  govulncheck, osv-scanner (built here via `go install`
+#                   when the default GOPATH isn't writable)
+#   tmp/bin         pip-audit (installed as a uv tool into UV_TOOL_BIN_DIR)
+#   tmp/uv-tools    pip-audit's uv tool environment
+#   tmp/xdg-cache   XDG cache (pip-audit & other XDG tools), writable here
+#   tmp/gopath, tmp/go-cache, tmp/uv-cache — Go + uv scratch caches, so uv/go
+#   don't try to write the read-only ~/cache in restricted environments
+export PATH=$PWD/tmp/gopath/bin:$PWD/tmp/bin:$PWD/.venv/bin:$PWD/mcp/cluster-exec:$HOME/.opencode/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin
+
+export GOPATH=$PWD/tmp/gopath
+export GOMODCACHE=$PWD/tmp/gopath/pkg/mod
+export GOCACHE=$PWD/tmp/go-cache
+export UV_CACHE_DIR=$PWD/tmp/uv-cache
+export UV_TOOL_DIR=$PWD/tmp/uv-tools
+export UV_TOOL_BIN_DIR=$PWD/tmp/bin
+export XDG_CACHE_HOME=$PWD/tmp/xdg-cache

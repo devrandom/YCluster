@@ -26,7 +26,7 @@ check: deps-verify vulncheck
 # Reachability-aware scan of local-ai-proxy deps against the OSV Go vuln DB.
 # Static and non-executing; it does need network (or a warm vuln DB cache).
 vulncheck:
-    @command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck not installed — run: go install golang.org/x/vuln/cmd/govulncheck@latest" >&2; exit 1; }
+    @command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck not installed — run: just deps-tools" >&2; exit 1; }
     @mkdir -p ./tmp/go-cache
     @GOCACHE="$(pwd)/tmp/go-cache" bash -c 'cd local-ai-proxy && govulncheck ./...'
 
@@ -43,3 +43,138 @@ deps-verify:
 deps-tidy:
     @mkdir -p ./tmp/go-cache
     @GOCACHE="$(pwd)/tmp/go-cache" bash -c 'cd local-ai-proxy && go mod tidy && go mod verify'
+
+# Install (or refresh) the dependency-hygiene audit tooling the gate needs —
+# encodes what were one-off installs so a fresh machine can stand it up:
+#
+#   govulncheck  (S1)      go install golang.org/x/vuln/cmd/govulncheck
+#   osv-scanner  (S2/S4/S6/S7/S9/S10)  go install google/osv-scanner
+#   pip-audit    (S3)      uv tool install
+#
+# The Go binaries are built from source (`go install`) per the repo's
+# no-prebuilt-binaries rule and land in "$(go env GOPATH)/bin"; pip-audit
+# lands as a uv tool. Where those land depends on env: under a Codex session
+# .codex/env redirects GOPATH and the uv tool dirs into tmp/ (writable even
+# when ~/go and ~/.local are read-only); on a normal dev machine they use the
+# user defaults (~/go/bin, ~/.local/bin). Keep the tools' bin dir on PATH.
+# Re-running refreshes in place, so it's safe once per machine.
+deps-tools:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v go >/dev/null 2>&1; then
+        echo "go not found — install the Go toolchain first (see docs/CONTRIBUTING.md)" >&2
+        exit 1
+    fi
+    go install golang.org/x/vuln/cmd/govulncheck@latest
+    go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
+    if ! command -v uv >/dev/null 2>&1; then
+        if [ -x "$HOME/.local/bin/uv" ]; then
+            export PATH="$HOME/.local/bin:$PATH"
+        else
+            echo "uv not found; install with 'pip install uv'" >&2
+            exit 1
+        fi
+    fi
+    uv tool install pip-audit
+    echo "ok: dep tooling installed — $(command -v govulncheck), $(command -v osv-scanner), $(command -v pip-audit)"
+
+# ---------------------------------------------------------------------------
+# Aggregated dependency hygiene across every shipped surface (docs/design/
+# dependency-hygiene.md). Audit flows are read-only; re-pins are separate.
+#
+#   deps-check        one gate = deps-verify + vulncheck + deps-vuln-py +
+#                                 deps-vuln-src
+#   deps-vuln-py      S2 root uv.lock, S3 ycluster requirements, S4 mcp uv.lock
+#   deps-vuln-src     S6 podman, S7 frp, S9 zulip, S10 open-webui (+plugins):
+#                     osv on the pinned build-tree checkouts + pin drift check
+#   deps-tidy-go      go mod tidy (S1)
+#   deps-tidy-py      uv lock (S2, S4)
+#   deps-tidy-src     emit a proposed new SHA/bump for the build-*.yml pins
+#                     (never auto-writes — always lands as its own commit)
+# ---------------------------------------------------------------------------
+
+# The one gate that answers "is everything we run clean?" across surfaces.
+# Read-only end to end. On surfaces still being baselined (Phase 2 of
+# dependency-hygiene.md) the sub-recipes report but do not hard-fail yet;
+# strict enforcement lands in Phase 4 once the accepted-findings ledger is set.
+deps-check: deps-verify vulncheck deps-vuln-py deps-vuln-src
+    @echo "ok: dependency audit complete (review findings above)"
+
+# Python surfaces S2/S3/S4: osv-scanner on each uv.lock, `uv lock --check`
+# proving the lock still matches pyproject, and pip-audit on the ycluster CLI
+# requirements (S3, which mirrors the apt runtime deps and has no lock).
+# The osv-scanner/pip-audit steps are report-only for now: these surfaces are
+# still being baselined (Phase 2) and findings are captured into the
+# accepted-findings ledger before they gate. `uv lock --check` stays strict —
+# it proves freshness, not vulnerability posture.
+deps-vuln-py:
+    @command -v osv-scanner >/dev/null 2>&1 || { echo "osv-scanner not installed — run: just deps-tools" >&2; exit 1; }
+    @command -v pip-audit >/dev/null 2>&1 || { echo "pip-audit not installed — run: just deps-tools" >&2; exit 1; }
+    @echo "== S2 root uv.lock: uv lock --check =="
+    @uv lock --check
+    @echo "== S2 root uv.lock: osv-scanner (report-only, Phase 2 baseline) =="
+    @osv-scanner --lockfile uv.lock || true
+    @echo "== S3 ycluster CLI requirements: pip-audit (report-only, Phase 2 baseline) =="
+    @pip-audit -r config/ansible/admin/files/ycluster/requirements.txt || true
+    @echo "== S4 mcp/cluster-exec uv.lock: uv lock --check =="
+    @cd mcp/cluster-exec && uv lock --check
+    @echo "== S4 mcp/cluster-exec uv.lock: osv-scanner (report-only, Phase 2 baseline) =="
+    @osv-scanner --lockfile mcp/cluster-exec/uv.lock || true
+
+# Pinned source-build surfaces (S6 podman, S7 frp, S9 zulip, S10 open-webui +
+# plugins): osv-scanner over each pinned build tree's lockfiles, and a pin
+# drift check. The build trees are gitignored scratch checkouts under ext/,
+# pinned to the SHA/tag in the build-*.yml playbooks; a fresh clone must
+# reproduce them from those pins before this recipe can scan (Phase 2).
+# Report-only for now: pinned vendored trees are baselined in Phase 2 and the
+# final freshness policy is decided there. S8 (rathole) is excluded — it is
+# being ripped out.
+deps-vuln-src:
+    @command -v osv-scanner >/dev/null 2>&1 || { echo "osv-scanner not installed — run: just deps-tools" >&2; exit 1; }
+    @for entry in \
+        "podman ext/podman config/ansible/admin/build-podman.yml podman_repo_sha" \
+        "frp ext/frp config/ansible/app/build-frp.yml frp_repo_sha" \
+        "zulip ext/docker-zulip config/ansible/app/build-zulip.yml zulip_version" \
+        "open-webui ext/open-webui config/ansible/app/build-open-webui.yml webui_version" \
+        "open-webui-plugins ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo"; do \
+        set -- $entry; surf="$$1"; dir="$$2"; pb="$$3"; var="$$4"; \
+        if [ ! -d "$$dir" ]; then \
+            echo "== SRC $$surf: no checkout at $$dir — clone from the $$pb pin first =="; continue; \
+        fi; \
+        pin=$$(sed -n "s/^[[:space:]]*$${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$$pb" | head -n1); \
+        if [[ "$$pin" == *"://"* ]]; then \
+            echo "== SRC $$surf: repo-URL pin (not yet a SHA) — pin $$var to a SHA per repo rule =="; \
+        else \
+            head_sha=$$(git -C "$$dir" rev-parse HEAD 2>/dev/null || true); \
+            tag=$$(git -C "$$dir" describe --tags --exact-match HEAD 2>/dev/null || true); \
+            if [ -n "$$pin" ] && [ -n "$$head_sha" ] && [ "$$head_sha" != "$$pin" ] && [ "$$tag" != "$$pin" ]; then \
+                echo "== SRC $$surf: DRIFT — checkout $$head_sha / $$tag vs pin $$pin =="; \
+            else \
+                echo "== SRC $$surf: checkout matches pin ($$pin) =="; \
+            fi; \
+        fi; \
+        echo "== SRC $$surf: osv-scanner $$dir =="; \
+        osv-scanner "$$dir" 2>&1 || true; \
+    done
+
+# Re-pin the Python uv locks (S2 root, S4 mcp/cluster-exec). Write-prone:
+# lands as its own reviewed commit alongside the lockfiles.
+deps-tidy-py:
+    @uv lock
+    @cd mcp/cluster-exec && uv lock
+
+# Emit a candidate SHA/version bump for the pinned source trees in the
+# build-*.yml playbooks (S6/S7/S9/S10). For SHA pins this is the current
+# upstream default-branch HEAD; for tag pins it is the latest matching tag.
+# Never writes the pin — copy the proposed value into the playbook as its own
+# reviewed change, then rebuild + re-audit with deps-vuln-src.
+deps-tidy-src:
+    @for entry in \
+        "podman https://github.com/containers/podman.git config/ansible/admin/build-podman.yml podman_repo_sha" \
+        "frp https://github.com/fatedier/frp.git config/ansible/app/build-frp.yml frp_repo_sha"; do \
+        set -- $entry; surf="$$1"; url="$$2"; pb="$$3"; var="$$4"; \
+        cur=$$(sed -n "s/^[[:space:]]*$${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$$pb" | head -n1); \
+        next=$$(git ls-remote "$$url" refs/heads/main 2>/dev/null | cut -f1); \
+        echo "$$surf: ($$pb) current=$$cur proposed=$$next"; \
+    done
+    @echo "tag-pinned surfaces (zulip 12.1-0, open-webui v0.11.0): bump the tag in the playbook and rebuild; no auto-write here."
