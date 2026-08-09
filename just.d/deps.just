@@ -136,7 +136,7 @@ deps-vuln-src:
         "frp ext/frp config/ansible/app/build-frp.yml frp_repo_sha" \
         "zulip ext/docker-zulip config/ansible/app/build-zulip.yml zulip_version" \
         "open-webui ext/open-webui config/ansible/app/build-open-webui.yml webui_version" \
-        "open-webui-plugins ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo"; do \
+        "open-webui-plugins ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo_sha"; do \
         set -- $entry; surf="$1"; dir="$2"; pb="$3"; var="$4"; \
         if [ ! -d "$dir" ]; then \
             echo "== SRC $surf: no checkout at $dir — clone from the $pb pin first =="; continue; \
@@ -155,6 +155,31 @@ deps-vuln-src:
         fi; \
         echo "== SRC $surf: osv-scanner $dir =="; \
         osv-scanner "$dir" 2>&1 || true; \
+    done
+
+# Check out each pinned source-build tree (S6/S7/S9/S10) at the SHA/tag pinned
+# in its build-*.yml playbook, so `deps-vuln-src` scans the same code a build
+# would use. Scaffolds ext/ from scratch if a checkout is missing and fetches
+# tags so both SHA and tag pins are addressable. Idempotent; run once per
+# machine after `deps-tools` (ext/ is gitignored scratch).
+deps-src-checkout:
+    @mkdir -p ./ext
+    @for entry in \
+        "podman https://github.com/containers/podman.git ext/podman config/ansible/admin/build-podman.yml podman_repo_sha" \
+        "frp https://github.com/fatedier/frp.git ext/frp config/ansible/app/build-frp.yml frp_repo_sha" \
+        "zulip https://github.com/zulip/docker-zulip.git ext/docker-zulip config/ansible/app/build-zulip.yml zulip_version" \
+        "open-webui https://github.com/open-webui/open-webui.git ext/open-webui config/ansible/app/build-open-webui.yml webui_version" \
+        "open-webui-plugins https://github.com/devrandom/open-webui-plugins.git ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo_sha"; do \
+        set -- $entry; surf="$1"; url="$2"; dir="$3"; pb="$4"; var="$5"; \
+        pin=$(sed -n "s/^[[:space:]]*${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$pb" | head -n1); \
+        if [ -z "$pin" ]; then echo "SKIP $surf: no $var pin in $pb"; continue; fi; \
+        if [ ! -d "$dir/.git" ]; then git clone --quiet --no-tags "$url" "$dir" 2>/dev/null; fi; \
+        git -C "$dir" fetch --quiet --tags origin 2>/dev/null || true; \
+        if git -C "$dir" checkout --quiet "$pin" 2>/dev/null; then \
+            echo "$surf: checked out $pin"; \
+        else \
+            echo "FAIL $surf: cannot checkout $pin in $dir"; \
+        fi; \
     done
 
 # Re-pin the Python uv locks (S2 root, S4 mcp/cluster-exec). Write-prone:

@@ -96,19 +96,18 @@ code); re-pin via `deps-tidy-src` on the next deliberate frp bump.
 
 ## S9 — zulip (pinned source build)
 
-Pin `zulip_version: 12.1-0` (tag), but the `ext/docker-zulip` checkout is
-upstream `main` (not the pinned tag) → **DRIFT**. The pin is a tag, not a SHA,
-so a fresh checkouts can't reproduce the scan tree until it's checked out at
-the tag. **Action (TRACKED):** behind the zulip packaging work, checkout at the
-pinned tag and continue scanning there.
+`zulip_version: 12.1-0` (tag) pinned in `build-zulip.yml`; `ext/docker-zulip`
+is now checked out at that tag via `just deps-src-checkout` → **in sync, no
+drift**. Tag-based pin (not SHA) is the upstream release scheme; scanning the
+tag-pinned tree is reproducible.
 
 ## S10 — open-webui + plugins (pinned source build)
 
-`webui_version: v0.11.0` (tag), but the `ext/open-webui` checkout is upstream
-`main` → **DRIFT** (same tag-reproducibility issue as S9).
-`plugins_repo` is a **repo URL, not a git SHA** → violates the repo's
-"pin source to a SHA" rule. **Action (TRACKED):** pin `plugins_repo` to a SHA
-and checkout both trees at their pins before scanning.
+`webui_version: v0.11.0` (tag) and `plugins_repo_sha`
+(`746f4b2f…`) both pinned in `build-open-webui.yml`; `ext/open-webui` and
+`ext/open-webui-plugins` are checked out at those pins via
+`just deps-src-checkout` → **in sync, no drift**. `plugins_repo` is now pinned
+to a SHA (was an unpinned repo URL, violating the "pin source to a SHA" rule).
 
 ## S11 — vLLM (PyPI wheels, documented exception)
 
@@ -133,7 +132,8 @@ re-run; not tracked in this ledger.
 
 ## Review cadence
 
-- Reassess **ansible-core**, **protobuf (S2/S3)**, and the **S9/S10 pin
-  gaps** on each `just deps-check`, and whenever the blocking upstreams move.
+- Reassess **ansible-core** and **protobuf (S2/S3)** on each `just deps-check`,
+  and whenever the blocking upstreams move. SRC pins are re-checked by the
+  `deps-vuln-src` drift check on every run.
 - `deps-vuln-py` / `deps-vuln-src` report these without failing until the
   accompanied entries stop being accepted (Phase 4).

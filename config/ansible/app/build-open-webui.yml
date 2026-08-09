@@ -9,6 +9,8 @@
     instance_suffix: "{{ '-' + instance if instance else '' }}"
     build_dir: "/opt/src/open-webui-build{{ instance_suffix }}"
     plugins_repo: "https://github.com/devrandom/open-webui-plugins.git"
+    # Pinned to a SHA per AGENTS.md "pin source to a git SHA" (no upstream tags).
+    plugins_repo_sha: "746f4b2f296d0b77f341bd646a19d07f49d3dd67"
     webui_repo: "https://github.com/open-webui/open-webui.git"
     webui_version: "v0.11.0"
     image_name: "registry.xc:5000/open-webui-with-plugins"
@@ -33,6 +35,8 @@
           git:
             repo: "{{ plugins_repo }}"
             dest: "{{ build_dir }}/open-webui-plugins"
+            version: "{{ plugins_repo_sha }}"
+            force: yes
             update: "{{ instance == '' }}"
 
         - name: Check out open-webui repository
