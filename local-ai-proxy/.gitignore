@@ -3,3 +3,8 @@ bin/
 *.test
 *.out
 coverage.*
+
+# threat-model / triage scratch
+.threat-model-state/
+.triage-state/
+.patch-state/

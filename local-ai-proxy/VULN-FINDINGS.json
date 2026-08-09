@@ -1,0 +1,68 @@
+{
+  "target": "/home/user/ycluster/local-ai-proxy",
+  "scanned_at": "2026-08-09T00:00:00Z",
+  "revision": "f8b2a6f",
+  "revision_note": "Re-emitted after `git pull` 4cf735d..f8b2a6f (API listener bound to loopback 127.0.0.1:4001; /metrics moved to a dedicated :4010 listener). The prior MinerU status_url/result_url finding (former F-001) was dropped: MinerU's shape/sandbox and its emitted callback URLs live outside this directory and are tracked as a separate review task (T3). Only the proxy's own in-scope forward/pass-through behavior is retained.",
+  "focus_areas": [
+    "HTTP /v1/* OpenAI API forward & per-model ACL (handler.go, acl.go, trusted.go)",
+    "Backend select / health probes / metrics exposure (router.go, health.go, metrics.go)",
+    "etcd source & config trust boundary (source.go, etcdclient.go, disabled.go)",
+    "Response/header/path pass-through (handler.go, router.go, TODO.md)",
+    "CLI ops surface (cli.go)"
+  ],
+  "findings": [
+    {
+      "id": "F-001",
+      "file": "acl.go",
+      "line": 69,
+      "category": "auth-bypass",
+      "severity": "MEDIUM",
+      "confidence": 0.5,
+      "title": "Allow-by-default ACL still lets models without an explicit allow be reached; the direct /v1 surface is now loopback-mitigated",
+      "description": "ACLConfig.Check (acl.go:69-87) only denies when an explicit ACLDeny entry matches; any request with no matching entry (model with no rule, or a caller matching neither allow nor deny) returns nil = allow. Commit f8b2a6f binds the API listener to loopback 127.0.0.1:4001 (main.go:152; Ansible proxy_listen 127.0.0.1:4001), so the direct unauth'd /v1 surface (previously :4000 on all interfaces) is no longer reachable from cluster-internal hosts in the managed deployment, and /v1/models (handler.go:155-171) likewise. The residual allow-by-default gap (T5) remains: an authenticated request through nginx that matches no ACL entry for the requested model is allowed, and safety depends on the listener staying loopback-bound.",
+      "exploit_scenario": "An authenticated external user requests a model that has ACL entries but none matching their user/groups; Check matches no entry and allows access. Alternatively, if Listen is ever overridden to a non-loopback address, any cluster host can POST with no identity headers and be allowed, restoring the pre-f8b2a6f direct path.",
+      "recommendation": "Make the ACL fail closed (no-match -> deny for any model that has at least one rule), verify every routable model has an explicit allow, keep the API listener loopback-bound, and require auth for any non-loopback peer.",
+      "confidence_reason": "The allow-by-default code path is unambiguous, but the highest-impact vector (direct cluster access) is mitigated by the f8b2a6f loopback bind; what remains is the unverified per-model coverage gap."
+    },
+    {
+      "id": "F-002",
+      "file": "handler.go",
+      "line": 418,
+      "category": "information-disclosure",
+      "severity": "MEDIUM",
+      "confidence": 0.5,
+      "title": "/metrics remains exposed cross-host on a dedicated listener (:4010); /healthz is now loopback-bound",
+      "description": "writeHealthz (handler.go:418-529) serializes every backend URL, state, timestamp, and probe error string (handler.go:449-457, 485-487). As of f8b2a6f it is served on the main listener which now binds loopback (main.go:146-152), so /healthz is no longer reachable from cluster-internal hosts in the managed deployment. /metrics, however, is served on the dedicated metrics_listen address, configured as :4010 on all interfaces for cross-host Prometheus scraping (main.go:154-158; Ansible inference_proxy_metrics_port 4010), with no auth and no firewall rule visible in the repo restricting it to the Prometheus hosts. It still exposes backend URLs and model names as label values plus live inflight/state gauges (metrics.go:51-93, 157-205).",
+      "exploit_scenario": "Any cluster-internal host with network reach to the target's :4010 can GET /metrics and read the backend inventory, model names, and real-time health/inflight state. Unlike the API listener, this port remains intentionally cross-host-reachable.",
+      "recommendation": "Restrict :4010 at the firewall to the Prometheus/observability hosts (or add scrape token/auth), keep /healthz loopback-only, and confirm nginx never proxies /healthz or /metrics publicly.",
+      "confidence_reason": "/healthz exposure is mitigated by the loopback bind; the remaining /metrics disclosure is intended for Prometheus but is open to the whole cluster with no network restriction visible in the repo."
+    },
+    {
+      "id": "F-003",
+      "file": "source.go",
+      "line": 195,
+      "category": "ssrf",
+      "severity": "MEDIUM",
+      "confidence": 0.5,
+      "title": "etcd-backend api_base URLs are contacted with client headers forwarded, enabling SSRF and Authorization forwarding when the etcd prefix is writable",
+      "description": "EtcdSource.parseKV (source.go:179-206) turns api_base strings from the etcd models prefix into *url.URL with no scheme/host allowlist. The health checker issues GET <backend>/v1/models (health.go:277-325) and the handler forwards each request to the backend with all client headers cloned except hop-by-hop (handler.go:312-318), including Authorization and X-User-Id. All control-plane nodes can write the inference prefix (T6), and etcd mTLS enforcement is unverified with a plaintext fallback when env is unset (etcdclient.go:61-70). A poisoned api_base can redirect the proxy, and the client credentials it forwards, to an arbitrary internal HTTP service. This is rooted in this directory's etcd-source and handler code, not in any backend's behavior.",
+      "exploit_scenario": "An account able to write /cluster/config/inference/models/<model> sets api_base to an internal admin service or 127.0.0.1:2379. A legitimate client calls that model; the proxy forwards the full request (including the client's Authorization header) to the attacker-chosen internal host, enabling internal recon and credential/data forwarding.",
+      "recommendation": "Schema-validate api_base in the etcd source (allow only http/https to an allowlisted host set), enforce etcd mTLS, and avoid forwarding sensitive client headers (Authorization) to untrusted backends; treat etcd writers as a security boundary.",
+      "confidence_reason": "Mechanism is grounded in source.go:195 and handler.go:318, but exploitation requires etcd write access, which is currently limited to trusted control-plane nodes."
+    },
+    {
+      "id": "F-004",
+      "file": "handler.go",
+      "line": 318,
+      "category": "header-injection",
+      "severity": "LOW",
+      "confidence": 0.45,
+      "title": "Broad /v1/* path forwarding and blocklist header pass-through expose backend endpoints and allow arbitrary header injection",
+      "description": "Any path under /v1/ is accepted and forwarded verbatim to the chosen backend (handler.go:180-204, 308-310; router.go:206-212), and the client's complete header set is copied through except hop-by-hop/Content-Length (handler.go:318, 685-692). There is no per-backend allowlist of downstream paths, methods, or headers, and backend response bodies are streamed back verbatim (handler.go:347-350). A client can reach backend endpoints the gateway never intended to expose (e.g. a future /v1/admin-style route) and can inject arbitrary headers (X-Forwarded-For, backend auth/debug headers) into backend requests. TODO.md explicitly flags allowlist header forwarding and path-prefix allowlisting as required work.",
+      "exploit_scenario": "An authenticated client sends /v1/admin/... through the proxy; because the /v1/* prefix check passes it is forwarded to the backend, which may interpret it as an admin call. The client can also set X-Forwarded-For: 127.0.0.1 to spoof trust in backends that key access decisions off forwarded-for.",
+      "recommendation": "Replace blocklist header forwarding with an explicit allowlist (Accept, Accept-Encoding, Authorization, Content-Type, User-Agent, X-User-Id, OpenAI-*) and add a per-backend allowlist of permitted /v1/* subpaths and methods.",
+      "confidence_reason": "The forwarding behavior and lack of allowlisting are unambiguous, but concrete impact depends on backend-specific interpretation of forwarded headers/paths, which is not verifiable statically."
+    }
+  ],
+  "summary": {"total": 4, "high": 0, "medium": 3, "low": 1, "low_confidence": 0}
+}
