@@ -20,7 +20,8 @@
   hosts: macos
   become: yes
   vars:
-    exo_version: v1.0.71                       # pinned exo-explore/exo tag/commit
+    # exo v1.0.71 = fd707de30b42db4211d15da96b9052e1dc280ed1.
+    exo_repo_sha: "fd707de30b42db4211d15da96b9052e1dc280ed1"
     exo_remote_url: https://github.com/exo-explore/exo.git
     exo_repo: /Users/dev/exo                   # checkout on the mac
     exo_patch_dir: /Users/dev/exo-patches      # carried patches, on the mac
@@ -40,7 +41,7 @@
       git:
         repo: "{{ exo_remote_url }}"
         dest: "{{ exo_build_dir }}"
-        version: "{{ exo_version }}"
+        version: "{{ exo_repo_sha }}"
         force: yes
       delegate_to: localhost
       run_once: yes
@@ -96,7 +97,7 @@
         fi
         cd "{{ exo_repo }}"
         git fetch --tags --force origin >/dev/null 2>&1 || true
-        target=$(git rev-parse "{{ exo_version }}^{commit}")
+        target=$(git rev-parse "{{ exo_repo_sha }}^{commit}")
         patched=1
         for p in "{{ exo_patch_dir }}"/*.patch; do
             [[ -e "$p" ]] || continue

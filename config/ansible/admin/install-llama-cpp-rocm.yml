@@ -4,7 +4,8 @@
   become: yes
   gather_facts: no
   vars:
-    llama_cpp_version: "b7770"
+    # llama.cpp b7770 = fe44d355748d3fe8f4765fb38c49bf1663d06805.
+    llama_cpp_repo_sha: "fe44d355748d3fe8f4765fb38c49bf1663d06805"
     llama_cpp_dir: /opt/src/llama.cpp
     gpu_target: "gfx1151"
   tasks:
@@ -40,7 +41,7 @@
       git:
         repo: https://github.com/ggerganov/llama.cpp.git
         dest: "{{ llama_cpp_dir }}"
-        version: "{{ llama_cpp_version }}"
+        version: "{{ llama_cpp_repo_sha }}"
         force: no
       register: llama_clone
 

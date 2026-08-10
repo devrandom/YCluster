@@ -32,7 +32,7 @@ Provisioning is fully Ansible-managed by `macos/setup-exo.yml` (part of
 - builds the exo dashboard once on the control host in a podman
   container (npm is never run on the macs) via
   `config/ansible/scripts/build-exo-dashboard.sh`;
-- clones/pins exo on each mac to the `exo_version` tag and applies the
+- clones/pins exo on each mac to the `exo_repo_sha` commit and applies the
   carried privacy patches (`config/ansible/macos/files/exo/patches/`);
 - ships the prebuilt dashboard, `run-exo.sh` and `exo-place.sh`;
 - installs the `com.ycluster.exo` LaunchDaemon so exo auto-starts on
@@ -43,8 +43,9 @@ Provisioning is fully Ansible-managed by `macos/setup-exo.yml` (part of
 ssh "$YC_SYNC_HOST" "cd /etc/ansible && ./run-playbook.sh macos/setup-exo.yml"
 ```
 
-To bump exo, change `exo_version` in `macos/setup-exo.yml` and re-run;
-the playbook rebuilds the dashboard and re-pins/-patches every mac.
+To bump exo, change `exo_repo_sha` (resolve the release tag to its commit
+SHA) in `macos/setup-exo.yml` and re-run; the playbook rebuilds the
+dashboard and re-pins/-patches every mac.
 
 `run-exo.sh` sets `EXO_OFFLINE=1` and `EXO_LIBP2P_NAMESPACE=ycluster` so
 peers only discover each other, not random nodes on the same network.
