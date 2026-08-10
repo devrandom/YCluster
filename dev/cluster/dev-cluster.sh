@@ -282,8 +282,15 @@ configure_net() {
   # unit, which otherwise sorts before ours and DHCPs).
   local n=$1 ip=$2
   # Containers name the NIC eth0; VMs use enp5s0 (predictable naming).
+  # Filter out docker bridges, veth pairs, and incus bridges — on a re-run
+  # with docker already installed, docker0 is the first non-loopback link
+  # and `head -1` would otherwise pick it. Writing 10-yc.network with
+  # Name=docker0 makes systemd-networkd manage docker0 and fight docker's
+  # own `bip: 172.17.0.1/16` (from app-dev.yml's daemon.json), so docker0
+  # ends up with no IP after any docker restart — host.docker.internal
+  # breaks inside the authentik container and postgres becomes unreachable.
   local iface
-  iface=$(INCUS exec "$n" -- sh -c 'ip -o link show | grep -v lo | awk -F": " "{print \$2}" | awk "{print \$1}" | head -1' 2>/dev/null)
+  iface=$(INCUS exec "$n" -- sh -c 'ip -o link show | grep -vE "(: )(lo|docker|veth|br-)" | awk -F": " "{print \$2}" | awk "{print \$1}" | head -1' 2>/dev/null)
   iface="${iface:-eth0}"
   iface="${iface%@*}"  # strip @ifN suffix from veth pairs
   INCUS exec "$n" -- sh -c 'rm -f /etc/netplan/*.yaml /run/systemd/network/*netplan*'
