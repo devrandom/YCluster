@@ -69,9 +69,20 @@
         existing_members_json: "{{ existing_members_result.results | selectattr('rc', 'equalto', 0) | first }}"
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
 
+    # The membership entry on the working peer may already include this node
+    # (e.g. it was added in a prior run and then its data dir was wiped by a
+    # PXE reinstall or dev-cluster reset). In that case etcdctl member add
+    # conflicts with the existing Raft entry and the cluster goes unhealthy on
+    # us. Detect the stale-self case so we can skip the redundant etcdctl add
+    # and let this node rejoin by snapshot from the peers instead.
+    - name: Check if this node is already in the cluster membership
+      set_fact:
+        etcd_already_member: "{{ (existing_members_json.stdout | from_json).members | selectattr('name', 'equalto', inventory_hostname) | list | length > 0 }}"
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+
     - name: Build initial cluster string for joining node
       set_fact:
-        etcd_join_cluster: "{{ (existing_members_json.stdout | from_json).members | map(attribute='name') | zip((existing_members_json.stdout | from_json).members | map(attribute='peerURLs') | map('first')) | map('join', '=') | join(',') }},{{ inventory_hostname }}={{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_peer_port }}"
+        etcd_join_cluster: "{{ (existing_members_json.stdout | from_json).members | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='name') | zip((existing_members_json.stdout | from_json).members | rejectattr('name', 'equalto', inventory_hostname) | map(attribute='peerURLs') | map('first')) | map('join', '=') | join(',') }},{{ inventory_hostname }}={{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_peer_port }}"
       when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
 
     # Pick the INITIAL_CLUSTER + STATE for the config template. For an
@@ -116,13 +127,13 @@
         --peer-urls="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd_peer_port }}"
       register: add_member_result
       failed_when: add_member_result.rc != 0
-      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists and not (etcd_already_member | default(false))
       delegate_to: "{{ working_etcd_host }}"
 
     - name: Wait a moment after adding member
       pause:
         seconds: 2
-      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists
+      when: etcd_cluster_size | int > 1 and etcd_initial_cluster_state == 'existing' and not etcd_data_exists.stat.exists and not (etcd_already_member | default(false))
 
     - name: Flush handlers to restart etcd immediately
       meta: flush_handlers
