@@ -2,9 +2,9 @@
 # ACME rehearsal fixture: Pebble (Let's Encrypt's test CA) on a dedicated
 # container, issuing for the dev external domain through the REAL
 # certificate path — certbot on the storage leader, webroot under the
-# public vhost, HTTP-01 arriving through the rathole tunnel at f1:80.
+# public vhost, HTTP-01 arriving through the frp tunnel at f1:80.
 # Exercises the operationally painful lore end-to-end: obtain-on-the-
-# rathole-node, webroot vs --nginx, the 127.0.0.2 public listener.
+# frps-node, webroot vs --nginx, the 127.0.0.2 public listener.
 #
 # Run as a TOP-LEVEL playbook from dev/cluster/ (vault avoidance):
 #   ../../venv/bin/ansible-playbook acme-dev.yml

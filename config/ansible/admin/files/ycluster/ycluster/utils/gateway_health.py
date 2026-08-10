@@ -7,7 +7,7 @@ traffic out); exit 1 means it must not. Invoked by the thin wrapper at
 env and the uplink interface name as argv[1].
 
 Fitness is judged by reachability to the frontend nodes over the uplink:
-  * the frontends are the cluster's real outbound dependency (rathole tunnels /
+  * the frontends are the cluster's real outbound dependency (frp tunnels /
     external serving), so this tests what actually matters rather than a proxy;
   * they are owned infrastructure, so there is no third-party probe to be
     polite about;
@@ -30,17 +30,17 @@ import subprocess
 import sys
 import threading
 
-DEFAULT_RATHOLE_PORT = 2333
 DEFAULT_FRP_PORT = 7000
 PROBE_TIMEOUT = 2.0   # seconds, per frontend TCP probe
 ETCD_TIMEOUT = 3.0    # seconds, hard ceiling on the live etcd read
 
 
-def parse_rathole_port(config_value, default=DEFAULT_RATHOLE_PORT):
-    """Extract the rathole control port from the etcd rathole config value.
+def parse_frp_port(config_value, default=DEFAULT_FRP_PORT):
+    """Extract the frp control port from the etcd frp config value.
 
-    Accepts bytes/str/None (as returned by etcd3 client.get); returns the port
-    core nodes connect to, or ``default`` when the value is missing/malformed.
+    Accepts bytes/str/None (as returned by etcd3 client.get); returns the
+    control port core nodes connect to, or ``default`` when the value is
+    missing/malformed. The value lives at /cluster/nodes/frp/config.
     """
     if not config_value:
         return default
@@ -54,16 +54,6 @@ def parse_rathole_port(config_value, default=DEFAULT_RATHOLE_PORT):
     if sep and host and port.isdigit():
         return int(port)
     return default
-
-
-def parse_frp_port(config_value, default=DEFAULT_FRP_PORT):
-    """Extract the frp control port from the etcd frp config value.
-
-    Parallel-run companion to parse_rathole_port. Same shape
-    ({remote_addr, token} JSON), different default port. Read from
-    /cluster/nodes/frp/config, not /cluster/nodes/rathole/config.
-    """
-    return parse_rathole_port(config_value, default=default)
 
 
 def frontend_probe_ips(nodes):
@@ -111,7 +101,7 @@ def next_hop_reachable(iface):
 
 
 def read_targets(timeout=ETCD_TIMEOUT):
-    """Return (probe_ips, rathole_port) read live from etcd.
+    """Return (probe_ips, frp_port) read live from etcd.
 
     Runs in a watchdog thread so a hung etcd connection can't stall keepalived:
     if the read does not finish within ``timeout`` we raise and the caller falls
@@ -125,8 +115,8 @@ def read_targets(timeout=ETCD_TIMEOUT):
             from . import frontend_manager
             client = get_etcd_client(max_retries=1, retry_delay=0)
             nodes = frontend_manager.get_frontend_nodes(client)
-            cfg, _ = client.get('/cluster/nodes/rathole/config')
-            box['result'] = (frontend_probe_ips(nodes), parse_rathole_port(cfg))
+            cfg, _ = client.get('/cluster/nodes/frp/config')
+            box['result'] = (frontend_probe_ips(nodes), parse_frp_port(cfg))
         except Exception as e:  # noqa: BLE001 - any failure -> fall back
             box['error'] = e
 

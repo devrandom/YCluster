@@ -3,7 +3,7 @@
 # binary stays in /opt/src/local-ai-proxy/bin/; install-local-ai-proxy.yml
 # fetches it from there via the controller.
 #
-# Unlike build-rathole.yml/build-frp.yml/build-open-webui.yml, the source
+# Unlike build-frp.yml/build-open-webui.yml, the source
 # isn't pinned to an external git SHA — local-ai-proxy lives in this repo
 # at the top level (../local-ai-proxy relative to config/ansible/),
 # synced to the controller via dev-sync. We push it from there to the

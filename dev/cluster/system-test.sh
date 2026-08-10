@@ -605,24 +605,26 @@ sec_usage() {
 }
 
 # --------------------------------------------------------------------------
-# 12. rathole client retired (ssh/admin ingress via frp)
+# 12. rathole uninstalled (frp ssh/admin tunnels)
 # --------------------------------------------------------------------------
 sec_rathole() {
-  # The rathole client (incl. rathole-ssh) is retired cluster-wide; ssh
-  # tunnels moved to frpc-ssh (1720N, checked in sec_frp). Assert the
-  # retirement holds on every core node.
-  for n in "${CORE[@]}"; do
-    $SSH "$n" "systemctl is-active --quiet rathole" && die "rathole client still active on $n"
-    $SSH "$n" "systemctl is-active --quiet rathole-ssh" && die "rathole-ssh still active on $n"
+  # rathole is fully ripped out: the client (incl. rathole-ssh) on core and
+  # compute nodes and the frontend rathole server are gone, replaced by frp
+  # (frpc-ssh on the core nodes, frps on f1). Assert no binary or config
+  # leftovers on every node that ever ran it.
+  local n
+  for n in s1 s2 s3 c1 c2 f1; do
+    $SSH "$n" "test ! -e /usr/local/bin/rathole && test ! -e /usr/bin/rathole && test ! -e /etc/rathole" \
+      || die "rathole still present on $n"
   done
-  ok "rathole client retired on all core nodes (ssh tunnels via frpc-ssh)"
+  ok "rathole uninstalled cluster-wide (frp ssh/admin tunnels)"
 }
 
 # --------------------------------------------------------------------------
 # 12b. frp public http/https + ssh tunnels via f1
 # --------------------------------------------------------------------------
 sec_frp() {
-  # frpc-ssh must be active on every core node, mirroring rathole-ssh.
+  # frpc-ssh must be active on every core node.
   for n in "${CORE[@]}"; do
     $SSH "$n" "systemctl is-active --quiet frpc-ssh" || die "frpc-ssh not active on $n"
   done
@@ -1014,7 +1016,7 @@ SECTION_REGISTRY=(
   "9.postgres + authentik + user management|sec_authentik"
   "10.incus vm lifecycle (c1)|sec_vm"
   "11.usage accounting -> postgres|sec_usage"
-  "12.rathole client retired (ssh tunnels via frpc-ssh)|sec_rathole"
+  "12.rathole uninstalled (frp ssh/admin tunnels)|sec_rathole"
   "13.admin web forward-auth gate|sec_admin_web"
   "14.local-ai-proxy inference path|sec_inference"
   "15.ACME via pebble (certbot + frp tunnel)|sec_acme"

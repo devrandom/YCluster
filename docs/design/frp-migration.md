@@ -164,7 +164,10 @@ Same per-host derivation rules as `app/templates/rathole-server.toml.j2`
    6.
 6. **Cleanup commit** — gated on soak completion, not cutover
    success. Removes rathole playbooks, configs, helpers, and the old
-   etcd key. The frp alt vhost (`admin-api-alt.conf`) and its PROXY
+   etcd key. **LANDED** — the repo rip-out is complete (rathole
+   playbooks/configs/CLI/utils and the health/gateway references are
+   gone; rathole is fully off the cluster). The frp alt vhost
+   (`admin-api-alt.conf`) and its PROXY
    endpoints on `127.0.0.2:17080/17443` stay — they remain the frp
    tunnel landing (`frpc` `localPort`) — and the main `:443`/`:80`
    vhost stays a plain non-PROXY listener; PROXY protocol is never

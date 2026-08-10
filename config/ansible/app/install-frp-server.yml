@@ -1,13 +1,11 @@
 ---
-# Install frp server (frps) on frontend nodes. frps now serves the
-# production primary public http/https (:80/:443) via the frp tunnels;
-# rathole keeps ssh/admin ingress until the cleanup step.
+# Install frp server (frps) on frontend nodes. frps serves the
+# production primary public http/https (:80/:443) via the frp tunnels,
+# the VM-access bastion tunnels, and SSH.
 #
 # frps listens on bindPort (default 7000) for frpc connections, and on
 # the per-proxy listenPort values for forwarded traffic. PROXY protocol
-# v2 is enabled so the nginx alt vhost picks up real client IPs — this
-# is the migrated rathole-PROXY-protocol item (rathole's public http/
-# https rollback ports :80/:14443 are gone).
+# v2 is enabled so the nginx vhost picks up real client IPs.
 - name: Install frp server configuration
   hosts: frontend
   # No `become` for compatibility with unprivileged controller user (the
@@ -15,7 +13,7 @@
   vars:
     frp_server_binary: "/usr/local/bin/frps"
     frp_server_binary_src: "/opt/src/frp/bin/frps"
-    # Control port (frpc <-> frps). Distinct from any rathole port.
+    # Control port (frpc <-> frps).
     frp_bind_port: 7000
 
   tasks:
@@ -56,8 +54,8 @@
 
     # Read the token from etcd at task time (no_log) rather than carrying it
     # as an inventory var, so `ansible-inventory --host <frontend>` can't print
-    # it. Same pattern as install-rathole-server.yml. Frontends have no etcd
-    # access, so delegate the read to a core node.
+    # it. Same pattern as install-frp.yml. Frontends have no etcd access,
+    # so delegate the read to a core node.
     - name: Read frp tunnel config from etcd
       command: etcdctl get --print-value-only /cluster/nodes/frp/config
       delegate_to: "{{ groups['core'][0] }}"
@@ -121,8 +119,6 @@
     # leader by install-frp-alt-vhost.yml) serves the production primary
     # public HTTP/HTTPS: frp forwards :80/:443 to the loopback backend
     # ports (17080 / 17443) with PROXY protocol v2, so this vhost picks
-    # up real client IPs. It replaces rathole's public http/https vhost.
-    # Removed wholesale at cleanup step 6 of the frp migration plan.
 
     # Frontend nodes are public, so run a host firewall (ufw) with
     # least-privilege openings rather than relying on an implicit cloud
@@ -164,9 +160,7 @@
     # remain bastion-only (reachable from the local sshd jump on dev1a/b
     # via 127.0.0.1, not from the WAN). frp now serves the production
     # primary public HTTP/HTTPS: https on :443 and http on :80 (was the
-    # :17080 alt port during the parallel-run phase). rathole's retired
-    # public HTTP/HTTPS ports (:80 / :14443) are no longer tracked from
-    # /etc/rathole/server.toml by install-rathole-server.yml.
+    # :17080 alt port during the parallel-run phase).
     - name: Allow public frp ports through ufw
       community.general.ufw:
         rule: allow
@@ -179,8 +173,7 @@
     # VM-access bastions keep their historical public ports (2210+idx /
     # 2213+idx legacy, 2220+idx / 2240+idx for idx>3), now served by frps
     # via each Incus host's frpc-bastion tunnel. Allow those same ports
-    # here so the firewall doesn't depend on rathole's config as rathole
-    # retreats. Derivation mirrors the retired rathole template.
+    # here so the firewall tracks the same derivation the frps template uses.
     - name: Build list of VM-bastion public ports
       set_fact:
         vm_bastion_public_ports: >-

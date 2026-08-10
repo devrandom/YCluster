@@ -191,7 +191,7 @@ class HealthRouteTests(unittest.TestCase):
         for r in (r1, r2):
             self.assertIn(r.status_code, (200, 503))
             data = r.get_json()
-            self.assertEqual(len(data["services"]), 21)
+            self.assertEqual(len(data["services"]), 20)
             self.assertIn("keepalived", data["services"])
             # c1 is non-storage → keepalived must be standby (not healthy,
             # not split-brain). This is the is_core_node() check end-to-end.

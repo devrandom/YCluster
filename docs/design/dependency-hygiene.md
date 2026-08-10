@@ -50,17 +50,18 @@ is organized around the **shipped pin**, not the checkout directory.
 | S5 | Ansible collections | pinned inside Ansible version (S2) | Python | ❌ |
 | S6 | podman | `admin/build-podman.yml` `podman_repo_sha` | source (Go/Rust) | ❌ |
 | S7 | frp | `app/build-frp.yml` `frp_repo_sha` | source (Go) | ❌ |
-| S8 | rathole | being **ripped out** — not a long-term surface | source (Rust) | ❌ |
+| S8 | rathole | **removed** (rip-out landed) — no longer a surface | source (Rust) | ✅ |
 | S9 | zulip | `app/build-zulip.yml` `zulip_version: 12.1-0` | source tree | ❌ |
 | S10 | open-webui + plugins | `app/build-open-webui.yml` `webui_version` + `plugins_repo` | source (Python/Node) | ❌ |
 | S11 | vLLM | `admin/install-vllm.yml` + `install-incus.yml` (`vllm>=0.20,<0.21`, dual-pinned) | PyPI wheels (documented exception) | ❌ |
 | S12 | OS packages + snaps | security patches via **unattended-upgrades**; leader-election services held (`dpkg --set-selections`); microceph held (`snap refresh --hold`) | system | partial (`packages.md`) |
 | S13 | dev tooling | `uv tool install` (serena, ty, mcp-fstools) | Python | ❌ (dev-only) |
 
-**Noteable item:** S8 (rathole) is slated for removal, so it is **not**
-pinned and not part of the dependency gate. It is excluded from scope until its
-removal lands — tracking it today would mean putting effort into hardening a
-component that is going away. Once removal lands, drop it from this table.
+**Noteable item:** S8 (rathole) was a candidate for removal rather than
+hardening, so it was **not** pinned and **not** part of the dependency gate —
+tracking it would have meant hardening a component slated for removal. The
+rip-out has now landed (rathole playbooks, configs, CLI, utils, health/gateway
+references removed), so it is dropped from this table.
 
 ## Design
 
@@ -170,7 +171,7 @@ The repo already keeps vulnerability artifacts per component
   `pip-audit`) is installed once per machine via `just deps-tools` — the Go
   bits from source via `go install`, `pip-audit` as a `uv tool`;
   nothing else gets downloaded as a binary. Source builds stay pinned to a
-  git SHA under `/opt/src` (S8 rathole is excluded — it's being ripped out).
+  git SHA under `/opt/src` (S8 rathole is removed — rip-out landed).
 - **No auto-upgrade:** every `deps-tidy-*` output is a separate reviewed change.
 - **Live/prod safety:** audits and re-pins are static; they never touch running
   nodes. OS/held-package upgrades remain behind the existing `packages.md`
@@ -193,15 +194,15 @@ for that surface's gate.
 | S5 | Ansible collections | ❌ | Covered by S2's ansible pin; verify a collection `requirements.yml` records what's needed so it's not implicit. | collection set reproducible from S2 |
 | S6 | podman | ❌ | osv on pinned-SHA tree locks + `git ls-remote` freshness (see Open Q2). | pinned SHA in policy, no reachable finding at that rev |
 | S7 | frp | ❌ | same as S6. | same |
-| S8 | rathole | ⚠️ `main` | **Tracked separately as removal** (rip it out; excludes rathole config/CLI/install YAML). No dependency hygiene work here — it's going away. | removed from repo + this table |
+| S8 | rathole | ✅ removed | **Rip-out landed** — rathole playbooks/configs/CLI/utils and the health/gateway references are removed from the repo. | done — removed from repo + this table |
 | S9 | zulip | ❌ | freshness (tag vs. latest) + osv at pinned tree. | pinned tag clean; bump reviewed |
 | S10 | open-webui + plugins | ❌ | freshness + osv; plugins repo SHA pinned (matches repo rule). | pinned SHA/tag, clean at that rev |
 | S11 | vLLM | ❌ | sanity-check latest in pinned range vs PyPI advisory feed; keep the two files in sync (existing `vllm-upgrade.md` workflow). | pins in `install-vllm.yml` + `install-incus.yml` in sync, no known-reachable advisory |
 | S12 | OS packages + snaps | partial | Keep informational; rely on unattended-upgrades; report `HeldPackagesStale` as context. | no code-gate blocker; held-package upgrades via `packages.md` |
 | S13 | dev tooling (uv tools) | ❌ | Monitor but exclude from green gate (dev-only); re-pin on `setup-tools` re-run. | not a blocker; documented |
 
-Phase 1 — **unblock & wire** (parallel): S8 removal is tracked separately (not
-here); add the gate tooling via the `deps-tools` bootstrap target +
+Phase 1 — **unblock & wire** (parallel): S8 removal landed separately (not
+covered here); add the gate tooling via the `deps-tools` bootstrap target +
 aggregate `deps-check` recipes; verify S1 in the aggregate.
 Phase 2 — **baseline** (parallel): run `deps-check`, capture findings into the
 accepted-findings ledger for S2, S3, S4, S6, S7, S9–S11.

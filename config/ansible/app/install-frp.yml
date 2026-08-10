@@ -1,12 +1,10 @@
 ---
-# Install frp client (frpc) on core nodes. frp now serves the production
+# Install frp client (frpc) on core nodes. frp serves the production
 # primary public http/https tunnels (:80/:443, leader-gated) plus the
-# per-core ssh tunnels; rathole keeps ssh/admin ingress until the cleanup
-# step.
+# per-core ssh tunnels.
 #
 # The frpc-start wrapper reads /cluster/nodes/frp/config from etcd at
-# startup and renders the client TOML from a jinja template — same
-# pattern as the rathole client.
+# startup and renders the client TOML from a jinja template.
 - name: Install frp client configuration and service
   hosts: core
   # No `become` for compatibility with unprivileged controller user (the

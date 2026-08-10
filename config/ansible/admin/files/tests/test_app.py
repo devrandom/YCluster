@@ -772,7 +772,7 @@ class LoopbackGuardTests(SchedTestBase):
         # Belt-and-suspenders tightening: the "no headers → admin" shortcut
         # is the dangerous path — it requires the caller to be EXACTLY
         # 127.0.0.1, not just any loopback. nginx's upstream from the
-        # public rathole-tunnel vhost (listen 127.0.0.2:443) may arrive
+        # public frp vhost (listen 127.0.0.2:443) may arrive
         # here; if forward-auth was bypassed, the request would be
         # headerless, and we don't want it treated as admin.
         d = self.get("/admin/users/data", admin=True,
@@ -803,7 +803,7 @@ class LoopbackGuardTests(SchedTestBase):
         self.assertTrue(d["is_admin"])
 
     def test_forward_auth_from_127_0_0_2_with_admin_headers_is_admin(self):
-        # nginx upstream from the public rathole-tunnel vhost may arrive
+        # nginx upstream from the public frp vhost may arrive
         # on 127.0.0.2; the forward-auth group check accepts any loopback
         # (the headers were set by nginx, so we trust them).
         # admin=True in our helper = "no headers" — instead set headers

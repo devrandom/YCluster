@@ -344,7 +344,7 @@ class SelectHealthyGpusTests(unittest.TestCase):
 
 
 class BastionPublicPortTests(unittest.TestCase):
-    """Must mirror app/templates/rathole-server.toml.j2's port math."""
+    """Must mirror app/templates/frps.toml.j2's port math."""
 
     def test_low_index_contiguous(self):
         # idx 1-3 keep historical ports: nvidia 2210+idx, compute 2213+idx.

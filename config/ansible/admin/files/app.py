@@ -2000,30 +2000,6 @@ def get_comprehensive_health():
     elif cert_health['status'] == 'warning' and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
     
-    # rathole client is retired: http/https, admin, and per-core SSH ingress
-    # moved to frp and the non-ssh client service is uninstalled. Only flag
-    # it as stale if it is somehow still running.
-    rathole_running = check_service_status('rathole')
-    if rathole_running:
-        health_status['services']['rathole'] = {
-            'status': 'unhealthy',
-            'details': {
-                'service_active': rathole_running,
-                'required': False,
-                'reason': 'retired: rathole client should be uninstalled'
-            }
-        }
-        health_status['overall'] = 'unhealthy'
-    else:
-        health_status['services']['rathole'] = {
-            'status': 'healthy',
-            'details': {
-                'service_active': rathole_running,
-                'required': False,
-                'reason': 'retired: rathole client uninstalled'
-            }
-        }
-    
     # Check clock skew
     clock_skew = check_clock_skew()
     health_status['services']['clock_skew'] = clock_skew
@@ -2828,7 +2804,7 @@ def _authentik_identity():
 
     1. The "no headers → admin" operator-space shortcut requires
        ``remote_addr`` to be EXACTLY ``127.0.0.1`` AND no UID set. A
-       nginx upstream from the public rathole-tunnel vhost (listen
+       nginx upstream from the public frp vhost (listen
        ``127.0.0.2:443``) may arrive on ``127.0.0.2``; a public request
        that has somehow bypassed forward-auth would land here headerless,
        and we don't want that treated as admin. An OAuth-authenticated
@@ -3016,7 +2992,7 @@ def vm_schedule_data():
             'owner': rec.get('owner'),
             'host': rec.get('host'),
             'gpus': rec.get('gpus'),
-            # Public rathole port the host's jump bastion is exposed on, so
+            # Public frp port the host.s jump bastion is exposed on, so
             # the page can render a ready-to-paste ~/.ssh/config ProxyJump.
             'port': vmm.bastion_public_port(rec.get('host')),
             'status': status,

@@ -127,8 +127,8 @@ deps-vuln-py:
 # pinned to the SHA/tag in the build-*.yml playbooks; a fresh clone must
 # reproduce them from those pins before this recipe can scan (Phase 2).
 # Report-only for now: pinned vendored trees are baselined in Phase 2 and the
-# final freshness policy is decided there. S8 (rathole) is excluded — it is
-# being ripped out.
+# final freshness policy is decided there. S8 (rathole) is removed — the
+# rip-out landed.
 deps-vuln-src:
     @command -v osv-scanner >/dev/null 2>&1 || { echo "osv-scanner not installed — run: just deps-tools" >&2; exit 1; }
     @for entry in \

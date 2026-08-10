@@ -13,46 +13,9 @@ import unittest
 from ycluster.utils import gateway_health as gh
 
 
-class ParseRatholePortTests(unittest.TestCase):
-    def test_str_value(self):
-        self.assertEqual(
-            gh.parse_rathole_port('{"remote_addr": "host.ycluster.net:2333"}'), 2333)
-
-    def test_bytes_value(self):
-        self.assertEqual(
-            gh.parse_rathole_port(b'{"remote_addr": "host:5000"}'), 5000)
-
-    def test_ipv4_host(self):
-        self.assertEqual(
-            gh.parse_rathole_port('{"remote_addr": "203.0.113.7:2333"}'), 2333)
-
-    def test_missing_value_uses_default(self):
-        self.assertEqual(gh.parse_rathole_port(None), gh.DEFAULT_RATHOLE_PORT)
-        self.assertEqual(gh.parse_rathole_port(b''), gh.DEFAULT_RATHOLE_PORT)
-
-    def test_no_remote_addr_uses_default(self):
-        self.assertEqual(gh.parse_rathole_port('{"token": "x"}'),
-                         gh.DEFAULT_RATHOLE_PORT)
-
-    def test_malformed_json_uses_default(self):
-        self.assertEqual(gh.parse_rathole_port('not json'),
-                         gh.DEFAULT_RATHOLE_PORT)
-
-    def test_non_numeric_port_uses_default(self):
-        self.assertEqual(gh.parse_rathole_port('{"remote_addr": "host:abc"}'),
-                         gh.DEFAULT_RATHOLE_PORT)
-
-    def test_no_port_uses_default(self):
-        self.assertEqual(gh.parse_rathole_port('{"remote_addr": "host"}'),
-                         gh.DEFAULT_RATHOLE_PORT)
-
-    def test_explicit_default(self):
-        self.assertEqual(gh.parse_rathole_port(None, default=9), 9)
-
-
 class ParseFrpPortTests(unittest.TestCase):
-    """parse_frp_port is the parallel-run companion to parse_rathole_port.
-    Same JSON shape, different default port (7000)."""
+    """parse_frp_port extracts the frp control port from the etcd frp config
+    value ({remote_addr, token} JSON); defaults to 7000."""
 
     def test_str_value(self):
         self.assertEqual(
@@ -96,7 +59,7 @@ class CheckGatewayTests(unittest.TestCase):
     def setUp(self):
         # Sensible defaults; individual tests override what they exercise.
         self._patch('carrier_up', lambda iface: True)
-        self._patch('read_targets', lambda timeout=gh.ETCD_TIMEOUT: (["1.1.1.1", "2.2.2.2"], 2333))
+        self._patch('read_targets', lambda timeout=gh.ETCD_TIMEOUT: (["1.1.1.1", "2.2.2.2"], 7000))
         self._patch('tcp_reachable', lambda iface, ip, port, timeout=gh.PROBE_TIMEOUT: False)
         self._patch('next_hop_reachable', lambda iface: False)
 
@@ -143,7 +106,7 @@ class CheckGatewayTests(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_no_frontends_falls_back_to_nexthop(self):
-        self._patch('read_targets', lambda timeout=gh.ETCD_TIMEOUT: ([], 2333))
+        self._patch('read_targets', lambda timeout=gh.ETCD_TIMEOUT: ([], 7000))
         self._patch('next_hop_reachable', lambda iface: True)
         ok, msg = gh.check_gateway("up0")
         self.assertTrue(ok)

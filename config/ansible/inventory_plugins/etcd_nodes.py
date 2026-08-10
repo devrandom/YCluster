@@ -198,10 +198,10 @@ class InventoryModule(BaseInventoryPlugin):
             leader_hostname = None
             self.display.vvv("No storage leader found in etcd")
 
-        # The rathole token is deliberately NOT injected as an inventory var:
+        # The frp token is deliberately NOT injected as an inventory var:
         # that would let `ansible-inventory --host <frontend>` print the secret
         # in cleartext during debugging. Both consumers read it from etcd at
-        # task time with no_log instead (app/install-rathole-server.yml and
+        # task time with no_log instead (app/install-frp-server.yml and
         # admin/install-vm-bastion.yml).
 
         # Read allocations from etcd

@@ -1260,7 +1260,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
              else ("shared GPU" if (instance_type == "container" and gpus)
                    else "no GPU"))
     print(f"Launched '{name}' ({where})")
-    print(f"  ssh -J {BASTION_JUMP_USER}@<rathole-host>:<port> "
+    print(f"  ssh -J {BASTION_JUMP_USER}@<bastion-host>:<port> "
           f"{VM_GUEST_USER}@{name}")
 
 
@@ -1538,11 +1538,11 @@ def vm_sync_keys(user):
 # bastion access list
 # --------------------------------------------------------------------------
 def bastion_public_port(host):
-    """Public rathole port the VM host's bastion is exposed on.
+    """Public frp bastion port the VM host's bastion is exposed on.
 
     MUST stay in sync with the port math in
-    app/templates/rathole-server.toml.j2 (that template is what actually
-    binds the port on the rathole server; this only predicts it). Index =
+    app/templates/frps.toml.j2 (that template is what actually
+    binds the port on the frps server; this only predicts it). Index =
     the numeric suffix of the host name. idx 1-3 keep historical contiguous
     ports (nvidia 2210+idx, compute 2213+idx); idx > 3 lands in a per-type
     disjoint block (nvidia 2220+idx, compute 2240+idx) so adding a host of

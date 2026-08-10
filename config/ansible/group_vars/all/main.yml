@@ -59,7 +59,7 @@ etcd_client_env: "{{ {'ETCD_HOSTS': etcd_hosts, 'ETCDCTL_ENDPOINTS': etcdctl_end
 # Bootstrap files location (ansible SSH key, etc.)
 bootstrap_files_dir: /opt/bootstrap-files
 
-# Build host for compiling binaries (rathole, open-webui, frp). Build
+# Build host for compiling binaries (open-webui, frp). Build
 # playbooks run here; install playbooks fetch artifacts from here via
 # the controller.
 buildhost: s1

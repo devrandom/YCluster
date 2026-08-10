@@ -8,9 +8,9 @@
 # public admin.<domain> block. The app/auth/comfy/open-webui surfaces live
 # in their own per-app templates (each declares its plain :443 listener
 # alongside the 127.0.0.2:17443 PROXY landing). It replaces rathole's
-# public http/https vhost (rathole now only carries ssh/admin ingress until
-# the step-6 cleanup). Split out of install-frp-server.yml so the frontend
-# frps install and the storage vhost install are two focused playbooks.
+# public http/https vhost (now fully removed). Split out of
+# install-frp-server.yml so the frontend frps install and the storage
+# vhost install are two focused playbooks.
 #
 # The alt vhost is intentionally kept separate from the primary
 # admin-api.conf.j2 rendering (setup-web-services.yml) so that the

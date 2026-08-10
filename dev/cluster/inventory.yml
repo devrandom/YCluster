@@ -45,7 +45,7 @@ all:
     # Dev has no Docker apt repo; install-docker-registry.yml falls back to
     # these for its docker + compose-v2 requirement.
     registry_docker_packages: [docker.io, docker-compose-v2]
-    # Build host for compiling binaries (rathole, open-webui, frp,
+    # Build host for compiling binaries (open-webui, frp,
     # local-ai-proxy). Defaults to s1; the build playbooks run here and
     # install playbooks fetch artifacts from here via the controller.
     buildhost: s1
@@ -104,10 +104,10 @@ all:
       hosts:
         c1: { ansible_host: 10.0.0.51 }
         c2: { ansible_host: 10.0.0.52 }
-    # Frontend node — external rathole-server host in the real cluster; here a
+    # Frontend node — external frp-server host in the real cluster; here a
     # container on the dev bridge. Deliberately NOT in `managed` (it runs the
-    # rathole server, not admin-api). Exercises the frontend group + the
-    # etcd-sourced rathole token (app/install-rathole-server.yml).
+    # frps server, not admin-api). Exercises the frontend group + the
+    # etcd-sourced frp token (app/install-frp-server.yml).
     frontend:
       hosts:
         f1: { ansible_host: 10.0.0.41 }

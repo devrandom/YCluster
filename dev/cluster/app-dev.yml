@@ -551,7 +551,7 @@
 - import_playbook: ../../config/ansible/admin/admin-stats.yml
 
 # The inference gateway: build-local-ai-proxy.yml compiles the Go binary
-# on {{ buildhost }} (s1) following the same pattern as build-rathole.yml /
+# on {{ buildhost }} (s1) following the same pattern as build-frp.yml /
 # build-frp.yml; install-local-ai-proxy.yml fetches the artifact and
 # deploys proxy + auth sidecar + the inference.xc vhost on all storage
 # nodes. The system test routes the dev-echo model at c1's stub backend
