@@ -14,6 +14,9 @@ Subcommands:
                     (deterministic decode). Repeats each depth and reports
                     median + min/max. --lens/--gen/--repeats/--prompt/--json.
   models            List model ids available on the gateway.
+  image <model>     POST a generated test image (red circle + \"42\") through the
+                    gateway and confirm the model actually reads it — the quick
+                    sanity check for multimodal/vision support.
   transcribe <file> POST an audio file to /v1/audio/transcriptions and print
                     the transcript. Optional --diarize adds speaker labels.
   ocr <file>...     POST document(s) / image(s) to /v1/file_parse (MinerU)
@@ -29,6 +32,7 @@ Usage:
   ./inference chat MiniMaxAI/MiniMax-M2.7
   ./inference bench MiniMaxAI/MiniMax-M2.7 --gen 128 --json
   ./inference bench model --repeats 5
+  ./inference image nemotron-3-nano-omni
   ./inference models
   ./inference transcribe tmp/ES2002d.Mix-Headset.wav
   ./inference transcribe tmp/ES2002d.Mix-Headset.wav --diarize
@@ -36,14 +40,17 @@ Usage:
   ./inference ocr tmp/scan.png tmp/contract.pdf --format zip --output out.zip
 """
 import argparse
+import base64
 import json
 import os
 import secrets
 import statistics
+import struct
 import sys
 import time
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -93,6 +100,148 @@ def cmd_models(args):
         print(m.get("id"))
 
 
+# 5x7 bitmap digits rendered into the generated test image (no PIL dependency).
+_DIGIT_FONT = {
+    "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+    "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+    "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+    "3": ["11111", "00010", "00100", "00010", "00001", "10001", "01110"],
+    "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+    "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+    "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+    "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+    "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+    "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+}
+
+
+def _make_test_image(text="42"):
+    """Build a simple red-circle-plus-number PNG (pure stdlib) and return its
+    data URL. Enough visual content that a vision-capable model has to actually
+    read pixels to answer — a text-only path just says it can't see the image."""
+    W, H = 400, 220
+    cx, cy, r = 120, 110, 80
+    scale, ox, oy = 6, 200, 70
+    px = [[(255, 255, 255) for _ in range(W)] for _ in range(H)]
+
+    for y in range(H):
+        for x in range(W):
+            if (x - cx) ** 2 + (y - cy) ** 2 <= r * r:
+                px[y][x] = (215, 40, 40)
+
+    def put(x, y):
+        # keep the digits clear of the circle's edge
+        if 0 <= x < W and 0 <= y < H and (x - 160) ** 2 + (y - 110) ** 2 > 40 ** 2:
+            px[y][x] = (20, 20, 20)
+
+    def glyph(d, x0, y0):
+        for rr, row in enumerate(_DIGIT_FONT[d]):
+            for cc, ch in enumerate(row):
+                if ch == "1":
+                    for dy in range(scale):
+                        for dx in range(scale):
+                            put(x0 + cc * scale + dx, y0 + rr * scale + dy)
+
+    for d in text:
+        glyph(d, ox, oy)
+        ox += 6 * scale + 10
+
+    rows = []
+    for y in range(H):
+        row = bytearray([0])
+        for x in range(W):
+            row += bytes(px[y][x])
+        rows.append(bytes(row))
+
+    def chunk(t, data):
+        c = t + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
+
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"".join(rows))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b""))
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+def cmd_image(args):
+    """POST a generated test image and confirm the model reads it (vision check)."""
+    parser = argparse.ArgumentParser(
+        prog=f"{sys.argv[0]} image",
+        description="Verify a model actually reads image input end-to-end.",
+    )
+    parser.add_argument("model")
+    parser.add_argument(
+        "--max-tokens", type=int, default=512,
+        help="max generated tokens (default 512)",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=180,
+        help="request timeout in seconds (default 180)",
+    )
+    a = parser.parse_args(args)
+
+    base, key = _load_config()
+    img = _make_test_image()
+    body = {
+        "model": a.model,
+        # keep the answer in `content` (nemotron-family emits a reasoning
+        # preamble otherwise that can eat the whole budget).
+        "chat_template_kwargs": {"thinking_mode": "disabled", "enable_thinking": False},
+        "messages": [{"role": "user", "content": [
+            {"type": "text",
+             "text": "What number and what colored shape are shown in this "
+                     "image? Answer concisely."},
+            {"type": "image_url", "image_url": {"url": img}},
+        ]}],
+        "max_tokens": a.max_tokens,
+        "temperature": 0.0,
+        "stream": False,
+    }
+
+    print(f"Endpoint: {base}")
+    print(f"Model:    {a.model}")
+    print()
+    try:
+        data = _post(base, key, "/v1/chat/completions", body, a.timeout)
+    except urllib.error.HTTPError as e:
+        print(f"image request: {RED}FAIL{RESET} — HTTP {e.code}: "
+              f"{e.read().decode('utf-8', 'replace')[:200]}")
+        print("  (a 400 here usually means the model/backend has no vision "
+              "support — enabled images are rejected upstream)")
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"image request: {RED}FAIL{RESET} — {type(e).__name__}: {e}")
+        return 1
+
+    msg = (data.get("choices") or [{}])[0].get("message", {}) or {}
+    content = msg.get("content") or ""
+    reasoning = msg.get("reasoning") or msg.get("reasoning_content") or ""
+    full = f"{content}\n{reasoning}".lower()
+
+    print(f"--- model response ---")
+    print(content or reasoning)
+    print()
+
+    num_ok = "42" in full
+    color_ok = "red" in full
+    checks = [
+        ("reads the number 42", num_ok),
+        ("identifies red", color_ok),
+    ]
+    failed = 0
+    for label, ok in checks:
+        print(f"  {label:20} {GREEN if ok else RED}{'ok' if ok else 'FAIL'}{RESET}")
+        failed += 0 if ok else 1
+    print()
+    if failed == 0:
+        print(f"vision: {GREEN}PASS{RESET} — model read the generated image")
+        return 0
+    print(f"vision: {RED}FAIL{RESET} — model did not describe the image contents "
+          "(image likely not reaching it)")
+    return 1
+
+
 def cmd_chat(args):
     """Streaming chat-completion smoke test (default)."""
     if not args:
@@ -121,6 +270,9 @@ def cmd_chat(args):
         print(f"detokenize: {tokens_list} -> {roundtrip!r}  [{ok}]")
     except urllib.error.HTTPError as e:
         print(f"tokenize: HTTP {e.code} — {e.read().decode('utf-8', 'replace').strip()}")
+    except Exception as e:  # noqa: BLE001 - tokenizer is informational: a backend
+                            # without /v1/tokenize must not abort the chat command
+        print(f"tokenize: skipped (endpoint not supported?) — {type(e).__name__}: {e}")
     print()
 
     # Stream a one-shot chat completion.
@@ -845,7 +997,7 @@ def main():
         return 0
     if (
         len(sys.argv) < 2
-        or sys.argv[1] not in ("chat", "bench", "models", "transcribe", "ocr")
+        or sys.argv[1] not in ("chat", "bench", "models", "image", "transcribe", "ocr")
     ):
         print(__doc__, file=sys.stderr)
         return 2
@@ -856,6 +1008,8 @@ def main():
         return cmd_models(rest)
     if sub == "chat":
         return cmd_chat(rest)
+    if sub == "image":
+        return cmd_image(rest)
     if sub == "bench":
         return cmd_bench(rest)
     if sub == "transcribe":
