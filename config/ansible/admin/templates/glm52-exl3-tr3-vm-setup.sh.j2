@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pull the GLM-5.2 EXL3 TR3 3-bpw image into {{ exl3_tr3_vm_name }}, smoke-test
-# GPU passthrough, check the NFS model mount, and hint at the HF download if
-# the model is missing.
+# GPU passthrough, mount the NFS model share (persisting it in the VM's fstab
+# so it survives reboots), and fail with a clear hint if the weights are missing.
 #
 #   ~/bin/glm52-exl3-tr3-vm-setup.sh
 #
@@ -15,8 +15,9 @@
 #    Host driver 610 hits CUDA error 803 "unsupported display driver / cuda
 #    driver combination" against the EXL3 image's bundled CUDA 13.2.75 — the
 #    image accepts up to driver 580.x.
-#  - NFS model mount at /model inside the VM (operator installs nfs-kernel-server
-#    on this host, adds the export, and mounts inside the VM).
+#  - nfs-kernel-server on this host exporting /home/dev/models to
+#    {{ exl3_tr3_nfs_cidr }}; this script mounts the export inside the VM and
+#    persists the mount in fstab so it survives VM reboots.
 #
 # Image: 0xSero's custom vLLM `verdictai/glm52-exl3-sparkinfer:v31-…-cu132-sm120a`
 # — EXL3 Trellis MoE + B12X sparse MLA + MTP spec-decode with a quantized EXL3
@@ -30,6 +31,8 @@ VM="{{ exl3_tr3_vm_name }}"
 IMAGE="{{ exl3_tr3_image }}"
 MODEL_HOST="{{ exl3_tr3_model_dir }}"
 DRIVER_LIB_VERSION="{{ exl3_tr3_driver_lib_version }}"
+# Incus bridge IP that serves the NFS export to the VM (10.100.0.1).
+NFS_HOST_IP="$(ip -4 -o addr show incusbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
 
 command -v incus >/dev/null \
   || { echo "incus missing - an operator must run admin/install-incus.yml" >&2; exit 1; }
@@ -43,6 +46,25 @@ incus info "$VM" | grep -q "^Status: RUNNING$" \
 # GPU passthrough + libcuda bind-mounts; the dev user on the host does not
 # need sudo for `incus exec` because of the incus-admin group).
 in_vm() { incus exec "$VM" -- "$@"; }
+
+# Ensure the NFS model export is mounted inside the VM and persists across VM
+# reboots (persisted in /etc/fstab with nofail). The NFS host is derived from
+# the incus bridge IP — never a hardcoded hostname. Idempotent.
+ensure_model_mount() {
+  [ -n "$NFS_HOST_IP" ] \
+    || { echo "could not determine the incus bridge IP (incusbr0)" >&2; exit 1; }
+  in_vm mkdir -p /mnt/models
+  if in_vm mountpoint -q /mnt/models; then
+    echo "  NFS model share already mounted"
+  else
+    echo "  mounting NFS model share from ${NFS_HOST_IP}"
+    in_vm mount -t nfs -o ro,vers=4 "${NFS_HOST_IP}:/home/dev/models" /mnt/models \
+      || { echo "  mount failed - is nfs-kernel-server exporting /home/dev/models on this host?" >&2; exit 1; }
+  fi
+  # Persist so a VM reboot doesn't drop the mount (only add the line once).
+  in_vm sh -c 'grep -q "^[^#].*/mnt/models" /etc/fstab || printf "%s:/home/dev/models\t/mnt/models\tnfs\tro,vers=4,nofail\t0\t0\n" "$1" >> /etc/fstab' _ "$NFS_HOST_IP"
+  in_vm ln -sfn "/mnt/models/{{ exl3_tr3_repo_basename }}" /model
+}
 
 echo "== pull $IMAGE (inside VM) =="
 in_vm podman pull "$IMAGE"
@@ -75,30 +97,18 @@ in_vm test -f "/usr/lib/x86_64-linux-gnu/libcuda.so.$DRIVER_LIB_VERSION" \
        echo "  incus exec $VM -- apt install -y nvidia-driver-{{ exl3_tr3_driver_pkg }}" >&2; \
        exit 1; }
 
-echo "== model mount check =="
+echo "== model mount =="
+ensure_model_mount
 if in_vm test -f "/model/config.json" && in_vm test -f "/model/model.safetensors.index.json"; then
   echo "  /model ready"
 else
-  echo "Model missing at /model inside VM. Two-step setup:"
-  echo ""
-  echo "  # 1. Install nfs-kernel-server on this host (one-time):"
-  echo "  sudo apt install -y nfs-kernel-server"
-  echo "  sudo tee /etc/exports.d/ycluster-models.conf <<EOF"
-  echo "/home/dev/models {{ exl3_tr3_nfs_cidr }}(ro,sync,no_subtree_check,no_root_squash)"
-  echo "EOF"
-  echo "  sudo exportfs -ra"
-  echo ""
-  echo "  # 2. Mount inside the VM (one-time):"
-  echo "  incus exec $VM -- apt install -y nfs-common"
-  echo "  incus exec $VM -- mount -t nfs -o ro,vers=4 $(hostname -I | awk '{print $1}'):/home/dev/models /mnt/nv4-models"
-  echo "  incus exec $VM -- ln -sfn /mnt/nv4-models/{{ exl3_tr3_repo_basename }} /model"
-  echo ""
-  echo "  # 3. Download the weights to the host (XET disabled - see comment below):"
-  echo "  HF_HUB_DISABLE_XET=1 hf download {{ exl3_tr3_repo }} --local-dir $MODEL_HOST"
-  echo ""
-  echo "  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint"
-  echo "  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s)."
-  exit 0
+  echo "  /model not ready after mounting - checkpoint missing at $MODEL_HOST" >&2
+  echo "  Download the weights to the host (XET disabled - see note below):" >&2
+  echo "    HF_HUB_DISABLE_XET=1 hf download {{ exl3_tr3_repo }} --local-dir $MODEL_HOST" >&2
+  echo "" >&2
+  echo "  # HF_HUB_DISABLE_XET=1: this node's egress can't reach the Xet CAS endpoint" >&2
+  echo "  # (the Xet path stalls at 0 B/s); the classic HF CDN works (~200 MB/s)." >&2
+  exit 1
 fi
 
 echo

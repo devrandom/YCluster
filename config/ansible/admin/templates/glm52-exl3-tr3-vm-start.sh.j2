@@ -27,12 +27,40 @@ set -euo pipefail
 VM="{{ exl3_tr3_vm_name }}"
 INNER_SCRIPT="{{ exl3_tr3_inner_script_path }}"
 REMOTE_SCRIPT="{{ exl3_tr3_remote_script_path }}"
+# Incus bridge IP that serves the NFS export to the VM (never a hardcoded
+# hostname; the export on this host reaches the VM over incusbr0).
+NFS_HOST_IP="$(ip -4 -o addr show incusbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
 
 command -v incus >/dev/null \
   || { echo "incus missing - an operator must run admin/install-incus.yml" >&2; exit 1; }
 
 incus info "$VM" | grep -q "^Status: RUNNING$" \
   || { echo "VM '$VM' is not running. Start it: incus start $VM" >&2; exit 1; }
+
+in_vm() { incus exec "$VM" -- "$@"; }
+
+# Ensure the NFS model export is mounted inside the VM and persists across VM
+# reboots (persisted in /etc/fstab with nofail). Idempotent; a plain reboot
+# drops the mount, so re-assert it here before launching.
+ensure_model_mount() {
+  [ -n "$NFS_HOST_IP" ] \
+    || { echo "could not determine the incus bridge IP (incusbr0)" >&2; exit 1; }
+  in_vm mkdir -p /mnt/models
+  if in_vm mountpoint -q /mnt/models; then
+    echo "  NFS model share already mounted"
+  else
+    echo "  mounting NFS model share from ${NFS_HOST_IP}"
+    in_vm mount -t nfs -o ro,vers=4 "${NFS_HOST_IP}:/home/dev/models" /mnt/models \
+      || { echo "  mount failed - is nfs-kernel-server exporting /home/dev/models on this host?" >&2; exit 1; }
+  fi
+  in_vm sh -c 'grep -q "^[^#].*/mnt/models" /etc/fstab || printf "%s:/home/dev/models\t/mnt/models\tnfs\tro,vers=4,nofail\t0\t0\n" "$1" >> /etc/fstab' _ "$NFS_HOST_IP"
+  in_vm ln -sfn "/mnt/models/{{ exl3_tr3_repo_basename }}" /model
+}
+
+echo "== model mount =="
+ensure_model_mount
+in_vm test -f "/model/config.json" \
+  || { echo "  /model not ready - run ~/bin/glm52-exl3-tr3-vm-setup.sh first" >&2; exit 1; }
 
 [ -f "$INNER_SCRIPT" ] \
   || { echo "inner launch script missing at $INNER_SCRIPT - re-run admin/install-glm52-exl3-tr3.yml" >&2; exit 1; }
