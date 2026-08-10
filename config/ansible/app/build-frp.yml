@@ -42,11 +42,12 @@
         # indicator inside the Jinja expression.
         any_binary_missing: '{{ frp_binary_stat.results | selectattr(''stat.exists'', ''equalto'', false) | list | length > 0 }}'
 
-    - name: Install build dependencies (go + git)
+    - name: Install build dependencies (go + git + make)
       apt:
         name:
           - golang-1.24
           - git
+          - make
         state: present
       become: yes
       when: any_binary_missing

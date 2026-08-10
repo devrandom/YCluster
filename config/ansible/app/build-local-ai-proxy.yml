@@ -43,11 +43,12 @@
         path: "{{ proxy_binary_path }}"
       register: proxy_binary
 
-    - name: Install build dependencies (go + git) on buildhost
+    - name: Install build dependencies (go + git + make) on buildhost
       apt:
         name:
           - golang-1.24
           - git
+          - make
         state: present
       become: yes
       when: not proxy_binary.stat.exists
