@@ -8,9 +8,10 @@
 # Same shape as build-open-webui.yml: run on localhost so import_playbook
 # can resolve `hosts` statically; every task delegates to the buildhost
 # (s1, via group_vars).
-#   docker-zulip release tag: 12.1-0  ->  ZULIP_GIT_REF=12.1
-#     (docker-zulip's 12.1-0 release corresponds to Zulip server 12.1,
-#      which is the Dockerfile's default ZULIP_GIT_REF pin.)
+#   docker-zulip release tag: 12.1-0  ->  ZULIP_GIT_REF=<zulip 12.1 commit>
+#     (docker-zulip's 12.1-0 release corresponds to Zulip server 12.1;
+#      both the docker-zulip checkout and the upstream Zulip source are
+#      pinned to exact commit SHAs per AGENTS.md "pin source to a git SHA".)
 #
 # The docker-zulip Dockerfile runs apt dist-upgrade and clones the upstream
 # Zulip repo, so the build needs the cluster proxy:
@@ -20,6 +21,12 @@
   gather_facts: false
   vars:
     zulip_repo: "https://github.com/zulip/docker-zulip.git"
+    # docker-zulip 12.1-0 = 9a0bd3608d6e6a1fab7bb913cfb2dd2251040c74.
+    zulip_repo_sha: "9a0bd3608d6e6a1fab7bb913cfb2dd2251040c74"
+    # Upstream zulip/zulip 12.1 = 7d85fc15464479fbb9c0c9f953e9b3532899a60e; used
+    # for both the home-button overlay checkout and the build's ZULIP_GIT_REF.
+    zulip_src_sha: "7d85fc15464479fbb9c0c9f953e9b3532899a60e"
+    # Operational image tag / installed version label (not a source pin).
     zulip_version: "12.1-0"
     zulip_image_name: registry.xc:5000/zulip
     build_dir: /opt/src/zulip-build
@@ -39,18 +46,18 @@
             state: directory
             mode: '0755'
 
-        - name: Check out docker-zulip at the pinned release tag
+        - name: Check out docker-zulip at the pinned commit
           git:
             repo: "{{ zulip_repo }}"
             dest: "{{ build_dir }}/docker-zulip"
-            version: "{{ zulip_version }}"
+            version: "{{ zulip_repo_sha }}"
             force: yes
 
         - name: Check out upstream Zulip source for the home-button overlay
           git:
             repo: "https://github.com/zulip/zulip.git"
             dest: "{{ build_dir }}/zulip-src"
-            version: "12.1"
+            version: "{{ zulip_src_sha }}"
             depth: 1
             force: yes
 
@@ -92,7 +99,7 @@
           shell: |
             docker buildx build \
               --build-arg http_proxy=http://10.0.0.254:3128 \
-              --build-arg ZULIP_GIT_REF=12.1 \
+              --build-arg ZULIP_GIT_REF={{ zulip_src_sha }} \
               --cache-from type=registry,ref={{ zulip_image_name }}:cache \
               --cache-to type=registry,ref={{ zulip_image_name }}:cache,mode=max \
               --progress plain \

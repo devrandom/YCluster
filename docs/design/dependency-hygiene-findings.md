@@ -96,18 +96,19 @@ code); re-pin via `deps-tidy-src` on the next deliberate frp bump.
 
 ## S9 — zulip (pinned source build)
 
-`zulip_version: 12.1-0` (tag) pinned in `build-zulip.yml`; `ext/docker-zulip`
-is now checked out at that tag via `just deps-src-checkout` → **in sync, no
-drift**. Tag-based pin (not SHA) is the upstream release scheme; scanning the
-tag-pinned tree is reproducible.
+`zulip_repo_sha` (docker-zulip 12.1-0 release commit) and `zulip_src_sha`
+(upstream zulip/zulip 12.1 release commit) are pinned in `build-zulip.yml`;
+the operational image tag stays `zulip_version: 12.1-0`. `ext/docker-zulip`
+is checked out at `zulip_repo_sha` via `just deps-src-checkout` → **in sync,
+no drift**. Source pins are commit SHAs per AGENTS.md "pin source to a git SHA".
 
 ## S10 — open-webui + plugins (pinned source build)
 
-`webui_version: v0.11.0` (tag) and `plugins_repo_sha`
-(`746f4b2f…`) both pinned in `build-open-webui.yml`; `ext/open-webui` and
+`webui_repo_sha` (open-webui v0.11.0 release commit) and `plugins_repo_sha`
+(`746f4b2f…`) are both pinned in `build-open-webui.yml`; `ext/open-webui` and
 `ext/open-webui-plugins` are checked out at those pins via
-`just deps-src-checkout` → **in sync, no drift**. `plugins_repo` is now pinned
-to a SHA (was an unpinned repo URL, violating the "pin source to a SHA" rule).
+`just deps-src-checkout` → **in sync, no drift**. Both are commit SHA pins per
+the "pin source to a git SHA" rule (plugins was an unpinned repo URL before).
 
 ## S11 — vLLM (PyPI wheels, documented exception)
 

@@ -197,9 +197,11 @@ Mirror the Open-WebUI upgrade approach
 (`docs/operations/open-webui-upgrade.md`):
 
 1. Resolve the new `docker-zulip` release tag and the corresponding
-   `ZULIP_GIT_REF` (Zulip server version).
-2. Bump `zulip_version` / `ZULIP_GIT_REF` in `build-zulip.yml` and
-   `zulip_version` in `install-zulip.yml`.
+   upstream Zulip release, and resolve **both to their commit SHAs**
+   (`git ls-remote` / `git rev-parse <tag>^{}`).
+2. Bump `zulip_repo_sha` and `zulip_src_sha` in `build-zulip.yml` (and the
+   `zulip_version` image tag in `build-zulip.yml` + `install-zulip.yml`
+   when the release tag itself changes).
 3. Rebuild the image in-cluster:
    `./run-playbook.sh app/build-zulip.yml`
 4. Redeploy: `./run-playbook.sh app/install-zulip.yml --limit storage`.

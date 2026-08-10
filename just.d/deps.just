@@ -124,7 +124,7 @@ deps-vuln-py:
 # Pinned source-build surfaces (S6 podman, S7 frp, S9 zulip, S10 open-webui +
 # plugins): osv-scanner over each pinned build tree's lockfiles, and a pin
 # drift check. The build trees are gitignored scratch checkouts under ext/,
-# pinned to the SHA/tag in the build-*.yml playbooks; a fresh clone must
+# pinned to a SHA in the build-*.yml playbooks; a fresh clone must
 # reproduce them from those pins before this recipe can scan (Phase 2).
 # Report-only for now: pinned vendored trees are baselined in Phase 2 and the
 # final freshness policy is decided there. S8 (rathole) is removed — the
@@ -134,8 +134,8 @@ deps-vuln-src:
     @for entry in \
         "podman ext/podman config/ansible/admin/build-podman.yml podman_repo_sha" \
         "frp ext/frp config/ansible/app/build-frp.yml frp_repo_sha" \
-        "zulip ext/docker-zulip config/ansible/app/build-zulip.yml zulip_version" \
-        "open-webui ext/open-webui config/ansible/app/build-open-webui.yml webui_version" \
+        "zulip ext/docker-zulip config/ansible/app/build-zulip.yml zulip_repo_sha" \
+        "open-webui ext/open-webui config/ansible/app/build-open-webui.yml webui_repo_sha" \
         "open-webui-plugins ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo_sha"; do \
         set -- $entry; surf="$1"; dir="$2"; pb="$3"; var="$4"; \
         if [ ! -d "$dir" ]; then \
@@ -157,18 +157,17 @@ deps-vuln-src:
         osv-scanner "$dir" 2>&1 || true; \
     done
 
-# Check out each pinned source-build tree (S6/S7/S9/S10) at the SHA/tag pinned
+# Check out each pinned source-build tree (S6/S7/S9/S10) at the SHA pinned
 # in its build-*.yml playbook, so `deps-vuln-src` scans the same code a build
-# would use. Scaffolds ext/ from scratch if a checkout is missing and fetches
-# tags so both SHA and tag pins are addressable. Idempotent; run once per
-# machine after `deps-tools` (ext/ is gitignored scratch).
+# would use. Scaffolds ext/ from scratch if a checkout is missing. Idempotent;
+# run once per machine after `deps-tools` (ext/ is gitignored scratch).
 deps-src-checkout:
     @mkdir -p ./ext
     @for entry in \
         "podman https://github.com/containers/podman.git ext/podman config/ansible/admin/build-podman.yml podman_repo_sha" \
         "frp https://github.com/fatedier/frp.git ext/frp config/ansible/app/build-frp.yml frp_repo_sha" \
-        "zulip https://github.com/zulip/docker-zulip.git ext/docker-zulip config/ansible/app/build-zulip.yml zulip_version" \
-        "open-webui https://github.com/open-webui/open-webui.git ext/open-webui config/ansible/app/build-open-webui.yml webui_version" \
+        "zulip https://github.com/zulip/docker-zulip.git ext/docker-zulip config/ansible/app/build-zulip.yml zulip_repo_sha" \
+        "open-webui https://github.com/open-webui/open-webui.git ext/open-webui config/ansible/app/build-open-webui.yml webui_repo_sha" \
         "open-webui-plugins https://github.com/devrandom/open-webui-plugins.git ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo_sha"; do \
         set -- $entry; surf="$1"; url="$2"; dir="$3"; pb="$4"; var="$5"; \
         pin=$(sed -n "s/^[[:space:]]*${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$pb" | head -n1); \
@@ -188,11 +187,10 @@ deps-tidy-py:
     @uv lock
     @cd mcp/cluster-exec && uv lock
 
-# Emit a candidate SHA/version bump for the pinned source trees in the
-# build-*.yml playbooks (S6/S7/S9/S10). For SHA pins this is the current
-# upstream default-branch HEAD; for tag pins it is the latest matching tag.
-# Never writes the pin — copy the proposed value into the playbook as its own
-# reviewed change, then rebuild + re-audit with deps-vuln-src.
+# Emit a candidate SHA bump for the SHA-pinned source trees in the
+# build-*.yml playbooks (S6/S7/S9/S10): the current upstream default-branch
+# HEAD. Never writes the pin — copy the proposed value into the playbook as its
+# own reviewed change, then rebuild + re-audit with deps-vuln-src.
 deps-tidy-src:
     @for entry in \
         "podman https://github.com/containers/podman.git config/ansible/admin/build-podman.yml podman_repo_sha" \
@@ -202,7 +200,7 @@ deps-tidy-src:
         next=$(git ls-remote "$url" refs/heads/main 2>/dev/null | cut -f1); \
         echo "$surf: ($pb) current=$cur proposed=$next"; \
     done
-    @echo "tag-pinned surfaces (zulip 12.1-0, open-webui v0.11.0): bump the tag in the playbook and rebuild; no auto-write here."
+    @echo "zulip/open-webui bump via upstream release tag -> new commit SHA in build-zulip.yml / build-open-webui.yml; no auto-write here."
 
 # Regenerate the full machine-readable baseline into tmp/ (gitignored scratch)
 # and point the reader at the version-controlled accepted-findings ledger.

@@ -51,8 +51,8 @@ is organized around the **shipped pin**, not the checkout directory.
 | S6 | podman | `admin/build-podman.yml` `podman_repo_sha` | source (Go/Rust) | ❌ |
 | S7 | frp | `app/build-frp.yml` `frp_repo_sha` | source (Go) | ❌ |
 | S8 | rathole | **removed** (rip-out landed) — no longer a surface | source (Rust) | ✅ |
-| S9 | zulip | `app/build-zulip.yml` `zulip_version: 12.1-0` | source tree | ❌ |
-| S10 | open-webui + plugins | `app/build-open-webui.yml` `webui_version` + `plugins_repo` | source (Python/Node) | ❌ |
+| S9 | zulip | `app/build-zulip.yml` `zulip_repo_sha` + `zulip_src_sha` (image tag `zulip_version: 12.1-0`) | source tree | ❌ |
+| S10 | open-webui + plugins | `app/build-open-webui.yml` `webui_repo_sha` + `plugins_repo_sha` | source (Python/Node) | ❌ |
 | S11 | vLLM | `admin/install-vllm.yml` + `install-incus.yml` (`vllm>=0.20,<0.21`, dual-pinned) | PyPI wheels (documented exception) | ❌ |
 | S12 | OS packages + snaps | security patches via **unattended-upgrades**; leader-election services held (`dpkg --set-selections`); microceph held (`snap refresh --hold`) | system | partial (`packages.md`) |
 | S13 | dev tooling | `uv tool install` (serena, ty, mcp-fstools) | Python | ❌ (dev-only) |

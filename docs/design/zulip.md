@@ -32,11 +32,11 @@ Decided so far:
 
 Sorted out with the operator before implementation:
 
-- **Version pin:** docker-zulip release tag `12.1-0` (2026-06-26). The
-  vendored `ext/docker-zulip` clone is a newer *master* SHA, not a
-  release; the build playbook must pin to the tag (`ZULIP_GIT_REF=12.1`
-  in the Dockerfile). Local `ext/` dirs are gitignored clones, not
-  submodules.
+- **Version pin:** docker-zulip release `12.1-0` (2026-06-26) and upstream
+  Zulip `12.1`, both pinned as exact **commit SHAs** in `build-zulip.yml`
+  (`zulip_repo_sha`, `zulip_src_sha`); `zulip_version: 12.1-0` is the
+  operational image tag. The Dockerfile's `ZULIP_GIT_REF` is set to
+  `zulip_src_sha`. Local `ext/` dirs are gitignored clones, not submodules.
 - **Postgres auth:** the `zulip` role connects with `scram-sha-256`
   password auth. No new `pg_hba.conf` rule is needed — the install
   playbook (`config/ansible/storage/install-postgres.yml`) already adds
@@ -373,7 +373,7 @@ only Postgres is a shared service).
 The cluster's third-party-binary rule (`AGENTS.md`) forbids pulling
 Zulip's published image from `ghcr.io`. Build locally instead, via a
 `build-zulip.yml` playbook, vendored under `/opt/src/zulip-build/`,
-pinned to the `12.1-0` release tag:
+pinned to exact commit SHAs (docker-zulip `12.1-0` + upstream Zulip `12.1`):
 
 ```yaml
 # config/ansible/app/build-zulip.yml (sketch)
@@ -385,7 +385,9 @@ pinned to the `12.1-0` release tag:
   gather_facts: false
   vars:
     zulip_repo: https://github.com/zulip/docker-zulip.git
-    zulip_version: "12.1-0"   # docker-zulip release tag; pins ZULIP_GIT_REF=12.1
+    zulip_repo_sha: "<docker-zulip 12.1-0 commit>"
+    zulip_src_sha: "<upstream zulip 12.1 commit>"
+    zulip_version: "12.1-0"   # operational image tag (not a source pin)
     zulip_image_name: registry.xc:5000/zulip
   tasks:
     - block:
@@ -399,11 +401,11 @@ pinned to the `12.1-0` release tag:
             path: /opt/src/zulip-build/docker-zulip
             state: directory
             mode: '0755'
-        - name: Check out docker-zulip at pinned tag
+        - name: Check out docker-zulip at pinned commit
           git:
             repo: "{{ zulip_repo }}"
             dest: /opt/src/zulip-build/docker-zulip
-            version: "{{ zulip_version }}"
+            version: "{{ zulip_repo_sha }}"
             force: yes
         - name: Build and push with buildx using registry cache
           shell: |
@@ -425,7 +427,7 @@ from `registry.xc:5000`. Upgrade is a rebuild at a new tag + restart.
 Pattern matches `config/ansible/app/build-open-webui.yml` and
 `config/ansible/app/build-local-ai-proxy.yml`. Building the docker-zulip
 Dockerfile runs `apt dist-upgrade`, `git clone`s the upstream Zulip repo
-then `git checkout`s the pin (`ZULIP_GIT_REF=12.1` by default) — that
+then `git checkout`s the pin (`ZULIP_GIT_REF={{ zulip_src_sha }}` by default) — that
 clone from github.com plus the apt update needs the cluster proxy, so
 pass `--build-arg http_proxy=http://10.0.0.254:3128` like the OWUI
 buildx args (the long pole in this step).
@@ -794,7 +796,8 @@ the Authentik blueprint can land in parallel with the install
 playbook.
 
 1. `config/ansible/app/build-zulip.yml` — clone docker-zulip, pin the
-   `12.1-0` tag, build + push to `registry.xc:5000`. Pure plumbing; the
+   `12.1-0` release commit (SHA) + the upstream Zulip `12.1` commit, build +
+   push to `registry.xc:5000`. Pure plumbing; the
    long pole is getting the Dockerfile's apt sources + upstream Zulip
    clone to play nice behind the cluster's network. — **0.5–1 d**.
 2. `install-zulip.yml` skeleton — docker compose on the leader,
