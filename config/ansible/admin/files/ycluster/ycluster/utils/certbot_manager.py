@@ -146,10 +146,21 @@ def discover_nginx_templates():
 def update_nginx_configs(local_mode=False):
     """Update nginx configurations from templates with the primary domain from etcd or localhost"""
     if local_mode:
-        # Local mode: use localhost and skip etcd
+        # Local mode: read the domain from etcd if available so rendered
+        # vhosts match any cert SANs certbot obtain already wrote (e.g.
+        # *.dev.test in dev-cluster tests). Without this the test's
+        # `Host: app.<domain>` hits `server_name app.localhost` and 404s.
+        # Keep TLS off so the alt vhost still serves plain HTTP; fall
+        # back to localhost when etcd is unreachable (true standalone).
         primary_domain = "localhost"
+        try:
+            config = get_https_config()
+            if 'domain' in config:
+                primary_domain = config['domain']
+        except Exception:
+            pass
         use_tls = False
-        print("Using local mode - domain: localhost, TLS: disabled")
+        print(f"Using local mode - domain: {primary_domain}, TLS: disabled")
     else:
         # Normal mode: get config from etcd
         config = get_https_config()
