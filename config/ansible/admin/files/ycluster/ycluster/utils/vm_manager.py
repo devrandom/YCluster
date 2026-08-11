@@ -58,6 +58,17 @@ SCHEDULED_STOP_GRACE_S = 300
 # in the reconciler journal.
 VM_ISSUE_PREFIX = "/cluster/vm-issue/"
 
+# Admin GPU reservations ("blocks") — a schedule entry with no backing VM.
+# An admin reserves `gpus` on `host` so the scheduler's admission control
+# treats them as committed capacity, exactly as if a VM were holding them,
+# without provisioning anything. Purely accounting/admission — there is no
+# physical GPU to attach, so nothing converges them. Records look like:
+#   {"host": "nv2", "gpus": 2, "mode": "on"|"schedule",
+#    "windows": [{start, end}, ...],  # required+valid for 'schedule'
+#    "reason": ..., "created_by": ..., "created_at": ..., "updated_at": ...}
+# Block ids are server-generated and never collide with VM names.
+GPU_BLOCKS_PREFIX = "/cluster/gpu-blocks/"
+
 VM_PROFILE = "gpu-vm"
 VM_IMAGE = "ubuntu-cuda-vllm"          # default for VMs (GPU or not):
                                        # ubuntu-cuda + vLLM + FlashInfer AOT
@@ -780,6 +791,23 @@ def desired_all():
     return _all_json(VM_DESIRED_PREFIX)
 
 
+def gpu_block_get(block_id):
+    return _get_json(GPU_BLOCKS_PREFIX + block_id)
+
+
+def gpu_block_set(block_id, rec):
+    _put_json(GPU_BLOCKS_PREFIX + block_id, rec)
+
+
+def gpu_block_delete(block_id):
+    _delete(GPU_BLOCKS_PREFIX + block_id)
+
+
+def gpu_blocks_all():
+    """{block_id: record} for every admin GPU reservation."""
+    return _all_json(GPU_BLOCKS_PREFIX)
+
+
 # Stop-grace markers ({"warned_at": iso, "immediate"?: bool}).
 def grace_get(name):
     return _get_json(VM_GRACE_PREFIX + name)
@@ -904,6 +932,46 @@ def gpu_commitments(registry, desired_all, now):
             {"vm": vm, "owner": rec.get("owner"), "gpus": gpus,
              "mode": mode, "windows": windows})
     return hosts
+
+
+def gpu_block_commitments(blocks, now):
+    """{host: [{vm, owner, gpus, mode, windows, is_block}]} implied by the
+    admin GPU reservations `blocks` ({block_id: record}). Same shape as
+    `gpu_commitments` (so `gpu_conflict` and the schedule page can treat
+    blocks as ordinary held capacity) with `owner` always None, `vm` set
+    to the block id, and `is_block` True to let the UI label them. A
+    block's `mode` is either 'on' (held continuously) or 'schedule'
+    (held during its live windows); an 'on'-mode block with no pool is
+    merely dormant and holds nothing."""
+    hosts = {}
+    for block_id, b in blocks.items():
+        gpus, host = b.get("gpus") or 0, b.get("host")
+        if not gpus or not host:
+            continue
+        mode = b.get("mode", "on")
+        windows = None
+        if mode == "schedule":
+            windows = [p for p in
+                       (_parse_window(w, now) for w in b.get("windows", []))
+                       if p]
+            if not windows:
+                continue
+        hosts.setdefault(host, []).append(
+            {"vm": block_id, "owner": None, "gpus": gpus, "mode": mode,
+             "windows": windows, "is_block": True})
+    return hosts
+
+
+def combine_gpu_commitments(*commit_sets):
+    """Merge any number of {host: [commit, ...]} dicts (from
+    `gpu_commitments` / `gpu_block_commitments`) into one, preserving
+    per-host order. Used so VM and block commitments are checked and shown
+    together against a single pool."""
+    merged = {}
+    for cs in commit_sets:
+        for host, items in cs.items():
+            merged.setdefault(host, []).extend(items)
+    return merged
 
 
 def gpu_conflict(commits, gpus, pool, lo, hi):

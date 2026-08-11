@@ -301,6 +301,131 @@ class StopNowTests(SchedTestBase):
         self.assertEqual(r.status_code, 403)
 
 
+class GpuBlockApiTests(SchedTestBase):
+    """Admin GPU reservations: admin-only create/edit/delete, admission
+    accounting against VM commitments, and data exposure on the schedule
+    page."""
+
+    def _win(self, hours_from_now=48):
+        base = (datetime.now(UTC) + timedelta(hours=hours_from_now)) \
+            .replace(minute=0, second=0, microsecond=0)
+        s = base.replace(hour=10)
+        e = s + timedelta(hours=4)
+        return [{"start": _iso(s), "end": _iso(e)}]
+
+    def test_non_admin_and_manager_denied(self):
+        for kw in ({}, {"manager": True}):
+            r = self.post("/admin/vm-schedule/gpu-block",
+                          {"host": "nv2", "gpus": 2, "mode": "on"}, **kw)
+            self.assertEqual(r.status_code, 403)
+        r = self.post("/admin/vm-schedule/gpu-block/delete",
+                      {"block": "block-x"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_admin_creates_on_block(self):
+        self.state("nv2", pool=4)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "on",
+                       "reason": "maintenance"}, admin=True)
+        self.assertEqual(r.status_code, 200)
+        block_id = r.get_json()["block"]
+        self.assertTrue(block_id.startswith("block-"))
+        rec = self.etcd.get_json(vmm.GPU_BLOCKS_PREFIX + block_id)
+        assert rec is not None
+        self.assertEqual(rec["host"], "nv2")
+        self.assertEqual(rec["gpus"], 2)
+        self.assertEqual(rec["reason"], "maintenance")
+
+    def test_block_counts_against_vm_admission(self):
+        # pool 2; an 'on' block of 2 -> a 2-GPU VM no longer fits. The block
+        # is created first (nothing committed yet); unmanaged VMs are
+        # committed *always*, so a pre-seeded unmanaged VM would itself have
+        # blocked the reservation. The VM is registered afterwards.
+        self.state("nv2", pool=2)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.vm("mine", owner="alice@x", gpus=2, host="nv2")
+        r = self.post("/admin/vm-schedule/set", {"vm": "mine", "mode": "on"})
+        self.assertEqual(r.status_code, 409)
+
+    def test_block_rejected_by_vm_commitment(self):
+        # pool 2; 'other' holds 2 always -> an 'on' block of 2 is overcommit.
+        self.state("nv2", pool=2)
+        self.vm("other", owner="bob@x", gpus=2, host="nv2")
+        self.desired("other", "on")
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 409)
+
+    def test_block_fails_open_without_pool(self):
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 200)
+
+    def test_schedule_block_exposed_to_admin_and_manager(self):
+        self.state("nv2", pool=4)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 1, "mode": "schedule",
+                       "windows": self._win()}, admin=True)
+        self.assertEqual(r.status_code, 200)
+        block_id = r.get_json()["block"]
+
+        for kw in ({"admin": True}, {"manager": True}):
+            d = self.get("/admin/vm-schedule/data", **kw).get_json()
+            self.assertEqual([b["block"] for b in d["blocks"]], [block_id])
+            nv2 = next(h for h in d["hosts"] if h["host"] == "nv2")
+            self.assertTrue(any(c["is_block"] for c in nv2["commitments"]))
+
+        # A plain user doesn't see the block roster (only its capacity
+        # effect in commitments), and hosts they don't touch stay hidden.
+        self.vm("a", owner="alice@x", host="nv2")
+        d = self.get("/admin/vm-schedule/data").get_json()
+        self.assertEqual(d["blocks"], [])
+
+    def test_edit_existing_block(self):
+        self.state("nv2", pool=4)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "on", "reason": "r1"},
+                      admin=True)
+        block_id = r.get_json()["block"]
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"block": block_id, "host": "nv2", "gpus": 3,
+                       "mode": "on", "reason": "r2"}, admin=True)
+        self.assertEqual(r.status_code, 200)
+        rec = self.etcd.get_json(vmm.GPU_BLOCKS_PREFIX + block_id)
+        self.assertEqual(rec["gpus"], 3)
+        self.assertEqual(rec["reason"], "r2")
+        self.assertEqual(rec["created_by"], "internal")  # admin = operator space
+
+    def test_invalid_inputs(self):
+        self.state("nv2", pool=4)
+        for bad in (0, -1, "x", 1.5):
+            r = self.post("/admin/vm-schedule/gpu-block",
+                          {"host": "nv2", "gpus": bad, "mode": "on"}, admin=True)
+            self.assertEqual(r.status_code, 400, f"gpus={bad!r}")
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "schedule"},
+                      admin=True)
+        self.assertEqual(r.status_code, 400)     # schedule without windows
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "BAD HOST", "gpus": 2, "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 400)
+
+    def test_delete_block(self):
+        self.state("nv2", pool=4)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "on"}, admin=True)
+        block_id = r.get_json()["block"]
+        r = self.post("/admin/vm-schedule/gpu-block/delete",
+                      {"block": block_id}, admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(self.etcd.get_json(vmm.GPU_BLOCKS_PREFIX + block_id))
+        r = self.post("/admin/vm-schedule/gpu-block/delete",
+                      {"block": block_id}, admin=True)
+        self.assertEqual(r.status_code, 404)
+
+
 class ScheduleDataTests(SchedTestBase):
     def test_owner_scoping(self):
         self.vm("a", owner="alice@x")

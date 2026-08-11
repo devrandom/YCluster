@@ -151,6 +151,87 @@
     </div>
   </template>
 
+  <template x-if="!loading && isAdmin">
+    <div>
+      <h2>Admin GPU blocks <span class="meta">reserve capacity without a VM</span></h2>
+      <template x-for="b in blocks" :key="b.block">
+        <div class="card">
+          <div class="vm-head" style="align-items:center">
+            <span class="vm-name" x-text="b.block"></span>
+            <span class="meta" x-text="`on ${b.host}`"></span>
+            <input type="number" min="1" step="1" style="width:4rem"
+                   x-model.number="b.gpus" title="GPUs to reserve">
+            <select x-model="b.mode">
+              <option value="on">always</option>
+              <option value="schedule">schedule</option>
+            </select>
+            <input type="text" placeholder="reason"
+                   x-model="b.reason" style="width:14rem">
+            <button @click="saveBlock(b)">Save</button>
+            <button class="warn" @click="deleteBlock(b)">Remove</button>
+            <span class="meta" x-show="b.created_by" x-text="`by ${b.created_by}`"></span>
+            <span class="saved" x-show="b.saved" x-text="b.saved"></span>
+            <span class="error" x-show="b.error" x-text="b.error"></span>
+          </div>
+          <template x-if="b.mode === 'schedule'">
+            <div>
+              <template x-for="(w, wi) in b.windows" :key="wi">
+                <div class="window">
+                  <input type="date" x-model="w.startDate">
+                  <input type="number" min="0" max="23" style="width:3.5rem"
+                         x-model.number="w.startHour" title="hour (0-23)"> –
+                  <input type="date" x-model="w.endDate">
+                  <input type="number" min="0" max="23" style="width:3.5rem"
+                         x-model.number="w.endHour" title="hour (0-23)">
+                  <button class="minor" @click="b.windows.splice(wi, 1)">remove</button>
+                </div>
+              </template>
+              <button class="minor" @click="b.windows.push(defaultWindow())">add window</button>
+            </div>
+          </template>
+        </div>
+      </template>
+      <div class="card">
+        <div class="vm-head" style="align-items:center">
+          <span class="vm-name">New block</span>
+          <select x-model="newBlock.host" :disabled="!poolHosts().length">
+            <option value="">host…</option>
+            <template x-for="h in poolHosts()" :key="h">
+              <option :value="h" x-text="h"></option>
+            </template>
+          </select>
+          <input type="number" min="1" step="1" style="width:4rem"
+                 x-model.number="newBlock.gpus" title="GPUs to reserve">
+          <select x-model="newBlock.mode">
+            <option value="on">always</option>
+            <option value="schedule">schedule</option>
+          </select>
+          <input type="text" placeholder="reason"
+                 x-model="newBlock.reason" style="width:14rem">
+          <button @click="createBlock()">Add block</button>
+          <span class="saved" x-show="newBlock.saved" x-text="newBlock.saved"></span>
+          <span class="error" x-show="newBlock.error" x-text="newBlock.error"></span>
+        </div>
+        <template x-if="newBlock.mode === 'schedule'">
+          <div>
+            <template x-for="(w, wi) in newBlock.windows" :key="wi">
+              <div class="window">
+                <input type="date" x-model="w.startDate">
+                <input type="number" min="0" max="23" style="width:3.5rem"
+                       x-model.number="w.startHour" title="hour (0-23)"> –
+                <input type="date" x-model="w.endDate">
+                <input type="number" min="0" max="23" style="width:3.5rem"
+                       x-model.number="w.endHour" title="hour (0-23)">
+                <button class="minor" @click="newBlock.windows.splice(wi, 1)">remove</button>
+              </div>
+            </template>
+            <button class="minor" @click="newBlock.windows.push(defaultWindow())">add window</button>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+
   <template x-if="!loading && hosts.length > 0">
     <div>
       <h2>Host GPU commitments</h2>
@@ -174,6 +255,8 @@
       return {
         rows: [],
         hosts: [],
+        blocks: [],
+        newBlock: {host: '', gpus: 1, mode: 'on', reason: '', windows: [], saved: '', error: ''},
         ssh: {},
         isAdmin: false,
         isManager: false,
@@ -211,6 +294,9 @@
                   }),
                 saved: '', error: '', showSsh: false, copied: false, copyErr: false}))
               this.hosts = data.hosts || []
+              this.blocks = (data.blocks || []).map(b => ({...b,
+                windows: this.partWindows(b.windows),
+                saved: '', error: ''}))
               this.ssh = data.ssh || {}
               this.isAdmin = !!data.is_admin
               this.isManager = !!data.is_manager
@@ -306,7 +392,9 @@
         },
 
         commitText(c) {
-          const who = c.vm + (c.owner ? ` (${c.owner})` : '')
+          const who = c.is_block
+            ? `⛔ reserved (${c.vm})`
+            : (c.vm + (c.owner ? ` (${c.owner})` : ''))
           if (!c.windows)
             return `${who} — ${c.gpus} GPU(s) held continuously (${c.mode})`
           const wins = c.windows.map(w =>
@@ -359,6 +447,110 @@
               } else row.error = d.error || 'failed'
             })
             .catch(() => { row.error = 'request failed' })
+        },
+
+        // Admin GPU blocks: reserved capacity with no backing VM. Only
+        // admins see the management UI (the server enforces it); blocks
+        // also show up in the host commitments for everyone.
+        partWindows(raw) {
+          return (raw || [])
+            .filter(w => !isNaN(new Date(w.start)) && !isNaN(new Date(w.end)))
+            .map(w => {
+              const s = new Date(w.start); s.setMinutes(0, 0, 0)
+              const e = new Date(w.end)
+              if (e.getMinutes() || e.getSeconds()) { e.setHours(e.getHours() + 1); e.setMinutes(0, 0, 0) }
+              const sp = this.parts(s), ep = this.parts(e)
+              return {startDate: sp.date, startHour: sp.hour, endDate: ep.date, endHour: ep.hour}
+            })
+        },
+
+        poolHosts() {
+          return (this.hosts || []).filter(h => h.pool != null).map(h => h.host)
+        },
+
+        defaultWindow() {
+          const start = new Date()
+          start.setMinutes(0, 0, 0); start.setHours(start.getHours() + 1)
+          const sp = this.parts(start), ep = this.parts(new Date(start.getTime() + 4 * 3600000))
+          return {startDate: sp.date, startHour: sp.hour, endDate: ep.date, endHour: ep.hour}
+        },
+
+        blockWindows(b) {
+          const windows = []
+          for (const w of b.windows) {
+            const start = this.mkDate(w.startDate, w.startHour), end = this.mkDate(w.endDate, w.endHour)
+            if (isNaN(start) || isNaN(end) || end <= start) {
+              b.error = 'each window needs a start before its end'
+              return null
+            }
+            windows.push({start: start.toISOString(), end: end.toISOString()})
+          }
+          return windows
+        },
+
+        saveBlock(b) {
+          b.saved = ''; b.error = ''
+          const gpus = Math.trunc(+b.gpus || 0)
+          if (!(gpus > 0)) { b.error = 'gpus must be a positive integer'; return }
+          const windows = this.blockWindows(b)
+          if (windows === null) return
+          fetch('/admin/vm-schedule/gpu-block', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({block: b.block, host: b.host, gpus,
+                                  mode: b.mode, reason: b.reason, windows}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              if (ok) {
+                b.saved = '✓ saved'
+                this.pollStatus()
+              } else b.error = d.error || 'failed'
+            })
+            .catch(() => { b.error = 'request failed' })
+        },
+
+        createBlock() {
+          const b = this.newBlock
+          b.saved = ''; b.error = ''
+          if (!b.host) { b.error = 'choose a host'; return }
+          const gpus = Math.trunc(+b.gpus || 0)
+          if (!(gpus > 0)) { b.error = 'gpus must be a positive integer'; return }
+          const windows = this.blockWindows(b)
+          if (windows === null) return
+          fetch('/admin/vm-schedule/gpu-block', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({host: b.host, gpus, mode: b.mode,
+                                  reason: b.reason, windows}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              if (ok) {
+                b.saved = `✓ ${d.block}`
+                b.windows = []
+                this.pollStatus()
+              } else b.error = d.error || 'failed'
+            })
+            .catch(() => { b.error = 'request failed' })
+        },
+
+        deleteBlock(b) {
+          b.error = ''
+          if (!confirm(`Remove GPU block ${b.block}?`)) return
+          fetch('/admin/vm-schedule/gpu-block/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({block: b.block}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              if (ok) {
+                this.blocks = this.blocks.filter(x => x.block !== b.block)
+                this.pollStatus()
+              } else b.error = d.error || 'failed'
+            })
+            .catch(() => { b.error = 'request failed' })
         }
       }
     }

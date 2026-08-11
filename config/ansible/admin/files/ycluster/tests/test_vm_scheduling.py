@@ -193,6 +193,64 @@ def commit(gpus=2, windows=None):
             "mode": "schedule" if windows else "on", "windows": windows}
 
 
+class GpuBlockCommitmentsTests(unittest.TestCase):
+    NOW = dt(h=12)
+
+    def block(self, host="nv2", gpus=2, mode="on", windows=None):
+        b = {"host": host, "gpus": gpus, "mode": mode}
+        if windows is not None:
+            b["windows"] = windows
+        return b
+
+    def test_on_holds_always(self):
+        c = vm.gpu_block_commitments({"blk1": self.block()}, self.NOW)
+        self.assertEqual(c["nv2"][0]["gpus"], 2)
+        self.assertIsNone(c["nv2"][0]["windows"])
+        self.assertEqual(c["nv2"][0]["mode"], "on")
+        self.assertTrue(c["nv2"][0]["is_block"])
+
+    def test_schedule_holds_during_live_windows(self):
+        b = self.block(mode="schedule", windows=[win(dt(h=14), dt(h=16))])
+        c = vm.gpu_block_commitments({"blk1": b}, self.NOW)
+        self.assertEqual(c["nv2"][0]["windows"], [(dt(h=14), dt(h=16))])
+
+    def test_schedule_only_elapsed_omitted(self):
+        b = self.block(mode="schedule", windows=[win(dt(h=8), dt(h=10))])
+        self.assertEqual(vm.gpu_block_commitments({"blk1": b}, self.NOW), {})
+
+    def test_zero_gpu_and_hostless_skipped(self):
+        blocks = {"a": self.block(gpus=0), "b": self.block(host=None)}
+        self.assertEqual(vm.gpu_block_commitments(blocks, self.NOW), {})
+
+    def test_groups_by_host(self):
+        blocks = {"a": self.block(host="nv2"), "b": self.block(host="nv3")}
+        c = vm.gpu_block_commitments(blocks, self.NOW)
+        self.assertEqual(sorted(c), ["nv2", "nv3"])
+
+    def test_vm_is_block_id_owner_none(self):
+        c = vm.gpu_block_commitments({"blk-1": self.block()}, self.NOW)
+        self.assertEqual(c["nv2"][0]["vm"], "blk-1")
+        self.assertIsNone(c["nv2"][0]["owner"])
+
+
+class CombineCommitmentsTests(unittest.TestCase):
+    NOW = dt(h=12)
+
+    def test_merges_by_host_preserving_order(self):
+        vms = vm.gpu_commitments({"v": vmrec()}, {"v": {"mode": "on"}}, self.NOW)
+        blocks = vm.gpu_block_commitments(
+            {"blk1": {"host": "nv2", "gpus": 2, "mode": "on"}}, self.NOW)
+        merged = vm.combine_gpu_commitments(vms, blocks)
+        self.assertEqual([c["vm"] for c in merged["nv2"]], ["v", "blk1"])
+        # The block's commitment feeds gpu_conflict exactly like a VM's.
+        self.assertIsNotNone(
+            vm.gpu_conflict(merged["nv2"], 2, 3, self.NOW, dt(h=18)))
+
+    def test_empty_inputs(self):
+        self.assertEqual(vm.combine_gpu_commitments(), {})
+        self.assertEqual(vm.combine_gpu_commitments({}), {})
+
+
 class ConflictTests(unittest.TestCase):
     def test_fits_in_empty_pool(self):
         self.assertIsNone(vm.gpu_conflict([], 2, 3, dt(h=10), dt(h=14)))

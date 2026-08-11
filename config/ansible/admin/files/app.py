@@ -39,6 +39,7 @@ MAC Address Formats:
 import functools
 import json
 import re
+import secrets
 import sys
 from typing import TypedDict
 
@@ -2864,10 +2865,10 @@ def _external_domain():
 def _gpu_admission_error(name, rec, mode, windows):
     """Admission control for a proposed desired state: None if the VM's
     registered GPU count fits its host's pool against the commitments
-    already accepted for the other VMs there, else a rejection message.
-    Fails open when the host hasn't reported a pool size yet (sampler
-    predates the gpu_pool field) — better to accept than to brick
-    scheduling during a rollout."""
+    already accepted for the other VMs (and admin GPU blocks) there, else
+    a rejection message. Fails open when the host hasn't reported a pool
+    size yet (sampler predates the gpu_pool field) — better to accept
+    than to brick scheduling during a rollout."""
     host, gpus = rec.get('host'), rec.get('gpus') or 0
     if rec.get('type') == 'container' or not host or not gpus \
             or mode not in ('on', 'schedule'):
@@ -2879,7 +2880,9 @@ def _gpu_admission_error(name, rec, mode, windows):
     now = datetime.now(UTC)
     registry = vmm.vms_all()
     registry.pop(name, None)
-    commits = vmm.gpu_commitments(registry, vmm.desired_all(), now).get(host, [])
+    commits = vmm.combine_gpu_commitments(
+        vmm.gpu_commitments(registry, vmm.desired_all(), now),
+        vmm.gpu_block_commitments(vmm.gpu_blocks_all(), now)).get(host, [])
     if mode == 'on':
         ranges = [(now, datetime.max.replace(tzinfo=UTC))]
     else:
@@ -2893,6 +2896,43 @@ def _gpu_admission_error(name, rec, mode, windows):
             when = ('now' if p == now
                     else p.strftime('%Y-%m-%d %H:%M UTC'))
             return (f"needs {gpus} GPU(s) on {host} but only "
+                    f"{max(free, 0)} uncommitted at {when} "
+                    f"(pool {pool}; held by {held})")
+    return None
+
+
+def _gpu_block_admission_error(host, gpus, mode, windows, exclude=None):
+    """Admission control for a proposed GPU block: None if `gpus` on
+    `host` fits the pool against the committed VMs and other blocks, else
+    a rejection message. Mirrors `_gpu_admission_error` (same fail-open
+    without a reported pool). `exclude` is a block_id to ignore when
+    editing an existing block, so it doesn't count against itself."""
+    if not host or not gpus or mode not in ('on', 'schedule'):
+        return None
+    snap = vmm.state_get(host)
+    pool = snap.get('gpu_pool') if snap else None
+    if not isinstance(pool, int):
+        return None
+    now = datetime.now(UTC)
+    blocks = vmm.gpu_blocks_all()
+    if exclude:
+        blocks.pop(exclude, None)
+    commits = vmm.combine_gpu_commitments(
+        vmm.gpu_commitments(vmm.vms_all(), vmm.desired_all(), now),
+        vmm.gpu_block_commitments(blocks, now)).get(host, [])
+    if mode == 'on':
+        ranges = [(now, datetime.max.replace(tzinfo=UTC))]
+    else:
+        ranges = [(datetime.fromisoformat(w['start']),
+                   datetime.fromisoformat(w['end'])) for w in windows]
+    for lo, hi in ranges:
+        worst = vmm.gpu_conflict(commits, gpus, pool, lo, hi)
+        if worst:
+            p, free, active = worst
+            held = ', '.join(f"{c['vm']} ({c['gpus']})" for c in active)
+            when = ('now' if p == now
+                    else p.strftime('%Y-%m-%d %H:%M UTC'))
+            return (f"block needs {gpus} GPU(s) on {host} but only "
                     f"{max(free, 0)} uncommitted at {when} "
                     f"(pool {pool}; held by {held})")
     return None
@@ -2965,6 +3005,7 @@ def vm_schedule_data():
         issues = vmm.issues_all()
         graces = vmm.grace_all()
         registry = vmm.vms_all()
+        blocks = vmm.gpu_blocks_all()
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
 
@@ -3022,7 +3063,9 @@ def vm_schedule_data():
     # VMs — other people's hosts/pools aren't their business. Admins and
     # managers keep the full roster (they answer capacity questions).
     visible_hosts = {r['host'] for r in rows if r['host']}
-    commitments = vmm.gpu_commitments(registry, desired_all, now)
+    commitments = vmm.combine_gpu_commitments(
+        vmm.gpu_commitments(registry, desired_all, now),
+        vmm.gpu_block_commitments(blocks, now))
     hosts = []
     for host in sorted(set(commitments) | set(pools)):
         if not pools.get(host) and not commitments.get(host):
@@ -3034,14 +3077,33 @@ def vm_schedule_data():
             'pool': pools.get(host),
             'commitments': [
                 {'vm': c['vm'], 'gpus': c['gpus'], 'mode': c['mode'],
+                 'is_block': c.get('is_block', False),
                  'owner': c['owner'] if id.is_manager else None,
                  'windows': None if c['windows'] is None else
                      [{'start': s.isoformat(), 'end': e.isoformat()}
                       for s, e in c['windows']]}
                 for c in commitments.get(host, [])],
         })
+    # Admin GPU blocks (editable roster). Creation/mutation is admin-only;
+    # managers see them for capacity answers but can't act. Windows are sent
+    # back as iso dicts so the page can continue editing them in place.
+    block_list = []
+    if id.is_manager:
+        for block_id, b in blocks.items():
+            block_list.append({
+                'block': block_id,
+                'host': b.get('host'),
+                'gpus': b.get('gpus'),
+                'mode': b.get('mode'),
+                'reason': b.get('reason'),
+                'created_by': b.get('created_by'),
+                'created_at': b.get('created_at'),
+                'updated_at': b.get('updated_at'),
+                'windows': b.get('windows', []),
+            })
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
                     'hosts': hosts,
+                    'blocks': sorted(block_list, key=lambda b: b['block']),
                     'email': id.email,
                     'is_admin': id.is_admin,
                     'is_manager': id.is_manager,
@@ -3200,6 +3262,95 @@ def vm_schedule_stop_now():
         'warned_at': datetime.now(UTC).isoformat(timespec='seconds'),
         'immediate': True,
     })
+    return jsonify({'ok': True})
+
+
+# Admin-only GPU blocks ("reservations"): a schedule entry with no backing
+# VM. A block holds `gpus` on `host` for the pool admission control, so the
+# scheduler refuses VMs that would overcommit past it, without provisioning
+# anything. Only admins may create/edit/delete; `block` (optional) edits an
+# existing block in place, otherwise a new one is created with a
+# server-generated id.
+@app.route('/admin/vm-schedule/gpu-block', methods=['POST'])
+def gpu_block_upsert():
+    id = _authentik_identity()
+    if not id.is_admin:
+        return jsonify({'error': 'only admins can manage GPU blocks'}), 403
+    data = request.get_json(silent=True) or {}
+    host = str(data.get('host', '')).strip()
+    gpus = data.get('gpus')
+    mode = data.get('mode')
+    reason = (data.get('reason') or '').strip()[:200]
+    block_id = data.get('block') or ''
+
+    if not re.fullmatch(r'[a-z0-9-]+', host):
+        return jsonify({'error': 'invalid host'}), 400
+    if not isinstance(gpus, int) or isinstance(gpus, bool) or not 1 <= gpus <= 512:
+        return jsonify({'error': 'gpus must be a positive integer'}), 400
+    if mode not in ('on', 'schedule'):
+        return jsonify({'error': 'mode must be on|schedule'}), 400
+
+    cur = None
+    if block_id:
+        if not re.fullmatch(r'[a-z0-9-]+', block_id):
+            return jsonify({'error': 'no such block'}), 404
+        try:
+            cur = vmm.gpu_block_get(block_id)
+        except Exception as e:
+            return jsonify({'error': f'etcd connection failed: {e}'}), 503
+        if not cur:
+            return jsonify({'error': 'no such block'}), 404
+    else:
+        block_id = (f"block-{datetime.now(UTC):%Y%m%d-%H%M%S}-"
+                    f"{secrets.token_hex(3)}")
+
+    windows = _parse_windows(data.get('windows', []))
+    # A 'schedule' block with no live window holds nothing, which makes the
+    # reservation meaningless; require at least one. 'on' blocks carry none.
+    if windows is None or (mode == 'schedule' and not windows):
+        return jsonify({'error': 'invalid windows'}), 400
+    if windows is None:
+        windows = []
+
+    conflict = _gpu_block_admission_error(host, gpus, mode, windows,
+                                          exclude=block_id)
+    if conflict:
+        return jsonify({'error': conflict}), 409
+
+    now = datetime.now(UTC)
+    rec = {
+        'host': host,
+        'gpus': gpus,
+        'mode': mode,
+        'windows': windows,
+        'reason': reason,
+        'created_by': id.email or id.uid or 'internal',
+        'created_at': ((cur or {}).get('created_at')
+                       or now.isoformat(timespec='seconds')),
+        'updated_at': now.isoformat(timespec='seconds'),
+    }
+    try:
+        vmm.gpu_block_set(block_id, rec)
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
+    return jsonify({'ok': True, 'block': block_id, 'mode': mode})
+
+
+@app.route('/admin/vm-schedule/gpu-block/delete', methods=['POST'])
+def gpu_block_remove():
+    id = _authentik_identity()
+    if not id.is_admin:
+        return jsonify({'error': 'only admins can manage GPU blocks'}), 403
+    data = request.get_json(silent=True) or {}
+    block_id = data.get('block', '')
+    if not re.fullmatch(r'[a-z0-9-]+', block_id):
+        return jsonify({'error': 'no such block'}), 404
+    try:
+        if not vmm.gpu_block_get(block_id):
+            return jsonify({'error': 'no such block'}), 404
+        vmm.gpu_block_delete(block_id)
+    except Exception as e:
+        return jsonify({'error': f'etcd connection failed: {e}'}), 503
     return jsonify({'ok': True})
 
 
