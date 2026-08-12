@@ -1367,6 +1367,131 @@ def vm_resize(name, size):
               "(cloud-init growpart).")
 
 
+def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
+             image=None, instance_type=None, billable=False):
+    """Alter parameters of an existing VM. Pass only what should change.
+
+    Live-applies: cpu, mem (mem visible to the guest on next reboot —
+    Incus sets the qemu limit immediately but the in-guest kernel keeps
+    its view until restart), owner (registry + bastion + key resync).
+    Requires stop + start for VMs: gpus (detach the current physical
+    GPUs, attach the new count from the host pool; the VM is restarted
+    in-place if it was running, otherwise left stopped). For containers
+    --gpus is the same 0/non-zero toggle as launch (profile device
+    add/remove); only the registry is updated. Not supported on an
+    existing VM (would require destroy + relaunch): image, type.
+
+    No-op if every supplied value already matches the registry.
+    """
+    _valid_vm_name(name)
+    rec = vm_get(name)
+    if not rec:
+        raise ValueError(f"No registered VM named '{name}'.")
+    if not _instance_exists(name):
+        raise ValueError(
+            f"'{name}' is registered (host={rec.get('host')}) but not "
+            f"present on this host ({socket.gethostname()}). Run the "
+            f"alter on {rec.get('host')}.")
+
+    if image is not None:
+        raise NotImplementedError(
+            "Changing --image on an existing VM is not supported. "
+            "Destroy and relaunch with the new image.")
+    cur_type = rec.get("type") or _default_instance_type()
+    if instance_type is not None and instance_type != "auto" \
+            and instance_type != cur_type:
+        raise NotImplementedError(
+            f"Changing --type from '{cur_type}' to '{instance_type}' on "
+            f"an existing VM is not supported. Destroy and relaunch.")
+    if gpus is not None and gpus < 0:
+        raise ValueError("--gpus cannot be negative")
+
+    # --- owner (registry + bastion + key resync) ---
+    owner_changed = owner is not None and owner != rec.get("owner")
+    new_owner_keys = None
+    if owner_changed:
+        new_user = user_get(owner)
+        if not new_user or not new_user.get("ssh_keys"):
+            raise ValueError(
+                f"New owner '{owner}' has no SSH keys registered. "
+                f"Add one first: ycluster vm ssh add {owner} '<public-key>'")
+        new_owner_keys = new_user["ssh_keys"]
+        rec["owner"] = owner
+
+    # --- gpus (VM path requires stop + start; container path is the
+    #     launch-style 0/non-zero toggle on the profile device) ---
+    gpu_changed = gpus is not None and gpus != (rec.get("gpus") or 0)
+    if gpu_changed:
+        if cur_type == "vm":
+            inst = _instance_info(name)
+            was_running = inst.get("status") == "Running"
+            if was_running:
+                print(f"Stopping '{name}' to change GPU count "
+                      f"({rec.get('gpus') or 0} -> {gpus})...")
+                _incus("stop", name)
+            release_gpus(name)                 # detach current physical GPUs
+            rec["gpus"] = gpus
+            _put_json(VMS_PREFIX + name, rec)
+            if gpus:
+                _ensure_gpus_attached(name)    # attach new count from pool
+            if was_running:
+                _ensure_nas_share(name)
+                _incus("start", name)
+                _wait_agent(name, GPU_VM_AGENT_TIMEOUT if gpus else 180)
+                if gpus:
+                    _verify_guest_gpus(name, gpus)
+        else:
+            # Container: gpu-ct profile bakes in a shared gpu0 device;
+            # --gpus 0 strips it, any positive value keeps/adds it.
+            if gpus == 0:
+                _incus("config", "device", "remove", name, "gpu0",
+                       check=False)
+            elif not any(d.get("type") == "gpu"
+                         for d in (_instance_info(name).get("devices")
+                                   or {}).values()):
+                # Profile device was stripped previously; re-attach from
+                # the profile rather than pinning a fresh one (there is
+                # only one shared GPU on a container host).
+                _incus("config", "device", "add", name, "gpu0",
+                       "gpu", "gputype=physical")
+            rec["gpus"] = gpus
+
+    # --- cpu / mem (live-applies; mem visible to the guest on next boot) ---
+    cpu_changed = cpu is not None and str(cpu) != str(rec.get("cpu"))
+    mem_changed = mem is not None and mem != rec.get("mem")
+    if cpu_changed:
+        _incus("config", "set", name, "limits.cpu", str(cpu))
+        rec["cpu"] = cpu
+    if mem_changed:
+        _incus("config", "set", name, "limits.memory", mem)
+        rec["mem"] = mem
+
+    changes = []
+    if owner_changed: changes.append(f"owner -> {owner}")
+    if gpu_changed:   changes.append(f"gpus -> {gpus}")
+    if cpu_changed:   changes.append(f"cpu -> {cpu}")
+    if mem_changed:   changes.append(f"mem -> {mem}")
+    if not changes:
+        print(f"No changes for '{name}' (every supplied value matches "
+              f"the current registry).")
+        return
+
+    _put_json(VMS_PREFIX + name, rec)
+
+    if owner_changed:
+        # Re-inject the new owner's keys inline so SSH works immediately;
+        # the bastion_watch daemon would eventually reconcile naturally,
+        # but a manual alter should be observable at once.
+        _inject_owner_keys(name, new_owner_keys,
+                           GPU_VM_AGENT_TIMEOUT if (rec.get("gpus") or 0)
+                           else 180)
+        bastion_sync()
+
+    _record_event("alter", name, owner=rec.get("owner"),
+                  gpus=rec.get("gpus"), billable=billable)
+    print(f"Altered '{name}': {', '.join(changes)}.")
+
+
 def desired_conflict(desired, action, now):
     """Reason a manual `action` ('start'|'stop'|'restart') will be reverted
     by the reconciler, or None.

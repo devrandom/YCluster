@@ -32,6 +32,35 @@ def register_vm_commands(subparsers):
         a.name, a.owner, a.gpus, a.cpu, a.mem, a.image, a.instance_type,
         billable=a.bill))
 
+    ap = sub.add_parser('alter', help='Alter parameters of an existing VM')
+    ap.add_argument('name')
+    ap.add_argument('--owner', default=None,
+                    help='New owner (must have SSH keys registered). '
+                         'Re-syncs bastion + injected SSH keys.')
+    ap.add_argument('--gpus', type=int, default=None,
+                    help='New GPU count. Live-applies for containers '
+                         '(profile device add/remove); for VMs the VM '
+                         'is stopped, GPUs detached, new count attached '
+                         'from the pool, then the VM is started.')
+    ap.add_argument('--cpu', type=int, default=None,
+                    help='New vCPU count (live-applies).')
+    ap.add_argument('--mem', default=None,
+                    help='New memory limit (e.g. 32GiB; live-applies, '
+                         'visible to the guest on next boot).')
+    ap.add_argument('--type', dest='instance_type', default=None,
+                    choices=['auto', 'vm', 'container'],
+                    help="Instance type. Not supported on an existing "
+                         "VM (would require destroy + relaunch).")
+    ap.add_argument('--image', default=None,
+                    help='Override the default image. Not supported on '
+                         'an existing VM (would require destroy + relaunch).')
+    ap.add_argument('--bill', action='store_true',
+                    help='Bill this admin op to the owner (CLI ops '
+                         'default to non-billable admin/debug time)')
+    ap.set_defaults(func=lambda a: vm.vm_alter(
+        a.name, owner=a.owner, gpus=a.gpus, cpu=a.cpu, mem=a.mem,
+        image=a.image, instance_type=a.instance_type, billable=a.bill))
+
     lsp = sub.add_parser('list', help='List registered VMs')
     lsp.set_defaults(func=lambda a: vm.vm_list())
 
