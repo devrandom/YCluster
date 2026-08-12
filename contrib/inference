@@ -682,9 +682,12 @@ def cmd_bench(args):
     parser.add_argument("model")
     parser.add_argument(
         "--lens", default="1000,4000,16000,64000",
-        help="comma-separated target prompt token counts",
+        help="comma-separated target prompt token counts (context lengths)",
     )
-    parser.add_argument("--gen", type=int, default=64, help="decode tokens per request")
+    parser.add_argument(
+        "--gen", type=int, default=256,
+        help="decode tokens per request (default 256)",
+    )
     parser.add_argument(
         "--repeats", type=int, default=3,
         help="how many times to run each prompt depth (median + min/max, default 3)",
