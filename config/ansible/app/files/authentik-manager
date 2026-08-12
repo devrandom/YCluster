@@ -153,8 +153,8 @@ entries:
       provider: !KeyOf provider-app
       meta_launch_url: https://$external_domain/
   # ComfyUI (comfy.<domain>): the MiniMax H3 video backend. Access is granted
-  # to the `comfy` group (members added by an admin) plus the ycluster-admins
-  # group; a user in neither sees no entry and the auth subrequest 401s.
+  # only to members of the `comfy` group (members added by an admin); anyone
+  # else sees no entry and the auth subrequest 401s.
   - model: authentik_core.group
     id: group-comfy
     identifiers:
@@ -180,11 +180,6 @@ entries:
     identifiers:
       target: !KeyOf app-comfy
       group: !KeyOf group-comfy
-      order: 0
-  - model: authentik_policies.policybinding
-    identifiers:
-      target: !KeyOf app-comfy
-      group: !KeyOf group-admins
       order: 0
   - model: authentik_outposts.outpost
     identifiers:
