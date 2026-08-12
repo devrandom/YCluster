@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Pull the DeepSeek-V4-Flash-0731 DSpark runtime image, smoke-test GPU
-# passthrough via CDI, and stage / verify the 0731 checkpoint. Run as the
-# dev user (no sudo):
+# Pull the DeepSeek-V4-Flash-0731 DSpark runtime images (Gilded Gnosis r16 for
+# serving + Infernal Invocation r4 for alongside long-context qualification),
+# smoke-test GPU passthrough via CDI, and stage / verify the 0731 checkpoint.
+# Run as the dev user (no sudo):
 #
 #   ~/bin/ds4-setup.sh                # image pull + CDI smoke + checkpoint check
 #   ~/bin/ds4-setup.sh --download     # also pull the 0731 checkpoint (~160 GB)
@@ -21,6 +22,12 @@
 set -eu
 
 IMAGE="{{ ds4_image }}"
+# Infernal Invocation r4 — the ALONGSIDE long-context qualification image
+# (same 0731 checkpoint), launched by ~/bin/ds4-infernal-start.sh as
+# `ds4-infernal` on its own port. Pulling it here means one setup script
+# covers both the serving r16 and the qualifying r4 container; the CDI smoke
+# test and checkpoint staging below are identical for both.
+INFERNAL_IMAGE="{{ ds4_infernal_image }}"
 REPO="{{ ds4_repo }}"
 REVISION="{{ ds4_revision }}"
 MODEL_HOST="${MODEL_HOST:-{{ ds4_model_dir }}}"
@@ -47,6 +54,9 @@ if [ "$action" != "verify-only" ]; then
   echo "== pull $IMAGE =="
   podman pull "$IMAGE"
 
+  echo "== pull $INFERNAL_IMAGE =="
+  podman pull "$INFERNAL_IMAGE"
+
   echo "== GPU passthrough smoke test (CDI) =="
   # CDI injects a host-visible GPU into a container; nvidia-smi inside the image
   # must see it. Pick the first idle GPU (util < 5%); fall back to index 0
@@ -62,7 +72,7 @@ if [ "$action" != "verify-only" ]; then
     || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml + ds4_enabled host_vars" >&2; exit 1; }
   echo "  (probed GPU $smoke_gpu)"
   echo
-  echo "Image ready."
+  echo "Images ready (r16 serving + r4 infernal)."
 fi
 
 # ---- checkpoint download (--download only) ----

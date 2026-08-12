@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# (Re)start DeepSeek-V4-Flash-0731 on the Infernal Invocation r4 DSpark image,
+# ALONGSIDE the currently-serving Gilded Gnosis r16 container. Run as the dev
+# user (no sudo):
+#
+#   ~/bin/ds4-infernal-start.sh
+#
+# This is the long-context qualification container: the per-host infernal GPU
+# set under TP4, 256K context, no CPU KV offload. It deliberately does NOT
+# touch the r16 `ds4-dspark` service — r4 binds only its own GPUs
+# (ds4_infernal_gpus) and listens on its own port with its own served-model
+# name, so both can run side by side while we watch the #298 silent-corruption
+# watchdog.
+#
+# The r4 image uses the Infernal Invocation launcher (lmcache-mp-wrapper.sh ->
+# serve-ds4-flash.sh), whose public interface is env vars, not the r16
+# entrypoint. Tunable knobs (env-var overrides):
+#   GPUS / TP_SIZE / DCP_SIZE / MAX_MODEL_LEN / MAX_NUM_SEQS
+#   MAX_NUM_BATCHED_TOKENS / GPU_UTIL / DSPARK_TOKENS / DSPARK_DEPTH_MODE /
+#   MODE / BACKEND / ALLREDUCE_MODE / KV_OFFLOADING_SIZE / LMCACHE_MODE /
+#   PORT / SERVED_NAME / IMAGE / MEM
+#
+# Release reference:
+#   https://github.com/local-inference-lab/rtx6kpro/blob/master/models/ds4dspark-infernal-invocation-r2.md
+set -euo pipefail
+
+IMAGE="${IMAGE:-{{ ds4_infernal_image }}}"
+MODEL_HOST="${MODEL_HOST:-{{ ds4_model_dir }}}"
+CONTAINER="${CONTAINER:-ds4-infernal}"
+PORT="${PORT:-{{ ds4_infernal_port | default(9217) }}}"
+# CDI GPU indices for this container — deployment-specific and intentionally
+# not pinned here. Set ds4_infernal_gpus in the private host_vars/<node>.yml
+# for this host. CDI indices renumber whenever the CDI spec is regenerated;
+# re-check `nvidia-ctk cdi list` before binding.
+GPUS="${GPUS:-{{ ds4_infernal_gpus | default('') }}}"
+[ -n "$GPUS" ] || { echo "no GPUs configured for $CONTAINER - set ds4_infernal_gpus in host_vars/<node>.yml (or override GPUS)" >&2; exit 1; }
+SERVED_NAME="${SERVED_NAME:-{{ ds4_infernal_served_name | default('deepseek-v4-flash-infernal') }}}"
+
+# ---- II launcher defaults (fixed probabilistic K5) ----
+MODE="${MODE:-dspark}"
+BACKEND="${BACKEND:-b12x-a8}"
+TP_SIZE="${TP_SIZE:-4}"
+DCP_SIZE="${DCP_SIZE:-1}"
+ALLREDUCE_MODE="${ALLREDUCE_MODE:-auto}"
+DSPARK_DEPTH_MODE="${DSPARK_DEPTH_MODE:-fixed}"
+DSPARK_TOKENS="${DSPARK_TOKENS:-5}"
+DSPARK_CAPACITY_ACTIVATION_BATCH_SIZE="${DSPARK_CAPACITY_ACTIVATION_BATCH_SIZE:-0}"
+DRAFT_SAMPLE_METHOD="${DRAFT_SAMPLE_METHOD:-probabilistic}"
+# GRAPH=auto derives the CUDA-graph verifier-row envelope from
+# MAX_NUM_SEQS * (1 + DSPARK_TOKENS). Don't cap it below that requirement.
+GRAPH="${GRAPH:-auto}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+GPU_UTIL="${GPU_UTIL:-0.95}"
+# Long-context qualification: keep the whole KV pool on-GPU. The TP4/256K
+# profile expects 4x256K concurrent to fit without CPU offload; verify the
+# actual pool from the startup log once up.
+KV_OFFLOADING_SIZE="${KV_OFFLOADING_SIZE:-0}"
+LMCACHE_MODE="${LMCACHE_MODE:-off}"
+LOAD_FORMAT="${LOAD_FORMAT:-instanttensor}"
+INSTANTTENSOR_BACKEND="${INSTANTTENSOR_BACKEND:-BUFFERED}"
+# Persistent JIT/autotune/CUDA-graph cache — separate from r16's ds4-r16 cache
+# (the cu133/torch2.13 fingerprint differs, and we don't want to race it).
+CACHE_DIR="${CACHE_DIR:-{{ ds4_infernal_cache_dir | default('/home/dev/.cache/ds4-infernal') }}}"
+# Cgroup cap. Warmup (JIT + cudagraph + model load) can spike; with InstantTensor
+# (BUFFERED) the checkpoint reuses page-cache pages. r16 already caps at 80G, so
+# keep this modest to fit the 125 GiB host alongside it.
+MEM="${MEM:-60g}"
+
+# pre-flight (no root needed)
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - as the dev user run: podman pull $IMAGE" >&2; exit 1; }
+[ -f "$MODEL_HOST/config.json" ] && [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+  || { echo "checkpoint missing or incomplete at $MODEL_HOST - run: ~/bin/ds4-setup.sh --download" >&2; exit 1; }
+
+mkdir -p "$CACHE_DIR" "$CACHE_DIR/tmp"
+dev_args=()
+ngpu=0
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); ngpu=$((ngpu + 1)); done
+cvd="$(seq -s, 0 $((ngpu - 1)))"
+
+# Model parent dir — the launcher scans /root/models/ for an HF-style model
+# directory. Our checkpoint is at DeepSeek-V4-Flash under the parent; mount so
+# it appears at /root/models/DeepSeek-V4-Flash.
+MODEL_PARENT="$(dirname "$MODEL_HOST")"
+
+# Do NOT stop/rm the r16 `ds4-dspark` container here. Replace only our own
+# previous r4 run so the qualification container is idempotent.
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+podman run -d --name "$CONTAINER" \
+  --entrypoint /usr/local/bin/lmcache-mp-wrapper.sh \
+  "${dev_args[@]}" \
+  --network=host \
+  --ipc=host --init \
+  --security-opt seccomp=unconfined --group-add keep-groups \
+  --ulimit memlock=-1:-1 \
+  --ulimit nofile=1048576:1048576 \
+  --ulimit stack=67108864:67108864 \
+  --memory "$MEM" --memory-swap "$MEM" \
+  -e CUDA_VISIBLE_DEVICES="$cvd" \
+  -e PORT="$PORT" \
+  -e MODE="$MODE" \
+  -e BACKEND="$BACKEND" \
+  -e TP_SIZE="$TP_SIZE" \
+  -e DCP_SIZE="$DCP_SIZE" \
+  -e ALLREDUCE_MODE="$ALLREDUCE_MODE" \
+  -e DSPARK_DEPTH_MODE="$DSPARK_DEPTH_MODE" \
+  -e DSPARK_TOKENS="$DSPARK_TOKENS" \
+  -e DSPARK_CAPACITY_ACTIVATION_BATCH_SIZE="$DSPARK_CAPACITY_ACTIVATION_BATCH_SIZE" \
+  -e DRAFT_SAMPLE_METHOD="$DRAFT_SAMPLE_METHOD" \
+  -e MAX_NUM_SEQS="$MAX_NUM_SEQS" \
+  -e GRAPH="$GRAPH" \
+  -e MAX_MODEL_LEN="$MAX_MODEL_LEN" \
+  -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
+  -e GPU_MEMORY_UTILIZATION="$GPU_UTIL" \
+  -e KV_OFFLOADING_SIZE="$KV_OFFLOADING_SIZE" \
+  -e LMCACHE_MODE="$LMCACHE_MODE" \
+  -e LOAD_FORMAT="$LOAD_FORMAT" \
+  -e INSTANTTENSOR_BACKEND="$INSTANTTENSOR_BACKEND" \
+  -e SERVED_MODEL_NAME="$SERVED_NAME" \
+  -e MODEL_PATH="/root/models/DeepSeek-V4-Flash" \
+  -e HF_HUB_OFFLINE=1 \
+  -e PYTHONHASHSEED="${PYTHONHASHSEED:-0}" \
+  -e EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}" \
+  -v "$MODEL_PARENT":/root/models:ro \
+  -v "$CACHE_DIR":/cache \
+  -v "$CACHE_DIR/tmp":/container-tmp \
+  "$IMAGE" \
+  /usr/local/bin/serve-ds4-flash.sh
+
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=$TP_SIZE DCP=$DCP_SIZE MODE=$MODE DSPARK_TOKENS=$DSPARK_TOKENS max_model_len=$MAX_MODEL_LEN gpu_util=$GPU_UTIL kv_offload=$KV_OFFLOADING_SIZE"
+echo "  (the existing r16 ds4-dspark container is untouched)"
+echo "  watch:  podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/v1/models"

@@ -49,6 +49,16 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
      yourself — confirm the file is present on the bastion through
      cluster-exec instead (e.g. `grep`/`test -f` against
      `/etc/ansible/...`), or ask the user to confirm the sync.
+
+   **Path mapping (easy to get wrong):** on the bastion `/etc/ansible`
+   is a symlink to `/opt/infrastructure/config/ansible`. So the local
+   repo's `config/ansible/` tree maps **directly** onto `/etc/ansible/`
+   on the bastion — local `config/ansible/admin/templates/foo.j2` is
+   `/etc/ansible/admin/templates/foo.j2`. Do **not** write
+   `/etc/ansible/config/ansible/...` (doubling the prefix: that path
+   does not exist). `/etc/ansible/` is itself where `run-playbook.sh`
+   and `env.sh` live (via the symlink).
+
 3. **Run the playbook via cluster-exec** (`run` tool; see
    `docs/operations/cluster-exec.md` for the full tool reference).
    Use `hostname="localhost"` for anything that should run on the

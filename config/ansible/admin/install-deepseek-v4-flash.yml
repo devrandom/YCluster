@@ -41,9 +41,9 @@
 #   GPU (all cards bound to vfio-pci — those go to install-glm52-exl3-tr3.yml
 #   instead, which uses a VM).
 #
-#   Per-host `ds4_gpus: "<space-separated CDI indices>"` (default "0 1") picks
-#   the GPUs this container uses. Default is the first two host-visible GPUs;
-#   set explicitly on multi-GPU hosts where you want a different pair.
+#   Per-host `ds4_gpus: "<space-separated CDI indices>"` selects the GPUs this
+#   container uses. Exact CDI indices are deployment-specific, so DS4 hosts
+#   must set this explicitly in private per-host vars (no public default).
 #
 #   Per-host `ds4_port: <port>` (default 9216) overrides the listening port.
 #
@@ -71,6 +71,14 @@
     # InstantTensor (BUFFERED), native offload, and full source-provenance
     # reproduction.
     ds4_image: "docker.io/voipmonitor/vllm:gilded-gnosis-v20-vllm1e9c9c3-sieec30ff-fi801d57a-cu132-20260731-r16"
+    # Infernal Invocation r4 image — the ALONGSIDE long-context qualification
+    # container (launched by ~/bin/ds4-infernal-start.sh as `ds4-infernal`, separate port /
+    # served name, never replaces the r16 `ds4-dspark` service). Same 0731
+    # checkpoint. The only line carrying the #298 silent-corruption fix (a FULL
+    # CUDA-graph prompt-state alias that corrupts DSpark K5 output at long
+    # context). cu133/torch2.13 — driver-610 probe passed on the DS4 host. See
+    # docs/inference/deepseek-v4-flash-0731-dspark.md.
+    ds4_infernal_image: "docker.io/voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4"
     # Native FP4+FP8 mixed checkpoint. The 0731 release is the r16 validation
     # target (K5 DSpark profile, ~218 t/s sustained decode on the 2×RTX PRO
     # 6000 Blackwell topology). The release SHA is pinned — different
@@ -96,11 +104,10 @@
     # run (~5 min warmup); reusing the volume avoids the recompile on subsequent
     # launches. Mounted at /cache (and /container-tmp) inside the container.
     ds4_cache_dir: "/home/dev/.cache/ds4-r16"
-    # GPU list is sourced from host_vars (<node>.yml: ds4_gpus). No play-level
-    # default here — Ansible precedence puts play vars above host_vars, so a
-    # play-level `ds4_default_gpus` would silently shadow any host_vars
-    # override. The template's `{{ ds4_gpus | default('0 1') }}` provides the
-    # fallback when a host doesn't set ds4_gpus.
+    # GPU list is sourced from host_vars (<node>.yml: ds4_gpus) with no public
+    # default: CDI indices are deployment-specific and must be pinned in the
+    # private per-host vars. A play-level default would both leak those pins
+    # and shadow host_vars under Ansible precedence.
   tasks:
     # Same guard as install-glm52.yml: skip nodes with no host-visible NVIDIA
     # GPU (no NVIDIA hardware, or all cards bound to vfio-pci for passthrough).
@@ -133,6 +140,7 @@
       loop:
         - ds4-setup.sh
         - ds4-start.sh
+        - ds4-infernal-start.sh
 
 - name: Register the DS4 backend with local-ai-proxy
   hosts: storage

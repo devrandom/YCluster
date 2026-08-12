@@ -20,10 +20,12 @@ IMAGE="${IMAGE:-{{ ds4_image }}}"
 MODEL_HOST="${MODEL_HOST:-{{ ds4_model_dir }}}"
 CONTAINER="${CONTAINER:-ds4-dspark}"
 PORT="${PORT:-{{ ds4_port }}}"
-# CDI GPU indices — the host-visible ones (DS4 runs on the bare host, so this
-# host must have at least 2 free host-visible cards; the rest may be bound to
-# vfio-pci for a GPU VM). Override per-host via ds4_gpus in host_vars/<node>.yml.
-GPUS="${GPUS:-{{ ds4_gpus | default('0 1') }}}"
+# CDI GPU indices for this container — deployment-specific and intentionally
+# not pinned here. Set ds4_gpus in the private host_vars/<node>.yml for this
+# host (the host needs at least TP_SIZE host-visible cards; others may be
+# bound to vfio-pci for a GPU VM).
+GPUS="${GPUS:-{{ ds4_gpus | default('') }}}"
+[ -n "$GPUS" ] || { echo "no GPUs configured for $CONTAINER - set ds4_gpus in host_vars/<node>.yml (or override GPUS)" >&2; exit 1; }
 SERVED_NAME="${SERVED_NAME:-{{ ds4_served_name }}}"
 
 # ---- r16 launcher defaults ----
