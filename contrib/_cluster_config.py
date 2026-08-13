@@ -72,8 +72,17 @@ def _read_etcd_token() -> str | None:
 
 def load(start: Path | None = None) -> ClusterConfig:
     on_bastion = _is_on_bastion()
-    path = _find_config((start or Path(__file__)).resolve())
-    cfg = yaml.safe_load(path.read_text()) or {}
+    config_path = None
+    cfg = {}
+    try:
+        config_path = _find_config((start or Path(__file__)).resolve())
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+    except FileNotFoundError:
+        # The installed CLI lives under /opt/ycluster-inference with no
+        # config.yml above it; on cluster nodes that is fine because the
+        # endpoint/token come from the marker + etcd.
+        if not on_bastion:
+            raise
 
     # Endpoint: on the bastion, always use the local proxy; otherwise honor
     # config.yml. The contrib/ scripts append "/v1/..." to whatever we return.
@@ -87,8 +96,8 @@ def load(start: Path | None = None) -> ClusterConfig:
     # is fine; the master key is a cluster admin bearer.
     token = None
     token_file = cfg.get("api_token_file")
-    if token_file:
-        token_path = path.parent / token_file
+    if token_file and config_path is not None:
+        token_path = config_path.parent / token_file
         if token_path.is_file():
             token = token_path.read_text().strip()
     if not token:
@@ -96,11 +105,13 @@ def load(start: Path | None = None) -> ClusterConfig:
 
     if not endpoint:
         raise ValueError(
-            f"{path}: `endpoint:` is required when not running on the bastion"
+            f"{config_path or 'config.yml'}: `endpoint:` is required when "
+            "not running on the bastion"
         )
     if not token:
         raise ValueError(
-            f"no bearer token found (set `api_token_file:` in {path}, "
-            f"or run on a cluster node with etcd access to {_ETCD_KEY})"
+            f"no bearer token found (set `api_token_file:` in "
+            f"{config_path or 'config.yml'}, or run on a cluster node with "
+            f"etcd access to {_ETCD_KEY})"
         )
     return ClusterConfig(endpoint=endpoint, token=token)

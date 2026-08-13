@@ -123,6 +123,9 @@ it does a tokenizer round-trip, streams a short completion (reasoning in
 dim gray, answer at normal weight), and prints ttft / tok-s / total at
 the end. Endpoint + bearer token come from `config.yml` at the repo root
 (see [`contrib/_cluster_config.py`](../../contrib/_cluster_config.py)).
+On managed cluster nodes, `install-ycluster-package.yml` installs this as
+an `inference` command on `PATH` with bash completion; a dev machine or
+laptop runs the same script from the repo checkout.
 
 ```bash
 # config.yml at the repo root:

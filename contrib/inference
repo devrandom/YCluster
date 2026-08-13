@@ -13,6 +13,11 @@ Subcommands:
                     Streams each request with ignore_eos + temperature 0
                     (deterministic decode). Repeats each depth and reports
                     median + min/max. --lens/--gen/--repeats/--prompt/--json.
+  batch <model>      Concurrent throughput under load: each round fires N
+                    requests at once (shared-prefix and/or cold-prefill).
+                    Reports requests/s plus median per-request latency.
+                    --cache is the % sharing one prefix (default 100;
+                    0 = fresh nonce for every request).
   models            List model ids available on the gateway.
   image <model>     POST a generated test image (red circle + \"42\") through the
                     gateway and confirm the model actually reads it — the quick
@@ -35,6 +40,9 @@ Usage:
   ./inference chat MiniMaxAI/MiniMax-M2.7
   ./inference bench MiniMaxAI/MiniMax-M2.7 --gen 128 --json
   ./inference bench model --repeats 5
+  ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 4 --json
+  ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 1,2,4,8 --json
+  ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 8 --cache 50
   ./inference image nemotron-3-nano-omni
   ./inference smoke MiniMaxAI/MiniMax-M2.7 A C
   ./inference smoke MiniMaxAI/MiniMax-M2.7 B --max 200000 --json
@@ -58,6 +66,7 @@ import time
 import urllib.error
 import urllib.request
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1016,6 +1025,223 @@ def cmd_bench(args):
     return 0
 
 
+def _batch_shared_prompt(shared_prefix):
+    """Shared-prefix prompt: one long body every request can cache, with a
+    unique leaf so requests are not byte-identical."""
+    return shared_prefix + f"\n[leaf {secrets.token_hex(4)}]"
+
+
+def _batch_sample(base, key, model, prompt, gen, timeout):
+    """One concurrent load request. Returns timings or {'error': ...}."""
+    r = _bench_stream(base, key, [{"role": "user", "content": prompt}],
+                      model, gen, timeout)
+    if r.get("error"):
+        return {"error": r["error"]}
+    usage = r["usage"] or {}
+    ptok = usage.get("prompt_tokens")
+    ctok = usage.get("completion_tokens") or gen
+    ttft = (r["t_first"] - r["t0"]) if r["t_first"] else None
+    dec = None
+    if r["t_first"] and r["t_last"]:
+        win = r["t_last"] - r["t_first"]
+        if win > 0 and ctok > 1:
+            dec = (ctok - 1) / win
+    return {
+        "prompt_tokens": ptok,
+        "completion_tokens": ctok,
+        "cached_tokens": (usage.get("prompt_tokens_details") or {}).get(
+            "cached_tokens") or 0,
+        "ttft_s": ttft,
+        "latency_s": r["t_end"] - r["t0"],
+        "decode_tps": dec,
+    }
+
+
+def _batch_round(base, key, model, prompt_tokens, gen, timeout, concurrency,
+                share_pct, shared_prefix, round_no):
+    n_shared = round(concurrency * share_pct / 100)
+    n_cold = concurrency - n_shared
+    prompts = ([_batch_shared_prompt(shared_prefix) for _ in range(n_shared)]
+               + [_bench_build_prompt(prompt_tokens) for _ in range(n_cold)])
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(_batch_sample, base, key, model, p, gen, timeout)
+                   for p in prompts]
+        samples = [f.result() for f in futures]
+    wall = time.monotonic() - t0
+    ok = [s for s in samples if "error" not in s]
+    errors = [s["error"] for s in samples if "error" in s]
+    med = lambda name: _agg(name, [s.get(name) for s in ok])[0]
+    return {
+        "round": round_no,
+        "requests": concurrency,
+        "shared": n_shared,
+        "cold": n_cold,
+        "ok": len(ok),
+        "errors": errors,
+        "wall_s": wall,
+        "requests_per_second": len(ok) / wall if wall else 0.0,
+        "median_prompt_tokens": med("prompt_tokens"),
+        "median_ttft_s": med("ttft_s"),
+        "median_latency_s": med("latency_s"),
+        "median_decode_tps": med("decode_tps"),
+        "median_cached_tokens": statistics.median(
+            [s["cached_tokens"] for s in ok]) if ok else None,
+        "samples": samples,
+    }
+
+
+def _batch_aggregate_decode_tps(rows):
+    """Median per-round system-wide decode rate: total output / round wall."""
+    per_round = []
+    for row in rows:
+        ok = [s for s in row["samples"] if "error" not in s]
+        if ok and row["wall_s"]:
+            tokens = sum(s.get("completion_tokens") or 0 for s in ok)
+            per_round.append(tokens / row["wall_s"])
+    return statistics.median(per_round) if per_round else None
+
+
+def _batch_run(base, key, model, prompt_tokens, gen, timeout, concurrency,
+              rounds, share_pct, mml=None):
+    shared_prefix = _bench_build_prompt(prompt_tokens) if share_pct else None
+    print(f"Endpoint: {base}\nModel:    {model}"
+          + (f"  (max_model_len {mml})" if mml else "")
+          + f"\nPrompt:   ~{prompt_tokens} tokens   Decode: {gen} tokens"
+          + f"   Concurrency: {concurrency}"
+          + f"   Cache: {share_pct}% shared / {100 - share_pct}% cold"
+          + f"   Rounds: {rounds}\n")
+    if rounds:
+        wp = (_batch_shared_prompt(shared_prefix) if shared_prefix
+              else _bench_build_prompt(prompt_tokens))
+        r = _bench_stream(base, key, [{"role": "user", "content": wp}],
+                          model, gen, timeout)
+        if r.get("error"):
+            print(f"  {RED}warmup ERR{RESET}: {r['error']}")
+    print(f"  {'round':>5}  {'req':>3}  {'ok':>3}  {'err':>3}  "
+          f"{'wall':>7}  {'r/s':>6}  {'ttft':>6}  {'e2e':>6}  "
+          f"{'decode':>8}  {'cached':>7}")
+    rows = []
+    t_all0 = time.monotonic()
+    for round_no in range(1, rounds + 1):
+        row = _batch_round(base, key, model, prompt_tokens, gen, timeout,
+                          concurrency, share_pct, shared_prefix, round_no)
+        rows.append(row)
+        print(f"  {row['round']:>5}  {row['requests']:>3}  {row['ok']:>3}  "
+              f"{row['requests'] - row['ok']:>3}  {row['wall_s']:6.1f}s  "
+              f"{row['requests_per_second']:5.2f}  "
+              f"{row['median_ttft_s'] or 0:5.2f}s  "
+              f"{row['median_latency_s'] or 0:5.2f}s  "
+              f"{row['median_decode_tps'] or 0:6.1f}  "
+              f"{row['median_cached_tokens'] or 0:6.0f}")
+    overall_wall = time.monotonic() - t_all0
+    all_ok = [s for row in rows for s in row["samples"] if "error" not in s]
+    summary = {
+        "requests": rounds * concurrency,
+        "ok": len(all_ok),
+        "errors": sum(len(row["errors"]) for row in rows),
+        "wall_s": overall_wall,
+        "requests_per_second": len(all_ok) / overall_wall if overall_wall else 0.0,
+        "median_prompt_tokens": _agg("prompt_tokens",
+                                     [s.get("prompt_tokens") for s in all_ok])[0],
+        "median_ttft_s": _agg("ttft_s", [s.get("ttft_s") for s in all_ok])[0],
+        "median_latency_s": _agg("latency_s",
+                                 [s.get("latency_s") for s in all_ok])[0],
+        "median_decode_tps": _agg("decode_tps",
+                                  [s.get("decode_tps") for s in all_ok])[0],
+        "aggregate_decode_tps": _batch_aggregate_decode_tps(rows),
+        "median_cached_tokens": statistics.median(
+            [s["cached_tokens"] for s in all_ok]) if all_ok else None,
+    }
+    print("  " + "-" * 78)
+    print(f"  TOTAL {summary['ok']}/{summary['requests']} ok  "
+          f"{summary['wall_s']:.1f}s  {summary['requests_per_second']:.2f} r/s  "
+          f"ttft {summary['median_ttft_s'] or 0:.2f}s  "
+          f"e2e {summary['median_latency_s'] or 0:.2f}s  "
+          f"decode {summary['median_decode_tps'] or 0:.1f}  "
+          f"cached {summary['median_cached_tokens'] or 0:.0f}")
+    print(f"  AGGREGATE {summary['ok']}/{summary['requests']} ok  "
+          f"{summary['wall_s']:.1f}s  {summary['requests_per_second']:.2f} r/s  "
+          f"decode {summary['aggregate_decode_tps'] or 0:.1f} tok/s  "
+          f"cached {summary['median_cached_tokens'] or 0:.0f}")
+    return {
+        "model": model, "max_model_len": mml, "concurrency": concurrency,
+        "prompt_tokens_target": prompt_tokens, "decode_tokens": gen,
+        "cache_percent_shared": share_pct, "rounds": rounds,
+        "summary": summary, "round_results": rows,
+    }
+
+
+def cmd_batch(args):
+    """Concurrent throughput/latency-under-load benchmark."""
+    parser = argparse.ArgumentParser(
+        prog=f"{sys.argv[0]} batch",
+        description="Fire concurrent requests and report requests/s plus "
+                    "median latency under load.",
+    )
+    parser.add_argument("model")
+    parser.add_argument(
+        "--concurrency", default="4",
+        help="comma-separated requests per round; pass multiple values for a "
+             "concurrency sweep (default 4)",
+    )
+    parser.add_argument(
+        "--prompt-tokens", type=int, default=4096,
+        help="target prompt token count (default 4096)",
+    )
+    parser.add_argument(
+        "--gen", type=int, default=256,
+        help="decode tokens per request (default 256)",
+    )
+    parser.add_argument(
+        "--cache", type=int, default=100,
+        help="percent of requests sharing one prompt prefix: 100 = all "
+             "cached-prefill (default), 0 = all cold prefill, NN = mix",
+    )
+    parser.add_argument(
+        "--rounds", type=int, default=3,
+        help="how many concurrent rounds to run (default 3)",
+    )
+    parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--json", action="store_true", help="emit JSON after the table")
+    a = parser.parse_args(args)
+    try:
+        concurrencies = [int(x) for x in a.concurrency.split(",") if x.strip()]
+    except ValueError:
+        parser.error("--concurrency must be comma-separated integers")
+    if not concurrencies or any(c < 1 for c in concurrencies):
+        parser.error("--concurrency values must be >= 1")
+    if a.rounds < 1:
+        parser.error("--rounds must be >= 1")
+    if a.prompt_tokens < 1:
+        parser.error("--prompt-tokens must be >= 1")
+    if a.gen < 1:
+        parser.error("--gen must be >= 1")
+    if not 0 <= a.cache <= 100:
+        parser.error("--cache must be 0..100")
+
+    base, key = _load_config()
+    mml = _bench_model_max_len(base, key, a.model)
+    if mml and a.prompt_tokens > mml - 2000:
+        print(f"{DIM}note: capping prompt tokens to {mml - 2000} "
+              f"(model max_model_len {mml}){RESET}")
+        a.prompt_tokens = mml - 2000
+    sys.stdout.reconfigure(line_buffering=True)
+    results = []
+    for i, concurrency in enumerate(concurrencies, 1):
+        if i > 1:
+            print()
+        if len(concurrencies) > 1:
+            print(f"=== concurrency {concurrency} ===")
+        results.append(_batch_run(base, key, a.model, a.prompt_tokens, a.gen,
+                                  a.timeout, concurrency, a.rounds, a.cache, mml))
+    if a.json:
+        print()
+        payload = results[0] if len(results) == 1 else results
+        print(json.dumps(payload, indent=2))
+    return 1 if any(r["summary"]["ok"] == 0 for r in results) else 0
+
+
 def cmd_transcribe(args):
     """Transcribe an audio file via /v1/audio/transcriptions."""
     parser = argparse.ArgumentParser(
@@ -1288,7 +1514,7 @@ def main():
         return 0
     if (
         len(sys.argv) < 2
-        or sys.argv[1] not in ("chat", "bench", "models", "image", "smoke",
+        or sys.argv[1] not in ("chat", "bench", "batch", "models", "image", "smoke",
                               "transcribe", "ocr")
     ):
         print(__doc__, file=sys.stderr)
@@ -1306,6 +1532,8 @@ def main():
         return cmd_smoke(rest)
     if sub == "bench":
         return cmd_bench(rest)
+    if sub == "batch":
+        return cmd_batch(rest)
     if sub == "transcribe":
         return cmd_transcribe(rest)
     if sub == "ocr":

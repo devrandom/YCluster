@@ -5,11 +5,16 @@
 #   cp contrib/inference-completion.bash /etc/bash_completion.d/inference
 #
 # Resolves the inference script relative to this file so it works regardless
-# of cwd. Override _INFERENCE_CMD before sourcing to point elsewhere, e.g.:
+# of cwd. When installed system-wide (no sibling `inference` binary), falls
+# back to `inference` from PATH. Override _INFERENCE_CMD before sourcing to
+# point elsewhere, e.g.:
 #   _INFERENCE_CMD=inference source contrib/inference-completion.bash
 
 _inference_completion_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${_INFERENCE_CMD:=${_inference_completion_dir}/inference}"
+if [[ ! -x "$_INFERENCE_CMD" ]] && command -v inference >/dev/null 2>&1; then
+    _INFERENCE_CMD=inference
+fi
 
 _INFERENCE_MODEL_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/ycluster/inference-models"
 _INFERENCE_MODEL_TTL=300  # 5 minutes
@@ -45,7 +50,7 @@ _inference_completion() {
     fi
 
     if (( cword == 1 )); then
-        COMPREPLY=( $(compgen -W "chat bench models transcribe ocr" -- "$cur") )
+        COMPREPLY=( $(compgen -W "chat bench batch models image smoke transcribe ocr" -- "$cur") )
         return
     fi
 
@@ -57,11 +62,38 @@ _inference_completion() {
             ;;
         bench)
             if [[ $cur == -* ]]; then
-                COMPREPLY=( $(compgen -W "--lens --gen --prompt --timeout --json -h --help" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--lens --gen --repeats --prompt --timeout --json -h --help" -- "$cur") )
             else
                 local models
                 models="$(_inference_fresh_models)"
                 COMPREPLY=( $(compgen -W "$models" -- "$cur") )
+            fi
+            ;;
+        batch)
+            if [[ $cur == -* ]]; then
+                COMPREPLY=( $(compgen -W "--concurrency --prompt-tokens --gen --cache --rounds --timeout --json -h --help" -- "$cur") )
+            else
+                local models
+                models="$(_inference_fresh_models)"
+                COMPREPLY=( $(compgen -W "$models" -- "$cur") )
+            fi
+            ;;
+        image)
+            if [[ $cur == -* ]]; then
+                COMPREPLY=( $(compgen -W "--max-tokens --timeout -h --help" -- "$cur") )
+            else
+                local models
+                models="$(_inference_fresh_models)"
+                COMPREPLY=( $(compgen -W "$models" -- "$cur") )
+            fi
+            ;;
+        smoke)
+            if [[ $cur == -* ]]; then
+                COMPREPLY=( $(compgen -W "--max --json -h --help" -- "$cur") )
+            else
+                local models
+                models="$(_inference_fresh_models)"
+                COMPREPLY=( $(compgen -W "A B C $models" -- "$cur") )
             fi
             ;;
         transcribe)

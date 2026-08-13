@@ -4,6 +4,7 @@
   become: yes
   vars:
     ycluster_package_dir: /opt/ycluster
+    inference_cli_dir: /opt/ycluster-inference
     
   tasks:
     - name: Install Python dependencies and package tools
@@ -209,6 +210,38 @@
         executable: /bin/bash
       register: completion_result
       changed_when: "'CHANGED' in completion_result.stdout"
+
+    - name: Create inference CLI directory
+      file:
+        path: "{{ inference_cli_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Install inference CLI scripts
+      copy:
+        src: "{{ playbook_dir }}/../../../contrib/{{ item.src }}"
+        dest: "{{ inference_cli_dir }}/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: inference, dest: inference, mode: '0755' }
+        - { src: _cluster_config.py, dest: _cluster_config.py, mode: '0644' }
+
+    - name: Install inference command on PATH
+      file:
+        src: "{{ inference_cli_dir }}/inference"
+        dest: /usr/local/bin/inference
+        state: link
+        force: yes
+
+    - name: Install inference bash completion
+      copy:
+        src: "{{ playbook_dir }}/../../../contrib/inference-completion.bash"
+        dest: /etc/bash_completion.d/inference-completion.bash
+        owner: root
+        group: root
+        mode: '0644'
 
   handlers:
     # systemd only re-reads EnvironmentFile on (re)start, so changing
