@@ -3017,6 +3017,9 @@ def vm_schedule_data():
             live[inst['name']] = inst.get('status')
 
     now = datetime.now(UTC)
+    commitments = vmm.combine_gpu_commitments(
+        vmm.gpu_commitments(registry, desired_all, now),
+        vmm.gpu_block_commitments(blocks, now))
     rows = []
     for name, rec in registry.items():
         # Admins and managers (view-only) see every VM; plain users only
@@ -3028,7 +3031,7 @@ def vm_schedule_data():
         mode = (desired or {}).get('mode', 'unmanaged')
         status = live.get(name, 'unknown')
         pending = vmm.pending_state(desired, status, graces.get(name), now)
-        rows.append({
+        row = {
             'vm': name,
             'owner': rec.get('owner'),
             'host': rec.get('host'),
@@ -3054,7 +3057,25 @@ def vm_schedule_data():
             # so they understand why they can't edit (admins / managers see
             # it too, harmlessly).
             'admin_locked': desired is not None and desired.get('mode') == 'unmanaged',
-        })
+        }
+        # Future windows this VM's registered GPU count can fit, for the
+        # one-click acquire suggestions. Mirror admission control: the VM's
+        # own current commitment is not counted against itself (unmanaged /
+        # on keep holding GPUs until the user actually schedules windows).
+        pool = pools.get(rec.get('host'))
+        if rec.get('type') != 'container' and isinstance(pool, int):
+            host_commits = [c for c in commitments.get(rec.get('host'), [])
+                            if c['vm'] != name]
+            own_windows = [(datetime.fromisoformat(w['start']),
+                            datetime.fromisoformat(w['end']))
+                           for w in _parse_windows(
+                               (desired or {}).get('windows', [])) or []]
+            row['suggestions'] = vmm.gpu_available_windows(
+                host_commits, rec.get('gpus') or 0, pool, now,
+                avoid_windows=own_windows)
+        else:
+            row['suggestions'] = []
+        rows.append(row)
 
     # Capacity commitments per host, so users can see what's free before
     # composing a schedule. VM names are shown to everyone (capacity is
@@ -3063,9 +3084,6 @@ def vm_schedule_data():
     # VMs — other people's hosts/pools aren't their business. Admins and
     # managers keep the full roster (they answer capacity questions).
     visible_hosts = {r['host'] for r in rows if r['host']}
-    commitments = vmm.combine_gpu_commitments(
-        vmm.gpu_commitments(registry, desired_all, now),
-        vmm.gpu_block_commitments(blocks, now))
     hosts = []
     for host in sorted(set(commitments) | set(pools)):
         if not pools.get(host) and not commitments.get(host):

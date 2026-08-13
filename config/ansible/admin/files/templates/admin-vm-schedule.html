@@ -148,6 +148,19 @@
           <button class="minor" @click="addWindow(row)">add window</button>
         </div>
       </template>
+      <template x-if="row.suggestions.length">
+        <div style="margin-top:0.6rem">
+          <div class="meta">Suggested windows
+            (fits <b x-text="`${row.gpus} GPU${row.gpus === 1 ? '' : 's'}`"></b>):</div>
+          <template x-for="s in row.suggestions" :key="s.start">
+            <div class="window">
+              <span class="meta" x-text="`${fmtStamp(s.start)} — ${s.hours} h`"></span>
+              <button class="minor" @click="acquire(row, s)"
+                      :disabled="!row.can_edit">acquire</button>
+            </div>
+          </template>
+        </div>
+      </template>
     </div>
   </template>
 
@@ -320,7 +333,8 @@
               for (const row of this.rows) {
                 const u = byVm[row.vm]
                 if (u) { row.status = u.status; row.pending = u.pending
-                         row.grace = u.grace; row.issue = u.issue }
+                         row.grace = u.grace; row.issue = u.issue
+                         row.suggestions = u.suggestions || [] }
               }
             })
             .catch(() => {})
@@ -421,6 +435,21 @@
           start.setMinutes(0, 0, 0); start.setHours(start.getHours() + 1)
           const sp = this.parts(start), ep = this.parts(new Date(start.getTime() + 4 * 3600000))
           row.windows.push({startDate: sp.date, startHour: sp.hour, endDate: ep.date, endHour: ep.hour})
+        },
+
+        acquire(row, s) {
+          const start = new Date(s.start)
+          if (isNaN(start) || start <= new Date()) { row.error = 'suggestion expired'; return }
+          row.saved = ''; row.error = ''
+          // Suggestions are capped server-side; clamp here too so the
+          // acquired window never over-allocates beyond 6 hours.
+          const hours = Math.max(1, Math.min(6, Math.round(s.hours || 0)))
+          row.mode = 'schedule'
+          const sp = this.parts(start)
+          const ep = this.parts(new Date(start.getTime() + hours * 3600000))
+          row.windows.push({startDate: sp.date, startHour: sp.hour,
+                            endDate: ep.date, endHour: ep.hour})
+          this.save(row)
         },
 
         save(row) {

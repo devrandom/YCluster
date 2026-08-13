@@ -16,7 +16,7 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ..common.etcd_utils import get_etcd_client, reset_etcd_client
 
@@ -993,6 +993,46 @@ def gpu_conflict(commits, gpus, pool, lo, hi):
         if free < gpus and (worst is None or free < worst[1]):
             worst = (p, free, active)
     return worst
+
+
+def gpu_available_windows(commits, gpus, pool, now, count=3, max_hours=6,
+                          horizon_days=7, avoid_windows=None):
+    """Future hourly-aligned windows where `gpus` GPUs fit `pool` against
+    `commits`, for the schedule page's availability suggestions.
+
+    Returns up to `count` windows, each starting at the next whole hour and
+    lasting the longest continuous span that fits, capped at `max_hours`
+    (6 by default, to discourage over-allocation). Suggested starts that
+    overlap `avoid_windows` (a list of (start, end) UTC pairs) are skipped,
+    so a VM's own already-scheduled windows don't get re-suggested.
+    """
+    if not isinstance(pool, int) or not gpus or gpus > pool:
+        return []
+    avoid_windows = avoid_windows or []
+    start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    horizon = start + timedelta(days=horizon_days)
+    out = []
+    t = start
+    while t < horizon and len(out) < count:
+        end = None
+        for hours in range(1, max_hours + 1):
+            candidate = t + timedelta(hours=hours)
+            if gpu_conflict(commits, gpus, pool, t, candidate) is None:
+                end = candidate
+        if end is not None and any(t < hi and lo < end
+                                   for lo, hi in avoid_windows):
+            t += timedelta(hours=1)
+            continue
+        if end is None:
+            t += timedelta(hours=1)
+            continue
+        out.append({
+            'start': t.isoformat(timespec='minutes'),
+            'end': end.isoformat(timespec='minutes'),
+            'hours': int((end - t).total_seconds() // 3600),
+        })
+        t = end
+    return out
 
 
 def _record_issue(issues, name, op, error, now):

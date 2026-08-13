@@ -478,6 +478,47 @@ class ScheduleDataTests(SchedTestBase):
         d = self.get("/admin/vm-schedule/data").get_json()
         self.assertEqual(d["grace_seconds"], vmm.SCHEDULED_STOP_GRACE_S)
 
+    def test_suggestions_available_for_gpu_vm(self):
+        self.state("nv2", pool=4)
+        self.vm("mine", owner="alice@x", gpus=2, host="nv2")
+        row = self.get("/admin/vm-schedule/data",
+                       email="alice@x").get_json()["rows"][0]
+        self.assertGreater(len(row["suggestions"]), 0)
+        for s in row["suggestions"]:
+            self.assertGreaterEqual(s["hours"], 1)
+            self.assertLessEqual(s["hours"], 6)
+            self.assertGreater(datetime.fromisoformat(s["start"]),
+                               datetime.now(UTC))
+
+    def test_suggestions_ignore_own_unmanaged_commitment(self):
+        # No desired record => unmanaged (always-held). The suggestion must
+        # not count the VM's own hold against itself; admission does the same
+        # when the owner switches it to 'schedule'.
+        self.state("nv2", pool=2)
+        self.vm("mine", owner="alice@x", gpus=2, host="nv2")
+        row = self.get("/admin/vm-schedule/data").get_json()["rows"][0]
+        self.assertGreater(len(row["suggestions"]), 0)
+
+    def test_suggestions_empty_without_pool_or_overcommit(self):
+        self.vm("mine", owner="alice@x", gpus=2, host="nv2")
+        row = self.get("/admin/vm-schedule/data").get_json()["rows"][0]
+        self.assertEqual(row["suggestions"], [])
+
+        self.state("nv2", pool=2)
+        self.vm("other", owner="bob@x", gpus=2, host="nv2")
+        self.desired("other", "on")
+        row = self.get("/admin/vm-schedule/data").get_json()["rows"][0]
+        self.assertEqual(row["suggestions"], [])
+
+    def test_suggestions_account_for_gpu_blocks(self):
+        self.state("nv2", pool=2)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 2, "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.vm("mine", owner="alice@x", gpus=2, host="nv2")
+        row = self.get("/admin/vm-schedule/data").get_json()["rows"][0]
+        self.assertEqual(row["suggestions"], [])
+
     def test_etcd_down_returns_503(self):
         def boom():
             raise RuntimeError("no etcd")

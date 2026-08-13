@@ -293,6 +293,51 @@ class ConflictTests(unittest.TestCase):
                                           dt(h=10), dt(h=14)))
 
 
+class AvailableWindowTests(unittest.TestCase):
+    """Future-window suggestions for the schedule page (gpu_available_windows)."""
+
+    def test_empty_pool_suggests_capped_windows(self):
+        wins = vm.gpu_available_windows([], 2, 4, dt(h=12), count=3)
+        self.assertEqual([w["hours"] for w in wins], [6, 6, 6])
+        self.assertEqual(wins[0]["start"], dt(h=13).isoformat(timespec="minutes"))
+        self.assertEqual(wins[1]["start"], dt(h=19).isoformat(timespec="minutes"))
+        self.assertEqual(wins[2]["start"], dt(d=13, h=1).isoformat(timespec="minutes"))
+
+    def test_commitment_shortens_window(self):
+        # 2 GPUs held 15-17 in a 3-GPU pool; candidate needs the remaining
+        # 2 (exactly 1 free), so the next window runs 13-15 and skips 15+.
+        commits = [commit(2, [(dt(h=15), dt(h=17))])]
+        wins = vm.gpu_available_windows(commits, 2, 3, dt(h=12), count=1)
+        self.assertEqual(len(wins), 1)
+        self.assertEqual(wins[0]["start"], dt(h=13).isoformat(timespec="minutes"))
+        self.assertEqual(wins[0]["end"], dt(h=15).isoformat(timespec="minutes"))
+        self.assertEqual(wins[0]["hours"], 2)
+
+    def test_skips_fully_busy_start(self):
+        # The whole pool is held 13-14, so the first suggestion starts at 14.
+        commits = [commit(4, [(dt(h=13), dt(h=14))])]
+        wins = vm.gpu_available_windows(commits, 2, 4, dt(h=12), count=1)
+        self.assertEqual(wins[0]["start"], dt(h=14).isoformat(timespec="minutes"))
+        self.assertEqual(wins[0]["hours"], 6)
+
+    def test_returns_empty_when_pool_unknown_or_too_small(self):
+        self.assertEqual(vm.gpu_available_windows([], 2, None, dt(h=12)), [])
+        self.assertEqual(vm.gpu_available_windows([], 5, 4, dt(h=12)), [])
+        self.assertEqual(vm.gpu_available_windows([], 0, 4, dt(h=12)), [])
+
+    def test_always_held_overcommit_returns_empty(self):
+        commits = [commit(4)]
+        self.assertEqual(vm.gpu_available_windows(commits, 2, 4, dt(h=12)), [])
+
+    def test_skips_suggestions_overlapping_avoided_windows(self):
+        # Own window 14-15: candidate 13-19 overlaps it, so the first
+        # suggestion starts after it (15), not before.
+        wins = vm.gpu_available_windows([], 2, 4, dt(h=12), count=1,
+                                        avoid_windows=[(dt(h=14), dt(h=15))])
+        self.assertEqual(wins[0]["start"], dt(h=15).isoformat(timespec="minutes"))
+        self.assertEqual(wins[0]["hours"], 6)
+
+
 class DesiredConflictTests(unittest.TestCase):
     NOW = dt(h=12)
 
