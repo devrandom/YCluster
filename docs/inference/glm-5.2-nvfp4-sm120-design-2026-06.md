@@ -403,7 +403,7 @@ defer the runtime GPU allocation to deploy time.
 4. **Validate** — coherence ✓ (17×24=408; bat-and-ball reasoned correctly, no
    NaN) and **tool calling ✓** (`get_weather{"location":"Paris"}` end-to-end
    through the gateway — the thing M3 can't do). Reasoning surfaces under the
-   `reasoning` field. Remaining: full `inference-smoke-test.py` A/B/C — note B
+   `reasoning` field. Remaining: full `./contrib/inference smoke <model> A B C` — note B
    (needle) needs GLM's `enable_thinking` kwarg, not M3's `thinking_mode`, and C
    (vision) only applies if this checkpoint is multimodal.
 5. ~~Wire into the gateway~~ **Done** — `ycluster inference add http://nvN.xc:9212`

@@ -224,7 +224,7 @@ Expect coherent text with `finish_reason: "stop"` (reasoning is inline in
 null bytes (`\0`), or `finish_reason: "length"` on a temp-0 prompt mean the
 kernel path is wrong — see "Why this stack existed" above.
 
-**Deeper verification (`contrib/inference-smoke-test.py`).** A re-runnable,
+**Deeper verification (`./contrib/inference smoke <model>`).** A re-runnable,
 model-agnostic harness (hits the gateway via `contrib/_cluster_config.py`; run
 after any image bump) covers three suites, all green on the b12x image:
 

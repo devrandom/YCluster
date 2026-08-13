@@ -24,7 +24,7 @@ reproducible-build item above) should land soon — making this moot.
 Extend `serve-minimax-m3-named.sh` (the wrapper already sed-patches the
 served-name lines; mirror that pattern) to bump `max-num-seqs` +
 `max-num-batched-tokens` from env vars, then validate with
-`contrib/inference-smoke-test.py` — suite A (quality, temp=0 traps:
+`./contrib/inference smoke <model> A B` — suite A (quality, temp=0 traps:
 17×24=408, bat-and-ball, letter-count, sibling logic) + suite B
 (long-context needle ~8k+). Corruption tells: empty/`\0` content,
 `finish_reason: "length"` on temp=0, leaked `<mm:think>` tags, wrong
