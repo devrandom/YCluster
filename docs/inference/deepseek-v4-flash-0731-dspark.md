@@ -16,11 +16,14 @@ offload, port 9216, gateway id `deepseek-v4-flash`.
   offload.
 - Plan in flight for a 4-GPU long-context run. Implemented as a **dedicated
   alongside script** `~/bin/ds4-infernal-start.sh` (template
-  `ds4-infernal-start.sh.j2`) that launches the Infernal Invocation r4 image
+  `ds4-infernal-start.sh.j2`) that launches the Infernal Invocation r10 image
   as container **`ds4-infernal`** on the per-host infernal GPU set, TP4, 256K,
   no offload — a separate service on port 9217 / served name
   `deepseek-v4-flash-infernal`. It does not touch the r16 `ds4-dspark`
-  container.
+  container. The r10 default is `MAX_NUM_SEQS=16` (96-row verifier-graph
+  envelope); its on-GPU KV pool is ~1.68M tokens
+  (`kv_cache_max_concurrency≈6.4` at 256K), so long-context concurrency is
+  still KV/compute-bound rather than slot-bound.
 
 ## The two `voipmonitor/vllm` image lines (the breadcrumb)
 
@@ -53,7 +56,11 @@ weight re-download/verification change.
   profile, native CPU + filesystem KV offload (`KV_OFFLOADING_SIZE` +
   `NATIVE_L2_GB/PATH`), and LMCache.
 - TP4 claim (when first flagged): `MAX_NUM_SEQS=8 @ 128K` ≈ 1M GPU-KV tokens →
-  4×256K fits **on-GPU with no CPU offload**. Verify from startup log once up.
+  4×256K fits **on-GPU with no CPU offload**. The live TP4/256K infernal
+  (r4) reported ~1.68M KV tokens
+  / `kv_cache_max_concurrency≈6.39` at 256K; the launcher default is now
+  `MAX_NUM_SEQS=16`, so verify the post-launch pool/cache metric
+  (`cache_config_info`) before tuning further.
 - Runbook: `ds4dspark-infernal-invocation-r2.md`.
 
   **r2 vs r3/r4 (and the PRs in between) — 2026-08-12 dig**
@@ -67,6 +74,15 @@ weight re-download/verification change.
   - **r3 (`…cu133-torch213-…-r3` = `7c0899fb…`)** = r2 + PRs #294,#295,#296 (adds
     #294, #295, #296 to the r2 head list). Moves to **CUDA 13.3 / torch 2.13**.
   - **r4 (`…cu133-torch213-…-r4` = `21f04805…`)** = r3 + PR **#298**.
+
+  **Moving past r4 (2026-08-13):** Docker Hub holds r7/r9/r10/r11. Only
+  r7/r9/r10 have DS4 `infernal-invocation` runbooks; r11 is GLM-only and has
+  no DS4 page. r7 is the broad TP2/TP4 perf baseline; r9 adds #302
+  (reasoning-aware strict tool-call grammar activation) and #303 (DSpark
+  draft FP8 config restore); r10 adds #304 (immutable filesystem KV
+  publication). The tool-call path (#302) plus filesystem KV (#304) are why
+  we target **r10**. Its qualified profile is TP2/native-offload 128K, so
+  our TP4/256K/no-offload shape still needs a local qualification pass.
 
   What the new PRs fix (all relevant to long-context DSpark K5 serving):
   - **#294** — grammar bitmask widths after draft trimming. Under DSpark,
@@ -100,9 +116,10 @@ weight re-download/verification change.
     `torch.cuda.is_available() == True`, device enumerated as RTX PRO 6000
     Blackwell, and a real matmul completed. **cu133/torch2.13 loads on driver
     610.**
-  - Remaining gate before promoting r4: a short **DSpark K5 TP4 256K** run to
-    watch the #298 corruption watchdog (this is the qualifying test, distinct
-    from the runtime-load probe above).
+  - r10 now ships the r4-era fixes plus #302/#303/#304, so the remaining
+    gate before cutover is the **DSpark K5 TP4 256K (no-offload)** run to
+    watch the #298 corruption watchdog and verify the actual KV pool from
+    `cache_config_info` (distinct from the runtime-load probe above).
 
 ## Deployment breadcrumb
 
@@ -111,29 +128,31 @@ weight re-download/verification change.
   local-ai-proxy).
 - Scripts: `templates/ds4-setup.sh.j2` (pull/CDI/checkpoint),
   `templates/ds4-start.sh.j2` (r16 serving), `templates/ds4-infernal-start.sh.j2`
-  (r4 alongside).
+  (r10 alongside).
 - Host: `host_vars/<ds4-host>.yml` (`ds4_enabled`, `ds4_gpus` (r16),
-  `ds4_infernal_gpus`/`ds4_infernal_served_name`/`ds4_infernal_port` (r4),
+  `ds4_infernal_gpus`/`ds4_infernal_served_name`/`ds4_infernal_port` (r10),
   `comfyui_gpu`).
-- Pending: launch the r4 `ds4-infernal` container **alongside** the running
+- Pending: launch the r10 `ds4-infernal` container **alongside** the running
   r16 TP2 container (don't disrupt the live one), then re-validate TP4 KV pool
   / `kv_cache_max_concurrency` before/while moving the infernal container into
   service.
-- Next target: **infernal-invocation r4** (not gilded r33, not II r2) — it is
-  the only line carrying the #298 long-context silent-corruption fix. First gate
-  is the cu133-vs-driver-610 probe on the DS4 host (above); it **passed**.
-- **Qualification runs r4 ALONGSIDE r16 — no restart/cutover of the live
-  `ds4-dspark` service.** r16 keeps serving on port 9216 the whole time. r4 is
+- Next target: **infernal-invocation r10** (not gilded r33, not II r2) — it is
+  the newest qualified II line (r7 perf base + #302/#303 tool-call/FP8 fixes +
+  #304 filesystem KV). The cu133-vs-driver-610 probe on the DS4 host (above)
+  **passed** for r4; r10 runs the same cu133/torch2.13 stack.
+- **Qualification runs r10 ALONGSIDE r16 — no restart/cutover of the live
+  `ds4-dspark` service.** r16 keeps serving on port 9216 the whole time. r10 is
   launched by `~/bin/ds4-infernal-start.sh` as a **separate container
   `ds4-infernal`** on port 9217 / served name `deepseek-v4-flash-infernal`,
   bound only to its per-host GPU set, running the DSpark K5 TP4 256K profile
   with no CPU offload. Watch the #298 corruption watchdog + actual TP4 KV pool
-  from the startup log, and read `/v1/models` on 9217. Only after r4 is
-  qualified do we choose a real cutover (which inherently frees r16's GPUs).
-  Neither `ds4-infernal` nor the r4 script ever stops/removes `ds4-dspark`.
+  from the startup log, and read `/v1/models` on 9217. Only after r10 is
+  qualified on TP4/256K do we green-light serving traffic (which inherently
+  frees r16's GPUs). Neither `ds4-infernal` nor the r10 script ever
+  stops/removes `ds4-dspark`.
 - GPU/CDI layout is deployment-specific, so exact pins are intentionally not
   documented here; they live in the private `host_vars/<ds4-host>.yml`
-  (`ds4_gpus` for r16, `ds4_infernal_gpus` for r4). If the CDI spec was
+  (`ds4_gpus` for r16, `ds4_infernal_gpus` for r10). If the CDI spec was
   regenerated with `--device-name-strategy=index`, CDI indices may not match
   nvidia-smi indices, and they renumber on regen/reboot — re-check
   `nvidia-ctk cdi list` before binding.

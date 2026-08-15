@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# (Re)start DeepSeek-V4-Flash-0731 on the Infernal Invocation r4 DSpark image,
+# (Re)start DeepSeek-V4-Flash-0731 on the Infernal Invocation r10 DSpark image,
 # ALONGSIDE the currently-serving Gilded Gnosis r16 container. Run as the dev
 # user (no sudo):
 #
@@ -7,12 +7,12 @@
 #
 # This is the long-context qualification container: the per-host infernal GPU
 # set under TP4, 256K context, no CPU KV offload. It deliberately does NOT
-# touch the r16 `ds4-dspark` service — r4 binds only its own GPUs
+# touch the r16 `ds4-dspark` service — r10 binds only its own GPUs
 # (ds4_infernal_gpus) and listens on its own port with its own served-model
 # name, so both can run side by side while we watch the #298 silent-corruption
 # watchdog.
 #
-# The r4 image uses the Infernal Invocation launcher (lmcache-mp-wrapper.sh ->
+# The r10 image uses the Infernal Invocation launcher (lmcache-mp-wrapper.sh ->
 # serve-ds4-flash.sh), whose public interface is env vars, not the r16
 # entrypoint. Tunable knobs (env-var overrides):
 #   GPUS / TP_SIZE / DCP_SIZE / MAX_MODEL_LEN / MAX_NUM_SEQS
@@ -21,7 +21,7 @@
 #   PORT / SERVED_NAME / IMAGE / MEM
 #
 # Release reference:
-#   https://github.com/local-inference-lab/rtx6kpro/blob/master/models/ds4dspark-infernal-invocation-r2.md
+#   https://github.com/local-inference-lab/rtx6kpro/blob/master/models/ds4dspark-infernal-invocation-r10.md
 set -euo pipefail
 
 IMAGE="${IMAGE:-{{ ds4_infernal_image }}}"
@@ -48,14 +48,18 @@ DSPARK_CAPACITY_ACTIVATION_BATCH_SIZE="${DSPARK_CAPACITY_ACTIVATION_BATCH_SIZE:-
 DRAFT_SAMPLE_METHOD="${DRAFT_SAMPLE_METHOD:-probabilistic}"
 # GRAPH=auto derives the CUDA-graph verifier-row envelope from
 # MAX_NUM_SEQS * (1 + DSPARK_TOKENS). Don't cap it below that requirement.
+# At 16 that means a 96-row envelope: watch warmup/graph VRAM and re-check
+# the KV pool (cache_config_info) after launch.
 GRAPH="${GRAPH:-auto}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 GPU_UTIL="${GPU_UTIL:-0.95}"
 # Long-context qualification: keep the whole KV pool on-GPU. The TP4/256K
-# profile expects 4x256K concurrent to fit without CPU offload; verify the
-# actual pool from the startup log once up.
+# pool is ~1.68M KV tokens (kv_cache_max_concurrency ≈ 6.4 at 256K);
+# MAX_NUM_SEQS=16 admits more short/shared-prefix concurrency than the
+# old 4/4x256K profile while still relying on KV scheduling to queue
+# long contexts. Verify the actual pool from cache_config_info once up.
 KV_OFFLOADING_SIZE="${KV_OFFLOADING_SIZE:-0}"
 LMCACHE_MODE="${LMCACHE_MODE:-off}"
 LOAD_FORMAT="${LOAD_FORMAT:-instanttensor}"
@@ -86,7 +90,7 @@ cvd="$(seq -s, 0 $((ngpu - 1)))"
 MODEL_PARENT="$(dirname "$MODEL_HOST")"
 
 # Do NOT stop/rm the r16 `ds4-dspark` container here. Replace only our own
-# previous r4 run so the qualification container is idempotent.
+# previous r10 run so the qualification container is idempotent.
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 podman run -d --name "$CONTAINER" \

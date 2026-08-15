@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pull the DeepSeek-V4-Flash-0731 DSpark runtime images (Gilded Gnosis r16 for
-# serving + Infernal Invocation r4 for alongside long-context qualification),
+# serving + Infernal Invocation r10 for alongside long-context qualification),
 # smoke-test GPU passthrough via CDI, and stage / verify the 0731 checkpoint.
 # Run as the dev user (no sudo):
 #
@@ -22,10 +22,10 @@
 set -eu
 
 IMAGE="{{ ds4_image }}"
-# Infernal Invocation r4 — the ALONGSIDE long-context qualification image
+# Infernal Invocation r10 — the ALONGSIDE long-context qualification image
 # (same 0731 checkpoint), launched by ~/bin/ds4-infernal-start.sh as
 # `ds4-infernal` on its own port. Pulling it here means one setup script
-# covers both the serving r16 and the qualifying r4 container; the CDI smoke
+# covers both the serving r16 and the qualifying r10 container; the CDI smoke
 # test and checkpoint staging below are identical for both.
 INFERNAL_IMAGE="{{ ds4_infernal_image }}"
 REPO="{{ ds4_repo }}"
@@ -72,7 +72,7 @@ if [ "$action" != "verify-only" ]; then
     || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml + ds4_enabled host_vars" >&2; exit 1; }
   echo "  (probed GPU $smoke_gpu)"
   echo
-  echo "Images ready (r16 serving + r4 infernal)."
+  echo "Images ready (r16 serving + r10 infernal)."
 fi
 
 # ---- checkpoint download (--download only) ----

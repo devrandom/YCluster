@@ -71,14 +71,14 @@
     # InstantTensor (BUFFERED), native offload, and full source-provenance
     # reproduction.
     ds4_image: "docker.io/voipmonitor/vllm:gilded-gnosis-v20-vllm1e9c9c3-sieec30ff-fi801d57a-cu132-20260731-r16"
-    # Infernal Invocation r4 image — the ALONGSIDE long-context qualification
+    # Infernal Invocation r10 image — the ALONGSIDE long-context qualification
     # container (launched by ~/bin/ds4-infernal-start.sh as `ds4-infernal`, separate port /
     # served name, never replaces the r16 `ds4-dspark` service). Same 0731
-    # checkpoint. The only line carrying the #298 silent-corruption fix (a FULL
-    # CUDA-graph prompt-state alias that corrupts DSpark K5 output at long
-    # context). cu133/torch2.13 — driver-610 probe passed on the DS4 host. See
-    # docs/inference/deepseek-v4-flash-0731-dspark.md.
-    ds4_infernal_image: "docker.io/voipmonitor/vllm:infernal-invocation-vllm3226eb7-b12x1584743-fi1ac6942-cu133-torch213-20260812-r4"
+    # checkpoint. r10 carries the #298 silent-corruption fix plus #302/#303
+    # (reasoning-aware strict tool calls, DSpark draft FP8 config restore) and
+    # #304 (immutable filesystem KV publication). cu133/torch2.13 on driver 610.
+    # See docs/inference/deepseek-v4-flash-0731-dspark.md.
+    ds4_infernal_image: "docker.io/voipmonitor/vllm:infernal-invocation-vllma7f04eb-b12x5d648d9-fi1ac6942-cu133-torch213-20260813-r10"
     # Native FP4+FP8 mixed checkpoint. The 0731 release is the r16 validation
     # target (K5 DSpark profile, ~218 t/s sustained decode on the 2×RTX PRO
     # 6000 Blackwell topology). The release SHA is pinned — different
