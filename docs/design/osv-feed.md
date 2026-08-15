@@ -1,0 +1,118 @@
+# Leak-free OSV CVE feed (`osv-feed/`)
+
+A repository-local, self-contained facility for checking CVEs against
+installed packages without uploading the host's package inventory or
+versions. It is designed to move to its own repository unchanged; see
+`osv-feed/README.md` for the standalone user manual and commands.
+
+## Why this shape
+
+- The OSV query API wants `(package, version)` pairs POSTed. For perimeter
+  hosts that leaks the exact software the boundary runs.
+- OSV publishes full ecosystem archives and per-ecosystem
+  `modified_id.csv` incremental indexes on public GCS. The mirror pulls
+  those same files every subscriber pulls, so neither versions nor package
+  interest leaves the network.
+- The local records retain the OSV `introduced`/`fixed`/`last_affected`
+  ranges, which is enough to classify each CVE for an installed version as:
+  - `patched` — version is outside the affected range (or the package is
+    not mentioned),
+  - `fix_available` — affected and a fixed version is recorded,
+  - `no_fix_yet` — affected and no fixed version is recorded yet.
+
+## Facility contents
+
+- `osv-feed/mirror.py` — initial full download of `<ecosystem>/all.zip`
+  and incremental sync via `<ecosystem>/modified_id.csv`; withdrawn records
+  (404) are removed locally. Storage is under a configurable DB directory
+  (default `~/.cache/osv-feed`; TOML configs at `/etc/osv-feed/config.toml`
+  and `~/.config/osv-feed.toml`, env `OSV_FEED_DB_DIR`, or `--db-dir`).
+  Mirror also maintains a per-ecosystem package index
+  (`<ecosystem>.index.json`) that lets `match` load only relevant records;
+  `match` builds it automatically for pre-index mirrors.
+- `osv-feed/matching.py` — OSV range evaluation, dpkg-native version
+  comparison with a fallback key, and the three-state classification.
+- `osv-feed/config.py` — merges system + user TOML into one full config;
+  resolves the feed DB dir, the ack DB path, and `[tracking.<name>]`
+  category tables (user tables override the built-in defaults).
+- `osv-feed/categories.py` — built-in default categories (`perimeter`,
+  `user`, `network`, `runtimes`) plus `[tracking.<name>]` package sets and
+  policy filters (minimum severity, allowed states, summary/details
+  interests). A config category replaces the default of the same name; a
+  medium-policy `default` fallback triages packages that belong to no
+  category.
+- `osv-feed/acks.py` — atomic JSON acknowledgment store (keyed by
+  `category + ecosystem + cve`) so acknowledged CVEs stay visible but are
+  labeled for alert suppression.
+- `osv-feed/cli.py` — `mirror`, `match`, and `ack` commands; `match`
+  emits `table`/`json`/`prometheus` output and accepts `--category` for a
+  configured tracking set. Without `--category`, `match` auto-tags each
+  package against every category that lists it, falling back to the
+  medium-policy `default` category for unmatched packages. With no
+  `--pkg`/`--spec-file`/`--category` it matches every package in any
+  tracking category, so a bare run reports the whole tracked surface.
+  `--verbose`/`-v` enriches the table with the CVE title, matched category
+  `interests`, aliases and reference URLs; json output always carries
+  `summary`/`details`/`aliases`/`references`/`published`/`modified`.
+  Prometheus output includes
+  `osv_feed_cve_info` with `category`/`acked` labels and
+  `osv_feed_cve_first_seen_seconds` so alerts can fire when a CVE has been
+  pending longer than a configured window.
+- `osv-feed/tests/` — server-free unittest suite (full mirror and
+  incremental sync tests use a local HTTP bucket fixture).
+
+Sizes (compressed, measured 2026-08-15): Ubuntu `all.zip` ~590 MB,
+Debian ~69 MB, PyPI ~32 MB; Ubuntu `modified_id.csv` ~3 MB per day.
+
+## Deployment plan (not yet wired)
+
+Run the mirror and CVE matching on a single designated node that has
+persistent storage for the feed DB and outbound access to
+`storage.googleapis.com/osv-vulnerabilities`. A single writer on that DB
+avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
+
+1. **Ship the tool (no prebuilt binaries).** Install the package source to
+   a system path and expose an `osv-feed` wrapper (`exec python3 -m
+   osv_feed "$@"`), and write `/etc/osv-feed/config.toml` pointing
+   `db_dir` and `ack_db` at the chosen storage plus the
+   `[tracking.<name>]` category tables (with an explicit `ecosystem` so
+   runs are deterministic).
+
+2. **Daily mirror.** An `osv-feed-mirror` `Type=oneshot` service runs
+   `osv-feed mirror --ecosystem Debian --ecosystem Ubuntu`, driven by a
+   `Persistent=true` daily timer with a randomized delay. Gate execution
+   so only the single writer node runs it.
+
+3. **Textfile collectors.** Two outputs into the node_exporter textfile
+   directory:
+   - per-node perimeter package versions, emitted as version-info metrics
+     (`...package_info{pkg,tier,version} 1`) by a local collector that
+     maps dpkg binaries to source packages
+     (`dpkg-query -W -f '${Package} ${Source}'`);
+   - CVE state via `osv-feed match --format prometheus` (a bare run
+     reports the whole tracked surface), emitting `osv_feed_cve_info` and
+     `osv_feed_cve_first_seen_seconds`.
+
+4. **Alert rules.** Add `PerimeterCVECriticalLongPending` /
+   `PerimeterCVEHighLongPending` to the Prometheus rules, firing from
+   `osv_feed_cve_first_seen_seconds` past the SLA (`for: 1h`), suppressing
+   acknowledged CVEs via the `acked="true"` label, and keeping
+   Alertmanager `repeat_interval` daily so unresolved `no_fix_yet`
+   findings stay visible.
+
+5. **Ownership.** `osv-feed ack add` silences a reviewed finding while
+   keeping it visible; keep the apt `upgradable`/USN check as the
+   zero-lag `fix_available` cross-check.
+
+6. **Container images (follow-up).** Digest-pin the images, then scan
+   SBOMs with `osv-scanner` offline (`--offline-vulnerabilities`) against
+   the same local ecosystem data.
+
+## Verification
+
+- `osv-feed/test.sh` stays green.
+- Run the mirror once and confirm `<db>/Debian.index.json` plus the
+  cursor; `osv-feed match --format prometheus` emits
+  `osv_feed_cve_first_seen_seconds`, scraped by the textfile collector.
+- `promtool check rules` passes on the new alert group, and a synthetic
+  high/critical pending CVE fires after the SLA window.

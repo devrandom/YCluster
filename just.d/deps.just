@@ -100,6 +100,12 @@ deps-tools:
 deps-check: deps-verify vulncheck deps-vuln-py deps-vuln-src
     @echo "ok: dependency audit complete (review findings above)"
 
+# Install (or refresh) the local osv-feed CVE feed tool from ./osv-feed.
+# Stdlib-only, so `uv tool install` pulls no runtime dependencies. Same
+# command as uv tool install ./osv-feed.
+osv-feed-tool:
+    @uv tool install ./osv-feed
+
 # Python surfaces S2/S3/S4: osv-scanner on each uv.lock, `uv lock --check`
 # proving the lock still matches pyproject, and pip-audit on the ycluster CLI
 # requirements (S3, which mirrors the apt runtime deps and has no lock).

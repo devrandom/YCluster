@@ -1,0 +1,291 @@
+# osv-feed
+
+Leak-free, stdlib-only OSV vulnerability feed: mirror OSV ecosystem data
+to a local directory and match installed package versions against it,
+without ever sending your package inventory or versions to a remote
+service.
+
+The facility is self-contained on purpose: it is expected to move to its
+own repository and only depends on the Python standard library.
+
+## Example
+
+`match` triages installed package versions against the mirrored feed and
+labels each finding with its tracking category, severity, state, and any
+acknowledgment:
+
+```bash
+$ osv-feed match --ecosystem Debian
+ECOSYSTEM  CATEGORY   PACKAGE  VERSION             SEVERITY  CVE                    STATE       ACK
+---------  ---------  -------  ------------------  --------  ---------------------  ----------  --------------------
+Debian     perimeter  nginx    1.26.3-3+deb13u7    high      DEBIAN-CVE-2026-60005  no_fix_yet
+Debian     perimeter  openssh  1:10.0p1-7+deb13u4  critical  DEBIAN-CVE-2026-60002  no_fix_yet
+Debian     network    dnsmasq  2.91-1+deb13u1      medium    DEBIAN-CVE-2026-12725  no_fix_yet
+Debian     user       sudo     1.9.16p2-3+deb13u2  high      DEBIAN-CVE-2023-22809  patched     2026-08-15 14:30 UTC
+```
+
+Adding `--verbose`/`-v` appends each CVE's title and important attributes
+under its row, and `--format json`/`--format prometheus` emit machine-readable
+output instead of the table.
+
+## Why
+
+- OSV's query API asks you to POST `(package, version)` pairs. That leaks
+  exactly what a perimeter defender does not want to share.
+- OSV publishes full ecosystem archives plus `modified_id.csv` incremental
+  indexes on GCS. Pulling those is a one-way public-data download; every
+  subscriber downloads the same files, so package interest is not revealed
+  either.
+- The per-record OSV format includes ranges with `introduced`/`fixed`
+  events, so a local mirror still supports the full
+  `patched` / `fix_available` / `no_fix_yet` classification.
+- We want to have policies and alerting
+
+## Install
+
+Install the `osv-feed` console command with uv (no runtime dependencies are
+pulled in):
+
+```bash
+uv tool install ./osv-feed
+```
+
+Once the facility is published, `uv tool install git+https://...` will work
+unchanged against the same pyproject.
+
+## Layout and configuration
+
+Local data lives under a DB directory, configurable via the CLI flag, the
+`OSV_FEED_DB_DIR` environment variable, or TOML config files:
+
+```text
+<db_dir>/<ecosystem>/<id>.json     one OSV record per file
+<db_dir>/<ecosystem>.cursor        last incremental sync timestamp
+<db_dir>/epss.json                 mirrored EPSS snapshot (score + percentile per CVE)
+<db_dir>/epss.cursor               latest EPSS mirror timestamp
+<db_dir>/first-seen.json           first-seen state for prometheus output
+```
+
+Default DB directory: `~/.cache/osv-feed`. CVE acknowledgments are kept in
+a separate, configurable JSON store (`[feed] ack_db`, default
+`~/.cache/osv-feed-acks.json`) so it can live on shared storage instead of in the
+mirrored feed data.
+
+### Config files
+
+TOML configuration is read from, in increasing precedence:
+
+1. `/etc/osv-feed/config.toml` (system)
+2. `~/.config/osv-feed.toml` (per-user, overrides per key)
+
+`OSV_FEED_DB_DIR` / `OSV_FEED_ACK_DB` override both config files, and the
+CLI flags override everything. Example:
+
+```toml
+[feed]
+db_dir = "/srv/osv-feed/db"
+ack_db = "/srv/osv-feed/acks.json"
+
+[tracking.perimeter]
+ecosystem = "Debian"
+packages = ["openssh-client", "nginx", "keepalived"]
+severity = "high"
+states = ["no_fix_yet", "fix_available"]
+interests = ["rce", "remote code execution"]
+
+[tracking.user]
+packages = ["openssh-client", "sudo"]
+severity = "high"
+interests = ["privilege escalation", "local privilege"]
+```
+
+A tracking category groups packages and a local filter policy for one
+matching run. `--category <name>` resolves `[tracking.<name>]` and applies:
+
+- `ecosystem` — default ecosystem for the category's packages;
+- `packages` — source/binary package names, optionally `name=version`;
+- `severity` — minimum severity (`low`/`medium`/`high`/`critical`);
+- `states` — allowed CVE states (`patched`, `fix_available`,
+  `no_fix_yet`);
+- `interests` — case-insensitive substrings matched against OSV
+  `summary`/`details`, so e.g. a perimeter category can focus on
+  remotely exploitable issues.
+
+### Built-in default categories
+
+A few category names are built in and work without any config. Defining a
+`[tracking.<name>]` table for one of these replaces the built-in default
+entirely, so you can tighten or relax it to taste:
+
+| name | packages | policy |
+| --- | --- | --- |
+| `perimeter` | `openssh`, `nginx` | severity `high` |
+| `user` | `sudo` | severity `high`, interests `privilege escalation`/`local privilege` |
+| `network` | `dnsmasq`, `squid`, `keepalived`, `wireguard-tools` | severity `medium` |
+| `runtimes` | `docker.io`, `containerd`, `runc`, `podman` | severity `high` |
+
+The built-ins use source package names (for example `openssh` covers the
+installed `openssh-client`), and all default categories allow the
+`no_fix_yet` and `fix_available` states.
+
+### Match category defaults
+
+When you run `match` without `--category`, the packages are auto-categorized:
+each package is matched against every category whose package set contains it,
+and the findings are labeled with those categories and filtered by each
+category's policy. A package that belongs to no category falls back to a
+single `default` category with a **medium** minimum-severity policy
+(`no_fix_yet` / `fix_available` states), so an unknown package is still
+triaged rather than passed through unfiltered. Passing `--category <name>`
+forces exactly one category and keeps its behavior unchanged.
+
+Running `match` with no `--pkg`, `--spec-file`, or `--category` matches
+every package listed in any tracking category (built-in and configured), so
+`python3 -m osv_feed match --format prometheus` reports the whole tracked
+surface.
+
+For tests/packaging the config paths can be redirected with
+`OSV_FEED_SYSTEM_CONFIG` and `OSV_FEED_USER_CONFIG`.
+
+## Usage
+
+Mirror one or more ecosystems (first run downloads the full archive, later
+runs use `modified_id.csv` for changes):
+
+```bash
+python3 -m osv_feed --db-dir /srv/osv-feed/db mirror --ecosystem Ubuntu
+python3 -m osv_feed mirror --ecosystem Ubuntu --ecosystem Debian
+```
+
+When `--ecosystem` is omitted on `mirror` or `match`, it defaults to the
+host OS via `/etc/os-release` when that is Debian or Ubuntu. On any other
+distribution there is no default and `--ecosystem` is required.
+
+Mirror writes progress to stderr by default (full-archive start/bytes/
+extracted-count, and per-record `updated`/`removed` lines on incremental
+sync). Pass `--quiet` (or `-q`) to suppress it for cron/scripts.
+
+Each `mirror` run also pulls the daily EPSS snapshot (`epss_scores-current`
+from the EPSS API) into `<db_dir>/epss.json`, so every finding can be
+enriched with an exploit-probability score and percentile without any
+outbound request at `match` time. When a fresh snapshot is already present
+it is skipped (re-download with `--force-full`); `match` still works without
+it, reporting EPSS as `0` for every CVE.
+
+Match package versions locally:
+
+```bash
+python3 -m osv_feed match --pkg 'openssh-client' --format table
+python3 -m osv_feed match --pkg 'openssh=1:9.6p1-3ubuntu13.3' --format json
+python3 -m osv_feed match --pkg 'nginx' --format prometheus
+python3 -m osv_feed match --category perimeter --format prometheus
+```
+
+When `=VERSION` is omitted, the installed version is resolved locally from
+`dpkg-query`, and binary package names are mapped back to their source
+package (for example `openssh-client` → `openssh`). Distro CVEs are tracked
+under source package names, so this makes `--pkg openssh-client` match
+without hardcoding a version.
+
+Mixed ecosystems use a JSON spec file:
+
+```bash
+python3 -m osv_feed match --spec-file specs.json --format prometheus
+```
+
+`specs.json` is an object or array of `{"ecosystem", "package", "version"}`.
+`version` is optional and defaults to the installed version.
+
+`match` warns on stderr when a requested ecosystem feed is absent or its last
+sync is more than a day old, since results would be stale or empty until you
+run `osv-feed mirror --ecosystem <name>`. An absent feed exits non-zero;
+a stale feed still proceeds.
+
+`--verbose` (or `-v`) with `--format table` prints extra detail under each
+row: the CVE title (OSV `summary`), the category `interests` that matched
+(e.g. `rce`, `privilege escalation`), any alias IDs, and the advisory
+reference URLs. The same fields (`summary`, `details`, `aliases`,
+`references`, `published`, `modified`) are always present in `--format json`
+output, so tooling can consume them without a verbose flag.
+
+### Acknowledgments
+
+Acknowledged CVEs stay visible in `match` output so the audit trail is
+preserved, but they are labeled (`acked="true"` in prometheus output) so
+alerting rules can suppress them. Acknowledgments are keyed per
+`category + ecosystem + cve` and stored in the ack DB (`--ack-db`,
+`[feed] ack_db`, or `OSV_FEED_ACK_DB`):
+
+```bash
+python3 -m osv_feed --ack-db /srv/osv-feed/acks.json \
+  ack add --category perimeter --ecosystem Debian \
+  --cve DEBIAN-CVE-2026-60000 --note 'blocked at firewall'
+python3 -m osv_feed --ack-db /srv/osv-feed/acks.json \
+  ack list --category perimeter
+python3 -m osv_feed --ack-db /srv/osv-feed/acks.json \
+  ack remove --category perimeter --ecosystem Debian \
+  --cve DEBIAN-CVE-2026-60000
+```
+
+`ack list` supports `--format table` (default) or `--format json`.
+
+The prometheus format emits:
+
+- `osv_feed_cve_info{ecosystem,package,version,cve,severity,state,category,acked}`
+  — `1` per finding, state is `patched`, `fix_available`, or `no_fix_yet`.
+  `severity` is the distro label when present (Debian urgency, Ubuntu
+  priority) or a CVSS 3.x qualitative rating
+  (`low`/`medium`/`high`/`critical`); it may be empty when the record has no
+  usable severity. `category` is the tracking category name (empty for
+  uncategorized matches) and `acked` is `true`/`false`.
+- `osv_feed_cve_first_seen_seconds{...}` — persisted first-seen epoch so
+  alerts can fire on "pending longer than N days".
+- `osv_feed_cve_epss_score{ecosystem,package,version,cve}` and
+  `osv_feed_cve_epss_percentile{...}` — EPSS exploit-probability score and
+  percentile (0..1) for the CVE, `0` when the snapshot is absent or the CVE
+  is not in it.
+
+## Matching semantics
+
+- Package names are matched case-insensitively against each OSV record's
+  `affected[].package.name`.
+- OSV ranges are evaluated with the standard `introduced` / `fixed` /
+  `last_affected` semantics, plus exact `versions` lists when present.
+- `fix_available` means the affected range names a fixed version and the
+  installed version is below it; `no_fix_yet` means the installed version is
+  affected but no fixed version is recorded.
+- Debian-family version comparison uses `dpkg --compare-versions` when
+  dpkg is installed, with a best-effort numeric-run fallback key otherwise.
+- Ubuntu/Debian CVEs are tracked against **source package** names. When you
+  supply a version explicitly, pass the source package name (for example
+  `openssh`, not `openssh-client`) or the record will not match; when you
+  omit the version, binary package names are mapped to their source package
+  automatically.
+
+## Mirror mechanics
+
+Initial sync downloads `<ecosystem>/all.zip` (for example Ubuntu is
+roughly 590 MB, Debian roughly 69 MB). Daily sync downloads the small
+`<ecosystem>/modified_id.csv` (about 3 MB for Ubuntu), fetches only records
+newer than the saved cursor, and removes local records whose upstream file
+returns 404 (withdrawn). No host data is sent at any point.
+
+Each ecosystem keeps a package index (`<ecosystem>.index.json`) alongside
+the record files, so `match` loads only records that mention the requested
+packages instead of scanning the whole archive. For a pre-index mirror,
+`match` builds the index once on first use (when the DB is writable) and
+persists it.
+
+## Tests
+
+```bash
+./test.sh
+# or, from this directory:
+PYTHONPATH=. python3 -m unittest discover -s tests
+```
+
+## Status
+
+Repository-local facility, generic and self-contained by design. Deployment (a mirror on a collector host plus a textfile collector
+and CVE alerts) and the migration to a standalone repository are
+follow-ups.
