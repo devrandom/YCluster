@@ -80,6 +80,14 @@ def download_epss(url: str | None = None) -> dict[str, dict[str, float]]:
     except (OSError, EOFError):
         content = raw.decode("utf-8", errors="replace")
 
+    # The upstream snapshot may lead with a "#model_version:..." comment line
+    # before the CSV header. DictReader takes the first non-comment line as the
+    # column names, so drop comment lines up front to keep "cve/epss/percentile"
+    # as the actual header.
+    content = "\n".join(
+        line for line in content.splitlines() if not line.lstrip().startswith("#")
+    )
+
     data: dict[str, dict[str, float]] = {}
     reader = csv.DictReader(io.StringIO(content))
     for row in reader:

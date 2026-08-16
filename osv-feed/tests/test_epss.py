@@ -54,6 +54,32 @@ class EpssModuleTest(unittest.TestCase):
         data = epss.download_epss(path)
         self.assertEqual({"CVE-OK": {"score": 0.5, "percentile": 0.9}}, data)
 
+    def test_download_skips_model_version_comment_line(self):
+        csv = (
+            "#model_version:v2026.06.15,score_date:2026-08-16T12:03:43Z\n"
+            "cve,epss,percentile\n"
+            "CVE-1999-0001,0.03351,0.87656\n"
+            "CVE-1999-0002,0.27858,0.9793\n"
+        )
+        path = self._write_file("live-format.csv", csv)
+        data = epss.download_epss(path)
+        self.assertEqual(
+            {"CVE-1999-0001": {"score": 0.03351, "percentile": 0.87656},
+             "CVE-1999-0002": {"score": 0.27858, "percentile": 0.9793}},
+            data,
+        )
+
+    def test_download_skips_comment_line_after_gzip(self):
+        gz = gzip.compress(
+            ("#model_version:v1\n"
+             "cve,epss,percentile\n"
+             "CVE-GZ,0.1,0.2\n").encode("utf-8")
+        )
+        path = self._write_file("live-format.csv.gz", gz, binary=True)
+        data = epss.download_epss(path)
+        self.assertEqual({"CVE-GZ": {"score": 0.1, "percentile": 0.2}}, data)
+
+
     def test_save_and_load_roundtrip(self):
         data = {"CVE-1": {"score": 0.25, "percentile": 0.8}}
         epss.save_epss(self.dir, data)
