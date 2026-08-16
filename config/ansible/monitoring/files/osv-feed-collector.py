@@ -7,14 +7,15 @@ the result (plus feed-health gauges) atomically to
 short oneshot systemd timer, same discipline as node-temps-collector.
 
 Why a single collector node: osv-feed's first-seen state
-(<db>/first-seen.json) is maintained by the matching run, and the mirror
-itself must have a single writer. Both live on one designated node (the
-one that owns /near1's feed DB), so the DB never has concurrent writers.
+(<state>/first-seen.json) is maintained by the matching run, and the mirror
+itself must have a single writer. Both live on one designated node, and the
+collector only ever reads the published read-only snapshot on the shared
+dir, so the writable DB never has concurrent writers.
 
 Output:
   osv_feed_cve_info / osv_feed_cve_epss_score /
   osv_feed_cve_epss_percentile / osv_feed_cve_first_seen_seconds
-    passthrough from `osv-feed match --format prometheus`
+    passthrough from `osv-feed --db-immutable match --format prometheus`
   osv_feed_mirror_present    1 when any mirrored ecosystem/EPSS cursor exists
   osv_feed_mirror_age_seconds  age of the most-stale mirrored feed cursor
   osv_feed_collector_error   1 when the last match run failed
@@ -35,7 +36,7 @@ import time
 
 OUT = os.environ.get("OSV_FEED_OUT", "/var/lib/prometheus/node-exporter/osv_feed.prom")
 OSV_FEED = os.environ.get("OSV_FEED_BIN", "/usr/local/bin/osv-feed")
-DB_DIR = os.environ.get("OSV_FEED_DB_DIR", "/near1/osv-feed/db")
+DB_DIR = os.environ.get("OSV_FEED_DB_DIR", "/near1/osv-feed")
 # Cursor files the mirror writes; the mirror is daily, so more than two
 # missed days means the feed is stale and matching can't be trusted.
 CURSOR_FILES = ("Ubuntu.cursor", "Debian.cursor", "epss.cursor")
@@ -68,7 +69,7 @@ def run_match() -> tuple[bool, str, list[str]]:
     """Run osv-feed match, returning (ok, body, error_lines)."""
     try:
         proc = subprocess.run(
-            [OSV_FEED, "match", "--format", "prometheus"],
+            [OSV_FEED, "--db-immutable", "match", "--format", "prometheus"],
             capture_output=True,
             text=True,
             timeout=MATCH_TIMEOUT,

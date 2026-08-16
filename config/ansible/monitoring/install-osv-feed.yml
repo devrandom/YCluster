@@ -1,11 +1,15 @@
 ---
 # Install and wire the local OSV CVE feed (osv-feed) on a single collector
-# node. Mirrors Debian/Ubuntu + EPSS daily onto the /near1 feed DB and
-# publishes CVE state to the node_exporter textfile directory.
+# node. The mirror writes Debian/Ubuntu + EPSS into a local SQLite store on
+# the node's disk (SQLite over a network share is fragile), then a publish
+# job snapshots that store to the shared /near1 dir; the collector matches
+# the snapshot read-only and writes CVE state to the node_exporter textfile
+# directory.
 #
-# Single writer: the daily mirror (which owns <db_dir>'s cursor/index/
-# first-seen state) and the match run both live on one designated node,
-# so the feed DB is never written concurrently.
+# Single writer: the daily mirror (which owns <db_dir>'s cursors,
+# first-seen state and the writable SQLite store) lives on one designated
+# node; readers only ever open the published snapshot with --db-immutable,
+# so the writable DB never has concurrent writers.
 #
 # Usage:
 #   ./run-playbook.sh monitoring/install-osv-feed.yml
@@ -20,8 +24,13 @@
   vars:
     osv_feed_install_dir: /opt/osv-feed
     osv_feed_collector_path: /usr/local/lib/cluster/osv-feed-collector
+    osv_feed_publish_path: /usr/local/lib/cluster/osv-feed-publish
     osv_feed_source_dir: "{{ playbook_dir }}/../../../osv-feed"
-    osv_feed_db_dir: /near1/osv-feed/db
+    # The writable SQLite store + cursors + first-seen state live on the
+    # node's local disk; only a read-only snapshot is published to the
+    # shared dir (see docs/design/osv-feed.md).
+    osv_feed_db_dir: /var/lib/osv-feed/db
+    osv_feed_snapshot_dir: /near1/osv-feed
     osv_feed_ack_db: /near1/osv-feed/acks.json
     osv_feed_ecosystem: Ubuntu
     osv_feed_match_interval_sec: 900
@@ -44,11 +53,19 @@
       - podman
 
   tasks:
-    # /near1 is an automounted NAS share; a `file` task that creates the
-    # child path triggers the mount on first use.
-    - name: Ensure feed DB directory exists
+    - name: Ensure local feed DB directory exists
       file:
         path: "{{ osv_feed_db_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # /near1 is an automounted NAS share; a `file` task that creates the
+    # child path triggers the mount on first use.
+    - name: Ensure snapshot directory exists on the shared mount
+      file:
+        path: "{{ osv_feed_snapshot_dir }}"
         state: directory
         owner: root
         group: root
@@ -112,6 +129,14 @@
         group: root
         mode: '0755'
 
+    - name: Install osv-feed publish script
+      copy:
+        src: files/osv-feed-publish.py
+        dest: "{{ osv_feed_publish_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
     - name: Create systemd service for daily mirror
       copy:
         dest: /etc/systemd/system/osv-feed-mirror.service
@@ -124,9 +149,14 @@
           [Service]
           Type=oneshot
           ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu
+          # Publish the read-only snapshot to the shared dir only once the
+          # local writable store is fully written and closed.
+          ExecStartPost=/usr/bin/python3 {{ osv_feed_publish_path }}
           User=root
+          Environment=OSV_FEED_DB_DIR={{ osv_feed_db_dir }}
+          Environment=OSV_FEED_SNAPSHOT_DIR={{ osv_feed_snapshot_dir }}
           # ProtectSystem=full keeps /usr,/boot,/etc read-only while leaving
-          # the /near1 NAS mount and textfile dir writable (no
+          # /var (local DB) and the /near1 NAS mount writable (no
           # ReadWritePaths gymnastics for an automounted share).
           ProtectSystem=full
           ProtectHome=true
@@ -165,7 +195,10 @@
           Type=oneshot
           ExecStart=/usr/bin/python3 {{ osv_feed_collector_path }}
           User=root
-          Environment=OSV_FEED_DB_DIR={{ osv_feed_db_dir }}
+          # Match against the published read-only snapshot on the shared
+          # mount; first-seen state stays on the local writable DB dir.
+          Environment=OSV_FEED_DB_DIR={{ osv_feed_snapshot_dir }}
+          Environment=OSV_FEED_STATE_DIR={{ osv_feed_db_dir }}
           ProtectSystem=full
           ProtectHome=true
           PrivateTmp=true
@@ -215,13 +248,22 @@
 
     # First data instead of waiting up to a day for the timer; tolerated if
     # the initial download needs a retry (the daily timer keeps retrying).
-    - name: Run the initial mirror so the feed exists before matching
-      command: /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu
+    # Mirror then publish, so the shared snapshot exists before collecting.
+    - name: Run the initial mirror and publish so the feed exists before matching
+      shell: |
+        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu \
+          && /usr/bin/python3 {{ osv_feed_publish_path }}
+      environment:
+        OSV_FEED_DB_DIR: "{{ osv_feed_db_dir }}"
+        OSV_FEED_SNAPSHOT_DIR: "{{ osv_feed_snapshot_dir }}"
       changed_when: false
       failed_when: false
 
     - name: Run an initial collection so metrics appear immediately
       command: /usr/bin/python3 {{ osv_feed_collector_path }}
+      environment:
+        OSV_FEED_DB_DIR: "{{ osv_feed_snapshot_dir }}"
+        OSV_FEED_STATE_DIR: "{{ osv_feed_db_dir }}"
       changed_when: false
       failed_when: false
 

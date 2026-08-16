@@ -58,7 +58,9 @@ def _build_bucket(root, ecosystem, records, ts_order=None):
     with zipfile.ZipFile(zip_path, "w") as zf:
         for record in records:
             zf.writestr(f"{ecosystem}/{record['id']}.json", json.dumps(record))
-            with open(os.path.join(directory, record["id"] + ".json"), "w", encoding="utf-8") as fh:
+            with open(
+                os.path.join(directory, record["id"] + ".json"), "w", encoding="utf-8"
+            ) as fh:
                 json.dump(record, fh)
     ts_order = ts_order or [
         f"2026-08-15T{index:02d}:00:00Z" for index in range(len(records), 0, -1)
@@ -66,6 +68,18 @@ def _build_bucket(root, ecosystem, records, ts_order=None):
     rows = "\n".join(f"{when},{record['id']}" for when, record in zip(ts_order, records))
     with open(os.path.join(directory, "modified_id.csv"), "w", encoding="utf-8") as fh:
         fh.write(rows + "\n")
+
+
+def _record_ids(db, ecosystem, conn=None):
+    if conn is None:
+        with mirror.connect(db, read_only=True) as conn:
+            return _record_ids(db, ecosystem, conn=conn)
+    return {
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM records WHERE ecosystem=?", (ecosystem,)
+        )
+    }
 
 
 class MirrorTest(unittest.TestCase):
@@ -90,13 +104,19 @@ class MirrorTest(unittest.TestCase):
             base_url=self.server.base_url,
             progress=progress.append,
         )
-        self.assertTrue(os.path.exists(mirror.record_path(self.db, "Ubuntu", "UBUNTU-CVE-1")))
-        self.assertTrue(os.path.exists(mirror.record_path(self.db, "Ubuntu", "UBUNTU-CVE-2")))
+        self.assertTrue(os.path.exists(mirror.db_path(self.db)))
+        self.assertEqual(
+            {"UBUNTU-CVE-1", "UBUNTU-CVE-2"}, _record_ids(self.db, "Ubuntu")
+        )
         self.assertTrue(os.path.exists(mirror.cursor_path(self.db, "Ubuntu")))
-        index = mirror.load_index(self.db, "Ubuntu")
-        self.assertIsNotNone(index)
-        self.assertIn("UBUNTU-CVE-1", index["packages"]["openssh"])
-        self.assertIn("UBUNTU-CVE-2", index["packages"]["openssh"])
+        with mirror.connect(self.db, read_only=True) as conn:
+            packages = {
+                row["package"]
+                for row in conn.execute(
+                    "SELECT package FROM packages WHERE ecosystem='Ubuntu'"
+                )
+            }
+        self.assertEqual({"openssh"}, packages)
         self.assertEqual(result["downloaded"], 2)
         joined = "\n".join(progress)
         self.assertIn("downloading", joined)
@@ -120,33 +140,24 @@ class MirrorTest(unittest.TestCase):
             progress=progress.append,
         )
         self.assertEqual(result["downloaded"], 1)
-        self.assertTrue(os.path.exists(mirror.record_path(self.db, "Ubuntu", "UBUNTU-CVE-A")))
-        self.assertTrue(os.path.exists(mirror.record_path(self.db, "Ubuntu", "UBUNTU-CVE-B")))
+        self.assertEqual({"UBUNTU-CVE-A", "UBUNTU-CVE-B"}, _record_ids(self.db, "Ubuntu"))
         joined = "\n".join(progress)
         self.assertIn("updated UBUNTU-CVE-B", joined)
         self.assertNotIn("updated UBUNTU-CVE-A", joined)
         self.assertIn("1 updated, 0 removed", joined)
-        index = mirror.load_index(self.db, "Ubuntu")
-        self.assertIn("UBUNTU-CVE-A", index["packages"]["openssh"])
-        self.assertIn("UBUNTU-CVE-B", index["packages"]["openssh"])
 
     def test_withdrawn_record_is_removed(self):
         _build_bucket(self.root, "Ubuntu", [_record("UBUNTU-CVE-A")])
         mirror.mirror_ecosystem(self.db, "Ubuntu", base_url=self.server.base_url)
-        record_path = mirror.record_path(self.db, "Ubuntu", "UBUNTU-CVE-A")
-        self.assertTrue(os.path.exists(record_path))
+        self.assertEqual({"UBUNTU-CVE-A"}, _record_ids(self.db, "Ubuntu"))
         os.remove(os.path.join(self.root, "Ubuntu", "UBUNTU-CVE-A.json"))
         os.remove(os.path.join(self.root, "Ubuntu", "all.zip"))
-        _build_bucket(
-            self.root,
-            "Ubuntu",
-            [],
-            ts_order=[],
-        )
+        _build_bucket(self.root, "Ubuntu", [], ts_order=[])
         rows = "2026-08-15T02:00:00Z,UBUNTU-CVE-A\n"
-        with open(os.path.join(self.root, "Ubuntu", "modified_id.csv"), "w", encoding="utf-8") as fh:
+        with open(
+            os.path.join(self.root, "Ubuntu", "modified_id.csv"), "w", encoding="utf-8"
+        ) as fh:
             fh.write(rows)
-        # The server replaces the csv; also ensure there is no record file served.
         progress = []
         result = mirror.mirror_ecosystem(
             self.db,
@@ -155,11 +166,16 @@ class MirrorTest(unittest.TestCase):
             progress=progress.append,
         )
         self.assertEqual(result["removed"], 1)
-        self.assertFalse(os.path.exists(record_path))
+        self.assertEqual(set(), _record_ids(self.db, "Ubuntu"))
+        with mirror.connect(self.db, read_only=True) as conn:
+            packages = {
+                row["package"]
+                for row in conn.execute(
+                    "SELECT package FROM packages WHERE ecosystem='Ubuntu'"
+                )
+            }
+        self.assertEqual(set(), packages)
         self.assertIn("removed UBUNTU-CVE-A (withdrawn)", "\n".join(progress))
-        index = mirror.load_index(self.db, "Ubuntu")
-        self.assertNotIn("UBUNTU-CVE-A", index["records"])
-        self.assertNotIn("openssh", index["packages"])
 
 
 class FeedStatusTest(unittest.TestCase):
@@ -169,16 +185,26 @@ class FeedStatusTest(unittest.TestCase):
         self.now = datetime(2026, 8, 15, tzinfo=timezone.utc)
 
     def _write_record(self):
-        os.makedirs(mirror.ecosystem_dir(self.db, "Ubuntu"), exist_ok=True)
-        path = mirror.record_path(self.db, "Ubuntu", "UBUNTU-CVE-1")
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"id": "UBUNTU-CVE-1"}, fh)
+        with mirror.connect(self.db) as conn:
+            conn.execute(
+                "INSERT INTO records(ecosystem, id, data) "
+                "VALUES('Ubuntu', 'UBUNTU-CVE-1', ?)",
+                (json.dumps({"id": "UBUNTU-CVE-1"}),),
+            )
 
-    def test_absent_when_directory_missing(self):
+    def test_absent_when_database_missing(self):
         self.assertEqual("absent", mirror.feed_status(self.db, "Ubuntu", now=self.now))
 
-    def test_absent_when_directory_empty(self):
-        os.makedirs(mirror.ecosystem_dir(self.db, "Ubuntu"), exist_ok=True)
+    def test_absent_when_no_records_for_ecosystem(self):
+        mirror.connect(self.db).close()
+        self.assertEqual("absent", mirror.feed_status(self.db, "Ubuntu", now=self.now))
+        # A different ecosystem's records do not imply this one is present.
+        with mirror.connect(self.db) as conn:
+            conn.execute(
+                "INSERT INTO records(ecosystem, id, data) "
+                "VALUES('Debian', 'DEBIAN-CVE-1', ?)",
+                (json.dumps({"id": "DEBIAN-CVE-1"}),),
+            )
         self.assertEqual("absent", mirror.feed_status(self.db, "Ubuntu", now=self.now))
 
     def test_ok_when_fresh_cursor(self):
@@ -195,25 +221,33 @@ class FeedStatusTest(unittest.TestCase):
         self._write_record()
         self.assertEqual("stale", mirror.feed_status(self.db, "Ubuntu", now=self.now))
 
-    def test_index_add_record_replaces_previous_packages(self):
-        index = mirror._empty_index()
-        mirror._index_add_record(
-            index,
-            "UBUNTU-CVE-R",
-            {"affected": [{"package": {"name": "openssh"}}]},
-        )
-        mirror._index_add_record(
-            index,
-            "UBUNTU-CVE-R",
-            {
-                "affected": [
-                    {"package": {"name": "openssh"}},
-                    {"package": {"name": "openssl"}},
-                ]
-            },
-        )
-        self.assertEqual(["openssh", "openssl"], index["records"]["UBUNTU-CVE-R"])
-        self.assertIn("UBUNTU-CVE-R", index["packages"]["openssl"])
+    def test_insert_record_replaces_package_rows(self):
+        with mirror.connect(self.db) as conn:
+            mirror._insert_record(
+                conn,
+                "Ubuntu",
+                {"id": "UBUNTU-CVE-R", "affected": [{"package": {"name": "openssh"}}]},
+            )
+            mirror._insert_record(
+                conn,
+                "Ubuntu",
+                {
+                    "id": "UBUNTU-CVE-R",
+                    "affected": [
+                        {"package": {"name": "openssh"}},
+                        {"package": {"name": "openssl"}},
+                    ],
+                },
+            )
+        with mirror.connect(self.db, read_only=True) as conn:
+            packages = {
+                row["package"]
+                for row in conn.execute(
+                    "SELECT package FROM packages "
+                    "WHERE ecosystem='Ubuntu' AND record_id='UBUNTU-CVE-R'"
+                )
+            }
+        self.assertEqual({"openssh", "openssl"}, packages)
 
     def test_boundary_age_is_fresh(self):
         self._write_record()

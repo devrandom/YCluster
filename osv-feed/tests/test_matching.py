@@ -9,11 +9,8 @@ from osv_feed import mirror
 
 
 def _write_record(db_dir, ecosystem, record):
-    directory = os.path.join(db_dir, ecosystem)
-    os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, record["id"] + ".json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(record, fh)
+    with mirror.connect(db_dir) as conn:
+        mirror._insert_record(conn, ecosystem, record)
 
 
 def _basic_record(record_id, package, introduced="0", fixed=None, last_affected=None):
@@ -175,17 +172,30 @@ class MatchSpecsTest(unittest.TestCase):
         )
         self.assertEqual("", findings[0]["severity"])
 
-    def test_candidate_records_uses_index(self):
+    def test_candidate_records_uses_package_index(self):
         _write_record(
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-A", "openssh")
         )
         _write_record(
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-B", "nginx")
         )
-        index = mirror.build_index(self.db, "Ubuntu")
-        mirror.save_index(self.db, "Ubuntu", index)
         records = matching._candidate_records(self.db, "Ubuntu", ["openssh"])
         self.assertEqual(["UBUNTU-CVE-A"], [record["id"] for record in records])
+
+    def test_candidate_records_immutable_read(self):
+        _write_record(
+            self.db, "Ubuntu", _basic_record("UBUNTU-CVE-A", "openssh")
+        )
+        records = matching._candidate_records(
+            self.db, "Ubuntu", ["openssh"], immutable=True
+        )
+        self.assertEqual(["UBUNTU-CVE-A"], [record["id"] for record in records])
+        db = os.path.join(self.db, "osv-feed.sqlite")
+        for sidecar in ("-journal", "-wal", "-shm"):
+            self.assertFalse(
+                os.path.exists(db + sidecar),
+                f"immutable read must not create {db + sidecar}",
+            )
 
     def test_first_seen_persists_and_stale_keys_dropped(self):
         _write_record(

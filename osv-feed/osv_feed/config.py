@@ -100,6 +100,40 @@ def resolve_ack_db(cli_value: str | None) -> str:
     return default_ack_db()
 
 
+def resolve_immutable_db(cli_value: bool | None) -> bool:
+    """Resolve whether the store is opened immutable (read-only share copy).
+
+    Honors CLI > env (OSV_FEED_IMMUTABLE_DB) > config ([feed] immutable_db)
+    > default (False).
+    """
+    if cli_value is not None:
+        return cli_value
+    env = os.environ.get("OSV_FEED_IMMUTABLE_DB")
+    if env:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    return bool(_feed_value(load_config(), "immutable_db"))
+
+
+def resolve_state_dir(cli_value: str | None, writable_default: str) -> str:
+    """Resolve the writable directory for first-seen state.
+
+    Honors CLI (``--state-dir``) > env (``OSV_FEED_STATE_DIR``) > config
+    (``[feed] state_dir``) > ``writable_default``. For an immutable snapshot
+    consumer (``--db-immutable``), ``db_dir`` points at a read-only copy that
+    ``osv-feed`` must not write, so the caller passes a local writable default
+    (the default DB dir) and first-seen state never lands on the share.
+    """
+    if cli_value:
+        return cli_value
+    env = os.environ.get("OSV_FEED_STATE_DIR")
+    if env:
+        return env
+    state_dir = _feed_value(load_config(), "state_dir")
+    if state_dir:
+        return os.path.expanduser(state_dir)
+    return writable_default
+
+
 def category_config(category: str, config: dict | None = None) -> dict | None:
     """Return a ``[tracking.<category>]`` table, or the built-in default.
 

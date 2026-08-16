@@ -1,11 +1,17 @@
-"""Mirror OSV ecosystem data to a local directory without uploading host data.
+"""Mirror OSV ecosystem data into a local SQLite store without uploading host data.
 
 Full ecosystem archives are downloaded once; afterwards only records listed
-in the per-ecosystem `modified_id.csv` are fetched. The directory layout is
-intentionally filesystem-native so it can be scanned by osv-scanner:
+in the per-ecosystem `modified_id.csv` are fetched. All ecosystems live in a
+single SQLite database so a snapshot is one self-contained file:
 
-    <db_dir>/<ecosystem>/<id>.json
+    <db_dir>/osv-feed.sqlite
     <db_dir>/<ecosystem>.cursor
+
+The database uses the rollback journal (DELETE mode), so the `.sqlite` file
+alone is always consistent once the writer closes — a copy of that single
+file after a mirror completes is a valid snapshot. Redundant per-ecosystem
+package indexes are not stored; matching filters the records that mention a
+requested package via an in-database index in one pass.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import csv
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import urllib.error
 import urllib.request
@@ -30,14 +37,75 @@ class MirrorError(RuntimeError):
     pass
 
 
-def ecosystem_dir(db_dir: str, ecosystem: str) -> str:
-    _check_name(ecosystem)
-    return os.path.join(db_dir, ecosystem)
+class _FeedConnection(sqlite3.Connection):
+    """A connection that closes itself when used as a context manager.
+
+    The stdlib ``with conn:`` commits/rolls back but leaves the connection
+    open; closing here too means ``with connect(...) as conn:`` never leaks.
+    """
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            self.close()
+        return False
 
 
-def record_path(db_dir: str, ecosystem: str, record_id: str) -> str:
-    _check_name(record_id)
-    return os.path.join(ecosystem_dir(db_dir, ecosystem), record_id + ".json")
+def db_path(db_dir: str) -> str:
+    return os.path.join(db_dir, "osv-feed.sqlite")
+
+
+def connect(
+    db_dir: str,
+    *,
+    read_only: bool = False,
+    immutable: bool = False,
+) -> sqlite3.Connection:
+    """Open the shared SQLite store.
+
+    Read-only opens target a copy that is only ever replaced atomically
+    (e.g. a snapshot on a read-only share); pass ``immutable=True`` there so
+    SQLite performs no locking and never writes journal files to the share.
+    """
+    path = db_path(db_dir)
+    if read_only:
+        uri = f"file:{path}?mode=ro" + ("&immutable=1" if immutable else "")
+        conn = sqlite3.connect(uri, uri=True, factory=_FeedConnection)
+        conn.row_factory = sqlite3.Row
+        return conn
+    os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(path, factory=_FeedConnection)
+    conn.row_factory = sqlite3.Row
+    _init_schema(conn)
+    return conn
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    # DELETE journaling keeps the database self-contained in one file so a
+    # copy is always a valid snapshot, even from a plain file copy.
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS records(
+          ecosystem TEXT NOT NULL,
+          id TEXT NOT NULL,
+          data TEXT NOT NULL,
+          PRIMARY KEY (ecosystem, id)
+        );
+        CREATE TABLE IF NOT EXISTS packages(
+          ecosystem TEXT NOT NULL,
+          package TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          PRIMARY KEY (ecosystem, package, record_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_packages_package
+          ON packages(ecosystem, package);
+        """
+    )
 
 
 def cursor_path(db_dir: str, ecosystem: str) -> str:
@@ -73,10 +141,7 @@ def feed_status(
     but there is no usable cursor or the last sync is older than ``max_age``.
     """
     now = now or datetime.now(timezone.utc)
-    directory = ecosystem_dir(db_dir, ecosystem)
-    if not os.path.isdir(directory) or not any(
-        name.endswith(".json") for name in os.listdir(directory)
-    ):
+    if not _db_has_records(db_dir, ecosystem):
         return "absent"
     cursor = load_cursor(db_dir, ecosystem, now)
     if cursor == datetime.min.replace(tzinfo=now.tzinfo):
@@ -86,16 +151,20 @@ def feed_status(
     return "ok" if now - cursor <= max_age else "stale"
 
 
-INDEX_VERSION = 1
-
-
-def index_path(db_dir: str, ecosystem: str) -> str:
-    _check_name(ecosystem)
-    return os.path.join(db_dir, ecosystem + ".index.json")
-
-
-def _empty_index() -> dict:
-    return {"version": INDEX_VERSION, "packages": {}, "records": {}}
+def _db_has_records(db_dir: str, ecosystem: str) -> bool:
+    try:
+        conn = connect(db_dir, read_only=True)
+    except sqlite3.OperationalError:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM records WHERE ecosystem=?", (ecosystem,)
+        ).fetchone()
+        return row[0] > 0
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        conn.close()
 
 
 def _record_packages(record: dict) -> set[str]:
@@ -107,77 +176,24 @@ def _record_packages(record: dict) -> set[str]:
     return packages
 
 
-def _index_add_record(index: dict, record_id: str, record: dict) -> None:
-    if not record_id:
-        return
-    previous = index["records"].get(record_id, [])
-    for package in previous:
-        ids = index["packages"].get(package, [])
-        if record_id in ids:
-            ids.remove(record_id)
-        if not ids:
-            index["packages"].pop(package, None)
-    packages = sorted(_record_packages(record))
-    index["records"][record_id] = packages
-    for package in packages:
-        if record_id not in index["packages"].setdefault(package, []):
-            index["packages"][package].append(record_id)
-
-
-def _index_remove_record(index: dict, record_id: str) -> None:
-    previous = index["records"].pop(record_id, [])
-    for package in previous:
-        ids = index["packages"].get(package, [])
-        if record_id in ids:
-            ids.remove(record_id)
-        if not ids:
-            index["packages"].pop(package, None)
-
-
-def load_index(db_dir: str, ecosystem: str) -> dict | None:
-    path = index_path(db_dir, ecosystem)
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (FileNotFoundError, ValueError):
-        return None
-    if data.get("version") != INDEX_VERSION:
-        return None
-    data.setdefault("packages", {})
-    data.setdefault("records", {})
-    return data
-
-
-def save_index(db_dir: str, ecosystem: str, index: dict) -> None:
-    path = index_path(db_dir, ecosystem)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(index, fh, sort_keys=True, separators=(",", ":"))
-    os.replace(tmp, path)
-
-
-def build_index(db_dir: str, ecosystem: str) -> dict:
-    """Build an in-memory package-to-record index from local records."""
-    index = _empty_index()
-    directory = ecosystem_dir(db_dir, ecosystem)
-    if os.path.isdir(directory):
-        for name in os.listdir(directory):
-            if not name.endswith(".json"):
-                continue
-            path = os.path.join(directory, name)
-            try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    record = json.load(fh)
-            except (OSError, ValueError) as exc:
-                raise ValueError(f"cannot read OSV record {path}: {exc}") from exc
-            _index_add_record(index, name[:-5], record)
-    return index
-
-
-def rebuild_index(db_dir: str, ecosystem: str) -> dict:
-    index = build_index(db_dir, ecosystem)
-    save_index(db_dir, ecosystem, index)
-    return index
+def _insert_record(
+    conn: sqlite3.Connection, ecosystem: str, record: dict
+) -> None:
+    record_id = record.get("id")
+    conn.execute(
+        "INSERT OR REPLACE INTO records(ecosystem, id, data) VALUES(?, ?, ?)",
+        (ecosystem, record_id, json.dumps(record, ensure_ascii=False, sort_keys=True)),
+    )
+    conn.execute(
+        "DELETE FROM packages WHERE ecosystem=? AND record_id=?",
+        (ecosystem, record_id),
+    )
+    for package in _record_packages(record):
+        conn.execute(
+            "INSERT OR REPLACE INTO packages(ecosystem, package, record_id) "
+            "VALUES(?, ?, ?)",
+            (ecosystem, package, record_id),
+        )
 
 
 def _check_name(value: str) -> None:
@@ -212,12 +228,13 @@ def download_all_zip(
         if progress:
             progress(message)
 
-    dest = ecosystem_dir(db_dir, ecosystem)
-    os.makedirs(dest, exist_ok=True)
+    _check_name(ecosystem)
+    os.makedirs(db_dir, exist_ok=True)
     url = base_url.rstrip("/") + f"/{ecosystem}/all.zip"
     fd, tmp = tempfile.mkstemp(dir=db_dir, prefix="osv-all-", suffix=".zip")
     os.close(fd)
     report(f"{ecosystem}: downloading {url}")
+    conn: sqlite3.Connection | None = None
     try:
         try:
             with urllib.request.urlopen(url, timeout=120) as resp:
@@ -234,44 +251,36 @@ def download_all_zip(
         except urllib.error.URLError as exc:
             raise MirrorError(f"GET {url}: {exc.reason}") from exc
         report(f"{ecosystem}: downloaded {size} bytes, extracting")
-        index = _empty_index()
-        with zipfile.ZipFile(tmp) as zf:
-            names = [
-                name
-                for name in zf.namelist()
-                if name.lower().endswith(".json") and not name.endswith("/")
-            ]
-            for name in names:
-                record = json.loads(zf.read(name).decode("utf-8"))
-                record_id = record.get("id")
-                if not record_id:
-                    raise MirrorError(f"{ecosystem}/all.zip entry {name!r} has no id")
-                _write_record(db_dir, ecosystem, record_id, record)
-                _index_add_record(index, record_id, record)
-        save_index(db_dir, ecosystem, index)
-        report(f"{ecosystem}: extracted {len(names)} records")
+        conn = connect(db_dir)
+        count = 0
+        # The full archive is authoritative for the ecosystem: replace all of
+        # its rows atomically so a failed sync leaves the previous feed intact.
+        with conn:
+            conn.execute("DELETE FROM records WHERE ecosystem=?", (ecosystem,))
+            conn.execute("DELETE FROM packages WHERE ecosystem=?", (ecosystem,))
+            with zipfile.ZipFile(tmp) as zf:
+                names = [
+                    name
+                    for name in zf.namelist()
+                    if name.lower().endswith(".json") and not name.endswith("/")
+                ]
+                for name in names:
+                    record = json.loads(zf.read(name).decode("utf-8"))
+                    record_id = record.get("id")
+                    if not record_id:
+                        raise MirrorError(
+                            f"{ecosystem}/all.zip entry {name!r} has no id"
+                        )
+                    _insert_record(conn, ecosystem, record)
+                    count += 1
+        report(f"{ecosystem}: extracted {count} records")
     finally:
+        if conn is not None:
+            conn.close()
         try:
             os.remove(tmp)
         except FileNotFoundError:
             pass
-
-
-def _write_record(db_dir: str, ecosystem: str, record_id: str, record: dict) -> None:
-    _check_name(record_id)
-    path = record_path(db_dir, ecosystem, record_id)
-    fd, tmp = tempfile.mkstemp(dir=ecosystem_dir(db_dir, ecosystem), prefix=".osv-", suffix=".json")
-    os.close(fd)
-    try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(record, fh, ensure_ascii=False, sort_keys=True)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.remove(tmp)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def _read_modified_rows(base_url: str, ecosystem: str) -> list[tuple[datetime, str]]:
@@ -308,7 +317,7 @@ def mirror_ecosystem(
 
     _check_name(ecosystem)
     now = now or datetime.now(timezone.utc)
-    os.makedirs(ecosystem_dir(db_dir, ecosystem), exist_ok=True)
+    os.makedirs(db_dir, exist_ok=True)
     cursor = load_cursor(db_dir, ecosystem, now)
     rows = _read_modified_rows(base_url, ecosystem)
     newest = rows[0][0] if rows else cursor
@@ -321,10 +330,8 @@ def mirror_ecosystem(
         return {"downloaded": len(rows), "removed": 0, "unchanged": 0}
 
     report(f"{ecosystem}: incremental sync since {cursor.isoformat()}")
-    index = load_index(db_dir, ecosystem)
-    index_dirty = False
-    downloaded = 0
-    removed = 0
+    to_update: dict[str, dict] = {}
+    to_remove: set[str] = set()
     for when, record_id in rows:
         if when <= cursor:
             break
@@ -332,28 +339,31 @@ def mirror_ecosystem(
         try:
             data = _http_get(base_url, suffix)
         except _NotFound:
-            try:
-                os.remove(record_path(db_dir, ecosystem, record_id))
-            except FileNotFoundError:
-                pass
-            if index is not None:
-                _index_remove_record(index, record_id)
-                index_dirty = True
-            removed += 1
+            to_remove.add(record_id)
             report(f"{ecosystem}: removed {record_id} (withdrawn)")
             continue
-        record = json.loads(data.decode("utf-8"))
-        _write_record(db_dir, ecosystem, record_id, record)
-        if index is not None:
-            _index_add_record(index, record_id, record)
-            index_dirty = True
-        downloaded += 1
+        to_update[record_id] = json.loads(data.decode("utf-8"))
         report(f"{ecosystem}: updated {record_id}")
+
+    if to_update or to_remove:
+        conn = connect(db_dir)
+        try:
+            with conn:
+                for record_id in to_remove:
+                    conn.execute(
+                        "DELETE FROM records WHERE ecosystem=? AND id=?",
+                        (ecosystem, record_id),
+                    )
+                    conn.execute(
+                        "DELETE FROM packages WHERE ecosystem=? AND record_id=?",
+                        (ecosystem, record_id),
+                    )
+                for record_id, record in to_update.items():
+                    _insert_record(conn, ecosystem, record)
+        finally:
+            conn.close()
+
     if rows:
         save_cursor(db_dir, ecosystem, newest)
-    if index is None:
-        rebuild_index(db_dir, ecosystem)
-    elif index_dirty:
-        save_index(db_dir, ecosystem, index)
-    report(f"{ecosystem}: {downloaded} updated, {removed} removed")
-    return {"downloaded": downloaded, "removed": removed, "unchanged": 0}
+    report(f"{ecosystem}: {len(to_update)} updated, {len(to_remove)} removed")
+    return {"downloaded": len(to_update), "removed": len(to_remove), "unchanged": 0}

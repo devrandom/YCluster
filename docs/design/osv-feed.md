@@ -24,17 +24,18 @@ versions. It is designed to move to its own repository unchanged; see
 
 - `osv-feed/mirror.py` — initial full download of `<ecosystem>/all.zip`
   and incremental sync via `<ecosystem>/modified_id.csv`; withdrawn records
-  (404) are removed locally. Storage is under a configurable DB directory
+  (404) are removed locally. All ecosystems are held in one SQLite database
+  (`<db_dir>/osv-feed.sqlite`, rollback-journal mode so the single file is
+  always a valid snapshot), under a configurable DB directory
   (default `~/.cache/osv-feed`; TOML configs at `/etc/osv-feed/config.toml`
   and `~/.config/osv-feed.toml`, env `OSV_FEED_DB_DIR`, or `--db-dir`).
-  Mirror also maintains a per-ecosystem package index
-  (`<ecosystem>.index.json`) that lets `match` load only relevant records;
-  `match` builds it automatically for pre-index mirrors.
+  An in-database `packages` table lets `match` load only relevant records.
 - `osv-feed/matching.py` — OSV range evaluation, dpkg-native version
   comparison with a fallback key, and the three-state classification.
 - `osv-feed/config.py` — merges system + user TOML into one full config;
-  resolves the feed DB dir, the ack DB path, and `[tracking.<name>]`
-  category tables (user tables override the built-in defaults).
+  resolves the feed DB dir, the ack DB path, the read-only snapshot
+  (`immutable_db`), and `[tracking.<name>]` category tables (user tables
+  override the built-in defaults).
 - `osv-feed/categories.py` — built-in default categories (`perimeter`,
   `user`, `network`, `runtimes`) plus `[tracking.<name>]` package sets and
   policy filters (minimum severity, allowed states, summary/details
@@ -92,38 +93,56 @@ avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
 2. **Daily mirror.** An `osv-feed-mirror` `Type=oneshot` service runs
    `osv-feed mirror --ecosystem Debian --ecosystem Ubuntu`, driven by a
    `Persistent=true` daily timer with a randomized delay. Gate execution
-   so only the single writer node runs it.
+   so only the single writer node runs it. All ecosystems land in the one
+   writable `osv-feed.sqlite` on the node's local disk.
 
-3. **Textfile collectors.** Two outputs into the node_exporter textfile
+3. **Publish a read-only snapshot.** SQLite directly over a network
+   filesystem (Samba/NFS) is fragile — locking and journal files on the
+   share. Instead, a separate `Type=oneshot` systemd job in the bigger
+   repo copies `<db_dir>/osv-feed.sqlite` to `/near1` with an atomic
+   replace after each mirror run. Because the DB uses rollback-journal
+   (DELETE) mode, the copied single file is always a complete snapshot.
+   The publish step also copies the EPSS snapshot and the per-ecosystem
+   cursors, which a reader's freshness/`match` run consults; `first-seen.json`
+   is deliberately *not* published — it is per-consumer writable state.
+   `osv-feed` depends only on the writable store being fresh; it never
+   publishes the snapshot itself.
+
+4. **Textfile collectors.** Two outputs into the node_exporter textfile
    directory:
    - per-node perimeter package versions, emitted as version-info metrics
      (`...package_info{pkg,tier,version} 1`) by a local collector that
      maps dpkg binaries to source packages
      (`dpkg-query -W -f '${Package} ${Source}'`);
-   - CVE state via `osv-feed match --format prometheus` (a bare run
-     reports the whole tracked surface), emitting `osv_feed_cve_info` and
-     `osv_feed_cve_first_seen_seconds`.
+   - CVE state via `osv-feed --db-immutable match --format prometheus`
+     (a bare run reports the whole tracked surface) pointed at the
+     `/near1` snapshot, emitting `osv_feed_cve_info` and
+     `osv_feed_cve_first_seen_seconds`. `--db-immutable` opens the file
+     with `mode=ro&immutable=1` so readers take no locks and never write
+     `-journal`/`-wal`/`-shm` files to the share. The first-seen gauge
+     needs writable state, so under `--db-immutable` `first-seen.json`
+     falls back to the local default DB dir
+     (`~/.cache/osv-feed`; pin it with `--state-dir` if needed) and is
+     never written into the read-only `/near1` snapshot.
 
-4. **Alert rules.** Add `PerimeterCVECriticalLongPending` /
+5. **Alert rules.** Add `PerimeterCVECriticalLongPending` /
    `PerimeterCVEHighLongPending` to the Prometheus rules, firing from
    `osv_feed_cve_first_seen_seconds` past the SLA (`for: 1h`), suppressing
    acknowledged CVEs via the `acked="true"` label, and keeping
    Alertmanager `repeat_interval` daily so unresolved `no_fix_yet`
    findings stay visible.
 
-5. **Ownership.** `osv-feed ack add` silences a reviewed finding while
+6. **Ownership.** `osv-feed ack add` silences a reviewed finding while
    keeping it visible; keep the apt `upgradable`/USN check as the
    zero-lag `fix_available` cross-check.
-
-6. **Container images (follow-up).** Digest-pin the images, then scan
-   SBOMs with `osv-scanner` offline (`--offline-vulnerabilities`) against
-   the same local ecosystem data.
 
 ## Verification
 
 - `osv-feed/test.sh` stays green.
-- Run the mirror once and confirm `<db>/Debian.index.json` plus the
-  cursor; `osv-feed match --format prometheus` emits
-  `osv_feed_cve_first_seen_seconds`, scraped by the textfile collector.
+- Run the mirror once and confirm `<db>/osv-feed.sqlite` plus the
+  per-ecosystem cursor; the publish job copies the sqlite file to `/near1`
+  and `osv-feed --db-immutable match --format prometheus` pointed at the
+  snapshot emits `osv_feed_cve_first_seen_seconds`, scraped by the
+  textfile collector.
 - `promtool check rules` passes on the new alert group, and a synthetic
   high/critical pending CVE fires after the SLA window.

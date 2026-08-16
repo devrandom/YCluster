@@ -59,12 +59,18 @@ Local data lives under a DB directory, configurable via the CLI flag, the
 `OSV_FEED_DB_DIR` environment variable, or TOML config files:
 
 ```text
-<db_dir>/<ecosystem>/<id>.json     one OSV record per file
+<db_dir>/osv-feed.sqlite           single shared SQLite store (all ecosystems)
 <db_dir>/<ecosystem>.cursor        last incremental sync timestamp
 <db_dir>/epss.json                 mirrored EPSS snapshot (score + percentile per CVE)
 <db_dir>/epss.cursor               latest EPSS mirror timestamp
 <db_dir>/first-seen.json           first-seen state for prometheus output
 ```
+
+All mirrored ecosystems live in one SQLite database
+(`<db_dir>/osv-feed.sqlite`). The database uses rollback-journal (DELETE)
+journaling, so the single `.sqlite` file is always self-consistent once the
+writer closes — a plain copy of that file after a `mirror` completes is a
+valid snapshot.
 
 Default DB directory: `~/.cache/osv-feed`. CVE acknowledgments are kept in
 a separate, configurable JSON store (`[feed] ack_db`, default
@@ -78,13 +84,15 @@ TOML configuration is read from, in increasing precedence:
 1. `/etc/osv-feed/config.toml` (system)
 2. `~/.config/osv-feed.toml` (per-user, overrides per key)
 
-`OSV_FEED_DB_DIR` / `OSV_FEED_ACK_DB` override both config files, and the
-CLI flags override everything. Example:
+`OSV_FEED_DB_DIR` / `OSV_FEED_ACK_DB` / `OSV_FEED_STATE_DIR` override both
+config files, and the CLI flags override everything. Example:
 
 ```toml
 [feed]
 db_dir = "/srv/osv-feed/db"
 ack_db = "/srv/osv-feed/acks.json"
+state_dir = "/srv/osv-feed/state"
+immutable_db = false
 
 [tracking.perimeter]
 ecosystem = "Debian"
@@ -270,11 +278,35 @@ roughly 590 MB, Debian roughly 69 MB). Daily sync downloads the small
 newer than the saved cursor, and removes local records whose upstream file
 returns 404 (withdrawn). No host data is sent at any point.
 
-Each ecosystem keeps a package index (`<ecosystem>.index.json`) alongside
-the record files, so `match` loads only records that mention the requested
-packages instead of scanning the whole archive. For a pre-index mirror,
-`match` builds the index once on first use (when the DB is writable) and
-persists it.
+All ecosystems share the single `osv-feed.sqlite` store, and each record
+also fills a `packages` table so `match` loads only records that mention
+the requested packages instead of scanning the whole archive.
+
+### Publishing a read-only snapshot
+
+The writable DB lives on a node with local storage for reasons of
+robustness: SQLite over a network filesystem (e.g. on a Samba/NFS share)
+invites locking and journaling problems. A separate deployment job copies
+`<db_dir>/osv-feed.sqlite` to a share like `/near1` after each `mirror`
+run, using an atomic replace so consumers always see a complete file.
+`osv-feed` itself only maintains the writable store; the publish step is
+owned by the surrounding repo's systemd job.
+
+`match` reads that snapshot with `--db-immutable`, which opens the file
+with `mode=ro&immutable=1` so SQLite takes no locks and never writes
+journal/`-wal`/`-shm` files to the share. The surrounding publish job
+copies the EPSS snapshot and the per-ecosystem cursors alongside the DB
+(a reader's `match` run consults them), but `first-seen.json` is never
+written into the read-only snapshot dir: under `--db-immutable` the
+writable `first-seen.json` falls back to the local default DB dir
+(`~/.cache/osv-feed`), so consumers pointed at the `/near1` copy never
+touch the share.
+
+`immutable_db=true` can also be set via `OSV_FEED_IMMUTABLE_DB` or
+`[feed] immutable_db`; the CLI flag wins over both. The first-seen state
+directory can be pinned explicitly with `--state-dir`,
+`OSV_FEED_STATE_DIR`, or `[feed] state_dir` when the default location is
+not appropriate.
 
 ## Tests
 

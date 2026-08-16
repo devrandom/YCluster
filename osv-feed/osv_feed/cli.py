@@ -22,9 +22,12 @@ from .categories import matched_interests
 from .categories import passes_category
 from .config import categories_for_package
 from .config import category_config
+from .config import default_db_dir
 from .config import load_config
 from .config import resolve_ack_db
 from .config import resolve_db_dir
+from .config import resolve_immutable_db
+from .config import resolve_state_dir
 from .config import tracking_categories
 from .installed import PackageNotInstalledError
 from .installed import host_ecosystem
@@ -450,6 +453,26 @@ def build_parser() -> argparse.ArgumentParser:
             "env OSV_FEED_ACK_DB overrides config, CLI wins)"
         ),
     )
+    parser.add_argument(
+        "--db-immutable",
+        action="store_true",
+        default=None,
+        help=(
+            "open the mirrored store immutable/read-only (no locking, no "
+            "journal writes) for consumers pointed at an atomic snapshot, "
+            "e.g. on a network share; env OSV_FEED_IMMUTABLE_DB and "
+            "[feed] immutable_db also work, CLI wins"
+        ),
+    )
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        help=(
+            "writable directory for first-seen state, separate from a "
+            "read-only snapshot DB dir when --db-immutable is used; env "
+            "OSV_FEED_STATE_DIR overrides [feed] state_dir, CLI wins"
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     mirror = subparsers.add_parser("mirror", help="sync OSV ecosystem data locally")
@@ -560,6 +583,13 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config()
     args.db_dir = resolve_db_dir(args.db_dir)
     args.ack_db = resolve_ack_db(args.ack_db)
+    args.immutable = resolve_immutable_db(args.db_immutable)
+    # First-seen state is writable and must never land on a read-only
+    # snapshot share; fall back to the local default DB dir when immutable.
+    args.state_dir = resolve_state_dir(
+        args.state_dir,
+        default_db_dir() if args.immutable else args.db_dir,
+    )
     if args.command == "mirror":
         progress = None if args.quiet else (lambda message: print(message, file=sys.stderr))
         for ecosystem in _mirror_ecosystems(args):
@@ -575,9 +605,9 @@ def main(argv: list[str] | None = None) -> int:
     specs = _parse_specs(args, config)
     if _warn_stale_feeds(args.db_dir, specs):
         return 1
-    findings = match_specs(args.db_dir, specs)
+    findings = match_specs(args.db_dir, specs, immutable=args.immutable)
     findings = _filtered_findings(findings, args, config, load_acks(args.ack_db))
-    first_seen = first_seen_for(args.db_dir, findings)
+    first_seen = first_seen_for(args.state_dir, findings)
     if args.format == "json":
         json.dump({"findings": findings, "first_seen": first_seen}, sys.stdout, indent=2)
         sys.stdout.write("\n")

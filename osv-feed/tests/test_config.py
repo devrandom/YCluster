@@ -15,6 +15,7 @@ class ConfigTest(unittest.TestCase):
         env = dict(os.environ)
         env.pop("OSV_FEED_DB_DIR", None)
         env.pop("OSV_FEED_ACK_DB", None)
+        env.pop("OSV_FEED_IMMUTABLE_DB", None)
         env["OSV_FEED_SYSTEM_CONFIG"] = self.system
         env["OSV_FEED_USER_CONFIG"] = self.user
         self.env_patch = mock.patch.dict(os.environ, env, clear=True)
@@ -70,6 +71,57 @@ class ConfigTest(unittest.TestCase):
         self._write(self.user, '[feed]\nack_db = "/srv/osv-feed/acks.json"\n')
         with mock.patch.dict(os.environ, {"OSV_FEED_ACK_DB": "/tmp/acks.json"}, clear=False):
             self.assertEqual(config.resolve_ack_db("/cli/acks.json"), "/cli/acks.json")
+
+    def test_immutable_db_default_false(self):
+        self.assertFalse(config.resolve_immutable_db(None))
+
+    def test_immutable_db_from_config(self):
+        self._write(self.system, '[feed]\nimmutable_db = true\n')
+        self.assertTrue(config.resolve_immutable_db(None))
+
+    def test_immutable_db_env_wins_over_config(self):
+        self._write(self.system, '[feed]\nimmutable_db = true\n')
+        with mock.patch.dict(
+            os.environ, {"OSV_FEED_IMMUTABLE_DB": "false"}, clear=False
+        ):
+            self.assertFalse(config.resolve_immutable_db(None))
+
+    def test_immutable_db_cli_wins_over_everything(self):
+        self._write(self.system, '[feed]\nimmutable_db = true\n')
+        with mock.patch.dict(
+            os.environ, {"OSV_FEED_IMMUTABLE_DB": "false"}, clear=False
+        ):
+            self.assertTrue(config.resolve_immutable_db(True))
+
+    def test_state_dir_defaults_to_writable_default(self):
+        self.assertEqual(
+            config.resolve_state_dir(None, "/data/osv-feed"), "/data/osv-feed"
+        )
+
+    def test_state_dir_from_config(self):
+        self._write(self.system, '[feed]\nstate_dir = "/srv/osv-state"\n')
+        self.assertEqual(
+            config.resolve_state_dir(None, "/data/osv-feed"), "/srv/osv-state"
+        )
+
+    def test_state_dir_env_wins_over_config(self):
+        self._write(self.system, '[feed]\nstate_dir = "/srv/osv-state"\n')
+        with mock.patch.dict(
+            os.environ, {"OSV_FEED_STATE_DIR": "/env/state"}, clear=False
+        ):
+            self.assertEqual(
+                config.resolve_state_dir(None, "/data/osv-feed"), "/env/state"
+            )
+
+    def test_state_dir_cli_wins_over_everything(self):
+        self._write(self.system, '[feed]\nstate_dir = "/srv/osv-state"\n')
+        with mock.patch.dict(
+            os.environ, {"OSV_FEED_STATE_DIR": "/env/state"}, clear=False
+        ):
+            self.assertEqual(
+                config.resolve_state_dir("/cli/state", "/data/osv-feed"),
+                "/cli/state",
+            )
 
     def test_tracking_categories_loaded(self):
         self._write(

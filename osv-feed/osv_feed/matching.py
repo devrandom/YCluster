@@ -18,12 +18,11 @@ import tempfile
 import time
 from typing import Callable
 
+import sqlite3
+
 from .epss import load_epss
-from .mirror import build_index
-from .mirror import ecosystem_dir
-from .mirror import load_index
-from .mirror import record_path
-from .mirror import save_index
+from .mirror import connect
+from .mirror import db_path
 
 VersionCompare = Callable[[str, str], int]
 
@@ -93,45 +92,54 @@ def _fallback_key(version: str) -> tuple:
 
 
 def iter_records(db_dir: str, ecosystem: str):
-    directory = ecosystem_dir(db_dir, ecosystem)
-    if not os.path.isdir(directory):
+    """Yield every OSV record for ``ecosystem`` from the SQLite store."""
+    try:
+        conn = connect(db_dir, read_only=True)
+    except sqlite3.OperationalError:
         return
-    for name in sorted(os.listdir(directory)):
-        if not name.endswith(".json"):
-            continue
-        path = os.path.join(directory, name)
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                yield json.load(fh)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"cannot read OSV record {path}: {exc}") from exc
+    try:
+        rows = conn.execute(
+            "SELECT data FROM records WHERE ecosystem=? ORDER BY id", (ecosystem,)
+        )
+        for row in rows:
+            try:
+                yield json.loads(row[0])
+            except ValueError as exc:
+                raise ValueError(
+                    f"cannot read OSV record in {db_path(db_dir)}: {exc}"
+                ) from exc
+    finally:
+        conn.close()
 
 
-def _candidate_records(db_dir: str, ecosystem: str, packages: list[str]) -> list[dict]:
-    """Load only records that may mention any requested package.
+def _candidate_records(
+    db_dir: str, ecosystem: str, packages: list[str], *, immutable: bool = False
+) -> list[dict]:
+    """Load only records that mention any requested package.
 
-    Uses the mirror's package index when present, and builds it in-memory
-    (persisted when the DB is writable) if the ecosystem predates indexing.
+    Uses the in-database package index so only candidate records are read,
+    regardless of how many ecosystems share the store.
     """
-    index = load_index(db_dir, ecosystem)
-    if index is None:
-        index = build_index(db_dir, ecosystem)
-        try:
-            save_index(db_dir, ecosystem, index)
-        except OSError:
-            pass
-    record_ids: set[str] = set()
-    for package in packages:
-        record_ids.update(index.get("packages", {}).get(package.lower(), []))
-    records: list[dict] = []
-    for record_id in sorted(record_ids):
-        path = record_path(db_dir, ecosystem, record_id)
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                records.append(json.load(fh))
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"cannot read OSV record {path}: {exc}") from exc
-    return records
+    wanted = [package.lower() for package in packages]
+    if not wanted:
+        return []
+    placeholders = ",".join("?" for _ in wanted)
+    sql = (
+        "SELECT DISTINCT r.data FROM records r "
+        "JOIN packages p ON p.ecosystem = r.ecosystem AND p.record_id = r.id "
+        f"WHERE r.ecosystem=? AND p.package IN ({placeholders})"
+    )
+    try:
+        conn = connect(db_dir, read_only=True, immutable=immutable)
+    except sqlite3.OperationalError:
+        return []
+    try:
+        return [
+            json.loads(row[0])
+            for row in conn.execute(sql, [ecosystem, *wanted]).fetchall()
+        ]
+    finally:
+        conn.close()
 
 
 def _range_fix_status(
@@ -355,12 +363,18 @@ def match_specs(
     db_dir: str,
     specs: list[dict],
     cmp: VersionCompare = version_compare,
+    *,
+    immutable: bool = False,
 ) -> list[dict]:
     """Match package specs against the local mirror.
 
     specs items: {"ecosystem": str, "package": str, "version": str}
     Returns the findings list; first-seen state is managed separately by
     ``first_seen_for`` after any filtering has been applied.
+
+    ``immutable`` opens the store without locking and without writing
+    journal files — intended for read-only consumers pointed at an atomic
+    snapshot (e.g. on a network share).
     """
     epss = load_epss(db_dir)
     by_ecosystem: dict[str, list[dict]] = {}
@@ -370,7 +384,10 @@ def match_specs(
     findings: list[dict] = []
     for ecosystem, ecosystem_specs in by_ecosystem.items():
         records = _candidate_records(
-            db_dir, ecosystem, [spec["package"] for spec in ecosystem_specs]
+            db_dir,
+            ecosystem,
+            [spec["package"] for spec in ecosystem_specs],
+            immutable=immutable,
         )
         for spec in ecosystem_specs:
             if spec.get("version") is None:

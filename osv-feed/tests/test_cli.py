@@ -11,15 +11,12 @@ from unittest import mock
 
 from osv_feed import cli
 from osv_feed import matching
+from osv_feed import mirror
 
 
 def _write_record(db_dir, ecosystem, record):
-    directory = os.path.join(db_dir, ecosystem)
-    os.makedirs(directory, exist_ok=True)
-    with open(
-        os.path.join(directory, record["id"] + ".json"), "w", encoding="utf-8"
-    ) as fh:
-        json.dump(record, fh)
+    with mirror.connect(db_dir) as conn:
+        mirror._insert_record(conn, ecosystem, record)
 
 
 HIGH_CVSS = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
@@ -79,6 +76,57 @@ class CliMatchTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             code = cli.main(["--db-dir", self.db] + argv)
         return code, out.getvalue()
+
+    def test_db_immutable_flag_flows_to_match(self):
+        local_state = tempfile.mkdtemp(prefix="osv-local-")
+        self.addCleanup(shutil.rmtree, local_state, ignore_errors=True)
+        with mock.patch("osv_feed.cli.feed_status", return_value="ok"), mock.patch(
+            "osv_feed.cli.match_specs", return_value=[]
+        ) as match_specs, mock.patch(
+            "osv_feed.cli.default_db_dir", return_value=local_state
+        ):
+            code, _ = self._run(
+                ["--db-immutable", "match", "--pkg", "openssh=1.0", "--format", "json"]
+            )
+        self.assertEqual(0, code)
+        self.assertTrue(match_specs.call_args.kwargs["immutable"])
+
+    def test_db_immutable_default_state_dir_is_local_not_snapshot(self):
+        local_state = tempfile.mkdtemp(prefix="osv-local-")
+        self.addCleanup(shutil.rmtree, local_state, ignore_errors=True)
+        with mock.patch("osv_feed.cli.default_db_dir", return_value=local_state):
+            code, _ = self._run(
+                [
+                    "--db-immutable",
+                    "match",
+                    "--pkg",
+                    "openssh=1:9.6p1-3ubuntu13.3",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(0, code)
+        self.assertTrue(os.path.exists(os.path.join(local_state, "first-seen.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.db, "first-seen.json")))
+
+    def test_db_immutable_state_dir_override_stays_off_snapshot(self):
+        state_dir = tempfile.mkdtemp(prefix="osv-state-")
+        self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
+        code, _ = self._run(
+            [
+                "--db-immutable",
+                "--state-dir",
+                state_dir,
+                "match",
+                "--pkg",
+                "openssh=1:9.6p1-3ubuntu13.3",
+                "--format",
+                "json",
+            ]
+        )
+        self.assertEqual(0, code)
+        self.assertTrue(os.path.exists(os.path.join(state_dir, "first-seen.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.db, "first-seen.json")))
 
     def test_json_output(self):
         code, output = self._run(
