@@ -54,6 +54,8 @@ Exposes six tools:
 
 - **`kill`** — terminate a backgrounded run by `session_id`. Only kills sessions owned by the caller's MCP session; attempts on other clients' sessions return `ERROR: session not found`. SIGTERM, then SIGKILL after 2s. Returns how many lines of output were captured before the kill.
 
+`tail` and `status` are rate-limited per session: at most 3 calls per 20 seconds (all tunable via env). A call over the limit is refused with a `RATE-LIMITED: …` message recommending the agent sleep (at least 10s) before polling again, so the agent doesn't busy-poll a long-running session.
+
 ## Transport
 
 Streamable HTTP at `http://127.0.0.1:4003/mcp` (configurable via `CE_HTTP_HOST` / `CE_HTTP_PORT` / `CE_HTTP_PATH`). The server runs as a long-lived daemon managed by `bash mcp/cluster-exec/cedaemon`:
@@ -183,6 +185,9 @@ run(command="cd /etc/ansible && ansible-playbook admin/install-ycluster-package.
 | `CE_AUTO_BG_TIMEOUT_S` | `10` | Auto-bg threshold in seconds — `run` tool calls return with `BACKGROUNDED session=<id>` after this many seconds of foreground time. Bump (e.g. `120`) for known-long commands; set to 0 to disable auto-backgrounding (foreground blocks until `timeout_s`). |
 | `CE_PROGRESS_INTERVAL_S` | `1.0` | Progress notification cadence in seconds. |
 | `CE_PROGRESS_TAIL_LINES` | `50` | Lines of cumulative tail shown in each progress notification. |
+| `CE_TAIL_STATUS_MAX_CALLS` | `3` | Max `tail`/`status` calls per session inside the window; beyond this, calls are refused with a backoff recommendation. |
+| `CE_TAIL_STATUS_WINDOW_S` | `20` | Sliding window (seconds) over which the `tail`/`status` rate limit counts calls. |
+| `CE_TAIL_STATUS_RECOMMENDED_SLEEP_S` | `10` | Minimum backoff (seconds) an agent is told to sleep after a rate-limited `tail`/`status` call. |
 | `CE_CAPTURE_REQUESTS` | unset | Debug-only: when set to a file path, every incoming HTTP request is appended to that path as one JSONL line (ts, method, path, headers, body). The bearer token is redacted to `Bearer ***` before write; codex `x-codex-turn-metadata.workspaces[*].associated_remote_urls` is reduced to hostname only and `latest_git_commit_hash` to `***`. Use to inspect what an MCP client actually sends on the wire. |
 
 ## Development
@@ -191,7 +196,7 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema tests.test_stop_endpoint
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_ratelimit tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema tests.test_stop_endpoint
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):

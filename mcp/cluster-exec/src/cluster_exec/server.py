@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import secrets
 import signal
@@ -16,7 +17,7 @@ from pydantic import AnyHttpUrl, ConfigDict, create_model
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import auth, exec, log, validate
+from . import auth, exec, log, ratelimit, validate
 
 
 # All tools must reject unknown arguments. The Pydantic default is
@@ -102,7 +103,10 @@ SERVER = MCPServer(
         "recover with `tail`/`kill`. Full "
         "`run` output is logged to the same JSONL file; the returned "
         "text is the head/tail-truncated merged stream with `[stderr]` "
-        "tags on stderr lines. `put` and `get` are foreground only (no "
+        "tags on stderr lines. `tail` and `status` polling is rate-limited "
+        "per session (max `CE_TAIL_STATUS_MAX_CALLS` per "
+        "`CE_TAIL_STATUS_WINDOW_S`s) \u2014 over the limit calls are refused "
+        "with a backoff recommendation. `put` and `get` are foreground only (no "
         "auto-backgrounding) and honor the same hard `timeout_s` (default "
         "1800s; set to 0 to disable). All three exec tools accept "
         "`hostname=\"localhost\"` to skip the inner ssh and run directly "
@@ -137,6 +141,48 @@ _TIMEOUT_S = _env_float("CE_TIMEOUT_S", 1800.0)
 _AUTO_BG_S = _env_float("CE_AUTO_BG_TIMEOUT_S", 10.0)
 _PROGRESS_INTERVAL_S = _env_float("CE_PROGRESS_INTERVAL_S", 1.0)
 _PROGRESS_TAIL_LINES = _env_int("CE_PROGRESS_TAIL_LINES", 50)
+
+# Anti busy-polling guard for the `tail`/`status` tools. Applied per
+# (tool, session) key: refuse calls more often than `_TAIL_STATUS_MAX_CALLS`
+# in `_TAIL_STATUS_WINDOW_S` seconds and tell the agent to sleep at least
+# `_TAIL_STATUS_RECOMMENDED_SLEEP_S` before polling again.
+_TAIL_STATUS_MAX_CALLS = _env_int("CE_TAIL_STATUS_MAX_CALLS", 3)
+_TAIL_STATUS_WINDOW_S = _env_float("CE_TAIL_STATUS_WINDOW_S", 20.0)
+_TAIL_STATUS_RECOMMENDED_SLEEP_S = _env_float(
+    "CE_TAIL_STATUS_RECOMMENDED_SLEEP_S", 10.0
+)
+_TAIL_STATUS_LIMITER = ratelimit.RateLimiter(
+    max_calls=_TAIL_STATUS_MAX_CALLS,
+    window_s=_TAIL_STATUS_WINDOW_S,
+    recommended_sleep_s=_TAIL_STATUS_RECOMMENDED_SLEEP_S,
+)
+
+
+def _poll_allowed(
+    tool: str, session: str | None, limiter: ratelimit.RateLimiter | None = None
+) -> str | None:
+    """Return a refusal message if `tool` on `session` is over its limit.
+
+    Refused calls don't consume a slot, so a caller that keeps hitting the
+    limit keeps getting a stable backoff recommendation until the window
+    clears. `session=None` (tail with no filter, status listing) shares one
+    unscoped bucket per tool. Pass `limiter` for tests; defaults to the
+    server-wide singleton.
+    """
+    limiter = limiter or _TAIL_STATUS_LIMITER
+    key = f"{tool}:{session or '_unscoped'}"
+    if limiter.allow(key):
+        return None
+    wait = max(
+        limiter.recommended_sleep_s,
+        math.ceil(limiter.backoff_seconds(key)),
+    )
+    scope = f"session {session!r}" if session else "the unscoped log/listing"
+    return (
+        f"RATE-LIMITED: too many {tool} calls for {scope} "
+        f"(max {limiter.max_calls} per {int(limiter.window_s)}s). "
+        f"Back off \u2014 sleep at least {int(wait)}s before polling again."
+    )
 
 
 # Redaction helpers used by the debug-only request capture middleware
@@ -559,7 +605,11 @@ async def get(
         "Optional `session` filter limits output to one session. The "
         "raw JSONL is written by `run` \u2014 useful for inspecting a "
         "backgrounded run (the `session` it returned) or recovering "
-        "output that was truncated in a `run` result."
+        "output that was truncated in a `run` result. "
+        "Polling is rate-limited per session (at most "
+        "`CE_TAIL_STATUS_MAX_CALLS` calls per `CE_TAIL_STATUS_WINDOW_S` "
+        "seconds); over the limit the call is refused with a backoff "
+        "recommendation."
     ),
 )
 async def tail(
@@ -573,6 +623,9 @@ async def tail(
                 text=f"ERROR: tail_lines must be non-negative, got {tail_lines}",
             )
         ]
+    refused = _poll_allowed("tail", session)
+    if refused is not None:
+        return [TextContent(type="text", text=refused)]
     log.init(_LOG_PATH)
     events = log.tail(_LOG_PATH, n=tail_lines, session=session)
     text = log.render(events, path=_LOG_PATH, requested=tail_lines)
@@ -645,7 +698,11 @@ def _session_state(bg, log_path: Path) -> str:
         "`session_id` it reports any run on this server \u2014 including one "
         "started by another thread/agent that handed you the id \u2014 showing "
         "whether the process is still running or has exited, line count so "
-        "far, and remaining time before the hard timeout kills it."
+        "far, and remaining time before the hard timeout kills it. "
+        "Polling is rate-limited per session (at most "
+        "`CE_TAIL_STATUS_MAX_CALLS` calls per `CE_TAIL_STATUS_WINDOW_S` "
+        "seconds); over the limit the call is refused with a backoff "
+        "recommendation."
     ),
 )
 async def status(
@@ -655,6 +712,9 @@ async def status(
     log.init(_LOG_PATH)
     if session_id is not None and not session_id:
         return [TextContent(type="text", text="ERROR: session_id must not be empty when provided")]
+    refused = _poll_allowed("status", session_id)
+    if refused is not None:
+        return [TextContent(type="text", text=refused)]
     if session_id:
         bg = exec.get_backgrounded(session_id)
         if bg is None:

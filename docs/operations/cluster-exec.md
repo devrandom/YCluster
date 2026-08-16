@@ -37,6 +37,13 @@ tool call always returns within 10s, either with the result or with
 `CE_AUTO_BG_TIMEOUT_S=120 bash mcp/cluster-exec/cedaemon --start`) to hold a
 known-long command in the foreground rather than auto-backgrounding.
 
+`tail` and `status` are rate-limited per session (max
+`CE_TAIL_STATUS_MAX_CALLS`, default 3 calls per `CE_TAIL_STATUS_WINDOW_S`,
+default 20s). A call over the limit is refused with a `RATE-LIMITED: …`
+message recommending the agent sleep (at least
+`CE_TAIL_STATUS_RECOMMENDED_SLEEP_S`, default 10s) before polling again — so
+pace polls instead of busy-looping while a long command runs.
+
 Full stdout/stderr is logged (untruncated) to `./tmp/cluster.log` as JSONL
 events; the tool result returns only the head/tail (defaults 25/25) of the
 chronologically merged stream, with `[stderr]` tags. Progress notifications
