@@ -30,13 +30,17 @@ class MirrorHealth(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             old = os.path.join(d, "Ubuntu.cursor")
             new = os.path.join(d, "Debian.cursor")
+            fresh = os.path.join(d, "Go.cursor")
             with open(old, "w") as fh:
                 fh.write("x")
             with open(new, "w") as fh:
                 fh.write("x")
+            with open(fresh, "w") as fh:
+                fh.write("x")
             cut = time.time() - 100
-            os.utime(old, (cut, cut))          # Ubuntu: 100s old
+            os.utime(old, (cut, cut))            # Ubuntu: 100s old
             os.utime(new, (cut + 50, cut + 50))  # Debian: 50s old
+            os.utime(fresh, (cut + 100, cut + 100))  # Go: fresh
             present, age = col.mirror_health(d)
             self.assertTrue(present)
             # The most-stale cursor (Ubuntu) drives the reported age.

@@ -39,7 +39,7 @@ OSV_FEED = os.environ.get("OSV_FEED_BIN", "/usr/local/bin/osv-feed")
 DB_DIR = os.environ.get("OSV_FEED_DB_DIR", "/near1/osv-feed")
 # Cursor files the mirror writes; the mirror is daily, so more than two
 # missed days means the feed is stale and matching can't be trusted.
-CURSOR_FILES = ("Ubuntu.cursor", "Debian.cursor", "epss.cursor")
+CURSOR_FILES = ("Ubuntu.cursor", "Debian.cursor", "Go.cursor", "epss.cursor")
 MATCH_TIMEOUT = 600
 
 

@@ -25,3 +25,12 @@ ecosystem = "{{ osv_feed_ecosystem }}"
 packages = {{ osv_feed_runtimes_packages | list | to_json }}
 severity = "high"
 states = ["no_fix_yet", "fix_available"]
+
+# Self-built Go binaries we ship from source pins are tracked against the OSV
+# Go ecosystem (not the distro), pinned to the exact version we build via the
+# `name=version` package form.
+[tracking.selfbuilt]
+ecosystem = "{{ osv_feed_selfbuilt_ecosystem }}"
+packages = {{ osv_feed_selfbuilt_packages | list | to_json }}
+severity = "{{ osv_feed_selfbuilt_severity }}"
+states = ["no_fix_yet", "fix_available"]

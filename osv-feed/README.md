@@ -119,6 +119,11 @@ matching run. `--category <name>` resolves `[tracking.<name>]` and applies:
   `summary`/`details`, so e.g. a perimeter category can focus on
   remotely exploitable issues.
 
+Self-built Go binaries (e.g. `frp`) are tracked the same way against the
+`Go` ecosystem, pinned to the version we build via the `name=version`
+package form (`ecosystem = "Go"`, `packages = ["github.com/fatedier/frp=0.70.0"]`),
+so no dpkg resolution is needed on the collector.
+
 ### Built-in default categories
 
 A few category names are built in and work without any config. Defining a
@@ -162,7 +167,8 @@ runs use `modified_id.csv` for changes):
 
 ```bash
 python3 -m osv_feed --db-dir /srv/osv-feed/db mirror --ecosystem Ubuntu
-python3 -m osv_feed mirror --ecosystem Ubuntu --ecosystem Debian
+python3 -m osv_feed mirror --ecosystem Ubuntu --ecosystem Debian --ecosystem Go
+python3 -m osv_feed mirror --ecosystem Go   # self-built Go binaries (e.g. frp)
 ```
 
 When `--ecosystem` is omitted on `mirror` or `match`, it defaults to the
@@ -243,9 +249,10 @@ The prometheus format emits:
   — `1` per finding, state is `patched`, `fix_available`, or `no_fix_yet`.
   `severity` is the distro label when present (Debian urgency, Ubuntu
   priority) or a CVSS 3.x qualitative rating
-  (`low`/`medium`/`high`/`critical`); it may be empty when the record has no
-  usable severity. `category` is the tracking category name (empty for
-  uncategorized matches) and `acked` is `true`/`false`.
+  (`low`/`medium`/`high`/`critical`); CVSS 4.0 / GHSA records use the
+  advisory's own `database_specific.severity` label. It may be empty when
+  the record has no usable severity. `category` is the tracking category
+  name (empty for uncategorized matches) and `acked` is `true`/`false`.
 - `osv_feed_cve_first_seen_seconds{...}` — persisted first-seen epoch so
   alerts can fire on "pending longer than N days".
 - `osv_feed_cve_epss_score{ecosystem,package,version,cve}` and
@@ -273,10 +280,11 @@ The prometheus format emits:
 ## Mirror mechanics
 
 Initial sync downloads `<ecosystem>/all.zip` (for example Ubuntu is
-roughly 590 MB, Debian roughly 69 MB). Daily sync downloads the small
-`<ecosystem>/modified_id.csv` (about 3 MB for Ubuntu), fetches only records
-newer than the saved cursor, and removes local records whose upstream file
-returns 404 (withdrawn). No host data is sent at any point.
+roughly 590 MB, Debian roughly 69 MB, Go roughly 11 MB). Daily sync
+downloads the small `<ecosystem>/modified_id.csv` (about 3 MB for Ubuntu),
+fetches only records newer than the saved cursor, and removes local records
+whose upstream file returns 404 (withdrawn). No host data is sent at any
+point.
 
 All ecosystems share the single `osv-feed.sqlite` store, and each record
 also fills a `packages` table so `match` loads only records that mention

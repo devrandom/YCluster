@@ -130,12 +130,16 @@ Extend the existing dependency gate rather than creating a parallel scanner:
   report plus an Ubuntu/USN security-source check for the short package list;
   alert when a security update for a P0-U or P0-A package is available but not
   yet applied within SLA. The local OSV feed (`osv-feed/`, see
-  `docs/design/osv-feed.md`) implements the leak-free Ubuntu/Debian mirror
-  and three-state matcher (`patched` / `fix_available` / `no_fix_yet`) without
-  posting installed versions anywhere; wire its `--format prometheus` output
+  `docs/design/osv-feed.md`) implements the leak-free Ubuntu/Debian/Go
+  mirror and three-state matcher
+  (`patched` / `fix_available` / `no_fix_yet`) without posting installed
+  versions anywhere; wire its `--format prometheus` output
   into the textfile collector and use the first-seen gauge for the pending
   CVE SLA.
-- frp/source pins: keep `deps-vuln-src`, but check the actual buildhost
+- frp/source pins: the osv-feed `Go` ecosystem already tracks `frp`
+  against the build pin (the `[tracking.selfbuilt]` category pins
+  `github.com/fatedier/frp=<pin version>`); keep `deps-vuln-src`, and also
+  check the actual buildhost
   `/opt/src/<tree>` HEAD against the playbook pin and verify the installed
   binary version matches the pin.
 - containers: add a source-built image scanner (for example `trivy` via

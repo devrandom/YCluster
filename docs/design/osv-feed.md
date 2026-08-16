@@ -63,7 +63,8 @@ versions. It is designed to move to its own repository unchanged; see
   incremental sync tests use a local HTTP bucket fixture).
 
 Sizes (compressed, measured 2026-08-15): Ubuntu `all.zip` ~590 MB,
-Debian ~69 MB, PyPI ~32 MB; Ubuntu `modified_id.csv` ~3 MB per day.
+Debian ~69 MB, PyPI ~32 MB, Go ~11 MB; Ubuntu `modified_id.csv` ~3 MB
+per day.
 
 ## YCluster wiring (repo-landed)
 
@@ -91,7 +92,9 @@ avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
    runs are deterministic).
 
 2. **Daily mirror.** An `osv-feed-mirror` `Type=oneshot` service runs
-   `osv-feed mirror --ecosystem Debian --ecosystem Ubuntu`, driven by a
+   `osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go`
+   (the Go feed tracks self-built binaries like `frp` that we ship from
+   source pins), driven by a
    `Persistent=true` daily timer with a randomized delay. Gate execution
    so only the single writer node runs it. All ecosystems land in the one
    writable `osv-feed.sqlite` on the node's local disk.

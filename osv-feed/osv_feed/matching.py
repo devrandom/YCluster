@@ -243,11 +243,36 @@ def _cvss3_qualitative(vector: str) -> str | None:
     return "critical"
 
 
+# CVSS 4.0 has no stable vector-only qualitative rating (the base score uses
+# a macrovector lookup), so CVSS 4.0 records fall back to the advisory's own
+# qualitative label published in OSV ``database_specific.severity`` (GitHub's
+# rating on GHSA/Go records), same trust model as Debian urgency / Ubuntu
+# priority labels.
+_GHSA_SEVERITY = {
+    "CRITICAL": "critical",
+    "HIGH": "high",
+    "MODERATE": "medium",
+    "LOW": "low",
+}
+
+
+def _osv_db_qualitative(record: dict) -> str | None:
+    """Return the OSV ``database_specific.severity`` as a canonical label."""
+    value = (record.get("database_specific") or {}).get("severity")
+    if not value:
+        return None
+    label = _GHSA_SEVERITY.get(str(value).upper())
+    if label is not None:
+        return label
+    return str(value).lower()
+
+
 def _severity_label(record: dict, package: str) -> str:
     """Best human severity for a package finding.
 
     Prefers distro-specific labels (Debian ``urgency``, Ubuntu priority
-    scores) and falls back to the CVSS 3.x qualitative rating.
+    scores, OSV ``database_specific.severity`` for CVSS 4.0/GHSA records) and
+    falls back to the CVSS 3.x qualitative rating.
     """
     distro: list[str] = []
     cvss: list[str] = []
@@ -257,13 +282,16 @@ def _severity_label(record: dict, package: str) -> str:
             score = sev.get("score")
             if not score:
                 continue
-            if (sev.get("type") or "").upper() in ("CVSS_V3", "CVSS_V4"):
+            if (sev.get("type") or "").upper() == "CVSS_V3":
                 qual = _cvss3_qualitative(str(score))
                 if qual and qual not in cvss:
                     cvss.append(qual)
             elif str(score) not in distro:
                 distro.append(str(score))
 
+    db_qual = _osv_db_qualitative(record)
+    if db_qual and db_qual not in distro:
+        distro.append(db_qual)
     for entry in _affected_entries(record, package):
         urgency = (entry.get("ecosystem_specific") or {}).get("urgency")
         if urgency and str(urgency).lower() not in ("not yet assigned", "end-of-life"):

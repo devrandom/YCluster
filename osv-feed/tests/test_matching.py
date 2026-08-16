@@ -172,6 +172,61 @@ class MatchSpecsTest(unittest.TestCase):
         )
         self.assertEqual("", findings[0]["severity"])
 
+    def test_severity_cvss4_uses_osv_database_label(self):
+        # CVSS 4.0 has no stable vector-only qualitative rating; the
+        # advisory's own ``database_specific.severity`` (GitHub rating on
+        # GHSA/Go records) supplies the label.
+        record = {
+            "id": "GHSA-CVSS4",
+            "database_specific": {"severity": "HIGH"},
+            "severity": [
+                {"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N"}
+            ],
+            "affected": [{"package": {"name": "github.com/fatedier/frp"}}],
+        }
+        _write_record(self.db, "Go", record)
+        findings = matching.match_specs(
+            self.db,
+            [{"ecosystem": "Go", "package": "github.com/fatedier/frp", "version": "0.70.0"}],
+        )
+        self.assertEqual("high", findings[0]["severity"])
+
+    def test_go_semver_frp_range_and_patch(self):
+        record = {
+            "id": "GHSA-26gq-p25f-99cp",
+            "database_specific": {"severity": "HIGH"},
+            "severity": [
+                {"type": "CVSS_V4", "score": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N"}
+            ],
+            "affected": [
+                {
+                    "package": {"ecosystem": "Go", "name": "github.com/fatedier/frp"},
+                    "ranges": [
+                        {
+                            "type": "SEMVER",
+                            "events": [
+                                {"introduced": "0.53.0"},
+                                {"fixed": "0.70.1"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        _write_record(self.db, "Go", record)
+        cases = {
+            "0.70.0": ("fix_available", "high"),   # deployed pin: inside range, fixed in 0.70.1
+            "0.70.1": ("patched", "high"),          # at/after the fix
+            "0.40.0": ("patched", "high"),          # before introduced
+        }
+        for version, (state, severity) in cases.items():
+            findings = matching.match_specs(
+                self.db,
+                [{"ecosystem": "Go", "package": "github.com/fatedier/frp", "version": version}],
+            )
+            self.assertEqual(state, findings[0]["state"], version)
+            self.assertEqual(severity, findings[0]["severity"], version)
+
     def test_candidate_records_uses_package_index(self):
         _write_record(
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-A", "openssh")

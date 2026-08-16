@@ -1,6 +1,6 @@
 ---
 # Install and wire the local OSV CVE feed (osv-feed) on a single collector
-# node. The mirror writes Debian/Ubuntu + EPSS into a local SQLite store on
+# node. The mirror writes Debian/Ubuntu/Go + EPSS into a local SQLite store on
 # the node's disk (SQLite over a network share is fragile), then a publish
 # job snapshots that store to the shared /near1 dir; the collector matches
 # the snapshot read-only and writes CVE state to the node_exporter textfile
@@ -51,6 +51,13 @@
       - containerd
       - runc
       - podman
+    # Self-built Go binaries we ship from source pins (see app/build-frp.yml),
+    # tracked against the OSV Go ecosystem. The `name=version` form pins the
+    # version we build, so no dpkg resolution is needed on the collector node.
+    osv_feed_selfbuilt_ecosystem: Go
+    osv_feed_selfbuilt_packages:
+      - github.com/fatedier/frp=0.70.0
+    osv_feed_selfbuilt_severity: high
 
   tasks:
     - name: Ensure local feed DB directory exists
@@ -148,7 +155,7 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu
+          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go
           # Publish the read-only snapshot to the shared dir only once the
           # local writable store is fully written and closed.
           ExecStartPost=/usr/bin/python3 {{ osv_feed_publish_path }}
@@ -251,7 +258,7 @@
     # Mirror then publish, so the shared snapshot exists before collecting.
     - name: Run the initial mirror and publish so the feed exists before matching
       shell: |
-        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu \
+        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go \
           && /usr/bin/python3 {{ osv_feed_publish_path }}
       environment:
         OSV_FEED_DB_DIR: "{{ osv_feed_db_dir }}"

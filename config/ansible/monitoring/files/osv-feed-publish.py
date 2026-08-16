@@ -33,6 +33,7 @@ FILES = (
     "epss.json",
     "Ubuntu.cursor",
     "Debian.cursor",
+    "Go.cursor",
     "epss.cursor",
 )
 
