@@ -1,0 +1,27 @@
+# Managed by ansible (install-osv-feed.yml). Do not edit by hand.
+[feed]
+db_dir = "{{ osv_feed_db_dir }}"
+ack_db = "{{ osv_feed_ack_db }}"
+
+# Tracking categories: source/binary package names matched against the local
+# mirror, with the compatible states and minimum severity each category pays
+# attention to. `ecosystem` is pinned so a run is deterministic regardless of
+# the host OS label. Only packages actually installed on this node produce
+# findings; the rest are skipped.
+[tracking.perimeter]
+ecosystem = "{{ osv_feed_ecosystem }}"
+packages = {{ osv_feed_perimeter_packages | list | to_json }}
+severity = "{{ osv_feed_perimeter_severity }}"
+states = ["no_fix_yet", "fix_available"]
+
+[tracking.network]
+ecosystem = "{{ osv_feed_ecosystem }}"
+packages = {{ osv_feed_network_packages | list | to_json }}
+severity = "medium"
+states = ["no_fix_yet", "fix_available"]
+
+[tracking.runtimes]
+ecosystem = "{{ osv_feed_ecosystem }}"
+packages = {{ osv_feed_runtimes_packages | list | to_json }}
+severity = "high"
+states = ["no_fix_yet", "fix_available"]

@@ -8,6 +8,20 @@ route:
   repeat_interval: 1h
   receiver: 'default'
   routes:
+    # Perimeter CVE alerts (osv-feed) repeat daily so an unresolved
+    # no_fix_yet/fix_available CVE stays visible instead of being
+    # swallowed by the shorter global repeat_interval. Severity still picks
+    # the receiver via the nested routes.
+    - match:
+        perimeter_cve: 'true'
+      repeat_interval: 24h
+      routes:
+        - match:
+            severity: critical
+          receiver: 'critical-alerts'
+        - match:
+            severity: warning
+          receiver: 'warning-alerts'
     - match:
         severity: critical
       receiver: 'critical-alerts'

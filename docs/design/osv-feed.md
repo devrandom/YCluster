@@ -64,7 +64,18 @@ versions. It is designed to move to its own repository unchanged; see
 Sizes (compressed, measured 2026-08-15): Ubuntu `all.zip` ~590 MB,
 Debian ~69 MB, PyPI ~32 MB; Ubuntu `modified_id.csv` ~3 MB per day.
 
-## Deployment plan (not yet wired)
+## YCluster wiring (repo-landed)
+
+The mirror and the CVE textfile collector are wired into the monitoring
+stack repo-side; deployment to the cluster is `monitoring.yml`, which
+imports `install-osv-feed.yml`. The playbook installs the package source
+and wrapper plus a single-node collector (default `core[0]`, override
+with `-e osv_feed_collector=...`), the daily mirror service/timer, the
+`/etc/osv-feed/config.toml` tracking categories, the `ycluster-security`
+Prometheus alert group, and the daily-repeat Alertmanager perimeter route.
+Only the playbook still needs to actually run against the cluster.
+
+The design that drove it:
 
 Run the mirror and CVE matching on a single designated node that has
 persistent storage for the feed DB and outbound access to

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Managed by ansible (install-osv-feed.yml). Launches the stdlib osv-feed
+# package from its install tree without requiring it to be on PYTHONPATH.
+PYTHONPATH="{{ osv_feed_install_dir }}${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m osv_feed "$@"

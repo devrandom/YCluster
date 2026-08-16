@@ -797,3 +797,82 @@ groups:
         annotations:
           summary: "CRPS logged a power fault transient on {{ $labels.node }}"
           description: "{{ $value | printf \"%.0f\" }} fault entr(ies) appeared in the CRPS event log on {{ $labels.node }} in the last 15m — a brief power fault the live gauges may have ridden over. Inspect `show log` on the controller."
+
+  # Local OSV CVE feed (osv-feed) health and perimeter CVE SLA alerts. The
+  # mirror + matcher run on a single collector node; its textfile collector
+  # emits osv_feed_mirror_* and osv_feed_collector_error health gauges plus
+  # osv_feed_cve_info / osv_feed_cve_first_seen_seconds. See
+  # docs/design/osv-feed.md and docs/design/perimeter-software-tracking.md.
+  - name: ycluster-security
+    rules:
+      # The daily mirror hasn't advanced a feed cursor in over two days, so
+      # any matcher output is based on stale (or missing) source data.
+      - alert: OSVFeedMirrorStale
+        expr: time() - osv_feed_mirror_age_seconds > 2 * 24 * 3600
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "OSV feed mirror stale on {{ $labels.node }}"
+          description: "The OSV feed on {{ $labels.node }} has not been mirrored in over 2 days (most-stale feed cursor age {{ $value | humanizeDuration }}). Matching is running against stale data."
+
+      # The textfile collector isn't refreshing osv_feed.prom (it always
+      # rewrites the file each run, so a stale mtime means the collector or
+      # its timer stopped rather than a transiently failed match).
+      - alert: OSVFeedCollectorStale
+        expr: time() - node_textfile_mtime_seconds{file=~".*osv_feed.prom"} > 20 * 60
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OSV feed collector stale on {{ $labels.node }}"
+          description: "osv_feed.prom on {{ $labels.node }} hasn't been updated in over 20 minutes. Check osv-feed-collector.timer/service."
+
+      # The most recent match run on the collector failed (fetch or feed
+      # missing); CVE series are dropped, so CVE SLA alerts would otherwise
+      # go quiet even though the tooling is broken.
+      - alert: OSVFeedCollectorError
+        expr: osv_feed_collector_error == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OSV feed match failing on {{ $labels.node }}"
+          description: "osv-feed match is failing on {{ $labels.node }}. CVE metrics are not being produced; check the collector service logs."
+
+      # A critical-severity tracked CVE has been pending (no_fix_yet or
+      # fix_available) on an installed package longer than the 12-hour SLA.
+      # first_seen lacks the severity/acked labels, so join against
+      # osv_feed_cve_info to filter to critical, non-acked findings while
+      # keeping the first-seen value (many-to-many across categories is
+      # collapsed with an aggregate on the info side).
+      - alert: PerimeterCVECriticalLongPending
+        expr: |
+          time() - osv_feed_cve_first_seen_seconds
+            * on(ecosystem, package, version, cve)
+              max by (ecosystem, package, version, cve) (osv_feed_cve_info{severity="critical", acked="false"})
+            > 12 * 3600
+        for: 1h
+        labels:
+          severity: critical
+          perimeter_cve: "true"
+        annotations:
+          summary: "Critical CVE {{ $labels.cve }} pending >12h on {{ $labels.package }}"
+          description: "Critical-severity CVE {{ $labels.cve }} affecting {{ $labels.package }} {{ $labels.version }} ({{ $labels.ecosystem }}) on {{ $labels.node }} has been pending for more than 12 hours. Decide within the perimeter SLA or acknowledge it explicitly."
+
+      # The high-severity counterpart, on a 2-day window so a separate alert
+      # page doesn't flood; both are routed with a daily repeat so unresolved
+      # perimeter CVEs stay visible (see alertmanager.yml.j2).
+      - alert: PerimeterCVEHighLongPending
+        expr: |
+          time() - osv_feed_cve_first_seen_seconds
+            * on(ecosystem, package, version, cve)
+              max by (ecosystem, package, version, cve) (osv_feed_cve_info{severity="high", acked="false"})
+            > 2 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+          perimeter_cve: "true"
+        annotations:
+          summary: "High CVE {{ $labels.cve }} pending >2d on {{ $labels.package }}"
+          description: "High-severity CVE {{ $labels.cve }} affecting {{ $labels.package }} {{ $labels.version }} ({{ $labels.ecosystem }}) on {{ $labels.node }} has been pending for more than 2 days. Review and decide within the perimeter SLA."

@@ -1,0 +1,231 @@
+---
+# Install and wire the local OSV CVE feed (osv-feed) on a single collector
+# node. Mirrors Debian/Ubuntu + EPSS daily onto the /near1 feed DB and
+# publishes CVE state to the node_exporter textfile directory.
+#
+# Single writer: the daily mirror (which owns <db_dir>'s cursor/index/
+# first-seen state) and the match run both live on one designated node,
+# so the feed DB is never written concurrently.
+#
+# Usage:
+#   ./run-playbook.sh monitoring/install-osv-feed.yml
+#   # override the collector node (must mount /near1 and have outbound access):
+#   ./run-playbook.sh monitoring/install-osv-feed.yml -e osv_feed_collector=storage-1
+#
+# See docs/design/osv-feed.md for the deployment plan and
+# docs/design/perimeter-software-tracking.md for the alert/SLA context.
+- name: Install osv-feed mirror and textfile collector
+  hosts: "{{ osv_feed_collector | default('core[0]') }}"
+  become: yes
+  vars:
+    osv_feed_install_dir: /opt/osv-feed
+    osv_feed_collector_path: /usr/local/lib/cluster/osv-feed-collector
+    osv_feed_source_dir: "{{ playbook_dir }}/../../../osv-feed"
+    osv_feed_db_dir: /near1/osv-feed/db
+    osv_feed_ack_db: /near1/osv-feed/acks.json
+    osv_feed_ecosystem: Ubuntu
+    osv_feed_match_interval_sec: 900
+    osv_feed_perimeter_packages:
+      - openssh
+      - nginx
+      - openssl
+      - certbot
+      - python3-certbot-nginx
+    osv_feed_perimeter_severity: high
+    osv_feed_network_packages:
+      - dnsmasq
+      - squid
+      - keepalived
+      - wireguard-tools
+    osv_feed_runtimes_packages:
+      - docker.io
+      - containerd
+      - runc
+      - podman
+
+  tasks:
+    # /near1 is an automounted NAS share; a `file` task that creates the
+    # child path triggers the mount on first use.
+    - name: Ensure feed DB directory exists
+      file:
+        path: "{{ osv_feed_db_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure osv-feed install directory exists
+      file:
+        path: "{{ osv_feed_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Push osv-feed package to the collector node
+      synchronize:
+        src: "{{ osv_feed_source_dir }}/osv_feed/"
+        dest: "{{ osv_feed_install_dir }}/osv_feed/"
+        delete: yes
+        recursive: yes
+        rsync_opts:
+          - "--exclude=__pycache__/"
+          - "--exclude=*.pyc"
+
+    - name: Install osv-feed wrapper
+      template:
+        src: osv-feed-wrapper.j2
+        dest: /usr/local/bin/osv-feed
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure osv-feed config directory exists
+      file:
+        path: /etc/osv-feed
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure cluster lib directory exists
+      file:
+        path: "{{ osv_feed_collector_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install osv-feed config
+      template:
+        src: osv-feed-config.toml.j2
+        dest: /etc/osv-feed/config.toml
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install osv-feed collector script
+      copy:
+        src: files/osv-feed-collector.py
+        dest: "{{ osv_feed_collector_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create systemd service for daily mirror
+      copy:
+        dest: /etc/systemd/system/osv-feed-mirror.service
+        content: |
+          [Unit]
+          Description=Mirror OSV vulnerability feeds (osv-feed)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu
+          User=root
+          # ProtectSystem=full keeps /usr,/boot,/etc read-only while leaving
+          # the /near1 NAS mount and textfile dir writable (no
+          # ReadWritePaths gymnastics for an automounted share).
+          ProtectSystem=full
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          TimeoutStartSec=3600
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create timer for daily mirror
+      copy:
+        dest: /etc/systemd/system/osv-feed-mirror.timer
+        content: |
+          [Unit]
+          Description=Daily OSV feed mirror (osv-feed)
+
+          [Timer]
+          OnCalendar=daily
+          RandomizedDelaySec=1h
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd service for textfile collector
+      copy:
+        dest: /etc/systemd/system/osv-feed-collector.service
+        content: |
+          [Unit]
+          Description=Collect osv-feed CVE metrics for node_exporter
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 {{ osv_feed_collector_path }}
+          User=root
+          Environment=OSV_FEED_DB_DIR={{ osv_feed_db_dir }}
+          ProtectSystem=full
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          TimeoutStartSec=700
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create timer for textfile collector
+      copy:
+        dest: /etc/systemd/system/osv-feed-collector.timer
+        content: |
+          [Unit]
+          Description=Collect osv-feed CVE metrics every {{ osv_feed_match_interval_sec }}s
+
+          [Timer]
+          OnBootSec=60s
+          OnUnitActiveSec={{ osv_feed_match_interval_sec }}s
+          AccuracySec=60s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Ensure node_exporter textfile directory exists
+      file:
+        path: /var/lib/prometheus/node-exporter
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Enable and start mirror timer
+      systemd:
+        name: osv-feed-mirror.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Enable and start collector timer
+      systemd:
+        name: osv-feed-collector.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    # First data instead of waiting up to a day for the timer; tolerated if
+    # the initial download needs a retry (the daily timer keeps retrying).
+    - name: Run the initial mirror so the feed exists before matching
+      command: /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu
+      changed_when: false
+      failed_when: false
+
+    - name: Run an initial collection so metrics appear immediately
+      command: /usr/bin/python3 {{ osv_feed_collector_path }}
+      changed_when: false
+      failed_when: false
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
