@@ -80,7 +80,7 @@ def register_vm_commands(subparsers):
     stp.add_argument('--gpus', type=int, default=None,
                     help='Number of passthrough GPUs to attach for this '
                          'start (default: the VM\'s registered GPU count; '
-                         'capped at that count and 0 only for a CPU-only VM)')
+                         'capped at that count; 0 runs without GPUs)')
     stp.add_argument('--bill', action='store_true',
                     help='Bill this runtime to the owner (CLI default: non-billable)')
     stp.set_defaults(func=lambda a: vm.vm_start(a.name, billable=a.bill,

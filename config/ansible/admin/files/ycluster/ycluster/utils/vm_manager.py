@@ -914,12 +914,16 @@ def pending_state(desired, status, grace, now):
 def desired_gpus(desired, registered):
     """How many GPUs a VM should run with under a desired-state record.
 
-    Uses the record's `gpus` when present; falls back to the VM's
-    registered allocation otherwise (backwards compat — schedules
-    written before this field meant 'all allocated GPUs')."""
-    g = (desired or {}).get("gpus")
-    if isinstance(g, int) and not isinstance(g, bool) and g > 0:
-        return g
+    Uses the record's `gpus` when explicitly set (0 means run with no
+    GPUs); falls back to the VM's registered allocation when absent
+    (backwards compat — schedules written before this field meant 'all
+    allocated GPUs')."""
+    d = desired or {}
+    if "gpus" in d:
+        g = d["gpus"]
+        if isinstance(g, int) and not isinstance(g, bool) \
+                and 0 <= g <= registered:
+            return g
     return registered
 
 
@@ -1119,10 +1123,11 @@ def reconcile():
                 _clear_issue(issues, name)
             else:
                 # Deferred to the start pass; schedule the GPU count the
-                # desired record calls for (falling back to registered).
+                # desired record calls for (explicit 0 = no GPUs, absent
+                # = falling back to registered).
                 to_start.append(
-                    (name, desired.get("gpus")
-                     or (all_vms.get(name, {}).get("gpus") or 0)))
+                    (name, desired_gpus(
+                        desired, all_vms.get(name, {}).get("gpus") or 0)))
         elif running:
             if not grace:
                 print(f"reconcile: warning '{name}' of scheduled stop "
@@ -1608,7 +1613,8 @@ def vm_stop(name, billable=False, initiator="cli", release=False):
 def vm_start(name, billable=False, initiator="cli", gpus=None):
     """Start a VM, converging its passthrough GPUs to `gpus` (default:
     the VM's registered count). `gpus` is capped at the registered count
-    so a caller can never over-allocate past the VM's allocation."""
+    so a caller can never over-allocate past the VM's allocation; 0
+    runs the VM without any passthrough GPUs."""
     # Backfill any host-side state added since this instance was created
     # (currently just the /data NAS share). Idempotent.
     _ensure_nas_share(name)
@@ -1617,9 +1623,8 @@ def vm_start(name, billable=False, initiator="cli", gpus=None):
     registered = (vm_get(name) or {}).get("gpus") or 0
     if gpus is not None:
         if not isinstance(gpus, int) or isinstance(gpus, bool) \
-                or gpus < 0 or gpus > registered \
-                or (registered > 0 and gpus == 0):
-            cap = f"1..{registered}" if registered else "0"
+                or gpus < 0 or gpus > registered:
+            cap = f"0..{registered}"
             raise ValueError(f"gpus must be an integer in {cap} "
                              f"for '{name}' (registered count {registered})")
         _ensure_gpus_attached(name, want=gpus)

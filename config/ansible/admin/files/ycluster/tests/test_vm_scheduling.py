@@ -189,10 +189,15 @@ class CommitmentsTests(unittest.TestCase):
         c = vm.gpu_commitments({"v": vmrec(gpus=4)}, d, self.NOW)
         self.assertEqual(c["nv2"][0]["gpus"], 4)
 
+    def test_desired_gpus_zero_commits_nothing(self):
+        # Explicit 0 GPUs runs CPU-only: no host-pool commitment at all.
+        d = {"v": {"mode": "on", "gpus": 0}}
+        self.assertEqual(vm.gpu_commitments({"v": vmrec(gpus=4)}, d, self.NOW), {})
+
     def test_desired_gpus_helper(self):
         self.assertEqual(vm.desired_gpus({"gpus": 2}, 4), 2)
-        self.assertEqual(vm.desired_gpus({"gpus": 0}, 4), 4)   # falsy -> fallback
-        self.assertEqual(vm.desired_gpus({}, 4), 4)
+        self.assertEqual(vm.desired_gpus({"gpus": 0}, 4), 0)  # explicit 0 kept
+        self.assertEqual(vm.desired_gpus({}, 4), 4)            # absent -> registered
         self.assertEqual(vm.desired_gpus(None, 4), 4)
 
 

@@ -294,11 +294,14 @@ class ScheduleSetTests(SchedTestBase):
         rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
         self.assertEqual(rec["gpus"], 1)
 
-    def test_gpus_zero_rejected_on_gpu_vm(self):
+    def test_gpus_zero_allowed_on_gpu_vm(self):
+        # Scheduling 0 GPUs runs the VM without holding any (CPU-only run).
         self.vm("v", owner="alice@x", gpus=2, host="nv2")
         r = self.post("/admin/vm-schedule/set",
                       {"vm": "v", "mode": "on", "gpus": 0})
-        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.status_code, 200)
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        self.assertEqual(rec["gpus"], 0)
 
     def test_gpus_over_registered_rejected(self):
         self.vm("v", owner="alice@x", gpus=2, host="nv2")

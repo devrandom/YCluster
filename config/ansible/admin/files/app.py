@@ -3246,10 +3246,9 @@ def vm_schedule_set():
         gpus = registered
     else:
         valid = (isinstance(gpus, int) and not isinstance(gpus, bool)
-                 and 0 <= gpus <= registered
-                 and (gpus > 0 if registered else True))
+                 and 0 <= gpus <= registered)
         if not valid:
-            cap = f'1..{registered}' if registered else '0'
+            cap = f'0..{registered}'
             return jsonify({'error': f'gpus must be an integer in {cap}'}), 400
 
     # Admission control self-gates to the modes that newly commit GPUs
