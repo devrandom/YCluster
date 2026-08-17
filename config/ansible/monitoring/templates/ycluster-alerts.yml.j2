@@ -807,8 +807,10 @@ groups:
     rules:
       # The daily mirror hasn't advanced a feed cursor in over two days, so
       # any matcher output is based on stale (or missing) source data.
+      # osv_feed_mirror_age_seconds is already the age (a delta from now), so
+      # compare it directly rather than subtracting it from time().
       - alert: OSVFeedMirrorStale
-        expr: time() - osv_feed_mirror_age_seconds > 2 * 24 * 3600
+        expr: osv_feed_mirror_age_seconds > 2 * 24 * 3600
         for: 6h
         labels:
           severity: warning
