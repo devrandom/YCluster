@@ -1,5 +1,39 @@
 # Harden P0-A gating: real authentik forward-auth at the edge
 
+## Status (2026-08-17)
+
+Implementation landed in the repo:
+
+- `open-webui-locations.conf` `location /` and `zulip-locations.conf`
+  `location /` now run the same `auth_request /outpost.goauthentik.io/auth/nginx`
+  edge gate as ComfyUI; both server-block templates include the shared
+  `admin-api-authentik-outpost.conf` plumbing.
+- `authentik-manager` adds `open-webui-edge` (chat.<domain>) and `zulip-edge`
+  (zulip.<domain>) forward-auth proxy providers + applications on the embedded
+  outpost.
+- `perimeter_software.yml` comments and `docs/design/perimeter-software-tracking.md`
+  describe the edge gate as the boundary (app-level OIDC/SAML login retained).
+- `open-webui-locations.conf` no longer mirrors the root vhost's inference
+  mount: `/v1/`, `/__auth`, and `/healthz` (a vestige from when OWUI served
+  the root vhost) were dropped from the chat.<domain> vhost — the inference
+  API and its `/healthz` probe live at the root <domain> vhost
+  (`ycluster_app-locations.conf`).
+- `zulip-locations.conf` exempts `/api/` from the edge gate: non-browser
+  API-key / basic-auth clients (apps, bots, `zulip-send`, integrations) are
+  proxied straight to Zulip, which is their credential gate. Zulip is
+  re-tiered P0-U in `perimeter_software.yml` and the design docs (the web
+  gate is the P0-A sub-surface).
+
+Deployed to the storage leader (app install playbooks; `nginx -t` + reload;
+the authentik worker re-applied `ycluster-admin.yaml`, binding
+`open-webui-edge` and `zulip-edge` forward-auth providers to the embedded
+outpost) and verified end-to-end through the public path:
+
+- Root <domain> `/v1/` + `/healthz` stay reachable; chat.<domain> `/` and
+  zulip.<domain> `/` redirect unauthenticated browsers to the IdP and load
+  after login; zulip `/api/v1/` still works with a real API key (apps / bots /
+  `zulip-send`); websockets/long-polling survive both.
+
 P0-A components are tiered as "behind a credential gate," but the gate is
 inconsistent. ComfyUI and the admin-api/ycluster_app surface are genuinely
 gated at the nginx edge by the authentik embedded-outpost forward-auth

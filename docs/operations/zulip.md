@@ -41,7 +41,15 @@ ssh -J "$YC_SYNC_HOST" "$LEADER"
 
 - **External (primary):** `zulip.<domain>` via the frp/nginx/certbot
   frontend. This is the hostname Zulip is configured with
-  (`SETTING_EXTERNAL_HOST`), so it's what Django accepts.
+  (`SETTING_EXTERNAL_HOST`), so it's what Django accepts. The interactive
+  web surface (everything except `/api/`) is edge-gated by the IdP
+  embedded-outpost forward-auth (`auth_request
+  /outpost.goauthentik.io/auth/nginx`, include
+  `admin-api-authentik-outpost.conf`), so only authenticated browsers
+  reach the Zulip container; app-level SAML login remains for the in-app
+  session. `/api/` is exempt from the edge gate: it serves API-key /
+  basic-auth clients (apps, bots, `zulip-send`) and Zulip is its own
+  credential gate there (a P0-U pre-auth surface).
 - **Internal:** `zulip.xc` → storage VIP → nginx. ⚠️ Currently returns
   HTTP 400 because `zulip.xc` is not in Zulip's allowed hosts (only the
   external hostname is). Until that's resolved, use the external

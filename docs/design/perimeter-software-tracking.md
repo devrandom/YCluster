@@ -40,8 +40,8 @@ P1 and P2 remain the remote/trust and interior tiers from the earlier model.
 | P0-A | frp control channel (`bindPort`) and tunnel registration/token path | frontends + core frpc clients | frp pin; token/config in etcd, rendered at service start |
 | P0-A | Per-core SSH tunnels | core nodes | frp pin; `app/install-frp.yml` |
 | P0-A | VM-access bastion `frpc` + jump sshd | Incus/Nvidia VM hosts | `admin/install-vm-bastion.yml`, in-container binary push |
-| P0-A | Open WebUI (chat.<domain>): local signup + password login disabled, OIDC via authentik is the only path in | storage leader | source-built image + `app/build-open-webui.yml` pin; osv-feed manifest |
-| P0-A | Zulip (zulip.<domain>): SAML-only steady state (`zulip_auth_backends: SAMLAuthBackend`), local password login disabled, authentik as IdP | storage leader | source-built image + `app/build-zulip.yml` pin; osv-feed manifest |
+| P0-A | Open WebUI (chat.<domain>): nginx `auth_request` edge forward-auth on `location /` (OIDC-via-authentik app login, local login disabled) | storage leader | source-built image + `app/build-open-webui.yml` pin; osv-feed manifest |
+| P0-U | Zulip (zulip.<domain>): `/api/` pre-auth surface (apps/bots/`zulip-send` use Zulip API keys / basic auth; web UI is IdP edge-gated, SAML-only app login) | storage leader | source-built image + `app/build-zulip.yml` pin; osv-feed manifest |
 | P0-A | ComfyUI (comfy.<domain>): nginx forward-auth gate before the app | storage leader (vhost) + GPU host (backend) | `app/install-comfyui.yml` buildah image; not yet osv-feed scanned |
 | P0-U | OpenSSH server (pre-auth wire protocol, KEX, auth negotiation) + admin TOTP/SSH key path | frontends, core, bastion containers, managed nodes | apt `openssh-server` + `unattended-upgrades`; config from setup playbooks |
 | P0-A | IdP/authentik and authenticated web endpoints behind forward-auth | storage leader | authentik image version var; nginx forward-auth |
@@ -58,18 +58,25 @@ P1 and P2 remain the remote/trust and interior tiers from the earlier model.
 
 P0-A *is* a standalone inventory tier: a component that is externally
 reachable but whose meaningful surface sits behind a credential/key gate is
-tiered P0-A, not subsumed under a P0-U neighbor. The gate can be nginx
-forward-auth (ComfyUI, admin-api) or a disabled-local-login IdP-only app where
-authentik is the only path in (Open WebUI: `ENABLE_SIGNUP=False` /
-`ENABLE_LOGIN_FORM=False`, OIDC via authentik). Being adjacent to the IdP does
+tiered P0-A, not subsumed under a P0-U neighbor. The gate at the nginx edge is
+the IdP embedded-outpost forward-auth (`auth_request
+/outpost.goauthentik.io/auth/nginx`) on the vhost's `location /` — this is the
+boundary for every P0-A web app (ComfyUI, admin-api, Open WebUI). The apps
+still keep their own IdP-backed login (OWUI OIDC / Zulip SAML) and disable
+local password login (`ENABLE_SIGNUP=False` / `ENABLE_LOGIN_FORM=False`,
+`zulip_auth_backends: SAMLAuthBackend`), but that app-level gate is no longer
+what keeps pre-auth bytes off the wire — the edge gate is. Being adjacent to
+the IdP does
 not make a component P0-U on its own. The pre-auth rule is about whether the
 component itself processes untrusted data on its reachable surface:
 - **P0-U** because they process untrusted pre-auth data themselves: `sshd`
   (wire protocol/KEX before key), WireGuard (handshake before key), `frps`
-  (WAN listener), and the `nginx` TLS/HTTP entry itself.
+  (WAN listener), the `nginx` TLS/HTTP entry itself, and Zulip's public
+  `/api/` (API-key / basic-auth surface Zulip authenticates itself, not the
+  IdP edge gate).
 - **P0-A** because a gate keeps untrusted pre-auth bytes off them: Open WebUI
-  and Zulip (authentik OIDC / SAML-only is the only login path — local
-  password login disabled), ComfyUI (nginx forward-auth), frp control/tunnel
+  and ComfyUI (nginx edge forward-auth at the vhost), admin-api
+  (authenticated web behind forward-auth), frp control/tunnel
   registration path, per-core SSH tunnels, VM bastion.
 
 The credential-gated *sub-surfaces* of a P0-U component (e.g. frp's control

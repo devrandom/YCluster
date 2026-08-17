@@ -181,6 +181,49 @@ entries:
       target: !KeyOf app-comfy
       group: !KeyOf group-comfy
       order: 0
+  # Open WebUI (chat.<domain>): edge forward-auth provider + application for
+  # the interactive web surface. No policy binding — open to every enrolled
+  # user, matching the previous OIDC-only access model. The separate OIDC
+  # provider (open-webui) remains for the app-level login.
+  - model: authentik_providers_proxy.proxyprovider
+    id: provider-chat
+    identifiers:
+      name: open-webui-edge
+    attrs:
+      mode: forward_single
+      external_host: https://chat.$external_domain
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+  - model: authentik_core.application
+    id: app-chat
+    identifiers:
+      slug: chat
+    attrs:
+      name: Open WebUI
+      provider: !KeyOf provider-chat
+      meta_launch_url: https://chat.$external_domain/
+  # Zulip web (zulip.<domain>): edge forward-auth gate for the interactive
+  # web surface. Distinct from the SAML provider (provider-zulip) that feeds
+  # Zulip's app-level login — the edge gate is the IdP boundary that keeps
+  # unauthenticated pre-auth bytes off the whole vhost. Open to every
+  # enrolled user (no policy binding).
+  - model: authentik_providers_proxy.proxyprovider
+    id: provider-zulip-fwd
+    identifiers:
+      name: zulip-edge
+    attrs:
+      mode: forward_single
+      external_host: https://zulip.$external_domain
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+  - model: authentik_core.application
+    id: app-zulip-fwd
+    identifiers:
+      slug: zulip-web
+    attrs:
+      name: Zulip
+      provider: !KeyOf provider-zulip-fwd
+      meta_launch_url: https://zulip.$external_domain/
   - model: authentik_outposts.outpost
     identifiers:
       managed: goauthentik.io/outposts/embedded
@@ -189,6 +232,8 @@ entries:
         - !KeyOf provider-admin
         - !KeyOf provider-app
         - !KeyOf provider-comfy
+        - !KeyOf provider-chat
+        - !KeyOf provider-zulip-fwd
       config:
         authentik_host: https://auth.$external_domain
 EOF

@@ -46,9 +46,16 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
 
-    # Location bodies (auth subrequest, /v1/, /) live in a shared include
-    # so both the plain and proxy listeners proxy to the same backend.
+    # IdP outpost plumbing (login redirect, OAuth callback, auth subrequest)
+    # for the edge forward-auth gate on location /. The outpost selects the
+    # matching application for chat.<domain> by the request Host.
+    include /etc/nginx/admin-api-authentik-outpost.conf;
+
+    # The OWUI `location /` body lives in a shared include so both the
+    # plain and proxy listeners proxy to the same backend.
     # `(( port ))` is the open-webui port, substituted by the
-    # install-open-webui.yml render step.
+    # install-open-webui.yml render step. The cluster inference API
+    # (`/v1/`) and its `/healthz` probe live at the root <domain> vhost,
+    # not on chat.<domain>.
     include /etc/nginx/open-webui-locations.conf;
 }

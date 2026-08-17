@@ -129,12 +129,14 @@ perimeter_software:
 
   # --- Public container images (osv-feed [tracking.container], manifests) ---
   - name: open-webui
-    # chat.<domain>. The vhost's `/` proxies to the OWUI backend, but OWUI
-    # itself is authentik-gated: local signup and the password login form are
-    # disabled (ENABLE_SIGNUP=False / ENABLE_LOGIN_FORM=False) and OIDC via
-    # authentik is the only login path. The component's meaningful surface is
-    # only reachable with an authentik session, so it tiers P0-A — it does not
-    # inherit a P0-U pre-auth boundary from sitting adjacent to the IdP.
+    # chat.<domain>. Edge-gated by the IdP: nginx `auth_request
+    # /outpost.goauthentik.io/auth/nginx` forward-auth on `location /` (same
+    # boundary as ComfyUI / admin-api) keeps unauthenticated pre-auth bytes off
+    # the whole vhost — the gate is the boundary, not a disabled login form.
+    # App-level login stays OIDC-via-authentik with local signup / password
+    # form disabled (ENABLE_SIGNUP=False / ENABLE_LOGIN_FORM=False). The
+    # inference API (/v1/) and its /healthz liveness probe are served at
+    # the root <domain> vhost, not on chat.<domain>.
     tier: P0-A
     osv_category: container
     # osv-feed [tracking.container]; manifest-driven, no packages list
@@ -143,13 +145,17 @@ perimeter_software:
     # pin_source: app/build-open-webui.yml webui_repo_sha f9590b80...; plugins 746f4b2f...
     # manifest: config/ansible/monitoring/container-manifests/open-webui.manifest (--uv-select base, 264 pkgs)
   - name: zulip
-    # zulip.<domain>. Same model as open-webui: the vhost `/` proxies straight
-    # to Zulip (no nginx forward-auth), but steady state is SAML-only
-    # (zulip_auth_backends: SAMLAuthBackend — local email/password login
-    # disabled), so the only way in is through authentik as the IdP. Tiered
-    # P0-A by the same rule as OWUI; the SAML ACS/login page is the pre-auth
-    # surface but the credential gate is authentik.
-    tier: P0-A
+    # zulip.<domain>. The interactive web surface (everything except /api/)
+    # is edge-gated by the IdP: nginx `auth_request
+    # /outpost.goauthentik.io/auth/nginx` forward-auth on the external
+    # zulip.<domain> vhost's `location /` (same boundary as ComfyUI /
+    # admin-api); app-level login is SAML-only
+    # (zulip_auth_backends: SAMLAuthBackend, local password login disabled).
+    # But /api/ is a pre-auth surface: non-browser clients (apps, bots,
+    # zulip-send) use Zulip API keys / basic auth, not an authentik cookie,
+    # so Zulip itself processes untrusted pre-auth bytes there — tiered
+    # P0-U by its worst exposure (the edge gate is the P0-A sub-surface).
+    tier: P0-U
     osv_category: container
     # osv-feed [tracking.container]; manifest-driven, no packages list
     osv_packages: []

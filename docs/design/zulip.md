@@ -160,8 +160,9 @@ container lifecycle; Open-WebUI has the parallel
 - Two domain-dependent blueprints generated at startup by
   `authentik-manager.write_owui_blueprint` and
   `.write_admin_blueprint`: the OIDC provider for Open-WebUI and the
-  two proxy providers (forward-auth) for `admin.<domain>` and
-  `app.<domain>`. These read `/cluster/https/domain` from etcd and
+  forward-auth proxy providers on the embedded outpost for
+  `admin.<domain>`, `app.<domain>`, `comfy.<domain>`, `chat.<domain>`,
+  and `zulip.<domain>`. These read `/cluster/https/domain` from etcd and
   re-render on every container start, so the external domain stays a
   single source of truth.
 
@@ -601,6 +602,19 @@ Add a `zulip.<domain>` vhost, following the existing
 single controlled ingress — the Zulip stack publishes no host-wide
 ports (see "Network isolation" under Deployment shape):
 
+- **Edge forward-auth gate (web).** `zulip-locations.conf` `location /`
+  runs `auth_request /outpost.goauthentik.io/auth/nginx` (the IdP embedded
+  outpost, include `admin-api-authentik-outpost.conf`) before proxying, so
+  unauthenticated pre-auth bytes from browsers never reach the Zulip
+  container — the same boundary as ComfyUI / admin-api. Zulip's app-level
+  SAML login remains for the in-app session.
+- **`/api/` is exempt from the edge gate (API-key surface).** Non-browser
+  clients (mobile/desktop apps, bots, `zulip-send`, integrations)
+  authenticate with Zulip API keys / HTTP basic auth, not an authentik
+  session cookie, so `location /api/` proxies straight to Zulip (no
+  auth_request) and Zulip itself is the credential gate. This pre-auth
+  surface is what tiers Zulip P0-U by its worst exposure (the web gate is
+  the P0-A sub-surface); see `docs/design/perimeter-software-tracking.md`.
 - A Jinja2 template at
   `config/ansible/app/files/zulip.conf.j2` (mirroring
   `config/ansible/app/files/open-webui.conf.j2`): a plain `:443`/`:80`

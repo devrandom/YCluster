@@ -119,4 +119,3 @@ DR, backups, node lifecycle, scaling/capacity.
 ## Authentik
 - [Split passwords frontend from general](authentik/split-passwords-frontend.md)
 - [Drop bcrypt hasher](authentik/drop-bcrypt-hasher.md)
-- **[HIGH]** [Harden P0-A gating: real forward-auth at the edge](authentik/harden-p0a-forward-auth.md) — OWUI/Zulip gate only at the app (disabled local login), not at the nginx edge like ComfyUI/admin-api; move all P0-A web surfaces behind the authentik outpost `auth_request`.

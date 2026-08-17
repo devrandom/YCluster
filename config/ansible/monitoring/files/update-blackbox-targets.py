@@ -149,8 +149,8 @@ def get_probe_specs(domain):
             "probe_name": "root",
         },
         {
-            # Inference stack liveness. /healthz on the open-webui
-            # vhost is an unauthenticated passthrough to the auth
+            # Inference stack liveness, served by the root <domain> vhost.
+            # /healthz is an unauthenticated passthrough to the auth
             # service's own /healthz, so the probe gets a 200 instead
             # of a 401 from the /v1/ auth subrequest.
             "url": f"https://{domain}/healthz",

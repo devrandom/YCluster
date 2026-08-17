@@ -7,8 +7,15 @@
 # declares both listeners — the plain :443/:80 listener and the frp tunnel
 # landing (127.0.0.2:17443, PROXY protocol v2).
 #
-# No IdP edge gate here: Zulip has its own login + SAML (against the cluster
-# IdP), so this vhost proxies straight to the Zulip container.
+# zulip.<domain> is edge-gated by the cluster IdP embedded-outpost
+# forward-auth: auth_request /outpost.goauthentik.io/auth/nginx runs before
+# any bytes reach the Zulip container for the interactive web surface
+# (everything except /api/) — same boundary as ComfyUI / admin-api. Zulip
+# still has its own SAML login (against the same IdP) for the app-level
+# session. /api/ is deliberately NOT gated: non-browser API clients
+# (mobile/desktop apps, bots, integrations) authenticate with Zulip API
+# keys / basic auth, not an authentik cookie, so Zulip itself is the
+# credential gate there — that pre-auth surface is what tiers Zulip P0-U.
 #
 # The location body is shared across the plain and proxy listeners via
 # zulip-locations.conf, whose port marker is substituted by the
@@ -48,6 +55,11 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     {% endif %}
     add_header X-Content-Type-Options nosniff always;
+
+    # IdP outpost plumbing (login redirect, OAuth callback, auth subrequest)
+    # for the edge forward-auth gate on location /. The outpost selects the
+    # matching application for zulip.<domain> by the request Host.
+    include /etc/nginx/admin-api-authentik-outpost.conf;
 
     include /etc/nginx/zulip-locations.conf;
 }
