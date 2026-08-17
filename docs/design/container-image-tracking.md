@@ -38,14 +38,14 @@ observes it.
   - `config/ansible/monitoring/container-manifests/zulip.manifest` — **182** PyPI packages from zulip
     12.1 / `7d85fc15` with `--uv-select prod` (mirrors upstream
     `create-production-venv`, which runs `uv sync --only-group=prod`).
-  - `config/ansible/monitoring/container-manifests/authentik.manifest` — **161** PyPI packages from
-    authentik 2026.2.4 / `d7dedc86` with `--uv-select base` (web frontend is
+  - `config/ansible/monitoring/container-manifests/authentik.manifest` — **158** PyPI packages from
+    authentik 2026.5.6 / `0c67ea476` with `--uv-select base` (web frontend is
     baked at build).
   All three re-matched end-to-end against a real PyPI mirror with no dev
   tooling present (see per-image results below).
 - **P3 (authentik digest pin) — repo-landed, not deployed.** `app/install-authentik.yml`
   pins the amd64 server image by digest
-  (`ghcr.io/goauthentik/server@sha256:87087e7e…`, var `authentik_image`);
+  (`ghcr.io/goauthentik/server@sha256:5a77d345…`, var `authentik_image`);
   `files/authentik-compose.yaml` lets `AUTHENTIK_IMAGE` override the whole
   reference (falls back to `:tag`), and `authentik-manager` writes it to the
   compose env like the tag.
@@ -60,7 +60,7 @@ observes it.
 
 | Image | Registry ref today | Source pin | Tier | Runs on |
 |---|---|---|---|---|
-| authentik server+worker | `ghcr.io/goauthentik/server@sha256:87087e7e…` (digest-pinned, repo-landed) | `authentik_image` (digest) + `authentik_version: "2026.2.4"` in `app/install-authentik.yml` | P0-A (IdP + authenticated web) | storage nodes |
+| authentik server+worker | `ghcr.io/goauthentik/server@sha256:5a77d345…` (digest-pinned, repo-landed) | `authentik_image` (digest) + `authentik_version: "2026.5.6"` in `app/install-authentik.yml` | P0-A (IdP + authenticated web) | storage nodes |
 | open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | `webui_repo_sha` v0.11.0 `f9590b80…` + plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
 | zulip | `registry.xc:5000/zulip:12.1-0` | docker-zulip `9a0bd360…` + zulip src `7d85fc15…` in `app/build-zulip.yml` | P0-U (login/registration/pre-auth) | storage leader |
 

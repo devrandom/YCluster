@@ -11,6 +11,9 @@ services:
       AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-authentik}
       AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB_NAME:-authentik}
       AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASS:-authentik}
+      # 2026.5 changed the default HTTP listen to [::]: the internal nginx
+      # and the manager healthcheck target 127.0.0.1, so keep the IPv4 bind.
+      AUTHENTIK_LISTEN__HTTP: 0.0.0.0:9000
       # Applied by authentik on first boot only: akadmin password + an API
       # token for it (the token is what `ycluster user` authenticates with).
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD}

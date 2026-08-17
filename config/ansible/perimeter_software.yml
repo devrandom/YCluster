@@ -184,5 +184,5 @@ perimeter_software:
     # osv-feed [tracking.container]; manifest-driven, no packages list
     osv_packages: []
     # package: container image (PyPI manifest, digest-pinned)
-    # pin_source: app/install-authentik.yml authentik_image @sha256:87087e7e... (2026.2.4)
-    # manifest: config/ansible/monitoring/container-manifests/authentik.manifest (--uv-select base, 161 pkgs)
+    # pin_source: app/install-authentik.yml authentik_image @sha256:5a77d345... (2026.5.6)
+    # manifest: config/ansible/monitoring/container-manifests/authentik.manifest (--uv-select base, 158 pkgs)

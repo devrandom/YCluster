@@ -77,9 +77,12 @@ entries:
     identifiers:
       slug: open-webui
     attrs:
-      name: Open WebUI
+      # App-login integration (OIDC for OWUI's own session), distinct from the
+      # `chat` edge forward-auth app. SSO-suffixed and hidden from the Library
+      # page so the dashboard shows one Open WebUI entry.
+      name: Open WebUI — SSO
       provider: !KeyOf provider-owui
-      meta_launch_url: https://chat.$external_domain/
+      meta_hide: true
 EOF
     chown 1000:1000 "$bp"
     chmod 600 "$bp"
@@ -295,9 +298,12 @@ entries:
     identifiers:
       slug: zulip
     attrs:
-      name: Zulip
+      # App-login integration (SAML for Zulip's own session), distinct from the
+      # `zulip-web` edge forward-auth app. SSO-suffixed and hidden from the
+      # Library page so the dashboard shows one Zulip entry.
+      name: Zulip — SSO
       provider: !KeyOf provider-zulip
-      meta_launch_url: https://zulip.$external_domain/
+      meta_hide: true
 EOF
     chown 1000:1000 "$bp"
     chmod 600 "$bp"
@@ -358,9 +364,16 @@ start_authentik() {
     # set its key to the etcd value and its expiry to never (authentik
     # creates bootstrap tokens with a 48h expiry by default).
     local token_key="$bootstrap_token"
+    # The authentik image no longer ships curl (2026.5+), so probe readiness
+    # with the in-image python3 instead.
     for i in $(seq 1 30); do
-        docker exec authentik-server curl -sS -o /dev/null \
-            http://127.0.0.1:9000/-/health/live/ 2>/dev/null || { sleep 2; continue; }
+        docker exec authentik-server python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen('http://127.0.0.1:9000/-/health/live/', timeout=2)
+except Exception:
+    raise SystemExit(1)
+" 2>/dev/null || { sleep 2; continue; }
         docker exec -e DJANGO_SETTINGS_MODULE=authentik.root.settings \
             authentik-server python3 -c "
 import django; django.setup()
