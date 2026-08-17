@@ -32,17 +32,17 @@ perimeter_software:
   - name: frps
     tier: P0-U
     osv_category: selfbuilt
-    osv_packages: ["github.com/fatedier/frp=0.70.0"]   # osv-feed [tracking.selfbuilt], Go
+    osv_packages: ["github.com/fatedier/frp=0.70.1"]   # osv-feed [tracking.selfbuilt], Go
     # package: github.com/fatedier/frp (Go)
-    # pin_source: app/build-frp.yml frp_repo_sha (frp v0.70.0 = 7b6e01f0...)
+    # pin_source: app/build-frp.yml frp_repo_sha (frp v0.70.1 = ebe707da...)
   - name: frpc (public HTTP/HTTPS + control channel)
     # Carries the P0-U public HTTP/HTTPS tunnel; the frp control channel /
     # tunnel-registration token path on top is P0-A. Tier by worst exposure.
     tier: P0-U
     osv_category: selfbuilt
-    osv_packages: ["github.com/fatedier/frp=0.70.0"]   # osv-feed [tracking.selfbuilt], Go; same pin as frps
+    osv_packages: ["github.com/fatedier/frp=0.70.1"]   # osv-feed [tracking.selfbuilt], Go; same pin as frps
     # package: github.com/fatedier/frp (Go)
-    # pin_source: app/build-frp.yml frp_repo_sha (frp v0.70.0)
+    # pin_source: app/build-frp.yml frp_repo_sha (frp v0.70.1)
 
   # --- apt / distro perimeter packages (osv-feed [tracking.perimeter]) ---
   - name: openssh-server

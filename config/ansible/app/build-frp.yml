@@ -15,9 +15,9 @@
     frp_binary_dir: "{{ frp_build_dir }}/bin"
     frp_server_binary: "{{ frp_binary_dir }}/frps"
     frp_client_binary: "{{ frp_binary_dir }}/frpc"
-    # frp v0.70.0 = 7b6e01f04f286632f0d23715aa17a3bc41234b5c.
+    # frp v0.70.1 = ebe707dacbc203823a59893a5e4df0759aa9d154.
     frp_repo_url: "https://github.com/fatedier/frp.git"
-    frp_repo_sha: "7b6e01f04f286632f0d23715aa17a3bc41234b5c"
+    frp_repo_sha: "ebe707dacbc203823a59893a5e4df0759aa9d154"
     # Go toolchain. Installed via apt (golang-1.24) on the buildhost when
     # a rebuild is needed; local_ai_proxy_go_bin overrides the path for
     # hosts that already have go elsewhere.

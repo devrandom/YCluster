@@ -162,9 +162,9 @@ lockdown decision rather than a "wait for the upstream fix" posture.
 `frp` is tracked against the OSV `Go` ecosystem with the `name=version`
 form, pinned to the exact version we build:
 
-- Pin in `app/build-frp.yml` (`frp_repo_sha`, plus `version 0.70.0`).
+- Pin in `app/build-frp.yml` (`frp_repo_sha`, plus `version 0.70.1`).
 - Tracking spec in `monitoring/install-osv-feed.yml`
-  (`osv_feed_selfbuilt_packages: ["github.com/fatedier/frp=0.70.0"]`).
+  (`osv_feed_selfbuilt_packages: ["github.com/fatedier/frp=0.70.1"]`).
 
 When bumping: rebuild from the new SHA with `app/build-frp.yml`, update the
 `frp=…` spec to the new version, and redeploy `install-osv-feed.yml` so the

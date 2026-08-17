@@ -36,7 +36,7 @@ class TestPerimeterInventory(unittest.TestCase):
                     "squid", "wireguard", "wireguard-tools"],
         "runtimes": ["containerd", "docker.io", "podman", "runc"],
         # selfbuilt entries dedupe onto a single frp pin (frps + frpc).
-        "selfbuilt": ["github.com/fatedier/frp=0.70.0"],
+        "selfbuilt": ["github.com/fatedier/frp=0.70.1"],
     }
 
     def setUp(self):

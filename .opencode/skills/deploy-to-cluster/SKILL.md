@@ -47,7 +47,7 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
    watcher sync.
    - If unsure whether edits landed, don't run `dev-sync --check`
      yourself — confirm the file is present on the bastion through
-     cluster-exec instead (e.g. `grep`/`test -f` against
+     the cluster-exec MCP instead (e.g. `grep`/`test -f` against
      `/etc/ansible/...`), or ask the user to confirm the sync.
 
    **Path mapping (easy to get wrong):** on the bastion `/etc/ansible`
@@ -59,7 +59,7 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
    does not exist). `/etc/ansible/` is itself where `run-playbook.sh`
    and `env.sh` live (via the symlink).
 
-3. **Run the playbook via cluster-exec** (`run` tool; see
+3. **Run the playbook via the cluster-exec MCP** (`run` tool; see
    `docs/operations/cluster-exec.md` for the full tool reference).
    Use `hostname="localhost"` for anything that should run on the
    bastion, where `/etc/ansible` lives:
@@ -91,7 +91,7 @@ playbooks under `config/ansible/<area>/`. Pick the one whose
 ## Targeting only the leader (dev only)
 
 For a leader-only dev run instead of `managed`, resolve the leader and
-pass it to the play `--limit` in a single cluster-exec run on the
+pass it to the play `--limit` in a single cluster-exec MCP run on the
 bastion (`$(ycluster cluster leader)` is evaluated there):
 
 ```
@@ -105,9 +105,9 @@ while testing since the public-facing app is the leader; promote to
 
 ## Verification
 
-After the playbook(s) run, resolve the leader with cluster-exec, then
-sanity-check it by passing the leader as the `hostname` argument — the
-cluster-exec hop target — rather than nesting a shell hop inside the
+After the playbook(s) run, resolve the leader with the cluster-exec MCP,
+then sanity-check it by passing the leader as the `hostname` argument — the
+cluster-exec MCP hop target — rather than nesting a shell hop inside the
 command:
 
 ```
@@ -119,7 +119,7 @@ run(command="ls -l /opt/admin-services/app.py", hostname="<leader>")
 `changed=N` in the playbook recap counts tasks that mutated state
 (file copies, service restarts). `changed=0` means the cluster was
 already up-to-date — if you expected a change, confirm the synced
-file landed on the bastion via cluster-exec (e.g. `test -f`/`grep`
+file landed on the bastion via the cluster-exec MCP (e.g. `test -f`/`grep`
 in `/etc/ansible/...`) rather than running `dev-sync --check`
 yourself.
 
