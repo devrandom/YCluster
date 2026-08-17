@@ -84,11 +84,13 @@
           <option value="off">off</option>
           <option value="schedule">schedule</option>
         </select>
-        <input type="number" min="0" :max="row.gpus" step="1"
-               style="width:4rem"
-               :title="`GPUs to use (0..${row.gpus}; 0 = run without GPUs)`"
-               x-model.number="row.schedGpus" :disabled="!row.can_edit"
-               x-show="row.gpus > 0">
+        <label class="meta" x-show="row.gpus > 0">
+          GPUs
+          <input type="number" min="0" :max="row.gpus" step="1"
+                 style="width:4rem"
+                 :title="`GPUs to use (0..${row.gpus}; 0 = run without GPUs)`"
+                 x-model.number="row.schedGpus" :disabled="!row.can_edit">
+        </label>
         <button @click="save(row)" :disabled="!row.can_edit">Save</button>
         <span class="meta" x-show="row.admin_locked">admin-managed</span>
         <span class="saved" x-show="row.saved" x-text="row.saved"></span>
