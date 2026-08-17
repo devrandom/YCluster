@@ -192,15 +192,15 @@
         mode: '0644'
       notify: reload systemd
 
-    - name: Create timer for daily mirror
+    - name: Create timer for periodic mirror
       copy:
         dest: /etc/systemd/system/osv-feed-mirror.timer
         content: |
           [Unit]
-          Description=Daily OSV feed mirror (osv-feed)
+          Description=Periodic OSV feed mirror (osv-feed)
 
           [Timer]
-          OnCalendar=daily
+          OnCalendar=*-*-* 0/6:00:00
           RandomizedDelaySec=1h
           Persistent=true
 
