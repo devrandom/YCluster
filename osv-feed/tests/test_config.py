@@ -16,6 +16,7 @@ class ConfigTest(unittest.TestCase):
         env.pop("OSV_FEED_DB_DIR", None)
         env.pop("OSV_FEED_ACK_DB", None)
         env.pop("OSV_FEED_IMMUTABLE_DB", None)
+        env.pop("OSV_FEED_CONTAINER_DIR", None)
         env["OSV_FEED_SYSTEM_CONFIG"] = self.system
         env["OSV_FEED_USER_CONFIG"] = self.user
         self.env_patch = mock.patch.dict(os.environ, env, clear=True)
@@ -121,6 +122,31 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(
                 config.resolve_state_dir("/cli/state", "/data/osv-feed"),
                 "/cli/state",
+            )
+
+    def test_container_dirs_default_empty(self):
+        self.assertEqual(config.resolve_container_dirs(None), [])
+
+    def test_container_dirs_from_env_pathsep_split(self):
+        with mock.patch.dict(
+            os.environ,
+            {"OSV_FEED_CONTAINER_DIR": "/a/manifests:/b/manifests"},
+            clear=False,
+        ):
+            self.assertEqual(
+                config.resolve_container_dirs(None),
+                ["/a/manifests", "/b/manifests"],
+            )
+
+    def test_container_dirs_cli_wins_over_env(self):
+        with mock.patch.dict(
+            os.environ,
+            {"OSV_FEED_CONTAINER_DIR": "/env/manifests"},
+            clear=False,
+        ):
+            self.assertEqual(
+                config.resolve_container_dirs(["/cli/manifests"]),
+                ["/cli/manifests"],
             )
 
     def test_tracking_categories_loaded(self):

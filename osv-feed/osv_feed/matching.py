@@ -20,6 +20,7 @@ from typing import Callable
 
 import sqlite3
 
+from .container import load_manifests
 from .epss import load_epss
 from .mirror import connect
 from .mirror import db_path
@@ -353,6 +354,17 @@ def _first_seen(db_dir: str, findings: list[dict]) -> dict[str, int]:
 
 
 def _finding_key(finding: dict) -> str:
+    if finding.get("image"):
+        return "|".join(
+            (
+                "image",
+                finding["image"],
+                finding["ecosystem"],
+                finding["requested_package"],
+                finding["version"],
+                finding["cve"],
+            )
+        )
     return "|".join(
         (finding["ecosystem"], finding["requested_package"], finding["version"], finding["cve"])
     )
@@ -419,57 +431,59 @@ def match_specs(
         )
         for spec in ecosystem_specs:
             if spec.get("version") is None:
-                findings.append(
-                    {
-                        "ecosystem": ecosystem,
-                        "package": spec["package"],
-                        "requested_package": spec["package"],
-                        "version": "",
-                        "cve": "",
-                        "summary": "",
-                        "details": "",
-                        "aliases": [],
-                        "references": [],
-                        "published": "",
-                        "modified": "",
-                        "severity": "",
-                        "state": UNINSTALLED,
-                        "epss_score": 0.0,
-                        "epss_percentile": 0.0,
-                    }
-                )
+                finding = {
+                    "ecosystem": ecosystem,
+                    "package": spec["package"],
+                    "requested_package": spec["package"],
+                    "version": "",
+                    "cve": "",
+                    "summary": "",
+                    "details": "",
+                    "aliases": [],
+                    "references": [],
+                    "published": "",
+                    "modified": "",
+                    "severity": "",
+                    "state": UNINSTALLED,
+                    "epss_score": 0.0,
+                    "epss_percentile": 0.0,
+                }
+                if spec.get("image"):
+                    finding["image"] = spec["image"]
+                findings.append(finding)
                 continue
             for record in records:
                 if not _affected_entries(record, spec["package"]):
                     continue
                 epss_hit = _epss_for(epss, record)
-                findings.append(
-                    {
-                        "ecosystem": ecosystem,
-                        "package": spec["package"],
-                        "requested_package": spec["package"],
-                        "version": spec["version"],
-                        "cve": record.get("id", ""),
-                        "summary": record.get("summary", ""),
-                        "details": record.get("details", ""),
-                        "aliases": [str(a) for a in (record.get("aliases") or [])],
-                        "references": [
-                            r.get("url")
-                            for r in (record.get("references") or [])
-                            if isinstance(r, dict) and r.get("url")
-                        ],
-                        "published": record.get("published", ""),
-                        "modified": record.get("modified", ""),
-                        "severity": _severity_label(record, spec["package"]),
-                        "state": classify_record(
-                            record, spec["package"], spec["version"], cmp
-                        ),
-                        "epss_score": epss_hit["score"] if epss_hit else 0.0,
-                        "epss_percentile": (
-                            epss_hit["percentile"] if epss_hit else 0.0
-                        ),
-                    }
-                )
+                finding = {
+                    "ecosystem": ecosystem,
+                    "package": spec["package"],
+                    "requested_package": spec["package"],
+                    "version": spec["version"],
+                    "cve": record.get("id", ""),
+                    "summary": record.get("summary", ""),
+                    "details": record.get("details", ""),
+                    "aliases": [str(a) for a in (record.get("aliases") or [])],
+                    "references": [
+                        r.get("url")
+                        for r in (record.get("references") or [])
+                        if isinstance(r, dict) and r.get("url")
+                    ],
+                    "published": record.get("published", ""),
+                    "modified": record.get("modified", ""),
+                    "severity": _severity_label(record, spec["package"]),
+                    "state": classify_record(
+                        record, spec["package"], spec["version"], cmp
+                    ),
+                    "epss_score": epss_hit["score"] if epss_hit else 0.0,
+                    "epss_percentile": (
+                        epss_hit["percentile"] if epss_hit else 0.0
+                    ),
+                }
+                if spec.get("image"):
+                    finding["image"] = spec["image"]
+                findings.append(finding)
     findings.sort(
         key=lambda f: (
             f["ecosystem"],
@@ -479,3 +493,23 @@ def match_specs(
         )
     )
     return findings
+
+
+def match_container(
+    db_dir: str,
+    container_dir: str,
+    cmp: VersionCompare = version_compare,
+    *,
+    immutable: bool = False,
+) -> list[dict]:
+    """Match every ``ecosystem:name=version`` spec in ``container_dir``.
+
+    Loads each ``*.manifest`` file and matches it through the same pipeline
+    as host packages; each finding carries an ``image`` label from its
+    manifest file name so first-seen and alerting are per-image. Returns an
+    empty list when the directory contains no manifests.
+    """
+    manifests = load_manifests(container_dir)
+    if not manifests:
+        return []
+    return match_specs(db_dir, manifests, cmp=cmp, immutable=immutable)

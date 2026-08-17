@@ -21,6 +21,11 @@
 - name: Install osv-feed mirror and textfile collector
   hosts: "{{ osv_feed_collector | default('core[0]') }}"
   become: yes
+  # Tracked package lists are derived from the single source of truth,
+  # config/ansible/perimeter_software.yml (docs/design/perimeter-software-tracking.md),
+  # so the inventory and the collector config cannot drift.
+  vars_files:
+    - ../perimeter_software.yml
   vars:
     osv_feed_install_dir: /opt/osv-feed
     osv_feed_collector_path: /usr/local/lib/cluster/osv-feed-collector
@@ -34,30 +39,24 @@
     osv_feed_ack_db: /near1/osv-feed/acks.json
     osv_feed_ecosystem: Ubuntu
     osv_feed_match_interval_sec: 900
-    osv_feed_perimeter_packages:
-      - openssh
-      - nginx
-      - openssl
-      - certbot
-      - python3-certbot-nginx
+    # Derived from perimeter_software.yml entries whose `osv_category` matches
+    # each osv-feed tracking table. `osv_packages` holds the exact match
+    # strings; entries without one (containers -> manifests, Incus not yet
+    # tracked) contribute nothing here.
+    osv_feed_perimeter_packages: "{{ perimeter_software | selectattr('osv_category', 'eq', 'perimeter') | map(attribute='osv_packages') | select('defined') | flatten | unique | list }}"
     osv_feed_perimeter_severity: high
-    osv_feed_network_packages:
-      - dnsmasq
-      - squid
-      - keepalived
-      - wireguard-tools
-    osv_feed_runtimes_packages:
-      - docker.io
-      - containerd
-      - runc
-      - podman
+    osv_feed_network_packages: "{{ perimeter_software | selectattr('osv_category', 'eq', 'network') | map(attribute='osv_packages') | select('defined') | flatten | unique | list }}"
+    osv_feed_runtimes_packages: "{{ perimeter_software | selectattr('osv_category', 'eq', 'runtimes') | map(attribute='osv_packages') | select('defined') | flatten | unique | list }}"
     # Self-built Go binaries we ship from source pins (see app/build-frp.yml),
     # tracked against the OSV Go ecosystem. The `name=version` form pins the
     # version we build, so no dpkg resolution is needed on the collector node.
     osv_feed_selfbuilt_ecosystem: Go
-    osv_feed_selfbuilt_packages:
-      - github.com/fatedier/frp=0.70.0
+    osv_feed_selfbuilt_packages: "{{ perimeter_software | selectattr('osv_category', 'eq', 'selfbuilt') | map(attribute='osv_packages') | select('defined') | flatten | unique | list }}"
     osv_feed_selfbuilt_severity: high
+    # Container image CVE manifests (container/*.manifest) live on the shared
+    # snapshot dir; the collector passes this to `match --container-dir`.
+    osv_feed_container_dir: "{{ osv_feed_snapshot_dir }}/container"
+    osv_feed_container_severity: high
 
   tasks:
     - name: Ensure local feed DB directory exists
@@ -73,6 +72,14 @@
     - name: Ensure snapshot directory exists on the shared mount
       file:
         path: "{{ osv_feed_snapshot_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure container manifest directory exists on the shared mount
+      file:
+        path: "{{ osv_feed_container_dir }}"
         state: directory
         owner: root
         group: root
@@ -103,6 +110,18 @@
         owner: root
         group: root
         mode: '0755'
+
+    - name: Push container image manifests to the shared snapshot dir
+      synchronize:
+        # Manifests are deployment-owned (not part of the general osv-feed
+        # tool); they pin exact image versions/digests and live next to this
+        # playbook under container-manifests/.
+        src: "{{ playbook_dir }}/container-manifests/"
+        dest: "{{ osv_feed_container_dir }}/"
+        delete: yes
+        recursive: yes
+      # The collector matches them from the read-only snapshot
+      # (see docs/design/container-image-tracking.md).
 
     - name: Ensure osv-feed config directory exists
       file:
@@ -155,7 +174,7 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go
+          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI
           # Publish the read-only snapshot to the shared dir only once the
           # local writable store is fully written and closed.
           ExecStartPost=/usr/bin/python3 {{ osv_feed_publish_path }}
@@ -206,6 +225,7 @@
           # mount; first-seen state stays on the local writable DB dir.
           Environment=OSV_FEED_DB_DIR={{ osv_feed_snapshot_dir }}
           Environment=OSV_FEED_STATE_DIR={{ osv_feed_db_dir }}
+          Environment=OSV_FEED_CONTAINER_DIR={{ osv_feed_container_dir }}
           ProtectSystem=full
           ProtectHome=true
           PrivateTmp=true
@@ -258,7 +278,7 @@
     # Mirror then publish, so the shared snapshot exists before collecting.
     - name: Run the initial mirror and publish so the feed exists before matching
       shell: |
-        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go \
+        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI \
           && /usr/bin/python3 {{ osv_feed_publish_path }}
       environment:
         OSV_FEED_DB_DIR: "{{ osv_feed_db_dir }}"
@@ -271,6 +291,7 @@
       environment:
         OSV_FEED_DB_DIR: "{{ osv_feed_snapshot_dir }}"
         OSV_FEED_STATE_DIR: "{{ osv_feed_db_dir }}"
+        OSV_FEED_CONTAINER_DIR: "{{ osv_feed_container_dir }}"
       changed_when: false
       failed_when: false
 

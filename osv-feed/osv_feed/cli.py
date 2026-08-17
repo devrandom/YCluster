@@ -25,6 +25,7 @@ from .config import category_config
 from .config import default_db_dir
 from .config import load_config
 from .config import resolve_ack_db
+from .config import resolve_container_dirs
 from .config import resolve_db_dir
 from .config import resolve_immutable_db
 from .config import resolve_state_dir
@@ -34,6 +35,7 @@ from .installed import host_ecosystem
 from .installed import installed_package
 from .matching import UNINSTALLED
 from .matching import first_seen_for
+from .matching import match_container
 from .matching import match_specs
 from .epss import mirror_epss
 from .mirror import feed_status
@@ -50,6 +52,14 @@ def _escape_prometheus(value: str) -> str:
 
 def _acked_label(finding: dict) -> str:
     return "true" if finding.get("acked") else "false"
+
+
+def _image_label(finding: dict) -> str:
+    """Prometheus ``,image="…"`` label segment for a container finding."""
+    image = finding.get("image")
+    if not image:
+        return ""
+    return f',image="{_escape_prometheus(image)}"'
 
 
 def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
@@ -69,6 +79,7 @@ def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
             f'state="{_escape_prometheus(finding["state"])}",'
             f'category="{_escape_prometheus(finding.get("category", ""))}",'
             f'acked="{_acked_label(finding)}"'
+            f'{_image_label(finding)}'
         )
         lines.append(f"osv_feed_cve_info{{{labels}}} 1")
     lines.append("# HELP osv_feed_cve_epss_score EPSS exploit-probability score for a CVE (0 if unknown).")
@@ -81,6 +92,7 @@ def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
             f'package="{_escape_prometheus(finding["requested_package"])}",'
             f'version="{_escape_prometheus(finding["version"])}",'
             f'cve="{_escape_prometheus(finding["cve"])}"'
+            f'{_image_label(finding)}'
         )
         lines.append(f"osv_feed_cve_epss_score{{{labels}}} {finding.get('epss_score', 0.0)}")
     lines.append("# HELP osv_feed_cve_epss_percentile EPSS percentile (0..1) for a CVE (0 if unknown).")
@@ -93,6 +105,7 @@ def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
             f'package="{_escape_prometheus(finding["requested_package"])}",'
             f'version="{_escape_prometheus(finding["version"])}",'
             f'cve="{_escape_prometheus(finding["cve"])}"'
+            f'{_image_label(finding)}'
         )
         lines.append(
             f"osv_feed_cve_epss_percentile{{{labels}}} {finding.get('epss_percentile', 0.0)}"
@@ -100,12 +113,19 @@ def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
     lines.append("# HELP osv_feed_cve_first_seen_seconds Seconds since epoch when a CVE was first seen for a package version.")
     lines.append("# TYPE osv_feed_cve_first_seen_seconds gauge")
     for key, value in first_seen.items():
-        ecosystem, package, version, cve = key.split("|")
+        parts = key.split("|")
+        if parts[0] == "image":
+            _, image, ecosystem, package, version, cve = parts
+            image_label = f',image="{_escape_prometheus(image)}"'
+        else:
+            ecosystem, package, version, cve = parts
+            image_label = ""
         labels = (
             f'ecosystem="{_escape_prometheus(ecosystem)}",'
             f'package="{_escape_prometheus(package)}",'
             f'version="{_escape_prometheus(version)}",'
             f'cve="{_escape_prometheus(cve)}"'
+            f'{image_label}'
         )
         lines.append(f"osv_feed_cve_first_seen_seconds{{{labels}}} {value}")
     lines.append("")
@@ -431,6 +451,25 @@ def _filtered_findings(findings: list[dict], args: argparse.Namespace, config: d
     return filtered
 
 
+def _filter_container_findings(
+    findings: list[dict], config: dict, acks: dict
+) -> list[dict]:
+    """Tag container findings ``category=container`` and apply its policy.
+
+    Container findings are driven by manifest files rather than a category
+    ``packages`` list, so they are tagged directly and filtered through the
+    ``[tracking.container]`` table (built-in default: high severity, pending
+    states only).
+    """
+    category_cfg = category_config("container", config)
+    filtered: list[dict] = []
+    for finding in findings:
+        tagged = _tag_finding(finding, "container", category_cfg, acks)
+        if tagged is not None:
+            filtered.append(tagged)
+    return filtered
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="osv-feed",
@@ -509,6 +548,16 @@ def build_parser() -> argparse.ArgumentParser:
     match.add_argument("--category", help="filter to a single tracking category (built-in or [tracking.<name>]); omit to auto-categorize the given packages")
     match.add_argument("--pkg", action="append", help="NAME[=VERSION] to match (repeatable; omitted version resolves the installed package and maps binary names to source)")
     match.add_argument("--spec-file", help="JSON object or array of {ecosystem, package, version} (omitted version resolves the installed package)")
+    match.add_argument(
+        "--container-dir",
+        action="append",
+        default=None,
+        help=(
+            "directory of container/*.manifest files (ecosystem:name=version "
+            "per line) to match; findings are tagged category=container with an "
+            "image label (repeatable)"
+        ),
+    )
     match.add_argument(
         "--format",
         choices=("table", "json", "prometheus"),
@@ -605,8 +654,21 @@ def main(argv: list[str] | None = None) -> int:
     specs = _parse_specs(args, config)
     if _warn_stale_feeds(args.db_dir, specs):
         return 1
+    acks = load_acks(args.ack_db)
     findings = match_specs(args.db_dir, specs, immutable=args.immutable)
-    findings = _filtered_findings(findings, args, config, load_acks(args.ack_db))
+    category = args.category or ""
+    if category == "container":
+        # ``container`` is a manifest-driven surface, not a package category;
+        # a ``--category container`` run is scoped to container findings only.
+        findings = []
+    else:
+        findings = _filtered_findings(findings, args, config, acks)
+    if not category or category == "container":
+        for container_dir in resolve_container_dirs(args.container_dir):
+            container_findings = match_container(
+                args.db_dir, container_dir, immutable=args.immutable
+            )
+            findings.extend(_filter_container_findings(container_findings, config, acks))
     first_seen = first_seen_for(args.state_dir, findings)
     if args.format == "json":
         json.dump({"findings": findings, "first_seen": first_seen}, sys.stdout, indent=2)

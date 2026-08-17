@@ -13,6 +13,10 @@
   become: yes
   vars:
     authentik_version: "2026.2.4"
+    # Digest pin for the amd64 server image, tracked by osv-feed container
+    # manifests; overrides the convenience tag so deploys only change when we
+    # deliberately bump the pin (see docs/design/container-image-tracking.md).
+    authentik_image: "ghcr.io/goauthentik/server@sha256:87087e7eacf1327811f827424373125d9f05a76f147b69dc8e2f7172cdef80fa"
     authentik_port: "{{ authentik_local_port | default('9300') }}"
   tasks:
     - name: Check if this host is the storage leader
@@ -134,6 +138,7 @@
           Restart=on-failure
           RestartSec=10
           Environment=AUTHENTIK_TAG={{ authentik_version }}
+          Environment=AUTHENTIK_IMAGE={{ authentik_image }}
           Environment=AUTHENTIK_PORT={{ authentik_port }}
 
           [Install]

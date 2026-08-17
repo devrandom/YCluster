@@ -39,7 +39,16 @@ OSV_FEED = os.environ.get("OSV_FEED_BIN", "/usr/local/bin/osv-feed")
 DB_DIR = os.environ.get("OSV_FEED_DB_DIR", "/near1/osv-feed")
 # Cursor files the mirror writes; the mirror is daily, so more than two
 # missed days means the feed is stale and matching can't be trusted.
-CURSOR_FILES = ("Ubuntu.cursor", "Debian.cursor", "Go.cursor", "epss.cursor")
+CURSOR_FILES = (
+    "Ubuntu.cursor",
+    "Debian.cursor",
+    "Go.cursor",
+    "PyPI.cursor",
+    "epss.cursor",
+)
+# Directory of container/*.manifest files to match (see osv-feed's
+# `match --container-dir`); empty/absent disables container matching.
+CONTAINER_DIR = os.environ.get("OSV_FEED_CONTAINER_DIR", "")
 MATCH_TIMEOUT = 600
 
 
@@ -66,10 +75,18 @@ def mirror_health(db_dir: str) -> tuple[bool, int]:
 
 
 def run_match() -> tuple[bool, str, list[str]]:
-    """Run osv-feed match, returning (ok, body, error_lines)."""
+    """Run osv-feed match, returning (ok, body, error_lines).
+
+    When ``OSV_FEED_CONTAINER_DIR`` is set and non-empty, pass
+    ``--container-dir`` so container image CVE findings (category=container,
+    image label) are included alongside the host categories.
+    """
+    argv = [OSV_FEED, "--db-immutable", "match", "--format", "prometheus"]
+    if CONTAINER_DIR.strip():
+        argv += ["--container-dir", CONTAINER_DIR]
     try:
         proc = subprocess.run(
-            [OSV_FEED, "--db-immutable", "match", "--format", "prometheus"],
+            argv,
             capture_output=True,
             text=True,
             timeout=MATCH_TIMEOUT,

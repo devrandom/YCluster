@@ -26,6 +26,10 @@ class MirrorHealth(unittest.TestCase):
         self.assertFalse(present)
         self.assertEqual(age, 0)
 
+    def test_cursor_set_covers_all_mirrored_ecosystems(self):
+        self.assertIn("PyPI.cursor", col.CURSOR_FILES)
+        self.assertIn("Go.cursor", col.CURSOR_FILES)
+
     def test_newest_cursor_drives_age(self):
         with tempfile.TemporaryDirectory() as d:
             old = os.path.join(d, "Ubuntu.cursor")
@@ -60,6 +64,29 @@ class RunMatch(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("osv_feed_cve_info", body)
         self.assertEqual(errors, ["warning line"])
+
+    def test_container_dir_omitted_when_unset(self):
+        proc = mock.Mock()
+        proc.returncode = 0
+        proc.stdout = ""
+        proc.stderr = ""
+        with mock.patch.object(col, "CONTAINER_DIR", ""):
+            with mock.patch.object(col.subprocess, "run", return_value=proc) as run:
+                col.run_match()
+        argv = run.call_args[0][0]
+        self.assertNotIn("--container-dir", argv)
+
+    def test_container_dir_passed_when_set(self):
+        proc = mock.Mock()
+        proc.returncode = 0
+        proc.stdout = ""
+        proc.stderr = ""
+        with mock.patch.object(col, "CONTAINER_DIR", "/near1/osv-feed/container"):
+            with mock.patch.object(col.subprocess, "run", return_value=proc) as run:
+                col.run_match()
+        argv = run.call_args[0][0]
+        self.assertIn("--container-dir", argv)
+        self.assertIn("/near1/osv-feed/container", argv)
 
     def test_failure_returns_no_body(self):
         proc = mock.Mock()

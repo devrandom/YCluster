@@ -34,3 +34,10 @@ ecosystem = "{{ osv_feed_selfbuilt_ecosystem }}"
 packages = {{ osv_feed_selfbuilt_packages | list | to_json }}
 severity = "{{ osv_feed_selfbuilt_severity }}"
 states = ["no_fix_yet", "fix_available"]
+
+# Container image findings are driven by container/*.manifest files (no
+# `packages` list); this table only tunes severity/state policy. The
+# collector passes `--container-dir` pointing at the published snapshot dir.
+[tracking.container]
+severity = "{{ osv_feed_container_severity }}"
+states = ["no_fix_yet", "fix_available"]

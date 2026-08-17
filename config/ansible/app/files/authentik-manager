@@ -297,6 +297,9 @@ start_authentik() {
     echo "AUTHENTIK_BOOTSTRAP_PASSWORD=$bootstrap_password" >> "$env_file"
     echo "AUTHENTIK_BOOTSTRAP_TOKEN=$bootstrap_token" >> "$env_file"
     echo "AUTHENTIK_TAG=${AUTHENTIK_TAG:?AUTHENTIK_TAG must be set by the unit}" >> "$env_file"
+    # Digest-pinned image reference (osv-feed container tracking) overrides
+    # the convenience tag; the unit sets it, so require it like the tag.
+    echo "AUTHENTIK_IMAGE=${AUTHENTIK_IMAGE:?AUTHENTIK_IMAGE must be set by the unit}" >> "$env_file"
     echo "AUTHENTIK_PORT=${AUTHENTIK_PORT:-9300}" >> "$env_file"
     echo "AUTHENTIK_DATA_DIR=$AUTHENTIK_DATA_DIR" >> "$env_file"
     echo "AUTHENTIK_DB_USER=authentik" >> "$env_file"

@@ -1,6 +1,8 @@
 services:
   server:
-    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG}
+    # AUTHENTIK_IMAGE overrides the whole reference; the default composes the
+    # tag so a digest pin (osv-feed container tracking) can come from the unit.
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:${AUTHENTIK_TAG}}
     container_name: authentik-server
     command: server
     environment:
@@ -26,7 +28,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG}
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:${AUTHENTIK_TAG}}
     container_name: authentik-worker
     command: worker
     environment:

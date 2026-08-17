@@ -136,6 +136,7 @@ entirely, so you can tighten or relax it to taste:
 | `user` | `sudo` | severity `high`, interests `privilege escalation`/`local privilege` |
 | `network` | `dnsmasq`, `squid`, `keepalived`, `wireguard-tools` | severity `medium` |
 | `runtimes` | `docker.io`, `containerd`, `runc`, `podman` | severity `high` |
+| `container` | — (driven by `container/*.manifest` files) | severity `high` |
 
 The built-ins use source package names (for example `openssh` covers the
 installed `openssh-client`), and all default categories allow the
@@ -169,6 +170,7 @@ runs use `modified_id.csv` for changes):
 python3 -m osv_feed --db-dir /srv/osv-feed/db mirror --ecosystem Ubuntu
 python3 -m osv_feed mirror --ecosystem Ubuntu --ecosystem Debian --ecosystem Go
 python3 -m osv_feed mirror --ecosystem Go   # self-built Go binaries (e.g. frp)
+python3 -m osv_feed mirror --ecosystem PyPI --ecosystem npm  # container images
 ```
 
 When `--ecosystem` is omitted on `mirror` or `match`, it defaults to the
@@ -209,6 +211,61 @@ python3 -m osv_feed match --spec-file specs.json --format prometheus
 
 `specs.json` is an object or array of `{"ecosystem", "package", "version"}`.
 `version` is optional and defaults to the installed version.
+
+### Container images
+
+Container images whose CVE surface you want to track are described by
+plain-text manifests, one `ecosystem:name=version` spec per line (`#` starts
+a comment). Each manifest is a regular file named `<image>.manifest` in a
+container directory, and every spec is matched against the local mirror:
+
+```bash
+# webapp 0.11.0 (source SHA 0123abc...)
+PyPI:requests=2.32.3
+npm:express=4.19.2
+Go:github.com/example/lib=1.2.3
+Ubuntu:libssl3=3.0.13-1ubuntu0.1
+```
+
+```bash
+python3 -m osv_feed match --container-dir /srv/osv-feed/manifests --format prometheus
+```
+
+Findings are tagged `category=container` and filtered through the
+`[tracking.container]` table (built-in default: severity `high`, pending
+states), and each finding carries an `image` label from its manifest file
+name.
+
+Manifests are generated deterministically from a pinned build tree via
+`osv_feed.manifestgen` (stdlib-only: parses `uv.lock` for the `PyPI`
+surface and `package-lock.json` for `npm`). Since a `uv.lock` often also
+pins dev tooling that is never shipped in the runtime image (black,
+pytest, ruff, daphne, mypy…), `--uv-select` restricts the emitted surface:
+`all` (every installable lockfile package), `base` (the root project's
+production dependencies), or a named group such as `prod` (closes over that
+dependency group), so the manifest matches the runtime surface the image
+actually ships. `npm` is typically excluded when the SPA frontend is baked
+at build rather than shipped in the runtime image:
+
+```bash
+python3 -m osv_feed.manifestgen webapp \
+  --uv path/to/uv.lock --uv-select base \
+  --comment "webapp v0.11.0 0123abc" \
+  --out webapp.manifest
+```
+
+First-seen and alerting are per-image, so the same transitive Python
+package in two images is tracked independently. `--container-dir` is
+additive — combine it with the default no-flag run (all tracked host
+category packages) to cover host + container CVEs in one collector pass, and
+mirror the ecosystems the images need (e.g. `PyPI`, `npm`) alongside the
+host ecosystem.
+
+When `--container-dir` is omitted, `OSV_FEED_CONTAINER_DIR` (a path-list
+separated by `:`) is honored, so the same collector/systemd wiring that
+drives `db_dir` via `OSV_FEED_DB_DIR` can point the textfile collector at
+the published manifest dir. A missing/empty dir yields no container
+findings.
 
 `match` warns on stderr when a requested ecosystem feed is absent or its last
 sync is more than a day old, since results would be stale or empty until you
@@ -253,6 +310,7 @@ The prometheus format emits:
   advisory's own `database_specific.severity` label. It may be empty when
   the record has no usable severity. `category` is the tracking category
   name (empty for uncategorized matches) and `acked` is `true`/`false`.
+  Container findings add an `image="<name>"` label from their manifest.
 - `osv_feed_cve_first_seen_seconds{...}` — persisted first-seen epoch so
   alerts can fire on "pending longer than N days".
 - `osv_feed_cve_epss_score{ecosystem,package,version,cve}` and

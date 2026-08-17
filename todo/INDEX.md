@@ -109,6 +109,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [/api/allocations + /api/health unauth](code-quality/api-allocations-health-unauth.md)
 
 ## Inference
+- [DS4 infernal: watch for DCP support, then TP2+DCP2 vs TP4](inference/ds4-infernal-dcp.md) — II launcher gates `DCP_SIZE=1` for DS4 DSpark and has no PP axis, leaving TP4 as the only 4-GPU 256K shape; re-test TP2+DCP2 once a build lifts the gate.
 - [vllm-mlx on m1 ops gaps](inference/vllm-mlx-ops.md)
 - [Upstream exo prompt-logging fix](inference/upstream-exo-prompt-logging.md)
 - [GPU-VM DKMS → Canonical-signed modules](inference/gpu-dkms-canonical.md)
@@ -118,3 +119,4 @@ DR, backups, node lifecycle, scaling/capacity.
 ## Authentik
 - [Split passwords frontend from general](authentik/split-passwords-frontend.md)
 - [Drop bcrypt hasher](authentik/drop-bcrypt-hasher.md)
+- **[HIGH]** [Harden P0-A gating: real forward-auth at the edge](authentik/harden-p0a-forward-auth.md) — OWUI/Zulip gate only at the app (disabled local login), not at the nginx edge like ComfyUI/admin-api; move all P0-A web surfaces behind the authentik outpost `auth_request`.

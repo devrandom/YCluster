@@ -114,6 +114,21 @@ def resolve_immutable_db(cli_value: bool | None) -> bool:
     return bool(_feed_value(load_config(), "immutable_db"))
 
 
+def resolve_container_dirs(cli_value: list[str] | None) -> list[str]:
+    """Resolve container manifest directories honoring CLI > env > none.
+
+    ``OSV_FEED_CONTAINER_DIR`` may hold one or more paths separated by
+    ``os.pathsep`` (empty/absent yields no container dirs). Mirrors
+    ``resolve_db_dir``: a single env var drives the collector and containers.
+    """
+    if cli_value:
+        return list(cli_value)
+    env = os.environ.get("OSV_FEED_CONTAINER_DIR")
+    if env:
+        return [d for d in env.split(os.pathsep) if d]
+    return []
+
+
 def resolve_state_dir(cli_value: str | None, writable_default: str) -> str:
     """Resolve the writable directory for first-seen state.
 

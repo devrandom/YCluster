@@ -35,21 +35,47 @@ P1 and P2 remain the remote/trust and interior tiers from the earlier model.
 | Tier | Surface | Where it runs | Update/deploy mechanism today |
 |---|---|---|---|
 | P0-U | `frps` WAN listeners for public HTTP/HTTPS and dynamically bound public ports | frontend nodes | source build pin in `app/build-frp.yml`; installed by `app/install-frp-server.yml` |
-| P0-U | `frpc` public HTTP/HTTPS tunnel, public nginx listeners/vhosts, certbot/ACME | storage leader | same frp pin; `app/install-frp.yml`; apt `nginx`/`certbot` + certbot-manager rendered sites |
-| P0-U | Public app pre-auth surface: login pages, static assets, health/unauthenticated routes, registration/redirect paths | storage leader containers, nginx forward-auth include | source-built images (`open-webui`, `zulip`), authentik image tag |
+| P0-U | `frpc` public HTTP/HTTPS tunnel, public nginx listeners/vhosts (ACME HTTP-01 challenge surface) | storage leader | same frp pin; `app/install-frp.yml`; apt `nginx` + certbot-manager rendered sites |
+| P0-U | Public app pre-auth surface: login pages, static assets, health/unauthenticated routes, registration/redirect paths | storage leader containers | authentik's own login/registration surface (the IdP is its own gate, not consumed through one) |
 | P0-A | frp control channel (`bindPort`) and tunnel registration/token path | frontends + core frpc clients | frp pin; token/config in etcd, rendered at service start |
 | P0-A | Per-core SSH tunnels | core nodes | frp pin; `app/install-frp.yml` |
 | P0-A | VM-access bastion `frpc` + jump sshd | Incus/Nvidia VM hosts | `admin/install-vm-bastion.yml`, in-container binary push |
-| P0-A | OpenSSH server + admin TOTP/SSH key path | frontends, core, bastion containers, managed nodes | apt `openssh-server` + `unattended-upgrades`; config from setup playbooks |
+| P0-A | Open WebUI (chat.<domain>): local signup + password login disabled, OIDC via authentik is the only path in | storage leader | source-built image + `app/build-open-webui.yml` pin; osv-feed manifest |
+| P0-A | Zulip (zulip.<domain>): SAML-only steady state (`zulip_auth_backends: SAMLAuthBackend`), local password login disabled, authentik as IdP | storage leader | source-built image + `app/build-zulip.yml` pin; osv-feed manifest |
+| P0-A | ComfyUI (comfy.<domain>): nginx forward-auth gate before the app | storage leader (vhost) + GPU host (backend) | `app/install-comfyui.yml` buildah image; not yet osv-feed scanned |
+| P0-U | OpenSSH server (pre-auth wire protocol, KEX, auth negotiation) + admin TOTP/SSH key path | frontends, core, bastion containers, managed nodes | apt `openssh-server` + `unattended-upgrades`; config from setup playbooks |
 | P0-A | IdP/authentik and authenticated web endpoints behind forward-auth | storage leader | authentik image version var; nginx forward-auth |
+| P1 | certbot + python3-certbot-nginx (outbound ACME renewal client) | storage leader | apt `certbot`, `python3-certbot-nginx` |
 | P0 guardrail | Frontend host firewall | frontends | apt `ufw`, managed by frp-server/monitoring playbooks |
-| P1 | WireGuard endpoint + remote peers | gateway VIP holder + remote nodes | apt `wireguard`/`wireguard-tools`; keys/config in `ycluster wg` |
+| P0-U | WireGuard endpoint (public UDP handshake processed before key) + remote peers | gateway VIP holder + remote nodes | apt `wireguard`/`wireguard-tools`; keys/config in `ycluster wg` |
 | P1 | Gateway NAT, keepalived, DHCP/DNS, PXE, squid, bootstrap HTTP | core nodes | apt `keepalived`, `dnsmasq`, `squid`, nginx/PXE artifacts |
 | P1 | SSH jump/VM bastion allow-list | VM hosts | `ycluster vm bastion-sync`; sshd keys in etcd |
 | P1 | Inference edge | storage leader | `local-ai-proxy` Go module (S1 dependency hygiene) |
 | P2 | Runtimes: docker, Incus/LXC, QEMU, podman, runc | storage/compute/Nvidia hosts | apt/snaps/pinned source builds |
 | P2 | etcd mTLS, registry, cluster CA | core/storage | etcd deployment + cert/key lifecycle |
+| P2 | prometheus-blackbox-exporter (outbound prober) | perimeter probes | apt `prometheus-blackbox-exporter` |
 | P2 | Host kernels, openssl/libssl, systemd, DPKG base | all managed nodes | apt + unattended-upgrades |
+
+P0-A *is* a standalone inventory tier: a component that is externally
+reachable but whose meaningful surface sits behind a credential/key gate is
+tiered P0-A, not subsumed under a P0-U neighbor. The gate can be nginx
+forward-auth (ComfyUI, admin-api) or a disabled-local-login IdP-only app where
+authentik is the only path in (Open WebUI: `ENABLE_SIGNUP=False` /
+`ENABLE_LOGIN_FORM=False`, OIDC via authentik). Being adjacent to the IdP does
+not make a component P0-U on its own. The pre-auth rule is about whether the
+component itself processes untrusted data on its reachable surface:
+- **P0-U** because they process untrusted pre-auth data themselves: `sshd`
+  (wire protocol/KEX before key), WireGuard (handshake before key), `frps`
+  (WAN listener), and the `nginx` TLS/HTTP entry itself.
+- **P0-A** because a gate keeps untrusted pre-auth bytes off them: Open WebUI
+  and Zulip (authentik OIDC / SAML-only is the only login path — local
+  password login disabled), ComfyUI (nginx forward-auth), frp control/tunnel
+  registration path, per-core SSH tunnels, VM bastion.
+
+The credential-gated *sub-surfaces* of a P0-U component (e.g. frp's control
+channel on top of the public tunnel, or authenticated web behind forward-auth)
+still belong here, but they do not define the component's tier — a component
+with any P0-U surface is tiered P0-U by its worst exposure.
 
 Frontend nodes are deliberately separate from the `managed` fleet: they run a
 smaller package set and should be updated as their own play explicitly, not
@@ -87,13 +113,26 @@ through bulk managed-node flows.
 
 ### Phase 1 — tracked perimeter inventory
 
+> **Status: landed (repo).** The version-controlled inventory now lives at
+> `config/ansible/perimeter_software.yml` (17 components with tier, `osv_category`,
+> and osv package list), kept
+> current with the playbooks in this repo. `monitoring/install-osv-feed.yml`
+> loads this file and derives its `[tracking.*]` package lists from it, so the
+> inventory is the operational source of truth for CVE matching. Phase 2's runtime version metric
+> (`ycluster_perimeter_package_info`) is not yet emitted; the CVE tracking and
+> alert wiring are live (see `docs/design/osv-feed.md` and
+> `docs/operations/packages.md`).
+
 Land a version-controlled perimeter inventory, ideally as one ansible vars
 file (`config/ansible/perimeter_software.yml`) plus this doc as the readable
 view:
 
-- component name, tier (`P0-U`, `P0-A`, `P1`, `P2`), node groups,
-  package/bin name, pin source (`build-*.yml` var or apt package), expected
-  update cadence, restart rule, verification step, owner.
+- Consumed fields only: component `name`, `tier` (`P0-U`, `P0-A`, `P1`, `P2`),
+  `osv_category`, and `osv_packages`. Package/bin name, pin source, manifest path,
+  node groups, cadence, restart rule, verification step, and owner are human
+  narrative — written as comments in the vars file or in the phase tables
+  below / linked playbooks, so no YAML key is ever mistaken for a machine
+  input. Keeping the inventory to its load-bearing fields avoids drift.
 - Keep the pin source in the existing playbooks; the inventory only references
   it so a bump is discoverable.
 

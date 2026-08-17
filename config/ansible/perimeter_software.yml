@@ -1,0 +1,182 @@
+---
+# Perimeter software inventory (docs/design/perimeter-software-tracking.md,
+# Phase 1). Version-controlled, single source of truth for what sits on (or
+# near) the external boundary and how it is tracked/updated.
+#
+# Tiers (tier = the component's own internet-reachable surface before a
+# credential gate, not its blast radius if compromised):
+#   P0-U  externally reachable before any credential gate (login/pre-auth, TLS
+#   P0-A  externally reachable but behind a credential/key gate
+#   P0 guardrail  not itself a vulnerable surface; a guardrail that gates P0
+#   P1    remote-trust / reachable-but-gated tier (VPN, DNS, jump, gateway)
+#   P2    interior runtimes / host base, or non-listening tooling (probes,
+#         renewal clients, libraries)
+#
+# Multi-surface components (e.g. authentik, frpc) are tiered by their worst
+# exposure; the narrower surface is noted on the entry.
+#
+# Fields vs. comments: only `name`, `tier`, `osv_category`, `osv_packages`, and
+# `untracked` are data consumed by automation/tests. Everything else about a
+# component (package/bin name, pin source, manifest path) is written as a
+# comment for human reference — it deliberately is not a field, so YAML keys
+# are never mistaken for machine inputs.
+#
+# osv-feed matches this software via the tracking categories in
+# monitoring/install-osv-feed.yml, which loads THIS FILE (vars_files) and
+# derives its [tracking.*] package lists from the per-entry `category` +
+# `osv_packages` fields below. Keep `osv_packages` in sync with the
+# pin/package a component ships so the collector tracks what actually runs.
+perimeter_software:
+
+  # --- Self-built source pins (osv-feed Go ecosystem via [tracking.selfbuilt]) ---
+  - name: frps
+    tier: P0-U
+    osv_category: selfbuilt
+    osv_packages: ["github.com/fatedier/frp=0.70.0"]   # osv-feed [tracking.selfbuilt], Go
+    # package: github.com/fatedier/frp (Go)
+    # pin_source: app/build-frp.yml frp_repo_sha (frp v0.70.0 = 7b6e01f0...)
+  - name: frpc (public HTTP/HTTPS + control channel)
+    # Carries the P0-U public HTTP/HTTPS tunnel; the frp control channel /
+    # tunnel-registration token path on top is P0-A. Tier by worst exposure.
+    tier: P0-U
+    osv_category: selfbuilt
+    osv_packages: ["github.com/fatedier/frp=0.70.0"]   # osv-feed [tracking.selfbuilt], Go; same pin as frps
+    # package: github.com/fatedier/frp (Go)
+    # pin_source: app/build-frp.yml frp_repo_sha (frp v0.70.0)
+
+  # --- apt / distro perimeter packages (osv-feed [tracking.perimeter]) ---
+  - name: openssh-server
+    # sshd's pre-auth surface (wire protocol, KEX, auth negotiation) is
+    # internet-reachable before a credential, so it tiers P0-U like any login
+    # page; only the authenticated admin session behind it is P0-A.
+    tier: P0-U
+    osv_category: perimeter
+    osv_packages: ["openssh"]   # osv-feed [tracking.perimeter]
+    # package: openssh
+    # pin_source: apt (unattended-upgrades); tracked via monitoring/install-osv-feed.yml
+  - name: openssl / libssl
+    tier: P2
+    osv_category: perimeter
+    osv_packages: ["openssl"]   # osv-feed [tracking.perimeter]; P2 exposure but apt-tracked with the perimeter set
+    # package: openssl
+    # pin_source: apt (unattended-upgrades)
+  - name: nginx
+    tier: P0-U
+    osv_category: perimeter
+    osv_packages: ["nginx"]   # osv-feed [tracking.perimeter]
+    # package: nginx
+    # pin_source: apt; certbot-manager rendered sites
+  - name: certbot + python3-certbot-nginx
+    # ACME HTTP-01 challenge is served by nginx (the P0-U surface); certbot
+    # itself is an outbound renewal client, so it tiers at P1, not P0-U.
+    tier: P1
+    osv_category: perimeter
+    osv_packages: ["certbot", "python3-certbot-nginx"]   # osv-feed [tracking.perimeter]
+    # package: certbot, python3-certbot-nginx
+    # pin_source: apt
+  - name: frontend host firewall
+    tier: "P0 guardrail"
+    osv_category: perimeter
+    osv_packages: ["ufw", "iptables"]   # osv-feed [tracking.perimeter]; P0 guardrail
+    # package: ufw, iptables
+    # pin_source: apt; frp-server/monitoring playbooks
+
+  # --- network-side packages (osv-feed [tracking.network], P1) ---
+  - name: keepalived
+    tier: P1
+    osv_category: network
+    osv_packages: ["keepalived"]   # osv-feed [tracking.network]
+    # package: keepalived
+    # pin_source: apt
+  - name: dnsmasq & squid
+    tier: P1
+    osv_category: network
+    osv_packages: ["dnsmasq", "squid"]   # osv-feed [tracking.network]
+    # package: dnsmasq, squid
+    # pin_source: apt
+  - name: wireguard / wireguard-tools
+    # The wireguard endpoint listens on a public UDP port and its handshake is
+    # processed before a key is established, so it tiers P0-U by exposure.
+    # wireguard-tools (wg/wg-quick) is non-listening config tooling (P2).
+    tier: P0-U
+    osv_category: network
+    osv_packages: ["wireguard", "wireguard-tools"]   # osv-feed [tracking.network]
+    # package: wireguard, wireguard-tools
+    # pin_source: apt
+  - name: prometheus-blackbox-exporter
+    # Outbound prober / scrape target: no external ingress surface, so it
+    # tiers at P2 like the other monitoring tooling rather than P1.
+    tier: P2
+    osv_category: network
+    osv_packages: ["prometheus-blackbox-exporter"]   # osv-feed [tracking.network]
+    # package: prometheus-blackbox-exporter
+    # pin_source: apt
+
+  # --- host runtimes (osv-feed [tracking.runtimes], P2) ---
+  - name: docker / containerd / runc / podman
+    tier: P2
+    osv_category: runtimes
+    osv_packages: ["docker.io", "containerd", "runc", "podman"]   # osv-feed [tracking.runtimes]
+    # package: docker.io, containerd, runc, podman
+    # pin_source: apt
+  - name: Incus / LXC / QEMU
+    tier: P2
+    osv_category: runtimes
+    # not yet in osv-feed [tracking.runtimes] (feed categories cover docker/containerd/runc/podman only) (untracked today)
+    osv_packages: []
+    # package: incus, lxc, qemu
+    # pin_source: apt/snaps
+
+  # --- Public container images (osv-feed [tracking.container], manifests) ---
+  - name: open-webui
+    # chat.<domain>. The vhost's `/` proxies to the OWUI backend, but OWUI
+    # itself is authentik-gated: local signup and the password login form are
+    # disabled (ENABLE_SIGNUP=False / ENABLE_LOGIN_FORM=False) and OIDC via
+    # authentik is the only login path. The component's meaningful surface is
+    # only reachable with an authentik session, so it tiers P0-A — it does not
+    # inherit a P0-U pre-auth boundary from sitting adjacent to the IdP.
+    tier: P0-A
+    osv_category: container
+    # osv-feed [tracking.container]; manifest-driven, no packages list
+    osv_packages: []
+    # package: container image (PyPI manifest)
+    # pin_source: app/build-open-webui.yml webui_repo_sha f9590b80...; plugins 746f4b2f...
+    # manifest: config/ansible/monitoring/container-manifests/open-webui.manifest (--uv-select base, 264 pkgs)
+  - name: zulip
+    # zulip.<domain>. Same model as open-webui: the vhost `/` proxies straight
+    # to Zulip (no nginx forward-auth), but steady state is SAML-only
+    # (zulip_auth_backends: SAMLAuthBackend — local email/password login
+    # disabled), so the only way in is through authentik as the IdP. Tiered
+    # P0-A by the same rule as OWUI; the SAML ACS/login page is the pre-auth
+    # surface but the credential gate is authentik.
+    tier: P0-A
+    osv_category: container
+    # osv-feed [tracking.container]; manifest-driven, no packages list
+    osv_packages: []
+    # package: container image (PyPI manifest)
+    # pin_source: app/build-zulip.yml zulip v12.1-0 (docker-zulip 9a0bd360..., src 7d85fc15...)
+    # manifest: config/ansible/monitoring/container-manifests/zulip.manifest (--uv-select prod, 182 pkgs)
+  - name: comfyui
+    # comfy.<domain>. Gated by the IdP edge forward-auth (auth_request
+    # /outpost.goauthentik.io/auth/nginx in comfyui-locations.conf); the app
+    # itself is unauthenticated and would be P0-U without that gate, so it is
+    # tiered P0-A by its actual boundary. Not yet scanned by osv-feed: no
+    # container/*.manifest is generated for the GPU-host image (untracked today).
+    tier: P0-A
+    osv_category: container
+    osv_packages: []
+    untracked: true
+    # package: container image (Python/uv deps)
+    # pin_source: app/install-comfyui.yml comfyui_image_tag 0.30.0 (buildah from source)
+    # manifest: none yet — no container manifest generated for comfyui (untracked today)
+  - name: authentik (server + worker)
+    # Login/registration and the pre-auth session surface are P0-U (no
+    # credential gate); only the authenticated admin endpoints behind
+    # forward-auth are P0-A. Tier by the worst exposure.
+    tier: P0-U
+    osv_category: container
+    # osv-feed [tracking.container]; manifest-driven, no packages list
+    osv_packages: []
+    # package: container image (PyPI manifest, digest-pinned)
+    # pin_source: app/install-authentik.yml authentik_image @sha256:87087e7e... (2026.2.4)
+    # manifest: config/ansible/monitoring/container-manifests/authentik.manifest (--uv-select base, 161 pkgs)

@@ -41,6 +41,14 @@ DEFAULT_CATEGORIES: dict[str, dict] = {
         "severity": "high",
         "states": ["no_fix_yet", "fix_available"],
     },
+    # Container image findings are driven by ``container/*.manifest`` files
+    # rather than the ``packages`` list (which stays empty); the table only
+    # supplies severity/state policy for the ``match --container-dir`` path.
+    "container": {
+        "packages": [],
+        "severity": "high",
+        "states": ["no_fix_yet", "fix_available"],
+    },
 }
 
 
