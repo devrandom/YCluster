@@ -73,7 +73,7 @@
         <span class="pending" x-show="row.pending" :title="pendingText(row)">⏳</span>
         <button class="warn" x-show="row.pending === 'stop' && row.can_edit"
                 @click="stopNow(row)" x-text="stopNowLabel(row)"></button>
-        <span class="meta" x-text="`${row.gpus} GPU · host ${row.host}` + ((isAdmin || isManager) ? ` · ${row.owner}` : '')"></span>
+        <span class="meta" x-text="`${gpusLabel(row)} · host ${row.host}` + ((isAdmin || isManager) ? ` · ${row.owner}` : '')"></span>
         <select x-model="row.mode" :disabled="!row.can_edit">
           <!-- unmanaged is admin-only; shown (disabled) so an admin-set
                value still displays for users, but they can't select it.
@@ -364,6 +364,13 @@
 
         stopNowLabel(row) {
           return (row.grace && row.grace.immediate) ? 'stopping…' : 'Stop now'
+        },
+
+        gpusLabel(row) {
+          // "current/max" when the scheduled GPU count differs from the
+          // VM's registered allocation, else just the allocated count.
+          const cur = row.schedGpus, max = row.gpus
+          return cur === max ? `${max} GPU` : `${cur}/${max} GPU`
         },
 
         stopNow(row) {
