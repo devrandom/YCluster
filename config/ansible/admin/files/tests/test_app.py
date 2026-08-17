@@ -278,6 +278,60 @@ class ScheduleSetTests(SchedTestBase):
         self.assertEqual(r.status_code, 409)
 
 
+    def test_default_gpus_is_registered_count(self):
+        # No `gpus` in the request (old clients) => all allocated GPUs.
+        self.vm("v", owner="alice@x", gpus=2, host="nv2")
+        r = self.post("/admin/vm-schedule/set", {"vm": "v", "mode": "on"})
+        self.assertEqual(r.status_code, 200)
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        self.assertEqual(rec["gpus"], 2)
+
+    def test_explicit_gpus_stored(self):
+        self.vm("v", owner="alice@x", gpus=4, host="nv2")
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "v", "mode": "on", "gpus": 1})
+        self.assertEqual(r.status_code, 200)
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "v")
+        self.assertEqual(rec["gpus"], 1)
+
+    def test_gpus_zero_rejected_on_gpu_vm(self):
+        self.vm("v", owner="alice@x", gpus=2, host="nv2")
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "v", "mode": "on", "gpus": 0})
+        self.assertEqual(r.status_code, 400)
+
+    def test_gpus_over_registered_rejected(self):
+        self.vm("v", owner="alice@x", gpus=2, host="nv2")
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "v", "mode": "on", "gpus": 3})
+        self.assertEqual(r.status_code, 400)
+
+    def test_cpu_only_vm_requires_zero_gpus(self):
+        self.vm("v", owner="alice@x", gpus=0, host="nv2")
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "v", "mode": "on", "gpus": 1})
+        self.assertEqual(r.status_code, 400)
+        r = self.post("/admin/vm-schedule/set",
+                      {"vm": "v", "mode": "on", "gpus": 0})
+        self.assertEqual(r.status_code, 200)
+
+    def test_admission_uses_chosen_gpus(self):
+        # nv2 pool = 3; 'other' holds 2 always; 'mine' is registered for 2.
+        # Choosing 2 over-commits (1 free) -> 409; choosing 1 fits -> 200.
+        self.state("nv2", pool=3)
+        self.vm("other", owner="bob@x", gpus=2, host="nv2")
+        self.desired("other", "on")
+        self.vm("mine", owner="alice@x", gpus=2, host="nv2")
+        r = self.post("/admin/vm-schedule/set", {"vm": "mine", "mode": "on",
+                                                 "gpus": 2}, admin=True)
+        self.assertEqual(r.status_code, 409)
+        r = self.post("/admin/vm-schedule/set", {"vm": "mine", "mode": "on",
+                                                 "gpus": 1}, admin=True)
+        self.assertEqual(r.status_code, 200)
+        rec = self.etcd.get_json(vmm.VM_DESIRED_PREFIX + "mine")
+        self.assertEqual(rec["gpus"], 1)
+
+
 class StopNowTests(SchedTestBase):
     def test_pending_stop_stamps_immediate(self):
         self.vm("v", owner="alice@x")
@@ -524,6 +578,16 @@ class ScheduleDataTests(SchedTestBase):
             raise RuntimeError("no etcd")
         vmm.get_etcd_client = boom
         self.assertEqual(self.get("/admin/vm-schedule/data").status_code, 503)
+
+
+    def test_sched_gpus_exposed(self):
+        self.vm("v", owner="alice@x", gpus=4, host="nv2")
+        row = self.get("/admin/vm-schedule/data").get_json()["rows"][0]
+        self.assertEqual(row["sched_gpus"], 4)          # default = all registered
+        rec = {"mode": "schedule", "gpus": 2, "windows": []}
+        self.etcd.seed_json(vmm.VM_DESIRED_PREFIX + "v", rec)
+        row = self.get("/admin/vm-schedule/data").get_json()["rows"][0]
+        self.assertEqual(row["sched_gpus"], 2)
 
 
 class ResourcesDataTests(SchedTestBase):

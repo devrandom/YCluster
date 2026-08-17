@@ -2862,14 +2862,17 @@ def _external_domain():
     return None
 
 
-def _gpu_admission_error(name, rec, mode, windows):
+def _gpu_admission_error(name, rec, mode, windows, gpus=None):
     """Admission control for a proposed desired state: None if the VM's
-    registered GPU count fits its host's pool against the commitments
-    already accepted for the other VMs (and admin GPU blocks) there, else
-    a rejection message. Fails open when the host hasn't reported a pool
-    size yet (sampler predates the gpu_pool field) — better to accept
-    than to brick scheduling during a rollout."""
-    host, gpus = rec.get('host'), rec.get('gpus') or 0
+    chosen GPU count (`gpus`, defaulting to its registered count) fits
+    its host's pool against the commitments already accepted for the
+    other VMs (and admin GPU blocks) there, else a rejection message.
+    Fails open when the host hasn't reported a pool size yet (sampler
+    predates the gpu_pool field) — better to accept than to brick
+    scheduling during a rollout."""
+    host = rec.get('host')
+    if gpus is None:
+        gpus = rec.get('gpus') or 0
     if rec.get('type') == 'container' or not host or not gpus \
             or mode not in ('on', 'schedule'):
         return None
@@ -3031,11 +3034,16 @@ def vm_schedule_data():
         mode = (desired or {}).get('mode', 'unmanaged')
         status = live.get(name, 'unknown')
         pending = vmm.pending_state(desired, status, graces.get(name), now)
+        sched_gpus = vmm.desired_gpus(desired, rec.get('gpus') or 0)
         row = {
             'vm': name,
             'owner': rec.get('owner'),
             'host': rec.get('host'),
             'gpus': rec.get('gpus'),
+            # GPU count this VM should run under per its desired record
+            # (defaults to all registered); the page's GPU selector starts
+            # here and the acquire hints are computed against it.
+            'sched_gpus': sched_gpus,
             # Public frp port the host.s jump bastion is exposed on, so
             # the page can render a ready-to-paste ~/.ssh/config ProxyJump.
             'port': vmm.bastion_public_port(rec.get('host')),
@@ -3071,7 +3079,7 @@ def vm_schedule_data():
                            for w in _parse_windows(
                                (desired or {}).get('windows', [])) or []]
             row['suggestions'] = vmm.gpu_available_windows(
-                host_commits, rec.get('gpus') or 0, pool, now,
+                host_commits, sched_gpus, pool, now,
                 avoid_windows=own_windows)
         else:
             row['suggestions'] = []
@@ -3228,15 +3236,32 @@ def vm_schedule_set():
     if windows is None:
         windows = []
 
+    # GPU count to run this desired state with — how many of the VM's
+    # allocated GPUs the scheduler should hold/attach. Absent (backwards
+    # compat) means all of them (the registered record). Bounded to the
+    # registered count so a save can never over-allocate past the VM.
+    registered = rec.get('gpus') or 0
+    gpus = data.get('gpus')
+    if gpus is None:
+        gpus = registered
+    else:
+        valid = (isinstance(gpus, int) and not isinstance(gpus, bool)
+                 and 0 <= gpus <= registered
+                 and (gpus > 0 if registered else True))
+        if not valid:
+            cap = f'1..{registered}' if registered else '0'
+            return jsonify({'error': f'gpus must be an integer in {cap}'}), 400
+
     # Admission control self-gates to the modes that newly commit GPUs
     # against the host pool ('on' = always-held, 'schedule' = windows);
     # 'off'/'unmanaged' return None (no new commitment).
-    conflict = _gpu_admission_error(name, rec, mode, windows)
+    conflict = _gpu_admission_error(name, rec, mode, windows, gpus=gpus)
     if conflict:
         return jsonify({'error': conflict}), 409
 
     vmm.desired_set(name, {
         'mode': mode,
+        'gpus': gpus,
         'windows': windows,
         # updated_by is for audit: prefer email (human-readable), fall
         # back to the UID (always present for an authenticated user),

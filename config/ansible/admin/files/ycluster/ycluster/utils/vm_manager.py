@@ -545,21 +545,28 @@ def release_gpus(name):
     return released
 
 
-def _ensure_gpus_attached(name):
-    """Attach passthrough GPUs from the host pool until the VM has its
-    registered count — the inverse of release_gpus, run before every
-    start. No-op for containers, unregistered instances, and VMs that
-    already hold their GPUs. Raises when the pool can't cover the gap
-    (the registered count is a commitment; starting with fewer would
-    silently under-deliver).
+def _ensure_gpus_attached(name, want=None):
+    """Attach passthrough GPUs from the host pool until the VM holds
+    `want` of them (default: its registered count) — the inverse of
+    release_gpus, run before every start. No-op for containers and
+    unregistered instances. Any GPUs already attached beyond `want` are
+    detached, so a start that asks for fewer than registered (the
+    schedule page / `vm start --gpus N`) converges to exactly that many.
+    Raises when the pool can't cover the gap.
     """
     inst = _instance_info(name)
     if not inst or inst.get("type") != "virtual-machine":
         return
-    want = (vm_get(name) or {}).get("gpus") or 0
+    if want is None:
+        want = (vm_get(name) or {}).get("gpus") or 0
     devices = inst.get("devices") or {}
-    have = sum(1 for d in devices.values()
-               if isinstance(d, dict) and d.get("type") == "gpu" and d.get("pci"))
+    gpu_devs = {d_name: d for d_name, d in devices.items()
+                if isinstance(d, dict) and d.get("type") == "gpu" and d.get("pci")}
+    have = len(gpu_devs)
+    if have > want:
+        for d_name in sorted(gpu_devs)[:have - want]:
+            _incus("config", "device", "remove", name, d_name)
+        return
     missing = want - have
     if missing <= 0:
         return
@@ -904,6 +911,18 @@ def pending_state(desired, status, grace, now):
 # accounting. Pure functions — no etcd, so unit-testable in isolation;
 # the admission orchestration (etcd reads) stays in the admin app.
 # --------------------------------------------------------------------------
+def desired_gpus(desired, registered):
+    """How many GPUs a VM should run with under a desired-state record.
+
+    Uses the record's `gpus` when present; falls back to the VM's
+    registered allocation otherwise (backwards compat — schedules
+    written before this field meant 'all allocated GPUs')."""
+    g = (desired or {}).get("gpus")
+    if isinstance(g, int) and not isinstance(g, bool) and g > 0:
+        return g
+    return registered
+
+
 def gpu_commitments(registry, desired_all, now):
     """{host: [{vm, owner, gpus, mode, windows}]} implied by the registry
     and the accepted desired records. `windows` is None for always-held
@@ -914,7 +933,8 @@ def gpu_commitments(registry, desired_all, now):
     for vm, rec in registry.items():
         if rec.get("type") == "container":
             continue
-        gpus, host = rec.get("gpus") or 0, rec.get("host")
+        host = rec.get("host")
+        gpus = desired_gpus(desired_all.get(vm), rec.get("gpus") or 0)
         if not gpus or not host:
             continue
         mode = (desired_all.get(vm) or {}).get("mode", "unmanaged")
@@ -1098,7 +1118,11 @@ def reconcile():
             if running:
                 _clear_issue(issues, name)
             else:
-                to_start.append(name)          # deferred to the start pass
+                # Deferred to the start pass; schedule the GPU count the
+                # desired record calls for (falling back to registered).
+                to_start.append(
+                    (name, desired.get("gpus")
+                     or (all_vms.get(name, {}).get("gpus") or 0)))
         elif running:
             if not grace:
                 print(f"reconcile: warning '{name}' of scheduled stop "
@@ -1144,10 +1168,10 @@ def reconcile():
 
     # Start pass — after every release above, so freed GPUs are visible to
     # _ensure_gpus_attached's free_gpus() lookup.
-    for name in to_start:
+    for name, gpus in to_start:
         print(f"reconcile: starting '{name}' (schedule/desired on)")
         try:
-            vm_start(name, billable=True, initiator="scheduler")
+            vm_start(name, billable=True, initiator="scheduler", gpus=gpus)
             _clear_issue(issues, name)
         except Exception as e:
             print(f"  start failed (will retry next tick): {e}",
@@ -1581,12 +1605,26 @@ def vm_stop(name, billable=False, initiator="cli", release=False):
         _warn_desired_conflict(name, "stop")
 
 
-def vm_start(name, billable=False, initiator="cli"):
+def vm_start(name, billable=False, initiator="cli", gpus=None):
+    """Start a VM, converging its passthrough GPUs to `gpus` (default:
+    the VM's registered count). `gpus` is capped at the registered count
+    so a caller can never over-allocate past the VM's allocation."""
     # Backfill any host-side state added since this instance was created
     # (currently just the /data NAS share). Idempotent.
     _ensure_nas_share(name)
-    # Re-acquire GPUs the scheduler released on a previous stop.
-    _ensure_gpus_attached(name)
+    # Re-acquire GPUs the scheduler released on a previous stop (or drop
+    # extras when starting with fewer than registered).
+    registered = (vm_get(name) or {}).get("gpus") or 0
+    if gpus is not None:
+        if not isinstance(gpus, int) or isinstance(gpus, bool) \
+                or gpus < 0 or gpus > registered \
+                or (registered > 0 and gpus == 0):
+            cap = f"1..{registered}" if registered else "0"
+            raise ValueError(f"gpus must be an integer in {cap} "
+                             f"for '{name}' (registered count {registered})")
+        _ensure_gpus_attached(name, want=gpus)
+    else:
+        _ensure_gpus_attached(name)
     _incus("start", name)
     _record_event_from_record("start", name, initiator=initiator,
                               billable=billable)

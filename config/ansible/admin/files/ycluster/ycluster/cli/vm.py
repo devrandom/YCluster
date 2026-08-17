@@ -77,9 +77,14 @@ def register_vm_commands(subparsers):
 
     stp = sub.add_parser('start', help='Start a stopped VM')
     stp.add_argument('name')
+    stp.add_argument('--gpus', type=int, default=None,
+                    help='Number of passthrough GPUs to attach for this '
+                         'start (default: the VM\'s registered GPU count; '
+                         'capped at that count and 0 only for a CPU-only VM)')
     stp.add_argument('--bill', action='store_true',
                     help='Bill this runtime to the owner (CLI default: non-billable)')
-    stp.set_defaults(func=lambda a: vm.vm_start(a.name, billable=a.bill))
+    stp.set_defaults(func=lambda a: vm.vm_start(a.name, billable=a.bill,
+                                                gpus=a.gpus))
 
     rsp = sub.add_parser('restart', help='Stop (if running) and start a VM')
     rsp.add_argument('name')

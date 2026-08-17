@@ -176,6 +176,26 @@ class CommitmentsTests(unittest.TestCase):
         reg = {"a": vmrec(gpus=0), "b": vmrec(host=None)}
         self.assertEqual(vm.gpu_commitments(reg, {}, self.NOW), {})
 
+    def test_desired_gpus_used(self):
+        d = {"v": {"mode": "schedule",
+                   "windows": [win(dt(h=14), dt(h=16))], "gpus": 1}}
+        c = vm.gpu_commitments({"v": vmrec(gpus=4)}, d, self.NOW)
+        self.assertEqual(c["nv2"][0]["gpus"], 1)
+
+    def test_desired_gpus_defaults_to_registered(self):
+        # Old desired records without `gpus` mean "all allocated GPUs".
+        d = {"v": {"mode": "schedule",
+                   "windows": [win(dt(h=14), dt(h=16))]}}
+        c = vm.gpu_commitments({"v": vmrec(gpus=4)}, d, self.NOW)
+        self.assertEqual(c["nv2"][0]["gpus"], 4)
+
+    def test_desired_gpus_helper(self):
+        self.assertEqual(vm.desired_gpus({"gpus": 2}, 4), 2)
+        self.assertEqual(vm.desired_gpus({"gpus": 0}, 4), 4)   # falsy -> fallback
+        self.assertEqual(vm.desired_gpus({}, 4), 4)
+        self.assertEqual(vm.desired_gpus(None, 4), 4)
+
+
     def test_owner_carried_through(self):
         c = vm.gpu_commitments({"v": vmrec(owner="bob@x")}, {}, self.NOW)
         self.assertEqual(c["nv2"][0]["owner"], "bob@x")
