@@ -26,7 +26,6 @@ Categories: [security](#security) ·
 - [Audit-log story](security/audit-log-story.md)
 - [Reconsider become usage](security/become-model-audit.md)
 - [core group definition](security/core-group-definition.md)
-- **[HIGH]** [CVE tracking](security/cve-tracking.md) — nothing scans for published CVEs affecting the toolchain; package inventory (apt, held snaps, `/opt/src/` builds, in-cluster images) has no automated advisory feed.
 
 ## Networking
 - **[HIGH]** [Switch rathole → frp](networking/switch-rathole-to-frp.md) — rathole upstream dormant + TCP socket leak; real external HTTPS outage 2026-07-17.
@@ -68,6 +67,7 @@ DR, backups, node lifecycle, scaling/capacity.
 ## Monitoring
 - **[MEDIUM]** [GPU health](monitoring/gpu-health-monitoring.md) — would have caught the nv3 GPU/driver-loss cascade (temperature / ECC / FLR events).
 - **[MEDIUM]** [VM guest disk-full](monitoring/vm-disk-full-alerts.md) — same blind spot; root cause of the same nv3 cascade.
+- **[MEDIUM]** [Container image scan-drift](monitoring/container-image-scan-drift.md) — snapshot vs running image can diverge (authentik false positives from a drifted snapshot); `PerimeterCVE*` alerts still surface it for now, so medium.
 - [Postgres + Qdrant liveness](monitoring/pg-qdrant-liveness.md)
 - [Backup freshness metric](monitoring/backup-freshness-metric.md)
 - [Clock-skew alert](monitoring/clock-skew-alert.md)
