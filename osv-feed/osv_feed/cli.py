@@ -10,7 +10,7 @@ import sys
 
 from . import __version__
 from .acks import add_ack
-from .acks import ack_key
+from .acks import find_ack
 from .acks import list_acks
 from .acks import load_acks
 from .acks import remove_ack
@@ -206,12 +206,13 @@ def _render_table(findings: list[dict], verbose: bool = False) -> str:
 
 
 def _render_ack_table(entries: list[dict]) -> str:
-    header = ("CATEGORY", "ECOSYSTEM", "CVE", "ACKED_AT", "NOTE")
+    header = ("CATEGORY", "ECOSYSTEM", "CVE", "SURFACE", "ACKED_AT", "NOTE")
     rows = [
         (
             entry.get("category", ""),
             entry.get("ecosystem", ""),
             entry.get("cve", ""),
+            entry.get("surface", ""),
             _format_acked_at(entry.get("acked_at", "")),
             entry.get("note", ""),
         )
@@ -410,13 +411,14 @@ def _tag_finding(finding: dict, category: str, category_cfg: dict | None, acks: 
     entry["interests"] = (
         matched_interests(entry, category_cfg) if category_cfg is not None else []
     )
-    ack = acks.get(ack_key(category, entry["ecosystem"], entry["cve"])) or acks.get(
-        ack_key(category, "", entry["cve"])
-    )
+    surface = entry.get("surface") or entry.get("image") or ""
+    ack = find_ack(acks, category, entry["ecosystem"], entry["cve"], surface)
     entry["acked"] = ack is not None
     if ack:
         entry["acked_at"] = ack.get("acked_at", "")
         entry["ack_note"] = ack.get("note", "")
+    if surface:
+        entry["surface"] = surface
     return entry
 
 
@@ -577,23 +579,42 @@ def build_parser() -> argparse.ArgumentParser:
     ack_add = ack_sub.add_parser("add", help="acknowledge a CVE so alerts can suppress it")
     ack_add.add_argument("--category", required=True)
     ack_add.add_argument("--ecosystem")
+    ack_add.add_argument(
+        "--surface",
+        default="",
+        help=(
+            "deployment surface to scope the ack to (e.g. a container image "
+            "name, or a host install like local-ai-proxy); empty acknowledges "
+            "the CVE on every surface"
+        ),
+    )
     ack_add.add_argument("--cve", required=True)
     ack_add.add_argument("--note", default="")
 
     ack_remove = ack_sub.add_parser("remove", help="remove a CVE acknowledgment")
     ack_remove.add_argument("--category", required=True)
     ack_remove.add_argument("--ecosystem")
+    ack_remove.add_argument(
+        "--surface",
+        default="",
+        help="surface the ack is scoped to (omit for a wildcard/surface-less ack)",
+    )
     ack_remove.add_argument("--cve", required=True)
 
     ack_list = ack_sub.add_parser("list", help="list acknowledged CVEs")
     ack_list.add_argument("--category")
+    ack_list.add_argument(
+        "--surface",
+        default=None,
+        help="only show acks scoped to this surface (wildcard surface-less acks are shown with an empty column)",
+    )
     ack_list.add_argument("--format", choices=("table", "json"), default="table")
     return parser
 
 
 def _run_ack(args: argparse.Namespace, config: dict) -> int:
     if args.ack_command == "list":
-        entries = list_acks(args.ack_db, args.category)
+        entries = list_acks(args.ack_db, args.category, surface=args.surface)
         if args.format == "json":
             json.dump(entries, sys.stdout, indent=2)
             sys.stdout.write("\n")
@@ -601,17 +622,21 @@ def _run_ack(args: argparse.Namespace, config: dict) -> int:
             sys.stdout.write(_render_ack_table(entries) + "\n")
         return 0
     ecosystem = args.ecosystem or ""
+    surface = args.surface or ""
     ecosystem_label = ecosystem or "any ecosystem"
+    surface_label = f", surface {surface!r}" if surface else ""
     if args.ack_command == "add":
         entry = add_ack(
             args.ack_db,
             category=args.category,
             ecosystem=ecosystem,
             cve=args.cve,
+            surface=surface,
             note=args.note,
         )
         print(
-            f"acknowledged {entry['cve']} in {entry['category']} ({ecosystem_label})"
+            f"acknowledged {entry['cve']} in {entry['category']} "
+            f"({ecosystem_label}{surface_label})"
         )
         return 0
     if remove_ack(
@@ -619,10 +644,18 @@ def _run_ack(args: argparse.Namespace, config: dict) -> int:
         category=args.category,
         ecosystem=ecosystem,
         cve=args.cve,
+        surface=surface,
     ):
-        print(f"removed ack for {args.cve} in {args.category} ({ecosystem_label})")
+        print(
+            f"removed ack for {args.cve} in {args.category} "
+            f"({ecosystem_label}{surface_label})"
+        )
         return 0
-    print(f"no ack found for {args.cve} in {args.category} ({ecosystem_label})", file=sys.stderr)
+    print(
+        f"no ack found for {args.cve} in {args.category} "
+        f"({ecosystem_label}{surface_label})",
+        file=sys.stderr,
+    )
     return 1
 
 

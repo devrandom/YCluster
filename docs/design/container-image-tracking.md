@@ -151,6 +151,13 @@ scanner introduces.
    ride the same `PerimeterCVE*LongPending` first-seen SLA; add a
    `PerimeterCVEHighContainerLongPending` only if container findings need a
    distinct routing window.
+6. **Ack per surface, not per CVE.** osv-feed acks accept a `--surface`
+   (a container name, or a non-container install such as `local-ai-proxy`)
+   so a shared CVE can be acknowledged on one image after a per-image review
+   without suppressing it on the others. An empty `--surface` remains the
+   legacy wildcard. This replaces the "container ack silences every image"
+   behavior and is what makes a per-image perimeter-CVE review actionable
+   without cross-cutting suppression (`docs/operations/packages.md`).
 
 ## Phased rollout
 

@@ -43,8 +43,12 @@ versions. It is designed to move to its own repository unchanged; see
   medium-policy `default` fallback triages packages that belong to no
   category.
 - `osv-feed/acks.py` — atomic JSON acknowledgment store (keyed by
-  `category + ecosystem + cve`) so acknowledged CVEs stay visible but are
-  labeled for alert suppression.
+  `category + ecosystem + cve`, plus an optional `surface`) so acknowledged
+  CVEs stay visible but are labeled for alert suppression. A `surface` is an
+  arbitrary deployment target (a container image, or a non-container install
+  such as `local-ai-proxy`); an empty surface is a wildcard that keeps the
+  legacy three-part key valid, and surface-scoped acks only suppress the CVE
+  on that surface.
 - `osv-feed/cli.py` — `mirror`, `match`, and `ack` commands; `match`
   emits `table`/`json`/`prometheus` output and accepts `--category` for a
   configured tracking set. Without `--category`, `match` auto-tags each

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -138,6 +140,7 @@ class ContainerCliTest(unittest.TestCase):
     def setUp(self):
         self.db = tempfile.mkdtemp(prefix="osv-cli-db-")
         self.manifest_dir = tempfile.mkdtemp(prefix="osv-cli-manifests-")
+        self.ack_db = os.path.join(self.db, "acks.json")
         self.addCleanup(shutil.rmtree, self.db, ignore_errors=True)
         self.addCleanup(shutil.rmtree, self.manifest_dir, ignore_errors=True)
         # The default no-flag run also auto-matches every host category, so
@@ -263,3 +266,84 @@ class ContainerCliTest(unittest.TestCase):
         self.assertEqual(["PYSEC-1"], [f["cve"] for f in findings])
         self.assertTrue(all(f["category"] == "container" for f in findings))
         self.assertEqual("webapp", findings[0]["image"])
+
+    def test_image_scoped_ack_suppresses_only_that_image(self):
+        _write_record(
+            self.db,
+            "PyPI",
+            _no_fix_record("PYSEC-1", "PyPI", "requests", "2.32.3"),
+        )
+        self._write_manifest("webapp.manifest", ["PyPI:requests=2.32.3"])
+        self._write_manifest("worker.manifest", ["PyPI:requests=2.32.3"])
+
+        # Ack the CVE only for the webapp image.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(
+                [
+                    "--db-dir", self.db,
+                    "--ack-db", self.ack_db,
+                    "ack", "add",
+                    "--category", "container",
+                    "--ecosystem", "PyPI",
+                    "--cve", "PYSEC-1",
+                    "--surface", "webapp",
+                ]
+            )
+        self.assertEqual(0, code, out.getvalue())
+
+        code, out = self._run(
+            [
+                "--ack-db", self.ack_db,
+                "match", "--container-dir", self.manifest_dir, "--format", "json",
+            ]
+        )
+        self.assertEqual(0, code)
+        findings = [
+            f
+            for f in json.loads(out)["findings"]
+            if f.get("category") == "container"
+        ]
+        by_image = {f["image"]: f for f in findings}
+        self.assertTrue(by_image["webapp"]["acked"])
+        self.assertFalse(by_image["worker"]["acked"])
+        self.assertEqual("webapp", by_image["webapp"]["surface"])
+
+    def test_wildcard_surface_ack_matches_all_images(self):
+        _write_record(
+            self.db,
+            "PyPI",
+            _no_fix_record("PYSEC-1", "PyPI", "requests", "2.32.3"),
+        )
+        self._write_manifest("webapp.manifest", ["PyPI:requests=2.32.3"])
+        self._write_manifest("worker.manifest", ["PyPI:requests=2.32.3"])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(
+                [
+                    "--db-dir", self.db,
+                    "--ack-db", self.ack_db,
+                    "ack", "add",
+                    "--category", "container",
+                    "--ecosystem", "PyPI",
+                    "--cve", "PYSEC-1",
+                ]
+            )
+        self.assertEqual(0, code, out.getvalue())
+
+        code, out = self._run(
+            [
+                "--ack-db", self.ack_db,
+                "match", "--container-dir", self.manifest_dir, "--format", "json",
+            ]
+        )
+        self.assertEqual(0, code)
+        findings = [
+            f
+            for f in json.loads(out)["findings"]
+            if f.get("category") == "container"
+        ]
+        by_image = {f["image"]: f for f in findings}
+        self.assertTrue(by_image["webapp"]["acked"])
+        self.assertTrue(by_image["worker"]["acked"])

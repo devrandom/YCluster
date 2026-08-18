@@ -595,6 +595,60 @@ class CliCategoryAckTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual([], cli.list_acks(self.ack_db))
 
+    def test_ack_surface_scoped_does_not_match_surfaceless_finding(self):
+        # A surface-scoped ack must not silence the same CVE on a host
+        # (surface-less) finding, so shared CVEs stay per-surface controllable.
+        out = io.StringIO()
+        with mock.patch("osv_feed.cli.load_config", return_value=self.CONFIG):
+            with contextlib.redirect_stdout(out):
+                code = cli.main(
+                    [
+                        "--db-dir", self.db,
+                        "--ack-db", self.ack_db,
+                        "ack", "add",
+                        "--category", "perimeter",
+                        "--ecosystem", "Debian",
+                        "--cve", "DEBIAN-CVE-RCE",
+                        "--surface", "authentik",
+                    ]
+                )
+        self.assertEqual(0, code, out.getvalue())
+        self.assertIn("surface 'authentik'", out.getvalue())
+
+        code, data = self._match(category="perimeter")
+        self.assertEqual(0, code)
+        finding = data["findings"][0]
+        self.assertFalse(finding["acked"], "surface-scoped ack leaked to a host finding")
+
+    def test_ack_list_filters_by_surface(self):
+        with mock.patch("osv_feed.cli.load_config", return_value=self.CONFIG):
+            cli.main(
+                [
+                    "--ack-db", self.ack_db, "ack", "add",
+                    "--category", "container", "--ecosystem", "PyPI",
+                    "--cve", "GHSA-1", "--surface", "open-webui",
+                ]
+            )
+            cli.main(
+                [
+                    "--ack-db", self.ack_db, "ack", "add",
+                    "--category", "container", "--ecosystem", "PyPI",
+                    "--cve", "GHSA-2", "--surface", "zulip",
+                ]
+            )
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(
+                    [
+                        "--ack-db", self.ack_db, "ack", "list",
+                        "--surface", "zulip", "--format", "json",
+                    ]
+                )
+        self.assertEqual(0, code)
+        entries = json.loads(out.getvalue())
+        self.assertEqual(["GHSA-2"], [entry["cve"] for entry in entries])
+        self.assertEqual("zulip", entries[0]["surface"])
+
 
 class CliDefaultCategoryTest(unittest.TestCase):
     def setUp(self):

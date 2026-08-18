@@ -83,6 +83,96 @@ class AcksTest(unittest.TestCase):
         self.assertEqual("", entries[0]["ecosystem"])
         self.assertEqual(["DEBIAN-CVE-1"], [e["cve"] for e in entries])
 
+    def test_key_with_surface_is_four_part(self):
+        self.assertEqual(
+            "container|PyPI|GHSA-1|open-webui",
+            acks.ack_key("container", "PyPI", "GHSA-1", "open-webui"),
+        )
+
+    def test_add_ack_stores_surface(self):
+        entry = acks.add_ack(
+            self.path,
+            category="container",
+            ecosystem="PyPI",
+            cve="GHSA-1",
+            surface="open-webui",
+            note="reviewed unreachable",
+        )
+        self.assertEqual("open-webui", entry["surface"])
+        self.assertEqual(
+            "container|PyPI|GHSA-1|open-webui",
+            acks.ack_key(entry["category"], entry["ecosystem"], entry["cve"], entry["surface"]),
+        )
+
+    def test_remove_ack_with_surface(self):
+        acks.add_ack(
+            self.path,
+            category="container",
+            ecosystem="PyPI",
+            cve="GHSA-1",
+            surface="open-webui",
+        )
+        self.assertTrue(
+            acks.remove_ack(
+                self.path,
+                category="container",
+                ecosystem="PyPI",
+                cve="GHSA-1",
+                surface="open-webui",
+            )
+        )
+        self.assertEqual([], acks.list_acks(self.path))
+        # A surface-less remove must NOT match a surface-scoped ack.
+        self.assertFalse(
+            acks.remove_ack(self.path, category="container", ecosystem="PyPI", cve="GHSA-1")
+        )
+
+    def test_list_filters_by_surface(self):
+        acks.add_ack(
+            self.path, category="container", ecosystem="PyPI", cve="G1", surface="open-webui"
+        )
+        acks.add_ack(
+            self.path, category="container", ecosystem="PyPI", cve="G2", surface="zulip"
+        )
+        acks.add_ack(self.path, category="container", ecosystem="PyPI", cve="G3")
+        entries = acks.list_acks(self.path, surface="zulip")
+        self.assertEqual(["G2"], [e["cve"] for e in entries])
+        # No surface filter returns everything, wildcard ack included.
+        self.assertEqual(3, len(acks.list_acks(self.path)))
+
+    def test_find_ack_prefers_exact_ecosystem_and_surface(self):
+        store = {}
+        # Exact ecosystem + exact surface wins over a wildcard surface ack.
+        store[acks.ack_key("container", "PyPI", "G1", "open-webui")] = {
+            "surface": "open-webui"
+        }
+        store[acks.ack_key("container", "PyPI", "G1")] = {"surface": ""}
+        got = acks.find_ack(store, "container", "PyPI", "G1", "open-webui")
+        self.assertEqual("open-webui", got["surface"])
+
+    def test_find_ack_surface_scoped_does_not_leak_to_other_surfaces(self):
+        store = {
+            acks.ack_key("container", "PyPI", "G1", "open-webui"): {"surface": "open-webui"}
+        }
+        # Different surface / no surface must NOT match the open-webui ack.
+        self.assertFalse(acks.find_ack(store, "container", "PyPI", "G1", "zulip"))
+        self.assertFalse(acks.find_ack(store, "container", "PyPI", "G1"))
+
+    def test_find_ack_wildcard_surface_matches_any_surface(self):
+        store = {acks.ack_key("container", "PyPI", "G1"): {"surface": ""}}
+        self.assertIsNotNone(acks.find_ack(store, "container", "PyPI", "G1", "open-webui"))
+        self.assertIsNotNone(acks.find_ack(store, "container", "PyPI", "G1"))
+
+    def test_find_ack_wildcard_ecosystem(self):
+        store = {acks.ack_key("container", "", "G1", "open-webui"): {"surface": "open-webui"}}
+        self.assertIsNotNone(acks.find_ack(store, "container", "PyPI", "G1", "open-webui"))
+        self.assertFalse(acks.find_ack(store, "container", "PyPI", "G1", "zulip"))
+
+    def test_find_ack_wildcard_everything(self):
+        store = {acks.ack_key("container", "", "G1"): {"surface": ""}}
+        self.assertIsNotNone(acks.find_ack(store, "container", "PyPI", "G1", "open-webui"))
+        self.assertFalse(acks.find_ack(store, "container", "PyPI", "G2", "open-webui"))
+
 
 if __name__ == "__main__":
     unittest.main()

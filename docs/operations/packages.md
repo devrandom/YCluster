@@ -142,20 +142,33 @@ The window constants live in `config/ansible/monitoring/templates/ycluster-alert
 
 Acknowledging keeps the finding visible in `match` output but marks it
 `acked="true"` so the alerts stop. Acks are keyed by
-`category + ecosystem + cve` (a container ack therefore applies to that CVE
-across all images, since ack keys do not carry `image`).
+`category + ecosystem + cve + [surface]`. A **surface** is an arbitrary
+deployment target: a container image, or a non-container install such as the
+self-built `local-ai-proxy` (Go ecosystem). An empty surface is a wildcard
+(keeps the legacy three-part key), so a surface-less ack suppresses the CVE on
+every surface, while a surface-scoped ack suppresses it only there. Matching
+prefers the most specific ack (exact ecosystem + exact surface, then
+wildcard surface, then wildcard ecosystem, then wildcard both).
 
 ```bash
 # On the collector node (config already points --ack-db at /near1/...):
 osv-feed ack add --category perimeter --ecosystem Debian --cve DEBIAN-CVE-XXXX-00000 \
   --note 'mitigated at firewall'
+# Scope an ack to one image so the same CVE stays alerting on other images:
+osv-feed ack add --category container --ecosystem PyPI --cve GHSA-XXXX-XXXX-XXXX \
+  --surface open-webui --note 'unreachable on open-webui wiring'
 osv-feed ack list --category perimeter --format json
-osv-feed ack remove --category perimeter --ecosystem Debian --cve DEBIAN-CVE-XXXX-00000
+osv-feed ack list --format json          # see the surface column / filter with --surface
+osv-feed ack remove --category container --ecosystem PyPI --cve GHSA-XXXX-XXXX-XXXX \
+  --surface open-webui
 ```
 
 Only acknowledge a CVE when it is actually mitigated (documented exception),
 not to silence noise — `no_fix_yet` entries are the cases that need a
-lockdown decision rather than a "wait for the upstream fix" posture.
+lockdown decision rather than a "wait for the upstream fix" posture. Prefer a
+`--surface`-scoped ack when the review only covered one deployment; a blanket
+ack suppresses the CVE everywhere it appears, including surfaces that were not
+reviewed.
 
 ### Bumping self-built pins (frp)
 
