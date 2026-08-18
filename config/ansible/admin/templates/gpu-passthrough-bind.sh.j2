@@ -17,6 +17,10 @@ modprobe vfio-pci
 
 for addr in "${passthrough[@]}"; do
     dev="/sys/bus/pci/devices/$addr"
+    # Not every card exposes an HD-Audio (.1) companion to its GPU function
+    # (e.g. some Blackwell parts have none). Skip a missing address rather
+    # than aborting the whole bind with set -e.
+    [ -e "$dev" ] || continue
     cur=""
     [ -L "$dev/driver" ] && cur=$(basename "$(readlink -f "$dev/driver")")
     [ "$cur" = vfio-pci ] && continue
