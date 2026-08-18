@@ -141,21 +141,63 @@ def _all_json(prefix):
 # --------------------------------------------------------------------------
 # incus helpers
 # --------------------------------------------------------------------------
-def _incus(*args, check=True, stdin=None):
+# Bounded stop windows so a wedged guest can never pin the reconciler.
+# Containers get a shorter graceful window — their stop is just SIGPWR to
+# PID1, and if that hangs we fall back to --force (killable userspace).
+# VMs are given longer to run the guest shutdown, and are NEVER forced
+# (SIGKILLing qemu mid-GPU-reset can wedge the vfio device in-kernel).
+_STOP_TIMEOUT_CONTAINER_S = 90
+_STOP_TIMEOUT_VM_S = 180
+_STOP_TIMEOUT_FORCE_S = 30
+
+
+def _incus(*args, check=True, stdin=None, timeout=None):
     # The incus CLI reads instance config from a non-TTY stdin until EOF,
     # so it must never inherit ours (`ssh host 'ycluster vm launch ...'`
     # keeps stdin open and incus init blocks forever).
     if stdin is not None:
         r = subprocess.run(
-            ["incus", *args], input=stdin, text=True, capture_output=True
+            ["incus", *args], input=stdin, text=True, capture_output=True,
+            timeout=timeout,
         )
     else:
         r = subprocess.run(
-            ["incus", *args], stdin=subprocess.DEVNULL, text=True, capture_output=True
+            ["incus", *args], stdin=subprocess.DEVNULL, text=True,
+            capture_output=True, timeout=timeout,
         )
     if check and r.returncode != 0:
         raise RuntimeError(f"incus {' '.join(args)} failed: {r.stderr.strip()}")
     return r
+
+
+def _incus_stop(name):
+    """Stop `name` with a bounded wait; never hang on a wedged guest.
+
+    Graceful `incus stop` first, with a per-type timeout. If a container
+    times out (PID1 stuck in userspace) fall back to `--force` — safe here
+    because containers share the host GPU via the profile rather than
+    pinning a passthrough device, so there is no FLR reset to corrupt.
+    VMs are never force-stopped (qemu SIGKILL mid GPU-reset can wedge the
+    vfio device in-kernel): a timed-out VM stop raises so the caller
+    records an issue and retries next tick instead of blocking forever.
+    """
+    is_vm = (_instance_info(name) or {}).get("type") == "virtual-machine"
+    deadline = _STOP_TIMEOUT_VM_S if is_vm else _STOP_TIMEOUT_CONTAINER_S
+    try:
+        return _incus("stop", name, timeout=deadline)
+    except subprocess.TimeoutExpired:
+        pass
+    if is_vm:
+        raise RuntimeError(
+            f"incus stop {name} hung >{deadline}s; NOT forcing a VM "
+            f"(GPU-reset wedge) — will retry next tick")
+    force = _incus("stop", name, "--force", check=False,
+                   timeout=_STOP_TIMEOUT_FORCE_S)
+    if force.returncode == 0:
+        return force
+    raise RuntimeError(
+        f"graceful incus stop {name} hung, then --force failed: "
+        f"{force.stderr.strip() or 'still hung after force-stop timeout'}")
 
 
 def _incus_json(*args):
@@ -1497,7 +1539,7 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
             if was_running:
                 print(f"Stopping '{name}' to change GPU count "
                       f"({rec.get('gpus') or 0} -> {gpus})...")
-                _incus("stop", name)
+                _incus_stop(name)
             release_gpus(name)                 # detach current physical GPUs
             rec["gpus"] = gpus
             _put_json(VMS_PREFIX + name, rec)
@@ -1595,7 +1637,7 @@ def _warn_desired_conflict(name, action):
 
 
 def vm_stop(name, billable=False, initiator="cli", release=False):
-    _incus("stop", name)
+    _incus_stop(name)
     _record_event_from_record("stop", name, initiator=initiator,
                               billable=billable)
     print(f"Stopped '{name}'.")
@@ -1640,7 +1682,7 @@ def vm_start(name, billable=False, initiator="cli", gpus=None):
 
 def vm_restart(name, billable=False, initiator="cli"):
     if _instance_running(name):
-        _incus("stop", name)
+        _incus_stop(name)
     _ensure_nas_share(name)
     _ensure_gpus_attached(name)
     _incus("start", name)
@@ -1661,7 +1703,7 @@ def vm_destroy(name):
         running = any(i.get("status") == "Running"
                       for i in _incus_json("list", name, "--format", "json"))
         if running:
-            _incus("stop", name)
+            _incus_stop(name)
         _incus("delete", name)
     _record_event_from_record("destroy", name)
     sync_dns_records()

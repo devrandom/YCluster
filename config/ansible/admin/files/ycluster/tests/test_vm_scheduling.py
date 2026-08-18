@@ -10,9 +10,11 @@ or a single module:
     python3 -m unittest tests.test_vm_scheduling
 """
 
+import subprocess
 import unittest
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from unittest import mock
 
 from ycluster.utils import vm_manager as vm
 
@@ -545,6 +547,57 @@ class SshKeyValidationTests(unittest.TestCase):
     def test_rejects_too_long(self):
         with self.assertRaises(ValueError):
             vm.validate_ssh_key("ssh-ed25519 " + "A" * 5000 + " x")
+
+
+def _proc(returncode, stderr=""):
+    return subprocess.CompletedProcess(["incus"], returncode, stderr=stderr)
+
+
+class IncusStopTests(unittest.TestCase):
+    """_incus_stop bounds the stop and only force-stops containers."""
+
+    def _stop(self, type_, *incus_effects):
+        with mock.patch.object(vm, "_instance_info",
+                               return_value={"type": type_}), \
+             mock.patch.object(vm, "_incus", side_effect=incus_effects) as m:
+            result = vm._incus_stop("x")
+        return result, m
+
+    def test_container_graceful_stop_succeeds_no_force(self):
+        result, m = self._stop("container", _proc(0))
+        self.assertEqual(result.returncode, 0)
+        m.assert_called_once_with("stop", "x",
+                                  timeout=vm._STOP_TIMEOUT_CONTAINER_S)
+
+    def test_vm_graceful_stop_succeeds_no_force(self):
+        result, m = self._stop("virtual-machine", _proc(0))
+        self.assertEqual(result.returncode, 0)
+        m.assert_called_once_with("stop", "x",
+                                  timeout=vm._STOP_TIMEOUT_VM_S)
+
+    def test_container_falls_back_to_force_on_timeout(self):
+        result, m = self._stop("container",
+                               subprocess.TimeoutExpired("incus stop", 90),
+                               _proc(0))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(m.call_count, 2)
+        # Second call adds --force, bounded by the force window.
+        self.assertEqual(m.call_args_list[1].args, ("stop", "x", "--force"))
+        self.assertEqual(
+            m.call_args_list[1].kwargs["timeout"], vm._STOP_TIMEOUT_FORCE_S)
+
+    def test_container_force_failure_raises(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._stop("container",
+                       subprocess.TimeoutExpired("incus stop", 90),
+                       _proc(1, "boom"))
+        self.assertIn("boom", str(ctx.exception))
+
+    def test_vm_timeout_never_forces(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._stop("virtual-machine",
+                       subprocess.TimeoutExpired("incus stop", 180))
+        self.assertIn("NOT forcing", str(ctx.exception))
 
 
 if __name__ == "__main__":
