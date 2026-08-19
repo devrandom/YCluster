@@ -89,11 +89,14 @@ EOF
 }
 
 # Forward-auth for the admin web pages: proxy provider on the embedded
-# outpost + application gated to the ycluster-admins group. Written here
-# for the same reason as the OWUI blueprint (needs the external domain).
-# Keep flow slugs / shared settings in sync with write_owui_blueprint.
-# ycluster-managers is the view-only counterpart — created alongside
-# admins so a fresh install doesn't need a separate bootstrap step.
+# outpost + application bound to the ycluster-admins and ycluster-managers
+# groups. Written here for the same reason as the OWUI blueprint (needs the
+# external domain). Keep flow slugs / shared settings in sync with
+# write_owui_blueprint. Managers are the view-only counterpart: the app
+# binding gets them into the admin pages (and shows the app in their
+# library), and the Flask app owner/role-gates mutations via
+# X-Authentik-Groups. ycluster-managers is created alongside admins so a
+# fresh install doesn't need a separate bootstrap step.
 write_admin_blueprint() {
     local external_domain="$1"
     local bp=/etc/authentik/blueprints/ycluster-admin.yaml
@@ -133,6 +136,11 @@ entries:
       target: !KeyOf app-admin
       group: !KeyOf group-admins
       order: 0
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf app-admin
+      group: !KeyOf group-managers
+      order: 1
   # User-facing landing surface (root <domain>): landing page + self-service
   # VM scheduling + Settings. No policy binding -> visible and usable by every
   # enrolled user; the Flask app owner-scopes per VM and gates the Admin link.
