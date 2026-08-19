@@ -62,6 +62,7 @@ entries:
       client_type: confidential
       client_id: open-webui
       client_secret: "$client_secret"
+      access_token_validity: days=1
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
       signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
@@ -153,6 +154,7 @@ entries:
     attrs:
       mode: forward_single
       external_host: https://$external_domain
+      access_token_validity: days=1
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
   - model: authentik_core.application
@@ -177,6 +179,7 @@ entries:
     attrs:
       mode: forward_single
       external_host: https://comfy.$external_domain
+      access_token_validity: days=1
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
   - model: authentik_core.application
@@ -203,6 +206,7 @@ entries:
     attrs:
       mode: forward_single
       external_host: https://chat.$external_domain
+      access_token_validity: days=1
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
   - model: authentik_core.application
@@ -225,6 +229,7 @@ entries:
     attrs:
       mode: forward_single
       external_host: https://zulip.$external_domain
+      access_token_validity: days=1
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
   - model: authentik_core.application
