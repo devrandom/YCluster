@@ -75,6 +75,13 @@ def register_user_commands(subparsers):
     uninvite_parser.add_argument('email', help='Invited email')
     uninvite_parser.set_defaults(func=user_uninvite)
 
+    invite_project_parser = user_subparsers.add_parser(
+        'invite-project',
+        help='Tag an outstanding invitation with a project (applied on enrollment)')
+    invite_project_parser.add_argument('email', help='Invited email')
+    invite_project_parser.add_argument('project', help='Project name to tag the invitation with')
+    invite_project_parser.set_defaults(func=user_invite_project)
+
     import_parser = user_subparsers.add_parser(
         'import-owui',
         help='Import Open-WebUI accounts by copying their bcrypt password hashes')
@@ -164,6 +171,11 @@ def user_uninvite(args):
         print(f"Revoked {count} invitation(s) for {args.email}")
     else:
         print(f"No outstanding invitation for {args.email}")
+
+
+def user_invite_project(args):
+    from ..utils import authentik_manager
+    print(authentik_manager.set_invitation_project(args.email, args.project))
 
 
 def user_import_owui(args):

@@ -382,3 +382,28 @@ def revoke_invitation(email):
     for inv in matched:
         api._request('DELETE', f"/stages/invitation/invitations/{inv['pk']}/")
     return len(matched)
+
+
+def set_invitation_project(email, project):
+    """Tag an outstanding invitation for `email` with `project`, stored in
+    the invitation's fixed_data (the enrollment flow's user-write stage
+    writes it onto the enrolled account's project_name). Pass `project` as
+    '' to clear the tag."""
+    api = AuthentikAPI()
+    invitations = api.get('/stages/invitation/invitations/', params={'page_size': 500})['results']
+    matched = [inv for inv in invitations
+               if (inv.get('fixed_data') or {}).get('email') == email]
+    if not matched:
+        raise RuntimeError(f"no outstanding invitation for {email}")
+    for inv in matched:
+        fixed = dict(inv.get('fixed_data') or {})
+        if project:
+            fixed['project_name'] = project
+        else:
+            fixed.pop('project_name', None)
+        api.patch(f"/stages/invitation/invitations/{inv['pk']}/",
+                  json={'fixed_data': fixed})
+    n = len(matched)
+    return (f"tagged {n} invitation{'s' if n != 1 else ''} for {email} "
+            f"with project {project!r}" if project else
+            f"cleared project tag from {n} invitation{'s' if n != 1 else ''} for {email}")

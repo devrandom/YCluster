@@ -156,9 +156,15 @@ revoke all; managers see only their authorized projects' invites, revoke is
 admin-only). CLI:
 
 ```
-ycluster user invitations       # list
-ycluster user uninvite alice@x  # revoke
+ycluster user invitations                          # list
+ycluster user uninvite alice@x                     # revoke
+ycluster user invite-project alice@x acme-demo     # tag a pending invite with a project
 ```
+
+An invitation tagged with a project via `invite-project` (or created with
+`invite --project`) writes that project onto the account when it enrolls,
+and — for managers — makes it visible in their outstanding-invites view
+only if the project is one they're authorized for.
 
 ## Disable / re-enable
 
