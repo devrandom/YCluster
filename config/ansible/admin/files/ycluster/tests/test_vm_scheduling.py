@@ -431,6 +431,30 @@ class VendorIdTests(unittest.TestCase):
         self.assertFalse(vm._is_live_vendor(b""))
 
 
+class GpuPoolClassTests(unittest.TestCase):
+    # gpu_pool() only counts vfio-bound display controllers; a class that
+    # isn't a display function (or a non-PCI class string) must be dropped.
+    def test_vga_class_counted(self):
+        # Older passthrough cards (RTX 6000 class) expose 0x0300 VGA.
+        self.assertTrue(vm._is_gpu_pci_class("0x030000"))
+
+    def test_blackwell_3d_class_counted(self):
+        # RTX PRO 6000 Blackwell exposes only a 3D-controller function
+        # (0x0302), no VGA - the nv1 pool was empty for this reason.
+        self.assertTrue(vm._is_gpu_pci_class("0x030200"))
+
+    def test_display_other_class_counted(self):
+        self.assertTrue(vm._is_gpu_pci_class("0x038000"))
+
+    def test_audio_function_excluded(self):
+        # The .1 companion function of a passthrough GPU is an audio
+        # device (0x04); it must not inflate the pool.
+        self.assertFalse(vm._is_gpu_pci_class("0x040300"))
+
+    def test_empty_string_not_counted(self):
+        self.assertFalse(vm._is_gpu_pci_class(""))
+
+
 class SelectHealthyGpusTests(unittest.TestCase):
     POOL = ["c1:00.0", "e1:00.0", "01:00.0", "02:00.0"]
 

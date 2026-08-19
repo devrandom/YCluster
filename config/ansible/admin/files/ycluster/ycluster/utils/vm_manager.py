@@ -420,6 +420,18 @@ def _read_file(inst, path):
 # --------------------------------------------------------------------------
 # GPU pool (discovered: GPUs bound to vfio-pci are available for passthrough)
 # --------------------------------------------------------------------------
+def _is_gpu_pci_class(cls):
+    """True for a PCI display-controller base class (0x03xxxx).
+
+    Covers the VGA class (0x0300xx) older passthrough cards expose and
+    the 3D-controller class (0x0302xx) that newer Blackwell cards (e.g.
+    RTX PRO 6000) expose as their only GPU function - both are single
+    GPU functions bound to vfio-pci. Audio (.1) functions read 0x0403xx
+    and stay excluded.
+    """
+    return cls.startswith("0x03")
+
+
 def gpu_pool():
     """PCI addresses of GPU functions bound to vfio-pci."""
     drv = "/sys/bus/pci/drivers/vfio-pci"
@@ -435,7 +447,7 @@ def gpu_pool():
                 cls = f.read().strip()
         except OSError:
             continue
-        if cls.startswith("0x0300"):          # 0x0300xx = VGA controller
+        if _is_gpu_pci_class(cls):
             gpus.append(entry)
     return gpus
 
