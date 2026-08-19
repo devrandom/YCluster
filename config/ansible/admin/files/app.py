@@ -2648,6 +2648,26 @@ def resources_data():
             continue
         vms_by_host.setdefault(host, []).append(name)
 
+    # Managers (non-admins) are project-scoped: they only see VMs owned by
+    # accounts in a project they're authorized for (none by default). Admins
+    # and plain users keep the existing roster behavior. Per-owner project
+    # lookups are cached so we don't hit the IdP per VM.
+    managed_projects = None
+    owner_project = {}
+    if id.is_manager and not id.is_admin:
+        from ycluster.utils import authentik_manager
+        managed_projects = set(authentik_manager.manager_projects(id.email)
+                               if id.email else [])
+
+        def _owner_visible(owner):
+            if owner not in owner_project:
+                owner_project[owner] = (authentik_manager.user_project(owner)
+                                        if owner else '')
+            return owner_project[owner] in managed_projects
+    else:
+        def _owner_visible(owner):
+            return True
+
     # Build per-host data
     result_hosts = []
     for h in hosts:
@@ -2661,6 +2681,8 @@ def resources_data():
         host_vms = []
         for vm_name in vms_by_host.get(hostname, []):
             rec = registry.get(vm_name, {})
+            if not _owner_visible(rec.get('owner')):
+                continue
             desired = desired_all.get(vm_name) or {}
             mode = desired.get('mode', 'unmanaged')
             # A VM is "scheduled now" if desired_on says it should be up.
@@ -2700,7 +2722,11 @@ def resources_data():
 
 @app.route('/admin/model-usage')
 def model_usage_page():
-    """Model usage stats page backed by cached PostgreSQL data."""
+    """Model usage stats page backed by cached PostgreSQL data. Admins only —
+    managers (and plain users) are denied, and the nav link is hidden from
+    them (see nav.js)."""
+    if not _authentik_identity().is_admin:
+        return 'forbidden', 403
     since_days = request.args.get('since', 7, type=int)
     since_days = max(1, min(90, since_days))
     user_filter = request.args.get('user', '')
@@ -2710,7 +2736,10 @@ def model_usage_page():
 
 @app.route('/admin/model-usage/data')
 def model_usage_data():
-    """JSON endpoint for model usage data."""
+    """JSON endpoint for model usage data. Admin-only: managers must not see
+    cross-project inference usage."""
+    if not _authentik_identity().is_admin:
+        return jsonify({'error': 'admin only'}), 403
     since_days = max(1, min(90, request.args.get('since', 7, type=int)))
     user_filter = request.args.get('user', '')
     model_filter = request.args.get('model', '')
@@ -2963,6 +2992,15 @@ def _can_edit_vm(id, rec, desired):
     return not (desired is not None and desired.get('mode') == 'unmanaged')
 
 
+@app.route('/admin/nav-identity')
+def nav_identity():
+    """Role signal for nav.js so it can show/hide admin-only links (e.g.
+    Model Usage) for managers versus admins. Kept tiny because it's hit on
+    every admin page load."""
+    id = _authentik_identity()
+    return jsonify({'is_admin': id.is_admin, 'is_manager': id.is_manager})
+
+
 @app.route('/')
 def app_landing():
     """Root of <domain>: a landing page linking the user-facing apps.
@@ -3023,12 +3061,42 @@ def vm_schedule_data():
     commitments = vmm.combine_gpu_commitments(
         vmm.gpu_commitments(registry, desired_all, now),
         vmm.gpu_block_commitments(blocks, now))
+
+    # Managers (non-admins) are project-scoped: they only see VMs owned by
+    # accounts in a project they're authorized for (none by default). Admins
+    # keep the full roster; plain users keep owner-only scoping below. The
+    # per-owner project lookup is cached so we don't hit the IdP per VM.
+    managed_projects = None
+    owner_project = {}
+    if id.is_manager and not id.is_admin:
+        from ycluster.utils import authentik_manager
+        managed_projects = set(authentik_manager.manager_projects(id.email)
+                               if id.email else [])
+
+        def _owner_visible(owner):
+            if owner not in owner_project:
+                owner_project[owner] = (authentik_manager.user_project(owner)
+                                        if owner else '')
+            return owner_project[owner] in managed_projects
+    else:
+        def _owner_visible(owner):
+            return True
+
+    def _owner_shown(owner):
+        # Owners are shown to admins everywhere, and to managers only for
+        # VMs inside their authorized projects; plain users stay redacted.
+        return id.is_admin or (managed_projects is not None
+                               and _owner_visible(owner))
+
     rows = []
     for name, rec in registry.items():
-        # Admins and managers (view-only) see every VM; plain users only
-        # their own. Manager-scoped data is un-redacted: managers need to
-        # see who owns what to answer questions without acting on it.
+        # Admins see every VM; managers are project-scoped (see above);
+        # plain users only their own. Manager-scoped data is un-redacted for
+        # in-scope VMs: managers need to see who owns what to answer
+        # questions without acting on it.
         if not id.is_manager and rec.get('owner') != id.email:
+            continue
+        if not _owner_visible(rec.get('owner')):
             continue
         desired = desired_all.get(name)
         mode = (desired or {}).get('mode', 'unmanaged')
@@ -3087,24 +3155,30 @@ def vm_schedule_data():
 
     # Capacity commitments per host, so users can see what's free before
     # composing a schedule. VM names are shown to everyone (capacity is
-    # shared knowledge); owners to admins and managers (plain users redacted).
-    # Plain (non-manager) users only see hosts that host one of their own
-    # VMs — other people's hosts/pools aren't their business. Admins and
-    # managers keep the full roster (they answer capacity questions).
+    # shared knowledge); owners to admins everywhere and to managers only
+    # for VMs in their authorized projects (plain users redacted). Plain and
+    # non-admin managers only see hosts that host one of their own (or
+    # in-scope) VMs — other people's hosts/pools aren't their business.
+    # Admins keep the full roster (they answer capacity questions).
     visible_hosts = {r['host'] for r in rows if r['host']}
+    block_hosts = {b.get('host') for b in blocks.values() if b.get('host')}
     hosts = []
     for host in sorted(set(commitments) | set(pools)):
         if not pools.get(host) and not commitments.get(host):
             continue          # container hosts: no passthrough pool
-        if not id.is_manager and host not in visible_hosts:
-            continue
+        if not id.is_admin and host not in visible_hosts:
+            # Non-admin managers also keep GPU-block hosts: blocks are
+            # shared admin capacity, not another project's VM ownership.
+            # Plain users stay restricted to their own VMs' hosts.
+            if managed_projects is None or host not in block_hosts:
+                continue
         hosts.append({
             'host': host,
             'pool': pools.get(host),
             'commitments': [
                 {'vm': c['vm'], 'gpus': c['gpus'], 'mode': c['mode'],
                  'is_block': c.get('is_block', False),
-                 'owner': c['owner'] if id.is_manager else None,
+                 'owner': c['owner'] if _owner_shown(c['owner']) else None,
                  'windows': None if c['windows'] is None else
                      [{'start': s.isoformat(), 'end': e.isoformat()}
                       for s, e in c['windows']]}
@@ -3759,10 +3833,35 @@ def vm_usage_data():
         if st['open'] is not None:
             accrue(st, now)
 
+    # Managers (non-admins) are project-scoped: they only see VM usage for
+    # accounts in a project they're authorized for (none by default). Admins
+    # keep the full roster; plain users are already owner-scoped by the
+    # pages feeding this data. Per-owner project lookups are cached so we
+    # don't hit the IdP per VM.
+    id = _authentik_identity()
+    managed_projects = None
+    owner_project = {}
+    if id.is_manager and not id.is_admin:
+        from ycluster.utils import authentik_manager
+        managed_projects = set(authentik_manager.manager_projects(id.email)
+                               if id.email else [])
+
+        def _owner_visible(owner):
+            if owner not in owner_project:
+                owner_project[owner] = (authentik_manager.user_project(owner)
+                                        if owner else '')
+            return owner_project[owner] in managed_projects
+    else:
+        def _owner_visible(owner):
+            return True
+
     rows = []
     for vm in sorted(set(per_vm) | set(sampled)):
         ev = per_vm.get(vm, {})
         sm = sampled.get(vm, {})
+        owner = ev.get('owner') or sm.get('owner') or ''
+        if not _owner_visible(owner):
+            continue
         tracked = round(ev.get('tracked', 0.0), 4)
         observed = round(sm.get('observed', 0.0), 4)
         # Is the VM on the clock right now, and on whose dime: an open
@@ -3776,7 +3875,7 @@ def vm_usage_data():
             current = None
         rows.append({
             'vm': vm,
-            'owner': ev.get('owner') or sm.get('owner') or '',
+            'owner': owner,
             'gpus': registry.get(vm, {}).get('gpus'),
             'schedule_mode': ((desired_all.get(vm) or {}).get('mode', 'unmanaged')
                               if vm in registry else None),
@@ -3795,7 +3894,10 @@ def vm_usage_data():
 
 @app.route('/admin/model-usage/options')
 def model_usage_options():
-    """JSON endpoint returning distinct users and models for filter dropdowns."""
+    """JSON endpoint returning distinct users and models for filter dropdowns.
+    Admin-only, like the rest of the model-usage surface."""
+    if not _authentik_identity().is_admin:
+        return jsonify({'error': 'admin only'}), 403
     since_days = max(1, min(90, request.args.get('since', 7, type=int)))
 
     conn, since_dt, err = _usage_stats_cursor(since_days)

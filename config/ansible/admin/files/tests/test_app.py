@@ -63,6 +63,14 @@ class SchedTestBase(unittest.TestCase):
         apikeys.get_etcd_client = lambda: self.etcd
         apikeys.PasswordHasher = _fast_hasher
         self.http = appmod.app.test_client()
+        # Manager-scoped endpoints (VM schedule, resources) consult
+        # authentik_manager.manager_projects / user_project. Default a test
+        # manager to a catch-all project so the legacy "manager sees the
+        # full in-scope roster" tests keep their meaning; the project-scoping
+        # tests override these with explicit stubs. Never touches a real IdP.
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["__any__"]
+        am.user_project = lambda email: "__any__"
 
     def tearDown(self):
         vmm.get_etcd_client = self._vmm_orig
@@ -592,6 +600,47 @@ class ScheduleDataTests(SchedTestBase):
         row = self.get("/admin/vm-schedule/data").get_json()["rows"][0]
         self.assertEqual(row["sched_gpus"], 2)
 
+    def test_manager_with_no_projects_sees_no_vms(self):
+        # A manager with no authorized projects sees no schedule rows at all
+        # (authorization defaults to none).
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: []
+        am.user_project = lambda email: "demo"
+        self.vm("a", owner="alice@x")
+        self.vm("b", owner="bob@x")
+        rows = self.get("/admin/vm-schedule/data", manager=True,
+                        email="carol@x").get_json()["rows"]
+        self.assertEqual(rows, [])
+
+    def test_manager_sees_only_authorized_project_vms(self):
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "demo" if email == "alice@x" else "other"
+        self.vm("a", owner="alice@x")
+        self.vm("b", owner="bob@x")
+        rows = self.get("/admin/vm-schedule/data", manager=True,
+                        email="carol@x").get_json()["rows"]
+        self.assertEqual([r["vm"] for r in rows], ["a"])
+
+    def test_manager_hosts_and_owners_scoped_to_authorized_vms(self):
+        # The manager's schedule page shows only hosts that hold an
+        # authorized-project VM, and only in-scope owners in the capacity
+        # panel — out-of-scope owners/hosts don't leak.
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "demo" if email == "alice@x" else "other"
+        self.vm("a", owner="alice@x", host="nv2", gpus=2)
+        self.vm("b", owner="bob@x", host="nv3", gpus=2)
+        self.desired("a", "on")
+        self.desired("b", "on")
+        self.state("nv2", pool=4)
+        self.state("nv3", pool=4)
+        d = self.get("/admin/vm-schedule/data", manager=True,
+                     email="carol@x").get_json()
+        self.assertEqual([h["host"] for h in d["hosts"]], ["nv2"])
+        owners = [c["owner"] for h in d["hosts"] for c in h["commitments"]]
+        self.assertEqual(owners, ["alice@x"])
+
 
 class ResourcesDataTests(SchedTestBase):
     """Tests for /admin/resources/data — per-compute-host models + VMs."""
@@ -710,6 +759,32 @@ class ResourcesDataTests(SchedTestBase):
         data = self.get("/admin/resources/data").get_json()
         self.assertEqual(data["inference"]["status"], "ok")
 
+    def test_manager_with_no_projects_sees_no_vms(self):
+        # A manager with no authorized projects sees no VMs on the Resources
+        # page (authorization defaults to none).
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: []
+        am.user_project = lambda email: "demo"
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("a", owner="alice@x", host="nv1")
+        self.vm("b", owner="bob@x", host="nv1")
+        data = self.get("/admin/resources/data", manager=True,
+                        email="carol@x").get_json()
+        vms = [v for h in data["hosts"] for v in h["vms"]]
+        self.assertEqual(vms, [])
+
+    def test_manager_sees_only_authorized_project_vms(self):
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "demo" if email == "alice@x" else "other"
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("a", owner="alice@x", host="nv1")
+        self.vm("b", owner="bob@x", host="nv1")
+        data = self.get("/admin/resources/data", manager=True,
+                        email="carol@x").get_json()
+        vms = [v["name"] for h in data["hosts"] for v in h["vms"]]
+        self.assertEqual(vms, ["a"])
+
 
 class ManagerRoleTests(SchedTestBase):
     """ycluster-managers: view-only counterpart to ycluster-admins.
@@ -726,6 +801,14 @@ class ManagerRoleTests(SchedTestBase):
         appmod.get_etcd_client = lambda: self.etcd
         inv_mod.get_etcd_client = lambda: self.etcd
         appmod.get_inference_status = lambda: None
+        # Managers are now project-scoped (authorized projects default to
+        # none). Stub the IdP projections so these role tests don't touch a
+        # real IdP: authorizing both demo + other keeps the "manager sees the
+        # full in-scope roster" flavor below while remaining project-scoped.
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo", "other"]
+        am.user_project = lambda email: {
+            "alice@x": "demo", "bob@x": "other"}.get(email, "demo")
 
     def _seed_host(self, hostname, htype, ip):
         self.etcd.seed_json(
@@ -769,6 +852,24 @@ class ManagerRoleTests(SchedTestBase):
         d = self.get("/admin/vm-schedule/data", manager=True).get_json()
         self.assertTrue(d["is_manager"])
         self.assertFalse(d["is_admin"])
+
+    def test_model_usage_hidden_from_managers(self):
+        # Model Usage (page + data + options) is admin-only; managers get 403
+        # before any DB work. Admins still reach the page shell.
+        for path in ("/admin/model-usage",
+                     "/admin/model-usage/data",
+                     "/admin/model-usage/options"):
+            r = self.get(path, manager=True, email="carol@x")
+            self.assertEqual(r.status_code, 403, path)
+        self.assertEqual(self.get("/admin/model-usage", admin=True).status_code, 200)
+
+    def test_nav_identity_reflects_role(self):
+        d = self.get("/admin/nav-identity", manager=True, email="carol@x").get_json()
+        self.assertFalse(d["is_admin"])
+        self.assertTrue(d["is_manager"])
+        d = self.get("/admin/nav-identity", admin=True).get_json()
+        self.assertTrue(d["is_admin"])
+        self.assertTrue(d["is_manager"])
 
     # --- VM schedule: mutations blocked ---
     def test_manager_cannot_set_others_vm(self):

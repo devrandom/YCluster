@@ -79,6 +79,26 @@
     }).join('');
     document.body.prepend(nav);
 
+    // Admin-only links (Model Usage) are dropped for managers — admins can
+    // load the page directly, but managers get 403 on it, so remove the nav
+    // entry too. Only meaningful on the admin surface (the app surface
+    // doesn't list it). Role comes from /admin/nav-identity, which nginx
+    // forward-auth fills from the IdP group headers. Applies asynchronously
+    // so the link can't leak beyond the initial frame into a page load.
+    if (!isApp) {
+        window.fetch('/admin/nav-identity').then(function (resp) {
+            if (!resp.ok) return;
+            return resp.json();
+        }).then(function (ident) {
+            if (!ident || ident.is_admin) return;
+            nav.querySelectorAll('a').forEach(function (a) {
+                if (a.getAttribute('href') === '/admin/model-usage') {
+                    a.remove();
+                }
+            });
+        });
+    }
+
     const acct = document.getElementById('account-link');
     if (acct) acct.href = authHref;
 })();

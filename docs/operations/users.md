@@ -7,8 +7,10 @@ its admin blueprint (`ycluster-admin.yaml`, written by `authentik-manager`)
 creates two groups the web app cares about:
 
 - `ycluster-admins` — full access to every admin page and mutation.
-- `ycluster-managers` — view access to every admin page (same visibility
-  as an admin), and the same owner-edit rights as a plain user on VMs
+- `ycluster-managers` — view access to the admin pages (utilization,
+  inventory, VM usage, and their own VM schedule/resources), with VMs and
+  the user roster **scoped to authorized projects**; cannot see Model
+  Usage. Managers keep the same owner-edit rights as a plain user on VMs
   they happen to own. Cannot edit other users' VMs, set any VM
   unmanaged, change inventory, or manage accounts/SSH-keys for users
   other than themselves.
@@ -50,8 +52,9 @@ Users → edit).
 
 | Capability | Admin | Manager | Plain user |
 |---|---|---|---|
-| `/admin/utilization`, `/admin/inventory`, `/admin/resources`, `/admin/model-usage`, `/admin/vm-usage` | full | full | read-only (some) / 403 |
-| `/admin/vm-schedule` view all VMs + owner emails | yes | yes | own VMs only, owners redacted |
+| `/admin/utilization`, `/admin/inventory` | full | read-only | read-only (some) / 403 |
+| `/admin/resources`, `/admin/vm-schedule`, `/admin/vm-usage` view VMs + owner emails | yes (all) | **authorized projects only** | own VMs only, owners redacted |
+| `/admin/model-usage` (page + data) | yes | **403 / hidden** | 403 |
 | `/admin/vm-schedule/set` (on|off|schedule), `stop-now` | yes | **owner-only** | owner-only |
 | `/admin/vm-schedule/set mode=unmanaged` (admin escape hatch) | yes | **403** | 403 |
 | `/admin/users` (roster + invitations) | yes | roster + invites for **authorized projects only** | 403 |
@@ -60,9 +63,13 @@ Users → edit).
 | `/api/inventory/asset/<host>` PUT/POST | yes | **403** | 403 |
 | `/admin/settings` (own SSH keys for VM access) | self | self | self |
 
-A manager is "an admin for visibility" — sees every admin page the same way
-an admin does, except the `/admin/users` roster (which is project-scoped).
-On the mutation side they inherit the same owner-only
+A manager is "an admin for visibility", but the visibility is
+project-scoped: on `/admin/vm-schedule`, `/admin/resources` and
+`/admin/vm-usage` they see only VMs owned by accounts in a project they're
+authorized for (defaults to none), and on `/admin/users` they see the
+project-scoped roster plus
+project-scoped invitations. Model Usage is admin-only and hidden from
+them. On the mutation side they inherit the same owner-only
 constraints as a plain user for VMs, and on `/admin/users` they get
 **project-scoped** user management (edit Notes, invite, and issue
 reset links) only for projects they're authorized for — see [Manager
