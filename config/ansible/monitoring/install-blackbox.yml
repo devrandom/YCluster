@@ -66,6 +66,15 @@
               timeout: 10s
               http:
                 preferred_ip_protocol: ip4
+                # Present this probe as a top-level navigation to the IdP
+                # forward-auth gate. Real SPA fetch/XHR carry cors/same-origin
+                # (see admin-api-authentik-outpost.conf) and get a 401 when the
+                # outpost session is stale; without this header the pinger
+                # would also get a 401 and blackbox would report the gated
+                # root vhost as down. Sending navigate restores the old
+                # 302 -> login-flow probe result.
+                headers:
+                  Sec-Fetch-Mode: navigate
             # http_401 module removed: the inference probe now uses the
             # unauthenticated /healthz passthrough (http_2xx) instead.
             http_ping:
