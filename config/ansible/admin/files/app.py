@@ -2661,8 +2661,16 @@ def resources_data():
 
         def _owner_visible(owner):
             if owner not in owner_project:
-                owner_project[owner] = (authentik_manager.user_project(owner)
-                                        if owner else '')
+                try:
+                    project = (authentik_manager.user_project(owner)
+                               if owner else '')
+                except Exception:
+                    # No IdP account (orphan VM owner) or transient IdP
+                    # failure: the owner can't be attributed to a project,
+                    # so fail closed — out of scope for a manager instead of
+                    # 500ing the whole page.
+                    project = ''
+                owner_project[owner] = project
             return owner_project[owner] in managed_projects
     else:
         def _owner_visible(owner):
@@ -3075,8 +3083,16 @@ def vm_schedule_data():
 
         def _owner_visible(owner):
             if owner not in owner_project:
-                owner_project[owner] = (authentik_manager.user_project(owner)
-                                        if owner else '')
+                try:
+                    project = (authentik_manager.user_project(owner)
+                               if owner else '')
+                except Exception:
+                    # No IdP account (orphan VM owner) or transient IdP
+                    # failure: the owner can't be attributed to a project,
+                    # so fail closed — out of scope for a manager instead of
+                    # 500ing the whole page.
+                    project = ''
+                owner_project[owner] = project
             return owner_project[owner] in managed_projects
     else:
         def _owner_visible(owner):
@@ -3848,8 +3864,16 @@ def vm_usage_data():
 
         def _owner_visible(owner):
             if owner not in owner_project:
-                owner_project[owner] = (authentik_manager.user_project(owner)
-                                        if owner else '')
+                try:
+                    project = (authentik_manager.user_project(owner)
+                               if owner else '')
+                except Exception:
+                    # No IdP account (orphan VM owner) or transient IdP
+                    # failure: the owner can't be attributed to a project,
+                    # so fail closed — out of scope for a manager instead of
+                    # 500ing the whole page.
+                    project = ''
+                owner_project[owner] = project
             return owner_project[owner] in managed_projects
     else:
         def _owner_visible(owner):

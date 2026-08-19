@@ -642,6 +642,26 @@ class ScheduleDataTests(SchedTestBase):
         self.assertEqual(owners, ["alice@x"])
 
 
+    def test_manager_orphan_owner_does_not_500(self):
+        # A VM whose owner has no IdP account must not 500 the whole page:
+        # the orphan is out of scope for a manager, and authorized VMs still
+        # render.
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+
+        def user_project(email):
+            if email == "ghost@x":
+                raise RuntimeError("no account for ghost@x")
+            return "demo" if email == "alice@x" else "other"
+        am.user_project = user_project
+        self.vm("a", owner="alice@x")
+        self.vm("g", owner="ghost@x")
+        resp = self.get("/admin/vm-schedule/data", manager=True, email="carol@x")
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.get_json()["rows"]
+        self.assertEqual([r["vm"] for r in rows], ["a"])
+
+
 class ResourcesDataTests(SchedTestBase):
     """Tests for /admin/resources/data — per-compute-host models + VMs."""
 
