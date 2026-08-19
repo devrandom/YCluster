@@ -20,6 +20,7 @@ def register_user_commands(subparsers):
     invite_parser.add_argument('email', help='Account email (cluster identity key)')
     invite_parser.add_argument('--name', help='Display name (defaults to email)')
     invite_parser.add_argument('--days', type=int, default=7, help='Expiry in days (default 7)')
+    invite_parser.add_argument('--project', help='Project to tag the invitation (and enrolled account) with')
     invite_parser.set_defaults(func=user_invite)
 
     admin_parser = user_subparsers.add_parser(
@@ -33,6 +34,18 @@ def register_user_commands(subparsers):
     manager_parser.add_argument('email', help='Account email')
     manager_parser.add_argument('--remove', action='store_true', help='Revoke instead of grant')
     manager_parser.set_defaults(func=user_manager)
+
+    manager_projects_parser = user_subparsers.add_parser(
+        'manager-projects',
+        help='List / manage the projects a manager is authorized to operate in')
+    manager_projects_parser.add_argument('email', help='Manager account email')
+    manager_projects_parser.add_argument(
+        'op', nargs='?', default='list', choices=('list', 'add', 'remove', 'set'),
+        help="list | add <project> | remove <project> | set <project> [project...]")
+    manager_projects_parser.add_argument(
+        'projects', nargs='*', help='Project name(s)')
+    manager_projects_parser.set_defaults(func=user_manager_projects)
+
 
     disable_parser = user_subparsers.add_parser(
         'disable', help='Disable an account (block login without removing)')
@@ -85,9 +98,29 @@ def user_add(args):
 
 def user_invite(args):
     from ..utils import authentik_manager
-    url = authentik_manager.invite_user(args.email, args.name, args.days)
+    url = authentik_manager.invite_user(args.email, args.name, args.days,
+                                        project=args.project)
     print(f"Invitation for {args.email} (expires in {args.days}d, single use):")
     print(f"  {url}")
+
+
+def user_manager_projects(args):
+    from ..utils import authentik_manager
+    if args.op == 'list':
+        projects = authentik_manager.manager_projects(args.email)
+        print(f"Manager projects for {args.email}: "
+              f"{', '.join(projects) if projects else '(none)'}")
+        return
+    if not args.projects:
+        raise SystemExit(f"manager-projects {args.op}: at least one project required")
+    current = set(authentik_manager.manager_projects(args.email))
+    if args.op == 'add':
+        new = sorted(current | set(args.projects))
+    elif args.op == 'remove':
+        new = sorted(current - set(args.projects))
+    else:  # set: replace entirely
+        new = list(dict.fromkeys(args.projects))
+    print(authentik_manager.set_manager_projects(args.email, new))
 
 
 def user_admin(args):

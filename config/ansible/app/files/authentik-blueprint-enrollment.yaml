@@ -65,6 +65,11 @@ entries:
       user_creation_mode: always_create
       create_users_as_inactive: false
       user_type: internal
+      # Persist the invitation's project tag onto the enrolled account so
+      # the account's project_name matches the project the inviter chose
+      # (see docs/design/manager-project-scoped-users.md).
+      data:
+        project_name: attributes.project_name
 
   - model: authentik_stages_user_login.userloginstage
     id: stage-user-login

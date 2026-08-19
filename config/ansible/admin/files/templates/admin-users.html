@@ -63,8 +63,10 @@
     Accounts live in the cluster IdP. <b>Invite</b> creates a single-use
     enrollment link for a <i>new</i> account (hand it over out-of-band — no
     email is sent); <b>reset link</b> issues a one-time password (re)set for
-    an existing one. <b>Admin</b> grants access to these admin pages;
-    <b>Manager</b> grants view-only access (no invites or mutations).
+    an existing one. <b>Admin</b> grants full access to these admin pages.
+    <b>Manager</b> grants view access plus project-scoped operations: edit
+    Notes, invite, and issue reset links — but only for projects they're
+    authorized to (set via `ycluster user manager-projects`).
   </p>
 
   <template x-if="error"><div class="error" x-text="error"></div></template>
@@ -78,12 +80,21 @@
     </div>
   </template>
 
-  <template x-if="isAdmin">
+  <template x-if="isAdmin || (managerProjects && managerProjects.length > 0)">
     <div>
       <h2>Invite a new user</h2>
-      <form class="invite-form" @submit.prevent="act('invite', invite.email, {name: invite.name, days: invite.days}, 'Invitation for ' + invite.email + ':')">
+      <form class="invite-form" @submit.prevent="act('invite', invite.email, {name: invite.name, days: invite.days, project_name: invite.project_name}, 'Invitation for ' + invite.email + ':')">
         <input type="text" x-model="invite.email" placeholder="email" size="28" required>
         <input type="text" x-model="invite.name" placeholder="display name (optional)" size="22">
+        <template x-if="!isAdmin">
+          <label>project
+            <select x-model="invite.project_name" required>
+              <template x-for="p in managerProjects" :key="p">
+                <option :value="p" x-text="p"></option>
+              </template>
+            </select>
+          </label>
+        </template>
         <label>expires <input type="number" x-model="invite.days" min="1" max="90" style="width:4rem"> d</label>
         <button type="submit">Create invitation</button>
       </form>
@@ -93,7 +104,7 @@
   <h2>Accounts</h2>
   <template x-if="!loading && users.length === 0"><p class="empty">No accounts</p></template>
   <table x-show="users.length > 0">
-    <thead><tr><th>Email</th><th>Name</th><th></th><th>Project</th><th>Notes</th><th>Created</th><th>Last login</th><template x-if="isAdmin"><th>Actions</th></template></tr></thead>
+    <thead><tr><th>Email</th><th>Name</th><th></th><th>Project</th><th>Notes</th><th>Created</th><th>Last login</th><template x-if="hasActions()"><th>Actions</th></template></tr></thead>
     <tbody>
       <template x-for="u in users" :key="u.email">
         <tr>
@@ -109,22 +120,32 @@
           <td x-text="u.admin_notes || ''"></td>
           <td x-text="u.date_joined ? u.date_joined.slice(0, 16).replace('T', ' ') : 'never'"></td>
           <td x-text="u.last_login ? u.last_login.slice(0, 16).replace('T', ' ') : 'never'"></td>
-          <template x-if="isAdmin">
+          <template x-if="isAdmin || u.can_manage">
             <td>
               <div class="menu" x-data="{open: false}" @click.outside="open = false">
                 <button class="minor menu-trigger" @click="open = !open" :aria-expanded="open">…</button>
                 <ul class="menu-list" x-show="open" x-cloak>
+                  <!-- Reset + notes-edit apply to every visible row: admins
+                       everywhere, managers only on their authorized-project
+                       users (the roster is already project-scoped server-side).
+                       Rendered directly rather than behind an x-if so the
+                       scoping of `u` can't collapse the menu. -->
                   <li><button type="button" class="menu-item"
                       @click="open=false; act('recovery', u.email, {}, 'Password (re)set link for ' + u.email + ':')">Reset link</button></li>
                   <li><button type="button" class="menu-item"
+                      @click="open=false; editUser(u)"
+                      x-text="isAdmin ? 'Edit…' : 'Edit notes…'"></button></li>
+                  <!-- admin-only actions. Per-item x-show (not a multi-child
+                       x-if template): a multi-root x-if template only renders
+                       its first child inside the x-for scope, dropping the
+                       rest. -->
+                  <li x-show="isAdmin"><button type="button" class="menu-item"
                       @click="open=false; act(u.is_admin ? 'admin_remove' : 'admin_add', u.email, {}, '')"
                       x-text="u.is_admin ? 'Revoke admin' : 'Make admin'"></button></li>
-                  <li><button type="button" class="menu-item"
+                  <li x-show="isAdmin"><button type="button" class="menu-item"
                       @click="open=false; act(u.is_manager ? 'manager_remove' : 'manager_add', u.email, {}, '')"
                       x-text="u.is_manager ? 'Revoke manager' : 'Make manager'"></button></li>
-                  <li><button type="button" class="menu-item"
-                      @click="open=false; editTarget = {email: u.email, name: u.name || '', project_name: u.project_name || '', admin_notes: u.admin_notes || ''}">Edit…</button></li>
-                  <li><button type="button" class="menu-item"
+                  <li x-show="isAdmin"><button type="button" class="menu-item"
                       @click="open=false; act(u.active ? 'deactivate' : 'activate', u.email, {}, '')"
                       x-text="u.active ? 'Disable' : 'Enable'"></button></li>
                 </ul>
@@ -139,11 +160,12 @@
   <h2>Outstanding invitations</h2>
   <template x-if="!loading && invitations.length === 0"><p class="empty">None</p></template>
   <table x-show="invitations.length > 0">
-    <thead><tr><th>Email</th><th>Expires</th><th>Link</th><th></th></tr></thead>
+    <thead><tr><th>Email</th><th>Project</th><th>Expires</th><th>Link</th><th></th></tr></thead>
     <tbody>
       <template x-for="inv in invitations" :key="inv.url">
         <tr>
           <td x-text="inv.email"></td>
+          <td x-text="inv.project_name || ''"></td>
           <td x-text="inv.expires ? inv.expires.slice(0, 16).replace('T', ' ') : '-'"></td>
           <td><span class="url" x-text="inv.url"></span></td>
           <td>
@@ -164,10 +186,10 @@
         <label>Email
           <input type="text" :value="editTarget && editTarget.email" disabled>
         </label>
-        <label>Display name
+        <label x-show="isAdmin">Display name
           <input type="text" x-model="editTarget.name" required>
         </label>
-        <label>Project name
+        <label x-show="isAdmin">Project name
           <input type="text" x-model="editTarget.project_name">
         </label>
         <label>Admin notes
@@ -186,16 +208,34 @@
       return {
         users: [],
         invitations: [],
-        // isAdmin drives the action menu, the invite form, and the
-        // invitation-revoke button — managers see the same list but no
-        // mutation controls. is_manager-only callers hit /admin/users/data
-        // successfully; is_admin implies is_manager.
+        // isAdmin gets the full menu + invite form; managers get a
+        // project-scoped subset (invite into an authorized project, reset +
+        // notes-edit for users in those projects). is_manager-only callers
+        // hit /admin/users/data successfully; is_admin implies is_manager.
         isAdmin: false,
+        // Authorized projects for a manager (empty for admins / managers
+        // with none) — drives the invite project selector.
+        managerProjects: [],
         loading: false,
         error: '',
         result: null,
-        invite: {email: '', name: '', days: 7},
+        invite: {email: '', name: '', days: 7, project_name: ''},
         editTarget: null,
+
+        hasActions() {
+          // Whether to render the per-row action column at all: admins, or
+          // managers with at least one authorized project.
+          return this.isAdmin || (this.managerProjects && this.managerProjects.length > 0)
+        },
+
+        editUser(u) {
+          // Managers may only edit the Notes field (server-enforced too).
+          this.editTarget = {email: u.email, admin_notes: u.admin_notes || ''}
+          if (this.isAdmin) {
+            this.editTarget.name = u.name || ''
+            this.editTarget.project_name = u.project_name || ''
+          }
+        },
 
         load() {
           this.loading = true
@@ -207,6 +247,7 @@
                 this.users = d.users
                 this.invitations = d.invitations
                 this.isAdmin = !!d.is_admin
+                this.managerProjects = d.manager_projects || []
               }
               this.loading = false
             })
@@ -225,7 +266,7 @@
               if (d.error) { this.error = d.error; return }
               if (d.url) this.result = {label, url: d.url}
               else if (d.message) this.result = {label: d.message}
-              if (action === 'invite') this.invite = {email: '', name: '', days: 7}
+              if (action === 'invite') this.invite = {email: '', name: '', days: 7, project_name: ''}
               this.load()
             })
             .catch(() => { this.error = 'request failed' })
@@ -233,10 +274,13 @@
 
         saveEdit() {
           if (!this.editTarget) return
-          this.act('edit', this.editTarget.email, {
-                   name: this.editTarget.name,
-                   project_name: this.editTarget.project_name,
-                   admin_notes: this.editTarget.admin_notes},
+          const payload = {admin_notes: this.editTarget.admin_notes}
+          if (this.isAdmin) {
+            // Admins may edit name/project too.
+            payload.name = this.editTarget.name
+            payload.project_name = this.editTarget.project_name
+          }
+          this.act('edit', this.editTarget.email, payload,
                    'Updated ' + this.editTarget.email + ':')
           this.editTarget = null
         }

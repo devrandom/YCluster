@@ -849,8 +849,9 @@ class ManagerRoleTests(SchedTestBase):
         self.assertEqual(r.status_code, 200)
 
     # --- /admin/users/data ---
-    def test_manager_can_list_users(self):
-        # Manager sees the roster (read-only). We stub authentik_manager to
+    def test_manager_with_no_projects_sees_empty_roster(self):
+        # Manager with no authorized projects sees no users — the roster is
+        # project-scoped and defaults to none. We stub authentik_manager to
         # return canned data — no real IdP in unit tests.
         from ycluster.utils import authentik_manager as am
         am.users_data = lambda: [{"email": "alice@x", "name": "Alice",
@@ -858,12 +859,34 @@ class ManagerRoleTests(SchedTestBase):
                                   "last_login": None, "date_joined": None,
                                   "project_name": "", "admin_notes": "",
                                   "is_admin": False, "is_manager": False}]
-        am.invitations_data = lambda: []
+        am.invitations_data = lambda projects=None: []
+        am.manager_projects = lambda email: []
         d = self.get("/admin/users/data", manager=True).get_json()
-        self.assertEqual(d["users"][0]["email"], "alice@x")
         # is_admin in the response is false for a manager caller; the page
-        # uses this to hide the action menu.
+        # uses this to hide admin-only controls. With no authorized projects
+        # the roster is empty, as is the invite project selector.
         self.assertFalse(d["is_admin"])
+        self.assertEqual(d["manager_projects"], [])
+        self.assertEqual(d["users"], [])
+
+    def test_manager_sees_only_authorized_project_users(self):
+        from ycluster.utils import authentik_manager as am
+        am.users_data = lambda: [
+            {"email": "alice@x", "name": "Alice", "type": "internal",
+             "active": True, "last_login": None, "date_joined": None,
+             "project_name": "demo", "admin_notes": "",
+             "is_admin": False, "is_manager": False},
+            {"email": "bob@x", "name": "Bob", "type": "internal",
+             "active": True, "last_login": None, "date_joined": None,
+             "project_name": "other", "admin_notes": "",
+             "is_admin": False, "is_manager": False},
+        ]
+        am.invitations_data = lambda projects=None: []
+        am.manager_projects = lambda email: ["demo"]
+        d = self.get("/admin/users/data", manager=True).get_json()
+        self.assertEqual([u["email"] for u in d["users"]], ["alice@x"])
+        # Every visible row is one the manager may manage.
+        self.assertTrue(all(u["can_manage"] for u in d["users"]))
 
     def test_admin_user_data_includes_is_admin_true(self):
         from ycluster.utils import authentik_manager as am
@@ -876,15 +899,151 @@ class ManagerRoleTests(SchedTestBase):
         d = self.get("/admin/users/data", email="alice@x").get_json()
         self.assertEqual(d, {"error": "admin only"})
 
-    def test_manager_cannot_act_on_user(self):
-        for action in ('invite', 'admin_add', 'manager_add',
-                       'admin_remove', 'manager_remove', 'activate',
-                       'deactivate', 'edit', 'recovery'):
+    def test_plain_user_cannot_act_on_user(self):
+        # Plain users (no manager/admin group) get 403 before any IdP call.
+        for action in ('invite', 'edit', 'recovery', 'uninvite',
+                       'admin_add', 'admin_remove', 'manager_add',
+                       'manager_remove', 'activate', 'deactivate'):
             r = self.post("/admin/users/action",
-                          {"action": action, "email": "bob@x"},
-                          manager=True)
+                          {"action": action, "email": "bob@x.org"},
+                          email="carol@x")
+            self.assertEqual(r.status_code, 403,
+                             f"action {action!r} should be 403 for plain user")
+
+    def test_manager_can_edit_notes_in_authorized_project(self):
+        # Manager edit forwards ONLY the notes field (never name/project)
+        # and only when the target user's project is authorized.
+        from ycluster.utils import authentik_manager as am
+        captured = {}
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "demo" if email == "bob@x.org" else ""
+        am.update_user = lambda email, name=None, project_name=None, admin_notes=None: (
+            captured.update(email=email, name=name, project_name=project_name,
+                            admin_notes=admin_notes) or f"updated {email}")
+        r = self.post("/admin/users/action",
+                      {"action": "edit", "email": "bob@x.org",
+                       "admin_notes": "VIP note"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured, {"email": "bob@x.org", "name": None,
+                                    "project_name": None,
+                                    "admin_notes": "VIP note"})
+
+    def test_manager_cannot_edit_notes_outside_authorized_project(self):
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "other"
+        am.update_user = lambda *a, **k: (
+            (_ for _ in ()).throw(AssertionError("update_user must not run")))
+        r = self.post("/admin/users/action",
+                      {"action": "edit", "email": "bob@x.org",
+                       "admin_notes": "x"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    def test_manager_can_invite_into_authorized_project(self):
+        from ycluster.utils import authentik_manager as am
+        captured = {}
+        am.manager_projects = lambda email: ["demo"]
+        am.invite_user = lambda email, name, days, project=None: (
+            captured.update(email=email, name=name, days=days, project=project)
+            or "http://invite")
+        r = self.post("/admin/users/action",
+                      {"action": "invite", "email": "new@x.org",
+                       "project_name": "demo", "days": 7},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 200)
+        # The invitation is tagged with the chosen project.
+        self.assertEqual(captured, {"email": "new@x.org", "name": None,
+                                    "days": 7, "project": "demo"})
+
+    def test_manager_cannot_invite_without_or_unauthed_project(self):
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.invite_user = lambda *a, **k: (
+            (_ for _ in ()).throw(AssertionError("invite_user must not run")))
+        # No project supplied.
+        r = self.post("/admin/users/action",
+                      {"action": "invite", "email": "new@x.org"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+        # Project not in the manager's authorized set.
+        r = self.post("/admin/users/action",
+                      {"action": "invite", "email": "new@x.org",
+                       "project_name": "other"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    def test_manager_can_recovery_authorized_user(self):
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "demo"
+        am.recovery_link = lambda email: "http://reset"
+        r = self.post("/admin/users/action",
+                      {"action": "recovery", "email": "bob@x.org"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["url"], "http://reset")
+
+    def test_manager_cannot_recovery_outside_authorized_project(self):
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "other"
+        am.recovery_link = lambda *a, **k: (
+            (_ for _ in ()).throw(AssertionError("recovery_link must not run")))
+        r = self.post("/admin/users/action",
+                      {"action": "recovery", "email": "bob@x.org"},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 403)
+
+    def test_manager_sees_only_authorized_project_invitations(self):
+        from ycluster.utils import authentik_manager as am
+        am.users_data = lambda: []
+        am.manager_projects = lambda email: ["demo"]
+        seen = {}
+        def invitations_data(projects=None):
+            seen["projects"] = projects
+            return [{"email": "a@x.org", "project_name": "demo",
+                     "expires": None, "url": "u1"}]
+        am.invitations_data = invitations_data
+        d = self.get("/admin/users/data", manager=True,
+                     email="carol@x").get_json()
+        self.assertEqual(seen["projects"], {"demo"})
+        self.assertEqual(d["invitations"][0]["project_name"], "demo")
+
+    def test_manager_still_403_on_admin_only_actions(self):
+        # Role changes, enable/disable, and invitation revocation stay
+        # admin-only even for managers with authorized projects.
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        for action in ('uninvite', 'admin_add', 'admin_remove',
+                       'manager_add', 'manager_remove', 'activate',
+                       'deactivate'):
+            r = self.post("/admin/users/action",
+                          {"action": action, "email": "bob@x.org"},
+                          manager=True, email="carol@x")
             self.assertEqual(r.status_code, 403,
                              f"action {action!r} should be 403 for manager")
+
+    def test_admin_can_invite_with_optional_project(self):
+        # Admins keep the existing invite path: project is optional and
+        # passed through when supplied.
+        from ycluster.utils import authentik_manager as am
+        captured = {}
+        am.invite_user = lambda email, name, days, project=None: (
+            captured.update(email=email, name=name, days=days, project=project)
+            or "http://invite")
+        r = self.post("/admin/users/action",
+                      {"action": "invite", "email": "new@x.org",
+                       "project_name": "demo"},
+                      admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured["project"], "demo")
+        r = self.post("/admin/users/action",
+                      {"action": "invite", "email": "new2@x.org"},
+                      admin=True)
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(captured["project"])
 
     def test_admin_edit_user_with_project_and_notes(self):
         # Edit action forwards project_name and admin_notes through to
@@ -972,6 +1131,7 @@ class LoopbackGuardTests(SchedTestBase):
         from ycluster.utils import authentik_manager as am
         self._orig_users_data = am.users_data
         self._orig_invitations_data = am.invitations_data
+        self._orig_update_user = am.update_user
         am.users_data = lambda: [{"email": "alice@x", "name": "Alice",
                                   "type": "internal", "active": True,
                                   "last_login": None, "date_joined": None,
@@ -989,6 +1149,7 @@ class LoopbackGuardTests(SchedTestBase):
         from ycluster.utils import authentik_manager as am
         am.users_data = self._orig_users_data
         am.invitations_data = self._orig_invitations_data
+        am.update_user = self._orig_update_user
         import ycluster.utils.inventory as inv_mod
         inv_mod.get_etcd_client = self._orig_inv_etcd
         super().tearDown()
@@ -1034,6 +1195,25 @@ class LoopbackGuardTests(SchedTestBase):
         d = self.get("/admin/users/data", remote_addr="127.0.0.1",
                      admin=True).get_json()
         self.assertTrue(d["is_admin"])
+
+    def test_group_admin_without_manager_group_can_act_on_user(self):
+        # A forward-auth admin in ycluster-admins but NOT ycluster-managers
+        # must still pass users_action's is_manager gate (admins implicitly
+        # pass the manager check) and retain full user-mutation rights.
+        from ycluster.utils import authentik_manager as am
+        captured = {}
+        am.update_user = lambda email, name=None, project_name=None, admin_notes=None: (
+            captured.update(email=email, name=name, project_name=project_name,
+                            admin_notes=admin_notes) or f"updated {email}")
+        r = self.http.post("/admin/users/action",
+                           json={"action": "edit", "email": "bob@x.org",
+                                 "name": "Bob", "admin_notes": "note"},
+                           headers={"X-Authentik-Email": "alice@x",
+                                    "X-Authentik-UID": "uid-alice",
+                                    "X-Authentik-Groups": "ycluster-admins"},
+                           environ_overrides={"REMOTE_ADDR": "127.0.0.2"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured["email"], "bob@x.org")
 
     def test_forward_auth_from_127_0_0_2_with_admin_headers_is_admin(self):
         # nginx upstream from the public frp vhost may arrive

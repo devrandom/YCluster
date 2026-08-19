@@ -3398,35 +3398,60 @@ def gpu_block_remove():
 
 @app.route('/admin/users')
 def users_page():
-    """Account management against the cluster IdP. Admins see and act;
-    managers see the same list (read-only)."""
+    """Account management against the cluster IdP. Admins get the full page;
+    managers get the roster with project-scoped note-edit / invite /
+    recovery controls (see docs/design/manager-project-scoped-users.md)."""
     return render_template('admin-users.html')
 
 
 @app.route('/admin/users/data')
 def users_data():
-    # Admins and managers (view-only) see the roster; plain users get 403.
+    # Admins (full) and managers (project-scoped) see the roster; plain
+    # users get 403.
     id = _authentik_identity()
     if not id.is_manager:
         return jsonify({'error': 'admin only'}), 403
     from ycluster.utils import authentik_manager
     try:
-        return jsonify({'users': authentik_manager.users_data(),
-                        'invitations': authentik_manager.invitations_data(),
-                        # Tell the page whether the caller can mutate (admin)
-                        # or is just a viewer (manager) — drives the action
-                        # menu and the manager-badge rendering.
-                        'is_admin': id.is_admin})
+        users = authentik_manager.users_data()
+        if id.is_admin:
+            allowed = None
+            manager_projects = []
+            invitations = authentik_manager.invitations_data()
+        else:
+            manager_projects = (authentik_manager.manager_projects(id.email)
+                                if id.email else [])
+            allowed = set(manager_projects)
+            invitations = authentik_manager.invitations_data(projects=allowed)
+            # Project-scope the roster: managers only see accounts that
+            # belong to a project they're authorized for (none by default).
+            users = [u for u in users if u.get('project_name') in allowed]
+        for u in users:
+            # The roster is already scoped to what this caller may manage,
+            # so every visible row is manageable.
+            u['can_manage'] = True
+        return jsonify({'users': users,
+                        'invitations': invitations,
+                        # Tell the page the caller's capabilities: admins
+                        # get the full menu; managers get project-scoped
+                        # note-edit / invite / recovery. manager_projects
+                        # drives the invite project selector for managers.
+                        'is_admin': id.is_admin,
+                        'manager_projects': manager_projects})
     except Exception as e:
         return jsonify({'error': str(e)}), 502
 
 
-# Mutating, admin-only (same forward-auth reasoning as vm_schedule_set);
-# every action maps onto a `ycluster user` operation. Managers can see the
-# list but not act — the UI hides the action menu when is_admin is false.
+# Mutating. Every action maps onto a `ycluster user` operation. Admins may
+# run every action; managers may run a project-scoped subset (invite into
+# an authorized project, reset / edit-notes for users in an authorized
+# project) — see docs/design/manager-project-scoped-users.md. The page
+# hides controls accordingly, but the backend is the gate: every manager
+# action re-checks the manager's authorized projects against the target.
 @app.route('/admin/users/action', methods=['POST'])
 def users_action():
-    if not _authentik_identity().is_admin:
+    id = _authentik_identity()
+    if not id.is_manager:
         return jsonify({'error': 'admin only'}), 403
     from ycluster.utils import authentik_manager
     data = request.get_json(silent=True) or {}
@@ -3434,34 +3459,76 @@ def users_action():
     email = (data.get('email') or '').strip()
     if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
         return jsonify({'error': 'invalid email'}), 400
+    admin = id.is_admin
     try:
-        if action == 'invite':
-            days = max(1, min(90, int(data.get('days') or 7)))
-            url = authentik_manager.invite_user(email, data.get('name') or None, days)
-            return jsonify({'ok': True, 'url': url})
+        # Authorized projects for this caller (empty for admins — they
+        # bypass the checks below).
+        projects = None
+        if not admin:
+            projects = set(authentik_manager.manager_projects(id.email)
+                           if id.email else [])
+
+        def allow_user(target_email):
+            """Whether this caller may edit-notes / reset `target_email`:
+            admins always; managers only when the target's project is one
+            they're authorized for."""
+            return admin or (authentik_manager.user_project(target_email)
+                             or '') in projects
+
+        # --- admin-only actions ---
         if action == 'uninvite':
+            if not admin:
+                return jsonify({'error': 'admin only'}), 403
             count = authentik_manager.revoke_invitation(email)
             return jsonify({'ok': True, 'message': f'revoked {count} invitation(s)'})
-        if action == 'recovery':
-            return jsonify({'ok': True, 'url': authentik_manager.recovery_link(email)})
         if action in ('admin_add', 'admin_remove'):
+            if not admin:
+                return jsonify({'error': 'admin only'}), 403
             msg = authentik_manager.set_admin(email, remove=(action == 'admin_remove'))
             return jsonify({'ok': True, 'message': msg})
         if action in ('manager_add', 'manager_remove'):
+            if not admin:
+                return jsonify({'error': 'admin only'}), 403
             msg = authentik_manager.set_manager(email, remove=(action == 'manager_remove'))
             return jsonify({'ok': True, 'message': msg})
         if action in ('activate', 'deactivate'):
+            if not admin:
+                return jsonify({'error': 'admin only'}), 403
             msg = authentik_manager.set_active(email, active=(action == 'activate'))
             return jsonify({'ok': True, 'message': msg})
+
+        # --- manager-scoped actions (admins pass through) ---
+        if action == 'invite':
+            project = (data.get('project_name') or '').strip()
+            if not admin:
+                # Managers must invite into one of their authorized projects.
+                if not project or project not in projects:
+                    return jsonify({'error': 'not authorized for project'}), 403
+            days = max(1, min(90, int(data.get('days') or 7)))
+            url = authentik_manager.invite_user(
+                email, data.get('name') or None, days, project=project or None)
+            return jsonify({'ok': True, 'url': url})
+        if action == 'recovery':
+            if not allow_user(email):
+                return jsonify({'error': 'not authorized for this user'}), 403
+            return jsonify({'ok': True, 'url': authentik_manager.recovery_link(email)})
         if action == 'edit':
-            # `data.get(k)` returns None when the key is absent, which
-            # update_user() treats as "skip this field" — so omitting a
-            # field from the request leaves it unchanged. Passing '' clears.
-            msg = authentik_manager.update_user(
-                email,
-                name=(data.get('name') or '').strip() or None,
-                project_name=data.get('project_name'),
-                admin_notes=data.get('admin_notes'))
+            if not allow_user(email):
+                return jsonify({'error': 'not authorized for this user'}), 403
+            if admin:
+                # `data.get(k)` returns None when the key is absent, which
+                # update_user() treats as "skip this field" — so omitting a
+                # field from the request leaves it unchanged. Passing ''
+                # clears.
+                msg = authentik_manager.update_user(
+                    email,
+                    name=(data.get('name') or '').strip() or None,
+                    project_name=data.get('project_name'),
+                    admin_notes=data.get('admin_notes'))
+            else:
+                # Managers may only touch the Notes field.
+                msg = authentik_manager.update_user(
+                    email, admin_notes=data.get('admin_notes'))
             return jsonify({'ok': True, 'message': msg})
         return jsonify({'error': 'unknown action'}), 400
     except Exception as e:

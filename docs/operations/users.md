@@ -54,16 +54,51 @@ Users → edit).
 | `/admin/vm-schedule` view all VMs + owner emails | yes | yes | own VMs only, owners redacted |
 | `/admin/vm-schedule/set` (on|off|schedule), `stop-now` | yes | **owner-only** | owner-only |
 | `/admin/vm-schedule/set mode=unmanaged` (admin escape hatch) | yes | **403** | 403 |
-| `/admin/users` (roster + invitations) | yes | read-only | 403 |
-| `/admin/users/action` (invite, role changes, edit, disable) | yes | **403** | 403 |
+| `/admin/users` (roster + invitations) | yes | roster + invites for **authorized projects only** | 403 |
+| `/admin/users/action` (invite / reset / edit notes) | yes | **authorized-projects only** | 403 |
+| `/admin/users/action` (role changes, enable/disable, revoke invite) | yes | **403** | 403 |
 | `/api/inventory/asset/<host>` PUT/POST | yes | **403** | 403 |
 | `/admin/settings` (own SSH keys for VM access) | self | self | self |
 
-A manager is "an admin for visibility, a user for mutations" — sees
-every admin page the same way an admin does, but on the mutation side
-inherits the same owner-only constraints as a plain user. Admins
-implicitly pass every manager check (single boolean inheritance, no
-double bookkeeping).
+A manager is "an admin for visibility" — sees every admin page the same way
+an admin does, except the `/admin/users` roster (which is project-scoped).
+On the mutation side they inherit the same owner-only
+constraints as a plain user for VMs, and on `/admin/users` they get
+**project-scoped** user management (edit Notes, invite, and issue
+reset links) only for projects they're authorized for — see [Manager
+project authorization](#manager-project-authorization) below. Admins
+implicitly pass every manager check (single boolean inheritance, no double
+bookkeeping).
+
+## Manager project authorization
+
+Managers can operate on `/admin/users` only within projects they've been
+granted. Given a manager `bob@x`, authorized projects default to **none**:
+
+```
+ycluster user manager-projects bob@x list                # (none) by default
+ycluster user manager-projects bob@x add acme-demo       # authorize one
+ycluster user manager-projects bob@x add acme-demo billing-ops
+ycluster user manager-projects bob@x remove acme-demo    # de-authorize one
+ycluster user manager-projects bob@x set acme-demo       # replace the whole list
+```
+
+With projects authorized, on `/admin/users` a manager can:
+
+- **See the roster**: only users whose `project_name` is one of their
+  authorized projects (with none authorized, the roster is empty).
+- **Edit Notes** on any user whose `project_name` is one of their
+  authorized projects (never name/project fields).
+- **Invite** only *into* one of their authorized projects (the invite and
+  the enrolled account are tagged with that project; a manager cannot make
+  untagged invites).
+- **Issue a password (re)set link** for a user in an authorized project.
+- See **outstanding invitations** only for their authorized projects.
+
+Everything else on the users page stays admin-only: making/revoking
+admin or manager, enable/disable, editing name/project, and revoking
+invitations. The backend enforces these checks regardless of what the UI
+shows.
 
 ## Granting / revoking roles
 
@@ -101,6 +136,7 @@ promoted to admin/manager.
 ```
 ycluster user invite alice@x                       # one-use enrollment link
 ycluster user invite alice@x --name "Alice" --days 14
+ycluster user invite alice@x --project acme-demo   # tag invite + enrolled account with a project
 ```
 
 Hand the URL over out-of-band — there's no SMTP in the cluster.
@@ -115,8 +151,9 @@ The CLI never sees the password; the user sets it via the link.
 
 ## Invitations
 
-Outstanding invitations are listed on `/admin/users` (admins can revoke;
-managers see the list, no revoke). CLI:
+Outstanding invitations are listed on `/admin/users` (admins see and can
+revoke all; managers see only their authorized projects' invites, revoke is
+admin-only). CLI:
 
 ```
 ycluster user invitations       # list
