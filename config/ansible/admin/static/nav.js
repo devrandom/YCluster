@@ -43,7 +43,6 @@
         ['Resources', '/admin/resources'],
         ['VM Schedule', '/admin/vm-schedule'],
         ['VM Usage', '/admin/vm-usage'],
-        ['Model Usage', '/admin/model-usage'],
         ['Users', '/admin/users'],
         ['Monitoring', '/grafana/dashboards'],
         ['Account', authHref],
@@ -79,23 +78,23 @@
     }).join('');
     document.body.prepend(nav);
 
-    // Admin-only links (Model Usage) are dropped for managers — admins can
-    // load the page directly, but managers get 403 on it, so remove the nav
-    // entry too. Only meaningful on the admin surface (the app surface
-    // doesn't list it). Role comes from /admin/nav-identity, which nginx
-    // forward-auth fills from the IdP group headers. Applies asynchronously
-    // so the link can't leak beyond the initial frame into a page load.
+    // Model Usage is admin-only, so it starts invisible and is inserted
+    // only after the role check confirms an admin — managers never see it
+    // flicker in and out. Role comes from /admin/nav-identity (nginx
+    // forward-auth fills it from the IdP group headers). Only meaningful on
+    // the admin surface (the app surface doesn't list it).
     if (!isApp) {
         window.fetch('/admin/nav-identity').then(function (resp) {
             if (!resp.ok) return;
             return resp.json();
         }).then(function (ident) {
-            if (!ident || ident.is_admin) return;
-            nav.querySelectorAll('a').forEach(function (a) {
-                if (a.getAttribute('href') === '/admin/model-usage') {
-                    a.remove();
-                }
-            });
+            if (!ident || !ident.is_admin) return;
+            var link = document.createElement('a');
+            link.href = '/admin/model-usage';
+            link.textContent = 'Model Usage';
+            if ('/admin/model-usage' === here) link.className = 'cur';
+            var users = nav.querySelector('a[href="/admin/users"]');
+            nav.insertBefore(link, users);
         });
     }
 
