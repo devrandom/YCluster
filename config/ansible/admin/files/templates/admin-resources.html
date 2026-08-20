@@ -42,6 +42,7 @@
     .gpu-badge { display: inline-block; background: #76b900; color: white;
                  padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.7rem;
                  font-weight: 700; }
+    .gpu-badge.off { background: #e5e7eb; color: #6b7280; }
     .muted { color: #999; }
     .gpu-usage { color: #166534; font-weight: 600; }
     .empty { color: #999; font-style: italic; font-size: 0.8rem; }
@@ -115,7 +116,9 @@
         <template x-for="vm in h.vms" :key="vm.name">
           <div class="vm-row" :class="{'not-scheduled': !vm.scheduled_now}">
             <span class="vm-name" x-text="vm.name"></span>
-            <span class="gpu-badge" x-show="vm.sched_gpus > 0" x-text="vm.sched_gpus + ' GPU'"></span>
+            <span class="gpu-badge" :class="vm.scheduled_now ? '' : 'off'"
+                  x-show="vm.sched_gpus > 0"
+                  x-text="(vm.sched_gpus < vm.gpus ? vm.sched_gpus + '/' + vm.gpus : vm.sched_gpus) + ' GPU'"></span>
             <span class="muted" x-show="vm.cpu"
                   x-text="vm.cpu + ' CPU'"></span>
             <span class="muted" x-show="vm.mem"
