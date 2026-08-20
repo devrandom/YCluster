@@ -43,6 +43,7 @@
                  padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.7rem;
                  font-weight: 700; }
     .muted { color: #999; }
+    .gpu-usage { color: #166534; font-weight: 600; }
     .empty { color: #999; font-style: italic; font-size: 0.8rem; }
     .models-grid { display: flex; flex-wrap: wrap; gap: 0.3rem; }
     .model-chip { background: #e0e7ff; border: 1px solid #c7d2fe;
@@ -90,8 +91,8 @@
         <span class="host-name" x-text="h.hostname"></span>
         <span class="host-meta" x-text="h.type + ' · ' + h.ip"></span>
         <span class="pill pill-disabled" x-show="h.disabled">disabled</span>
-        <span class="host-meta" x-show="h.gpu_count > 0"
-              x-text="h.gpu_count + ' GPU' + (h.gpu_count > 1 ? 's' : '')"></span>
+        <span class="host-meta gpu-usage" x-show="h.gpu_count > 0"
+              x-text="h.gpus_used + '/' + h.gpu_count + ' GPU' + (h.gpu_count > 1 ? 's' : '')"></span>
         <span class="host-meta" x-show="h.hardware && h.hardware.cpu"
               x-text="h.hardware.cpu"></span>
         <span class="host-meta" x-show="h.hardware && h.hardware.ram_gb"

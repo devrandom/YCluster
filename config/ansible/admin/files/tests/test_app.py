@@ -778,6 +778,44 @@ class ResourcesDataTests(SchedTestBase):
         self.assertEqual(vm["gpus"], 4)
         self.assertEqual(vm["sched_gpus"], 1)
 
+    def test_gpus_used_sums_scheduled_vms(self):
+        # Host with a 3-GPU pool and two VMs scheduled on → 2/3 used.
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self._seed_hardware("nv1", gpus=[{}, {}, {}])
+        self.vm("vm-a", owner="alice@x", gpus=1, host="nv1")
+        self.vm("vm-b", owner="bob@x", gpus=1, host="nv1")
+        self.desired("vm-a", "on")
+        self.desired("vm-b", "on")
+        data = self.get("/admin/resources/data").get_json()
+        host = [h for h in data["hosts"] if h["hostname"] == "nv1"][0]
+        self.assertEqual(host["gpu_count"], 3)
+        self.assertEqual(host["gpus_used"], 2)
+
+    def test_gpus_used_excludes_off_and_includes_blocks(self):
+        # An off VM holds nothing, but an admin GPU block on the host counts.
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self._seed_hardware("nv1", gpus=[{}, {}, {}])
+        self.vm("vm-on", owner="alice@x", gpus=2, host="nv1")
+        self.vm("vm-off", owner="bob@x", gpus=2, host="nv1")
+        self.desired("vm-on", "on")
+        self.desired("vm-off", "off")
+        self.etcd.seed_json(vmm.GPU_BLOCKS_PREFIX + "blk",
+                            {"host": "nv1", "gpus": 1, "mode": "on"})
+        data = self.get("/admin/resources/data").get_json()
+        host = [h for h in data["hosts"] if h["hostname"] == "nv1"][0]
+        self.assertEqual(host["gpus_used"], 3)   # vm-on 2 + block 1
+
+    def test_gpus_used_unmanaged_defaults_to_registered(self):
+        # No desired record → the VM is unmanaged and holds its registered
+        # GPUs (devices are never released), so it counts toward "used".
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self._seed_hardware("nv1", gpus=[{}, {}])
+        self.vm("v", owner="alice@x", gpus=2, host="nv1")
+        data = self.get("/admin/resources/data").get_json()
+        host = [h for h in data["hosts"] if h["hostname"] == "nv1"][0]
+        self.assertEqual(host["gpu_count"], 2)
+        self.assertEqual(host["gpus_used"], 2)
+
     def test_vm_cpu_mem_exposed(self):
         self._seed_host("nv1", "nvidia", "10.0.0.111")
         self.vm("v", owner="alice@x", host="nv1", cpu="8", mem="32GiB")

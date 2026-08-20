@@ -2676,6 +2676,16 @@ def resources_data():
         def _owner_visible(owner):
             return True
 
+    # GPUs currently scheduled/committed per host: the same desired-state
+    # commitments the schedule page and admission control use (VMs plus
+    # admin GPU reservations/blocks). This is the "used" half of the
+    # used/total badge on each host card.
+    commitments = vmm.combine_gpu_commitments(
+        vmm.gpu_commitments(registry, desired_all, now),
+        vmm.gpu_block_commitments(vmm.gpu_blocks_all(), now))
+    gpus_used = {host: sum(c['gpus'] for c in commits)
+                 for host, commits in commitments.items()}
+
     # Build per-host data
     result_hosts = []
     for h in hosts:
@@ -2720,6 +2730,7 @@ def resources_data():
             'disabled': h.get('disabled', False),
             'hardware': hardware,
             'gpu_count': len(gpus),
+            'gpus_used': gpus_used.get(hostname, 0),
             'gpus': gpus,
             'vms': host_vms,
         })
