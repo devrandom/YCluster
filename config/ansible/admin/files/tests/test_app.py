@@ -88,9 +88,11 @@ class SchedTestBase(unittest.TestCase):
             rec["mem"] = mem
         self.etcd.seed_json(vmm.VMS_PREFIX + name, rec)
 
-    def desired(self, name, mode, windows=None):
-        self.etcd.seed_json(vmm.VM_DESIRED_PREFIX + name,
-                            {"mode": mode, "windows": windows or []})
+    def desired(self, name, mode, windows=None, gpus=None):
+        rec = {"mode": mode, "windows": windows or []}
+        if gpus is not None:
+            rec["gpus"] = gpus
+        self.etcd.seed_json(vmm.VM_DESIRED_PREFIX + name, rec)
 
     def state(self, host, pool=None, instances=None):
         snap = {"instances": instances or []}
@@ -754,6 +756,27 @@ class ResourcesDataTests(SchedTestBase):
         by_name = {h["hostname"]: h for h in data["hosts"]}
         self.assertFalse(by_name["nv1"]["disabled"])
         self.assertTrue(by_name["nv2"]["disabled"])
+
+    def test_sched_gpus_defaults_to_registered(self):
+        # Launched with 2 GPUs, but no desired record yet → scheduled GPU
+        # count falls back to the registered (max) allocation.
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("v", owner="alice@x", gpus=2, host="nv1")
+        data = self.get("/admin/resources/data").get_json()
+        vm = data["hosts"][0]["vms"][0]
+        self.assertEqual(vm["gpus"], 2)
+        self.assertEqual(vm["sched_gpus"], 2)
+
+    def test_sched_gpus_uses_desired_record(self):
+        # Launched with 4 GPUs but scheduled to run with 1 → the badge shows
+        # the currently scheduled count, not the registered max.
+        self._seed_host("nv1", "nvidia", "10.0.0.111")
+        self.vm("v", owner="alice@x", gpus=4, host="nv1")
+        self.desired("v", "on", gpus=1)
+        data = self.get("/admin/resources/data").get_json()
+        vm = data["hosts"][0]["vms"][0]
+        self.assertEqual(vm["gpus"], 4)
+        self.assertEqual(vm["sched_gpus"], 1)
 
     def test_vm_cpu_mem_exposed(self):
         self._seed_host("nv1", "nvidia", "10.0.0.111")

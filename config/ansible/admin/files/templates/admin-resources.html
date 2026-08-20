@@ -114,7 +114,7 @@
         <template x-for="vm in h.vms" :key="vm.name">
           <div class="vm-row" :class="{'not-scheduled': !vm.scheduled_now}">
             <span class="vm-name" x-text="vm.name"></span>
-            <span class="gpu-badge" x-show="vm.gpus > 0" x-text="vm.gpus + ' GPU'"></span>
+            <span class="gpu-badge" x-show="vm.sched_gpus > 0" x-text="vm.sched_gpus + ' GPU'"></span>
             <span class="muted" x-show="vm.cpu"
                   x-text="vm.cpu + ' CPU'"></span>
             <span class="muted" x-show="vm.mem"

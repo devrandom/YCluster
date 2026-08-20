@@ -2695,10 +2695,15 @@ def resources_data():
             mode = desired.get('mode', 'unmanaged')
             # A VM is "scheduled now" if desired_on says it should be up.
             scheduled_now = vmm.desired_on(desired, now) if desired else False
+            # "Currently scheduled" GPU count: what the VM should run with
+            # per its desired record (defaults to all registered GPUs), as
+            # opposed to the registered max it was launched with.
+            sched_gpus = vmm.desired_gpus(desired, rec.get('gpus') or 0)
             host_vms.append({
                 'name': vm_name,
                 'owner': rec.get('owner'),
                 'gpus': rec.get('gpus', 0),
+                'sched_gpus': sched_gpus,
                 'cpu': rec.get('cpu'),
                 'mem': rec.get('mem'),
                 'type': rec.get('type', 'vm'),
