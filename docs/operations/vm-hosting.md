@@ -11,6 +11,80 @@ optional external SSH access. The `ycluster vm` CLI manages them.
 - **Images**: `ubuntu-cuda` and the derived `ubuntu-cuda-vllm` — see
   [Images](#images).
 
+## Adding a new VM host
+
+Onboarding a new GPU VM host touches several independent pieces, and it is
+easy to miss one (a missing frontend firewall rule silently drops all
+external SSH to VMs on the new host). Work through them in order:
+
+1. **Register the node in etcd so the inventory sees it.** The etcd
+   inventory plugin (`config/ansible/inventory_plugins/etcd_nodes.py`)
+   reads node allocations under `/cluster/nodes/by-hostname/…`; a GPU VM
+   host must be allocated with `type: nvidia`. `nvidia` is a child of
+   `compute`, so this is what puts the host in the `compute` group that the
+   VM plays target — and in `groups['compute']`, which
+   `app/install-frp-server.yml` iterates to compute frontend firewall
+   ports.
+
+2. **Add `host_vars/<host>.yml`** (in `ycluster-private`, symlinked in):
+   ```yaml
+   incus_vm_host: true
+   incus_passthrough_gpu_pci:
+     - "0000:<bus>:<slot>.0"        # primary PCI function of each passthrough GPU
+   vm_bastion_service: vm-bastion-<host>
+   ```
+   `vm_bastion_service` is what enables external SSH and what the frontend
+   firewall logic keys on.
+
+3. **Physical prerequisites.** Enable AMD-Vi / IOMMU in the BIOS (see
+   [BIOS: enable AMD-Vi (IOMMU)](#bios-enable-amd-vi-iommu)) so `vfio-pci`
+   can bind the passthrough GPUs.
+
+4. **Run the provisioning playbooks** (as `root` via Ansible, on the
+   `managed`/compute host):
+   - `admin/install-incus.yml` — installs Incus, builds/publishes the VM
+     images, creates the `incusbr0` bridge + isolation ACL, and installs
+     `gpu-passthrough.service`. **Reboot the host after the first run** so
+     the GPU split (nvidia vs `vfio-pci`) takes effect at boot — see
+     [Critical rule: never live-rebind a GPU](#critical-rule-never-live-rebind-a-gpu).
+   - `admin/install-vm-bastion.yml` — deploys the `bastion` container
+     (jump-only sshd + frpc) and derives the host's
+     [`bastion_public_port`](#port-derivation).
+
+5. **Update the frontend host firewall — easy to forget.** Re-run
+   `app/install-frp-server.yml` against the `frontend` group
+   (currently `dev1a`/`dev1b`) so `ufw` opens the new host's derived
+   bastion public port (frontends default-deny incoming). Without this
+   step, external SSH through the new host's bastion is silently dropped.
+   `frps` runs on the frontends, so it forwards the public bastion port to
+   the host's bastion tunnel.
+
+6. **Verify.**
+   - The host appears in the inventory under `compute`/`nvidia`
+     (`ansible-inventory --host <host>`).
+   - A frontend `ufw status` shows the derived public port allowed, and
+     re-running `install-frp-server.yml` shows a `changed` for that port
+     on first fix-up.
+   - `frpc-bastion.service` is active in the bastion, and
+     `ycluster vm bastion-sync` has filled its `authorized_keys`.
+   - Boot a test VM and `ssh -J jump@<frontend>:<port> ubuntu@<vm>`.
+
+### Port derivation
+
+The public bastion port is derived from the node name and index, and the
+derivation is duplicated in both `admin/install-vm-bastion.yml`
+(`bastion_public_port`) and `app/install-frp-server.yml`
+(`vm_bastion_public_ports`) — keep them in sync:
+
+| node | idx ≤ 3 | idx > 3 |
+|------|---------|---------|
+| nvidia (`nv<idx>`) | `2210+idx` (nv1→2211) | `2220+idx` |
+| compute (`c<idx>`)  | `2213+idx` (c1→2214) | `2240+idx` |
+
+Low-index ports are historical and stable (existing `ssh -J` invocations
+keep working); the disjoint `2220+idx` / `2240+idx` blocks for idx > 3
+mean adding one node type never shifts another type's ports.
+
 ## GPU Split (host vs. passthrough)
 
 Each VM host divides its GPUs: some stay on the `nvidia` driver for the
@@ -236,17 +310,20 @@ ranges. The bridge resolver forwards DNS to the cluster gateway
 
 ## External SSH access
 
-A `bastion` container on `incusbr0` runs a jump-only sshd plus a rathole
-client. Each VM host gets its own public port on the rathole frontend
+A `bastion` container on `incusbr0` runs a jump-only sshd plus an frpc
+client. Each VM host gets its own public port on the frp frontend
 (nv2 → `2212`, nv3 → `2213`). Users reach their VM with:
 
 ```bash
-ssh -J jump@<rathole-host>:<port> ubuntu@<vm-name>
+ssh -J jump@<frontend>:<port> ubuntu@<vm-name>
 ```
 
 Each host's service name is set via `vm_bastion_service` in
-`host_vars/<host>.yml`; its public port is derived in
-`app/templates/rathole-server.toml.j2` from the node type and index. The
+`host_vars/<host>.yml`; its public port is derived from the node type and
+index (see [Port derivation](#port-derivation)) and applied in
+`admin/install-vm-bastion.yml`. `app/install-frp-server.yml` (run against
+the `frontend` group) must have opened that port in the frontend `ufw` —
+without it, external SSH through the bastion is silently dropped. The
 original low-index hosts keep their historical ports (idx 1-3: nvidia
 `2210+idx`, compute `2213+idx`, i.e. 2211-2216), so deployed bastions are
 never renumbered. Every host with idx > 3 lands in a per-type disjoint
