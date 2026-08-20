@@ -573,6 +573,97 @@ class SshKeyValidationTests(unittest.TestCase):
             vm.validate_ssh_key("ssh-ed25519 " + "A" * 5000 + " x")
 
 
+class VmAccessTests(unittest.TestCase):
+    """Registry -> SSH access mapping: owner + additional users."""
+
+    KEY_A = ("ssh-ed25519 "
+             "AAAAC3NzaC1lZDI1NTE5AAAAIKKEYMATERIAL00000AAAa alice@x")
+    KEY_B = ("ssh-ed25519 "
+             "AAAAC3NzaC1lZDI1NTE5AAAAIKKEYMATERIAL11111BBb bob@x")
+    KEY_SHARED = ("ssh-ed25519 "
+                  "AAAAC3NzaC1lZDI1NTE5AAAAIKKEYMATERIAL99999ZZz shared@x")
+
+    def _rec(self, owner, additional=()):
+        return {"owner": owner, "additional_users": list(additional),
+                "gpus": 1, "host": "nv2", "type": "vm"}
+
+    def test_access_users_owner_plus_additional(self):
+        self.assertEqual(
+            vm._vm_access_users(self._rec("a@x", ["b@x", "c@x"])),
+            ["a@x", "b@x", "c@x"])
+
+    def test_access_users_dedupes_and_skips_blank(self):
+        self.assertEqual(
+            vm._vm_access_users(self._rec("a@x", ["a@x", "b@x", ""])),
+            ["a@x", "b@x"])
+
+    def test_access_users_empty(self):
+        self.assertEqual(vm._vm_access_users({}), [])
+        self.assertEqual(vm._vm_access_users({"owner": None}), [])
+
+    @mock.patch.object(vm, "vms_all")
+    def test_access_vms_maps_owner_and_additional(self, vms_all):
+        vms_all.return_value = {
+            "vm1": self._rec("a@x", ["b@x"]),
+            "vm2": self._rec("b@x"),
+        }
+        self.assertEqual(
+            vm._access_vms(),
+            {"a@x": ["vm1"], "b@x": ["vm1", "vm2"]})
+
+    @mock.patch.object(vm, "user_get")
+    def test_access_keys_union_deduped(self, user_get):
+        user_get.side_effect = lambda u: (
+            {"ssh_keys": [self.KEY_A]} if u == "a@x"
+            else {"ssh_keys": [self.KEY_B]})
+        rec = self._rec("a@x", ["a@x", "b@x"])
+        self.assertEqual(vm._vm_access_keys(rec), [self.KEY_A, self.KEY_B])
+
+    @mock.patch.object(vm, "users_all")
+    @mock.patch.object(vm, "vms_all")
+    def test_bastion_permitopen_for_owner_and_additional(self, vms_all,
+                                                         users_all):
+        vms_all.return_value = {"vm1": self._rec("a@x", ["b@x"])}
+        users_all.return_value = {
+            "a@x": {"ssh_keys": [self.KEY_A]},
+            "b@x": {"ssh_keys": [self.KEY_B]},
+        }
+        out = vm._bastion_authorized_keys()
+        self.assertIn(
+            f'restrict,port-forwarding,permitopen="vm1:22" {self.KEY_A}', out)
+        self.assertIn(
+            f'restrict,port-forwarding,permitopen="vm1:22" {self.KEY_B}', out)
+
+    @mock.patch.object(vm, "users_all")
+    @mock.patch.object(vm, "vms_all")
+    def test_bastion_dedupes_shared_key_unions_permitopen(self, vms_all,
+                                                          users_all):
+        vms_all.return_value = {
+            "vm1": self._rec("a@x"),
+            "vm2": self._rec("b@x"),
+        }
+        users_all.return_value = {
+            "a@x": {"ssh_keys": [self.KEY_SHARED]},
+            "b@x": {"ssh_keys": [self.KEY_SHARED]},
+        }
+        out = vm._bastion_authorized_keys()
+        lines = [l for l in out.splitlines() if not l.startswith("#")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('permitopen="vm1:22"', lines[0])
+        self.assertIn('permitopen="vm2:22"', lines[0])
+
+    @mock.patch.object(vm, "user_get")
+    @mock.patch.object(vm, "_instance_exists")
+    @mock.patch.object(vm, "vm_get")
+    def test_alter_add_user_without_keys_raises(self, vm_get, inst_exists,
+                                                user_get):
+        vm_get.return_value = self._rec("a@x")
+        inst_exists.return_value = True
+        user_get.return_value = None          # added user has no record
+        with self.assertRaises(ValueError):
+            vm.vm_alter("vm1", add_users=["b@x"])
+
+
 def _proc(returncode, stderr=""):
     return subprocess.CompletedProcess(["incus"], returncode, stderr=stderr)
 

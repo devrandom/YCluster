@@ -6,7 +6,8 @@ registry, and the SSH jump bastion's access list. Runs on the Incus host
 
 etcd layout:
   /cluster/users/<user>   -> {"ssh_keys": [...]}
-  /cluster/vms/<name>     -> {"owner": <user>, "gpus": N, "created": <iso>}
+  /cluster/vms/<name>     -> {"owner": <user>, "additional_users": [...],
+                              "gpus": N, "created": <iso>}
 """
 
 import json
@@ -785,12 +786,46 @@ def vms_all():
     return _all_json(VMS_PREFIX)
 
 
-def _owner_vms():
-    """Return {owner: [vm names]}."""
+def _vm_access_users(rec):
+    """Users who may SSH to a VM: its owner plus any additional users.
+
+    The owner stays the billing/accounting identity; additional_users are
+    extra registered users granted the same SSH access. Returns a list
+    without duplicates."""
+    users = []
+    owner = rec.get("owner")
+    if owner:
+        users.append(owner)
+    for u in rec.get("additional_users") or []:
+        if u and u not in users:
+            users.append(u)
+    return users
+
+
+def _access_vms():
+    """Return {user: [vm names]} for every user who can SSH to a VM.
+
+    A user appears for each VM they own AND each VM they are an additional
+    user on; a VM can map to several users."""
     out = {}
     for name, rec in vms_all().items():
-        out.setdefault(rec.get("owner"), []).append(name)
+        for u in _vm_access_users(rec):
+            out.setdefault(u, []).append(name)
     return out
+
+
+def _vm_access_keys(rec):
+    """Union of every registered SSH key of all users with VM access.
+
+    The VM's primary login user accepts the owner's keys *and* each
+    additional user's keys, deduped by key material."""
+    seen, keys = set(), []
+    for u in _vm_access_users(rec):
+        for k in (user_get(u) or {}).get("ssh_keys", []):
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    return keys
 
 
 def _guest_login_user(vm_name):
@@ -825,14 +860,30 @@ def _ensure_sshd(vm_name, agent_timeout=180):
            "systemctl enable --now ssh.service")
 
 
-def _inject_owner_keys(vm_name, keys, agent_timeout=180):
-    """Install an owner's keys into the VM's primary login user."""
+def _inject_vm_keys(vm_name, keys, agent_timeout=180):
+    """Install the given keys into the VM's primary login user."""
     _wait_agent(vm_name, agent_timeout)
     # cloud-init creates the default user on first boot — wait for it.
     _incus("exec", vm_name, "--", "cloud-init", "status", "--wait", check=False)
     guest = _guest_login_user(vm_name)
     content = "".join(k.strip() + "\n" for k in keys)
     _push_file(vm_name, f"/home/{guest}/.ssh/authorized_keys", content, guest)
+
+
+def _sync_vm_keys(vm_name, agent_timeout=180):
+    """Recompute and inject the union of all access-user keys for a VM.
+
+    Only acts on a VM that exists and is running on this host; stopped or
+    absent instances are skipped (they'd block _wait_agent for minutes)."""
+    if not _instance_exists(vm_name):
+        return False
+    if not _instance_running(vm_name):
+        print(f"Skipping '{vm_name}' (not running).")
+        return False
+    rec = vm_get(vm_name) or {}
+    print(f"Refreshing keys in '{vm_name}'...")
+    _inject_vm_keys(vm_name, _vm_access_keys(rec), agent_timeout)
+    return True
 
 
 def desired_get(name):
@@ -1436,7 +1487,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     else:
         print(f"Waiting for the {instance_type} to boot, provisioning SSH...")
     _ensure_sshd(name, timeout)
-    _inject_owner_keys(name, user["ssh_keys"], timeout)
+    _inject_vm_keys(name, _vm_access_keys(record), timeout)
     bastion_sync()
 
     # Confirm the guest actually sees the GPUs we passed through (catches a
@@ -1491,18 +1542,25 @@ def vm_resize(name, size):
 
 
 def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
-             image=None, instance_type=None, billable=False):
+             image=None, instance_type=None, billable=False,
+             add_users=None, remove_users=None):
     """Alter parameters of an existing VM. Pass only what should change.
 
     Live-applies: cpu, mem (mem visible to the guest on next reboot —
     Incus sets the qemu limit immediately but the in-guest kernel keeps
-    its view until restart), owner (registry + bastion + key resync).
-    Requires stop + start for VMs: gpus (detach the current physical
-    GPUs, attach the new count from the host pool; the VM is restarted
-    in-place if it was running, otherwise left stopped). For containers
-    --gpus is the same 0/non-zero toggle as launch (profile device
-    add/remove); only the registry is updated. Not supported on an
-    existing VM (would require destroy + relaunch): image, type.
+    its view until restart), owner and additional users (registry +
+    bastion + key resync). Requires stop + start for VMs: gpus (detach
+    the current physical GPUs, attach the new count from the host pool;
+    the VM is restarted in-place if it was running, otherwise left
+    stopped). For containers --gpus is the same 0/non-zero toggle as
+    launch (profile device add/remove); only the registry is updated.
+    Not supported on an existing VM (would require destroy + relaunch):
+    image, type.
+
+    `add_users`/`remove_users` are lists of registered users granted
+    (or stripped of) SSH access to the VM, alongside the owner. They must
+    have keys registered to be added; the owner is never an additional
+    user itself.
 
     No-op if every supplied value already matches the registry.
     """
@@ -1531,15 +1589,34 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
 
     # --- owner (registry + bastion + key resync) ---
     owner_changed = owner is not None and owner != rec.get("owner")
-    new_owner_keys = None
     if owner_changed:
         new_user = user_get(owner)
         if not new_user or not new_user.get("ssh_keys"):
             raise ValueError(
                 f"New owner '{owner}' has no SSH keys registered. "
                 f"Add one first: ycluster vm ssh add {owner} '<public-key>'")
-        new_owner_keys = new_user["ssh_keys"]
         rec["owner"] = owner
+
+    # --- additional users (registry + bastion + key resync) ---
+    cur_add = set(rec.get("additional_users") or [])
+    add_users = add_users or []
+    remove_users = remove_users or []
+    for u in add_users:
+        _valid_user(u)
+        # Validating the user has keys mirrors the owner path: an added
+        # user with no registered keys would grant nothing and confuse.
+        user = user_get(u)
+        if not user or not user.get("ssh_keys"):
+            raise ValueError(
+                f"User '{u}' has no SSH keys registered. Add one first: "
+                f"ycluster vm ssh add {u} '<public-key>'")
+    owner_name = rec.get("owner")
+    new_add = (cur_add | set(add_users)) - set(remove_users)
+    if owner_name:
+        new_add.discard(owner_name)        # owner is never an additional user
+    access_changed = set(new_add) != cur_add
+    if access_changed:
+        rec["additional_users"] = sorted(new_add)
 
     # --- gpus (VM path requires stop + start; container path is the
     #     launch-style 0/non-zero toggle on the profile device) ---
@@ -1590,10 +1667,13 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
         rec["mem"] = mem
 
     changes = []
-    if owner_changed: changes.append(f"owner -> {owner}")
-    if gpu_changed:   changes.append(f"gpus -> {gpus}")
-    if cpu_changed:   changes.append(f"cpu -> {cpu}")
-    if mem_changed:   changes.append(f"mem -> {mem}")
+    if owner_changed:   changes.append(f"owner -> {owner}")
+    if access_changed:
+        joined = ", ".join(rec.get("additional_users") or [])
+        changes.append(f"additional users -> [{joined}]")
+    if gpu_changed:     changes.append(f"gpus -> {gpus}")
+    if cpu_changed:     changes.append(f"cpu -> {cpu}")
+    if mem_changed:     changes.append(f"mem -> {mem}")
     if not changes:
         print(f"No changes for '{name}' (every supplied value matches "
               f"the current registry).")
@@ -1601,13 +1681,13 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
 
     _put_json(VMS_PREFIX + name, rec)
 
-    if owner_changed:
-        # Re-inject the new owner's keys inline so SSH works immediately;
-        # the bastion_watch daemon would eventually reconcile naturally,
-        # but a manual alter should be observable at once.
-        _inject_owner_keys(name, new_owner_keys,
-                           GPU_VM_AGENT_TIMEOUT if (rec.get("gpus") or 0)
-                           else 180)
+    if owner_changed or access_changed:
+        # Recompute the VM's key set (owner + additional users) inline so
+        # SSH works/revokes immediately; the bastion_watch daemon would
+        # eventually reconcile naturally, but a manual alter should be
+        # observable at once.
+        _sync_vm_keys(name, GPU_VM_AGENT_TIMEOUT if (rec.get("gpus") or 0)
+                      else 180)
         bastion_sync()
 
     _record_event("alter", name, owner=rec.get("owner"),
@@ -1843,25 +1923,20 @@ def pin_existing_vms():
 
 
 def vm_sync_keys(user):
-    """Re-inject a user's current keys into every running VM they own.
+    """Recompute the injected key set for every running VM `user` accesses.
 
-    If the user has no keys left (or the record is gone), the VMs'
-    authorized_keys are emptied — removing a user's keys revokes access.
+    A VM's authorized_keys holds the union of the owner's and every
+    additional user's keys, so a change to any one user's keys (add/remove,
+    or the record disappearing) is propagated by recomputing the whole VM.
+    Removing a user's keys drops them out of every VM they access, revoking
+    that access.
 
     Only acts on VMs that exist *on this host* (incus is local-only) and
     are currently RUNNING — stopped VMs would block on _wait_agent for
     minutes and aren't reachable anyway.
     """
-    rec = user_get(user) or {"ssh_keys": []}
-    keys = rec.get("ssh_keys", [])
-    for name in _owner_vms().get(user, []):
-        if not _instance_exists(name):
-            continue                           # VM not on this host
-        if not _instance_running(name):
-            print(f"Skipping '{name}' (not running).")
-            continue
-        print(f"Refreshing keys in '{name}'...")
-        _inject_owner_keys(name, keys)
+    for name in _access_vms().get(user, []):
+        _sync_vm_keys(name)
 
 
 # --------------------------------------------------------------------------
@@ -1893,23 +1968,24 @@ def _bastion_authorized_keys():
     """Render the jump user's authorized_keys from the etcd registries.
 
     Each key line is restricted to port-forwarding only, and `permitopen`
-    is locked to the :22 of exactly the VMs that user owns.
+    is locked to the :22 of exactly the VMs that user can access (owns or
+    is an additional user on).
 
     Deduped by key material: if the same public key is registered under
-    multiple etcd owners (same human, multiple identities), we emit one
-    line whose `permitopen` is the union of all owners' VMs. Otherwise
+    multiple etcd users (same human, multiple identities), we emit one
+    line whose `permitopen` is the union of all those users' VMs. Otherwise
     OpenSSH would only honour the first matching line's restrictions and
     the rest would be silently shadowed.
     """
     users = users_all()
-    owner_vms = _owner_vms()
+    access_vms = _access_vms()
     # key material (everything except the trailing comment) -> dict with
     # the canonical key line we'll emit and the set of VMs it can reach.
     by_key = {}
-    for owner, rec in sorted(users.items()):
-        vmnames = owner_vms.get(owner, [])
+    for user, rec in sorted(users.items()):
+        vmnames = access_vms.get(user, [])
         if not vmnames:
-            continue                           # owns no VMs -> no jump access
+            continue                           # no access to any VM
         for key in rec.get("ssh_keys", []):
             parts = key.split(None, 2)         # type, material, [comment]
             if len(parts) < 2:
@@ -1944,7 +2020,7 @@ def bastion_sync():
 
 def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
     """Watch incus lifecycle events; on instance-started/restarted, queue a
-    key re-sync for that VM's owner.
+    key re-sync for every user who can access that VM (owner + additional).
 
     Covers the case where a VM that was stopped (or in ERROR) when the
     watcher booted gets started later — no etcd event fires, so this is
@@ -1981,13 +2057,14 @@ def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
                 if name == BASTION_CONTAINER:
                     continue
                 rec = vm_get(name)
-                owner = rec.get("owner") if rec else None
-                if not owner:
+                users = _vm_access_users(rec or {})
+                if not users:
                     continue
                 print(f"bastion-watch: lifecycle '{action}' on '{name}' "
-                      f"(owner={owner}) — queueing key sync", flush=True)
+                      f"({', '.join(users)}) — queueing key sync", flush=True)
                 with cond:
-                    dirty_users.add(owner)
+                    for u in users:
+                        dirty_users.add(u)
                     bastion_dirty[0] = True
                     cond.notify()
             proc.wait()
@@ -2044,8 +2121,10 @@ def bastion_watch(debounce=2.0):
 
     Three kinds of trigger:
       * etcd /cluster/users/<u> change  → bastion_sync + vm_sync_keys(u)
-      * etcd /cluster/vms/<v> change    → bastion_sync + vm_sync_keys(<v owner>)
-      * incus instance-started/restarted → vm_sync_keys(<v owner>)
+      * etcd /cluster/vms/<v> change    → bastion_sync + vm_sync_keys(each
+                                         user who can access <v>)
+      * incus instance-started/restarted → vm_sync_keys(each user who
+                                         can access <v>)
 
     vm_sync_keys acts only on RUNNING VMs that live on this host.
 
@@ -2055,7 +2134,7 @@ def bastion_watch(debounce=2.0):
     changes. We detect that in the callback and via a periodic health check,
     then re-register both watches and do a full bastion/VM-key resync (the
     triggering key's identity is lost on a break, so we can't target one
-    owner).
+    user).
     """
     import threading
 
@@ -2066,12 +2145,12 @@ def bastion_watch(debounce=2.0):
 
     print("bastion-watch: initial sync...", flush=True)
     bastion_sync()
-    # Initial VM-key sync for every owner with VMs on this host.
-    for owner in sorted(_owner_vms()):
+    # Initial VM-key sync for every user with access to VMs on this host.
+    for user in sorted(_access_vms()):
         try:
-            vm_sync_keys(owner)
+            vm_sync_keys(user)
         except Exception as e:
-            print(f"bastion-watch: initial vm_sync_keys({owner}) failed: {e}",
+            print(f"bastion-watch: initial vm_sync_keys({user}) failed: {e}",
                   file=sys.stderr, flush=True)
     print(f"bastion-watch: watching {USERS_PREFIX} and {VMS_PREFIX} "
           f"(debounce={debounce}s)", flush=True)
@@ -2149,21 +2228,21 @@ def bastion_watch(debounce=2.0):
             _register_watches()
 
     def _full_resync():
-        """Recompute the bastion ACL and every owner's VM keys from scratch.
+        """Recompute the bastion ACL and every VM's keys from scratch.
 
         Used after a watch-stream break: the failed event no longer carries
-        the changed user, so we can't limit the resync to a single owner.
+        the changed user, so we can't limit the resync to a single user.
         """
         try:
             bastion_sync()
         except Exception as e:
             print(f"bastion-watch: full_resync bastion_sync failed: {e}",
                   file=sys.stderr, flush=True)
-        for owner in sorted(_owner_vms()):
+        for user in sorted(_access_vms()):
             try:
-                vm_sync_keys(owner)
+                vm_sync_keys(user)
             except Exception as e:
-                print(f"bastion-watch: full_resync vm_sync_keys({owner}) "
+                print(f"bastion-watch: full_resync vm_sync_keys({user}) "
                       f"failed: {e}", file=sys.stderr, flush=True)
 
     threading.Thread(
@@ -2202,12 +2281,20 @@ def bastion_watch(debounce=2.0):
             continue
         if not had_work:
             continue                   # idle wake; watches are healthy
-        # VM-record changes can shift ownership; pull each changed VM's
-        # current owner into the per-user resync set.
+        # VM-record changes can shift the set of users who can reach a VM,
+        # so re-sync each changed VM directly (recomputes its full key
+        # union -> added users in, removed users out). Also pull the changed
+        # VM's access users into the per-user resync set so their keys reach
+        # every other VM they can access.
         for name in vms:
             rec = vm_get(name)
-            if rec and rec.get("owner"):
-                users.add(rec["owner"])
+            for u in _vm_access_users(rec or {}):
+                users.add(u)
+            try:
+                _sync_vm_keys(name)
+            except Exception as e:
+                print(f"bastion-watch: _sync_vm_keys({name}) failed: {e}",
+                      file=sys.stderr, flush=True)
         try:
             bastion_sync()
         except Exception as e:

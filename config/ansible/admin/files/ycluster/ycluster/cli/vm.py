@@ -37,6 +37,14 @@ def register_vm_commands(subparsers):
     ap.add_argument('--owner', default=None,
                     help='New owner (must have SSH keys registered). '
                          'Re-syncs bastion + injected SSH keys.')
+    ap.add_argument('--add-user', action='append', default=None, metavar='USER',
+                    help='Grant a registered user SSH access to this VM '
+                         '(repeatable; must have keys registered). '
+                         'Re-syncs bastion + injected SSH keys.')
+    ap.add_argument('--remove-user', action='append', default=None,
+                    metavar='USER',
+                    help='Revoke a registered user\'s SSH access to this VM '
+                         '(repeatable). Re-syncs bastion + injected SSH keys.')
     ap.add_argument('--gpus', type=int, default=None,
                     help='New GPU count. Live-applies for containers '
                          '(profile device add/remove); for VMs the VM '
@@ -59,7 +67,8 @@ def register_vm_commands(subparsers):
                          'default to non-billable admin/debug time)')
     ap.set_defaults(func=lambda a: vm.vm_alter(
         a.name, owner=a.owner, gpus=a.gpus, cpu=a.cpu, mem=a.mem,
-        image=a.image, instance_type=a.instance_type, billable=a.bill))
+        image=a.image, instance_type=a.instance_type, billable=a.bill,
+        add_users=a.add_user, remove_users=a.remove_user))
 
     lsp = sub.add_parser('list', help='List registered VMs')
     lsp.set_defaults(func=lambda a: vm.vm_list())
