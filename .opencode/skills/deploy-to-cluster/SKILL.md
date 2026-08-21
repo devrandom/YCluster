@@ -38,13 +38,14 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
 
 ## Deployment flow
 
-1. **Commit locally** (no prefixes; match repo style).
-2. **Files sync automatically — `dev-sync` is user-managed.** Its
+1. **Files sync automatically — `dev-sync` is user-managed.** Its
    inotify daemon is started once per machine by the user (via direnv,
-   outside agent sessions) and rsyncs the working tree to the cluster
-   on every edit. The agent doesn't run it and may not even have
-   `dev-sync` on its PATH; the agent just commits and lets the user's
-   watcher sync.
+   outside agent sessions) and rsyncs the working tree (including
+   uncommitted edits) to the cluster on every edit. The agent doesn't
+   run it and may not even have `dev-sync` on its PATH; the agent just
+   edits files and lets the user's watcher sync. Committing is **not**
+   part of the deploy flow — the user decides when to commit, before or
+   after deploying.
    - If unsure whether edits landed, don't run `dev-sync --check`
      yourself — confirm the file is present on the bastion through
      the cluster-exec MCP instead (e.g. `grep`/`test -f` against
@@ -59,7 +60,7 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
    does not exist). `/etc/ansible/` is itself where `run-playbook.sh`
    and `env.sh` live (via the symlink).
 
-3. **Run the playbook via the cluster-exec MCP** (`run` tool; see
+2. **Run the playbook via the cluster-exec MCP** (`run` tool; see
    `docs/operations/cluster-exec.md` for the full tool reference).
    Use `hostname="localhost"` for anything that should run on the
    bastion, where `/etc/ansible` lives:
@@ -101,7 +102,8 @@ run(command="cd /etc/ansible && ./run-playbook.sh <playbook>.yml --limit $(yclus
 
 Other admin-api instances stay on old code during dev. This is fine
 while testing since the public-facing app is the leader; promote to
-`--limit managed` before committing the change.
+`--limit managed`. Commit only when the user asks — the user decides
+whether to commit before or after deploying.
 
 ## Verification
 
