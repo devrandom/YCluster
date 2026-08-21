@@ -94,6 +94,26 @@ groups:
           summary: "Critical disk space on {{ $labels.node }}"
           description: "Disk usage on {{ $labels.node }} root filesystem is above 95%"
 
+      # Offsite backup disk (not a scraped node; metric written to the storage
+      # leader's node-exporter textfile by backup-databases).
+      - alert: LowOffsiteDiskSpace
+        expr: ycluster_offsite_disk_used_percent > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on offsite destination {{ $labels.destination }}"
+          description: "Offsite backup destination {{ $labels.destination }} disk is at {{ $value }}% used"
+
+      - alert: CriticalOffsiteDiskSpace
+        expr: ycluster_offsite_disk_used_percent > 95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical disk space on offsite destination {{ $labels.destination }}"
+          description: "Offsite backup destination {{ $labels.destination }} disk is at {{ $value }}% used"
+
       # Load average
       - alert: HighLoadAverage
         expr: node_load15 / count by(node) (node_cpu_seconds_total{mode="idle"}) > 2

@@ -12,6 +12,7 @@ QDRANT_BACKUP_DIR="$BACKUP_DIR/qdrant"
 ETCD_BACKUP_DIR="$BACKUP_DIR/etcd"
 RETENTION_DAYS=30
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OFFSITE_METRICS_FILE="${OFFSITE_METRICS_FILE:-/var/lib/prometheus/node-exporter/offsite_disk.prom}"
 
 # Logging function
 log() {
@@ -294,6 +295,8 @@ sync_backups() {
         
     done <<< "$destinations"
     
+    emit_offsite_disk_metrics
+    
     log "Sync summary: $sync_successes/$total_destinations destinations successful"
     
     if [ $sync_failures -gt 0 ]; then
@@ -393,6 +396,65 @@ rotate_destination() {
         log "ERROR: rotate: deletion failed on $dest_name"
         return 1
     fi
+}
+
+# Emit node-exporter textfile metrics for offsite disk usage so Prometheus can
+# alert on a backup destination filling up, even though it isn't a scraped
+# node. Runs on the storage leader (where the textfile dir exists); a
+# destination we can't reach is reported up=0 with no disk gauges.
+emit_offsite_disk_metrics() {
+    local out_dir; out_dir=$(dirname "$OFFSITE_METRICS_FILE")
+    if [ ! -d "$out_dir" ]; then
+        log "offsite-disk: metrics dir $out_dir absent, skipping"
+        return 0
+    fi
+    local destinations; destinations=$(get_backup_destinations)
+    if [ -z "$destinations" ]; then
+        return 0
+    fi
+    local tmp; tmp=$(mktemp "$out_dir/offsite_disk.XXXXXX" 2>/dev/null) || return 0
+    chmod 0644 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    {
+        echo "# HELP ycluster_offsite_disk_used_percent Offsite backup disk used percent."
+        echo "# TYPE ycluster_offsite_disk_used_percent gauge"
+        echo "# HELP ycluster_offsite_disk_avail_bytes Offsite backup disk available bytes."
+        echo "# TYPE ycluster_offsite_disk_avail_bytes gauge"
+        echo "# HELP ycluster_offsite_disk_size_bytes Offsite backup disk total bytes."
+        echo "# TYPE ycluster_offsite_disk_size_bytes gauge"
+        echo "# HELP ycluster_offsite_up Whether an offsite backup destination was reachable."
+        echo "# TYPE ycluster_offsite_up gauge"
+        local line name url target path df_line avail size pct
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            name=$(echo "$line" | cut -d' ' -f1)
+            url=$(echo "$line" | cut -d' ' -f2-)
+            if [[ "$url" != *@*:* ]]; then
+                echo "ycluster_offsite_up{destination=\"$name\"} 0"
+                continue
+            fi
+            target="${url%%:*}"
+            path="${url#*:}"
+            path="${path%/}"
+            df_line=$(ssh -o StrictHostKeyChecking=accept-new "$target" \
+                "cd '${path:-.}' && df --output=avail,size,pcent --block-size=1 . 2>/dev/null" 2>/dev/null \
+                | tail -1)
+            set -- $df_line
+            avail=$1 size=$2 pct=$3
+            if [ -z "$avail" ] || [ -z "$size" ] || [ -z "$pct" ]; then
+                log "offsite-disk: unexpected df output for $name: '$df_line'"
+                echo "ycluster_offsite_up{destination=\"$name\"} 0"
+                continue
+            fi
+            pct=${pct%\%}
+            echo "ycluster_offsite_up{destination=\"$name\"} 1"
+            echo "ycluster_offsite_disk_used_percent{destination=\"$name\"} $pct"
+            echo "ycluster_offsite_disk_avail_bytes{destination=\"$name\"} $avail"
+            echo "ycluster_offsite_disk_size_bytes{destination=\"$name\"} $size"
+        done <<< "$destinations"
+    } > "$tmp" 2>/dev/null
+    mv -f "$tmp" "$OFFSITE_METRICS_FILE" 2>/dev/null || rm -f "$tmp"
+    log "offsite-disk: wrote $OFFSITE_METRICS_FILE"
+    return 0
 }
 
 # Encrypt backup file with age
@@ -957,6 +1019,7 @@ main() {
                 dry_run=1
             fi
             if rotate_backups "$dry_run"; then
+                emit_offsite_disk_metrics
                 log "Rotate completed"
                 exit 0
             else
