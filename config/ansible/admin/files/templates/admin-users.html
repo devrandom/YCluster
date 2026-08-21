@@ -248,6 +248,12 @@
                 this.invitations = d.invitations
                 this.isAdmin = !!d.is_admin
                 this.managerProjects = d.manager_projects || []
+                // Managers: default the invite project to their first
+                // authorized project so the form never submits an empty
+                // project_name while the dropdown shows a visible option.
+                if (!this.isAdmin && this.managerProjects.length) {
+                  this.invite.project_name = this.managerProjects[0]
+                }
               }
               this.loading = false
             })

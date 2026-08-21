@@ -3571,8 +3571,11 @@ def users_action():
         # bypass the checks below).
         projects = None
         if not admin:
-            projects = set(authentik_manager.manager_projects(id.email)
-                           if id.email else [])
+            # Normalize stored names (strip whitespace) so a project entered
+            # with stray spaces still matches the manager's authorization.
+            projects = set(p.strip() for p in
+                           (authentik_manager.manager_projects(id.email)
+                            if id.email else []) if p and p.strip())
 
         def allow_user(target_email):
             """Whether this caller may edit-notes / reset `target_email`:
@@ -3608,7 +3611,11 @@ def users_action():
             project = (data.get('project_name') or '').strip()
             if not admin:
                 # Managers must invite into one of their authorized projects.
-                if not project or project not in projects:
+                # An empty selection is a missing required field (the invite
+                # form's default), not an authorization failure.
+                if not project:
+                    return jsonify({'error': 'project required'}), 400
+                if project not in projects:
                     return jsonify({'error': 'not authorized for project'}), 403
             days = max(1, min(90, int(data.get('days') or 7)))
             url = authentik_manager.invite_user(

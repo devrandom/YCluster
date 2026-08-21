@@ -1148,13 +1148,31 @@ class ManagerRoleTests(SchedTestBase):
         r = self.post("/admin/users/action",
                       {"action": "invite", "email": "new@x.org"},
                       manager=True, email="carol@x")
-        self.assertEqual(r.status_code, 403)
+        # Missing project is a required-field error, not an authorization one.
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("project required", r.get_json()["error"])
         # Project not in the manager's authorized set.
         r = self.post("/admin/users/action",
                       {"action": "invite", "email": "new@x.org",
                        "project_name": "other"},
                       manager=True, email="carol@x")
         self.assertEqual(r.status_code, 403)
+
+    def test_manager_invite_matches_normalized_project(self):
+        # Authorized project names with stray whitespace still authorize an
+        # invite submitted with the clean name (and vice-versa).
+        from ycluster.utils import authentik_manager as am
+        captured = {}
+        am.manager_projects = lambda email: [" demo "]
+        am.invite_user = lambda email, name, days, project=None: (
+            captured.update(email=email, name=name, days=days, project=project)
+            or "http://invite")
+        r = self.post("/admin/users/action",
+                      {"action": "invite", "email": "new@x.org",
+                       "project_name": "demo", "days": 7},
+                      manager=True, email="carol@x")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(captured["project"], "demo")
 
     def test_manager_can_recovery_authorized_user(self):
         from ycluster.utils import authentik_manager as am
