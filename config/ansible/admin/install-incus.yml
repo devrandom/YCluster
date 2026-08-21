@@ -10,6 +10,11 @@
   vars:
     # CUDA toolkit version baked into the GPU guest image (matches install-nvidia.yml)
     cuda_version: "12-9"
+    # Guest GPU power limit (W) baked into the 'ubuntu-cuda' image. Matches
+    # the host's nvidia-power-limit default (install-nvidia.yml). Passthrough
+    # GPUs are invisible to the host nvidia driver, so each guest sets the cap
+    # itself on every boot via a systemd service in the image.
+    nvidia_power_limit_watts: 300
     # vLLM version baked into the derived 'ubuntu-cuda-vllm' image
     vllm_version: "0.20.1"
     # FlashInfer source tag matching the version vLLM pulls in. Used to

@@ -187,6 +187,30 @@ while the device is unbound), which cuts VM firmware boot to ~90 s.
 Inference is unaffected — benchmarked identical at 1 GiB vs 128 GiB:
 once weights are resident, generation is GPU-internal, not BAR-bound.
 
+### GPU power limiting
+
+The host's `nvidia-power-limit.service` (default **300 W**, set by
+`admin/install-nvidia.yml`) only sees host-visible GPUs. On a passthrough
+host those GPUs are bound to `vfio-pci` and handed to VMs, so the host
+service correctly no-ops there — **the 300 W cap therefore must be applied
+inside each guest**, or the passthrough GPUs run at the card's default
+(600 W) limit.
+
+The guest image enforces this: `install-incus.yml` bakes
+`nvidia-power-limit` plus a `nvidia-power-limit.service` (same default
+300 W) into `ubuntu-cuda`, so every GPU VM caps its GPUs on every boot.
+The `nvidia_power_limit_watts` var in `install-incus.yml` controls both
+the value and whether guests get `--max` (matches
+`install-nvidia.yml`'s host-side default).
+
+To change an **already-running** VM before the next image rebuild, set it
+by hand (lost on guest reboot until the VM is re-provisioned from a
+rebuilt image):
+
+```bash
+incus exec <vm> -- nvidia-smi -pl 300
+```
+
 ## Managing VMs
 
 The `ycluster vm` CLI runs on the VM host (it shells out to `incus`

@@ -53,6 +53,36 @@ incus exec "$BUILDER" -- bash -euxc "
     apt-get clean
 "
 
+echo "==> Baking in guest NVIDIA power-limit service ({{ nvidia_power_limit_watts }} W)..."
+# A passthrough host has no host-visible GPU (all GPUs are bound to
+# vfio-pci and handed to VMs), so the host-side nvidia-power-limit.service
+# correctly no-ops there. The limit therefore has to be set inside each
+# guest, on every boot. Bake the same power-limit script and a matching
+# systemd unit into the image so every GPU VM enforces it. The guest script
+# no-ops cleanly in a CPU-only VM (no nvidia-smi GPU), so this is safe for
+# the whole image population.
+GUEST_POWER_LIMIT_B64='{{ lookup('file', 'files/scripts/nvidia-power-limit') | b64encode }}'
+incus exec "$BUILDER" -- bash -euc "
+    printf '%s' \"$GUEST_POWER_LIMIT_B64\" | base64 -d > /usr/local/sbin/nvidia-power-limit
+    chmod 0755 /usr/local/sbin/nvidia-power-limit
+    cat > /etc/systemd/system/nvidia-power-limit.service <<'EOF'
+[Unit]
+Description=Set NVIDIA GPU power limits (guest)
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nvidia-power-limit {{ '--max' if nvidia_power_limit_watts >= 600 else '' }}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl enable nvidia-power-limit.service 2>/dev/null || true
+    systemctl enable nvidia-persistenced.service 2>/dev/null || true
+"
+
 echo "==> Stopping and publishing image..."
 incus stop "$BUILDER"
 # `incus publish --alias` refuses to overwrite an existing alias, so on
