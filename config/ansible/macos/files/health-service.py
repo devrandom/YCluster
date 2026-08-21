@@ -54,6 +54,19 @@ def check_port_open(host, port, timeout=3):
     except:
         return False
 
+def resolves(host):
+    """Resolve a hostname, returning (ok, error).
+
+    Used by check_dns_status to prove DNS works functionally: a cluster
+    .xc name (split-DNS via /etc/resolver/xc over wg) and a public name
+    must both resolve.
+    """
+    try:
+        socket.getaddrinfo(host, None)
+        return True, None
+    except OSError as e:
+        return False, str(e)
+
 def check_ntp_status():
     """Check NTP configuration on macOS.
 
@@ -373,7 +386,7 @@ def health():
     # Check NTP
     ntp_health = _timed('ntp', check_ntp_status)
     health_status['services']['ntp'] = ntp_health
-    if ntp_health['status'] in ['unhealthy', 'critical']:
+    if ntp_health['status'] in ['unhealthy', 'critical', 'error']:
         health_status['overall'] = 'unhealthy'
     elif ntp_health['status'] in ['degraded', 'warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
@@ -381,7 +394,7 @@ def health():
     # Check DNS
     dns_health = _timed('dns', check_dns_status)
     health_status['services']['dns'] = dns_health
-    if dns_health['status'] in ['unhealthy', 'critical']:
+    if dns_health['status'] in ['unhealthy', 'critical', 'error']:
         health_status['overall'] = 'unhealthy'
     elif dns_health['status'] in ['degraded', 'warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
@@ -397,7 +410,7 @@ def health():
     # Check disk space
     disk_health = _timed('disk_space', check_disk_space)
     health_status['services']['disk_space'] = disk_health
-    if disk_health['status'] in ['critical']:
+    if disk_health['status'] in ['critical', 'error']:
         health_status['overall'] = 'unhealthy'
     elif disk_health['status'] in ['warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
@@ -405,7 +418,7 @@ def health():
     # Check system load
     load_health = _timed('system_load', check_system_load)
     health_status['services']['system_load'] = load_health
-    if load_health['status'] in ['critical']:
+    if load_health['status'] in ['critical', 'error']:
         health_status['overall'] = 'unhealthy'
     elif load_health['status'] in ['warning'] and health_status['overall'] == 'healthy':
         health_status['overall'] = 'degraded'
