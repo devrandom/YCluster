@@ -261,6 +261,12 @@ sync_backups() {
     local sync_successes=0
     local total_destinations=0
     
+    # Free headroom on the (small) offsite disks before rsync, or the nightly
+    # push ENOSPCs and the backup chain silently stalls there.
+    if ! rotate_backups ""; then
+        sync_failures=$((sync_failures + 1))
+    fi
+    
     # Process each destination
     while IFS= read -r destination_line; do
         if [ -z "$destination_line" ]; then
@@ -296,6 +302,96 @@ sync_backups() {
     else
         log "All destinations synced successfully"
         return 0
+    fi
+}
+
+# Apply retention rotation to every enabled destination, freeing space on the
+# (small) offsite disks ahead of the nightly rsync. Policy lives in
+# ycluster.utils.backup_rotation (pure, unit-tested): newest 7 days kept daily,
+# then one per ISO week to 180 days, one per month older. This only ever
+# deletes `.age` files — never anything on-cluster. `$1` non-empty = dry-run
+# (report what would be deleted without touching the remote).
+rotate_backups() {
+    local dry_run="${1:-}"
+    local destinations; destinations=$(get_backup_destinations)
+    if [ -z "$destinations" ]; then
+        log "rotate: no enabled backup destinations configured"
+        return 0
+    fi
+    local failures=0 total=0
+    while IFS= read -r destination_line; do
+        if [ -z "$destination_line" ]; then
+            continue
+        fi
+        total=$((total + 1))
+        local dest_name dest_url
+        dest_name=$(echo "$destination_line" | cut -d' ' -f1)
+        dest_url=$(echo "$destination_line" | cut -d' ' -f2-)
+        if ! rotate_destination "$dest_name" "$dest_url" "$dry_run"; then
+            failures=$((failures + 1))
+        fi
+    done <<< "$destinations"
+    log "rotate: $((total - failures))/$total destination(s) rotated"
+    [ "$failures" -eq 0 ]
+}
+
+# Rotate one destination. Only ssh destinations (rsync URL `user@host:path`,
+# where path may be absolute or relative to the remote home) are rotated; a
+# URL without user@host is left alone. Gathers the remote
+# `.age` listing over ssh, computes the plan locally with
+# ycluster.utils.backup_rotation, then deletes the chosen files (or, in
+# dry-run mode, just prints them).
+rotate_destination() {
+    local dest_name="$1" dest_url="$2" dry_run="${3:-}"
+    local target path
+    if [[ "$dest_url" != *@*:* ]]; then
+        log "rotate: skip $dest_name ($dest_url): not an ssh destination"
+        return 0
+    fi
+    target="${dest_url%%:*}"
+    path="${dest_url#*:}"
+    path="${path%/}"
+    if [ -z "$path" ]; then
+        log "rotate: skip $dest_name ($dest_url): empty remote path"
+        return 0
+    fi
+
+    local listing
+    if ! listing=$(ssh -o StrictHostKeyChecking=accept-new "$target" \
+            "cd '$path' && find . -type f -name '*.age' -printf '%T@\t%s\t%p\n'" 2>/dev/null); then
+        log "ERROR: rotate: could not list backups on $dest_name"
+        return 1
+    fi
+
+    local plan_json
+    plan_json=$(printf '%s\n' "$listing" | \
+        python3 -m ycluster.utils.backup_rotation) || {
+        log "ERROR: rotate: rotation plan failed for $dest_name"
+        return 1
+    }
+
+    local n_delete delete_mb
+    n_delete=$(echo "$plan_json" | jq -r '.delete | length')
+    delete_mb=$(echo "$plan_json" | jq -r '.delete_mb')
+    log "rotate: $dest_name: delete $n_delete file(s), free ~${delete_mb}MB"
+
+    if [ "$n_delete" -eq 0 ]; then
+        return 0
+    fi
+    if [ -n "$dry_run" ]; then
+        while IFS= read -r f; do
+            log "rotate:   (dry-run) would delete: $f"
+        done < <(echo "$plan_json" | jq -r '.delete[]')
+        return 0
+    fi
+
+    if echo "$plan_json" | jq -r '.delete[]' | \
+        ssh -o StrictHostKeyChecking=accept-new "$target" \
+            "cd '$path' && xargs -d '\n' -r rm -f --"; then
+        log "rotate: $dest_name: deleted $n_delete file(s)"
+    else
+        log "ERROR: rotate: deletion failed on $dest_name"
+        return 1
     fi
 }
 
@@ -853,6 +949,21 @@ main() {
                 exit 1
             fi
             ;;
+        rotate)
+            check_storage_leader
+            local dry_run=""
+            shift
+            if [ "${1:-}" = "--dry-run" ]; then
+                dry_run=1
+            fi
+            if rotate_backups "$dry_run"; then
+                log "Rotate completed"
+                exit 0
+            else
+                log "Rotate completed with errors"
+                exit 1
+            fi
+            ;;
         status)
             show_status
             ;;
@@ -900,7 +1011,7 @@ main() {
             verify_restore
             ;;
         *)
-            echo "Usage: $0 {backup [postgres|qdrant|etcd|all]|restore <db> [file]|verify-restore|sync|status|cleanup}"
+            echo "Usage: $0 {backup [postgres|qdrant|etcd|all]|restore <db> [file]|verify-restore|sync|rotate [--dry-run]|status|cleanup}"
             echo "  backup [db]    - Create backups (default: all databases)"
             echo "    postgres     - Backup PostgreSQL only"
             echo "    qdrant       - Backup Qdrant only"
@@ -908,7 +1019,8 @@ main() {
             echo "    all          - Backup all databases (default)"
             echo "  restore <db>   - Restore newest backup into the LIVE service (DESTRUCTIVE; --yes to skip prompt)"
             echo "  verify-restore - Drill: load newest backups into scratch instances, emit metrics"
-            echo "  sync           - Sync encrypted backups to remote destinations"
+            echo "  sync           - Sync encrypted backups to remote destinations (rotates offsite retention first)"
+            echo "  rotate [--dry-run] - Apply offsite retention rotation now (--dry-run only reports)"
             echo "  status         - Show current backup status"
             echo "  cleanup        - Clean up old backups only"
             exit 1
