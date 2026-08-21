@@ -65,6 +65,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [ycluster vm set-gpus](incus/ycluster-vm-set-gpus.md)
 
 ## Monitoring
+- **[HIGH]** [Alternative / redundant alert delivery paths](monitoring/alternative-alert-paths.md) — single alert path (ntfy-webhook → ntfy.sh) silently drops node down/recovery when egress is unreachable; add fallback channel + durable queue + delivery-failure alert.
 - **[MEDIUM]** [GPU health](monitoring/gpu-health-monitoring.md) — would have caught the nv3 GPU/driver-loss cascade (temperature / ECC / FLR events).
 - **[MEDIUM]** [VM guest disk-full](monitoring/vm-disk-full-alerts.md) — same blind spot; root cause of the same nv3 cascade.
 - **[MEDIUM]** [Container image scan-drift](monitoring/container-image-scan-drift.md) — snapshot vs running image can diverge (authentik false positives from a drifted snapshot); `PerimeterCVE*` alerts still surface it for now, so medium.
