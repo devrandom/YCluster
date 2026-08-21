@@ -1,4 +1,26 @@
-# Compile Incus from source (drop noble's 6.0.0 zlib publish bottleneck)
+# Compile Incus from source (drop noble's 6.0.0 zlib publish bottleneck) — DONE
+
+## Status — DONE
+
+Built Incus 6.0.5 from source and swapped it into place on the first
+production VM host (`config/ansible/admin/build-incus.yml` +
+`install-incus.yml`: build vendored under `/opt/src/incus/bin`, distro
+binaries `dpkg-divert`ed aside, apt `incus`/`incus-client` packages kept
+for the units/groups/man-pages). Verification on that host:
+
+- `incusd --version` reports 6.0.5.
+- The unified `incus publish --compression zstd` no longer passes `-c`:
+  the inner convert is `qemu-img convert ... -O qcow2 -T none -t none` and
+  the outer zstd archive does all the compression.
+- The CUDA/vLLM image republish dropped from ~20+ min (6.0.0 zlib path) to
+  ~2 min.
+- Both GPU guest images were rebuilt and verified against the 6.0.5 build
+  (`ubuntu-cuda`, `ubuntu-cuda-vllm`); the old orphan vLLM image was
+  removed. Existing VMs are unaffected (independent root volumes, not
+  overlays).
+
+Rolling 6.0.5 out to the remaining Incus hosts (after the nv1 soak) is a
+HIGH deployment-specific item in `ycluster-private/todos.md`.
 
 Why: noble's apt `incus` is 6.0.0, which hardcodes the VM publish
 convert as `qemu-img convert -f raw -O qcow2 -c` (single-threaded zlib)
@@ -44,9 +66,9 @@ unified VM export → no `-c`); noble ships the `libcowsql-dev` cgo dep
    CUDA/vLLM rebuild.
 
 ## Acceptance
-- `incus publish <vm> --compression zstd` (unified) shows
+- [x] `incus publish <vm> --compression zstd` (unified) shows
   `qemu-img convert ... -O qcow2 -T none -t none` with no `-c`.
-- Image publish wall-time drops (the zlib step disappears; outer zstd
+- [x] Image publish wall-time drops (the zlib step disappears; outer zstd
   unchanged). Rebuild/republish `ubuntu-cuda-vllm` and compare.
 
 ## Refs

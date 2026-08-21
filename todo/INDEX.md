@@ -58,7 +58,6 @@ DR, backups, node lifecycle, scaling/capacity.
 
 ## Incus
 - **[HIGH]** [Incus storage dir→zfs](incus/incus-storage-dir-to-zfs.md) — runaway-guest root-fs fill; caused the nv3 GPU/driver-loss cascade.
-- [Compile Incus from source](incus/compile-incus-from-source.md) — noble's 6.0.0 hardcodes single-threaded zlib `qemu-img convert -c` on VM publish; >= 6.0.5 kills the inner `-c` for unified publishes.
 - [Build incus VM images once, copy between hosts](incus/incus-vm-images-build-once.md)
 - [Dev-cluster system tests — incus DNS](incus/dev-cluster-system-tests-dns.md)
 - [Dev cluster: browsable external/TLS path](incus/dev-cluster-browsable-tls.md)
