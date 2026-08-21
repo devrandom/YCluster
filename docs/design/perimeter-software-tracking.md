@@ -230,12 +230,13 @@ Proposed alerts (monitoring/templates/ycluster-alerts.yml.j2):
   pinned digest.
 - `PerimeterCVECritical` / `PerimeterCVEHigh` — scanner output touches a P0-U,
   P0-A, or P1 component.
-- `PerimeterCVECriticalLongPending` / `PerimeterCVEHighLongPending` — same
-  scanner signal has been pending past the SLA window
-  (`osv_feed_cve_first_seen_seconds` vs wall clock); the perimeter route in
-  Alertmanager uses a 24h `repeat_interval` so unresolved CVEs stay visible
-  daily. `no_fix_yet` findings page separately so a lockdown decision is
-  triggered rather than hidden inside a fix-available list.
+- `PerimeterCVECriticalLongPending` / `PerimeterCVEHighLongPending` — the
+  coalesced `osv_feed_cve_summary` per severity (count + up-to-5 example
+  CVEs, filtered by osv-feed to non-acked pending findings past the
+  severity's SLA); the perimeter route in Alertmanager uses a 24h
+  `repeat_interval` so unresolved CVEs stay visible daily. `no_fix_yet`
+  findings page separately so a lockdown decision is triggered rather than
+  hidden inside a fix-available list.
 - `RatholeLegacyActive` — until the frontend rathole cleanup lands, alert if
   the service is running so the removal stays visible.
 

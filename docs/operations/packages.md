@@ -117,26 +117,34 @@ alerts.
 What actually appears in Prometheus:
 
 - `osv_feed_cve_info{ecosystem,package,version,cve,severity,state,category,acked[,image]}`
-- `osv_feed_cve_first_seen_seconds{...}` (persisted per finding; alerts use it)
+- `osv_feed_cve_first_seen_seconds{...}` (persisted per finding)
+- `osv_feed_cve_summary{severity,acked,cves}` — one series per alert severity
+  (critical/high), value = count of non-acked pending findings past that
+  severity's SLA, `cves` = up to 5 example CVE IDs; emitted only when
+  non-zero.
 - `osv_feed_cve_epss_score` / `osv_feed_cve_epss_percentile` (0..1)
 - `osv_feed_mirror_present`, `osv_feed_mirror_age_seconds`,
   `osv_feed_collector_error` (feed health)
 
 ### PerimeterCVE alerts
 
-- `PerimeterCVECriticalLongPending` — a critical pending CVE (`no_fix_yet`
-  or `fix_available`) older than **12h**, non-acked.
-- `PerimeterCVEHighLongPending` — a high pending CVE older than **2 days**,
-  non-acked.
+- `PerimeterCVECriticalLongPending` — non-acked critical pending CVEs
+  (`no_fix_yet` or `fix_available`) past **12h**, coalesced into one alert
+  with a count + up to 5 example CVEs.
+- `PerimeterCVEHighLongPending` — non-acked high pending CVEs past **2 days**,
+  coalesced the same way.
 
-Both join `first_seen` against `osv_feed_cve_info` on
-`ecosystem,package,version,cve,image`, so each container image stays a
-distinct perimeter surface. They repeat daily (Alertmanager
-`repeat_interval: 24h` for the `perimeter_cve` route) until resolved or
-acked, and route by `severity` (critical vs warning receiver).
+Each fires from `osv_feed_cve_summary{severity=...,acked="false"} > 0`, where
+osv-feed has already collapsed all pending, non-acked findings past that
+severity's SLA into one series per severity (the `acked="false"` label makes
+the ack state explicit; `cves` lists up to 5 examples). They repeat daily
+(Alertmanager `repeat_interval: 24h` for the `perimeter_cve` route) until
+resolved or acked, and route by `severity` (critical vs warning receiver).
 
-The window constants live in `config/ansible/monitoring/templates/ycluster-alerts.yml.j2`
-(`12 * 3600` and `2 * 24 * 3600`).
+The SLA window constants live in `osv-feed/osv_feed/cli.py`
+(`CRITICAL_SLA_SECONDS` / `HIGH_SLA_SECONDS`); the per-CVE detail is still
+available from the `osv_feed_cve_info`/`osv_feed_cve_first_seen_seconds`
+series and `osv-feed match --format table`.
 
 ### Acknowledging / deciding on a CVE
 

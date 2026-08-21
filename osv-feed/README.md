@@ -313,6 +313,11 @@ The prometheus format emits:
   Container findings add an `image="<name>"` label from their manifest.
 - `osv_feed_cve_first_seen_seconds{...}` — persisted first-seen epoch so
   alerts can fire on "pending longer than N days".
+- `osv_feed_cve_summary{severity,acked,cves}` — one series per alert
+  severity (`critical`/`high`), value = count of non-acked pending findings
+  past that severity's SLA, `cves` = up to 5 example CVE IDs (oldest
+  first-seen first). Emitted only when the count is non-zero. This is what
+  coalesced perimeter-CVE alerts fire on, replacing per-CVE pages.
 - `osv_feed_cve_epss_score{ecosystem,package,version,cve}` and
   `osv_feed_cve_epss_percentile{...}` — EPSS exploit-probability score and
   percentile (0..1) for the CVE, `0` when the snapshot is absent or the CVE

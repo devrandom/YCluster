@@ -7,6 +7,7 @@ import datetime
 import json
 import re
 import sys
+import time
 
 from . import __version__
 from .acks import add_ack
@@ -34,12 +35,26 @@ from .installed import PackageNotInstalledError
 from .installed import host_ecosystem
 from .installed import installed_package
 from .matching import UNINSTALLED
+from .matching import PENDING_STATES
+from .matching import _finding_key
 from .matching import first_seen_for
 from .matching import match_container
 from .matching import match_specs
 from .epss import mirror_epss
 from .mirror import feed_status
 from .mirror import mirror_ecosystem
+
+
+# Per-severity SLA (seconds) that a non-acked pending CVE must have been
+# first-seen for before it contributes to the coalesced osv_feed_cve_summary.
+# Mirrors the PerimeterCVECriticalLongPending (12h) / PerimeterCVEHighLongPending
+# (2d) alert tiers; kept here so the summary and the alert rules stay in lockstep.
+CRITICAL_SLA_SECONDS = 12 * 3600
+HIGH_SLA_SECONDS = 2 * 24 * 3600
+SEVERITY_SLA_SECONDS = {
+    "critical": CRITICAL_SLA_SECONDS,
+    "high": HIGH_SLA_SECONDS,
+}
 
 
 def _escape_prometheus(value: str) -> str:
@@ -62,7 +77,45 @@ def _image_label(finding: dict) -> str:
     return f',image="{_escape_prometheus(image)}"'
 
 
+def _cve_summary(findings: list[dict], first_seen: dict[str, int]) -> dict[str, dict]:
+    """Coalesce pending CVEs into one entry per alert severity.
+
+    Collects non-acked ``no_fix_yet``/``fix_available`` findings whose
+    first-seen is at least the severity's SLA old, keyed by finding (package +
+    version + CVE, image-aware), and returns
+    ``{severity: {"count": int, "cves": [cve, ...]}}`` where ``cves`` holds at
+    most 5 distinct CVEs, oldest first_seen first. Only severities with a
+    configured SLA (critical / high) are emitted, matching the alert tiers.
+    """
+    now = int(time.time())
+    buckets: dict[str, dict] = {}
+    for finding in findings:
+        if finding.get("acked"):
+            continue
+        if finding.get("state") not in PENDING_STATES:
+            continue
+        severity = finding.get("severity") or ""
+        sla = SEVERITY_SLA_SECONDS.get(severity)
+        if sla is None:
+            continue
+        first = first_seen.get(_finding_key(finding))
+        if first is None or now - first < sla:
+            continue
+        bucket = buckets.setdefault(severity, {"seen": set(), "cves": {}})
+        bucket["seen"].add(_finding_key(finding))
+        bucket["cves"][finding["cve"]] = first
+    result: dict[str, dict] = {}
+    for severity, bucket in buckets.items():
+        ordered = sorted(bucket["cves"].items(), key=lambda kv: (kv[1], kv[0]))
+        result[severity] = {
+            "count": len(bucket["seen"]),
+            "cves": [cve for cve, _ in ordered][:5],
+        }
+    return result
+
+
 def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
+    summary = _cve_summary(findings, first_seen)
     lines = [
         "# HELP osv_feed_cve_info CVE state for an installed package version.",
         "# TYPE osv_feed_cve_info gauge",
@@ -128,6 +181,16 @@ def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
             f'{image_label}'
         )
         lines.append(f"osv_feed_cve_first_seen_seconds{{{labels}}} {value}")
+    lines.append("# HELP osv_feed_cve_summary Count of non-acked pending CVEs past the per-severity SLA, with up to 5 example CVEs.")
+    lines.append("# TYPE osv_feed_cve_summary gauge")
+    for severity in ("critical", "high"):
+        entry = summary.get(severity)
+        if not entry:
+            continue
+        cves = ",".join(entry["cves"])
+        lines.append(
+            f'osv_feed_cve_summary{{severity="{severity}",acked="false",cves="{_escape_prometheus(cves)}"}} {entry["count"]}'
+        )
     lines.append("")
     return "\n".join(lines)
 

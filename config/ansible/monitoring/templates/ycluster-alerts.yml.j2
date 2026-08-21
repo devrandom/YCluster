@@ -862,44 +862,33 @@ groups:
           summary: "OSV feed match failing on {{ $labels.node }}"
           description: "osv-feed match is failing on {{ $labels.node }}. CVE metrics are not being produced; check the collector service logs."
 
-      # A critical-severity tracked CVE has been pending (no_fix_yet or
-      # fix_available) on an installed package longer than the 12-hour SLA.
-      # first_seen lacks the severity/acked labels, so join against
-      # osv_feed_cve_info to filter to critical, non-acked findings while
-      # keeping the first-seen value (many-to-many across categories is
-      # collapsed with an aggregate on the info side). `image` is in both the
-      # on() and the aggregation so container images stay distinct perimeter
-      # surfaces: the same PyPI package+version+CVE can appear in several
-      # images, which would otherwise be a many-to-one match (and would
-      # collapse distinct images into one alert).
+      # Coalesced perimeter CVE alerts. osv-feed emits one
+      # osv_feed_cve_summary series per alert severity (critical / high), with
+      # the value = count of non-acked pending (no_fix_yet / fix_available)
+      # findings past that severity's SLA and a `cves` label listing up to 5
+      # example CVE IDs (oldest first_seen first). This replaces the previous
+      # per-CVE alert (one alert per package/CVE/image) so a stepped-up CVE
+      # back-log collapses into a single alert per severity instead of flooding.
+      # `for: 1h` debounces; both are routed with a daily repeat so unresolved
+      # perimeter CVEs stay visible (see alertmanager.yml.j2).
       - alert: PerimeterCVECriticalLongPending
-        expr: |
-          time() - osv_feed_cve_first_seen_seconds
-            * on(ecosystem, package, version, cve, image)
-              max by (ecosystem, package, version, cve, image) (osv_feed_cve_info{severity="critical", acked="false"})
-            > 12 * 3600
+        expr: osv_feed_cve_summary{severity="critical", acked="false"} > 0
         for: 1h
         labels:
           severity: critical
           perimeter_cve: "true"
         annotations:
-          summary: "Critical CVE {{ $labels.cve }} pending >12h on {{ $labels.package }}"
-          description: "Critical-severity CVE {{ $labels.cve }} affecting {{ $labels.package }} {{ $labels.version }} ({{ $labels.ecosystem }}){{ if $labels.image }} in image {{ $labels.image }}{{ end }} on {{ $labels.node }} has been pending for more than 12 hours. Decide within the perimeter SLA or acknowledge it explicitly."
+          summary: "{{ $value }} critical CVEs pending beyond the 12h SLA{{ if $labels.cves }}: {{ $labels.cves }}{{ end }}"
+          description: "{{ $value }} non-acked critical-severity CVEs have been pending longer than the 12-hour perimeter SLA{{ if $labels.cves }} (up to 5 examples: {{ $labels.cves }}){{ end }}. Decide within the perimeter SLA or acknowledge each explicitly (osv-feed ack)."
 
-      # The high-severity counterpart, on a 2-day window so a separate alert
-      # page doesn't flood; both are routed with a daily repeat so unresolved
-      # perimeter CVEs stay visible (see alertmanager.yml.j2). Same image-aware
-      # join as the critical rule.
+      # The high-severity counterpart, on a 2-day SLA so it pages separately.
+      # Same coalesced osv_feed_cve_summary shape as the critical rule.
       - alert: PerimeterCVEHighLongPending
-        expr: |
-          time() - osv_feed_cve_first_seen_seconds
-            * on(ecosystem, package, version, cve, image)
-              max by (ecosystem, package, version, cve, image) (osv_feed_cve_info{severity="high", acked="false"})
-            > 2 * 24 * 3600
+        expr: osv_feed_cve_summary{severity="high", acked="false"} > 0
         for: 1h
         labels:
           severity: warning
           perimeter_cve: "true"
         annotations:
-          summary: "High CVE {{ $labels.cve }} pending >2d on {{ $labels.package }}"
-          description: "High-severity CVE {{ $labels.cve }} affecting {{ $labels.package }} {{ $labels.version }} ({{ $labels.ecosystem }}){{ if $labels.image }} in image {{ $labels.image }}{{ end }} on {{ $labels.node }} has been pending for more than 2 days. Review and decide within the perimeter SLA."
+          summary: "{{ $value }} high CVEs pending beyond the 2-day SLA{{ if $labels.cves }}: {{ $labels.cves }}{{ end }}"
+          description: "{{ $value }} non-acked high-severity CVEs have been pending longer than the 2-day perimeter SLA{{ if $labels.cves }} (up to 5 examples: {{ $labels.cves }}){{ end }}. Review and decide within the perimeter SLA."

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -155,6 +156,80 @@ class CliMatchTest(unittest.TestCase):
         self.assertIn("osv_feed_cve_first_seen_seconds", output)
         self.assertIn("osv_feed_cve_epss_score", output)
         self.assertIn("osv_feed_cve_epss_percentile", output)
+        self.assertIn("osv_feed_cve_summary", output)
+
+    def test_cve_summary_coalesces_pending_past_sla(self):
+        now = int(time.time())
+        base = {"ecosystem": "Ubuntu", "requested_package": "nginx", "version": "1.0"}
+        findings = [
+            {**base, "cve": "CVE-C1", "severity": "critical", "state": "no_fix_yet", "acked": False},
+            {**base, "cve": "CVE-C2", "severity": "critical", "state": "no_fix_yet", "acked": False},
+            {**base, "cve": "CVE-H1", "severity": "high", "state": "no_fix_yet", "acked": False},
+            {**base, "cve": "CVE-ACK", "severity": "critical", "state": "no_fix_yet", "acked": True},
+            {**base, "cve": "CVE-NEW", "severity": "critical", "state": "no_fix_yet", "acked": False},
+            {**base, "cve": "CVE-PT", "severity": "critical", "state": "patched", "acked": False},
+        ]
+        first_seen = {
+            "Ubuntu|nginx|1.0|CVE-C1": now - 20 * 3600,
+            "Ubuntu|nginx|1.0|CVE-C2": now - 13 * 3600,
+            "Ubuntu|nginx|1.0|CVE-H1": now - 3 * 24 * 3600,
+            "Ubuntu|nginx|1.0|CVE-NEW": now - 60,
+            "Ubuntu|nginx|1.0|CVE-ACK": now - 20 * 3600,
+            "Ubuntu|nginx|1.0|CVE-PT": now - 20 * 3600,
+        }
+        summary = cli._cve_summary(findings, first_seen)
+        self.assertEqual({"count": 2, "cves": ["CVE-C1", "CVE-C2"]}, summary["critical"])
+        self.assertEqual({"count": 1, "cves": ["CVE-H1"]}, summary["high"])
+
+    def test_cve_summary_lists_top_five_oldest_first(self):
+        now = int(time.time())
+        base = {
+            "ecosystem": "Ubuntu",
+            "requested_package": "nginx",
+            "version": "1.0",
+            "severity": "high",
+            "state": "no_fix_yet",
+            "acked": False,
+        }
+        findings = [{**base, "cve": f"CVE-H{i}"} for i in range(7)]
+        first_seen = {f"Ubuntu|nginx|1.0|CVE-H{i}": now - (2 * 24 * 3600 + i) for i in range(7)}
+        summary = cli._cve_summary(findings, first_seen)
+        self.assertEqual(7, summary["high"]["count"])
+        # Oldest first_seen first; larger i has a smaller (older) epoch.
+        self.assertEqual(
+            ["CVE-H6", "CVE-H5", "CVE-H4", "CVE-H3", "CVE-H2"],
+            summary["high"]["cves"],
+        )
+
+    def test_prometheus_render_emits_coalesced_summary(self):
+        now = int(time.time())
+        base = {"ecosystem": "Ubuntu", "requested_package": "nginx", "version": "1.0"}
+        findings = [
+            {
+                **base,
+                "cve": "CVE-C1",
+                "severity": "critical",
+                "state": "no_fix_yet",
+                "acked": False,
+            },
+            {
+                **base,
+                "cve": "CVE-H\"1",
+                "severity": "high",
+                "state": "no_fix_yet",
+                "acked": False,
+            },
+        ]
+        first_seen = {
+            "Ubuntu|nginx|1.0|CVE-C1": now - 20 * 3600,
+            'Ubuntu|nginx|1.0|CVE-H"1': now - 3 * 24 * 3600,
+        }
+        output = cli._render_prometheus(findings, first_seen)
+        self.assertIn('osv_feed_cve_summary{severity="critical",acked="false",cves="CVE-C1"} 1', output)
+        self.assertIn(
+            'osv_feed_cve_summary{severity="high",acked="false",cves="CVE-H\\"1"} 1', output
+        )
+        self.assertNotIn('severity="medium"', output)
 
     def test_empty_findings_still_exit_zero(self):
         code, output = self._run(

@@ -14,7 +14,8 @@ dir, so the writable DB never has concurrent writers.
 
 Output:
   osv_feed_cve_info / osv_feed_cve_epss_score /
-  osv_feed_cve_epss_percentile / osv_feed_cve_first_seen_seconds
+  osv_feed_cve_epss_percentile / osv_feed_cve_first_seen_seconds /
+  osv_feed_cve_summary
     passthrough from `osv-feed --db-immutable match --format prometheus`
   osv_feed_mirror_present    1 when any mirrored ecosystem/EPSS cursor exists
   osv_feed_mirror_age_seconds  age of the most-stale mirrored feed cursor

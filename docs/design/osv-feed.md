@@ -60,9 +60,11 @@ versions. It is designed to move to its own repository unchanged; see
   `interests`, aliases and reference URLs; json output always carries
   `summary`/`details`/`aliases`/`references`/`published`/`modified`.
   Prometheus output includes
-  `osv_feed_cve_info` with `category`/`acked` labels and
-  `osv_feed_cve_first_seen_seconds` so alerts can fire when a CVE has been
-  pending longer than a configured window.
+  `osv_feed_cve_info` with `category`/`acked` labels,
+  `osv_feed_cve_first_seen_seconds` (so alerts can fire when a CVE has been
+  pending longer than a configured window), and a coalesced
+  `osv_feed_cve_summary` per severity (count + up-to-5 example CVEs) for
+  anti-flood alerting.
 - `osv-feed/tests/` — server-free unittest suite (full mirror and
   incremental sync tests use a local HTTP bucket fixture).
 
@@ -132,12 +134,15 @@ avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
      (`~/.cache/osv-feed`; pin it with `--state-dir` if needed) and is
      never written into the read-only `/near1` snapshot.
 
-5. **Alert rules.** Add `PerimeterCVECriticalLongPending` /
-   `PerimeterCVEHighLongPending` to the Prometheus rules, firing from
-   `osv_feed_cve_first_seen_seconds` past the SLA (`for: 1h`), suppressing
-   acknowledged CVEs via the `acked="true"` label, and keeping
-   Alertmanager `repeat_interval` daily so unresolved `no_fix_yet`
-   findings stay visible.
+5. **Alert rules.** `PerimeterCVECriticalLongPending` /
+   `PerimeterCVEHighLongPending` fire from the coalesced
+   `osv_feed_cve_summary` series (per severity: count + up-to-5 example
+   CVEs), which osv-feed already filters to non-acked pending findings past
+   that severity's SLA (12h critical / 2d high) at match time. `for: 1h`
+   debounces, acknowledged CVEs are excluded via the `acked="false"` label,
+   and Alertmanager `repeat_interval` stays daily so unresolved `no_fix_yet`
+   findings remain visible. This replaces the previous per-CVE alert (one
+   page per package/CVE/image) with one alert per severity.
 
 6. **Ownership.** `osv-feed ack add` silences a reviewed finding while
    keeping it visible; keep the apt `upgradable`/USN check as the
