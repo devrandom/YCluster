@@ -104,6 +104,27 @@
         name: nvidia-container-toolkit
         state: present
 
+    # A node can be a pure GPU-passthrough host where every GPU is bound to
+    # vfio-pci and the nvidia module is deliberately never loaded (see
+    # gpu-passthrough-bind). There the host driver is installed for future
+    # role switches, but /proc/driver/nvidia/version can never exist, so the
+    # reboot guard below must be skipped. Apply it only when at least one
+    # NVIDIA GPU is bound to the host.
+    - name: Count NVIDIA GPUs bound to the host (not vfio-pci)
+      shell: |
+        host=0
+        for dev in /sys/bus/pci/devices/*; do
+          [ "$(cat "$dev/vendor" 2>/dev/null)" = "0x10de" ] || continue
+          class=$(cat "$dev/class" 2>/dev/null)
+          case "$class" in 0x030000|0x030200) ;; *) continue ;; esac
+          drv=""
+          [ -L "$dev/driver" ] && drv=$(basename "$(readlink -f "$dev/driver")")
+          [ "$drv" != vfio-pci ] && host=$((host + 1))
+        done
+        echo "$host"
+      register: host_gpu_count
+      changed_when: false
+
     - name: Read loaded kernel module version
       shell: grep -oP '\d+\.\d+\.\d+' /proc/driver/nvidia/version | head -1
       register: loaded_kernel_version
@@ -120,6 +141,7 @@
       reboot:
         reboot_timeout: 600
       when:
+        - host_gpu_count.stdout | int > 0
         - loaded_kernel_version.stdout != installed_userspace_version.stdout
         - allow_reboot | default(false) | bool
 
@@ -132,6 +154,7 @@
           Re-run with -e allow_reboot=true to auto-reboot,
           or reboot manually then re-run.
       when:
+        - host_gpu_count.stdout | int > 0
         - loaded_kernel_version.stdout != installed_userspace_version.stdout
         - not (allow_reboot | default(false) | bool)
 
@@ -149,7 +172,9 @@
 
     - name: Regenerate CDI spec if stale
       command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-      when: cdi_driver_version.stdout != installed_driver_version.stdout
+      when:
+        - host_gpu_count.stdout | int > 0
+        - cdi_driver_version.stdout != installed_driver_version.stdout
       changed_when: true
 
     - name: Configure CUDA PATH for all users
