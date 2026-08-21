@@ -1,0 +1,133 @@
+---
+# Build Incus from source on the buildhost (default s1). The binaries stay
+# in the build output dir; install-incus.yml fetches them from there via the
+# controller (the binary-swap step). Run admin/build-incus.yml first, then
+# redeploy install-incus.yml.
+#
+# Why build from source: Ubuntu 24.04 (noble) holds the 6.0 line at
+# 6.0.0 (`6.0.0-1ubuntu0.3`), which hardcodes the VM publish convert as
+# `qemu-img convert -f raw -O qcow2 -c` — single-threaded zlib and the long
+# pole in `incus publish` for the CUDA/vLLM VM images (~20+ min each). The
+# fix landed in Incus >= 6.0.5: for **unified** publishes the inner convert
+# no longer passes `-c`, so the (multithreaded) outer `--compression zstd`
+# archive does all the compression. There's no apt path to 6.0.5 (only
+# 6.0.5-8 on resolute, not noble), so — consistent with the "no prebuilt
+# third-party binaries" rule and the build-podman.yml precedent — build from
+# source. See docs/operations/packages.md and
+# todo/incus/compile-incus-from-source.md.
+#
+# The `make` target compiles against apt's libcowsql-dev (+ libsqlite3-dev
+# etc.), the same way upstream's CI builds on Ubuntu. `make deps` is only
+# needed when libcowsql-dev isn't available, so it is not run here.
+#
+# The play runs on localhost (so import_playbook can resolve `hosts`
+# statically) and each task delegates to the buildhost — same shape as
+# build-podman.yml / build-frp.yml. Source is vendored under
+# /opt/src/incus/ and pinned to a git SHA.
+- name: Build Incus from source
+  hosts: localhost
+  vars:
+    incus_build_dir: "/opt/src/incus"
+    incus_bin_dir: "{{ incus_build_dir }}/bin"
+    # incus v6.0.5 = a87f49a2491fa3a0e74896c1f2322bd356c59ddc.
+    incus_repo_url: "https://github.com/lxc/incus.git"
+    incus_repo_sha: "a87f49a2491fa3a0e74896c1f2322bd356c59ddc"
+    # Go toolchain. Installed via apt (golang-1.24) on the buildhost when
+    # a rebuild is needed; local_ai_proxy_go_bin overrides the path for
+    # hosts that already have go elsewhere.
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
+    # `go install ... ./...` writes every cmd/<tool> here via GOBIN, plus
+    # incus-migrate and incus-agent (built with their own tags by `make`).
+    incus_binaries:
+      - incusd
+      - incus
+      - incus-agent
+      - incus-user
+      - incus-migrate
+  tasks:
+    - name: Check if Incus binaries already exist
+      stat:
+        path: "{{ incus_bin_dir }}/{{ item }}"
+      register: incus_binary_stat
+      loop: "{{ incus_binaries }}"
+      delegate_to: "{{ buildhost }}"
+
+    # All binaries must exist for the build to be a no-op. Build when any
+    # is missing. The check is inlined on each task (any_binary_missing)
+    # rather than as a set_fact, since the value contains `>` which collides
+    # with YAML block-scalar syntax (same note as build-frp.yml).
+    - name: Install Incus build dependencies
+      apt:
+        name:
+          - golang-1.24
+          - git
+          - make
+          - build-essential
+          - autoconf
+          - automake
+          - libtool
+          - pkg-config
+          - libacl1-dev
+          - libcap-dev
+          - libdbus-1-dev
+          - liblz4-dev
+          - libseccomp-dev
+          - libselinux-dev
+          - libsqlite3-dev
+          - libudev-dev
+          - libuv1-dev
+          - liblxc-dev
+          - libcowsql-dev
+          - zip
+        state: present
+      become: yes
+      when: incus_binary_stat.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+      delegate_to: "{{ buildhost }}"
+
+    - name: Remove existing build directory (clean rebuild)
+      file:
+        path: "{{ incus_build_dir }}"
+        state: absent
+      when: incus_binary_stat.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+      delegate_to: "{{ buildhost }}"
+
+    - name: Clone Incus repository at pinned SHA
+      git:
+        repo: "{{ incus_repo_url }}"
+        dest: "{{ incus_build_dir }}"
+        version: "{{ incus_repo_sha }}"
+        depth: 1
+      when: incus_binary_stat.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+      delegate_to: "{{ buildhost }}"
+
+    # `make` runs `go install -tags libsqlite3 ./...` (via GOBIN), plus the
+    # CGO-disabled incus-migrate and incus-agent. CGO_LDFLAGS_ALLOW mirrors
+    # upstream CI so the pthread-wrap / z-now linker flags are permitted.
+    - name: Build Incus binaries
+      command: make
+      args:
+        chdir: "{{ incus_build_dir }}"
+      environment:
+        PATH: "{{ go_bin | dirname }}:{{ ansible_env.PATH | default('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin') }}"
+        GOBIN: "{{ incus_bin_dir }}"
+        CGO_LDFLAGS_ALLOW: "(-Wl,-wrap,pthread_create)|(-Wl,-z,now)"
+      when: incus_binary_stat.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+      delegate_to: "{{ buildhost }}"
+
+    - name: Verify Incus binaries were produced
+      stat:
+        path: "{{ incus_bin_dir }}/{{ item }}"
+      register: incus_binary_verify
+      loop: "{{ incus_binaries }}"
+      failed_when: not incus_binary_verify.stat.exists
+      delegate_to: "{{ buildhost }}"
+
+    - name: Show built Incus daemon version
+      command: "{{ incus_bin_dir }}/incusd version"
+      register: incus_version
+      changed_when: false
+      delegate_to: "{{ buildhost }}"
+
+    - name: Print built Incus daemon version
+      debug:
+        var: incus_version.stdout
