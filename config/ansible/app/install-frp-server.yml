@@ -195,37 +195,6 @@
         proto: tcp
       loop: "{{ vm_bastion_public_ports }}"
 
-    - name: Remove retired frp alt http port from ufw
-      community.general.ufw:
-        rule: allow
-        port: '17080'
-        proto: tcp
-        delete: yes
-      failed_when: false
-
-    # Leftover openings from the rathole era and the frp parallel-run soak
-    # phase. None of these are bound by any current listener (verified:
-    # frps binds only 80/443/7000, the VM-bastion public ports, and the
-    # UFW-blocked per-core SSH tunnels 17201-17204). Delete them so the
-    # firewall matches the intended surface.
-    - name: Remove retired frp alt/soak ports from ufw
-      community.general.ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-        delete: yes
-      loop:
-        - '17212'
-        - '17214'
-        - '17215'
-        - '17216'
-        - '17821'
-        - '17822'
-        - '17443'
-        - '18443'
-        - '2213'
-      failed_when: false
-
     - name: Set default-deny incoming and enable ufw
       community.general.ufw:
         state: enabled
