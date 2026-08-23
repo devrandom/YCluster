@@ -173,7 +173,7 @@ deps-src-checkout:
         "podman https://github.com/containers/podman.git ext/podman config/ansible/admin/build-podman.yml podman_repo_sha" \
         "frp https://github.com/fatedier/frp.git ext/frp config/ansible/app/build-frp.yml frp_repo_sha" \
         "zulip https://github.com/zulip/docker-zulip.git ext/docker-zulip config/ansible/app/build-zulip.yml zulip_repo_sha" \
-        "open-webui https://github.com/open-webui/open-webui.git ext/open-webui config/ansible/app/build-open-webui.yml webui_repo_sha" \
+        "open-webui https://github.com/devrandom/open-webui.git ext/open-webui config/ansible/app/build-open-webui.yml webui_repo_sha" \
         "open-webui-plugins https://github.com/devrandom/open-webui-plugins.git ext/open-webui-plugins config/ansible/app/build-open-webui.yml plugins_repo_sha"; do \
         set -- $entry; surf="$1"; url="$2"; dir="$3"; pb="$4"; var="$5"; \
         pin=$(sed -n "s/^[[:space:]]*${var}:[[:space:]]*[\"']\([^\"']*\)[\"'].*/\1/p" "$pb" | head -n1); \
