@@ -6,6 +6,11 @@ Receives Alertmanager webhook payloads and forwards them to ntfy with proper for
 
 import json
 import logging
+import os
+import threading
+import time
+from collections import deque
+
 import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
@@ -18,6 +23,48 @@ logger = logging.getLogger(__name__)
 NTFY_TOPIC = "cf0d6065-2357-493e-a7a8-06666dd660eb"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 PROMETHEUS_URL = "http://localhost:9090"
+
+# Per-alert dedup and global outbound throttle. These exist so bursts of
+# Alertmanager retries and repeats don't pile up against ntfy.sh's rate limit
+# (429) and extend the block. Values are tunable via env for a rolling restart.
+DEDUP_WINDOW_SECONDS = int(os.environ.get("NTFY_DEDUP_WINDOW_SECONDS", "300"))
+THROTTLE_MAX_SENDS = int(os.environ.get("NTFY_THROTTLE_MAX_SENDS", "10"))
+THROTTLE_WINDOW_SECONDS = int(os.environ.get("NTFY_THROTTLE_WINDOW_SECONDS", "60"))
+
+_lock = threading.Lock()
+_last_sent_at = {}
+_send_history = deque()
+
+
+def alert_key(alert):
+    """Return a stable key identifying one (status, alert) instance."""
+    fingerprint = alert.get("fingerprint")
+    if fingerprint:
+        return fingerprint
+    labels = alert.get("labels", {})
+    return json.dumps((alert.get("status"), sorted(labels.items())), sort_keys=True)
+
+
+def _admit(key, now=None):
+    """Decide whether an alert may hit ntfy.sh: 'send', 'dedup', or 'throttle'.
+
+    A successful admission records the attempt so failures and retries don't
+    immediately retry and re-stoke the upstream rate limit.
+    """
+    now = now if now is not None else time.monotonic()
+    with _lock:
+        last = _last_sent_at.get(key)
+        if last is not None and now - last < DEDUP_WINDOW_SECONDS:
+            return "dedup"
+
+        while _send_history and now - _send_history[0] > THROTTLE_WINDOW_SECONDS:
+            _send_history.popleft()
+        if len(_send_history) >= THROTTLE_MAX_SENDS:
+            return "throttle"
+
+        _last_sent_at[key] = now
+        _send_history.append(now)
+        return "send"
 
 def query_blackbox_nodes(domain, instance):
     """Query Prometheus for blackbox_node labels for a given domain/instance."""
@@ -123,7 +170,8 @@ def format_alert_message(alert):
     }
 
 def send_to_ntfy(title, message, priority="default", tags=""):
-    """Send notification to ntfy."""
+    """Send a notification to ntfy. Returns True on success, 'rate_limited'
+    when ntfy.sh returned HTTP 429, or False on any other failure."""
     headers = {
         'Title': title.encode('utf-8').decode('utf-8'),
         'Priority': priority,
@@ -135,6 +183,9 @@ def send_to_ntfy(title, message, priority="default", tags=""):
         # Ensure message is properly encoded as UTF-8
         message_bytes = message.encode('utf-8')
         response = requests.post(NTFY_URL, data=message_bytes, headers=headers, timeout=10)
+        if response.status_code == 429:
+            logger.warning(f"ntfy.sh rate-limited notification: {title}")
+            return 'rate_limited'
         response.raise_for_status()
         logger.info(f"Sent notification to ntfy: {title}")
         return True
@@ -153,35 +204,64 @@ def webhook():
         logger.info(f"Received webhook with data: {json.dumps(data, indent=2)}")
 
         alerts = data.get('alerts', [])
-        success_count = 0
-        
+        sent = 0
+        deduped = 0
+        throttled = 0
+        rate_limited = 0
+        errors = 0
+
         for alert in alerts:
+            key = alert_key(alert)
+            decision = _admit(key)
+            if decision == 'dedup':
+                deduped += 1
+                logger.info(f"Deduplicated already-notified alert: {key}")
+                continue
+            if decision == 'throttle':
+                throttled += 1
+                logger.warning(f"Throttled notification for alert: {key}")
+                continue
+
             try:
                 formatted = format_alert_message(alert)
-                if send_to_ntfy(
+                result = send_to_ntfy(
                     formatted['title'],
                     formatted['message'],
                     formatted['priority'],
                     formatted['tags']
-                ):
-                    success_count += 1
+                )
+                if result is True:
+                    sent += 1
+                elif result == 'rate_limited':
+                    rate_limited += 1
+                else:
+                    errors += 1
             except Exception as e:
                 logger.error(f"Error processing alert: {e}")
-        
-        # Return error if we couldn't send any notifications
-        if len(alerts) > 0 and success_count == 0:
-            return jsonify({
-                'error': 'Failed to send any notifications',
-                'processed': len(alerts),
-                'sent': 0
-            }), 503  # Service Unavailable - triggers Alertmanager retry
+                errors += 1
 
-        # TODO consider if it's correct to return 200 if some alerts failed
+        # Acknowledge deduped/throttled/rate-limited alerts so Alertmanager does
+        # not retry them and re-stoke the ntfy.sh rate limit. Only a genuine
+        # send failure with nothing delivered keeps the 503 -> retry behaviour.
+        if errors and sent == 0:
+            return jsonify({
+                'error': 'Failed to send notifications',
+                'processed': len(alerts),
+                'sent': 0,
+                'deduped': deduped,
+                'throttled': throttled,
+                'rate_limited': rate_limited,
+                'errors': errors
+            }), 503  # Service Unavailable - triggers Alertmanager retry
 
         return jsonify({
             'status': 'success',
             'processed': len(alerts),
-            'sent': success_count
+            'sent': sent,
+            'deduped': deduped,
+            'throttled': throttled,
+            'rate_limited': rate_limited,
+            'errors': errors
         })
         
     except Exception as e:
