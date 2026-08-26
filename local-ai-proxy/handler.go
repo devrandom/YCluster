@@ -85,6 +85,12 @@ type Handler struct {
 	// service is down. main applies DefaultAuthHealthURL when unset.
 	AuthHealthURL string
 
+	// authProbe caches AuthHealthURL's /healthz result on a short TTL so the
+	// proxy's own /healthz doesn't open a fresh loopback connection to the
+	// auth sidecar on every probe. Populated lazily; see authStatus.
+	authCache *authProbe
+	authOnce  sync.Once
+
 	// Load, if set, is incremented around each upstream call so the
 	// router can pick the least-loaded backend.
 	Load LoadTracker
@@ -138,15 +144,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Operator endpoint: current backend health states + per-model rollup.
 	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
+		auth := h.authStatus(r)
 		if h.Health != nil {
 			var models map[string][]*url.URL
 			if src := h.Health.source; src != nil {
 				models = src.Snapshot()
 			}
-			writeHealthz(w, r, h.Health.Snapshot(), models, h.AuthHealthURL, h.client)
+			writeHealthz(w, r, h.Health.Snapshot(), models, auth)
 			return
 		}
-		writeHealthzNoop(w, r, h.AuthHealthURL, h.client)
+		writeHealthzNoop(w, r, auth)
 		return
 	}
 
@@ -405,6 +412,58 @@ func removeURL(s []*url.URL, u *url.URL) []*url.URL {
 	return s
 }
 
+// authProbeTTL bounds how long the proxy recalls the auth sidecar's /healthz
+// result. Short enough to stay a faithful canary, long enough to collapse the
+// connect-per-probe pattern into at most one upstream check per TTL window.
+const authProbeTTL = 10 * time.Second
+
+// authProbe memoizes the auth service /healthz result so the proxy's own
+// /healthz doesn't open a fresh loopback connection to the auth sidecar on
+// every probe. Calls are serialized behind a mutex, so a burst of concurrent
+// /healthz requests coalesce into a single upstream probe per TTL window
+// rather than a stampede onto the sidecar.
+type authProbe struct {
+	url    string
+	client *http.Client
+	ttl    time.Duration
+
+	mu     sync.Mutex
+	result map[string]any
+	at     time.Time
+}
+
+func newAuthProbe(url string, client *http.Client, ttl time.Duration) *authProbe {
+	return &authProbe{url: url, client: client, ttl: ttl}
+}
+
+// Check returns the cached auth /healthz state, probing the sidecar only when
+// the cache is empty or stale. A nil result means no auth check is configured
+// (empty url).
+func (p *authProbe) Check(r *http.Request) map[string]any {
+	if p == nil || p.url == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.result != nil && time.Since(p.at) < p.ttl {
+		return p.result
+	}
+	result := probeAuthHealth(r, p.url, p.client)
+	p.result = result
+	p.at = time.Now()
+	return result
+}
+
+// authStatus returns the cached auth /healthz state for this handler's
+// AuthHealthURL. The cache is built lazily on first use so it picks up the
+// URL that main (or a test) assigns after constructing the Handler.
+func (h *Handler) authStatus(r *http.Request) map[string]any {
+	h.authOnce.Do(func() {
+		h.authCache = newAuthProbe(h.AuthHealthURL, h.client, authProbeTTL)
+	})
+	return h.authCache.Check(r)
+}
+
 // writeHealthz writes a JSON summary of per-backend and per-model state.
 //
 // Model state is derived from its backends:
@@ -415,7 +474,7 @@ func removeURL(s []*url.URL, u *url.URL) []*url.URL {
 //
 // Overall status is a rollup of model state (disabled models don't count
 // as alerts): ok | degraded | down | unknown.
-func writeHealthz(w http.ResponseWriter, r *http.Request, snap map[string]BackendHealth, models map[string][]*url.URL, authURL string, client *http.Client) {
+func writeHealthz(w http.ResponseWriter, r *http.Request, snap map[string]BackendHealth, models map[string][]*url.URL, auth map[string]any) {
 	type entry struct {
 		URL       string   `json:"url"`
 		State     string   `json:"state"`
@@ -513,8 +572,7 @@ func writeHealthz(w http.ResponseWriter, r *http.Request, snap map[string]Backen
 	}
 
 	status := http.StatusOK
-	if authURL != "" {
-		auth := checkAuthHealth(r, authURL, client)
+	if auth != nil {
 		resp["auth"] = auth
 		if auth["status"] != "ok" {
 			overall = "down"
@@ -531,14 +589,13 @@ func writeHealthz(w http.ResponseWriter, r *http.Request, snap map[string]Backen
 // writeHealthzNoop responds when a Handler has no HealthChecker
 // (passthrough mode, or checks disabled). Proxy-itself-up is 200;
 // a configured auth check can downgrade it to 503.
-func writeHealthzNoop(w http.ResponseWriter, r *http.Request, authURL string, client *http.Client) {
+func writeHealthzNoop(w http.ResponseWriter, r *http.Request, auth map[string]any) {
 	resp := map[string]any{
 		"status":  "ok",
 		"message": "health checks disabled",
 	}
 	status := http.StatusOK
-	if authURL != "" {
-		auth := checkAuthHealth(r, authURL, client)
+	if auth != nil {
 		resp["auth"] = auth
 		if auth["status"] != "ok" {
 			resp["status"] = "down"
@@ -550,11 +607,11 @@ func writeHealthzNoop(w http.ResponseWriter, r *http.Request, authURL string, cl
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// checkAuthHealth probes the auth service's /healthz and returns a
+// probeAuthHealth probes the auth service's /healthz and returns a
 // small map describing its state. The probe is given a short timeout
 // so the proxy's own /healthz stays fast even when the auth service
 // is unresponsive.
-func checkAuthHealth(r *http.Request, authURL string, client *http.Client) map[string]any {
+func probeAuthHealth(r *http.Request, authURL string, client *http.Client) map[string]any {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 

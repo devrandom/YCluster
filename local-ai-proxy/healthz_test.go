@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -158,5 +159,37 @@ func TestHealthzFoldsAuthStatus(t *testing.T) {
 		}
 		run(kind+"-auth-up-200", authUp.URL, http.StatusOK, "ok", withHealth)
 		run(kind+"-auth-down-503", authDown.URL, http.StatusServiceUnavailable, "down", withHealth)
+	}
+}
+
+// TestHealthzAuthProbeIsCached verifies that repeated /healthz requests within
+// the probe TTL result in a single upstream check of the auth sidecar, rather
+// than one fresh connection per request — the connect-per-probe pattern that
+// can load the auth sidecar's small listen backlog under a probe burst.
+func TestHealthzAuthProbeIsCached(t *testing.T) {
+	var hits atomic.Int32
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer auth.Close()
+
+	h := NewHandler(NewPassthroughRouter(mustURL(t, "http://x:1")))
+	h.AuthHealthURL = auth.URL
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	for i := 0; i < 5; i++ {
+		resp, err := http.Get(srv.URL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d; want 200", resp.StatusCode)
+		}
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("auth /healthz hit %d times; want 1 (coalesced within TTL)", n)
 	}
 }
