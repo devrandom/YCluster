@@ -524,17 +524,38 @@ groups:
           summary: "No internet uplink available"
           description: "No nodes in the cluster have internet connectivity"
 
-      # HTTPS domain accessibility - aggregated across all blackbox nodes
+      # Full public-site accessibility: the root site and the admin-api ping.
+      # The /healthz probe is deliberately excluded -- it reflects
+      # inference/auth-service health, not the public site, and fires its own
+      # InferenceGatewayHealth alert below so an inference failure names itself
+      # instead of reading as a whole-site outage.
       - alert: HTTPSDomainDown
-        expr: min(probe_success{job="https-domain"}) by (domain, instance) == 0
+        expr: min(probe_success{job="https-domain", probe_name=~"root|admin-ping"}) by (domain, instance) == 0
         for: 1m
         labels:
           severity: critical
           domain: '{{ $labels.domain }}'
           instance: '{{ $labels.instance }}'
         annotations:
-          summary: "HTTPS domain {{ $labels.instance }} is down"
-          description: "HTTPS domain {{ $labels.instance }} has been unreachable for more than 2 minutes"
+          summary: "Public site {{ $labels.instance }} is down"
+          description: "Public site {{ $labels.instance }} (root or admin-ping) has been unreachable for more than 1 minute"
+
+      # Inference/auth health: /healthz on the root vhost is an unauthenticated
+      # passthrough to the inference gateway's auth health endpoint. This is the
+      # canary for local-ai-proxy + its auth sidecar, so degradation here is a
+      # real inference-path warning even while the public site is up. Kept as
+      # its own critical so an inference outage names itself instead of being
+      # folded into the public-site HTTPSDomainDown alert.
+      - alert: InferenceGatewayHealth
+        expr: min(probe_success{job="https-domain", probe_name="inference-models"}) by (domain, instance) == 0
+        for: 1m
+        labels:
+          severity: critical
+          domain: '{{ $labels.domain }}'
+          instance: '{{ $labels.instance }}'
+        annotations:
+          summary: "Inference gateway health lost ({{ $labels.instance }})"
+          description: "The /healthz inference-gateway check for {{ $labels.instance }} has been failing for more than 1 minute"
 
       # HTTPS domain availability below 99% over 8 hours
       - alert: HTTPSDomainLowAvailability
