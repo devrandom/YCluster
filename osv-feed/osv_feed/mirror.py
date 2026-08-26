@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -50,6 +50,14 @@ _RETRY_REASONS = (TimeoutError, socket.timeout, ConnectionError)
 # fall back to the bulk archive below), so concurrency must stay modest to avoid
 # saturating the collector node.
 _FETCH_WORKERS = 4
+
+# Cap how many per-record fetches may be submitted-but-not-yet-applied at once.
+# Never buffer the whole backlog: peak memory must stay proportional to a small
+# window of parsed records, not to the total number of records pending. The
+# window is a multiple of the worker pool so proxy round-trips keep overlapping
+# without piling up parsed payloads in RAM (the whole-backlog buffering that
+# OOM'd the collector node).
+_INFLIGHT_WINDOW = _FETCH_WORKERS * 4
 
 # A deep backlog means most of the ecosystem is stale, so per-record
 # incremental replay is wasted work: nearly every record would be re-fetched
@@ -415,7 +423,6 @@ def mirror_ecosystem(
     conn = connect(db_dir)
     updated = 0
     removed = 0
-    fetched: dict[str, tuple[str, object]] = {}
 
     def _fetch_one(record_id: str) -> tuple[str, tuple[str, object]]:
         suffix = f"{ecosystem}/{record_id}.json"
@@ -427,42 +434,55 @@ def mirror_ecosystem(
         report(f"{ecosystem}: updated {record_id}")
         return record_id, ("upsert", json.loads(data.decode("utf-8")))
 
+    def _apply(fut: Future) -> None:
+        nonlocal updated, removed
+        _record_id, (action, payload) = fut.result()
+        if action == "remove":
+            conn.execute(
+                "DELETE FROM records WHERE ecosystem=? AND id=?",
+                (ecosystem, payload),
+            )
+            conn.execute(
+                "DELETE FROM packages WHERE ecosystem=? AND record_id=?",
+                (ecosystem, payload),
+            )
+            removed += 1
+        else:
+            _insert_record(conn, ecosystem, payload)
+            updated += 1
+
     pool = ThreadPoolExecutor(max_workers=_FETCH_WORKERS)
     try:
-        # Submit all fetches up front so the proxy round-trips overlap, then
-        # drain them in timestamp-group order: a group is applied+committed
-        # only once its own fetches are done, so the durable cursor advances
-        # monotonically and an interrupted run still resumes below the last
-        # committed group.
-        by_when: dict[object, list[tuple[object, str]]] = {}
+        # Drain the backlog in timestamp-group order (oldest first) so the
+        # durable cursor advances one group at a time and an interrupted run
+        # resumes below the last committed group. Memory must stay bounded:
+        # submitting the whole backlog up front and retaining every parsed
+        # payload until the end made peak memory O(backlog) — that is what
+        # OOM'd the collector. Instead keep only a sliding window of at most
+        # _INFLIGHT_WINDOW submitted-but-unapplied fetches in memory.
+        work = [(when, rid) for when in sorted(groups) for rid in groups[when]]
+        pending: dict[tuple[object, str], Future] = {}
+        work_iter = iter(work)
+
+        def _fill() -> None:
+            while len(pending) < _INFLIGHT_WINDOW:
+                try:
+                    when, rid = next(work_iter)
+                except StopIteration:
+                    return
+                pending[(when, rid)] = pool.submit(_fetch_one, rid)
+
+        _fill()
         for when in sorted(groups):
-            bucket = [(pool.submit(_fetch_one, rid), rid) for rid in groups[when]]
-            by_when[when] = bucket
-        for when in sorted(by_when):
-            for fut, _record_id in by_when[when]:
-                rid, payload = fut.result()
-                fetched[rid] = payload
-            for record_id in groups[when]:
-                action, payload = fetched[record_id]
-                if action == "remove":
-                    conn.execute(
-                        "DELETE FROM records WHERE ecosystem=? AND id=?",
-                        (ecosystem, payload),
-                    )
-                    conn.execute(
-                        "DELETE FROM packages WHERE ecosystem=? AND record_id=?",
-                        (ecosystem, payload),
-                    )
-                    removed += 1
-                else:
-                    _insert_record(conn, ecosystem, payload)
-                    updated += 1
+            for rid in groups[when]:
+                _apply(pending.pop((when, rid)))
+                _fill()
             conn.commit()
             save_cursor(db_dir, ecosystem, when)
     finally:
-        # Don't wait for the whole queue if a fetch failed below; drop the
-        # still-pending fetches now. Running workers finish their current
-        # request (network-bound and short) and then exit.
+        # Drop any still-pending fetches: an interrupted run resumes below the
+        # last committed group, so cancelling the rest is safe. Running workers
+        # finish their current (network-bound, short) request and then exit.
         pool.shutdown(wait=False, cancel_futures=True)
         conn.close()
 

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import urllib.error
@@ -231,6 +232,64 @@ class MirrorTest(unittest.TestCase):
             {"UBUNTU-CVE-A", "UBUNTU-CVE-B", "UBUNTU-CVE-C", "UBUNTU-CVE-D"},
             _record_ids(self.db, "Ubuntu"),
         )
+
+    def test_incremental_fetch_window_is_bounded(self):
+        # The old submit-all-up-front drain retained a parsed payload for every
+        # record in the backlog, so peak memory grew with backlog size (that is
+        # what OOM'd the collector). The incremental path must hold only a
+        # bounded sliding window of in-flight fetches, no matter the backlog.
+        _build_bucket(
+            self.root,
+            "Ubuntu",
+            [_record("UBUNTU-CVE-000")],
+            ts_order=["2026-08-15T00:00:00Z"],
+        )
+        mirror.mirror_ecosystem(self.db, "Ubuntu", base_url=self.server.base_url)
+        n = 2000
+        records = [_record(f"UBUNTU-CVE-{i:03d}") for i in range(1, n + 1)]
+        ts_order = [
+            f"2026-08-15T01:{i // 60:02d}:{i % 60:02d}Z" for i in range(1, n + 1)
+        ]
+        _build_bucket(self.root, "Ubuntu", records, ts_order=ts_order)
+
+        real_executor = ThreadPoolExecutor
+        lock = threading.Lock()
+        live = 0
+        peak = 0
+
+        def _done(_fut):
+            nonlocal live
+            with lock:
+                live -= 1
+
+        class _TrackingExecutor:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def submit(self, fn, *args, **kwargs):
+                nonlocal live, peak
+                with lock:
+                    live += 1
+                    peak = max(peak, live)
+                fut = self._inner.submit(fn, *args, **kwargs)
+                fut.add_done_callback(_done)
+                return fut
+
+            def shutdown(self, *args, **kwargs):
+                return self._inner.shutdown(*args, **kwargs)
+
+        def _factory(*args, **kwargs):
+            return _TrackingExecutor(real_executor(*args, **kwargs))
+
+        with mock.patch("osv_feed.mirror.ThreadPoolExecutor", side_effect=_factory):
+            result = mirror.mirror_ecosystem(
+                self.db, "Ubuntu", base_url=self.server.base_url
+            )
+        self.assertEqual(result["downloaded"], n)
+        self.assertEqual(len(_record_ids(self.db, "Ubuntu")), n + 1)
+        # Regression guard: never submit more than the bounded window, regardless
+        # of a backlog far larger than the window.
+        self.assertLessEqual(peak, mirror._INFLIGHT_WINDOW)
 
     def test_deep_backlog_uses_archive_sync(self):
         # A large pending backlog must rebuild from the bulk all.zip archive
