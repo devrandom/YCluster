@@ -278,6 +278,10 @@ groups:
         for: 1h
         labels:
           severity: warning
+          # Packages are often held deliberately pending a maintenance window
+          # (e.g. the PG16 restart). Keep the reminder but don't re-page every
+          # 2h -- alertmanager gives slow_repeat a 24h repeat interval.
+          slow_repeat: "true"
         annotations:
           summary: "Held packages on {{ $labels.node }} not upgraded in over 30 days"
           description: "Run: cd /etc/ansible && ./run-playbook.sh storage/upgrade-held-packages.yml"

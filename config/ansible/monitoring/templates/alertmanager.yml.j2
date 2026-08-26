@@ -27,6 +27,14 @@ route:
       receiver: 'critical-alerts'
       group_wait: 5s
       repeat_interval: 30m
+    # Slow-repeat alerts (e.g. held packages pending a deliberate maintenance
+    # window) still notify, but only re-page daily instead of every 2h. Must be
+    # matched before the generic warning route below, which would otherwise
+    # win (Alertmanager routes to the first matching sibling).
+    - match:
+        slow_repeat: 'true'
+      receiver: 'warning-alerts'
+      repeat_interval: 24h
     - match:
         severity: warning
       receiver: 'warning-alerts'

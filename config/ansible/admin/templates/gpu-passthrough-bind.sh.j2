@@ -66,3 +66,20 @@ if [ "$host_nvidia" -gt 0 ]; then
         modprobe --ignore-install "$mod"
     done
 fi
+
+# Reconcile nvidia-persistenced with the actual hardware on every boot, so
+# enable/disable state can't drift from the physical GPU layout. It keeps the
+# host driver resident for CUDA; on an all-passthrough host the driver is
+# never loaded and it can never succeed, so it only trips SystemdUnitFailed.
+# Mask it there, enable it where a host GPU keeps the driver loaded. (The
+# cdi-refresh policy -- always disabled, CDI owned by bind + `nvidia-ctk cdi
+# generate` -- lives in clear-benign-failed-units.yml, not here: it doesn't
+# depend on GPU presence.) Reset prior failed state so it only pages if it
+# genuinely breaks on this boot.
+if [ "$host_nvidia" -gt 0 ]; then
+    systemctl unmask nvidia-persistenced.service 2>/dev/null || true
+    systemctl enable --now nvidia-persistenced.service 2>/dev/null || true
+else
+    systemctl mask nvidia-persistenced.service 2>/dev/null || true
+fi
+systemctl reset-failed nvidia-persistenced.service 2>/dev/null || true

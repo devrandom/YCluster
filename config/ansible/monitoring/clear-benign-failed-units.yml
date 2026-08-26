@@ -193,7 +193,40 @@
       loop: "{{ cdi_units.stdout_lines }}"
 
     - name: Clear nvidia-cdi-refresh failed state
-      command: systemctl reset-failed nvidia-cdi-refresh.service
+      command: systemctl reset-failed {{ item }}
+      loop: "{{ cdi_units.stdout_lines }}"
       failed_when: false
       changed_when: false
-      when: cdi_units.stdout_lines | length > 0
+
+    # lxc-net runs a dnsmasq for LXC system containers on lxcbr0 (10.0.3.x).
+    # This fleet uses Incus (with its own bridge) for VM workloads, not LXC
+    # system containers; on a host with no LXC containers and no lxcbr0 the
+    # service is dead weight and can only fail on boot (a stale dnsmasq bind).
+    # Mask it, condition-based and idempotent: an LXC workload added later
+    # simply re-enables the service. rc: 0 = safe to mask, 1 = in use,
+    # 9 = unit not present.
+    - name: Detect unused LXC (no containers, no bridge, unit present)
+      shell: |
+        [ -e /lib/systemd/system/lxc-net.service ] || \
+          [ -e /etc/systemd/system/lxc-net.service ] || exit 9
+        n=$(lxc-ls -1 2>/dev/null | grep -vc '^$' || true)
+        [ "$n" -gt 0 ] && exit 1
+        [ -d /sys/class/net/lxcbr0 ] && exit 1
+        exit 0
+      register: lxc_unused
+      failed_when: false
+      changed_when: false
+
+    - name: Mask unused lxc-net service
+      systemd:
+        name: lxc-net.service
+        enabled: no
+        state: stopped
+        masked: yes
+      when: lxc_unused.rc == 0
+
+    - name: Clear lxc-net failed state
+      command: systemctl reset-failed lxc-net.service
+      failed_when: false
+      changed_when: false
+      when: lxc_unused.rc == 0
