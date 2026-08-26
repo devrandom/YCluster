@@ -188,7 +188,10 @@
           ProtectHome=true
           PrivateTmp=true
           NoNewPrivileges=true
-          TimeoutStartSec=3600
+          # The Ubuntu feed alone can take hours to fetch over the cluster
+          # proxy (thousands of per-record requests); the incremental sync
+          # is resumable, so a generous window just lets it finish.
+          TimeoutStartSec=43200
         mode: '0644'
       notify: reload systemd
 

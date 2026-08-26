@@ -20,17 +20,72 @@ import csv
 import io
 import json
 import os
+import socket
 import sqlite3
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 GCS_BASE = "https://osv-vulnerabilities.storage.googleapis.com"
 
 Progress = Callable[[str], None]
+
+# Transient network failures (timeouts, resets, SSL handshake timeouts) are
+# retried with capped backoff. HTTP status errors are surfaced immediately —
+# a 404 is meaningful (withdrawn record) and 5xx should abort rather than
+# hammer the upstream.
+_RETRY_ATTEMPTS = 5
+_RETRY_BASE_DELAY_S = 5.0
+_RETRY_MAX_DELAY_S = 60.0
+_RETRY_REASONS = (TimeoutError, socket.timeout, ConnectionError)
+
+# Per-record JSON fetches go over the cluster HTTP proxy one connection each.
+# Normal day-to-day increments are tiny (dozens of records), so a small pool
+# is plenty; large catch-ups never replay per-record anyway (deep-backlog syncs
+# fall back to the bulk archive below), so concurrency must stay modest to avoid
+# saturating the collector node.
+_FETCH_WORKERS = 4
+
+# A deep backlog means most of the ecosystem is stale, so per-record
+# incremental replay is wasted work: nearly every record would be re-fetched
+# over the proxy one HTTP call at a time and re-inserted in its own small
+# transaction. At that point a single streaming download of the current full
+# ``all.zip`` archive plus one atomic transaction is the efficient path.
+_FULL_SYNC_THRESHOLD = 40000
+
+
+def _is_transient_network_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, _RETRY_REASONS):
+        return True
+    # e.g. URLError whose underlying reason is an SSL handshake / read timeout
+    return isinstance(exc, urllib.error.URLError) and isinstance(
+        exc.reason, _RETRY_REASONS
+    )
+
+
+def _urlopen(url: str, timeout: float, *, progress: Progress | None = None):
+    """Open ``url``, retrying transient network errors with capped backoff."""
+    delay = _RETRY_BASE_DELAY_S
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            return urllib.request.urlopen(url, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - inspect the reason below
+            if not _is_transient_network_error(exc):
+                raise
+            if attempt == _RETRY_ATTEMPTS:
+                raise
+            name = url.rstrip("/").rsplit("/", 1)[-1]
+            if progress:
+                progress(f"retrying {name} (attempt {attempt}/{_RETRY_ATTEMPTS}): {exc}")
+            time.sleep(delay)
+            delay = min(delay * 2, _RETRY_MAX_DELAY_S)
 
 
 class MirrorError(RuntimeError):
@@ -201,10 +256,12 @@ def _check_name(value: str) -> None:
         raise MirrorError(f"unsafe OSV name: {value!r}")
 
 
-def _http_get(base_url: str, suffix: str) -> bytes:
+def _http_get(
+    base_url: str, suffix: str, *, progress: Progress | None = None
+) -> bytes:
     url = base_url.rstrip("/") + "/" + suffix
     try:
-        with urllib.request.urlopen(url, timeout=60) as resp:
+        with _urlopen(url, 60, progress=progress) as resp:
             return resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -237,7 +294,7 @@ def download_all_zip(
     conn: sqlite3.Connection | None = None
     try:
         try:
-            with urllib.request.urlopen(url, timeout=120) as resp:
+            with _urlopen(url, 120, progress=report) as resp:
                 size = 0
                 with open(tmp, "wb") as out:
                     while True:
@@ -330,40 +387,84 @@ def mirror_ecosystem(
         return {"downloaded": len(rows), "removed": 0, "unchanged": 0}
 
     report(f"{ecosystem}: incremental sync since {cursor.isoformat()}")
-    to_update: dict[str, dict] = {}
-    to_remove: set[str] = set()
+    # Group the changed records by change timestamp (rows are newest-first).
+    # Each timestamp group is applied to the store and the durable cursor is
+    # advanced only after that group commits, so an interrupted run (a
+    # timeout/kill or an exhausted network retry) resumes below the last
+    # committed group instead of discarding the whole day's work. Groups are
+    # applied oldest-first: the cursor moves monotonically upward, so the
+    # run naturally continues from where the previous one stopped.
+    groups: dict[object, list[str]] = {}
     for when, record_id in rows:
         if when <= cursor:
             break
+        groups.setdefault(when, []).append(record_id)
+
+    pending_count = sum(len(ids) for ids in groups.values())
+    if pending_count >= _FULL_SYNC_THRESHOLD:
+        report(
+            f"{ecosystem}: {pending_count} changed records >= "
+            f"{_FULL_SYNC_THRESHOLD}; using full archive sync instead of "
+            "per-record replay"
+        )
+        download_all_zip(db_dir, ecosystem, base_url=base_url, progress=progress)
+        if rows:
+            save_cursor(db_dir, ecosystem, newest)
+        return {"downloaded": len(rows), "removed": 0, "unchanged": 0}
+
+    conn = connect(db_dir)
+    updated = 0
+    removed = 0
+    fetched: dict[str, tuple[str, object]] = {}
+
+    def _fetch_one(record_id: str) -> tuple[str, tuple[str, object]]:
         suffix = f"{ecosystem}/{record_id}.json"
         try:
-            data = _http_get(base_url, suffix)
+            data = _http_get(base_url, suffix, progress=report)
         except _NotFound:
-            to_remove.add(record_id)
             report(f"{ecosystem}: removed {record_id} (withdrawn)")
-            continue
-        to_update[record_id] = json.loads(data.decode("utf-8"))
+            return record_id, ("remove", record_id)
         report(f"{ecosystem}: updated {record_id}")
+        return record_id, ("upsert", json.loads(data.decode("utf-8")))
 
-    if to_update or to_remove:
-        conn = connect(db_dir)
-        try:
-            with conn:
-                for record_id in to_remove:
+    pool = ThreadPoolExecutor(max_workers=_FETCH_WORKERS)
+    try:
+        # Submit all fetches up front so the proxy round-trips overlap, then
+        # drain them in timestamp-group order: a group is applied+committed
+        # only once its own fetches are done, so the durable cursor advances
+        # monotonically and an interrupted run still resumes below the last
+        # committed group.
+        by_when: dict[object, list[tuple[object, str]]] = {}
+        for when in sorted(groups):
+            bucket = [(pool.submit(_fetch_one, rid), rid) for rid in groups[when]]
+            by_when[when] = bucket
+        for when in sorted(by_when):
+            for fut, _record_id in by_when[when]:
+                rid, payload = fut.result()
+                fetched[rid] = payload
+            for record_id in groups[when]:
+                action, payload = fetched[record_id]
+                if action == "remove":
                     conn.execute(
                         "DELETE FROM records WHERE ecosystem=? AND id=?",
-                        (ecosystem, record_id),
+                        (ecosystem, payload),
                     )
                     conn.execute(
                         "DELETE FROM packages WHERE ecosystem=? AND record_id=?",
-                        (ecosystem, record_id),
+                        (ecosystem, payload),
                     )
-                for record_id, record in to_update.items():
-                    _insert_record(conn, ecosystem, record)
-        finally:
-            conn.close()
+                    removed += 1
+                else:
+                    _insert_record(conn, ecosystem, payload)
+                    updated += 1
+            conn.commit()
+            save_cursor(db_dir, ecosystem, when)
+    finally:
+        # Don't wait for the whole queue if a fetch failed below; drop the
+        # still-pending fetches now. Running workers finish their current
+        # request (network-bound and short) and then exit.
+        pool.shutdown(wait=False, cancel_futures=True)
+        conn.close()
 
-    if rows:
-        save_cursor(db_dir, ecosystem, newest)
-    report(f"{ecosystem}: {len(to_update)} updated, {len(to_remove)} removed")
-    return {"downloaded": len(to_update), "removed": len(to_remove), "unchanged": 0}
+    report(f"{ecosystem}: {updated} updated, {removed} removed")
+    return {"downloaded": updated, "removed": removed, "unchanged": 0}
