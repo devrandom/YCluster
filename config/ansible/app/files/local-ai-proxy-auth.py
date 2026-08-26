@@ -25,7 +25,8 @@ import os
 import secrets
 import threading
 import time
-from wsgiref.simple_server import make_server
+from wsgiref.simple_server import WSGIServer, make_server
+from socketserver import ThreadingMixIn
 
 from argon2 import PasswordHasher, exceptions
 from flask import Flask, Response, request
@@ -196,6 +197,22 @@ def healthz():
     return {"status": "ok"}, 200
 
 
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Threaded WSGI server with a larger listen backlog.
+
+    The stock make_server WSGI server is single-threaded (one request at a
+    time) and binds the default backlog of 5. That serialized argon2-heavy
+    /auth verifications ahead of the /healthz probes local-ai-proxy sends on
+    every inference-health check; under load the probes blew their 3s client
+    timeout and the proxy reported healthy auth as down. Threading lets a
+    /healthz run in its own thread (the argon2 C verify releases the GIL), and
+    the larger backlog lets a burst of probes queue instead of being dropped.
+    """
+
+    daemon_threads = True
+    request_queue_size = 128
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -205,7 +222,8 @@ def main():
     host, port = addr.rsplit(":", 1)
     port = int(port)
     log.info("starting on %s:%d", host, port)
-    with make_server(host, port, app) as srv:
+    srv = make_server(host, port, app, server_class=_ThreadingWSGIServer)
+    with srv:
         srv.serve_forever()
 
 
