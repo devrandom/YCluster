@@ -250,3 +250,79 @@
       shell: |
         launchctl unload /Library/LaunchDaemons/com.ycluster.mount-near1.plist 2>/dev/null || true
         launchctl load /Library/LaunchDaemons/com.ycluster.mount-near1.plist
+
+
+- name: Mount VM-data NFS subtree on Linux nodes
+  hosts: core:compute
+  become: yes
+  tasks:
+    # Rollout switch: the NFS client mount is only provisioned on hosts that
+    # opt in by setting `vm_data_nfs: true` (host_vars). Hosts still using the
+    # shared CIFS /near1 for VM data skip this play entirely.
+    - name: Skip hosts not opted into the NFS VM-data switch
+      meta: end_host
+      when: not (vm_data_nfs | default(false))
+
+    - name: Install NFS client utilities
+      apt:
+        name: nfs-common
+        state: present
+        update_cache: yes
+
+    - name: Create NFS mount point
+      file:
+        path: "{{ vm_data_nfs_mount }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create systemd mount unit for VM-data NFS
+      copy:
+        dest: /etc/systemd/system/vm-data.mount
+        content: |
+          [Unit]
+          Description=Incus VM data NFS mount
+          After=network-online.target
+          Wants=network-online.target
+
+          [Mount]
+          What={{ vm_data_nfs_server }}:{{ vm_data_nfs_export }}
+          Where={{ vm_data_nfs_mount }}
+          Type=nfs
+          Options={{ vm_data_nfs_client_opts }}
+          TimeoutSec=60
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Flush handlers
+      meta: flush_handlers
+
+    - name: Enable and start the VM-data NFS mount
+      systemd:
+        name: vm-data.mount
+        enabled: yes
+        state: started
+
+    - name: Check the VM-data NFS mount is present
+      command: "mountpoint -q {{ vm_data_nfs_mount }}"
+      failed_when: false
+      changed_when: false
+      register: vm_data_nfs_mounted
+
+    - name: Fail if the VM-data NFS mount is missing
+      fail:
+        msg: "{{ vm_data_nfs_mount }} is not an active mount; Incus VM `data` disks need the NFS VM-data mount (vm_data_nfs switch)."
+      when: vm_data_nfs_mounted.rc != 0
+
+    - name: Install the VM-data NFS mount check (for scripts)
+      copy:
+        src: "{{ playbook_dir }}/../scripts/check-vm-data-nfs-mount.sh"
+        dest: /usr/local/bin/check-vm-data-nfs-mount
+        mode: '0755'
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes

@@ -86,3 +86,26 @@ vip_metric: 500
 # On the wg server itself the connected wg0 route wins (lower metric).
 wg_peer_subnet: "10.0.1.0/24"
 wg_route_metric: 1024
+
+# --- Incus VM passthrough data: CIFS -> NFSv4 ---------------------------------
+# Durable fix for the CIFS+netfs folio-lock writeback deadlock that wedges a
+# VM's virtiofsd `data` disk (see the private incident; tracked in
+# todo/incus/vm-data-cifs-to-nfs.md). The server-side NFS export is
+# unconditional (setup-nas.yml always exports); the CLIENT mount is the
+# rollout switch: set `vm_data_nfs: true` on a host (host_vars) to have
+# mount-nas-share.yml provision an NFSv4 mount of the NAS VM-data subtree
+# there instead of serving VM disks over the shared CIFS /near1.
+vm_data_nfs: false            # host flag: provision the NFS VM-data client mount
+vm_data_nfs_server: nas1.xc
+vm_data_nfs_export: /near1/vm # NAS-side subtree exported unconditionally
+vm_data_nfs_mount: /mnt/near1-vm
+# NFSv4 client options (genuine NFS mount options). No automount (VM data must
+# be present for virtiofsd); bg+hard keep boot from hanging. The 60s boot
+# timeout is set as TimeoutSec=60 on the .mount unit in mount-nas-share.yml.
+vm_data_nfs_client_opts: "nfsvers=4.2,hard,bg,rsize=1048576,wsize=1048576,nconnect=4,actimeo=60,nocto,noatime,async"
+# Export network + single-UID mapping. NFS has no forceuid/forcegid, so the
+# server squashes every access to uid/gid 1000 (mirrors CIFS uid/gid=1000) and
+# the exported tree must be owned by 1000:1000 (setup-nas.yml ensures it).
+vm_data_nfs_export_net: 10.0.0.0/24
+vm_data_nfs_anon_uid: 1000
+vm_data_nfs_anon_gid: 1000

@@ -17,6 +17,29 @@ VM); everything above it (`/near1/comfyui`, `/near1/models`, `/near1/osv-feed`,
 path and each Incus `data` disk is a bind mount beneath it (same shape as
 today) — not one NFS mount per VM.
 
+## Implementation status
+
+Initial implementation is in (code only — **not yet applied to any host**):
+
+- **Server (unconditional):** `config/ansible/app/setup-nas.yml` installs
+  `nfs-kernel-server` and always exports `/near1/vm` (single-UID squash
+  `all_squash,anonuid=1000,anongid=1000`, net `10.0.0.0/24`).
+- **Client (rollout switch):** `config/ansible/app/mount-nas-share.yml` gates
+  the NFS client mount on the per-host Ansible flag `vm_data_nfs` (default
+  `false`; the rollout host sets it `true` in its `host_vars/<host>.yml`). It
+  installs `nfs-common`,
+  writes a static `vm-data.mount` systemd unit with `TimeoutSec=60` (no
+  automount), enables/starts it, and fails if the mount is missing.
+- **Mount check (for scripts):**
+  `config/ansible/scripts/check-vm-data-nfs-mount.sh` → installed at
+  `/usr/local/bin/check-vm-data-nfs-mount`; scripts call it before touching VM
+  `data` paths.
+- Client flags (see below) live in `group_vars/all/main.yml` as
+  `vm_data_nfs_*`.
+
+Still to do: staged test (hand mount + Incus `data` repoint) and rollout in the
+maintenance window (see "Test").
+
 ## Done when
 
 - `nfs-common` installed on each GPU host that mounts VM data (NFS client).
@@ -32,14 +55,16 @@ today) — not one NFS mount per VM.
 ## Proposed client flags
 
 ```
-nfsvers=4.2,hard,bg,rsize=1048576,wsize=1048576,nconnect=4,actimeo=60,nocto,noatime,async,_netdev
+nfsvers=4.2,hard,bg,rsize=1048576,wsize=1048576,nconnect=4,actimeo=60,nocto,noatime,async
 ```
 
 - `hard` — never surface a fake EIO to the guest on a transient blip.
 - `nconnect=4` — 10G link; multiple TCP connections to saturate it.
 - **No automount** (VM data must be present whenever virtiofsd starts); mount
-  statically. `bg` retries in the background instead of blocking boot; cap boot
-  with `x-systemd.mount-timeout=60`.
+  statically. `bg` retries in the background instead of blocking boot; the
+  systemd `vm-data.mount` unit caps boot with `TimeoutSec=60`.
+- `_netdev` is **not** in the client options; the `.mount` unit orders itself
+  after `network-online.target` via `After=`/`Wants=` instead.
 - Keep the shared NAS export's CIFS automount untouched.
 
 ## Test

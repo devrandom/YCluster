@@ -316,6 +316,32 @@ ssh nv3.yc sudo incus-build-vllm-image           # or --force to rebuild
 that share a host directory into a VM silently fall back to **9p**,
 markedly slower for large sequential reads (model loading).
 
+### VM `data` passthrough on NFSv4
+
+Incus VM `data` disks (the persistent per-VM disk attached via virtiofs)
+ride the NAS VM-data subtree over **NFSv4**, not the shared CIFS `/near1`.
+The CIFS + netfs writeback path deadlocks a VM's `virtiofsd` worker in
+D-state (see `todo/incus/vm-data-cifs-to-nfs.md` and the private incident),
+so the durable fix is moving this protocol to NFS, which has no
+`cifs_reopen_file(can_flush=true)` read path.
+
+- **Server (unconditional):** `setup-nas.yml` installs `nfs-kernel-server` on
+  the NAS host and always exports the whole `/near1/vm` subtree as one NFSv4
+  export, single-UID squashed to uid/gid 1000 (`all_squash,anonuid=1000,
+  anongid=1000`) to mirror the CIFS `uid=1000,gid=1000` arrangement. The shared
+  `/near1` CIFS export stays for its existing non-VM consumers.
+- **Client (rollout switch):** the client mount is gated by a per-host Ansible
+  flag, `vm_data_nfs` (default `false`; set `true` in `host_vars/<host>.yml`).
+  When set, `mount-nas-share.yml` installs `nfs-common`, writes a static
+  `vm-data.mount` systemd unit (`TimeoutSec=60`, no automount), enables/starts
+  it, and fails if the mount is not actually present.
+- **Mount check (for scripts):** scripts that touch VM `data` paths run
+  `/usr/local/bin/check-vm-data-nfs-mount` (installed by the play) to fail fast
+  if the mount is missing instead of writing into an empty directory.
+- **Per-VM shape:** the single `/near1/vm` mount is the passthrough source;
+  each VM's `data` disk is a bind mount beneath it (same shape as the old CIFS
+  path), not one NFS mount per VM.
+
 ### HF model cache (read-only share)
 
 When a host Hugging Face cache is shared into a VM read-only, point only

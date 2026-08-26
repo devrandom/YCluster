@@ -149,7 +149,56 @@
       command: /usr/local/bin/zfs-pool-exporter
       changed_when: false
 
+    # --- Unconditional NFSv4 export of the VM passthrough data subtree --------
+    # The CLIENT mount is the rollout switch (vm_data_nfs host flag, see
+    # mount-nas-share.yml); the server export is always present. NFS has no
+    # forceuid/forcegid, so every access is squashed to uid/gid 1000 (mirroring
+    # the CIFS mount's uid=1000,gid=1000) and the tree is owned by 1000:1000.
+    - name: Install NFS kernel server
+      apt:
+        name: nfs-kernel-server
+        state: present
+        update_cache: yes
+
+    - name: Ensure NFS export directory exists
+      file:
+        path: "{{ vm_data_nfs_export }}"
+        state: directory
+        owner: "{{ vm_data_nfs_anon_uid }}"
+        group: "{{ vm_data_nfs_anon_gid }}"
+        mode: '0775'
+
+    - name: Own the VM-data subtree as uid/gid 1000 (NFS single-UID parity)
+      file:
+        path: "{{ vm_data_nfs_export }}"
+        state: directory
+        owner: "{{ vm_data_nfs_anon_uid }}"
+        group: "{{ vm_data_nfs_anon_gid }}"
+        recurse: yes
+
+    - name: Configure NFS /etc/exports
+      copy:
+        dest: /etc/exports
+        content: |
+          # VM passthrough data subtree — exported unconditionally for the
+          # Incus VM hosts. Single-UID squash mirrors the CIFS uid/gid=1000.
+          {{ vm_data_nfs_export }} {{ vm_data_nfs_export_net }}(rw,sync,no_subtree_check,all_squash,anonuid={{ vm_data_nfs_anon_uid }},anongid={{ vm_data_nfs_anon_gid }})
+        mode: '0644'
+      register: nfs_exports
+      notify: re-export nfs
+
+    - name: Enable and start NFS server
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - rpcbind
+        - nfs-kernel-server
+
   handlers:
+    - name: re-export nfs
+      command: exportfs -ra
     - name: restart smbd
       systemd:
         name: smbd
