@@ -103,6 +103,20 @@
       until: bastion_ready.rc == 0
       changed_when: false
 
+    # Auto-start with the Incus daemon so a host reboot doesn't leave the
+    # jump host down (the daemon only restores prior state when autostart is
+    # unset AND the prior shutdown was clean; VMs are reconciled separately).
+    # `incus config set` is silent on success, so gate on the current value.
+    - name: Read current bastion autostart setting
+      command: "incus config get {{ vm_bastion_container }} boot.autostart"
+      register: bastion_autostart_cur
+      changed_when: false
+
+    - name: Enable bastion auto-start on host boot
+      command: "incus config set {{ vm_bastion_container }} boot.autostart=true"
+      changed_when: true
+      when: bastion_autostart_cur.stdout != 'true'
+
     # First-boot cloud-init holds the apt-lists lock for ~30 s. The setup
     # script runs apt-get install, which will fail with "Could not get
     # lock /var/lib/apt/lists/lock" if it races. cloud-init may not be
