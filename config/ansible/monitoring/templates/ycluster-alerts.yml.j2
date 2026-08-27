@@ -667,7 +667,7 @@ groups:
             node_hwmon_temp_celsius
             * on(chip, sensor, instance) group_left()
             node_hwmon_sensor_label{label="SYSTIN"}
-          ) > 30
+          ) > 38
           unless on(node) (
             max by (node) (node_ipmi_temperature_celsius{role="ambient"})
             or
@@ -678,7 +678,7 @@ groups:
           severity: warning
         annotations:
           summary: "High chassis-ambient temperature on {{ $labels.node }}"
-          description: "Internal board (SYSTIN) sensor on {{ $labels.node }} is {{ $value }}°C (>30°C) for 5m — no intake sensor here, check room temperature"
+          description: "Internal board (SYSTIN) sensor on {{ $labels.node }} is {{ $value }}°C (>38°C) for 5m — no intake sensor here, check room temperature"
 
       - alert: CriticalChassisAmbientTemperature
         expr: |
@@ -686,7 +686,7 @@ groups:
             node_hwmon_temp_celsius
             * on(chip, sensor, instance) group_left()
             node_hwmon_sensor_label{label="SYSTIN"}
-          ) > 35
+          ) > 43
           unless on(node) (
             max by (node) (node_ipmi_temperature_celsius{role="ambient"})
             or
@@ -697,7 +697,7 @@ groups:
           severity: critical
         annotations:
           summary: "Critical chassis-ambient temperature on {{ $labels.node }}"
-          description: "Internal board (SYSTIN) sensor on {{ $labels.node }} is {{ $value }}°C (>35°C) — no intake sensor here, check room HVAC"
+          description: "Internal board (SYSTIN) sensor on {{ $labels.node }} is {{ $value }}°C (>43°C) — no intake sensor here, check room HVAC"
 
       # CPU die temperature via k10temp (AMD) — temp1 is Tctl. Far more
       # reliable than IPMI "CPU Package Temp", which is often a socket

@@ -173,9 +173,40 @@
     },
     {
       "type": "timeseries",
-      "title": "Comino cooling loop",
+      "title": "Chassis ambient (SYSTIN board sensor)",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 26 },
+      "id": 15,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 38 },
+              { "color": "red", "value": 43 }
+            ]
+          },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line" } }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "node_hwmon_temp_celsius * on(chip, sensor, instance) group_left() node_hwmon_sensor_label{label=\"SYSTIN\"}",
+          "legendFormat": "{{node}} / {{sensor}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Comino cooling loop",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 35 },
       "id": 7,
       "fieldConfig": {
         "defaults": {
@@ -198,7 +229,7 @@
       "type": "timeseries",
       "title": "Comino fans & pumps",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 26 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 35 },
       "id": 8,
       "fieldConfig": {
         "defaults": {
@@ -270,7 +301,7 @@
       "type": "row",
       "title": "CRPS power supplies (Comino)",
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
       "id": 9,
       "panels": []
     },
@@ -278,7 +309,7 @@
       "type": "timeseries",
       "title": "CRPS PSU temperatures",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 },
       "id": 10,
       "fieldConfig": {
         "defaults": {
@@ -301,7 +332,7 @@
       "type": "timeseries",
       "title": "CRPS PSU output power",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
       "id": 11,
       "fieldConfig": {
         "defaults": {
@@ -324,7 +355,7 @@
       "type": "timeseries",
       "title": "CRPS PSU input voltage (AC) — low = sag",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 53 },
       "id": 12,
       "fieldConfig": {
         "defaults": {
@@ -356,7 +387,7 @@
       "title": "CRPS logged power-fault transients (events the live poll misses)",
       "description": "Fault/alarm transitions harvested from the controller's on-board event log. A bar here means a brief power fault occurred even if the live PSU gauges looked fine — sub-second sags/dropouts that recover between scrapes are recorded by the controller and counted here.",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 53 },
       "id": 13,
       "fieldConfig": {
         "defaults": {
@@ -386,7 +417,7 @@
       "title": "CRPS per-PSU dropout events (asymmetry → flaky module/feed)",
       "description": "Per-PSU asymmetric drops from the event log: a single module losing input/output while the others hold steady. One module dominating points at a specific flaky PSU, connector, or AC feed (e.g. PSU4) rather than a bank-wide sag.",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
       "id": 14,
       "fieldConfig": {
         "defaults": {
