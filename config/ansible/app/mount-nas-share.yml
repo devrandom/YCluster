@@ -275,9 +275,20 @@
         state: directory
         mode: '0755'
 
+    - name: Compute the systemd mount unit name
+      command: "systemd-escape --path --suffix=mount {{ vm_data_nfs_mount }}"
+      register: vm_data_nfs_unit
+      changed_when: false
+
+    - name: Remove any stale wrongly-named VM-data mount unit
+      file:
+        path: /etc/systemd/system/vm-data.mount
+        state: absent
+      notify: reload systemd
+
     - name: Create systemd mount unit for VM-data NFS
       copy:
-        dest: /etc/systemd/system/vm-data.mount
+        dest: "/etc/systemd/system/{{ vm_data_nfs_unit.stdout }}"
         content: |
           [Unit]
           Description=Incus VM data NFS mount
@@ -301,7 +312,7 @@
 
     - name: Enable and start the VM-data NFS mount
       systemd:
-        name: vm-data.mount
+        name: "{{ vm_data_nfs_unit.stdout }}"
         enabled: yes
         state: started
 

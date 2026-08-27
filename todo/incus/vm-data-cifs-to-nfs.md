@@ -19,16 +19,22 @@ today) — not one NFS mount per VM.
 
 ## Implementation status
 
-Initial implementation is in (code only — **not yet applied to any host**):
-
-- **Server (unconditional):** `config/ansible/app/setup-nas.yml` installs
-  `nfs-kernel-server` and always exports `/near1/vm` (single-UID squash
+- **Server: deployed on the NAS host** (`setup-nas.yml` ran against it;
+  `nfs-kernel-server` + `rpcbind` active, `/etc/exports` live, `exportfs -v`
+  and `showmount -e` confirm `/near1/vm` for `10.0.0.0/24`).
+- **Client: deployed on the rollout GPU host** (`mount-nas-share.yml --limit <rollout-host>`; the NFS
+  mount is live at `/mnt/near1-vm` — `vers=4.2,nconnect=4`, unit enabled at
+  boot, check script installed and passing). Incus `data` disks still point
+  at the CIFS bind-mount path; the repoint is deferred to the maintenance
+  window.
+- **Code:** `config/ansible/app/setup-nas.yml` installs `nfs-kernel-server`
+  and always exports `/near1/vm` (single-UID squash
   `all_squash,anonuid=1000,anongid=1000`, net `10.0.0.0/24`).
 - **Client (rollout switch):** `config/ansible/app/mount-nas-share.yml` gates
   the NFS client mount on the per-host Ansible flag `vm_data_nfs` (default
   `false`; the rollout host sets it `true` in its `host_vars/<host>.yml`). It
-  installs `nfs-common`,
-  writes a static `vm-data.mount` systemd unit with `TimeoutSec=60` (no
+  installs `nfs-common`, computes the unit name from the mount path with
+  `systemd-escape`, writes a static mount unit with `TimeoutSec=60` (no
   automount), enables/starts it, and fails if the mount is missing.
 - **Mount check (for scripts):**
   `config/ansible/scripts/check-vm-data-nfs-mount.sh` → installed at
