@@ -15,6 +15,8 @@ entries:
       # Serve this brand for every request host — without it authentik
       # falls back to its built-in stock brand for unmatched domains.
       default: true
+      # flow_user_settings is set in the ycluster-user-settings blueprint,
+      # which owns the custom read-only user-settings flow.
       branding_title: YCluster
       branding_logo: ycluster-logo.svg
       branding_favicon: ycluster-favicon.svg

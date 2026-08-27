@@ -1,0 +1,173 @@
+# User-settings flow for /if/user#settings "User details". Replaces the stock
+# default-user-settings-flow because that flow renders Username and Email as
+# editable fields for every user (they're only rejected server-side by the
+# tenant's default_user_change_* flags). Here Username and Email are rendered
+# with the read-only prompt type so they are genuinely uneditable in the
+# browser, while Name and Locale stay editable.
+version: 1
+metadata:
+  name: ycluster-user-settings
+entries:
+  - model: authentik_flows.flow
+    id: flow
+    identifiers:
+      slug: ycluster-user-settings-flow
+    attrs:
+      name: YCluster user settings
+      title: Update your info
+      designation: stage_configuration
+      authentication: require_authenticated
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-field-username
+    identifiers:
+      name: ycluster-user-settings-field-username
+    attrs:
+      field_key: username
+      label: Username
+      placeholder: Username
+      placeholder_expression: false
+      initial_value: |
+        try:
+            return user.username
+        except:
+            return ''
+      initial_value_expression: true
+      type: text_read_only
+      order: 200
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-field-name
+    identifiers:
+      name: ycluster-user-settings-field-name
+    attrs:
+      field_key: name
+      label: Name
+      placeholder: Name
+      placeholder_expression: false
+      initial_value: |
+        try:
+            return user.name
+        except:
+            return ''
+      initial_value_expression: true
+      required: true
+      type: text
+      order: 201
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-field-email
+    identifiers:
+      name: ycluster-user-settings-field-email
+    attrs:
+      field_key: email
+      label: Email
+      placeholder: Email
+      placeholder_expression: false
+      initial_value: |
+        try:
+            return user.email
+        except:
+            return ''
+      initial_value_expression: true
+      type: text_read_only
+      order: 202
+
+  - model: authentik_stages_prompt.prompt
+    id: prompt-field-locale
+    identifiers:
+      name: ycluster-user-settings-field-locale
+    attrs:
+      field_key: attributes.settings.locale
+      label: Locale
+      placeholder: Locale
+      placeholder_expression: false
+      initial_value: |
+        try:
+            return user.attributes.get("settings", {}).get("locale", "")
+        except:
+            return ''
+      initial_value_expression: true
+      required: true
+      type: ak-locale
+      order: 203
+
+  # Same checks as the stock default-user-settings-authorization policy:
+  # read-only Username/Email always submit their current value, so this
+  # passes; it only rejects a forged submission that changes either.
+  - model: authentik_policies_expression.expressionpolicy
+    id: authorization
+    identifiers:
+      name: ycluster-user-settings-authorization
+    attrs:
+      expression: |
+        from authentik.core.models import (
+            USER_ATTRIBUTE_CHANGE_EMAIL,
+            USER_ATTRIBUTE_CHANGE_NAME,
+            USER_ATTRIBUTE_CHANGE_USERNAME
+        )
+        prompt_data = request.context.get("prompt_data")
+
+        if not request.user.group_attributes(request.http_request).get(
+            USER_ATTRIBUTE_CHANGE_EMAIL, request.http_request.tenant.default_user_change_email
+        ):
+            if prompt_data.get("email") != request.user.email:
+                ak_message("Not allowed to change email address.")
+                return False
+
+        if not request.user.group_attributes(request.http_request).get(
+            USER_ATTRIBUTE_CHANGE_NAME, request.http_request.tenant.default_user_change_name
+        ):
+            if prompt_data.get("name") != request.user.name:
+                ak_message("Not allowed to change name.")
+                return False
+
+        if not request.user.group_attributes(request.http_request).get(
+            USER_ATTRIBUTE_CHANGE_USERNAME, request.http_request.tenant.default_user_change_username
+        ):
+            if prompt_data.get("username") != request.user.username:
+                ak_message("Not allowed to change username.")
+                return False
+
+        return True
+
+  - model: authentik_stages_user_write.userwritestage
+    id: stage-user-write
+    identifiers:
+      name: ycluster-user-settings-write
+    attrs:
+      user_creation_mode: never_create
+
+  - model: authentik_stages_prompt.promptstage
+    id: stage-prompt
+    identifiers:
+      name: ycluster-user-settings
+    attrs:
+      fields:
+        - !KeyOf prompt-field-username
+        - !KeyOf prompt-field-name
+        - !KeyOf prompt-field-email
+        - !KeyOf prompt-field-locale
+      validation_policies:
+        - !KeyOf authorization
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow
+      stage: !KeyOf stage-prompt
+      order: 20
+
+  - model: authentik_flows.flowstagebinding
+    identifiers:
+      target: !KeyOf flow
+      stage: !KeyOf stage-user-write
+      order: 100
+
+  # Point the default brand's "User details" panel at this flow. Kept here
+  # (not in the branding blueprint) so the brand never references a flow from
+  # another blueprint that may not have applied yet.
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      flow_user_settings: !KeyOf flow
