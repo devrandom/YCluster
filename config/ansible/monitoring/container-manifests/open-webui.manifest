@@ -1,8 +1,8 @@
-# open-webui v0.11.0 (source f9590b80); runtime Python deps from uv.lock base deps (npm frontend is baked at build, not shipped in image)
+# open-webui v0.11.1 (source d3e8bf34); runtime Python deps from uv.lock base deps (npm frontend is baked at build, not shipped in image)
 # PyPI packages (uv.lock)
 PyPI:accelerate=1.13.0
 PyPI:aiocache=0.12.3
-PyPI:aiodns=4.0.4
+PyPI:aiodns=3.6.1
 PyPI:aiofiles=25.1.0
 PyPI:aiohappyeyeballs=2.6.2
 PyPI:aiohttp=3.13.5
@@ -173,7 +173,7 @@ PyPI:pyarrow=20.0.0
 PyPI:pyasn1=0.6.3
 PyPI:pyasn1-modules=0.4.2
 PyPI:pybase64=1.4.3
-PyPI:pycares=5.0.1
+PyPI:pycares=4.11.0
 PyPI:pyclipper=1.4.0
 PyPI:pycparser=3.0
 PyPI:pycrdt=0.13.1
@@ -191,6 +191,7 @@ PyPI:pypdf=6.7.5
 PyPI:pypika=0.51.1
 PyPI:pyproject-hooks=1.2.0
 PyPI:python-dateutil=2.9.0.post0
+PyPI:python-docx=1.2.0
 PyPI:python-dotenv=1.2.2
 PyPI:python-engineio=4.13.2
 PyPI:python-mimeparse=2.0.0

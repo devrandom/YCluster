@@ -212,7 +212,7 @@ To regenerate a manifest after an image/lockfile bump:
 # From a checkout of the pinned tree containing uv.lock:
 python3 -m osv_feed.manifestgen open-webui \
   --uv uv.lock --uv-select base \
-  --comment "open-webui v0.11.0 <sha>" \
+  --comment "open-webui v0.11.1 <sha>" \
   --out open-webui.manifest
 ```
 

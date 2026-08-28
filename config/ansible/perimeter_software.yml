@@ -142,8 +142,8 @@ perimeter_software:
     # osv-feed [tracking.container]; manifest-driven, no packages list
     osv_packages: []
     # package: container image (PyPI manifest)
-    # pin_source: app/build-open-webui.yml webui_repo_sha 3c6df8bb... (v0.11.0-dr); plugins 746f4b2f...
-    # manifest: config/ansible/monitoring/container-manifests/open-webui.manifest (--uv-select base, 264 pkgs)
+    # pin_source: app/build-open-webui.yml webui_repo_sha 1537cc01... (v0.11.1-dr); plugins 746f4b2f...
+    # manifest: config/ansible/monitoring/container-manifests/open-webui.manifest (--uv-select base, 265 pkgs)
   - name: zulip
     # zulip.<domain>. The interactive web surface (everything except /api/)
     # is edge-gated by the IdP: nginx `auth_request

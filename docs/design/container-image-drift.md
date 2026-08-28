@@ -144,7 +144,7 @@ detects leader-ness, and writes `perimeter_image_scan_drift.prom`:
 ```
 perimeter_image_scan_drift{image="authentik"} 0
 perimeter_image_scan_drift{image="open-webui"} 1
-perimeter_image_scan_drift_expected{image="open-webui"} "open-webui-v0.11.0-f9590b80"
+perimeter_image_scan_drift_expected{image="open-webui"} "open-webui-v0.11.1-d3e8bf34"
 perimeter_image_scan_drift_actual{image="open-webui"} "open-webui-v0.12.0-abcdef01"
 ```
 

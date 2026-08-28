@@ -12,11 +12,11 @@
     # open-webui-plugins (private, no upstream tags) = 746f4b2f296d0b77f341bd646a19d07f49d3dd67.
     plugins_repo_sha: "746f4b2f296d0b77f341bd646a19d07f49d3dd67"
     webui_repo: "https://github.com/devrandom/open-webui.git"
-    # open-webui v0.11.0-dr (devrandom fork; branch, not tag) =
-    # 3c6df8bb13eb3785dde0849cf5cf682d6dffddd5. Upstream v0.11.0
-    # (f9590b80) + mobile-gated image/gallery upload commit; bump this
+    # open-webui v0.11.1-dr (devrandom fork; branch, not tag) =
+    # 1537cc0127538bed5947553316593741cc67acee. Upstream v0.11.1
+    # (d3e8bf34) + mobile-gated image/gallery upload commit; bump this
     # pin when further -dr commits land.
-    webui_repo_sha: "3c6df8bb13eb3785dde0849cf5cf682d6dffddd5"
+    webui_repo_sha: "1537cc0127538bed5947553316593741cc67acee"
     image_name: "registry.xc:5000/open-webui-with-plugins"
     image_tag: "{{ instance if instance else 'latest' }}"
   tasks:

@@ -104,7 +104,7 @@ no drift**. Source pins are commit SHAs per AGENTS.md "pin source to a git SHA".
 
 ## S10 — open-webui + plugins (pinned source build)
 
-`webui_repo_sha` (open-webui v0.11.0 release commit) and `plugins_repo_sha`
+`webui_repo_sha` (open-webui v0.11.1-dr fork commit, upstream v0.11.1 `d3e8bf34`) and `plugins_repo_sha`
 (`746f4b2f…`) are both pinned in `build-open-webui.yml`; `ext/open-webui` and
 `ext/open-webui-plugins` are checked out at those pins via
 `just deps-src-checkout` → **in sync, no drift**. Both are commit SHA pins per
