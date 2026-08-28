@@ -25,6 +25,27 @@
         line: "listen_addresses = '*'"
         backup: yes
 
+    - name: Configure PostgreSQL slow query logging threshold
+      lineinfile:
+        path: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^#?log_min_duration_statement\s*='
+        line: "log_min_duration_statement = 1000"
+        backup: yes
+
+    - name: Configure PostgreSQL to log lock waits
+      lineinfile:
+        path: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^#?log_lock_waits\s*='
+        line: "log_lock_waits = on"
+        backup: yes
+
+    - name: Configure PostgreSQL autovacuum logging threshold
+      lineinfile:
+        path: /etc/postgresql/16/main/postgresql.conf
+        regexp: '^#?log_autovacuum_min_duration\s*='
+        line: "log_autovacuum_min_duration = 1000"
+        backup: yes
+
     - name: Configure PostgreSQL client authentication for Docker networks
       lineinfile:
         path: /etc/postgresql/16/main/pg_hba.conf
