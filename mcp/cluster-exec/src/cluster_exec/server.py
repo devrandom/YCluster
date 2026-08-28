@@ -12,7 +12,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
-from mcp.types import TextContent
+from mcp.types import TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl, ConfigDict, create_model
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -344,6 +344,7 @@ def _principal_from_ctx(ctx: Context) -> str | None:
         "than `-1` (use the run() `head_lines`/`tail_lines` args instead), "
         "headtail, and sleep > 10s."
     ),
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True),
 )
 async def run(
     command: str,
@@ -448,6 +449,7 @@ async def run(
         "file is missing or not a regular file. Full stderr is logged "
         "to ./tmp/cluster.log as JSONL."
     ),
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True),
 )
 async def put(
     local_path: str,
@@ -534,6 +536,7 @@ async def put(
         "regular file. Full stderr is logged to ./tmp/cluster.log as "
         "JSONL."
     ),
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
 )
 async def get(
     remote_path: str,
@@ -611,6 +614,7 @@ async def get(
         "seconds); over the limit the call is refused with a backoff "
         "recommendation."
     ),
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
 )
 async def tail(
     tail_lines: int = 50,
@@ -642,6 +646,7 @@ async def tail(
         "2s. Returns how many lines of output were captured before the kill "
         "\u2014 fetch the full transcript with `tail -s <session_id>`."
     ),
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False),
 )
 async def kill(
     session_id: str,
@@ -704,6 +709,7 @@ def _session_state(bg, log_path: Path) -> str:
         "seconds); over the limit the call is refused with a backoff "
         "recommendation."
     ),
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False),
 )
 async def status(
     session_id: str | None = None,
