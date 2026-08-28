@@ -195,6 +195,18 @@ groups:
           summary: "Ceph cluster unhealthy"
           description: "Ceph cluster is reporting unhealthy status on {{ $value }} nodes"
 
+      # A single OSD down: ceph health can stay OK (auto-out + full
+      # replication), which the cluster-level CephCluster* alerts miss.
+      # ceph_exporter exposes ceph_osd_up (1=up, 0=down) per OSD.
+      - alert: CephOSDDown
+        expr: ceph_osd_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ceph OSD {{ $labels.ceph_daemon }} is down"
+          description: "OSD {{ $labels.ceph_daemon }} on {{ $labels.instance }} has been down for more than 5 minutes"
+
       # Leadership alerts
       - alert: NoStorageLeader
         expr: sum(ycluster_storage_leader) == 0
