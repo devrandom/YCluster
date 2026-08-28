@@ -11,6 +11,11 @@ POSTGRES_BACKUP_DIR="$BACKUP_DIR/postgres"
 QDRANT_BACKUP_DIR="$BACKUP_DIR/qdrant"
 ETCD_BACKUP_DIR="$BACKUP_DIR/etcd"
 RETENTION_DAYS=30
+# Only `.age` files within this many days are pushed offsite. Matches rotation's
+# DAILY_DAYS window; combined with `--files-from` (no --delete) this stops rsync from
+# re-uploading the 8-30d files that offsite rotation just pruned, without touching
+# anything locally or on the remote.
+OFFSITE_SYNC_DAYS="${OFFSITE_SYNC_DAYS:-7}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OFFSITE_METRICS_FILE="${OFFSITE_METRICS_FILE:-/var/lib/prometheus/node-exporter/offsite_disk.prom}"
 
@@ -282,13 +287,39 @@ sync_backups() {
         
         # Add trailing slash to source directory to sync contents
         local source_dir="${ENCRYPTED_BACKUP_DIR}/"
-        
-        if rsync -av --timeout=300 -e 'ssh -o StrictHostKeyChecking=accept-new' "$source_dir" "$dest_url" 2>&1 | while IFS= read -r line; do
+
+        # Push only the dense recent window (matching rotation's DAILY_DAYS).
+        # Offsite rotation has already pruned the older files on the remote, so
+        # re-listing them here would just re-upload what we deleted and refill
+        # the small offsite disk. We deliberately do NOT use --delete: everything
+        # on disk (local history and the remote's rotated long-term set) is kept.
+        local cutoff sync_list
+        cutoff=$(date -d "-$((OFFSITE_SYNC_DAYS - 1)) days" +%Y%m%d)
+        sync_list=$(mktemp)
+        find "$ENCRYPTED_BACKUP_DIR" -type f -name '*.age' -printf '%P\n' | \
+        while IFS= read -r rel; do
+            local filedate
+            filedate="${rel##*/}"; filedate="${filedate:0:8}"
+            if [[ "$filedate" =~ ^[0-9]{8}$ ]] && [ "$filedate" -ge "$cutoff" ]; then
+                printf '%s\n' "$rel"
+            fi
+        done > "$sync_list"
+
+        if [ ! -s "$sync_list" ]; then
+            log "  rsync: no backups within $OFFSITE_SYNC_DAYS-day window, skipping push to $dest_name"
+            rm -f "$sync_list"
+            sync_successes=$((sync_successes + 1))
+            continue
+        fi
+
+        if rsync -av --timeout=300 --files-from="$sync_list" -e 'ssh -o StrictHostKeyChecking=accept-new' "$source_dir" "$dest_url" 2>&1 | while IFS= read -r line; do
             log "  rsync: $line"
         done; then
+            rm -f "$sync_list"
             log "Successfully synced to $dest_name"
             sync_successes=$((sync_successes + 1))
         else
+            rm -f "$sync_list"
             log "ERROR: Failed to sync to $dest_name"
             sync_failures=$((sync_failures + 1))
         fi
