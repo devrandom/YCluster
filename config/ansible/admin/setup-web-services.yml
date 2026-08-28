@@ -266,6 +266,32 @@
       notify: restart nginx
       when: "'storage' in group_names"
 
+    # Friendly 5xx page referenced by every gated vhost's
+    # `error_page 500 502 503 504 /50x.html`. Served from the nginx webroot
+    # by an internal location that is exempt from the auth gate, so users
+    # who hit a 500 still get a clear path home. Static file — read per
+    # request, so no nginx restart is needed for this task.
+    - name: Install friendly 50x error page
+      copy:
+        src: files/50x.html
+        dest: /usr/share/nginx/html/50x.html
+        mode: '0644'
+      when: "'storage' in group_names"
+
+    # Shared fragment defining the internal /50x.html + /__smoke_50x sibling
+    # locations for every forward-auth vhost (chat, zulip, comfy, root
+    # <domain>, admin.<domain>). Included at server level from each vhost's
+    # top-level locations file (open-webui-, zulip-, comfyui-,
+    # ycluster_app-, and admin-api-authed-locations.conf) — one definition,
+    # no copy-paste per vhost.
+    - name: Install shared friendly-50x nginx fragment
+      copy:
+        src: files/friendly-50x.conf
+        dest: /etc/nginx/friendly-50x.conf
+        mode: '0644'
+      notify: restart nginx
+      when: "'storage' in group_names"
+
     # ycluster_app-locations.conf has no Jinja2 markers — plain copy.
     # Included by ycluster_app.conf.j2 (single source: certbot-manager
     # renders the plain :443 and frp tunnel landing listeners).

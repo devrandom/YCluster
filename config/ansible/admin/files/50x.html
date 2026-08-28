@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Something went wrong</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f4f5f7; color: #1f2430; margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card {
+    background: #fff; padding: 48px 40px; border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06); text-align: center;
+    max-width: 440px; margin: 24px;
+  }
+  .code { font-size: 13px; letter-spacing: .12em; color: #8a94a3; margin: 0 0 12px; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p { color: #5a6270; margin: 0 0 28px; line-height: 1.5; }
+  .row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  a, button {
+    font: inherit; text-decoration: none; padding: 10px 18px; border-radius: 8px;
+    font-weight: 600; cursor: pointer; display: inline-block;
+  }
+  a { background: #1a73e8; color: #fff; }
+  button { background: #fff; color: #1f2430; border: 1px solid #d0d4dd; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <p class="code">500</p>
+    <h1>Something went wrong</h1>
+    <p>The server hit a temporary hiccup and couldn't finish loading this page. It usually clears up if you try again.</p>
+    <div class="row">
+      <a href="/">Back to home</a>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </div>
+  </main>
+</body>
+</html>
