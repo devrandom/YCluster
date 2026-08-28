@@ -341,6 +341,22 @@ so the durable fix is moving this protocol to NFS, which has no
 - **Per-VM shape:** the single `/near1/vm` mount is the passthrough source;
   each VM's `data` disk is a bind mount beneath it (same shape as the old CIFS
   path), not one NFS mount per VM.
+- **Verify `/data` as `ubuntu`, never root:** when checking a VM's `data`
+  disk, run as the guest's login user — `incus exec <vm> -- su - ubuntu -c
+  'ls -la /data'` — never a bare `incus exec <vm> -- ...`, which runs as root.
+  On the virtiofs-over-NFSv4 share, root (uid 0) gets `Operation not supported`
+  (ENOTSUP) for every read/write/readdir of `/data`. That is normal, not a
+  broken mount: the same operations succeed as `ubuntu`. This has sent several
+  debugging sessions down the wrong path (it looks exactly like a failed
+  passthrough disk), so always test as `ubuntu`.
+- **Do not use `raw.idmap` for uid mapping on these VMs:** setting
+  `raw.idmap` (e.g. `both 1000 1000`) makes Incus launch virtiofsd with
+  `--translate-uid=/--translate-gid=` instead of `--posix-acl`, and on this
+  Incus/virtiofsd/QEMU stack the start wedge/fails with `Failed to add the
+  virtiofs device: Monitor is disconnected`, leaving the instance STOPPED
+  with a non-cancelable "Starting instance" task. The 1:1 mapping that the
+  `data` passthrough already needs is instead provided by the device's
+  `shift: "true"`, so leave `raw.idmap` unset.
 
 ### HF model cache (read-only share)
 
