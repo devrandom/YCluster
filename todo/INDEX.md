@@ -19,6 +19,7 @@ Categories: [security](#security) ·
 
 ## Security
 - **[HIGH]** [etcd RBAC by client cert](security/etcd-rbac-by-cert.md) — one shared `etcd-client` cert today; an Incus-host compromise leaks every secret in etcd. Split identity into `etcd-storage` (all s*) and `etcd-compute` (c*/nv*/nas*), turn on RBAC, consolidate secret prefixes under `/cluster/config/`.
+- **[MEDIUM]** [Mitigate DoS on the authentik forward-auth / proxysession path](security/authentik-forward-auth-dos-mitigation.md) — every unauthenticated hit writes a `proxysession` row (SELECT+INSERT) with no rate limit at the outpost or the gated `location /` roots; add `limit_req`, stop Blackbox probing gated endpoints, and (longer term) avoid the DB write per unauthenticated hit.
 - **[MEDIUM]** [Sudo-user consistency](security/sudo-user-consistency.md) — paired with vendor cleanup; privileged set drifts node-to-node today.
 - [Eval: should `dev` be a macOS admin?](security/dev-macos-admin-eval.md) — `setup-macos.yml` gives `dev` the `admin` primary group, unlike Linux where dev is deliberately not a sudoer.
 - **[MEDIUM]** [SSH-key rotation](security/ssh-key-rotation.md) — no procedure; full cluster compromise if the Ansible key leaks.
