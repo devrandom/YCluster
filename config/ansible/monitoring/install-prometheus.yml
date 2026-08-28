@@ -384,6 +384,7 @@
           url: "https://grafana.com/api/dashboards/7587/revisions/3/download"
           sha256: "ce403bb878e22dd250775b7aa8521913e6201741177ca954fa7a4fb1dd898fac"
           filename: "blackbox-exporter.json"
+          datasource_uid: "prometheus-central"
 
     - name: Create Docker network for Grafana
       docker_network:

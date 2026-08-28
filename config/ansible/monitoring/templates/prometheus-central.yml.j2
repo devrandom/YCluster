@@ -44,14 +44,34 @@ scrape_configs:
         - '{__name__=~"ceph_pg_.*"}'
         - '{__name__=~"ceph_rbd_.*"}'
         - '{__name__=~"ceph_mgr_.*"}'
-        - '{__name__=~"probe_.*"}'
-        - '{job="https-domain"}'
     static_configs:
 {% for host in groups['core'] %}
       - targets: ['{{ hostvars[host]['ansible_host'] }}:9090']
         labels:
           federated_from: '{{ host }}'
 {% endfor %}
+
+  # HTTPS-domain probing. Owned here (and only here) so the public site is
+  # probed once cluster-wide instead of from every core Prometheus. Per-target
+  # module is set via file_sd labels (see update-blackbox-targets.py, which
+  # runs on every core node and keeps this shared file fresh on the leader).
+  - job_name: 'https-domain'
+    scheme: https
+    tls_config:
+      ca_file: /etc/blackbox_exporter/tls/ca.crt
+      cert_file: /etc/blackbox_exporter/tls/server.crt
+      key_file: /etc/blackbox_exporter/tls/server.key
+      insecure_skip_verify: false
+    metrics_path: /probe
+    file_sd_configs:
+      - files:
+        - '/etc/prometheus/blackbox-targets.json'
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__param_target]
+        target_label: instance
+      - source_labels: [module]
+        target_label: __param_module
 
   # Direct scraping of critical services (backup)
   - job_name: 'ycluster-health-central'

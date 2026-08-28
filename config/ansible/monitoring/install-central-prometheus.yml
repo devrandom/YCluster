@@ -22,6 +22,25 @@
         mode: '0644'
       notify: restart central prometheus if running
 
+    - name: Create central Prometheus rules directory
+      file:
+        path: /etc/prometheus/rules
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Configure central Prometheus federated alert rules
+      template:
+        src: ycluster-federated-alerts.yml.j2
+        dest: /etc/prometheus/rules/ycluster-federated-alerts.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+        variable_start_string: '[%'
+        variable_end_string: '%]'
+      notify: restart central prometheus if running
+
     - name: Create central Prometheus systemd service
       copy:
         dest: /etc/systemd/system/prometheus-central.service

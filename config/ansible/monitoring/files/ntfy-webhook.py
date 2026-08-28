@@ -22,7 +22,11 @@ logger = logging.getLogger(__name__)
 # Configuration
 NTFY_TOPIC = "cf0d6065-2357-493e-a7a8-06666dd660eb"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
-PROMETHEUS_URL = "http://localhost:9090"
+# Enrichment queries go to the central Prometheus (not localhost:9090):
+# probe_* / https-domain data now lives only on central, which runs on the
+# storage leader. admin.xc (10.0.0.100) is the keepalived storage VIP, so it
+# follows the leader and reliably reaches central on any core node.
+PROMETHEUS_URL = os.environ.get("NTFY_PROMETHEUS_URL", "http://admin.xc:9091")
 
 # Per-alert dedup and global outbound throttle. These exist so bursts of
 # Alertmanager retries and repeats don't pile up against ntfy.sh's rate limit

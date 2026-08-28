@@ -1257,7 +1257,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus-local"
+        "uid": "prometheus-central"
       },
       "fieldConfig": {
         "defaults": {
@@ -1335,7 +1335,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus-local"
+            "uid": "prometheus-central"
           },
           "editorMode": "code",
           "expr": "probe_success{job=\"https-domain\"}",
@@ -1346,7 +1346,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "prometheus-local"
+            "uid": "prometheus-central"
           },
           "editorMode": "code",
           "expr": "probe_duration_seconds{job=\"https-domain\"}",

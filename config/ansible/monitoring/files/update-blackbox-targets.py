@@ -141,13 +141,16 @@ def get_probe_specs(domain):
     The `module` must match a stanza in /etc/prometheus/blackbox.yml (see
     install-blackbox.yml). Each entry becomes one Prometheus scrape target
     per blackbox exporter.
+
+    Note: the bare root URL (https://<domain>) is deliberately NOT probed.
+    It is fronted by authentik forward-auth, so blackbox follows a 302
+    redirect cascade (/ -> /outpost.goauthentik.io/start ->
+    /application/o/authorize -> /if/flow/...) that multiplied nginx requests
+    per probe. The /healthz and /api/ping probes cover the public site and
+    admin API with single 200 responses, so site health is still monitored
+    without the redirect storm.
     """
     return [
-        {
-            "url": f"https://{domain}",
-            "module": "http_2xx",
-            "probe_name": "root",
-        },
         {
             # Inference stack liveness, served by the root <domain> vhost.
             # /healthz is an unauthenticated passthrough to the auth
