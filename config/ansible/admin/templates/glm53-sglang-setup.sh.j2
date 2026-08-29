@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Pull the GLM-5.3-Flash NVFP4 base image, build the SM120-patched SGLang
+# image from the staged build context, CDI-smoke the GPU, and stage/verify
+# the checkpoint. Run as the dev user (no sudo):
+#
+#   ~/bin/glm53-sglang-setup.sh            # build patched image + verify ckpt
+#   ~/bin/glm53-sglang-setup.sh --verify-checkpoint  # just verify staged ckpt
+#
+# The base (docker.io/lmsysorg/sglang:glm-5.3-flash@sha256:...) is the exact
+# digest 0xSero validated on 4x RTX PRO 6000 (SM120). Six SM120 compatibility
+# patches (baked into the image) are vendored in the repo under
+# config/ansible/admin/files/glm53-sglang/ and staged to the build dir by
+# admin/install-glm53-flash.yml. No prebuilt binary is fetched — the base is a
+# pinned public image and the patches are source, built here.
+#
+# On SM120 the MoE runner MUST be flashinfer_cutlass (set in the start script):
+# FlashInfer's CuteDSL MoE hard-codes sm100/103 and aborts at startup with
+# "No supported CUDA architectures found for major versions [10]".
+#
+# Managed by admin/install-glm53-flash.yml — edit there.
+# See docs/inference/glm-5.3-flash-deploy-2026-08.md.
+# No `pipefail`: a pipeline's exit is the last command's exit, so closing
+# pipes can't kill the script via SIGPIPE. `set -eu` still catches real errors.
+set -eu
+
+BASE_IMAGE="{{ glm53_base_image }}"
+IMAGE="{{ glm53_image }}"
+BUILD_DIR="{{ glm53_build_dir }}"
+REPO="{{ glm53_repo }}"
+REVISION="{{ glm53_revision }}"
+MODEL_HOST="${MODEL_HOST:-{{ glm53_model_dir }}}"
+
+action="setup"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --verify-checkpoint) action="verify"; shift ;;
+    -h|--help)
+      sed -n '2,9p' "$0"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v podman >/dev/null \
+  || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+# ---- build the patched image + CDI smoke (skip for --verify-checkpoint) ----
+if [ "$action" != "verify" ]; then
+  echo "== pull base image =="
+  podman pull "$BASE_IMAGE"
+
+  echo "== build patched image: $IMAGE =="
+  # Rebuild the SM120 runtime with the six compatibility patches baked at
+  # their editable-install import paths. `--pull=never` keeps the build on the
+  # base we just pinned (no silent drift to a newer public tag).
+  podman build --pull=never -t "$IMAGE" "$BUILD_DIR"
+
+  echo "== GPU passthrough smoke test (CDI) =="
+  # CDI injects a host-visible GPU into a container; nvidia-smi inside the
+  # image must see it. Pick the first idle GPU (util < 5%); fall back to
+  # index 0 only if every card is busy — the CDI test doesn't allocate
+  # memory, so a busy GPU still proves CDI works. Verify by exit code, not
+  # stdout (piping through head -1 with pipefail triggers SIGPIPE and kills
+  # the script).
+  smoke_gpu="$(nvidia-smi --query-gpu=index,utilization.gpu --format=csv,noheader,nounits \
+    | awk -F, '$2+0 < 5 {print $1; exit}')"
+  [ -n "$smoke_gpu" ] || smoke_gpu="0"
+  podman run --rm --entrypoint nvidia-smi \
+    --device "nvidia.com/gpu=$smoke_gpu" --group-add keep-groups "$IMAGE" -L > /dev/null \
+    || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml + glm53_flash_enabled host_vars" >&2; exit 1; }
+  echo "  (probed GPU $smoke_gpu)"
+  echo
+  echo "Patched image ready: $IMAGE"
+fi
+
+# ---- checkpoint verification (always) ----
+echo "== verify checkpoint =="
+[ -f "$MODEL_HOST/config.json" ] \
+  || { echo "checkpoint missing at $MODEL_HOST (~182 GB) - download it, then re-run this script" >&2; exit 1; }
+[ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+  || { echo "index missing at $MODEL_HOST/model.safetensors.index.json" >&2; exit 1; }
+
+# The 0xSero manifest pins the revision and the four core metadata hashes;
+# it is a configuration lock, not a full shard check. We enforce the pinned
+# metadata hashes here and a 120-shard count. (Affirmative registry/network
+# incidents near the node have briefly truncated HF transfers; re-run
+# `hf download --revision $REVISION` to repair any missing/incomplete shard,
+# then re-verify.)
+ckpt_dir="$MODEL_HOST"
+config_sha="a47f597b347010c4d8bca9ef584ce4d2fbf20a0a6ec86ad7694e71184b7e95e5"
+index_sha="f3a4c40897e00fab0de0380b05b66279bc341233cc14fa71a80bab2b683e3b7b"
+chat_sha="41cff9af7b3a86c96751b107a8444f245fbda0bd5320b636a5bb1f7f4ba1a5c3"
+gen_sha="230c30609ecbbb9e6583bedde8e7bdda0c6eb8fe5fad0eaeb3d1b293d751cb4f"
+
+fail=""
+for pair in "config.json $config_sha" "model.safetensors.index.json $index_sha" \
+            "chat_template.jinja $chat_sha" "generation_config.json $gen_sha"; do
+  set -- $pair
+  f="$1"; want="$2"
+  got="$(sha256sum "$ckpt_dir/$f" | awk '{print $1}')"
+  if [ "$got" != "$want" ]; then
+    echo "  HASH MISMATCH: $f (got $got, want $want)" >&2
+    fail=1
+  fi
+done
+
+nshards="$(ls "$ckpt_dir"/model-*-of-00120.safetensors 2>/dev/null | wc -l)"
+[ "$nshards" -eq 120 ] || { echo "  expected 120 shards, found $nshards" >&2; fail=1; }
+
+if [ -n "${fail:-}" ]; then
+  echo "checkpoint verification FAILED - re-run: HF_HUB_DISABLE_XET=1 uv tool run hf download $REPO --revision $REVISION --local-dir $MODEL_HOST" >&2
+  exit 1
+fi
+echo "  metadata hashes OK (config/index/chat_template/generation_config)"
+echo "  shard count OK: $nshards"
+echo
+if [ "$action" = "setup" ]; then
+  echo "Start the server:  ~/bin/glm53-sglang-start.sh"
+fi

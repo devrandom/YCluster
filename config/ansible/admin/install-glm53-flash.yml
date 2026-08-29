@@ -1,0 +1,187 @@
+---
+# Deploy GLM-5.3-Flash NVFP4 (SM120 SGLang) inference scripts to Nvidia GPU
+# nodes. Companion to docs/inference/glm-5.3-flash-deploy-2026-08.md. Two dev
+# scripts (the dev user has no sudo, and needs none for these):
+#   ~dev/bin/glm53-sglang-setup.sh - pull the base image, build the patched
+#                                    image, CDI-smoke the GPU, verify the
+#                                    staged checkpoint (120 shards + pinned
+#                                    metadata hashes). Flags:
+#                                      --verify-checkpoint  just verify a
+#                                         staged checkpoint
+#   ~dev/bin/glm53-sglang-start.sh - (re)launch the server, e.g. after reboot
+#
+# Model: LibertAIDAI/GLM-5.3-Flash-NVFP4 @ 9e0d74e3...(the pinned 0xSero SM120
+# NVFP4 checkpoint). 320B-total / 18B-active hybrid KDA+sparse-MLA MoE,
+# weight-only NVFP4, ~182 GiB across 120 shards. This is the only NVFP4 build
+# of GLM-5.3-Flash that runs on SM120 (RTX PRO 6000) — the official
+# zai-org/GLM-5.3-Flash is BF16 (~328 GB) and fits neither 4x96 GB nor the
+# SM120 recipe. 0xSero's sm120 bundle pins the exact revision and bakes six
+# SM120 compatibility patches; see the design doc for the trust rationale.
+#
+# Image: lmsysorg/sglang:glm-5.3-flash@sha256:3a97bd5... (the exact base that
+# 0xSero validated) + the six baked patches, built by glm53-sglang-setup.sh
+# from the vendored build context (files/glm53-sglang/). On SM120 the MoE
+# runner MUST be flashinfer_cutlass — FlashInfer's CuteDSL MoE hard-codes
+# sm100/103 and aborts at startup with "No supported CUDA architectures found
+# for major versions [10]". DSA attention, FP8 KV (1M ctx), NEXTN MTP5 spec
+# decode. Measured 143 t/s (low effort) / 208 t/s (max effort) single-stream.
+#
+# Host prerequisites (podman + nvidia CDI) are generic and live in
+# setup-gpu-podman.yml. The patched image is built locally from the vendored
+# files (no prebuilt binary is fetched — the base is a pinned public image,
+# the six patches are source under files/).
+#
+# Gating:
+#   Per-host `glm53_flash_enabled: true` in host_vars/<node>.yml opts into
+#   this play, same pattern as ds4_enabled / glm52_enabled. No-op on nvidia
+#   hosts that don't opt in and on hosts with no host-visible GPU.
+#
+#   Per-host `glm53_flash_gpus: "<space-separated CDI indices>"" selects the
+#   4 GPUs this container uses (TP=4 / EP=4). Deployment-specific — pinned in
+#   private per-host vars, no public default.
+#
+#   Per-host `glm53_flash_port: <port>` (default 9218) overrides the port.
+#
+#   Per-host `glm53_flash_served_name: "<name>"` (default "glm-5.3-flash") is
+#   the gateway routing key (what clients pass as `model:`).
+#
+# Run after setup-gpu-podman.yml (podman + CDI). To bring the server up:
+#   ssh <host>.yc
+#   ~/bin/glm53-sglang-setup.sh          # build patched image + verify ckpt
+#   ~/bin/glm53-sglang-start.sh          # launch (idempotent)
+
+- name: Deploy GLM-5.3-Flash inference scripts to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # ---- Cluster-wide (not per-host overridable) -----------------------
+    # Base image digest 0xSero validated on 4x RTX PRO 6000 (SM120). The
+    # patched image is rebuilt on top of it from the vendored context.
+    glm53_base_image: "docker.io/lmsysorg/sglang:glm-5.3-flash@sha256:3a97bd50034ca60c6e6c86b8e36a73675d261f6a5eb71197796aee5175409290"
+    # Local tag for the patched (6 SM120 patches) image we build on the host.
+    glm53_image: "localhost/glm53-flash-nvfp4-sglang:sm120-20260829"
+    glm53_repo: "LibertAIDAI/GLM-5.3-Flash-NVFP4"
+    glm53_revision: "9e0d74e3cef17f634e84fb8e2223707e02616290"
+    glm53_model_dir: "/home/dev/models/GLM-5.3-Flash-NVFP4"
+    glm53_served_name: "glm-5.3-flash"
+    # Port the container listens on inside the host (--network=host, so the
+    # host's port is the API endpoint reachable at http://<host>.xc:<port>).
+    # 9212=b12x, 9216=DS4, 9217=DS4-infernal, 9218=GLM-5.3.
+    glm53_port: 9218
+    # Where tools stage the build context on the host (copied below from the
+    # vendored files/glm53-sglang/). glm53-sglang-setup.sh builds from here.
+    glm53_build_dir: "/home/dev/glm53-flash-sglang-build"
+  tasks:
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: End play for nodes that have not opted into GLM-5.3
+      meta: end_host
+      when: not (glm53_flash_enabled | default(false))
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    # `src` stays relative to this playbook (config/ansible/admin/). A src
+    # with a trailing slash copies the directory CONTENTS, so the Dockerfile,
+    # patches/, chat template and manifest land directly in the build dir —
+    # exactly what podman build needs at its top level.
+    - name: Stage the GLM-5.3 SGLang build context on the host
+      copy:
+        src: files/glm53-sglang/
+        dest: "{{ glm53_build_dir }}/"
+        owner: dev
+        group: dev
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: Install GLM-5.3 dev inference scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - glm53-sglang-setup.sh
+        - glm53-sglang-start.sh
+
+- name: Register the GLM-5.3 backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    # Resolved below to the first nvidia host that sets glm53_flash_enabled:
+    # true in host_vars. Empty until the storage leader computes it; the
+    # register/smoke tasks only run when a host actually opts in. Deployment-
+    # agnostic — no hardcoded node name here.
+    glm53_nvidia_host: ""
+    glm53_backend_url: "http://{{ glm53_nvidia_host }}.xc:{{ hostvars[glm53_nvidia_host]['glm53_flash_port'] | default(9218) }}"
+    glm53_served_name: "{{ hostvars[glm53_nvidia_host]['glm53_flash_served_name'] | default('glm-5.3-flash') }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Resolve the GLM-5.3-enabled nvidia host
+      set_fact:
+        glm53_nvidia_host: >-
+          {{ (groups['nvidia']
+              | select('in', hostvars.keys())
+              | list)
+             | map('extract', hostvars, 'glm53_flash_enabled')
+             | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+             | selectattr(0, 'defined')
+             | selectattr(0, 'equalto', true)
+             | map(attribute=1)
+             | first
+             | default('') }}
+      when: is_storage_leader
+      # If no nvidia host opts in (glm53_flash_enabled: true), glm53_nvidia_host
+      # stays empty and the registration tasks skip below.
+
+    - name: Register the GLM-5.3 backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ glm53_backend_url }} {{ glm53_served_name }}
+      register: glm53_proxy_register
+      changed_when: "'added' in glm53_proxy_register.stdout or 'registered' in glm53_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - glm53_nvidia_host | length > 0
+        - not ansible_check_mode
+
+    - name: Smoke check the GLM-5.3 backend through local-ai-proxy
+      uri:
+        url: "http://127.0.0.1:4001/v1/models"
+        return_content: no
+        status_code: [200, 401, 404]
+      register: proxy_smoke
+      failed_when: false
+      retries: 5
+      delay: 1
+      until: proxy_smoke.status is defined
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+
+    - name: Report smoke check
+      debug:
+        msg: >-
+          local-ai-proxy on {{ inventory_hostname }}:4001 replied
+          {{ proxy_smoke.status | default('unreachable') }};
+          GLM-5.3 backend registered at {{ glm53_backend_url }}
+          (served: {{ glm53_served_name }})
+      when:
+        - is_storage_leader
+        - not ansible_check_mode

@@ -35,3 +35,8 @@ deployment-agnostic — no node names, IPs, or account specifics.
   stock tool calling), serving on the whole 8-GPU node at PP=2×TP=4 (~2.2×
   prefill vs flat TP=8 on this no-NVLink box). Includes the node-crash incident
   and the retired-REAP history.
+- [GLM-5.3-Flash on 2- or 4-GPU SM120 slices](glm-5.3-flash-deploy-2026-08.md)
+  — 320B/18B hybrid KDA+sparse-MLA MoE (MIT weights). **Serving via Path A**
+  (0xSero SGLang NVFP4 @ TP4/EP4 on 4 GPUs, 1M ctx, ~531 tok/s aggregate @conc 8),
+  verified 2026-08-29. 2 GPUs ⇒ only EXL3 TR3 4-bpw fits (non-OSI checkpoint,
+  262k ctx).

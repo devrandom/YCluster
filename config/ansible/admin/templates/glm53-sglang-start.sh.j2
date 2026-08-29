@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# (Re)start the GLM-5.3-Flash NVFP4 inference server on the SM120-patched
+# SGLang image. Run as the dev user (no sudo), e.g. after a reboot:
+#
+#   ~/bin/glm53-sglang-start.sh
+#
+# Idempotent: replaces any existing container. Defaults to the exact validated
+# 0xSero SM120 recipe: TP=4/EP=4, DSA attention (flashinfer_sparse_mla), FP8 KV
+# cache at 1,048,576-token context, flashinfer_cutlass MoE runner, NEXTN (MTP5)
+# speculative decode, glm45/glm47 parsers, multimodal. Measured 143 t/s (low
+# effort) / 208 t/s (max effort) single-stream.
+#
+# Tunable knobs (env-var overrides):
+#   IMAGE / MODEL_HOST / CONTAINER / PORT / SERVED_NAME / GPUS / MEM / CACHE_DIR
+#
+# Managed by admin/install-glm53-flash.yml — edit there.
+# See docs/inference/glm-5.3-flash-deploy-2026-08.md.
+set -euo pipefail
+
+# Rootless podman needs this user's systemd user session to apply cgroup
+# limits (--memory). When launched through an admin/ops shell (e.g. runuser
+# from root) the inherited DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR can point
+# at a different session, which drops podman onto the cgroupfs fallback — and
+# rootless cgroupfs cannot enforce limits. Pin to the current user's runtime so
+# the cgroup manager stays systemd.
+_uid="$(id -u)"
+if [ -S "/run/user/$_uid/bus" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$_uid"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$_uid/bus"
+fi
+
+IMAGE="${IMAGE:-{{ glm53_image }}}"
+MODEL_HOST="${MODEL_HOST:-{{ glm53_model_dir }}}"
+CONTAINER="${CONTAINER:-glm53-flash-sglang}"
+PORT="${PORT:-{{ glm53_port }}}"
+# CDI GPU indices for this container — deployment-specific and intentionally
+# not pinned here. Set glm53_flash_gpus in the private host_vars/<node>.yml
+# (exactly 4 cards for TP=4/EP=4; CDI indices renumber whenever the CDI spec
+# is regenerated — re-check `nvidia-ctk cdi list` before binding).
+GPUS="${GPUS:-{{ glm53_flash_gpus | default('') }}}"
+[ -n "$GPUS" ] || { echo "no GPUs configured for $CONTAINER - set glm53_flash_gpus in host_vars/<node>.yml (or override GPUS)" >&2; exit 1; }
+SERVED_NAME="${SERVED_NAME:-{{ glm53_served_name }}}"
+
+# Persistent JIT/autotune/CUDA-graph cache. First run writes FlashInfer
+# autotune tables + graph capture here; reusing the volume avoids the ~minutes
+# recompile on subsequent launches. Mounted at the recipe's SGLang cache path
+# (engine-owned, writable) inside the container.
+CACHE_DIR="${CACHE_DIR:-{{ glm53_cache_dir | default('/home/dev/.cache/glm53-sglang') }}}"
+# Cgroup cap. Startup (182 GiB stream-to-GPU + JIT + graph capture) is the
+# risk window on this ~125 GiB-RAM node. The image loads shards direct-to-GPU
+# (fast loader) so host-RAM stays well under this ceiling; the cap keeps a
+# runaway warmup from OOM-killing the whole host (a co-resident load once
+# panicked the node).
+MEM="${MEM:-80g}"
+
+# pre-flight (no root needed)
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - run: ~/bin/glm53-sglang-setup.sh" >&2; exit 1; }
+[ -f "$MODEL_HOST/config.json" ] && [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+  || { echo "checkpoint missing or incomplete at $MODEL_HOST - run: ~/bin/glm53-sglang-setup.sh (verify) + download" >&2; exit 1; }
+
+mkdir -p "$CACHE_DIR"
+dev_args=()
+ngpu=0
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); ngpu=$((ngpu + 1)); done
+# CDI renumbers the injected GPUs to a 0-based range; the recipe's TP=4 needs
+# exactly 4 devices inside the container.
+cvd="$(seq -s, 0 $((ngpu - 1)))"
+
+if [ "$ngpu" -ne 4 ]; then
+  echo "TP/EP=4 requires exactly 4 GPUs; glm53_flash_gpus gave [$GPUS] ($ngpu)" >&2
+  exit 1
+fi
+
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+# Deviations from the 0xSero Dockerfile CMD (offline-cluster / port hygiene):
+#   --port 30000 -> --port "$PORT" — with --network=host the container's
+#     listening port IS the host port; default 30000 (the recipe's host port)
+#     clashes with nothing today but the validated deployments used their own
+#     gateway port, so we take it as an env knob. Served name defaults to the
+#     recipe's "glm-5.3-flash" (our gateway routing key).
+#   --model-path /model — the checkpoint is bind-mounted read-only at /model.
+#   The six SM120 patches + chat template are baked into the image; nothing
+#     else is mounted. Env (CUDA_DEVICE_ORDER=PCI_BUS_ID, TORCH_CUDA_ARCH_LIST
+#     =12.0a, FLASHINFER_CUDA_ARCH_LIST=12.0f, SGLANG_OPT_* toggles) is baked
+#     into the image by the Dockerfile.
+podman run -d --name "$CONTAINER" \
+  "${dev_args[@]}" \
+  --network=host \
+  --shm-size 32g \
+  --init \
+  --security-opt seccomp=unconfined --group-add keep-groups \
+  --ulimit memlock=-1:-1 \
+  --ulimit nofile=1048576:1048576 \
+  --ulimit stack=67108864:67108864 \
+  --memory "$MEM" --memory-swap "$MEM" \
+  -e CUDA_VISIBLE_DEVICES="$cvd" \
+  -v "$MODEL_HOST":/model:ro \
+  -v "$CACHE_DIR":/root/.cache \
+  "$IMAGE" \
+  -m sglang.launch_server \
+    --model-path /model \
+    --served-model-name "$SERVED_NAME" \
+    --tp-size 4 \
+    --ep-size 4 \
+    --context-length 1048576 \
+    --quantization modelopt_fp4 \
+    --attention-backend dsa \
+    --dsa-prefill-backend flashinfer_sparse_mla \
+    --dsa-decode-backend flashinfer_sparse_mla \
+    --linear-attn-backend triton \
+    --kv-cache-dtype fp8_e4m3 \
+    --moe-runner-backend flashinfer_cutlass \
+    --disable-shared-experts-fusion \
+    --chunked-prefill-size 8192 \
+    --max-prefill-tokens 8192 \
+    --max-running-requests 8 \
+    --mem-fraction-static 0.90 \
+    --cuda-graph-max-bs-decode 8 \
+    --speculative-algorithm NEXTN \
+    --speculative-num-steps 5 \
+    --speculative-eagle-topk 1 \
+    --speculative-num-draft-tokens 6 \
+    --speculative-adaptive \
+    --media-url-max-file-size-mb 1024 \
+    --enable-multimodal \
+    --chat-template /chat-template.jinja \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --host 0.0.0.0 \
+    --port "$PORT"
+
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=4 EP=4, 1M ctx, mem cap $MEM"
+echo "  watch:  podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/health   # takes several minutes"
