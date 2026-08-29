@@ -134,21 +134,21 @@ Each core node gets its own SSH tunnel endpoint on the frp server, with a port t
 Add this SSH config to your `~/.ssh/config` for easy access (one `Host` block per core node):
 
 ```
-Host s?.rat
+Host s?.frp
     HostName localhost
     User root
     ProxyJump your-frontend.net
-Host s1.rat
+Host s1.frp
     Port 17201
-Host s2.rat
+Host s2.frp
     Port 17202
-Host s3.rat
+Host s3.frp
     Port 17203
-Host s4.rat
+Host s4.frp
     Port 17204
 ```
 
-Then use direct access - `ssh s1.rat`.
+Then use direct access - `ssh s1.frp`.
 
 ## Remote Nodes (WireGuard)
 

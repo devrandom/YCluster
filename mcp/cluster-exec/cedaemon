@@ -49,7 +49,7 @@
 #                          MCP clients send on the wire.
 #
 # This script does not inherit CE_* into the spawned server. Pass them through
-# the shell (e.g. `CE_BASTION=s3.rat bash mcp/cluster-exec/cedaemon --start`)
+# the shell (e.g. `CE_BASTION=s3.frp bash mcp/cluster-exec/cedaemon --start`)
 # or wire them in your .envrc before calling.
 
 set -euo pipefail
