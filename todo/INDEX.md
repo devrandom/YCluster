@@ -120,5 +120,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [CDI spec regeneration on GPU host](inference/cdi-spec-regen.md) — stale `/etc/cdi/nvidia.yaml` after driver upgrade or vfio→nvidia rebind; podman CDI fails on ghost devices. Wire into `gpu-passthrough-bind.sh.j2`.
 
 ## Authentik
+- [Open WebUI sits entirely behind the edge outpost — carve out its pre-auth paths](authentik/open-webui-edge-pre-auth-paths.md) — all of `chat.<domain>` is edge-gated via auth_request, so OWUI's own OIDC/static/metadata/health pre-auth surface bounces through authentik (daily logouts + intermittent 500s); pre-auth `/oauth/*`+static/metadata/health exemption applied in the cluster; remaining follow-up is the edge-gate `access_token_validity` daily kick.
+- [OWUI OIDC: issue refresh tokens so Open WebUI stops dropping its session daily](authentik/owui-oidc-refresh-token.md) — `provider-owui` (1-day access token, no `offline_access` granted) meant OWUI couldn't refresh and deleted its OAuth session daily; `offline_access` scope mapping + `refresh_token_validity: days=30` added and applied in the cluster. Does not fix the separate edge-gate daily kick.
 - [Split passwords frontend from general](authentik/split-passwords-frontend.md)
 - [Drop bcrypt hasher](authentik/drop-bcrypt-hasher.md)
