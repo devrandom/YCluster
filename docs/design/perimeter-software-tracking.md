@@ -103,11 +103,6 @@ through bulk managed-node flows.
   binaries. `app/build-frp.yml` also skips rebuilding if the old binaries
   already exist, so bumping `frp_repo_sha` alone can leave old binaries in
   place. A perimeter upgrade needs a verifiable rebuild-on-pin-change path.
-- **Rathole is not retired on frontends.** The repo rip-out excludes frontend
-  nodes, and the legacy rathole service is still active there for external
-  admin clients. Rathole upstream is dormant, so it cannot be treated as a
-  maintainable P0 component; it should be removed from the perimeter, not
-  tracked.
 - **Container images are not scanned or digest-pinned.** Images such as
   authentik, open-webui, zulip, and `registry:2` are not covered by
   `dependency-hygiene.md` (deferred there) and have no runtime CVE/digest
@@ -237,8 +232,6 @@ Proposed alerts (monitoring/templates/ycluster-alerts.yml.j2):
   `repeat_interval` so unresolved CVEs stay visible daily. `no_fix_yet`
   findings page separately so a lockdown decision is triggered rather than
   hidden inside a fix-available list.
-- `RatholeLegacyActive` — until the frontend rathole cleanup lands, alert if
-  the service is running so the removal stays visible.
 
 SLA proposal:
 
@@ -269,14 +262,11 @@ SLA proposal:
 
 ## First actions
 
-1. Remove rathole from frontends and migrate/revoke the legacy admin clients;
-   delete `app/uninstall-rathole.yml`'s frontend exclusion and scrub the binary
-   once the external clients are gone.
-2. Fix `app/build-frp.yml` so a pin change forces a verified rebuild and the
+1. Fix `app/build-frp.yml` so a pin change forces a verified rebuild and the
    installed binary records its source SHA.
-3. Land the perimeter inventory vars + textfile collector with `p0-u`/`p0-a`
+2. Land the perimeter inventory vars + textfile collector with `p0-u`/`p0-a`
    tier labels.
-4. Wire the `osv-feed` mirror (DB on `/near1`, configurable) and
+3. Wire the `osv-feed` mirror (DB on `/near1`, configurable) and
    `match --format prometheus` into the collector; see
    `docs/design/osv-feed.md`.
-5. Add the Phase 5 alerts with the separate P0-U/P0-A SLA rows.
+4. Add the Phase 5 alerts with the separate P0-U/P0-A SLA rows.

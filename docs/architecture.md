@@ -8,7 +8,7 @@
 - **macOS nodes (m1+)**: macOS compute nodes, bootstrapped via `/bootstrap/macos` endpoint
 - **Nvidia nodes (nv1+)**: Ubuntu-based Nvidia GPU servers, bootstrapped via `/bootstrap/nvidia` endpoint
 - **NAS nodes (nas1+)**: Ubuntu-based NAS devices, bootstrapped via `/bootstrap/nas` endpoint (dynamic IP)
-- **Frontend nodes (f1+)**: External access via Rathole (frp in migration) reverse proxy — public HTTP/HTTPS tunnels to the storage leader's `127.0.0.2`. When registered by IP they also get an internal `.xc` DNS record, so they're reachable from inside the cluster by name (`ssh f1.xc`, `ping f1`). Full path + how to add a public vhost: `docs/operations/public-routing.md`.
+- **Frontend nodes (f1+)**: External access via frp reverse proxy — public HTTP/HTTPS tunnels to the storage leader's `127.0.0.2`. When registered by IP they also get an internal `.xc` DNS record, so they're reachable from inside the cluster by name (`ssh f1.xc`, `ping f1`). Full path + how to add a public vhost: `docs/operations/public-routing.md`.
 - **Adhoc nodes (x1-x49)**: Ad-hoc nodes that join by setting hostname before DHCP (no Ansible required)
 
 ## Key Services
@@ -40,7 +40,7 @@
   - `site.yml` - Main orchestration playbook
   - `admin/` - Admin services (DHCP, PXE, web services, ycluster package)
   - `storage/` - Storage infrastructure (Ceph, PostgreSQL, Qdrant)
-  - `app/` - Application deployments (Open-WebUI, Rathole)
+  - `app/` - Application deployments (Open-WebUI, frp)
   - `monitoring/` - Prometheus, Grafana, alerting
   - `inventory_plugins/etcd_nodes.py` - Dynamic inventory from etcd
 - `config/ansible/admin/files/ycluster/` - Python CLI tool source

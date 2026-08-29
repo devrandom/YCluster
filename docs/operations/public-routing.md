@@ -12,7 +12,7 @@ external user
    https://name.<domain>                  (public DNS -> frontend public IP)
         |
         v
-frontend node (fN)  frp/rathole server  (public 80 / 14443, alt 17080/17443)
+frontend node (fN)  frp server  (public 80/443, alt 17080/17443)
         |  TCP tunnel (raw bytes: SNI + HTTP Host are preserved)
         v
 STORAGE LEADER      127.0.0.2:80  OR  127.0.0.2:443   <-- the actual endpoint
@@ -27,7 +27,7 @@ backed service  (e.g. comfy backend on <gpu-host>.xc:8188, open-webui, app serve
 Key facts that end up mattering in practice:
 
 - **External HTTP/HTTPS lands on the storage leader's `127.0.0.2:80` /
-  `127.0.0.2:443`.** The frp/rathole client on the leader forwards the tunnel
+  `127.0.0.2:443`.** The frp client on the leader forwards the tunnel
   to that loopback address. `127.0.0.1` is reserved for cluster-internal
   health checks and full admin-api access; `127.0.0.2` is the public-facing
   nginx listener.
@@ -40,9 +40,11 @@ Key facts that end up mattering in practice:
   will reliably 404 on the `_` default vhost even when the real path works.
   Test against the leader's `127.0.0.2:443` directly, or through an external
   client.
-- The tunnel is raw TCP with no PROXY protocol on the primary rathole path
-  (frp alt ports add it — see `docs/design/frp-migration.md`). SNI and the
-  HTTP `Host` header pass through untouched, so nginx routes purely by
+- frp terminates the tunnel on the well-known public ports (`:80`/`:443`)
+  as plain TCP with no PROXY protocol (real HTTP clients and direct probes
+  don't speak it) and carries PROXY protocol only on the alt ports
+  (`17080`/`17443` — see `docs/archive/frp-migration.md`). Either way SNI and
+  the HTTP `Host` header pass through untouched, so nginx routes purely by
   `server_name`.
 
 ## Anatomy of a public vhost

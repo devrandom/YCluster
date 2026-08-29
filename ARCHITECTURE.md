@@ -32,7 +32,7 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 **Storage Nodes (s4+)**
 - MicroCeph with RBD volumes and exclusive locking
 - Stateful services (PostgreSQL, Qdrant, Docker registry) with leader election
-- Storage leader manages Rathole reverse proxy
+- Storage leader manages frp reverse proxy
 - Encrypted user RBD volumes with Tang-based key management
 
 **macOS Nodes (m\*)**
@@ -43,7 +43,7 @@ This architecture enables resilient, self-managing infrastructure that scales fr
 - Provide processing capacity for workloads
 
 **Frontend Nodes (f\*)**
-- Provide external access via Rathole reverse proxy
+- Provide external access via frp reverse proxy
 - Registered in etcd for dynamic configuration
 
 ### Core Services
@@ -121,6 +121,6 @@ The WG overlay is the cluster's remote-node onboarding mechanism. It is strictly
 
 - **Server**: the active gateway-VIP holder runs `wg0` with address `10.0.1.1/24`. A 30s systemd timer (`ycluster-wg-reconcile.timer`) on every core node checks VIP ownership and brings `wg0` up or down accordingly, so the wg server follows VIP failover without coupling to the keepalived config.
 - **Routing**: every cluster node gets a static `10.0.1.0/24 via 10.0.0.254 metric 1024` route. The lower-metric connected route on the wg server wins locally; everywhere else the VIP route sends peer traffic through whichever core node currently holds the server.
-- **Public surface**: nginx serves a dedicated vhost on `127.0.0.2:443/80` with an explicit whitelist (`/bootstrap/wg`, `/api/wg/register`, `/api/wg/poll/*`, read-only status endpoints). Rathole is configured to forward external traffic to `127.0.0.2`, isolating public requests from the cluster-only `127.0.0.1`/`10.0.0.x` listeners. Everything outside the whitelist returns 404 to the public internet.
+- **Public surface**: nginx serves a dedicated vhost on `127.0.0.2:443/80` with an explicit whitelist (`/bootstrap/wg`, `/api/wg/register`, `/api/wg/poll/*`, read-only status endpoints). frp is configured to forward external traffic to `127.0.0.2`, isolating public requests from the cluster-only `127.0.0.1`/`10.0.0.x` listeners. Everything outside the whitelist returns 404 to the public internet.
 - **Approval**: `/api/wg/register` stores the peer as pending in etcd; an operator runs `ycluster wg approve <hostname>` on a core node, which updates etcd and triggers `wg syncconf wg0` to bring the peer online.
 

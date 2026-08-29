@@ -2,7 +2,7 @@
 
 Found via the dev cluster. `stop_all_services` in
 `config/ansible/storage/scripts/storage-leader-election` stops
-`ycluster-apps.target`/`docker-registry`/`rathole`/`misc-rbd`/`user-rbd`
+`ycluster-apps.target`/`docker-registry`/`frpc`/`misc-rbd`/`user-rbd`
 **in parallel** (5s-timeout background jobs) and never gracefully stops
 `postgresql@16-main`/`qdrant` at all — so the rbd units' plain `umount`
 always loses the race against the services still holding the mount
@@ -15,7 +15,7 @@ routine drain.
 ## Fix shape
 
 Stop the mount *consumers* first and wait (`postgresql@16-main`, `qdrant`,
-`ycluster-apps.target`, `docker-registry`, `rathole` — bounded timeout),
+`ycluster-apps.target`, `docker-registry`, `frpc` — bounded timeout),
 then stop `misc-rbd`/`user-rbd` so their umounts see a free mount; keep
 the aggressive path as the fallback it was meant to be.
 

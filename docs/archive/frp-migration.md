@@ -1,4 +1,13 @@
-# frp migration plan
+# frp migration plan — archived
+
+> **Archived 2026-08-29.** The rathole → frp migration is complete and the
+> plan is now history. rathole (server + clients) was fully uninstalled from
+> prod, its playbooks/configs/CLI/helpers were removed from the repo, the old
+> `/cluster/nodes/rathole/config` etcd key was deleted, and frp is the sole
+> tunnel (public `:80`/`:443`, alt PROXY `:17080`/`:17443`, per-core SSH
+> `1720N`). Tracking item `todo/networking/switch-rathole-to-frp.md` is the
+> record of what landed; this doc is kept for the port allocation rationale
+> and the PROXY-protocol/rate-limit reasoning.
 
 Replace rathole with [frp](https://github.com/fatedier/frp) v0.70.0 across the
 cluster. Rathole is dormant upstream ([discussion #416](https://github.com/rathole-org/rathole/discussions/416)),
@@ -161,12 +170,15 @@ Same per-host derivation rules as `app/templates/rathole-server.toml.j2`
 5. **Cut over remaining prod frontends** one at a time
    (dev1a/b → bastions → s1–s3 frpc). Each step is a single DNS /
    LB flip; rathole keeps running as the rollback target until step
-   6.
+   6. *(Superseded — step 6 has landed, rathole is fully gone.)*
 6. **Cleanup commit** — gated on soak completion, not cutover
    success. Removes rathole playbooks, configs, helpers, and the old
    etcd key. **LANDED** — the repo rip-out is complete (rathole
    playbooks/configs/CLI/utils and the health/gateway references are
-   gone; rathole is fully off the cluster). The frp alt vhost
+   gone), the prod uninstall is done on all frontends (`rathole`
+   stopped/disabled, its unit/binaries/config and the `2333/tcp` ufw
+   rule removed), and the old etcd key was deleted. frp is the sole
+   tunnel. The frp alt vhost
    (`admin-api-alt.conf`) and its PROXY
    endpoints on `127.0.0.2:17080/17443` stay — they remain the frp
    tunnel landing (`frpc` `localPort`) — and the main `:443`/`:80`

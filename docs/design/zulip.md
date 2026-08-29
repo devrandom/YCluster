@@ -26,7 +26,7 @@ Decided so far:
 - Expose internally at `zulip.xc` (storage VIP) and externally at
   `zulip.<domain>`, behind the frp/nginx/certbot pipeline now used by
   `app.<domain>`, `admin.<domain>`, and `comfy.<domain>` (see
-  `docs/design/frp-migration.md`) — not the retired rathole frontend.
+  `docs/archive/frp-migration.md`) — not the retired rathole frontend.
 
 ### Confirmed decisions (2026-08-06)
 
@@ -634,14 +634,14 @@ ports (see "Network isolation" under Deployment shape):
 - The storage VIP (`10.0.0.100`) already resolves `zulip.xc` once
   the DNS record is added to the cluster's DNS. In-cluster DNS is
   `ycluster dhcp update-hosts` (etcd → dnsmasq), *not* a `ycluster
-  dns` command — see `docs/design/frp-migration.md` for how the
+  dns` command — see `docs/archive/frp-migration.md` for how the
   current app vhosts register. The external `zulip.<domain>`
   A/CNAME is handled out-of-band with the domain provider.
 
 Internal access: `zulip.xc` → storage VIP → nginx → Zulip container.
 External access: `zulip.<domain>` → frp PROXY landing on
 `127.0.0.2:17443` → nginx → Zulip. Same frp frontend the rest of the
-cluster uses (see `docs/design/frp-migration.md`); no new ingress.
+cluster uses (see `docs/archive/frp-migration.md`); no new ingress.
 
 ## State and backups
 

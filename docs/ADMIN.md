@@ -30,7 +30,7 @@ The dashboard monitors these services across all nodes:
 - **TLS Certificates**: Expiry monitoring and renewal status
 - **Clock Synchronization**: NTP sync and skew detection
 - **VIP Status**: Virtual IP failover status
-- **Rathole**: Reverse proxy for external access
+- **frp**: Reverse proxy for external access
 
 #### Virtual IP (VIP) Management
 - **Gateway VIP** (10.0.0.254): Cluster services and external access
@@ -217,24 +217,6 @@ ycluster certbot delete <domain>
 
 # Update nginx configuration with domain from etcd
 ycluster certbot update-nginx
-```
-
-### Rathole Tunnel Configuration
-```bash
-# Set rathole server configuration
-ycluster rathole set --remote-addr "your-server.com:2333" --token "secret_token"
-
-# Show current configuration
-ycluster rathole get
-
-# Generate client configuration from etcd
-ycluster rathole generate-client
-
-# Generate SSH-only client configuration
-ycluster rathole generate-ssh-client
-
-# Delete configuration
-ycluster rathole delete
 ```
 
 ### WireGuard Overlay (Remote Nodes)
@@ -450,7 +432,7 @@ The storage leader runs:
 - PostgreSQL database
 - Qdrant vector database
 - Docker registry
-- Rathole client (for external access)
+- frp client (for external access)
 
 ### DHCP Leader
 The DHCP leader runs:
@@ -531,7 +513,7 @@ Virtual IPs automatically fail over between nodes using keepalived. The dashboar
 
 ### Network Security
 - **Internal communication**: Services communicate over cluster network
-- **External access**: Controlled via rathole reverse proxy
+- **External access**: Controlled via frp reverse proxy
 - **AMT interfaces**: Separate network segment for out-of-band management
 
 ### Access Control

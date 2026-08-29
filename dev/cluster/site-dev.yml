@@ -77,7 +77,7 @@
 # frp fixture: seed an frp tunnel config in etcd, then build + install the
 # frp server on f1 and the frp client on the core nodes. frp carries the
 # public http/https tunnels (:80/:443) plus ssh. See
-# docs/design/frp-migration.md.
+# docs/archive/frp-migration.md.
 - name: Seed frp tunnel config (dev fixture)
   hosts: s1
   become: yes

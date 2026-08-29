@@ -225,7 +225,7 @@ The cost is a structural rename across:
   `test_*` fixtures that prime `/cluster/tls/`, `/cluster/wg/server`,
   `/cluster/nodes/rathole/config`.
 - Docs: `docs/operations/etcd.md`, `docs/operations/disaster-recovery.md`,
-  `docs/operations/inference.md`, `docs/design/frp-migration.md`, the
+  `docs/operations/inference.md`, `docs/archive/frp-migration.md`, the
   schema comment in `app.py`.
 
 ### Migration

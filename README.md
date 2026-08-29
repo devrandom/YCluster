@@ -77,7 +77,7 @@ Both interfaces are automatically configured when you set up HTTPS certificates.
 - **Distributed storage** using MicroCeph with RBD and XFS
 - **Auto-discovery** and PXE provisioning
 - **TLS certificates** with self-signed and Let's Encrypt integration
-- **Reverse proxy** support via Rathole for external access
+- **Reverse proxy** support via frp for external access
 - **Comprehensive monitoring** with health checks, certificate tracking, and clock skew detection
 
 ## Certificate Management
@@ -104,17 +104,17 @@ ycluster certbot status
 
 ## External Access
 
-Register an external server as a frontend node and deploy rathole server:
+Register an external server as a frontend node and deploy the frp server:
 
 ```bash
 # Register the frontend server
-ycluster frontend add f1 your-server.com --description "External rathole server"
+ycluster frontend add f1 your-server.com --description "External frp server"
 
-# Deploy rathole server to the frontend node
-ansible-playbook install-rathole-server.yml
+# Deploy frp server to the frontend node
+ansible-playbook install-frp-server.yml
 
-# Configure cluster nodes to connect to the frontend server
-ycluster rathole set --remote-addr "your-server.com:2333" --token "your_secret_token"
+# Configure cluster nodes to connect to the frontend's frp server
+ycluster frp set --remote-addr "your-server.com:7000" --token "your_secret_token"
 ```
 
 A frontend registered by IP (`ycluster frontend add f1 203.0.113.7`) also gets
@@ -124,12 +124,12 @@ registration into `/etc/static-hosts` and served by dnsmasq (refreshed every
 ~30s); frontends registered by hostname are skipped since they already resolve
 via public DNS. `ycluster frontend list` shows the registered address.
 
-The rathole configuration provides two separate services:
+The frp reverse proxy provides two services:
 
-- **Main rathole service**: Runs only on the storage leader and provides HTTP/HTTPS tunnels for web services
-- **SSH rathole service**: Runs on every core node and provides individual SSH access tunnels
+- **Main frp service**: Runs only on the storage leader and provides HTTP/HTTPS tunnels for web services
+- **SSH frp service**: Runs on every core node and provides individual SSH access tunnels
 
-Each core node gets its own SSH tunnel endpoint on the rathole server, with a port that follows the node number (`sN` → `220N`: s1→2201, s2→2202, …, s4→2204). The SSH services bind to localhost on the rathole server, so access them by first SSH'ing into your frontend server, then connecting to the specific node:
+Each core node gets its own SSH tunnel endpoint on the frp server, with a port that follows the node number (`sN` → `1720N`: s1→17201, s2→17202, …, s4→17204). The SSH services bind to localhost on the frontend server, so access them by first SSH'ing into your frontend server, then connecting to the specific node:
 
 Add this SSH config to your `~/.ssh/config` for easy access (one `Host` block per core node):
 
@@ -139,13 +139,13 @@ Host s?.rat
     User root
     ProxyJump your-frontend.net
 Host s1.rat
-    Port 2201
+    Port 17201
 Host s2.rat
-    Port 2202
+    Port 17202
 Host s3.rat
-    Port 2203
+    Port 17203
 Host s4.rat
-    Port 2204
+    Port 17204
 ```
 
 Then use direct access - `ssh s1.rat`.
@@ -198,7 +198,7 @@ All cluster management is now consolidated under the `ycluster` CLI:
 - **HTTPS Configuration**: `ycluster https` - domain and certificate settings
 - **Let's Encrypt**: `ycluster certbot` - SSL certificate operations
 - **Frontend Nodes**: `ycluster frontend` - manage external access points
-- **Rathole Configuration**: `ycluster rathole` - reverse proxy settings
+- **frp Configuration**: `ycluster frp` - reverse proxy tunnel settings
 - **WireGuard Overlay**: `ycluster wg` - remote-node onboarding and peer management
 - **Storage Management**: `ycluster storage` - RBD volume operations
 - **Inference Gateway**: `ycluster inference` - manage models and backends served by local-ai-proxy

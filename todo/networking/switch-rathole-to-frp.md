@@ -46,7 +46,7 @@ etcd schema:
   on `:443`/`:80`. End-to-end external traffic through frp exercised
   the full admin-api surface (public whitelist + authed locations +
   forward-auth via cluster IdP) plus open-webui + ycluster_app.
-  Migration plan in `docs/design/frp-migration.md` deliverable #10.
+  Migration plan in `docs/archive/frp-migration.md` deliverable #10.
 - **Step 5 — port swap landed**: `a78a6845`. rathole moved off `:443`
   to `:14443` (rollback path), frp takes `:443` (production primary).
   Alt vhost on storage (`admin-api-alt.conf.j2`) unchanged — still
@@ -80,12 +80,11 @@ etcd schema:
   today, and it survives the rathole etcd-key deletion). Removed the
   retired rathole public vhost blocks (`127.0.0.2:443` whitelist +
   `127.0.0.2:80` redirect/acme) from `admin-api.conf.j2`; external public
-  traffic stays on the frp alt vhost. Remaining step-6 items (per-client
-  rate limits, rathole teardown/admin switchover) still open; the main
+  traffic stays on the frp alt vhost. The main
   `:443`/`:80` vhost stays non-PROXY (see step 6 below).
-- **Step 6 — rip out rathole (pending, gated on soak)**: remove
-  rathole playbooks/configs/units/helpers, switch rate-limit zones
-  to per-client semantics, delete the old etcd key
+- **Step 6 — rip out rathole (landed)**: removed
+  rathole playbooks/configs/units/helpers, switched rate-limit zones
+  to per-client semantics, and deleted the old etcd key
   `/cluster/nodes/rathole/config`. PROXY protocol is **not** enabled
   on the main `:443`/`:80` vhost — well-known public ports must stay
   standard, because real HTTP clients and direct probes (blackbox,
@@ -94,7 +93,7 @@ etcd schema:
   which stay as the frp tunnel landing (`frpc` `localPort`), and the
   main vhost stays a plain non-PROXY listener so nginx can be hit
   directly / from inside the cluster. See
-  `docs/design/frp-migration.md` "Cleanup" + deliverable #8
+  `docs/archive/frp-migration.md` "Cleanup" + deliverable #8
   (`_rathole_public_host` → `_frp_public_host` in `admin/files/app.py`).
   **SSH tunnels migrate in step 6 too**: there are two SSH surfaces
   and both need to move to frp without churning users:
@@ -128,19 +127,18 @@ etcd schema:
   health-status rathole blocks are gone from `app.py`/`health-api.py`.
   The dev fixtures, system test, and docs (dependency-hygiene S8,
   frp-migration step 6) are updated.
-- **Ready to deploy — prod uninstall**: rathole is dormant on the cluster
-  (no service/process running) but the binary + `/etc/rathole` remain on
-  the storage/core/compute/nvidia nodes. `app/uninstall-rathole.yml`
-  removes them (plus any rathole systemd units and the
-  `/usr/local/bin/rathole-config` wrapper via install-ycluster-package).
-  Run with `--limit managed`, normal stop-before-deploy review.
+- **Done — prod uninstall**: rathole is fully off the cluster. The
+  binary, `/etc/rathole`, systemd units, and the frontend rathole server
+  (admin 8821/8822) were removed from storage/core/compute/nvidia and the
+  frontends (dev1a/dev1b); the stale `/cluster/nodes/rathole/config` etcd
+  key was deleted. `app/uninstall-rathole.yml` is deleted.
 
 ## Soak window
 
 Doc proposes minimum 4 weeks of idle parallel tunnels + 2 weeks of
 prod traffic on the frp path, longer if Prometheus counters show
 anomalies (FIN_WAIT-2 climbing, frp reconnect rate > N/h, latency
-p99 regression vs rathole baseline) — `docs/design/frp-migration.md:213-217`.
+p99 regression vs rathole baseline) — `docs/archive/frp-migration.md:213-217`.
 Step 6 lands after.
 
 ## Plan

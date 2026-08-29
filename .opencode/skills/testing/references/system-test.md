@@ -69,12 +69,12 @@ ssh -F dev/cluster/.ssh/config s1 'systemctl status postgresql@16-main'
 | 4 | admin-api (core + non-core) | `/api/status` via nginx on c1, `/api/health`, `/metrics`, `/api/allocate` (etcd write), `/api/inventory` |
 | 5 | base infra | dnsmasq+squid/chrony on s1-s3 + c1, gateway VIP on exactly one node, cluster DNS serves service names, `/api/health` healthy on c1 |
 | 6 | adhoc DHCP join | incus `x1` DHCPs `10.0.0.151`, registers in etcd, resolves as `x1.xc` |
-| 7 | storage leader + VIP | `/cluster/leader/app` set, `/rbd/{user,misc}` mounted, leader-only services (postgres/registry/rathole/authentik/qdrant/rbd) active, VIP on leader only |
+| 7 | storage leader + VIP | `/cluster/leader/app` set, `/rbd/{user,misc}` mounted, leader-only services (postgres/registry/frpc/authentik/qdrant/rbd) active, VIP on leader only |
 | 8 | DHCP leader election | `/cluster/leader/dhcp` set, fails over on `systemctl stop/start dhcp-leader-election` — **disruptive** |
 | 9 | postgres + authentik + user mgmt | authentik DB, `/-/health/live/`, `ycluster user add/admin/invite/uninvite` (CLI → IdP API → postgres) |
 | 10 | incus VM lifecycle (c1) | sampler+reconciler timers, `vm launch`, `vm sample`, grace-stamp+stop on desired=off, start on desired=on, `vm destroy` |
 | 11 | usage accounting → postgres | `vm_events` drained, `/cluster/vms-events/` empty, `vm_samples` rows |
-| 12 | rathole tunnels via f1 | ssh banners through f1:2201-2203, http via f1:80 → leader public vhost |
+| 12 | rathole removed + frp tunnels | no rathole leftovers cluster-wide; frpc active on leader, frpc-ssh on each core, ssh banners via f1:17201-17203, http via f1:80 → frp alt vhost (PROXY protocol delivers client IP) |
 | 13 | admin web forward-auth | anonymous `/admin/` → 302 to authentik outpost; `/api/inventory` open internally, gated publicly |
 | 14 | local-ai-proxy | all storage nodes run it, `ycluster inference add` hot-reloads, chat completion proxied through nginx auth, missing/wrong bearer → 401, wrong token on a live per-user key → clean 401 (argon2 verify-mismatch path) |
 | 15 | ACME via Pebble | Pebble directory via `pebble.xc`, certbot obtain against pebble, certificate in etcd, nginx restored to dev local mode |

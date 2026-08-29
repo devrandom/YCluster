@@ -49,7 +49,7 @@ No prebuilt third-party binaries. Cluster software comes from one of:
 - **snap** (held, upgraded via playbooks — see `docs/operations/packages.md`)
 - **Build from source** in a dedicated `app/build-<name>.yml` or
   `admin/build-<name>.yml` playbook, source vendored under `/opt/src/`,
-  pinned to a git SHA (e.g. `app/build-rathole.yml`, `app/build-open-webui.yml`)
+  pinned to a git SHA (e.g. `app/build-frp.yml`, `app/build-open-webui.yml`)
 - **Docker images** built in-cluster, pushed to `registry.xc:5000`
 
 No `get_url`/`curl`/`wget` of compiled artifacts, no PyPI C-extension wheels,

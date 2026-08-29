@@ -327,7 +327,7 @@ still serving — auto-heals on reboot and needs none of this.)
    (Clevis auto-unlocks now that 2-of-3 Tang serve). Confirm
    `mountpoint /rbd/user`. If a volume still won't unlock, force it with the
    passphrase: `ycluster storage rbd start -K` (user volume; vault passphrase).
-5. **Apps + VIPs.** `ycluster-apps.target`, registry, rathole, and the gateway
+5. **Apps + VIPs.** `ycluster-apps.target`, registry, frp, and the gateway
    (10.0.0.254) / storage (10.0.0.100) VIPs follow the leader. Verify with
    `ycluster cluster status`.
 6. **Remaining nodes** (compute, GPU, etc.) PXE/boot and rejoin via DHCP/etcd.
