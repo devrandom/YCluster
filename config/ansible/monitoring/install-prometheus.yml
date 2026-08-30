@@ -160,6 +160,7 @@
         name:
           - python3-flask
           - python3-requests
+          - python3-etcd3
         state: present
 
     - name: Copy ntfy webhook handler
@@ -196,6 +197,11 @@
         mode: '0644'
         force: no
 
+    - name: Ensure etcd-client group exists
+      group:
+        name: etcd-client
+        system: yes
+
     - name: Create ntfy-webhook user
       user:
         name: ntfy-webhook
@@ -203,6 +209,8 @@
         shell: /usr/sbin/nologin
         home: /var/lib/ntfy-webhook
         create_home: no
+        groups: [etcd-client]
+        append: yes
 
     - name: Create ntfy webhook systemd service
       copy:
@@ -217,6 +225,7 @@
           Type=simple
           User=ntfy-webhook
           Group=ntfy-webhook
+          EnvironmentFile=-/etc/ycluster/etcd-client.env
           ExecStart=/usr/bin/python3 /usr/local/bin/ntfy-webhook.py
           Restart=always
           RestartSec=5

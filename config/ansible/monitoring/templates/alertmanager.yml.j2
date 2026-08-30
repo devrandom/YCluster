@@ -40,6 +40,9 @@ route:
       receiver: 'warning-alerts'
       repeat_interval: 2h
 
+# Keep the receiver local: Alertmanager HA deliberately races for availability,
+# so cross-host suppression belongs in the webhook (which dedupes via etcd when
+# available and fails open when it does not).
 receivers:
   - name: 'default'
     # Default receiver - can be configured later

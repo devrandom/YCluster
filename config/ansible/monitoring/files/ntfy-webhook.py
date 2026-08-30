@@ -4,6 +4,7 @@ Alertmanager webhook handler for ntfy notifications.
 Receives Alertmanager webhook payloads and forwards them to ntfy with proper formatting.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -14,6 +15,11 @@ from collections import deque
 import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
+
+try:
+    import etcd3
+except ImportError:
+    etcd3 = None
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +44,75 @@ THROTTLE_WINDOW_SECONDS = int(os.environ.get("NTFY_THROTTLE_WINDOW_SECONDS", "60
 _lock = threading.Lock()
 _last_sent_at = {}
 _send_history = deque()
+_shared_client = None
+
+
+def _new_shared_client():
+    """Return an etcd client, or None when shared dedup is unavailable."""
+    if etcd3 is None or os.environ.get("NTFY_SHARED_DEDUP", "1") == "0":
+        return None
+
+    hosts = [
+        value.strip()
+        for value in os.environ.get("ETCD_HOSTS", "localhost:2379").split(",")
+        if value.strip()
+    ]
+    kwargs = {}
+    for env_name, kwarg_name in [
+        ("ETCD_CACERT", "ca_cert"),
+        ("ETCD_CERT", "cert_cert"),
+        ("ETCD_KEY", "cert_key"),
+    ]:
+        value = os.environ.get(env_name)
+        if value:
+            kwargs[kwarg_name] = value
+
+    for host_port in hosts:
+        host, _, port = host_port.rpartition(":")
+        try:
+            client = etcd3.client(
+                host=host,
+                port=int(port),
+                timeout=1,
+                **kwargs,
+            )
+            # gRPC channels connect lazily, so construction alone proves
+            # nothing; probe the endpoint so failover can try the next peer.
+            client.status()
+            return client
+        except Exception:
+            continue
+    return None
+
+
+def _shared_claim(key):
+    """Atomically claim a cross-host send.
+
+    Returns False when another webhook host already claimed the key. On any
+    etcd failure it returns True so delivery remains available; callers may
+    produce a duplicate rather than miss an alert.
+    """
+    global _shared_client
+    if etcd3 is None or os.environ.get("NTFY_SHARED_DEDUP", "1") == "0":
+        return True
+
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    etcd_key = f"/monitoring/ntfy/notifications/{digest}"
+
+    client = _shared_client
+    if client is None:
+        client = _new_shared_client()
+        if client is None:
+            return True
+        _shared_client = client
+
+    try:
+        lease = client.lease(DEDUP_WINDOW_SECONDS)
+        return client.put_if_not_exists(etcd_key, "1", lease=lease)
+    except Exception as e:
+        _shared_client = None
+        logger.warning(f"Shared dedup unavailable; failing open: {e}")
+        return True
 
 
 def alert_key(alert):
@@ -224,6 +299,10 @@ def webhook():
             if decision == 'throttle':
                 throttled += 1
                 logger.warning(f"Throttled notification for alert: {key}")
+                continue
+            if decision == 'send' and not _shared_claim(key):
+                deduped += 1
+                logger.info(f"Deduplicated cross-host notification: {key}")
                 continue
 
             try:
