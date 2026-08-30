@@ -29,8 +29,6 @@ groups:
         for: 1m
         labels:
           severity: critical
-          domain: '{{ $labels.domain }}'
-          instance: '{{ $labels.instance }}'
         annotations:
           summary: "Admin API {{ $labels.instance }} is down"
           description: "The admin API for {{ $labels.instance }} (admin-ping) has been unreachable for more than 1 minute"
@@ -46,8 +44,6 @@ groups:
         for: 1m
         labels:
           severity: critical
-          domain: '{{ $labels.domain }}'
-          instance: '{{ $labels.instance }}'
         annotations:
           summary: "Inference gateway health lost ({{ $labels.instance }})"
           description: "The /healthz inference-gateway check for {{ $labels.instance }} has been failing for more than 1 minute"
@@ -58,8 +54,6 @@ groups:
         for: 5m
         labels:
           severity: warning
-          domain: '{{ $labels.domain }}'
-          instance: '{{ $labels.instance }}'
         annotations:
           summary: "HTTPS domain {{ $labels.instance }} availability below 99%"
           description: "HTTPS domain {{ $labels.instance }} has {{ $value | humanizePercentage }} availability over the past 8 hours (threshold: 99%)"
@@ -70,8 +64,6 @@ groups:
         for: 1h
         labels:
           severity: warning
-          domain: '{{ $labels.domain }}'
-          instance: '{{ $labels.instance }}'
         annotations:
           summary: "HTTPS certificate expiring soon"
           description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
@@ -82,8 +74,6 @@ groups:
         for: 5m
         labels:
           severity: critical
-          domain: '{{ $labels.domain }}'
-          instance: '{{ $labels.instance }}'
         annotations:
           summary: "HTTPS certificate expiring very soon"
           description: "HTTPS certificate for {{ $labels.instance }} expires in {{ $value | humanizeDuration }}"
@@ -97,8 +87,6 @@ groups:
         for: 1m
         labels:
           severity: warning
-          domain: '{{ $labels.domain }}'
-          instance: '{{ $labels.instance }}'
         annotations:
           summary: "HTTPS domain {{ $labels.instance }} returning error status"
           description: "HTTPS domain {{ $labels.instance }} is returning HTTP status code {{ $value }} for more than 2 minutes"
@@ -109,8 +97,6 @@ groups:
         for: 5m
         labels:
           severity: warning
-          domain: '{{ $labels.domain }}'
-          instance: '{{ $labels.instance }}'
         annotations:
           summary: "HTTPS domain {{ $labels.instance }} slow response"
           description: "HTTPS domain {{ $labels.instance }} response time is {{ $value }}s (>10s) for more than 5 minutes"

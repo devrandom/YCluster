@@ -9,5 +9,4 @@ ExecStart=/usr/bin/prometheus-alertmanager \
   --cluster.peer={{ hostvars[host]['ansible_host'] }}:9094 \
 {% endif %}
 {% endfor %}
-  --cluster.settle-timeout=30s \
-  --log.level=debug
+  --cluster.settle-timeout=30s
