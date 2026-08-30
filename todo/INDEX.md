@@ -60,6 +60,7 @@ DR, backups, node lifecycle, scaling/capacity.
 ## Incus
 - **[HIGH]** [Incus VM passthrough `data`: CIFS → NFSv4](incus/vm-data-cifs-to-nfs.md) — CIFS+netfs writeback deadlock wedged a GPU VM's `data` disk (D-state, needs a host reboot). Move the whole `/near1/vm` subtree to a single NFSv4 mount.
 - **[HIGH]** [Incus storage dir→zfs](incus/incus-storage-dir-to-zfs.md) — runaway-guest root-fs fill; caused the nv3 GPU/driver-loss cascade.
+- **[HIGH]** [`vm launch` memory preflight](incus/vm-launch-memory-preflight.md) — GPU VMs pin all guest RAM; launching without enough free host memory wedged a GPU host. Fail the launch when `MemAvailable` can't cover the requested RAM.
 - [Build incus VM images once, copy between hosts](incus/incus-vm-images-build-once.md)
 - [Dev-cluster system tests — incus DNS](incus/dev-cluster-system-tests-dns.md)
 - [Dev cluster: browsable external/TLS path](incus/dev-cluster-browsable-tls.md)
