@@ -10,8 +10,15 @@
 # speculative decode, glm45/glm47 parsers, multimodal. Measured 143 t/s (low
 # effort) / 208 t/s (max effort) single-stream.
 #
+# --mem-fraction-static is set below the original 0xSero recipe value (0.90 ->
+# 0.85) to hold back a ~5% cushion of each 96 GiB card for multimodal (vision)
+# workspace. At 0.90 the slices ran at ~93-94 GiB / 97.9 GiB and a ~4 MB image
+# upload OOM'd the CUDA allocator (only ~28 MiB free on the card). Trade-off:
+# a smaller fraction shrinks the KV pool / context capacity, so re-qualify
+# performance and concurrency before raising it back toward 0.90.
+#
 # Tunable knobs (env-var overrides):
-#   IMAGE / MODEL_HOST / CONTAINER / PORT / SERVED_NAME / GPUS / MEM / CACHE_DIR
+#   IMAGE / MODEL_HOST / CONTAINER / PORT / SERVED_NAME / GPUS / MEM / CACHE_DIR / MEM_FRACTION
 #
 # Managed by admin/install-glm53-flash.yml — edit there.
 # See docs/inference/glm-5.3-flash-deploy-2026-08.md.
@@ -52,6 +59,10 @@ CACHE_DIR="${CACHE_DIR:-{{ glm53_cache_dir | default('/home/dev/.cache/glm53-sgl
 # runaway warmup from OOM-killing the whole host (a co-resident load once
 # panicked the node).
 MEM="${MEM:-80g}"
+# Fraction of each GPU's VRAM SGLang reserves for the weights + KV cache pool.
+# See the headroom note above; tunable via MEM_FRACTION or the playbook var
+# glm53_mem_fraction_static.
+MEM_FRACTION="${MEM_FRACTION:-{{ glm53_mem_fraction_static }}}"
 
 # pre-flight (no root needed)
 podman image exists "$IMAGE" \
@@ -116,7 +127,7 @@ podman run -d --name "$CONTAINER" \
     --chunked-prefill-size 8192 \
     --max-prefill-tokens 8192 \
     --max-running-requests 8 \
-    --mem-fraction-static 0.90 \
+    --mem-fraction-static "$MEM_FRACTION" \
     --cuda-graph-max-bs-decode 8 \
     --speculative-algorithm NEXTN \
     --speculative-num-steps 5 \

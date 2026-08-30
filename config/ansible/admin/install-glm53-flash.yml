@@ -64,6 +64,13 @@
     glm53_revision: "9e0d74e3cef17f634e84fb8e2223707e02616290"
     glm53_model_dir: "/home/dev/models/GLM-5.3-Flash-NVFP4"
     glm53_served_name: "glm-5.3-flash"
+    # Fraction of each GPU's VRAM SGLang reserves for the weights + KV cache
+    # pool. Held at 0.85 (below the 0xSero recipe default 0.90) to keep a ~5%
+    # per-card cushion for multimodal (vision) workspace: at 0.90 slices ran at
+    # ~93-94 GiB / 97.9 GiB and a ~4 MB image upload OOM'd the CUDA allocator.
+    # Smaller fraction => smaller KV pool / context capacity — re-qualify
+    # performance and concurrency before raising this back toward 0.90.
+    glm53_mem_fraction_static: 0.85
     # Port the container listens on inside the host (--network=host, so the
     # host's port is the API endpoint reachable at http://<host>.xc:<port>).
     # 9212=b12x, 9216=DS4, 9217=DS4-infernal, 9218=GLM-5.3.

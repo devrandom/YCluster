@@ -38,6 +38,9 @@ ENTRYPOINT ["python3"]
 # Validated 2026-08-26: flashinfer_cutlass MoE runner (SM120-native CUTLASS fp4 kernels).
 # flashinfer_cutedsl CANNOT be substituted here: FlashInfer's CuteDSL MoE hard-codes
 # supported_major_versions=[10] (datacenter Blackwell tcgen05), these cards are major 12.
+# --mem-fraction-static is 0.85 (not the 0xSero default 0.90) to keep a ~5% per-card
+# cushion for multimodal (vision) workspace; at 0.90 a ~4 MB image upload OOM'd the CUDA
+# allocator. The deployed start script overrides this CMD, so keep the value in sync there.
 CMD ["-m", "sglang.launch_server", \
      "--model-path", "/model", \
      "--served-model-name", "glm-5.3-flash", \
@@ -55,7 +58,7 @@ CMD ["-m", "sglang.launch_server", \
      "--chunked-prefill-size", "8192", \
      "--max-prefill-tokens", "8192", \
      "--max-running-requests", "8", \
-     "--mem-fraction-static", "0.90", \
+     "--mem-fraction-static", "0.85", \
      "--cuda-graph-max-bs-decode", "8", \
      "--speculative-algorithm", "NEXTN", \
      "--speculative-num-steps", "5", \
