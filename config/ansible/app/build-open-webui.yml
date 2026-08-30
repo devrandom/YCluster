@@ -63,6 +63,12 @@
             dest: "{{ build_dir }}/open-webui-home-icon.patch"
             mode: '0644'
 
+        - name: Copy Open WebUI friendly error-page frontend patch
+          copy:
+            src: files/open-webui-error-page.patch
+            dest: "{{ build_dir }}/open-webui-error-page.patch"
+            mode: '0644'
+
         # Applies a Svelte change (adds a Y icon in the chat navbar top-right that
         # links to the apex-domain home) to the checked-out frontend before the
         # docker build. Idempotent: git apply --check fails once applied, so stage
@@ -71,6 +77,34 @@
           shell: |
             if git apply --check ../open-webui-home-icon.patch 2>/dev/null; then
               git apply ../open-webui-home-icon.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
+        # Adds status/message context plus "Back to home" and "Try again" actions
+        # to the SvelteKit error boundary, mirroring the nginx friendly-50x page.
+        # Same idempotent apply pattern as the home-icon patch.
+        - name: Apply Open WebUI friendly error-page frontend patch
+          shell: |
+            if git apply --check ../open-webui-error-page.patch 2>/dev/null; then
+              git apply ../open-webui-error-page.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
+        - name: Copy Open WebUI smoke-error route patch
+          copy:
+            src: files/open-webui-smoke-error.patch
+            dest: "{{ build_dir }}/open-webui-smoke-error.patch"
+            mode: '0644'
+
+        # Adds a /__smoke_app_error route that deliberately throws 500 from its
+        # load function, exercising the friendly error boundary end-to-end
+        # (parity with nginx /__smoke_50x). Same idempotent apply pattern.
+        - name: Apply Open WebUI smoke-error route patch
+          shell: |
+            if git apply --check ../open-webui-smoke-error.patch 2>/dev/null; then
+              git apply ../open-webui-smoke-error.patch
             fi
           args:
             chdir: "{{ build_dir }}/open-webui"

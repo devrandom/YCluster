@@ -1,0 +1,13 @@
+diff --git a/src/routes/__smoke_app_error/+page.ts b/src/routes/__smoke_app_error/+page.ts
+new file mode 100644
+index 0000000..b8ee02d
+--- /dev/null
++++ b/src/routes/__smoke_app_error/+page.ts
+@@ -0,0 +1,7 @@
++import { error } from '@sveltejs/kit';
++
++// Deliberately triggers the SvelteKit error boundary to exercise the friendly
++// error page end-to-end. Mirrors nginx's /__smoke_50x operator smoke endpoint.
++export function load() {
++	error(500, 'Internal Error');
++}

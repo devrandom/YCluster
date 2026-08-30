@@ -1,0 +1,36 @@
+diff --git a/src/routes/+error.svelte b/src/routes/+error.svelte
+index 9c26db3..c401514 100644
+--- a/src/routes/+error.svelte
++++ b/src/routes/+error.svelte
+@@ -4,8 +4,29 @@
+ 
+ <div class=" bg-white dark:bg-gray-800 min-h-screen">
+ 	<div class=" flex h-full">
+-		<div class="m-auto my-10 dark:text-gray-300 text-3xl font-normal">
+-			{$page.status}: {$page.error?.message}
++		<div class="m-auto my-10 text-center">
++			<p class="text-sm font-medium tracking-widest text-gray-400 dark:text-gray-500">
++				{$page.status}
++			</p>
++			<h1 class="mt-2 text-3xl font-normal text-gray-800 dark:text-gray-200">
++				{$page.error?.message ?? 'Something went wrong'}
++			</h1>
++			<p class="mt-3 text-sm text-gray-500 dark:text-gray-400">
++				The server hit a temporary hiccup and couldn't finish loading this page. It usually clears
++				up if you try again.
++			</p>
++			<div class="mt-8 flex items-center justify-center gap-3">
++				<a
++					href="/"
++					class="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700"
++					>Back to home</a
++				>
++				<button
++					type="button"
++					class="rounded-lg border border-gray-300 bg-white px-5 py-2.5 text-sm font-semibold text-gray-800 transition hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
++					on:click={() => window.location.reload()}>Try again</button
++				>
++			</div>
+ 		</div>
+ 	</div>
+ </div>
