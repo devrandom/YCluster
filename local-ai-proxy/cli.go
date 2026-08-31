@@ -597,7 +597,7 @@ func mustEtcdClient(cfg *EtcdConfig) *clientv3.Client {
 }
 
 func runACL(args []string, configPath string) {
-if len(args) == 0 {
+	if len(args) == 0 {
 		fatalUsage("acl <ls|set>")
 	}
 	subcmd := args[0]
@@ -674,88 +674,71 @@ func aclSet(args []string, configPath string) {
 	if model == "" {
 		fatalUsage("acl set <model> [+-user:name|+-group:name...]")
 	}
-	// No tokens means clear.
-	if len(tokens) == 0 {
-		cfg := mustLoadConfig(configPath)
-		if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
-			fatal("CLI requires etcd-backed config")
-		}
-		client := mustEtcdClient(cfg.Etcd)
-		defer client.Close()
-		key := cfg.Etcd.Prefix + model
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		resp, err := client.Get(ctx, key)
-		if err != nil {
-			fatal("etcd get %s: %v", key, err)
-		}
-		var v etcdModelValue
-		if len(resp.Kvs) > 0 {
-			if err := json.Unmarshal(resp.Kvs[0].Value, &v); err != nil {
-				fatal("existing value at %s is not JSON: %v", key, err)
-			}
-		} else {
-			fatal("no such model: %s", model)
-		}
-		v.ACL = nil
-		buf, err := json.Marshal(v)
-		if err != nil {
-			fatal("marshal: %v", err)
-		}
-		if _, err := client.Put(ctx, key, string(buf)); err != nil {
-			fatal("etcd put %s: %v", key, err)
-		}
-		fmt.Printf("ACL cleared for %s\n", model)
-		return
-	}
+
 	entries, err := ParseACLEntries(tokens)
 	if err != nil {
 		fatal("%v", err)
 	}
-	cfg := mustLoadConfig(configPath)
-	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
-		fatal("CLI requires etcd-backed config")
-	}
-	client := mustEtcdClient(cfg.Etcd)
+
+	client, prefix := mustEtcdForCLI(configPath)
 	defer client.Close()
-	key := cfg.Etcd.Prefix + model
+	key := prefix + model
+	value := mustGetEtcdModelValue(client, key, model)
+
+	if len(tokens) == 0 {
+		value.ACL = nil
+	} else {
+		value.ACL = &ACLModelRule{Entries: entries}
+	}
+	mustPutEtcdModelValue(client, key, value)
+	printACLSet(model, value.ACL)
+}
+
+// mustGetEtcdModelValue reads one model mapping and turns a missing key or
+// malformed JSON into the CLI's usual fatal error.
+func mustGetEtcdModelValue(client *clientv3.Client, key, model string) etcdModelValue {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	resp, err := client.Get(ctx, key)
 	if err != nil {
 		fatal("etcd get %s: %v", key, err)
 	}
-	var v etcdModelValue
-	if len(resp.Kvs) > 0 {
-		if err := json.Unmarshal(resp.Kvs[0].Value, &v); err != nil {
-			fatal("existing value at %s is not JSON: %v", key, err)
-		}
-	} else {
+	if len(resp.Kvs) == 0 {
 		fatal("no such model: %s", model)
 	}
-	if len(entries) == 0 {
-		v.ACL = nil
-	} else {
-		v.ACL = &ACLModelRule{Entries: entries}
+
+	var value etcdModelValue
+	if err := json.Unmarshal(resp.Kvs[0].Value, &value); err != nil {
+		fatal("existing value at %s is not JSON: %v", key, err)
 	}
-	buf, err := json.Marshal(v)
+	return value
+}
+
+func mustPutEtcdModelValue(client *clientv3.Client, key string, value etcdModelValue) {
+	buf, err := json.Marshal(value)
 	if err != nil {
 		fatal("marshal: %v", err)
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if _, err := client.Put(ctx, key, string(buf)); err != nil {
 		fatal("etcd put %s: %v", key, err)
 	}
-	if v.ACL == nil {
+}
+
+func printACLSet(model string, rule *ACLModelRule) {
+	if rule == nil {
 		fmt.Printf("ACL cleared for %s\n", model)
-	} else {
-		fmt.Printf("ACL updated for %s:\n", model)
-		for _, entry := range v.ACL.Entries {
-			prefix := "+"
-			if entry.Decision == ACLDeny {
-				prefix = "-"
-			}
-			fmt.Printf("  %s%s\n", prefix, entry.Subject)
+		return
+	}
+	fmt.Printf("ACL updated for %s:\n", model)
+	for _, entry := range rule.Entries {
+		prefix := "+"
+		if entry.Decision == ACLDeny {
+			prefix = "-"
 		}
+		fmt.Printf("  %s%s\n", prefix, entry.Subject)
 	}
 }
 
