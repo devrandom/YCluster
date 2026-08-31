@@ -384,6 +384,11 @@ def load_state():
             s = json.load(f)
     except (OSError, ValueError):
         return new_state()
+    return _normalized_state(s)
+
+
+def _normalized_state(s):
+    """Merge persisted state over defaults, filling version gaps."""
     base = new_state()
     if isinstance(s, dict):
         base.update({k: s[k] for k in base if k in s and k != "counts"})
