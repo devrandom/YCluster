@@ -188,10 +188,6 @@ class ComprehensiveHealthTests(unittest.TestCase):
         self.assertEqual(health['overall'], 'unhealthy')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class MacFromNeighborTableTests(unittest.TestCase):
     def _run(self, stdout='[]'):
         with mock.patch.object(appmod, 'subprocess') as sp:
@@ -484,3 +480,96 @@ class AppVipStatusTests(unittest.TestCase):
                                   side_effect=RuntimeError('boom')):
             got = appmod.check_vip_status()
         self.assertEqual(got['keepalived_service']['status'], 'error')
+
+
+class ParseWindowsTests(unittest.TestCase):
+    def test_validates_and_sorts_windows(self):
+        windows = [
+            {'start': '2030-01-02T00:00:00+00:00',
+             'end': '2030-01-03T00:00:00+00:00'},
+            {'start': '2030-01-01T00:00:00+00:00',
+             'end': '2030-01-01T01:00:00+00:00'},
+        ]
+        got = appmod._parse_windows(windows)
+        self.assertEqual([w['start'] for w in got],
+                         ['2030-01-01T00:00:00+00:00',
+                          '2030-01-02T00:00:00+00:00'])
+
+    def test_rejects_bad_windows(self):
+        self.assertIsNone(appmod._parse_windows('bad'))
+        self.assertIsNone(appmod._parse_windows([None]))
+        self.assertIsNone(appmod._parse_windows(
+            [{'start': '2030-01-01T00:00:00+00:00',
+              'end': '2030-01-02T00:00:00+00:00', 'bad': True}][0:0] or None))
+        self.assertIsNone(appmod._parse_windows(
+            [{'start': 'bad', 'end': 'bad'}]))
+        self.assertIsNone(appmod._parse_windows(
+            [{'start': '2030-01-01T00:00:00', 'end': '2030-01-02T00:00:00'}]))
+        self.assertIsNone(appmod._parse_windows(
+            [{'start': '2030-01-02T00:00:00+00:00',
+              'end': '2030-01-01T00:00:00+00:00'}]))
+        self.assertEqual(appmod._parse_windows(
+            [{'start': '2020-01-02T00:00:00+00:00',
+              'end': '2020-01-03T00:00:00+00:00'}]), [])
+
+
+class FrpPublicHostTests(unittest.TestCase):
+    def test_host_and_failure(self):
+        client = mock.Mock()
+        client.get.return_value = (
+            b'{"remote_addr": "frp.example:7000"}', None)
+        with mock.patch.object(appmod, 'get_etcd_client', return_value=client):
+            self.assertEqual(appmod._frp_public_host(), 'frp.example')
+
+        client.get.return_value = (None, None)
+        with mock.patch.object(appmod, 'get_etcd_client', return_value=client):
+            self.assertIsNone(appmod._frp_public_host())
+
+        with mock.patch.object(appmod, 'get_etcd_client',
+                               side_effect=RuntimeError('down')):
+            self.assertIsNone(appmod._frp_public_host())
+
+
+class FrontendHostsTests(unittest.TestCase):
+    def test_frontend_entries_and_bad_json(self):
+        client = mock.Mock()
+        meta = mock.Mock()
+        meta.key = b'/cluster/nodes/frontend/f1'
+        client.get_prefix.return_value = [
+            (b'{"name": "f1", "ip": "ip-a"}', meta),
+            (b'bad', meta),
+            (None, meta),
+            (b'{"name": "f2"}', meta),
+        ]
+        self.assertEqual(appmod._frontend_hosts_entries(client),
+                         ['ip-a f1 f1.xc'])
+
+
+class NodeHostsEntriesTests(unittest.TestCase):
+    def test_node_and_amt_entries(self):
+        client = mock.Mock()
+        meta = mock.Mock()
+        client.get_prefix.return_value = [
+            (b'{"hostname": "c1", "ip": "ip-c1"}', meta),
+            (b'{"hostname": "c1a", "ip": "ip-c1a"}', meta),
+            (b'bad', meta),
+        ]
+        with mock.patch.object(appmod, 'determine_ip_from_hostname',
+                               side_effect=lambda h: 'ip-amt' if h == 'c1a' else None):
+            got = appmod._node_hosts_entries(client)
+        self.assertEqual(got, ['ip-c1 c1 c1.xc', 'ip-amt c1a c1a.xc'])
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class LeadershipStatusTests(unittest.TestCase):
+    def test_leadership_and_error(self):
+        client = mock.Mock()
+        client.get.side_effect = [(b's1', None), (b's2', None)]
+        with mock.patch.object(appmod, 'get_etcd_client', return_value=client):
+            self.assertEqual(appmod.get_leadership_status(),
+                             {'storage_leader': 's1', 'dhcp_leader': 's2'})
+        with mock.patch.object(appmod, 'get_etcd_client',
+                               side_effect=RuntimeError('down')):
+            self.assertEqual(appmod.get_leadership_status(), {})

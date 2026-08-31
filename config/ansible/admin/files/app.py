@@ -58,6 +58,7 @@ from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
 
 import app_inventory
+import app_schedule
 from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
@@ -2806,165 +2807,20 @@ def vm_schedule_data():
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
 
-    live, pools = {}, {}
-    for host, snap in states.items():
-        if isinstance(snap.get('gpu_pool'), int):
-            pools[host] = snap['gpu_pool']
-        for inst in snap.get('instances', []):
-            live[inst['name']] = inst.get('status')
-
+    from ycluster.utils import authentik_manager
+    from app_schedule import live_state, schedule_hosts, schedule_rows
+    live, pools = live_state(states)
     now = datetime.now(UTC)
     commitments = vmm.combine_gpu_commitments(
         vmm.gpu_commitments(registry, desired_all, now),
         vmm.gpu_block_commitments(blocks, now))
+    visible, shown = app_schedule.owner_filters(id, authentik_manager)
 
-    # Managers (non-admins) are project-scoped: they only see VMs owned by
-    # accounts in a project they're authorized for (none by default). Admins
-    # keep the full roster; plain users keep owner-only scoping below. The
-    # per-owner project lookup is cached so we don't hit the IdP per VM.
-    managed_projects = None
-    owner_project = {}
-    if id.is_manager and not id.is_admin:
-        from ycluster.utils import authentik_manager
-        managed_projects = set(authentik_manager.manager_projects(id.email)
-                               if id.email else [])
-
-        def _owner_visible(owner):
-            if owner not in owner_project:
-                try:
-                    project = (authentik_manager.user_project(owner)
-                               if owner else '')
-                except Exception:
-                    # No IdP account (orphan VM owner) or transient IdP
-                    # failure: the owner can't be attributed to a project,
-                    # so fail closed — out of scope for a manager instead of
-                    # 500ing the whole page.
-                    project = ''
-                owner_project[owner] = project
-            return owner_project[owner] in managed_projects
-    else:
-        def _owner_visible(owner):
-            return True
-
-    def _owner_shown(owner):
-        # Owners are shown to admins everywhere, and to managers only for
-        # VMs inside their authorized projects; plain users stay redacted.
-        return id.is_admin or (managed_projects is not None
-                               and _owner_visible(owner))
-
-    rows = []
-    for name, rec in registry.items():
-        # Admins see every VM; managers are project-scoped (see above);
-        # plain users only their own. Manager-scoped data is un-redacted for
-        # in-scope VMs: managers need to see who owns what to answer
-        # questions without acting on it.
-        if not id.is_manager and rec.get('owner') != id.email:
-            continue
-        if not _owner_visible(rec.get('owner')):
-            continue
-        desired = desired_all.get(name)
-        mode = (desired or {}).get('mode', 'unmanaged')
-        status = live.get(name, 'unknown')
-        pending = vmm.pending_state(desired, status, graces.get(name), now)
-        sched_gpus = vmm.desired_gpus(desired, rec.get('gpus') or 0)
-        row = {
-            'vm': name,
-            'owner': rec.get('owner'),
-            'host': rec.get('host'),
-            'gpus': rec.get('gpus'),
-            # GPU count this VM should run under per its desired record
-            # (defaults to all registered); the page's GPU selector starts
-            # here and the acquire hints are computed against it.
-            'sched_gpus': sched_gpus,
-            # Public frp port the host.s jump bastion is exposed on, so
-            # the page can render a ready-to-paste ~/.ssh/config ProxyJump.
-            'port': vmm.bastion_public_port(rec.get('host')),
-            'status': status,
-            'mode': mode,
-            'windows': (desired or {}).get('windows', []),
-            'issue': issues.get(name),
-            'pending': pending,
-            'grace': graces.get(name),
-            # Distinguishes an explicit admin-set 'unmanaged' record (locked
-            # to non-admins) from the no-record default (user-schedulable).
-            'has_desired': desired is not None,
-            # Pre-computed editability: server-side mirror of the rules in
-            # vm_schedule_set so the JS template can disable the dropdown +
-            # Save button without re-deriving them. See _can_edit_vm.
-            'can_edit': _can_edit_vm(id, rec, desired),
-            # True when the VM is locked by an explicit admin-set unmanaged
-            # record. Drives the 'admin-managed' badge — shown to the owner
-            # so they understand why they can't edit (admins / managers see
-            # it too, harmlessly).
-            'admin_locked': desired is not None and desired.get('mode') == 'unmanaged',
-        }
-        # Future windows this VM's registered GPU count can fit, for the
-        # one-click acquire suggestions. Mirror admission control: the VM's
-        # own current commitment is not counted against itself (unmanaged /
-        # on keep holding GPUs until the user actually schedules windows).
-        pool = pools.get(rec.get('host'))
-        if rec.get('type') != 'container' and isinstance(pool, int):
-            host_commits = [c for c in commitments.get(rec.get('host'), [])
-                            if c['vm'] != name]
-            own_windows = [(datetime.fromisoformat(w['start']),
-                            datetime.fromisoformat(w['end']))
-                           for w in _parse_windows(
-                               (desired or {}).get('windows', [])) or []]
-            row['suggestions'] = vmm.gpu_available_windows(
-                host_commits, sched_gpus, pool, now,
-                avoid_windows=own_windows)
-        else:
-            row['suggestions'] = []
-        rows.append(row)
-
-    # Capacity commitments per host, so users can see what's free before
-    # composing a schedule. VM names are shown to everyone (capacity is
-    # shared knowledge); owners to admins everywhere and to managers only
-    # for VMs in their authorized projects (plain users redacted). Plain and
-    # non-admin managers only see hosts that host one of their own (or
-    # in-scope) VMs — other people's hosts/pools aren't their business.
-    # Admins keep the full roster (they answer capacity questions).
-    visible_hosts = {r['host'] for r in rows if r['host']}
-    block_hosts = {b.get('host') for b in blocks.values() if b.get('host')}
-    hosts = []
-    for host in sorted(set(commitments) | set(pools)):
-        if not pools.get(host) and not commitments.get(host):
-            continue          # container hosts: no passthrough pool
-        if not id.is_admin and host not in visible_hosts:
-            # Non-admin managers also keep GPU-block hosts: blocks are
-            # shared admin capacity, not another project's VM ownership.
-            # Plain users stay restricted to their own VMs' hosts.
-            if managed_projects is None or host not in block_hosts:
-                continue
-        hosts.append({
-            'host': host,
-            'pool': pools.get(host),
-            'commitments': [
-                {'vm': c['vm'], 'gpus': c['gpus'], 'mode': c['mode'],
-                 'is_block': c.get('is_block', False),
-                 'owner': c['owner'] if _owner_shown(c['owner']) else None,
-                 'windows': None if c['windows'] is None else
-                     [{'start': s.isoformat(), 'end': e.isoformat()}
-                      for s, e in c['windows']]}
-                for c in commitments.get(host, [])],
-        })
-    # Admin GPU blocks (editable roster). Creation/mutation is admin-only;
-    # managers see them for capacity answers but can't act. Windows are sent
-    # back as iso dicts so the page can continue editing them in place.
-    block_list = []
-    if id.is_manager:
-        for block_id, b in blocks.items():
-            block_list.append({
-                'block': block_id,
-                'host': b.get('host'),
-                'gpus': b.get('gpus'),
-                'mode': b.get('mode'),
-                'reason': b.get('reason'),
-                'created_by': b.get('created_by'),
-                'created_at': b.get('created_at'),
-                'updated_at': b.get('updated_at'),
-                'windows': b.get('windows', []),
-            })
+    rows = schedule_rows(id, registry, desired_all, issues, graces, live,
+                         commitments, pools, now, _can_edit_vm,
+                         _parse_windows, vmm, authentik_manager)
+    hosts = schedule_hosts(id, rows, blocks, commitments, pools, shown)
+    block_list = schedule_blocks(id, blocks)
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
                     'hosts': hosts,
                     'blocks': sorted(block_list, key=lambda b: b['block']),
@@ -2972,12 +2828,26 @@ def vm_schedule_data():
                     'is_admin': id.is_admin,
                     'is_manager': id.is_manager,
                     'grace_seconds': vmm.SCHEDULED_STOP_GRACE_S,
-                    # Everything the page needs to render an ~/.ssh/config
-                    # entry: the public jump host (None → page shows a
-                    # <frp-host> placeholder) plus the well-known users.
                     'ssh': {'frp_host': _frp_public_host(),
                             'jump_user': vmm.BASTION_JUMP_USER,
                             'vm_user': vmm.VM_GUEST_USER}})
+
+
+def schedule_blocks(id, blocks):
+    """Render the admin GPU block roster for managers."""
+    if not id.is_manager:
+        return []
+    return [{
+        'block': block_id,
+        'host': b.get('host'),
+        'gpus': b.get('gpus'),
+        'mode': b.get('mode'),
+        'reason': b.get('reason'),
+        'created_by': b.get('created_by'),
+        'created_at': b.get('created_at'),
+        'updated_at': b.get('updated_at'),
+        'windows': b.get('windows', []),
+    } for block_id, b in blocks.items()]
 
 
 def _frp_public_host():
