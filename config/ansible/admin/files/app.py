@@ -1461,6 +1461,48 @@ def get_time():
     """Get current timestamp for clock synchronization checks"""
     return jsonify({'timestamp': time.time()})
 
+def _mac_from_dhcp_leases(client, client_ip):
+    """Look up a MAC address from DHCP leases in etcd."""
+    for value, _metadata in client.get_prefix('/cluster/dhcp/leases/'):
+        if not value:
+            continue
+        try:
+            lease_data = json.loads(value.decode())
+            if lease_data.get('ip') == client_ip:
+                return lease_data.get('mac')
+        except json.JSONDecodeError:
+            # Skip non-JSON entries in the dhcp prefix
+            continue
+    return None
+
+
+def _mac_from_neighbor_table(client_ip):
+    """Look up a MAC address via `ip --json neigh show`, validating format."""
+    print("fallback to neighbor table", client_ip, file=sys.stderr)
+    try:
+        result = subprocess.run(['ip', '--json', 'neigh', 'show', client_ip],
+                                capture_output=True, text=True, timeout=5)
+        neighbors = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        print(f"neighbor table JSON parse error: {e}", file=sys.stderr)
+        print(f"Raw stdout was: {result.stdout or ''}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"neighbor table lookup failed for {client_ip}: {e}",
+              file=sys.stderr)
+        return None
+
+    for neighbor in neighbors:
+        print(f"neighbor: {neighbor}", file=sys.stderr)
+        if neighbor.get('dst') != client_ip or 'lladdr' not in neighbor:
+            continue
+        mac = neighbor['lladdr']
+        if isinstance(mac, str) and len(mac) == 17 and mac.count(':') == 5:
+            return mac
+        print("MAC validation failed", file=sys.stderr)
+    return None
+
+
 def get_mac_from_ip(client_ip):
     """
     Look up MAC address from IP address using DHCP leases in etcd or neighbor table.
@@ -1468,46 +1510,13 @@ def get_mac_from_ip(client_ip):
     """
     if not client_ip:
         return None
-    
+
     client = get_etcd_client()
+    mac = _mac_from_dhcp_leases(client, client_ip)
+    if mac:
+        return mac
+    return _mac_from_neighbor_table(client_ip)
 
-    # Look through DHCP leases in etcd
-    for value, metadata in client.get_prefix('/cluster/dhcp/leases/'):
-        if value:
-            try:
-                lease_data = json.loads(value.decode())
-                if lease_data.get('ip') == client_ip:
-                    # Return non-normalized MAC (with colons) from lease data
-                    return lease_data.get('mac')
-            except json.JSONDecodeError:
-                # Skip non-JSON entries in the dhcp prefix
-                continue
-
-    print("fallback to neighbor table", client_ip, file=sys.stderr)
-
-    # Fallback to neighbor table lookup using ip --json neigh
-    result = None
-    try:
-        result = subprocess.run(['ip', '--json', 'neigh', 'show', client_ip], 
-                              capture_output=True, text=True, timeout=5)
-        neighbors = json.loads(result.stdout)
-        for i, neighbor in enumerate(neighbors):
-            print(f"neighbor {i}: {neighbor}", file=sys.stderr)
-            if neighbor.get('dst') == client_ip and 'lladdr' in neighbor:
-                mac = neighbor['lladdr']
-                # Validate MAC format (should be xx:xx:xx:xx:xx:xx)
-                if isinstance(mac, str) and len(mac) == 17 and mac.count(':') == 5:
-                    return mac
-                else:
-                    print(f"MAC validation failed", file=sys.stderr)
-    except json.JSONDecodeError as e:
-        print(f"neighbor table JSON parse error: {e}", file=sys.stderr)
-        assert result is not None
-        print(f"Raw stdout was: {result.stdout or ''}", file=sys.stderr)
-    except Exception as e:
-        print(f"neighbor table lookup failed for {client_ip}: {e}", file=sys.stderr)
-
-    return None
 
 @app.route('/autoinstall/meta-data')
 def serve_meta_data():

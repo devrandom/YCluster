@@ -188,3 +188,63 @@ class ComprehensiveHealthTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MacFromNeighborTableTests(unittest.TestCase):
+    def _run(self, stdout='[]'):
+        with mock.patch.object(appmod, 'subprocess') as sp:
+            sp.run.return_value = mock.Mock(returncode=0, stdout=stdout)
+            result = appmod._mac_from_neighbor_table('ip-a')
+        return result
+
+    def test_valid_mac(self):
+        stdout = '[{"dst": "ip-a", "lladdr": "aa:bb:cc:dd:ee:ff"}]'
+        self.assertEqual(self._run(stdout), 'aa:bb:cc:dd:ee:ff')
+
+    def test_invalid_mac_format(self):
+        stdout = '[{"dst": "ip-a", "lladdr": "short"}]'
+        self.assertIsNone(self._run(stdout))
+
+    def test_no_match(self):
+        stdout = '[{"dst": "ip-b", "lladdr": "aa:bb:cc:dd:ee:ff"}]'
+        self.assertIsNone(self._run(stdout))
+
+    def test_bad_json(self):
+        self.assertIsNone(self._run('not json'))
+
+
+class MacFromDHCPLeasesTests(unittest.TestCase):
+    def test_finds_matching_lease(self):
+        import json as _json
+        client = mock.Mock()
+        lease = _json.dumps({'ip': 'ip-a', 'mac': 'aa:bb:cc:dd:ee:ff'})
+        client.get_prefix.return_value = [(lease.encode(), None)]
+        self.assertEqual(appmod._mac_from_dhcp_leases(client, 'ip-a'),
+                         'aa:bb:cc:dd:ee:ff')
+
+    def test_no_match(self):
+        import json as _json
+        client = mock.Mock()
+        lease = _json.dumps({'ip': 'ip-b', 'mac': 'aa:bb:cc:dd:ee:ff'})
+        client.get_prefix.return_value = [(lease.encode(), None)]
+        self.assertIsNone(appmod._mac_from_dhcp_leases(client, 'ip-a'))
+
+    def test_invalid_json_skipped(self):
+        client = mock.Mock()
+        client.get_prefix.return_value = [(b'not json', None)]
+        self.assertIsNone(appmod._mac_from_dhcp_leases(client, 'ip-a'))
+
+
+class GetMacFromIPTTests(unittest.TestCase):
+    def test_empty_ip_returns_none(self):
+        with mock.patch.object(appmod, 'get_etcd_client') as _:
+            self.assertIsNone(appmod.get_mac_from_ip(None))
+
+    def test_dhcp_hit_skips_neighbor(self):
+        with mock.patch.object(appmod, 'get_etcd_client'), \
+             mock.patch.object(appmod, '_mac_from_dhcp_leases',
+                               return_value='aa:bb:cc:dd:ee:ff') as dhcp, \
+             mock.patch.object(appmod, '_mac_from_neighbor_table') as neighbor:
+            self.assertEqual(appmod.get_mac_from_ip('ip-a'),
+                             'aa:bb:cc:dd:ee:ff')
+        neighbor.assert_not_called()
