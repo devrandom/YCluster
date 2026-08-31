@@ -237,16 +237,25 @@ def _collect_disks_darwin(facts):
         pass
 
 
+def _gpu_darwin_entry(gpu):
+    """Normalize one system_profiler GPU record, or None when unnamed."""
+    name = gpu.get('sppci_model') or gpu.get('_name')
+    if not name:
+        return None
+    vram = gpu.get('sppci_vram') or gpu.get('_spdisplays_vram')
+    vendor = 'Apple' if 'Apple' in name else gpu.get('sppci_vendor', '')
+    return {'vendor': vendor, 'model': name, 'vram': vram}
+
+
 def _collect_gpus_darwin(facts):
     """GPU list via system_profiler displays data."""
     try:
         r = _run(['system_profiler', 'SPDisplaysDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
         for gpu in data.get('SPDisplaysDataType', []):
-            name = gpu.get('sppci_model') or gpu.get('_name')
-            vram = gpu.get('sppci_vram') or gpu.get('_spdisplays_vram')
-            if name:
-                facts['gpus'].append({'vendor': 'Apple' if 'Apple' in name else gpu.get('sppci_vendor', ''), 'model': name, 'vram': vram})
+            entry = _gpu_darwin_entry(gpu)
+            if entry:
+                facts['gpus'].append(entry)
     except Exception:
         pass
 

@@ -241,3 +241,11 @@ class CollectBMCMacTest(unittest.TestCase):
         with mock.patch.object(inventory, "_load_ipmi_modules"), \
              mock.patch.object(inventory, "_run", side_effect=RuntimeError("boom")):
             self.assertIsNone(inventory._collect_bmc_mac_linux())
+
+class DarwinGpuEntryTest(unittest.TestCase):
+    def test_normalizes_apple_gpu(self):
+        entry = inventory._gpu_darwin_entry({'sppci_model': 'Apple M4', 'sppci_vram': '16 GB'})
+        self.assertEqual(entry, {'vendor': 'Apple', 'model': 'Apple M4', 'vram': '16 GB'})
+
+    def test_requires_name(self):
+        self.assertIsNone(inventory._gpu_darwin_entry({}))
