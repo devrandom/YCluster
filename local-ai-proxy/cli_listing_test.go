@@ -133,3 +133,12 @@ func TestParseAndPrintModelEntries(t *testing.T) {
 		t.Fatalf("expected alpha before beta in output: %q", text)
 	}
 }
+
+func TestEtcdConfigured(t *testing.T) {
+	if etcdConfigured(Config{}) {
+		t.Fatal("empty config: want false")
+	}
+	if !etcdConfigured(Config{Etcd: &EtcdConfig{Prefix: "/p/"}}) {
+		t.Fatal("etcd config: want true")
+	}
+}

@@ -59,9 +59,7 @@ func modelsLs(configPath string, args []string) {
 		fatalUsage("models ls")
 	}
 	cfg := mustLoadConfig(configPath)
-	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
-		fatal("CLI requires etcd-backed config (no etcd section in %s)", configPath)
-	}
+	requireEtcdConfig(cfg, configPath)
 	client := mustEtcdClient(cfg.Etcd)
 	defer client.Close()
 	prefix := cfg.Etcd.Prefix
@@ -79,6 +77,20 @@ func modelsLs(configPath string, args []string) {
 	entries := parseModelEntries(resp.Kvs, prefix)
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 	printModelEntries(entries)
+}
+
+// requireEtcdConfig rejects non-etcd configurations for CLI commands that
+// always need a model prefix.
+func etcdConfigured(cfg Config) bool {
+	return cfg.Etcd != nil && cfg.Etcd.Prefix != ""
+}
+
+// requireEtcdConfig rejects non-etcd configurations for CLI commands that
+// always need a model prefix.
+func requireEtcdConfig(cfg Config, configPath string) {
+	if !etcdConfigured(cfg) {
+		fatal("CLI requires etcd-backed config (no etcd section in %s)", configPath)
+	}
 }
 
 // parseModelEntries converts etcd key-value pairs into sorted model entries,
