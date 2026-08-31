@@ -75,3 +75,50 @@ type errTest struct{ msg string }
 func (e errTest) Error() string { return e.msg }
 
 var errInvalidRequest = errTest{"unknown model: ghost"}
+
+func TestExtractMultipartModel(t *testing.T) {
+	body := "--BOUNDARY\r\n" +
+		"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n" +
+		"Content-Type: audio/wav\r\n" +
+		"\r\n" +
+		"binary-data-here\r\n" +
+		"--BOUNDARY\r\n" +
+		"Content-Disposition: form-data; name=\"model\"\r\n" +
+		"\r\n" +
+		"whisper-1\r\n" +
+		"--BOUNDARY--\r\n"
+	model, err := extractMultipartModel([]byte(body), "BOUNDARY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "whisper-1" {
+		t.Fatalf("expected whisper-1, got %q", model)
+	}
+}
+
+func TestExtractMultipartModelNotFound(t *testing.T) {
+	body := "--BOUNDARY\r\n" +
+		"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n" +
+		"\r\n" +
+		"binary-data\r\n" +
+		"--BOUNDARY--\r\n"
+	model, err := extractMultipartModel([]byte(body), "BOUNDARY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "" {
+		t.Fatalf("expected empty model, got %q", model)
+	}
+}
+
+func TestExtractMultipartModelMalformed(t *testing.T) {
+	// The multipart reader treats non-multipart input as zero parts (EOF),
+	// so the caller's "missing model field" check is the actual guard.
+	model, err := extractMultipartModel([]byte("not a multipart body"), "BOUNDARY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "" {
+		t.Fatalf("expected empty model, got %q", model)
+	}
+}
