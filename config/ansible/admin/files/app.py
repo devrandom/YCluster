@@ -2051,67 +2051,31 @@ def get_host_health(host_ip, timeout=5):
                 'error': str(e), 'exception': type(e).__name__,
                 'elapsed_ms': _elapsed()}
 
+def _vip_status_for_ip(ip):
+    """Run `ip addr` and return one VIP detail dict."""
+    details = {'ip': ip, 'active': False, 'master': None, 'interface': None}
+    try:
+        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', ip],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            interfaces = json.loads(result.stdout)
+            if interfaces:
+                details['active'] = True
+                details['master'] = platform.node()
+                details['interface'] = interfaces[0].get('ifname')
+    except json.JSONDecodeError as e:
+        details['error'] = f'JSON parse error: {str(e)}'
+    except Exception as e:
+        details['error'] = str(e)
+    return details
+
+
 def check_vip_status():
     """Check VIP status using keepalived and ip commands"""
-    gateway_vip_ip = '10.0.0.254'
-    storage_vip_ip = '10.0.0.100'
     vip_status = {
-        'gateway_vip': {
-            'ip': gateway_vip_ip,
-            'active': False,
-            'master': None,
-            'interface': None
-        },
-        'storage_vip': {
-            'ip': storage_vip_ip,
-            'active': False,
-            'master': None,
-            'interface': None
-        }
+        'gateway_vip': _vip_status_for_ip('10.0.0.254'),
+        'storage_vip': _vip_status_for_ip('10.0.0.100'),
     }
-    
-    # Check gateway VIP
-    try:
-        # Use 'ip -j addr show to <vip>' to get JSON output for reliable parsing
-        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', gateway_vip_ip], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            # Parse JSON output - if there's any output, VIP is active on this node
-            interfaces = json.loads(result.stdout)
-            if interfaces:
-                # VIP is assigned to this node
-                vip_status['gateway_vip']['active'] = True
-                vip_status['gateway_vip']['master'] = platform.node()
-                # Get interface name from first interface in results
-                vip_status['gateway_vip']['interface'] = interfaces[0].get('ifname')
-        else:
-            # No output means VIP is not assigned to this node
-            vip_status['gateway_vip']['active'] = False
-            
-    except json.JSONDecodeError as e:
-        vip_status['gateway_vip']['error'] = f'JSON parse error: {str(e)}'
-    except Exception as e:
-        vip_status['gateway_vip']['error'] = str(e)
-    
-    # Check storage VIP
-    try:
-        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', storage_vip_ip], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            interfaces = json.loads(result.stdout)
-            if interfaces:
-                vip_status['storage_vip']['active'] = True
-                vip_status['storage_vip']['master'] = platform.node()
-                vip_status['storage_vip']['interface'] = interfaces[0].get('ifname')
-        else:
-            vip_status['storage_vip']['active'] = False
-            
-    except json.JSONDecodeError as e:
-        vip_status['storage_vip']['error'] = f'JSON parse error: {str(e)}'
-    except Exception as e:
-        vip_status['storage_vip']['error'] = str(e)
-    
-    # Check keepalived service status
     try:
         keepalived_running = check_service_status('keepalived')
         vip_status['keepalived_service'] = {
@@ -2124,8 +2088,8 @@ def check_vip_status():
             'status': 'error',
             'error': str(e)
         }
-    
     return vip_status
+
 
 def get_cluster_vip_status(host_health):
     """Get VIP status across all cluster nodes from existing health data"""

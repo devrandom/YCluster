@@ -463,3 +463,24 @@ class UsersActionValidationTests(unittest.TestCase):
                 json={'action': 'unknown', 'email': 'target-user'})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json(), {'error': 'unknown action'})
+
+
+class AppVipStatusTests(unittest.TestCase):
+    def test_vip_status_for_ip(self):
+        results = [
+            mock.Mock(returncode=0, stdout='[{"ifname":"eth0"}]', stderr=''),
+            mock.Mock(returncode=1, stdout='', stderr=''),
+        ]
+        with mock.patch.object(appmod.subprocess, 'run', side_effect=results):
+            active = appmod._vip_status_for_ip('vip-a')
+            inactive = appmod._vip_status_for_ip('vip-b')
+        self.assertTrue(active['active'])
+        self.assertEqual(active['interface'], 'eth0')
+        self.assertFalse(inactive['active'])
+
+    def test_vip_status_service_error(self):
+        with mock.patch.object(appmod, '_vip_status_for_ip', return_value={}), \
+                mock.patch.object(appmod, 'check_service_status',
+                                  side_effect=RuntimeError('boom')):
+            got = appmod.check_vip_status()
+        self.assertEqual(got['keepalived_service']['status'], 'error')
