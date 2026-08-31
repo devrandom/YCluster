@@ -98,6 +98,132 @@ class InventoryModule(BaseInventoryPlugin):
             tls_kwargs['cert_key'] = key
         return hosts, tls_kwargs
 
+    def _connect(self, etcd3, hosts, tls_kwargs):
+        """Try each configured etcd host, returning the first usable client."""
+        grpc_options = [('grpc.enable_http_proxy', 0)]
+        for host_port in hosts:
+            try:
+                host, port = host_port.split(':')
+                client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options, **tls_kwargs)
+                client.status()
+                return client
+            except Exception as e:
+                self.display.warning(f"etcd inventory: {host_port} unreachable: {e}")
+        return None
+
+    def _create_groups(self):
+        """Create the static group structure and parent/child links."""
+        for group in ('storage', 'compute', 'core', 'etcd', 'frontend', 'nas',
+                      'nvidia', 'adhoc', 'all_nodes', 'managed'):
+            self.inventory.add_group(group)
+        self.inventory.add_child('compute', 'nvidia')
+        for child in ('storage', 'compute', 'adhoc', 'nas'):
+            self.inventory.add_child('managed', child)
+
+    def _etcd_members(self, client):
+        """Return the set of live etcd member IPs, or an empty set on failure."""
+        members = set()
+        try:
+            for member in client.members:
+                for url in member.peer_urls:
+                    members.add(url.split('://')[1].split(':')[0])
+        except Exception as e:
+            self.display.warning(f"Failed to enumerate etcd members: {e}")
+        return members
+
+    def _warn_membership_drift(self, etcd_members):
+        """Warn when live etcd membership differs from the static group."""
+        static = self.inventory.groups.get('etcd')
+        if not etcd_members or not static:
+            return
+        static_ips = {h.vars.get('ansible_host') for h in static.get_hosts()}
+        static_ips.discard(None)
+        if static_ips and static_ips != etcd_members:
+            self.display.warning(
+                f"etcd inventory: live etcd membership {sorted(etcd_members)} "
+                f"differs from the static etcd group {sorted(static_ips)} — "
+                f"update the static quorum definition (or investigate the cluster)")
+
+    def _storage_leader(self, client):
+        """Read the storage leader hostname from etcd, or None."""
+        value, _ = client.get('/cluster/leader/app')
+        if value:
+            leader = value.decode().strip()
+            self.display.vvv(f"Storage leader found: {leader}")
+            return leader
+        self.display.vvv("No storage leader found in etcd")
+        return None
+
+    def _add_allocation(self, inventory, value, leader_hostname, etcd_members):
+        """Add one node allocation to the inventory."""
+        try:
+            allocation = json.loads(value.decode())
+            hostname = allocation['hostname']
+            ip_address = allocation['ip']
+            node_type = allocation['type']
+            mac_address = allocation['mac']
+
+            # Skip AMT aliases and unprovisioned DHCP/disabled nodes.
+            if hostname.endswith('a') or hostname.startswith('dhcp-') \
+                    or allocation.get('disabled'):
+                return
+        except Exception as e:
+            self.display.warning(f"Failed to parse allocation: {e}")
+            return
+
+        self._add_allocation_host(hostname, ip_address, node_type, mac_address,
+                                  leader_hostname, etcd_members)
+
+    def _add_allocation_host(self, hostname, ip_address, node_type,
+                             mac_address, leader_hostname, etcd_members):
+        self.inventory.add_host(hostname)
+        self.inventory.set_variable(hostname, 'ansible_host', ip_address)
+        self.inventory.set_variable(hostname, 'mac_address', mac_address)
+        self.inventory.set_variable(hostname, 'node_type', node_type)
+        self.inventory.set_variable(hostname, 'storage_leader',
+                                    hostname == leader_hostname)
+        self.inventory.add_child('all_nodes', hostname)
+        self._add_type_group(node_type, hostname)
+        if re.fullmatch(r's\d+', hostname):
+            self.inventory.add_child('core', hostname)
+        if ip_address in etcd_members:
+            self.inventory.add_child('etcd', hostname)
+
+    def _add_type_group(self, node_type, hostname):
+        """Add a node to its type-specific group, creating it when needed."""
+        if node_type == 'macos' and not self.inventory.groups.get('macos'):
+            self.inventory.add_group('macos')
+        groups = {'storage': 'storage', 'compute': 'compute', 'macos': 'macos',
+                  'nas': 'nas', 'nvidia': 'nvidia', 'adhoc': 'adhoc'}
+        group = groups.get(node_type, 'other')
+        if group == 'other' and not self.inventory.groups.get('other'):
+            self.inventory.add_group('other')
+        self.inventory.add_child(group, hostname)
+
+    def _add_frontends(self, client, prefix):
+        """Add frontend nodes from etcd."""
+        for value, metadata in client.get_prefix(prefix):
+            if value:
+                self._add_frontend(value)
+
+    def _add_frontend(self, value):
+        try:
+            node = json.loads(value.decode())
+            name = node.get('name')
+            address = node.get('ip') or node.get('hostname')
+            if not name or not address:
+                return
+            self.inventory.add_host(name)
+            self.inventory.set_variable(name, 'ansible_host', address)
+            self.inventory.set_variable(name, 'node_type', 'frontend')
+            for key, val in node.items():
+                if key not in ('name', 'ip', 'hostname'):
+                    self.inventory.set_variable(name, key, val)
+            self.inventory.set_variable(name, 'storage_leader', False)
+            self.inventory.add_child('frontend', name)
+        except Exception as e:
+            self.display.warning(f"Failed to parse frontend node: {e}")
+
     def parse(self, inventory, loader, path, cache=True):
         """Parse the inventory file and populate the inventory object"""
         try:
@@ -105,202 +231,24 @@ class InventoryModule(BaseInventoryPlugin):
         except ImportError:
             self.display.warning("etcd3 module is required for etcd_nodes inventory plugin; skipping etcd inventory")
             return
-            
+
         super(InventoryModule, self).parse(inventory, loader, path, cache)
-
-        # Read configuration
         config = self._read_config_data(path)
-
         prefix = config.get('prefix', '/cluster/nodes')
         etcd_hosts, tls_kwargs = self._resolve_etcd_connection(config)
 
-        # Connect to etcd
-        etcd_client = None
-        # Disable HTTP proxy for etcd3 client, since they are on this subnet.  grpcio version 1.51 does not
-        # support CIDR notation in the `no_proxy` environment variable.
-        grpc_options = [('grpc.enable_http_proxy', 0)]
-
-        for host_port in etcd_hosts:
-            try:
-                host, port = host_port.split(':')
-                # tls_kwargs (ca_cert/cert_cert/cert_key) is empty until the
-                # cluster is on mTLS; when set, etcd3 connects over TLS.
-                etcd_client = etcd3.client(host=host, port=int(port), grpc_options=grpc_options, **tls_kwargs)
-                etcd_client.status()  # Test connection
-                break
-            except Exception as e:
-                # A client whose status() failed is not usable — clear it so
-                # the all-hosts-down check below doesn't pass a broken client.
-                etcd_client = None
-                self.display.warning(f"etcd inventory: {host_port} unreachable: {e}")
-                continue
-        
+        etcd_client = self._connect(etcd3, etcd_hosts, tls_kwargs)
         if not etcd_client:
             self.display.warning(f"Could not connect to any etcd host: {etcd_hosts}; skipping etcd inventory")
             return
 
-        # Create groups
-        self.inventory.add_group('storage')
-        self.inventory.add_group('compute')
-        self.inventory.add_group('core')
-        self.inventory.add_group('etcd')
-        self.inventory.add_group('frontend')
-        self.inventory.add_group('nas')
-        self.inventory.add_group('nvidia')
-        self.inventory.add_group('adhoc')
-        self.inventory.add_group('all_nodes')
-        # Supergroup for generic Ubuntu cluster nodes that get base config
-        # (locale, chrony, ycluster package, admin-api, etc.)
-        self.inventory.add_group('managed')
+        self._create_groups()
+        etcd_members = self._etcd_members(etcd_client)
+        self._warn_membership_drift(etcd_members)
+        leader_hostname = self._storage_leader(etcd_client)
 
-        # nvidia is a subgroup of compute
-        self.inventory.add_child('compute', 'nvidia')
-
-        # managed = storage + compute (incl. nvidia via compute) + adhoc + nas
-        self.inventory.add_child('managed', 'storage')
-        self.inventory.add_child('managed', 'compute')
-        self.inventory.add_child('managed', 'adhoc')
-        self.inventory.add_child('managed', 'nas')
-
-        # Discover actual etcd members from the cluster
-        etcd_members = set()
-        try:
-            members = etcd_client.members
-            for member in members:
-                # Extract hostname from peer URL (e.g. http://10.0.0.11:2380 -> resolve via inventory later)
-                for url in member.peer_urls:
-                    host = url.split('://')[1].split(':')[0]
-                    etcd_members.add(host)
-        except Exception as e:
-            self.display.warning(f"Failed to enumerate etcd members: {e}")
-
-        # Cross-check live membership against the statically-defined etcd
-        # group (the DR/bootstrap floor from the boot inventory, parsed
-        # before this plugin) and surface drift instead of hiding it.
-        static_etcd = self.inventory.groups.get('etcd')
-        if etcd_members and static_etcd:
-            static_ips = {h.vars.get('ansible_host') for h in static_etcd.get_hosts()}
-            static_ips.discard(None)
-            if static_ips and static_ips != etcd_members:
-                self.display.warning(
-                    f"etcd inventory: live etcd membership {sorted(etcd_members)} "
-                    f"differs from the static etcd group {sorted(static_ips)} — "
-                    f"update the static quorum definition (or investigate the cluster)")
-
-        # Read storage leader from etcd
-        leader_key = '/cluster/leader/app'
-        leader_value, _ = etcd_client.get(leader_key)
-        if leader_value:
-            leader_hostname = leader_value.decode().strip()
-            self.display.vvv(f"Storage leader found: {leader_hostname}")
-        else:
-            leader_hostname = None
-            self.display.vvv("No storage leader found in etcd")
-
-        # The frp token is deliberately NOT injected as an inventory var:
-        # that would let `ansible-inventory --host <frontend>` print the secret
-        # in cleartext during debugging. Both consumers read it from etcd at
-        # task time with no_log instead (app/install-frp-server.yml and
-        # admin/install-vm-bastion.yml).
-
-        # Read allocations from etcd
         for value, metadata in etcd_client.get_prefix(f"{prefix}/by-hostname/"):
             if value:
-                try:
-                    allocation = json.loads(value.decode())
-                    hostname = allocation['hostname']
-                    ip_address = allocation['ip']
-                    node_type = allocation['type']
-                    mac_address = allocation['mac']
-                    
-                    # Skip AMT hosts (hostnames ending with 'a')
-                    if hostname.endswith('a'):
-                        continue
-                    
-                    # Skip DHCP hosts (hostnames starting with 'dhcp-')
-                    if hostname.startswith('dhcp-'):
-                        continue
+                self._add_allocation(inventory, value, leader_hostname, etcd_members)
 
-                    # Skip disabled nodes — they are allocated in etcd but
-                    # not provisioned, so ansible should not target them.
-                    if allocation.get('disabled'):
-                        continue
-
-
-                    # Add host to inventory
-                    self.inventory.add_host(hostname)
-                    
-                    # Set host variables
-                    self.inventory.set_variable(hostname, 'ansible_host', ip_address)
-                    self.inventory.set_variable(hostname, 'mac_address', mac_address)
-                    self.inventory.set_variable(hostname, 'node_type', node_type)
-                    
-                    # Set storage leader flag
-                    if hostname == leader_hostname:
-                        self.inventory.set_variable(hostname, 'storage_leader', True)
-                    else:
-                        self.inventory.set_variable(hostname, 'storage_leader', False)
-                    
-                    # Add to all_nodes group
-                    self.inventory.add_child('all_nodes', hostname)
-                    
-                    # Add to type-specific group
-                    if node_type == 'storage':
-                        self.inventory.add_child('storage', hostname)
-                    elif node_type == 'compute':
-                        self.inventory.add_child('compute', hostname)
-                    elif node_type == 'macos':
-                        if not self.inventory.groups.get('macos'):
-                            self.inventory.add_group('macos')
-                        self.inventory.add_child('macos', hostname)
-                    elif node_type == 'nas':
-                        self.inventory.add_child('nas', hostname)
-                    elif node_type == 'nvidia':
-                        self.inventory.add_child('nvidia', hostname)
-                    elif node_type == 'adhoc':
-                        self.inventory.add_child('adhoc', hostname)
-                    else:
-                        if not self.inventory.groups.get('other'):
-                            self.inventory.add_group('other')
-                        self.inventory.add_child('other', hostname)
-                    
-                    # Add to core group if matches storage naming (s1+)
-                    if re.fullmatch(r's\d+', hostname):
-                        self.inventory.add_child('core', hostname)
-                    
-                    # Add to etcd group if this host is an actual etcd member
-                    if ip_address in etcd_members:
-                        self.inventory.add_child('etcd', hostname)
-                except Exception as e:
-                    self.display.warning(f"Failed to parse allocation: {e}")
-
-        # Read frontend nodes from etcd
-        frontend_prefix = f"{prefix}/frontend"
-        for value, metadata in etcd_client.get_prefix(frontend_prefix):
-            if value:
-                try:
-                    frontend_node = json.loads(value.decode())
-                    name = frontend_node.get('name')
-                    address = frontend_node.get('ip') or frontend_node.get('hostname')
-                    
-                    if name and address:
-                        # Add host to inventory
-                        self.inventory.add_host(name)
-                        
-                        # Set host variables
-                        self.inventory.set_variable(name, 'ansible_host', address)
-                        self.inventory.set_variable(name, 'node_type', 'frontend')
-                        
-                        # Add any additional variables from etcd
-                        for key, val in frontend_node.items():
-                            if key not in ['name', 'ip', 'hostname']:
-                                self.inventory.set_variable(name, key, val)
-                        
-                        # Set storage leader flag
-                        self.inventory.set_variable(name, 'storage_leader', False)
-                        
-                        # Add to frontend group
-                        self.inventory.add_child('frontend', name)
-                        
-                except Exception as e:
-                    self.display.warning(f"Failed to parse frontend node: {e}")
+        self._add_frontends(etcd_client, f"{prefix}/frontend")
