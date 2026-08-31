@@ -1,9 +1,4 @@
 {
- "any_types": {
-  "local-ai-proxy/cli.go": 1,
-  "local-ai-proxy/handler.go": 12,
-  "local-ai-proxy/health.go": 1
- },
  "cognitive": {
   "acl.go::(*ACLConfig).Check": 7,
   "acl.go::(*ACLConfig).Validate": 7,
@@ -74,7 +69,7 @@
   "health.go::(*HealthChecker).Start": 5,
   "health.go::(*HealthChecker).checkAll": 10,
   "health.go::(*HealthChecker).checkOne": 12,
-  "health.go::(*HealthChecker).record": 6,
+  "health.go::(*HealthChecker).record": 7,
   "health.go::(*HealthChecker).uniqueBackendURLs": 3,
   "health.go::(*HealthChecker).updateModelMetrics": 12,
   "health.go::(BackendState).String": 1,
@@ -1940,8 +1935,8 @@
   "disabled.go": 28.5,
   "errors.go": 10.4,
   "etcdclient.go": 35.4,
-  "handler.go": 95.2,
-  "health.go": 84.2,
+  "handler.go": 94.4,
+  "health.go": 85.7,
   "load.go": 30.4,
   "main.go": 63.6,
   "metrics.go": 45.3,
@@ -2031,8 +2026,8 @@
   "local-ai-proxy/disabled.go": 60,
   "local-ai-proxy/errors.go": 33,
   "local-ai-proxy/etcdclient.go": 94,
-  "local-ai-proxy/handler.go": 764,
-  "local-ai-proxy/health.go": 361,
+  "local-ai-proxy/handler.go": 782,
+  "local-ai-proxy/health.go": 362,
   "local-ai-proxy/load.go": 41,
   "local-ai-proxy/main.go": 250,
   "local-ai-proxy/metrics.go": 224,

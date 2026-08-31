@@ -197,6 +197,11 @@ def go_any_types() -> list[str]:
 
     Comments and literals are stripped first, so `\\bany\\b` matches real type
     positions (`map[string]any`, `[]any`, bare `any`) and not English prose.
+
+    Exception: `...any` in variadic position is the stdlib idiom for
+    fmt/slog forwarding wrappers (e.g. `func fatal(format string, args ...any)`)
+    and cannot be typed without changing every call site; it is not an
+    untyped-data escape hatch and is not flagged.
     """
     hits = []
     for path in sorted(GO_DIR.rglob("*.go")):
@@ -204,6 +209,8 @@ def go_any_types() -> list[str]:
             continue
         code = _strip_go_noncode(path.read_text())
         for i, line in enumerate(code.splitlines(), 1):
+            if "...any" in line:
+                continue
             if re.search(r"\bany\b", line) or "interface{}" in line:
                 hits.append(
                     f"{path.relative_to(ROOT)}:{i}: any/interface{{}} use"

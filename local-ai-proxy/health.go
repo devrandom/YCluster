@@ -352,10 +352,11 @@ func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string, m
 			msg = "backend disabled"
 			lvl = slog.LevelInfo
 		}
-		attrs := []any{"backend", u.String()}
 		if errMsg != "" {
-			attrs = append(attrs, "err", errMsg)
+			hc.logger.Log(context.Background(), lvl, msg,
+				"backend", u.String(), "err", errMsg)
+		} else {
+			hc.logger.Log(context.Background(), lvl, msg, "backend", u.String())
 		}
-		hc.logger.Log(context.Background(), lvl, msg, attrs...)
 	}
 }
