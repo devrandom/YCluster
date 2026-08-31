@@ -166,7 +166,7 @@
   "config/ansible/monitoring/files/osv-feed-publish.py": 0.0,
   "config/ansible/monitoring/files/update-blackbox-targets.py": 0.0,
   "config/ansible/monitoring/files/vm-gpu-collector.py": 0.0,
-  "local-ai-proxy total": 48.8
+  "local-ai-proxy total": 50.6
  },
  "crap": {
   "acl.go::(*ACLConfig).Check": 42.0,
