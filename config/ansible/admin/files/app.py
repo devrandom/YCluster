@@ -3155,7 +3155,8 @@ def users_action():
     id = _authentik_identity()
     if not id.is_manager:
         return jsonify({'error': 'admin only'}), 403
-    from app_users import authorized_projects
+    from app_users import (admin_user_action, authorized_projects,
+                           edit_user, invite_user, recovery_user)
     from ycluster.utils import authentik_manager
     data = request.get_json(silent=True) or {}
     action = data.get('action')
@@ -3165,66 +3166,25 @@ def users_action():
     admin = id.is_admin
     try:
         projects = authorized_projects(id, admin, authentik_manager)
-        def allow_user(target_email):
-            return admin or (authentik_manager.user_project(target_email)
-                             or '') in projects
-
-        # --- admin-only actions ---
-        if action == 'uninvite':
+        if action in ('uninvite', 'admin_add', 'admin_remove',
+                      'manager_add', 'manager_remove', 'activate',
+                      'deactivate'):
             if not admin:
                 return jsonify({'error': 'admin only'}), 403
-            count = authentik_manager.revoke_invitation(email)
-            return jsonify({'ok': True, 'message': f'revoked {count} invitation(s)'})
-        if action in ('admin_add', 'admin_remove'):
-            if not admin:
-                return jsonify({'error': 'admin only'}), 403
-            msg = authentik_manager.set_admin(email, remove=(action == 'admin_remove'))
-            return jsonify({'ok': True, 'message': msg})
-        if action in ('manager_add', 'manager_remove'):
-            if not admin:
-                return jsonify({'error': 'admin only'}), 403
-            msg = authentik_manager.set_manager(email, remove=(action == 'manager_remove'))
-            return jsonify({'ok': True, 'message': msg})
-        if action in ('activate', 'deactivate'):
-            if not admin:
-                return jsonify({'error': 'admin only'}), 403
-            msg = authentik_manager.set_active(email, active=(action == 'activate'))
-            return jsonify({'ok': True, 'message': msg})
-
-        if action == 'invite':
-            project = (data.get('project_name') or '').strip()
-            if not admin:
-                # Managers must invite into one of their authorized projects.
-                # An empty selection is a missing required field (the invite
-                # form's default), not an authorization failure.
-                if not project:
-                    return jsonify({'error': 'project required'}), 400
-                if project not in projects:
-                    return jsonify({'error': 'not authorized for project'}), 403
-            days = max(1, min(90, int(data.get('days') or 7)))
-            url = authentik_manager.invite_user(
-                email, data.get('name') or None, days, project=project or None)
-            return jsonify({'ok': True, 'url': url})
-        if action == 'recovery':
-            if not allow_user(email):
-                return jsonify({'error': 'not authorized for this user'}), 403
-            return jsonify({'ok': True, 'url': authentik_manager.recovery_link(email)})
-        if action == 'edit':
-            if not allow_user(email):
-                return jsonify({'error': 'not authorized for this user'}), 403
-            if admin:
-                # update_user skips absent fields; passing '' clears.
-                msg = authentik_manager.update_user(
-                    email,
-                    name=(data.get('name') or '').strip() or None,
-                    project_name=data.get('project_name'),
-                    admin_notes=data.get('admin_notes'))
-            else:
-                # Managers may only touch the Notes field.
-                msg = authentik_manager.update_user(
-                    email, admin_notes=data.get('admin_notes'))
-            return jsonify({'ok': True, 'message': msg})
-        return jsonify({'error': 'unknown action'}), 400
+            payload, status = admin_user_action(
+                action, email, authentik_manager)
+        elif action == 'invite':
+            payload, status = invite_user(
+                email, data, projects, authentik_manager, admin=admin)
+        elif action == 'recovery':
+            payload, status = recovery_user(
+                email, projects, authentik_manager, admin=admin)
+        elif action == 'edit':
+            payload, status = edit_user(
+                email, data, projects, authentik_manager, admin=admin)
+        else:
+            payload, status = {'error': 'unknown action'}, 400
+        return jsonify(payload), status
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 

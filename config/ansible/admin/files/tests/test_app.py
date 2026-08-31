@@ -1092,6 +1092,14 @@ class ManagerRoleTests(SchedTestBase):
             self.assertEqual(r.status_code, 403,
                              f"action {action!r} should be 403 for plain user")
 
+    def test_settings_page_and_data(self):
+        # Keep both settings routes wired up while exercising a simple
+        # successful page render and identity-driven key listing.
+        self.assertEqual(self.get("/admin/settings").status_code, 200)
+        self.assertEqual(self.get("/admin/settings/data").get_json(),
+                         {"email": "alice@x", "is_admin": False,
+                          "is_manager": False, "keys": []})
+
     def test_manager_can_edit_notes_in_authorized_project(self):
         # Manager edit forwards ONLY the notes field (never name/project)
         # and only when the target user's project is authorized.
