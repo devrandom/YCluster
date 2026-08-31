@@ -157,31 +157,17 @@ def collect_hardware():
     return _collect_hardware_linux()
 
 
-def _collect_hardware_darwin():
-    """Collect hardware facts on macOS using system_profiler and sysctl."""
-    facts = {
-        'collected_at': datetime.now(UTC).isoformat(),
-        'cpu': None,
-        'ram_gb': None,
-        'disks': [],
-        'nics': [],
-        'gpus': [],
-        'serial': None,
-        'product': None,
-        'bios_version': None,
-        'os': None,
-        'kernel': None,
-        'bmc_mac': None,
-    }
-
-    # OS / kernel
+def _collect_os_darwin(facts):
+    """Kernel release and macOS version."""
     try:
         facts['kernel'] = platform.release()
         facts['os'] = f"macOS {platform.mac_ver()[0]}"
     except Exception:
         pass
 
-    # Hardware overview via system_profiler
+
+def _collect_hardware_overview_darwin(facts):
+    """Product, serial, firmware, and RAM via system_profiler."""
     try:
         r = _run(['system_profiler', 'SPHardwareDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
@@ -197,7 +183,9 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
-    # CPU via sysctl
+
+def _collect_cpu_darwin(facts):
+    """CPU brand and core counts via sysctl."""
     try:
         brand = _run(['sysctl', '-n', 'machdep.cpu.brand_string'], timeout=5).stdout.strip()
         if not brand:
@@ -213,7 +201,9 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
-    # Disks via system_profiler
+
+def _collect_disks_darwin(facts):
+    """Disk inventory via system_profiler storage data."""
     try:
         r = _run(['system_profiler', 'SPStorageDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
@@ -236,7 +226,9 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
-    # GPUs via system_profiler
+
+def _collect_gpus_darwin(facts):
+    """GPU list via system_profiler displays data."""
     try:
         r = _run(['system_profiler', 'SPDisplaysDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
@@ -248,7 +240,9 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
-    # NICs via system_profiler
+
+def _collect_nics_darwin(facts):
+    """Network interfaces via system_profiler network data."""
     try:
         r = _run(['system_profiler', 'SPNetworkDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
@@ -269,6 +263,16 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
+
+def _collect_hardware_darwin():
+    """Collect hardware facts on macOS using system_profiler and sysctl."""
+    facts = _init_hardware_facts()
+    _collect_os_darwin(facts)
+    _collect_hardware_overview_darwin(facts)
+    _collect_cpu_darwin(facts)
+    _collect_disks_darwin(facts)
+    _collect_gpus_darwin(facts)
+    _collect_nics_darwin(facts)
     return facts
 
 

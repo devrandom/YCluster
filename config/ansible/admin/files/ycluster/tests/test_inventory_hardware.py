@@ -155,5 +155,75 @@ class CollectGPUsTest(unittest.TestCase):
         self.assertEqual(facts["gpus"][0]["vram_mb"], 40960)
 
 
+class CollectCPUDarwinTest(unittest.TestCase):
+    def test_brand_with_cores(self):
+        def fake_run(cmd, **kw):
+            arg = cmd[-1]
+            return run_result({
+                "machdep.cpu.brand_string": "Intel Xeon",
+                "hw.physicalcpu": "8",
+                "hw.logicalcpu": "16",
+            }.get(arg, ""))
+        with mock.patch.object(inventory, "_run", side_effect=fake_run):
+            facts = inventory._init_hardware_facts()
+            inventory._collect_cpu_darwin(facts)
+        self.assertEqual(facts["cpu"], "Intel Xeon, 8c/16t")
+
+    def test_apple_silicon_fallback_uses_product(self):
+        def fake_run(cmd, **kw):
+            arg = cmd[-1]
+            return run_result({
+                "machdep.cpu.brand_string": "",   # Intel brand absent on AS
+                "hw.physicalcpu": "10",
+                "hw.logicalcpu": "10",
+            }.get(arg, ""))
+        with mock.patch.object(inventory, "_run", side_effect=fake_run):
+            facts = inventory._init_hardware_facts()
+            facts["product"] = "Mac mini"
+            inventory._collect_cpu_darwin(facts)
+        self.assertEqual(facts["cpu"], "Mac mini, 10c/10t")
+
+
+class CollectDisksDarwinTest(unittest.TestCase):
+    def test_partitions_dedup_and_types(self):
+        import json
+        data = {"SPStorageDataType": [
+            {"bsd_name": "disk0s0", "com.apple.diskmanagement.sizeondisk": 512 * 1024 ** 3,
+             "physical_interconnect": "PCI-Express", "device_model": "APPLE SSD"},
+            {"bsd_name": "disk0s1", "com.apple.diskmanagement.sizeondisk": 512 * 1024 ** 3,
+             "physical_interconnect": "PCI-Express"},
+            {"bsd_name": "disk1s0", "com.apple.diskmanagement.sizeondisk": 0,
+             "physical_interconnect": "SATA"},
+        ]}
+        with mock.patch.object(inventory, "_run", return_value=run_result(json.dumps(data))):
+            facts = inventory._init_hardware_facts()
+            inventory._collect_disks_darwin(facts)
+        # bsd_name normalization ("disk0s0"->"disk") dedups partitions
+        # of the same physical disk. NB: the medium check looks for the
+        # substring "pcie"/"nvme"/"flash"; "PCI-Express" matches none,
+        # so classification falls through to "hdd" (pre-existing quirk,
+        # preserved here).
+        self.assertEqual(len(facts["disks"]), 1)
+        self.assertEqual(facts["disks"][0]["name"], "disk")
+        self.assertEqual(facts["disks"][0]["type"], "hdd")
+        self.assertEqual(facts["disks"][0]["size"], "512G")
+
+
+class CollectNICsDarwinTest(unittest.TestCase):
+    def test_filters_wireless_and_bridge(self):
+        import json
+        data = {"SPNetworkDataType": [
+            {"interface": "en0", "spnetwork_hardware_address": "aa:bb",
+             "spnetwork_interface_type": "Ethernet"},
+            {"interface": "en1", "spnetwork_interface_type": "IEEE80211"},
+            {"interface": "bridge0", "spnetwork_interface_type": "Bridge"},
+        ]}
+        with mock.patch.object(inventory, "_run", return_value=run_result(json.dumps(data))):
+            facts = inventory._init_hardware_facts()
+            inventory._collect_nics_darwin(facts)
+        self.assertEqual([n["name"] for n in facts["nics"]], ["en0"])
+        self.assertEqual(facts["nics"][0]["mac"], "aa:bb")
+
+
 if __name__ == "__main__":
     unittest.main()
