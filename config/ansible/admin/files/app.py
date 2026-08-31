@@ -1701,73 +1701,80 @@ def serve_bootstrap(node_type):
 
 
 @app.route('/metrics')
+def _service_health_value(status):
+    """Map a service status string to a numeric Prometheus value."""
+    return {'healthy': 0, 'degraded': 1, 'unhealthy': 2,
+            'standby': 3}.get(status, 2)
+
+
+def _node_metric(node, name, value):
+    return f'ycluster_{name}{{node="{node}"}} {value}'
+
+
+def _service_metrics(node, health_data):
+    """Render per-service health and ceph-status metric lines."""
+    metrics = []
+    for service, details in health_data.get('services', {}).items():
+        value = _service_health_value(details.get('status'))
+        metrics.append(f'ycluster_service_health{{node="{node}",service="{service}"}} {value}')
+        if service == 'ceph' and isinstance(details.get('details'), dict):
+            ok = details['details'] == 'HEALTH_OK'
+            metrics.append(f'ycluster_ceph_health{{node="{node}"}} {1 if ok else 0}')
+    return metrics
+
+
+def _leader_metrics(node, health_data):
+    storage_leader = 1 if health_data.get('storage_leader', False) else 0
+    dhcp_leader = 1 if health_data.get('dhcp_leader', False) else 0
+    return [
+        _node_metric(node, 'storage_leader', storage_leader),
+        _node_metric(node, 'dhcp_leader', dhcp_leader),
+    ]
+
+
+def _vip_metrics(node):
+    vip_status = check_vip_status()
+    return [
+        f'ycluster_vip_active{{node="{node}",vip="gateway"}} '
+        f'{1 if vip_status["gateway_vip"]["active"] else 0}',
+        f'ycluster_vip_active{{node="{node}",vip="storage"}} '
+        f'{1 if vip_status["storage_vip"]["active"] else 0}',
+    ]
+
+
+def _cert_metrics(node):
+    cert_status = check_certificate_expiry()
+    days = cert_status.get('details', {}).get('days_until_expiry')
+    if days is not None:
+        return [_node_metric(node, 'ycluster_certificate_days_until_expiry', days)]
+    return []
+
+
+def _prometheus_health_metrics(health_data):
+    """Render node/service/leader/vip/cert/drain metric lines."""
+    node = platform.node()
+    overall_value = 1 if health_data['overall'] == 'healthy' else 0
+    metrics = [_node_metric(node, 'node_healthy', overall_value)]
+    metrics.extend(_service_metrics(node, health_data))
+    metrics.extend(_leader_metrics(node, health_data))
+    metrics.extend(_vip_metrics(node))
+    metrics.extend(_cert_metrics(node))
+    drained = 1 if health_data.get('drained', False) else 0
+    metrics.append(_node_metric(node, 'node_drained', drained))
+    return metrics
+
+
 def prometheus_metrics():
     """Prometheus metrics endpoint"""
     try:
-        # Get health data
         health_data = get_comprehensive_health()
-        
-        metrics = []
-        
-        # Overall health metric
-        overall_value = 1 if health_data['overall'] == 'healthy' else 0
-        metrics.append(f'ycluster_node_healthy{{node="{platform.node()}"}} {overall_value}')
-        
-        # Service health metrics
-        for service, details in health_data.get('services', {}).items():
-            status = details.get('status')
-            if status == 'healthy':
-                service_value = 0
-            elif status == 'degraded':
-                service_value = 1
-            elif status == 'unhealthy':
-                service_value = 2
-            elif status == 'standby':
-                service_value = 3
-            else:
-                service_value = 2
-            metrics.append(f'ycluster_service_health{{node="{platform.node()}",service="{service}"}} {service_value}')
-            
-            # Service-specific metrics
-            if service == 'ceph' and isinstance(details.get('details'), dict):
-                # Ceph status could be healthy/degraded/unhealthy
-                ceph_status = details['details']
-                if ceph_status == 'HEALTH_OK':
-                    metrics.append(f'ycluster_ceph_health{{node="{platform.node()}"}} 1')
-                else:
-                    metrics.append(f'ycluster_ceph_health{{node="{platform.node()}"}} 0')
-        
-        # Leadership metrics
-        storage_leader = 1 if health_data.get('storage_leader', False) else 0
-        dhcp_leader = 1 if health_data.get('dhcp_leader', False) else 0
-        metrics.append(f'ycluster_storage_leader{{node="{platform.node()}"}} {storage_leader}')
-        metrics.append(f'ycluster_dhcp_leader{{node="{platform.node()}"}} {dhcp_leader}')
-        
-        # VIP metrics
-        vip_status = check_vip_status()
-        gateway_vip_active = 1 if vip_status['gateway_vip']['active'] else 0
-        storage_vip_active = 1 if vip_status['storage_vip']['active'] else 0
-        metrics.append(f'ycluster_vip_active{{node="{platform.node()}",vip="gateway"}} {gateway_vip_active}')
-        metrics.append(f'ycluster_vip_active{{node="{platform.node()}",vip="storage"}} {storage_vip_active}')
-        
-        # Certificate expiry metrics
-        cert_status = check_certificate_expiry()
-        if cert_status.get('details', {}).get('days_until_expiry') is not None:
-            days_until_expiry = cert_status['details']['days_until_expiry']
-            metrics.append(f'ycluster_certificate_days_until_expiry{{node="{platform.node()}"}} {days_until_expiry}')
-        
-        # Node drain status
-        drained = 1 if health_data.get('drained', False) else 0
-        metrics.append(f'ycluster_node_drained{{node="{platform.node()}"}} {drained}')
-        
-        # Return metrics in Prometheus format
+        metrics = _prometheus_health_metrics(health_data)
         response = '\n'.join(metrics) + '\n'
         return response, 200, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
-        
-    except Exception as e:
-        # Return error metric
+    except Exception:
         error_response = f'ycluster_metrics_error{{node="{platform.node()}"}} 1\n'
         return error_response, 500, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
+
 
 def _add_health_service(health_status, name, result, unhealthy_statuses=('unhealthy', 'error'),
                         degraded_statuses=('degraded',)):
