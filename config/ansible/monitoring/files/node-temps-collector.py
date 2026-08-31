@@ -219,6 +219,55 @@ def select_comino_device(devices, reader):
     return None
 
 
+def _comino_reader(dev):
+    """Return (data, channel_labels) from a Comino serial device, retrying
+    on transient EBUSY. Returns None when all retries fail."""
+
+    # rm-monitor (if installed) grabs the port via TIOCEXCL during 5s
+    # polls, so retry briefly on EBUSY.
+    import serial
+
+    last_err = None
+    for _ in range(5):
+        try:
+            with serial.Serial(dev, 9600, timeout=0.1, exclusive=True) as port:
+                labels = _comino_channel_labels(port)
+                line = _comino_query(port, ":get_data")
+            return line, labels
+        except (serial.SerialException, OSError) as e:
+            last_err = e
+            time.sleep(0.3)
+    print(f"# comino read failed on {dev}: {last_err}", file=sys.stderr)
+    return None
+
+
+def _comino_parse_temps(data, temp_map):
+    """Extract valid temperature readings from the controller payload."""
+    temps = []
+    for field, (sensor, role) in temp_map.items():
+        try:
+            v = float(data[field].replace(",", "."))
+        except (KeyError, ValueError):
+            continue
+        # Controller sometimes reports 0/negative for disconnected probes.
+        if 0 < v <= 150:
+            temps.append((sensor, role, v))
+    return temps
+
+
+def _comino_parse_fans(data, ch_labels):
+    """Extract valid fan RPM readings from the controller payload."""
+    fans = []
+    for ch, name in ch_labels.items():
+        try:
+            v = float(data[ch].replace(",", "."))
+        except (KeyError, ValueError):
+            continue
+        if v >= 0:
+            fans.append((ch, name, v))
+    return fans
+
+
 def collect_comino():
     """Return (temps, fans). temps = [(sensor, role, c)]; fans = [(ch, name, rpm)]."""
     temps, fans = [], []
@@ -228,47 +277,13 @@ def collect_comino():
         print("# pyserial not installed; skipping Comino", file=sys.stderr)
         return temps, fans
 
-    def reader(dev):
-        # rm-monitor (if installed) grabs the port via TIOCEXCL during 5s
-        # polls, so retry briefly on EBUSY.
-        last_err = None
-        for _ in range(5):
-            try:
-                with serial.Serial(dev, 9600, timeout=0.1, exclusive=True) as port:
-                    labels = _comino_channel_labels(port)
-                    line = _comino_query(port, ":get_data")
-                return line, labels
-            except (serial.SerialException, OSError) as e:
-                last_err = e
-                time.sleep(0.3)
-        print(f"# comino read failed on {dev}: {last_err}", file=sys.stderr)
-        return None
-
-    selected = select_comino_device(comino_candidate_devices(), reader)
+    selected = select_comino_device(comino_candidate_devices(), _comino_reader)
     if selected is None:
         return temps, fans
     _dev, data, ch_labels = selected
 
-    for field, (sensor, role) in COMINO_TEMP_MAP.items():
-        try:
-            v = float(data[field].replace(",", "."))
-        except (KeyError, ValueError):
-            continue
-        # Controller sometimes reports 0/negative for disconnected probes.
-        if v <= 0 or v > 150:
-            continue
-        temps.append((sensor, role, v))
-
-    for ch, name in ch_labels.items():
-        try:
-            v = float(data[ch].replace(",", "."))
-        except (KeyError, ValueError):
-            continue
-        if v < 0:
-            continue
-        fans.append((ch, name, v))
-
-    return temps, fans
+    return (_comino_parse_temps(data, COMINO_TEMP_MAP),
+            _comino_parse_fans(data, ch_labels))
 
 
 def esc(v):
