@@ -993,3 +993,15 @@ class ValidateVMLaunchTests(unittest.TestCase):
     def test_already_exists_raises(self, valid_name, vm_get, exists, user_get):
         with self.assertRaisesRegex(ValueError, 'already exists'):
             vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
+
+
+class GpuPoolDiscoveryTests(unittest.TestCase):
+    def test_gpu_entry_uses_pci_class(self):
+        with mock.patch.object(vm, '_device_pci_class', return_value='0x030200'):
+            self.assertTrue(vm._is_gpu_pci_entry('c1:00.0'))
+        with mock.patch.object(vm, '_device_pci_class', return_value='0x040300'):
+            self.assertFalse(vm._is_gpu_pci_entry('c1:00.1'))
+
+    def test_read_error_excluded(self):
+        with mock.patch.object(vm, '_device_pci_class', return_value=None):
+            self.assertFalse(vm._is_gpu_pci_entry('x'))

@@ -398,24 +398,27 @@ def _is_gpu_pci_class(cls):
     """
     return cls.startswith("0x03")
 
+def _device_pci_class(entry):
+    """Read the PCI class of a device, or None if unavailable."""
+    try:
+        with open(f"/sys/bus/pci/devices/{entry}/class") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
 def gpu_pool():
     """PCI addresses of GPU functions bound to vfio-pci."""
     drv = "/sys/bus/pci/drivers/vfio-pci"
     if not os.path.isdir(drv):
         return []
-    gpus = []
-    for entry in sorted(os.listdir(drv)):
-        dev = f"/sys/bus/pci/devices/{entry}"
-        if not os.path.isdir(dev):
-            continue
-        try:
-            with open(f"{dev}/class") as f:
-                cls = f.read().strip()
-        except OSError:
-            continue
-        if _is_gpu_pci_class(cls):
-            gpus.append(entry)
-    return gpus
+    return [entry for entry in sorted(os.listdir(drv))
+            if _is_gpu_pci_entry(entry)]
+
+
+def _is_gpu_pci_entry(entry):
+    cls = _device_pci_class(entry)
+    return cls is not None and _is_gpu_pci_class(cls)
 
 def _assigned_gpus():
     assigned = set()
