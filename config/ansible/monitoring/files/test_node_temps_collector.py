@@ -88,3 +88,33 @@ class SelectCominoDevice(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CominoChannelLabelTests(unittest.TestCase):
+    def test_fan_mode(self):
+        label, fan_n, _pump_n = ntc._comino_channel_label('1', 'FAN', 'CH1', 0, 0)
+        self.assertEqual(label, 'fan 1')
+        self.assertEqual(fan_n, 1)
+
+    def test_pump_mode(self):
+        label, _fan_n, pump_n = ntc._comino_channel_label('1', 'PUMP', 'CH1', 0, 0)
+        self.assertEqual(label, 'pump 1')
+        self.assertEqual(pump_n, 1)
+
+    def test_off_skipped(self):
+        label, _, _ = ntc._comino_channel_label('1', 'OFF', 'CH1', 0, 0)
+        self.assertIsNone(label)
+
+    def test_not_installed_skipped(self):
+        label, _, _ = ntc._comino_channel_label('0', 'FAN', 'CH1', 0, 0)
+        self.assertIsNone(label)
+
+    def test_unknown_mode(self):
+        label, _, _ = ntc._comino_channel_label('1', 'XYZ', 'CH1', 0, 0)
+        self.assertIn('xyz', label)
+
+    def test_counters_increment_independently(self):
+        _, fan_n, _ = ntc._comino_channel_label('1', 'FAN', 'CH1', 0, 0)
+        _, _, pump_n = ntc._comino_channel_label('1', 'PUMP', 'CH2', 1, 0)
+        self.assertEqual(fan_n, 1)
+        self.assertEqual(pump_n, 1)

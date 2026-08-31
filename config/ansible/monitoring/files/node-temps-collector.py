@@ -164,6 +164,19 @@ def _comino_query(port, cmd, read_timeout=0.5):
     return buf.decode(errors="replace").rstrip("\r\n")
 
 
+def _comino_channel_label(install, mode, ch, fan_n, pump_n):
+    """Return (label, fan_n, pump_n) for one channel, or (None, ...) to skip."""
+    if install.strip() == "0" or mode == "OFF":
+        return None, fan_n, pump_n
+    if mode == "FAN":
+        fan_n += 1
+        return f"fan {fan_n}", fan_n, pump_n
+    if mode == "PUMP":
+        pump_n += 1
+        return f"pump {pump_n}", fan_n, pump_n
+    return f"{ch} ({mode.lower() or '?'})", fan_n, pump_n
+
+
 def _comino_channel_labels(port):
     raw = _comino_query(port, ":get_channel_value").split(";")
     if len(raw) != 24:
@@ -173,17 +186,10 @@ def _comino_channel_labels(port):
     for i in range(8):
         install, _pwm_cal, mode = raw[i * 3:i * 3 + 3]
         ch = f"CH{i + 1}"
-        m = mode.strip().upper()
-        if install.strip() == "0" or m == "OFF":
-            continue
-        if m == "FAN":
-            fan_n += 1
-            labels[ch] = f"fan {fan_n}"
-        elif m == "PUMP":
-            pump_n += 1
-            labels[ch] = f"pump {pump_n}"
-        else:
-            labels[ch] = f"{ch} ({m.lower() or '?'})"
+        label, fan_n, pump_n = _comino_channel_label(
+            install, mode.strip().upper(), ch, fan_n, pump_n)
+        if label is not None:
+            labels[ch] = label
     return labels
 
 

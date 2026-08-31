@@ -27,6 +27,12 @@ sys.modules['collect_model_stats'] = _stats
 _spec.loader.exec_module(_stats)
 from collect_model_stats import _bucket_entry, _parse_entry_timestamp, aggregate_logs
 
+_mon_path = os.path.join(_FILES, '..', '..', 'monitoring', 'files', 'node-temps-collector.py')
+_mon_spec = importlib.util.spec_from_file_location('node_temps_collector', _mon_path)
+_mon = importlib.util.module_from_spec(_mon_spec)
+sys.modules['node_temps_collector'] = _mon
+_mon_spec.loader.exec_module(_mon)
+
 
 class ParseTimestampTests(unittest.TestCase):
     def test_valid_iso(self):
