@@ -1855,6 +1855,98 @@ def _watcher_healthy(watch_ids, watcher):
     callbacks = getattr(watcher, "_callbacks", None) or {}
     return bool(watch_ids) and all(wid in callbacks for wid in watch_ids)
 
+def _sync_vm_keys_quietly(name):
+    """Sync one VM's keys, swallowing errors (logged to stderr)."""
+    try:
+        _sync_vm_keys(name)
+    except Exception as e:
+        print(f"bastion-watch: _sync_vm_keys({name}) failed: {e}",
+              file=sys.stderr, flush=True)
+
+
+def _sync_user_keys_quietly(user):
+    """Sync one user's keys, swallowing errors (logged to stderr)."""
+    try:
+        vm_sync_keys(user)
+    except Exception as e:
+        print(f"bastion-watch: vm_sync_keys({user}) failed: {e}",
+              file=sys.stderr, flush=True)
+
+
+def _repair_and_resync(repair, full_resync, debounce):
+    """Retry watch repair until it succeeds, then do a full key resync."""
+    while True:
+        try:
+            repair()
+            break
+        except Exception as e:
+            print(f"bastion-watch: watch repair failed: {e!r}; "
+                  f"retrying in {debounce}s", file=sys.stderr,
+                  flush=True)
+            time.sleep(debounce)
+    full_resync()
+
+
+def _drain_dirty(cond, dirty_users, dirty_vms, bastion_dirty, watch_broken):
+    """Clear and return the pending work sets under the condition lock."""
+    with cond:
+        users = set(dirty_users); dirty_users.clear()
+        vms = set(dirty_vms); dirty_vms.clear()
+        broken = watch_broken[0]
+        watch_broken[0] = False
+        had_work = bastion_dirty[0]
+        bastion_dirty[0] = False
+    return users, vms, broken, had_work
+
+
+def _sync_dirty_vms(vms, users):
+    """Re-sync keys for each changed VM and collect its access users."""
+    for name in vms:
+        rec = vm_get(name)
+        for u in _vm_access_users(rec or {}):
+            users.add(u)
+        _sync_vm_keys_quietly(name)
+
+
+def _sync_users(users):
+    try:
+        bastion_sync()
+    except Exception as e:
+        print(f"bastion-watch: bastion_sync failed: {e}",
+              file=sys.stderr, flush=True)
+    for user in sorted(users):
+        _sync_user_keys_quietly(user)
+
+
+def _bastion_watch_tick(cond, dirty_users, dirty_vms, bastion_dirty,
+                        watch_broken, debounce, health_check_s,
+                        _watch_ok, repair, full_resync):
+    """One debounce tick of the bastion-watch loop.
+
+    Waits for work, drains the dirty sets, handles watch-stream breaks (via
+    repair + full_resync), then re-syncs the bastion and affected VM/user
+    keys. Shared state is protected by `cond`.
+    """
+    with cond:
+        while not bastion_dirty[0]:
+            if not cond.wait(timeout=health_check_s):
+                break                  # periodic liveness probe while idle
+    time.sleep(debounce)               # let the burst settle
+
+    users, vms, broken, had_work = _drain_dirty(
+        cond, dirty_users, dirty_vms, bastion_dirty, watch_broken)
+    if not _watch_ok():
+        broken = True
+    if broken:
+        _repair_and_resync(repair, full_resync, debounce)
+        return
+    if not had_work:
+        return                         # idle wake; watches are healthy
+
+    _sync_dirty_vms(vms, users)
+    _sync_users(users)
+
+
 def bastion_watch(debounce=2.0):
     """Watch the user and VM registries; re-sync the bastion and VM keys
     on any change.
@@ -2000,59 +2092,12 @@ def bastion_watch(debounce=2.0):
     print("bastion-watch: incus lifecycle monitor started", flush=True)
 
     while True:
-        with cond:
-            while not bastion_dirty[0]:
-                if not cond.wait(timeout=HEALTH_CHECK_S):
-                    break              # periodic liveness probe while idle
-        time.sleep(debounce)           # let the burst settle
-        with cond:
-            users = set(dirty_users); dirty_users.clear()
-            vms = set(dirty_vms); dirty_vms.clear()
-            broken = watch_broken[0]
-            watch_broken[0] = False
-            had_work = bastion_dirty[0]
-            bastion_dirty[0] = False
-        if not broken:
-            broken = not _watch_ok()
-        if broken:
-            while True:
-                try:
-                    _repair_watches()
-                    break
-                except Exception as e:
-                    print(f"bastion-watch: watch repair failed: {e!r}; "
-                          f"retrying in {debounce}s", file=sys.stderr,
-                          flush=True)
-                    time.sleep(debounce)
-            _full_resync()
-            continue
-        if not had_work:
-            continue                   # idle wake; watches are healthy
-        # VM-record changes can shift the set of users who can reach a VM,
-        # so re-sync each changed VM directly (recomputes its full key
-        # union -> added users in, removed users out). Also pull the changed
-        # VM's access users into the per-user resync set so their keys reach
-        # every other VM they can access.
-        for name in vms:
-            rec = vm_get(name)
-            for u in _vm_access_users(rec or {}):
-                users.add(u)
-            try:
-                _sync_vm_keys(name)
-            except Exception as e:
-                print(f"bastion-watch: _sync_vm_keys({name}) failed: {e}",
-                      file=sys.stderr, flush=True)
-        try:
-            bastion_sync()
-        except Exception as e:
-            print(f"bastion-watch: bastion_sync failed: {e}",
-                  file=sys.stderr, flush=True)
-        for user in sorted(users):
-            try:
-                vm_sync_keys(user)
-            except Exception as e:
-                print(f"bastion-watch: vm_sync_keys({user}) failed: {e}",
-                      file=sys.stderr, flush=True)
+        _bastion_watch_tick(
+            cond, dirty_users, dirty_vms, bastion_dirty, watch_broken,
+            debounce, HEALTH_CHECK_S,
+            _watch_ok=lambda: _watcher_healthy(watch_ids, client.watcher),
+            repair=_repair_watches, full_resync=_full_resync,
+        )
 
 
 from .vm_alter import vm_alter  # noqa: E402  # moved to keep modules focused
