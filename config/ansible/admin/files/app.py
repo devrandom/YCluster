@@ -1485,59 +1485,14 @@ def serve_user_data():
     # Get interface configuration for this node type (fallback to 'unknown')
     interfaces = NODE_TYPE_INTERFACES.get(node_type, NODE_TYPE_INTERFACES['unknown'])
     
-    # Get SSH public key content
-    ssh_key_path = '/opt/bootstrap-files/ansible_ssh_key.pub'
-    with open(ssh_key_path, 'r') as f:
-        ssh_key_content = f.read().strip()
-
-    # Get crypted password for ubuntu user (env var takes precedence for dev)
-    ubuntu_password = os.environ.get('UBUNTU_PASSWORD_HASH')
-    if not ubuntu_password:
-        try:
-            with open('/etc/shadow', 'r') as f:
-                for line in f:
-                    fields = line.strip().split(':')
-                    if fields[0] == 'ubuntu' and len(fields) > 1:
-                        ubuntu_password = fields[1]
-                        break
-        except (PermissionError, FileNotFoundError):
-            raise Exception("Cannot read ubuntu password from /etc/shadow - set UBUNTU_PASSWORD_HASH env var or check permissions")
-
-        if not ubuntu_password:
-            raise Exception("Ubuntu user not found in /etc/shadow - set UBUNTU_PASSWORD_HASH env var")
-
+    ssh_key_content = app_autoinstall.ssh_key('/opt/bootstrap-files/ansible_ssh_key.pub')
+    ubuntu_password = app_autoinstall.ubuntu_password()
     proxy_url = f'http://{GATEWAY_VIP}:3128'
 
-    # Log template variables
-    print(f"Generating user-data for {hostname}:", file=sys.stderr)
-    print(f"  node_type: {node_type}", file=sys.stderr)
-    print(f"  ip_address: {ip_address}", file=sys.stderr)
-    print(f"  amt_ip_address: {amt_ip_address}", file=sys.stderr)
-    print(f"  cluster_interface: {interfaces['cluster_interface']}", file=sys.stderr)
-    print(f"  uplink_interface: {interfaces['uplink_interface']}", file=sys.stderr)
-    print(f"  amt_interface: {interfaces['amt_interface']}", file=sys.stderr)
-    print(f"  proxy_url: {proxy_url}", file=sys.stderr)
-    print(f"  ubuntu_password: {'(from env)' if os.environ.get('UBUNTU_PASSWORD_HASH') else '(from shadow)'}", file=sys.stderr)
-
-    # Read and render template
-    with open(AUTOINSTALL_USER_DATA_TEMPLATE, 'r') as f:
-        template_content = f.read()
-
-    template = Template(template_content)
-    rendered_content = template.render(
-        node_type=node_type,
-        hostname=hostname,
-        ip_address=ip_address,
-        amt_ip_address=amt_ip_address,
-        cluster_interface=interfaces['cluster_interface'],
-        uplink_interface=interfaces['uplink_interface'],
-        amt_interface=interfaces['amt_interface'],
-        ssh_key_content=ssh_key_content,
-        ubuntu_password=ubuntu_password,
-        proxy_url=proxy_url,
-        gateway_vip=GATEWAY_VIP
-    )
-    
+    rendered_content = app_autoinstall.render_user_data(
+        Template(open(AUTOINSTALL_USER_DATA_TEMPLATE).read()),
+        allocation_data, interfaces, proxy_url, GATEWAY_VIP,
+        ssh_key_content, ubuntu_password)
     return rendered_content, 200, {'Content-Type': 'text/plain'}
 
 
