@@ -402,3 +402,19 @@ class SecretsMountHelpersTests(unittest.TestCase):
              mock.patch.object(appmod.os.path, 'isdir', return_value=True), \
              mock.patch.object(appmod.os, 'listdir', side_effect=PermissionError):
             self.assertEqual(appmod._secrets_access(True), (True, None))
+
+
+class DetermineIpTests(unittest.TestCase):
+    def test_known_prefixes(self):
+        self.assertEqual(appmod.determine_ip_from_hostname('s2'), '10.0.0.12')
+        self.assertEqual(appmod.determine_ip_from_hostname('nas3'), '10.0.0.133')
+        self.assertEqual(appmod.determine_ip_from_hostname('d5', via_wg=True), '10.0.1.205')
+
+    def test_amt_and_unknown(self):
+        self.assertEqual(appmod.determine_ip_from_hostname('c2a'), '10.10.10.52')
+        self.assertIsNone(appmod.determine_ip_from_hostname('unknown1'))
+        self.assertIsNone(appmod.determine_ip_from_hostname(''))
+
+    def test_out_of_range(self):
+        with self.assertRaises(ValueError):
+            appmod.determine_ip_from_hostname('nas99')

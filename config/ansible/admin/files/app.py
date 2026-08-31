@@ -154,6 +154,37 @@ IP_RANGES: dict[str, IPRange] = {
     'd': {'base': 200, 'max': 30},   # Dev (remote wg scratch): 10.0.1.201-230 (wg peers only)
 }
 
+def _parse_host_location(hostname):
+    """Return (prefix, number, is_amt) for a known host prefix, or None.
+
+    AMT hostnames end in 'a'; that suffix is stripped before parsing.
+    """
+    is_amt = hostname.endswith('a')
+    bare = hostname[:-1] if is_amt else hostname
+    for prefix in IP_RANGES:
+        if not bare.startswith(prefix):
+            continue
+        try:
+            return prefix, int(bare[len(prefix):]), is_amt
+        except ValueError:
+            continue
+    return None
+
+
+def _host_ip(prefix, number, is_amt, via_wg):
+    config = IP_RANGES[prefix]
+    if not 1 <= number <= config['max']:
+        raise ValueError(f"Node number {number} for prefix '{prefix}' exceeds range 1-{config['max']}")
+    last_octet = config['base'] + number
+    if is_amt:
+        # AMT interface: separate 10.10.10.0/24 subnet.
+        return f"10.10.10.{last_octet}"
+    if via_wg:
+        # WG peers live in their own /24 for a clean connected route.
+        return f"10.0.1.{last_octet}"
+    return f"10.0.0.{last_octet}"
+
+
 def determine_ip_from_hostname(hostname, via_wg=False):
     """Generate deterministic IP based on hostname.
 
@@ -161,48 +192,10 @@ def determine_ip_from_hostname(hostname, via_wg=False):
     preserving the per-type hostname numbering. A physical compute c3
     lands at 10.0.0.53; a wg-bootstrapped compute c3 lands at 10.0.1.53.
     """
-    if not hostname:
+    parsed = _parse_host_location(hostname) if hostname else None
+    if parsed is None:
         return None
-
-    # Check if this is an AMT hostname (ends with 'a')
-    is_amt = hostname.endswith('a')
-    if is_amt:
-        hostname = hostname[:-1]  # Strip trailing 'a' for parsing
-
-    # Try multi-char prefixes first (e.g., 'nas'), then single-char
-    prefix = None
-    num = None
-    for p in IP_RANGES:
-        if hostname.startswith(p):
-            try:
-                num = int(hostname[len(p):])
-                prefix = p
-                break
-            except ValueError:
-                continue
-
-    if prefix is None or num is None:
-        return None
-
-    config = IP_RANGES[prefix]
-
-    # Validate number is within range
-    if num < 1 or num > config['max']:
-        raise ValueError(f"Node number {num} for prefix '{prefix}' exceeds range 1-{config['max']}")
-
-    # Calculate base IP address
-    base_ip = config['base'] + num
-
-    if is_amt:
-        # AMT interface: use separate 10.10.10.0/24 subnet
-        return f"10.10.10.{base_ip}"
-    elif via_wg:
-        # WG-bootstrapped peers live on a separate /24 so the wg server
-        # gets a clean connected route instead of per-peer /32s.
-        return f"10.0.1.{base_ip}"
-    else:
-        # Regular interface
-        return f"10.0.0.{base_ip}"
+    return _host_ip(*parsed, via_wg)
 
 def determine_type_from_mac(mac_address):
     """Determine machine type based on MAC address prefix.
