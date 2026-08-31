@@ -17,20 +17,17 @@ from typing import TypedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import cast
 from etcd3.client import KVMetadata
-from scapy.all import sniff, sendp, get_if_hwaddr
+from scapy.all import sniff, sendp
 from scapy.layers.dhcp import DHCP, BOOTP
-from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import Ether
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from ..common.etcd_utils import get_etcd_client, get_etcd_hosts
+from .dhcp_packets import (LEASE_TIME, create_dhcp_ack, create_dhcp_nak,
+                           create_dhcp_offer, interface_for_ip)
 
 # Configuration
 ETCD_PREFIX = '/cluster/dhcp'
-LEASE_TIME = 43200  # 12 hours
-GATEWAY = '10.0.0.254'
-DNS_SERVER = '10.0.0.254'
-NTP_SERVER = '10.0.0.254'
 HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
 
 # IP allocation configuration (same as Flask app)
@@ -771,194 +768,122 @@ class DHCPServer:
         assert hostname is not None
 
         # Create DHCP OFFER
-        offer = self.create_dhcp_offer(packet, offered_ip, hostname)
-        interface = self.get_interface_for_ip(self.server_ip)
+        offer = create_dhcp_offer(self.server_ip, packet, offered_ip, hostname)
+        interface = interface_for_ip(self.server_ip)
         sendp(offer, iface=interface, verbose=0)
         logger.info(f"Sent DHCP OFFER {offered_ip} ({hostname}) to {mac}")
     
     def handle_dhcp_request(self, packet):
         """Handle DHCP REQUEST packet"""
         mac = packet[Ether].src
-        
-        # Get requested IP, hostname, and server ID
+        requested_ip, requested_hostname, server_id = self._request_details(packet)
+        client_info = self._client_details(requested_ip, requested_hostname)
+        logger.info(f"DHCP REQUEST from {mac}{client_info}")
+
+        # Check if request is for us
+        if server_id and server_id != self.server_ip:
+            logger.info(f"DHCP REQUEST not for us (server_id: {server_id})")
+            return
+
+        should_reallocate = self._request_should_reallocate(mac, requested_hostname)
+
+        # Reallocate if needed
+        if should_reallocate:
+            requested_ip = self._reallocate_lease(
+                mac, requested_ip, requested_hostname)
+
+        # Validate the request
+        if mac in self.leases and self.leases[mac]['ip'] == requested_ip:
+            # Send ACK
+            hostname = self.leases[mac].get('hostname', '')
+            ack = create_dhcp_ack(self.server_ip, packet, requested_ip, hostname)
+            self._send_dhcp_reply(packet, ack)
+            logger.info(f"Sent DHCP ACK {requested_ip} ({hostname}) to {mac}")
+        else:
+            # Send NAK
+            nak = create_dhcp_nak(self.server_ip, packet)
+            self._send_dhcp_reply(packet, nak)
+            reason = self._nak_reason(mac, requested_ip)
+            logger.info(f"Sent DHCP NAK to {mac}: {reason}")
+
+    def _request_details(self, packet):
+        """Read requested IP, hostname, and server ID from a DHCP packet."""
         requested_ip = None
         requested_hostname = None
         server_id = None
         if packet.haslayer(DHCP):
             for option in packet[DHCP].options:
-                if isinstance(option, tuple):
-                    if option[0] == 'requested_addr':
-                        requested_ip = option[1]
-                    elif option[0] == 'hostname':
-                        requested_hostname = option[1].decode() if isinstance(option[1], bytes) else option[1]
-                    elif option[0] == 'server_id':
-                        server_id = option[1]
-        
-        # If no requested_addr option, fall back to ciaddr (used in renewals per RFC 2131)
+                if not isinstance(option, tuple):
+                    continue
+                if option[0] == 'requested_addr':
+                    requested_ip = option[1]
+                elif option[0] == 'hostname':
+                    value = option[1]
+                    requested_hostname = value.decode() if isinstance(value, bytes) else value
+                elif option[0] == 'server_id':
+                    server_id = option[1]
+
+        # If no requested_addr option, fall back to ciaddr (used in renewals
+        # per RFC 2131)
         if not requested_ip and packet.haslayer(BOOTP):
             ciaddr = packet[BOOTP].ciaddr
             if ciaddr and ciaddr != '0.0.0.0':
                 requested_ip = ciaddr
-        
-        # Log with client-provided details
+        return requested_ip, requested_hostname, server_id
+
+    @staticmethod
+    def _client_details(requested_ip, requested_hostname):
         client_details = []
         if requested_hostname:
             client_details.append(f"hostname={requested_hostname}")
         if requested_ip:
             client_details.append(f"requested_ip={requested_ip}")
-        client_info = f" ({', '.join(client_details)})" if client_details else ""
-        logger.info(f"DHCP REQUEST from {mac}{client_info}")
-        
-        # Check if request is for us
-        if server_id and server_id != self.server_ip:
-            logger.info(f"DHCP REQUEST not for us (server_id: {server_id})")
-            return
-        
-        # Check if we need to reallocate based on hostname
-        should_reallocate = False
-        if requested_hostname and mac in self.leases:
-            # Ignore temporary hostnames during autoinstall
-            if requested_hostname in ['ubuntu-server', 'localhost', '']:
-                logger.info(f"Ignoring temporary hostname '{requested_hostname}' for {mac}")
-                requested_hostname = None
-                should_reallocate = False  # Don't reallocate for temporary hostnames
-            else:
-                current_hostname = self.leases[mac].get('hostname', '')
-                expected_ip = self.determine_ip_from_hostname(requested_hostname)
-                current_ip = self.leases[mac]['ip']
-                
-                if current_hostname != requested_hostname:
-                    logger.info(f"Hostname changed from {current_hostname} to {requested_hostname} for {mac}")
-                    should_reallocate = True
-                elif expected_ip and expected_ip != current_ip:
-                    logger.info(f"IP should change from {current_ip} to {expected_ip} for hostname {requested_hostname} on {mac}")
-                    should_reallocate = True
-        
-        # Reallocate if needed
-        if should_reallocate:
-            # Remove old lease and create new one
-            self.allocated_ips.discard(self.leases[mac]['ip'])
-            del self.leases[mac]
-            # Get new lease with requested hostname
-            offered_ip, hostname = self.get_or_create_lease(mac, requested_ip, requested_hostname)
-            if offered_ip:
-                requested_ip = offered_ip
-        
-        # Validate the request
-        if mac in self.leases and self.leases[mac]['ip'] == requested_ip:
-            # Send ACK
-            hostname = self.leases[mac].get('hostname', '')
-            ack = self.create_dhcp_ack(packet, requested_ip, hostname)
-            interface = self.get_interface_for_ip(self.server_ip)
-            sendp(ack, iface=interface, verbose=0)
-            logger.info(f"Sent DHCP ACK {requested_ip} ({hostname}) to {mac}")
-        else:
-            # Send NAK
-            nak = self.create_dhcp_nak(packet)
-            interface = self.get_interface_for_ip(self.server_ip)
-            sendp(nak, iface=interface, verbose=0)
-            if mac not in self.leases:
-                reason = "no lease found"
-            elif requested_ip is None:
-                reason = "no requested IP in options or ciaddr"
-            else:
-                reason = f"lease IP {self.leases[mac]['ip']} != requested {requested_ip}"
-            logger.info(f"Sent DHCP NAK to {mac}: {reason}")
-    
-    def get_interface_for_ip(self, ip):
-        """Get the network interface for a given IP address"""
-        import netifaces
-        for interface in netifaces.interfaces():
-            addrs = netifaces.ifaddresses(interface)
-            if netifaces.AF_INET in addrs:
-                for addr in addrs[netifaces.AF_INET]:
-                    if addr['addr'] == ip:
-                        return interface
-        raise ValueError(f"No interface found for IP {ip}")
+        return f" ({', '.join(client_details)})" if client_details else ""
 
-    def build_dhcp_options(self, message_type, hostname=''):
-        """Build common DHCP options for OFFER and ACK packets"""
-        options = [
-            ('message-type', message_type),
-            ('server_id', self.server_ip),
-            ('lease_time', LEASE_TIME),
-            ('subnet_mask', '255.255.255.0'),
-            ('router', GATEWAY),
-            ('name_server', DNS_SERVER),
-            ('NTP_server', NTP_SERVER),
-            ('tftp_server_name', self.server_ip),  # Option 66
-            ('boot-file-name', 'EFI/BOOT/grubx64.efi')  # Option 67
-        ]
-        
-        # Add hostname if available
-        if hostname:
-            options.insert(-1, ('hostname', hostname))
-        
-        options.append('end')
-        return options
+    def _request_should_reallocate(self, mac, requested_hostname):
+        """Whether an existing lease must be replaced by a hostname request."""
+        if not requested_hostname or mac not in self.leases:
+            return False
 
-    def create_dhcp_offer(self, request_packet, offered_ip, hostname=''):
-        """Create DHCP OFFER packet"""
-        interface = self.get_interface_for_ip(self.server_ip)
-        options = self.build_dhcp_options(2, hostname)  # OFFER = 2
-        
-        return (
-            Ether(dst=request_packet[Ether].src, src=get_if_hwaddr(interface)) /
-            IP(src=self.server_ip, dst='255.255.255.255') /
-            UDP(sport=67, dport=68) /
-            BOOTP(
-                op=2,  # Boot reply
-                htype=1,
-                hlen=6,
-                xid=request_packet[BOOTP].xid,
-                yiaddr=offered_ip,
-                siaddr=self.server_ip,
-                chaddr=request_packet[BOOTP].chaddr
-            ) /
-            DHCP(options=options)
-        )
-    
-    def create_dhcp_ack(self, request_packet, ack_ip, hostname=''):
-        """Create DHCP ACK packet"""
-        interface = self.get_interface_for_ip(self.server_ip)
-        options = self.build_dhcp_options(5, hostname)  # ACK = 5
-        
-        return (
-            Ether(dst=request_packet[Ether].src, src=get_if_hwaddr(interface)) /
-            IP(src=self.server_ip, dst='255.255.255.255') /
-            UDP(sport=67, dport=68) /
-            BOOTP(
-                op=2,  # Boot reply
-                htype=1,
-                hlen=6,
-                xid=request_packet[BOOTP].xid,
-                yiaddr=ack_ip,
-                siaddr=self.server_ip,
-                chaddr=request_packet[BOOTP].chaddr
-            ) /
-            DHCP(options=options)
-        )
-    
-    def create_dhcp_nak(self, request_packet):
-        """Create DHCP NAK packet"""
-        interface = self.get_interface_for_ip(self.server_ip)
-        return (
-            Ether(dst=request_packet[Ether].src, src=get_if_hwaddr(interface)) /
-            IP(src=self.server_ip, dst='255.255.255.255') /
-            UDP(sport=67, dport=68) /
-            BOOTP(
-                op=2,  # Boot reply
-                htype=1,
-                hlen=6,
-                xid=request_packet[BOOTP].xid,
-                chaddr=request_packet[BOOTP].chaddr
-            ) /
-            DHCP(options=[
-                ('message-type', 6),  # NAK
-                ('server_id', self.server_ip),
-                'end'
-            ])
-        )
+        # Ignore temporary hostnames during autoinstall
+        if requested_hostname in ['ubuntu-server', 'localhost', '']:
+            logger.info(f"Ignoring temporary hostname '{requested_hostname}' for {mac}")
+            return False
+
+        lease = self.leases[mac]
+        current_hostname = lease.get('hostname', '')
+        expected_ip = self.determine_ip_from_hostname(requested_hostname)
+        current_ip = lease['ip']
+
+        if current_hostname != requested_hostname:
+            logger.info(f"Hostname changed from {current_hostname} to "
+                        f"{requested_hostname} for {mac}")
+            return True
+        if expected_ip and expected_ip != current_ip:
+            logger.info(f"IP should change from {current_ip} to {expected_ip} "
+                        f"for hostname {requested_hostname} on {mac}")
+            return True
+        return False
+
+    def _reallocate_lease(self, mac, requested_ip, requested_hostname):
+        """Remove the old lease and create a replacement, returning its IP."""
+        self.allocated_ips.discard(self.leases[mac]['ip'])
+        del self.leases[mac]
+        offered_ip, _ = self.get_or_create_lease(
+            mac, requested_ip, requested_hostname)
+        return offered_ip if offered_ip else requested_ip
+
+    def _send_dhcp_reply(self, packet, reply):
+        interface = interface_for_ip(self.server_ip)
+        sendp(reply, iface=interface, verbose=0)
+
+    def _nak_reason(self, mac, requested_ip):
+        if mac not in self.leases:
+            return "no lease found"
+        if requested_ip is None:
+            return "no requested IP in options or ciaddr"
+        return (f"lease IP {self.leases[mac]['ip']} != "
+                f"requested {requested_ip}")
     
     def dhcp_packet_handler(self, packet):
         """Handle incoming DHCP packets"""
@@ -1031,7 +956,7 @@ class DHCPServer:
         cleanup_thread.start()
         
         # Start packet sniffing
-        interface = self.get_interface_for_ip(self.server_ip)
+        interface = interface_for_ip(self.server_ip)
         logger.info(f"DHCP server listening on {interface} ({self.server_ip})")
         sniff(
             iface=interface,
