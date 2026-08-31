@@ -154,29 +154,13 @@ func modelsAddOneResult(client *clientv3.Client, prefix, model, apiBase string) 
 	key := prefix + model
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.Get(ctx, key)
-	if err != nil {
-		fatal("etcd get %s: %v", key, err)
-	}
-	var v etcdModelValue
-	if len(resp.Kvs) > 0 {
-		if err := json.Unmarshal(resp.Kvs[0].Value, &v); err != nil {
-			fatal("existing value at %s is not JSON: %v", key, err)
-		}
-		for _, b := range v.Backends {
-			if b.APIBase == apiBase {
-				return false
-			}
-		}
+
+	v := getEtcdModelValue(ctx, client, key)
+	if backendExists(v.Backends, apiBase) {
+		return false
 	}
 	v.Backends = append(v.Backends, etcdBackendEntry{APIBase: apiBase})
-	buf, err := json.Marshal(v)
-	if err != nil {
-		fatal("marshal: %v", err)
-	}
-	if _, err := client.Put(ctx, key, string(buf)); err != nil {
-		fatal("etcd put %s: %v", key, err)
-	}
+	putEtcdModelValue(ctx, client, key, v)
 	return true
 }
 

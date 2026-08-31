@@ -18,6 +18,42 @@ type modelEntry struct {
 	backends []string
 }
 
+// getEtcdModelValue returns the current model value, or an empty one when
+// the key doesn't exist yet. Fatal on transport errors and malformed JSON.
+func getEtcdModelValue(ctx context.Context, client *clientv3.Client, key string) etcdModelValue {
+	resp, err := client.Get(ctx, key)
+	if err != nil {
+		fatal("etcd get %s: %v", key, err)
+	}
+	var v etcdModelValue
+	if len(resp.Kvs) > 0 {
+		if err := json.Unmarshal(resp.Kvs[0].Value, &v); err != nil {
+			fatal("existing value at %s is not JSON: %v", key, err)
+		}
+	}
+	return v
+}
+
+func putEtcdModelValue(ctx context.Context, client *clientv3.Client, key string, v etcdModelValue) {
+	buf, err := json.Marshal(v)
+	if err != nil {
+		fatal("marshal: %v", err)
+	}
+	if _, err := client.Put(ctx, key, string(buf)); err != nil {
+		fatal("etcd put %s: %v", key, err)
+	}
+}
+
+// backendExists reports whether apiBase is already in the backend list.
+func backendExists(backends []etcdBackendEntry, apiBase string) bool {
+	for _, b := range backends {
+		if b.APIBase == apiBase {
+			return true
+		}
+	}
+	return false
+}
+
 func modelsLs(configPath string, args []string) {
 	if len(args) != 0 {
 		fatalUsage("models ls")
