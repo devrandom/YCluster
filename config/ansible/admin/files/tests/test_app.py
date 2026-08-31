@@ -140,6 +140,20 @@ class SchedTestBase(unittest.TestCase):
 
 
 class ScheduleSetTests(SchedTestBase):
+    def test_vm_get_connection_failure(self):
+        with mock.patch.object(vmm, 'vm_get',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/set",
+                          {"vm": "v", "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 503)
+
+    def test_vm_get_connection_failure_stop_now(self):
+        with mock.patch.object(vmm, 'vm_get',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/stop-now",
+                          {"vm": "v"}, admin=True)
+        self.assertEqual(r.status_code, 503)
+
     def test_no_such_vm(self):
         self.assertEqual(self.post("/admin/vm-schedule/set",
                                    {"vm": "ghost", "mode": "off"}).status_code, 404)

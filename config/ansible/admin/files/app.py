@@ -61,6 +61,7 @@ from app_gpu_blocks import (gpu_block_record, invalid_windows,
                             resolve_gpu_block, validate_gpu_block)
 import app_inventory
 import app_schedule
+from app_schedule import schedule_gpu_count, validate_schedule_mode
 from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
@@ -2918,20 +2919,9 @@ def vm_schedule_set():
         return jsonify({'error': 'not your VM'}), 403
 
     mode = data.get('mode')
-    if mode not in ('on', 'off', 'schedule', 'unmanaged'):
-        return jsonify({'error': 'mode must be on|off|schedule|unmanaged'}), 400
-    # 'unmanaged' (scheduler hands-off) is an admin-only escape hatch: non-
-    # admins can neither set it nor change a VM an admin already set
-    # unmanaged. A VM with no record yet is its implicit default (also shown
-    # as 'unmanaged') and stays schedulable by its owner — only an explicit
-    # record locks it.
-    if not id.is_admin:
-        cur = vmm.desired_get(name)
-        cur_mode = cur.get('mode') if cur else None
-        if mode == 'unmanaged':
-            return jsonify({'error': 'only admins can set a VM unmanaged'}), 403
-        if cur_mode == 'unmanaged':
-            return jsonify({'error': 'admin-managed VM; only an admin can change it'}), 403
+    error = validate_schedule_mode(id, name, mode, vmm)
+    if error:
+        return jsonify(error[0]), error[1]
 
     # Windows are preserved across every mode (including unmanaged) so a
     # user can flip on/off/unmanaged as a temporary override and switch
@@ -2950,16 +2940,9 @@ def vm_schedule_set():
     # allocated GPUs the scheduler should hold/attach. Absent (backwards
     # compat) means all of them (the registered record). Bounded to the
     # registered count so a save can never over-allocate past the VM.
-    registered = rec.get('gpus') or 0
-    gpus = data.get('gpus')
-    if gpus is None:
-        gpus = registered
-    else:
-        valid = (isinstance(gpus, int) and not isinstance(gpus, bool)
-                 and 0 <= gpus <= registered)
-        if not valid:
-            cap = f'0..{registered}'
-            return jsonify({'error': f'gpus must be an integer in {cap}'}), 400
+    gpus, error = schedule_gpu_count(rec, data.get('gpus'))
+    if error:
+        return jsonify(error[0]), error[1]
 
     # Admission control self-gates to the modes that newly commit GPUs
     # against the host pool ('on' = always-held, 'schedule' = windows);

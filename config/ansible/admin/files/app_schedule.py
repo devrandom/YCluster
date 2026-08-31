@@ -3,6 +3,39 @@
 from datetime import datetime
 
 
+def validate_schedule_mode(identity, name, mode, vmm):
+    """Validate a requested schedule mode and non-admin lockout rules."""
+    if mode not in ('on', 'off', 'schedule', 'unmanaged'):
+        return {'error': 'mode must be on|off|schedule|unmanaged'}, 400
+
+    # 'unmanaged' (scheduler hands-off) is an admin-only escape hatch: non-
+    # admins can neither set it nor change a VM an admin already set
+    # unmanaged. A VM with no record yet is its implicit default (also shown
+    # as 'unmanaged') and stays schedulable by its owner — only an explicit
+    # record locks it.
+    if not identity.is_admin:
+        current = vmm.desired_get(name)
+        current_mode = current.get('mode') if current else None
+        if mode == 'unmanaged':
+            return {'error': 'only admins can set a VM unmanaged'}, 403
+        if current_mode == 'unmanaged':
+            return {'error': 'admin-managed VM; only an admin can change it'}, 403
+    return None
+
+
+def schedule_gpu_count(rec, requested):
+    """Bound the requested GPU count to the VM's registered GPUs."""
+    registered = rec.get('gpus') or 0
+    if requested is None:
+        return registered, None
+    valid = (isinstance(requested, int) and not isinstance(requested, bool)
+             and 0 <= requested <= registered)
+    if not valid:
+        return None, ({'error': f'gpus must be an integer in 0..{registered}'},
+                      400)
+    return requested, None
+
+
 def live_state(states):
     """Return ({vm: status}, {host: pool_size}) from host snapshots."""
     live, pools = {}, {}
