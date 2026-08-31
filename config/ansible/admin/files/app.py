@@ -900,91 +900,81 @@ def check_docker_daemon():
             'details': {'message': f'Docker check failed: {str(e)}'}
         }
 
+def _registry_probe_status():
+    """Probe the Docker registry /v2/ endpoint.
+
+    Returns (healthy, api_version, error) — tries localhost then the
+    storage VIP, stopping at the first 200 response.
+    """
+    test_urls = [f'http://localhost:5000/v2/', f'http://{STORAGE_VIP}:5000/v2/']
+    error = None
+    for url in test_urls:
+        try:
+            response = requests.get(url, timeout=5)
+        except requests.exceptions.Timeout:
+            error = 'Registry health check timeout'
+        except requests.exceptions.ConnectionError:
+            error = 'Registry connection failed'
+        except Exception as e:
+            error = f'Registry health check failed: {str(e)}'
+        else:
+            if response.status_code == 200:
+                version = response.headers.get('Docker-Distribution-Api-Version', 'unknown')
+                return True, version, None
+            error = f'Registry health check returned HTTP {response.status_code}'
+    return False, None, error
+
+
+def _registry_leader_status(running, port_open, healthy, version, error):
+    """Determine status/message on the storage leader."""
+    if running and port_open and healthy:
+        return 'healthy', f'Registry running and healthy (API version {version})'
+    if running and port_open:
+        return 'degraded', f'Registry running but health check failed: {error}'
+    if running:
+        return 'unhealthy', f'Registry running but port not accessible: {error}'
+    return 'unhealthy', 'Registry not running'
+
+
 def check_docker_registry():
     """Check Docker registry status and functionality"""
     try:
-        # Check if registry service is running
-        registry_service_running = check_service_status('docker-registry')
-        
-        # Also check if registry container is running directly
-        registry_container_running = False
+        service_running = check_service_status('docker-registry')
+        port_open = check_port_open('localhost', 5000)
+        healthy, version, error = (False, None, None)
+        if port_open:
+            healthy, version, error = _registry_probe_status()
 
-        # Check if registry port is open (try both localhost and storage VIP)
-        registry_port_open = check_port_open('localhost', 5000)
-
-        # Test registry health endpoint
-        registry_healthy = False
-        registry_error = None
-        registry_version = None
-        
-        if registry_port_open:
-            # Try both localhost and VIP endpoints
-            test_urls = ['http://localhost:5000/v2/', 'http://10.0.0.100:5000/v2/']
-            for url in test_urls:
-                try:
-                    health_response = requests.get(url, timeout=5)
-                    if health_response.status_code == 200:
-                        registry_healthy = True
-                        registry_version = health_response.headers.get('Docker-Distribution-Api-Version', 'unknown')
-                        break
-                    else:
-                        registry_error = f'Registry health check returned HTTP {health_response.status_code}'
-                except requests.exceptions.Timeout:
-                    registry_error = 'Registry health check timeout'
-                except requests.exceptions.ConnectionError:
-                    registry_error = 'Registry connection failed'
-                except Exception as e:
-                    registry_error = f'Registry health check failed: {str(e)}'
-        
-        # Check if this node should be running the registry (storage leader)
         is_storage_lead = is_storage_leader()
-        
-        # Registry is considered running if either service or container is running
-        registry_running = registry_service_running or registry_container_running
-        
-        # Determine overall status
+        running = service_running  # container check is a no-op (always False)
+
         if is_storage_lead:
-            if registry_running and registry_port_open and registry_healthy:
-                status = 'healthy'
-                message = f'Registry running and healthy (API version {registry_version})'
-            elif registry_running and registry_port_open:
-                status = 'degraded'
-                message = f'Registry running but health check failed: {registry_error}'
-            elif registry_running:
-                status = 'unhealthy'
-                message = f'Registry running but port not accessible: {registry_error}'
-            else:
-                status = 'unhealthy'
-                message = 'Registry not running'
+            status, message = _registry_leader_status(running, port_open, healthy, version, error)
+        elif running or port_open:
+            status, message = 'unhealthy', 'Split-brain: Registry running on non-leader'
         else:
-            # Not storage leader - registry should not be running
-            if registry_running or registry_port_open:
-                status = 'unhealthy'
-                message = 'Split-brain: Registry running on non-leader'
-            else:
-                status = 'standby'
-                message = 'Registry not required (not storage leader)'
-        
+            status, message = 'standby', 'Registry not required (not storage leader)'
+
         return {
             'status': status,
             'details': {
-                'service_active': registry_service_running,
-                'container_running': registry_container_running,
-                'port_open': registry_port_open,
-                'health_check_passed': registry_healthy,
-                'api_version': registry_version,
+                'service_active': service_running,
+                'container_running': False,
+                'port_open': port_open,
+                'health_check_passed': healthy,
+                'api_version': version,
                 'required': is_storage_lead,
                 'reason': 'storage leader' if is_storage_lead else 'not storage leader',
                 'message': message,
-                'error': registry_error
+                'error': error
             }
         }
-        
     except Exception as e:
         return {
             'status': 'error',
             'details': {'message': f'Registry check failed: {str(e)}'}
         }
+
 
 def check_tang_service():
     """Check Tang server status and functionality"""

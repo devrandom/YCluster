@@ -292,3 +292,25 @@ class OpenWebuiProbeTests(unittest.TestCase):
             healthy, version, error = appmod._open_webui_health_probe()
         self.assertFalse(healthy)
         self.assertIn('HTTP 503', error)
+
+
+class RegistryLeaderStatusTests(unittest.TestCase):
+    def test_healthy(self):
+        status, msg = appmod._registry_leader_status(True, True, True, 'v2', None)
+        self.assertEqual(status, 'healthy')
+        self.assertIn('API version v2', msg)
+
+    def test_degraded(self):
+        status, msg = appmod._registry_leader_status(True, True, False, None, 'bad')
+        self.assertEqual(status, 'degraded')
+        self.assertIn('health check failed', msg)
+
+    def test_port_closed(self):
+        status, msg = appmod._registry_leader_status(True, False, False, None, None)
+        self.assertEqual(status, 'unhealthy')
+        self.assertIn('port not accessible', msg)
+
+    def test_not_running(self):
+        status, msg = appmod._registry_leader_status(False, False, False, None, None)
+        self.assertEqual(status, 'unhealthy')
+        self.assertIn('not running', msg)
