@@ -378,3 +378,12 @@ class SecretsMountTests(unittest.TestCase):
              mock.patch.object(ha.os.path, 'isdir', return_value=True), \
              mock.patch.object(ha.os, 'listdir', side_effect=PermissionError):
             self.assertEqual(ha._secrets_access(True), (True, None))
+
+
+class ServiceMetricValueTests(unittest.TestCase):
+    def test_ordinals(self):
+        self.assertEqual(ha.service_metric_value('healthy'), 0)
+        self.assertEqual(ha.service_metric_value('degraded'), 1)
+        self.assertEqual(ha.service_metric_value('unhealthy'), 2)
+        self.assertEqual(ha.service_metric_value('standby'), 3)
+        self.assertEqual(ha.service_metric_value('unknown'), 2)

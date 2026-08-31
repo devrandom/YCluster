@@ -921,6 +921,11 @@ def health():
     return jsonify(health_status), status_code
 
 
+def service_metric_value(status):
+    """Map a service status to the metrics API's ordinal."""
+    return {'healthy': 0, 'degraded': 1, 'standby': 3}.get(status, 2)
+
+
 @app.route('/metrics')
 def prometheus_metrics():
     try:
@@ -931,17 +936,7 @@ def prometheus_metrics():
         metrics.append(f'ycluster_node_healthy{{node="{_HOSTNAME}"}} {overall_value}')
 
         for service, details in health_data.get('services', {}).items():
-            status = details.get('status')
-            if status == 'healthy':
-                service_value = 0
-            elif status == 'degraded':
-                service_value = 1
-            elif status == 'unhealthy':
-                service_value = 2
-            elif status == 'standby':
-                service_value = 3
-            else:
-                service_value = 2
+            service_value = service_metric_value(details.get('status'))
             metrics.append(
                 f'ycluster_service_health{{node="{_HOSTNAME}",'
                 f'service="{service}"}} {service_value}'
