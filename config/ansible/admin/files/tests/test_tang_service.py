@@ -8,11 +8,18 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+_FILES = os.path.dirname(_HERE)
+for _p in (_HERE, _FILES, os.path.join(_FILES, 'ycluster')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 _API_PATH = os.path.join(_HERE, '..', 'health-api.py')
 _spec = importlib.util.spec_from_file_location('health_api', _API_PATH)
 ha = importlib.util.module_from_spec(_spec)
 sys.modules['health_api'] = ha
 _spec.loader.exec_module(ha)
+
+import app as appmod
+import health_api as ha
 
 
 class TangAdvertisementTests(unittest.TestCase):
@@ -82,3 +89,47 @@ class CheckTangServiceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AppTangAdvertisementTests(unittest.TestCase):
+    def test_200_with_key_count(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {'keys': [1, 2, 3]}
+        with mock.patch.object(appmod.requests, 'get', return_value=response):
+            healthy, keys, error = appmod._tang_advertisement_status()
+        self.assertTrue(healthy)
+        self.assertEqual(keys, 3)
+        self.assertIsNone(error)
+
+    def test_non_200(self):
+        response = mock.Mock(status_code=500)
+        with mock.patch.object(appmod.requests, 'get', return_value=response):
+            healthy, keys, error = appmod._tang_advertisement_status()
+        self.assertFalse(healthy)
+        self.assertIn('HTTP 500', error)
+
+    def test_timeout(self):
+        import requests
+        with mock.patch.object(appmod.requests, 'get',
+                               side_effect=requests.exceptions.Timeout()):
+            healthy, keys, error = appmod._tang_advertisement_status()
+        self.assertFalse(healthy)
+        self.assertIn('timeout', error)
+
+
+class AppTangHealthFromProbeTests(unittest.TestCase):
+    def test_healthy(self):
+        status, msg = appmod._tang_health_from_probe(True, True, True, 3, None)
+        self.assertEqual(status, 'healthy')
+
+    def test_degraded(self):
+        status, msg = appmod._tang_health_from_probe(True, True, False, None, 'bad')
+        self.assertEqual(status, 'degraded')
+
+    def test_port_closed(self):
+        status, msg = appmod._tang_health_from_probe(True, False, False, None, None)
+        self.assertEqual(status, 'unhealthy')
+
+    def test_not_running(self):
+        status, msg = appmod._tang_health_from_probe(False, False, False, None, None)
+        self.assertEqual(status, 'unhealthy')
