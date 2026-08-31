@@ -1247,6 +1247,84 @@ class VMHelperTests(unittest.TestCase):
             self.assertEqual(vm.state_all(), {'host': {'status': 'Running'}})
 
 
+class VMListHelperTests(unittest.TestCase):
+    def test_strip_tz(self):
+        self.assertEqual(vm._strip_tz(''), '')
+        self.assertEqual(vm._strip_tz('2026-01-01T00:00:00Z'),
+                         '2026-01-01T00:00:00')
+        self.assertEqual(vm._strip_tz('2026-01-01T00:00:00+02:00'),
+                         '2026-01-01T00:00:00')
+        self.assertEqual(vm._strip_tz('2026-01-01T00:00:00'),
+                         '2026-01-01T00:00:00')
+
+    def test_sampled_states_skips_unnamed(self):
+        states = {
+            'host-a': {'instances': [{'name': 'vm1', 'status': 'Running'},
+                                     {'status': 'Running'}]},
+            'host-b': {'instances': [{'name': 'vm2', 'status': 'Stopped'}]},
+        }
+        self.assertEqual(vm._sampled_states(lambda: states),
+                         {'vm1': 'Running', 'vm2': 'Stopped'})
+
+    def test_vm_list_state_priority(self):
+        self.assertEqual(vm._vm_list_state('vm1', {'state': 'provisioning'},
+                                           'host', {}, {}), 'provisioning')
+        self.assertEqual(vm._vm_list_state('vm1', {'host': 'host'}, 'host',
+                                           {'vm1': 'Running'}, {}), 'Running')
+        self.assertEqual(vm._vm_list_state('vm1', {'host': 'remote'}, 'host',
+                                           {}, {'vm1': 'Stopped'}), 'Stopped')
+        self.assertEqual(vm._vm_list_state('vm1', {'host': 'remote'}, 'host',
+                                           {}, {}), '(remote)')
+
+    def test_sync_limits_backfills_local_vms(self):
+        with mock.patch.object(vm.socket, 'gethostname', return_value='host-a'), \
+                mock.patch.object(vm, 'vms_all',
+                                  return_value={'local': {'host': 'host-a'},
+                                                'remote': {'host': 'host-b'}}), \
+                mock.patch.object(vm, '_sync_vm_limits_once',
+                                  side_effect=[True, False]) as sync_once, \
+                mock.patch('builtins.print') as print_:
+            vm.vm_sync_limits()
+        sync_once.assert_called_once_with('local', {'host': 'host-a'})
+        print_.assert_called_once_with('synced cpu/mem for 1 VM(s) on host-a')
+
+
+    def test_reconcile_cleanup_deletes_orphan_issues(self):
+        issues = {'vm1': True, 'vm2': True}
+        with mock.patch.object(vm, '_delete') as delete:
+            vm._reconcile_cleanup(issues, {'vm2': {}})
+        delete.assert_called_once_with(vm.VM_ISSUE_PREFIX + 'vm1')
+        self.assertEqual(issues, {'vm2': True})
+
+    def test_record_event_from_record_uses_registry(self):
+        with mock.patch.object(vm, 'vm_get',
+                               return_value={'owner': 'alice@x', 'gpus': 2}), \
+                mock.patch.object(vm, '_record_event') as record:
+            vm._record_event_from_record('start', 'vm1', initiator='web',
+                                         billable=True)
+        record.assert_called_once_with('start', 'vm1', owner='alice@x',
+                                       gpus=2, initiator='web', billable=True)
+
+    def test_vm_gpus_reports_assigned_free_and_wedged(self):
+        with mock.patch.object(vm, 'gpu_pool', return_value=[]), \
+                mock.patch('builtins.print') as print_:
+            vm.vm_gpus()
+        print_.assert_called_once_with(
+            'No vfio-pci GPUs found — has the host been rebooted since '
+            'the passthrough binding was configured?')
+
+        with mock.patch.object(vm, 'gpu_pool', return_value=['p1', 'p2', 'p3']), \
+                mock.patch.object(vm, '_assigned_gpus', return_value={'p1'}), \
+                mock.patch.object(vm, '_gpu_healthy',
+                                  side_effect=lambda pci: pci == 'p2'), \
+                mock.patch('builtins.print') as print_:
+            vm.vm_gpus()
+        self.assertEqual(print_.mock_calls[0], mock.call('p1  ASSIGNED'))
+        self.assertEqual(print_.mock_calls[1], mock.call('p2  free'))
+        self.assertEqual(print_.mock_calls[2],
+                         mock.call('p3  WEDGED (PCIe fault? — won\'t be allocated)'))
+
+
 class UserRegistryTests(unittest.TestCase):
     KEY = 'ssh-ed25519 ' + 'A' * 24 + ' comment'
 
