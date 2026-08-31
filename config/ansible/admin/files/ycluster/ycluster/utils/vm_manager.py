@@ -1562,6 +1562,29 @@ def _strip_tz(ts: str) -> str:
         return ts[:-6]
     return ts
 
+def _sampled_states(state_all_fn=None):
+    """Map instance name -> status from every host's etcd state snapshot."""
+    all_states = state_all() if state_all_fn is None else state_all_fn()
+    sampled = {}
+    for _host, snap in all_states.items():
+        for inst in snap.get("instances", []):
+            name = inst.get("name")
+            if name:
+                sampled[name] = inst.get("status", "?")
+    return sampled
+
+
+def _vm_list_state(name, rec, local, live_states, sampled):
+    """Determine the display state for one VM in the list."""
+    if rec.get("state") == "provisioning":
+        return "provisioning"          # launch did not complete
+    host = rec.get("host")
+    if host == local:
+        return live_states.get(name, "(absent)")
+    # Prefer the etcd snapshot over "(remote)" when available.
+    return sampled.get(name, "(remote)")
+
+
 def vm_list():
     vms = vms_all()
     if not vms:
@@ -1574,27 +1597,16 @@ def vm_list():
                        for i in _incus_json("list", "--format", "json")}
     except FileNotFoundError:
         live_states = {}
-    # Sampled state from every host's etcd snapshot (vm-state-sampler timer).
-    sampled = {}
-    for host, snap in state_all().items():
-        for inst in snap.get("instances", []):
-            name = inst.get("name")
-            if name:
-                sampled[name] = inst.get("status", "?")
+    sampled = _sampled_states()
     print(f"{'NAME':<20} {'OWNER':<24} {'HOST':<8} {'GPUS':<5} "
           f"{'STATE':<14} CREATED")
     for name, rec in sorted(vms.items()):
         host = rec.get("host")
-        if rec.get("state") == "provisioning":
-            state = "provisioning"        # launch did not complete
-        elif host == local:
-            state = live_states.get(name, "(absent)")
-        else:
-            # Prefer the etcd snapshot over "(remote)" when available.
-            state = sampled.get(name, "(remote)")
+        state = _vm_list_state(name, rec, local, live_states, sampled)
         print(f"{name:<20} {rec.get('owner', '?'):<24} {host or '?':<8} "
               f"{str(rec.get('gpus', '?')):<5} {state:<14} "
               f"{_strip_tz(rec.get('created', ''))}")
+
 
 def _live_ipv4(inst):
     """Return the instance's current live global IPv4, or None."""
