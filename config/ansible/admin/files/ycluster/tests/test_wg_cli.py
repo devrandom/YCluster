@@ -90,3 +90,20 @@ class ReconcileHelpersTests(unittest.TestCase):
             wg_config._sync_existing_interface(up=False)
         log_dry.assert_called_once_with('wg syncconf wg0 (from rendered server config)')
         self.assertEqual(out.getvalue(), '')
+
+
+class InitServerTests(unittest.TestCase):
+    def test_preserves_existing_key_and_port(self):
+        existing = {'privkey': 'old-private', 'pubkey': 'old-public', 'port': 60000}
+        with mock.patch.object(wg_config, '_gen_keypair') as gen:
+            got = wg_config._updated_server(existing, ['host'], None, False)
+        gen.assert_not_called()
+        self.assertEqual(got['port'], 60000)
+        self.assertEqual(got['endpoints'], ['host:51820'])
+
+    def test_rotate_generates_keypair(self):
+        with mock.patch.object(wg_config, '_gen_keypair', return_value=('new-private', 'new-public')):
+            got = wg_config._updated_server({}, ['host'], 60001, True)
+        self.assertEqual(got['privkey'], 'new-private')
+        self.assertEqual(got['pubkey'], 'new-public')
+        self.assertEqual(got['port'], 60001)

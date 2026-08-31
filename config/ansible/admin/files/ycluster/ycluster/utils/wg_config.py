@@ -84,22 +84,22 @@ def get_server():
 
 def init_server(endpoints, port=None, rotate=False):
     """Create or update the server record. Endpoints is a list of 'host[:port]'."""
-    normalized = [_parse_endpoint(e) for e in endpoints]
     client = get_etcd_client()
-    existing = get_server() or {}
-
-    if rotate or 'privkey' not in existing:
-        priv, pub = _gen_keypair()
-        existing['privkey'] = priv
-        existing['pubkey'] = pub
-
-    existing['port'] = port or existing.get('port') or DEFAULT_PORT
-    existing['endpoints'] = normalized
-    existing['server_ip'] = SERVER_IP
+    existing = _updated_server(get_server() or {}, endpoints, port, rotate)
     if DRY_RUN:
         _log_dry(f"etcd put {SERVER_KEY}")
     else:
         client.put(SERVER_KEY, json.dumps(existing))
+    return existing
+
+
+def _updated_server(existing, endpoints, port, rotate):
+    """Return the server record after applying init/rotation fields."""
+    if rotate or 'privkey' not in existing:
+        existing['privkey'], existing['pubkey'] = _gen_keypair()
+    existing['port'] = port or existing.get('port') or DEFAULT_PORT
+    existing['endpoints'] = [_parse_endpoint(e) for e in endpoints]
+    existing['server_ip'] = SERVER_IP
     return existing
 
 
