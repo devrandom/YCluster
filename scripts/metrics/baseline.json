@@ -234,7 +234,7 @@
   "config/ansible/monitoring/files/osv-feed-publish.py": 0.0,
   "config/ansible/monitoring/files/update-blackbox-targets.py": 0.0,
   "config/ansible/monitoring/files/vm-gpu-collector.py": 0.0,
-  "local-ai-proxy total": 60.4
+  "local-ai-proxy total": 60.8
  },
  "crap": {
   "acl.go::Check": 6.0,
@@ -1282,8 +1282,8 @@
   "load.go::get": 2.0,
   "main.go::awaitServerExit": 20.0,
   "main.go::buildEtcdRouter": 12.0,
-  "main.go::buildPassthroughRouter": 6.0,
-  "main.go::buildRouter": 30.0,
+  "main.go::buildPassthroughRouter": 2.0,
+  "main.go::buildRouter": 10.4,
   "main.go::buildServers": 3.0,
   "main.go::buildYAMLRouter": 12.0,
   "main.go::configureDisabledBackends": 20.0,
