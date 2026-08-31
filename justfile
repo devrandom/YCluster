@@ -6,6 +6,7 @@
 #   lint.just         yamllint + ty + go vet
 #   deps.just         govulncheck audit + go.mod/go.sum pin maintenance
 #   python.just       uv venv + editable ycluster install
+#   metrics.just      quality-metric gate (complexity/CRAP/coverage/dead code)
 #
 # `just` with no args lists all recipes. Use `just <recipe>` to run one.
 
@@ -18,6 +19,7 @@ import "just.d/lint.just"
 import "just.d/deps.just"
 import "just.d/worktrees.just"
 import "just.d/python.just"
+import "just.d/metrics.just"
 
 # Default: list every recipe across modules.
 default:

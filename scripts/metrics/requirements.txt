@@ -1,0 +1,20 @@
+# Pinned metric-tool dependencies. Install with:
+#   uv pip install --require-hashes -r scripts/metrics/requirements.txt
+# Hashes are the PyPI-published sha256 digests (verified 2026-08-31); every
+# transitive dependency must be listed because --require-hashes rejects
+# anything without an explicit pin.
+#
+radon==6.0.1 \
+    --hash=sha256:632cc032364a6f8bb1010a2f6a12d0f14bc7e5ede76585ef29dc0cecf4cd8859
+mando==0.7.1 \
+    --hash=sha256:26ef1d70928b6057ee3ca12583d73c63e05c49de8972d620c278a7b206581a8a
+colorama==0.4.6 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+vulture==2.16 \
+    --hash=sha256:6e0f1c312cef1c87856957e5c2ca9608834a7c794c2180477f30bf0e4cc58eee
+coverage==7.16.0 \
+    --hash=sha256:077f0964087883176ff6ab9b074694cae29f8c708273b13ca62c183c6ed716cd \
+    --hash=sha256:e9883a2f8206ce3af59117dc278e5d043fea06912bca3f199816129e5e2de354 \
+    --hash=sha256:984e5430fc6f858385009e92549955157d79335b1f3e13e1031e0f89d1284261
