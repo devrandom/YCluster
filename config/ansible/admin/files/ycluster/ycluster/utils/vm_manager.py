@@ -200,17 +200,16 @@ def _pinned_ips():
     return pinned
 
 def _occupied_ips():
-    """Set of IPs already in use on this host's incus bridge: every pinned
-    eth0 address plus every currently-live address (e.g. the bastion's
-    DHCP-assigned .36 that has no static pin)."""
+    """Pinned eth0 addresses plus every currently-live instance address."""
     occupied = set(_pinned_ips().values())
-    for inst in _incus_json("list", "--format", "json"):
-        net = (inst.get("state") or {}).get("network") or {}
-        for iface in net.values():
-            for a in iface.get("addresses", []) or []:
-                if a.get("family") == "inet" and a.get("scope") == "global":
-                    occupied.add(a["address"])
-    return occupied
+    return occupied.union(*(_live_instance_ips(i) for i in _incus_json("list", "--format", "json")))
+
+def _live_instance_ips(inst):
+    net = (inst.get("state") or {}).get("network") or {}
+    return {a["address"]
+            for iface in net.values()
+            for a in iface.get("addresses", []) or []
+            if a.get("family") == "inet" and a.get("scope") == "global"}
 
 def _pick_vm_ip(prefer=None, taken=None):
     """Return the first unused IP in VM_IP_POOL_START..VM_IP_POOL_END.
