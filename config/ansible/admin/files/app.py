@@ -405,53 +405,20 @@ def allocate_hostname():
     except Exception as e:
         return jsonify({'error': f'Allocation failed: {str(e)}'}), 500
 
-@app.route('/api/wg/register', methods=['POST'])
 def wg_register():
-    """Allocate a hostname+IP (as a cluster node of the requested type)
-    and register a WireGuard peer pubkey for it in one atomic call.
-
-    This endpoint is public (exposed via the admin-api reverse proxy for
-    remote-node onboarding), so it validates input carefully and does not
-    leak details of unrelated allocations.
-
-    Body (JSON): {mac, type, pubkey}
-      mac:    client MAC (any format)
-      type:   one of storage|compute|macos|nas|nvidia (default: compute)
-      pubkey: base64-encoded 32-byte WireGuard public key
-    Returns: {hostname, ip, status, pubkey_sha256}
-    """
-    import base64
+    """Allocate a node and register a WireGuard peer in one atomic call."""
     from ycluster.utils import wg_config
 
     data = request.get_json(silent=True) or {}
-    mac = data.get('mac')
-    node_type = data.get('type') or 'compute'
-    pubkey = data.get('pubkey')
+    mac, node_type, pubkey, error = app_wg.validate_register_input(data)
+    if error:
+        return jsonify({'error': error}), 400
 
-    if not mac or not pubkey:
-        return jsonify({'error': 'mac and pubkey are required'}), 400
-    if node_type not in ('storage', 'compute', 'macos', 'nas', 'nvidia', 'dev'):
-        return jsonify({'error': f'invalid type: {node_type}'}), 400
-
-    # Sanity-check the pubkey shape before touching etcd
-    try:
-        decoded = base64.b64decode(pubkey, validate=True)
-        if len(decoded) != 32:
-            raise ValueError('wrong length')
-    except Exception:
-        return jsonify({'error': 'invalid pubkey (expected base64 32-byte key)'}), 400
-
-    try:
-        allocation = get_or_create_allocation(mac, node_type=node_type, via_wg=True)
-    except Exception as e:
-        return jsonify({'error': f'allocation failed: {e}'}), 500
-
-    try:
-        peer = wg_config.register_peer(allocation['hostname'], pubkey)
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'registration failed: {e}'}), 500
+    allocation, peer, failure = app_wg.register_peer(
+        get_or_create_allocation, wg_config.register_peer,
+        mac, node_type, pubkey)
+    if failure:
+        return jsonify({'error': failure[1]}), failure[0]
 
     return jsonify({
         'hostname': allocation['hostname'],
