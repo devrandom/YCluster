@@ -263,46 +263,56 @@ func awaitServerExit(servers []*http.Server, errCh <-chan error, shutdownDone <-
 func buildRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
 	switch {
 	case cfg.Backend.URL != "":
-		b, err := url.Parse(cfg.Backend.URL)
-		if err != nil {
-			return nil, nil, err
-		}
-		logger.Info("local-ai-proxy starting", "mode", "passthrough", "listen", cfg.Listen, "backend", b.String())
-		return NewPassthroughRouter(b), nil, nil
-
+		return buildPassthroughRouter(cfg, logger)
 	case len(cfg.Backends) > 0:
-		src, err := NewYAMLSource(cfg.Backends)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := src.Start(context.Background()); err != nil {
-			return nil, nil, err
-		}
-		logger.Info("local-ai-proxy starting", "mode", "yaml", "listen", cfg.Listen, "models", len(cfg.Backends), "max_routing_body_bytes", cfg.MaxRoutingBodyBytes)
-		r := NewModelRouter(src)
-		r.MaxRoutingBodyBytes = cfg.MaxRoutingBodyBytes
-		r.Logger = logger
-		return r, src, nil
-
+		return buildYAMLRouter(cfg, logger)
 	case cfg.Etcd != nil && cfg.Etcd.Prefix != "":
-		src, err := NewEtcdSource(*cfg.Etcd, logger)
-		if err != nil {
-			return nil, nil, err
-		}
-		startCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := src.Start(startCtx); err != nil {
-			_ = src.Close()
-			return nil, nil, err
-		}
-		// Log the resolved endpoints (ETCD_HOSTS env wins over YAML), not the
-		// raw YAML field, which is usually empty in production.
-		logger.Info("local-ai-proxy starting", "mode", "etcd", "listen", cfg.Listen, "endpoints", etcdEndpoints(cfg.Etcd), "prefix", cfg.Etcd.Prefix, "max_routing_body_bytes", cfg.MaxRoutingBodyBytes)
-		r := NewModelRouter(src)
-		r.MaxRoutingBodyBytes = cfg.MaxRoutingBodyBytes
-		r.Logger = logger
-		return r, src, nil
+		return buildEtcdRouter(cfg, logger)
 	}
-
 	return nil, nil, errors.New("no routing source configured (this is a bug; Validate should have caught it)")
+}
+
+func buildPassthroughRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
+	b, err := url.Parse(cfg.Backend.URL)
+	if err != nil {
+		return nil, nil, err
+	}
+	logger.Info("local-ai-proxy starting", "mode", "passthrough", "listen", cfg.Listen, "backend", b.String())
+	return NewPassthroughRouter(b), nil, nil
+}
+
+func buildYAMLRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
+	src, err := NewYAMLSource(cfg.Backends)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := src.Start(context.Background()); err != nil {
+		return nil, nil, err
+	}
+	logger.Info("local-ai-proxy starting", "mode", "yaml", "listen", cfg.Listen, "models", len(cfg.Backends), "max_routing_body_bytes", cfg.MaxRoutingBodyBytes)
+	return newYAMLModelRouter(cfg, src, logger), src, nil
+}
+
+func buildEtcdRouter(cfg Config, logger *slog.Logger) (Router, Source, error) {
+	src, err := NewEtcdSource(*cfg.Etcd, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	startCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := src.Start(startCtx); err != nil {
+		_ = src.Close()
+		return nil, nil, err
+	}
+	// Log the resolved endpoints (ETCD_HOSTS env wins over YAML), not the
+	// raw YAML field, which is usually empty in production.
+	logger.Info("local-ai-proxy starting", "mode", "etcd", "listen", cfg.Listen, "endpoints", etcdEndpoints(cfg.Etcd), "prefix", cfg.Etcd.Prefix, "max_routing_body_bytes", cfg.MaxRoutingBodyBytes)
+	return newYAMLModelRouter(cfg, src, logger), src, nil
+}
+
+func newYAMLModelRouter(cfg Config, src Source, logger *slog.Logger) *ModelRouter {
+	r := NewModelRouter(src)
+	r.MaxRoutingBodyBytes = cfg.MaxRoutingBodyBytes
+	r.Logger = logger
+	return r
 }
