@@ -13,6 +13,7 @@ Peer IP is NOT stored here — it comes from the node allocation at
 import hashlib
 import json
 import os
+import os
 import subprocess
 import tempfile
 from datetime import datetime, UTC
@@ -277,11 +278,8 @@ def _wg_interface_exists():
     return r.returncode == 0
 
 
-def _local_wg_pubkey():
-    """Return the pubkey derived from the existing wg0.conf, or None."""
-    import os
-    if not os.path.exists(WG_CONF_PATH):
-        return None
+def _conf_private_key():
+    """Extract PrivateKey from wg0.conf, or None if absent."""
     try:
         with open(WG_CONF_PATH) as f:
             for line in f:
@@ -289,10 +287,23 @@ def _local_wg_pubkey():
                     _, _, priv = line.partition('=')
                     priv = priv.strip()
                     if priv:
-                        return _run(['wg', 'pubkey'], input=priv).stdout.strip()
+                        return priv
     except Exception:
         return None
     return None
+
+
+def _local_wg_pubkey():
+    """Return the pubkey derived from the existing wg0.conf, or None."""
+    if not os.path.exists(WG_CONF_PATH):
+        return None
+    priv = _conf_private_key()
+    if not priv:
+        return None
+    try:
+        return _run(['wg', 'pubkey'], input=priv).stdout.strip()
+    except Exception:
+        return None
 
 
 def _assert_local_is_server(server):

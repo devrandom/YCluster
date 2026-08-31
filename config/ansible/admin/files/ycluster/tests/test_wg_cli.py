@@ -107,3 +107,17 @@ class InitServerTests(unittest.TestCase):
         self.assertEqual(got['privkey'], 'new-private')
         self.assertEqual(got['pubkey'], 'new-public')
         self.assertEqual(got['port'], 60001)
+
+
+class WgPublicKeyTests(unittest.TestCase):
+    def test_missing_file_no_pubkey(self):
+        with mock.patch.object(wg_config.os.path, 'exists', return_value=False):
+            self.assertIsNone(wg_config._local_wg_pubkey())
+
+    def test_private_key_converted(self):
+        result = mock.Mock(stdout='pub\n')
+        with mock.patch.object(wg_config.os.path, 'exists', return_value=True), \
+                mock.patch.object(wg_config, '_conf_private_key', return_value='priv'), \
+                mock.patch.object(wg_config, '_run', return_value=result) as run:
+            self.assertEqual(wg_config._local_wg_pubkey(), 'pub')
+        run.assert_called_once_with(['wg', 'pubkey'], input='priv')
