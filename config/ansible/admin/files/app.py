@@ -57,6 +57,8 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
 
+from app_gpu_blocks import (gpu_block_record, invalid_windows,
+                            resolve_gpu_block, validate_gpu_block)
 import app_inventory
 import app_schedule
 from ycluster.common.etcd_utils import get_etcd_client
@@ -3027,63 +3029,38 @@ def gpu_block_upsert():
     if not id.is_admin:
         return jsonify({'error': 'only admins can manage GPU blocks'}), 403
     data = request.get_json(silent=True) or {}
-    host = str(data.get('host', '')).strip()
-    gpus = data.get('gpus')
-    mode = data.get('mode')
-    reason = (data.get('reason') or '').strip()[:200]
-    block_id = data.get('block') or ''
 
-    if not re.fullmatch(r'[a-z0-9-]+', host):
-        return jsonify({'error': 'invalid host'}), 400
-    if not isinstance(gpus, int) or isinstance(gpus, bool) or not 1 <= gpus <= 512:
-        return jsonify({'error': 'gpus must be a positive integer'}), 400
-    if mode not in ('on', 'schedule'):
-        return jsonify({'error': 'mode must be on|schedule'}), 400
+    fields, error = validate_gpu_block(data)
+    if error:
+        return jsonify(error[0]), error[1]
+    block_id = fields['block_id']
 
-    cur = None
-    if block_id:
-        if not re.fullmatch(r'[a-z0-9-]+', block_id):
-            return jsonify({'error': 'no such block'}), 404
-        try:
-            cur = vmm.gpu_block_get(block_id)
-        except Exception as e:
-            return jsonify({'error': f'etcd connection failed: {e}'}), 503
-        if not cur:
-            return jsonify({'error': 'no such block'}), 404
-    else:
-        block_id = (f"block-{datetime.now(UTC):%Y%m%d-%H%M%S}-"
-                    f"{secrets.token_hex(3)}")
+    block_id, cur, error = resolve_gpu_block(block_id, vmm)
+    if error:
+        return jsonify(error[0]), error[1]
 
     windows = _parse_windows(data.get('windows', []))
     # A 'schedule' block with no live window holds nothing, which makes the
     # reservation meaningless; require at least one. 'on' blocks carry none.
-    if windows is None or (mode == 'schedule' and not windows):
-        return jsonify({'error': 'invalid windows'}), 400
-    if windows is None:
-        windows = []
+    error = invalid_windows(fields['mode'], windows)
+    if error:
+        return jsonify(error[0]), error[1]
 
-    conflict = _gpu_block_admission_error(host, gpus, mode, windows,
-                                          exclude=block_id)
+    conflict = _gpu_block_admission_error(
+        fields['host'], fields['gpus'], fields['mode'], windows,
+        exclude=block_id)
     if conflict:
         return jsonify({'error': conflict}), 409
 
-    now = datetime.now(UTC)
-    rec = {
-        'host': host,
-        'gpus': gpus,
-        'mode': mode,
-        'windows': windows,
-        'reason': reason,
-        'created_by': id.email or id.uid or 'internal',
-        'created_at': ((cur or {}).get('created_at')
-                       or now.isoformat(timespec='seconds')),
-        'updated_at': now.isoformat(timespec='seconds'),
-    }
+    rec = gpu_block_record(
+        id, cur, fields['host'], fields['gpus'], fields['mode'], windows,
+        fields['reason'])
     try:
         vmm.gpu_block_set(block_id, rec)
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
-    return jsonify({'ok': True, 'block': block_id, 'mode': mode})
+    return jsonify({'ok': True, 'block': block_id,
+                    'mode': fields['mode']})
 
 
 @app.route('/admin/vm-schedule/gpu-block/delete', methods=['POST'])

@@ -20,6 +20,7 @@ import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))      # .../admin/files/tests
 _FILES = os.path.dirname(_HERE)                          # .../admin/files
@@ -478,6 +479,32 @@ class GpuBlockApiTests(SchedTestBase):
         r = self.post("/admin/vm-schedule/gpu-block",
                       {"host": "BAD HOST", "gpus": 2, "mode": "on"}, admin=True)
         self.assertEqual(r.status_code, 400)
+
+    def test_invalid_block_id_and_get_failure(self):
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"block": "bad/block", "host": "nv2", "gpus": 1,
+                       "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 404)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"block": "block-a", "host": "nv2", "gpus": 1,
+                       "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 404)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 1, "mode": "off"}, admin=True)
+        self.assertEqual(r.status_code, 400)
+        with mock.patch.object(vmm, 'gpu_block_get',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/gpu-block",
+                          {"block": "block-a", "host": "nv2", "gpus": 1,
+                           "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 503)
+
+    def test_gpu_block_set_failure_is_503(self):
+        with mock.patch.object(vmm, 'gpu_block_set',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/gpu-block",
+                          {"host": "nv2", "gpus": 1, "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 503)
 
     def test_delete_block(self):
         self.state("nv2", pool=4)
