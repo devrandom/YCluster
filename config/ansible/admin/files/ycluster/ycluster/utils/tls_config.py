@@ -185,62 +185,76 @@ def generate_and_store_cert(common_name, san_list):
     # Store the common name in etcd for future use
     set_common_name_in_etcd(common_name)
 
-def main():
+def _cmd_generate(args):
+    san_list = args.san or ["10.0.0.254", "cluster.local", "localhost"]
+    generate_and_store_cert(args.common_name, san_list)
+
+
+def _cmd_set_common_name(args):
+    set_common_name_in_etcd(args.common_name)
+
+
+def _cmd_get_common_name(args):
+    common_name = get_common_name_from_etcd()
+    if common_name:
+        print(f"Common name: {common_name}")
+    else:
+        print("No common name set in etcd")
+
+
+def _cmd_set(args):
+    with open(args.cert_file, 'r') as f:
+        cert_pem = f.read()
+    with open(args.key_file, 'r') as f:
+        key_pem = f.read()
+    set_tls_cert(cert_pem, key_pem)
+
+
+def _cmd_get(args):
+    if not get_tls_cert():
+        sys.exit(1)
+
+
+def _build_parser():
     parser = argparse.ArgumentParser(description='Manage TLS certificates in etcd')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # Generate command
+
     gen_parser = subparsers.add_parser('generate', help='Generate and store a new self-signed certificate')
     gen_parser.add_argument('--common-name', help='Common name for the certificate (defaults to value from etcd or cluster.local)')
     gen_parser.add_argument('--san', action='append', help='Subject Alternative Name (can be used multiple times)')
-    
-    # Set common name command
+
     cn_parser = subparsers.add_parser('set-common-name', help='Set common name in etcd')
     cn_parser.add_argument('common_name', help='Common name to store in etcd')
-    
-    # Get common name command
+
     subparsers.add_parser('get-common-name', help='Get common name from etcd')
-    
-    # Set command
+
     set_parser = subparsers.add_parser('set', help='Set certificate and key from files')
     set_parser.add_argument('--cert-file', required=True, help='Path to certificate file')
     set_parser.add_argument('--key-file', required=True, help='Path to private key file')
-    
-    # Get command
+
     subparsers.add_parser('get', help='Get current TLS certificate')
-    
-    # Delete command
     subparsers.add_parser('delete', help='Delete TLS certificate')
-    
+    return parser
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
-    
+
     if not args.command:
         parser.print_help()
         return
-    
+
+    commands = {
+        'generate': lambda: _cmd_generate(args),
+        'set-common-name': lambda: _cmd_set_common_name(args),
+        'get-common-name': _cmd_get_common_name,
+        'set': lambda: _cmd_set(args),
+        'get': _cmd_get,
+        'delete': delete_tls_cert,
+    }
     try:
-        if args.command == 'generate':
-            san_list = args.san or ["10.0.0.254", "cluster.local", "localhost"]
-            generate_and_store_cert(args.common_name, san_list)
-        elif args.command == 'set-common-name':
-            set_common_name_in_etcd(args.common_name)
-        elif args.command == 'get-common-name':
-            common_name = get_common_name_from_etcd()
-            if common_name:
-                print(f"Common name: {common_name}")
-            else:
-                print("No common name set in etcd")
-        elif args.command == 'set':
-            with open(args.cert_file, 'r') as f:
-                cert_pem = f.read()
-            with open(args.key_file, 'r') as f:
-                key_pem = f.read()
-            set_tls_cert(cert_pem, key_pem)
-        elif args.command == 'get':
-            if not get_tls_cert():
-                sys.exit(1)
-        elif args.command == 'delete':
-            delete_tls_cert()
+        commands[args.command]()
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
