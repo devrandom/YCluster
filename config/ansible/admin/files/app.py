@@ -583,65 +583,80 @@ def get_dhcp_config():
         return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
 
 @app.route('/api/hosts')
+def _node_hosts_entries(client):
+    """Generate hosts entries for cluster nodes registered in etcd."""
+    entries = []
+    for value, _metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
+        if not value:
+            continue
+        try:
+            allocation = json.loads(value.decode())
+            hostname = allocation['hostname']
+            ip = allocation['ip']
+
+            # Skip AMT hostnames registered as nodes - they get correct
+            # entries auto-generated from the base node below
+            if hostname.endswith('a') and determine_ip_from_hostname(hostname):
+                continue
+
+            entries.append(f"{ip} {hostname} {hostname}.xc")
+
+            # Add AMT hostname entry if this is a regular node (not already AMT)
+            if not hostname.endswith('a'):
+                amt_hostname = f"{hostname}a"
+                amt_ip = determine_ip_from_hostname(amt_hostname)
+                if amt_ip:
+                    entries.append(f"{amt_ip} {amt_hostname} {amt_hostname}.xc")
+        except Exception:
+            pass
+    return entries
+
+
+def _frontend_hosts_entries(client):
+    """Generate entries for frontend nodes (separate etcd prefix).
+
+    Frontend nodes sit outside the cluster subnet — emit their reachable
+    address so the cluster can resolve/ping/ssh them by name. Only
+    IP-registered nodes can go in a hosts file; hostname-registered ones
+    already resolve via DNS.
+    """
+    entries = []
+    for value, _metadata in client.get_prefix("/cluster/nodes/frontend/"):
+        if not value:
+            continue
+        try:
+            node = json.loads(value.decode())
+            name = node.get('name')
+            ip = node.get('ip')
+            if name and ip:
+                entries.append(f"{ip} {name} {name}.xc")
+        except Exception:
+            pass
+    return entries
+
+
 def get_hosts():
     """Generate hosts file format from etcd allocations"""
     try:
         client = get_etcd_client()
     except Exception as e:
         return f"# etcd connection failed: {str(e)}\n", 503
-    
-    hosts_entries = []
-    
-    # Get all allocations
-    for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
-        if value:
-            try:
-                allocation = json.loads(value.decode())
-                hostname = allocation['hostname']
-                ip = allocation['ip']
-                
-                # Skip AMT hostnames registered as nodes - they get correct
-                # entries auto-generated from the base node below
-                if hostname.endswith('a') and determine_ip_from_hostname(hostname):
-                    continue
-                
-                # Add main hostname entry
-                hosts_entries.append(f"{ip} {hostname} {hostname}.xc")
-                
-                # Add AMT hostname entry if this is a regular node (not already AMT)
-                if not hostname.endswith('a'):
-                    amt_hostname = f"{hostname}a"
-                    amt_ip = determine_ip_from_hostname(amt_hostname)
-                    if amt_ip:
-                        hosts_entries.append(f"{amt_ip} {amt_hostname} {amt_hostname}.xc")
-            except:
-                pass
-    
-    # Frontend nodes live under a separate etcd prefix (not by-hostname) and
-    # sit outside the cluster subnet — emit their reachable address so the
-    # cluster can resolve/ping/ssh them by name. Only IP-registered nodes can
-    # go in a hosts file; hostname-registered ones already resolve via DNS.
-    for value, metadata in client.get_prefix("/cluster/nodes/frontend/"):
-        if value:
-            try:
-                node = json.loads(value.decode())
-                name = node.get('name')
-                ip = node.get('ip')
-                if name and ip:
-                    hosts_entries.append(f"{ip} {name} {name}.xc")
-            except:
-                pass
+
+    hosts_entries = _node_hosts_entries(client)
+    hosts_entries.extend(_frontend_hosts_entries(client))
 
     # Add service aliases that point to storage VIP
-    hosts_entries.append("10.0.0.100 registry.xc")
-    hosts_entries.append("10.0.0.100 admin.xc")
-    hosts_entries.append("10.0.0.100 inference.xc")
-    hosts_entries.append("10.0.0.100 auth.xc")
+    hosts_entries.extend([
+        f"{STORAGE_VIP} registry.xc",
+        f"{STORAGE_VIP} admin.xc",
+        f"{STORAGE_VIP} inference.xc",
+        f"{STORAGE_VIP} auth.xc",
+    ])
 
     if hosts_entries:
         return '\n'.join(sorted(hosts_entries)) + '\n', 200, {'Content-Type': 'text/plain'}
-    else:
-        return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
+    return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
+
 
 def check_service_status(service_name):
     """Check if a systemd service is active"""

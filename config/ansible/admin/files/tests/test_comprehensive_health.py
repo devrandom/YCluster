@@ -1,6 +1,7 @@
 """Unit tests for app.py comprehensive-health decomposition."""
 
 import contextlib
+import json as _json
 import unittest
 from unittest import mock
 
@@ -314,3 +315,47 @@ class RegistryLeaderStatusTests(unittest.TestCase):
         status, msg = appmod._registry_leader_status(False, False, False, None, None)
         self.assertEqual(status, 'unhealthy')
         self.assertIn('not running', msg)
+
+
+class NodeHostsEntriesTests(unittest.TestCase):
+    def _client(self, allocations):
+        client = mock.Mock()
+        client.get_prefix.return_value = [
+            (_json.dumps(a).encode(), None) for a in allocations]
+        return client
+
+    @mock.patch.object(appmod, 'determine_ip_from_hostname')
+    def test_regular_node_gets_amt(self, determine):
+        determine.return_value = 'ip-amt'
+        client = self._client([{'hostname': 'n1', 'ip': 'ip-n1'}])
+        entries = appmod._node_hosts_entries(client)
+        self.assertEqual(sorted(entries),
+                         ['ip-amt n1a n1a.xc', 'ip-n1 n1 n1.xc'])
+
+    @mock.patch.object(appmod, 'determine_ip_from_hostname',
+                       return_value='ip-amt')
+    def test_amt_hostname_skipped(self, determine):
+        client = self._client([{'hostname': 'n1a', 'ip': 'ip-amt'}])
+        self.assertEqual(appmod._node_hosts_entries(client), [])
+
+    @mock.patch.object(appmod, 'determine_ip_from_hostname')
+    def test_bad_json_skipped(self, determine):
+        client = mock.Mock()
+        client.get_prefix.return_value = [(b'not json', None)]
+        self.assertEqual(appmod._node_hosts_entries(client), [])
+
+
+class FrontendHostsEntriesTests(unittest.TestCase):
+    def test_named_and_ip(self):
+        client = mock.Mock()
+        client.get_prefix.return_value = [
+            (_json.dumps({'name': 'fe1', 'ip': 'ip-fe1'}).encode(), None)]
+        self.assertEqual(appmod._frontend_hosts_entries(client),
+                         ['ip-fe1 fe1 fe1.xc'])
+
+    def test_missing_name_or_ip(self):
+        client = mock.Mock()
+        client.get_prefix.return_value = [
+            (_json.dumps({'name': 'fe1'}).encode(), None),
+            (_json.dumps({'ip': 'ip-fe1'}).encode(), None)]
+        self.assertEqual(appmod._frontend_hosts_entries(client), [])
