@@ -1,13 +1,8 @@
 """GPU VM hosting on Incus.
 
 Manages GPU-passthrough VMs, a per-user SSH key registry, a VM-ownership
-registry, and the SSH jump bastion's access list. Runs on the Incus host
-(nv2): it shells out to the local `incus` client and reads/writes etcd.
-
-etcd layout:
-  /cluster/users/<user>   -> {"ssh_keys": [...]}
-  /cluster/vms/<name>     -> {"owner": <user>, "additional_users": [...],
-                              "gpus": N, "created": <iso>}
+registry, and the SSH jump bastion's access list. Runs on the Incus host:
+shells out to the local `incus` client and reads/writes etcd.
 """
 
 import json
@@ -567,43 +562,7 @@ def release_gpus(name):
             released += 1
     return released
 
-def _ensure_gpus_attached(name, want=None):
-    """Attach passthrough GPUs from the host pool until the VM holds
-    `want` of them (default: its registered count) — the inverse of
-    release_gpus, run before every start. No-op for containers and
-    unregistered instances. Any GPUs already attached beyond `want` are
-    detached, so a start that asks for fewer than registered (the
-    schedule page / `vm start --gpus N`) converges to exactly that many.
-    Raises when the pool can't cover the gap.
-    """
-    inst = _instance_info(name)
-    if not inst or inst.get("type") != "virtual-machine":
-        return
-    if want is None:
-        want = (vm_get(name) or {}).get("gpus") or 0
-    devices = inst.get("devices") or {}
-    gpu_devs = {d_name: d for d_name, d in devices.items()
-                if isinstance(d, dict) and d.get("type") == "gpu" and d.get("pci")}
-    have = len(gpu_devs)
-    if have > want:
-        for d_name in sorted(gpu_devs)[:have - want]:
-            _incus("config", "device", "remove", name, d_name)
-        return
-    missing = want - have
-    if missing <= 0:
-        return
-    try:
-        picked = _select_free_gpus(missing)
-    except ValueError as e:
-        raise RuntimeError(f"'{name}' needs {missing} more GPU(s): {e}")
-    idx = 0
-    for pci in picked:
-        while f"gpu{idx}" in devices:
-            idx += 1
-        _incus("config", "device", "add", name, f"gpu{idx}", "gpu",
-               "gputype=physical", f"pci={pci}")
-        devices[f"gpu{idx}"] = {"type": "gpu", "pci": pci}
-        print(f"  re-attached GPU {pci} as gpu{idx}")
+
 
 # --------------------------------------------------------------------------
 # user SSH key registry
@@ -2071,3 +2030,5 @@ def bastion_watch(debounce=2.0):
 
 
 from .vm_alter import vm_alter  # noqa: E402  # moved to keep modules focused
+
+from .gpu_attach import _ensure_gpus_attached  # noqa: E402
