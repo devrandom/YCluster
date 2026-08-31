@@ -1,10 +1,13 @@
 package main
 
 import (
+	"io"
 	"log/slog"
 	"net/url"
 	"testing"
-	"io"
+
+	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func testSource(prefix string) *EtcdSource {
@@ -115,5 +118,45 @@ func TestParseKVURLRoundTrip(t *testing.T) {
 	parsed, _ := url.Parse("http://s1:8000/v1")
 	if urls[0].String() != parsed.String() {
 		t.Errorf("url mismatch: %v vs %v", urls[0], parsed)
+	}
+}
+
+func TestApplyWatchEvents(t *testing.T) {
+	s := &EtcdSource{prefix: "models/", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s.snapshot.Store(&map[string][]*url.URL{"existing": {mustURL(t, "http://old:8000")}})
+	s.aclModels.Store(&map[string]ACLModelRule{})
+
+	events := []*clientv3.Event{
+		{Type: clientv3.EventTypePut, Kv: &mvccpb.KeyValue{
+			Key:   []byte("models/new"),
+			Value: []byte(`{"backends":[{"api_base":"http://new:8000"}]}`),
+		}},
+		{Type: clientv3.EventTypeDelete, Kv: &mvccpb.KeyValue{Key: []byte("models/existing")}},
+	}
+	s.applyWatchEvents(events)
+
+	snap := s.Snapshot()
+	if _, ok := snap["existing"]; ok {
+		t.Fatal("existing model should have been deleted")
+	}
+	if urls, ok := snap["new"]; !ok || len(urls) != 1 || urls[0].String() != "http://new:8000" {
+		t.Fatalf("new model missing: %v", snap)
+	}
+}
+
+func TestApplyWatchEventsPutInvalidJSON(t *testing.T) {
+	s := &EtcdSource{prefix: "models/", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s.snapshot.Store(&map[string][]*url.URL{})
+	s.aclModels.Store(&map[string]ACLModelRule{})
+
+	events := []*clientv3.Event{
+		{Type: clientv3.EventTypePut, Kv: &mvccpb.KeyValue{
+			Key:   []byte("models/bad"),
+			Value: []byte(`not json`),
+		}},
+	}
+	s.applyWatchEvents(events)
+	if _, ok := s.Snapshot()["bad"]; ok {
+		t.Fatal("invalid JSON should not create a model entry")
 	}
 }

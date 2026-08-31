@@ -93,6 +93,18 @@ def crap(cyc: float, cov: float) -> float:
 
 # ---------------------------------------------------------------- Go side ---
 
+def _go_method_name(raw: str) -> str:
+    """Strip the receiver prefix from a Go method name for coverage matching.
+
+    gocyclo/gocognit report ``(*Type).Method`` but ``go tool cover`` reports
+    ``Method``. Normalising here lets the CRAP calculation find per-method
+    coverage instead of silently defaulting to 0%.
+    """
+    if ")." in raw:
+        return raw.rsplit(").", 1)[1]
+    return raw
+
+
 def go_cyclomatic() -> dict[tuple[str, str], float]:
     """Cyclomatic per function, keyed by (file, name) — stable across edits."""
     out = run([str(BIN / "gocyclo"), "-over", "0", "."], cwd=GO_DIR)
@@ -103,7 +115,7 @@ def go_cyclomatic() -> dict[tuple[str, str], float]:
             continue
         cyc = int(parts[0])
         # format: <cyc> <pkg> <func> <file>:<line>:<col>
-        name = parts[2]
+        name = _go_method_name(parts[2])
         pos = parts[-1]
         file_part, _line_no, _ = pos.rsplit(":", 2)
         if file_part.endswith("_test.go") or "/tmp/" in file_part:
@@ -119,7 +131,7 @@ def go_cognitive() -> dict[tuple[str, str], float]:
         pos = fn["Pos"]
         if pos["Filename"].endswith("_test.go") or "/tmp/" in pos["Filename"]:
             continue
-        res[(pos["Filename"], fn["FuncName"])] = fn["Complexity"]
+        res[(pos["Filename"], _go_method_name(fn["FuncName"]))] = fn["Complexity"]
     return res
 
 
