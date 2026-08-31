@@ -3579,20 +3579,27 @@ def settings_data():
                     'keys': rec.get('ssh_keys', [])})
 
 
-# Mutating, forward-auth gated. ALWAYS scoped to the caller's own
-# /cluster/users/<email> record — the email comes from the auth header, never
-# from the request body, so a user can only edit their own keys. We touch only
-# etcd here: the per-host `vm bastion-watch` services watch /cluster/users and
-# re-sync the jump bastions + running VMs on change. Calling bastion_sync() /
-# vm_sync_keys() inline would fail — this runs on a core node with no incus.
-@app.route('/admin/settings/keys/add', methods=['POST'])
-def settings_keys_add():
+def _settings_key_payload():
+    """Validate caller identity and SSH key.
+
+    Returns (identity, key, error_response). The email comes from the auth
+    header only, so a caller can edit only its own /cluster/users record.
+    Bastion and VM key syncs are handled by watchers, never inline here.
+    """
     id = _authentik_identity()
     if not id.email:
-        return jsonify({'error': 'no authenticated user'}), 403
+        return id, None, (jsonify({'error': 'no authenticated user'}), 403)
     key = (request.get_json(silent=True) or {}).get('key', '')
     if not isinstance(key, str) or not key.strip():
-        return jsonify({'error': 'no key provided'}), 400
+        return id, None, (jsonify({'error': 'no key provided'}), 400)
+    return id, key, None
+
+
+@app.route('/admin/settings/keys/add', methods=['POST'])
+def settings_keys_add():
+    id, key, error = _settings_key_payload()
+    if error:
+        return error
     try:
         vmm.user_add_key(id.email, key)
     except ValueError as e:
@@ -3603,25 +3610,16 @@ def settings_keys_add():
 
 
 @app.route('/admin/settings/keys/remove', methods=['POST'])
-def _remove_ssh_key(email, key):
-    """Remove one SSH key for a user. Raises on etcd/validation errors."""
-    rec = vmm.user_get(email) or {}
-    if key not in rec.get('ssh_keys', []):
-        raise KeyError('key not found')
-    # Pass the full key line so the substring match removes exactly it
-    # (distinct keys have distinct material, never a substring of each).
-    vmm.user_remove_key(email, key)
-
-
 def settings_keys_remove():
-    id = _authentik_identity()
-    if not id.email:
-        return jsonify({'error': 'no authenticated user'}), 403
-    key = (request.get_json(silent=True) or {}).get('key', '')
-    if not isinstance(key, str) or not key.strip():
-        return jsonify({'error': 'no key provided'}), 400
+    id, key, error = _settings_key_payload()
+    if error:
+        return error
     try:
-        _remove_ssh_key(id.email, key)
+        rec = vmm.user_get(id.email) or {}
+        if key not in rec.get('ssh_keys', []):
+            raise KeyError('key not found')
+        # Full key line: distinct keys are never substrings of each other.
+        vmm.user_remove_key(id.email, key)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
