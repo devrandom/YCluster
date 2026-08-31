@@ -45,9 +45,14 @@
 
     - name: Copy lite health API
       copy:
-        src: "files/health-api.py"
-        dest: "{{ admin_services_dir }}/health-api.py"
+        src: "files/{{ item }}"
+        dest: "{{ admin_services_dir }}/{{ item }}"
         mode: '0644'
+      loop:
+        - health-api.py
+        - health_common.py
+        - health_checks.py
+        - health_report.py
       notify: restart health-api
 
     # Admin API now uses the YCluster package directly
