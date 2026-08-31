@@ -92,44 +92,68 @@ def _show(args):
 def _print_node(hostname, hw, asset):
     print(f"=== {hostname} ===")
     if hw:
-        print(f"  Product:   {hw.get('product') or '-'}")
-        print(f"  Serial:    {hw.get('serial') or '-'}")
-        print(f"  CPU:       {hw.get('cpu') or '-'}")
-        ram = f"{hw['ram_gb']} GB" if hw.get('ram_gb') else '-'
-        print(f"  RAM:       {ram}")
-        disks = hw.get('disks') or []
-        if disks:
-            disk_str = ', '.join(f"{d['name']} {d['size']} {d['type']}" +
-                                  (f" ({d['model']})" if d.get('model') else '')
-                                  for d in disks)
-            print(f"  Disks:     {disk_str}")
-        gpus = hw.get('gpus') or []
-        if gpus:
-            gpu_str = ', '.join(g.get('model') or g.get('vendor', '?') for g in gpus)
-            print(f"  GPUs:      {gpu_str}")
-        nics = hw.get('nics') or []
-        if nics:
-            nic_str = ', '.join(f"{n['name']}" + (f" {n['speed']}" if n.get('speed') else '') for n in nics)
-            print(f"  NICs:      {nic_str}")
-        print(f"  BMC:       {hw.get('bmc_mac') or '-'}")
-        print(f"  OS:        {hw.get('os') or '-'}  kernel {hw.get('kernel') or '-'}")
-        print(f"  BIOS:      {hw.get('bios_version') or '-'}")
-        print(f"  Collected: {hw.get('collected_at', '-')[:19]}")
+        _print_hardware(hw)
     else:
         print("  [no hardware data — run: ycluster inventory collect]")
-
     if asset:
-        print(f"  Vendor:    {asset.get('vendor') or '-'}")
-        print(f"  Purchased: {asset.get('purchased_at') or '-'}")
-        print(f"  Warranty:  {asset.get('warranty_expires') or '-'}")
-        cost = asset.get('cost')
-        currency = asset.get('cost_currency', 'EUR')
-        symbols = {'EUR': '€', 'USD': '$'}
-        sym = symbols.get(currency, currency)
-        print(f"  Cost:      {f'{sym}{cost:.2f}' if cost else '-'}")
-        print(f"  Location:  {asset.get('location') or '-'}")
-        if asset.get('notes'):
-            print(f"  Notes:     {asset['notes']}")
+        _print_asset(asset)
+
+
+def _print_hardware(hw):
+    print(f"  Product:   {hw.get('product') or '-'}")
+    print(f"  Serial:    {hw.get('serial') or '-'}")
+    print(f"  CPU:       {hw.get('cpu') or '-'}")
+    ram = f"{hw['ram_gb']} GB" if hw.get('ram_gb') else '-'
+    print(f"  RAM:       {ram}")
+    _print_disks(hw.get('disks') or [])
+    _print_gpus(hw.get('gpus') or [])
+    _print_nics(hw.get('nics') or [])
+    print(f"  BMC:       {hw.get('bmc_mac') or '-'}")
+    print(f"  OS:        {hw.get('os') or '-'}  kernel {hw.get('kernel') or '-'}")
+    print(f"  BIOS:      {hw.get('bios_version') or '-'}")
+    print(f"  Collected: {hw.get('collected_at', '-')[:19]}")
+
+
+def _print_disks(disks):
+    if not disks:
+        return
+    disk_str = ', '.join(
+        f"{disk['name']} {disk['size']} {disk['type']}"
+        + (f" ({disk['model']})" if disk.get('model') else '')
+        for disk in disks
+    )
+    print(f"  Disks:     {disk_str}")
+
+
+def _print_gpus(gpus):
+    if not gpus:
+        return
+    gpu_str = ', '.join(gpu.get('model') or gpu.get('vendor', '?') for gpu in gpus)
+    print(f"  GPUs:      {gpu_str}")
+
+
+def _print_nics(nics):
+    if not nics:
+        return
+    nic_str = ', '.join(
+        f"{nic['name']}" + (f" {nic['speed']}" if nic.get('speed') else '')
+        for nic in nics
+    )
+    print(f"  NICs:      {nic_str}")
+
+
+def _print_asset(asset):
+    print(f"  Vendor:    {asset.get('vendor') or '-'}")
+    print(f"  Purchased: {asset.get('purchased_at') or '-'}")
+    print(f"  Warranty:  {asset.get('warranty_expires') or '-'}")
+    cost = asset.get('cost')
+    currency = asset.get('cost_currency', 'EUR')
+    symbols = {'EUR': '€', 'USD': '$'}
+    symbol = symbols.get(currency, currency)
+    print(f"  Cost:      {f'{symbol}{cost:.2f}' if cost else '-'}")
+    print(f"  Location:  {asset.get('location') or '-'}")
+    if asset.get('notes'):
+        print(f"  Notes:     {asset['notes']}")
 
 
 def _collect(args):
