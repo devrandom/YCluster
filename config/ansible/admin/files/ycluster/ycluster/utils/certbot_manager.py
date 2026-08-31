@@ -335,31 +335,107 @@ def start_fetch_tls_timer():
     except Exception as e:
         print(f"Warning: Could not start fetch-tls-certs timer: {e}")
 
+def _check_frpc_active():
+    """Return True when frpc is running (we're on the tunnel host)."""
+    frpc = subprocess.run(['systemctl', 'is-active', '--quiet', 'frpc'])
+    if frpc.returncode != 0:
+        print("frpc.service is not active on this node — run this on the "
+              "node holding the public frp tunnel (normally the storage leader).")
+        return False
+    return True
+
+
+def _build_certbot_cmd(csr_path, cert_path, chain_path, email,
+                       non_interactive, test_cert, server):
+    """Build the certbot certonly command for CSR mode."""
+    cmd = [
+        'certbot', 'certonly',
+        '--csr', csr_path,
+        '--webroot', '-w', '/var/www/html',
+        '--agree-tos',
+        '--no-eff-email',
+        '--cert-path', str(cert_path),
+        '--chain-path', str(chain_path),
+    ]
+    if non_interactive:
+        cmd.append('--non-interactive')
+    if email:
+        cmd.extend(['--email', email])
+    else:
+        cmd.append('--register-unsafely-without-email')
+    if test_cert:
+        cmd.append('--test-cert')
+        print("Using staging server (test certificate)")
+    if server:
+        cmd.extend(['--server', server])
+        print(f"Using ACME server: {server}")
+    return cmd
+
+
+def _store_certificate(cert_path, chain_path):
+    """Store the obtained certificate in etcd and write it to nginx."""
+    cert_content = cert_path.read_text()
+    if chain_path.exists():
+        fullchain_content = cert_content + chain_path.read_text()
+    else:
+        fullchain_content = cert_content
+
+    # Stop the fetch-tls-certs timer to prevent race conditions during writes
+    stop_fetch_tls_timer()
+    try:
+        client = get_etcd_client()
+        client.put('/cluster/tls/cert', fullchain_content)
+        print("Certificate stored in etcd")
+
+        write_tls_key_to_nginx()
+        nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
+        nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
+        nginx_cert_path.write_text(fullchain_content)
+        nginx_cert_path.chmod(0o644)
+        print(f"Certificate written to nginx: {nginx_cert_path}")
+    finally:
+        # Restart the fetch-tls-certs timer
+        start_fetch_tls_timer()
+
+    update_nginx_configs()
+
+
+def _cleanup_temp_files(temp_key_path, csr_path, temp_dir):
+    """Best-effort cleanup of temporary key/CSR/cert files."""
+    for path in (temp_key_path, csr_path):
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+    try:
+        import shutil
+        shutil.rmtree(temp_dir)
+    except Exception:
+        pass
+
+
 def obtain_certificate(test_cert=False, non_interactive=False, server=None):
     """Obtain a new certificate from Let's Encrypt (or another ACME CA) using CSR mode"""
     config = get_https_config()
     domains = get_all_domains(config)
-    
+
     if not domains:
         print("No domains configured. Use 'ycluster https set-domain <domain>' first.")
         return False
-    
+
     if 'domain' not in config:
         print("No primary domain configured. Use 'ycluster https set-domain <domain>' first.")
         return False
-    
+
     primary_domain = config['domain']
     email = config.get('email')
-    
+
     # HTTP-01 challenges arrive via the frp tunnel (frontend f1:80 ->
     # frpc -> alt vhost 127.0.0.2:17080) — certbot must run on the node
     # where the frpc tunnel lands (the storage leader), or the CA never
     # reaches the webroot this process writes to. frpc is leader-gated,
     # so gating on it doubles as the "am I the tunnel host" check.
-    frpc = subprocess.run(['systemctl', 'is-active', '--quiet', 'frpc'])
-    if frpc.returncode != 0:
-        print("frpc.service is not active on this node — run this on the "
-              "node holding the public frp tunnel (normally the storage leader).")
+    if not _check_frpc_active():
         return False
 
     print(f"Obtaining certificate for domains: {', '.join(domains)}")
@@ -368,123 +444,47 @@ def obtain_certificate(test_cert=False, non_interactive=False, server=None):
         print(f"Email: {email}")
     else:
         print("No email configured - using --register-unsafely-without-email")
-    
+
     # Write TLS key to temporary file for CSR generation
     temp_key_path = write_tls_key_to_temp()
     if not temp_key_path:
         return False
-    
+
     # Generate CSR with our existing private key
     csr_path = generate_csr(temp_key_path, domains)
     if not csr_path:
-        # Clean up temp key file
         try:
             os.unlink(temp_key_path)
-        except:
+        except Exception:
             pass
         return False
-    
+
     # Ensure nginx has a certificate (fallback to etcd cert if no Let's Encrypt cert exists)
     ensure_nginx_cert_from_etcd()
-    
+
     # Create temporary directory for certbot output
     temp_dir = tempfile.mkdtemp()
-    
+    cert_path = Path(temp_dir) / 'cert.pem'
+    chain_path = Path(temp_dir) / 'chain.pem'
+
     try:
-        # Define specific output file paths
-        cert_path = Path(temp_dir) / 'cert.pem'
-        chain_path = Path(temp_dir) / 'chain.pem'
-        
-        # Build certbot command using CSR mode with specific output paths
-        cmd = [
-            'certbot', 'certonly',
-            '--csr', csr_path,
-            '--webroot', '-w', '/var/www/html',
-            '--agree-tos',
-            '--no-eff-email',
-            '--cert-path', str(cert_path),
-            '--chain-path', str(chain_path)
-        ]
-        
-        # Add non-interactive flag if requested
-        if non_interactive:
-            cmd.append('--non-interactive')
-        
-        # Add email or register without email
-        if email:
-            cmd.extend(['--email', email])
-        else:
-            cmd.append('--register-unsafely-without-email')
-        
-        # Add test cert flag if requested
-        if test_cert:
-            cmd.append('--test-cert')
-            print("Using staging server (test certificate)")
-
-        if server:
-            cmd.extend(['--server', server])
-            print(f"Using ACME server: {server}")
-
+        cmd = _build_certbot_cmd(csr_path, cert_path, chain_path, email,
+                                 non_interactive, test_cert, server)
         run_certbot_command(cmd)
         print("Certificate obtained successfully!")
-        
-        # Read certificate files from known paths
+
         if not cert_path.exists():
             print("Error: Certificate file not generated by certbot")
             return False
-        
-        cert_content = cert_path.read_text()
-        
-        # Create fullchain (cert + chain)
-        if chain_path.exists():
-            chain_content = chain_path.read_text()
-            fullchain_content = cert_content + chain_content
-        else:
-            fullchain_content = cert_content
-        
-        # Stop the fetch-tls-certs timer to prevent race conditions during writes
-        stop_fetch_tls_timer()
-        
-        try:
-            # Store certificate in etcd
-            client = get_etcd_client()
-            client.put('/cluster/tls/cert', fullchain_content)
-            print("Certificate stored in etcd")
-            
-            # Write certificate to nginx
-            write_tls_key_to_nginx()
-            nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
-            nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
-            nginx_cert_path.write_text(fullchain_content)
-            nginx_cert_path.chmod(0o644)
-            print(f"Certificate written to nginx: {nginx_cert_path}")
-        finally:
-            # Restart the fetch-tls-certs timer
-            start_fetch_tls_timer()
-        
-        # Update nginx configs with correct domain
-        update_nginx_configs()
-        
+
+        _store_certificate(cert_path, chain_path)
         return True
-        
     except subprocess.CalledProcessError:
         print("Failed to obtain certificate")
         return False
     finally:
-        # Clean up temporary files and directory
-        try:
-            os.unlink(temp_key_path)
-        except:
-            pass
-        try:
-            os.unlink(csr_path)
-        except:
-            pass
-        try:
-            import shutil
-            shutil.rmtree(temp_dir)
-        except:
-            pass
+        _cleanup_temp_files(temp_key_path, csr_path, temp_dir)
+
 
 def renew_certificates(non_interactive=False):
     """Renew existing certificates using CSR mode"""
