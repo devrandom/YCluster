@@ -151,15 +151,25 @@ func disableMetadataJSON(reason string) string {
 }
 
 func backendsEnable(args []string, configPath string) {
-	if len(args) != 1 {
-		fatalUsage("backends enable <url>")
-	}
+	enableTarget(args)
 	target, err := normalizeBackendURL(args[0])
 	if err != nil {
 		fatal("%v", err)
 	}
 	client, prefix := mustEtcdForCLIDisabled(configPath)
 	defer client.Close()
+	deleteDisabledBackend(client, prefix, target)
+}
+
+// enableTarget validates the one positional backend URL.
+func enableTarget(args []string) {
+	if len(args) != 1 {
+		fatalUsage("backends enable <url>")
+	}
+}
+
+// deleteDisabledBackend removes the disable marker and reports the result.
+func deleteDisabledBackend(client *clientv3.Client, prefix, target string) {
 	key := prefix + target
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -259,6 +269,17 @@ func decodeModelIDs(resp *http.Response, endpoint string) ([]string, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("%s returned HTTP %d: %s", endpoint, resp.StatusCode, string(body))
 	}
+	payload, err := decodeModelPayload(resp, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return modelIDs(payload), nil
+}
+
+// decodeModelPayload reads the standard OpenAI-style models response.
+func decodeModelPayload(resp *http.Response, endpoint string) ([]struct {
+	ID string `json:"id"`
+}, error) {
 	var payload struct {
 		Data []struct {
 			ID string `json:"id"`
@@ -267,13 +288,19 @@ func decodeModelIDs(resp *http.Response, endpoint string) ([]string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", endpoint, err)
 	}
-	ids := make([]string, 0, len(payload.Data))
-	for _, m := range payload.Data {
+	return payload.Data, nil
+}
+
+func modelIDs(data []struct {
+	ID string `json:"id"`
+}) []string {
+	ids := make([]string, 0, len(data))
+	for _, m := range data {
 		if m.ID != "" {
 			ids = append(ids, m.ID)
 		}
 	}
-	return ids, nil
+	return ids
 }
 
 func mustLoadConfig(path string) Config {

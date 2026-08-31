@@ -2,6 +2,8 @@ package main
 
 import (
 	"flag"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -120,5 +122,32 @@ func TestPrintDisabled(t *testing.T) {
 	out = captureStdout(t, func() { printDisabled("", "http://b") })
 	if strings.Contains(out, "reason:") {
 		t.Fatalf("got %q", out)
+	}
+}
+
+func TestDecodeModelIDs(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"a"},{"id":""},{"id":"b"}]}`)),
+	}
+	ids, err := decodeModelIDs(resp, "endpoint")
+	if err != nil || len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+		t.Fatalf("got %v, %v", ids, err)
+	}
+
+	resp = &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Body:       io.NopCloser(strings.NewReader("boom")),
+	}
+	if _, err := decodeModelIDs(resp, "endpoint"); err == nil {
+		t.Fatal("non-200: want error")
+	}
+
+	resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("bad")),
+	}
+	if _, err := decodeModelIDs(resp, "endpoint"); err == nil {
+		t.Fatal("bad JSON: want error")
 	}
 }
