@@ -162,13 +162,16 @@ def _cmd_key_list(args):
     except Exception as e:
         print(f"error: etcd read failed: {e}", file=sys.stderr)
         sys.exit(1)
+    _print_key_table(data)
+
+
+def _print_key_table(data):
     fmt = "{:<36} {:<40} {:<14} {}"
     print(fmt.format('KEY ID', 'OWNER', 'CREATED', 'LABEL'))
     for email in sorted(data):
         for rec in data[email]:
-            print(fmt.format(rec['key_id'], email,
-                             rec['created_at'][:13].replace('T', ' '),
-                             rec['label']))
+            created = rec['created_at'][:13].replace('T', ' ')
+            print(fmt.format(rec['key_id'], email, created, rec['label']))
         if not data[email]:
             print(fmt.format('', email, '', '(no keys)'))
 
