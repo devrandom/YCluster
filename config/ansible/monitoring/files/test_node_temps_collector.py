@@ -44,6 +44,52 @@ class ParseCominoData(unittest.TestCase):
         self.assertIsNone(ntc.parse_comino_data("1;2;3"))
 
 
+class CominoQueryTests(unittest.TestCase):
+    class Port:
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+            self.reads = 0
+
+        def reset_input_buffer(self):
+            pass
+
+        def write(self, _data):
+            pass
+
+        def flush(self):
+            pass
+
+        def read(self, _size):
+            self.reads += 1
+            return self.chunks.pop(0)
+
+    def query(self, chunks, times=(0, .1, .2, .3, .9)):
+        port = self.Port(chunks)
+        with mock.patch.object(ntc.time, 'monotonic', side_effect=times):
+            got = ntc._comino_query(port, ':get_data')
+        return got, port
+
+    def test_reads_single_terminated_chunk(self):
+        got, port = self.query([b'response\r\n'])
+        self.assertEqual(got, 'response')
+        self.assertEqual(port.reads, 1)
+
+    def test_assembles_chunks_until_termination(self):
+        got, port = self.query([b'resp', b'onse\r\n'])
+        self.assertEqual(got, 'response')
+        self.assertEqual(port.reads, 2)
+
+    def test_stops_on_empty_chunk_after_data(self):
+        got, port = self.query([b'resp', b'', b'unread'])
+        self.assertEqual(got, 'resp')
+        self.assertEqual(port.reads, 2)
+
+    def test_timeout_returns_partial_data(self):
+        got, port = self.query([b'response'], times=(0, .1, .6, .9))
+        self.assertEqual(got, 'response')
+        self.assertEqual(port.reads, 1)
+
+
 class CollectIpmiTests(unittest.TestCase):
     @staticmethod
     def result(stdout='', returncode=0):

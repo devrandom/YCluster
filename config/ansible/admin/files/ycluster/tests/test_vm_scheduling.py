@@ -928,6 +928,56 @@ class ReconcileStopTests(unittest.TestCase):
         stop.assert_called_once_with('vm1', initiator='scheduler')
 
 
+class SyncDnsRecordsTests(unittest.TestCase):
+    @staticmethod
+    def output(text):
+        return subprocess.CompletedProcess([], 0, stdout=text, stderr='')
+
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_managed_bridges', return_value=['br0', 'br1'])
+    @mock.patch.object(vm, '_incus_json')
+    def test_sync_dns_records_reconciles_and_returns_changed(self, list_json,
+                                                             bridges, incus):
+        list_json.return_value = [
+            {'name': 'vm2', 'expanded_devices': {'eth0': {
+                'network': 'br0', 'ipv4.address': '10.0.0.2'}}},
+            {'name': 'vm1', 'expanded_devices': {'eth0': {
+                'network': 'br0', 'ipv4.address': '10.0.0.1'}}},
+        ]
+        bridges.return_value = ['br0', 'br1']
+
+        def get(*args):
+            if args[:3] == ('network', 'get', 'br0'):
+                if args[3] == 'dns.domain':
+                    return self.output('ycluster\n')
+                return self.output(
+                    'resolver 10.0.0.254\n'
+                    'host-record=vm1,vm1.ycluster,10.0.0.9\n')
+            if args[:3] == ('network', 'get', 'br1'):
+                if args[3] == 'dns.domain':
+                    return self.output('ycluster')
+                return self.output(
+                    'host-record=vm1,vm1.ycluster,10.0.0.1\n')
+            if args[:3] in (('network', 'set', 'br0'),
+                            ('network', 'set', 'br1')):
+                return self.output('')
+            raise AssertionError(f'unexpected incus call {args}')
+
+        incus.side_effect = get
+        changed = vm.sync_dns_records()
+        self.assertEqual(changed, {
+            'br0': [
+                'host-record=vm1,vm1.ycluster,10.0.0.1',
+                'host-record=vm2,vm2.ycluster,10.0.0.2'],
+            'br1': [],
+        })
+        incus.assert_any_call('network', 'set', 'br0', 'raw.dnsmasq',
+                              'resolver 10.0.0.254\n'
+                              'host-record=vm1,vm1.ycluster,10.0.0.1\n'
+                              'host-record=vm2,vm2.ycluster,10.0.0.2')
+        incus.assert_any_call('network', 'set', 'br1', 'raw.dnsmasq', '')
+
+
 class ReconcileLocalTests(unittest.TestCase):
     @mock.patch.object(vm, '_clear_issue')
     def test_unmanaged_clears_issue_and_returns(self, clear):

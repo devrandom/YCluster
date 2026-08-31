@@ -226,6 +226,7 @@ def update_nginx_configs(local_mode=False):
     if result.returncode != 0:
         print(f"Nginx config test failed: {result.stderr}")
         return False
+    return True
 
 
 def ensure_nginx_cert_from_etcd():
