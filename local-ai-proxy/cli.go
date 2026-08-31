@@ -353,17 +353,7 @@ func backendsDisable(args []string, configPath string) {
 	client, prefix := mustEtcdForCLIDisabled(configPath)
 	defer client.Close()
 	key := prefix + target
-	value := ""
-	if *reason != "" {
-		buf, err := json.Marshal(map[string]string{
-			"reason": *reason,
-			"at":     time.Now().UTC().Format(time.RFC3339),
-		})
-		if err != nil {
-			fatal("marshal: %v", err)
-		}
-		value = string(buf)
-	}
+	value := disableMetadataJSON(*reason)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := client.Put(ctx, key, value); err != nil {
@@ -374,6 +364,22 @@ func backendsDisable(args []string, configPath string) {
 		fmt.Printf("  reason: %s\n", *reason)
 	}
 	fmt.Println("(takes effect at next health-check cycle)")
+}
+
+// disableMetadataJSON marshals the optional disable reason to JSON metadata,
+// or an empty string when no reason was given.
+func disableMetadataJSON(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	buf, err := json.Marshal(map[string]string{
+		"reason": reason,
+		"at":     time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		fatal("marshal: %v", err)
+	}
+	return string(buf)
 }
 
 func backendsEnable(args []string, configPath string) {
@@ -471,6 +477,11 @@ func discoverModels(apiBase string) ([]string, error) {
 		return nil, fmt.Errorf("GET %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
+	return decodeModelIDs(resp, endpoint)
+}
+
+// decodeModelIDs validates the response status and extracts model IDs.
+func decodeModelIDs(resp *http.Response, endpoint string) ([]string, error) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("%s returned HTTP %d: %s", endpoint, resp.StatusCode, string(body))
