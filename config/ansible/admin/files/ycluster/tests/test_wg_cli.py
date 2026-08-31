@@ -6,6 +6,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 from ycluster.cli import wg
+from ycluster.utils import wg_config
 
 
 def peer(hostname, status, ip='ip-a'):
@@ -57,3 +58,35 @@ class PrintPeersTableTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReconcileHelpersTests(unittest.TestCase):
+    def test_reconcile_down_dry_run(self):
+        out = io.StringIO()
+        with mock.patch('ycluster.utils.wg_config.DRY_RUN', True), \
+                mock.patch('ycluster.utils.wg_config._wg_interface_exists', return_value=True), \
+                mock.patch('ycluster.utils.wg_config._log_dry') as log_dry, \
+                redirect_stdout(out):
+            wg_config._reconcile_down()
+        log_dry.assert_called_once_with('wg-quick down wg0')
+        self.assertEqual(out.getvalue(), '')
+
+    def test_sync_missing_interface_dry_run(self):
+        out = io.StringIO()
+        with mock.patch('ycluster.utils.wg_config.DRY_RUN', True), \
+                mock.patch('ycluster.utils.wg_config._wg_interface_exists', return_value=False), \
+                mock.patch('ycluster.utils.wg_config._log_dry') as log_dry, \
+                redirect_stdout(out):
+            wg_config._sync_existing_interface(up=True)
+        log_dry.assert_called_once_with('wg-quick up wg0')
+        self.assertEqual(out.getvalue(), '')
+
+    def test_sync_existing_interface_dry_run(self):
+        out = io.StringIO()
+        with mock.patch('ycluster.utils.wg_config.DRY_RUN', True), \
+                mock.patch('ycluster.utils.wg_config._wg_interface_exists', return_value=True), \
+                mock.patch('ycluster.utils.wg_config._log_dry') as log_dry, \
+                redirect_stdout(out):
+            wg_config._sync_existing_interface(up=False)
+        log_dry.assert_called_once_with('wg syncconf wg0 (from rendered server config)')
+        self.assertEqual(out.getvalue(), '')
