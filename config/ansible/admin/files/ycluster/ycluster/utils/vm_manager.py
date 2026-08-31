@@ -1584,6 +1584,42 @@ def vm_list():
               f"{str(rec.get('gpus', '?')):<5} {state:<14} "
               f"{_strip_tz(rec.get('created', ''))}")
 
+def _live_ipv4(inst):
+    """Return the instance's current live global IPv4, or None."""
+    net = (inst.get("state") or {}).get("network") or {}
+    for iface in net.values():
+        for a in iface.get("addresses", []) or []:
+            if a.get("family") == "inet" and a.get("scope") == "global":
+                return a["address"]
+    return None
+
+
+def _live_ip_counts(insts):
+    """Map live IP -> occurrence count, to detect collisions."""
+    counts = {}
+    for inst in insts:
+        ip = _live_ipv4(inst)
+        if ip:
+            counts[ip] = counts.get(ip, 0) + 1
+    return counts
+
+
+def _pin_queues(insts, pinned_by_name, live_counts):
+    """Split unpinned instances into unique-live-IP first, colliding later."""
+    queue_first = []
+    queue_later = []
+    for inst in insts:
+        name = inst["name"]
+        if name == BASTION_CONTAINER or name in pinned_by_name:
+            continue
+        ip = _live_ipv4(inst)
+        if ip and live_counts.get(ip, 0) == 1:
+            queue_first.append(name)
+        else:
+            queue_later.append(name)
+    return queue_first, queue_later
+
+
 def pin_existing_vms():
     """Migration helper: pin a static IP on every non-bastion incus
     instance on this host that doesn't already have one.
@@ -1603,39 +1639,14 @@ def pin_existing_vms():
     pinned_by_name = _pinned_ips()
     taken = set(pinned_by_name.values())
 
-    # Map every instance to its current live IPv4 (None when stopped or
-    # unreachable). Then count occurrences so we can detect collisions
-    # like the vm3/vm2 case where two guests claim the same address.
-    live = {}
-    for inst in insts:
-        ip = None
-        net = (inst.get("state") or {}).get("network") or {}
-        for iface in net.values():
-            for a in iface.get("addresses", []) or []:
-                if a.get("family") == "inet" and a.get("scope") == "global":
-                    ip = a["address"]
-                    break
-            if ip:
-                break
-        live[inst["name"]] = ip
-    live_counts = {}
-    for ip in live.values():
-        if ip:
-            live_counts[ip] = live_counts.get(ip, 0) + 1
+    live = {inst["name"]: _live_ipv4(inst) for inst in insts}
+    live_counts = _live_ip_counts(insts)
 
-    changes = []
     # Pin instances whose live IP is *uniquely theirs* first, so the lucky
     # tie-winner gets to keep it before we reallocate the others.
-    queue_first = []
-    queue_later = []
-    for name, ip in live.items():
-        if name == BASTION_CONTAINER or name in pinned_by_name:
-            continue
-        if ip and live_counts.get(ip, 0) == 1:
-            queue_first.append(name)
-        else:
-            queue_later.append(name)
+    queue_first, queue_later = _pin_queues(insts, pinned_by_name, live_counts)
 
+    changes = []
     for name in queue_first + queue_later:
         target = _pick_vm_ip(prefer=live[name], taken=taken)
         if target == live[name]:
@@ -1649,6 +1660,7 @@ def pin_existing_vms():
         changes.append((name, target, note))
     sync_dns_records()
     return changes
+
 
 def vm_sync_keys(user):
     """Recompute the injected key set for every running VM `user` accesses.
