@@ -128,22 +128,32 @@ def _parse_ipmi_mac(output):
     return None
 
 
-def _collect_bmc_mac_linux():
-    """Best-effort read of the BMC MAC via ipmitool. Returns MAC or None."""
+def _load_ipmi_modules():
     for mod in ('ipmi_devintf', 'ipmi_si'):
         try:
             _run(['modprobe', mod], timeout=5)
         except Exception:
             pass
+
+
+def _bmc_mac_from_channel(channel):
+    """Read one ipmitool channel, returning a MAC or None on any miss."""
+    try:
+        r = _run(['ipmitool', 'lan', 'print', str(channel)], timeout=10)
+        if r.returncode == 0:
+            return _parse_ipmi_mac(r.stdout)
+    except Exception:
+        return None
+    return None
+
+
+def _collect_bmc_mac_linux():
+    """Best-effort read of the BMC MAC via ipmitool. Returns MAC or None."""
+    _load_ipmi_modules()
     for channel in (1, 8):
-        try:
-            r = _run(['ipmitool', 'lan', 'print', str(channel)], timeout=10)
-            if r.returncode == 0:
-                mac = _parse_ipmi_mac(r.stdout)
-                if mac:
-                    return mac
-        except Exception:
-            continue
+        mac = _bmc_mac_from_channel(channel)
+        if mac:
+            return mac
     return None
 
 

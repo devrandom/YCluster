@@ -227,3 +227,17 @@ class CollectNICsDarwinTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CollectBMCMacTest(unittest.TestCase):
+    def test_returns_first_channel_mac(self):
+        with mock.patch.object(inventory, "_load_ipmi_modules"), \
+             mock.patch.object(inventory, "_run", side_effect=[
+                 run_result("MAC Address  : aa:bb"),
+                 run_result("MAC Address  : cc:dd"),
+             ]):
+            self.assertEqual(inventory._collect_bmc_mac_linux(), "aa:bb")
+
+    def test_failure_returns_none(self):
+        with mock.patch.object(inventory, "_load_ipmi_modules"), \
+             mock.patch.object(inventory, "_run", side_effect=RuntimeError("boom")):
+            self.assertIsNone(inventory._collect_bmc_mac_linux())
