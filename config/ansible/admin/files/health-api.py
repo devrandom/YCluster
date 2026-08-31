@@ -548,37 +548,47 @@ def check_tang_service():
 
 
 
+def _secrets_mount_details():
+    result = subprocess.run(['mountpoint', '-q', '/secrets'],
+                            capture_output=True, text=True, timeout=5)
+    is_mounted = result.returncode == 0
+    mount_details = None
+    if is_mounted:
+        try:
+            mount_result = subprocess.run(
+                ['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS', '/secrets'],
+                capture_output=True, text=True, timeout=5)
+            if mount_result.returncode == 0:
+                mount_details = mount_result.stdout.strip()
+        except Exception:
+            pass
+    return is_mounted, mount_details
+
+
+def _secrets_access(is_mounted):
+    secrets_accessible = False
+    secrets_error = None
+    try:
+        if os.path.exists('/secrets') and os.path.isdir('/secrets'):
+            os.listdir('/secrets')
+            secrets_accessible = True
+        else:
+            secrets_error = '/secrets directory does not exist'
+    except PermissionError:
+        # The service runs unprivileged and /secrets contents are deliberately
+        # root-only; mounted-but-unreadable is the expected state.
+        secrets_accessible = is_mounted
+        secrets_error = None
+    except Exception as e:
+        secrets_error = f'Error accessing /secrets: {str(e)}'
+    return secrets_accessible, secrets_error
+
+
 def check_secrets_mount():
     """Check if /secrets is mounted"""
     try:
-        result = subprocess.run(['mountpoint', '-q', '/secrets'],
-                              capture_output=True, text=True, timeout=5)
-        is_mounted = result.returncode == 0
-
-        mount_details = None
-        if is_mounted:
-            try:
-                mount_result = subprocess.run(
-                    ['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS', '/secrets'],
-                    capture_output=True, text=True, timeout=5)
-                if mount_result.returncode == 0:
-                    mount_details = mount_result.stdout.strip()
-            except:
-                pass
-
-        secrets_accessible = False
-        secrets_error = None
-        try:
-            if os.path.exists('/secrets') and os.path.isdir('/secrets'):
-                os.listdir('/secrets')
-                secrets_accessible = True
-            else:
-                secrets_error = '/secrets directory does not exist'
-        except PermissionError:
-            secrets_accessible = is_mounted
-            secrets_error = None
-        except Exception as e:
-            secrets_error = f'Error accessing /secrets: {str(e)}'
+        is_mounted, mount_details = _secrets_mount_details()
+        secrets_accessible, secrets_error = _secrets_access(is_mounted)
 
         if is_mounted and secrets_accessible:
             status = 'healthy'
@@ -673,60 +683,32 @@ def check_open_webui():
         return {'status': 'error', 'details': {'message': f'Open-WebUI check failed: {str(e)}'}}
 
 
+def _vip_status_for_ip(ip):
+    """Run `ip addr` and return one VIP detail dict."""
+    details = {'ip': ip, 'active': False, 'master': None, 'interface': None}
+    try:
+        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', ip],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            interfaces = json.loads(result.stdout)
+            if interfaces:
+                details['active'] = True
+                details['master'] = _HOSTNAME
+                details['interface'] = interfaces[0].get('ifname')
+    except json.JSONDecodeError as e:
+        details['error'] = f'JSON parse error: {str(e)}'
+    except Exception as e:
+        details['error'] = str(e)
+    return details
+
+
 def check_vip_status():
     """Check VIP status using keepalived and ip commands"""
-    gateway_vip_ip = GATEWAY_VIP
-    storage_vip_ip = STORAGE_VIP
     vip_status = {
-        'gateway_vip': {
-            'ip': gateway_vip_ip,
-            'active': False,
-            'master': None,
-            'interface': None
-        },
-        'storage_vip': {
-            'ip': storage_vip_ip,
-            'active': False,
-            'master': None,
-            'interface': None
-        }
+        'gateway_vip': _vip_status_for_ip(GATEWAY_VIP),
+        'storage_vip': _vip_status_for_ip(STORAGE_VIP),
     }
 
-    # Check gateway VIP
-    try:
-        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', gateway_vip_ip],
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            interfaces = json.loads(result.stdout)
-            if interfaces:
-                vip_status['gateway_vip']['active'] = True
-                vip_status['gateway_vip']['master'] = _HOSTNAME
-                vip_status['gateway_vip']['interface'] = interfaces[0].get('ifname')
-        else:
-            vip_status['gateway_vip']['active'] = False
-    except json.JSONDecodeError as e:
-        vip_status['gateway_vip']['error'] = f'JSON parse error: {str(e)}'
-    except Exception as e:
-        vip_status['gateway_vip']['error'] = str(e)
-
-    # Check storage VIP
-    try:
-        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', storage_vip_ip],
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            interfaces = json.loads(result.stdout)
-            if interfaces:
-                vip_status['storage_vip']['active'] = True
-                vip_status['storage_vip']['master'] = _HOSTNAME
-                vip_status['storage_vip']['interface'] = interfaces[0].get('ifname')
-        else:
-            vip_status['storage_vip']['active'] = False
-    except json.JSONDecodeError as e:
-        vip_status['storage_vip']['error'] = f'JSON parse error: {str(e)}'
-    except Exception as e:
-        vip_status['storage_vip']['error'] = str(e)
-
-    # Check keepalived service status
     try:
         keepalived_running = check_service_status('keepalived')
         vip_status['keepalived_service'] = {

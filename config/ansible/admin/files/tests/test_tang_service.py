@@ -351,3 +351,30 @@ class HealthApiDockerTests(unittest.TestCase):
             self.assertEqual(ha.check_docker_daemon()['status'], 'healthy')
         with mock.patch.object(ha, 'check_service_status', return_value=False):
             self.assertEqual(ha.check_docker_daemon()['status'], 'unhealthy')
+
+
+class SecretsMountTests(unittest.TestCase):
+    def test_mount_details(self):
+        results = [
+            mock.Mock(returncode=0, stdout='', stderr=''),
+            mock.Mock(returncode=0, stdout='source:fstype:opts', stderr=''),
+        ]
+        with mock.patch.object(ha.subprocess, 'run', side_effect=results):
+            self.assertEqual(ha._secrets_mount_details(), (True, 'source:fstype:opts'))
+
+    def test_mount_details_not_mounted(self):
+        result = mock.Mock(returncode=1, stdout='', stderr='')
+        with mock.patch.object(ha.subprocess, 'run', return_value=result):
+            self.assertEqual(ha._secrets_mount_details(), (False, None))
+
+    def test_secrets_access_ok(self):
+        with mock.patch.object(ha.os.path, 'exists', return_value=True), \
+             mock.patch.object(ha.os.path, 'isdir', return_value=True), \
+             mock.patch.object(ha.os, 'listdir', return_value=['a']):
+            self.assertEqual(ha._secrets_access(True), (True, None))
+
+    def test_secrets_access_permission_treated_as_mounted(self):
+        with mock.patch.object(ha.os.path, 'exists', return_value=True), \
+             mock.patch.object(ha.os.path, 'isdir', return_value=True), \
+             mock.patch.object(ha.os, 'listdir', side_effect=PermissionError):
+            self.assertEqual(ha._secrets_access(True), (True, None))
