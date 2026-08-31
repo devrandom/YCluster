@@ -248,3 +248,47 @@ class GetMacFromIPTTests(unittest.TestCase):
             self.assertEqual(appmod.get_mac_from_ip('ip-a'),
                              'aa:bb:cc:dd:ee:ff')
         neighbor.assert_not_called()
+
+
+class OpenWebuiLeaderStatusTests(unittest.TestCase):
+    def test_healthy(self):
+        status, msg = appmod._open_webui_leader_status(
+            True, True, True, '1.0', None)
+        self.assertEqual(status, 'healthy')
+        self.assertIn('version 1.0', msg)
+
+    def test_degraded(self):
+        status, msg = appmod._open_webui_leader_status(
+            True, True, False, None, 'HTTP 503')
+        self.assertEqual(status, 'degraded')
+        self.assertIn('health check failed', msg)
+
+    def test_port_closed(self):
+        status, msg = appmod._open_webui_leader_status(
+            True, False, False, None, None)
+        self.assertEqual(status, 'unhealthy')
+        self.assertIn('port not accessible', msg)
+
+    def test_not_running(self):
+        status, msg = appmod._open_webui_leader_status(
+            False, False, False, None, None)
+        self.assertEqual(status, 'unhealthy')
+        self.assertIn('not running', msg)
+
+
+class OpenWebuiProbeTests(unittest.TestCase):
+    def test_200_with_version(self):
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {'version': '2.0'}
+        with mock.patch.object(appmod.requests, 'get', return_value=response):
+            healthy, version, error = appmod._open_webui_health_probe()
+        self.assertTrue(healthy)
+        self.assertEqual(version, '2.0')
+        self.assertIsNone(error)
+
+    def test_non_200(self):
+        response = mock.Mock(status_code=503)
+        with mock.patch.object(appmod.requests, 'get', return_value=response):
+            healthy, version, error = appmod._open_webui_health_probe()
+        self.assertFalse(healthy)
+        self.assertIn('HTTP 503', error)

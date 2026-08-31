@@ -146,7 +146,7 @@
   "trusted.go::remoteIsTrusted": 5
  },
  "coverage": {
-  "config/ansible/admin/files/app.py": 42.8,
+  "config/ansible/admin/files/app.py": 43.7,
   "config/ansible/admin/files/collect-model-stats.py": 0.0,
   "config/ansible/admin/files/collect-vm-stats.py": 0.0,
   "config/ansible/admin/files/health-api.py": 42.0,
@@ -280,6 +280,8 @@
   "config/ansible/admin/files/app.py::_mac_from_neighbor_table": 10.2,
   "config/ansible/admin/files/app.py::_node_metric": 1.1,
   "config/ansible/admin/files/app.py::_ntp_health": 3.0,
+  "config/ansible/admin/files/app.py::_open_webui_health_probe": 8.0,
+  "config/ansible/admin/files/app.py::_open_webui_leader_status": 7.0,
   "config/ansible/admin/files/app.py::_parse_windows": 10.6,
   "config/ansible/admin/files/app.py::_postgres_health": 2.0,
   "config/ansible/admin/files/app.py::_prometheus_health_metrics": 8.2,
@@ -307,7 +309,7 @@
   "config/ansible/admin/files/app.py::check_dns_status": 39.0,
   "config/ansible/admin/files/app.py::check_docker_daemon": 3.5,
   "config/ansible/admin/files/app.py::check_docker_registry": 74.5,
-  "config/ansible/admin/files/app.py::check_open_webui": 76.2,
+  "config/ansible/admin/files/app.py::check_open_webui": 12.0,
   "config/ansible/admin/files/app.py::check_port_open": 4.0,
   "config/ansible/admin/files/app.py::check_secrets_mount": 33.6,
   "config/ansible/admin/files/app.py::check_service_conditionally": 7.7,
@@ -1256,6 +1258,8 @@
   "config/ansible/admin/files/app.py::_mac_from_neighbor_table": 10,
   "config/ansible/admin/files/app.py::_node_metric": 1,
   "config/ansible/admin/files/app.py::_ntp_health": 3,
+  "config/ansible/admin/files/app.py::_open_webui_health_probe": 6,
+  "config/ansible/admin/files/app.py::_open_webui_leader_status": 7,
   "config/ansible/admin/files/app.py::_parse_windows": 10,
   "config/ansible/admin/files/app.py::_postgres_health": 2,
   "config/ansible/admin/files/app.py::_prometheus_health_metrics": 3,
@@ -1283,7 +1287,7 @@
   "config/ansible/admin/files/app.py::check_dns_status": 11,
   "config/ansible/admin/files/app.py::check_docker_daemon": 3,
   "config/ansible/admin/files/app.py::check_docker_registry": 19,
-  "config/ansible/admin/files/app.py::check_open_webui": 18,
+  "config/ansible/admin/files/app.py::check_open_webui": 7,
   "config/ansible/admin/files/app.py::check_port_open": 2,
   "config/ansible/admin/files/app.py::check_secrets_mount": 12,
   "config/ansible/admin/files/app.py::check_service_conditionally": 6,
@@ -2312,7 +2316,7 @@
   "trusted.go": 26.1
  },
  "lines": {
-  "config/ansible/admin/files/app.py": 2776,
+  "config/ansible/admin/files/app.py": 2765,
   "config/ansible/admin/files/collect-model-stats.py": 136,
   "config/ansible/admin/files/collect-vm-stats.py": 97,
   "config/ansible/admin/files/common/__init__.py": 0,

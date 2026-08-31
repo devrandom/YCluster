@@ -1121,85 +1121,74 @@ def check_secrets_mount():
             'details': {'message': f'Secrets mount check failed: {str(e)}'}
         }
 
+def _open_webui_health_probe():
+    """Probe the Open-WebUI health endpoint.
+
+    Returns (healthy, version, error).
+    """
+    try:
+        response = requests.get('http://localhost:8380/health', timeout=5)
+    except requests.exceptions.Timeout:
+        return False, None, 'Open-WebUI health check timeout'
+    except requests.exceptions.ConnectionError:
+        return False, None, 'Open-WebUI connection failed'
+    except Exception as e:
+        return False, None, f'Open-WebUI health check failed: {str(e)}'
+
+    if response.status_code != 200:
+        return False, None, f'Open-WebUI health check returned HTTP {response.status_code}'
+    try:
+        version = response.json().get('version', 'unknown')
+    except Exception:
+        version = 'unknown'
+    return True, version, None
+
+
+def _open_webui_leader_status(running, port_open, healthy, version, error):
+    """Determine status/message on the storage leader."""
+    if running and port_open and healthy:
+        return 'healthy', f'Open-WebUI running and healthy (version {version})'
+    if running and port_open:
+        return 'degraded', f'Open-WebUI running but health check failed: {error}'
+    if running:
+        return 'unhealthy', f'Open-WebUI service running but port not accessible: {error}'
+    return 'unhealthy', 'Open-WebUI service not running'
+
+
 def check_open_webui():
     """Check Open-WebUI service status and functionality"""
     try:
-        # Check if Open-WebUI service is running
-        webui_service_running = check_service_status('open-webui')
-        
-        # Check if Open-WebUI port is open
-        webui_port_open = check_port_open('localhost', 8380)
-        
-        # Test Open-WebUI health endpoint
-        webui_healthy = False
-        webui_error = None
-        webui_version = None
-        
-        if webui_port_open:
-            try:
-                # Try health check endpoint
-                health_response = requests.get('http://localhost:8380/health', timeout=5)
-                if health_response.status_code == 200:
-                    webui_healthy = True
-                    try:
-                        health_data = health_response.json()
-                        webui_version = health_data.get('version', 'unknown')
-                    except:
-                        webui_version = 'unknown'
-                else:
-                    webui_error = f'Open-WebUI health check returned HTTP {health_response.status_code}'
-            except requests.exceptions.Timeout:
-                webui_error = 'Open-WebUI health check timeout'
-            except requests.exceptions.ConnectionError:
-                webui_error = 'Open-WebUI connection failed'
-            except Exception as e:
-                webui_error = f'Open-WebUI health check failed: {str(e)}'
-        
-        # Check if this node should be running Open-WebUI (storage leader)
+        running = check_service_status('open-webui')
+        port_open = check_port_open('localhost', 8380)
+        healthy, version, error = (False, None, None)
+        if port_open:
+            healthy, version, error = _open_webui_health_probe()
         is_storage_lead = is_storage_leader()
-        
-        # Determine overall status
+
         if is_storage_lead:
-            if webui_service_running and webui_port_open and webui_healthy:
-                status = 'healthy'
-                message = f'Open-WebUI running and healthy (version {webui_version})'
-            elif webui_service_running and webui_port_open:
-                status = 'degraded'
-                message = f'Open-WebUI running but health check failed: {webui_error}'
-            elif webui_service_running:
-                status = 'unhealthy'
-                message = f'Open-WebUI service running but port not accessible: {webui_error}'
-            else:
-                status = 'unhealthy'
-                message = 'Open-WebUI service not running'
+            status, message = _open_webui_leader_status(running, port_open, healthy, version, error)
+        elif running or port_open:
+            status, message = 'unhealthy', 'Split-brain: Open-WebUI running on non-leader'
         else:
-            # Not storage leader - Open-WebUI should not be running
-            if webui_service_running or webui_port_open:
-                status = 'unhealthy'
-                message = 'Split-brain: Open-WebUI running on non-leader'
-            else:
-                status = 'standby'
-                message = 'Open-WebUI not required (not storage leader)'
-        
+            status, message = 'standby', 'Open-WebUI not required (not storage leader)'
+
         return {
             'status': status,
             'details': {
-                'service_active': webui_service_running,
-                'port_open': webui_port_open,
-                'health_check_passed': webui_healthy,
-                'version': webui_version,
+                'service_active': running,
+                'port_open': port_open,
+                'health_check_passed': healthy,
+                'version': version,
                 'required': is_storage_lead,
                 'reason': 'storage leader' if is_storage_lead else 'not storage leader',
                 'message': message,
-                'error': webui_error
+                'error': error
             }
         }
-        
     except Exception as e:
-        return {
-            'status': 'error',
-            'details': {'message': f'Open-WebUI check failed: {str(e)}'}
-        }
+        return {'status': 'error', 'details': {'message': f'Open-WebUI check failed: {str(e)}'}}
+
+
 
 def is_storage_leader():
     """Check if this node is the current storage leader"""
