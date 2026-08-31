@@ -18,22 +18,18 @@ from ..common.etcd_utils import get_etcd_client, reset_etcd_client
 
 USERS_PREFIX = "/cluster/users/"
 VMS_PREFIX = "/cluster/vms/"
-# Lifecycle event queue, drained into usage_stats by collect-vm-stats on
-# the storage leader. Deliberately NOT under VMS_PREFIX — vm_list/vms_all
-# iterate that prefix and would mistake events for registrations.
+# Lifecycle event queue, drained into usage_stats by collect-vm-stats. Keep
+# it outside VMS_PREFIX so vm_list/vms_all don't mistake events for VMs.
 EVENTS_PREFIX = "/cluster/vms-events/"
-# Per-host incus state snapshots, written by the vm-state-sampler timer on
-# incus hosts (`ycluster vm sample`) and read by collect-vm-stats. Push via
-# etcd client certs — the cluster's one trust mechanism — rather than the
-# leader reaching into hosts (ssh/HTTP).
+# Per-host Incus state snapshots, written by the sampler timer and read by
+# collect-vm-stats. Push via etcd client certs, not host ssh/HTTP.
 VM_STATE_PREFIX = "/cluster/vm-state/"
 # Stamped into each snapshot; must match the vm-state-sampler.timer cadence
 # (files/vm-state-sampler.timer) — observed GPU-hours = sum(gpus * interval_s).
 VM_STATE_INTERVAL_S = 60
-# Desired power state per VM, written by the scheduling page (admin-api on
-# the leader) and converged by the vm-reconciler timer on each incus host —
-# hosts pull intent and push state over etcd client certs; there is no
-# inbound control channel. {"mode": "on"|"off"|"schedule", "windows":
+# Desired power state per VM, written by admin-api and converged by the
+# vm-reconciler timer; hosts pull intent over etcd (no inbound channel).
+# {"mode": "on"|"off"|"schedule", "windows":
 # [{"start": <ISO datetime>, "end": <ISO datetime>}] (UTC; one-shot
 # absolute windows, not recurring; multiple allowed),
 # "updated_by": ..., "updated_at": ...}. No record = unmanaged (status quo).
@@ -47,11 +43,8 @@ VM_GRACE_PREFIX = "/cluster/vm-grace/"
 # Minimum warning-to-shutdown grace for scheduler-initiated stops
 # (effective grace is this rounded up to the next reconciler tick).
 SCHEDULED_STOP_GRACE_S = 300
-# Last reconciler failure per VM ({"op": "start"|"stop", "error": ...,
-# "at": iso}), written when convergence fails and cleared once the VM
-# converges (or its desired record disappears). Read by the schedule page
-# so start failures (e.g. RAM exhaustion) surface to the owner, not only
-# in the reconciler journal.
+# Last reconciler failure per VM, written on failure and cleared on success;
+# read by the schedule page so failures surface to the owner.
 VM_ISSUE_PREFIX = "/cluster/vm-issue/"
 
 # Admin GPU reservations ("blocks") — a schedule entry with no backing VM.
@@ -1252,34 +1245,34 @@ def sample_state():
     print(f"sampled {len(instances)} instance(s)")
 
 def vm_sync_limits():
-    """Backfill cpu/mem from incus into VMS_PREFIX for VMs on this host.
-
-    Runs locally on each compute host (no SSH needed — `_incus` is local).
-    Only touches VMs already registered in VMS_PREFIX with `host == self`;
-    updates the record only when cpu/mem are missing, so re-runs are no-ops
-    once everything is backfilled. Use to migrate VMs launched before
-    vm_launch started persisting limits (the Resources page needs them)."""
+    """Backfill cpu/mem for local registered VMs when missing."""
     me = socket.gethostname()
     vms = vms_all()
     updated = 0
     for name, rec in vms.items():
         if rec.get("host") != me:
             continue
-        if rec.get("cpu") and rec.get("mem"):
-            continue
-        r = _incus("config", "get", name, "limits.cpu", check=False)
-        if r.returncode != 0 or not r.stdout.strip():
-            continue
-        cpu = r.stdout.strip()
-        r = _incus("config", "get", name, "limits.memory", check=False)
-        if r.returncode != 0 or not r.stdout.strip():
-            continue
-        mem = r.stdout.strip()
-        rec["cpu"] = cpu
-        rec["mem"] = mem
-        _put_json(VMS_PREFIX + name, rec)
-        updated += 1
+        if _sync_vm_limits_once(name, rec):
+            updated += 1
     print(f"synced cpu/mem for {updated} VM(s) on {me}")
+
+def _incus_config_value(name, key):
+    """Return an Incus config value, or None when unavailable."""
+    r = _incus("config", "get", name, key, check=False)
+    value = r.stdout.strip() if r.returncode == 0 else ""
+    return value or None
+
+
+def _sync_vm_limits_once(name, rec):
+    """Backfill one VM; returns True when a record was written."""
+    if rec.get("cpu") and rec.get("mem"): return False
+    values = [_incus_config_value(name, key) for key in ("limits.cpu", "limits.memory")]
+    if None in values:
+        return False
+    rec["cpu"], rec["mem"] = values
+    _put_json(VMS_PREFIX + name, rec)
+    return True
+
 
 def _validate_vm_launch(name, owner, gpus, instance_type):
     """Reject invalid names, GPU counts, types, and users without SSH keys."""
@@ -1302,7 +1295,7 @@ def _validate_vm_launch(name, owner, gpus, instance_type):
 
 def _create_incus_instance(name, instance_type, image, profile, cpu, mem,
                            gpus, owner):
-    """Create the instance via incus init, pin a static IP, sync DNS."""
+    """Create the instance, pin a static IP, and sync DNS."""
     gpu_desc = f"{gpus} GPU" if gpus else "no GPU"
     print(f"Creating {instance_type} '{name}' ({cpu} CPU, {mem} RAM, "
           f"{gpu_desc}) owned by '{owner}'...")
