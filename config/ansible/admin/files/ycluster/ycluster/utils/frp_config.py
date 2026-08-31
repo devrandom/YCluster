@@ -30,32 +30,33 @@ def validate_host_port(remote_addr):
             raise ValueError(f"Invalid port: '{port_str}'. Must be a number")
         raise
 
+def _merged_frp_config(client, remote_addr, token):
+    """Merge partial updates with the existing etcd config."""
+    config = {}
+    if not (remote_addr and token):
+        value, _ = client.get('/cluster/nodes/frp/config')
+        if value:
+            config = json.loads(value.decode())
+    if remote_addr:
+        config['remote_addr'] = remote_addr
+    if token:
+        config['token'] = token
+    return config
+
+
 def set_frp_config(remote_addr, token):
     """Set frp configuration in etcd"""
     if remote_addr:
         validate_host_port(remote_addr)
 
     client = get_etcd_client()
-    key = '/cluster/nodes/frp/config'
-
-    # Get existing config if updating partially
-    config = {}
-    if not (remote_addr and token):
-        value, _ = client.get(key)
-        if value:
-            config = json.loads(value.decode())
-
-    if remote_addr:
-        config['remote_addr'] = remote_addr
-    if token:
-        config['token'] = token
+    config = _merged_frp_config(client, remote_addr, token)
 
     if not config.get('remote_addr') or not config.get('token'):
         print("Error: Both remote_addr and token must be set", file=sys.stderr)
         sys.exit(1)
 
-    value = json.dumps(config)
-    client.put(key, value)
+    client.put('/cluster/nodes/frp/config', json.dumps(config))
     print(f"Set frp config: remote_addr={config['remote_addr']}, token=***")
 
 def get_frp_config():
