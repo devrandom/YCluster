@@ -148,13 +148,13 @@ def go_coverage(profile: Path) -> tuple[dict[tuple[str, str], float], float | No
         if not line.strip():
             continue
         if line.startswith("total:"):
-            total = float(line.rsplit("\t", 1)[1].rstrip("%")) / 100
+            total = float(line.rsplit(None, 1)[1].rstrip("%")) / 100
             continue
-        pos, name, pct = line.rsplit("\t", 2)
+        pos, name, pct = line.rsplit(None, 2)
         frac = float(pct.rstrip("%")) / 100
         # pos is <module>/local-ai-proxy/<file>:<line>; match gocyclo's
         # module-relative paths.
-        file_part = pos.rsplit(":", 1)[0]
+        file_part = pos.rstrip(":").rsplit(":", 1)[0]
         marker = "local-ai-proxy/"
         if marker in file_part:
             file_part = file_part.split(marker, 1)[1]

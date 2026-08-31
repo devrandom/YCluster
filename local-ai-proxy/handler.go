@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -480,126 +479,6 @@ func (h *Handler) authStatus(r *http.Request) *authState {
 //
 // Overall status is a rollup of model state (disabled models don't count
 // as alerts): ok | degraded | down | unknown.
-func writeHealthz(w http.ResponseWriter, r *http.Request, snap map[string]BackendHealth, models map[string][]*url.URL, auth *authState) {
-	type entry struct {
-		URL       string   `json:"url"`
-		State     string   `json:"state"`
-		LastCheck string   `json:"last_check"`
-		Err       string   `json:"err,omitempty"`
-		Models    []string `json:"models,omitempty"`
-	}
-	type modelEntry struct {
-		Name     string   `json:"name"`
-		State    string   `json:"state"`
-		Backends []string `json:"backends"`
-	}
-	urls := make([]string, 0, len(snap))
-	for k := range snap {
-		urls = append(urls, k)
-	}
-	sort.Strings(urls)
-
-	backends := make([]entry, 0, len(urls))
-	healthy, down, disabled := 0, 0, 0
-	for _, u := range urls {
-		bh := snap[u]
-		switch bh.State {
-		case StateHealthy:
-			healthy++
-		case StateDown:
-			down++
-		case StateDisabled:
-			disabled++
-		}
-		e := entry{
-			URL:       u,
-			State:     bh.State.String(),
-			LastCheck: bh.LastCheck.UTC().Format(time.RFC3339),
-			Models:    bh.Models,
-		}
-		if bh.Err != "" {
-			e.Err = bh.Err
-		}
-		backends = append(backends, e)
-	}
-
-	// Per-model rollup. Model state is derived from its backends.
-	modelNames := make([]string, 0, len(models))
-	for name := range models {
-		modelNames = append(modelNames, name)
-	}
-	sort.Strings(modelNames)
-
-	modelEntries := make([]modelEntry, 0, len(modelNames))
-	modelHealthy, modelDisabled, modelUnavailable := 0, 0, 0
-	for _, name := range modelNames {
-		urls := models[name]
-		urlStrs := make([]string, 0, len(urls))
-		for _, u := range urls {
-			urlStrs = append(urlStrs, u.String())
-		}
-		state := modelStateFromBackends(urls, snap)
-		switch state {
-		case "healthy":
-			modelHealthy++
-		case "disabled":
-			modelDisabled++
-		case "unavailable":
-			modelUnavailable++
-		}
-		modelEntries = append(modelEntries, modelEntry{
-			Name: name, State: state, Backends: urlStrs,
-		})
-	}
-
-	// Overall status is a model-level rollup — a down backend that has
-	// healthy siblings for its model shouldn't page. Disabled models are
-	// operator-acknowledged and don't contribute to degraded/down.
-	overall := "ok"
-	accountable := modelHealthy + modelUnavailable
-	switch {
-	case len(modelEntries) == 0:
-		overall = "unknown"
-	case modelHealthy == 0 && modelUnavailable == 0:
-		overall = "unknown"
-	case modelUnavailable > 0 && modelHealthy == 0 && accountable > 0:
-		overall = "down"
-	case modelUnavailable > 0:
-		overall = "degraded"
-	}
-
-	resp := struct {
-		Status   string       `json:"status"`
-		Healthy  int          `json:"healthy"`
-		Down     int          `json:"down"`
-		Disabled int          `json:"disabled"`
-		Backends []entry      `json:"backends"`
-		Models   []modelEntry `json:"models"`
-		Auth     *authState   `json:"auth,omitempty"`
-	}{
-		Status:   overall,
-		Healthy:  healthy,
-		Down:     down,
-		Disabled: disabled,
-		Backends: backends,
-		Models:   modelEntries,
-	}
-
-	status := http.StatusOK
-	if auth != nil {
-		resp.Auth = auth
-		if auth.Status != "ok" {
-			overall = "down"
-			resp.Status = overall
-			status = http.StatusServiceUnavailable
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
 // writeHealthzNoop responds when a Handler has no HealthChecker
 // (passthrough mode, or checks disabled). Proxy-itself-up is 200;
 // a configured auth check can downgrade it to 503.
