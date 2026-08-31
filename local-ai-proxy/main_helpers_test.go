@@ -70,3 +70,26 @@ func TestBuildServersMetricsListen(t *testing.T) {
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
+
+func TestParseArgsServe(t *testing.T) {
+	args, cfg, ok := parseArgs([]string{"serve", "--addr", ":8080"})
+	if !ok {
+		t.Fatal("expected ok=true for serve")
+	}
+	if cfg != DefaultConfigPath {
+		t.Fatalf("config path = %q, want default", cfg)
+	}
+	if len(args) != 2 || args[0] != "--addr" {
+		t.Fatalf("unexpected serve args: %v", args)
+	}
+}
+
+func TestParseArgsConfigPrefix(t *testing.T) {
+	_, cfg, ok := parseArgs([]string{"-c", "/tmp/test.yaml", "serve"})
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if cfg != "/tmp/test.yaml" {
+		t.Fatalf("config path = %q, want /tmp/test.yaml", cfg)
+	}
+}

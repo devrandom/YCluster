@@ -20,49 +20,12 @@ import (
 const DefaultConfigPath = "/etc/local-ai-proxy/config.yaml"
 
 func main() {
-	// Subcommand dispatch. `-c <path>` or `--config <path>` may appear
-	// before the subcommand (so ops commands use the same config as the server).
-	args := os.Args[1:]
-	configPath := DefaultConfigPath
-	for len(args) >= 2 && (args[0] == "-c" || args[0] == "--config") {
-		configPath = args[1]
-		args = args[2:]
-	}
-	if len(args) > 0 {
-		switch args[0] {
-		case "models", "backends", "acl":
-			runCLI(args[0], args[1:], configPath)
-			return
-		case "serve":
-			args = args[1:]
-		default:
-			fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-c <path>|--config <path>] <subcommand>\n")
-			os.Exit(1)
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-c <path>|--config <path>] <subcommand>\n")
-		os.Exit(1)
+	args, configPath, ok := parseArgs(os.Args[1:])
+	if !ok {
+		return
 	}
 
-	// Serve mode. Parse the remaining flags as before.
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", "", "listen address (overrides config)")
-	backendURL := fs.String("backend", "", "single backend URL (overrides config; implies passthrough mode)")
-	cfgFlag := fs.String("config", "", "path to YAML config (default "+DefaultConfigPath+")")
-	_ = fs.Parse(args)
-	if *cfgFlag != "" {
-		configPath = *cfgFlag
-	}
-
-	cfg, err := LoadConfigOrDefault(configPath, *addr, *backendURL)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
-
-	metrics := NewMetrics()
+	cfg, logger, metrics := mustServeConfig(configPath, args)
 	router, source, err := buildRouter(cfg, logger)
 	if err != nil {
 		log.Fatal(err)
@@ -95,6 +58,58 @@ func main() {
 	servers := buildServers(cfg, chained, metrics, logger)
 	runServers(servers, logger)
 	logger.Info("stopped")
+}
+
+// parseArgs handles the subcommand dispatch and config-path prefix. Returns
+// the remaining args for serve mode and the resolved config path. Returns
+// ok=false when the process should exit (either a CLI subcommand ran or
+// usage was printed).
+func parseArgs(args []string) (serveArgs []string, configPath string, ok bool) {
+	configPath = DefaultConfigPath
+	for len(args) >= 2 && (args[0] == "-c" || args[0] == "--config") {
+		configPath = args[1]
+		args = args[2:]
+	}
+	if len(args) > 0 {
+		switch args[0] {
+		case "models", "backends", "acl":
+			runCLI(args[0], args[1:], configPath)
+			return nil, "", false
+		case "serve":
+			return args[1:], configPath, true
+		default:
+			usage()
+			os.Exit(1)
+		}
+	}
+	usage()
+	os.Exit(1)
+	return nil, "", false
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "usage: local-ai-proxy [-c <path>|--config <path>] <subcommand>\n")
+}
+
+// mustServeConfig parses serve-mode flags and loads the config. Fatal on error.
+func mustServeConfig(configPath string, args []string) (Config, *slog.Logger, *Metrics) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", "", "listen address (overrides config)")
+	backendURL := fs.String("backend", "", "single backend URL (overrides config; implies passthrough mode)")
+	cfgFlag := fs.String("config", "", "path to YAML config (default "+DefaultConfigPath+")")
+	_ = fs.Parse(args)
+	if *cfgFlag != "" {
+		configPath = *cfgFlag
+	}
+
+	cfg, err := LoadConfigOrDefault(configPath, *addr, *backendURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+	return cfg, logger, NewMetrics()
 }
 
 // startHealthChecker starts the model-health checker only in model-routed
