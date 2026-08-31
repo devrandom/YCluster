@@ -486,135 +486,89 @@ def obtain_certificate(test_cert=False, non_interactive=False, server=None):
         _cleanup_temp_files(temp_key_path, csr_path, temp_dir)
 
 
+def _renew_read_fullchain(cert_path, chain_path):
+    """Read cert + chain, returning the combined fullchain content."""
+    cert_content = cert_path.read_text()
+    if chain_path.exists():
+        return cert_content + chain_path.read_text()
+    return cert_content
+
+
+def _store_renewed_certificate(client, fullchain_content):
+    """Store the renewed certificate in etcd and nginx, with timer fencing."""
+    # Stop the fetch-tls-certs timer to prevent race conditions during writes
+    stop_fetch_tls_timer()
+    try:
+        client.put('/cluster/tls/cert', fullchain_content)
+        print("Renewed certificate stored in etcd")
+
+        write_tls_key_to_nginx()
+        nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
+        nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
+        nginx_cert_path.write_text(fullchain_content)
+        nginx_cert_path.chmod(0o644)
+        print(f"Certificate written to nginx: {nginx_cert_path}")
+    finally:
+        start_fetch_tls_timer()
+
+
 def renew_certificates(non_interactive=False):
     """Renew existing certificates using CSR mode"""
     print("Renewing certificates...")
-    
+
     config = get_https_config()
     if 'domain' not in config:
         print("No primary domain configured for renewal")
         return False
-    
-    primary_domain = config['domain']
+
     domains = get_all_domains(config)
-    
+
     # Check if we have a certificate in etcd (our source of truth)
     client = get_etcd_client()
     cert_value, _ = client.get('/cluster/tls/cert')
     if not cert_value:
         print("No existing certificate found in etcd")
         return False
-    
+
     # Write TLS key to temporary file for CSR generation
     temp_key_path = write_tls_key_to_temp()
     if not temp_key_path:
         return False
-    
+
     # Generate CSR with our existing private key
     csr_path = generate_csr(temp_key_path, domains)
     if not csr_path:
-        # Clean up temp key file
         try:
             os.unlink(temp_key_path)
-        except:
+        except Exception:
             pass
         return False
-    
+
     # Ensure nginx has a certificate (fallback to etcd cert if no Let's Encrypt cert exists)
     ensure_nginx_cert_from_etcd()
-    
+
     # Create temporary directory for certbot output
     temp_dir = tempfile.mkdtemp()
-    
+    cert_path = Path(temp_dir) / 'cert.pem'
+    chain_path = Path(temp_dir) / 'chain.pem'
+
     try:
-        # Define specific output file paths
-        cert_path = Path(temp_dir) / 'cert.pem'
-        chain_path = Path(temp_dir) / 'chain.pem'
-        
-        # Build certbot renew command using CSR mode with specific output paths
-        cmd = [
-            'certbot', 'certonly',
-            '--csr', csr_path,
-            '--webroot', '-w', '/var/www/html',
-            '--force-renewal',  # Force renewal even if not due
-            '--cert-path', str(cert_path),
-            '--chain-path', str(chain_path)
-        ]
-
-        # Registration/TOS flags — without these certbot refuses to run
-        # non-interactively on a fresh account (same flags as obtain_certificate).
-        cmd.extend(['--agree-tos', '--no-eff-email'])
-
-        # Add non-interactive flag if requested
-        if non_interactive:
-            cmd.append('--non-interactive')
-
-        # Add email or register without email
-        if config.get('email'):
-            cmd.extend(['--email', config['email']])
-        else:
-            cmd.append('--register-unsafely-without-email')
-
+        cmd = _build_certbot_cmd(csr_path, cert_path, chain_path,
+                                 config.get('email'), non_interactive,
+                                 test_cert=False, server=None)
+        cmd.append('--force-renewal')
         result = run_certbot_command(cmd, check=False)
-        if result.returncode == 0:
-            print("Certificate renewal completed successfully!")
-            
-            # Read certificate files from known paths
-            if cert_path.exists():
-                cert_content = cert_path.read_text()
-                
-                # Create fullchain (cert + chain)
-                if chain_path.exists():
-                    chain_content = chain_path.read_text()
-                    fullchain_content = cert_content + chain_content
-                else:
-                    fullchain_content = cert_content
-                
-                # Stop the fetch-tls-certs timer to prevent race conditions during writes
-                stop_fetch_tls_timer()
-                
-                try:
-                    # Store renewed certificate in etcd
-                    client.put('/cluster/tls/cert', fullchain_content)
-                    print("Renewed certificate stored in etcd")
-                    
-                    # Write certificate to nginx
-                    write_tls_key_to_nginx()
-                    nginx_cert_path = Path('/etc/nginx/ssl/cert.pem')
-                    nginx_cert_path.parent.mkdir(parents=True, exist_ok=True)
-                    nginx_cert_path.write_text(fullchain_content)
-                    nginx_cert_path.chmod(0o644)
-                    print(f"Renewed certificate written to nginx: {nginx_cert_path}")
-                finally:
-                    # Restart the fetch-tls-certs timer
-                    start_fetch_tls_timer()
-                
-                # Update nginx configs with correct domain
-                update_nginx_configs()
-            
-            return True
-        else:
-            print("Certificate renewal completed with warnings")
-            return True
-            
-    except subprocess.CalledProcessError:
-        print("Failed to renew certificates")
-        return False
+        if result.returncode != 0:
+            return False
+
+        print("Certificate renewal completed successfully!")
+        fullchain_content = _renew_read_fullchain(cert_path, chain_path)
+        _store_renewed_certificate(client, fullchain_content)
+        update_nginx_configs()
+        return True
     finally:
-        # Clean up temporary files and directory
-        try:
-            os.unlink(temp_key_path)
-        except:
-            pass
-        try:
-            os.unlink(csr_path)
-        except:
-            pass
-        try:
-            import shutil
-            shutil.rmtree(temp_dir)
-        except:
-            pass
+        _cleanup_temp_files(temp_key_path, csr_path, temp_dir)
+
 
 def list_certificates():
     """List certificate status from etcd"""
