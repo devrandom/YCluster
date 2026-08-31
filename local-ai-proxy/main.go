@@ -63,7 +63,6 @@ func main() {
 	slog.SetDefault(logger)
 
 	metrics := NewMetrics()
-
 	router, source, err := buildRouter(cfg, logger)
 	if err != nil {
 		log.Fatal(err)
@@ -72,60 +71,16 @@ func main() {
 		defer source.Close()
 	}
 
-	// Health checker: only runs in model-routed modes (source != nil)
-	// and when interval > 0. Exposes /healthz; not yet wired into
-	// routing decisions.
-	var health *HealthChecker
-	if source != nil {
-		interval := cfg.HealthCheckInterval
-		if interval == 0 {
-			interval = DefaultHealthCheckInterval
-		}
-		if interval > 0 {
-			health = NewHealthChecker(source, interval, logger)
-			health.Metrics = metrics
-			// Wire the disabled-backends feature when the Source is
-			// etcd-backed: we reuse its client, and default the prefix
-			// to /cluster/config/inference/disabled/.
-			if es, ok := source.(*EtcdSource); ok && cfg.Etcd != nil {
-				dp := cfg.Etcd.DisabledPrefix
-				if dp == "" {
-					dp = DefaultDisabledPrefix
-				}
-				health.Disabled = NewEtcdDisabledBackends(es.Client(), dp, logger)
-				logger.Info("disabled-backends tracker enabled", "prefix", dp)
-			}
-			health.Start(context.Background())
-			defer health.Close()
-			logger.Info("health checker started", "interval", interval.String())
-		}
+	health := startHealthChecker(cfg, source, metrics, logger)
+	if health != nil {
+		defer health.Close()
 	}
 
-	// Fan-out: the LoadCounter is shared between handler (inc/dec around
-	// upstream calls) and router (reads counts to pick least-loaded).
-	// Passthrough mode skips it — a single backend has nothing to balance.
 	loadCounter := NewLoadCounter()
-	if mr, ok := router.(*ModelRouter); ok {
-		if health != nil {
-			mr.Healthy = health
-		}
-		mr.Load = loadCounter
-	}
+	configureRouter(router, health, loadCounter)
 
 	h := NewHandler(router)
-	h.Health = health
-	h.AuthHealthURL = cfg.AuthHealthURL
-	h.Metrics = metrics
-	if es, ok := source.(*EtcdSource); ok {
-		// Hot-reloading union: yaml acl ⊎ inline-per-model + etcd default.
-		yamlACL := cfg.ACL
-		h.ACLProvider = func() *ACLConfig { return MergeACL(yamlACL, es.ACLSnapshot()) }
-	} else {
-		h.ACL = cfg.ACL
-	}
-	if _, ok := router.(*ModelRouter); ok {
-		h.Load = loadCounter
-	}
+	configureHandler(h, cfg, router, source, health, metrics, loadCounter)
 
 	// Outer middleware chain: TrustedHeaders strips X-User-Id for
 	// requests from outside the trusted proxy CIDRs, so nothing
@@ -137,12 +92,88 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// The main listener serves the API chain (including /healthz). /metrics
-	// lives on the main listener by default, but when metrics_listen is
-	// configured it is served from that separate listener instead — this
-	// lets the API listener stay bound to loopback while Prometheus scrapes
-	// cross-host on the exposed metrics port. Metrics are plain Prometheus
-	// text and don't need logging or X-User-Id stripping.
+	servers := buildServers(cfg, chained, metrics, logger)
+	runServers(servers, logger)
+	logger.Info("stopped")
+}
+
+// startHealthChecker starts the model-health checker only in model-routed
+// modes and when an interval is configured. It returns nil in passthrough mode.
+func startHealthChecker(cfg Config, source Source, metrics *Metrics, logger *slog.Logger) *HealthChecker {
+	if source == nil {
+		return nil
+	}
+
+	interval := cfg.HealthCheckInterval
+	if interval == 0 {
+		interval = DefaultHealthCheckInterval
+	}
+	if interval <= 0 {
+		return nil
+	}
+
+	health := NewHealthChecker(source, interval, logger)
+	health.Metrics = metrics
+	configureDisabledBackends(health, source, cfg, logger)
+	health.Start(context.Background())
+	logger.Info("health checker started", "interval", interval.String())
+	return health
+}
+
+// configureDisabledBackends wires the disabled-backends feature when the
+// Source is etcd-backed: we reuse its client and default the prefix to
+// /cluster/config/inference/disabled/.
+func configureDisabledBackends(health *HealthChecker, source Source, cfg Config, logger *slog.Logger) {
+	es, ok := source.(*EtcdSource)
+	if !ok || cfg.Etcd == nil {
+		return
+	}
+
+	dp := cfg.Etcd.DisabledPrefix
+	if dp == "" {
+		dp = DefaultDisabledPrefix
+	}
+	health.Disabled = NewEtcdDisabledBackends(es.Client(), dp, logger)
+	logger.Info("disabled-backends tracker enabled", "prefix", dp)
+}
+
+// configureRouter attaches health and load state to the model router when it
+// is present. Passthrough mode has a single backend and needs neither.
+func configureRouter(router Router, health *HealthChecker, loadCounter *LoadCounter) {
+	mr, ok := router.(*ModelRouter)
+	if !ok {
+		return
+	}
+	if health != nil {
+		mr.Healthy = health
+	}
+	mr.Load = loadCounter
+}
+
+// configureHandler wires metrics, ACLs, and load counters into the API
+// handler according to the selected routing mode.
+func configureHandler(h *Handler, cfg Config, router Router, source Source, health *HealthChecker, metrics *Metrics, loadCounter *LoadCounter) {
+	h.Health = health
+	h.AuthHealthURL = cfg.AuthHealthURL
+	h.Metrics = metrics
+
+	if es, ok := source.(*EtcdSource); ok {
+		// Hot-reloading union: yaml acl ⊎ inline-per-model + etcd default.
+		yamlACL := cfg.ACL
+		h.ACLProvider = func() *ACLConfig { return MergeACL(yamlACL, es.ACLSnapshot()) }
+	} else {
+		h.ACL = cfg.ACL
+	}
+
+	if _, ok := router.(*ModelRouter); ok {
+		h.Load = loadCounter
+	}
+}
+
+// buildServers creates the API listener and, when configured, the separate
+// Prometheus listener. Metrics are plain text and intentionally bypass the
+// logging and trusted-header middleware.
+func buildServers(cfg Config, chained http.Handler, metrics *Metrics, logger *slog.Logger) []*http.Server {
 	mux := http.NewServeMux()
 	if cfg.MetricsListen == "" {
 		mux.Handle("/metrics", metrics.Handler())
@@ -150,15 +181,27 @@ func main() {
 	mux.Handle("/", chained)
 
 	servers := []*http.Server{{Addr: cfg.Listen, Handler: mux}}
-
 	if cfg.MetricsListen != "" {
 		mmux := http.NewServeMux()
 		mmux.Handle("/metrics", metrics.Handler())
 		servers = append(servers, &http.Server{Addr: cfg.MetricsListen, Handler: mmux})
 		logger.Info("metrics served on separate listener", "addr", cfg.MetricsListen, "main", cfg.Listen)
 	}
+	return servers
+}
 
+// runServers starts all listeners and blocks until a listener fails or a
+// graceful shutdown completes after SIGINT/SIGTERM.
+func runServers(servers []*http.Server, logger *slog.Logger) {
 	errCh := make(chan error, len(servers))
+	startListeners(servers, errCh)
+
+	shutdownDone := make(chan struct{})
+	go shutdownOnSignal(servers, logger, shutdownDone)
+	awaitServerExit(servers, errCh, shutdownDone, logger)
+}
+
+func startListeners(servers []*http.Server, errCh chan<- error) {
 	for _, s := range servers {
 		s := s
 		go func() {
@@ -167,25 +210,26 @@ func main() {
 			}
 		}()
 	}
+}
 
-	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		sig := <-sigCh
-		logger.Info("shutdown requested", "signal", sig.String())
+func shutdownOnSignal(servers []*http.Server, logger *slog.Logger, done chan<- struct{}) {
+	defer close(done)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigCh
+	logger.Info("shutdown requested", "signal", sig.String())
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		for _, s := range servers {
-			if err := s.Shutdown(ctx); err != nil {
-				logger.Warn("graceful shutdown timed out; forcing close", "err", err.Error())
-				_ = s.Close()
-			}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, s := range servers {
+		if err := s.Shutdown(ctx); err != nil {
+			logger.Warn("graceful shutdown timed out; forcing close", "err", err.Error())
+			_ = s.Close()
 		}
-	}()
+	}
+}
 
+func awaitServerExit(servers []*http.Server, errCh <-chan error, shutdownDone <-chan struct{}, logger *slog.Logger) {
 	select {
 	case err := <-errCh:
 		logger.Error("listener exited unexpectedly", "err", err)
@@ -195,7 +239,6 @@ func main() {
 		os.Exit(1)
 	case <-shutdownDone:
 	}
-	logger.Info("stopped")
 }
 
 // buildRouter selects the routing mode from config and returns a router
