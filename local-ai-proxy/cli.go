@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -71,59 +70,6 @@ func runBackends(args []string, configPath string) {
 		backendsLs(args, configPath)
 	default:
 		fatalUsage("backends <disable|enable|ls>")
-	}
-}
-
-func modelsLs(configPath string, args []string) {
-	if len(args) != 0 {
-		fatalUsage("models ls")
-	}
-	cfg := mustLoadConfig(configPath)
-	if cfg.Etcd == nil || cfg.Etcd.Prefix == "" {
-		fatal("CLI requires etcd-backed config (no etcd section in %s)", configPath)
-	}
-	client := mustEtcdClient(cfg.Etcd)
-	defer client.Close()
-	prefix := cfg.Etcd.Prefix
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := client.Get(ctx, prefix, clientv3.WithPrefix())
-	if err != nil {
-		fatal("etcd get %s: %v", prefix, err)
-	}
-	if len(resp.Kvs) == 0 {
-		fmt.Println("No models configured.")
-		return
-	}
-	type entry struct {
-		name     string
-		backends []string
-	}
-	entries := make([]entry, 0, len(resp.Kvs))
-	for _, kv := range resp.Kvs {
-		name := strings.TrimPrefix(string(kv.Key), prefix)
-		var v etcdModelValue
-		if err := json.Unmarshal(kv.Value, &v); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: invalid JSON: %v\n", name, err)
-			continue
-		}
-		urls := make([]string, 0, len(v.Backends))
-		for _, b := range v.Backends {
-			urls = append(urls, b.APIBase)
-		}
-		entries = append(entries, entry{name: name, backends: urls})
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
-	for _, e := range entries {
-		if len(e.backends) == 1 {
-			fmt.Printf("  %s  ->  %s\n", e.name, e.backends[0])
-		} else {
-			fmt.Printf("  %s  (%d backends)\n", e.name, len(e.backends))
-			for _, b := range e.backends {
-				fmt.Printf("    - %s\n", b)
-			}
-		}
 	}
 }
 
@@ -609,57 +555,6 @@ func runACL(args []string, configPath string) {
 		aclSet(args, configPath)
 	default:
 		fatalUsage("acl <ls|set>")
-	}
-}
-
-func aclLs(args []string, configPath string) {
-	if len(args) != 0 {
-		fatalUsage("acl ls")
-	}
-	cfg := mustLoadConfig(configPath)
-	if cfg.Etcd == nil {
-		fatal("acl ls requires etcd config")
-	}
-	client := mustEtcdClient(cfg.Etcd)
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := client.Get(ctx, cfg.Etcd.Prefix, clientv3.WithPrefix())
-	if err != nil {
-		fatal("etcd get %s: %v", cfg.Etcd.Prefix, err)
-	}
-	type modelACL struct {
-		model   string
-		entries []ACLEntry
-	}
-	var ac []modelACL
-	for _, kv := range resp.Kvs {
-		name := strings.TrimPrefix(string(kv.Key), cfg.Etcd.Prefix)
-		var v etcdModelValue
-		if err := json.Unmarshal(kv.Value, &v); err != nil {
-			continue
-		}
-		if v.ACL != nil {
-			ac = append(ac, modelACL{model: name, entries: v.ACL.Entries})
-		}
-	}
-	if len(ac) == 0 {
-		fmt.Println("No per-model ACL rules.")
-		return
-	}
-	sort.Slice(ac, func(i, j int) bool { return ac[i].model < ac[j].model })
-	for i, e := range ac {
-		if i > 0 {
-			fmt.Println()
-		}
-		fmt.Printf("%s:\n", e.model)
-		for _, entry := range e.entries {
-			prefix := "+"
-			if entry.Decision == ACLDeny {
-				prefix = "-"
-			}
-			fmt.Printf("  %s%s\n", prefix, entry.Subject)
-		}
 	}
 }
 
