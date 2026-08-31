@@ -5,7 +5,9 @@ Run:  python3 -m unittest test_node_temps_collector  (from this dir)
 """
 import importlib.util
 import os
+import subprocess
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SPEC = importlib.util.spec_from_file_location(
@@ -40,6 +42,48 @@ class ParseCominoData(unittest.TestCase):
 
     def test_wrong_field_count_rejected(self):
         self.assertIsNone(ntc.parse_comino_data("1;2;3"))
+
+
+class CollectIpmiTests(unittest.TestCase):
+    @staticmethod
+    def result(stdout='', returncode=0):
+        return subprocess.CompletedProcess([], returncode, stdout=stdout,
+                                          stderr='')
+
+    def test_parses_readings_and_roles(self):
+        stdout = (
+            'INLET_AIR_TEMP | 0Bh | ok | 55.1 | 20 degrees C\n'
+            'SLOT1_GPU_TEMP | 18h | ok | 11.1 | 35 degrees C\n'
+            'CPU_TEMP | 20h | nc | 30.1 | 45 degrees C\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(
+                ntc.collect_ipmi(),
+                [('INLET_AIR_TEMP', 'ambient', 20.0),
+                 ('SLOT1_GPU_TEMP', 'gpu', 35.0),
+                 ('CPU_TEMP', 'cpu', 45.0)])
+
+    def test_skips_unreadable_and_nonnumeric(self):
+        stdout = (
+            'SLOT2_GPU_TEMP | 19h | ns | 11.1 | No Reading\n'
+            'OTHER | 21h | ok | 12.1 | maybe\n'
+            'SHORT | 22h | ok\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(ntc.collect_ipmi(), [])
+
+    def test_nonzero_returncode_is_empty(self):
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result('x', returncode=1)):
+            self.assertEqual(ntc.collect_ipmi(), [])
+
+    def test_missing_or_slow_ipmitool_is_empty(self):
+        for exc in (FileNotFoundError('missing'),
+                    subprocess.TimeoutExpired('ipmitool', 15)):
+            with mock.patch.object(ntc.subprocess, 'run', side_effect=exc):
+                self.assertEqual(ntc.collect_ipmi(), [])
 
 
 class SelectCominoDevice(unittest.TestCase):
