@@ -62,10 +62,10 @@ type DisabledLookup interface {
 // interval. Results drive observability today; a future router will
 // consult them when fan-out arrives.
 type HealthChecker struct {
-	source    Source
-	interval  time.Duration
-	client    *http.Client
-	logger    *slog.Logger
+	source   Source
+	interval time.Duration
+	client   *http.Client
+	logger   *slog.Logger
 
 	// Disabled, if set, is consulted before each poll. Disabled URLs
 	// are not contacted and are reported with StateDisabled.
@@ -132,32 +132,6 @@ func (hc *HealthChecker) Close() error {
 		<-hc.done
 	}
 	return nil
-}
-
-// Probe runs an out-of-band health check on u in a goroutine and
-// returns immediately. Used by the request handler to nudge the
-// checker after a retry: the checker is the single writer to the
-// state map, and an immediate re-probe means a transient backend
-// glitch doesn't strand traffic until the next tick.
-//
-// Disabled backends are skipped. If the checker is shutting down
-// the probe is a no-op.
-func (hc *HealthChecker) Probe(u *url.URL) {
-	if hc == nil || u == nil {
-		return
-	}
-	if hc.Disabled != nil && hc.Disabled.IsDisabled(u.String()) {
-		return
-	}
-	ctx := context.Background()
-	if hc.done != nil {
-		select {
-		case <-hc.done:
-			return
-		default:
-		}
-	}
-	go hc.checkOne(ctx, u)
 }
 
 // IsHealthy reports whether the given backend URL was observed as
