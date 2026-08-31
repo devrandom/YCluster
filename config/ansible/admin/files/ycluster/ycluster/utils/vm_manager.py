@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..common.etcd_utils import get_etcd_client, reset_etcd_client
+from .vm_desired import desired_conflict as _desired_conflict
 
 USERS_PREFIX = "/cluster/users/"
 VMS_PREFIX = "/cluster/vms/"
@@ -1120,6 +1121,43 @@ def _reconcile_start_pass(to_start, issues, now):
             _record_issue(issues, name, "start", e, now)
 
 
+def _reconcile_local(name, desired, statuses, graces, now, issues, to_start,
+                     all_vms):
+    """Converge one registered local VM toward its desired state."""
+    # No record, or an explicit 'unmanaged' record (which the web page
+    # now stores to preserve a dormant schedule) — the scheduler never
+    # touches it; keep the status quo.
+    if not desired or desired.get("mode") == "unmanaged":
+        _clear_issue(issues, name)
+        return
+    want_on = desired_on(desired, now)
+    running = statuses.get(name) == "Running"
+    grace = graces.get(name)
+
+    if want_on:
+        _reconcile_want_on(name, desired, running, grace, issues,
+                           to_start, all_vms)
+    elif running:
+        _reconcile_want_off_running(name, grace, now, issues)
+    else:
+        _clear_issue(issues, name)
+        if grace:
+            # Already stopped (e.g. the owner shut it down during
+            # grace) — release as a scheduled stop would have.
+            grace_delete(name)
+            released = release_gpus(name)
+            if released:
+                print(f"reconcile: '{name}' already stopped — released "
+                      f"{released} GPU(s) to the host pool")
+
+
+def _reconcile_cleanup(issues, all_vms):
+    """Delete issues for VMs that no longer exist in the registry."""
+    for name in sorted(set(issues) - set(all_vms)):
+        _delete(VM_ISSUE_PREFIX + name)
+        del issues[name]
+
+
 def reconcile():
     """Converge local instances toward their desired power state.
 
@@ -1150,40 +1188,15 @@ def reconcile():
     # freed GPUs this tick instead of failing acquisition and retrying.
     to_start = []
     for name in sorted(local_vms):
-        desired = desireds.get(name)
-        # No record, or an explicit 'unmanaged' record (which the web page
-        # now stores to preserve a dormant schedule) — the scheduler never
-        # touches it; keep the status quo.
-        if not desired or desired.get("mode") == "unmanaged":
-            _clear_issue(issues, name)
-            continue
-        want_on = desired_on(desired, now)
-        running = statuses.get(name) == "Running"
-        grace = graces.get(name)
-
-        if want_on:
-            _reconcile_want_on(name, desired, running, grace, issues,
-                               to_start, all_vms)
-        elif running:
-            _reconcile_want_off_running(name, grace, now, issues)
-        else:
-            _clear_issue(issues, name)
-            if grace:
-                # Already stopped (e.g. the owner shut it down during
-                # grace) — release as a scheduled stop would have.
-                grace_delete(name)
-                released = release_gpus(name)
-                if released:
-                    print(f"reconcile: '{name}' already stopped — released "
-                          f"{released} GPU(s) to the host pool")
+        _reconcile_local(name, desireds.get(name), statuses, graces, now,
+                         issues, to_start, all_vms)
 
     _reconcile_start_pass(to_start, issues, now)
 
     # Issues for VMs that left the registry entirely would dangle
     # forever (vm_destroy clears its own, but a record can also vanish
     # by hand). Issues for other hosts' VMs are theirs to manage.
-    for name in sorted(set(issues) - set(all_vms)):
-        _delete(VM_ISSUE_PREFIX + name)
+    _reconcile_cleanup(issues, all_vms)
 
 
 def _record_event(event, name, owner=None, gpus=None, initiator="cli",
@@ -1440,27 +1453,7 @@ def vm_resize(name, size):
 
 
 def desired_conflict(desired, action, now):
-    """Reason a manual `action` ('start'|'stop'|'restart') will be reverted
-    by the reconciler, or None.
-
-    A CLI lifecycle op doesn't touch the desired record, so the reconciler
-    keeps converging toward it: stopping a VM the schedule wants ON gets
-    restarted next tick; starting one the schedule wants OFF gets stopped
-    (after grace). 'restart' ends running, so it conflicts like 'start'.
-    None for an unmanaged VM (no record, or an explicit 'unmanaged' record
-    preserving a dormant schedule) or an action that agrees with the
-    schedule. Pure — unit-testable; the I/O wrapper supplies the record."""
-    if not desired or desired.get("mode") == "unmanaged":
-        return None
-    want_on = desired_on(desired, now)
-    mode = desired.get("mode")
-    if action == "stop" and want_on:
-        return (f"scheduled ON (mode={mode}) — the reconciler will restart "
-                f"it within ~2 min; set mode 'off' to keep it stopped")
-    if action in ("start", "restart") and not want_on:
-        return (f"scheduled OFF (mode={mode}) — the reconciler will stop it "
-                f"again after grace; adjust the schedule to keep it running")
-    return None
+    return _desired_conflict(desired, action, now, desired_on)
 
 def _warn_desired_conflict(name, action):
     """Print a heads-up if a CLI lifecycle op contradicts the VM's schedule

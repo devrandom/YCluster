@@ -139,27 +139,34 @@ def delete_frp_config():
     else:
         print("No frp configuration found to delete")
 
-def main():
+def _build_parser():
     parser = argparse.ArgumentParser(description='Manage frp configuration in etcd')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
-    # Set command
     set_parser = subparsers.add_parser('set', help='Set frp configuration')
     set_parser.add_argument('--remote-addr', help='Remote server address (e.g., server.com:7000)')
     set_parser.add_argument('--token', help='Authentication token')
 
-    # Get command
     subparsers.add_parser('get', help='Get current frp configuration')
-
-    # Generate client config command
     subparsers.add_parser('generate-client', help='Generate client configuration from etcd')
-
-    # Generate SSH-only client config command
     subparsers.add_parser('generate-ssh-client', help='Generate SSH-only client configuration from etcd')
-
-    # Delete command
     subparsers.add_parser('delete', help='Delete frp configuration')
+    return parser
 
+
+def _run_command(command, args):
+    handlers = {
+        'set': lambda: set_frp_config(args.remote_addr, args.token),
+        'get': get_frp_config,
+        'generate-client': generate_client_config,
+        'generate-ssh-client': generate_ssh_client_config,
+        'delete': delete_frp_config,
+    }
+    handlers[command]()
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
 
     if not args.command:
@@ -167,16 +174,7 @@ def main():
         return
 
     try:
-        if args.command == 'set':
-            set_frp_config(args.remote_addr, args.token)
-        elif args.command == 'get':
-            get_frp_config()
-        elif args.command == 'generate-client':
-            generate_client_config()
-        elif args.command == 'generate-ssh-client':
-            generate_ssh_client_config()
-        elif args.command == 'delete':
-            delete_frp_config()
+        _run_command(args.command, args)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

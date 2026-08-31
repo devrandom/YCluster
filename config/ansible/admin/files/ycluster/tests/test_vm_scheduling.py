@@ -928,6 +928,29 @@ class ReconcileStopTests(unittest.TestCase):
         stop.assert_called_once_with('vm1', initiator='scheduler')
 
 
+class ReconcileLocalTests(unittest.TestCase):
+    @mock.patch.object(vm, '_clear_issue')
+    def test_unmanaged_clears_issue_and_returns(self, clear):
+        issues = {'vm1': True}
+        vm._reconcile_local('vm1', {'mode': 'unmanaged'}, {}, {}, None,
+                            issues, [], {})
+        clear.assert_called_once_with(issues, 'vm1')
+
+    @mock.patch.object(vm, '_clear_issue')
+    def test_no_desired_clears_issue_and_returns(self, clear):
+        vm._reconcile_local('vm1', None, {}, {}, None, {}, [], {})
+        clear.assert_called_once_with({}, 'vm1')
+
+
+class ReconcileCleanupTests(unittest.TestCase):
+    @mock.patch.object(vm, '_delete')
+    def test_deletes_issues_for_missing_vms(self, delete):
+        issues = {'vm1': True, 'vm2': True}
+        vm._reconcile_cleanup(issues, {'vm1': {}})
+        delete.assert_called_once_with(vm.VM_ISSUE_PREFIX + 'vm2')
+        self.assertEqual(issues, {'vm1': True})
+
+
 class ReconcileWantOnTests(unittest.TestCase):
     def test_running_clears_issue(self):
         issues = {'vm1': True}
