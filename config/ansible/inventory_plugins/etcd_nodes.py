@@ -45,7 +45,6 @@ DOCUMENTATION = '''
 REQUIREMENTS = ['etcd3']
 
 from ansible.plugins.inventory import BaseInventoryPlugin
-from ansible.errors import AnsibleError
 import json
 import re
 import os

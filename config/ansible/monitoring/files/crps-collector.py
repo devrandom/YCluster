@@ -225,7 +225,6 @@ def parse_show_alarms(text):
     text = strip_ansi(text)
     alarms_set = faults_set = None
     flags = {}
-    section_is_fault = False
     for line in text.splitlines():
         line = line.strip()
         agg = _AGG_LINE.match(line)
@@ -234,10 +233,8 @@ def parse_show_alarms(text):
             nonzero = int(hexval, 16) != 0
             if kind == "Alarms":
                 alarms_set = nonzero
-                section_is_fault = False
             else:
                 faults_set = nonzero
-                section_is_fault = True
             continue
         m = _FLAG_ROW.match(line)
         if m:

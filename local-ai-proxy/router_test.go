@@ -22,9 +22,6 @@ func (f *fakeSource) Start(context.Context) error    { return nil }
 func (f *fakeSource) Snapshot() map[string][]*url.URL { return f.m }
 func (f *fakeSource) Close() error                   { return nil }
 
-// single wraps one URL in a slice for fakeSource test data.
-func single(u *url.URL) []*url.URL { return []*url.URL{u} }
-
 func mustURL(t *testing.T, s string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(s)

@@ -49,6 +49,7 @@ def create_parser():
     from .inventory import register_inventory_commands
     from .vm import register_vm_commands
     from .user import register_user_commands
+    from .storage import register_storage_commands
 
     register_cluster_commands(subparsers)
     register_health_alias(subparsers)
@@ -65,6 +66,7 @@ def create_parser():
     register_inventory_commands(subparsers)
     register_vm_commands(subparsers)
     register_user_commands(subparsers)
+    register_storage_commands(subparsers)
 
     return parser
 

@@ -43,7 +43,7 @@ import secrets
 import sys
 from typing import TypedDict
 
-from flask import Flask, request, jsonify, redirect, render_template, send_from_directory, send_file
+from flask import Flask, request, jsonify, redirect, render_template, send_from_directory
 import os
 import threading
 import time
@@ -2626,7 +2626,6 @@ def resources_data():
     id = _authentik_identity()
     from ycluster.utils.inventory import list_all as inventory_list_all
     from ycluster.utils import vm_manager as vmm
-    from urllib.parse import urlparse
 
     hosts = get_all_hosts()
     inv = {r['hostname']: r for r in inventory_list_all()}

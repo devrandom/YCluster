@@ -436,15 +436,6 @@ class DHCPServer:
         return f"{prefix}{next_num}"
     
     @staticmethod
-    def ip_to_int(ip):
-        """Convert IP string to integer"""
-        parts = ip.split('.')
-        return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])
-    
-    @staticmethod
-    def int_to_ip(ip_int):
-        """Convert integer to IP string"""
-        return f"{(ip_int >> 24) & 0xFF}.{(ip_int >> 16) & 0xFF}.{(ip_int >> 8) & 0xFF}.{ip_int & 0xFF}"
     
     def allocate_hostname_and_ip(self, mac_address, requested_hostname=None):
         """Allocate hostname and IP using same logic as Flask app"""

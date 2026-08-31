@@ -93,7 +93,8 @@ def crap(cyc: float, cov: float) -> float:
 
 # ---------------------------------------------------------------- Go side ---
 
-def go_cyclomatic() -> dict[tuple[str, int], float]:
+def go_cyclomatic() -> dict[tuple[str, str], float]:
+    """Cyclomatic per function, keyed by (file, name) — stable across edits."""
     out = run([str(BIN / "gocyclo"), "-over", "0", "."], cwd=GO_DIR)
     res = {}
     for line in out.splitlines():
@@ -101,22 +102,24 @@ def go_cyclomatic() -> dict[tuple[str, int], float]:
         if len(parts) < 4:
             continue
         cyc = int(parts[0])
-        pos = parts[-1]  # file:line:col
-        file_part, line_no, _ = pos.rsplit(":", 2)
+        # format: <cyc> <pkg> <func> <file>:<line>:<col>
+        name = parts[2]
+        pos = parts[-1]
+        file_part, _line_no, _ = pos.rsplit(":", 2)
         if file_part.endswith("_test.go") or "/tmp/" in file_part:
             continue
-        res[(file_part, int(line_no))] = cyc
+        res[(file_part, name)] = cyc
     return res
 
 
-def go_cognitive() -> dict[tuple[str, int], float]:
+def go_cognitive() -> dict[tuple[str, str], float]:
     out = run([str(BIN / "gocognit"), "-json", "-over", "0", "."], cwd=GO_DIR)
     res = {}
     for fn in json.loads(out):
         pos = fn["Pos"]
         if pos["Filename"].endswith("_test.go") or "/tmp/" in pos["Filename"]:
             continue
-        res[(pos["Filename"], pos["Line"])] = fn["Complexity"]
+        res[(pos["Filename"], fn["FuncName"])] = fn["Complexity"]
     return res
 
 
@@ -135,11 +138,11 @@ def go_dead_code() -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
-def go_coverage(profile: Path) -> tuple[dict[tuple[str, int], float], float | None]:
-    """Return (per-func coverage fraction keyed by decl file/line, total frac)."""
+def go_coverage(profile: Path) -> tuple[dict[tuple[str, str], float], float | None]:
+    """Return (per-func coverage keyed by (file, name), total fraction)."""
     run(["go", "test", "./...", "-coverprofile=" + profile.name], cwd=GO_DIR)
     out = run(["go", "tool", "cover", "-func", profile.name], cwd=GO_DIR)
-    per_func: dict[tuple[str, int], float] = {}
+    per_func: dict[tuple[str, str], float] = {}
     total = None
     for line in out.splitlines():
         if not line.strip():
@@ -147,10 +150,15 @@ def go_coverage(profile: Path) -> tuple[dict[tuple[str, int], float], float | No
         if line.startswith("total:"):
             total = float(line.rsplit("\t", 1)[1].rstrip("%")) / 100
             continue
-        pos, _name, pct = line.rsplit("\t", 2)
+        pos, name, pct = line.rsplit("\t", 2)
         frac = float(pct.rstrip("%")) / 100
-        file_part, ln, _ = pos.rsplit(":", 2)
-        per_func[(file_part, int(ln))] = frac
+        # pos is <module>/local-ai-proxy/<file>:<line>; match gocyclo's
+        # module-relative paths.
+        file_part = pos.rsplit(":", 1)[0]
+        marker = "local-ai-proxy/"
+        if marker in file_part:
+            file_part = file_part.split(marker, 1)[1]
+        per_func[(file_part, name)] = frac
     return per_func, total
 
 
@@ -236,10 +244,10 @@ def collect_go(skip_coverage: bool) -> list[tuple[str, str, float]]:
         cov_by_func, cov_total = go_coverage(profile)
         profile.unlink(missing_ok=True)
 
-    # Per-function metrics are keyed by (file, declline); gocyclo and gocognit
-    # point at the same declaration lines.
+    # Per-function metrics are keyed by (file, name); all three Go tools
+    # report the same names for the same functions.
     for key, c in cyc.items():
-        name = f"{key[0]}:{key[1]}"
+        name = f"{key[0]}::{key[1]}"
         out.append(("cyclomatic", name, c))
         if key in cog:
             out.append(("cognitive", name, cog[key]))
@@ -288,15 +296,21 @@ def _py_source(paths: list[str]) -> list[str]:
                 continue
             if "__pycache__" in f.parts:
                 continue
+            # Vendored patch modules monkey-patch upstream sglang; their
+            # "unused" symbols mirror upstream signatures (same as vendor).
+            if "glm53-sglang" in f.parts and "patches" in f.parts:
+                continue
             keep.append(str(f))
     return keep
 
 
-def py_coverage(blocks: list[tuple[str, list[dict]]]) -> tuple[dict[str, float], dict[tuple[str, int], float]]:
+def py_coverage(
+    blocks: list[tuple[str, list[dict]]],
+) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
     """Run coverage.py over the unittest suites.
 
     blocks: [(relpath, radon cc blocks)] used for per-function CRAP.
-    Returns ({relpath: pct}, {(relpath, lineno): func coverage fraction}).
+    Returns ({relpath: pct}, {(relpath, name): func coverage fraction}).
     """
     import os
 
@@ -350,7 +364,7 @@ def py_coverage(blocks: list[tuple[str, list[dict]]]) -> tuple[dict[str, float],
     per_file = {
         f: round(100 * c / t, 1) for f, (c, t) in counts.items() if t
     }
-    per_func: dict[tuple[str, int], float] = {}
+    per_func: dict[tuple[str, str], float] = {}
     for rel, fns in blocks:
         m = missing.get(rel, set())
         for b in fns:
@@ -358,7 +372,7 @@ def py_coverage(blocks: list[tuple[str, list[dict]]]) -> tuple[dict[str, float],
                 continue
             total_lines = b["endline"] - b["lineno"] + 1
             hit = sum(1 for ln in range(b["lineno"], b["endline"] + 1) if ln not in m)
-            per_func[(rel, b["lineno"])] = hit / total_lines if total_lines else 0.0
+            per_func[(rel, b["name"])] = hit / total_lines if total_lines else 0.0
     json_path.unlink(missing_ok=True)
     data_file.unlink(missing_ok=True)
     return per_file, per_func
@@ -377,7 +391,7 @@ def collect_py(skip_coverage: bool) -> list[tuple[str, str, float]]:
         for b in fns:
             if b["type"] not in ("function", "method"):
                 continue
-            out.append(("cyclomatic", f"{rel}:{b['lineno']} {b['name']}", b["complexity"]))
+            out.append(("cyclomatic", f"{rel}::{b['name']}", b["complexity"]))
     hal = json.loads(run(["radon", "hal", "-j", *paths]))
     for path, m in hal.items():
         rel = str(Path(path).relative_to(ROOT))
@@ -387,7 +401,8 @@ def collect_py(skip_coverage: bool) -> list[tuple[str, str, float]]:
         rel = str(Path(path).relative_to(ROOT))
         out.append(("lines", rel, m["sloc"]))
     # vulture exits 3 when dead code is found (1 = invalid input, 2 = bad args).
-    vuln = run_findings(["vulture", *paths], findings_codes={3})
+    whitelist = METRICS_DIR / "whitelist.py"
+    vuln = run_findings(["vulture", *paths, str(whitelist)], findings_codes={3})
     for line in vuln.splitlines():
         if line.strip():
             out.append(("dead_code", _stable_key(line.strip()), 1))
@@ -398,7 +413,7 @@ def collect_py(skip_coverage: bool) -> list[tuple[str, str, float]]:
     for rel, pct in per_file.items():
         out.append(("coverage", rel, pct))
     cyc_by_key = {
-        (rel, b["lineno"]): b["complexity"]
+        (rel, b["name"]): b["complexity"]
         for rel, fns in blocks
         for b in fns
         if b["type"] in ("function", "method")
@@ -407,7 +422,7 @@ def collect_py(skip_coverage: bool) -> list[tuple[str, str, float]]:
         c = cyc_by_key.get(key)
         if c is None:
             continue
-        name = f"{key[0]}:{key[1]}"
+        name = f"{key[0]}::{key[1]}"
         out.append(("crap", name, round(crap(c, cov), 1)))
     return out
 

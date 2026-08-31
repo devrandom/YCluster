@@ -23,10 +23,8 @@ TOKEN_ETCD_KEY = '/cluster/config/authentik/bootstrap-token'
 ADMIN_GROUP = 'ycluster-admins'
 MANAGER_GROUP = 'ycluster-managers'
 
-
 def _base_url():
     return os.environ.get('YC_AUTHENTIK_URL', 'http://auth.xc').rstrip('/')
-
 
 def _link_base_url():
     """Base for URLs handed to users (invites, recovery links): always the
@@ -44,7 +42,6 @@ def _link_base_url():
             "YC_AUTHENTIK_LINK_URL to override.")
     return f"https://auth.{value.decode().strip()}"
 
-
 def _api_token():
     client = get_etcd_client()
     value, _ = client.get(TOKEN_ETCD_KEY)
@@ -52,7 +49,6 @@ def _api_token():
         raise RuntimeError(
             f"No authentik API token at {TOKEN_ETCD_KEY} — has authentik started once?")
     return value.decode().strip()
-
 
 class AuthentikAPI:
     def __init__(self):
@@ -88,7 +84,6 @@ class AuthentikAPI:
             raise RuntimeError(f"flow '{slug}' not found — is the enrollment blueprint applied?")
         return flows[0]['pk']
 
-
 def _get_user(api, email):
     """Find an account by the user-facing identifier. Most accounts have
     username == email, but authentik's default admin (akadmin) and any
@@ -100,7 +95,6 @@ def _get_user(api, email):
     if not users:
         raise RuntimeError(f"no account for {email}")
     return users[0]
-
 
 def add_user(email, name=None, active=True):
     """Create an internal account keyed by email (no credentials — for
@@ -114,7 +108,6 @@ def add_user(email, name=None, active=True):
         'is_active': active,
     })
     return {'email': email, 'pk': user['pk']}
-
 
 def import_owui_users(dry_run=False):
     """Migrate Open-WebUI accounts into authentik by copying their bcrypt
@@ -172,7 +165,6 @@ def import_owui_users(dry_run=False):
     ak.close()
     return results
 
-
 def invite_user(email, name=None, days=7, project=None):
     """Issue a single-use enrollment invitation pre-bound to the email.
     If `project` is given, it is tagged onto the invitation (and written
@@ -204,7 +196,6 @@ def invite_user(email, name=None, days=7, project=None):
     })
     return f"{_link_base_url()}/if/flow/{ENROLLMENT_FLOW_SLUG}/?itoken={invitation['pk']}"
 
-
 def users_data():
     """Accounts as a list of dicts (email, name, type, active, last_login,
     is_admin, is_manager, date_joined, project_name, admin_notes,
@@ -232,7 +223,6 @@ def users_data():
         })
     return sorted(rows, key=lambda r: r['email'])
 
-
 def invitations_data(projects=None):
     """Outstanding invitations as a list of dicts (email, expires, url,
     project_name). If `projects` is given (iterable of authorized project
@@ -257,13 +247,11 @@ def invitations_data(projects=None):
         })
     return rows
 
-
 def _user_attributes(email):
     """The `attributes` JSON of an account (empty dict if none)."""
     api = AuthentikAPI()
     user = _get_user(api, email)
     return user.get('attributes') or {}
-
 
 def manager_projects(email):
     """Project names a manager account is authorized to operate in. Empty
@@ -271,11 +259,9 @@ def manager_projects(email):
     everywhere — so the value is only meaningful on manager accounts."""
     return list(_user_attributes(email).get('manager_projects') or [])
 
-
 def user_project(email):
     """The `project_name` attribute of an account ('' if unset)."""
     return _user_attributes(email).get('project_name') or ''
-
 
 def set_manager_projects(email, projects):
     """Replace the `manager_projects` attribute for an account (deduped,
@@ -289,18 +275,15 @@ def set_manager_projects(email, projects):
     return (f"manager projects for {email}: "
             f"{', '.join(clean) if clean else 'none'}")
 
-
 def set_admin(email, remove=False):
     """Add (or remove) an account to the ycluster-admins group, which gates
     the forward-auth'd admin web pages. Returns the action performed."""
     return _set_group_membership(email, ADMIN_GROUP, remove=remove)
 
-
 def set_manager(email, remove=False):
     """Add (or remove) an account to the ycluster-managers group, which grants
     view-only access to the admin web pages. Returns the action performed."""
     return _set_group_membership(email, MANAGER_GROUP, remove=remove)
-
 
 def _set_group_membership(email, group, remove=False):
     api = AuthentikAPI()
@@ -313,19 +296,6 @@ def _set_group_membership(email, group, remove=False):
     api.post(f"/core/groups/{groups[0]['pk']}/{action}/", json={'pk': user['pk']})
     return f"{'removed' if remove else 'added'} {email} {'from' if remove else 'to'} {group}"
 
-
-def ensure_group(name):
-    """Create the named group if it doesn't already exist. Idempotent.
-    Used by the install playbook to bootstrap the manager group alongside
-    the admin group (which the blueprint creates)."""
-    api = AuthentikAPI()
-    existing = api.get('/core/groups/', params={'name': name})['results']
-    if existing:
-        return {'name': name, 'pk': existing[0]['pk'], 'created': False}
-    group = api.post('/core/groups/', json={'name': name, 'is_superuser': False})
-    return {'name': name, 'pk': group['pk'], 'created': True}
-
-
 def set_active(email, active):
     """Enable or disable an account (is_active in authentik). Disabling
     blocks login without removing the account."""
@@ -333,7 +303,6 @@ def set_active(email, active):
     user = _get_user(api, email)
     api.patch(f"/core/users/{user['pk']}/", json={'is_active': active})
     return f"{'enabled' if active else 'disabled'} {email}"
-
 
 def update_user(email, name=None, project_name=None, admin_notes=None):
     """Update mutable user fields. Only provided fields are changed;
@@ -360,7 +329,6 @@ def update_user(email, name=None, project_name=None, admin_notes=None):
     api.patch(f"/core/users/{user['pk']}/", json=payload)
     return f"updated {email}"
 
-
 def recovery_link(email):
     """Generate a one-time password-set link for an existing account
     (out-of-band delivery — no SMTP anywhere in the cluster)."""
@@ -372,7 +340,6 @@ def recovery_link(email):
     link = result['link']
     return _link_base_url() + '/if/' + link.split('/if/', 1)[1]
 
-
 def revoke_invitation(email):
     """Delete outstanding invitation(s) for an email. Returns the count."""
     api = AuthentikAPI()
@@ -382,7 +349,6 @@ def revoke_invitation(email):
     for inv in matched:
         api._request('DELETE', f"/stages/invitation/invitations/{inv['pk']}/")
     return len(matched)
-
 
 def set_invitation_project(email, project):
     """Tag an outstanding invitation for `email` with `project`, stored in

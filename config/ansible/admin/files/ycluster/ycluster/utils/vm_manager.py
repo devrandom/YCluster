@@ -111,7 +111,6 @@ NAS_DEVICE = "data"
 _VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")     # Incus instance names
 _USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")        # identifiers / emails
 
-
 # --------------------------------------------------------------------------
 # etcd helpers
 # --------------------------------------------------------------------------
@@ -119,14 +118,11 @@ def _get_json(key):
     val, _ = get_etcd_client().get(key)
     return json.loads(val.decode()) if val else None
 
-
 def _put_json(key, obj):
     get_etcd_client().put(key, json.dumps(obj))
 
-
 def _delete(key):
     get_etcd_client().delete(key)
-
 
 def _all_json(prefix):
     """Return {name: record} for direct children of an etcd prefix."""
@@ -137,7 +133,6 @@ def _all_json(prefix):
             continue
         out[name] = json.loads(val.decode())
     return out
-
 
 # --------------------------------------------------------------------------
 # incus helpers
@@ -150,7 +145,6 @@ def _all_json(prefix):
 _STOP_TIMEOUT_CONTAINER_S = 90
 _STOP_TIMEOUT_VM_S = 180
 _STOP_TIMEOUT_FORCE_S = 30
-
 
 def _incus(*args, check=True, stdin=None, timeout=None):
     # The incus CLI reads instance config from a non-TTY stdin until EOF,
@@ -169,7 +163,6 @@ def _incus(*args, check=True, stdin=None, timeout=None):
     if check and r.returncode != 0:
         raise RuntimeError(f"incus {' '.join(args)} failed: {r.stderr.strip()}")
     return r
-
 
 def _incus_stop(name):
     """Stop `name` with a bounded wait; never hang on a wedged guest.
@@ -200,14 +193,11 @@ def _incus_stop(name):
         f"graceful incus stop {name} hung, then --force failed: "
         f"{force.stderr.strip() or 'still hung after force-stop timeout'}")
 
-
 def _incus_json(*args):
     return json.loads(_incus(*args).stdout)
 
-
 def _instance_exists(name):
     return _incus("info", name, check=False).returncode == 0
-
 
 def _pinned_ips():
     """Return {instance_name: ipv4.address} for instances whose eth0 nic
@@ -221,7 +211,6 @@ def _pinned_ips():
             pinned[inst["name"]] = ip
     return pinned
 
-
 def _occupied_ips():
     """Set of IPs already in use on this host's incus bridge: every pinned
     eth0 address plus every currently-live address (e.g. the bastion's
@@ -234,7 +223,6 @@ def _occupied_ips():
                 if a.get("family") == "inet" and a.get("scope") == "global":
                     occupied.add(a["address"])
     return occupied
-
 
 def _pick_vm_ip(prefer=None, taken=None):
     """Return the first unused IP in VM_IP_POOL_START..VM_IP_POOL_END.
@@ -260,7 +248,6 @@ def _pick_vm_ip(prefer=None, taken=None):
         f"{VM_IP_POOL_END}; taken: {sorted(taken)}"
     )
 
-
 def _pin_instance_ip(name, ip):
     """Pin `name`'s eth0 nic to `ip`. Idempotent.
 
@@ -276,11 +263,9 @@ def _pin_instance_ip(name, ip):
         _incus("config", "device", "set", name, "eth0",
                f"ipv4.address={ip}")
 
-
 def _managed_bridges():
     return [n["name"] for n in _incus_json("network", "list", "--format", "json")
             if n.get("type") == "bridge" and n.get("managed")]
-
 
 def sync_dns_records():
     """Reconcile each managed bridge's dnsmasq host-records with the
@@ -323,7 +308,6 @@ def sync_dns_records():
                    "\n".join(desired))
             changed[bridge] = records
     return changed
-
 
 def _ensure_nas_share(name):
     """Best-effort: provision /near1/vm/<name> on the host and attach it
@@ -368,7 +352,6 @@ def _ensure_nas_share(name):
            f"source={host_dir}", f"path={NAS_GUEST_PATH}",
            *shift, "required=false")
 
-
 def _instance_running(name):
     r = _incus("list", name, "--format", "csv", "-c", "ns", check=False)
     for line in r.stdout.splitlines():
@@ -376,7 +359,6 @@ def _instance_running(name):
         if host_name == name:
             return state.upper() == "RUNNING"
     return False
-
 
 def _wait_agent(name, timeout=180):
     """Wait until `incus exec` works inside an instance."""
@@ -386,7 +368,6 @@ def _wait_agent(name, timeout=180):
             return
         time.sleep(3)
     raise RuntimeError(f"'{name}' did not become reachable within {timeout}s")
-
 
 def _push_file(inst, path, content, owner, mode="0600"):
     """Write `content` to `path` inside an instance, owned by `owner`."""
@@ -400,7 +381,6 @@ def _push_file(inst, path, content, owner, mode="0600"):
         raise RuntimeError(f"incus file push to {inst}{path} failed: {r.stderr.strip()}")
     _incus("exec", inst, "--", "chown", "-R", f"{owner}:{owner}", directory)
     _incus("exec", inst, "--", "chmod", "700", directory)
-
 
 def _read_file(inst, path):
     """Return the contents of `path` inside `inst`, or None if absent.
@@ -417,7 +397,6 @@ def _read_file(inst, path):
         return None
     return r.stdout
 
-
 # --------------------------------------------------------------------------
 # GPU pool (discovered: GPUs bound to vfio-pci are available for passthrough)
 # --------------------------------------------------------------------------
@@ -431,7 +410,6 @@ def _is_gpu_pci_class(cls):
     and stay excluded.
     """
     return cls.startswith("0x03")
-
 
 def gpu_pool():
     """PCI addresses of GPU functions bound to vfio-pci."""
@@ -452,7 +430,6 @@ def gpu_pool():
             gpus.append(entry)
     return gpus
 
-
 def _assigned_gpus():
     assigned = set()
     for inst in _incus_json("list", "--format", "json"):
@@ -461,11 +438,9 @@ def _assigned_gpus():
                 assigned.add(dev["pci"])
     return assigned
 
-
 def free_gpus():
     assigned = _assigned_gpus()
     return [g for g in gpu_pool() if g not in assigned]
-
 
 def _is_live_vendor(config_bytes):
     """True if the first two PCI config-space bytes are a real vendor ID.
@@ -475,7 +450,6 @@ def _is_live_vendor(config_bytes):
         return False
     vid = config_bytes[0] | (config_bytes[1] << 8)
     return vid not in (0x0000, 0xffff)
-
 
 def _gpu_healthy(pci):
     """Liveness probe for a free passthrough GPU.
@@ -505,7 +479,6 @@ def _gpu_healthy(pci):
         return False
     return _is_live_vendor(vid)
 
-
 def select_healthy_gpus(free, n, is_healthy):
     """Pick `n` GPUs from `free` (in pool order) that pass `is_healthy`.
 
@@ -524,7 +497,6 @@ def select_healthy_gpus(free, n, is_healthy):
                          f"requested {n}{extra}.")
     return healthy[:n], wedged
 
-
 def _select_free_gpus(n):
     """Live wrapper around select_healthy_gpus: choose n healthy free GPUs
     and log any wedged ones skipped."""
@@ -533,7 +505,6 @@ def _select_free_gpus(n):
         print(f"  GPU {g} excluded from allocation: failed liveness probe "
               f"(PCIe wedge / DPC link-down?)", file=sys.stderr)
     return picked
-
 
 def _verify_guest_gpus(vm_name, expected):
     """Best-effort post-boot check: warn loudly if the guest doesn't see
@@ -549,7 +520,6 @@ def _verify_guest_gpus(vm_name, expected):
     else:
         print(f"  verified {seen} GPU(s) visible in the guest.")
     return seen
-
 
 def vm_gpus():
     pool = gpu_pool()
@@ -567,7 +537,6 @@ def vm_gpus():
             status = "WEDGED (PCIe fault? — won't be allocated)"
         print(f"{g}  {status}")
 
-
 def _instance_info(name):
     """The instance's full JSON record, or None if it doesn't exist on
     this host."""
@@ -576,7 +545,6 @@ def _instance_info(name):
         if inst.get("name") == name:
             return inst
     return None
-
 
 def release_gpus(name):
     """Detach a stopped VM's passthrough GPU devices back to the host
@@ -598,7 +566,6 @@ def release_gpus(name):
             _incus("config", "device", "remove", name, dev_name)
             released += 1
     return released
-
 
 def _ensure_gpus_attached(name, want=None):
     """Attach passthrough GPUs from the host pool until the VM holds
@@ -638,7 +605,6 @@ def _ensure_gpus_attached(name, want=None):
         devices[f"gpu{idx}"] = {"type": "gpu", "pci": pci}
         print(f"  re-attached GPU {pci} as gpu{idx}")
 
-
 # --------------------------------------------------------------------------
 # user SSH key registry
 # --------------------------------------------------------------------------
@@ -647,14 +613,12 @@ def _valid_vm_name(name):
         raise ValueError(f"Invalid VM name '{name}': use lowercase letters, "
                          f"digits and hyphens (Incus instance name rules).")
 
-
 def _valid_user(name):
     # Usernames are plain identifiers (often email addresses); they only
     # need to be safe as an etcd key component — no slashes or whitespace.
     if not _USER_RE.match(name):
         raise ValueError(f"Invalid user '{name}': allowed characters are "
                          f"letters, digits and . _ % + @ -")
-
 
 def _host_config_value(wanted):
     """Read one key from HOST_CONFIG_PATH (written by install-incus.yml).
@@ -669,7 +633,6 @@ def _host_config_value(wanted):
         pass
     return None
 
-
 def _default_instance_type():
     """Per-host default ('vm' or 'container') from HOST_CONFIG_PATH,
     written by admin/install-incus.yml. Fallback is 'vm' so legacy hosts
@@ -677,14 +640,11 @@ def _default_instance_type():
     v = _host_config_value("default_instance_type")
     return v if v in ("vm", "container") else "vm"
 
-
 def user_get(user):
     return _get_json(USERS_PREFIX + user)
 
-
 def users_all():
     return _all_json(USERS_PREFIX)
-
 
 # Per-user key cap: bounds the etcd value and the bastion authorized_keys
 # regenerated from it. Generous — real users have a handful.
@@ -696,7 +656,6 @@ MAX_SSH_KEY_LEN = 4096
 # tokens are well-formed (the type a plain identifier, the material base64).
 _SSH_KEY_TYPE_RE = re.compile(r"^[A-Za-z0-9@._-]+$")
 _SSH_KEY_B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,3}$")
-
 
 def validate_ssh_key(key):
     """Validate a single SSH public-key line; return the cleaned string.
@@ -727,7 +686,6 @@ def validate_ssh_key(key):
         raise ValueError("That does not look like an SSH public key.")
     return key
 
-
 def user_add_key(user, key):
     _valid_user(user)
     key = validate_ssh_key(key)
@@ -742,7 +700,6 @@ def user_add_key(user, key):
     _put_json(USERS_PREFIX + user, rec)
     print(f"Added SSH key for '{user}' ({len(rec['ssh_keys'])} total).")
 
-
 def user_remove_key(user, match):
     rec = user_get(user)
     if not rec:
@@ -755,7 +712,6 @@ def user_remove_key(user, match):
     else:
         _delete(USERS_PREFIX + user)          # no keys left -> drop the user
     print(f"Removed {removed} key(s) from '{user}'.")
-
 
 def user_list(user=None):
     if user:
@@ -774,17 +730,14 @@ def user_list(user=None):
         for name, rec in sorted(users.items()):
             print(f"{name}: {len(rec.get('ssh_keys', []))} key(s)")
 
-
 # --------------------------------------------------------------------------
 # VM registry + lifecycle
 # --------------------------------------------------------------------------
 def vm_get(name):
     return _get_json(VMS_PREFIX + name)
 
-
 def vms_all():
     return _all_json(VMS_PREFIX)
-
 
 def _vm_access_users(rec):
     """Users who may SSH to a VM: its owner plus any additional users.
@@ -801,7 +754,6 @@ def _vm_access_users(rec):
             users.append(u)
     return users
 
-
 def _access_vms():
     """Return {user: [vm names]} for every user who can SSH to a VM.
 
@@ -812,7 +764,6 @@ def _access_vms():
         for u in _vm_access_users(rec):
             out.setdefault(u, []).append(name)
     return out
-
 
 def _vm_access_keys(rec):
     """Union of every registered SSH key of all users with VM access.
@@ -827,7 +778,6 @@ def _vm_access_keys(rec):
                 keys.append(k)
     return keys
 
-
 def _guest_login_user(vm_name):
     """The VM's primary login user (uid 1000) — 'ubuntu' on cloud images."""
     r = _incus("exec", vm_name, "--", "getent", "passwd", "1000", check=False)
@@ -835,12 +785,10 @@ def _guest_login_user(vm_name):
         return r.stdout.split(":", 1)[0]
     return VM_GUEST_USER
 
-
 # A GPU VM's OVMF firmware spends several minutes enumerating the large
 # BARs of passed-through GPUs before the guest kernel even starts, so the
 # agent takes far longer to appear than for a CPU-only VM.
 GPU_VM_AGENT_TIMEOUT = 900
-
 
 def _ensure_sshd(vm_name, agent_timeout=180):
     """Make sure the VM has an SSH server listening on port 22."""
@@ -859,7 +807,6 @@ def _ensure_sshd(vm_name, agent_timeout=180):
            "systemctl disable --now ssh.socket 2>/dev/null || true; "
            "systemctl enable --now ssh.service")
 
-
 def _inject_vm_keys(vm_name, keys, agent_timeout=180):
     """Install the given keys into the VM's primary login user."""
     _wait_agent(vm_name, agent_timeout)
@@ -868,7 +815,6 @@ def _inject_vm_keys(vm_name, keys, agent_timeout=180):
     guest = _guest_login_user(vm_name)
     content = "".join(k.strip() + "\n" for k in keys)
     _push_file(vm_name, f"/home/{guest}/.ssh/authorized_keys", content, guest)
-
 
 def _sync_vm_keys(vm_name, agent_timeout=180):
     """Recompute and inject the union of all access-user keys for a VM.
@@ -885,72 +831,54 @@ def _sync_vm_keys(vm_name, agent_timeout=180):
     _inject_vm_keys(vm_name, _vm_access_keys(rec), agent_timeout)
     return True
 
-
 def desired_get(name):
     return _get_json(VM_DESIRED_PREFIX + name)
-
 
 def desired_set(name, desired):
     _put_json(VM_DESIRED_PREFIX + name, desired)
 
-
 def desired_delete(name):
     _delete(VM_DESIRED_PREFIX + name)
-
 
 def desired_all():
     """{name: desired record} for every managed VM."""
     return _all_json(VM_DESIRED_PREFIX)
 
-
 def gpu_block_get(block_id):
     return _get_json(GPU_BLOCKS_PREFIX + block_id)
-
 
 def gpu_block_set(block_id, rec):
     _put_json(GPU_BLOCKS_PREFIX + block_id, rec)
 
-
 def gpu_block_delete(block_id):
     _delete(GPU_BLOCKS_PREFIX + block_id)
-
 
 def gpu_blocks_all():
     """{block_id: record} for every admin GPU reservation."""
     return _all_json(GPU_BLOCKS_PREFIX)
 
-
 # Stop-grace markers ({"warned_at": iso, "immediate"?: bool}).
-def grace_get(name):
-    return _get_json(VM_GRACE_PREFIX + name)
-
 
 def grace_set(name, rec):
     _put_json(VM_GRACE_PREFIX + name, rec)
 
-
 def grace_delete(name):
     _delete(VM_GRACE_PREFIX + name)
 
-
 def grace_all():
     return _all_json(VM_GRACE_PREFIX)
-
 
 # Reconciler convergence failures ({"op", "error", "at"}), surfaced on the
 # schedule page.
 def issues_all():
     return _all_json(VM_ISSUE_PREFIX)
 
-
 # Per-host incus state snapshots (status + gpu_pool), written by the sampler.
 def state_get(host):
     return _get_json(VM_STATE_PREFIX + host)
 
-
 def state_all():
     return _all_json(VM_STATE_PREFIX)
-
 
 def _parse_window(w, now=None):
     """Parse one {start, end} window into a (start, end) pair of UTC
@@ -967,7 +895,6 @@ def _parse_window(w, now=None):
     if end <= start or (now is not None and end <= now):
         return None
     return start, end
-
 
 def desired_on(desired, now):
     """Evaluate a desired-state record at `now` (UTC).
@@ -986,7 +913,6 @@ def desired_on(desired, now):
                 return True
     return False
 
-
 def pending_state(desired, status, grace, now):
     """What the reconciler will do to this VM on its next tick — 'start',
     'stop', or None (converged / unmanaged) — from its desired record vs
@@ -1003,7 +929,6 @@ def pending_state(desired, status, grace, now):
     if not want_on and (live_on or grace):
         return "stop"
     return None
-
 
 # --------------------------------------------------------------------------
 # GPU capacity commitments (admission control for the scheduling page)
@@ -1030,7 +955,6 @@ def desired_gpus(desired, registered):
                 and 0 <= g <= registered:
             return g
     return registered
-
 
 def gpu_commitments(registry, desired_all, now):
     """{host: [{vm, owner, gpus, mode, windows}]} implied by the registry
@@ -1062,7 +986,6 @@ def gpu_commitments(registry, desired_all, now):
              "mode": mode, "windows": windows})
     return hosts
 
-
 def gpu_block_commitments(blocks, now):
     """{host: [{vm, owner, gpus, mode, windows, is_block}]} implied by the
     admin GPU reservations `blocks` ({block_id: record}). Same shape as
@@ -1090,7 +1013,6 @@ def gpu_block_commitments(blocks, now):
              "windows": windows, "is_block": True})
     return hosts
 
-
 def combine_gpu_commitments(*commit_sets):
     """Merge any number of {host: [commit, ...]} dicts (from
     `gpu_commitments` / `gpu_block_commitments`) into one, preserving
@@ -1101,7 +1023,6 @@ def combine_gpu_commitments(*commit_sets):
         for host, items in cs.items():
             merged.setdefault(host, []).extend(items)
     return merged
-
 
 def gpu_conflict(commits, gpus, pool, lo, hi):
     """Worst capacity violation for a candidate needing `gpus` GPUs
@@ -1122,7 +1043,6 @@ def gpu_conflict(commits, gpus, pool, lo, hi):
         if free < gpus and (worst is None or free < worst[1]):
             worst = (p, free, active)
     return worst
-
 
 def gpu_available_windows(commits, gpus, pool, now, count=3, max_hours=6,
                           horizon_days=7, avoid_windows=None):
@@ -1163,19 +1083,16 @@ def gpu_available_windows(commits, gpus, pool, now, count=3, max_hours=6,
         t = end
     return out
 
-
 def _record_issue(issues, name, op, error, now):
     _put_json(VM_ISSUE_PREFIX + name,
               {"op": op, "error": str(error)[:300],
                "at": now.isoformat(timespec="seconds")})
     issues[name] = True
 
-
 def _clear_issue(issues, name):
     if name in issues:
         _delete(VM_ISSUE_PREFIX + name)
         del issues[name]
-
 
 def reconcile():
     """Converge local instances toward their desired power state.
@@ -1294,7 +1211,6 @@ def reconcile():
     for name in sorted(set(issues) - set(all_vms)):
         _delete(VM_ISSUE_PREFIX + name)
 
-
 def _record_event(event, name, owner=None, gpus=None, initiator="cli",
                   billable=False):
     """Append a lifecycle event to the etcd queue (usage accounting).
@@ -1320,12 +1236,10 @@ def _record_event(event, name, owner=None, gpus=None, initiator="cli",
         print(f"Warning: failed to record {event} event for {name}: {e}",
               file=sys.stderr)
 
-
 def _record_event_from_record(event, name, initiator="cli", billable=False):
     rec = vm_get(name) or {}
     _record_event(event, name, owner=rec.get("owner"), gpus=rec.get("gpus"),
                   initiator=initiator, billable=billable)
-
 
 def sample_state():
     """Snapshot local incus state into etcd for usage accounting.
@@ -1357,7 +1271,6 @@ def sample_state():
     _put_json(VM_STATE_PREFIX + socket.gethostname(), payload)
     print(f"sampled {len(instances)} instance(s)")
 
-
 def vm_sync_limits():
     """Backfill cpu/mem from incus into VMS_PREFIX for VMs on this host.
 
@@ -1387,7 +1300,6 @@ def vm_sync_limits():
         _put_json(VMS_PREFIX + name, rec)
         updated += 1
     print(f"synced cpu/mem for {updated} VM(s) on {me}")
-
 
 def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
               instance_type=None, billable=False):
@@ -1505,7 +1417,6 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     print(f"  ssh -J {BASTION_JUMP_USER}@<bastion-host>:<port> "
           f"{VM_GUEST_USER}@{name}")
 
-
 def vm_resize(name, size):
     """Grow a VM's root disk to `size` (e.g. '160GiB').
 
@@ -1539,7 +1450,6 @@ def vm_resize(name, size):
     else:
         print("  VM is stopped — the filesystem will grow on next boot "
               "(cloud-init growpart).")
-
 
 def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
              image=None, instance_type=None, billable=False,
@@ -1694,7 +1604,6 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
                   gpus=rec.get("gpus"), billable=billable)
     print(f"Altered '{name}': {', '.join(changes)}.")
 
-
 def desired_conflict(desired, action, now):
     """Reason a manual `action` ('start'|'stop'|'restart') will be reverted
     by the reconciler, or None.
@@ -1718,7 +1627,6 @@ def desired_conflict(desired, action, now):
                 f"again after grace; adjust the schedule to keep it running")
     return None
 
-
 def _warn_desired_conflict(name, action):
     """Print a heads-up if a CLI lifecycle op contradicts the VM's schedule
     (the reconciler would undo it). Only meaningful for CLI-initiated ops."""
@@ -1726,7 +1634,6 @@ def _warn_desired_conflict(name, action):
                               datetime.now(timezone.utc))
     if reason:
         print(f"  NOTE: '{name}' is {reason}.", file=sys.stderr)
-
 
 def vm_stop(name, billable=False, initiator="cli", release=False):
     _incus_stop(name)
@@ -1742,7 +1649,6 @@ def vm_stop(name, billable=False, initiator="cli", release=False):
               if released else "No passthrough GPUs to release.")
     if initiator == "cli":
         _warn_desired_conflict(name, "stop")
-
 
 def vm_start(name, billable=False, initiator="cli", gpus=None):
     """Start a VM, converging its passthrough GPUs to `gpus` (default:
@@ -1771,7 +1677,6 @@ def vm_start(name, billable=False, initiator="cli", gpus=None):
     if initiator == "cli":
         _warn_desired_conflict(name, "start")
 
-
 def vm_restart(name, billable=False, initiator="cli"):
     if _instance_running(name):
         _incus_stop(name)
@@ -1785,7 +1690,6 @@ def vm_restart(name, billable=False, initiator="cli"):
     print(f"Restarted '{name}'.")
     if initiator == "cli":
         _warn_desired_conflict(name, "restart")
-
 
 def vm_destroy(name):
     if _instance_exists(name):
@@ -1806,7 +1710,6 @@ def vm_destroy(name):
     bastion_sync()
     print(f"Destroyed '{name}' and removed its registration.")
 
-
 def _strip_tz(ts: str) -> str:
     """Drop the timezone suffix from an ISO 8601 timestamp for display."""
     if not ts:
@@ -1818,7 +1721,6 @@ def _strip_tz(ts: str) -> str:
     if len(ts) > 6 and ts[-6] in ("+", "-") and ts[-3] == ":":
         return ts[:-6]
     return ts
-
 
 def vm_list():
     vms = vms_all()
@@ -1853,7 +1755,6 @@ def vm_list():
         print(f"{name:<20} {rec.get('owner', '?'):<24} {host or '?':<8} "
               f"{str(rec.get('gpus', '?')):<5} {state:<14} "
               f"{_strip_tz(rec.get('created', ''))}")
-
 
 def pin_existing_vms():
     """Migration helper: pin a static IP on every non-bastion incus
@@ -1921,7 +1822,6 @@ def pin_existing_vms():
     sync_dns_records()
     return changes
 
-
 def vm_sync_keys(user):
     """Recompute the injected key set for every running VM `user` accesses.
 
@@ -1937,7 +1837,6 @@ def vm_sync_keys(user):
     """
     for name in _access_vms().get(user, []):
         _sync_vm_keys(name)
-
 
 # --------------------------------------------------------------------------
 # bastion access list
@@ -1962,7 +1861,6 @@ def bastion_public_port(host):
     if idx <= 3:
         return (2210 if is_nv else 2213) + idx
     return (2220 if is_nv else 2240) + idx
-
 
 def _bastion_authorized_keys():
     """Render the jump user's authorized_keys from the etcd registries.
@@ -2001,7 +1899,6 @@ def _bastion_authorized_keys():
         lines.append(f"{opts} {entry['key']}")
     return "\n".join(lines) + "\n"
 
-
 def bastion_sync():
     if not _instance_exists(BASTION_CONTAINER):
         print(f"Bastion container '{BASTION_CONTAINER}' not found — skipping "
@@ -2016,7 +1913,6 @@ def bastion_sync():
         return
     _push_file(BASTION_CONTAINER, keys_path, content, BASTION_JUMP_USER)
     print(f"Bastion synced: {n} authorized key line(s).")
-
 
 def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
     """Watch incus lifecycle events; on instance-started/restarted, queue a
@@ -2073,7 +1969,6 @@ def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
                   file=sys.stderr, flush=True)
         time.sleep(5)                              # backoff before restart
 
-
 def _watch_response_keys(response, prefix):
     """Return the changed keys (suffix past `prefix`) from an etcd3 watch
     callback response, or None if the response is a stream-break error.
@@ -2093,7 +1988,6 @@ def _watch_response_keys(response, prefix):
             keys.append(key[len(prefix):])
     return keys
 
-
 def _watcher_healthy(watch_ids, watcher):
     """True if every expected watch is still armed on an etcd3 Watcher.
 
@@ -2106,7 +2000,6 @@ def _watcher_healthy(watch_ids, watcher):
         return False
     callbacks = getattr(watcher, "_callbacks", None) or {}
     return bool(watch_ids) and all(wid in callbacks for wid in watch_ids)
-
 
 def bastion_watch(debounce=2.0):
     """Watch the user and VM registries; re-sync the bastion and VM keys

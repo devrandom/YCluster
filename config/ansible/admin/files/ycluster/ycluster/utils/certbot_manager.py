@@ -616,28 +616,6 @@ def renew_certificates(non_interactive=False):
         except:
             pass
 
-def store_cert_info(primary_domain, domains):
-    """Store certificate information in etcd"""
-    try:
-        client = get_etcd_client()
-        
-        cert_info = {
-            'primary_domain': primary_domain,
-            'domains': domains,
-            'cert_path': f'/etc/letsencrypt/live/{primary_domain}/fullchain.pem',
-            'key_path': f'/etc/letsencrypt/live/{primary_domain}/privkey.pem',
-            'nginx_cert_path': '/etc/nginx/ssl/cert.pem',
-            'nginx_key_path': '/etc/nginx/ssl/key.pem',
-            'updated_at': subprocess.run(['date', '-Iseconds'], capture_output=True, text=True).stdout.strip()
-        }
-        
-        key = '/cluster/https/certificate_info'
-        client.put(key, json.dumps(cert_info))
-        print("Certificate information stored in etcd")
-    except Exception as e:
-        print(f"Warning: Could not store certificate info in etcd: {e}")
-
-
 def list_certificates():
     """List certificate status from etcd"""
     print("Certificate status:")

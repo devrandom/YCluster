@@ -160,22 +160,6 @@ func TestMergeACLUnionsRules(t *testing.T) {
 	}
 }
 
-func sameSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	seen := make(map[string]struct{}, len(a))
-	for _, s := range a {
-		seen[s] = struct{}{}
-	}
-	for _, s := range b {
-		if _, ok := seen[s]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 func TestSplitGroups(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

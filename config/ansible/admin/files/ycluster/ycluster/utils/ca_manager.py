@@ -323,12 +323,3 @@ def revoke_certificate(hostname):
     if not removed:
         print(f"No certificate found for {hostname}")
 
-def get_ca_cert_path():
-    """Get the path to the CA certificate"""
-    return CA_CERT_PATH
-
-def get_server_cert_paths(hostname):
-    """Get paths to server certificate and key"""
-    cert_file = f"{CERTS_PATH}/{hostname}.crt"
-    key_file = f"{CERTS_PATH}/{hostname}.key"
-    return cert_file, key_file
