@@ -161,24 +161,31 @@ def cluster_bmc_get(args):
     """Get BMC MAC for a host (or all hosts) from the hardware record in etcd."""
     client = get_etcd_client()
     if not args.hostname:
-        for value, meta in client.get_prefix('/cluster/nodes/hardware/'):
-            hostname = meta.key.decode().rsplit('/', 1)[-1]
-            hw = json.loads(value.decode())
-            mac = hw.get('bmc_mac')
-            if mac:
-                print(f"{hostname}: {mac}")
+        _print_all_bmc_macs(client)
         return
-    key = f'/cluster/nodes/hardware/{args.hostname}'
-    result = client.get(key)
+    _print_host_bmc_mac(client, args.hostname)
+
+
+def _print_all_bmc_macs(client):
+    for value, meta in client.get_prefix('/cluster/nodes/hardware/'):
+        hostname = meta.key.decode().rsplit('/', 1)[-1]
+        hw = json.loads(value.decode())
+        mac = hw.get('bmc_mac')
+        if mac:
+            print(f"{hostname}: {mac}")
+
+
+def _print_host_bmc_mac(client, hostname):
+    result = client.get(f'/cluster/nodes/hardware/{hostname}')
     if result[0] is None:
-        print(f"No hardware record for {args.hostname}", file=sys.stderr)
+        print(f"No hardware record for {hostname}", file=sys.stderr)
         sys.exit(1)
     hw = json.loads(result[0].decode())
     mac = hw.get('bmc_mac')
     if mac:
         print(mac)
     else:
-        print(f"No BMC MAC recorded for {args.hostname}")
+        print(f"No BMC MAC recorded for {hostname}")
 
 
 def cluster_bmc_set(args):
