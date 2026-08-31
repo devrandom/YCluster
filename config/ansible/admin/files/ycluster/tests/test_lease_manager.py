@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock as mock
 import unittest.mock
 from datetime import datetime
 
@@ -43,3 +44,20 @@ class LeaseManagerHelpersTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DeleteKeysTests(unittest.TestCase):
+    def test_mac_delete_keys(self):
+        got = lease_manager._mac_delete_keys('host', 'aabb')
+        self.assertEqual(got, [
+            '/cluster/nodes/by-hostname/host',
+            '/cluster/nodes/by-mac/aabb',
+            '/cluster/dhcp/leases/aabb',
+        ])
+
+    def test_delete_keys_counts_successes(self):
+        client = mock.Mock()
+        client.delete.side_effect = [True, False, RuntimeError('down')]
+        with mock.patch('builtins.print'):
+            self.assertTrue(lease_manager._delete_keys(client, ['a', 'b', 'c'], 'MAC', 'aa'))
+        self.assertEqual(client.delete.call_count, 3)

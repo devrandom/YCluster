@@ -181,36 +181,40 @@ def delete_by_mac(mac):
     
     try:
         allocation = json.loads(allocation_data[0].decode())
-        hostname = allocation['hostname']
-        ip = allocation['ip']
-        
-        print(f"Found allocation: {hostname} -> {ip} (MAC: {mac})")
-        
-        # Delete all related entries
-        keys_to_delete = [
-            f"/cluster/nodes/by-hostname/{hostname}",
-            f"/cluster/nodes/by-mac/{normalized_mac}",
-            f"/cluster/dhcp/leases/{normalized_mac}"
-        ]
-        
-        deleted_count = 0
-        for key in keys_to_delete:
-            try:
-                result = client.delete(key)
-                if result:
-                    print(f"Deleted: {key}")
-                    deleted_count += 1
-                else:
-                    print(f"Not found: {key}")
-            except Exception as e:
-                print(f"Error deleting {key}: {e}")
-        
-        print(f"Successfully deleted {deleted_count} entries for MAC {mac}")
-        return deleted_count > 0
-        
+        _print_allocation_found(allocation, mac)
+        keys = _mac_delete_keys(allocation['hostname'], normalized_mac)
+        return _delete_keys(client, keys, "MAC", mac)
     except Exception as e:
         print(f"Error processing allocation data: {e}")
         return False
+
+def _print_allocation_found(allocation, mac):
+    print(f"Found allocation: {allocation['hostname']} -> {allocation['ip']} (MAC: {mac})")
+
+
+def _mac_delete_keys(hostname, normalized_mac):
+    return [
+        f"/cluster/nodes/by-hostname/{hostname}",
+        f"/cluster/nodes/by-mac/{normalized_mac}",
+        f"/cluster/dhcp/leases/{normalized_mac}"
+    ]
+
+
+def _delete_keys(client, keys, label, source):
+    deleted_count = 0
+    for key in keys:
+        try:
+            result = client.delete(key)
+            if result:
+                print(f"Deleted: {key}")
+                deleted_count += 1
+            else:
+                print(f"Not found: {key}")
+        except Exception as e:
+            print(f"Error deleting {key}: {e}")
+    print(f"Successfully deleted {deleted_count} entries for {label} {source}")
+    return deleted_count > 0
+
 
 def main():
     parser = argparse.ArgumentParser(description='DHCP Lease Manager')
