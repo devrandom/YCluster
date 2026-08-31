@@ -405,21 +405,36 @@ def _cleanup_temp_files(temp_key_path, csr_path, temp_dir):
         pass
 
 
+def _validate_obtain_domains(config):
+    """Return (domains, primary_domain, email), or (None, None, None)."""
+    domains = get_all_domains(config)
+    if not domains or 'domain' not in config:
+        print("No domains configured. Use 'ycluster https set-domain <domain>' first.")
+        return None, None, None
+    return domains, config['domain'], config.get('email')
+
+
+def _prepare_obtain_csr(domains):
+    """Create a temporary key/CSR pair; returns (key, csr) and cleans up on CSR failure."""
+    temp_key_path = write_tls_key_to_temp()
+    if not temp_key_path:
+        return None, None
+    csr_path = generate_csr(temp_key_path, domains)
+    if not csr_path:
+        try:
+            os.unlink(temp_key_path)
+        except Exception:
+            pass
+        return None, None
+    return temp_key_path, csr_path
+
+
 def obtain_certificate(test_cert=False, non_interactive=False, server=None):
     """Obtain a new certificate from Let's Encrypt (or another ACME CA) using CSR mode"""
     config = get_https_config()
-    domains = get_all_domains(config)
-
+    domains, primary_domain, email = _validate_obtain_domains(config)
     if not domains:
-        print("No domains configured. Use 'ycluster https set-domain <domain>' first.")
         return False
-
-    if 'domain' not in config:
-        print("No primary domain configured. Use 'ycluster https set-domain <domain>' first.")
-        return False
-
-    primary_domain = config['domain']
-    email = config.get('email')
 
     # HTTP-01 challenges arrive via the frp tunnel (frontend f1:80 ->
     # frpc -> alt vhost 127.0.0.2:17080) — certbot must run on the node
@@ -436,18 +451,8 @@ def obtain_certificate(test_cert=False, non_interactive=False, server=None):
     else:
         print("No email configured - using --register-unsafely-without-email")
 
-    # Write TLS key to temporary file for CSR generation
-    temp_key_path = write_tls_key_to_temp()
+    temp_key_path, csr_path = _prepare_obtain_csr(domains)
     if not temp_key_path:
-        return False
-
-    # Generate CSR with our existing private key
-    csr_path = generate_csr(temp_key_path, domains)
-    if not csr_path:
-        try:
-            os.unlink(temp_key_path)
-        except Exception:
-            pass
         return False
 
     # Ensure nginx has a certificate (fallback to etcd cert if no Let's Encrypt cert exists)
