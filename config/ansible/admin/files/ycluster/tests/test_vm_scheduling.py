@@ -10,10 +10,12 @@ or a single module:
     python3 -m unittest tests.test_vm_scheduling
 """
 
+import json
 import subprocess
 import contextlib
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Optional
 from unittest import mock
 
@@ -1078,3 +1080,208 @@ class GpuPoolDiscoveryTests(unittest.TestCase):
     def test_read_error_excluded(self):
         with mock.patch.object(vm, '_device_pci_class', return_value=None):
             self.assertFalse(vm._is_gpu_pci_entry('x'))
+
+
+class FakeEtcd:
+    def __init__(self, values=None, prefix=None):
+        self.values = values or {}
+        self.prefix = prefix or []
+        self.puts = []
+        self.deletes = []
+
+    def get(self, key):
+        value = self.values.get(key)
+        if value is None:
+            return None, None
+        return json.dumps(value).encode(), None
+
+    def put(self, key, value):
+        self.puts.append((key, value))
+
+    def delete(self, key):
+        self.deletes.append(key)
+
+    def get_prefix(self, prefix):
+        if isinstance(self.prefix, dict):
+            return self.prefix.get(prefix, [])
+        return self.prefix
+
+
+class VMHelperTests(unittest.TestCase):
+    def test_etcd_json_helpers(self):
+        fake = FakeEtcd({vm.USERS_PREFIX + 'user': {'keys': []}})
+        fake.prefix = [
+            (json.dumps({'state': 'on'}).encode(),
+             SimpleNamespace(key=b'/prefix/vm1')),
+            (json.dumps({'state': 'off'}).encode(),
+             SimpleNamespace(key=b'/prefix/')),
+            (json.dumps({'state': 'off'}).encode(),
+             SimpleNamespace(key=b'/prefix/a/b')),
+        ]
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake):
+            self.assertEqual(vm._get_json(vm.USERS_PREFIX + 'user'),
+                             {'keys': []})
+            self.assertIsNone(vm._get_json('/missing'))
+            vm._put_json('/key', {'state': 'on'})
+            vm._delete('/key')
+            self.assertEqual(
+                vm._all_json('/prefix/'),
+                {'vm1': {'state': 'on'}})
+        self.assertEqual(fake.puts, [('/key', '{"state": "on"}')])
+        self.assertEqual(fake.deletes, ['/key'])
+
+    def test_incus_helper_variants(self):
+        result = SimpleNamespace(returncode=0, stdout='{"ok": true}',
+                                 stderr='')
+        with mock.patch.object(vm.subprocess, 'run', return_value=result) as run:
+            self.assertEqual(vm._incus('list', stdin='data'), result)
+            self.assertEqual(run.call_args.kwargs['input'], 'data')
+            self.assertEqual(vm._incus('list'), result)
+            self.assertIsNone(run.call_args.kwargs.get('input'))
+            self.assertEqual(vm._incus_json('list'), {'ok': True})
+
+        failure = SimpleNamespace(returncode=1, stdout='', stderr='boom')
+        with mock.patch.object(vm.subprocess, 'run', return_value=failure):
+            with self.assertRaises(RuntimeError):
+                vm._incus('info', 'missing')
+            self.assertFalse(vm._instance_exists('missing'))
+
+    def test_incus_ip_and_bridge_helpers(self):
+        instances = [{
+            'name': 'vm1',
+            'expanded_devices': {'eth0': {'ipv4.address': 'ip-1'}},
+            'state': {'network': {'eth0': {'addresses': [
+                {'family': 'inet', 'scope': 'global', 'address': 'ip-2'},
+                {'family': 'inet6', 'scope': 'global', 'address': 'ip-6'},
+            ]}}},
+        }]
+        self.assertEqual(vm._live_instance_ips(instances[0]), {'ip-2'})
+        with mock.patch.object(vm, '_incus_json', return_value=instances):
+            self.assertEqual(vm._pinned_ips(), {'vm1': 'ip-1'})
+        with mock.patch.object(vm, '_pinned_ips',
+                               return_value={'vm1': 'ip-1'}), \
+                mock.patch.object(vm, '_incus_json', return_value=instances):
+            self.assertEqual(vm._occupied_ips(), {'ip-1', 'ip-2'})
+        self.assertEqual(vm._pick_vm_ip('ip-1', ['ip-2']), 'ip-1')
+        self.assertEqual(vm._pick_vm_ip(taken=['ip-200']),
+                         f'{vm.VM_IP_SUBNET_PREFIX}.{vm.VM_IP_POOL_START}')
+        with self.assertRaises(RuntimeError):
+            vm._pick_vm_ip(taken=[f'{vm.VM_IP_SUBNET_PREFIX}.{n}'
+                                  for n in range(10, 201)])
+        with mock.patch.object(vm, '_incus', return_value=SimpleNamespace(
+                returncode=1)) as incus:
+            vm._pin_instance_ip('vm1', 'ip-1')
+        self.assertEqual(incus.call_count, 2)
+        with mock.patch.object(vm, '_incus_json', return_value=[
+                {'name': 'incusbr0', 'type': 'bridge', 'managed': True},
+                {'name': 'other', 'type': 'bridge', 'managed': False}]):
+            self.assertEqual(vm._managed_bridges(), ['incusbr0'])
+
+    def test_validation_and_host_config(self):
+        with self.assertRaises(ValueError):
+            vm._valid_vm_name('Bad VM')
+        with self.assertRaises(ValueError):
+            vm._valid_user('bad user')
+        data = 'default_instance_type: "container"\nother: value\n'
+        with mock.patch('builtins.open', mock.mock_open(read_data=data)):
+            self.assertEqual(vm._host_config_value('default_instance_type'),
+                             'container')
+            self.assertEqual(vm._default_instance_type(), 'container')
+        with mock.patch('builtins.open', mock.mock_open(read_data='x')):
+            self.assertIsNone(vm._host_config_value('missing'))
+        with mock.patch('builtins.open', side_effect=OSError):
+            self.assertIsNone(vm._host_config_value('missing'))
+            self.assertEqual(vm._default_instance_type(), 'vm')
+
+    def test_registry_shortcuts(self):
+        fake = FakeEtcd()
+        fake.values = {
+            vm.USERS_PREFIX + 'user': {'keys': []},
+            vm.VM_DESIRED_PREFIX + 'vm1': {'mode': 'on'},
+            vm.GPU_BLOCKS_PREFIX + 'block': {'gpus': 1},
+            vm.VM_STATE_PREFIX + 'host': {'status': 'Running'},
+        }
+        fake.prefix = {
+            vm.USERS_PREFIX: [
+                (b'{"keys":[]}',
+                 SimpleNamespace(key=b'/cluster/users/user')),
+            ],
+            vm.VM_DESIRED_PREFIX: [
+                (b'{"mode":"on"}',
+                 SimpleNamespace(key=b'/cluster/vm-desired/vm1')),
+            ],
+            vm.GPU_BLOCKS_PREFIX: [
+                (b'{"mode":"on"}',
+                 SimpleNamespace(key=b'/cluster/gpu-blocks/block')),
+            ],
+            vm.VM_GRACE_PREFIX: [
+                (b'{"warned_at":"now"}',
+                 SimpleNamespace(key=b'/cluster/vm-grace/vm1')),
+            ],
+            vm.VM_ISSUE_PREFIX: [
+                (b'{"op":"start"}',
+                 SimpleNamespace(key=b'/cluster/vm-issue/vm1')),
+            ],
+            vm.VM_STATE_PREFIX: [
+                (b'{"status":"Running"}',
+                 SimpleNamespace(key=b'/cluster/vm-state/host')),
+            ],
+        }
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake):
+            self.assertEqual(vm.user_get('user'), {'keys': []})
+            self.assertEqual(vm.users_all(), {'user': {'keys': []}})
+            self.assertEqual(vm.desired_get('vm1'), {'mode': 'on'})
+            vm.desired_set('vm1', {'mode': 'off'})
+            vm.desired_delete('vm1')
+            self.assertEqual(vm.desired_all(), {'vm1': {'mode': 'on'}})
+            self.assertEqual(vm.gpu_block_get('block'), {'gpus': 1})
+            vm.gpu_block_set('block', {'gpus': 2})
+            vm.gpu_block_delete('block')
+            self.assertEqual(vm.gpu_blocks_all(), {'block': {'mode': 'on'}})
+            vm.grace_set('vm1', {'warned_at': 'now'})
+            vm.grace_delete('vm1')
+            self.assertEqual(vm.grace_all(),
+                             {'vm1': {'warned_at': 'now'}})
+            self.assertEqual(vm.issues_all(), {'vm1': {'op': 'start'}})
+            self.assertEqual(vm.state_get('host'), {'status': 'Running'})
+            self.assertEqual(vm.state_all(), {'host': {'status': 'Running'}})
+
+
+class UserRegistryTests(unittest.TestCase):
+    KEY = 'ssh-ed25519 ' + 'A' * 24 + ' comment'
+
+    def test_add_and_remove_user_keys(self):
+        fake = FakeEtcd({vm.USERS_PREFIX + 'user': {'ssh_keys': []}})
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake), \
+                mock.patch('builtins.print') as print_:
+            vm.user_add_key('user', self.KEY)
+            self.assertEqual(fake.puts[0][1], json.dumps(
+                {'ssh_keys': [self.KEY]}))
+            vm.user_add_key('user', self.KEY)
+            fake.values[vm.USERS_PREFIX + 'user'] = {'ssh_keys': [self.KEY]}
+            vm.user_remove_key('user', self.KEY)
+        self.assertEqual(len(print_.mock_calls), 3)
+
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake):
+            with self.assertRaises(ValueError):
+                vm.user_remove_key('missing', self.KEY)
+
+    def test_user_list_and_key_cap(self):
+        fake = FakeEtcd({
+            vm.USERS_PREFIX + 'user': {'ssh_keys': [self.KEY]},
+            vm.USERS_PREFIX + 'full': {
+                'ssh_keys': ['k'] * vm.MAX_SSH_KEYS_PER_USER},
+        })
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake), \
+                mock.patch('builtins.print') as print_:
+            vm.user_list('user')
+            vm.user_list()
+            with self.assertRaises(ValueError):
+                vm.user_add_key('full', self.KEY)
+        self.assertEqual(len(print_.mock_calls), 3)
+
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake), \
+                mock.patch('builtins.print') as print_:
+            vm.user_list('missing')
+            vm.user_list()
+        self.assertEqual(len(print_.mock_calls), 2)
