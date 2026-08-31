@@ -667,22 +667,27 @@ def user_remove_key(user, match):
         _delete(USERS_PREFIX + user)          # no keys left -> drop the user
     print(f"Removed {removed} key(s) from '{user}'.")
 
+def _print_user_keys(user, rec):
+    print(f"{user}:")
+    for key in rec.get("ssh_keys", []):
+        print(f"  {key}")
+
+def _print_user_summary(users):
+    if not users:
+        return print("No users registered.")
+    for name, rec in sorted(users.items()):
+        print(f"{name}: {len(rec.get('ssh_keys', []))} key(s)")
+
+
 def user_list(user=None):
     if user:
         rec = user_get(user)
         if not rec:
             print(f"No such user: {user}")
             return
-        print(f"{user}:")
-        for k in rec.get("ssh_keys", []):
-            print(f"  {k}")
-    else:
-        users = users_all()
-        if not users:
-            print("No users registered.")
-            return
-        for name, rec in sorted(users.items()):
-            print(f"{name}: {len(rec.get('ssh_keys', []))} key(s)")
+        _print_user_keys(user, rec)
+        return
+    _print_user_summary(users_all())
 
 # --------------------------------------------------------------------------
 # VM registry + lifecycle
@@ -699,14 +704,9 @@ def _vm_access_users(rec):
     The owner stays the billing/accounting identity; additional_users are
     extra registered users granted the same SSH access. Returns a list
     without duplicates."""
-    users = []
     owner = rec.get("owner")
-    if owner:
-        users.append(owner)
-    for u in rec.get("additional_users") or []:
-        if u and u not in users:
-            users.append(u)
-    return users
+    users = [owner] if owner else []
+    return users + [u for u in rec.get("additional_users") or [] if u and u not in users]
 
 def _access_vms():
     """Return {user: [vm names]} for every user who can SSH to a VM.
