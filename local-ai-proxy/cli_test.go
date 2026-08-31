@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"strings"
 	"testing"
 
 	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
@@ -90,6 +91,34 @@ func TestPrintDisabledBackend(t *testing.T) {
 	kv.Value = nil
 	out = captureStdout(t, func() { printDisabledBackend("/prefix/", kv) })
 	if out != "  http://backend:8000\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestDisableTarget(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	if got := disableTarget([]string{"http://backend:8000"}, fs); got != "http://backend:8000" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestACLRules(t *testing.T) {
+	if aclRule(nil, 0) != nil {
+		t.Fatal("empty tokens: want nil rule")
+	}
+	entries := []ACLEntry{{Subject: "user:a"}}
+	if aclRule(entries, 1).Entries[0].Subject != "user:a" {
+		t.Fatal("entry not retained")
+	}
+}
+
+func TestPrintDisabled(t *testing.T) {
+	out := captureStdout(t, func() { printDisabled("bad", "http://b") })
+	if !strings.Contains(out, "Disabled: http://b") || !strings.Contains(out, "reason: bad") {
+		t.Fatalf("got %q", out)
+	}
+	out = captureStdout(t, func() { printDisabled("", "http://b") })
+	if strings.Contains(out, "reason:") {
 		t.Fatalf("got %q", out)
 	}
 }

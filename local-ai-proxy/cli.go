@@ -95,27 +95,41 @@ func backendsDisable(args []string, configPath string) {
 		fmt.Fprintln(os.Stderr, "usage: local-ai-proxy backends disable <url> [--reason ...]")
 	}
 	_ = fs.Parse(args)
-	rest := fs.Args()
+	target, err := normalizeBackendURL(disableTarget(fs.Args(), fs))
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	client, prefix := mustEtcdForCLIDisabled(configPath)
+	defer client.Close()
+	putDisabledBackend(client, prefix, target, disableMetadataJSON(*reason))
+	printDisabled(*reason, target)
+}
+
+// disableTarget validates exactly one positional backend URL.
+func disableTarget(rest []string, fs *flag.FlagSet) string {
 	if len(rest) != 1 {
 		fs.Usage()
 		os.Exit(2)
 	}
-	target, err := normalizeBackendURL(rest[0])
-	if err != nil {
-		fatal("%v", err)
-	}
-	client, prefix := mustEtcdForCLIDisabled(configPath)
-	defer client.Close()
+	return rest[0]
+}
+
+// putDisabledBackend writes the disabled marker for a backend URL.
+func putDisabledBackend(client *clientv3.Client, prefix, target, value string) {
 	key := prefix + target
-	value := disableMetadataJSON(*reason)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := client.Put(ctx, key, value); err != nil {
 		fatal("etcd put %s: %v", key, err)
 	}
+}
+
+// printDisabled reports the successful disable operation.
+func printDisabled(reason, target string) {
 	fmt.Printf("Disabled: %s\n", target)
-	if *reason != "" {
-		fmt.Printf("  reason: %s\n", *reason)
+	if reason != "" {
+		fmt.Printf("  reason: %s\n", reason)
 	}
 	fmt.Println("(takes effect at next health-check cycle)")
 }
@@ -328,16 +342,7 @@ func runACL(args []string, configPath string) {
 }
 
 func aclSet(args []string, configPath string) {
-	model := ""
-	tokens := []string{}
-	if len(args) >= 1 {
-		model = args[0]
-		tokens = args[1:]
-	}
-	if model == "" {
-		fatalUsage("acl set <model> [+-user:name|+-group:name...]")
-	}
-
+	model, tokens := aclSetArgs(args)
 	entries, err := ParseACLEntries(tokens)
 	if err != nil {
 		fatal("%v", err)
@@ -347,14 +352,29 @@ func aclSet(args []string, configPath string) {
 	defer client.Close()
 	key := prefix + model
 	value := mustGetEtcdModelValue(client, key, model)
-
-	if len(tokens) == 0 {
-		value.ACL = nil
-	} else {
-		value.ACL = &ACLModelRule{Entries: entries}
-	}
+	value.ACL = aclRule(entries, len(tokens))
 	mustPutEtcdModelValue(client, key, value)
 	printACLSet(model, value.ACL)
+}
+
+// aclSetArgs splits the model name from ACL entry tokens.
+func aclSetArgs(args []string) (model string, tokens []string) {
+	if len(args) >= 1 {
+		model = args[0]
+		tokens = args[1:]
+	}
+	if model == "" {
+		fatalUsage("acl set <model> [+-user:name|+-group:name...]")
+	}
+	return model, tokens
+}
+
+// aclRule returns nil to clear the ACL, or a rule containing the entries.
+func aclRule(entries []ACLEntry, count int) *ACLModelRule {
+	if count == 0 {
+		return nil
+	}
+	return &ACLModelRule{Entries: entries}
 }
 
 // mustGetEtcdModelValue reads one model mapping and turns a missing key or
