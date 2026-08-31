@@ -1050,48 +1050,45 @@ def check_tang_service():
 
 
 
+def _secrets_mount_details():
+    """Return (mounted, findmnt details) for /secrets."""
+    result = subprocess.run(['mountpoint', '-q', '/secrets'],
+                            capture_output=True, text=True, timeout=5)
+    mount_details = None
+    if result.returncode == 0:
+        try:
+            mount_result = subprocess.run(
+                ['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS', '/secrets'],
+                capture_output=True, text=True, timeout=5)
+            if mount_result.returncode == 0:
+                mount_details = mount_result.stdout.strip()
+        except Exception:
+            pass
+    return result.returncode == 0, mount_details
+
+
+def _secrets_access(is_mounted):
+    """Return (accessible, error) for /secrets; mounted-but-root-only is OK."""
+    try:
+        if os.path.isdir('/secrets'):
+            os.listdir('/secrets')
+            return True, None
+        return False, '/secrets directory does not exist'
+    except PermissionError:
+        return is_mounted, None
+    except Exception as e:
+        return False, f'Error accessing /secrets: {str(e)}'
+
+
 def check_secrets_mount():
     """Check if /secrets is mounted"""
     try:
-        # Check if /secrets is mounted
-        result = subprocess.run(['mountpoint', '-q', '/secrets'], 
-                              capture_output=True, text=True, timeout=5)
-        is_mounted = result.returncode == 0
-        
-        # Get mount details if mounted
-        mount_details = None
-        if is_mounted:
-            try:
-                mount_result = subprocess.run(['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS', '/secrets'], 
-                                            capture_output=True, text=True, timeout=5)
-                if mount_result.returncode == 0:
-                    mount_details = mount_result.stdout.strip()
-            except:
-                pass
-        
-        # Check if secrets directory exists and is accessible
-        secrets_accessible = False
-        secrets_error = None
-        try:
-            if os.path.exists('/secrets') and os.path.isdir('/secrets'):
-                # Try to list the directory to verify access
-                os.listdir('/secrets')
-                secrets_accessible = True
-            else:
-                secrets_error = '/secrets directory does not exist'
-        except PermissionError:
-            # The service runs unprivileged and /secrets contents are
-            # deliberately root-only; mounted-but-unreadable is the
-            # expected state, and mountedness is what this check is for.
-            secrets_accessible = is_mounted
-            secrets_error = None
-        except Exception as e:
-            secrets_error = f'Error accessing /secrets: {str(e)}'
+        is_mounted, mount_details = _secrets_mount_details()
+        secrets_accessible, secrets_error = _secrets_access(is_mounted)
 
-        # Determine overall status
         if is_mounted and secrets_accessible:
             status = 'healthy'
-            message = f'Secrets volume mounted and accessible'
+            message = 'Secrets volume mounted and accessible'
         elif is_mounted:
             status = 'degraded'
             message = f'Secrets volume mounted but not accessible: {secrets_error}'
@@ -1111,10 +1108,8 @@ def check_secrets_mount():
         }
         
     except Exception as e:
-        return {
-            'status': 'error',
-            'details': {'message': f'Secrets mount check failed: {str(e)}'}
-        }
+        return {'status': 'error',
+                'details': {'message': f'Secrets mount check failed: {str(e)}'}}
 
 def _open_webui_health_probe():
     """Probe the Open-WebUI health endpoint.

@@ -388,3 +388,17 @@ class DisabledHealthTests(unittest.TestCase):
         ]
         self.assertEqual(appmod._disabled_health(hosts),
                          {'off': {'status': 'disabled', 'services': []}})
+
+
+class SecretsMountHelpersTests(unittest.TestCase):
+    def test_mount_details(self):
+        results = [mock.Mock(returncode=0, stdout='', stderr=''),
+                   mock.Mock(returncode=0, stdout='source:type:opts', stderr='')]
+        with mock.patch.object(appmod.subprocess, 'run', side_effect=results):
+            self.assertEqual(appmod._secrets_mount_details(), (True, 'source:type:opts'))
+
+    def test_access_permission_treated_as_mounted(self):
+        with mock.patch.object(appmod.os.path, 'exists', return_value=True), \
+             mock.patch.object(appmod.os.path, 'isdir', return_value=True), \
+             mock.patch.object(appmod.os, 'listdir', side_effect=PermissionError):
+            self.assertEqual(appmod._secrets_access(True), (True, None))
