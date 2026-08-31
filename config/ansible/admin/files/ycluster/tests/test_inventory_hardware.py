@@ -249,3 +249,18 @@ class DarwinGpuEntryTest(unittest.TestCase):
 
     def test_requires_name(self):
         self.assertIsNone(inventory._gpu_darwin_entry({}))
+
+class HardwareOverviewTest(unittest.TestCase):
+    def test_applies_macos_fields(self):
+        facts = inventory._init_hardware_facts()
+        inventory._apply_hardware_overview(facts, {
+            'machine_name': 'Mac mini',
+            'serial_number': 'serial',
+            'platform_UUID': 'uuid',
+            'SMC_version_system': 'smc',
+            'physical_memory': '64 GB',
+        })
+        self.assertEqual(facts['product'], 'Mac mini')
+        self.assertEqual(facts['serial'], 'serial')
+        self.assertEqual(facts['bios_version'], 'smc')
+        self.assertEqual(facts['ram_gb'], 64)

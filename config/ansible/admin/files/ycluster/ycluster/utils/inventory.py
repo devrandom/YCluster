@@ -181,17 +181,19 @@ def _collect_hardware_overview_darwin(facts):
     try:
         r = _run(['system_profiler', 'SPHardwareDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
-        hw = data.get('SPHardwareDataType', [{}])[0]
-        facts['product'] = hw.get('machine_name')
-        facts['serial'] = hw.get('serial_number')
-        facts['bios_version'] = hw.get('platform_UUID') and hw.get('SMC_version_system') or hw.get('boot_rom_version')
-        mem_str = hw.get('physical_memory', '')  # e.g. "512 GB"
-        if mem_str:
-            parts = mem_str.split()
-            if len(parts) == 2 and parts[1] == 'GB':
-                facts['ram_gb'] = int(parts[0])
+        _apply_hardware_overview(facts, data.get('SPHardwareDataType', [{}])[0])
     except Exception:
         pass
+
+
+def _apply_hardware_overview(facts, hw):
+    facts['product'] = hw.get('machine_name')
+    facts['serial'] = hw.get('serial_number')
+    facts['bios_version'] = hw.get('platform_UUID') and hw.get('SMC_version_system') or hw.get('boot_rom_version')
+    mem_str = hw.get('physical_memory', '')  # e.g. "512 GB"
+    parts = mem_str.split()
+    if len(parts) == 2 and parts[1] == 'GB':
+        facts['ram_gb'] = int(parts[0])
 
 
 def _collect_cpu_darwin(facts):
