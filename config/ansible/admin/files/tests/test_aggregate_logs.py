@@ -79,3 +79,14 @@ class AggregateLogsTests(unittest.TestCase):
         ]
         result = aggregate_logs(entries)
         self.assertEqual(len(result), 2)
+
+class RequestLogDecodeTests(unittest.TestCase):
+    def test_decodes_nested_request(self):
+        raw = b'{"MESSAGE": "{\\"msg\\": \\"request\\", \\"model\\": \\"m\\"}"}\n'
+        self.assertEqual(_stats._request_log_from_json(raw), {'msg': 'request', 'model': 'm'})
+
+    def test_ignores_bad_or_non_request(self):
+        self.assertIsNone(_stats._request_log_from_json(b'not json'))
+        self.assertIsNone(_stats._request_log_from_json(b'{"MESSAGE": "not json"}'))
+        self.assertIsNone(_stats._request_log_from_json(b'{"MESSAGE": "{\\"msg\\": \\"other\\"}"}'))
+        self.assertIsNone(_stats._request_log_from_json(b'   '))

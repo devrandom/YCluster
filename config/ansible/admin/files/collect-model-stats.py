@@ -67,27 +67,28 @@ def fetch_journal_logs(since_ts: float):
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert proc.stdout is not None
-    entries = []
     for line in proc.stdout:
-        line = line.decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = entry.get("MESSAGE", "")
-        if not msg:
-            continue
-        try:
-            log = json.loads(msg)
-        except json.JSONDecodeError:
-            continue
-        if log.get("msg") != "request":
-            continue
-        entries.append(log)
+        log = _request_log_from_json(line)
+        if log:
+            entries.append(log)
     proc.wait()
     return entries
+
+
+def _request_log_from_json(raw_line):
+    """Decode one journal line and return request logs, or None."""
+    line = raw_line.decode("utf-8", errors="replace").strip()
+    if not line:
+        return None
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    try:
+        log = json.loads(entry.get("MESSAGE", ""))
+    except json.JSONDecodeError:
+        return None
+    return log if log.get("msg") == "request" else None
 
 
 def _parse_entry_timestamp(entry):
