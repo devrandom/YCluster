@@ -11,6 +11,31 @@ from datetime import datetime
 
 from ..common.etcd_utils import get_etcd_client
 
+def _parse_records(client, prefix, label):
+    records = []
+    for value, metadata in client.get_prefix(prefix):
+        if not value:
+            continue
+        try:
+            data = json.loads(value.decode())
+            key = metadata.key.decode().split('/')[-1]
+            records.append((key, data))
+        except Exception as e:
+            print(f"Error parsing {label}: {e}")
+    records.sort(key=lambda item: item[0])
+    return records
+
+
+def _format_allocated_at(value):
+    if value == 'Unknown':
+        return value
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError):
+        return value
+
+
 def list_allocations():
     """List all node allocations from etcd"""
     try:
@@ -18,41 +43,34 @@ def list_allocations():
     except Exception as e:
         print(e)
         return
-    
+
     print("\n=== Node Allocations ===")
-    allocations = []
-    
-    # Get all allocations by hostname
-    for value, metadata in client.get_prefix("/cluster/nodes/by-hostname/"):
-        if value:
-            try:
-                allocation = json.loads(value.decode())
-                hostname = metadata.key.decode().split('/')[-1]
-                allocations.append((hostname, allocation))
-            except Exception as e:
-                print(f"Error parsing allocation: {e}")
-    
-    # Sort by hostname
-    allocations.sort(key=lambda x: x[0])
-    
+    allocations = _parse_records(client, "/cluster/nodes/by-hostname/", "allocation")
     if not allocations:
         print("No allocations found")
         return
-    
+
     print(f"{'Hostname':<15} {'Type':<8} {'IP':<15} {'MAC':<17} {'Allocated At'}")
     print("-" * 80)
-    
+
     for hostname, allocation in allocations:
-        allocated_at = allocation.get('allocated_at', 'Unknown')
-        if allocated_at != 'Unknown':
-            try:
-                # Parse and format timestamp
-                dt = datetime.fromisoformat(allocated_at.replace('Z', '+00:00'))
-                allocated_at = dt.strftime('%Y-%m-%d %H:%M:%S')
-            except:
-                pass
-        
+        allocated_at = _format_allocated_at(allocation.get('allocated_at', 'Unknown'))
         print(f"{hostname:<15} {allocation.get('type', 'unknown'):<8} {allocation.get('ip', 'unknown'):<15} {allocation.get('mac', 'unknown'):<17} {allocated_at}")
+
+def _format_lease(lease, now):
+    expires_str = lease.get('expires', 'Unknown')
+    status = 'Unknown'
+
+    if expires_str != 'Unknown':
+        try:
+            expires = datetime.fromisoformat(expires_str)
+            expires_str = expires.strftime('%Y-%m-%d %H:%M:%S')
+            status = 'Active' if expires > now else 'Expired'
+        except (ValueError, TypeError):
+            pass
+
+    return expires_str, status
+
 
 def list_leases():
     """List all DHCP leases from etcd"""
@@ -61,46 +79,22 @@ def list_leases():
     except Exception as e:
         print(e)
         return
-    
+
     print("\n=== DHCP Leases ===")
-    leases = []
-    
-    # Get all leases
-    for value, metadata in client.get_prefix("/cluster/dhcp/leases/"):
-        if value:
-            try:
-                lease = json.loads(value.decode())
-                mac = metadata.key.decode().split('/')[-1]
-                leases.append((mac, lease))
-            except Exception as e:
-                print(f"Error parsing lease: {e}")
-    
-    # Sort by MAC
-    leases.sort(key=lambda x: x[0])
-    
+    leases = _parse_records(client, "/cluster/dhcp/leases/", "lease")
     if not leases:
         print("No leases found")
         return
-    
+
     print(f"{'MAC Address':<17} {'IP':<15} {'Hostname':<15} {'Expires':<19} {'Status'}")
     print("-" * 85)
-    
+
     now = datetime.now()
     for mac_key, lease in leases:
-        expires_str = lease.get('expires', 'Unknown')
-        status = 'Unknown'
-        
-        if expires_str != 'Unknown':
-            try:
-                expires = datetime.fromisoformat(expires_str)
-                expires_str = expires.strftime('%Y-%m-%d %H:%M:%S')
-                status = 'Active' if expires > now else 'Expired'
-            except:
-                pass
-        
+        expires_str, status = _format_lease(lease, now)
         hostname = lease.get('hostname', '')
         ip = lease.get('ip', 'unknown')
-        
+
         # Display the MAC from lease data (with colons) if available, otherwise use key
         display_mac = lease.get('mac', mac_key)
         print(f"{display_mac:<17} {ip:<15} {hostname:<15} {expires_str:<19} {status}")
