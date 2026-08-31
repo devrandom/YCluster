@@ -1760,357 +1760,253 @@ def prometheus_metrics():
         error_response = f'ycluster_metrics_error{{node="{platform.node()}"}} 1\n'
         return error_response, 500, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
 
+def _add_health_service(health_status, name, result, unhealthy_statuses=('unhealthy', 'error'),
+                        degraded_statuses=('degraded',)):
+    """Record one service result and roll it into the overall status."""
+    health_status['services'][name] = result
+    status = result['status']
+    if status in unhealthy_statuses:
+        health_status['overall'] = 'unhealthy'
+    elif status in degraded_statuses and health_status['overall'] == 'healthy':
+        health_status['overall'] = 'degraded'
+
+
+def _required_service_health(active, port, service, leader_reason):
+    """Status for a service required on the current leader."""
+    healthy = active and port
+    return {
+        'status': 'healthy' if healthy else 'unhealthy',
+        'details': {
+            'service_active': active,
+            'port_open': port,
+            'required': True,
+            'reason': leader_reason,
+        }
+    }
+
+
+def _standby_service_health(active, port, service_reason):
+    """Status for a leader-elected service on a non-leader."""
+    running = active or port
+    if running:
+        details = {
+            'service_active': active,
+            'port_open': port,
+            'required': False,
+            'reason': 'split-brain: running on non-leader',
+        }
+    else:
+        details = {
+            'service_active': active,
+            'port_open': port,
+            'required': False,
+            'reason': service_reason,
+        }
+    return {'status': 'unhealthy' if running else 'standby', 'details': details}
+
+
+def _etcd_health():
+    if not is_etcd_node():
+        return {'status': 'not_applicable', 'details': {'reason': 'admin-api uses etcd only on storage nodes'}}
+    try:
+        client = get_etcd_client()
+        client.get('/test')
+        return {'status': 'healthy', 'details': 'connected'}
+    except Exception as e:
+        return {'status': 'unhealthy', 'details': str(e)}
+
+
+def _ceph_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_ceph_status()
+
+
+def _postgres_health(is_storage_lead):
+    running = check_service_status('postgresql@16-main')
+    port = check_port_open('localhost', 5432)
+    if is_storage_lead:
+        return _required_service_health(running, port, 'postgresql', 'storage leader')
+    return _standby_service_health(running, port, 'not storage leader')
+
+
+def _qdrant_health(is_storage_lead):
+    running = check_service_status('qdrant')
+    port = check_port_open('localhost', 6333)
+    if is_storage_lead:
+        return _required_service_health(running, port, 'qdrant', 'storage leader')
+    return _standby_service_health(running, port, 'not storage leader')
+
+
+def _leader_election_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    running = check_service_status('storage-leader-election')
+    return {
+        'status': 'healthy' if running else 'unhealthy',
+        'details': {'service_active': running}
+    }
+
+
+def _dhcp_health(is_dhcp_lead):
+    port = check_port_open('localhost', 8067)
+    if is_dhcp_lead:
+        return {
+            'status': 'healthy' if port else 'unhealthy',
+            'details': {
+                'health_port_open': port,
+                'required': True,
+                'reason': 'dhcp leader'
+            }
+        }
+    running = port
+    return {
+        'status': 'unhealthy' if running else 'standby',
+        'details': {
+            'health_port_open': port,
+            'required': False,
+            'reason': 'split-brain: dhcp running on non-leader' if running else 'not dhcp leader'
+        }
+    }
+
+
+def _squid_health():
+    running = check_service_status('squid')
+    port = check_port_open('localhost', 3128)
+    functional = False
+    error = None
+
+    if running and port:
+        try:
+            response = requests.get(
+                'http://localhost:12723/api/ping',
+                proxies={'http': 'http://localhost:3128'},
+                timeout=5
+            )
+            if response.status_code in [200, 503]:
+                functional = True
+            else:
+                error = f'HTTP {response.status_code}'
+        except requests.exceptions.ProxyError as e:
+            error = f'Proxy error: {str(e)}'
+        except requests.exceptions.Timeout:
+            error = 'Proxy timeout'
+        except Exception as e:
+            error = f'Proxy test failed: {str(e)}'
+
+    healthy = running and port and functional
+    return {
+        'status': 'healthy' if healthy else 'unhealthy',
+        'details': {
+            'service_active': running,
+            'port_open': port,
+            'proxy_functional': functional,
+            'error': error
+        }
+    }
+
+
+def _ntp_health():
+    running = check_service_status('ntp') or check_service_status('chrony')
+    return {
+        'status': 'healthy' if running else 'unhealthy',
+        'details': {'service_active': running}
+    }
+
+
+def _keepalived_health():
+    current_hostname = platform.node()
+    if is_etcd_node() and current_hostname in get_core_nodes():
+        running = check_service_status('keepalived')
+        return {
+            'status': 'healthy' if running else 'unhealthy',
+            'details': {'service_active': running}
+        }
+
+    running = check_service_status('keepalived')
+    if running:
+        return {
+            'status': 'unhealthy',
+            'details': {
+                'service_active': running,
+                'reason': 'split-brain: keepalived running on non-core node'
+            }
+        }
+    return {
+        'status': 'standby',
+        'details': {
+            'service_active': running,
+            'reason': 'not a core node'
+        }
+    }
+
+
 def get_comprehensive_health():
     """Get comprehensive health data (extracted from health() function)"""
     health_status = {
         'overall': 'healthy',
         'services': {}
     }
-    
-    # Determine current node type
     current_node_type = get_current_node_type()
     is_storage_node = current_node_type == 'storage'
 
-    # Check etcd — only storage (s*) nodes talk to etcd. Non-storage admin-api
-    # instances hold no etcd client (etcd is firewalled to s*), so probing it
-    # here would be both meaningless and a connection we deliberately removed.
-    if is_etcd_node():
-        try:
-            client = get_etcd_client()
-            client.get('/test')
-            health_status['services']['etcd'] = {'status': 'healthy', 'details': 'connected'}
-        except Exception as e:
-            health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
-            health_status['overall'] = 'unhealthy'
-    else:
-        health_status['services']['etcd'] = {
-            'status': 'not_applicable',
-            'details': {'reason': 'admin-api uses etcd only on storage nodes'}
-        }
-    
-    # Check Ceph storage (only on storage nodes)
-    if is_storage_node:
-        ceph_health = check_ceph_status()
-        health_status['services']['ceph'] = ceph_health
-        if ceph_health['status'] not in ['healthy', 'degraded']:
-            health_status['overall'] = 'unhealthy'
-    else:
-        health_status['services']['ceph'] = {
-            'status': 'not_applicable',
-            'details': {'reason': 'not required on compute nodes'}
-        }
-    
-    # Check PostgreSQL (always check, flag split-brain if running on non-leader)
-    postgres_running = check_service_status('postgresql@16-main')
-    postgres_port = check_port_open('localhost', 5432)
+    _add_health_service(health_status, 'etcd', _etcd_health(), ('unhealthy',), ())
+    _add_health_service(health_status, 'ceph', _ceph_health(is_storage_node), ('unhealthy', 'error', 'standby', 'unknown'), ())
+
     is_storage_lead = is_storage_leader()
-    
-    if is_storage_lead:
-        postgres_healthy = postgres_running and postgres_port
-        health_status['services']['postgresql'] = {
-            'status': 'healthy' if postgres_healthy else 'unhealthy',
-            'details': {
-                'service_active': postgres_running,
-                'port_open': postgres_port,
-                'required': True,
-                'reason': 'storage leader'
-            }
-        }
-        if not postgres_healthy:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Not leader but check for split-brain
-        if postgres_running or postgres_port:
-            health_status['services']['postgresql'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'service_active': postgres_running,
-                    'port_open': postgres_port,
-                    'required': False,
-                    'reason': 'split-brain: running on non-leader'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['postgresql'] = {
-                'status': 'standby',
-                'details': {
-                    'service_active': postgres_running,
-                    'port_open': postgres_port,
-                    'required': False,
-                    'reason': 'not storage leader'
-                }
-            }
-    
-    # Check Qdrant (always check, flag split-brain if running on non-leader)
-    qdrant_running = check_service_status('qdrant')
-    qdrant_port = check_port_open('localhost', 6333)
-    
-    if is_storage_lead:
-        qdrant_healthy = qdrant_running and qdrant_port
-        health_status['services']['qdrant'] = {
-            'status': 'healthy' if qdrant_healthy else 'unhealthy',
-            'details': {
-                'service_active': qdrant_running,
-                'port_open': qdrant_port,
-                'required': True,
-                'reason': 'storage leader'
-            }
-        }
-        if not qdrant_healthy:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Not leader but check for split-brain
-        if qdrant_running or qdrant_port:
-            health_status['services']['qdrant'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'service_active': qdrant_running,
-                    'port_open': qdrant_port,
-                    'required': False,
-                    'reason': 'split-brain: running on non-leader'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['qdrant'] = {
-                'status': 'standby',
-                'details': {
-                    'service_active': qdrant_running,
-                    'port_open': qdrant_port,
-                    'required': False,
-                    'reason': 'not storage leader'
-                }
-            }
-    
-    # Check storage-only services (storage_leader_election, dhcp_leader_election)
-    for service_name, systemd_name in [
-        ('storage_leader_election', 'storage-leader-election'),
-        ('dhcp_leader_election', 'dhcp-leader-election')
-    ]:
-        if is_storage_node:
-            service_running = check_service_status(systemd_name)
-            health_status['services'][service_name] = {
-                'status': 'healthy' if service_running else 'unhealthy',
-                'details': {'service_active': service_running}
-            }
-            if not service_running:
-                health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services'][service_name] = {
-                'status': 'not_applicable',
-                'details': {'reason': 'not required on compute nodes'}
-            }
-    
-    # Check DHCP (only required if we are DHCP leader)
-    is_dhcp_lead = is_dhcp_leader()
-    dhcp_port = check_port_open('localhost', 8067)  # DHCP health port
-    
-    if is_dhcp_lead:
-        health_status['services']['dhcp'] = {
-            'status': 'healthy' if dhcp_port else 'unhealthy',
-            'details': {
-                'health_port_open': dhcp_port,
-                'required': True,
-                'reason': 'dhcp leader'
-            }
-        }
-        if not dhcp_port:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Check for split-brain condition
-        if dhcp_port:
-            health_status['services']['dhcp'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'health_port_open': dhcp_port,
-                    'required': False,
-                    'reason': 'split-brain: dhcp running on non-leader'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['dhcp'] = {
-                'status': 'standby',
-                'details': {
-                    'health_port_open': dhcp_port,
-                    'required': False,
-                    'reason': 'not dhcp leader'
-                }
-            }
-    
-    # Check DNS (dnsmasq)
-    dns_health = check_dns_status()
-    health_status['services']['dns'] = dns_health
-    if dns_health['status'] == 'unhealthy':
-        health_status['overall'] = 'unhealthy'
-    
-    # Check Squid proxy
-    squid_running = check_service_status('squid')
-    squid_port = check_port_open('localhost', 3128)
-    squid_functional = False
-    squid_error = None
-    
-    if squid_running and squid_port:
-        # Test actual proxy functionality using local ping endpoint
-        try:
-            # Test a simple HTTP request through the proxy to our own ping endpoint
-            proxy_response = requests.get(
-                'http://localhost:12723/api/ping',
-                proxies={'http': 'http://localhost:3128'},
-                timeout=5
-            )
-            if proxy_response.status_code in [200, 503]:
-                squid_functional = True
-            else:
-                squid_error = f'HTTP {proxy_response.status_code}'
-        except requests.exceptions.ProxyError as e:
-            squid_error = f'Proxy error: {str(e)}'
-        except requests.exceptions.Timeout:
-            squid_error = 'Proxy timeout'
-        except Exception as e:
-            squid_error = f'Proxy test failed: {str(e)}'
-    
-    squid_healthy = squid_running and squid_port and squid_functional
-    health_status['services']['squid'] = {
-        'status': 'healthy' if squid_healthy else 'unhealthy',
-        'details': {
-            'service_active': squid_running,
-            'port_open': squid_port,
-            'proxy_functional': squid_functional,
-            'error': squid_error
-        }
-    }
-    if not squid_healthy:
-        health_status['overall'] = 'unhealthy'
-    
-    # Check NTP
-    ntp_running = check_service_status('ntp') or check_service_status('chrony')
-    health_status['services']['ntp'] = {
-        'status': 'healthy' if ntp_running else 'unhealthy',
-        'details': {'service_active': ntp_running}
-    }
-    if not ntp_running:
-        health_status['overall'] = 'unhealthy'
-    
-    # Check TLS certificate expiry
-    cert_health = check_certificate_expiry()
-    health_status['services']['tls_certificate'] = cert_health
-    if cert_health['status'] in ['expired', 'critical']:
-        health_status['overall'] = 'unhealthy'
-    elif cert_health['status'] == 'warning' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check clock skew
-    clock_skew = check_clock_skew()
-    health_status['services']['clock_skew'] = clock_skew
-    if clock_skew['status'] in ['critical', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif clock_skew['status'] == 'warning' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check Docker daemon (only on storage nodes)
-    if is_storage_node:
-        docker_daemon = check_docker_daemon()
-        health_status['services']['docker_daemon'] = docker_daemon
-        if docker_daemon['status'] in ['unhealthy', 'error']:
-            health_status['overall'] = 'unhealthy'
-        elif docker_daemon['status'] == 'degraded' and health_status['overall'] == 'healthy':
-            health_status['overall'] = 'degraded'
-    else:
-        health_status['services']['docker_daemon'] = {
-            'status': 'not_applicable',
-            'details': {'reason': 'not required on compute nodes'}
-        }
-    
-    # Check Docker registry
-    docker_registry = check_docker_registry()
-    health_status['services']['docker_registry'] = docker_registry
-    if docker_registry['status'] in ['unhealthy', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif docker_registry['status'] == 'degraded' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check storage-only services with complex health checks (tang, secrets_mount)
-    for service_name, check_func in [
-        ('tang', check_tang_service),
-        ('secrets_mount', check_secrets_mount)
-    ]:
-        if is_storage_node:
-            service_result = check_func()
-            health_status['services'][service_name] = service_result
-            if service_result['status'] in ['unhealthy', 'error']:
-                health_status['overall'] = 'unhealthy'
-            elif service_result['status'] == 'degraded' and health_status['overall'] == 'healthy':
-                health_status['overall'] = 'degraded'
-        else:
-            health_status['services'][service_name] = {
-                'status': 'not_applicable',
-                'details': {'reason': 'not required on compute nodes'}
-            }
-    
-    # Check Open-WebUI
-    open_webui = check_open_webui()
-    health_status['services']['open_webui'] = open_webui
-    if open_webui['status'] in ['unhealthy', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif open_webui['status'] == 'degraded' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check VIP status
+    _add_health_service(health_status, 'postgresql', _postgres_health(is_storage_lead), ('unhealthy',), ())
+    _add_health_service(health_status, 'qdrant', _qdrant_health(is_storage_lead), ('unhealthy',), ())
+    _add_health_service(health_status, 'storage_leader_election', _leader_election_health(is_storage_node), ('unhealthy',), ())
+    _add_health_service(health_status, 'dhcp', _dhcp_health(is_dhcp_leader()), ('unhealthy',), ())
+    _add_health_service(health_status, 'dns', check_dns_status(), ('unhealthy',), ())
+    _add_health_service(health_status, 'squid', _squid_health(), ('unhealthy',), ())
+    _add_health_service(health_status, 'ntp', _ntp_health(), ('unhealthy',), ())
+    _add_health_service(health_status, 'tls_certificate', check_certificate_expiry(), ('expired', 'critical'), ('warning',))
+    _add_health_service(health_status, 'clock_skew', check_clock_skew(), ('critical', 'error'), ('warning',))
+    _add_health_service(health_status, 'docker_daemon', _docker_daemon_health(is_storage_node), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'docker_registry', check_docker_registry(), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'tang', _tang_health(is_storage_node), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'secrets_mount', _secrets_mount_health(is_storage_node), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'open_webui', check_open_webui(), ('unhealthy', 'error'), ('degraded',))
+
     vip_health = check_vip_status()
-    gateway_vip_active = vip_health['gateway_vip']['active']
-    storage_vip_active = vip_health['storage_vip']['active']
-    
-    health_status['services']['gateway_vip'] = {
-        'status': 'healthy' if gateway_vip_active else 'standby',
-        'details': vip_health['gateway_vip']
-    }
-    
-    health_status['services']['storage_vip'] = {
-        'status': 'healthy' if storage_vip_active else 'standby',
-        'details': vip_health['storage_vip']
-    }
-    
-    # Check keepalived service (only on core nodes). Short-circuit on
-    # non-storage nodes so get_core_nodes() (an etcd read) only runs where an
-    # etcd client exists — non-core nodes are never core. etcd is core-only.
-    current_hostname = platform.node()
-    if is_etcd_node() and current_hostname in get_core_nodes():
-        keepalived_running = check_service_status('keepalived')
-        health_status['services']['keepalived'] = {
-            'status': 'healthy' if keepalived_running else 'unhealthy',
-            'details': {'service_active': keepalived_running}
-        }
-        if not keepalived_running:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Not a core node - keepalived should not be running
-        keepalived_running = check_service_status('keepalived')
-        if keepalived_running:
-            health_status['services']['keepalived'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'service_active': keepalived_running,
-                    'reason': 'split-brain: keepalived running on non-core node'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['keepalived'] = {
-                'status': 'standby',
-                'details': {
-                    'service_active': keepalived_running,
-                    'reason': 'not a core node'
-                }
-            }
-    
-    # Add leadership status for this node
-    health_status['storage_leader'] = is_storage_leader()
+    _add_health_service(health_status, 'gateway_vip', _gateway_vip_health(vip_health), (), ())
+    _add_health_service(health_status, 'storage_vip', _storage_vip_health(vip_health), (), ())
+    _add_health_service(health_status, 'keepalived', _keepalived_health(), ('unhealthy',), ())
+
+    health_status['storage_leader'] = is_storage_lead
     health_status['dhcp_leader'] = is_dhcp_leader()
     health_status['drained'] = is_node_drained()
-    
+
     return health_status
+
+
+def _docker_daemon_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_docker_daemon()
+
+
+def _tang_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_tang_service()
+
+
+def _secrets_mount_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_secrets_mount()
+
+
+def _gateway_vip_health(vip_health):
+    active = vip_health['gateway_vip']['active']
+    return {'status': 'healthy' if active else 'standby', 'details': vip_health['gateway_vip']}
+
+
+def _storage_vip_health(vip_health):
+    active = vip_health['storage_vip']['active']
+    return {'status': 'healthy' if active else 'standby', 'details': vip_health['storage_vip']}
 
 @app.route('/api/health')
 def health():
