@@ -1281,19 +1281,8 @@ def vm_sync_limits():
         updated += 1
     print(f"synced cpu/mem for {updated} VM(s) on {me}")
 
-def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
-              instance_type=None, billable=False):
-    """Launch a GPU instance (VM or container).
-
-    instance_type='auto' (or None) picks based on the host's
-    /etc/ycluster/host.yml — 'vm' on VM hosts (NVIDIA passthrough),
-    'container' on container hosts (AMD shared GPU). Override with
-    instance_type='vm' or 'container'.
-
-    For containers the gpu-ct profile already attaches the host's single
-    GPU; --gpus 0 removes it, any positive --gpus value just keeps the
-    profile's device (there's no per-GPU pinning on a single-GPU host).
-    """
+def _validate_vm_launch(name, owner, gpus, instance_type):
+    """Reject invalid names, GPU counts, types, and users without SSH keys."""
     _valid_vm_name(name)
     if gpus < 0:
         raise ValueError("--gpus cannot be negative")
@@ -1301,10 +1290,6 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
         instance_type = _default_instance_type()
     if instance_type not in ("vm", "container"):
         raise ValueError(f"Invalid --type '{instance_type}' (vm|container|auto)")
-    if image is None:
-        image = VM_IMAGE if instance_type == "vm" else CT_IMAGE
-    profile = VM_PROFILE if instance_type == "vm" else CT_PROFILE
-
     user = user_get(owner)
     if not user or not user.get("ssh_keys"):
         raise ValueError(
@@ -1312,31 +1297,26 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
             f"  ycluster vm ssh add {owner} '<public-key>'")
     if vm_get(name) or _instance_exists(name):
         raise ValueError(f"'{name}' already exists.")
+    return instance_type
 
-    # GPU selection: VM path pins specific passthrough GPUs from the host's
-    # vfio pool; container path shares the host's single GPU via the profile,
-    # so 'gpus' here is just a 0/non-zero toggle. Wedged GPUs (PCIe
-    # fault / DPC link-down) are probed out so a launch fails fast here
-    # instead of hanging OVMF for ~15 min on a dead card.
-    picked = []
-    if instance_type == "vm" and gpus:
-        picked = _select_free_gpus(gpus)
 
+def _create_incus_instance(name, instance_type, image, profile, cpu, mem,
+                           gpus, owner):
+    """Create the instance via incus init, pin a static IP, sync DNS."""
     gpu_desc = f"{gpus} GPU" if gpus else "no GPU"
     print(f"Creating {instance_type} '{name}' ({cpu} CPU, {mem} RAM, "
           f"{gpu_desc}) owned by '{owner}'...")
-    # incus init: --vm = VM; no flag = container (the default).
     type_args = ["--vm"] if instance_type == "vm" else []
     _incus("init", image, name, *type_args, "--profile", profile,
            "-c", f"limits.cpu={cpu}", "-c", f"limits.memory={mem}")
-
-    # Pin a static IP before first start, so dnsmasq always offers the
-    # same address to this MAC and ipv4_filtering (in the gpu-vm / gpu-ct
-    # profile) has an authoritative source-IP to enforce.
     pinned_ip = _pick_vm_ip()
     _pin_instance_ip(name, pinned_ip)
     sync_dns_records()
 
+
+def _attach_launch_gpus(name, instance_type, gpus, picked):
+    """Attach GPU devices after instance creation (VM path) or strip the
+    shared gpu0 device for a container launched with --gpus 0."""
     if instance_type == "vm":
         for i, pci in enumerate(picked):
             # A 'gpu' device of gputype=physical attaches the GPU's whole IOMMU
@@ -1344,19 +1324,13 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
             # separately or Incus fails with "device is already attached".
             _incus("config", "device", "add", name, f"gpu{i}", "gpu",
                    "gputype=physical", f"pci={pci}")
-    else:
+    elif gpus == 0:
         # gpu-ct profile bakes in a shared gpu0 device. Strip it on --gpus 0.
-        if gpus == 0:
-            _incus("config", "device", "remove", name, "gpu0", check=False)
+        _incus("config", "device", "remove", name, "gpu0", check=False)
 
-    _ensure_nas_share(name)
-    _incus("start", name)
 
-    # Register immediately, before SSH provisioning, so the instance is
-    # accounted for even if this command crashes — but mark it 'provisioning'
-    # until the launch fully completes, so an interrupted launch is
-    # recognisable.
-    record = {
+def _build_vm_record(name, owner, gpus, cpu, mem, instance_type):
+    return {
         "owner": owner,
         "gpus": gpus,
         "cpu": cpu,
@@ -1366,9 +1340,10 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "state": "provisioning",
     }
-    _put_json(VMS_PREFIX + name, record)
-    _record_event("launch", name, owner=owner, gpus=gpus, billable=billable)
 
+
+def _wait_and_provision(name, record, instance_type, gpus):
+    """Wait for boot, inject keys, sync bastion, and verify guest GPUs."""
     # Containers boot in seconds (no firmware enum); only GPU VMs need the
     # extended timeout.
     timeout = (GPU_VM_AGENT_TIMEOUT
@@ -1387,15 +1362,52 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     if instance_type == "vm" and gpus:
         _verify_guest_gpus(name, gpus)
 
+
+def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
+              instance_type=None, billable=False):
+    """Launch a GPU instance (VM or container).
+
+    instance_type='auto' (or None) picks based on the host's
+    /etc/ycluster/host.yml — 'vm' on VM hosts (NVIDIA passthrough),
+    'container' on container hosts (AMD shared GPU). Override with
+    instance_type='vm' or 'container'.
+
+    For containers the gpu-ct profile already attaches the host's single
+    GPU; --gpus 0 removes it, any positive --gpus value just keeps the
+    profile's device (there's no per-GPU pinning on a single-GPU host).
+    """
+    instance_type = _validate_vm_launch(name, owner, gpus, instance_type)
+    if image is None:
+        image = VM_IMAGE if instance_type == "vm" else CT_IMAGE
+    profile = VM_PROFILE if instance_type == "vm" else CT_PROFILE
+
+    # GPU selection: VM path pins specific passthrough GPUs from the host's
+    # vfio pool; container path shares the host's single GPU via the profile,
+    # so 'gpus' here is just a 0/non-zero toggle. Wedged GPUs (PCIe
+    # fault / DPC link-down) are probed out so a launch fails fast here
+    # instead of hanging OVMF for ~15 min on a dead card.
+    picked = []
+    if instance_type == "vm" and gpus:
+        picked = _select_free_gpus(gpus)
+
+    _create_incus_instance(name, instance_type, image, profile, cpu, mem,
+                           gpus, owner)
+    _attach_launch_gpus(name, instance_type, gpus, picked)
+    _ensure_nas_share(name)
+    _incus("start", name)
+
+    # Register immediately, before SSH provisioning, so the instance is
+    # accounted for even if this command crashes — but mark it 'provisioning'
+    # until the launch fully completes, so an interrupted launch is
+    # recognisable.
+    record = _build_vm_record(name, owner, gpus, cpu, mem, instance_type)
+    _put_json(VMS_PREFIX + name, record)
+    _record_event("launch", name, owner=owner, gpus=gpus, billable=billable)
+
+    _wait_and_provision(name, record, instance_type, gpus)
+
     record["state"] = "ready"
     _put_json(VMS_PREFIX + name, record)
-
-    where = (f"GPU(s): {', '.join(picked)}" if picked
-             else ("shared GPU" if (instance_type == "container" and gpus)
-                   else "no GPU"))
-    print(f"Launched '{name}' ({where})")
-    print(f"  ssh -J {BASTION_JUMP_USER}@<bastion-host>:<port> "
-          f"{VM_GUEST_USER}@{name}")
 
 def vm_resize(name, size):
     """Grow a VM's root disk to `size` (e.g. '160GiB').

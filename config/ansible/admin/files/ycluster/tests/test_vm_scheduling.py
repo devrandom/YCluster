@@ -957,3 +957,39 @@ class ReconcileWantOnTests(unittest.TestCase):
                                   {'vm1': {'gpus': 1}})
         gd.assert_called_once_with('vm1')
         self.assertEqual(to_start, [])
+
+
+class ValidateVMLaunchTests(unittest.TestCase):
+    @mock.patch.object(vm, '_instance_exists', return_value=False)
+    @mock.patch.object(vm, 'vm_get', return_value=None)
+    @mock.patch.object(vm, 'user_get')
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_valid_launch(self, valid_name, user_get, vm_get, exists):
+        user_get.return_value = {'ssh_keys': ['key']}
+        result = vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
+        self.assertEqual(result, 'vm')
+
+    @mock.patch.object(vm, 'user_get', return_value=None)
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_no_keys_raises(self, valid_name, user_get):
+        with self.assertRaisesRegex(ValueError, 'no SSH keys'):
+            vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
+
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_negative_gpus_raises(self, valid_name):
+        with self.assertRaisesRegex(ValueError, 'cannot be negative'):
+            vm._validate_vm_launch('vm1', 'a@x', -1, 'vm')
+
+    @mock.patch.object(vm, 'user_get', return_value={'ssh_keys': ['k']})
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_bad_type_raises(self, valid_name, user_get):
+        with self.assertRaisesRegex(ValueError, 'Invalid --type'):
+            vm._validate_vm_launch('vm1', 'a@x', 1, 'lxc')
+
+    @mock.patch.object(vm, 'user_get', return_value={'ssh_keys': ['k']})
+    @mock.patch.object(vm, '_instance_exists', return_value=True)
+    @mock.patch.object(vm, 'vm_get', return_value=None)
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_already_exists_raises(self, valid_name, vm_get, exists, user_get):
+        with self.assertRaisesRegex(ValueError, 'already exists'):
+            vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
