@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 import app as appmod
+import app_users
 
 
 def service(status, **details):
@@ -418,3 +419,47 @@ class DetermineIpTests(unittest.TestCase):
     def test_out_of_range(self):
         with self.assertRaises(ValueError):
             appmod.determine_ip_from_hostname('nas99')
+
+
+class AuthorizedProjectsTests(unittest.TestCase):
+    def test_admin_bypasses(self):
+        manager = mock.Mock()
+        self.assertIsNone(app_users.authorized_projects(mock.Mock(email='op'), True, manager))
+        manager.manager_projects.assert_not_called()
+
+    def test_manager_projects_normalized(self):
+        manager = mock.Mock(manager_projects=lambda email: [' a ', '', None])
+        got = app_users.authorized_projects(mock.Mock(email='op'), False, manager)
+        self.assertEqual(got, {'a'})
+
+
+class UsersActionRouteTests(unittest.TestCase):
+    def test_requires_manager(self):
+        with mock.patch.object(appmod, '_authentik_identity',
+                               return_value=mock.Mock(is_manager=False)):
+            response = appmod.app.test_client().post('/admin/users/action')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json(), {'error': 'admin only'})
+
+
+class UsersActionValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.identity = mock.Mock(is_manager=True, is_admin=False,
+                                  email='manager-user')
+
+    def test_invalid_email(self):
+        with mock.patch.object(appmod, '_authentik_identity', return_value=self.identity):
+            response = appmod.app.test_client().post(
+                '/admin/users/action', json={'action': 'invite', 'email': 'bad'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_unknown_action(self):
+        manager = mock.Mock(manager_projects=mock.Mock(return_value=['p']))
+        with mock.patch.object(appmod, '_authentik_identity', return_value=self.identity), \
+             mock.patch.object(appmod.re, 'fullmatch', return_value=object()), \
+             mock.patch('ycluster.utils.authentik_manager', manager):
+            response = appmod.app.test_client().post(
+                '/admin/users/action',
+                json={'action': 'unknown', 'email': 'target-user'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {'error': 'unknown action'})

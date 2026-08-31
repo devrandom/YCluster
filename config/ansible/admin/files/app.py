@@ -3434,17 +3434,12 @@ def users_data():
         return jsonify({'error': str(e)}), 502
 
 
-# Mutating. Every action maps onto a `ycluster user` operation. Admins may
-# run every action; managers may run a project-scoped subset (invite into
-# an authorized project, reset / edit-notes for users in an authorized
-# project) — see docs/design/manager-project-scoped-users.md. The page
-# hides controls accordingly, but the backend is the gate: every manager
-# action re-checks the manager's authorized projects against the target.
 @app.route('/admin/users/action', methods=['POST'])
 def users_action():
     id = _authentik_identity()
     if not id.is_manager:
         return jsonify({'error': 'admin only'}), 403
+    from app_users import authorized_projects
     from ycluster.utils import authentik_manager
     data = request.get_json(silent=True) or {}
     action = data.get('action')
@@ -3453,20 +3448,8 @@ def users_action():
         return jsonify({'error': 'invalid email'}), 400
     admin = id.is_admin
     try:
-        # Authorized projects for this caller (empty for admins — they
-        # bypass the checks below).
-        projects = None
-        if not admin:
-            # Normalize stored names (strip whitespace) so a project entered
-            # with stray spaces still matches the manager's authorization.
-            projects = set(p.strip() for p in
-                           (authentik_manager.manager_projects(id.email)
-                            if id.email else []) if p and p.strip())
-
+        projects = authorized_projects(id, admin, authentik_manager)
         def allow_user(target_email):
-            """Whether this caller may edit-notes / reset `target_email`:
-            admins always; managers only when the target's project is one
-            they're authorized for."""
             return admin or (authentik_manager.user_project(target_email)
                              or '') in projects
 
@@ -3492,7 +3475,6 @@ def users_action():
             msg = authentik_manager.set_active(email, active=(action == 'activate'))
             return jsonify({'ok': True, 'message': msg})
 
-        # --- manager-scoped actions (admins pass through) ---
         if action == 'invite':
             project = (data.get('project_name') or '').strip()
             if not admin:
@@ -3515,10 +3497,7 @@ def users_action():
             if not allow_user(email):
                 return jsonify({'error': 'not authorized for this user'}), 403
             if admin:
-                # `data.get(k)` returns None when the key is absent, which
-                # update_user() treats as "skip this field" — so omitting a
-                # field from the request leaves it unchanged. Passing ''
-                # clears.
+                # update_user skips absent fields; passing '' clears.
                 msg = authentik_manager.update_user(
                     email,
                     name=(data.get('name') or '').strip() or None,
