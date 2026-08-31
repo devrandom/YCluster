@@ -61,3 +61,18 @@ class DeleteKeysTests(unittest.TestCase):
         with mock.patch('builtins.print'):
             self.assertTrue(lease_manager._delete_keys(client, ['a', 'b', 'c'], 'MAC', 'aa'))
         self.assertEqual(client.delete.call_count, 3)
+
+
+class LeaseMainTests(unittest.TestCase):
+    def test_target_detection(self):
+        self.assertTrue(lease_manager._looks_like_mac('aa:bb'))
+        self.assertTrue(lease_manager._looks_like_mac('aabbccddeeff'))
+        self.assertFalse(lease_manager._looks_like_mac('host'))
+
+    def test_delete_target_dispatch(self):
+        with mock.patch.object(lease_manager, 'delete_by_mac', return_value=True) as mac, \
+                mock.patch.object(lease_manager, 'delete_by_hostname', return_value=False) as host:
+            self.assertTrue(lease_manager._delete_target('aa:bb'))
+            self.assertFalse(lease_manager._delete_target('host'))
+        mac.assert_called_once_with('aa:bb')
+        host.assert_called_once_with('host')

@@ -216,29 +216,37 @@ def _delete_keys(client, keys, label, source):
     return deleted_count > 0
 
 
+def _looks_like_mac(target):
+    return ':' in target or len(target.replace(':', '').replace('-', '')) == 12
+
+
+def _delete_target(target):
+    """Delete by MAC when the target looks like one, else by hostname."""
+    if _looks_like_mac(target):
+        return delete_by_mac(target)
+    return delete_by_hostname(target)
+
+
 def main():
     parser = argparse.ArgumentParser(description='DHCP Lease Manager')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # List commands
+
     subparsers.add_parser('allocations', help='List all node allocations')
     subparsers.add_parser('leases', help='List all DHCP leases')
     subparsers.add_parser('all', help='List both allocations and leases')
-    
-    # Delete commands
+
     delete_parser = subparsers.add_parser('delete', help='Delete entries')
     delete_parser.add_argument('target', help='Hostname or MAC address to delete')
-    
+
     args = parser.parse_args()
-    
     if not args.command:
         parser.print_help()
         return
-    
-    # Unset proxy environment variables
+
+    # Some etcd/http libraries honor proxy env; direct cluster traffic does not.
     os.environ.pop('http_proxy', None)
     os.environ.pop('https_proxy', None)
-    
+
     if args.command == 'all':
         list_allocations()
         list_leases()
@@ -247,16 +255,7 @@ def main():
     elif args.command == 'leases':
         list_leases()
     elif args.command == 'delete':
-        # Auto-detect if target is hostname or MAC address
-        target = args.target
-        if ':' in target or len(target.replace(':', '').replace('-', '')) == 12:
-            # Looks like a MAC address
-            success = delete_by_mac(target)
-        else:
-            # Assume it's a hostname
-            success = delete_by_hostname(target)
-        
-        if success:
+        if _delete_target(args.target):
             print("Deletion completed successfully")
         else:
             print("Deletion failed")
