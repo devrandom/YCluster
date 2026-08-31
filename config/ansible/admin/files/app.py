@@ -3689,6 +3689,77 @@ def vm_usage_page():
 
 
 @app.route('/admin/vm-usage/data')
+def _assemble_intervals(events, since_dt, now):
+    """Assemble running intervals per VM from the event stream (each VM's
+    pre-window event sorts before its window events, and the state machine
+    is per-VM, so the combined list needs no global re-sort). launch/start
+    open an interval (restart keeps one open across the gap), stop/destroy
+    close it; an interval still open accrues until now. Time is clipped to
+    the window; billable is a property of the opening event.
+
+    Returns {vm: {'owner': str, 'open': (ts, gpus, billable) | None,
+                  'billable': float, 'tracked': float}}.
+    """
+    def accrue(st, end):
+        start, ev_gpus, ev_billable = st['open']
+        lo, hi = max(start, since_dt), min(end, now)
+        if hi > lo:
+            hours = (hi - lo).total_seconds() / 3600 * (ev_gpus or 0)
+            st['tracked'] += hours
+            if ev_billable:
+                st['billable'] += hours
+
+    per_vm = {}
+    for ts, vm, event, owner, gpus, billable in events:
+        st = per_vm.setdefault(vm, {'owner': owner, 'open': None,
+                                    'billable': 0.0, 'tracked': 0.0})
+        if owner:
+            st['owner'] = owner
+        if event in ('launch', 'start', 'restart'):
+            if st['open'] is None:
+                st['open'] = (ts, gpus, billable)
+        elif event in ('stop', 'destroy'):
+            if st['open'] is not None:
+                accrue(st, ts)
+                st['open'] = None
+    for st in per_vm.values():
+        if st['open'] is not None:
+            accrue(st, now)
+    return per_vm
+
+
+def _usage_row(vm, ev, sm, registry, desired_all, last_state):
+    """Render one row of the per-VM usage table."""
+    owner = ev.get('owner') or sm.get('owner') or ''
+    tracked = round(ev.get('tracked', 0.0), 4)
+    observed = round(sm.get('observed', 0.0), 4)
+    # Is the VM on the clock right now, and on whose dime: an open
+    # event interval says billable/unbilled; running per the latest
+    # sample with no open interval is untracked runtime.
+    if ev.get('open') is not None:
+        current = 'billable' if ev['open'][2] else 'unbilled'
+    elif last_state.get(vm) == 'Running':
+        current = 'untracked'
+    else:
+        current = None
+    return {
+        'vm': vm,
+        'owner': owner,
+        'gpus': registry.get(vm, {}).get('gpus'),
+        'schedule_mode': ((desired_all.get(vm) or {}).get('mode', 'unmanaged')
+                          if vm in registry else None),
+        'windows': (desired_all.get(vm) or {}).get('windows', []),
+        'billable_gpu_hours': round(ev.get('billable', 0.0), 4),
+        'tracked_gpu_hours': tracked,
+        'observed_gpu_hours': observed,
+        'samples': sm.get('samples', 0),
+        'current': current,
+        # Sampling granularity is one interval; flag drift beyond that
+        # plus 10% slack.
+        'drift': abs(observed - tracked) > max(0.1, tracked * 0.1),
+    }
+
+
 def vm_usage_data():
     """Per-VM GPU-hours in the window: billable + tracked from lifecycle
     events (interval assembly), observed from incus-state samples."""
@@ -3735,37 +3806,7 @@ def vm_usage_data():
     except Exception:
         pass
 
-    # Assemble running intervals per VM from the event stream (each VM's
-    # pre-window event sorts before its window events, and the state machine
-    # is per-VM, so the combined list needs no global re-sort). launch/start
-    # open an interval (restart keeps one open across the gap), stop/destroy
-    # close it; an interval still open accrues until now. Time is clipped to
-    # the window; billable is a property of the opening event.
-    def accrue(st, end):
-        start, ev_gpus, ev_billable = st['open']
-        lo, hi = max(start, since_dt), min(end, now)
-        if hi > lo:
-            hours = (hi - lo).total_seconds() / 3600 * (ev_gpus or 0)
-            st['tracked'] += hours
-            if ev_billable:
-                st['billable'] += hours
-
-    per_vm = {}
-    for ts, vm, event, owner, gpus, billable in events:
-        st = per_vm.setdefault(vm, {'owner': owner, 'open': None,
-                                    'billable': 0.0, 'tracked': 0.0})
-        if owner:
-            st['owner'] = owner
-        if event in ('launch', 'start', 'restart'):
-            if st['open'] is None:
-                st['open'] = (ts, gpus, billable)
-        elif event in ('stop', 'destroy'):
-            if st['open'] is not None:
-                accrue(st, ts)
-                st['open'] = None
-    for st in per_vm.values():
-        if st['open'] is not None:
-            accrue(st, now)
+    per_vm = _assemble_intervals(events, since_dt, now)
 
     # Managers (non-admins) are project-scoped: they only see VM usage for
     # accounts in a project they're authorized for (none by default). Admins
@@ -3804,33 +3845,7 @@ def vm_usage_data():
         owner = ev.get('owner') or sm.get('owner') or ''
         if not _owner_visible(owner):
             continue
-        tracked = round(ev.get('tracked', 0.0), 4)
-        observed = round(sm.get('observed', 0.0), 4)
-        # Is the VM on the clock right now, and on whose dime: an open
-        # event interval says billable/unbilled; running per the latest
-        # sample with no open interval is untracked runtime.
-        if ev.get('open') is not None:
-            current = 'billable' if ev['open'][2] else 'unbilled'
-        elif last_state.get(vm) == 'Running':
-            current = 'untracked'
-        else:
-            current = None
-        rows.append({
-            'vm': vm,
-            'owner': owner,
-            'gpus': registry.get(vm, {}).get('gpus'),
-            'schedule_mode': ((desired_all.get(vm) or {}).get('mode', 'unmanaged')
-                              if vm in registry else None),
-            'windows': (desired_all.get(vm) or {}).get('windows', []),
-            'billable_gpu_hours': round(ev.get('billable', 0.0), 4),
-            'tracked_gpu_hours': tracked,
-            'observed_gpu_hours': observed,
-            'samples': sm.get('samples', 0),
-            'current': current,
-            # Sampling granularity is one interval; flag drift beyond that
-            # plus 10% slack.
-            'drift': abs(observed - tracked) > max(0.1, tracked * 0.1),
-        })
+        rows.append(_usage_row(vm, ev, sm, registry, desired_all, last_state))
     return jsonify(rows)
 
 
