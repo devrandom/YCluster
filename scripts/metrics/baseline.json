@@ -213,7 +213,7 @@
   "config/ansible/monitoring/files/osv-feed-publish.py": 0.0,
   "config/ansible/monitoring/files/update-blackbox-targets.py": 0.0,
   "config/ansible/monitoring/files/vm-gpu-collector.py": 0.0,
-  "local-ai-proxy total": 58.9
+  "local-ai-proxy total": 59.0
  },
  "crap": {
   "acl.go::Check": 6.0,
@@ -1150,7 +1150,7 @@
   "health.go::Close": 12.0,
   "health.go::IsHealthy": 2.0,
   "health.go::NewHealthChecker": 1.0,
-  "health.go::Probe": 56.0,
+  "health.go::Probe": 30.1,
   "health.go::ServesModel": 5.0,
   "health.go::Snapshot": 2.0,
   "health.go::Start": 20.0,

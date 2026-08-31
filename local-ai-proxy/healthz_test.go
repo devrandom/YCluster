@@ -193,3 +193,9 @@ func TestHealthzAuthProbeIsCached(t *testing.T) {
 		t.Errorf("auth /healthz hit %d times; want 1 (coalesced within TTL)", n)
 	}
 }
+
+func TestProbeNilChecker(t *testing.T) {
+	var hc *HealthChecker
+	u, _ := url.Parse("http://backend:8000")
+	hc.Probe(u) // should not panic
+}
