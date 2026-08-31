@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -279,25 +280,34 @@ func modelsRemoveBackendEverywhere(ctx context.Context, client *clientv3.Client,
 		fatal("etcd get %s: %v", prefix, err)
 	}
 
-	touched, deleted := 0, 0
-	for _, kv := range resp.Kvs {
-		name := strings.TrimPrefix(string(kv.Key), prefix)
-		updated, modelDeleted, ok := removeBackendFromValue(ctx, client, string(kv.Key), name, kv.Value, target)
-		if !ok {
-			continue
-		}
-		if updated {
-			touched++
-		}
-		if modelDeleted {
-			deleted++
-		}
-	}
+	touched, deleted := countBackendRemovals(ctx, client, prefix, resp.Kvs, target)
 	if touched == 0 {
 		fmt.Printf("No models reference backend %s\n", target)
 		return
 	}
 	fmt.Printf("Removed backend %s from %d model(s); %d model(s) deleted.\n", target, touched, deleted)
+}
+
+// countBackendRemovals filters target from each model under prefix.
+// Returns the number of models updated and deleted.
+func countBackendRemovals(ctx context.Context, client *clientv3.Client, prefix string, kvs []*mvccpb.KeyValue, target string) (touched, deleted int) {
+	for _, kv := range kvs {
+		name := strings.TrimPrefix(string(kv.Key), prefix)
+		updated, modelDeleted, ok := removeBackendFromValue(ctx, client, string(kv.Key), name, kv.Value, target)
+		if !ok {
+			continue
+		}
+		touched += boolToInt(updated)
+		deleted += boolToInt(modelDeleted)
+	}
+	return touched, deleted
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // removeBackendFromValue filters one etcd model mapping. Returns
