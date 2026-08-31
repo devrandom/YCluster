@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"flag"
+	"testing"
+
+	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
+)
 
 func TestDisabledPrefixFor(t *testing.T) {
 	// Unset DisabledPrefix must resolve to the same default the gateway uses
@@ -52,5 +57,39 @@ func TestNormalizeBackendURL(t *testing.T) {
 		if got, err := normalizeBackendURL(in); err != nil || got != want {
 			t.Errorf("normalizeBackendURL(%q) = %q, %v; want %q, nil", in, got, err, want)
 		}
+	}
+}
+
+func TestParseModelsAddArgs(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	apiBase, model, err := parseModelsAddArgs([]string{"http://backend:8000", "model"}, fs)
+	if err != nil || apiBase != "http://backend:8000" || model != "model" {
+		t.Fatalf("got %q, %q, %v", apiBase, model, err)
+	}
+
+	apiBase, model, err = parseModelsAddArgs([]string{"backend:8000"}, fs)
+	if err != nil || apiBase != "http://backend:8000" || model != "" {
+		t.Fatalf("discover: got %q, %q, %v", apiBase, model, err)
+	}
+
+	if _, _, err := parseModelsAddArgs(nil, fs); err == nil {
+		t.Fatal("empty args: want error")
+	}
+	if _, _, err := parseModelsAddArgs([]string{"http://backend:8000", "http://bad"}, fs); err == nil {
+		t.Fatal("URL model: want error")
+	}
+}
+
+func TestPrintDisabledBackend(t *testing.T) {
+	kv := &mvccpb.KeyValue{Key: []byte("/prefix/http://backend:8000"), Value: []byte("note")}
+	out := captureStdout(t, func() { printDisabledBackend("/prefix/", kv) })
+	if out != "  http://backend:8000  note\n" {
+		t.Fatalf("got %q", out)
+	}
+
+	kv.Value = nil
+	out = captureStdout(t, func() { printDisabledBackend("/prefix/", kv) })
+	if out != "  http://backend:8000\n" {
+		t.Fatalf("got %q", out)
 	}
 }

@@ -19,47 +19,6 @@ import (
 // ops subcommands (`models`, `backends`) when -config is not given.
 const DefaultConfigPath = "/etc/local-ai-proxy/config.yaml"
 
-func main() {
-	args, configPath, ok := parseArgs(os.Args[1:])
-	if !ok {
-		return
-	}
-
-	cfg, logger, metrics := mustServeConfig(configPath, args)
-	router, source, err := buildRouter(cfg, logger)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if source != nil {
-		defer source.Close()
-	}
-
-	health := startHealthChecker(cfg, source, metrics, logger)
-	if health != nil {
-		defer health.Close()
-	}
-
-	loadCounter := NewLoadCounter()
-	configureRouter(router, health, loadCounter)
-
-	h := NewHandler(router)
-	configureHandler(h, cfg, router, source, health, metrics, loadCounter)
-
-	// Outer middleware chain: TrustedHeaders strips X-User-Id for
-	// requests from outside the trusted proxy CIDRs, so nothing
-	// downstream (logging, handler, upstream backend) sees a forged
-	// identity.
-	var chained http.Handler = LoggingMiddleware(logger, h)
-	chained, err = TrustedHeadersMiddleware(cfg.TrustedProxies, chained)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	servers := buildServers(cfg, chained, metrics, logger)
-	runServers(servers, logger)
-	logger.Info("stopped")
-}
-
 // parseArgs handles the subcommand dispatch and config-path prefix. Returns
 // the remaining args for serve mode and the resolved config path. Returns
 // ok=false when the process should exit (either a CLI subcommand ran or
