@@ -143,38 +143,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Operator endpoint: current backend health states + per-model rollup.
 	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
-		auth := h.authStatus(r)
-		if h.Health != nil {
-			var models map[string][]*url.URL
-			if src := h.Health.source; src != nil {
-				models = src.Snapshot()
-			}
-			writeHealthz(w, r, h.Health.Snapshot(), models, auth)
-			return
-		}
-		writeHealthzNoop(w, r, auth)
+		h.serveHealthz(w, r)
 		return
 	}
 
 	// For multi-backend routers, we own the /v1/models response.
 	// Passthrough (Models()==nil) falls through to proxy the upstream.
-	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-		if modelRouted {
-			models := h.servableModels()
-			if acl := h.currentACL(); acl != nil {
-				user := r.Header.Get("X-User-Id")
-				groups := SplitGroups(r.Header.Get("X-User-Groups"))
-				filtered := models[:0]
-				for _, m := range models {
-					if acl.Check(m, user, groups) == nil {
-						filtered = append(filtered, m)
-					}
-				}
-				models = filtered
-			}
-			writeModelsList(w, models)
-			return
-		}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && modelRouted {
+		h.serveModelsList(w, r)
+		return
 	}
 
 	// In model-routed mode, reject obvious non-API paths with 404
@@ -189,56 +166,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tokenizer aliases: llama.cpp and vLLM both expose tokenizer
-	// endpoints at the bare /tokenize and /detokenize paths (neither
-	// serves them under /v1/). We accept the /v1/-prefixed form so
-	// clients can reach them through the same external surface as the
-	// rest of the OpenAI-compatible API, then rewrite to the backend's
-	// native path before dispatching.
-	//
-	// /v1/file_parse: MinerU's mineru-api serves at the bare
-	// /file_parse (no /v1/ prefix). Same rewrite convention as the
-	// tokenizer endpoints above — external clients use /v1/, we strip
-	// it before dispatching. See docs/design/mineru.md.
-	switch r.URL.Path {
-	case "/v1/tokenize":
-		r.URL.Path = "/tokenize"
-	case "/v1/detokenize":
-		r.URL.Path = "/detokenize"
-	case "/v1/file_parse":
-		r.URL.Path = "/file_parse"
-	}
+	rewriteAPIPath(r)
 
 	route, err := h.router.Route(r)
 	if route != nil {
 		SetRequestModel(r.Context(), route.Model)
 	}
-	if err != nil {
-		h.Metrics.ObserveRouteError(classifyRouteError(err))
-		if errors.Is(err, ErrNoHealthyBackend) {
-			h.logger.Warn("no healthy backend", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
-			writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", err.Error())
-			return
-		}
-		h.logger.Info("route rejected", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+	if h.handleRouteError(w, r, err) {
 		return
 	}
 
-	if acl := h.currentACL(); acl != nil {
-		user := r.Header.Get("X-User-Id")
-		groups := SplitGroups(r.Header.Get("X-User-Groups"))
-		if err := acl.Check(route.Model, user, groups); err != nil {
-			h.Metrics.ObserveRouteError(RouteErrACLDenied)
-			h.logger.Info("acl denied",
-				"model", route.Model, "user", user, "groups", groups,
-				"method", r.Method, "path", r.URL.Path)
-			writeOpenAIError(w, http.StatusForbidden, "permission_denied", err.Error())
-			return
-		}
+	if h.requestACL(w, r, route.Model) {
+		h.dispatch(w, r, route)
 	}
-
-	h.dispatch(w, r, route)
 }
 
 // classifyRouteError maps a Route() error to a stable metric label.
