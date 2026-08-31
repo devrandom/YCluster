@@ -3736,89 +3736,22 @@ def _usage_row(vm, ev, sm, registry, desired_all, last_state):
 def vm_usage_data():
     """Per-VM GPU-hours in the window: billable + tracked from lifecycle
     events (interval assembly), observed from incus-state samples."""
+    from app_usage import fetch_usage_state, owner_visibility, registry_snapshots, usage_rows
     since_days = max(1, min(90, request.args.get('since', 7, type=int)))
     conn, since_dt, err = _usage_stats_cursor(since_days)
     if err:
         return jsonify({'error': err}), 500
     assert conn is not None
-    now = datetime.now(UTC)
 
     with conn:
         with conn.cursor() as cur:
-            # Events inside the window, plus each VM's single latest event
-            # before it — that one row decides whether an interval was open
-            # (and with what gpus/billable) at the window start, so the scan
-            # stays bounded as history grows.
-            cur.execute('''SELECT DISTINCT ON (vm) ts, vm, event, owner, gpus, billable
-                           FROM vm_events WHERE ts < %s
-                           ORDER BY vm, ts DESC''', [since_dt])
-            pre_events = cur.fetchall()
-            cur.execute('''SELECT ts, vm, event, owner, gpus, billable
-                           FROM vm_events WHERE ts >= %s
-                           ORDER BY vm, ts''', [since_dt])
-            events = pre_events + cur.fetchall()
-            cur.execute('''
-                SELECT vm, MAX(COALESCE(owner, '')),
-                       SUM(CASE WHEN state = 'Running' THEN gpus * interval_s ELSE 0 END)::float / 3600,
-                       COUNT(*) FILTER (WHERE state = 'Running')
-                FROM vm_samples WHERE ts >= %s
-                GROUP BY vm
-            ''', [since_dt])
-            sampled = {r[0]: {'owner': r[1], 'observed': r[2] or 0.0,
-                              'samples': r[3]} for r in cur.fetchall()}
-            cur.execute('''SELECT DISTINCT ON (vm) vm, state
-                           FROM vm_samples ORDER BY vm, ts DESC''')
-            last_state = dict(cur.fetchall())
+            events, sampled, last_state = fetch_usage_state(cur, since_dt)
 
-    # Registry (current GPU count) and schedules; usage numbers still
-    # render if etcd is unreachable.
-    registry, desired_all = {}, {}
-    try:
-        registry = vmm.vms_all()
-        desired_all = vmm.desired_all()
-    except Exception:
-        pass
-
-    per_vm = _assemble_intervals(events, since_dt, now)
-
-    # Managers (non-admins) are project-scoped: they only see VM usage for
-    # accounts in a project they're authorized for (none by default). Admins
-    # keep the full roster; plain users are already owner-scoped by the
-    # pages feeding this data. Per-owner project lookups are cached so we
-    # don't hit the IdP per VM.
-    id = _authentik_identity()
-    managed_projects = None
-    owner_project = {}
-    if id.is_manager and not id.is_admin:
-        from ycluster.utils import authentik_manager
-        managed_projects = set(authentik_manager.manager_projects(id.email)
-                               if id.email else [])
-
-        def _owner_visible(owner):
-            if owner not in owner_project:
-                try:
-                    project = (authentik_manager.user_project(owner)
-                               if owner else '')
-                except Exception:
-                    # No IdP account (orphan VM owner) or transient IdP
-                    # failure: the owner can't be attributed to a project,
-                    # so fail closed — out of scope for a manager instead of
-                    # 500ing the whole page.
-                    project = ''
-                owner_project[owner] = project
-            return owner_project[owner] in managed_projects
-    else:
-        def _owner_visible(owner):
-            return True
-
-    rows = []
-    for vm in sorted(set(per_vm) | set(sampled)):
-        ev = per_vm.get(vm, {})
-        sm = sampled.get(vm, {})
-        owner = ev.get('owner') or sm.get('owner') or ''
-        if not _owner_visible(owner):
-            continue
-        rows.append(_usage_row(vm, ev, sm, registry, desired_all, last_state))
+    registry, desired_all = registry_snapshots(vmm)
+    per_vm = _assemble_intervals(events, since_dt, datetime.now(UTC))
+    from ycluster.utils import authentik_manager
+    visible = owner_visibility(_authentik_identity(), authentik_manager)
+    rows = usage_rows(per_vm, sampled, registry, desired_all, last_state, visible, _usage_row)
     return jsonify(rows)
 
 
