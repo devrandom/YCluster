@@ -73,37 +73,47 @@ def _show(args):
     print(json.dumps(redacted, indent=2))
 
 
-def _list(args):
-    peers = wg_config.list_peers()
+def _filter_peers(peers, args):
+    """Filter peers by status, if a status filter was requested."""
     if args.pending:
-        peers = [p for p in peers if p[1]['status'] == 'pending']
+        return [p for p in peers if p[1]['status'] == 'pending']
     if args.approved:
-        peers = [p for p in peers if p[1]['status'] == 'approved']
+        return [p for p in peers if p[1]['status'] == 'approved']
+    return peers
 
-    if args.as_json:
-        out = []
-        for hostname, peer, node in peers:
-            out.append({
-                'hostname': hostname,
-                'status': peer['status'],
-                'ip': node['ip'] if node else None,
-                'type': node['type'] if node else None,
-                'pubkey_sha256': peer.get('pubkey_sha256'),
-                'created_at': peer.get('created_at'),
-                'approved_at': peer.get('approved_at'),
-            })
-        print(json.dumps(out, indent=2))
-        return
 
-    if not peers:
-        print("no peers")
-        return
+def _peer_json(hostname, peer, node):
+    return {
+        'hostname': hostname,
+        'status': peer['status'],
+        'ip': node['ip'] if node else None,
+        'type': node['type'] if node else None,
+        'pubkey_sha256': peer.get('pubkey_sha256'),
+        'created_at': peer.get('created_at'),
+        'approved_at': peer.get('approved_at'),
+    }
+
+
+def _print_peers_table(peers):
     print(f"{'HOSTNAME':<10} {'STATUS':<10} {'TYPE':<10} {'IP':<16} {'FP':<18} CREATED")
     for hostname, peer, node in peers:
         ip = node['ip'] if node else '-'
         ntype = node['type'] if node else '-'
         fp = peer.get('pubkey_sha256', '-')
-        print(f"{hostname:<10} {peer['status']:<10} {ntype:<10} {ip:<16} {fp:<18} {peer.get('created_at','')}")
+        print(f"{hostname:<10} {peer['status']:<10} {ntype:<10} {ip:<16} "
+              f"{fp:<18} {peer.get('created_at','')}")
+
+
+def _list(args):
+    peers = _filter_peers(wg_config.list_peers(), args)
+    if args.as_json:
+        out = [_peer_json(hostname, peer, node) for hostname, peer, node in peers]
+        print(json.dumps(out, indent=2))
+        return
+    if not peers:
+        print("no peers")
+        return
+    _print_peers_table(peers)
 
 
 def _approve(args):
