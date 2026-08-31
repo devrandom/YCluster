@@ -31,23 +31,27 @@ func runCLI(subcmd string, args []string, configPath string) {
 	}
 }
 
-func runModels(args []string, configPath string) {
-	if len(args) == 0 {
-		fatalUsage("models <ls|add|remove>")
-	}
-	subcmd := args[0]
-	args = args[1:]
+type modelCommand func(args []string, configPath string)
 
-	switch subcmd {
-	case "ls", "list":
-		modelsLs(configPath, args)
-	case "add":
-		modelsAdd(args, configPath)
-	case "remove", "rm":
-		modelsRemove(args, configPath)
-	default:
+var modelCommands = map[string]modelCommand{
+	"ls":     wrapModelsLs,
+	"list":   wrapModelsLs,
+	"add":    modelsAdd,
+	"remove": modelsRemove,
+	"rm":     modelsRemove,
+}
+
+func wrapModelsLs(args []string, configPath string) {
+	modelsLs(configPath, args)
+}
+
+func runModels(args []string, configPath string) {
+	subcmd, rest := popSubcommand(args, "models <ls|add|remove>")
+	cmd, ok := modelCommands[subcmd]
+	if !ok {
 		fatalUsage("models <ls|add|remove>")
 	}
+	cmd(rest, configPath)
 }
 
 func discoverModels(apiBase string) ([]string, error) {
