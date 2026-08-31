@@ -566,6 +566,21 @@ def renew_certificates(non_interactive=False):
         _cleanup_temp_files(temp_key_path, csr_path, temp_dir)
 
 
+def _print_expiry(cert_value):
+    """Best-effort extraction of the Not After line from openssl output."""
+    try:
+        result = subprocess.run(['openssl', 'x509', '-noout', '-text'],
+                                input=cert_value.decode(), text=True,
+                                capture_output=True)
+        if result.returncode == 0:
+            for line in result.stdout.split('\n'):
+                if 'Not After' in line:
+                    print(f"Expires: {line.strip()}")
+                    break
+    except Exception:
+        pass
+
+
 def list_certificates():
     """List certificate status from etcd"""
     print("Certificate status:")
@@ -587,21 +602,7 @@ def list_certificates():
         
         if cert_value and key_value:
             print("Certificate: Present in etcd")
-            
-            # Try to get certificate info
-            try:
-                import subprocess
-                result = subprocess.run(['openssl', 'x509', '-noout', '-text'], 
-                                      input=cert_value.decode(), text=True, 
-                                      capture_output=True)
-                if result.returncode == 0:
-                    # Extract expiry date
-                    for line in result.stdout.split('\n'):
-                        if 'Not After' in line:
-                            print(f"Expires: {line.strip()}")
-                            break
-            except:
-                pass
+            _print_expiry(cert_value)
         else:
             print("Certificate: Not found in etcd")
         
