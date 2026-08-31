@@ -128,75 +128,77 @@ def delete_https_config():
     else:
         print("No HTTPS configuration found to delete")
 
-def main():
-    parser = argparse.ArgumentParser(description='Manage HTTPS domain configuration in etcd')
+def _print_https_config():
+    """Render the current HTTPS configuration to stdout."""
+    config = get_https_config()
+    if not config:
+        print("No HTTPS configuration found")
+        return
+    print("HTTPS Configuration:")
+    if 'domain' in config:
+        print(f"Primary domain: {config['domain']}")
+    if config.get('aliases'):
+        print(f"Aliases: {', '.join(config['aliases'])}")
+    if 'email' in config:
+        print(f"Email: {config['email']}")
+    all_domains = get_all_domains()
+    if all_domains:
+        print(f"All domains: {', '.join(all_domains)}")
+
+
+def _list_domains():
+    """Print all configured domains, one per line."""
+    domains = get_all_domains()
+    if domains:
+        for domain in domains:
+            print(domain)
+    else:
+        print("No domains configured")
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(
+        description='Manage HTTPS domain configuration in etcd')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # Set domain command
+
     domain_parser = subparsers.add_parser('set-domain', help='Set primary domain')
     domain_parser.add_argument('domain', help='Primary domain name')
-    
-    # Add alias command
+
     alias_parser = subparsers.add_parser('add-alias', help='Add domain alias')
     alias_parser.add_argument('alias', help='Domain alias to add')
-    
-    # Remove alias command
+
     remove_parser = subparsers.add_parser('remove-alias', help='Remove domain alias')
     remove_parser.add_argument('alias', help='Domain alias to remove')
-    
-    # Set email command
-    email_parser = subparsers.add_parser('set-email', help='Set email for Let\'s Encrypt')
+
+    email_parser = subparsers.add_parser(
+        'set-email', help="Set email for Let's Encrypt")
     email_parser.add_argument('email', help='Email address')
-    
-    # Get command
+
     subparsers.add_parser('get', help='Get current HTTPS configuration')
-    
-    # List domains command
     subparsers.add_parser('list-domains', help='List all domains (primary + aliases)')
-    
-    # Delete command
     subparsers.add_parser('delete', help='Delete HTTPS configuration')
-    
+    return parser
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
-    
+
     if not args.command:
         parser.print_help()
         return
-    
+
+    commands = {
+        'set-domain': lambda: set_domain(args.domain),
+        'add-alias': lambda: add_alias(args.alias),
+        'remove-alias': lambda: remove_alias(args.alias),
+        'set-email': lambda: set_email(args.email),
+        'get': _print_https_config,
+        'list-domains': _list_domains,
+        'delete': delete_https_config,
+    }
     try:
-        if args.command == 'set-domain':
-            set_domain(args.domain)
-        elif args.command == 'add-alias':
-            add_alias(args.alias)
-        elif args.command == 'remove-alias':
-            remove_alias(args.alias)
-        elif args.command == 'set-email':
-            set_email(args.email)
-        elif args.command == 'get':
-            config = get_https_config()
-            if config:
-                print("HTTPS Configuration:")
-                if 'domain' in config:
-                    print(f"Primary domain: {config['domain']}")
-                if config.get('aliases'):
-                    print(f"Aliases: {', '.join(config['aliases'])}")
-                if 'email' in config:
-                    print(f"Email: {config['email']}")
-                
-                all_domains = get_all_domains()
-                if all_domains:
-                    print(f"All domains: {', '.join(all_domains)}")
-            else:
-                print("No HTTPS configuration found")
-        elif args.command == 'list-domains':
-            domains = get_all_domains()
-            if domains:
-                for domain in domains:
-                    print(domain)
-            else:
-                print("No domains configured")
-        elif args.command == 'delete':
-            delete_https_config()
+        commands[args.command]()
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
