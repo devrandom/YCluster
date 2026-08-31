@@ -3603,6 +3603,16 @@ def settings_keys_add():
 
 
 @app.route('/admin/settings/keys/remove', methods=['POST'])
+def _remove_ssh_key(email, key):
+    """Remove one SSH key for a user. Raises on etcd/validation errors."""
+    rec = vmm.user_get(email) or {}
+    if key not in rec.get('ssh_keys', []):
+        raise KeyError('key not found')
+    # Pass the full key line so the substring match removes exactly it
+    # (distinct keys have distinct material, never a substring of each).
+    vmm.user_remove_key(email, key)
+
+
 def settings_keys_remove():
     id = _authentik_identity()
     if not id.email:
@@ -3611,12 +3621,7 @@ def settings_keys_remove():
     if not isinstance(key, str) or not key.strip():
         return jsonify({'error': 'no key provided'}), 400
     try:
-        rec = vmm.user_get(id.email) or {}
-        if key not in rec.get('ssh_keys', []):
-            return jsonify({'error': 'key not found'}), 404
-        # Pass the full key line so the substring match removes exactly it
-        # (distinct keys have distinct material, never a substring of each).
-        vmm.user_remove_key(id.email, key)
+        _remove_ssh_key(id.email, key)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
