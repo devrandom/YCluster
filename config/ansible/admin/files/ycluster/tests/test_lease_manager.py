@@ -42,10 +42,6 @@ class LeaseManagerHelpersTests(unittest.TestCase):
         self.assertEqual(lease_manager._format_lease({}, now), ('Unknown', 'Unknown'))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class DeleteKeysTests(unittest.TestCase):
     def test_mac_delete_keys(self):
         got = lease_manager._mac_delete_keys('host', 'aabb')
@@ -64,6 +60,11 @@ class DeleteKeysTests(unittest.TestCase):
 
 
 class LeaseMainTests(unittest.TestCase):
+    def run_main(self, *arguments):
+        with mock.patch.object(lease_manager.sys, 'argv', ['lease', *arguments]), \
+                mock.patch('builtins.print'):
+            lease_manager.main()
+
     def test_target_detection(self):
         self.assertTrue(lease_manager._looks_like_mac('aa:bb'))
         self.assertTrue(lease_manager._looks_like_mac('aabbccddeeff'))
@@ -76,3 +77,36 @@ class LeaseMainTests(unittest.TestCase):
             self.assertFalse(lease_manager._delete_target('host'))
         mac.assert_called_once_with('aa:bb')
         host.assert_called_once_with('host')
+
+    def test_no_command_prints_help(self):
+        with mock.patch.object(lease_manager.argparse.ArgumentParser, 'print_help') as help_:
+            self.run_main()
+        help_.assert_called_once_with()
+
+    def test_list_commands_dispatch(self):
+        with mock.patch.object(lease_manager, 'list_allocations') as allocations, \
+                mock.patch.object(lease_manager, 'list_leases') as leases:
+            self.run_main('all')
+            self.assertEqual(allocations.call_count, 1)
+            self.assertEqual(leases.call_count, 1)
+
+            allocations.reset_mock()
+            self.run_main('allocations')
+            self.assertEqual(allocations.call_count, 1)
+
+            leases.reset_mock()
+            self.run_main('leases')
+            self.assertEqual(leases.call_count, 1)
+
+    def test_delete_success_and_failure(self):
+        with mock.patch.object(lease_manager, '_delete_target', return_value=True) as target:
+            self.run_main('delete', 'host')
+            self.assertEqual(target.call_count, 1)
+
+        with mock.patch.object(lease_manager, '_delete_target', return_value=False), \
+                self.assertRaises(SystemExit):
+            self.run_main('delete', 'host')
+
+
+if __name__ == '__main__':
+    unittest.main()
