@@ -56,37 +56,51 @@ def register_inventory_commands(subparsers):
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _show_one(args):
+    """Show a single node by hostname."""
+    hw = inv.get_hardware(args.hostname)
+    asset = inv.get_asset(args.hostname)
+    data = {'hostname': args.hostname, 'hardware': hw, 'asset': asset}
+    if args.as_json:
+        print(json.dumps(data, indent=2))
+    else:
+        _print_node(args.hostname, hw, asset)
+
+
+def _rows_json(rows):
+    out = []
+    for r in rows:
+        alloc = r['allocation'] or {}
+        out.append({
+            'hostname': alloc.get('hostname'),
+            'type': alloc.get('type'),
+            'ip': alloc.get('ip'),
+            'hardware': r['hardware'],
+            'asset': r['asset'],
+        })
+    print(json.dumps(out, indent=2))
+
+
+def _rows_human(rows):
+    for r in rows:
+        alloc = r['allocation'] or {}
+        hostname = r.get('hostname') or alloc.get('hostname', '?')
+        _print_node(hostname, r['hardware'], r['asset'])
+        print()
+
+
 def _show(args):
     if args.hostname:
-        hw = inv.get_hardware(args.hostname)
-        asset = inv.get_asset(args.hostname)
-        data = {'hostname': args.hostname, 'hardware': hw, 'asset': asset}
-        if args.as_json:
-            print(json.dumps(data, indent=2))
-        else:
-            _print_node(args.hostname, hw, asset)
+        _show_one(args)
+        return
+
+    rows = inv.list_all()
+    rows.sort(key=lambda r: (r['allocation'] or {}).get('hostname', '') or
+                             (r['hardware'] or {}).get('hostname', '') or '')
+    if args.as_json:
+        _rows_json(rows)
     else:
-        rows = inv.list_all()
-        rows.sort(key=lambda r: (r['allocation'] or {}).get('hostname', '') or
-                                 (r['hardware'] or {}).get('hostname', '') or '')
-        if args.as_json:
-            out = []
-            for r in rows:
-                alloc = r['allocation'] or {}
-                out.append({
-                    'hostname': alloc.get('hostname'),
-                    'type': alloc.get('type'),
-                    'ip': alloc.get('ip'),
-                    'hardware': r['hardware'],
-                    'asset': r['asset'],
-                })
-            print(json.dumps(out, indent=2))
-        else:
-            for r in rows:
-                alloc = r['allocation'] or {}
-                hostname = r.get('hostname') or alloc.get('hostname', '?')
-                _print_node(hostname, r['hardware'], r['asset'])
-                print()
+        _rows_human(rows)
 
 
 def _print_node(hostname, hw, asset):
