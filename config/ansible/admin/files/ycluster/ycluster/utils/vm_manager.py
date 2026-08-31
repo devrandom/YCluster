@@ -1754,6 +1754,41 @@ def bastion_sync():
     _push_file(BASTION_CONTAINER, keys_path, content, BASTION_JUMP_USER)
     print(f"Bastion synced: {n} authorized key line(s).")
 
+def _extract_lifecycle_instance(line):
+    """Parse one incus monitor JSON line into (action, instance_name) for
+    started/restarted non-bastion instances. Returns (None, None) when the
+    line is irrelevant."""
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        return None, None
+    md = ev.get("metadata") or {}
+    action = md.get("action")
+    if action not in ("instance-started", "instance-restarted"):
+        return None, None
+    # source is "/1.0/instances/<name>"
+    src = md.get("source") or ""
+    parts = src.strip("/").split("/")
+    if len(parts) < 3 or parts[1] != "instances":
+        return None, None
+    return action, parts[2]
+
+
+def _queue_key_sync(name, cond, dirty_users, bastion_dirty):
+    """Queue a key re-sync for every user who can access `name`'s VM."""
+    rec = vm_get(name)
+    users = _vm_access_users(rec or {})
+    if not users:
+        return
+    print(f"bastion-watch: lifecycle event on '{name}' "
+          f"({', '.join(users)}) — queueing key sync", flush=True)
+    with cond:
+        for u in users:
+            dirty_users.add(u)
+        bastion_dirty[0] = True
+        cond.notify()
+
+
 def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
     """Watch incus lifecycle events; on instance-started/restarted, queue a
     key re-sync for every user who can access that VM (owner + additional).
@@ -1763,7 +1798,6 @@ def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
     the only way to notice. Runs in a daemon thread; if `incus monitor`
     dies, it is restarted with a short backoff.
     """
-    relevant = ("instance-started", "instance-restarted")
     while True:
         try:
             proc = subprocess.Popen(
@@ -1776,38 +1810,18 @@ def _incus_lifecycle_thread(cond, dirty_users, bastion_dirty):
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
+                action, name = _extract_lifecycle_instance(line)
+                if action is None:
                     continue
-                md = ev.get("metadata") or {}
-                action = md.get("action")
-                if action not in relevant:
-                    continue
-                src = md.get("source") or ""
-                # source is "/1.0/instances/<name>"
-                parts = src.strip("/").split("/")
-                if len(parts) < 3 or parts[1] != "instances":
-                    continue
-                name = parts[2]
                 if name == BASTION_CONTAINER:
                     continue
-                rec = vm_get(name)
-                users = _vm_access_users(rec or {})
-                if not users:
-                    continue
-                print(f"bastion-watch: lifecycle '{action}' on '{name}' "
-                      f"({', '.join(users)}) — queueing key sync", flush=True)
-                with cond:
-                    for u in users:
-                        dirty_users.add(u)
-                    bastion_dirty[0] = True
-                    cond.notify()
+                _queue_key_sync(name, cond, dirty_users, bastion_dirty)
             proc.wait()
         except Exception as e:
             print(f"bastion-watch: incus monitor crashed: {e!r}",
                   file=sys.stderr, flush=True)
         time.sleep(5)                              # backoff before restart
+
 
 def _watch_response_keys(response, prefix):
     """Return the changed keys (suffix past `prefix`) from an etcd3 watch

@@ -50,3 +50,37 @@ class PinQueuesTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ExtractLifecycleInstanceTests(unittest.TestCase):
+    def _line(self, action='instance-started', source='/1.0/instances/vm1'):
+        import json as _json
+        return _json.dumps({'metadata': {'action': action, 'source': source}})
+
+    def test_started(self):
+        action, name = vm._extract_lifecycle_instance(self._line())
+        self.assertEqual(action, 'instance-started')
+        self.assertEqual(name, 'vm1')
+
+    def test_restarted(self):
+        action, name = vm._extract_lifecycle_instance(
+            self._line(action='instance-restarted'))
+        self.assertEqual(action, 'instance-restarted')
+        self.assertEqual(name, 'vm1')
+
+    def test_irrelevant_action(self):
+        action, name = vm._extract_lifecycle_instance(
+            self._line(action='instance-shutdown'))
+        self.assertIsNone(action)
+        self.assertIsNone(name)
+
+    def test_bad_json(self):
+        action, name = vm._extract_lifecycle_instance('not json')
+        self.assertIsNone(action)
+        self.assertIsNone(name)
+
+    def test_bad_source_path(self):
+        action, name = vm._extract_lifecycle_instance(
+            self._line(source='/1.0/containers/vm1'))
+        self.assertIsNone(action)
+        self.assertIsNone(name)
