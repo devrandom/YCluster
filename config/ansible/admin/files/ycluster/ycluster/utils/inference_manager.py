@@ -16,6 +16,89 @@ import requests
 LOCAL_AI_PROXY_URL = "http://localhost:4001"
 
 
+def _colored_fn(use_color):
+    """Return a colorizing function, or identity when not a tty."""
+    state_color = {
+        "healthy":     "32",
+        "down":        "31",
+        "disabled":    "90",
+        "unavailable": "31",
+        "unknown":     "90",
+    }
+    status_color = {
+        "ok": "32",        # green
+        "degraded": "33",  # yellow
+        "down": "31",      # red
+        "unknown": "90",   # gray
+    }
+
+    def colored_status(status):
+        code = status_color.get(status, "0")
+        return f"\033[{code}m{status}\033[0m" if use_color else status
+
+    def colored_state(state):
+        code = state_color.get(state, "0")
+        return f"\033[{code}m{state}\033[0m" if use_color else state
+
+    return colored_status, colored_state
+
+
+def _print_backend_section(backends, colored_state):
+    max_url = max(len(b.get("url", "")) for b in backends)
+    for b in backends:
+        url = b.get("url", "?")
+        state = b.get("state", "?")
+        line = f"  {url.ljust(max_url)}  {colored_state(state)}"
+        if b.get("err"):
+            err = b["err"]
+            if len(err) > 70:
+                err = err[:67] + "..."
+            line += f"  {err}"
+        print(line)
+
+
+def _print_model_section(models, colored_state):
+    if not models:
+        return
+    print()
+    print("models:")
+    max_name = max(len(m.get("name", "")) for m in models)
+    for m in models:
+        name = m.get("name", "?")
+        state = m.get("state", "?")
+        line = f"  {name.ljust(max_name)}  {colored_state(state)}"
+        if len(m.get("backends", [])) > 1:
+            line += f"  ({len(m['backends'])} backends)"
+        print(line)
+
+
+def _render_status(data, use_color):
+    """Render the /healthz payload as human-readable output."""
+    status = data.get("status", "?")
+    healthy = data.get("healthy", 0)
+    down = data.get("down", 0)
+    disabled = data.get("disabled", 0)
+    backends = data.get("backends", [])
+    models = data.get("models", [])
+
+    colored_status, colored_state = _colored_fn(use_color)
+
+    if not backends:
+        print(f"status: {status}")
+        print(data.get("message", "no backends configured"))
+        return
+
+    summary = f"{healthy} healthy / {down} down"
+    if disabled:
+        summary += f" / {disabled} disabled"
+    print(f"status: {colored_status(status)}  ({summary})")
+
+    print()
+    print("backends:")
+    _print_backend_section(backends, colored_state)
+    _print_model_section(models, colored_state)
+
+
 def show_status(proxy_url=LOCAL_AI_PROXY_URL):
     """Print local-ai-proxy backend + model health from its /healthz."""
     try:
@@ -29,70 +112,7 @@ def show_status(proxy_url=LOCAL_AI_PROXY_URL):
         print(f"{proxy_url}/healthz returned HTTP {resp.status_code}: {resp.text}")
         sys.exit(1)
 
-    data = resp.json()
-    status = data.get("status", "?")
-    healthy = data.get("healthy", 0)
-    down = data.get("down", 0)
-    disabled = data.get("disabled", 0)
-    backends = data.get("backends", [])
-    models = data.get("models", [])
-
-    if not backends:
-        print(f"status: {status}")
-        print(data.get("message", "no backends configured"))
-        return
-
-    use_color = sys.stdout.isatty()
-
-    def colored(s, code):
-        return f"\033[{code}m{s}\033[0m" if use_color else s
-
-    status_color = {
-        "ok": "32",        # green
-        "degraded": "33",  # yellow
-        "down": "31",      # red
-        "unknown": "90",   # gray
-    }.get(status, "0")
-    state_color = {
-        "healthy":     "32",
-        "down":        "31",
-        "disabled":    "90",
-        "unavailable": "31",
-        "unknown":     "90",
-    }
-
-    summary = f"{healthy} healthy / {down} down"
-    if disabled:
-        summary += f" / {disabled} disabled"
-    print(f"status: {colored(status, status_color)}  ({summary})")
-
-    # Backends section
-    print()
-    print("backends:")
-    max_url = max(len(b.get("url", "")) for b in backends)
-    for b in backends:
-        url = b.get("url", "?")
-        state = b.get("state", "?")
-        line = f"  {url.ljust(max_url)}  {colored(state, state_color.get(state, '0'))}"
-        if b.get("err"):
-            err = b["err"]
-            if len(err) > 70:
-                err = err[:67] + "..."
-            line += f"  {err}"
-        print(line)
-
-    # Models section
-    if models:
-        print()
-        print("models:")
-        max_name = max(len(m.get("name", "")) for m in models)
-        for m in models:
-            name = m.get("name", "?")
-            state = m.get("state", "?")
-            line = f"  {name.ljust(max_name)}  {colored(state, state_color.get(state, '0'))}"
-            if len(m.get("backends", [])) > 1:
-                line += f"  ({len(m['backends'])} backends)"
-            print(line)
+    _render_status(resp.json(), sys.stdout.isatty())
 
 
 def reload_proxy():
