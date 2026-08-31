@@ -404,59 +404,60 @@ def check_docker_daemon():
         return {'status': 'error', 'details': {'message': f'Docker check failed: {str(e)}'}}
 
 
+def _registry_probe_status():
+    """Probe the Docker registry /v2/ endpoint; localhost, then storage VIP."""
+    test_urls = [f'http://localhost:5000/v2/', f'http://{STORAGE_VIP}:5000/v2/']
+    error = None
+    for url in test_urls:
+        try:
+            response = requests.get(url, timeout=5)
+        except requests.exceptions.Timeout:
+            error = 'Registry health check timeout'
+        except requests.exceptions.ConnectionError:
+            error = 'Registry connection failed'
+        except Exception as e:
+            error = f'Registry health check failed: {str(e)}'
+        else:
+            if response.status_code == 200:
+                version = response.headers.get('Docker-Distribution-Api-Version', 'unknown')
+                return True, version, None
+            error = f'Registry health check returned HTTP {response.status_code}'
+    return False, None, error
+
+
+def _registry_leader_status(running, port_open, healthy, version, error):
+    """Determine status/message on the storage leader."""
+    if running and port_open and healthy:
+        return 'healthy', f'Registry running and healthy (API version {version})'
+    if running and port_open:
+        return 'degraded', f'Registry running but health check failed: {error}'
+    if running:
+        return 'unhealthy', f'Registry running but port not accessible: {error}'
+    return 'unhealthy', 'Registry not running'
+
+
 def check_docker_registry():
     """Check Docker registry status and functionality"""
     try:
         registry_service_running = check_service_status('docker-registry')
         registry_container_running = False
         registry_port_open = check_port_open('localhost', 5000)
-
-        registry_healthy = False
-        registry_error = None
-        registry_version = None
+        registry_healthy, registry_version, registry_error = (False, None, None)
 
         if registry_port_open:
-            test_urls = ['http://localhost:5000/v2/', 'http://10.0.0.100:5000/v2/']
-            for url in test_urls:
-                try:
-                    health_response = requests.get(url, timeout=5)
-                    if health_response.status_code == 200:
-                        registry_healthy = True
-                        registry_version = health_response.headers.get(
-                            'Docker-Distribution-Api-Version', 'unknown')
-                        break
-                    else:
-                        registry_error = f'Registry health check returned HTTP {health_response.status_code}'
-                except requests.exceptions.Timeout:
-                    registry_error = 'Registry health check timeout'
-                except requests.exceptions.ConnectionError:
-                    registry_error = 'Registry connection failed'
-                except Exception as e:
-                    registry_error = f'Registry health check failed: {str(e)}'
+            registry_healthy, registry_version, registry_error = _registry_probe_status()
 
         registry_running = registry_service_running or registry_container_running
         is_storage_lead = is_storage_leader()
 
         if is_storage_lead:
-            if registry_running and registry_port_open and registry_healthy:
-                status = 'healthy'
-                message = f'Registry running and healthy (API version {registry_version})'
-            elif registry_running and registry_port_open:
-                status = 'degraded'
-                message = f'Registry running but health check failed: {registry_error}'
-            elif registry_running:
-                status = 'unhealthy'
-                message = f'Registry running but port not accessible: {registry_error}'
-            else:
-                status = 'unhealthy'
-                message = 'Registry not running'
+            status, message = _registry_leader_status(
+                registry_running, registry_port_open, registry_healthy,
+                registry_version, registry_error)
+        elif registry_running or registry_port_open:
+            status, message = 'unhealthy', 'Split-brain: Registry running on non-leader'
         else:
-            if registry_running or registry_port_open:
-                status = 'unhealthy'
-                message = 'Split-brain: Registry running on non-leader'
-            else:
-                status = 'standby'
-                message = 'Registry not required (not storage leader)'
+            status, message = 'standby', 'Registry not required (not storage leader)'
 
         return {
             'status': status,
@@ -603,57 +604,57 @@ def check_secrets_mount():
         return {'status': 'error', 'details': {'message': f'Secrets mount check failed: {str(e)}'}}
 
 
+def _open_webui_health_probe():
+    """Probe the Open-WebUI health endpoint; returns (healthy, version, error)."""
+    try:
+        response = requests.get('http://localhost:8380/health', timeout=5)
+    except requests.exceptions.Timeout:
+        return False, None, 'Open-WebUI health check timeout'
+    except requests.exceptions.ConnectionError:
+        return False, None, 'Open-WebUI connection failed'
+    except Exception as e:
+        return False, None, f'Open-WebUI health check failed: {str(e)}'
+
+    if response.status_code != 200:
+        return False, None, f'Open-WebUI health check returned HTTP {response.status_code}'
+    try:
+        version = response.json().get('version', 'unknown')
+    except Exception:
+        version = 'unknown'
+    return True, version, None
+
+
+def _open_webui_leader_status(running, port_open, healthy, version, error):
+    """Determine status/message on the storage leader."""
+    if running and port_open and healthy:
+        return 'healthy', f'Open-WebUI running and healthy (version {version})'
+    if running and port_open:
+        return 'degraded', f'Open-WebUI running but health check failed: {error}'
+    if running:
+        return 'unhealthy', f'Open-WebUI service running but port not accessible: {error}'
+    return 'unhealthy', 'Open-WebUI service not running'
+
+
 def check_open_webui():
     """Check Open-WebUI service status and functionality"""
     try:
         webui_service_running = check_service_status('open-webui')
         webui_port_open = check_port_open('localhost', 8380)
-
-        webui_healthy = False
-        webui_error = None
-        webui_version = None
+        webui_healthy, webui_version, webui_error = (False, None, None)
 
         if webui_port_open:
-            try:
-                health_response = requests.get('http://localhost:8380/health', timeout=5)
-                if health_response.status_code == 200:
-                    webui_healthy = True
-                    try:
-                        health_data = health_response.json()
-                        webui_version = health_data.get('version', 'unknown')
-                    except:
-                        webui_version = 'unknown'
-                else:
-                    webui_error = f'Open-WebUI health check returned HTTP {health_response.status_code}'
-            except requests.exceptions.Timeout:
-                webui_error = 'Open-WebUI health check timeout'
-            except requests.exceptions.ConnectionError:
-                webui_error = 'Open-WebUI connection failed'
-            except Exception as e:
-                webui_error = f'Open-WebUI health check failed: {str(e)}'
+            webui_healthy, webui_version, webui_error = _open_webui_health_probe()
 
         is_storage_lead = is_storage_leader()
 
         if is_storage_lead:
-            if webui_service_running and webui_port_open and webui_healthy:
-                status = 'healthy'
-                message = f'Open-WebUI running and healthy (version {webui_version})'
-            elif webui_service_running and webui_port_open:
-                status = 'degraded'
-                message = f'Open-WebUI running but health check failed: {webui_error}'
-            elif webui_service_running:
-                status = 'unhealthy'
-                message = f'Open-WebUI service running but port not accessible: {webui_error}'
-            else:
-                status = 'unhealthy'
-                message = 'Open-WebUI service not running'
+            status, message = _open_webui_leader_status(
+                webui_service_running, webui_port_open, webui_healthy,
+                webui_version, webui_error)
+        elif webui_service_running or webui_port_open:
+            status, message = 'unhealthy', 'Split-brain: Open-WebUI running on non-leader'
         else:
-            if webui_service_running or webui_port_open:
-                status = 'unhealthy'
-                message = 'Split-brain: Open-WebUI running on non-leader'
-            else:
-                status = 'standby'
-                message = 'Open-WebUI not required (not storage leader)'
+            status, message = 'standby', 'Open-WebUI not required (not storage leader)'
 
         return {
             'status': status,
