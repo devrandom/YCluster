@@ -704,43 +704,37 @@ def check_ceph_status():
     except:
         return {'status': 'unavailable', 'details': 'ceph command failed'}
 
+def _dns_query_details():
+    """Query the local resolver for this host and return (working, message)."""
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = ['127.0.0.1']
+        resolver.timeout = 3
+        resolver.lifetime = 5
+
+        local_hostname = platform.node()
+        answer = resolver.resolve(local_hostname, 'A')
+        if answer:
+            resolved_ips = [str(rdata) for rdata in answer]
+            return True, (f"Local DNS server responding "
+                          f"({local_hostname} -> {', '.join(resolved_ips)})")
+        return False, f"Local DNS query for {local_hostname} returned no results"
+    except dns.resolver.Timeout:
+        return False, "Local DNS query timeout"
+    except dns.resolver.NXDOMAIN:
+        return False, "Local DNS query: domain not found"
+    except dns.resolver.NoAnswer:
+        return False, "Local DNS query: no answer"
+    except Exception as e:
+        return False, f"Local DNS query error: {str(e)}"
+
+
 def check_dns_status():
     """Check DNS (dnsmasq) service and functionality"""
     try:
-        # Check if dnsmasq service is running
         service_running = check_service_status('dnsmasq')
-        
-        # Test local DNS server directly using dnspython
-        dns_working = False
-        dns_details = "DNS query failed"
-        
-        try:
-            # Create a resolver that queries the local DNS server directly
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = ['127.0.0.1']
-            resolver.timeout = 3
-            resolver.lifetime = 5
-            
-            # Query local hostname A record
-            local_hostname = platform.node()
-            answer = resolver.resolve(local_hostname, 'A')
-            if answer:
-                resolved_ips = [str(rdata) for rdata in answer]
-                dns_working = True
-                dns_details = f"Local DNS server responding ({local_hostname} -> {', '.join(resolved_ips)})"
-            else:
-                dns_details = f"Local DNS query for {local_hostname} returned no results"
-                
-        except dns.resolver.Timeout:
-            dns_details = "Local DNS query timeout"
-        except dns.resolver.NXDOMAIN:
-            dns_details = "Local DNS query: domain not found"
-        except dns.resolver.NoAnswer:
-            dns_details = "Local DNS query: no answer"
-        except Exception as e:
-            dns_details = f"Local DNS query error: {str(e)}"
-        
-        # Overall status
+        dns_working, dns_details = _dns_query_details()
+
         if service_running and dns_working:
             status = 'healthy'
             details = f"Service active, {dns_details}"
@@ -750,7 +744,7 @@ def check_dns_status():
         else:
             status = 'unhealthy'
             details = f"Service inactive, {dns_details}"
-            
+
         return {
             'status': status,
             'details': {
@@ -760,7 +754,8 @@ def check_dns_status():
             }
         }
     except Exception as e:
-        return {'status': 'error', 'details': f'DNS check failed: {str(e)}'}
+        return {'status': 'error', 'details': f"DNS check failed: {str(e)}"}
+
 
 def check_certificate_expiry():
     """Check TLS certificate expiry from etcd"""
@@ -779,7 +774,7 @@ def check_certificate_expiry():
     try:
         client = get_etcd_client()
         cert_value, _ = client.get('/cluster/tls/cert')
-        
+
         if not cert_value:
             return {
                 'status': 'not_configured',
@@ -789,20 +784,13 @@ def check_certificate_expiry():
                     'expires_at': None
                 }
             }
-        
-        # Parse the certificate
+
         cert_pem = cert_value.decode()
         cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
-        
-        # Get expiry date
         expires_at = cert.not_valid_after
-        now = datetime.now(UTC).replace(tzinfo=None)  # Remove timezone for comparison
-        
-        # Calculate days until expiry
-        time_until_expiry = expires_at - now
-        days_until_expiry = time_until_expiry.days
-        
-        # Determine status based on days remaining
+        now = datetime.now(UTC).replace(tzinfo=None)
+        days_until_expiry = (expires_at - now).days
+
         if days_until_expiry < 0:
             status = 'expired'
             message = f'Certificate expired {abs(days_until_expiry)} days ago'
@@ -815,7 +803,7 @@ def check_certificate_expiry():
         else:
             status = 'healthy'
             message = f'Certificate expires in {days_until_expiry} days'
-        
+
         return {
             'status': status,
             'details': {
@@ -826,7 +814,7 @@ def check_certificate_expiry():
                 'issuer': cert.issuer.rfc4514_string()
             }
         }
-        
+
     except Exception as e:
         return {
             'status': 'error',
