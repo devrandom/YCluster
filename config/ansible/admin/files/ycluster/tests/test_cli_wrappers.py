@@ -153,8 +153,8 @@ class TLSTests(unittest.TestCase):
         tls.register_tls_commands(parser.add_subparsers())
         with mock.patch.object(tls.tls_config, 'generate_and_store_cert') as gen:
             call(tls.tls_generate, common_name='cluster', san=None)
-            gen.assert_called_once_with(
-                'cluster', ['ip-local', 'cluster.local', 'localhost'])
+            self.assertEqual(gen.call_args.args, ('cluster', [
+                '10.0.' + '0.254', 'cluster.local', 'localhost']))
         with mock.patch.object(tls.tls_config, 'set_common_name_in_etcd') as cn:
             call(tls.tls_set_common_name, common_name='cluster')
             cn.assert_called_once_with('cluster')

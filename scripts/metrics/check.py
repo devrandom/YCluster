@@ -351,6 +351,7 @@ def py_coverage(
                 "test_node_temps_collector",
                 "test_ntfy_webhook",
                 "test_osv_feed_collector",
+                "test_target_and_provision",
             ],
         ),
     )
