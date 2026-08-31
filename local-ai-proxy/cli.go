@@ -239,26 +239,40 @@ func modelsRemove(args []string, configPath string) {
 		fmt.Fprintln(os.Stderr, "<url> alone removes that backend from every model.")
 	}
 	_ = fs.Parse(args)
-	rest := fs.Args()
+
+	model, apiBase := resolveRemoveArgs(fs.Args(), *apiBaseFlag, fs)
+	if model == "" && apiBase == "" {
+		os.Exit(2)
+	}
 
 	client, prefix := mustEtcdForCLI(configPath)
 	defer client.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Resolve (model, apiBase) from the positionals plus --api-base.
-	// A positional containing "://" is a backend URL; the other a model.
-	// This lets `remove` mirror `add`'s `<url> [model]` shape while still
-	// accepting the model-first `<model> [--api-base <url>]` form.
-	model := ""
-	apiBase := *apiBaseFlag
+	if model == "" {
+		modelsRemoveBackendEverywhere(ctx, client, prefix, apiBase)
+		return
+	}
+	if apiBase == "" {
+		deleteEtcdKey(ctx, client, prefix+model)
+		fmt.Printf("Removed model: %s\n", model)
+		return
+	}
+	modelsRemoveOne(ctx, client, prefix, model, apiBase)
+}
+
+// resolveRemoveArgs accepts both the model-first and URL-first forms:
+// `<model> [--api-base <url>]` and `<url> [model]`. A positional containing
+// "://" is treated as a backend URL; the other as the model name.
+func resolveRemoveArgs(rest []string, apiBase string, fs *flag.FlagSet) (model, resolvedURL string) {
+	resolvedURL = apiBase
 	for _, a := range rest {
 		if strings.Contains(a, "://") {
-			if apiBase != "" && apiBase != a {
-				fatal("backend specified twice (%s and %s)", apiBase, a)
+			if resolvedURL != "" && resolvedURL != a {
+				fatal("backend specified twice (%s and %s)", resolvedURL, a)
 			}
-			apiBase = a
+			resolvedURL = a
 		} else {
 			if model != "" {
 				fatal("more than one model given (%s and %s)", model, a)
@@ -266,71 +280,56 @@ func modelsRemove(args []string, configPath string) {
 			model = a
 		}
 	}
-	if model == "" && apiBase == "" {
+	if model == "" && resolvedURL == "" {
 		fs.Usage()
-		os.Exit(2)
 	}
+	return model, resolvedURL
+}
 
-	// Backend only: drop that backend from every model — the inverse of
-	// the bulk `models add <api-base>` auto-discovery.
-	if model == "" {
-		modelsRemoveBackendEverywhere(ctx, client, prefix, apiBase)
-		return
-	}
-
+// modelsRemoveOne removes a single backend from a single model. When the
+// removed backend is the last, the model is deleted entirely.
+func modelsRemoveOne(ctx context.Context, client *clientv3.Client, prefix, model, rawAPIBase string) {
 	key := prefix + model
-	resp, err := client.Get(ctx, key)
-	if err != nil {
-		fatal("etcd get %s: %v", key, err)
-	}
-	if len(resp.Kvs) == 0 {
-		fatal("no such model: %s", model)
-	}
-
-	if apiBase == "" {
-		if _, err := client.Delete(ctx, key); err != nil {
-			fatal("etcd delete %s: %v", key, err)
-		}
-		fmt.Printf("Removed model: %s\n", model)
-		return
-	}
-
-	target, err := normalizeBackendURL(apiBase)
+	v := mustGetEtcdModelValue(client, key, model)
+	target, err := normalizeBackendURL(rawAPIBase)
 	if err != nil {
 		fatal("%v", err)
 	}
-	var v etcdModelValue
-	if err := json.Unmarshal(resp.Kvs[0].Value, &v); err != nil {
-		fatal("existing value at %s is not JSON: %v", key, err)
+
+	filtered, removed := filterBackends(v.Backends, target)
+	if !removed {
+		fatal("model %s has no backend %s", model, target)
 	}
-	filtered := v.Backends[:0]
+	if len(filtered) == 0 {
+		deleteEtcdKey(ctx, client, key)
+		fmt.Printf("Removed last backend from %s — model deleted.\n", model)
+		return
+	}
+	v.Backends = filtered
+	mustPutEtcdModelValue(client, key, v)
+	fmt.Printf("Removed backend %s from %s.\n", target, model)
+}
+
+// filterBackends returns the backend slice without target, using the same
+// in-place filter semantics as the rest of the CLI. Returns the filtered
+// slice and whether the target was present.
+func filterBackends(backends []etcdBackendEntry, target string) ([]etcdBackendEntry, bool) {
+	filtered := backends[:0]
 	removed := false
-	for _, b := range v.Backends {
+	for _, b := range backends {
 		if b.APIBase == target {
 			removed = true
 			continue
 		}
 		filtered = append(filtered, b)
 	}
-	if !removed {
-		fatal("model %s has no backend %s", model, target)
+	return filtered, removed
+}
+
+func deleteEtcdKey(ctx context.Context, client *clientv3.Client, key string) {
+	if _, err := client.Delete(ctx, key); err != nil {
+		fatal("etcd delete %s: %v", key, err)
 	}
-	if len(filtered) == 0 {
-		if _, err := client.Delete(ctx, key); err != nil {
-			fatal("etcd delete %s: %v", key, err)
-		}
-		fmt.Printf("Removed last backend from %s — model deleted.\n", model)
-		return
-	}
-	v.Backends = filtered
-	buf, err := json.Marshal(v)
-	if err != nil {
-		fatal("marshal: %v", err)
-	}
-	if _, err := client.Put(ctx, key, string(buf)); err != nil {
-		fatal("etcd put %s: %v", key, err)
-	}
-	fmt.Printf("Removed backend %s from %s.\n", target, model)
 }
 
 // modelsRemoveBackendEverywhere drops the given backend URL from every
@@ -344,50 +343,50 @@ func modelsRemoveBackendEverywhere(ctx context.Context, client *clientv3.Client,
 	if err != nil {
 		fatal("etcd get %s: %v", prefix, err)
 	}
+
 	touched, deleted := 0, 0
 	for _, kv := range resp.Kvs {
 		name := strings.TrimPrefix(string(kv.Key), prefix)
-		var v etcdModelValue
-		if err := json.Unmarshal(kv.Value, &v); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: invalid JSON, skipped: %v\n", name, err)
+		updated, modelDeleted, ok := removeBackendFromValue(ctx, client, string(kv.Key), name, kv.Value, target)
+		if !ok {
 			continue
 		}
-		filtered := v.Backends[:0]
-		removed := false
-		for _, b := range v.Backends {
-			if b.APIBase == target {
-				removed = true
-				continue
-			}
-			filtered = append(filtered, b)
+		if updated {
+			touched++
 		}
-		if !removed {
-			continue
-		}
-		touched++
-		if len(filtered) == 0 {
-			if _, err := client.Delete(ctx, string(kv.Key)); err != nil {
-				fatal("etcd delete %s: %v", kv.Key, err)
-			}
+		if modelDeleted {
 			deleted++
-			fmt.Printf("  deleted model %s (last backend removed)\n", name)
-			continue
 		}
-		v.Backends = filtered
-		buf, err := json.Marshal(v)
-		if err != nil {
-			fatal("marshal %s: %v", name, err)
-		}
-		if _, err := client.Put(ctx, string(kv.Key), string(buf)); err != nil {
-			fatal("etcd put %s: %v", kv.Key, err)
-		}
-		fmt.Printf("  removed backend from %s\n", name)
 	}
 	if touched == 0 {
 		fmt.Printf("No models reference backend %s\n", target)
 		return
 	}
 	fmt.Printf("Removed backend %s from %d model(s); %d model(s) deleted.\n", target, touched, deleted)
+}
+
+// removeBackendFromValue filters one etcd model mapping. Returns
+// (backend was removed, model was deleted, value was valid JSON).
+func removeBackendFromValue(ctx context.Context, client *clientv3.Client, key, name string, raw []byte, target string) (updated, deleted, valid bool) {
+	var v etcdModelValue
+	if err := json.Unmarshal(raw, &v); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s: invalid JSON, skipped: %v\n", name, err)
+		return false, false, false
+	}
+
+	filtered, removed := filterBackends(v.Backends, target)
+	if !removed {
+		return false, false, true
+	}
+	if len(filtered) == 0 {
+		deleteEtcdKey(ctx, client, key)
+		fmt.Printf("  deleted model %s (last backend removed)\n", name)
+		return true, true, true
+	}
+	v.Backends = filtered
+	mustPutEtcdModelValue(client, key, v)
+	fmt.Printf("  removed backend from %s\n", name)
+	return true, false, true
 }
 
 func backendsDisable(args []string, configPath string) {

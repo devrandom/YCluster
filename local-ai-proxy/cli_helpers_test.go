@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"strings"
@@ -52,5 +53,45 @@ func TestPrintACLSet(t *testing.T) {
 	want := "ACL updated for model:\n  +user:alice\n  -group:staff\n"
 	if out != want {
 		t.Fatalf("got %q, want %q", out, want)
+	}
+}
+
+func TestResolveRemoveArgs(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+
+	model, apiBase := resolveRemoveArgs([]string{"https://backend", "model"}, "", fs)
+	if model != "model" || apiBase != "https://backend" {
+		t.Fatalf("URL-first: got model=%q apiBase=%q", model, apiBase)
+	}
+
+	model, apiBase = resolveRemoveArgs([]string{"model"}, "https://backend", fs)
+	if model != "model" || apiBase != "https://backend" {
+		t.Fatalf("model-first: got model=%q apiBase=%q", model, apiBase)
+	}
+
+	model, apiBase = resolveRemoveArgs([]string{}, "", fs)
+	if model != "" || apiBase != "" {
+		t.Fatalf("empty: got model=%q apiBase=%q", model, apiBase)
+	}
+}
+
+func TestFilterBackends(t *testing.T) {
+	backends := []etcdBackendEntry{
+		{APIBase: "http://a:8000"},
+		{APIBase: "http://b:8000"},
+		{APIBase: "http://c:8000"},
+	}
+
+	filtered, removed := filterBackends(backends, "http://b:8000")
+	if !removed {
+		t.Fatal("expected removed=true")
+	}
+	if len(filtered) != 2 || filtered[0].APIBase != "http://a:8000" || filtered[1].APIBase != "http://c:8000" {
+		t.Fatalf("unexpected filtered backends: %v", filtered)
+	}
+
+	_, removed = filterBackends(backends, "http://missing:8000")
+	if removed {
+		t.Fatal("expected removed=false for missing backend")
 	}
 }
