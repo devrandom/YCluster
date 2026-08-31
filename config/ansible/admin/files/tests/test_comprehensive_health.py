@@ -378,3 +378,13 @@ class DnsQueryDetailsTests(unittest.TestCase):
             working, message = appmod._dns_query_details()
         self.assertFalse(working)
         self.assertEqual(message, 'Local DNS query timeout')
+
+
+class DisabledHealthTests(unittest.TestCase):
+    def test_disabled_host_seeding(self):
+        hosts = [
+            {'hostname': 'on', 'type': 'storage'},
+            {'hostname': 'off', 'type': 'storage', 'disabled': True},
+        ]
+        self.assertEqual(appmod._disabled_health(hosts),
+                         {'off': {'status': 'disabled', 'services': []}})

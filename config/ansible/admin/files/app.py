@@ -2411,15 +2411,18 @@ def _scrub_adhoc_etcd(result):
     return result
 
 
+def _disabled_health(hosts):
+    """Seed the health map with disabled-host placeholders."""
+    return {h['hostname']: {'status': 'disabled', 'services': []}
+            for h in hosts if h.get('disabled', False)}
+
+
 def get_all_host_health(hosts):
     """Fetch health for all non-disabled hosts in parallel."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    host_health = {}
-    active = [h for h in hosts if not h.get('disabled', False)]
     types = {h['hostname']: h.get('type') for h in hosts}
-    for h in hosts:
-        if h.get('disabled', False):
-            host_health[h['hostname']] = {'status': 'disabled', 'services': []}
+    host_health = _disabled_health(hosts)
+    active = [h for h in hosts if h['hostname'] not in host_health]
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         # Use hostname, not IP — etcd's IP field can be stale (e.g. after a
