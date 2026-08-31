@@ -109,6 +109,11 @@ func modelsAdd(args []string, configPath string) {
 		modelsAddOne(client, prefix, rest[1], apiBase)
 		return
 	}
+	modelsAddDiscovered(client, prefix, apiBase)
+}
+
+// modelsAddDiscovered discovers models from the backend and adds them all.
+func modelsAddDiscovered(client *clientv3.Client, prefix, apiBase string) {
 	ids, err := discoverModels(apiBase)
 	if err != nil {
 		fatal("%v", err)
