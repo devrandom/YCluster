@@ -159,7 +159,6 @@
   "serve.go::buildServeStack": 2,
   "serve.go::main": 2,
   "serve.go::newServeResources": 5,
-  "source.go::ACLSnapshot": 5,
   "source.go::Close": 2,
   "source.go::NewEtcdSource": 2,
   "source.go::NewYAMLSource": 6,
@@ -168,6 +167,8 @@
   "source.go::applyWatchEvents": 12,
   "source.go::parseKV": 8,
   "source.go::watch": 5,
+  "source_acl.go::ACLSnapshot": 1,
+  "source_acl.go::copyACLModels": 3,
   "trusted.go::TrustedHeadersMiddleware": 3,
   "trusted.go::parseCIDRs": 4,
   "trusted.go::remoteIsTrusted": 5
@@ -237,7 +238,7 @@
   "config/ansible/monitoring/files/osv-feed-publish.py": 0.0,
   "config/ansible/monitoring/files/update-blackbox-targets.py": 0.0,
   "config/ansible/monitoring/files/vm-gpu-collector.py": 0.0,
-  "local-ai-proxy total": 61.3
+  "local-ai-proxy total": 61.9
  },
  "crap": {
   "acl.go::Check": 6.0,
@@ -1341,7 +1342,6 @@
   "serve.go::main": 12.0,
   "serve.go::newServeResources": 20.0,
   "serve.go::wireServeHandler": 2.0,
-  "source.go::ACLSnapshot": 30.0,
   "source.go::Client": 2.0,
   "source.go::Close": 2.0,
   "source.go::NewEtcdSource": 12.0,
@@ -1352,6 +1352,9 @@
   "source.go::modelName": 1.0,
   "source.go::parseKV": 7.0,
   "source.go::watch": 20.0,
+  "source_acl.go::ACLSnapshot": 2.0,
+  "source_acl.go::clearACLModels": 1.0,
+  "source_acl.go::copyACLModels": 4.0,
   "trusted.go::TrustedHeadersMiddleware": 3.0,
   "trusted.go::parseCIDRs": 4.0,
   "trusted.go::remoteIsTrusted": 5.0
@@ -2512,7 +2515,6 @@
   "serve.go::main": 3,
   "serve.go::newServeResources": 4,
   "serve.go::wireServeHandler": 1,
-  "source.go::ACLSnapshot": 5,
   "source.go::Client": 1,
   "source.go::Close": 1,
   "source.go::NewEtcdSource": 3,
@@ -2523,6 +2525,9 @@
   "source.go::modelName": 1,
   "source.go::parseKV": 7,
   "source.go::watch": 4,
+  "source_acl.go::ACLSnapshot": 2,
+  "source_acl.go::clearACLModels": 1,
+  "source_acl.go::copyACLModels": 4,
   "trusted.go::TrustedHeadersMiddleware": 3,
   "trusted.go::parseCIDRs": 4,
   "trusted.go::remoteIsTrusted": 5
@@ -2629,7 +2634,8 @@
   "router.go": 71.5,
   "routing.go": 39.9,
   "serve.go": 31.8,
-  "source.go": 84.1,
+  "source.go": 77.7,
+  "source_acl.go": 26.1,
   "trusted.go": 26.1
  },
  "lines": {
@@ -2734,7 +2740,8 @@
   "local-ai-proxy/router.go": 341,
   "local-ai-proxy/routing.go": 97,
   "local-ai-proxy/serve.go": 75,
-  "local-ai-proxy/source.go": 257,
+  "local-ai-proxy/source.go": 240,
+  "local-ai-proxy/source_acl.go": 30,
   "local-ai-proxy/trusted.go": 60
  }
 }

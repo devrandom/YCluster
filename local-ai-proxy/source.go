@@ -235,23 +235,6 @@ func (s *EtcdSource) Close() error {
 	return s.client.Close()
 }
 
-// ACLSnapshot returns the etcd-side ACL view (inline per-model rules
-// plus the singleton default key, if configured). nil when no rules
-// or default are present, so MergeACL can skip work entirely.
-func (s *EtcdSource) ACLSnapshot() *ACLConfig {
-	var modelsCopy map[string]ACLModelRule
-	if mp := s.aclModels.Load(); mp != nil && len(*mp) > 0 {
-		modelsCopy = make(map[string]ACLModelRule, len(*mp))
-		for k, v := range *mp {
-			modelsCopy[k] = v
-		}
-	}
-	if modelsCopy == nil {
-		return nil
-	}
-	return &ACLConfig{Models: modelsCopy}
-}
-
 // Client exposes the underlying etcd client so adjacent components
 // (e.g., EtcdDisabledBackends) can share it without reopening.
 func (s *EtcdSource) Client() *clientv3.Client { return s.client }
