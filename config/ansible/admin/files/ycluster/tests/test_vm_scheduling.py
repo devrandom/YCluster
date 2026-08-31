@@ -11,12 +11,14 @@ or a single module:
 """
 
 import subprocess
+import contextlib
 import unittest
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from unittest import mock
 
 from ycluster.utils import vm_manager as vm
+from ycluster.utils import vm_alter
 
 UTC = timezone.utc
 
@@ -717,3 +719,158 @@ class IncusStopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VMAlterHelperTests(unittest.TestCase):
+    def _rec(self, **kw):
+        base = {"name": "vm1", "owner": "a@x", "type": "vm", "gpus": 1}
+        base.update(kw)
+        return base
+
+    def test_change_summary(self):
+        rec = {"additional_users": ["b@x"]}
+        changes = vm_alter._vm_alter_changes(
+            "new@x", True, rec, True, 2, True, 8, True, "16GiB", True)
+        self.assertEqual(changes, [
+            "owner -> new@x", "additional users -> [b@x]",
+            "gpus -> 2", "cpu -> 8", "mem -> 16GiB",
+        ])
+
+    @mock.patch.object(vm, "_verify_guest_gpus")
+    @mock.patch.object(vm, "_wait_agent")
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_ensure_nas_share")
+    @mock.patch.object(vm, "_ensure_gpus_attached")
+    @mock.patch.object(vm, "_put_json")
+    @mock.patch.object(vm, "release_gpus")
+    @mock.patch.object(vm, "_incus_stop")
+    @mock.patch.object(vm, "_instance_info")
+    def test_vm_gpu_change_running(self, info, stop, release, put, attach,
+                                   nas, incus, wait, verify):
+        rec = self._rec()
+        info.return_value = {"status": "Running"}
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "vm", 2))
+        stop.assert_called_once_with("vm1")
+        release.assert_called_once_with("vm1")
+        put.assert_called_once()
+        attach.assert_called_once_with("vm1")
+        nas.assert_called_once_with("vm1")
+        incus.assert_any_call("start", "vm1")
+        verify.assert_called_once_with("vm1", 2)
+        self.assertEqual(rec["gpus"], 2)
+
+    @mock.patch.object(vm, "_instance_info",
+                       return_value={"status": "Stopped"})
+    @mock.patch.object(vm, "_incus_stop")
+    @mock.patch.object(vm, "release_gpus")
+    @mock.patch.object(vm, "_put_json")
+    @mock.patch.object(vm, "_ensure_gpus_attached")
+    def test_vm_gpu_change_stopped_no_gpu(self, attach, put, release, stop,
+                                          info):
+        rec = self._rec()
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "vm", 0))
+        stop.assert_not_called()
+        release.assert_called_once_with("vm1")
+        attach.assert_not_called()
+        self.assertEqual(rec["gpus"], 0)
+
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_instance_info", return_value={"devices": {}})
+    def test_container_gpu_add_and_remove(self, info, incus):
+        rec = self._rec(type="container", gpus=0)
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "container", 1))
+        incus.assert_called_once_with("config", "device", "add", "vm1",
+                                      "gpu0", "gpu", "gputype=physical")
+
+        rec = self._rec(type="container", gpus=1)
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "container", 0))
+        incus.assert_called_with("config", "device", "remove", "vm1",
+                                 "gpu0", check=False)
+        self.assertEqual(rec["gpus"], 0)
+
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_instance_info",
+                       return_value={"devices": {"gpu0": {"type": "gpu"}}})
+    def test_container_gpu_already_present(self, info, incus):
+        rec = self._rec(type="container", gpus=0)
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "container", 1))
+        incus.assert_not_called()
+        self.assertEqual(rec["gpus"], 1)
+
+
+class VMAlterOrchestratorTests(unittest.TestCase):
+    def _patches(self):
+        return [
+            mock.patch.object(vm, "_valid_vm_name"),
+            mock.patch.object(vm, "_instance_exists", return_value=True),
+            mock.patch.object(vm, "_put_json"),
+            mock.patch.object(vm, "_record_event"),
+        ]
+
+    @mock.patch.object(vm, "vm_get")
+    def test_vm_alter_no_changes(self, vm_get):
+        rec = {"name": "vm1", "owner": "a@x", "type": "vm", "gpus": 1,
+               "cpu": "4", "mem": "8GiB", "additional_users": ["b@x"]}
+        vm_get.return_value = rec
+        with contextlib.ExitStack() as stack:
+            put = stack.enter_context(mock.patch.object(vm, "_put_json"))
+            event = stack.enter_context(mock.patch.object(vm, "_record_event"))
+            stack.enter_context(mock.patch.object(vm, "_instance_exists", return_value=True))
+            stack.enter_context(mock.patch.object(vm, "user_get", return_value={"ssh_keys": ["key"]}))
+            vm.vm_alter("vm1", owner="a@x", gpus=1, cpu="4", mem="8GiB",
+                        add_users=["b@x"], remove_users=[])
+        self.assertEqual(put.call_count, 0)
+        self.assertEqual(event.call_count, 0)
+
+    @mock.patch.object(vm, "bastion_sync")
+    @mock.patch.object(vm, "_sync_vm_keys")
+    @mock.patch.object(vm, "_record_event")
+    @mock.patch.object(vm, "_put_json")
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_valid_user")
+    @mock.patch.object(vm, "user_get")
+    @mock.patch.object(vm, "_instance_info")
+    @mock.patch.object(vm, "vm_get")
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_vm_alter_applies_changes(self, valid_name, vm_get, info,
+                                      user_get, valid_user, incus, put, event,
+                                      sync_keys, bastion_sync):
+        rec = {"name": "vm1", "owner": "a@x", "type": "container", "gpus": 0,
+               "cpu": "4", "mem": "8GiB"}
+        vm_get.return_value = rec
+        info.return_value = {"status": "Stopped", "devices": {"gpu0": {"type": "gpu"}}}
+        user_get.return_value = {"ssh_keys": ["key"]}
+        with contextlib.ExitStack() as stack:
+            _ = stack.enter_context(mock.patch.object(vm, "_instance_exists", return_value=True))
+            vm.vm_alter(
+                "vm1", owner="new@x", gpus=1, cpu="8", mem="16GiB",
+                add_users=["b@x"], remove_users=[])
+        put.assert_called_once()
+        sync_keys.assert_called_once()
+        bastion_sync.assert_called_once()
+        event.assert_called_once()
+        self.assertEqual(rec["owner"], "new@x")
+        self.assertEqual(rec["additional_users"], ["b@x"])
+        self.assertEqual(rec["gpus"], 1)
+        self.assertEqual(rec["cpu"], "8")
+        self.assertEqual(rec["mem"], "16GiB")
+
+    @mock.patch.object(vm, "_instance_exists", return_value=False)
+    @mock.patch.object(vm, "vm_get", return_value={"host": "elsewhere"})
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_vm_alter_requires_local_instance(self, valid_name, vm_get,
+                                              exists):
+        with self.assertRaisesRegex(ValueError, "not present on this host"):
+            vm_alter.vm_alter("vm1")
+
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "vm_get", return_value={"type": "vm"})
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_vm_alter_rejects_image_type_negative_gpu(self, valid_name,
+                                                      vm_get, exists):
+        with self.assertRaises(NotImplementedError):
+            vm_alter.vm_alter("vm1", image="new")
+        with self.assertRaises(NotImplementedError):
+            vm_alter.vm_alter("vm1", instance_type="container")
+        with self.assertRaises(ValueError):
+            vm_alter.vm_alter("vm1", gpus=-1)
