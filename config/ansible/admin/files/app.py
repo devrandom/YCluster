@@ -57,6 +57,7 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
 
+import app_inventory
 from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
@@ -1372,51 +1373,10 @@ def inventory_list():
 @app.route('/api/inventory/export.csv')
 def inventory_export_csv():
     """Export full inventory as CSV (internal only)"""
-    import csv, io
     try:
         from ycluster.utils.inventory import list_all
         rows = list_all()
-        rows.sort(key=lambda r: (r['allocation'] or {}).get('hostname', '') or '')
-
-        fieldnames = [
-            'hostname', 'type', 'ip',
-            'product', 'serial', 'bios_version',
-            'cpu', 'ram_gb', 'disks', 'gpus', 'nics',
-            'os', 'kernel',
-            'vendor', 'purchased_at', 'warranty_expires', 'cost', 'cost_currency', 'location', 'notes',
-            'hw_collected_at', 'asset_updated_at',
-        ]
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction='ignore')
-        writer.writeheader()
-        for r in rows:
-            alloc = r['allocation'] or {}
-            hw = r['hardware'] or {}
-            asset = r['asset'] or {}
-            writer.writerow({
-                'hostname':         alloc.get('hostname', ''),
-                'type':             alloc.get('type', ''),
-                'ip':               alloc.get('ip', ''),
-                'product':          hw.get('product', ''),
-                'serial':           hw.get('serial', ''),
-                'bios_version':     hw.get('bios_version', ''),
-                'cpu':              hw.get('cpu', ''),
-                'ram_gb':           hw.get('ram_gb', ''),
-                'disks':            '; '.join(f"{d['name']} {d['size']} {d['type']}" for d in (hw.get('disks') or [])),
-                'gpus':             '; '.join(g.get('model') or g.get('vendor', '?') for g in (hw.get('gpus') or [])),
-                'nics':             '; '.join(f"{n['name']}" + (f" {n['speed']}" if n.get('speed') else '') for n in (hw.get('nics') or [])),
-                'os':               hw.get('os', ''),
-                'kernel':           hw.get('kernel', ''),
-                'vendor':           asset.get('vendor', ''),
-                'purchased_at':     asset.get('purchased_at', ''),
-                'warranty_expires': asset.get('warranty_expires', ''),
-                'cost':             asset.get('cost', ''),
-                'cost_currency':    asset.get('cost_currency', 'EUR'),
-                'location':         asset.get('location', ''),
-                'notes':            asset.get('notes', ''),
-                'hw_collected_at':  (hw.get('collected_at') or '')[:19],
-                'asset_updated_at': (asset.get('updated_at') or '')[:19],
-            })
+        buf = app_inventory.export_csv(rows)
         from flask import Response
         return Response(buf.getvalue(), mimetype='text/csv',
                         headers={'Content-Disposition': 'attachment; filename=inventory.csv'})
