@@ -343,9 +343,7 @@ def recovery_link(email):
 def revoke_invitation(email):
     """Delete outstanding invitation(s) for an email. Returns the count."""
     api = AuthentikAPI()
-    invitations = api.get('/stages/invitation/invitations/', params={'page_size': 500})['results']
-    matched = [inv for inv in invitations
-               if (inv.get('fixed_data') or {}).get('email') == email]
+    matched = _matched_invitations(api, email)
     for inv in matched:
         api._request('DELETE', f"/stages/invitation/invitations/{inv['pk']}/")
     return len(matched)
