@@ -272,13 +272,9 @@ def _collect_hardware_darwin():
     return facts
 
 
-def _collect_hardware_linux():
-    """
-    Collect hardware facts for the local Linux node and return a dict.
-    Uses dmidecode, lshw, lspci, nvidia-smi where available.
-    Degrades gracefully when tools are missing.
-    """
-    facts = {
+def _init_hardware_facts():
+    """Empty facts skeleton for _collect_hardware_* functions."""
+    return {
         'collected_at': datetime.now(UTC).isoformat(),
         'cpu': None,
         'ram_gb': None,
@@ -293,14 +289,18 @@ def _collect_hardware_linux():
         'bmc_mac': None,
     }
 
-    # OS / kernel
+
+def _collect_os_kernel(facts):
+    """OS name and kernel release."""
     try:
         facts['kernel'] = platform.release()
         facts['os'] = ' '.join(_run(['lsb_release', '-sd']).stdout.strip().strip('"').split())
     except Exception:
         pass
 
-    # CPU
+
+def _collect_cpu(facts):
+    """CPU model and core/thread counts via lscpu."""
     try:
         r = _run(['lscpu'])
         lines = {k.strip(): v.strip() for k, v in
@@ -316,7 +316,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # RAM — sum installed DIMMs from dmidecode for exact physical capacity.
+
+def _collect_ram(facts):
+    """Installed DIMM total from dmidecode for exact physical capacity."""
     try:
         r = _run(['dmidecode', '-t', 'memory'], timeout=10)
         total_mb = 0
@@ -332,7 +334,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # DMI — serial, product, BIOS
+
+def _collect_dmi(facts):
+    """Serial, product name, and BIOS version via dmidecode."""
     try:
         r = _run(['dmidecode', '-t', 'system'], timeout=10)
         for line in r.stdout.splitlines():
@@ -352,7 +356,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # Disks via lsblk
+
+def _collect_disks(facts):
+    """Block devices via lsblk, skipping loop/ram/virtual devices."""
     try:
         r = _run(['lsblk', '-d', '-o', 'NAME,SIZE,ROTA,MODEL', '--json'])
         data = json.loads(r.stdout)
@@ -377,7 +383,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # NICs via ip link + ethtool
+
+def _collect_nics(facts):
+    """Physical NICs via ip link, with speed/driver from ethtool."""
     try:
         r = _run(['ip', '-j', 'link', 'show'])
         ifaces = json.loads(r.stdout)
@@ -413,7 +421,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # GPUs via lspci
+
+def _collect_gpus(facts):
+    """GPUs via lspci, enriched with nvidia-smi data when available."""
     try:
         r = _run(['lspci', '-mm'])
         for line in r.stdout.splitlines():
@@ -454,7 +464,20 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # BMC MAC via ipmitool (best-effort; None if no BMC or ipmitool missing)
-    facts['bmc_mac'] = _collect_bmc_mac_linux()
 
+def _collect_hardware_linux():
+    """
+    Collect hardware facts for the local Linux node and return a dict.
+    Uses dmidecode, lshw, lspci, nvidia-smi where available.
+    Degrades gracefully when tools are missing.
+    """
+    facts = _init_hardware_facts()
+    _collect_os_kernel(facts)
+    _collect_cpu(facts)
+    _collect_ram(facts)
+    _collect_dmi(facts)
+    _collect_disks(facts)
+    _collect_nics(facts)
+    _collect_gpus(facts)
+    facts['bmc_mac'] = _collect_bmc_mac_linux()
     return facts
