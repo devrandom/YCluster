@@ -143,8 +143,8 @@ def discover_nginx_templates():
     
     return sites
 
-def update_nginx_configs(local_mode=False):
-    """Update nginx configurations from templates with the primary domain from etcd or localhost"""
+def _primary_domain_and_tls(local_mode):
+    """Determine the primary domain and TLS mode for nginx config rendering."""
     if local_mode:
         # Local mode: read the domain from etcd if available so rendered
         # vhosts match any cert SANs certbot obtain already wrote (e.g.
@@ -159,65 +159,64 @@ def update_nginx_configs(local_mode=False):
                 primary_domain = config['domain']
         except Exception:
             pass
-        use_tls = False
-        print(f"Using local mode - domain: {primary_domain}, TLS: disabled")
-    else:
-        # Normal mode: get config from etcd
-        config = get_https_config()
-        
-        if 'domain' not in config:
-            print("No primary domain configured - cannot generate nginx configs")
-            return False
-        
-        primary_domain = config['domain']
-        use_tls = True
-    
+        return primary_domain, False
+    config = get_https_config()
+    if 'domain' not in config:
+        return None, True
+    return config['domain'], True
+
+
+def _site_domain(site_name, primary_domain):
+    """Determine the domain for a site by extracting the instance name."""
+    if '_' in site_name:
+        # Instance-specific site gets subdomain (extract instance after last underscore)
+        instance = site_name.split('_')[-1]
+        return f"{instance}.{primary_domain}"
+    return primary_domain
+
+
+def _process_nginx_site(site_name, template_path, primary_domain, use_tls):
+    """Render and write one nginx site config. Returns True when written."""
+    nginx_config_path = Path(f'/etc/nginx/sites-available/{site_name}')
+    print(f"Processing template: {template_path} -> {nginx_config_path}")
+
+    try:
+        template_content = template_path.read_text()
+        site_domain = _site_domain(site_name, primary_domain)
+        template = Template(template_content)
+        updated_content = template.render(domain=site_domain, primary=primary_domain, use_tls=use_tls)
+
+        if nginx_config_path.exists():
+            existing_content = nginx_config_path.read_text()
+            if existing_content == updated_content:
+                print(f"  {site_name}: already up to date")
+                return False
+
+        nginx_config_path.write_text(updated_content)
+        print(f"  {site_name}: configuration updated (domain: {site_domain})")
+        return True
+    except Exception as e:
+        print(f"  {site_name}: error processing template - {e}")
+        return False
+
+
+def update_nginx_configs(local_mode=False):
+    """Update nginx configurations from templates with the primary domain from etcd or localhost"""
+    primary_domain, use_tls = _primary_domain_and_tls(local_mode)
+    if primary_domain is None:
+        print("No primary domain configured - cannot generate nginx configs")
+        return False
+
     sites = discover_nginx_templates()
-    
     if not sites:
         print("No nginx templates found")
         return False
-    
+
     updated_count = 0
-    
     for site_name, template_path in sites:
-        nginx_config_path = Path(f'/etc/nginx/sites-available/{site_name}')
-        
-        print(f"Processing template: {template_path} -> {nginx_config_path}")
-        
-        try:
-            # Read template config
-            template_content = template_path.read_text()
-
-            # Determine domain for this site by extracting instance from site name
-            if '_' in site_name:
-                # Instance-specific site gets subdomain (extract instance after last underscore)
-                instance = site_name.split('_')[-1]
-                site_domain = f"{instance}.{primary_domain}"
-            else:
-                # Production site gets primary domain
-                site_domain = primary_domain
-
-            # Render template with domain, primary domain and use_tls variables
-            template = Template(template_content)
-            updated_content = template.render(domain=site_domain, primary=primary_domain, use_tls=use_tls)
-
-            # Check if config already exists and is the same
-            if nginx_config_path.exists():
-                existing_content = nginx_config_path.read_text()
-                if existing_content == updated_content:
-                    print(f"  {site_name}: already up to date")
-                    continue
-
-            # Write updated config
-            nginx_config_path.write_text(updated_content)
-            print(f"  {site_name}: configuration updated (domain: {site_domain})")
+        if _process_nginx_site(site_name, template_path, primary_domain, use_tls):
             updated_count += 1
-            
-        except Exception as e:
-            print(f"  {site_name}: error processing template - {e}")
-            continue
-    
+
     if updated_count == 0:
         print("All nginx configurations are already up to date")
         return True
@@ -228,14 +227,6 @@ def update_nginx_configs(local_mode=False):
         print(f"Nginx config test failed: {result.stderr}")
         return False
 
-    # Reload nginx
-    result = subprocess.run(['systemctl', 'reload', 'nginx'], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Failed to reload nginx: {result.stderr}")
-        return False
-
-    print(f"Updated {updated_count} nginx configurations and reloaded successfully")
-    return True
 
 def ensure_nginx_cert_from_etcd():
     """Ensure nginx has a certificate from etcd (fallback for when no Let's Encrypt cert exists)"""
