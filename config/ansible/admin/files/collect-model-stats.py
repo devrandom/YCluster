@@ -90,32 +90,47 @@ def fetch_journal_logs(since_ts: float):
     return entries
 
 
+def _parse_entry_timestamp(entry):
+    """Return the entry timestamp as a float, or None when missing/invalid."""
+    ts_str = entry.get("time", "")
+    if not ts_str:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def _bucket_entry(buckets, entry, ts):
+    """Accumulate one log entry into its time/user/model bucket."""
+    user = entry.get("user", "") or ""
+    model = entry.get("model", "") or ""
+    duration_ms = entry.get("duration_ms", 0) or 0
+    bytes_out = entry.get("bytes_out", 0) or 0
+
+    period_start = floor_bucket(ts)
+    period_end = period_start + BUCKET_MINUTES * 60
+
+    key = (period_start, period_end, user, model)
+    if key not in buckets:
+        buckets[key] = {"request_count": 0, "total_duration_ms": 0, "total_bytes_out": 0}
+    buckets[key]["request_count"] += 1
+    buckets[key]["total_duration_ms"] += duration_ms
+    buckets[key]["total_bytes_out"] += bytes_out
+
+
 def aggregate_logs(entries):
+    """Group log entries into time/user/model buckets for the usage DB."""
     buckets = {}
-    for e in entries:
-        user = e.get("user", "") or ""
-        model = e.get("model", "") or ""
-        duration_ms = e.get("duration_ms", 0) or 0
-        bytes_out = e.get("bytes_out", 0) or 0
-        ts_str = e.get("time", "")
-        if not ts_str or not model:
+    for entry in entries:
+        model = entry.get("model", "") or ""
+        if not model:
             continue
-        try:
-            dt = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            ts = dt.timestamp()
-        except Exception:
+        ts = _parse_entry_timestamp(entry)
+        if ts is None:
             continue
-
-        period_start = floor_bucket(ts)
-        period_end = period_start + BUCKET_MINUTES * 60
-
-        key = (period_start, period_end, user, model)
-        if key not in buckets:
-            buckets[key] = {"request_count": 0, "total_duration_ms": 0, "total_bytes_out": 0}
-        buckets[key]["request_count"] += 1
-        buckets[key]["total_duration_ms"] += duration_ms
-        buckets[key]["total_bytes_out"] += bytes_out
-
+        _bucket_entry(buckets, entry, ts)
     return list(buckets.items())
 
 
