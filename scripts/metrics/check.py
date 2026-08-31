@@ -347,6 +347,7 @@ def py_coverage(
             {},
             [
                 "test_crps_collector",
+                "test_monitoring_helpers",
                 "test_node_temps_collector",
                 "test_ntfy_webhook",
                 "test_osv_feed_collector",
