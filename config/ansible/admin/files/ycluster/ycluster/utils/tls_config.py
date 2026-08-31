@@ -248,9 +248,9 @@ def main():
     commands = {
         'generate': lambda: _cmd_generate(args),
         'set-common-name': lambda: _cmd_set_common_name(args),
-        'get-common-name': _cmd_get_common_name,
+        'get-common-name': lambda: _cmd_get_common_name(args),
         'set': lambda: _cmd_set(args),
-        'get': _cmd_get,
+        'get': lambda: _cmd_get(args),
         'delete': delete_tls_cert,
     }
     try:
