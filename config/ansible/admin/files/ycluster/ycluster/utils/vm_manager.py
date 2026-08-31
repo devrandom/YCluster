@@ -1094,6 +1094,78 @@ def _clear_issue(issues, name):
         _delete(VM_ISSUE_PREFIX + name)
         del issues[name]
 
+def _reconcile_want_on(name, desired, running, grace, issues, to_start,
+                       all_vms):
+    """Handle a VM whose desired state is ON."""
+    if grace:
+        grace_delete(name)
+        if running:
+            print(f"reconcile: '{name}' desired flipped back on — "
+                  f"cancelled pending stop")
+    if running:
+        _clear_issue(issues, name)
+    else:
+        # Deferred to the start pass; schedule the GPU count the
+        # desired record calls for (explicit 0 = no GPUs, absent
+        # = falling back to registered).
+        to_start.append(
+            (name, desired_gpus(desired,
+                                all_vms.get(name, {}).get("gpus") or 0)))
+
+
+def _reconcile_stop(name, grace, now, issues):
+    """Stop a VM whose grace period has elapsed (or was bypassed)."""
+    try:
+        warned = datetime.fromisoformat(grace["warned_at"])
+    except (KeyError, TypeError, ValueError):
+        warned = None
+    # `immediate` is set by the schedule page's "stop now" button to
+    # bypass the remaining grace (the guest was already warned).
+    immediate = bool(grace.get("immediate"))
+    if immediate or warned is None or \
+            (now - warned).total_seconds() >= SCHEDULED_STOP_GRACE_S:
+        print(f"reconcile: stopping '{name}' (schedule/desired off, "
+              f"{'immediate' if immediate else 'grace elapsed'})")
+        try:
+            vm_stop(name, initiator="scheduler")
+            grace_delete(name)
+            released = release_gpus(name)
+            if released:
+                print(f"  released {released} GPU(s) to the host pool")
+            _clear_issue(issues, name)
+        except Exception as e:
+            print(f"  stop failed (will retry next tick; "
+                  f"NOT forcing): {e}", file=sys.stderr)
+            _record_issue(issues, name, "stop", e, now)
+
+
+def _reconcile_want_off_running(name, grace, now, issues):
+    """Handle a running VM whose desired state is OFF."""
+    if not grace:
+        print(f"reconcile: warning '{name}' of scheduled stop "
+              f"(>= {SCHEDULED_STOP_GRACE_S}s grace)")
+        _incus("exec", name, "--", "sh", "-c",
+               "echo 'YCluster: scheduled shutdown within minutes "
+               "(save your work)' | wall", check=False)
+        grace_set(name, {"warned_at": now.isoformat(timespec="seconds")})
+        return
+    _reconcile_stop(name, grace, now, issues)
+
+
+def _reconcile_start_pass(to_start, issues, now):
+    """Start pass — after every release, so freed GPUs are visible to
+    _ensure_gpus_attached's free_gpus() lookup."""
+    for name, gpus in to_start:
+        print(f"reconcile: starting '{name}' (schedule/desired on)")
+        try:
+            vm_start(name, billable=True, initiator="scheduler", gpus=gpus)
+            _clear_issue(issues, name)
+        except Exception as e:
+            print(f"  start failed (will retry next tick): {e}",
+                  file=sys.stderr)
+            _record_issue(issues, name, "start", e, now)
+
+
 def reconcile():
     """Converge local instances toward their desired power state.
 
@@ -1136,52 +1208,10 @@ def reconcile():
         grace = graces.get(name)
 
         if want_on:
-            if grace:
-                grace_delete(name)
-                if running:
-                    print(f"reconcile: '{name}' desired flipped back on — "
-                          f"cancelled pending stop")
-            if running:
-                _clear_issue(issues, name)
-            else:
-                # Deferred to the start pass; schedule the GPU count the
-                # desired record calls for (explicit 0 = no GPUs, absent
-                # = falling back to registered).
-                to_start.append(
-                    (name, desired_gpus(
-                        desired, all_vms.get(name, {}).get("gpus") or 0)))
+            _reconcile_want_on(name, desired, running, grace, issues,
+                               to_start, all_vms)
         elif running:
-            if not grace:
-                print(f"reconcile: warning '{name}' of scheduled stop "
-                      f"(>= {SCHEDULED_STOP_GRACE_S}s grace)")
-                _incus("exec", name, "--", "sh", "-c",
-                       "echo 'YCluster: scheduled shutdown within minutes "
-                       "(save your work)' | wall", check=False)
-                grace_set(name, {"warned_at": now.isoformat(timespec="seconds")})
-                continue
-            try:
-                warned = datetime.fromisoformat(grace["warned_at"])
-            except (KeyError, TypeError, ValueError):
-                warned = None
-            # `immediate` is set by the schedule page's "stop now" button to
-            # bypass the remaining grace (the guest was already warned).
-            immediate = bool(grace.get("immediate"))
-            if immediate or warned is None or \
-                    (now - warned).total_seconds() >= SCHEDULED_STOP_GRACE_S:
-                print(f"reconcile: stopping '{name}' (schedule/desired off, "
-                      f"{'immediate' if immediate else 'grace elapsed'})")
-                try:
-                    vm_stop(name, initiator="scheduler")
-                    grace_delete(name)
-                    released = release_gpus(name)
-                    if released:
-                        print(f"  released {released} GPU(s) to the "
-                              f"host pool")
-                    _clear_issue(issues, name)
-                except Exception as e:
-                    print(f"  stop failed (will retry next tick; "
-                          f"NOT forcing): {e}", file=sys.stderr)
-                    _record_issue(issues, name, "stop", e, now)
+            _reconcile_want_off_running(name, grace, now, issues)
         else:
             _clear_issue(issues, name)
             if grace:
@@ -1193,23 +1223,14 @@ def reconcile():
                     print(f"reconcile: '{name}' already stopped — released "
                           f"{released} GPU(s) to the host pool")
 
-    # Start pass — after every release above, so freed GPUs are visible to
-    # _ensure_gpus_attached's free_gpus() lookup.
-    for name, gpus in to_start:
-        print(f"reconcile: starting '{name}' (schedule/desired on)")
-        try:
-            vm_start(name, billable=True, initiator="scheduler", gpus=gpus)
-            _clear_issue(issues, name)
-        except Exception as e:
-            print(f"  start failed (will retry next tick): {e}",
-                  file=sys.stderr)
-            _record_issue(issues, name, "start", e, now)
+    _reconcile_start_pass(to_start, issues, now)
 
     # Issues for VMs that left the registry entirely would dangle
     # forever (vm_destroy clears its own, but a record can also vanish
     # by hand). Issues for other hosts' VMs are theirs to manage.
     for name in sorted(set(issues) - set(all_vms)):
         _delete(VM_ISSUE_PREFIX + name)
+
 
 def _record_event(event, name, owner=None, gpus=None, initiator="cli",
                   billable=False):

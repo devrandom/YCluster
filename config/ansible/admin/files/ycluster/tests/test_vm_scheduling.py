@@ -874,3 +874,86 @@ class VMAlterOrchestratorTests(unittest.TestCase):
             vm_alter.vm_alter("vm1", instance_type="container")
         with self.assertRaises(ValueError):
             vm_alter.vm_alter("vm1", gpus=-1)
+
+
+class ReconcileStopTests(unittest.TestCase):
+    def _test_stop(self, grace, now, mock_stop, issues=None):
+        issues = issues if issues is not None else {}
+        with mock.patch.object(vm, 'vm_stop') as _mock_stop, \
+             mock.patch.object(vm, 'grace_delete'), \
+             mock.patch.object(vm, 'release_gpus', return_value=2), \
+             mock.patch.object(vm, '_clear_issue') as clear:
+            _mock_stop.return_value = None
+            vm._reconcile_stop('vm1', grace, now, issues)
+        return _mock_stop, clear
+
+    @mock.patch.object(vm, '_clear_issue')
+    @mock.patch.object(vm, 'vm_stop')
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'release_gpus', return_value=2)
+    def test_immediate_stop(self, release, gd, stop, clear):
+        now = datetime(2026, 8, 30, 10, 0, 0, tzinfo=timezone.utc)
+        grace = {'warned_at': now.isoformat(), 'immediate': True}
+        issues = {'vm1': True}
+        vm._reconcile_stop('vm1', grace, now, issues)
+        stop.assert_called_once_with('vm1', initiator='scheduler')
+        clear.assert_called_once_with(issues, 'vm1')
+
+    @mock.patch.object(vm, 'vm_stop')
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'release_gpus', return_value=0)
+    def test_grace_elapsed_stop(self, release, gd, stop):
+        now = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+        warned = datetime(2026, 8, 30, 10, 0, 0, tzinfo=timezone.utc)
+        grace = {'warned_at': warned.isoformat()}
+        vm._reconcile_stop('vm1', grace, now, {})
+        stop.assert_called_once_with('vm1', initiator='scheduler')
+
+    @mock.patch.object(vm, 'vm_stop', side_effect=RuntimeError('stop failed'))
+    def test_stop_failure_records_issue(self, stop):
+        now = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+        grace = {'immediate': True}
+        issues = {}
+        with mock.patch.object(vm, '_record_issue') as record:
+            vm._reconcile_stop('vm1', grace, now, issues)
+        record.assert_called_once()
+
+    @mock.patch.object(vm, 'vm_stop')
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'release_gpus', return_value=0)
+    def test_no_warned_at_stops(self, release, gd, stop):
+        now = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+        grace = {}
+        vm._reconcile_stop('vm1', grace, now, {})
+        stop.assert_called_once_with('vm1', initiator='scheduler')
+
+
+class ReconcileWantOnTests(unittest.TestCase):
+    def test_running_clears_issue(self):
+        issues = {'vm1': True}
+        with mock.patch.object(vm, '_clear_issue') as clear:
+            vm._reconcile_want_on('vm1', {'mode': 'on'}, True, None,
+                                  issues, [], {'vm1': {'gpus': 1}})
+        clear.assert_called_once_with(issues, 'vm1')
+
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'desired_gpus', return_value=2)
+    def test_not_running_appends_to_start(self, dg, gd):
+        to_start = []
+        all_vms = {'vm1': {'gpus': 1}}
+        with mock.patch.object(vm, '_clear_issue'):
+            vm._reconcile_want_on('vm1', {'mode': 'on'}, False, None,
+                                  {}, to_start, all_vms)
+        self.assertEqual(to_start, [('vm1', 2)])
+        gd.assert_not_called()
+
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'desired_gpus', return_value=1)
+    def test_grace_deleted_on_flip_back(self, dg, gd):
+        to_start = []
+        with mock.patch.object(vm, '_clear_issue'):
+            vm._reconcile_want_on('vm1', {'mode': 'on'}, True,
+                                  {'warned_at': 'x'}, {}, to_start,
+                                  {'vm1': {'gpus': 1}})
+        gd.assert_called_once_with('vm1')
+        self.assertEqual(to_start, [])
