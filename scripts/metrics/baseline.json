@@ -174,7 +174,7 @@
   "trusted.go::remoteIsTrusted": 5
  },
  "coverage": {
-  "config/ansible/admin/files/app.py": 54.6,
+  "config/ansible/admin/files/app.py": 55.1,
   "config/ansible/admin/files/app_autoinstall.py": 100.0,
   "config/ansible/admin/files/app_gpu_blocks.py": 100.0,
   "config/ansible/admin/files/app_inventory.py": 100.0,
@@ -402,7 +402,7 @@
   "config/ansible/admin/files/app.py::get_cluster_vip_status": 23.6,
   "config/ansible/admin/files/app.py::get_comprehensive_health": 1.0,
   "config/ansible/admin/files/app.py::get_core_nodes": 4.0,
-  "config/ansible/admin/files/app.py::get_current_node_type": 26.8,
+  "config/ansible/admin/files/app.py::get_current_node_type": 6.0,
   "config/ansible/admin/files/app.py::get_dhcp_config": 22.3,
   "config/ansible/admin/files/app.py::get_host_health": 13.4,
   "config/ansible/admin/files/app.py::get_hosts": 4.0,
