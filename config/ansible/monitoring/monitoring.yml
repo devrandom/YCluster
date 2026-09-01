@@ -5,6 +5,7 @@
 - import_playbook: install-node-temps.yml
 - import_playbook: install-crps.yml
 - import_playbook: install-osv-feed.yml
+- import_playbook: install_dashboard.yml
 - import_playbook: ceph.yml
 # Silence benign boot-time systemd failures (networkd wait-online, snap
 # leftovers, VM-host nvidia units) so SystemdUnitFailed only fires on real
