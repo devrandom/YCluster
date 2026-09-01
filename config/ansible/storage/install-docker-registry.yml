@@ -182,10 +182,12 @@
       systemd:
         daemon_reload: yes
 
-    - name: Disable docker-registry service (managed by leader election)
+    # The unit is static, so it cannot be enabled/disabled. Leader election
+    # decides whether it runs.
+    - name: Stop docker-registry service
       systemd:
         name: docker-registry.service
-        enabled: no
+        state: stopped
 
     # Docker daemon insecure-registries / buildkit / buildx config now lives
     # in admin/install-docker-official.yml so it's in place before app/app.yml.

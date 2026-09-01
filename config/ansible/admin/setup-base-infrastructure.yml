@@ -108,7 +108,7 @@
     - name: Set ubuntu user password
       user:
         name: ubuntu
-        password: "{{ vault_ubuntu_password | password_hash('sha512') }}"
+        password: "{{ vault_ubuntu_password | password_hash('sha512', 'ycluster') }}"
         update_password: always
 
     - name: Populate local node information in etcd

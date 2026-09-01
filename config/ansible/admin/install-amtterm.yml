@@ -2,6 +2,8 @@
 - name: Install amtterm_ssl on storage nodes
   hosts: storage
   become: yes
+  vars:
+    amtterm_version: 8ba47278ec726a02fb039a87462311094be36ca3
   tasks:
     - name: Install build dependencies
       apt:
@@ -23,15 +25,34 @@
       git:
         repo: https://github.com/jerryabramson/amtterm_ssl.git
         dest: /opt/src/amtterm_ssl
-        version: 8ba47278ec726a02fb039a87462311094be36ca3
+        version: "{{ amtterm_version }}"
         force: yes
 
-    - name: Build amtterm_ssl
-      make:
-        chdir: /opt/src/amtterm_ssl
+    # Idempotence is keyed on the pinned SHA so a version bump forces a
+    # rebuild/reinstall; a bare binary-existence check would silently keep
+    # the old build on hosts that already have it.
+    - name: Check installed amtterm_ssl version
+      command: cat /opt/src/amtterm_ssl/.ansible-version
+      register: amtterm_installed
+      changed_when: false
+      failed_when: false
 
-    - name: Install amtterm_ssl
-      make:
-        chdir: /opt/src/amtterm_ssl
-        target: install
-      become: yes
+    - name: Rebuild and reinstall amtterm_ssl when the pinned SHA changes
+      when: amtterm_installed.stdout | default('') != amtterm_version
+      block:
+        - name: Build amtterm_ssl
+          command: make
+          args:
+            chdir: /opt/src/amtterm_ssl
+
+        - name: Install amtterm_ssl
+          command: make install
+          args:
+            chdir: /opt/src/amtterm_ssl
+          become: yes
+
+        - name: Record installed amtterm_ssl version
+          copy:
+            dest: /opt/src/amtterm_ssl/.ansible-version
+            content: "{{ amtterm_version }}\n"
+            mode: '0644'

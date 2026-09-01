@@ -22,7 +22,7 @@
     shell: /bin/bash
     home: "{{ admin_home }}"
     create_home: yes
-    password: "{{ admin_password | password_hash('sha512') }}"
+    password: "{{ admin_password | password_hash('sha512', 'ycluster') }}"
     state: present
 
 - name: Add admin user to sudo group

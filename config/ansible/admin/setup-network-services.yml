@@ -89,25 +89,6 @@
         state: stopped
         enabled: no
 
-    - name: Check if resolv.conf is a symlink
-      stat:
-        path: /etc/resolv.conf
-      register: resolv_stat
-
-    - name: Remove systemd-resolved symlink
-      file:
-        path: /etc/resolv.conf
-        state: absent
-      when: resolv_stat.stat.islnk is defined and resolv_stat.stat.islnk
-
-    - name: Create static resolv.conf
-      copy:
-        dest: /etc/resolv.conf
-        content: |
-          nameserver 127.0.0.1
-          search xc
-        mode: '0644'
-
     - name: Clear default dnsmasq.conf to avoid conflicts
       copy:
         dest: /etc/dnsmasq.conf

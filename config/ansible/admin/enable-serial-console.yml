@@ -8,10 +8,20 @@
         path: /dev/ttyS4
       register: ttys4_dev
 
+    # Platform serial8250 drivers can expose tty devices for nonexistent
+    # ports. Reading the modem-status bits detects those unusable devices,
+    # while a plain existence check does not.
+    - name: Check whether /dev/ttyS4 is a usable serial port
+      command: stty -F /dev/ttyS4 size
+      register: ttys4_usable
+      changed_when: false
+      failed_when: false
+      when: ttys4_dev.stat.exists
+
     - name: Enable serial-getty@ttyS4.service
       systemd:
         name: serial-getty@ttyS4.service
         masked: no
         enabled: yes
         state: started
-      when: ttys4_dev.stat.exists
+      when: ttys4_dev.stat.exists and (ttys4_usable.rc is defined and ttys4_usable.rc == 0)

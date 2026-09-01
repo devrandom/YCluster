@@ -67,23 +67,18 @@
         group: root
         mode: '0755'
 
-    # /near1 is an automounted NAS share; a `file` task that creates the
-    # child path triggers the mount on first use.
+    # /near1 is an automounted CIFS share; a `file` task that creates the
+    # child path triggers the mount on first use. Ownership and mode are
+    # controlled by the mount, not Ansible.
     - name: Ensure snapshot directory exists on the shared mount
       file:
         path: "{{ osv_feed_snapshot_dir }}"
         state: directory
-        owner: root
-        group: root
-        mode: '0755'
 
     - name: Ensure container manifest directory exists on the shared mount
       file:
         path: "{{ osv_feed_container_dir }}"
         state: directory
-        owner: root
-        group: root
-        mode: '0755'
 
     - name: Ensure osv-feed install directory exists
       file:
