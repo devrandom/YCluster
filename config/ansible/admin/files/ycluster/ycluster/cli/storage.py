@@ -3,7 +3,18 @@ Storage and RBD management commands
 """
 
 import sys
-from ..storage import user_rbd  # type: ignore[reportMissingImports]  # noqa: F401
+
+
+def _user_rbd():
+    """Import the RBD implementation lazily.
+
+    The storage surface is only usable on nodes with the RBD tooling
+    installed; importing it eagerly breaks every CLI invocation
+    (including --version) on nodes without it.
+    """
+    from ..storage import user_rbd
+    return user_rbd
+
 
 def register_storage_commands(subparsers):
     """Register storage management commands"""
@@ -42,6 +53,7 @@ def register_storage_commands(subparsers):
 
 def storage_rbd_start(args):
     """Start user RBD"""
+    user_rbd = _user_rbd()
     success = user_rbd.rbd_start(use_passphrase=args.K)
     if success:
         print("User RBD successfully acquired and mounted")
@@ -53,23 +65,23 @@ def storage_rbd_start(args):
 
 def storage_rbd_stop(args):
     """Stop user RBD"""
-    user_rbd.rbd_stop()
+    _user_rbd().rbd_stop()
 
 
 def storage_rbd_status(args):
     """Show RBD status"""
-    user_rbd.rbd_status()
+    _user_rbd().rbd_status()
 
 
 def storage_rbd_check(args):
     """Check RBD decrypt capability"""
-    success = user_rbd.rbd_check(use_passphrase=args.K)
+    success = _user_rbd().rbd_check(use_passphrase=args.K)
     sys.exit(0 if success else 1)
 
 
 def storage_rbd_bind(args):
     """Bind RBD to Clevis"""
-    result = user_rbd.rbd_bind(args.key_file)
+    result = _user_rbd().rbd_bind(args.key_file)
     if result == 0:
         print("Clevis binding already correct")
         sys.exit(0)
