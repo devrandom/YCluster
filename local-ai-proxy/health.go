@@ -2,9 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -62,10 +59,10 @@ type DisabledLookup interface {
 // interval. Results drive observability today; a future router will
 // consult them when fan-out arrives.
 type HealthChecker struct {
-	source    Source
-	interval  time.Duration
-	client    *http.Client
-	logger    *slog.Logger
+	source   Source
+	interval time.Duration
+	client   *http.Client
+	logger   *slog.Logger
 
 	// Disabled, if set, is consulted before each poll. Disabled URLs
 	// are not contacted and are reported with StateDisabled.
@@ -132,32 +129,6 @@ func (hc *HealthChecker) Close() error {
 		<-hc.done
 	}
 	return nil
-}
-
-// Probe runs an out-of-band health check on u in a goroutine and
-// returns immediately. Used by the request handler to nudge the
-// checker after a retry: the checker is the single writer to the
-// state map, and an immediate re-probe means a transient backend
-// glitch doesn't strand traffic until the next tick.
-//
-// Disabled backends are skipped. If the checker is shutting down
-// the probe is a no-op.
-func (hc *HealthChecker) Probe(u *url.URL) {
-	if hc == nil || u == nil {
-		return
-	}
-	if hc.Disabled != nil && hc.Disabled.IsDisabled(u.String()) {
-		return
-	}
-	ctx := context.Background()
-	if hc.done != nil {
-		select {
-		case <-hc.done:
-			return
-		default:
-		}
-	}
-	go hc.checkOne(ctx, u)
 }
 
 // IsHealthy reports whether the given backend URL was observed as
@@ -272,90 +243,4 @@ func (hc *HealthChecker) uniqueBackendURLs() map[string]*url.URL {
 		}
 	}
 	return out
-}
-
-func (hc *HealthChecker) checkOne(ctx context.Context, u *url.URL) {
-	checkURL := *u
-	checkURL.Path = joinPath(checkURL.Path, "/v1/models")
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checkURL.String(), nil)
-	if err != nil {
-		hc.record(u, StateDown, fmt.Sprintf("build request: %v", err), nil)
-		return
-	}
-	resp, err := hc.client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return // shutting down
-		}
-		hc.record(u, StateDown, err.Error(), nil)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Treat any HTTP response as "backend is reachable" — a 4xx from
-	// auth or a missing endpoint still means the server is up. 5xx is
-	// counted as down.
-	if resp.StatusCode >= 500 {
-		hc.record(u, StateDown, fmt.Sprintf("HTTP %d", resp.StatusCode), nil)
-		return
-	}
-
-	// Parse the /v1/models response to learn which model IDs the backend
-	// serves. Cap the body at 1 MiB — backends like exo expose ~120 models
-	// but no /v1/models response should be megabytes. If the body isn't
-	// valid JSON or doesn't match the OpenAI shape, leave Models nil so
-	// ServesModel returns true (don't filter a reachable backend we
-	// couldn't interrogate).
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var models []string
-	if err == nil {
-		var parsed struct {
-			Data []struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(body, &parsed) == nil && parsed.Data != nil {
-			models = make([]string, 0, len(parsed.Data))
-			for _, m := range parsed.Data {
-				models = append(models, m.ID)
-			}
-		}
-	}
-	hc.record(u, StateHealthy, "", models)
-}
-
-func (hc *HealthChecker) record(u *url.URL, state BackendState, errMsg string, models []string) {
-	hc.mu.Lock()
-	prev, had := hc.states[u.String()]
-	next := BackendHealth{
-		URL:       u,
-		State:     state,
-		LastCheck: time.Now(),
-		Err:       errMsg,
-		Models:    models,
-	}
-	hc.states[u.String()] = next
-	hc.mu.Unlock()
-
-	hc.Metrics.SetBackendState(u.String(), state.String())
-	hc.updateModelMetrics()
-
-	if !had || prev.State != state {
-		msg := "backend healthy"
-		lvl := slog.LevelInfo
-		switch state {
-		case StateDown:
-			msg = "backend down"
-			lvl = slog.LevelWarn
-		case StateDisabled:
-			msg = "backend disabled"
-			lvl = slog.LevelInfo
-		}
-		attrs := []any{"backend", u.String()}
-		if errMsg != "" {
-			attrs = append(attrs, "err", errMsg)
-		}
-		hc.logger.Log(context.Background(), lvl, msg, attrs...)
-	}
 }

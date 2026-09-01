@@ -164,6 +164,19 @@ def _comino_query(port, cmd, read_timeout=0.5):
     return buf.decode(errors="replace").rstrip("\r\n")
 
 
+def _comino_channel_label(install, mode, ch, fan_n, pump_n):
+    """Return (label, fan_n, pump_n) for one channel, or (None, ...) to skip."""
+    if install.strip() == "0" or mode == "OFF":
+        return None, fan_n, pump_n
+    if mode == "FAN":
+        fan_n += 1
+        return f"fan {fan_n}", fan_n, pump_n
+    if mode == "PUMP":
+        pump_n += 1
+        return f"pump {pump_n}", fan_n, pump_n
+    return f"{ch} ({mode.lower() or '?'})", fan_n, pump_n
+
+
 def _comino_channel_labels(port):
     raw = _comino_query(port, ":get_channel_value").split(";")
     if len(raw) != 24:
@@ -173,17 +186,10 @@ def _comino_channel_labels(port):
     for i in range(8):
         install, _pwm_cal, mode = raw[i * 3:i * 3 + 3]
         ch = f"CH{i + 1}"
-        m = mode.strip().upper()
-        if install.strip() == "0" or m == "OFF":
-            continue
-        if m == "FAN":
-            fan_n += 1
-            labels[ch] = f"fan {fan_n}"
-        elif m == "PUMP":
-            pump_n += 1
-            labels[ch] = f"pump {pump_n}"
-        else:
-            labels[ch] = f"{ch} ({m.lower() or '?'})"
+        label, fan_n, pump_n = _comino_channel_label(
+            install, mode.strip().upper(), ch, fan_n, pump_n)
+        if label is not None:
+            labels[ch] = label
     return labels
 
 
@@ -219,6 +225,55 @@ def select_comino_device(devices, reader):
     return None
 
 
+def _comino_reader(dev):
+    """Return (data, channel_labels) from a Comino serial device, retrying
+    on transient EBUSY. Returns None when all retries fail."""
+
+    # rm-monitor (if installed) grabs the port via TIOCEXCL during 5s
+    # polls, so retry briefly on EBUSY.
+    import serial
+
+    last_err = None
+    for _ in range(5):
+        try:
+            with serial.Serial(dev, 9600, timeout=0.1, exclusive=True) as port:
+                labels = _comino_channel_labels(port)
+                line = _comino_query(port, ":get_data")
+            return line, labels
+        except (serial.SerialException, OSError) as e:
+            last_err = e
+            time.sleep(0.3)
+    print(f"# comino read failed on {dev}: {last_err}", file=sys.stderr)
+    return None
+
+
+def _comino_parse_temps(data, temp_map):
+    """Extract valid temperature readings from the controller payload."""
+    temps = []
+    for field, (sensor, role) in temp_map.items():
+        try:
+            v = float(data[field].replace(",", "."))
+        except (KeyError, ValueError):
+            continue
+        # Controller sometimes reports 0/negative for disconnected probes.
+        if 0 < v <= 150:
+            temps.append((sensor, role, v))
+    return temps
+
+
+def _comino_parse_fans(data, ch_labels):
+    """Extract valid fan RPM readings from the controller payload."""
+    fans = []
+    for ch, name in ch_labels.items():
+        try:
+            v = float(data[ch].replace(",", "."))
+        except (KeyError, ValueError):
+            continue
+        if v >= 0:
+            fans.append((ch, name, v))
+    return fans
+
+
 def collect_comino():
     """Return (temps, fans). temps = [(sensor, role, c)]; fans = [(ch, name, rpm)]."""
     temps, fans = [], []
@@ -228,105 +283,76 @@ def collect_comino():
         print("# pyserial not installed; skipping Comino", file=sys.stderr)
         return temps, fans
 
-    def reader(dev):
-        # rm-monitor (if installed) grabs the port via TIOCEXCL during 5s
-        # polls, so retry briefly on EBUSY.
-        last_err = None
-        for _ in range(5):
-            try:
-                with serial.Serial(dev, 9600, timeout=0.1, exclusive=True) as port:
-                    labels = _comino_channel_labels(port)
-                    line = _comino_query(port, ":get_data")
-                return line, labels
-            except (serial.SerialException, OSError) as e:
-                last_err = e
-                time.sleep(0.3)
-        print(f"# comino read failed on {dev}: {last_err}", file=sys.stderr)
-        return None
-
-    selected = select_comino_device(comino_candidate_devices(), reader)
+    selected = select_comino_device(comino_candidate_devices(), _comino_reader)
     if selected is None:
         return temps, fans
     _dev, data, ch_labels = selected
 
-    for field, (sensor, role) in COMINO_TEMP_MAP.items():
-        try:
-            v = float(data[field].replace(",", "."))
-        except (KeyError, ValueError):
-            continue
-        # Controller sometimes reports 0/negative for disconnected probes.
-        if v <= 0 or v > 150:
-            continue
-        temps.append((sensor, role, v))
-
-    for ch, name in ch_labels.items():
-        try:
-            v = float(data[ch].replace(",", "."))
-        except (KeyError, ValueError):
-            continue
-        if v < 0:
-            continue
-        fans.append((ch, name, v))
-
-    return temps, fans
+    return (_comino_parse_temps(data, COMINO_TEMP_MAP),
+            _comino_parse_fans(data, ch_labels))
 
 
 def esc(v):
     return v.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def write_prom(ipmi, gpu, comino_temps, comino_fans):
-    lines = []
-    lines.append("# HELP node_ipmi_temperature_celsius Chassis temperature sensor reading via IPMI.")
-    lines.append("# TYPE node_ipmi_temperature_celsius gauge")
-    for sensor, role, val in ipmi:
-        lines.append(
-            f'node_ipmi_temperature_celsius{{sensor="{esc(sensor)}",role="{role}"}} {val}'
-        )
-    def gpu_lbls(g):
-        return (
-            f'index="{esc(g["index"])}",'
-            f'pci_bus_id="{esc(g["pci_bus_id"])}",'
-            f'name="{esc(g["name"])}"'
-        )
+def _gpu_labels(g):
+    return (
+        f'index="{esc(g["index"])}",'
+        f'pci_bus_id="{esc(g["pci_bus_id"])}",'
+        f'name="{esc(g["name"])}"'
+    )
 
-    lines.append("# HELP node_gpu_temperature_celsius GPU temperature via nvidia-smi (host-visible GPUs only).")
-    lines.append("# TYPE node_gpu_temperature_celsius gauge")
-    for g in gpu:
-        lines.append(f'node_gpu_temperature_celsius{{{gpu_lbls(g)}}} {g["temp_c"]}')
-    lines.append("# HELP node_gpu_utilization_percent GPU compute utilization percent (host-visible GPUs).")
-    lines.append("# TYPE node_gpu_utilization_percent gauge")
-    for g in gpu:
-        lines.append(f'node_gpu_utilization_percent{{{gpu_lbls(g)}}} {g["util_gpu"]}')
-    lines.append("# HELP node_gpu_memory_utilization_percent GPU memory-bandwidth utilization percent.")
-    lines.append("# TYPE node_gpu_memory_utilization_percent gauge")
-    for g in gpu:
-        lines.append(f'node_gpu_memory_utilization_percent{{{gpu_lbls(g)}}} {g["util_mem"]}')
-    lines.append("# HELP node_gpu_memory_used_bytes GPU memory used in bytes.")
-    lines.append("# TYPE node_gpu_memory_used_bytes gauge")
-    for g in gpu:
-        lines.append(f'node_gpu_memory_used_bytes{{{gpu_lbls(g)}}} {g["mem_used_mib"] * 1024 * 1024}')
-    lines.append("# HELP node_gpu_memory_total_bytes GPU memory total in bytes.")
-    lines.append("# TYPE node_gpu_memory_total_bytes gauge")
-    for g in gpu:
-        lines.append(f'node_gpu_memory_total_bytes{{{gpu_lbls(g)}}} {g["mem_total_mib"] * 1024 * 1024}')
-    lines.append("# HELP node_gpu_power_watts GPU power draw in watts.")
-    lines.append("# TYPE node_gpu_power_watts gauge")
-    for g in gpu:
-        lines.append(f'node_gpu_power_watts{{{gpu_lbls(g)}}} {g["power_w"]}')
-    lines.append("# HELP node_comino_temperature_celsius Temperature from a Comino RM cooling controller.")
-    lines.append("# TYPE node_comino_temperature_celsius gauge")
-    for sensor, role, val in comino_temps:
-        lines.append(
-            f'node_comino_temperature_celsius{{sensor="{esc(sensor)}",role="{role}"}} {val}'
-        )
-    lines.append("# HELP node_comino_fan_rpm Fan/pump tachometer from a Comino RM cooling controller.")
-    lines.append("# TYPE node_comino_fan_rpm gauge")
-    for ch, name, val in comino_fans:
-        lines.append(
-            f'node_comino_fan_rpm{{channel="{esc(ch)}",name="{esc(name)}"}} {val}'
-        )
-    body = "\n".join(lines) + "\n"
+
+def _emit_metric(lines, help_text, name, samples):
+    lines.append(f"# HELP {name} {help_text}")
+    lines.append(f"# TYPE {name} gauge")
+    lines.extend(samples)
+
+
+def _emit_gpu_metrics(lines, gpu):
+    lbls = _gpu_labels
+    _emit_metric(lines, "GPU temperature via nvidia-smi (host-visible GPUs only).",
+                 "node_gpu_temperature_celsius",
+                 [f'node_gpu_temperature_celsius{{{lbls(g)}}} {g["temp_c"]}' for g in gpu])
+    _emit_metric(lines, "GPU compute utilization percent (host-visible GPUs).",
+                 "node_gpu_utilization_percent",
+                 [f'node_gpu_utilization_percent{{{lbls(g)}}} {g["util_gpu"]}' for g in gpu])
+    _emit_metric(lines, "GPU memory-bandwidth utilization percent.",
+                 "node_gpu_memory_utilization_percent",
+                 [f'node_gpu_memory_utilization_percent{{{lbls(g)}}} {g["util_mem"]}' for g in gpu])
+    _emit_metric(lines, "GPU memory used in bytes.",
+                 "node_gpu_memory_used_bytes",
+                 [f'node_gpu_memory_used_bytes{{{lbls(g)}}} {g["mem_used_mib"] * 1024 * 1024}' for g in gpu])
+    _emit_metric(lines, "GPU memory total in bytes.",
+                 "node_gpu_memory_total_bytes",
+                 [f'node_gpu_memory_total_bytes{{{lbls(g)}}} {g["mem_total_mib"] * 1024 * 1024}' for g in gpu])
+    _emit_metric(lines, "GPU power draw in watts.",
+                 "node_gpu_power_watts",
+                 [f'node_gpu_power_watts{{{lbls(g)}}} {g["power_w"]}' for g in gpu])
+
+
+def _prom_body(ipmi, gpu, comino_temps, comino_fans):
+    """Render all collected metrics in Prometheus text format."""
+    lines = []
+    _emit_metric(lines, "Chassis temperature sensor reading via IPMI.",
+                 "node_ipmi_temperature_celsius",
+                 [f'node_ipmi_temperature_celsius{{sensor="{esc(sensor)}",role="{role}"}} {val}'
+                  for sensor, role, val in ipmi])
+    _emit_gpu_metrics(lines, gpu)
+    _emit_metric(lines, "Temperature from a Comino RM cooling controller.",
+                 "node_comino_temperature_celsius",
+                 [f'node_comino_temperature_celsius{{sensor="{esc(sensor)}",role="{role}"}} {val}'
+                  for sensor, role, val in comino_temps])
+    _emit_metric(lines, "Fan/pump tachometer from a Comino RM cooling controller.",
+                 "node_comino_fan_rpm",
+                 [f'node_comino_fan_rpm{{channel="{esc(ch)}",name="{esc(name)}"}} {val}'
+                  for ch, name, val in comino_fans])
+    return "\n".join(lines) + "\n"
+
+
+def write_prom(ipmi, gpu, comino_temps, comino_fans):
+    body = _prom_body(ipmi, gpu, comino_temps, comino_fans)
 
     d = os.path.dirname(OUT)
     fd, tmp = tempfile.mkstemp(prefix=".temps.", suffix=".prom", dir=d)

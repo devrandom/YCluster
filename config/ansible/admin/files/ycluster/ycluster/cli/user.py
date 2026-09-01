@@ -121,13 +121,17 @@ def user_manager_projects(args):
     if not args.projects:
         raise SystemExit(f"manager-projects {args.op}: at least one project required")
     current = set(authentik_manager.manager_projects(args.email))
-    if args.op == 'add':
-        new = sorted(current | set(args.projects))
-    elif args.op == 'remove':
-        new = sorted(current - set(args.projects))
-    else:  # set: replace entirely
-        new = list(dict.fromkeys(args.projects))
+    new = _updated_projects(current, args.projects, args.op)
     print(authentik_manager.set_manager_projects(args.email, new))
+
+
+def _updated_projects(current, projects, op):
+    """Apply add/remove/set semantics to the project list."""
+    if op == 'add':
+        return sorted(current | set(projects))
+    if op == 'remove':
+        return sorted(current - set(projects))
+    return list(dict.fromkeys(projects))  # set: replace entirely
 
 
 def user_admin(args):

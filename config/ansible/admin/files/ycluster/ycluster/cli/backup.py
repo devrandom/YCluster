@@ -78,53 +78,51 @@ def backup_recipients_list(args):
     """List all backup encryption recipients."""
     try:
         client = get_etcd_client()
-        
-        # Get all recipients from etcd
         result = client.get_prefix('/cluster/backup/recipients/')
-        
-        recipients = []
-        
-        for value, metadata in result:
-            try:
-                recipient_data = json.loads(value.decode('utf-8'))
-                name = metadata.key.decode('utf-8').split('/')[-1]
-                
-                recipient_info = {
-                    'name': name,
-                    'public_key': recipient_data.get('public_key', 'N/A'),
-                    'created_at': recipient_data.get('created_at', 'N/A')
-                }
-                
-                if recipient_data.get('description'):
-                    recipient_info['description'] = recipient_data['description']
-                
-                recipients.append(recipient_info)
-                
-            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                print(f"Error parsing recipient data: {e}")
-                continue
-        
+        recipients = _parse_recipients(result)
         if args.json:
             print(json.dumps(recipients, indent=2))
         else:
-            if not recipients:
-                print("No backup encryption recipients configured.")
-                return
-            
-            print("Backup Encryption Recipients:")
-            print("-" * 50)
-            
-            for recipient in recipients:
-                print(f"Name: {recipient['name']}")
-                print(f"  Public Key: {recipient['public_key']}")
-                if 'description' in recipient:
-                    print(f"  Description: {recipient['description']}")
-                print(f"  Added: {recipient['created_at']}")
-                print()
-                
+            _print_recipients(recipients)
     except Exception as e:
         print(f"Error listing recipients: {e}")
         sys.exit(1)
+
+
+def _parse_recipients(result):
+    """Decode and normalize etcd recipient records, skipping bad data."""
+    recipients = []
+    for value, metadata in result:
+        try:
+            recipient_data = json.loads(value.decode('utf-8'))
+            name = metadata.key.decode('utf-8').split('/')[-1]
+            info = {
+                'name': name,
+                'public_key': recipient_data.get('public_key', 'N/A'),
+                'created_at': recipient_data.get('created_at', 'N/A')
+            }
+            if recipient_data.get('description'):
+                info['description'] = recipient_data['description']
+            recipients.append(info)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            print(f"Error parsing recipient data: {e}")
+            continue
+    return recipients
+
+
+def _print_recipients(recipients):
+    if not recipients:
+        print("No backup encryption recipients configured.")
+        return
+    print("Backup Encryption Recipients:")
+    print("-" * 50)
+    for recipient in recipients:
+        print(f"Name: {recipient['name']}")
+        print(f"  Public Key: {recipient['public_key']}")
+        if 'description' in recipient:
+            print(f"  Description: {recipient['description']}")
+        print(f"  Added: {recipient['created_at']}")
+        print()
 
 
 def backup_recipients_add(args):

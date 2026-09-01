@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"flag"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+
+	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
+)
 
 func TestDisabledPrefixFor(t *testing.T) {
 	// Unset DisabledPrefix must resolve to the same default the gateway uses
@@ -52,5 +60,94 @@ func TestNormalizeBackendURL(t *testing.T) {
 		if got, err := normalizeBackendURL(in); err != nil || got != want {
 			t.Errorf("normalizeBackendURL(%q) = %q, %v; want %q, nil", in, got, err, want)
 		}
+	}
+}
+
+func TestParseModelsAddArgs(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	apiBase, model, err := parseModelsAddArgs([]string{"http://backend:8000", "model"}, fs)
+	if err != nil || apiBase != "http://backend:8000" || model != "model" {
+		t.Fatalf("got %q, %q, %v", apiBase, model, err)
+	}
+
+	apiBase, model, err = parseModelsAddArgs([]string{"backend:8000"}, fs)
+	if err != nil || apiBase != "http://backend:8000" || model != "" {
+		t.Fatalf("discover: got %q, %q, %v", apiBase, model, err)
+	}
+
+	if _, _, err := parseModelsAddArgs(nil, fs); err == nil {
+		t.Fatal("empty args: want error")
+	}
+	if _, _, err := parseModelsAddArgs([]string{"http://backend:8000", "http://bad"}, fs); err == nil {
+		t.Fatal("URL model: want error")
+	}
+}
+
+func TestPrintDisabledBackend(t *testing.T) {
+	kv := &mvccpb.KeyValue{Key: []byte("/prefix/http://backend:8000"), Value: []byte("note")}
+	out := captureStdout(t, func() { printDisabledBackend("/prefix/", kv) })
+	if out != "  http://backend:8000  note\n" {
+		t.Fatalf("got %q", out)
+	}
+
+	kv.Value = nil
+	out = captureStdout(t, func() { printDisabledBackend("/prefix/", kv) })
+	if out != "  http://backend:8000\n" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestDisableTarget(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	if got := disableTarget([]string{"http://backend:8000"}, fs); got != "http://backend:8000" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestACLRules(t *testing.T) {
+	if aclRule(nil, 0) != nil {
+		t.Fatal("empty tokens: want nil rule")
+	}
+	entries := []ACLEntry{{Subject: "user:a"}}
+	if aclRule(entries, 1).Entries[0].Subject != "user:a" {
+		t.Fatal("entry not retained")
+	}
+}
+
+func TestPrintDisabled(t *testing.T) {
+	out := captureStdout(t, func() { printDisabled("bad", "http://b") })
+	if !strings.Contains(out, "Disabled: http://b") || !strings.Contains(out, "reason: bad") {
+		t.Fatalf("got %q", out)
+	}
+	out = captureStdout(t, func() { printDisabled("", "http://b") })
+	if strings.Contains(out, "reason:") {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestDecodeModelIDs(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"a"},{"id":""},{"id":"b"}]}`)),
+	}
+	ids, err := decodeModelIDs(resp, "endpoint")
+	if err != nil || len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+		t.Fatalf("got %v, %v", ids, err)
+	}
+
+	resp = &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Body:       io.NopCloser(strings.NewReader("boom")),
+	}
+	if _, err := decodeModelIDs(resp, "endpoint"); err == nil {
+		t.Fatal("non-200: want error")
+	}
+
+	resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("bad")),
+	}
+	if _, err := decodeModelIDs(resp, "endpoint"); err == nil {
+		t.Fatal("bad JSON: want error")
 	}
 }

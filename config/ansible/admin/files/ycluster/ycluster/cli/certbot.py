@@ -92,11 +92,67 @@ def certbot_update_nginx(args):
     sys.exit(0 if success else 1)
 
 
+def _print_tls_materials_status():
+    """Check and print TLS material presence in etcd and nginx."""
+    try:
+        client = get_etcd_client()
+        key_value, _ = client.get('/cluster/tls/key')
+        cert_value, _ = client.get('/cluster/tls/cert')
+
+        if key_value and cert_value:
+            print("TLS materials: Present in etcd")
+            _print_nginx_tls_status()
+        elif key_value:
+            print("TLS private key: Present in etcd, certificate missing")
+        elif cert_value:
+            print("TLS certificate: Present in etcd, key missing")
+        else:
+            print("TLS materials: Not found (generate with 'ycluster tls generate')")
+    except Exception as e:
+        print(f"TLS materials: Error checking ({e})")
+
+
+def _print_nginx_tls_status():
+    nginx_key = Path('/etc/nginx/ssl/key.pem')
+    nginx_cert = Path('/etc/nginx/ssl/cert.pem')
+
+    if nginx_key.exists() and nginx_cert.exists():
+        print("Nginx TLS files: Present")
+    else:
+        print("Nginx TLS files: Missing (will be created when needed)")
+
+
+def _print_lets_encrypt_status():
+    """Check Let's Encrypt certificate presence and expiry."""
+    try:
+        client = get_etcd_client()
+        cert_value, _ = client.get('/cluster/tls/cert')
+        if cert_value:
+            print("Let's Encrypt certificate: Present in etcd")
+            _print_cert_expiry(cert_value)
+        else:
+            print("Let's Encrypt certificate: Not found")
+    except Exception as e:
+        print(f"Certificate check error: {e}")
+
+
+def _print_cert_expiry(cert_value):
+    """Print the expiry date of a PEM certificate via openssl."""
+    try:
+        result = subprocess.run(['openssl', 'x509', '-noout', '-enddate'],
+                              input=cert_value.decode(), text=True,
+                              capture_output=True)
+        if result.returncode == 0:
+            print(f"Certificate {result.stdout.strip()}")
+    except Exception:
+        pass
+
+
 def certbot_status(args):
     """Show certificate status"""
     config = certbot_manager.get_https_config()
     domains = certbot_manager.get_all_domains(config)
-    
+
     print("HTTPS Configuration:")
     if 'domain' in config:
         print(f"Primary domain: {config['domain']}")
@@ -106,55 +162,11 @@ def certbot_status(args):
         print(f"Email: {config['email']}")
     else:
         print("Email: Not configured (will use --register-unsafely-without-email)")
-    
-    # Check if TLS materials exist
-    try:
-        client = get_etcd_client()
-        key_value, _ = client.get('/cluster/tls/key')
-        cert_value, _ = client.get('/cluster/tls/cert')
-        
-        if key_value and cert_value:
-            print("TLS materials: Present in etcd")
-            
-            # Check nginx paths
-            nginx_key = Path('/etc/nginx/ssl/key.pem')
-            nginx_cert = Path('/etc/nginx/ssl/cert.pem')
-            
-            if nginx_key.exists() and nginx_cert.exists():
-                print("Nginx TLS files: Present")
-            else:
-                print("Nginx TLS files: Missing (will be created when needed)")
-        elif key_value:
-            print("TLS private key: Present in etcd, certificate missing")
-        elif cert_value:
-            print("TLS certificate: Present in etcd, key missing")
-        else:
-            print("TLS materials: Not found (generate with 'ycluster tls generate')")
-    except Exception as e:
-        print(f"TLS materials: Error checking ({e})")
-    
+
+    _print_tls_materials_status()
+
     if domains:
         print(f"All domains: {', '.join(domains)}")
-        
-        # Check if certificates exist in etcd
-        try:
-            client = get_etcd_client()
-            cert_value, _ = client.get('/cluster/tls/cert')
-            if cert_value:
-                print("Let's Encrypt certificate: Present in etcd")
-            
-                # Try to get certificate expiry
-                try:
-                    result = subprocess.run(['openssl', 'x509', '-noout', '-enddate'], 
-                                          input=cert_value.decode(), text=True, 
-                                          capture_output=True)
-                    if result.returncode == 0:
-                        print(f"Certificate {result.stdout.strip()}")
-                except:
-                    pass
-            else:
-                print("Let's Encrypt certificate: Not found")
-        except Exception as e:
-            print(f"Certificate check error: {e}")
+        _print_lets_encrypt_status()
     else:
         print("No domains configured")

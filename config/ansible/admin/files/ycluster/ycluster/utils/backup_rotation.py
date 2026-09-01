@@ -108,7 +108,7 @@ def plan(entries: list, *, today: _dt.date | None = None,
     groups = group_by_engine(entries)
     keep: set = set()
     delete: list = []
-    for engine, files in groups.items():
+    for _engine, files in groups.items():
         k = schedule_keep(files, today, daily_days, weekly_days)
         keep |= k
         for f in files:

@@ -662,13 +662,15 @@ sec_frp() {
 
   # PROXY protocol end-to-end: a request to f1:80 from c1 must reach
   # the frp alt vhost on 127.0.0.2:17080 and serve the public whitelist.
-  # /status is a public page served by admin-api.
+  # /status is behind forward-auth (commit 60baf408), so an anonymous
+  # request gets a plain 401 from the outpost — which still proves the
+  # frp tunnel, PROXY protocol, nginx, and the auth gate are all up.
   local domain admin_host
   domain=$($SSH s1 "$E etcdctl get /cluster/https/domain --print-value-only" | tr -d '[:space:]')
   [ -n "$domain" ] || die "no external domain in etcd (app-dev fixture missing)"
   admin_host="admin.$domain"
   retry 15 2 "http through f1:80 (frp)" \
-    $SSH c1 "curl -fsS --max-time 5 -H 'Host: $admin_host' http://${IP[f1]}/status -o /dev/null"
+    $SSH c1 "curl -s --max-time 5 -o /dev/null -w '%{http_code}' -H 'Host: $admin_host' http://${IP[f1]}/status | grep -q 401"
   ok "public http through f1:80 -> frp alt vhost (PROXY protocol)"
 
   # Verify PROXY protocol actually delivers the client IP: the alt
@@ -700,10 +702,19 @@ sec_admin_web() {
   admin_host="admin.$domain"
 
   local loc
-  loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' http://${IP[f1]}/admin/")
+  # Browser navigation (Sec-Fetch-Mode: navigate) gets the 302 redirect to
+  # the authentik outpost login. Background fetches/XHR deliberately get a
+  # plain 401 instead — see admin-api-authentik-outpost.conf for the
+  # CORS rationale.
+  loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' -H 'Sec-Fetch-Mode: navigate' http://${IP[f1]}/admin/")
   echo "$loc" | grep -q '^302 .*outpost.goauthentik.io/start' \
-    || die "/admin/ not gated (got: $loc)"
-  ok "/admin/ via f1 redirects anonymous to authentik outpost"
+    || die "/admin/ not gated for browser navigation (got: $loc)"
+  ok "/admin/ via f1 redirects anonymous browsers to authentik outpost"
+
+  local plain
+  plain=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $admin_host' http://${IP[f1]}/admin/")
+  [ "$plain" = 401 ] || die "/admin/ background fetch should get 401 (got: $plain)"
+  ok "/admin/ background fetch gets plain 401 (no CORS redirect)"
 
   # The outpost start endpoint must itself be served (proxied to authentik
   # on the leader) and hand the browser on to the IdP's login flow.
@@ -719,7 +730,7 @@ sec_admin_web() {
 
   # Same endpoint, internal vs public: /api/inventory is open inside the
   # cluster (asserted in section 4) but auth-gated on the public vhost.
-  code=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $admin_host' http://${IP[f1]}/api/inventory")
+  code=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: $admin_host' -H 'Sec-Fetch-Mode: navigate' http://${IP[f1]}/api/inventory")
   [ "$code" = 302 ] || die "/api/inventory not gated on public vhost (got $code)"
   ok "/api/inventory: open internally, gated publicly"
 
@@ -737,9 +748,11 @@ sec_admin_web() {
   auth_host="auth.$domain"
 
   # /admin/ — the exact path the production browser takes; the leak
-  # here is what made admin./app. hang for users.
+  # here is what made admin./app. hang for users. Browser navigation
+  # (Sec-Fetch-Mode: navigate) is the request class that gets the 302;
+  # background fetches get a plain 401 (see the outpost conf).
   local frp_loc
-  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' http://${IP[f1]}/admin/")
+  frp_loc=$($SSH c1 "curl -s --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: $admin_host' -H 'Sec-Fetch-Mode: navigate' http://${IP[f1]}/admin/")
   echo "$frp_loc" | grep -qE '^302 https?://[^/:]+/outpost\.goauthentik\.io/start' \
     || die "/admin/ (frp) redirect leaks port (got: $frp_loc)"
   ok "/admin/ via f1:80 (frp): Location has no port"
@@ -947,8 +960,11 @@ sec_failover() {
     $SSH c1 "curl -fsS --max-time 5 http://$VIP:5000/v2/ -o /dev/null"
   ok "registry serving via VIP on $new"
 
+  # /status is behind forward-auth (commit 60baf408), so 401 is the
+  # expected anonymous response — it proves frp re-homed to the new
+  # leader and nginx + the auth gate are serving again.
   retry 30 3 "public http tunnel re-established via $new" \
-    $SSH c1 "curl -fsS --max-time 5 -H 'Host: admin.$(etcd_domain)' http://${IP[f1]}/status -o /dev/null"
+    $SSH c1 "curl -s --max-time 5 -o /dev/null -w '%{http_code}' -H 'Host: admin.$(etcd_domain)' http://${IP[f1]}/status | grep -q 401"
   ok "frp client re-homed: f1:80 serves again"
 
   # State followed leadership: the new leader binds the same shared backing,

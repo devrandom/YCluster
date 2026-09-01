@@ -395,3 +395,12 @@ class WritePromLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class NormalizedStateTests(unittest.TestCase):
+    def test_fills_missing_count_states(self):
+        state = cc._normalized_state({"counts": {"normal": 2}, "pages_total": 5})
+        self.assertEqual(state["counts"], {"normal": 2, "alarm": 0, "fault": 0})
+        self.assertEqual(state["pages_total"], 5)
+
+    def test_non_dict_gets_defaults(self):
+        self.assertEqual(cc._normalized_state("bad"), cc.new_state())

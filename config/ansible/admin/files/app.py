@@ -43,9 +43,8 @@ import secrets
 import sys
 from typing import TypedDict
 
-from flask import Flask, request, jsonify, redirect, render_template, send_from_directory, send_file
+from flask import Flask, request, jsonify, redirect, render_template, send_from_directory
 import os
-import threading
 import time
 import subprocess
 import socket
@@ -57,6 +56,18 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
 
+from app_gpu_blocks import (gpu_block_record, invalid_windows,
+                            resolve_gpu_block, validate_gpu_block)
+import app_inventory
+import app_schedule
+from app_schedule import schedule_gpu_count, validate_schedule_mode
+from app_allocation import (determine_ip_from_hostname, determine_type_from_mac,
+                            get_next_hostname, get_or_create_allocation)
+from app_helpers import (_add_health_service, _assemble_intervals,
+                         _can_edit_vm, _gateway_vip_health,
+                         _parse_windows, _required_service_health,
+                         _standby_service_health, _storage_vip_health,
+                         _usage_row)
 from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
@@ -119,9 +130,6 @@ GATEWAY_VIP = '10.0.0.254'
 # change. The inventory plugin treats any s\d+ hostname as a core node;
 # we mirror that by filtering on type == 'storage'.
 
-# Thread lock for allocation operations
-allocation_lock = threading.Lock()
-
 # Hostname route params flow into etcd keys (f"{ETCD_PREFIX}/by-hostname/...");
 # validate before interpolation so a crafted URL can't address adjacent etcd
 # namespaces. Covers <prefix><number> names and the dynamic dhcp-NNN form.
@@ -141,244 +149,7 @@ def validated_hostname(view):
     return wrapper
 
 # IP allocation configuration (avoiding DHCP range 10.0.0.100-200)
-class IPRange(TypedDict):
-    base: int
-    max: int
-
-IP_RANGES: dict[str, IPRange] = {
-    's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
-    'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
-    'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
-    'nv': {'base': 110, 'max': 20},  # Nvidia: 10.0.0.111-130 (nv1-nv20)
-    'nas': {'base': 130, 'max': 10}, # NAS: 10.0.0.131-140 (nas1-nas10)
-    'd': {'base': 200, 'max': 30},   # Dev (remote wg scratch): 10.0.1.201-230 (wg peers only)
-}
-
-def determine_ip_from_hostname(hostname, via_wg=False):
-    """Generate deterministic IP based on hostname.
-
-    via_wg=True puts the IP in the wg peer subnet (10.0.1.0/24) while
-    preserving the per-type hostname numbering. A physical compute c3
-    lands at 10.0.0.53; a wg-bootstrapped compute c3 lands at 10.0.1.53.
-    """
-    if not hostname:
-        return None
-
-    # Check if this is an AMT hostname (ends with 'a')
-    is_amt = hostname.endswith('a')
-    if is_amt:
-        hostname = hostname[:-1]  # Strip trailing 'a' for parsing
-
-    # Try multi-char prefixes first (e.g., 'nas'), then single-char
-    prefix = None
-    num = None
-    for p in IP_RANGES:
-        if hostname.startswith(p):
-            try:
-                num = int(hostname[len(p):])
-                prefix = p
-                break
-            except ValueError:
-                continue
-
-    if prefix is None or num is None:
-        return None
-
-    config = IP_RANGES[prefix]
-
-    # Validate number is within range
-    if num < 1 or num > config['max']:
-        raise ValueError(f"Node number {num} for prefix '{prefix}' exceeds range 1-{config['max']}")
-
-    # Calculate base IP address
-    base_ip = config['base'] + num
-
-    if is_amt:
-        # AMT interface: use separate 10.10.10.0/24 subnet
-        return f"10.10.10.{base_ip}"
-    elif via_wg:
-        # WG-bootstrapped peers live on a separate /24 so the wg server
-        # gets a clean connected route instead of per-peer /32s.
-        return f"10.0.1.{base_ip}"
-    else:
-        # Regular interface
-        return f"10.0.0.{base_ip}"
-
-def determine_type_from_mac(mac_address):
-    """Determine machine type based on MAC address prefix.
-
-    Used for PXE boot allocation. macOS nodes use explicit type parameter
-    via /macos/bootstrap endpoint.
-    """
-    if not mac_address:
-        return 'compute'
-
-    # Normalize MAC address to lowercase and remove separators
-    normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
-
-    # Check for storage prefix (58:47:ca becomes 5847ca)
-    if normalized_mac.startswith('5847ca'):
-        return 'storage'
-
-    # Default to compute
-    return 'compute'
-
-def get_next_hostname(client, node_type):
-    """Get the next available hostname for a node type"""
-    prefixes = {
-        'storage': 's',
-        'compute': 'c',
-        'macos': 'm',
-        'nvidia': 'nv',
-        'nas': 'nas',
-        'dev': 'd',
-    }
-    
-    prefix = prefixes.get(node_type, 'c')
-    
-    # Get all existing hostnames of this type
-    existing_numbers = []
-    for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/{prefix}"):
-        if value:
-            hostname = metadata.key.decode().split('/')[-1]
-            try:
-                num = int(hostname[len(prefix):])
-                existing_numbers.append(num)
-            except:
-                pass
-    
-    # Find the next available number
-    next_num = 1
-    if existing_numbers:
-        existing_numbers.sort()
-        # Find first gap or use max+1
-        for i, num in enumerate(existing_numbers):
-            if num != i + 1:
-                next_num = i + 1
-                break
-        else:
-            next_num = len(existing_numbers) + 1
-    
-    return f"{prefix}{next_num}"
-
-def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
-    """Get existing allocation or create new one for non-normalized MAC address.
-
-    Args:
-        mac_address: MAC address (any format)
-        node_type: Optional type override ('storage', 'compute', 'macos').
-                   If not provided, type is detected from MAC address.
-                   If provided and different from existing, the allocation is updated.
-        via_wg:    Transport marker — WG-bootstrapped nodes get their IP
-                   from 10.0.1.0/24 instead of 10.0.0.0/24. Preserved in
-                   the allocation record so list/lookup stays consistent.
-    """
-    client = get_etcd_client()
-    normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
-
-    # Check if allocation already exists
-    existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
-    if existing_data[0]:
-        data = json.loads(existing_data[0].decode())
-        existing_via_wg = bool(data.get('via_wg', False))
-        # Some old entries may lack IP or amt_ip, fill them in
-        if 'amt_ip' not in data:
-            amt_ip_address = determine_ip_from_hostname(data['hostname'] + 'a')
-            data['amt_ip'] = amt_ip_address
-
-        # Transport changed (LAN <-> WG): IP is derived from hostname+via_wg,
-        # so recompute and rewrite. Otherwise a node bootstrapped over WG after
-        # a prior LAN allocation keeps its 10.0.0.x address, which collides
-        # with the LAN subnet on the WG server and silently breaks the tunnel.
-        if via_wg != existing_via_wg:
-            new_ip = determine_ip_from_hostname(data['hostname'], via_wg=via_wg)
-            print(f"allocation {data['hostname']} ({normalized_mac}): transport "
-                  f"{'LAN->WG' if via_wg else 'WG->LAN'}, ip {data['ip']} -> {new_ip}",
-                  file=sys.stderr)
-            data['ip'] = new_ip
-            data['via_wg'] = via_wg
-            data['updated_at'] = datetime.now(UTC).isoformat()
-            existing_via_wg = via_wg
-            allocation_json = json.dumps(data)
-            client.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json)
-            client.put(f"{ETCD_PREFIX}/by-hostname/{data['hostname']}", allocation_json)
-
-        # Update type if explicitly requested and different
-        if node_type and data.get('type') != node_type:
-            old_hostname = data['hostname']
-            # Allocate new hostname for the new type
-            new_hostname = get_next_hostname(client, node_type)
-            new_ip = determine_ip_from_hostname(new_hostname, via_wg=existing_via_wg)
-            new_amt_ip = determine_ip_from_hostname(new_hostname + "a")
-
-            # Update allocation data
-            data['hostname'] = new_hostname
-            data['type'] = node_type
-            data['ip'] = new_ip
-            data['amt_ip'] = new_amt_ip
-            data['updated_at'] = datetime.now(UTC).isoformat()
-
-            # Update in etcd (delete old hostname entry, create new one)
-            allocation_json = json.dumps(data)
-            client.delete(f"{ETCD_PREFIX}/by-hostname/{old_hostname}")
-            client.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json)
-            client.put(f"{ETCD_PREFIX}/by-hostname/{new_hostname}", allocation_json)
-
-        return data
-
-
-    # Create new allocation
-    with allocation_lock:
-        # Double-check after acquiring lock
-        existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
-        if existing_data[0]:
-            return json.loads(existing_data[0].decode())
-
-        # Determine machine type and allocate hostname
-        machine_type = node_type or determine_type_from_mac(mac_address)
-
-        # allocation_lock only serializes this process; the DHCP server (and
-        # any other admin-api instance) allocates concurrently, so commit via
-        # compare-and-swap and retry on conflict.
-        for _ in range(5):
-            hostname = get_next_hostname(client, machine_type)
-            ip_address = determine_ip_from_hostname(hostname, via_wg=via_wg)
-            amt_ip_address = determine_ip_from_hostname(hostname + "a")
-
-            allocation_data = {
-                'hostname': hostname,
-                'type': machine_type,
-                'ip': ip_address,
-                'amt_ip': amt_ip_address,
-                'mac': normalized_mac,
-                'via_wg': via_wg,
-                'allocated_at': datetime.now(UTC).isoformat()
-            }
-
-            allocation_json = json.dumps(allocation_data)
-            committed, _ = client.transaction(
-                compare=[
-                    client.transactions.version(f"{ETCD_PREFIX}/by-mac/{normalized_mac}") == 0,
-                    client.transactions.version(f"{ETCD_PREFIX}/by-hostname/{hostname}") == 0
-                ],
-                success=[
-                    client.transactions.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json),
-                    client.transactions.put(f"{ETCD_PREFIX}/by-hostname/{hostname}", allocation_json)
-                ],
-                failure=[]
-            )
-            if committed:
-                return allocation_data
-
-            # Lost the race. If this MAC got allocated elsewhere, return that
-            # allocation; otherwise the hostname was taken — pick the next.
-            existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
-            if existing_data[0]:
-                return json.loads(existing_data[0].decode())
-
-        raise RuntimeError(
-            f"allocation for {normalized_mac} failed: etcd transaction "
-            f"conflicted on every attempt")
+# is in app_allocation.py.
 
 @app.route('/api/allocate')
 def allocate_hostname():
@@ -411,53 +182,20 @@ def allocate_hostname():
     except Exception as e:
         return jsonify({'error': f'Allocation failed: {str(e)}'}), 500
 
-@app.route('/api/wg/register', methods=['POST'])
 def wg_register():
-    """Allocate a hostname+IP (as a cluster node of the requested type)
-    and register a WireGuard peer pubkey for it in one atomic call.
-
-    This endpoint is public (exposed via the admin-api reverse proxy for
-    remote-node onboarding), so it validates input carefully and does not
-    leak details of unrelated allocations.
-
-    Body (JSON): {mac, type, pubkey}
-      mac:    client MAC (any format)
-      type:   one of storage|compute|macos|nas|nvidia (default: compute)
-      pubkey: base64-encoded 32-byte WireGuard public key
-    Returns: {hostname, ip, status, pubkey_sha256}
-    """
-    import base64
+    """Allocate a node and register a WireGuard peer in one atomic call."""
     from ycluster.utils import wg_config
 
     data = request.get_json(silent=True) or {}
-    mac = data.get('mac')
-    node_type = data.get('type') or 'compute'
-    pubkey = data.get('pubkey')
+    mac, node_type, pubkey, error = app_wg.validate_register_input(data)
+    if error:
+        return jsonify({'error': error}), 400
 
-    if not mac or not pubkey:
-        return jsonify({'error': 'mac and pubkey are required'}), 400
-    if node_type not in ('storage', 'compute', 'macos', 'nas', 'nvidia', 'dev'):
-        return jsonify({'error': f'invalid type: {node_type}'}), 400
-
-    # Sanity-check the pubkey shape before touching etcd
-    try:
-        decoded = base64.b64decode(pubkey, validate=True)
-        if len(decoded) != 32:
-            raise ValueError('wrong length')
-    except Exception:
-        return jsonify({'error': 'invalid pubkey (expected base64 32-byte key)'}), 400
-
-    try:
-        allocation = get_or_create_allocation(mac, node_type=node_type, via_wg=True)
-    except Exception as e:
-        return jsonify({'error': f'allocation failed: {e}'}), 500
-
-    try:
-        peer = wg_config.register_peer(allocation['hostname'], pubkey)
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'registration failed: {e}'}), 500
+    allocation, peer, failure = app_wg.register_peer(
+        get_or_create_allocation, wg_config.register_peer,
+        mac, node_type, pubkey)
+    if failure:
+        return jsonify({'error': failure[1]}), failure[0]
 
     return jsonify({
         'hostname': allocation['hostname'],
@@ -582,6 +320,58 @@ def get_dhcp_config():
     else:
         return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
 
+def _node_hosts_entries(client):
+    """Generate hosts entries for cluster nodes registered in etcd."""
+    entries = []
+    for value, _metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
+        if not value:
+            continue
+        try:
+            allocation = json.loads(value.decode())
+            hostname = allocation['hostname']
+            ip = allocation['ip']
+
+            # Skip AMT hostnames registered as nodes - they get correct
+            # entries auto-generated from the base node below
+            if hostname.endswith('a') and determine_ip_from_hostname(hostname):
+                continue
+
+            entries.append(f"{ip} {hostname} {hostname}.xc")
+
+            # Add AMT hostname entry if this is a regular node (not already AMT)
+            if not hostname.endswith('a'):
+                amt_hostname = f"{hostname}a"
+                amt_ip = determine_ip_from_hostname(amt_hostname)
+                if amt_ip:
+                    entries.append(f"{amt_ip} {amt_hostname} {amt_hostname}.xc")
+        except Exception:
+            pass
+    return entries
+
+
+def _frontend_hosts_entries(client):
+    """Generate entries for frontend nodes (separate etcd prefix).
+
+    Frontend nodes sit outside the cluster subnet — emit their reachable
+    address so the cluster can resolve/ping/ssh them by name. Only
+    IP-registered nodes can go in a hosts file; hostname-registered ones
+    already resolve via DNS.
+    """
+    entries = []
+    for value, _metadata in client.get_prefix("/cluster/nodes/frontend/"):
+        if not value:
+            continue
+        try:
+            node = json.loads(value.decode())
+            name = node.get('name')
+            ip = node.get('ip')
+            if name and ip:
+                entries.append(f"{ip} {name} {name}.xc")
+        except Exception:
+            pass
+    return entries
+
+
 @app.route('/api/hosts')
 def get_hosts():
     """Generate hosts file format from etcd allocations"""
@@ -589,59 +379,22 @@ def get_hosts():
         client = get_etcd_client()
     except Exception as e:
         return f"# etcd connection failed: {str(e)}\n", 503
-    
-    hosts_entries = []
-    
-    # Get all allocations
-    for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/by-hostname/"):
-        if value:
-            try:
-                allocation = json.loads(value.decode())
-                hostname = allocation['hostname']
-                ip = allocation['ip']
-                
-                # Skip AMT hostnames registered as nodes - they get correct
-                # entries auto-generated from the base node below
-                if hostname.endswith('a') and determine_ip_from_hostname(hostname):
-                    continue
-                
-                # Add main hostname entry
-                hosts_entries.append(f"{ip} {hostname} {hostname}.xc")
-                
-                # Add AMT hostname entry if this is a regular node (not already AMT)
-                if not hostname.endswith('a'):
-                    amt_hostname = f"{hostname}a"
-                    amt_ip = determine_ip_from_hostname(amt_hostname)
-                    if amt_ip:
-                        hosts_entries.append(f"{amt_ip} {amt_hostname} {amt_hostname}.xc")
-            except:
-                pass
-    
-    # Frontend nodes live under a separate etcd prefix (not by-hostname) and
-    # sit outside the cluster subnet — emit their reachable address so the
-    # cluster can resolve/ping/ssh them by name. Only IP-registered nodes can
-    # go in a hosts file; hostname-registered ones already resolve via DNS.
-    for value, metadata in client.get_prefix("/cluster/nodes/frontend/"):
-        if value:
-            try:
-                node = json.loads(value.decode())
-                name = node.get('name')
-                ip = node.get('ip')
-                if name and ip:
-                    hosts_entries.append(f"{ip} {name} {name}.xc")
-            except:
-                pass
+
+    hosts_entries = _node_hosts_entries(client)
+    hosts_entries.extend(_frontend_hosts_entries(client))
 
     # Add service aliases that point to storage VIP
-    hosts_entries.append("10.0.0.100 registry.xc")
-    hosts_entries.append("10.0.0.100 admin.xc")
-    hosts_entries.append("10.0.0.100 inference.xc")
-    hosts_entries.append("10.0.0.100 auth.xc")
+    hosts_entries.extend([
+        f"{STORAGE_VIP} registry.xc",
+        f"{STORAGE_VIP} admin.xc",
+        f"{STORAGE_VIP} inference.xc",
+        f"{STORAGE_VIP} auth.xc",
+    ])
 
     if hosts_entries:
         return '\n'.join(sorted(hosts_entries)) + '\n', 200, {'Content-Type': 'text/plain'}
-    else:
-        return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
+    return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
+
 
 def check_service_status(service_name):
     """Check if a systemd service is active"""
@@ -689,43 +442,37 @@ def check_ceph_status():
     except:
         return {'status': 'unavailable', 'details': 'ceph command failed'}
 
+def _dns_query_details():
+    """Query the local resolver for this host and return (working, message)."""
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = ['127.0.0.1']
+        resolver.timeout = 3
+        resolver.lifetime = 5
+
+        local_hostname = platform.node()
+        answer = resolver.resolve(local_hostname, 'A')
+        if answer:
+            resolved_ips = [str(rdata) for rdata in answer]
+            return True, (f"Local DNS server responding "
+                          f"({local_hostname} -> {', '.join(resolved_ips)})")
+        return False, f"Local DNS query for {local_hostname} returned no results"
+    except dns.resolver.Timeout:
+        return False, "Local DNS query timeout"
+    except dns.resolver.NXDOMAIN:
+        return False, "Local DNS query: domain not found"
+    except dns.resolver.NoAnswer:
+        return False, "Local DNS query: no answer"
+    except Exception as e:
+        return False, f"Local DNS query error: {str(e)}"
+
+
 def check_dns_status():
     """Check DNS (dnsmasq) service and functionality"""
     try:
-        # Check if dnsmasq service is running
         service_running = check_service_status('dnsmasq')
-        
-        # Test local DNS server directly using dnspython
-        dns_working = False
-        dns_details = "DNS query failed"
-        
-        try:
-            # Create a resolver that queries the local DNS server directly
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = ['127.0.0.1']
-            resolver.timeout = 3
-            resolver.lifetime = 5
-            
-            # Query local hostname A record
-            local_hostname = platform.node()
-            answer = resolver.resolve(local_hostname, 'A')
-            if answer:
-                resolved_ips = [str(rdata) for rdata in answer]
-                dns_working = True
-                dns_details = f"Local DNS server responding ({local_hostname} -> {', '.join(resolved_ips)})"
-            else:
-                dns_details = f"Local DNS query for {local_hostname} returned no results"
-                
-        except dns.resolver.Timeout:
-            dns_details = "Local DNS query timeout"
-        except dns.resolver.NXDOMAIN:
-            dns_details = "Local DNS query: domain not found"
-        except dns.resolver.NoAnswer:
-            dns_details = "Local DNS query: no answer"
-        except Exception as e:
-            dns_details = f"Local DNS query error: {str(e)}"
-        
-        # Overall status
+        dns_working, dns_details = _dns_query_details()
+
         if service_running and dns_working:
             status = 'healthy'
             details = f"Service active, {dns_details}"
@@ -735,7 +482,7 @@ def check_dns_status():
         else:
             status = 'unhealthy'
             details = f"Service inactive, {dns_details}"
-            
+
         return {
             'status': status,
             'details': {
@@ -745,7 +492,8 @@ def check_dns_status():
             }
         }
     except Exception as e:
-        return {'status': 'error', 'details': f'DNS check failed: {str(e)}'}
+        return {'status': 'error', 'details': f"DNS check failed: {str(e)}"}
+
 
 def check_certificate_expiry():
     """Check TLS certificate expiry from etcd"""
@@ -764,7 +512,7 @@ def check_certificate_expiry():
     try:
         client = get_etcd_client()
         cert_value, _ = client.get('/cluster/tls/cert')
-        
+
         if not cert_value:
             return {
                 'status': 'not_configured',
@@ -774,20 +522,13 @@ def check_certificate_expiry():
                     'expires_at': None
                 }
             }
-        
-        # Parse the certificate
+
         cert_pem = cert_value.decode()
         cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
-        
-        # Get expiry date
         expires_at = cert.not_valid_after
-        now = datetime.now(UTC).replace(tzinfo=None)  # Remove timezone for comparison
-        
-        # Calculate days until expiry
-        time_until_expiry = expires_at - now
-        days_until_expiry = time_until_expiry.days
-        
-        # Determine status based on days remaining
+        now = datetime.now(UTC).replace(tzinfo=None)
+        days_until_expiry = (expires_at - now).days
+
         if days_until_expiry < 0:
             status = 'expired'
             message = f'Certificate expired {abs(days_until_expiry)} days ago'
@@ -800,7 +541,7 @@ def check_certificate_expiry():
         else:
             status = 'healthy'
             message = f'Certificate expires in {days_until_expiry} days'
-        
+
         return {
             'status': status,
             'details': {
@@ -811,7 +552,7 @@ def check_certificate_expiry():
                 'issuer': cert.issuer.rfc4514_string()
             }
         }
-        
+
     except Exception as e:
         return {
             'status': 'error',
@@ -900,203 +641,192 @@ def check_docker_daemon():
             'details': {'message': f'Docker check failed: {str(e)}'}
         }
 
+def _registry_probe_status():
+    """Probe the Docker registry /v2/ endpoint.
+
+    Returns (healthy, api_version, error) — tries localhost then the
+    storage VIP, stopping at the first 200 response.
+    """
+    test_urls = [f'http://localhost:5000/v2/', f'http://{STORAGE_VIP}:5000/v2/']
+    error = None
+    for url in test_urls:
+        try:
+            response = requests.get(url, timeout=5)
+        except requests.exceptions.Timeout:
+            error = 'Registry health check timeout'
+        except requests.exceptions.ConnectionError:
+            error = 'Registry connection failed'
+        except Exception as e:
+            error = f'Registry health check failed: {str(e)}'
+        else:
+            if response.status_code == 200:
+                version = response.headers.get('Docker-Distribution-Api-Version', 'unknown')
+                return True, version, None
+            error = f'Registry health check returned HTTP {response.status_code}'
+    return False, None, error
+
+
+def _registry_leader_status(running, port_open, healthy, version, error):
+    """Determine status/message on the storage leader."""
+    if running and port_open and healthy:
+        return 'healthy', f'Registry running and healthy (API version {version})'
+    if running and port_open:
+        return 'degraded', f'Registry running but health check failed: {error}'
+    if running:
+        return 'unhealthy', f'Registry running but port not accessible: {error}'
+    return 'unhealthy', 'Registry not running'
+
+
 def check_docker_registry():
     """Check Docker registry status and functionality"""
     try:
-        # Check if registry service is running
-        registry_service_running = check_service_status('docker-registry')
-        
-        # Also check if registry container is running directly
-        registry_container_running = False
+        service_running = check_service_status('docker-registry')
+        port_open = check_port_open('localhost', 5000)
+        healthy, version, error = (False, None, None)
+        if port_open:
+            healthy, version, error = _registry_probe_status()
 
-        # Check if registry port is open (try both localhost and storage VIP)
-        registry_port_open = check_port_open('localhost', 5000)
-
-        # Test registry health endpoint
-        registry_healthy = False
-        registry_error = None
-        registry_version = None
-        
-        if registry_port_open:
-            # Try both localhost and VIP endpoints
-            test_urls = ['http://localhost:5000/v2/', 'http://10.0.0.100:5000/v2/']
-            for url in test_urls:
-                try:
-                    health_response = requests.get(url, timeout=5)
-                    if health_response.status_code == 200:
-                        registry_healthy = True
-                        registry_version = health_response.headers.get('Docker-Distribution-Api-Version', 'unknown')
-                        break
-                    else:
-                        registry_error = f'Registry health check returned HTTP {health_response.status_code}'
-                except requests.exceptions.Timeout:
-                    registry_error = 'Registry health check timeout'
-                except requests.exceptions.ConnectionError:
-                    registry_error = 'Registry connection failed'
-                except Exception as e:
-                    registry_error = f'Registry health check failed: {str(e)}'
-        
-        # Check if this node should be running the registry (storage leader)
         is_storage_lead = is_storage_leader()
-        
-        # Registry is considered running if either service or container is running
-        registry_running = registry_service_running or registry_container_running
-        
-        # Determine overall status
+        running = service_running  # container check is a no-op (always False)
+
         if is_storage_lead:
-            if registry_running and registry_port_open and registry_healthy:
-                status = 'healthy'
-                message = f'Registry running and healthy (API version {registry_version})'
-            elif registry_running and registry_port_open:
-                status = 'degraded'
-                message = f'Registry running but health check failed: {registry_error}'
-            elif registry_running:
-                status = 'unhealthy'
-                message = f'Registry running but port not accessible: {registry_error}'
-            else:
-                status = 'unhealthy'
-                message = 'Registry not running'
+            status, message = _registry_leader_status(running, port_open, healthy, version, error)
+        elif running or port_open:
+            status, message = 'unhealthy', 'Split-brain: Registry running on non-leader'
         else:
-            # Not storage leader - registry should not be running
-            if registry_running or registry_port_open:
-                status = 'unhealthy'
-                message = 'Split-brain: Registry running on non-leader'
-            else:
-                status = 'standby'
-                message = 'Registry not required (not storage leader)'
-        
+            status, message = 'standby', 'Registry not required (not storage leader)'
+
         return {
             'status': status,
             'details': {
-                'service_active': registry_service_running,
-                'container_running': registry_container_running,
-                'port_open': registry_port_open,
-                'health_check_passed': registry_healthy,
-                'api_version': registry_version,
+                'service_active': service_running,
+                'container_running': False,
+                'port_open': port_open,
+                'health_check_passed': healthy,
+                'api_version': version,
                 'required': is_storage_lead,
                 'reason': 'storage leader' if is_storage_lead else 'not storage leader',
                 'message': message,
-                'error': registry_error
+                'error': error
             }
         }
-        
     except Exception as e:
         return {
             'status': 'error',
             'details': {'message': f'Registry check failed: {str(e)}'}
         }
 
+
+def _tang_advertisement_status():
+    """Probe the Tang advertisement endpoint.
+
+    Returns (healthy, keys, error) — healthy is True when the endpoint
+    returned 200, keys is the advertised key count (or 'unknown'), and
+    error carries a human-readable failure description.
+    """
+    try:
+        response = requests.get('http://localhost:8777/adv', timeout=5)
+    except requests.exceptions.Timeout:
+        return False, None, 'Tang advertisement timeout'
+    except requests.exceptions.ConnectionError:
+        return False, None, 'Tang connection failed'
+    except Exception as e:
+        return False, None, f'Tang advertisement failed: {str(e)}'
+
+    if response.status_code != 200:
+        return False, None, f'Tang advertisement returned HTTP {response.status_code}'
+    try:
+        data = response.json()
+        if isinstance(data, dict) and 'keys' in data:
+            return True, len(data['keys']), None
+        return True, 'unknown', None
+    except Exception:
+        return True, 'unknown', None
+
+
+def _tang_health_from_probe(running, port_open, healthy, keys, error):
+    """Derive status/message from the service, port, and advertisement probes."""
+    if running and port_open and healthy:
+        status = 'healthy'
+        message = f'Tang server running and healthy ({keys} keys)'
+    elif running and port_open:
+        status = 'degraded'
+        message = f'Tang service running but advertisement failed: {error}'
+    elif running:
+        status = 'unhealthy'
+        message = f'Tang service running but port not accessible: {error}'
+    else:
+        status = 'unhealthy'
+        message = 'Tang service not running'
+    return status, message
+
+
 def check_tang_service():
     """Check Tang server status and functionality"""
     try:
-        # Check if Tang service is running
-        tang_service_running = check_service_status('tang-server.service')
-        
-        # Check if Tang port is open
-        tang_port_open = check_port_open('localhost', 8777)
-        
-        # Test Tang advertisement endpoint
-        tang_healthy = False
-        tang_error = None
-        tang_keys = None
-        
-        if tang_port_open:
-            try:
-                adv_response = requests.get('http://localhost:8777/adv', timeout=5)
-                if adv_response.status_code == 200:
-                    tang_healthy = True
-                    # Try to parse the advertisement to count keys
-                    try:
-                        adv_data = adv_response.json()
-                        if isinstance(adv_data, dict) and 'keys' in adv_data:
-                            tang_keys = len(adv_data['keys'])
-                        else:
-                            tang_keys = 'unknown'
-                    except:
-                        tang_keys = 'unknown'
-                else:
-                    tang_error = f'Tang advertisement returned HTTP {adv_response.status_code}'
-            except requests.exceptions.Timeout:
-                tang_error = 'Tang advertisement timeout'
-            except requests.exceptions.ConnectionError:
-                tang_error = 'Tang connection failed'
-            except Exception as e:
-                tang_error = f'Tang advertisement failed: {str(e)}'
-        
-        # Determine overall status
-        if tang_service_running and tang_port_open and tang_healthy:
-            status = 'healthy'
-            message = f'Tang server running and healthy ({tang_keys} keys)'
-        elif tang_service_running and tang_port_open:
-            status = 'degraded'
-            message = f'Tang service running but advertisement failed: {tang_error}'
-        elif tang_service_running:
-            status = 'unhealthy'
-            message = f'Tang service running but port not accessible: {tang_error}'
-        else:
-            status = 'unhealthy'
-            message = 'Tang service not running'
-        
+        running = check_service_status('tang-server.service')
+        port_open = check_port_open('localhost', 8777)
+
+        healthy, keys, error = (False, None, None)
+        if port_open:
+            healthy, keys, error = _tang_advertisement_status()
+
+        status, message = _tang_health_from_probe(running, port_open, healthy, keys, error)
         return {
             'status': status,
             'details': {
-                'service_active': tang_service_running,
-                'port_open': tang_port_open,
-                'advertisement_working': tang_healthy,
-                'key_count': tang_keys,
+                'service_active': running,
+                'port_open': port_open,
+                'advertisement_working': healthy,
+                'key_count': keys,
                 'message': message,
-                'error': tang_error
+                'error': error
             }
         }
-        
     except Exception as e:
-        return {
-            'status': 'error',
-            'details': {'message': f'Tang check failed: {str(e)}'}
-        }
+        return {'status': 'error', 'details': {'message': f'Tang check failed: {str(e)}'}}
+
+
+
+def _secrets_mount_details():
+    """Return (mounted, findmnt details) for /secrets."""
+    result = subprocess.run(['mountpoint', '-q', '/secrets'],
+                            capture_output=True, text=True, timeout=5)
+    mount_details = None
+    if result.returncode == 0:
+        try:
+            mount_result = subprocess.run(
+                ['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS', '/secrets'],
+                capture_output=True, text=True, timeout=5)
+            if mount_result.returncode == 0:
+                mount_details = mount_result.stdout.strip()
+        except Exception:
+            pass
+    return result.returncode == 0, mount_details
+
+
+def _secrets_access(is_mounted):
+    """Return (accessible, error) for /secrets; mounted-but-root-only is OK."""
+    try:
+        if os.path.isdir('/secrets'):
+            os.listdir('/secrets')
+            return True, None
+        return False, '/secrets directory does not exist'
+    except PermissionError:
+        return is_mounted, None
+    except Exception as e:
+        return False, f'Error accessing /secrets: {str(e)}'
+
 
 def check_secrets_mount():
     """Check if /secrets is mounted"""
     try:
-        # Check if /secrets is mounted
-        result = subprocess.run(['mountpoint', '-q', '/secrets'], 
-                              capture_output=True, text=True, timeout=5)
-        is_mounted = result.returncode == 0
-        
-        # Get mount details if mounted
-        mount_details = None
-        if is_mounted:
-            try:
-                mount_result = subprocess.run(['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS', '/secrets'], 
-                                            capture_output=True, text=True, timeout=5)
-                if mount_result.returncode == 0:
-                    mount_details = mount_result.stdout.strip()
-            except:
-                pass
-        
-        # Check if secrets directory exists and is accessible
-        secrets_accessible = False
-        secrets_error = None
-        try:
-            if os.path.exists('/secrets') and os.path.isdir('/secrets'):
-                # Try to list the directory to verify access
-                os.listdir('/secrets')
-                secrets_accessible = True
-            else:
-                secrets_error = '/secrets directory does not exist'
-        except PermissionError:
-            # The service runs unprivileged and /secrets contents are
-            # deliberately root-only; mounted-but-unreadable is the
-            # expected state, and mountedness is what this check is for.
-            secrets_accessible = is_mounted
-            secrets_error = None
-        except Exception as e:
-            secrets_error = f'Error accessing /secrets: {str(e)}'
+        is_mounted, mount_details = _secrets_mount_details()
+        secrets_accessible, secrets_error = _secrets_access(is_mounted)
 
-        # Determine overall status
         if is_mounted and secrets_accessible:
             status = 'healthy'
-            message = f'Secrets volume mounted and accessible'
+            message = 'Secrets volume mounted and accessible'
         elif is_mounted:
             status = 'degraded'
             message = f'Secrets volume mounted but not accessible: {secrets_error}'
@@ -1116,90 +846,77 @@ def check_secrets_mount():
         }
         
     except Exception as e:
-        return {
-            'status': 'error',
-            'details': {'message': f'Secrets mount check failed: {str(e)}'}
-        }
+        return {'status': 'error',
+                'details': {'message': f'Secrets mount check failed: {str(e)}'}}
+
+def _open_webui_health_probe():
+    """Probe the Open-WebUI health endpoint.
+
+    Returns (healthy, version, error).
+    """
+    try:
+        response = requests.get('http://localhost:8380/health', timeout=5)
+    except requests.exceptions.Timeout:
+        return False, None, 'Open-WebUI health check timeout'
+    except requests.exceptions.ConnectionError:
+        return False, None, 'Open-WebUI connection failed'
+    except Exception as e:
+        return False, None, f'Open-WebUI health check failed: {str(e)}'
+
+    if response.status_code != 200:
+        return False, None, f'Open-WebUI health check returned HTTP {response.status_code}'
+    try:
+        version = response.json().get('version', 'unknown')
+    except Exception:
+        version = 'unknown'
+    return True, version, None
+
+
+def _open_webui_leader_status(running, port_open, healthy, version, error):
+    """Determine status/message on the storage leader."""
+    if running and port_open and healthy:
+        return 'healthy', f'Open-WebUI running and healthy (version {version})'
+    if running and port_open:
+        return 'degraded', f'Open-WebUI running but health check failed: {error}'
+    if running:
+        return 'unhealthy', f'Open-WebUI service running but port not accessible: {error}'
+    return 'unhealthy', 'Open-WebUI service not running'
+
 
 def check_open_webui():
     """Check Open-WebUI service status and functionality"""
     try:
-        # Check if Open-WebUI service is running
-        webui_service_running = check_service_status('open-webui')
-        
-        # Check if Open-WebUI port is open
-        webui_port_open = check_port_open('localhost', 8380)
-        
-        # Test Open-WebUI health endpoint
-        webui_healthy = False
-        webui_error = None
-        webui_version = None
-        
-        if webui_port_open:
-            try:
-                # Try health check endpoint
-                health_response = requests.get('http://localhost:8380/health', timeout=5)
-                if health_response.status_code == 200:
-                    webui_healthy = True
-                    try:
-                        health_data = health_response.json()
-                        webui_version = health_data.get('version', 'unknown')
-                    except:
-                        webui_version = 'unknown'
-                else:
-                    webui_error = f'Open-WebUI health check returned HTTP {health_response.status_code}'
-            except requests.exceptions.Timeout:
-                webui_error = 'Open-WebUI health check timeout'
-            except requests.exceptions.ConnectionError:
-                webui_error = 'Open-WebUI connection failed'
-            except Exception as e:
-                webui_error = f'Open-WebUI health check failed: {str(e)}'
-        
-        # Check if this node should be running Open-WebUI (storage leader)
+        running = check_service_status('open-webui')
+        port_open = check_port_open('localhost', 8380)
+        healthy, version, error = (False, None, None)
+        if port_open:
+            healthy, version, error = _open_webui_health_probe()
         is_storage_lead = is_storage_leader()
-        
-        # Determine overall status
+
         if is_storage_lead:
-            if webui_service_running and webui_port_open and webui_healthy:
-                status = 'healthy'
-                message = f'Open-WebUI running and healthy (version {webui_version})'
-            elif webui_service_running and webui_port_open:
-                status = 'degraded'
-                message = f'Open-WebUI running but health check failed: {webui_error}'
-            elif webui_service_running:
-                status = 'unhealthy'
-                message = f'Open-WebUI service running but port not accessible: {webui_error}'
-            else:
-                status = 'unhealthy'
-                message = 'Open-WebUI service not running'
+            status, message = _open_webui_leader_status(running, port_open, healthy, version, error)
+        elif running or port_open:
+            status, message = 'unhealthy', 'Split-brain: Open-WebUI running on non-leader'
         else:
-            # Not storage leader - Open-WebUI should not be running
-            if webui_service_running or webui_port_open:
-                status = 'unhealthy'
-                message = 'Split-brain: Open-WebUI running on non-leader'
-            else:
-                status = 'standby'
-                message = 'Open-WebUI not required (not storage leader)'
-        
+            status, message = 'standby', 'Open-WebUI not required (not storage leader)'
+
         return {
             'status': status,
             'details': {
-                'service_active': webui_service_running,
-                'port_open': webui_port_open,
-                'health_check_passed': webui_healthy,
-                'version': webui_version,
+                'service_active': running,
+                'port_open': port_open,
+                'health_check_passed': healthy,
+                'version': version,
                 'required': is_storage_lead,
                 'reason': 'storage leader' if is_storage_lead else 'not storage leader',
                 'message': message,
-                'error': webui_error
+                'error': error
             }
         }
-        
     except Exception as e:
-        return {
-            'status': 'error',
-            'details': {'message': f'Open-WebUI check failed: {str(e)}'}
-        }
+        return {'status': 'error', 'details': {'message': f'Open-WebUI check failed: {str(e)}'}}
+
+
 
 def is_storage_leader():
     """Check if this node is the current storage leader"""
@@ -1400,51 +1117,10 @@ def inventory_list():
 @app.route('/api/inventory/export.csv')
 def inventory_export_csv():
     """Export full inventory as CSV (internal only)"""
-    import csv, io
     try:
         from ycluster.utils.inventory import list_all
         rows = list_all()
-        rows.sort(key=lambda r: (r['allocation'] or {}).get('hostname', '') or '')
-
-        fieldnames = [
-            'hostname', 'type', 'ip',
-            'product', 'serial', 'bios_version',
-            'cpu', 'ram_gb', 'disks', 'gpus', 'nics',
-            'os', 'kernel',
-            'vendor', 'purchased_at', 'warranty_expires', 'cost', 'cost_currency', 'location', 'notes',
-            'hw_collected_at', 'asset_updated_at',
-        ]
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction='ignore')
-        writer.writeheader()
-        for r in rows:
-            alloc = r['allocation'] or {}
-            hw = r['hardware'] or {}
-            asset = r['asset'] or {}
-            writer.writerow({
-                'hostname':         alloc.get('hostname', ''),
-                'type':             alloc.get('type', ''),
-                'ip':               alloc.get('ip', ''),
-                'product':          hw.get('product', ''),
-                'serial':           hw.get('serial', ''),
-                'bios_version':     hw.get('bios_version', ''),
-                'cpu':              hw.get('cpu', ''),
-                'ram_gb':           hw.get('ram_gb', ''),
-                'disks':            '; '.join(f"{d['name']} {d['size']} {d['type']}" for d in (hw.get('disks') or [])),
-                'gpus':             '; '.join(g.get('model') or g.get('vendor', '?') for g in (hw.get('gpus') or [])),
-                'nics':             '; '.join(f"{n['name']}" + (f" {n['speed']}" if n.get('speed') else '') for n in (hw.get('nics') or [])),
-                'os':               hw.get('os', ''),
-                'kernel':           hw.get('kernel', ''),
-                'vendor':           asset.get('vendor', ''),
-                'purchased_at':     asset.get('purchased_at', ''),
-                'warranty_expires': asset.get('warranty_expires', ''),
-                'cost':             asset.get('cost', ''),
-                'cost_currency':    asset.get('cost_currency', 'EUR'),
-                'location':         asset.get('location', ''),
-                'notes':            asset.get('notes', ''),
-                'hw_collected_at':  (hw.get('collected_at') or '')[:19],
-                'asset_updated_at': (asset.get('updated_at') or '')[:19],
-            })
+        buf = app_inventory.export_csv(rows)
         from flask import Response
         return Response(buf.getvalue(), mimetype='text/csv',
                         headers={'Content-Disposition': 'attachment; filename=inventory.csv'})
@@ -1461,6 +1137,48 @@ def get_time():
     """Get current timestamp for clock synchronization checks"""
     return jsonify({'timestamp': time.time()})
 
+def _mac_from_dhcp_leases(client, client_ip):
+    """Look up a MAC address from DHCP leases in etcd."""
+    for value, _metadata in client.get_prefix('/cluster/dhcp/leases/'):
+        if not value:
+            continue
+        try:
+            lease_data = json.loads(value.decode())
+            if lease_data.get('ip') == client_ip:
+                return lease_data.get('mac')
+        except json.JSONDecodeError:
+            # Skip non-JSON entries in the dhcp prefix
+            continue
+    return None
+
+
+def _mac_from_neighbor_table(client_ip):
+    """Look up a MAC address via `ip --json neigh show`, validating format."""
+    print("fallback to neighbor table", client_ip, file=sys.stderr)
+    try:
+        result = subprocess.run(['ip', '--json', 'neigh', 'show', client_ip],
+                                capture_output=True, text=True, timeout=5)
+        neighbors = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        print(f"neighbor table JSON parse error: {e}", file=sys.stderr)
+        print(f"Raw stdout was: {result.stdout or ''}", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"neighbor table lookup failed for {client_ip}: {e}",
+              file=sys.stderr)
+        return None
+
+    for neighbor in neighbors:
+        print(f"neighbor: {neighbor}", file=sys.stderr)
+        if neighbor.get('dst') != client_ip or 'lladdr' not in neighbor:
+            continue
+        mac = neighbor['lladdr']
+        if isinstance(mac, str) and len(mac) == 17 and mac.count(':') == 5:
+            return mac
+        print("MAC validation failed", file=sys.stderr)
+    return None
+
+
 def get_mac_from_ip(client_ip):
     """
     Look up MAC address from IP address using DHCP leases in etcd or neighbor table.
@@ -1468,46 +1186,13 @@ def get_mac_from_ip(client_ip):
     """
     if not client_ip:
         return None
-    
+
     client = get_etcd_client()
+    mac = _mac_from_dhcp_leases(client, client_ip)
+    if mac:
+        return mac
+    return _mac_from_neighbor_table(client_ip)
 
-    # Look through DHCP leases in etcd
-    for value, metadata in client.get_prefix('/cluster/dhcp/leases/'):
-        if value:
-            try:
-                lease_data = json.loads(value.decode())
-                if lease_data.get('ip') == client_ip:
-                    # Return non-normalized MAC (with colons) from lease data
-                    return lease_data.get('mac')
-            except json.JSONDecodeError:
-                # Skip non-JSON entries in the dhcp prefix
-                continue
-
-    print("fallback to neighbor table", client_ip, file=sys.stderr)
-
-    # Fallback to neighbor table lookup using ip --json neigh
-    result = None
-    try:
-        result = subprocess.run(['ip', '--json', 'neigh', 'show', client_ip], 
-                              capture_output=True, text=True, timeout=5)
-        neighbors = json.loads(result.stdout)
-        for i, neighbor in enumerate(neighbors):
-            print(f"neighbor {i}: {neighbor}", file=sys.stderr)
-            if neighbor.get('dst') == client_ip and 'lladdr' in neighbor:
-                mac = neighbor['lladdr']
-                # Validate MAC format (should be xx:xx:xx:xx:xx:xx)
-                if isinstance(mac, str) and len(mac) == 17 and mac.count(':') == 5:
-                    return mac
-                else:
-                    print(f"MAC validation failed", file=sys.stderr)
-    except json.JSONDecodeError as e:
-        print(f"neighbor table JSON parse error: {e}", file=sys.stderr)
-        assert result is not None
-        print(f"Raw stdout was: {result.stdout or ''}", file=sys.stderr)
-    except Exception as e:
-        print(f"neighbor table lookup failed for {client_ip}: {e}", file=sys.stderr)
-
-    return None
 
 @app.route('/autoinstall/meta-data')
 def serve_meta_data():
@@ -1544,59 +1229,14 @@ def serve_user_data():
     # Get interface configuration for this node type (fallback to 'unknown')
     interfaces = NODE_TYPE_INTERFACES.get(node_type, NODE_TYPE_INTERFACES['unknown'])
     
-    # Get SSH public key content
-    ssh_key_path = '/opt/bootstrap-files/ansible_ssh_key.pub'
-    with open(ssh_key_path, 'r') as f:
-        ssh_key_content = f.read().strip()
-
-    # Get crypted password for ubuntu user (env var takes precedence for dev)
-    ubuntu_password = os.environ.get('UBUNTU_PASSWORD_HASH')
-    if not ubuntu_password:
-        try:
-            with open('/etc/shadow', 'r') as f:
-                for line in f:
-                    fields = line.strip().split(':')
-                    if fields[0] == 'ubuntu' and len(fields) > 1:
-                        ubuntu_password = fields[1]
-                        break
-        except (PermissionError, FileNotFoundError):
-            raise Exception("Cannot read ubuntu password from /etc/shadow - set UBUNTU_PASSWORD_HASH env var or check permissions")
-
-        if not ubuntu_password:
-            raise Exception("Ubuntu user not found in /etc/shadow - set UBUNTU_PASSWORD_HASH env var")
-
+    ssh_key_content = app_autoinstall.ssh_key('/opt/bootstrap-files/ansible_ssh_key.pub')
+    ubuntu_password = app_autoinstall.ubuntu_password()
     proxy_url = f'http://{GATEWAY_VIP}:3128'
 
-    # Log template variables
-    print(f"Generating user-data for {hostname}:", file=sys.stderr)
-    print(f"  node_type: {node_type}", file=sys.stderr)
-    print(f"  ip_address: {ip_address}", file=sys.stderr)
-    print(f"  amt_ip_address: {amt_ip_address}", file=sys.stderr)
-    print(f"  cluster_interface: {interfaces['cluster_interface']}", file=sys.stderr)
-    print(f"  uplink_interface: {interfaces['uplink_interface']}", file=sys.stderr)
-    print(f"  amt_interface: {interfaces['amt_interface']}", file=sys.stderr)
-    print(f"  proxy_url: {proxy_url}", file=sys.stderr)
-    print(f"  ubuntu_password: {'(from env)' if os.environ.get('UBUNTU_PASSWORD_HASH') else '(from shadow)'}", file=sys.stderr)
-
-    # Read and render template
-    with open(AUTOINSTALL_USER_DATA_TEMPLATE, 'r') as f:
-        template_content = f.read()
-
-    template = Template(template_content)
-    rendered_content = template.render(
-        node_type=node_type,
-        hostname=hostname,
-        ip_address=ip_address,
-        amt_ip_address=amt_ip_address,
-        cluster_interface=interfaces['cluster_interface'],
-        uplink_interface=interfaces['uplink_interface'],
-        amt_interface=interfaces['amt_interface'],
-        ssh_key_content=ssh_key_content,
-        ubuntu_password=ubuntu_password,
-        proxy_url=proxy_url,
-        gateway_vip=GATEWAY_VIP
-    )
-    
+    rendered_content = app_autoinstall.render_user_data(
+        Template(open(AUTOINSTALL_USER_DATA_TEMPLATE).read()),
+        allocation_data, interfaces, proxy_url, GATEWAY_VIP,
+        ssh_key_content, ubuntu_password)
     return rendered_content, 200, {'Content-Type': 'text/plain'}
 
 
@@ -1691,74 +1331,223 @@ def serve_bootstrap(node_type):
     return rendered_content, 200, {'Content-Type': 'text/plain'}
 
 
+def _service_health_value(status):
+    """Map a service status string to a numeric Prometheus value."""
+    return {'healthy': 0, 'degraded': 1, 'unhealthy': 2,
+            'standby': 3}.get(status, 2)
+
+
+def _node_metric(node, name, value):
+    return f'ycluster_{name}{{node="{node}"}} {value}'
+
+
+def _service_metrics(node, health_data):
+    """Render per-service health and ceph-status metric lines."""
+    metrics = []
+    for service, details in health_data.get('services', {}).items():
+        value = _service_health_value(details.get('status'))
+        metrics.append(f'ycluster_service_health{{node="{node}",service="{service}"}} {value}')
+        if service == 'ceph' and isinstance(details.get('details'), dict):
+            ok = details['details'] == 'HEALTH_OK'
+            metrics.append(f'ycluster_ceph_health{{node="{node}"}} {1 if ok else 0}')
+    return metrics
+
+
+def _leader_metrics(node, health_data):
+    storage_leader = 1 if health_data.get('storage_leader', False) else 0
+    dhcp_leader = 1 if health_data.get('dhcp_leader', False) else 0
+    return [
+        _node_metric(node, 'storage_leader', storage_leader),
+        _node_metric(node, 'dhcp_leader', dhcp_leader),
+    ]
+
+
+def _vip_metrics(node):
+    vip_status = check_vip_status()
+    return [
+        f'ycluster_vip_active{{node="{node}",vip="gateway"}} '
+        f'{1 if vip_status["gateway_vip"]["active"] else 0}',
+        f'ycluster_vip_active{{node="{node}",vip="storage"}} '
+        f'{1 if vip_status["storage_vip"]["active"] else 0}',
+    ]
+
+
+def _cert_metrics(node):
+    cert_status = check_certificate_expiry()
+    days = cert_status.get('details', {}).get('days_until_expiry')
+    if days is not None:
+        return [_node_metric(node, 'ycluster_certificate_days_until_expiry', days)]
+    return []
+
+
+def _prometheus_health_metrics(health_data):
+    """Render node/service/leader/vip/cert/drain metric lines."""
+    node = platform.node()
+    overall_value = 1 if health_data['overall'] == 'healthy' else 0
+    metrics = [_node_metric(node, 'node_healthy', overall_value)]
+    metrics.extend(_service_metrics(node, health_data))
+    metrics.extend(_leader_metrics(node, health_data))
+    metrics.extend(_vip_metrics(node))
+    metrics.extend(_cert_metrics(node))
+    drained = 1 if health_data.get('drained', False) else 0
+    metrics.append(_node_metric(node, 'node_drained', drained))
+    return metrics
+
+
 @app.route('/metrics')
 def prometheus_metrics():
     """Prometheus metrics endpoint"""
     try:
-        # Get health data
         health_data = get_comprehensive_health()
-        
-        metrics = []
-        
-        # Overall health metric
-        overall_value = 1 if health_data['overall'] == 'healthy' else 0
-        metrics.append(f'ycluster_node_healthy{{node="{platform.node()}"}} {overall_value}')
-        
-        # Service health metrics
-        for service, details in health_data.get('services', {}).items():
-            status = details.get('status')
-            if status == 'healthy':
-                service_value = 0
-            elif status == 'degraded':
-                service_value = 1
-            elif status == 'unhealthy':
-                service_value = 2
-            elif status == 'standby':
-                service_value = 3
-            else:
-                service_value = 2
-            metrics.append(f'ycluster_service_health{{node="{platform.node()}",service="{service}"}} {service_value}')
-            
-            # Service-specific metrics
-            if service == 'ceph' and isinstance(details.get('details'), dict):
-                # Ceph status could be healthy/degraded/unhealthy
-                ceph_status = details['details']
-                if ceph_status == 'HEALTH_OK':
-                    metrics.append(f'ycluster_ceph_health{{node="{platform.node()}"}} 1')
-                else:
-                    metrics.append(f'ycluster_ceph_health{{node="{platform.node()}"}} 0')
-        
-        # Leadership metrics
-        storage_leader = 1 if health_data.get('storage_leader', False) else 0
-        dhcp_leader = 1 if health_data.get('dhcp_leader', False) else 0
-        metrics.append(f'ycluster_storage_leader{{node="{platform.node()}"}} {storage_leader}')
-        metrics.append(f'ycluster_dhcp_leader{{node="{platform.node()}"}} {dhcp_leader}')
-        
-        # VIP metrics
-        vip_status = check_vip_status()
-        gateway_vip_active = 1 if vip_status['gateway_vip']['active'] else 0
-        storage_vip_active = 1 if vip_status['storage_vip']['active'] else 0
-        metrics.append(f'ycluster_vip_active{{node="{platform.node()}",vip="gateway"}} {gateway_vip_active}')
-        metrics.append(f'ycluster_vip_active{{node="{platform.node()}",vip="storage"}} {storage_vip_active}')
-        
-        # Certificate expiry metrics
-        cert_status = check_certificate_expiry()
-        if cert_status.get('details', {}).get('days_until_expiry') is not None:
-            days_until_expiry = cert_status['details']['days_until_expiry']
-            metrics.append(f'ycluster_certificate_days_until_expiry{{node="{platform.node()}"}} {days_until_expiry}')
-        
-        # Node drain status
-        drained = 1 if health_data.get('drained', False) else 0
-        metrics.append(f'ycluster_node_drained{{node="{platform.node()}"}} {drained}')
-        
-        # Return metrics in Prometheus format
+        metrics = _prometheus_health_metrics(health_data)
         response = '\n'.join(metrics) + '\n'
         return response, 200, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
-        
-    except Exception as e:
-        # Return error metric
+    except Exception:
         error_response = f'ycluster_metrics_error{{node="{platform.node()}"}} 1\n'
         return error_response, 500, {'Content-Type': 'text/plain; version=0.0.4; charset=utf-8'}
+
+
+
+
+
+
+
+
+def _etcd_health():
+    if not is_etcd_node():
+        return {'status': 'not_applicable', 'details': {'reason': 'admin-api uses etcd only on storage nodes'}}
+    try:
+        client = get_etcd_client()
+        client.get('/test')
+        return {'status': 'healthy', 'details': 'connected'}
+    except Exception as e:
+        return {'status': 'unhealthy', 'details': str(e)}
+
+
+def _ceph_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_ceph_status()
+
+
+def _postgres_health(is_storage_lead):
+    running = check_service_status('postgresql@16-main')
+    port = check_port_open('localhost', 5432)
+    if is_storage_lead:
+        return _required_service_health(running, port, 'postgresql', 'storage leader')
+    return _standby_service_health(running, port, 'not storage leader')
+
+
+def _qdrant_health(is_storage_lead):
+    running = check_service_status('qdrant')
+    port = check_port_open('localhost', 6333)
+    if is_storage_lead:
+        return _required_service_health(running, port, 'qdrant', 'storage leader')
+    return _standby_service_health(running, port, 'not storage leader')
+
+
+def _leader_election_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    running = check_service_status('storage-leader-election')
+    return {
+        'status': 'healthy' if running else 'unhealthy',
+        'details': {'service_active': running}
+    }
+
+
+def _dhcp_health(is_dhcp_lead):
+    port = check_port_open('localhost', 8067)
+    if is_dhcp_lead:
+        return {
+            'status': 'healthy' if port else 'unhealthy',
+            'details': {
+                'health_port_open': port,
+                'required': True,
+                'reason': 'dhcp leader'
+            }
+        }
+    running = port
+    return {
+        'status': 'unhealthy' if running else 'standby',
+        'details': {
+            'health_port_open': port,
+            'required': False,
+            'reason': 'split-brain: dhcp running on non-leader' if running else 'not dhcp leader'
+        }
+    }
+
+
+def _squid_health():
+    running = check_service_status('squid')
+    port = check_port_open('localhost', 3128)
+    functional = False
+    error = None
+
+    if running and port:
+        try:
+            response = requests.get(
+                'http://localhost:12723/api/ping',
+                proxies={'http': 'http://localhost:3128'},
+                timeout=5
+            )
+            if response.status_code in [200, 503]:
+                functional = True
+            else:
+                error = f'HTTP {response.status_code}'
+        except requests.exceptions.ProxyError as e:
+            error = f'Proxy error: {str(e)}'
+        except requests.exceptions.Timeout:
+            error = 'Proxy timeout'
+        except Exception as e:
+            error = f'Proxy test failed: {str(e)}'
+
+    healthy = running and port and functional
+    return {
+        'status': 'healthy' if healthy else 'unhealthy',
+        'details': {
+            'service_active': running,
+            'port_open': port,
+            'proxy_functional': functional,
+            'error': error
+        }
+    }
+
+
+def _ntp_health():
+    running = check_service_status('ntp') or check_service_status('chrony')
+    return {
+        'status': 'healthy' if running else 'unhealthy',
+        'details': {'service_active': running}
+    }
+
+
+def _keepalived_health():
+    current_hostname = platform.node()
+    if is_etcd_node() and current_hostname in get_core_nodes():
+        running = check_service_status('keepalived')
+        return {
+            'status': 'healthy' if running else 'unhealthy',
+            'details': {'service_active': running}
+        }
+
+    running = check_service_status('keepalived')
+    if running:
+        return {
+            'status': 'unhealthy',
+            'details': {
+                'service_active': running,
+                'reason': 'split-brain: keepalived running on non-core node'
+            }
+        }
+    return {
+        'status': 'standby',
+        'details': {
+            'service_active': running,
+            'reason': 'not a core node'
+        }
+    }
+
 
 def get_comprehensive_health():
     """Get comprehensive health data (extracted from health() function)"""
@@ -1766,351 +1555,60 @@ def get_comprehensive_health():
         'overall': 'healthy',
         'services': {}
     }
-    
-    # Determine current node type
     current_node_type = get_current_node_type()
     is_storage_node = current_node_type == 'storage'
 
-    # Check etcd — only storage (s*) nodes talk to etcd. Non-storage admin-api
-    # instances hold no etcd client (etcd is firewalled to s*), so probing it
-    # here would be both meaningless and a connection we deliberately removed.
-    if is_etcd_node():
-        try:
-            client = get_etcd_client()
-            client.get('/test')
-            health_status['services']['etcd'] = {'status': 'healthy', 'details': 'connected'}
-        except Exception as e:
-            health_status['services']['etcd'] = {'status': 'unhealthy', 'details': str(e)}
-            health_status['overall'] = 'unhealthy'
-    else:
-        health_status['services']['etcd'] = {
-            'status': 'not_applicable',
-            'details': {'reason': 'admin-api uses etcd only on storage nodes'}
-        }
-    
-    # Check Ceph storage (only on storage nodes)
-    if is_storage_node:
-        ceph_health = check_ceph_status()
-        health_status['services']['ceph'] = ceph_health
-        if ceph_health['status'] not in ['healthy', 'degraded']:
-            health_status['overall'] = 'unhealthy'
-    else:
-        health_status['services']['ceph'] = {
-            'status': 'not_applicable',
-            'details': {'reason': 'not required on compute nodes'}
-        }
-    
-    # Check PostgreSQL (always check, flag split-brain if running on non-leader)
-    postgres_running = check_service_status('postgresql@16-main')
-    postgres_port = check_port_open('localhost', 5432)
+    _add_health_service(health_status, 'etcd', _etcd_health(), ('unhealthy',), ())
+    _add_health_service(health_status, 'ceph', _ceph_health(is_storage_node), ('unhealthy', 'error', 'standby', 'unknown'), ())
+
     is_storage_lead = is_storage_leader()
-    
-    if is_storage_lead:
-        postgres_healthy = postgres_running and postgres_port
-        health_status['services']['postgresql'] = {
-            'status': 'healthy' if postgres_healthy else 'unhealthy',
-            'details': {
-                'service_active': postgres_running,
-                'port_open': postgres_port,
-                'required': True,
-                'reason': 'storage leader'
-            }
-        }
-        if not postgres_healthy:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Not leader but check for split-brain
-        if postgres_running or postgres_port:
-            health_status['services']['postgresql'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'service_active': postgres_running,
-                    'port_open': postgres_port,
-                    'required': False,
-                    'reason': 'split-brain: running on non-leader'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['postgresql'] = {
-                'status': 'standby',
-                'details': {
-                    'service_active': postgres_running,
-                    'port_open': postgres_port,
-                    'required': False,
-                    'reason': 'not storage leader'
-                }
-            }
-    
-    # Check Qdrant (always check, flag split-brain if running on non-leader)
-    qdrant_running = check_service_status('qdrant')
-    qdrant_port = check_port_open('localhost', 6333)
-    
-    if is_storage_lead:
-        qdrant_healthy = qdrant_running and qdrant_port
-        health_status['services']['qdrant'] = {
-            'status': 'healthy' if qdrant_healthy else 'unhealthy',
-            'details': {
-                'service_active': qdrant_running,
-                'port_open': qdrant_port,
-                'required': True,
-                'reason': 'storage leader'
-            }
-        }
-        if not qdrant_healthy:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Not leader but check for split-brain
-        if qdrant_running or qdrant_port:
-            health_status['services']['qdrant'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'service_active': qdrant_running,
-                    'port_open': qdrant_port,
-                    'required': False,
-                    'reason': 'split-brain: running on non-leader'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['qdrant'] = {
-                'status': 'standby',
-                'details': {
-                    'service_active': qdrant_running,
-                    'port_open': qdrant_port,
-                    'required': False,
-                    'reason': 'not storage leader'
-                }
-            }
-    
-    # Check storage-only services (storage_leader_election, dhcp_leader_election)
-    for service_name, systemd_name in [
-        ('storage_leader_election', 'storage-leader-election'),
-        ('dhcp_leader_election', 'dhcp-leader-election')
-    ]:
-        if is_storage_node:
-            service_running = check_service_status(systemd_name)
-            health_status['services'][service_name] = {
-                'status': 'healthy' if service_running else 'unhealthy',
-                'details': {'service_active': service_running}
-            }
-            if not service_running:
-                health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services'][service_name] = {
-                'status': 'not_applicable',
-                'details': {'reason': 'not required on compute nodes'}
-            }
-    
-    # Check DHCP (only required if we are DHCP leader)
-    is_dhcp_lead = is_dhcp_leader()
-    dhcp_port = check_port_open('localhost', 8067)  # DHCP health port
-    
-    if is_dhcp_lead:
-        health_status['services']['dhcp'] = {
-            'status': 'healthy' if dhcp_port else 'unhealthy',
-            'details': {
-                'health_port_open': dhcp_port,
-                'required': True,
-                'reason': 'dhcp leader'
-            }
-        }
-        if not dhcp_port:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Check for split-brain condition
-        if dhcp_port:
-            health_status['services']['dhcp'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'health_port_open': dhcp_port,
-                    'required': False,
-                    'reason': 'split-brain: dhcp running on non-leader'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['dhcp'] = {
-                'status': 'standby',
-                'details': {
-                    'health_port_open': dhcp_port,
-                    'required': False,
-                    'reason': 'not dhcp leader'
-                }
-            }
-    
-    # Check DNS (dnsmasq)
-    dns_health = check_dns_status()
-    health_status['services']['dns'] = dns_health
-    if dns_health['status'] == 'unhealthy':
-        health_status['overall'] = 'unhealthy'
-    
-    # Check Squid proxy
-    squid_running = check_service_status('squid')
-    squid_port = check_port_open('localhost', 3128)
-    squid_functional = False
-    squid_error = None
-    
-    if squid_running and squid_port:
-        # Test actual proxy functionality using local ping endpoint
-        try:
-            # Test a simple HTTP request through the proxy to our own ping endpoint
-            proxy_response = requests.get(
-                'http://localhost:12723/api/ping',
-                proxies={'http': 'http://localhost:3128'},
-                timeout=5
-            )
-            if proxy_response.status_code in [200, 503]:
-                squid_functional = True
-            else:
-                squid_error = f'HTTP {proxy_response.status_code}'
-        except requests.exceptions.ProxyError as e:
-            squid_error = f'Proxy error: {str(e)}'
-        except requests.exceptions.Timeout:
-            squid_error = 'Proxy timeout'
-        except Exception as e:
-            squid_error = f'Proxy test failed: {str(e)}'
-    
-    squid_healthy = squid_running and squid_port and squid_functional
-    health_status['services']['squid'] = {
-        'status': 'healthy' if squid_healthy else 'unhealthy',
-        'details': {
-            'service_active': squid_running,
-            'port_open': squid_port,
-            'proxy_functional': squid_functional,
-            'error': squid_error
-        }
-    }
-    if not squid_healthy:
-        health_status['overall'] = 'unhealthy'
-    
-    # Check NTP
-    ntp_running = check_service_status('ntp') or check_service_status('chrony')
-    health_status['services']['ntp'] = {
-        'status': 'healthy' if ntp_running else 'unhealthy',
-        'details': {'service_active': ntp_running}
-    }
-    if not ntp_running:
-        health_status['overall'] = 'unhealthy'
-    
-    # Check TLS certificate expiry
-    cert_health = check_certificate_expiry()
-    health_status['services']['tls_certificate'] = cert_health
-    if cert_health['status'] in ['expired', 'critical']:
-        health_status['overall'] = 'unhealthy'
-    elif cert_health['status'] == 'warning' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check clock skew
-    clock_skew = check_clock_skew()
-    health_status['services']['clock_skew'] = clock_skew
-    if clock_skew['status'] in ['critical', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif clock_skew['status'] == 'warning' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check Docker daemon (only on storage nodes)
-    if is_storage_node:
-        docker_daemon = check_docker_daemon()
-        health_status['services']['docker_daemon'] = docker_daemon
-        if docker_daemon['status'] in ['unhealthy', 'error']:
-            health_status['overall'] = 'unhealthy'
-        elif docker_daemon['status'] == 'degraded' and health_status['overall'] == 'healthy':
-            health_status['overall'] = 'degraded'
-    else:
-        health_status['services']['docker_daemon'] = {
-            'status': 'not_applicable',
-            'details': {'reason': 'not required on compute nodes'}
-        }
-    
-    # Check Docker registry
-    docker_registry = check_docker_registry()
-    health_status['services']['docker_registry'] = docker_registry
-    if docker_registry['status'] in ['unhealthy', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif docker_registry['status'] == 'degraded' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check storage-only services with complex health checks (tang, secrets_mount)
-    for service_name, check_func in [
-        ('tang', check_tang_service),
-        ('secrets_mount', check_secrets_mount)
-    ]:
-        if is_storage_node:
-            service_result = check_func()
-            health_status['services'][service_name] = service_result
-            if service_result['status'] in ['unhealthy', 'error']:
-                health_status['overall'] = 'unhealthy'
-            elif service_result['status'] == 'degraded' and health_status['overall'] == 'healthy':
-                health_status['overall'] = 'degraded'
-        else:
-            health_status['services'][service_name] = {
-                'status': 'not_applicable',
-                'details': {'reason': 'not required on compute nodes'}
-            }
-    
-    # Check Open-WebUI
-    open_webui = check_open_webui()
-    health_status['services']['open_webui'] = open_webui
-    if open_webui['status'] in ['unhealthy', 'error']:
-        health_status['overall'] = 'unhealthy'
-    elif open_webui['status'] == 'degraded' and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-    
-    # Check VIP status
+    _add_health_service(health_status, 'postgresql', _postgres_health(is_storage_lead), ('unhealthy',), ())
+    _add_health_service(health_status, 'qdrant', _qdrant_health(is_storage_lead), ('unhealthy',), ())
+    _add_health_service(health_status, 'storage_leader_election', _leader_election_health(is_storage_node), ('unhealthy',), ())
+    _add_health_service(health_status, 'dhcp', _dhcp_health(is_dhcp_leader()), ('unhealthy',), ())
+    _add_health_service(health_status, 'dns', check_dns_status(), ('unhealthy',), ())
+    _add_health_service(health_status, 'squid', _squid_health(), ('unhealthy',), ())
+    _add_health_service(health_status, 'ntp', _ntp_health(), ('unhealthy',), ())
+    _add_health_service(health_status, 'tls_certificate', check_certificate_expiry(), ('expired', 'critical'), ('warning',))
+    _add_health_service(health_status, 'clock_skew', check_clock_skew(), ('critical', 'error'), ('warning',))
+    _add_health_service(health_status, 'docker_daemon', _docker_daemon_health(is_storage_node), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'docker_registry', check_docker_registry(), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'tang', _tang_health(is_storage_node), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'secrets_mount', _secrets_mount_health(is_storage_node), ('unhealthy', 'error'), ('degraded',))
+    _add_health_service(health_status, 'open_webui', check_open_webui(), ('unhealthy', 'error'), ('degraded',))
+
     vip_health = check_vip_status()
-    gateway_vip_active = vip_health['gateway_vip']['active']
-    storage_vip_active = vip_health['storage_vip']['active']
-    
-    health_status['services']['gateway_vip'] = {
-        'status': 'healthy' if gateway_vip_active else 'standby',
-        'details': vip_health['gateway_vip']
-    }
-    
-    health_status['services']['storage_vip'] = {
-        'status': 'healthy' if storage_vip_active else 'standby',
-        'details': vip_health['storage_vip']
-    }
-    
-    # Check keepalived service (only on core nodes). Short-circuit on
-    # non-storage nodes so get_core_nodes() (an etcd read) only runs where an
-    # etcd client exists — non-core nodes are never core. etcd is core-only.
-    current_hostname = platform.node()
-    if is_etcd_node() and current_hostname in get_core_nodes():
-        keepalived_running = check_service_status('keepalived')
-        health_status['services']['keepalived'] = {
-            'status': 'healthy' if keepalived_running else 'unhealthy',
-            'details': {'service_active': keepalived_running}
-        }
-        if not keepalived_running:
-            health_status['overall'] = 'unhealthy'
-    else:
-        # Not a core node - keepalived should not be running
-        keepalived_running = check_service_status('keepalived')
-        if keepalived_running:
-            health_status['services']['keepalived'] = {
-                'status': 'unhealthy',
-                'details': {
-                    'service_active': keepalived_running,
-                    'reason': 'split-brain: keepalived running on non-core node'
-                }
-            }
-            health_status['overall'] = 'unhealthy'
-        else:
-            health_status['services']['keepalived'] = {
-                'status': 'standby',
-                'details': {
-                    'service_active': keepalived_running,
-                    'reason': 'not a core node'
-                }
-            }
-    
-    # Add leadership status for this node
-    health_status['storage_leader'] = is_storage_leader()
+    _add_health_service(health_status, 'gateway_vip', _gateway_vip_health(vip_health), (), ())
+    _add_health_service(health_status, 'storage_vip', _storage_vip_health(vip_health), (), ())
+    _add_health_service(health_status, 'keepalived', _keepalived_health(), ('unhealthy',), ())
+
+    health_status['storage_leader'] = is_storage_lead
     health_status['dhcp_leader'] = is_dhcp_leader()
     health_status['drained'] = is_node_drained()
-    
+
     return health_status
+
+
+def _docker_daemon_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_docker_daemon()
+
+
+def _tang_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_tang_service()
+
+
+def _secrets_mount_health(is_storage_node):
+    if not is_storage_node:
+        return {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}}
+    return check_secrets_mount()
+
+
+
+
 
 @app.route('/api/health')
 def health():
@@ -2252,67 +1750,31 @@ def get_host_health(host_ip, timeout=5):
                 'error': str(e), 'exception': type(e).__name__,
                 'elapsed_ms': _elapsed()}
 
+def _vip_status_for_ip(ip):
+    """Run `ip addr` and return one VIP detail dict."""
+    details = {'ip': ip, 'active': False, 'master': None, 'interface': None}
+    try:
+        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', ip],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            interfaces = json.loads(result.stdout)
+            if interfaces:
+                details['active'] = True
+                details['master'] = platform.node()
+                details['interface'] = interfaces[0].get('ifname')
+    except json.JSONDecodeError as e:
+        details['error'] = f'JSON parse error: {str(e)}'
+    except Exception as e:
+        details['error'] = str(e)
+    return details
+
+
 def check_vip_status():
     """Check VIP status using keepalived and ip commands"""
-    gateway_vip_ip = '10.0.0.254'
-    storage_vip_ip = '10.0.0.100'
     vip_status = {
-        'gateway_vip': {
-            'ip': gateway_vip_ip,
-            'active': False,
-            'master': None,
-            'interface': None
-        },
-        'storage_vip': {
-            'ip': storage_vip_ip,
-            'active': False,
-            'master': None,
-            'interface': None
-        }
+        'gateway_vip': _vip_status_for_ip('10.0.0.254'),
+        'storage_vip': _vip_status_for_ip('10.0.0.100'),
     }
-    
-    # Check gateway VIP
-    try:
-        # Use 'ip -j addr show to <vip>' to get JSON output for reliable parsing
-        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', gateway_vip_ip], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            # Parse JSON output - if there's any output, VIP is active on this node
-            interfaces = json.loads(result.stdout)
-            if interfaces:
-                # VIP is assigned to this node
-                vip_status['gateway_vip']['active'] = True
-                vip_status['gateway_vip']['master'] = platform.node()
-                # Get interface name from first interface in results
-                vip_status['gateway_vip']['interface'] = interfaces[0].get('ifname')
-        else:
-            # No output means VIP is not assigned to this node
-            vip_status['gateway_vip']['active'] = False
-            
-    except json.JSONDecodeError as e:
-        vip_status['gateway_vip']['error'] = f'JSON parse error: {str(e)}'
-    except Exception as e:
-        vip_status['gateway_vip']['error'] = str(e)
-    
-    # Check storage VIP
-    try:
-        result = subprocess.run(['ip', '-j', 'addr', 'show', 'to', storage_vip_ip], 
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            interfaces = json.loads(result.stdout)
-            if interfaces:
-                vip_status['storage_vip']['active'] = True
-                vip_status['storage_vip']['master'] = platform.node()
-                vip_status['storage_vip']['interface'] = interfaces[0].get('ifname')
-        else:
-            vip_status['storage_vip']['active'] = False
-            
-    except json.JSONDecodeError as e:
-        vip_status['storage_vip']['error'] = f'JSON parse error: {str(e)}'
-    except Exception as e:
-        vip_status['storage_vip']['error'] = str(e)
-    
-    # Check keepalived service status
     try:
         keepalived_running = check_service_status('keepalived')
         vip_status['keepalived_service'] = {
@@ -2325,8 +1787,8 @@ def check_vip_status():
             'status': 'error',
             'error': str(e)
         }
-    
     return vip_status
+
 
 def get_cluster_vip_status(host_health):
     """Get VIP status across all cluster nodes from existing health data"""
@@ -2515,15 +1977,18 @@ def _scrub_adhoc_etcd(result):
     return result
 
 
+def _disabled_health(hosts):
+    """Seed the health map with disabled-host placeholders."""
+    return {h['hostname']: {'status': 'disabled', 'services': []}
+            for h in hosts if h.get('disabled', False)}
+
+
 def get_all_host_health(hosts):
     """Fetch health for all non-disabled hosts in parallel."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    host_health = {}
-    active = [h for h in hosts if not h.get('disabled', False)]
     types = {h['hostname']: h.get('type') for h in hosts}
-    for h in hosts:
-        if h.get('disabled', False):
-            host_health[h['hostname']] = {'status': 'disabled', 'services': []}
+    host_health = _disabled_health(hosts)
+    active = [h for h in hosts if h['hostname'] not in host_health]
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         # Use hostname, not IP — etcd's IP field can be stale (e.g. after a
@@ -2626,7 +2091,6 @@ def resources_data():
     id = _authentik_identity()
     from ycluster.utils.inventory import list_all as inventory_list_all
     from ycluster.utils import vm_manager as vmm
-    from urllib.parse import urlparse
 
     hosts = get_all_hosts()
     inv = {r['hostname']: r for r in inventory_list_all()}
@@ -2994,26 +2458,6 @@ def _gpu_block_admission_error(host, gpus, mode, windows, exclude=None):
     return None
 
 
-def _can_edit_vm(id, rec, desired):
-    """Whether the caller may change this VM's mode via
-    /admin/vm-schedule/set. Encodes the same rules the POST endpoint
-    enforces, so the schedule page can disable the controls in JS
-    without re-deriving them. Returned in each row's `can_edit` field;
-    the template binds `:disabled="!row.can_edit"` to the mode <select>
-    + Save button. Mirrors vm_schedule_set:
-      - admin: yes (any VM)
-      - non-admin owner (manager or user): yes, unless admin-set
-        unmanaged
-      - non-admin non-owner (manager or user): no — managers see other
-        users' VMs but can't edit them; the page filters them out via
-        the ownership check below.
-    Note: an owner can't select the 'unmanaged' option itself (admin
-    escape hatch) — handled by the option's `:disabled="!isAdmin"`."""
-    if id.is_admin:
-        return True
-    if rec.get('owner') != id.email:
-        return False
-    return not (desired is not None and desired.get('mode') == 'unmanaged')
 
 
 @app.route('/admin/nav-identity')
@@ -3074,165 +2518,20 @@ def vm_schedule_data():
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
 
-    live, pools = {}, {}
-    for host, snap in states.items():
-        if isinstance(snap.get('gpu_pool'), int):
-            pools[host] = snap['gpu_pool']
-        for inst in snap.get('instances', []):
-            live[inst['name']] = inst.get('status')
-
+    from ycluster.utils import authentik_manager
+    from app_schedule import live_state, schedule_hosts, schedule_rows
+    live, pools = live_state(states)
     now = datetime.now(UTC)
     commitments = vmm.combine_gpu_commitments(
         vmm.gpu_commitments(registry, desired_all, now),
         vmm.gpu_block_commitments(blocks, now))
+    visible, shown = app_schedule.owner_filters(id, authentik_manager)
 
-    # Managers (non-admins) are project-scoped: they only see VMs owned by
-    # accounts in a project they're authorized for (none by default). Admins
-    # keep the full roster; plain users keep owner-only scoping below. The
-    # per-owner project lookup is cached so we don't hit the IdP per VM.
-    managed_projects = None
-    owner_project = {}
-    if id.is_manager and not id.is_admin:
-        from ycluster.utils import authentik_manager
-        managed_projects = set(authentik_manager.manager_projects(id.email)
-                               if id.email else [])
-
-        def _owner_visible(owner):
-            if owner not in owner_project:
-                try:
-                    project = (authentik_manager.user_project(owner)
-                               if owner else '')
-                except Exception:
-                    # No IdP account (orphan VM owner) or transient IdP
-                    # failure: the owner can't be attributed to a project,
-                    # so fail closed — out of scope for a manager instead of
-                    # 500ing the whole page.
-                    project = ''
-                owner_project[owner] = project
-            return owner_project[owner] in managed_projects
-    else:
-        def _owner_visible(owner):
-            return True
-
-    def _owner_shown(owner):
-        # Owners are shown to admins everywhere, and to managers only for
-        # VMs inside their authorized projects; plain users stay redacted.
-        return id.is_admin or (managed_projects is not None
-                               and _owner_visible(owner))
-
-    rows = []
-    for name, rec in registry.items():
-        # Admins see every VM; managers are project-scoped (see above);
-        # plain users only their own. Manager-scoped data is un-redacted for
-        # in-scope VMs: managers need to see who owns what to answer
-        # questions without acting on it.
-        if not id.is_manager and rec.get('owner') != id.email:
-            continue
-        if not _owner_visible(rec.get('owner')):
-            continue
-        desired = desired_all.get(name)
-        mode = (desired or {}).get('mode', 'unmanaged')
-        status = live.get(name, 'unknown')
-        pending = vmm.pending_state(desired, status, graces.get(name), now)
-        sched_gpus = vmm.desired_gpus(desired, rec.get('gpus') or 0)
-        row = {
-            'vm': name,
-            'owner': rec.get('owner'),
-            'host': rec.get('host'),
-            'gpus': rec.get('gpus'),
-            # GPU count this VM should run under per its desired record
-            # (defaults to all registered); the page's GPU selector starts
-            # here and the acquire hints are computed against it.
-            'sched_gpus': sched_gpus,
-            # Public frp port the host.s jump bastion is exposed on, so
-            # the page can render a ready-to-paste ~/.ssh/config ProxyJump.
-            'port': vmm.bastion_public_port(rec.get('host')),
-            'status': status,
-            'mode': mode,
-            'windows': (desired or {}).get('windows', []),
-            'issue': issues.get(name),
-            'pending': pending,
-            'grace': graces.get(name),
-            # Distinguishes an explicit admin-set 'unmanaged' record (locked
-            # to non-admins) from the no-record default (user-schedulable).
-            'has_desired': desired is not None,
-            # Pre-computed editability: server-side mirror of the rules in
-            # vm_schedule_set so the JS template can disable the dropdown +
-            # Save button without re-deriving them. See _can_edit_vm.
-            'can_edit': _can_edit_vm(id, rec, desired),
-            # True when the VM is locked by an explicit admin-set unmanaged
-            # record. Drives the 'admin-managed' badge — shown to the owner
-            # so they understand why they can't edit (admins / managers see
-            # it too, harmlessly).
-            'admin_locked': desired is not None and desired.get('mode') == 'unmanaged',
-        }
-        # Future windows this VM's registered GPU count can fit, for the
-        # one-click acquire suggestions. Mirror admission control: the VM's
-        # own current commitment is not counted against itself (unmanaged /
-        # on keep holding GPUs until the user actually schedules windows).
-        pool = pools.get(rec.get('host'))
-        if rec.get('type') != 'container' and isinstance(pool, int):
-            host_commits = [c for c in commitments.get(rec.get('host'), [])
-                            if c['vm'] != name]
-            own_windows = [(datetime.fromisoformat(w['start']),
-                            datetime.fromisoformat(w['end']))
-                           for w in _parse_windows(
-                               (desired or {}).get('windows', [])) or []]
-            row['suggestions'] = vmm.gpu_available_windows(
-                host_commits, sched_gpus, pool, now,
-                avoid_windows=own_windows)
-        else:
-            row['suggestions'] = []
-        rows.append(row)
-
-    # Capacity commitments per host, so users can see what's free before
-    # composing a schedule. VM names are shown to everyone (capacity is
-    # shared knowledge); owners to admins everywhere and to managers only
-    # for VMs in their authorized projects (plain users redacted). Plain and
-    # non-admin managers only see hosts that host one of their own (or
-    # in-scope) VMs — other people's hosts/pools aren't their business.
-    # Admins keep the full roster (they answer capacity questions).
-    visible_hosts = {r['host'] for r in rows if r['host']}
-    block_hosts = {b.get('host') for b in blocks.values() if b.get('host')}
-    hosts = []
-    for host in sorted(set(commitments) | set(pools)):
-        if not pools.get(host) and not commitments.get(host):
-            continue          # container hosts: no passthrough pool
-        if not id.is_admin and host not in visible_hosts:
-            # Non-admin managers also keep GPU-block hosts: blocks are
-            # shared admin capacity, not another project's VM ownership.
-            # Plain users stay restricted to their own VMs' hosts.
-            if managed_projects is None or host not in block_hosts:
-                continue
-        hosts.append({
-            'host': host,
-            'pool': pools.get(host),
-            'commitments': [
-                {'vm': c['vm'], 'gpus': c['gpus'], 'mode': c['mode'],
-                 'is_block': c.get('is_block', False),
-                 'owner': c['owner'] if _owner_shown(c['owner']) else None,
-                 'windows': None if c['windows'] is None else
-                     [{'start': s.isoformat(), 'end': e.isoformat()}
-                      for s, e in c['windows']]}
-                for c in commitments.get(host, [])],
-        })
-    # Admin GPU blocks (editable roster). Creation/mutation is admin-only;
-    # managers see them for capacity answers but can't act. Windows are sent
-    # back as iso dicts so the page can continue editing them in place.
-    block_list = []
-    if id.is_manager:
-        for block_id, b in blocks.items():
-            block_list.append({
-                'block': block_id,
-                'host': b.get('host'),
-                'gpus': b.get('gpus'),
-                'mode': b.get('mode'),
-                'reason': b.get('reason'),
-                'created_by': b.get('created_by'),
-                'created_at': b.get('created_at'),
-                'updated_at': b.get('updated_at'),
-                'windows': b.get('windows', []),
-            })
+    rows = schedule_rows(id, registry, desired_all, issues, graces, live,
+                         commitments, pools, now, _can_edit_vm,
+                         _parse_windows, vmm, authentik_manager)
+    hosts = schedule_hosts(id, rows, blocks, commitments, pools, shown)
+    block_list = schedule_blocks(id, blocks)
     return jsonify({'rows': sorted(rows, key=lambda r: r['vm']),
                     'hosts': hosts,
                     'blocks': sorted(block_list, key=lambda b: b['block']),
@@ -3240,12 +2539,26 @@ def vm_schedule_data():
                     'is_admin': id.is_admin,
                     'is_manager': id.is_manager,
                     'grace_seconds': vmm.SCHEDULED_STOP_GRACE_S,
-                    # Everything the page needs to render an ~/.ssh/config
-                    # entry: the public jump host (None → page shows a
-                    # <frp-host> placeholder) plus the well-known users.
                     'ssh': {'frp_host': _frp_public_host(),
                             'jump_user': vmm.BASTION_JUMP_USER,
                             'vm_user': vmm.VM_GUEST_USER}})
+
+
+def schedule_blocks(id, blocks):
+    """Render the admin GPU block roster for managers."""
+    if not id.is_manager:
+        return []
+    return [{
+        'block': block_id,
+        'host': b.get('host'),
+        'gpus': b.get('gpus'),
+        'mode': b.get('mode'),
+        'reason': b.get('reason'),
+        'created_by': b.get('created_by'),
+        'created_at': b.get('created_at'),
+        'updated_at': b.get('updated_at'),
+        'windows': b.get('windows', []),
+    } for block_id, b in blocks.items()]
 
 
 def _frp_public_host():
@@ -3262,34 +2575,6 @@ def _frp_public_host():
         return None
 
 
-def _parse_windows(windows):
-    """Validate one-shot scheduling windows and normalize them to UTC ISO
-    strings, sorted, with fully-elapsed windows dropped. Each window is
-    {'start': <ISO datetime>, 'end': <ISO datetime>} with explicit
-    timezones (the page sends UTC). Returns the normalized list, or None
-    if anything is invalid."""
-    if not isinstance(windows, list) or len(windows) > 50:
-        return None
-    now = datetime.now(UTC)
-    out = []
-    for w in windows:
-        if not isinstance(w, dict):
-            return None
-        try:
-            start = datetime.fromisoformat(str(w.get('start')))
-            end = datetime.fromisoformat(str(w.get('end')))
-        except (TypeError, ValueError):
-            return None
-        if start.tzinfo is None or end.tzinfo is None:
-            return None
-        start, end = start.astimezone(UTC), end.astimezone(UTC)
-        if end <= start:
-            return None
-        if end <= now:
-            continue
-        out.append({'start': start.isoformat(timespec='seconds'),
-                    'end': end.isoformat(timespec='seconds')})
-    return sorted(out, key=lambda w: w['start'])
 
 
 # Mutating endpoint by design (unlike the S2-removed admin mutations):
@@ -3314,20 +2599,9 @@ def vm_schedule_set():
         return jsonify({'error': 'not your VM'}), 403
 
     mode = data.get('mode')
-    if mode not in ('on', 'off', 'schedule', 'unmanaged'):
-        return jsonify({'error': 'mode must be on|off|schedule|unmanaged'}), 400
-    # 'unmanaged' (scheduler hands-off) is an admin-only escape hatch: non-
-    # admins can neither set it nor change a VM an admin already set
-    # unmanaged. A VM with no record yet is its implicit default (also shown
-    # as 'unmanaged') and stays schedulable by its owner — only an explicit
-    # record locks it.
-    if not id.is_admin:
-        cur = vmm.desired_get(name)
-        cur_mode = cur.get('mode') if cur else None
-        if mode == 'unmanaged':
-            return jsonify({'error': 'only admins can set a VM unmanaged'}), 403
-        if cur_mode == 'unmanaged':
-            return jsonify({'error': 'admin-managed VM; only an admin can change it'}), 403
+    error = validate_schedule_mode(id, name, mode, vmm)
+    if error:
+        return jsonify(error[0]), error[1]
 
     # Windows are preserved across every mode (including unmanaged) so a
     # user can flip on/off/unmanaged as a temporary override and switch
@@ -3346,16 +2620,9 @@ def vm_schedule_set():
     # allocated GPUs the scheduler should hold/attach. Absent (backwards
     # compat) means all of them (the registered record). Bounded to the
     # registered count so a save can never over-allocate past the VM.
-    registered = rec.get('gpus') or 0
-    gpus = data.get('gpus')
-    if gpus is None:
-        gpus = registered
-    else:
-        valid = (isinstance(gpus, int) and not isinstance(gpus, bool)
-                 and 0 <= gpus <= registered)
-        if not valid:
-            cap = f'0..{registered}'
-            return jsonify({'error': f'gpus must be an integer in {cap}'}), 400
+    gpus, error = schedule_gpu_count(rec, data.get('gpus'))
+    if error:
+        return jsonify(error[0]), error[1]
 
     # Admission control self-gates to the modes that newly commit GPUs
     # against the host pool ('on' = always-held, 'schedule' = windows);
@@ -3425,63 +2692,38 @@ def gpu_block_upsert():
     if not id.is_admin:
         return jsonify({'error': 'only admins can manage GPU blocks'}), 403
     data = request.get_json(silent=True) or {}
-    host = str(data.get('host', '')).strip()
-    gpus = data.get('gpus')
-    mode = data.get('mode')
-    reason = (data.get('reason') or '').strip()[:200]
-    block_id = data.get('block') or ''
 
-    if not re.fullmatch(r'[a-z0-9-]+', host):
-        return jsonify({'error': 'invalid host'}), 400
-    if not isinstance(gpus, int) or isinstance(gpus, bool) or not 1 <= gpus <= 512:
-        return jsonify({'error': 'gpus must be a positive integer'}), 400
-    if mode not in ('on', 'schedule'):
-        return jsonify({'error': 'mode must be on|schedule'}), 400
+    fields, error = validate_gpu_block(data)
+    if error:
+        return jsonify(error[0]), error[1]
+    block_id = fields['block_id']
 
-    cur = None
-    if block_id:
-        if not re.fullmatch(r'[a-z0-9-]+', block_id):
-            return jsonify({'error': 'no such block'}), 404
-        try:
-            cur = vmm.gpu_block_get(block_id)
-        except Exception as e:
-            return jsonify({'error': f'etcd connection failed: {e}'}), 503
-        if not cur:
-            return jsonify({'error': 'no such block'}), 404
-    else:
-        block_id = (f"block-{datetime.now(UTC):%Y%m%d-%H%M%S}-"
-                    f"{secrets.token_hex(3)}")
+    block_id, cur, error = resolve_gpu_block(block_id, vmm)
+    if error:
+        return jsonify(error[0]), error[1]
 
     windows = _parse_windows(data.get('windows', []))
     # A 'schedule' block with no live window holds nothing, which makes the
     # reservation meaningless; require at least one. 'on' blocks carry none.
-    if windows is None or (mode == 'schedule' and not windows):
-        return jsonify({'error': 'invalid windows'}), 400
-    if windows is None:
-        windows = []
+    error = invalid_windows(fields['mode'], windows)
+    if error:
+        return jsonify(error[0]), error[1]
 
-    conflict = _gpu_block_admission_error(host, gpus, mode, windows,
-                                          exclude=block_id)
+    conflict = _gpu_block_admission_error(
+        fields['host'], fields['gpus'], fields['mode'], windows,
+        exclude=block_id)
     if conflict:
         return jsonify({'error': conflict}), 409
 
-    now = datetime.now(UTC)
-    rec = {
-        'host': host,
-        'gpus': gpus,
-        'mode': mode,
-        'windows': windows,
-        'reason': reason,
-        'created_by': id.email or id.uid or 'internal',
-        'created_at': ((cur or {}).get('created_at')
-                       or now.isoformat(timespec='seconds')),
-        'updated_at': now.isoformat(timespec='seconds'),
-    }
+    rec = gpu_block_record(
+        id, cur, fields['host'], fields['gpus'], fields['mode'], windows,
+        fields['reason'])
     try:
         vmm.gpu_block_set(block_id, rec)
     except Exception as e:
         return jsonify({'error': f'etcd connection failed: {e}'}), 503
-    return jsonify({'ok': True, 'block': block_id, 'mode': mode})
+    return jsonify({'ok': True, 'block': block_id,
+                    'mode': fields['mode']})
 
 
 @app.route('/admin/vm-schedule/gpu-block/delete', methods=['POST'])
@@ -3548,17 +2790,13 @@ def users_data():
         return jsonify({'error': str(e)}), 502
 
 
-# Mutating. Every action maps onto a `ycluster user` operation. Admins may
-# run every action; managers may run a project-scoped subset (invite into
-# an authorized project, reset / edit-notes for users in an authorized
-# project) — see docs/design/manager-project-scoped-users.md. The page
-# hides controls accordingly, but the backend is the gate: every manager
-# action re-checks the manager's authorized projects against the target.
 @app.route('/admin/users/action', methods=['POST'])
 def users_action():
     id = _authentik_identity()
     if not id.is_manager:
         return jsonify({'error': 'admin only'}), 403
+    from app_users import (admin_user_action, authorized_projects,
+                           edit_user, invite_user, recovery_user)
     from ycluster.utils import authentik_manager
     data = request.get_json(silent=True) or {}
     action = data.get('action')
@@ -3567,83 +2805,26 @@ def users_action():
         return jsonify({'error': 'invalid email'}), 400
     admin = id.is_admin
     try:
-        # Authorized projects for this caller (empty for admins — they
-        # bypass the checks below).
-        projects = None
-        if not admin:
-            # Normalize stored names (strip whitespace) so a project entered
-            # with stray spaces still matches the manager's authorization.
-            projects = set(p.strip() for p in
-                           (authentik_manager.manager_projects(id.email)
-                            if id.email else []) if p and p.strip())
-
-        def allow_user(target_email):
-            """Whether this caller may edit-notes / reset `target_email`:
-            admins always; managers only when the target's project is one
-            they're authorized for."""
-            return admin or (authentik_manager.user_project(target_email)
-                             or '') in projects
-
-        # --- admin-only actions ---
-        if action == 'uninvite':
+        projects = authorized_projects(id, admin, authentik_manager)
+        if action in ('uninvite', 'admin_add', 'admin_remove',
+                      'manager_add', 'manager_remove', 'activate',
+                      'deactivate'):
             if not admin:
                 return jsonify({'error': 'admin only'}), 403
-            count = authentik_manager.revoke_invitation(email)
-            return jsonify({'ok': True, 'message': f'revoked {count} invitation(s)'})
-        if action in ('admin_add', 'admin_remove'):
-            if not admin:
-                return jsonify({'error': 'admin only'}), 403
-            msg = authentik_manager.set_admin(email, remove=(action == 'admin_remove'))
-            return jsonify({'ok': True, 'message': msg})
-        if action in ('manager_add', 'manager_remove'):
-            if not admin:
-                return jsonify({'error': 'admin only'}), 403
-            msg = authentik_manager.set_manager(email, remove=(action == 'manager_remove'))
-            return jsonify({'ok': True, 'message': msg})
-        if action in ('activate', 'deactivate'):
-            if not admin:
-                return jsonify({'error': 'admin only'}), 403
-            msg = authentik_manager.set_active(email, active=(action == 'activate'))
-            return jsonify({'ok': True, 'message': msg})
-
-        # --- manager-scoped actions (admins pass through) ---
-        if action == 'invite':
-            project = (data.get('project_name') or '').strip()
-            if not admin:
-                # Managers must invite into one of their authorized projects.
-                # An empty selection is a missing required field (the invite
-                # form's default), not an authorization failure.
-                if not project:
-                    return jsonify({'error': 'project required'}), 400
-                if project not in projects:
-                    return jsonify({'error': 'not authorized for project'}), 403
-            days = max(1, min(90, int(data.get('days') or 7)))
-            url = authentik_manager.invite_user(
-                email, data.get('name') or None, days, project=project or None)
-            return jsonify({'ok': True, 'url': url})
-        if action == 'recovery':
-            if not allow_user(email):
-                return jsonify({'error': 'not authorized for this user'}), 403
-            return jsonify({'ok': True, 'url': authentik_manager.recovery_link(email)})
-        if action == 'edit':
-            if not allow_user(email):
-                return jsonify({'error': 'not authorized for this user'}), 403
-            if admin:
-                # `data.get(k)` returns None when the key is absent, which
-                # update_user() treats as "skip this field" — so omitting a
-                # field from the request leaves it unchanged. Passing ''
-                # clears.
-                msg = authentik_manager.update_user(
-                    email,
-                    name=(data.get('name') or '').strip() or None,
-                    project_name=data.get('project_name'),
-                    admin_notes=data.get('admin_notes'))
-            else:
-                # Managers may only touch the Notes field.
-                msg = authentik_manager.update_user(
-                    email, admin_notes=data.get('admin_notes'))
-            return jsonify({'ok': True, 'message': msg})
-        return jsonify({'error': 'unknown action'}), 400
+            payload, status = admin_user_action(
+                action, email, authentik_manager)
+        elif action == 'invite':
+            payload, status = invite_user(
+                email, data, projects, authentik_manager, admin=admin)
+        elif action == 'recovery':
+            payload, status = recovery_user(
+                email, projects, authentik_manager, admin=admin)
+        elif action == 'edit':
+            payload, status = edit_user(
+                email, data, projects, authentik_manager, admin=admin)
+        else:
+            payload, status = {'error': 'unknown action'}, 400
+        return jsonify(payload), status
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
@@ -3672,20 +2853,27 @@ def settings_data():
                     'keys': rec.get('ssh_keys', [])})
 
 
-# Mutating, forward-auth gated. ALWAYS scoped to the caller's own
-# /cluster/users/<email> record — the email comes from the auth header, never
-# from the request body, so a user can only edit their own keys. We touch only
-# etcd here: the per-host `vm bastion-watch` services watch /cluster/users and
-# re-sync the jump bastions + running VMs on change. Calling bastion_sync() /
-# vm_sync_keys() inline would fail — this runs on a core node with no incus.
-@app.route('/admin/settings/keys/add', methods=['POST'])
-def settings_keys_add():
+def _settings_key_payload():
+    """Validate caller identity and SSH key.
+
+    Returns (identity, key, error_response). The email comes from the auth
+    header only, so a caller can edit only its own /cluster/users record.
+    Bastion and VM key syncs are handled by watchers, never inline here.
+    """
     id = _authentik_identity()
     if not id.email:
-        return jsonify({'error': 'no authenticated user'}), 403
+        return id, None, (jsonify({'error': 'no authenticated user'}), 403)
     key = (request.get_json(silent=True) or {}).get('key', '')
     if not isinstance(key, str) or not key.strip():
-        return jsonify({'error': 'no key provided'}), 400
+        return id, None, (jsonify({'error': 'no key provided'}), 400)
+    return id, key, None
+
+
+@app.route('/admin/settings/keys/add', methods=['POST'])
+def settings_keys_add():
+    id, key, error = _settings_key_payload()
+    if error:
+        return error
     try:
         vmm.user_add_key(id.email, key)
     except ValueError as e:
@@ -3697,18 +2885,14 @@ def settings_keys_add():
 
 @app.route('/admin/settings/keys/remove', methods=['POST'])
 def settings_keys_remove():
-    id = _authentik_identity()
-    if not id.email:
-        return jsonify({'error': 'no authenticated user'}), 403
-    key = (request.get_json(silent=True) or {}).get('key', '')
-    if not isinstance(key, str) or not key.strip():
-        return jsonify({'error': 'no key provided'}), 400
+    id, key, error = _settings_key_payload()
+    if error:
+        return error
     try:
         rec = vmm.user_get(id.email) or {}
         if key not in rec.get('ssh_keys', []):
-            return jsonify({'error': 'key not found'}), 404
-        # Pass the full key line so the substring match removes exactly it
-        # (distinct keys have distinct material, never a substring of each).
+            raise KeyError('key not found')
+        # Full key line: distinct keys are never substrings of each other.
         vmm.user_remove_key(id.email, key)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -3794,148 +2978,29 @@ def vm_usage_page():
 
 
 @app.route('/admin/vm-usage/data')
+
+
+
+
 def vm_usage_data():
     """Per-VM GPU-hours in the window: billable + tracked from lifecycle
     events (interval assembly), observed from incus-state samples."""
+    from app_usage import fetch_usage_state, owner_visibility, registry_snapshots, usage_rows
     since_days = max(1, min(90, request.args.get('since', 7, type=int)))
     conn, since_dt, err = _usage_stats_cursor(since_days)
     if err:
         return jsonify({'error': err}), 500
     assert conn is not None
-    now = datetime.now(UTC)
 
     with conn:
         with conn.cursor() as cur:
-            # Events inside the window, plus each VM's single latest event
-            # before it — that one row decides whether an interval was open
-            # (and with what gpus/billable) at the window start, so the scan
-            # stays bounded as history grows.
-            cur.execute('''SELECT DISTINCT ON (vm) ts, vm, event, owner, gpus, billable
-                           FROM vm_events WHERE ts < %s
-                           ORDER BY vm, ts DESC''', [since_dt])
-            pre_events = cur.fetchall()
-            cur.execute('''SELECT ts, vm, event, owner, gpus, billable
-                           FROM vm_events WHERE ts >= %s
-                           ORDER BY vm, ts''', [since_dt])
-            events = pre_events + cur.fetchall()
-            cur.execute('''
-                SELECT vm, MAX(COALESCE(owner, '')),
-                       SUM(CASE WHEN state = 'Running' THEN gpus * interval_s ELSE 0 END)::float / 3600,
-                       COUNT(*) FILTER (WHERE state = 'Running')
-                FROM vm_samples WHERE ts >= %s
-                GROUP BY vm
-            ''', [since_dt])
-            sampled = {r[0]: {'owner': r[1], 'observed': r[2] or 0.0,
-                              'samples': r[3]} for r in cur.fetchall()}
-            cur.execute('''SELECT DISTINCT ON (vm) vm, state
-                           FROM vm_samples ORDER BY vm, ts DESC''')
-            last_state = dict(cur.fetchall())
+            events, sampled, last_state = fetch_usage_state(cur, since_dt)
 
-    # Registry (current GPU count) and schedules; usage numbers still
-    # render if etcd is unreachable.
-    registry, desired_all = {}, {}
-    try:
-        registry = vmm.vms_all()
-        desired_all = vmm.desired_all()
-    except Exception:
-        pass
-
-    # Assemble running intervals per VM from the event stream (each VM's
-    # pre-window event sorts before its window events, and the state machine
-    # is per-VM, so the combined list needs no global re-sort). launch/start
-    # open an interval (restart keeps one open across the gap), stop/destroy
-    # close it; an interval still open accrues until now. Time is clipped to
-    # the window; billable is a property of the opening event.
-    def accrue(st, end):
-        start, ev_gpus, ev_billable = st['open']
-        lo, hi = max(start, since_dt), min(end, now)
-        if hi > lo:
-            hours = (hi - lo).total_seconds() / 3600 * (ev_gpus or 0)
-            st['tracked'] += hours
-            if ev_billable:
-                st['billable'] += hours
-
-    per_vm = {}
-    for ts, vm, event, owner, gpus, billable in events:
-        st = per_vm.setdefault(vm, {'owner': owner, 'open': None,
-                                    'billable': 0.0, 'tracked': 0.0})
-        if owner:
-            st['owner'] = owner
-        if event in ('launch', 'start', 'restart'):
-            if st['open'] is None:
-                st['open'] = (ts, gpus, billable)
-        elif event in ('stop', 'destroy'):
-            if st['open'] is not None:
-                accrue(st, ts)
-                st['open'] = None
-    for st in per_vm.values():
-        if st['open'] is not None:
-            accrue(st, now)
-
-    # Managers (non-admins) are project-scoped: they only see VM usage for
-    # accounts in a project they're authorized for (none by default). Admins
-    # keep the full roster; plain users are already owner-scoped by the
-    # pages feeding this data. Per-owner project lookups are cached so we
-    # don't hit the IdP per VM.
-    id = _authentik_identity()
-    managed_projects = None
-    owner_project = {}
-    if id.is_manager and not id.is_admin:
-        from ycluster.utils import authentik_manager
-        managed_projects = set(authentik_manager.manager_projects(id.email)
-                               if id.email else [])
-
-        def _owner_visible(owner):
-            if owner not in owner_project:
-                try:
-                    project = (authentik_manager.user_project(owner)
-                               if owner else '')
-                except Exception:
-                    # No IdP account (orphan VM owner) or transient IdP
-                    # failure: the owner can't be attributed to a project,
-                    # so fail closed — out of scope for a manager instead of
-                    # 500ing the whole page.
-                    project = ''
-                owner_project[owner] = project
-            return owner_project[owner] in managed_projects
-    else:
-        def _owner_visible(owner):
-            return True
-
-    rows = []
-    for vm in sorted(set(per_vm) | set(sampled)):
-        ev = per_vm.get(vm, {})
-        sm = sampled.get(vm, {})
-        owner = ev.get('owner') or sm.get('owner') or ''
-        if not _owner_visible(owner):
-            continue
-        tracked = round(ev.get('tracked', 0.0), 4)
-        observed = round(sm.get('observed', 0.0), 4)
-        # Is the VM on the clock right now, and on whose dime: an open
-        # event interval says billable/unbilled; running per the latest
-        # sample with no open interval is untracked runtime.
-        if ev.get('open') is not None:
-            current = 'billable' if ev['open'][2] else 'unbilled'
-        elif last_state.get(vm) == 'Running':
-            current = 'untracked'
-        else:
-            current = None
-        rows.append({
-            'vm': vm,
-            'owner': owner,
-            'gpus': registry.get(vm, {}).get('gpus'),
-            'schedule_mode': ((desired_all.get(vm) or {}).get('mode', 'unmanaged')
-                              if vm in registry else None),
-            'windows': (desired_all.get(vm) or {}).get('windows', []),
-            'billable_gpu_hours': round(ev.get('billable', 0.0), 4),
-            'tracked_gpu_hours': tracked,
-            'observed_gpu_hours': observed,
-            'samples': sm.get('samples', 0),
-            'current': current,
-            # Sampling granularity is one interval; flag drift beyond that
-            # plus 10% slack.
-            'drift': abs(observed - tracked) > max(0.1, tracked * 0.1),
-        })
+    registry, desired_all = registry_snapshots(vmm)
+    per_vm = _assemble_intervals(events, since_dt, datetime.now(UTC))
+    from ycluster.utils import authentik_manager
+    visible = owner_visibility(_authentik_identity(), authentik_manager)
+    rows = usage_rows(per_vm, sampled, registry, desired_all, last_state, visible, _usage_row)
     return jsonify(rows)
 
 

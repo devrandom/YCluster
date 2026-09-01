@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,38 +143,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Operator endpoint: current backend health states + per-model rollup.
 	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
-		auth := h.authStatus(r)
-		if h.Health != nil {
-			var models map[string][]*url.URL
-			if src := h.Health.source; src != nil {
-				models = src.Snapshot()
-			}
-			writeHealthz(w, r, h.Health.Snapshot(), models, auth)
-			return
-		}
-		writeHealthzNoop(w, r, auth)
+		h.serveHealthz(w, r)
 		return
 	}
 
 	// For multi-backend routers, we own the /v1/models response.
 	// Passthrough (Models()==nil) falls through to proxy the upstream.
-	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-		if modelRouted {
-			models := h.servableModels()
-			if acl := h.currentACL(); acl != nil {
-				user := r.Header.Get("X-User-Id")
-				groups := SplitGroups(r.Header.Get("X-User-Groups"))
-				filtered := models[:0]
-				for _, m := range models {
-					if acl.Check(m, user, groups) == nil {
-						filtered = append(filtered, m)
-					}
-				}
-				models = filtered
-			}
-			writeModelsList(w, models)
-			return
-		}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && modelRouted {
+		h.serveModelsList(w, r)
+		return
 	}
 
 	// In model-routed mode, reject obvious non-API paths with 404
@@ -190,56 +166,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tokenizer aliases: llama.cpp and vLLM both expose tokenizer
-	// endpoints at the bare /tokenize and /detokenize paths (neither
-	// serves them under /v1/). We accept the /v1/-prefixed form so
-	// clients can reach them through the same external surface as the
-	// rest of the OpenAI-compatible API, then rewrite to the backend's
-	// native path before dispatching.
-	//
-	// /v1/file_parse: MinerU's mineru-api serves at the bare
-	// /file_parse (no /v1/ prefix). Same rewrite convention as the
-	// tokenizer endpoints above — external clients use /v1/, we strip
-	// it before dispatching. See docs/design/mineru.md.
-	switch r.URL.Path {
-	case "/v1/tokenize":
-		r.URL.Path = "/tokenize"
-	case "/v1/detokenize":
-		r.URL.Path = "/detokenize"
-	case "/v1/file_parse":
-		r.URL.Path = "/file_parse"
-	}
+	rewriteAPIPath(r)
 
 	route, err := h.router.Route(r)
 	if route != nil {
 		SetRequestModel(r.Context(), route.Model)
 	}
-	if err != nil {
-		h.Metrics.ObserveRouteError(classifyRouteError(err))
-		if errors.Is(err, ErrNoHealthyBackend) {
-			h.logger.Warn("no healthy backend", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
-			writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", err.Error())
-			return
-		}
-		h.logger.Info("route rejected", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+	if h.handleRouteError(w, r, err) {
 		return
 	}
 
-	if acl := h.currentACL(); acl != nil {
-		user := r.Header.Get("X-User-Id")
-		groups := SplitGroups(r.Header.Get("X-User-Groups"))
-		if err := acl.Check(route.Model, user, groups); err != nil {
-			h.Metrics.ObserveRouteError(RouteErrACLDenied)
-			h.logger.Info("acl denied",
-				"model", route.Model, "user", user, "groups", groups,
-				"method", r.Method, "path", r.URL.Path)
-			writeOpenAIError(w, http.StatusForbidden, "permission_denied", err.Error())
-			return
-		}
+	if h.requestACL(w, r, route.Model) {
+		h.dispatch(w, r, route)
 	}
-
-	h.dispatch(w, r, route)
 }
 
 // classifyRouteError maps a Route() error to a stable metric label.
@@ -417,6 +356,12 @@ func removeURL(s []*url.URL, u *url.URL) []*url.URL {
 // connect-per-probe pattern into at most one upstream check per TTL window.
 const authProbeTTL = 10 * time.Second
 
+// authState mirrors the auth sidecar's /healthz result.
+type authState struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 // authProbe memoizes the auth service /healthz result so the proxy's own
 // /healthz doesn't open a fresh loopback connection to the auth sidecar on
 // every probe. Calls are serialized behind a mutex, so a burst of concurrent
@@ -428,7 +373,7 @@ type authProbe struct {
 	ttl    time.Duration
 
 	mu     sync.Mutex
-	result map[string]any
+	result *authState
 	at     time.Time
 }
 
@@ -439,7 +384,7 @@ func newAuthProbe(url string, client *http.Client, ttl time.Duration) *authProbe
 // Check returns the cached auth /healthz state, probing the sidecar only when
 // the cache is empty or stale. A nil result means no auth check is configured
 // (empty url).
-func (p *authProbe) Check(r *http.Request) map[string]any {
+func (p *authProbe) Check(r *http.Request) *authState {
 	if p == nil || p.url == "" {
 		return nil
 	}
@@ -457,7 +402,7 @@ func (p *authProbe) Check(r *http.Request) map[string]any {
 // authStatus returns the cached auth /healthz state for this handler's
 // AuthHealthURL. The cache is built lazily on first use so it picks up the
 // URL that main (or a test) assigns after constructing the Handler.
-func (h *Handler) authStatus(r *http.Request) map[string]any {
+func (h *Handler) authStatus(r *http.Request) *authState {
 	h.authOnce.Do(func() {
 		h.authCache = newAuthProbe(h.AuthHealthURL, h.client, authProbeTTL)
 	})
@@ -474,131 +419,23 @@ func (h *Handler) authStatus(r *http.Request) map[string]any {
 //
 // Overall status is a rollup of model state (disabled models don't count
 // as alerts): ok | degraded | down | unknown.
-func writeHealthz(w http.ResponseWriter, r *http.Request, snap map[string]BackendHealth, models map[string][]*url.URL, auth map[string]any) {
-	type entry struct {
-		URL       string   `json:"url"`
-		State     string   `json:"state"`
-		LastCheck string   `json:"last_check"`
-		Err       string   `json:"err,omitempty"`
-		Models    []string `json:"models,omitempty"`
-	}
-	type modelEntry struct {
-		Name     string   `json:"name"`
-		State    string   `json:"state"`
-		Backends []string `json:"backends"`
-	}
-	urls := make([]string, 0, len(snap))
-	for k := range snap {
-		urls = append(urls, k)
-	}
-	sort.Strings(urls)
-
-	backends := make([]entry, 0, len(urls))
-	healthy, down, disabled := 0, 0, 0
-	for _, u := range urls {
-		bh := snap[u]
-		switch bh.State {
-		case StateHealthy:
-			healthy++
-		case StateDown:
-			down++
-		case StateDisabled:
-			disabled++
-		}
-		e := entry{
-			URL:       u,
-			State:     bh.State.String(),
-			LastCheck: bh.LastCheck.UTC().Format(time.RFC3339),
-			Models:    bh.Models,
-		}
-		if bh.Err != "" {
-			e.Err = bh.Err
-		}
-		backends = append(backends, e)
-	}
-
-	// Per-model rollup. Model state is derived from its backends.
-	modelNames := make([]string, 0, len(models))
-	for name := range models {
-		modelNames = append(modelNames, name)
-	}
-	sort.Strings(modelNames)
-
-	modelEntries := make([]modelEntry, 0, len(modelNames))
-	modelHealthy, modelDisabled, modelUnavailable := 0, 0, 0
-	for _, name := range modelNames {
-		urls := models[name]
-		urlStrs := make([]string, 0, len(urls))
-		for _, u := range urls {
-			urlStrs = append(urlStrs, u.String())
-		}
-		state := modelStateFromBackends(urls, snap)
-		switch state {
-		case "healthy":
-			modelHealthy++
-		case "disabled":
-			modelDisabled++
-		case "unavailable":
-			modelUnavailable++
-		}
-		modelEntries = append(modelEntries, modelEntry{
-			Name: name, State: state, Backends: urlStrs,
-		})
-	}
-
-	// Overall status is a model-level rollup — a down backend that has
-	// healthy siblings for its model shouldn't page. Disabled models are
-	// operator-acknowledged and don't contribute to degraded/down.
-	overall := "ok"
-	accountable := modelHealthy + modelUnavailable
-	switch {
-	case len(modelEntries) == 0:
-		overall = "unknown"
-	case modelHealthy == 0 && modelUnavailable == 0:
-		overall = "unknown"
-	case modelUnavailable > 0 && modelHealthy == 0 && accountable > 0:
-		overall = "down"
-	case modelUnavailable > 0:
-		overall = "degraded"
-	}
-
-	resp := map[string]any{
-		"status":   overall,
-		"healthy":  healthy,
-		"down":     down,
-		"disabled": disabled,
-		"backends": backends,
-		"models":   modelEntries,
-	}
-
-	status := http.StatusOK
-	if auth != nil {
-		resp["auth"] = auth
-		if auth["status"] != "ok" {
-			overall = "down"
-			resp["status"] = overall
-			status = http.StatusServiceUnavailable
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
 // writeHealthzNoop responds when a Handler has no HealthChecker
 // (passthrough mode, or checks disabled). Proxy-itself-up is 200;
 // a configured auth check can downgrade it to 503.
-func writeHealthzNoop(w http.ResponseWriter, r *http.Request, auth map[string]any) {
-	resp := map[string]any{
-		"status":  "ok",
-		"message": "health checks disabled",
+func writeHealthzNoop(w http.ResponseWriter, r *http.Request, auth *authState) {
+	resp := struct {
+		Status  string     `json:"status"`
+		Message string     `json:"message"`
+		Auth    *authState `json:"auth,omitempty"`
+	}{
+		Status:  "ok",
+		Message: "health checks disabled",
 	}
 	status := http.StatusOK
 	if auth != nil {
-		resp["auth"] = auth
-		if auth["status"] != "ok" {
-			resp["status"] = "down"
+		resp.Auth = auth
+		if auth.Status != "ok" {
+			resp.Status = "down"
 			status = http.StatusServiceUnavailable
 		}
 	}
@@ -611,25 +448,25 @@ func writeHealthzNoop(w http.ResponseWriter, r *http.Request, auth map[string]an
 // small map describing its state. The probe is given a short timeout
 // so the proxy's own /healthz stays fast even when the auth service
 // is unresponsive.
-func probeAuthHealth(r *http.Request, authURL string, client *http.Client) map[string]any {
+func probeAuthHealth(r *http.Request, authURL string, client *http.Client) *authState {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
 	if err != nil {
-		return map[string]any{"status": "down", "error": "build request: " + err.Error()}
+		return &authState{Status: "down", Error: "build request: " + err.Error()}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return map[string]any{"status": "down", "error": err.Error()}
+		return &authState{Status: "down", Error: err.Error()}
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode != http.StatusOK {
-		return map[string]any{"status": "down", "error": fmt.Sprintf("HTTP %d", resp.StatusCode)}
+		return &authState{Status: "down", Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
-	return map[string]any{"status": "ok"}
+	return &authState{Status: "ok"}
 }
 
 // servableModels returns the model names that should appear in
@@ -656,109 +493,4 @@ func (h *Handler) servableModels() []string {
 		}
 	}
 	return out
-}
-
-// modelStateFromBackends classifies a model's rollup state from its
-// backends' health. Matches the categories used by /healthz:
-// healthy, unavailable, disabled, unknown.
-func modelStateFromBackends(urls []*url.URL, snap map[string]BackendHealth) string {
-	if len(urls) == 0 {
-		return "unknown"
-	}
-	anyHealthy, anyState, allDisabled := false, false, true
-	for _, u := range urls {
-		bh, seen := snap[u.String()]
-		if !seen {
-			allDisabled = false
-			continue
-		}
-		anyState = true
-		if bh.State != StateDisabled {
-			allDisabled = false
-		}
-		if bh.State == StateHealthy {
-			anyHealthy = true
-		}
-	}
-	switch {
-	case !anyState:
-		return "unknown"
-	case anyHealthy:
-		return "healthy"
-	case allDisabled:
-		return "disabled"
-	default:
-		return "unavailable"
-	}
-}
-
-// writeModelsList emits an OpenAI-compatible /v1/models response built
-// from the router's known model names.
-func writeModelsList(w http.ResponseWriter, models []string) {
-	type modelEntry struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		OwnedBy string `json:"owned_by"`
-	}
-	data := make([]modelEntry, 0, len(models))
-	for _, m := range models {
-		data = append(data, modelEntry{ID: m, Object: "model", OwnedBy: "local-ai-proxy"})
-	}
-	resp := struct {
-		Object string       `json:"object"`
-		Data   []modelEntry `json:"data"`
-	}{Object: "list", Data: data}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-// streamBody copies upstream → client, flushing after each read so that
-// SSE / chunked responses reach the client promptly. A write error aborts
-// the copy; the caller's request context is already wired to cancel the
-// upstream connection in that case.
-func streamBody(w http.ResponseWriter, body io.Reader) error {
-	rc := http.NewResponseController(w)
-	buf := make([]byte, 32*1024)
-	for {
-		n, rerr := body.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			if ferr := rc.Flush(); ferr != nil && !errors.Is(ferr, http.ErrNotSupported) {
-				return ferr
-			}
-		}
-		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				return nil
-			}
-			return rerr
-		}
-	}
-}
-
-func copyHeaders(dst, src http.Header) {
-	for k, vv := range src {
-		if _, skip := hopByHop[http.CanonicalHeaderKey(k)]; skip {
-			continue
-		}
-		dst[k] = append(dst[k], vv...)
-	}
-}
-
-func joinPath(a, b string) string {
-	switch {
-	case a == "":
-		return b
-	case b == "":
-		return a
-	case strings.HasSuffix(a, "/") && strings.HasPrefix(b, "/"):
-		return a + b[1:]
-	case !strings.HasSuffix(a, "/") && !strings.HasPrefix(b, "/"):
-		return a + "/" + b
-	default:
-		return a + b
-	}
 }

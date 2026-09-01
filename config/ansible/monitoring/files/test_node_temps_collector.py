@@ -5,7 +5,9 @@ Run:  python3 -m unittest test_node_temps_collector  (from this dir)
 """
 import importlib.util
 import os
+import subprocess
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SPEC = importlib.util.spec_from_file_location(
@@ -40,6 +42,94 @@ class ParseCominoData(unittest.TestCase):
 
     def test_wrong_field_count_rejected(self):
         self.assertIsNone(ntc.parse_comino_data("1;2;3"))
+
+
+class CominoQueryTests(unittest.TestCase):
+    class Port:
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+            self.reads = 0
+
+        def reset_input_buffer(self):
+            pass
+
+        def write(self, _data):
+            pass
+
+        def flush(self):
+            pass
+
+        def read(self, _size):
+            self.reads += 1
+            return self.chunks.pop(0)
+
+    def query(self, chunks, times=(0, .1, .2, .3, .9)):
+        port = self.Port(chunks)
+        with mock.patch.object(ntc.time, 'monotonic', side_effect=times):
+            got = ntc._comino_query(port, ':get_data')
+        return got, port
+
+    def test_reads_single_terminated_chunk(self):
+        got, port = self.query([b'response\r\n'])
+        self.assertEqual(got, 'response')
+        self.assertEqual(port.reads, 1)
+
+    def test_assembles_chunks_until_termination(self):
+        got, port = self.query([b'resp', b'onse\r\n'])
+        self.assertEqual(got, 'response')
+        self.assertEqual(port.reads, 2)
+
+    def test_stops_on_empty_chunk_after_data(self):
+        got, port = self.query([b'resp', b'', b'unread'])
+        self.assertEqual(got, 'resp')
+        self.assertEqual(port.reads, 2)
+
+    def test_timeout_returns_partial_data(self):
+        got, port = self.query([b'response'], times=(0, .1, .6, .9))
+        self.assertEqual(got, 'response')
+        self.assertEqual(port.reads, 1)
+
+
+class CollectIpmiTests(unittest.TestCase):
+    @staticmethod
+    def result(stdout='', returncode=0):
+        return subprocess.CompletedProcess([], returncode, stdout=stdout,
+                                          stderr='')
+
+    def test_parses_readings_and_roles(self):
+        stdout = (
+            'INLET_AIR_TEMP | 0Bh | ok | 55.1 | 20 degrees C\n'
+            'SLOT1_GPU_TEMP | 18h | ok | 11.1 | 35 degrees C\n'
+            'CPU_TEMP | 20h | nc | 30.1 | 45 degrees C\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(
+                ntc.collect_ipmi(),
+                [('INLET_AIR_TEMP', 'ambient', 20.0),
+                 ('SLOT1_GPU_TEMP', 'gpu', 35.0),
+                 ('CPU_TEMP', 'cpu', 45.0)])
+
+    def test_skips_unreadable_and_nonnumeric(self):
+        stdout = (
+            'SLOT2_GPU_TEMP | 19h | ns | 11.1 | No Reading\n'
+            'OTHER | 21h | ok | 12.1 | maybe\n'
+            'SHORT | 22h | ok\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(ntc.collect_ipmi(), [])
+
+    def test_nonzero_returncode_is_empty(self):
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result('x', returncode=1)):
+            self.assertEqual(ntc.collect_ipmi(), [])
+
+    def test_missing_or_slow_ipmitool_is_empty(self):
+        for exc in (FileNotFoundError('missing'),
+                    subprocess.TimeoutExpired('ipmitool', 15)):
+            with mock.patch.object(ntc.subprocess, 'run', side_effect=exc):
+                self.assertEqual(ntc.collect_ipmi(), [])
 
 
 class SelectCominoDevice(unittest.TestCase):
@@ -88,3 +178,33 @@ class SelectCominoDevice(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CominoChannelLabelTests(unittest.TestCase):
+    def test_fan_mode(self):
+        label, fan_n, _pump_n = ntc._comino_channel_label('1', 'FAN', 'CH1', 0, 0)
+        self.assertEqual(label, 'fan 1')
+        self.assertEqual(fan_n, 1)
+
+    def test_pump_mode(self):
+        label, _fan_n, pump_n = ntc._comino_channel_label('1', 'PUMP', 'CH1', 0, 0)
+        self.assertEqual(label, 'pump 1')
+        self.assertEqual(pump_n, 1)
+
+    def test_off_skipped(self):
+        label, _, _ = ntc._comino_channel_label('1', 'OFF', 'CH1', 0, 0)
+        self.assertIsNone(label)
+
+    def test_not_installed_skipped(self):
+        label, _, _ = ntc._comino_channel_label('0', 'FAN', 'CH1', 0, 0)
+        self.assertIsNone(label)
+
+    def test_unknown_mode(self):
+        label, _, _ = ntc._comino_channel_label('1', 'XYZ', 'CH1', 0, 0)
+        self.assertIn('xyz', label)
+
+    def test_counters_increment_independently(self):
+        _, fan_n, _ = ntc._comino_channel_label('1', 'FAN', 'CH1', 0, 0)
+        _, _, pump_n = ntc._comino_channel_label('1', 'PUMP', 'CH2', 1, 0)
+        self.assertEqual(fan_n, 1)
+        self.assertEqual(pump_n, 1)

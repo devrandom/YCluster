@@ -20,6 +20,7 @@ import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))      # .../admin/files/tests
 _FILES = os.path.dirname(_HERE)                          # .../admin/files
@@ -139,6 +140,20 @@ class SchedTestBase(unittest.TestCase):
 
 
 class ScheduleSetTests(SchedTestBase):
+    def test_vm_get_connection_failure(self):
+        with mock.patch.object(vmm, 'vm_get',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/set",
+                          {"vm": "v", "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 503)
+
+    def test_vm_get_connection_failure_stop_now(self):
+        with mock.patch.object(vmm, 'vm_get',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/stop-now",
+                          {"vm": "v"}, admin=True)
+        self.assertEqual(r.status_code, 503)
+
     def test_no_such_vm(self):
         self.assertEqual(self.post("/admin/vm-schedule/set",
                                    {"vm": "ghost", "mode": "off"}).status_code, 404)
@@ -478,6 +493,32 @@ class GpuBlockApiTests(SchedTestBase):
         r = self.post("/admin/vm-schedule/gpu-block",
                       {"host": "BAD HOST", "gpus": 2, "mode": "on"}, admin=True)
         self.assertEqual(r.status_code, 400)
+
+    def test_invalid_block_id_and_get_failure(self):
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"block": "bad/block", "host": "nv2", "gpus": 1,
+                       "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 404)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"block": "block-a", "host": "nv2", "gpus": 1,
+                       "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 404)
+        r = self.post("/admin/vm-schedule/gpu-block",
+                      {"host": "nv2", "gpus": 1, "mode": "off"}, admin=True)
+        self.assertEqual(r.status_code, 400)
+        with mock.patch.object(vmm, 'gpu_block_get',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/gpu-block",
+                          {"block": "block-a", "host": "nv2", "gpus": 1,
+                           "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 503)
+
+    def test_gpu_block_set_failure_is_503(self):
+        with mock.patch.object(vmm, 'gpu_block_set',
+                               side_effect=RuntimeError('unavailable')):
+            r = self.post("/admin/vm-schedule/gpu-block",
+                          {"host": "nv2", "gpus": 1, "mode": "on"}, admin=True)
+        self.assertEqual(r.status_code, 503)
 
     def test_delete_block(self):
         self.state("nv2", pool=4)
@@ -1091,6 +1132,14 @@ class ManagerRoleTests(SchedTestBase):
                           email="carol@x")
             self.assertEqual(r.status_code, 403,
                              f"action {action!r} should be 403 for plain user")
+
+    def test_settings_page_and_data(self):
+        # Keep both settings routes wired up while exercising a simple
+        # successful page render and identity-driven key listing.
+        self.assertEqual(self.get("/admin/settings").status_code, 200)
+        self.assertEqual(self.get("/admin/settings/data").get_json(),
+                         {"email": "alice@x", "is_admin": False,
+                          "is_manager": False, "keys": []})
 
     def test_manager_can_edit_notes_in_authorized_project(self):
         # Manager edit forwards ONLY the notes field (never name/project)

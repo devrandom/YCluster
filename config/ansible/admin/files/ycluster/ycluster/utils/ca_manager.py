@@ -248,45 +248,54 @@ def generate_server_cert(hostname, san_list=None):
     
     return server_cert, server_key, cert_file, key_file
 
+def _certificate_common_name(cert):
+    for attr in cert.subject:
+        if attr.oid == NameOID.COMMON_NAME:
+            return attr.value
+    return None
+
+
+def _certificate_san(cert):
+    """Return SAN names, or an empty list when the extension is absent."""
+    try:
+        san_ext = cert.extensions.get_extension_for_oid(
+            x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        return [str(name) for name in san_ext.value]
+    except x509.ExtensionNotFound:
+        return []
+
+
+def _print_certificate(cert_file):
+    hostname = cert_file.stem
+    try:
+        with open(cert_file, 'rb') as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+
+        print(f"  {hostname}:")
+        print(f"    Subject: {_certificate_common_name(cert)}")
+        print(f"    Valid from: {cert.not_valid_before}")
+        print(f"    Valid until: {cert.not_valid_after}")
+        san = _certificate_san(cert)
+        if san:
+            print(f"    SAN: {', '.join(san)}")
+    except Exception as e:
+        print(f"  {hostname}: Error reading certificate - {e}")
+
+
 def list_certificates():
     """List all generated certificates"""
     if not os.path.exists(CERTS_PATH):
         print("No certificates directory found")
         return
-    
+
     cert_files = list(Path(CERTS_PATH).glob("*.crt"))
     if not cert_files:
         print("No certificates found")
         return
-    
+
     print("Generated certificates:")
     for cert_file in sorted(cert_files):
-        hostname = cert_file.stem
-        try:
-            with open(cert_file, 'rb') as f:
-                cert = x509.load_pem_x509_certificate(f.read())
-
-            subject_cn = None
-            for attr in cert.subject:
-                if attr.oid == NameOID.COMMON_NAME:
-                    subject_cn = attr.value
-                    break
-            
-            print(f"  {hostname}:")
-            print(f"    Subject: {subject_cn}")
-            print(f"    Valid from: {cert.not_valid_before}")
-            print(f"    Valid until: {cert.not_valid_after}")
-            
-            # Show SAN
-            try:
-                san_ext = cert.extensions.get_extension_for_oid(x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
-                san_list = [str(name) for name in san_ext.value]
-                print(f"    SAN: {', '.join(san_list)}")
-            except x509.ExtensionNotFound:
-                pass
-            
-        except Exception as e:
-            print(f"  {hostname}: Error reading certificate - {e}")
+        _print_certificate(cert_file)
 
 def get_ca_info():
     """Get CA certificate information"""
@@ -323,12 +332,3 @@ def revoke_certificate(hostname):
     if not removed:
         print(f"No certificate found for {hostname}")
 
-def get_ca_cert_path():
-    """Get the path to the CA certificate"""
-    return CA_CERT_PATH
-
-def get_server_cert_paths(hostname):
-    """Get paths to server certificate and key"""
-    cert_file = f"{CERTS_PATH}/{hostname}.crt"
-    key_file = f"{CERTS_PATH}/{hostname}.key"
-    return cert_file, key_file

@@ -26,3 +26,21 @@
 # local-ai-proxy; it is exposed via the frontend/frp reverse proxy. See
 # docs/design/comfyui-h3.md.
 - import_playbook: install-comfyui.yml
+
+# NAS setup (targets the nas group; no-op on clusters without one)
+- import_playbook: setup-nas.yml
+
+# frp external connectivity (client on core, server on frontend,
+# alt vhost on storage leader). Requires app/build-frp.yml first.
+- import_playbook: install-frp.yml
+- import_playbook: install-frp-server.yml
+- import_playbook: install-frp-alt-vhost.yml
+
+# Zulip (storage leader, leader-gated)
+- import_playbook: install-zulip.yml
+
+# Authentik (storage leader, leader-gated)
+- import_playbook: install-authentik.yml
+
+# WhisperX (compute, opt-in via whisperx_enabled in host_vars)
+- import_playbook: install-whisperx.yml

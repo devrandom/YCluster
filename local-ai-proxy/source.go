@@ -43,9 +43,9 @@ func NewYAMLSource(mappings []Mapping) (*YAMLSource, error) {
 	return &YAMLSource{m: m}, nil
 }
 
-func (s *YAMLSource) Start(ctx context.Context) error   { return nil }
-func (s *YAMLSource) Snapshot() map[string][]*url.URL   { return s.m }
-func (s *YAMLSource) Close() error                      { return nil }
+func (s *YAMLSource) Start(ctx context.Context) error { return nil }
+func (s *YAMLSource) Snapshot() map[string][]*url.URL { return s.m }
+func (s *YAMLSource) Close() error                    { return nil }
 
 // etcdBackendEntry is one backend within an etcd model value.
 // Future fields (backend_model, max_concurrent, weight) will live here.
@@ -66,9 +66,9 @@ type etcdModelValue struct {
 // JSON matching etcdValue. Inline ACL rules and an optional singleton
 // default-policy key feed into the proxy's effective ACL.
 type EtcdSource struct {
-	client        *clientv3.Client
-	prefix        string
-	logger        *slog.Logger
+	client *clientv3.Client
+	prefix string
+	logger *slog.Logger
 
 	// snapshot holds an immutable backend map; swapped atomically on updates.
 	snapshot atomic.Pointer[map[string][]*url.URL]
@@ -142,38 +142,47 @@ func (s *EtcdSource) watch(ctx context.Context, startRev int64) {
 		if len(wresp.Events) == 0 {
 			continue
 		}
-		curM := s.snapshot.Load()
-		curA := s.aclModels.Load()
-		nextM := make(map[string][]*url.URL, len(*curM)+len(wresp.Events))
-		for k, v := range *curM {
-			nextM[k] = v
-		}
-		nextA := make(map[string]ACLModelRule, len(*curA)+len(wresp.Events))
-		for k, v := range *curA {
-			nextA[k] = v
-		}
-		for _, ev := range wresp.Events {
-			name := s.modelName(ev.Kv.Key)
-			switch ev.Type {
-			case clientv3.EventTypePut:
-				urls, acl, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value)
-				if ok {
-					nextM[name] = urls
-				}
-				if acl != nil {
-					nextA[name] = *acl
-				} else {
-					delete(nextA, name)
-				}
-			case clientv3.EventTypeDelete:
-				delete(nextM, name)
+		s.applyWatchEvents(wresp.Events)
+		s.logger.Info("etcd source updated",
+			"models", len(*s.snapshot.Load()),
+			"acl_rules", len(*s.aclModels.Load()))
+	}
+}
+
+// applyWatchEvents atomically applies a batch of etcd watch events to the
+// in-memory snapshot and ACL model map. It copies the current maps, applies
+// each event, then stores the new maps so readers see a consistent view.
+func (s *EtcdSource) applyWatchEvents(events []*clientv3.Event) {
+	curM := s.snapshot.Load()
+	curA := s.aclModels.Load()
+	nextM := make(map[string][]*url.URL, len(*curM)+len(events))
+	for k, v := range *curM {
+		nextM[k] = v
+	}
+	nextA := make(map[string]ACLModelRule, len(*curA)+len(events))
+	for k, v := range *curA {
+		nextA[k] = v
+	}
+	for _, ev := range events {
+		name := s.modelName(ev.Kv.Key)
+		switch ev.Type {
+		case clientv3.EventTypePut:
+			urls, acl, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value)
+			if ok {
+				nextM[name] = urls
+			}
+			if acl != nil {
+				nextA[name] = *acl
+			} else {
 				delete(nextA, name)
 			}
+		case clientv3.EventTypeDelete:
+			delete(nextM, name)
+			delete(nextA, name)
 		}
-		s.snapshot.Store(&nextM)
-		s.aclModels.Store(&nextA)
-		s.logger.Info("etcd source updated", "models", len(nextM), "acl_rules", len(nextA))
 	}
+	s.snapshot.Store(&nextM)
+	s.aclModels.Store(&nextA)
 }
 
 func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, *ACLModelRule, bool) {
@@ -224,23 +233,6 @@ func (s *EtcdSource) Close() error {
 		<-s.done
 	}
 	return s.client.Close()
-}
-
-// ACLSnapshot returns the etcd-side ACL view (inline per-model rules
-// plus the singleton default key, if configured). nil when no rules
-// or default are present, so MergeACL can skip work entirely.
-func (s *EtcdSource) ACLSnapshot() *ACLConfig {
-	var modelsCopy map[string]ACLModelRule
-	if mp := s.aclModels.Load(); mp != nil && len(*mp) > 0 {
-		modelsCopy = make(map[string]ACLModelRule, len(*mp))
-		for k, v := range *mp {
-			modelsCopy[k] = v
-		}
-	}
-	if modelsCopy == nil {
-		return nil
-	}
-	return &ACLConfig{Models: modelsCopy}
 }
 
 // Client exposes the underlying etcd client so adjacent components

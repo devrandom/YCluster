@@ -8,7 +8,9 @@ Run from the package root (config/ansible/admin/files/ycluster):
     python3 -m unittest tests.test_gateway_health
 """
 
+import io
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 
 from ycluster.utils import gateway_health as gh
 
@@ -115,15 +117,20 @@ class CheckGatewayTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     def test_usage_without_iface(self):
-        self.assertEqual(gh.main([]), 2)
+        with redirect_stdout(io.StringIO()) as out, \
+                redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(gh.main([]), 2)
+        self.assertIn("usage:", out.getvalue() + err.getvalue())
 
     def test_exit_codes_track_health(self):
         orig = gh.check_gateway
         try:
             gh.check_gateway = lambda iface: (True, "ok")
-            self.assertEqual(gh.main(["up0"]), 0)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(gh.main(["up0"]), 0)
             gh.check_gateway = lambda iface: (False, "bad")
-            self.assertEqual(gh.main(["up0"]), 1)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(gh.main(["up0"]), 1)
         finally:
             gh.check_gateway = orig
 

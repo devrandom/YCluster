@@ -7,53 +7,23 @@ import os
 import sys
 import time
 import json
-import socket
 import threading
 import logging
-import subprocess
-import yaml
 from datetime import datetime, timedelta
-from typing import TypedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import cast
-from etcd3.client import KVMetadata
-from scapy.all import sniff, sendp, get_if_hwaddr
+from scapy.all import sniff, sendp
 from scapy.layers.dhcp import DHCP, BOOTP
-from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import Ether
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from ..common.etcd_utils import get_etcd_client, get_etcd_hosts
+from .dhcp_packets import (LEASE_TIME, create_dhcp_ack, create_dhcp_nak,
+                           create_dhcp_offer, interface_for_ip)
+from .dhcp_allocation import DHCPAllocationMixin
+from .dhcp_leases import DHCPLeaseStore
 
 # Configuration
-ETCD_PREFIX = '/cluster/dhcp'
-LEASE_TIME = 43200  # 12 hours
-GATEWAY = '10.0.0.254'
-DNS_SERVER = '10.0.0.254'
-NTP_SERVER = '10.0.0.254'
 HEALTH_PORT = int(os.environ.get('DHCP_HEALTH_PORT', '8067'))
-
-# IP allocation configuration (same as Flask app)
-class IPRange(TypedDict):
-    base: int
-    max: int
-
-IP_RANGES: dict[str, IPRange] = {
-    's': {'base': 10, 'max': 20},    # Storage: 10.0.0.11-30 (s1-s20)
-    'c': {'base': 50, 'max': 20},    # Compute: 10.0.0.51-70 (c1-c20)
-    'm': {'base': 90, 'max': 20},    # MacOS: 10.0.0.91-110 (m1-m20)
-    'nv': {'base': 110, 'max': 20},  # Nvidia: 10.0.0.111-130 (nv1-nv20)
-    'nas': {'base': 130, 'max': 10}, # NAS: 10.0.0.131-140 (nas1-nas10)
-    'x': {'base': 150, 'max': 49},   # Adhoc: 10.0.0.151-199 (x1-x49)
-}
-
-# Dynamic IP allocation range for auto-assigned hostnames
-DYNAMIC_IP_START = 200
-DYNAMIC_IP_END = 249
-
-# Sentinel: an allocation attempt lost its etcd compare-and-swap race and
-# should be re-run from the top (re-check existing state, re-pick, re-commit).
-_ALLOC_RETRY = object()
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -230,7 +200,7 @@ class HealthServer:
             self.server.server_close()
             logger.info("Health monitoring server stopped")
 
-class DHCPServer:
+class DHCPServer(DHCPAllocationMixin, DHCPLeaseStore):
     def __init__(self):
         self.leases = {}  # mac -> lease_info
         self.allocated_ips = set()
@@ -247,507 +217,6 @@ class DHCPServer:
         except Exception as e:
             logger.error(f"Could not connect to any etcd host: {e}")
             return None
-    
-    def get_server_ip(self):
-        """Get the IP address of the DHCP server from netplan primary interface"""
-        try:
-            # Try to get primary interface from netplan
-            result = subprocess.run(['netplan', 'get', 'network.ethernets.primary'], 
-                                  capture_output=True, text=True, check=True)
-            primary_config = yaml.safe_load(result.stdout)
-            
-            if primary_config and 'addresses' in primary_config:
-                # Get first address and extract IP (remove CIDR notation)
-                first_addr = primary_config['addresses'][0]
-                ip = first_addr.split('/')[0]
-                logger.info(f"Using primary interface IP from netplan: {ip}")
-                return ip
-        except (subprocess.CalledProcessError, yaml.YAMLError, IndexError, KeyError) as e:
-            logger.warning(f"Could not get primary interface from netplan: {e}")
-        
-        # Fallback: derive the IP from the hostname convention
-        hostname = socket.gethostname()
-        ip = self.determine_ip_from_hostname(hostname)
-        if ip:
-            logger.info(f"Using convention IP for {hostname}: {ip}")
-            return ip
-
-        raise ValueError("Could not determine server IP from netplan primary interface or hostname")
-
-    def determine_ip_from_hostname(self, hostname):
-        """Generate deterministic IP based on hostname (same logic as Flask app)"""
-        if not hostname:
-            return None
-        
-        # Check if this is an AMT hostname (ends with 'a')
-        is_amt = hostname.endswith('a')
-        if is_amt:
-            hostname = hostname[:-1]  # Strip trailing 'a' for parsing
-
-        # Try multi-char prefixes first (e.g., 'nas'), then single-char
-        prefix = None
-        num = None
-        for p in IP_RANGES:
-            if hostname.startswith(p):
-                try:
-                    num = int(hostname[len(p):])
-                    prefix = p
-                    break
-                except ValueError:
-                    continue
-        
-        if prefix is None:
-            return None
-        assert num is not None  # narrowed by the loop+break: prefix set only when num set
-
-        config = IP_RANGES[prefix]
-        
-        # Validate number is within range
-        if num < 1 or num > config['max']:
-            return None
-        
-        # Calculate base IP address
-        base_ip = config['base'] + num
-        
-        if is_amt:
-            # AMT interface: use separate 10.10.10.0/24 subnet
-            return f"10.10.10.{base_ip}"
-        else:
-            # Regular interface
-            return f"10.0.0.{base_ip}"
-    
-    def determine_type_from_mac(self, mac_address):
-        """Determine machine type based on MAC address prefix (same logic as Flask app)"""
-        if not mac_address:
-            return 'compute'
-        
-        # Normalize MAC address to lowercase and remove separators
-        normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
-        
-        # Check for storage prefix (58:47:ca becomes 5847ca)
-        if normalized_mac.startswith('5847ca'):
-            return 'storage'
-        
-        # Default to compute
-        return 'compute'
-    
-    def determine_type_from_hostname(self, hostname):
-        """Determine machine type from hostname prefix"""
-        if not hostname:
-            return 'compute'
-        
-        # Check multi-char prefixes first
-        if hostname.startswith('nas'):
-            return 'nas'
-        if hostname.startswith('nv'):
-            return 'nvidia'
-        
-        prefix = hostname[0].lower()
-        if prefix == 's':
-            return 'storage'
-        elif prefix == 'c':
-            return 'compute'
-        elif prefix == 'm':
-            return 'macos'
-        elif prefix == 'x':
-            return 'adhoc'
-        else:
-            return 'compute'
-    
-    def get_next_dynamic_ip(self):
-        """Get the next available IP from the dynamic range 200-249"""
-        client = self.get_etcd_client()
-        assert client is not None
-
-        # Get all allocated IPs from etcd nodes
-        allocated_ips = set()
-        # etcd3's get_prefix returns Optional[Generator] per its inferred type
-        # (the @_handle_errors wrapper drops the return annotation), but
-        # at runtime it always yields (value, metadata) tuples.
-        entries = cast("list[tuple[bytes, KVMetadata]]",
-                       list(client.get_prefix(f"/cluster/nodes/by-hostname/") or ()))
-        for value, metadata in entries:
-            if value:
-                try:
-                    allocation = json.loads(value.decode())
-                    ip = allocation['ip']
-                    # Extract last octet
-                    last_octet = int(ip.split('.')[-1])
-                    allocated_ips.add(last_octet)
-                except:
-                    pass
-        
-        # Also include currently leased IPs
-        for lease in self.leases.values():
-            try:
-                last_octet = int(lease['ip'].split('.')[-1])
-                allocated_ips.add(last_octet)
-            except:
-                pass
-        
-        # Find next available IP in dynamic range
-        for ip_num in range(DYNAMIC_IP_START, DYNAMIC_IP_END + 1):
-            if ip_num not in allocated_ips:
-                return f"10.0.0.{ip_num}"
-        
-        # If no IPs available, return None
-        return None
-
-    def get_next_hostname(self, node_type):
-        """Get the next available hostname for a node type (same logic as Flask app)"""
-        prefixes = {
-            'storage': 's',
-            'compute': 'c',
-            'macos': 'm',
-            'nvidia': 'nv',
-            'nas': 'nas',
-            'adhoc': 'x'
-        }
-        
-        prefix = prefixes.get(node_type, 'c')
-        
-        client = self.get_etcd_client()
-        if not client:
-            return f"{prefix}1"  # Fallback
-        
-        # Get all existing hostnames of this type from etcd nodes prefix
-        existing_numbers = []
-        for value, metadata in client.get_prefix(f"/cluster/nodes/by-hostname/{prefix}"):
-            if value:
-                hostname = metadata.key.decode().split('/')[-1]
-                try:
-                    num = int(hostname[len(prefix):])
-                    existing_numbers.append(num)
-                except:
-                    pass
-
-        # Find the next available number
-        next_num = 1
-        if existing_numbers:
-            existing_numbers.sort()
-            # Find first gap or use max+1
-            for i, num in enumerate(existing_numbers):
-                if num != i + 1:
-                    next_num = i + 1
-                    break
-            else:
-                next_num = len(existing_numbers) + 1
-        
-        return f"{prefix}{next_num}"
-    
-    @staticmethod
-    def ip_to_int(ip):
-        """Convert IP string to integer"""
-        parts = ip.split('.')
-        return (int(parts[0]) << 24) + (int(parts[1]) << 16) + (int(parts[2]) << 8) + int(parts[3])
-    
-    @staticmethod
-    def int_to_ip(ip_int):
-        """Convert integer to IP string"""
-        return f"{(ip_int >> 24) & 0xFF}.{(ip_int >> 16) & 0xFF}.{(ip_int >> 8) & 0xFF}.{ip_int & 0xFF}"
-    
-    def allocate_hostname_and_ip(self, mac_address, requested_hostname=None):
-        """Allocate hostname and IP using same logic as Flask app"""
-        # The commit is a compare-and-swap; another allocator (admin-api, or
-        # a second dhcp-server during leader failover) can win the race, in
-        # which case the whole check/pick/commit cycle is re-run.
-        for _ in range(3):
-            result = self._allocate_attempt(mac_address, requested_hostname)
-            if result is not _ALLOC_RETRY:
-                return result
-        logger.error(f"Allocation for {mac_address} conflicted on every attempt")
-        return None, None
-
-    def _allocate_attempt(self, mac_address, requested_hostname=None):
-        """One allocation attempt: returns (hostname, ip), (None, None) on
-        fatal error, or _ALLOC_RETRY on a lost etcd race."""
-        # Normalize MAC address
-        normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
-        
-        # Don't allocate AMT hostnames via DHCP - they are static only
-        if requested_hostname and requested_hostname.endswith('a'):
-            logger.info(f"Ignoring AMT hostname request {requested_hostname} - AMT interfaces use static configuration")
-            requested_hostname = None
-        
-        client = self.get_etcd_client()
-        if not client:
-            return None, None
-        
-        # Check if this MAC address already has an allocation in etcd nodes
-        existing_data = client.get(f"/cluster/nodes/by-mac/{normalized_mac}")
-        if existing_data[0]:
-            allocation = json.loads(existing_data[0].decode())
-            # If no hostname requested or same hostname, return existing
-            if not requested_hostname or allocation['hostname'] == requested_hostname:
-                return allocation['hostname'], allocation['ip']
-            # If different hostname requested, we need to reallocate
-            logger.info(f"Reallocating {mac_address} from {allocation['hostname']} to {requested_hostname}")
-
-        hostname = None
-        ip_address = None
-        machine_type = None
-        # mod_revision of an existing by-hostname entry we validated as ours
-        # (same MAC); None means the hostname must still be unallocated at
-        # commit time.
-        hostname_mod_revision = None
-
-        # Use requested hostname if provided and valid
-        if requested_hostname:
-            # Validate hostname format and calculate IP
-            ip_address = self.determine_ip_from_hostname(requested_hostname)
-            if ip_address:
-                # Check if hostname is already taken by another MAC
-                existing_hostname_data = client.get(f"/cluster/nodes/by-hostname/{requested_hostname}")
-                existing_value, existing_metadata = existing_hostname_data
-                if existing_value:
-                    existing_allocation = json.loads(existing_value.decode())
-                    if existing_allocation['mac'] != mac_address:
-                        logger.warning(f"Hostname {requested_hostname} already taken by {existing_allocation['mac']}")
-                        # Fall back to auto-allocation
-                        requested_hostname = None
-                        hostname = None
-                        ip_address = None
-                    else:
-                        # Same MAC, update allocation
-                        hostname = requested_hostname
-                        machine_type = self.determine_type_from_hostname(hostname)
-                        assert existing_metadata is not None
-                        hostname_mod_revision = existing_metadata.mod_revision
-                else:
-                    # Hostname available, use it
-                    hostname = requested_hostname
-                    machine_type = self.determine_type_from_hostname(hostname)
-            else:
-                logger.warning(f"Invalid hostname format: {requested_hostname}, falling back to auto-allocation")
-                requested_hostname = None
-
-        # Fall back to auto-allocation if no valid hostname requested or validation failed
-        if not hostname:
-            # For auto-allocation, use dynamic IP range instead of hostname-based IPs
-            ip_address = self.get_next_dynamic_ip()
-            if not ip_address:
-                logger.error(f"No dynamic IPs available in range {DYNAMIC_IP_START}-{DYNAMIC_IP_END}")
-                return None, None
-            
-            # Create a temporary hostname based on IP for tracking
-            last_octet = ip_address.split('.')[-1]
-            hostname = f"dhcp-{last_octet}"
-            machine_type = self.determine_type_from_mac(mac_address)
-        
-        if not ip_address:
-            logger.error(f"Could not determine IP for hostname {hostname}")
-            return None, None
-        
-        # Create allocation record
-        from datetime import datetime, timezone
-        allocation = {
-            'hostname': hostname,
-            'type': machine_type,
-            'ip': ip_address,
-            'mac': normalized_mac,
-            'allocated_at': datetime.now(timezone.utc).isoformat()
-        }
-        
-        # Store in etcd with both lookups (same as Flask app)
-        allocation_json = json.dumps(allocation)
-        
-        try:
-            # Compare-and-swap: the checks above are non-atomic with this
-            # write, so guard them with compares — by-mac unchanged since we
-            # read it (or still absent), and the target hostname still in the
-            # state we validated. A concurrent allocator makes the
-            # transaction fail instead of silently double-assigning.
-            if existing_data[0]:
-                assert existing_data[1] is not None
-                compare = [client.transactions.mod(
-                    f"/cluster/nodes/by-mac/{normalized_mac}")
-                    == existing_data[1].mod_revision]
-            else:
-                compare = [client.transactions.version(
-                    f"/cluster/nodes/by-mac/{normalized_mac}") == 0]
-            if hostname_mod_revision is not None:
-                compare.append(client.transactions.mod(
-                    f"/cluster/nodes/by-hostname/{hostname}")
-                    == hostname_mod_revision)
-            else:
-                compare.append(client.transactions.version(
-                    f"/cluster/nodes/by-hostname/{hostname}") == 0)
-
-            success: list = [
-                client.transactions.put(f"/cluster/nodes/by-mac/{normalized_mac}", allocation_json),
-                client.transactions.put(f"/cluster/nodes/by-hostname/{hostname}", allocation_json)
-            ]
-            # Reallocation: retire the old hostname entry in the same
-            # transaction (deleting it up front would orphan the record if
-            # the writes then failed).
-            if existing_data[0]:
-                old_hostname = json.loads(existing_data[0].decode())['hostname']
-                if old_hostname != hostname:
-                    success.append(client.transactions.delete(
-                        f"/cluster/nodes/by-hostname/{old_hostname}"))
-
-            committed, _ = client.transaction(
-                compare=compare, success=success, failure=[])
-            if not committed:
-                logger.warning(f"Allocation of {hostname} to {mac_address} "
-                               f"lost an etcd race; retrying")
-                return _ALLOC_RETRY
-            logger.info(f"Allocated {hostname} ({ip_address}) to {mac_address}")
-            return hostname, ip_address
-        except Exception as e:
-            logger.error(f"Failed to store allocation in etcd: {e}")
-            return None, None
-    
-    def migrate_leases_to_normalized_mac(self):
-        """Migrate existing leases to use normalized MAC addresses as keys"""
-        client = self.get_etcd_client()
-        if not client:
-            return
-        
-        logger.info("Starting lease migration to normalized MAC addresses...")
-        migrated_count = 0
-        
-        try:
-            # Get all existing lease entries
-            for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/leases/"):
-                if not value:
-                    continue
-                    
-                try:
-                    lease_data = json.loads(value.decode('utf-8'))
-                    old_key = metadata.key.decode()
-                    old_mac_key = old_key.split('/')[-1]  # Extract MAC from key
-                    
-                    # Get MAC from lease data
-                    mac_in_data = lease_data.get('mac', '')
-                    if not mac_in_data:
-                        logger.warning(f"Lease {old_key} has no MAC in data, skipping")
-                        continue
-                    
-                    # Normalize the MAC address
-                    normalized_mac = mac_in_data.lower().replace(':', '').replace('-', '')
-                    new_key = f"{ETCD_PREFIX}/leases/{normalized_mac}"
-                    
-                    # Check if this lease needs migration
-                    if old_mac_key == normalized_mac:
-                        continue
-
-                    # Store lease with normalized MAC key
-                    client.put(new_key, json.dumps(lease_data))
-                    
-                    # Delete old entry if it's different from new key
-                    if old_key != new_key:
-                        client.delete(old_key)
-                        logger.info(f"Migrated lease: {old_key} -> {new_key}")
-                        migrated_count += 1
-                    
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse lease data for {metadata.key.decode()}: {e}")
-                except Exception as e:
-                    logger.error(f"Failed to migrate lease {metadata.key.decode()}: {e}")
-            
-            if migrated_count > 0:
-                logger.info(f"Successfully migrated {migrated_count} leases to normalized MAC format")
-            else:
-                logger.info("No lease migration needed - all leases already use normalized MAC format")
-                
-        except Exception as e:
-            logger.error(f"Failed to migrate leases: {e}")
-
-    def load_leases_from_etcd(self):
-        """Load existing leases from etcd"""
-        client = self.get_etcd_client()
-        if not client:
-            return
-        
-        try:
-            for value, metadata in client.get_prefix(f"{ETCD_PREFIX}/leases/"):
-                lease_data = json.loads(value.decode('utf-8'))
-                mac = lease_data['mac']
-                
-                # Ensure lease has required fields for new format
-                if 'expires' not in lease_data:
-                    # Legacy lease - add expires field
-                    expires = datetime.now() + timedelta(seconds=LEASE_TIME)
-                    lease_data['expires'] = expires.isoformat()
-                
-                if 'hostname' not in lease_data:
-                    lease_data['hostname'] = ''
-                
-                if 'allocated_at' not in lease_data:
-                    lease_data['allocated_at'] = datetime.now().isoformat()
-                
-                self.leases[mac] = lease_data
-                self.allocated_ips.add(lease_data['ip'])
-                logger.info(f"Loaded lease: {mac} -> {lease_data['ip']}")
-        except Exception as e:
-            logger.error(f"Failed to load leases from etcd: {e}")
-
-    def save_lease_to_etcd(self, mac, lease_data):
-        """Save lease to etcd using normalized MAC as key"""
-        client = self.get_etcd_client()
-        if not client:
-            return False
-        
-        try:
-            # Normalize MAC for etcd key
-            normalized_mac = mac.lower().replace(':', '').replace('-', '')
-            key = f"{ETCD_PREFIX}/leases/{normalized_mac}"
-            client.put(key, json.dumps(lease_data))
-            logger.info(f"Saved lease to etcd: {mac} -> {lease_data['ip']}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to save lease to etcd: {e}")
-            return False
-    
-    def get_or_create_lease(self, mac, requested_ip=None, requested_hostname=None):
-        """Get existing lease or create new one using Flask app allocation logic"""
-        # Check if we have an existing lease
-        if mac in self.leases:
-            lease = self.leases[mac]
-            # Check if lease is still valid
-            expires = datetime.fromisoformat(lease['expires'])
-            if expires > datetime.now():
-                # If hostname changed and it's not a temporary hostname, we need to reallocate
-                if requested_hostname and lease.get('hostname', '') != requested_hostname:
-                    # Don't reallocate for temporary hostnames - preserve existing allocation
-                    if requested_hostname not in ['ubuntu-server', 'localhost', '']:
-                        logger.info(f"Hostname change requested for {mac}: {lease.get('hostname', '')} -> {requested_hostname}")
-                        # Remove old lease
-                        self.allocated_ips.discard(lease['ip'])
-                        del self.leases[mac]
-                    else:
-                        logger.info(f"Ignoring temporary hostname '{requested_hostname}' for {mac}, keeping existing allocation")
-                        return lease['ip'], lease.get('hostname', '')
-                else:
-                    return lease['ip'], lease.get('hostname', '')
-            else:
-                # Lease expired, remove it
-                self.allocated_ips.discard(lease['ip'])
-                del self.leases[mac]
-        
-        # Use Flask app allocation logic to get hostname and IP
-        hostname, ip = self.allocate_hostname_and_ip(mac, requested_hostname)
-        
-        if not ip:
-            logger.error(f"No IP could be allocated for {mac}")
-            return None, None
-        
-        # Create new lease
-        expires = datetime.now() + timedelta(seconds=LEASE_TIME)
-        lease_data = {
-            'mac': mac,
-            'ip': ip,
-            'hostname': hostname or '',
-            'expires': expires.isoformat(),
-            'allocated_at': datetime.now().isoformat()
-        }
-        
-        self.leases[mac] = lease_data
-        self.allocated_ips.add(ip)
-        self.save_lease_to_etcd(mac, lease_data)
-        
-        return ip, hostname
     
     def handle_dhcp_discover(self, packet):
         """Handle DHCP DISCOVER packet"""
@@ -780,194 +249,122 @@ class DHCPServer:
         assert hostname is not None
 
         # Create DHCP OFFER
-        offer = self.create_dhcp_offer(packet, offered_ip, hostname)
-        interface = self.get_interface_for_ip(self.server_ip)
+        offer = create_dhcp_offer(self.server_ip, packet, offered_ip, hostname)
+        interface = interface_for_ip(self.server_ip)
         sendp(offer, iface=interface, verbose=0)
         logger.info(f"Sent DHCP OFFER {offered_ip} ({hostname}) to {mac}")
     
     def handle_dhcp_request(self, packet):
         """Handle DHCP REQUEST packet"""
         mac = packet[Ether].src
-        
-        # Get requested IP, hostname, and server ID
+        requested_ip, requested_hostname, server_id = self._request_details(packet)
+        client_info = self._client_details(requested_ip, requested_hostname)
+        logger.info(f"DHCP REQUEST from {mac}{client_info}")
+
+        # Check if request is for us
+        if server_id and server_id != self.server_ip:
+            logger.info(f"DHCP REQUEST not for us (server_id: {server_id})")
+            return
+
+        should_reallocate = self._request_should_reallocate(mac, requested_hostname)
+
+        # Reallocate if needed
+        if should_reallocate:
+            requested_ip = self._reallocate_lease(
+                mac, requested_ip, requested_hostname)
+
+        # Validate the request
+        if mac in self.leases and self.leases[mac]['ip'] == requested_ip:
+            # Send ACK
+            hostname = self.leases[mac].get('hostname', '')
+            ack = create_dhcp_ack(self.server_ip, packet, requested_ip, hostname)
+            self._send_dhcp_reply(packet, ack)
+            logger.info(f"Sent DHCP ACK {requested_ip} ({hostname}) to {mac}")
+        else:
+            # Send NAK
+            nak = create_dhcp_nak(self.server_ip, packet)
+            self._send_dhcp_reply(packet, nak)
+            reason = self._nak_reason(mac, requested_ip)
+            logger.info(f"Sent DHCP NAK to {mac}: {reason}")
+
+    def _request_details(self, packet):
+        """Read requested IP, hostname, and server ID from a DHCP packet."""
         requested_ip = None
         requested_hostname = None
         server_id = None
         if packet.haslayer(DHCP):
             for option in packet[DHCP].options:
-                if isinstance(option, tuple):
-                    if option[0] == 'requested_addr':
-                        requested_ip = option[1]
-                    elif option[0] == 'hostname':
-                        requested_hostname = option[1].decode() if isinstance(option[1], bytes) else option[1]
-                    elif option[0] == 'server_id':
-                        server_id = option[1]
-        
-        # If no requested_addr option, fall back to ciaddr (used in renewals per RFC 2131)
+                if not isinstance(option, tuple):
+                    continue
+                if option[0] == 'requested_addr':
+                    requested_ip = option[1]
+                elif option[0] == 'hostname':
+                    value = option[1]
+                    requested_hostname = value.decode() if isinstance(value, bytes) else value
+                elif option[0] == 'server_id':
+                    server_id = option[1]
+
+        # If no requested_addr option, fall back to ciaddr (used in renewals
+        # per RFC 2131)
         if not requested_ip and packet.haslayer(BOOTP):
             ciaddr = packet[BOOTP].ciaddr
             if ciaddr and ciaddr != '0.0.0.0':
                 requested_ip = ciaddr
-        
-        # Log with client-provided details
+        return requested_ip, requested_hostname, server_id
+
+    @staticmethod
+    def _client_details(requested_ip, requested_hostname):
         client_details = []
         if requested_hostname:
             client_details.append(f"hostname={requested_hostname}")
         if requested_ip:
             client_details.append(f"requested_ip={requested_ip}")
-        client_info = f" ({', '.join(client_details)})" if client_details else ""
-        logger.info(f"DHCP REQUEST from {mac}{client_info}")
-        
-        # Check if request is for us
-        if server_id and server_id != self.server_ip:
-            logger.info(f"DHCP REQUEST not for us (server_id: {server_id})")
-            return
-        
-        # Check if we need to reallocate based on hostname
-        should_reallocate = False
-        if requested_hostname and mac in self.leases:
-            # Ignore temporary hostnames during autoinstall
-            if requested_hostname in ['ubuntu-server', 'localhost', '']:
-                logger.info(f"Ignoring temporary hostname '{requested_hostname}' for {mac}")
-                requested_hostname = None
-                should_reallocate = False  # Don't reallocate for temporary hostnames
-            else:
-                current_hostname = self.leases[mac].get('hostname', '')
-                expected_ip = self.determine_ip_from_hostname(requested_hostname)
-                current_ip = self.leases[mac]['ip']
-                
-                if current_hostname != requested_hostname:
-                    logger.info(f"Hostname changed from {current_hostname} to {requested_hostname} for {mac}")
-                    should_reallocate = True
-                elif expected_ip and expected_ip != current_ip:
-                    logger.info(f"IP should change from {current_ip} to {expected_ip} for hostname {requested_hostname} on {mac}")
-                    should_reallocate = True
-        
-        # Reallocate if needed
-        if should_reallocate:
-            # Remove old lease and create new one
-            self.allocated_ips.discard(self.leases[mac]['ip'])
-            del self.leases[mac]
-            # Get new lease with requested hostname
-            offered_ip, hostname = self.get_or_create_lease(mac, requested_ip, requested_hostname)
-            if offered_ip:
-                requested_ip = offered_ip
-        
-        # Validate the request
-        if mac in self.leases and self.leases[mac]['ip'] == requested_ip:
-            # Send ACK
-            hostname = self.leases[mac].get('hostname', '')
-            ack = self.create_dhcp_ack(packet, requested_ip, hostname)
-            interface = self.get_interface_for_ip(self.server_ip)
-            sendp(ack, iface=interface, verbose=0)
-            logger.info(f"Sent DHCP ACK {requested_ip} ({hostname}) to {mac}")
-        else:
-            # Send NAK
-            nak = self.create_dhcp_nak(packet)
-            interface = self.get_interface_for_ip(self.server_ip)
-            sendp(nak, iface=interface, verbose=0)
-            if mac not in self.leases:
-                reason = "no lease found"
-            elif requested_ip is None:
-                reason = "no requested IP in options or ciaddr"
-            else:
-                reason = f"lease IP {self.leases[mac]['ip']} != requested {requested_ip}"
-            logger.info(f"Sent DHCP NAK to {mac}: {reason}")
-    
-    def get_interface_for_ip(self, ip):
-        """Get the network interface for a given IP address"""
-        import netifaces
-        for interface in netifaces.interfaces():
-            addrs = netifaces.ifaddresses(interface)
-            if netifaces.AF_INET in addrs:
-                for addr in addrs[netifaces.AF_INET]:
-                    if addr['addr'] == ip:
-                        return interface
-        raise ValueError(f"No interface found for IP {ip}")
+        return f" ({', '.join(client_details)})" if client_details else ""
 
-    def build_dhcp_options(self, message_type, hostname=''):
-        """Build common DHCP options for OFFER and ACK packets"""
-        options = [
-            ('message-type', message_type),
-            ('server_id', self.server_ip),
-            ('lease_time', LEASE_TIME),
-            ('subnet_mask', '255.255.255.0'),
-            ('router', GATEWAY),
-            ('name_server', DNS_SERVER),
-            ('NTP_server', NTP_SERVER),
-            ('tftp_server_name', self.server_ip),  # Option 66
-            ('boot-file-name', 'EFI/BOOT/grubx64.efi')  # Option 67
-        ]
-        
-        # Add hostname if available
-        if hostname:
-            options.insert(-1, ('hostname', hostname))
-        
-        options.append('end')
-        return options
+    def _request_should_reallocate(self, mac, requested_hostname):
+        """Whether an existing lease must be replaced by a hostname request."""
+        if not requested_hostname or mac not in self.leases:
+            return False
 
-    def create_dhcp_offer(self, request_packet, offered_ip, hostname=''):
-        """Create DHCP OFFER packet"""
-        interface = self.get_interface_for_ip(self.server_ip)
-        options = self.build_dhcp_options(2, hostname)  # OFFER = 2
-        
-        return (
-            Ether(dst=request_packet[Ether].src, src=get_if_hwaddr(interface)) /
-            IP(src=self.server_ip, dst='255.255.255.255') /
-            UDP(sport=67, dport=68) /
-            BOOTP(
-                op=2,  # Boot reply
-                htype=1,
-                hlen=6,
-                xid=request_packet[BOOTP].xid,
-                yiaddr=offered_ip,
-                siaddr=self.server_ip,
-                chaddr=request_packet[BOOTP].chaddr
-            ) /
-            DHCP(options=options)
-        )
-    
-    def create_dhcp_ack(self, request_packet, ack_ip, hostname=''):
-        """Create DHCP ACK packet"""
-        interface = self.get_interface_for_ip(self.server_ip)
-        options = self.build_dhcp_options(5, hostname)  # ACK = 5
-        
-        return (
-            Ether(dst=request_packet[Ether].src, src=get_if_hwaddr(interface)) /
-            IP(src=self.server_ip, dst='255.255.255.255') /
-            UDP(sport=67, dport=68) /
-            BOOTP(
-                op=2,  # Boot reply
-                htype=1,
-                hlen=6,
-                xid=request_packet[BOOTP].xid,
-                yiaddr=ack_ip,
-                siaddr=self.server_ip,
-                chaddr=request_packet[BOOTP].chaddr
-            ) /
-            DHCP(options=options)
-        )
-    
-    def create_dhcp_nak(self, request_packet):
-        """Create DHCP NAK packet"""
-        interface = self.get_interface_for_ip(self.server_ip)
-        return (
-            Ether(dst=request_packet[Ether].src, src=get_if_hwaddr(interface)) /
-            IP(src=self.server_ip, dst='255.255.255.255') /
-            UDP(sport=67, dport=68) /
-            BOOTP(
-                op=2,  # Boot reply
-                htype=1,
-                hlen=6,
-                xid=request_packet[BOOTP].xid,
-                chaddr=request_packet[BOOTP].chaddr
-            ) /
-            DHCP(options=[
-                ('message-type', 6),  # NAK
-                ('server_id', self.server_ip),
-                'end'
-            ])
-        )
+        # Ignore temporary hostnames during autoinstall
+        if requested_hostname in ['ubuntu-server', 'localhost', '']:
+            logger.info(f"Ignoring temporary hostname '{requested_hostname}' for {mac}")
+            return False
+
+        lease = self.leases[mac]
+        current_hostname = lease.get('hostname', '')
+        expected_ip = self.determine_ip_from_hostname(requested_hostname)
+        current_ip = lease['ip']
+
+        if current_hostname != requested_hostname:
+            logger.info(f"Hostname changed from {current_hostname} to "
+                        f"{requested_hostname} for {mac}")
+            return True
+        if expected_ip and expected_ip != current_ip:
+            logger.info(f"IP should change from {current_ip} to {expected_ip} "
+                        f"for hostname {requested_hostname} on {mac}")
+            return True
+        return False
+
+    def _reallocate_lease(self, mac, requested_ip, requested_hostname):
+        """Remove the old lease and create a replacement, returning its IP."""
+        self.allocated_ips.discard(self.leases[mac]['ip'])
+        del self.leases[mac]
+        offered_ip, _ = self.get_or_create_lease(
+            mac, requested_ip, requested_hostname)
+        return offered_ip if offered_ip else requested_ip
+
+    def _send_dhcp_reply(self, packet, reply):
+        interface = interface_for_ip(self.server_ip)
+        sendp(reply, iface=interface, verbose=0)
+
+    def _nak_reason(self, mac, requested_ip):
+        if mac not in self.leases:
+            return "no lease found"
+        if requested_ip is None:
+            return "no requested IP in options or ciaddr"
+        return (f"lease IP {self.leases[mac]['ip']} != "
+                f"requested {requested_ip}")
     
     def dhcp_packet_handler(self, packet):
         """Handle incoming DHCP packets"""
@@ -1040,7 +437,7 @@ class DHCPServer:
         cleanup_thread.start()
         
         # Start packet sniffing
-        interface = self.get_interface_for_ip(self.server_ip)
+        interface = interface_for_ip(self.server_ip)
         logger.info(f"DHCP server listening on {interface} ({self.server_ip})")
         sniff(
             iface=interface,

@@ -225,7 +225,6 @@ def parse_show_alarms(text):
     text = strip_ansi(text)
     alarms_set = faults_set = None
     flags = {}
-    section_is_fault = False
     for line in text.splitlines():
         line = line.strip()
         agg = _AGG_LINE.match(line)
@@ -234,10 +233,8 @@ def parse_show_alarms(text):
             nonzero = int(hexval, 16) != 0
             if kind == "Alarms":
                 alarms_set = nonzero
-                section_is_fault = False
             else:
                 faults_set = nonzero
-                section_is_fault = True
             continue
         m = _FLAG_ROW.match(line)
         if m:
@@ -387,6 +384,11 @@ def load_state():
             s = json.load(f)
     except (OSError, ValueError):
         return new_state()
+    return _normalized_state(s)
+
+
+def _normalized_state(s):
+    """Merge persisted state over defaults, filling version gaps."""
     base = new_state()
     if isinstance(s, dict):
         base.update({k: s[k] for k in base if k in s and k != "counts"})
@@ -618,9 +620,50 @@ def _g(lines, name, help_text):
     lines.append(f"# TYPE {name} gauge")
 
 
-def write_prom(metrics):
+def _emit_log_event_total(lines, log):
+    counts = (log or {}).get("counts", {})
+    for st in LOG_STATES:
+        lines.append(f'node_crps_log_event_total{{state="{st}"}} {int(counts.get(st, 0))}')
+
+
+def _emit_module_events(lines, mods, log):
+    # Emit a 0 for every present PSU too, so clean panels show flat-zero
+    # healthy lines instead of "No data" and increase() has a baseline.
+    me = (log or {}).get("module_events", {})
+    present = {m["module"] for m in mods}
+    all_mods = sorted(present | set(me), key=lambda x: int(x) if x.isdigit() else 0)
+    for m in all_mods:
+        for kind in MODULE_EVENT_KINDS:
+            value = int(me.get(m, {}).get(kind, 0))
+            lines.append(
+                f'node_crps_psu_event_total{{module="{esc(m)}",kind="{kind}"}} {value}')
+
+
+def _emit_log(lines, mods, log):
+    """Emit cumulative event-log harvest counters."""
+    lines.append("# HELP node_crps_log_event_total Distinct CRPS event-log entries harvested, by state.")
+    lines.append("# TYPE node_crps_log_event_total counter")
+    _emit_log_event_total(lines, log)
+    lines.append("# HELP node_crps_psu_event_total Per-PSU asymmetric drop events from the event log (single module down while >=2 others healthy).")
+    lines.append("# TYPE node_crps_psu_event_total counter")
+    _emit_module_events(lines, mods, log)
+    lines.append("# HELP node_crps_log_harvest_pages_total Cumulative `show log` pages swept by the collector.")
+    lines.append("# TYPE node_crps_log_harvest_pages_total counter")
+    if log:
+        lines.append(f"node_crps_log_harvest_pages_total {int(log['pages_total'])}")
+    _g(lines, "node_crps_log_ring_pages", "CRPS event-log ring-buffer size (entries).")
+    if log and log.get("ring_pages"):
+        lines.append(f"node_crps_log_ring_pages {int(log['ring_pages'])}")
+    _g(lines, "node_crps_log_seeded", "1 once the baseline log sweep has run.")
+    if log:
+        lines.append(f"node_crps_log_seeded {1 if log['seeded'] else 0}")
+
+
+def _prom_body(metrics):
     lines = []
     mods = metrics["modules"] if metrics else []
+    state = metrics["state"] if metrics else None
+    flags = metrics["flags"] if metrics else {}
 
     def emit_psu(name, help_text, key, extra_labels=None):
         _g(lines, name, help_text)
@@ -633,40 +676,36 @@ def write_prom(metrics):
                 labels += "," + extra_labels
             lines.append(f"{name}{{{labels}}} {v}")
 
-    emit_psu("node_crps_psu_vin_volts", "CRPS PSU input voltage (V).", "vin")
-    emit_psu("node_crps_psu_vout_volts", "CRPS PSU output voltage (V).", "vout")
-    emit_psu("node_crps_psu_iout_amps", "CRPS PSU output current (A).", "iout")
-    emit_psu("node_crps_psu_pin_watts", "CRPS PSU input power (W).", "pin")
-    emit_psu("node_crps_psu_pout_watts", "CRPS PSU output power (W).", "pout")
+    for name, help_text, key in (
+        ("node_crps_psu_vin_volts", "CRPS PSU input voltage (V).", "vin"),
+        ("node_crps_psu_vout_volts", "CRPS PSU output voltage (V).", "vout"),
+        ("node_crps_psu_iout_amps", "CRPS PSU output current (A).", "iout"),
+        ("node_crps_psu_pin_watts", "CRPS PSU input power (W).", "pin"),
+        ("node_crps_psu_pout_watts", "CRPS PSU output power (W).", "pout"),
+        ("node_crps_psu_fan_rpm", "CRPS PSU fan tachometer (RPM).", "fan"),
+    ):
+        emit_psu(name, help_text, key)
 
     _g(lines, "node_crps_psu_temp_celsius", "CRPS PSU temperature probe (C).")
     for m in mods:
         for probe, key in (("1", "temp1"), ("2", "temp2")):
-            v = m[key]
-            if v is None:
-                continue
-            lines.append(
-                f'node_crps_psu_temp_celsius{{module="{esc(m["module"])}",probe="{probe}"}} {v}'
-            )
+            if m[key] is not None:
+                lines.append(
+                    f'node_crps_psu_temp_celsius{{module="{esc(m["module"])}",probe="{probe}"}} {m[key]}')
 
-    emit_psu("node_crps_psu_fan_rpm", "CRPS PSU fan tachometer (RPM).", "fan")
-
-    _g(lines, "node_crps_psu_present", "1 = CRPS PSU module enumerated.")
-    for m in mods:
-        lines.append(f'node_crps_psu_present{{module="{esc(m["module"])}"}} {int(m["present"])}')
-
-    _g(lines, "node_crps_psu_ok", "1 = CRPS PSU module in Normal state.")
-    for m in mods:
-        lines.append(f'node_crps_psu_ok{{module="{esc(m["module"])}"}} {int(m["ok"])}')
+    for name, help_text, key in (
+        ("node_crps_psu_present", "1 = CRPS PSU module enumerated.", "present"),
+        ("node_crps_psu_ok", "1 = CRPS PSU module in Normal state.", "ok"),
+    ):
+        _g(lines, name, help_text)
+        for m in mods:
+            lines.append(f'{name}{{module="{esc(m["module"])}"}} {int(m[key])}')
 
     # Controller aggregate state, 1-hot.
-    state = metrics["state"] if metrics else None
     _g(lines, "node_crps_state", "Controller aggregate state, 1-hot (normal|alarm|fault).")
     for s in ("normal", "alarm", "fault"):
         lines.append(f'node_crps_state{{state="{s}"}} {1 if state == s else 0}')
 
-    # Per-flag alarm/fault bits.
-    flags = metrics["flags"] if metrics else {}
     _g(lines, "node_crps_alarm", "CRPS active alarm/fault flag (1 = set).")
     for flag, val in sorted(flags.items()):
         lines.append(f'node_crps_alarm{{flag="{esc(flag)}"}} {int(val)}')
@@ -683,46 +722,12 @@ def write_prom(metrics):
     emit_scalar("node_crps_redundancy_enabled", "Cold-redundancy (crEnable) configured.",
                 metrics["redundancy_enabled"] if metrics else None,
                 cast=lambda b: 1 if b else 0)
+    _emit_log(lines, mods, metrics.get("log") if metrics else None)
+    return "\n".join(lines) + "\n"
 
-    # Event-log harvest. Counters are cumulative across the oneshot timer's
-    # runs (persisted in STATE_FILE); a logged transient the live gauges
-    # missed shows as increase(node_crps_log_event_total{state="fault"}).
-    log = metrics.get("log") if metrics else None
-    lines.append("# HELP node_crps_log_event_total Distinct CRPS event-log entries harvested, by state.")
-    lines.append("# TYPE node_crps_log_event_total counter")
-    if log:
-        for st in LOG_STATES:
-            lines.append(f'node_crps_log_event_total{{state="{st}"}} {int(log["counts"].get(st, 0))}')
-    # Per-PSU asymmetric drop events harvested from the log: a single
-    # module losing input/output while the others hold steady — the
-    # dropout-asymmetry signal that fingers a specific flaky PSU/feed
-    # rather than a bank-wide sag.
-    me = log["module_events"] if log else {}
-    # Emit a 0 for every currently-present PSU (not just ones that have had
-    # events) so the panel shows flat-zero "healthy" lines rather than "No
-    # data" on a clean box, and increase() has a baseline to work from.
-    present_mods = {m["module"] for m in mods}
-    all_mods = sorted(present_mods | set(me), key=lambda x: int(x) if x.isdigit() else 0)
-    lines.append("# HELP node_crps_psu_event_total Per-PSU asymmetric drop events from the event log (single module down while >=2 others healthy).")
-    lines.append("# TYPE node_crps_psu_event_total counter")
-    for m in all_mods:
-        for kind in MODULE_EVENT_KINDS:
-            lines.append(
-                f'node_crps_psu_event_total{{module="{esc(m)}",kind="{kind}"}} {int(me.get(m, {}).get(kind, 0))}'
-            )
-    lines.append("# HELP node_crps_log_harvest_pages_total Cumulative `show log` pages swept by the collector.")
-    lines.append("# TYPE node_crps_log_harvest_pages_total counter")
-    if log:
-        lines.append(f"node_crps_log_harvest_pages_total {int(log['pages_total'])}")
-    _g(lines, "node_crps_log_ring_pages", "CRPS event-log ring-buffer size (entries).")
-    if log and log.get("ring_pages"):
-        lines.append(f"node_crps_log_ring_pages {int(log['ring_pages'])}")
-    _g(lines, "node_crps_log_seeded", "1 once the baseline log sweep has run.")
-    if log:
-        lines.append(f"node_crps_log_seeded {1 if log['seeded'] else 0}")
 
-    body = "\n".join(lines) + "\n"
-
+def write_prom(metrics):
+    body = _prom_body(metrics)
     d = os.path.dirname(OUT)
     fd, tmp = tempfile.mkstemp(prefix=".crps.", suffix=".prom", dir=d)
     try:
@@ -736,7 +741,6 @@ def write_prom(metrics):
         except OSError:
             pass
         raise
-
 
 def main():
     metrics = collect()

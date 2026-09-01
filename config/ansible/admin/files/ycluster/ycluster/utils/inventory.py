@@ -128,22 +128,32 @@ def _parse_ipmi_mac(output):
     return None
 
 
-def _collect_bmc_mac_linux():
-    """Best-effort read of the BMC MAC via ipmitool. Returns MAC or None."""
+def _load_ipmi_modules():
     for mod in ('ipmi_devintf', 'ipmi_si'):
         try:
             _run(['modprobe', mod], timeout=5)
         except Exception:
             pass
+
+
+def _bmc_mac_from_channel(channel):
+    """Read one ipmitool channel, returning a MAC or None on any miss."""
+    try:
+        r = _run(['ipmitool', 'lan', 'print', str(channel)], timeout=10)
+        if r.returncode == 0:
+            return _parse_ipmi_mac(r.stdout)
+    except Exception:
+        return None
+    return None
+
+
+def _collect_bmc_mac_linux():
+    """Best-effort read of the BMC MAC via ipmitool. Returns MAC or None."""
+    _load_ipmi_modules()
     for channel in (1, 8):
-        try:
-            r = _run(['ipmitool', 'lan', 'print', str(channel)], timeout=10)
-            if r.returncode == 0:
-                mac = _parse_ipmi_mac(r.stdout)
-                if mac:
-                    return mac
-        except Exception:
-            continue
+        mac = _bmc_mac_from_channel(channel)
+        if mac:
+            return mac
     return None
 
 
@@ -157,47 +167,37 @@ def collect_hardware():
     return _collect_hardware_linux()
 
 
-def _collect_hardware_darwin():
-    """Collect hardware facts on macOS using system_profiler and sysctl."""
-    facts = {
-        'collected_at': datetime.now(UTC).isoformat(),
-        'cpu': None,
-        'ram_gb': None,
-        'disks': [],
-        'nics': [],
-        'gpus': [],
-        'serial': None,
-        'product': None,
-        'bios_version': None,
-        'os': None,
-        'kernel': None,
-        'bmc_mac': None,
-    }
-
-    # OS / kernel
+def _collect_os_darwin(facts):
+    """Kernel release and macOS version."""
     try:
         facts['kernel'] = platform.release()
         facts['os'] = f"macOS {platform.mac_ver()[0]}"
     except Exception:
         pass
 
-    # Hardware overview via system_profiler
+
+def _collect_hardware_overview_darwin(facts):
+    """Product, serial, firmware, and RAM via system_profiler."""
     try:
         r = _run(['system_profiler', 'SPHardwareDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
-        hw = data.get('SPHardwareDataType', [{}])[0]
-        facts['product'] = hw.get('machine_name')
-        facts['serial'] = hw.get('serial_number')
-        facts['bios_version'] = hw.get('platform_UUID') and hw.get('SMC_version_system') or hw.get('boot_rom_version')
-        mem_str = hw.get('physical_memory', '')  # e.g. "512 GB"
-        if mem_str:
-            parts = mem_str.split()
-            if len(parts) == 2 and parts[1] == 'GB':
-                facts['ram_gb'] = int(parts[0])
+        _apply_hardware_overview(facts, data.get('SPHardwareDataType', [{}])[0])
     except Exception:
         pass
 
-    # CPU via sysctl
+
+def _apply_hardware_overview(facts, hw):
+    facts['product'] = hw.get('machine_name')
+    facts['serial'] = hw.get('serial_number')
+    facts['bios_version'] = hw.get('platform_UUID') and hw.get('SMC_version_system') or hw.get('boot_rom_version')
+    mem_str = hw.get('physical_memory', '')  # e.g. "512 GB"
+    parts = mem_str.split()
+    if len(parts) == 2 and parts[1] == 'GB':
+        facts['ram_gb'] = int(parts[0])
+
+
+def _collect_cpu_darwin(facts):
+    """CPU brand and core counts via sysctl."""
     try:
         brand = _run(['sysctl', '-n', 'machdep.cpu.brand_string'], timeout=5).stdout.strip()
         if not brand:
@@ -213,7 +213,9 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
-    # Disks via system_profiler
+
+def _collect_disks_darwin(facts):
+    """Disk inventory via system_profiler storage data."""
     try:
         r = _run(['system_profiler', 'SPStorageDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
@@ -236,19 +238,32 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
-    # GPUs via system_profiler
+
+def _gpu_darwin_entry(gpu):
+    """Normalize one system_profiler GPU record, or None when unnamed."""
+    name = gpu.get('sppci_model') or gpu.get('_name')
+    if not name:
+        return None
+    vram = gpu.get('sppci_vram') or gpu.get('_spdisplays_vram')
+    vendor = 'Apple' if 'Apple' in name else gpu.get('sppci_vendor', '')
+    return {'vendor': vendor, 'model': name, 'vram': vram}
+
+
+def _collect_gpus_darwin(facts):
+    """GPU list via system_profiler displays data."""
     try:
         r = _run(['system_profiler', 'SPDisplaysDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
         for gpu in data.get('SPDisplaysDataType', []):
-            name = gpu.get('sppci_model') or gpu.get('_name')
-            vram = gpu.get('sppci_vram') or gpu.get('_spdisplays_vram')
-            if name:
-                facts['gpus'].append({'vendor': 'Apple' if 'Apple' in name else gpu.get('sppci_vendor', ''), 'model': name, 'vram': vram})
+            entry = _gpu_darwin_entry(gpu)
+            if entry:
+                facts['gpus'].append(entry)
     except Exception:
         pass
 
-    # NICs via system_profiler
+
+def _collect_nics_darwin(facts):
+    """Network interfaces via system_profiler network data."""
     try:
         r = _run(['system_profiler', 'SPNetworkDataType', '-json'], timeout=15)
         data = json.loads(r.stdout)
@@ -269,16 +284,22 @@ def _collect_hardware_darwin():
     except Exception:
         pass
 
+
+def _collect_hardware_darwin():
+    """Collect hardware facts on macOS using system_profiler and sysctl."""
+    facts = _init_hardware_facts()
+    _collect_os_darwin(facts)
+    _collect_hardware_overview_darwin(facts)
+    _collect_cpu_darwin(facts)
+    _collect_disks_darwin(facts)
+    _collect_gpus_darwin(facts)
+    _collect_nics_darwin(facts)
     return facts
 
 
-def _collect_hardware_linux():
-    """
-    Collect hardware facts for the local Linux node and return a dict.
-    Uses dmidecode, lshw, lspci, nvidia-smi where available.
-    Degrades gracefully when tools are missing.
-    """
-    facts = {
+def _init_hardware_facts():
+    """Empty facts skeleton for _collect_hardware_* functions."""
+    return {
         'collected_at': datetime.now(UTC).isoformat(),
         'cpu': None,
         'ram_gb': None,
@@ -293,14 +314,18 @@ def _collect_hardware_linux():
         'bmc_mac': None,
     }
 
-    # OS / kernel
+
+def _collect_os_kernel(facts):
+    """OS name and kernel release."""
     try:
         facts['kernel'] = platform.release()
         facts['os'] = ' '.join(_run(['lsb_release', '-sd']).stdout.strip().strip('"').split())
     except Exception:
         pass
 
-    # CPU
+
+def _collect_cpu(facts):
+    """CPU model and core/thread counts via lscpu."""
     try:
         r = _run(['lscpu'])
         lines = {k.strip(): v.strip() for k, v in
@@ -316,7 +341,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # RAM — sum installed DIMMs from dmidecode for exact physical capacity.
+
+def _collect_ram(facts):
+    """Installed DIMM total from dmidecode for exact physical capacity."""
     try:
         r = _run(['dmidecode', '-t', 'memory'], timeout=10)
         total_mb = 0
@@ -332,7 +359,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # DMI — serial, product, BIOS
+
+def _collect_dmi(facts):
+    """Serial, product name, and BIOS version via dmidecode."""
     try:
         r = _run(['dmidecode', '-t', 'system'], timeout=10)
         for line in r.stdout.splitlines():
@@ -352,7 +381,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # Disks via lsblk
+
+def _collect_disks(facts):
+    """Block devices via lsblk, skipping loop/ram/virtual devices."""
     try:
         r = _run(['lsblk', '-d', '-o', 'NAME,SIZE,ROTA,MODEL', '--json'])
         data = json.loads(r.stdout)
@@ -377,7 +408,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # NICs via ip link + ethtool
+
+def _collect_nics(facts):
+    """Physical NICs via ip link, with speed/driver from ethtool."""
     try:
         r = _run(['ip', '-j', 'link', 'show'])
         ifaces = json.loads(r.stdout)
@@ -413,7 +446,9 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # GPUs via lspci
+
+def _collect_gpus(facts):
+    """GPUs via lspci, enriched with nvidia-smi data when available."""
     try:
         r = _run(['lspci', '-mm'])
         for line in r.stdout.splitlines():
@@ -454,7 +489,20 @@ def _collect_hardware_linux():
     except Exception:
         pass
 
-    # BMC MAC via ipmitool (best-effort; None if no BMC or ipmitool missing)
-    facts['bmc_mac'] = _collect_bmc_mac_linux()
 
+def _collect_hardware_linux():
+    """
+    Collect hardware facts for the local Linux node and return a dict.
+    Uses dmidecode, lshw, lspci, nvidia-smi where available.
+    Degrades gracefully when tools are missing.
+    """
+    facts = _init_hardware_facts()
+    _collect_os_kernel(facts)
+    _collect_cpu(facts)
+    _collect_ram(facts)
+    _collect_dmi(facts)
+    _collect_disks(facts)
+    _collect_nics(facts)
+    _collect_gpus(facts)
+    facts['bmc_mac'] = _collect_bmc_mac_linux()
     return facts

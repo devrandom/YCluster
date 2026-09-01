@@ -15,6 +15,24 @@ Gate every stage/commit/push in the `ycluster` repo. Pairs with
   commit.
 - **No commit prefixes**; use a compact imperative subject line.
 
+## Quality metrics before committing code
+
+Before staging new or modified code, run the quality-metric gate:
+
+```bash
+rm -f config/ansible/admin/files/.coverage && .venv/bin/python scripts/metrics/check.py
+```
+
+- The gate must be green before committing. It runs the test suites and
+  enforces caps for complexity, file length, CRAP, per-file coverage, dead
+  code, and `any`/`interface{}` usage; new violations fail the commit.
+- If the change intentionally improves debt, run
+  `scripts/metrics/check.py --adopt`, review the baseline diff, and include
+  `scripts/metrics/baseline.json` in the commit (or a separate baseline
+  commit). Do not adopt merely to make a failing gate pass.
+- If the gate fails for an unrelated pre-existing violation, stop and surface
+  it; don't bypass or relax the gate to get a commit through.
+
 ## Public repo must never contain
 
 - **Emails** (prod/personal). Placeholders (`example.com`, `x.org`,

@@ -101,6 +101,21 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             return input_ids
         return []
 
+    def _strip_closer_token_ids(self, delta_token_ids):
+        if delta_token_ids and delta_token_ids[0] == self.end_token_id:
+            return delta_token_ids[1:]
+        return delta_token_ids
+
+    def _strip_leading_closer(self, delta_text, delta_token_ids):
+        """Drop one leading closer at response start, if present."""
+        if not delta_text.startswith(self.end_token):
+            return delta_text, delta_token_ids
+
+        delta_text = delta_text[len(self.end_token) :]
+        if not delta_text:
+            return None, delta_token_ids
+        return delta_text, self._strip_closer_token_ids(delta_token_ids)
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
@@ -117,12 +132,11 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             # Apply the leading-closer tolerance once. Later unmatched closers
             # stay visible as content.
             self._at_response_start = False
-            if delta_text.startswith(self.end_token):
-                delta_text = delta_text[len(self.end_token) :]
-                if not delta_text:
-                    return None
-                if delta_token_ids and delta_token_ids[0] == self.end_token_id:
-                    delta_token_ids = delta_token_ids[1:]
+            delta_text, delta_token_ids = self._strip_leading_closer(
+                delta_text, delta_token_ids
+            )
+            if delta_text is None:
+                return None
 
         if self.end_token_id in previous_token_ids:
             return DeltaMessage(content=delta_text)

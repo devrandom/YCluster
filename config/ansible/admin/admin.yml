@@ -24,6 +24,10 @@
 - import_playbook: install-rocm.yml
 - import_playbook: install-llama-cpp-rocm.yml
 - import_playbook: install-nvidia.yml
+# NVMe APST/ASPM mitigation (targets nvidia hosts; no-op elsewhere)
+- import_playbook: install-nvme-mitigation.yml
+# Custom podman binary (prerequisite for setup-gpu-podman.yml)
+- import_playbook: install-podman.yml
 # Comino CRPS PSU redundancy (3+1 by default). Idempotent; skips hosts
 # without CRPS hardware. Runs after install-nvidia so the /dev/ttyACM*
 # udev rules + dialout group are in place.

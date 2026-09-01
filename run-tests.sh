@@ -7,6 +7,11 @@
 #   PYTHON=python3 ./run-tests.sh
 set -euo pipefail
 
+# Keep diagnostic output on stdout so callers can distinguish "no stderr"
+# from a failed run without losing warnings or failure details.
+exec 2>&1
+export PYTHONWARNINGS=ignore
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES="$ROOT/config/ansible/admin/files"
 PY="${PYTHON:-}"

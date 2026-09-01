@@ -12,14 +12,6 @@ def get_version():
                 return line.split('=')[1].strip().strip('"\'')
     return '0.1.0'
 
-# Read requirements
-def get_requirements():
-    requirements_file = os.path.join(os.path.dirname(__file__), 'requirements.txt')
-    if os.path.exists(requirements_file):
-        with open(requirements_file) as f:
-            return [line.strip() for line in f if line.strip() and not line.startswith('#')]
-    return []
-
 setup(
     name="ycluster",
     version=get_version(),

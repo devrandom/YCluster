@@ -30,19 +30,19 @@ setup-venv:
     uv sync
     uv pip install -e config/ansible/admin/files/ycluster/
 
-# Install serena-agent, ty, and the local mcp-fstools sibling as
-# isolated uv tools. serena is pinned to its git source (matches
-# README.md Tools section); ty is the current type checker per ty.toml
-# — pyright is no longer used; mcp-fstools is the sibling repo that
-# opencode registers as a remote MCP. `uv tool install` is idempotent —
-# re-running this is a no-op for already-installed tools and upgrades
-# them in place otherwise.
+# Install serena-agent, ty, the local mcp-fstools sibling, and
+# python-gitlab as isolated uv tools. serena is pinned to its git source
+# (matches README.md Tools section); ty is the current type checker per
+# ty.toml — pyright is no longer used; mcp-fstools is the sibling repo
+# that opencode registers as a remote MCP. `uv tool install` is
+# idempotent — re-running this is a no-op for already-installed tools
+# and upgrades them in place otherwise.
 #
 # mcp-fstools is expected as a sibling repo (../mcp-fstools). If you
 # don't have it locally, clone it from github.com/devrandom/mcp-fstools
 # next to ycluster — the install step warns and skips rather than
 # failing so the other tools still install.
-[doc("Install serena-agent (from git), ty, and ../mcp-fstools (skipped if sibling missing) as isolated uv tools")]
+[doc("Install serena-agent (from git), ty, python-gitlab, and ../mcp-fstools (skipped if sibling missing) as isolated uv tools")]
 setup-tools:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -57,7 +57,8 @@ setup-tools:
     fi
     uv tool install --from git+https://github.com/oraios/serena serena-agent
     uv tool install ty
-    fstools_dir="$(justfile_directory())/../mcp-fstools"
+    uv tool install python-gitlab
+    fstools_dir="{{justfile_directory()}}/../mcp-fstools"
     if [ -d "$fstools_dir" ]; then
         uv tool install "$fstools_dir"
     else

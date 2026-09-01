@@ -33,7 +33,7 @@ test-system-quick:
 
 test-system:
     @mkdir -p ./tmp
-    ./dev/cluster/system-test.sh --background
+    ./dev/cluster/system-test.sh --background --assert-only
     @echo
     @echo "log: {{TEST_LOG}}  (tail -f to watch; grep -E '^(== SECTION|PASS|FAIL)' for summary)"
 

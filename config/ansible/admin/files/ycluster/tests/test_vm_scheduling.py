@@ -10,13 +10,17 @@ or a single module:
     python3 -m unittest tests.test_vm_scheduling
 """
 
+import json
 import subprocess
+import contextlib
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Optional
 from unittest import mock
 
 from ycluster.utils import vm_manager as vm
+from ycluster.utils import vm_alter
 
 UTC = timezone.utc
 
@@ -717,3 +721,645 @@ class IncusStopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VMAlterHelperTests(unittest.TestCase):
+    def _rec(self, **kw):
+        base = {"name": "vm1", "owner": "a@x", "type": "vm", "gpus": 1}
+        base.update(kw)
+        return base
+
+    def test_change_summary(self):
+        rec = {"additional_users": ["b@x"]}
+        changes = vm_alter._vm_alter_changes(
+            "new@x", True, rec, True, 2, True, 8, True, "16GiB", True)
+        self.assertEqual(changes, [
+            "owner -> new@x", "additional users -> [b@x]",
+            "gpus -> 2", "cpu -> 8", "mem -> 16GiB",
+        ])
+
+    @mock.patch.object(vm, "_verify_guest_gpus")
+    @mock.patch.object(vm, "_wait_agent")
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_ensure_nas_share")
+    @mock.patch.object(vm, "_ensure_gpus_attached")
+    @mock.patch.object(vm, "_put_json")
+    @mock.patch.object(vm, "release_gpus")
+    @mock.patch.object(vm, "_incus_stop")
+    @mock.patch.object(vm, "_instance_info")
+    def test_vm_gpu_change_running(self, info, stop, release, put, attach,
+                                   nas, incus, wait, verify):
+        rec = self._rec()
+        info.return_value = {"status": "Running"}
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "vm", 2))
+        stop.assert_called_once_with("vm1")
+        release.assert_called_once_with("vm1")
+        put.assert_called_once()
+        attach.assert_called_once_with("vm1")
+        nas.assert_called_once_with("vm1")
+        incus.assert_any_call("start", "vm1")
+        verify.assert_called_once_with("vm1", 2)
+        self.assertEqual(rec["gpus"], 2)
+
+    @mock.patch.object(vm, "_instance_info",
+                       return_value={"status": "Stopped"})
+    @mock.patch.object(vm, "_incus_stop")
+    @mock.patch.object(vm, "release_gpus")
+    @mock.patch.object(vm, "_put_json")
+    @mock.patch.object(vm, "_ensure_gpus_attached")
+    def test_vm_gpu_change_stopped_no_gpu(self, attach, put, release, stop,
+                                          info):
+        rec = self._rec()
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "vm", 0))
+        stop.assert_not_called()
+        release.assert_called_once_with("vm1")
+        attach.assert_not_called()
+        self.assertEqual(rec["gpus"], 0)
+
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_instance_info", return_value={"devices": {}})
+    def test_container_gpu_add_and_remove(self, info, incus):
+        rec = self._rec(type="container", gpus=0)
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "container", 1))
+        incus.assert_called_once_with("config", "device", "add", "vm1",
+                                      "gpu0", "gpu", "gputype=physical")
+
+        rec = self._rec(type="container", gpus=1)
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "container", 0))
+        incus.assert_called_with("config", "device", "remove", "vm1",
+                                 "gpu0", check=False)
+        self.assertEqual(rec["gpus"], 0)
+
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_instance_info",
+                       return_value={"devices": {"gpu0": {"type": "gpu"}}})
+    def test_container_gpu_already_present(self, info, incus):
+        rec = self._rec(type="container", gpus=0)
+        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "container", 1))
+        incus.assert_not_called()
+        self.assertEqual(rec["gpus"], 1)
+
+
+class VMAlterOrchestratorTests(unittest.TestCase):
+    def _patches(self):
+        return [
+            mock.patch.object(vm, "_valid_vm_name"),
+            mock.patch.object(vm, "_instance_exists", return_value=True),
+            mock.patch.object(vm, "_put_json"),
+            mock.patch.object(vm, "_record_event"),
+        ]
+
+    @mock.patch.object(vm, "vm_get")
+    def test_vm_alter_no_changes(self, vm_get):
+        rec = {"name": "vm1", "owner": "a@x", "type": "vm", "gpus": 1,
+               "cpu": "4", "mem": "8GiB", "additional_users": ["b@x"]}
+        vm_get.return_value = rec
+        with contextlib.ExitStack() as stack:
+            put = stack.enter_context(mock.patch.object(vm, "_put_json"))
+            event = stack.enter_context(mock.patch.object(vm, "_record_event"))
+            stack.enter_context(mock.patch.object(vm, "_instance_exists", return_value=True))
+            stack.enter_context(mock.patch.object(vm, "user_get", return_value={"ssh_keys": ["key"]}))
+            vm.vm_alter("vm1", owner="a@x", gpus=1, cpu="4", mem="8GiB",
+                        add_users=["b@x"], remove_users=[])
+        self.assertEqual(put.call_count, 0)
+        self.assertEqual(event.call_count, 0)
+
+    @mock.patch.object(vm, "bastion_sync")
+    @mock.patch.object(vm, "_sync_vm_keys")
+    @mock.patch.object(vm, "_record_event")
+    @mock.patch.object(vm, "_put_json")
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_valid_user")
+    @mock.patch.object(vm, "user_get")
+    @mock.patch.object(vm, "_instance_info")
+    @mock.patch.object(vm, "vm_get")
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_vm_alter_applies_changes(self, valid_name, vm_get, info,
+                                      user_get, valid_user, incus, put, event,
+                                      sync_keys, bastion_sync):
+        rec = {"name": "vm1", "owner": "a@x", "type": "container", "gpus": 0,
+               "cpu": "4", "mem": "8GiB"}
+        vm_get.return_value = rec
+        info.return_value = {"status": "Stopped", "devices": {"gpu0": {"type": "gpu"}}}
+        user_get.return_value = {"ssh_keys": ["key"]}
+        with contextlib.ExitStack() as stack:
+            _ = stack.enter_context(mock.patch.object(vm, "_instance_exists", return_value=True))
+            vm.vm_alter(
+                "vm1", owner="new@x", gpus=1, cpu="8", mem="16GiB",
+                add_users=["b@x"], remove_users=[])
+        put.assert_called_once()
+        sync_keys.assert_called_once()
+        bastion_sync.assert_called_once()
+        event.assert_called_once()
+        self.assertEqual(rec["owner"], "new@x")
+        self.assertEqual(rec["additional_users"], ["b@x"])
+        self.assertEqual(rec["gpus"], 1)
+        self.assertEqual(rec["cpu"], "8")
+        self.assertEqual(rec["mem"], "16GiB")
+
+    @mock.patch.object(vm, "_instance_exists", return_value=False)
+    @mock.patch.object(vm, "vm_get", return_value={"host": "elsewhere"})
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_vm_alter_requires_local_instance(self, valid_name, vm_get,
+                                              exists):
+        with self.assertRaisesRegex(ValueError, "not present on this host"):
+            vm_alter.vm_alter("vm1")
+
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "vm_get", return_value={"type": "vm"})
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_vm_alter_rejects_image_type_negative_gpu(self, valid_name,
+                                                      vm_get, exists):
+        with self.assertRaises(NotImplementedError):
+            vm_alter.vm_alter("vm1", image="new")
+        with self.assertRaises(NotImplementedError):
+            vm_alter.vm_alter("vm1", instance_type="container")
+        with self.assertRaises(ValueError):
+            vm_alter.vm_alter("vm1", gpus=-1)
+
+
+class ReconcileStopTests(unittest.TestCase):
+    def _test_stop(self, grace, now, mock_stop, issues=None):
+        issues = issues if issues is not None else {}
+        with mock.patch.object(vm, 'vm_stop') as _mock_stop, \
+             mock.patch.object(vm, 'grace_delete'), \
+             mock.patch.object(vm, 'release_gpus', return_value=2), \
+             mock.patch.object(vm, '_clear_issue') as clear:
+            _mock_stop.return_value = None
+            vm._reconcile_stop('vm1', grace, now, issues)
+        return _mock_stop, clear
+
+    @mock.patch.object(vm, '_clear_issue')
+    @mock.patch.object(vm, 'vm_stop')
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'release_gpus', return_value=2)
+    def test_immediate_stop(self, release, gd, stop, clear):
+        now = datetime(2026, 8, 30, 10, 0, 0, tzinfo=timezone.utc)
+        grace = {'warned_at': now.isoformat(), 'immediate': True}
+        issues = {'vm1': True}
+        vm._reconcile_stop('vm1', grace, now, issues)
+        stop.assert_called_once_with('vm1', initiator='scheduler')
+        clear.assert_called_once_with(issues, 'vm1')
+
+    @mock.patch.object(vm, 'vm_stop')
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'release_gpus', return_value=0)
+    def test_grace_elapsed_stop(self, release, gd, stop):
+        now = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+        warned = datetime(2026, 8, 30, 10, 0, 0, tzinfo=timezone.utc)
+        grace = {'warned_at': warned.isoformat()}
+        vm._reconcile_stop('vm1', grace, now, {})
+        stop.assert_called_once_with('vm1', initiator='scheduler')
+
+    @mock.patch.object(vm, 'vm_stop', side_effect=RuntimeError('stop failed'))
+    def test_stop_failure_records_issue(self, stop):
+        now = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+        grace = {'immediate': True}
+        issues = {}
+        with mock.patch.object(vm, '_record_issue') as record:
+            vm._reconcile_stop('vm1', grace, now, issues)
+        record.assert_called_once()
+
+    @mock.patch.object(vm, 'vm_stop')
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'release_gpus', return_value=0)
+    def test_no_warned_at_stops(self, release, gd, stop):
+        now = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+        grace = {}
+        vm._reconcile_stop('vm1', grace, now, {})
+        stop.assert_called_once_with('vm1', initiator='scheduler')
+
+
+class SyncDnsRecordsTests(unittest.TestCase):
+    @staticmethod
+    def output(text):
+        return subprocess.CompletedProcess([], 0, stdout=text, stderr='')
+
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_managed_bridges', return_value=['br0', 'br1'])
+    @mock.patch.object(vm, '_incus_json')
+    def test_sync_dns_records_reconciles_and_returns_changed(self, list_json,
+                                                             bridges, incus):
+        list_json.return_value = [
+            {'name': 'vm2', 'expanded_devices': {'eth0': {
+                'network': 'br0', 'ipv4.address': '10.0.0.2'}}},
+            {'name': 'vm1', 'expanded_devices': {'eth0': {
+                'network': 'br0', 'ipv4.address': '10.0.0.1'}}},
+        ]
+        bridges.return_value = ['br0', 'br1']
+
+        def get(*args):
+            if args[:3] == ('network', 'get', 'br0'):
+                if args[3] == 'dns.domain':
+                    return self.output('ycluster\n')
+                return self.output(
+                    'resolver 10.0.0.254\n'
+                    'host-record=vm1,vm1.ycluster,10.0.0.9\n')
+            if args[:3] == ('network', 'get', 'br1'):
+                if args[3] == 'dns.domain':
+                    return self.output('ycluster')
+                return self.output(
+                    'host-record=vm1,vm1.ycluster,10.0.0.1\n')
+            if args[:3] in (('network', 'set', 'br0'),
+                            ('network', 'set', 'br1')):
+                return self.output('')
+            raise AssertionError(f'unexpected incus call {args}')
+
+        incus.side_effect = get
+        changed = vm.sync_dns_records()
+        self.assertEqual(changed, {
+            'br0': [
+                'host-record=vm1,vm1.ycluster,10.0.0.1',
+                'host-record=vm2,vm2.ycluster,10.0.0.2'],
+            'br1': [],
+        })
+        incus.assert_any_call('network', 'set', 'br0', 'raw.dnsmasq',
+                              'resolver 10.0.0.254\n'
+                              'host-record=vm1,vm1.ycluster,10.0.0.1\n'
+                              'host-record=vm2,vm2.ycluster,10.0.0.2')
+        incus.assert_any_call('network', 'set', 'br1', 'raw.dnsmasq', '')
+
+
+class ReconcileLocalTests(unittest.TestCase):
+    @mock.patch.object(vm, '_clear_issue')
+    def test_unmanaged_clears_issue_and_returns(self, clear):
+        issues = {'vm1': True}
+        vm._reconcile_local('vm1', {'mode': 'unmanaged'}, {}, {}, None,
+                            issues, [], {})
+        clear.assert_called_once_with(issues, 'vm1')
+
+    @mock.patch.object(vm, '_clear_issue')
+    def test_no_desired_clears_issue_and_returns(self, clear):
+        vm._reconcile_local('vm1', None, {}, {}, None, {}, [], {})
+        clear.assert_called_once_with({}, 'vm1')
+
+
+class ReconcileCleanupTests(unittest.TestCase):
+    @mock.patch.object(vm, '_delete')
+    def test_deletes_issues_for_missing_vms(self, delete):
+        issues = {'vm1': True, 'vm2': True}
+        vm._reconcile_cleanup(issues, {'vm1': {}})
+        delete.assert_called_once_with(vm.VM_ISSUE_PREFIX + 'vm2')
+        self.assertEqual(issues, {'vm1': True})
+
+
+class ReconcileWantOnTests(unittest.TestCase):
+    def test_running_clears_issue(self):
+        issues = {'vm1': True}
+        with mock.patch.object(vm, '_clear_issue') as clear:
+            vm._reconcile_want_on('vm1', {'mode': 'on'}, True, None,
+                                  issues, [], {'vm1': {'gpus': 1}})
+        clear.assert_called_once_with(issues, 'vm1')
+
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'desired_gpus', return_value=2)
+    def test_not_running_appends_to_start(self, dg, gd):
+        to_start = []
+        all_vms = {'vm1': {'gpus': 1}}
+        with mock.patch.object(vm, '_clear_issue'):
+            vm._reconcile_want_on('vm1', {'mode': 'on'}, False, None,
+                                  {}, to_start, all_vms)
+        self.assertEqual(to_start, [('vm1', 2)])
+        gd.assert_not_called()
+
+    @mock.patch.object(vm, 'grace_delete')
+    @mock.patch.object(vm, 'desired_gpus', return_value=1)
+    def test_grace_deleted_on_flip_back(self, dg, gd):
+        to_start = []
+        with mock.patch.object(vm, '_clear_issue'):
+            vm._reconcile_want_on('vm1', {'mode': 'on'}, True,
+                                  {'warned_at': 'x'}, {}, to_start,
+                                  {'vm1': {'gpus': 1}})
+        gd.assert_called_once_with('vm1')
+        self.assertEqual(to_start, [])
+
+
+class ValidateVMLaunchTests(unittest.TestCase):
+    @mock.patch.object(vm, '_instance_exists', return_value=False)
+    @mock.patch.object(vm, 'vm_get', return_value=None)
+    @mock.patch.object(vm, 'user_get')
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_valid_launch(self, valid_name, user_get, vm_get, exists):
+        user_get.return_value = {'ssh_keys': ['key']}
+        result = vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
+        self.assertEqual(result, 'vm')
+
+    @mock.patch.object(vm, 'user_get', return_value=None)
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_no_keys_raises(self, valid_name, user_get):
+        with self.assertRaisesRegex(ValueError, 'no SSH keys'):
+            vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
+
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_negative_gpus_raises(self, valid_name):
+        with self.assertRaisesRegex(ValueError, 'cannot be negative'):
+            vm._validate_vm_launch('vm1', 'a@x', -1, 'vm')
+
+    @mock.patch.object(vm, 'user_get', return_value={'ssh_keys': ['k']})
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_bad_type_raises(self, valid_name, user_get):
+        with self.assertRaisesRegex(ValueError, 'Invalid --type'):
+            vm._validate_vm_launch('vm1', 'a@x', 1, 'lxc')
+
+    @mock.patch.object(vm, 'user_get', return_value={'ssh_keys': ['k']})
+    @mock.patch.object(vm, '_instance_exists', return_value=True)
+    @mock.patch.object(vm, 'vm_get', return_value=None)
+    @mock.patch.object(vm, '_valid_vm_name')
+    def test_already_exists_raises(self, valid_name, vm_get, exists, user_get):
+        with self.assertRaisesRegex(ValueError, 'already exists'):
+            vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
+
+
+class GpuPoolDiscoveryTests(unittest.TestCase):
+    def test_gpu_entry_uses_pci_class(self):
+        with mock.patch.object(vm, '_device_pci_class', return_value='0x030200'):
+            self.assertTrue(vm._is_gpu_pci_entry('c1:00.0'))
+        with mock.patch.object(vm, '_device_pci_class', return_value='0x040300'):
+            self.assertFalse(vm._is_gpu_pci_entry('c1:00.1'))
+
+    def test_read_error_excluded(self):
+        with mock.patch.object(vm, '_device_pci_class', return_value=None):
+            self.assertFalse(vm._is_gpu_pci_entry('x'))
+
+
+class FakeEtcd:
+    def __init__(self, values=None, prefix=None):
+        self.values = values or {}
+        self.prefix = prefix or []
+        self.puts = []
+        self.deletes = []
+
+    def get(self, key):
+        value = self.values.get(key)
+        if value is None:
+            return None, None
+        return json.dumps(value).encode(), None
+
+    def put(self, key, value):
+        self.puts.append((key, value))
+
+    def delete(self, key):
+        self.deletes.append(key)
+
+    def get_prefix(self, prefix):
+        if isinstance(self.prefix, dict):
+            return self.prefix.get(prefix, [])
+        return self.prefix
+
+
+class VMHelperTests(unittest.TestCase):
+    def test_etcd_json_helpers(self):
+        fake = FakeEtcd({vm.USERS_PREFIX + 'user': {'keys': []}})
+        fake.prefix = [
+            (json.dumps({'state': 'on'}).encode(),
+             SimpleNamespace(key=b'/prefix/vm1')),
+            (json.dumps({'state': 'off'}).encode(),
+             SimpleNamespace(key=b'/prefix/')),
+            (json.dumps({'state': 'off'}).encode(),
+             SimpleNamespace(key=b'/prefix/a/b')),
+        ]
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake):
+            self.assertEqual(vm._get_json(vm.USERS_PREFIX + 'user'),
+                             {'keys': []})
+            self.assertIsNone(vm._get_json('/missing'))
+            vm._put_json('/key', {'state': 'on'})
+            vm._delete('/key')
+            self.assertEqual(
+                vm._all_json('/prefix/'),
+                {'vm1': {'state': 'on'}})
+        self.assertEqual(fake.puts, [('/key', '{"state": "on"}')])
+        self.assertEqual(fake.deletes, ['/key'])
+
+    def test_incus_helper_variants(self):
+        result = SimpleNamespace(returncode=0, stdout='{"ok": true}',
+                                 stderr='')
+        with mock.patch.object(vm.subprocess, 'run', return_value=result) as run:
+            self.assertEqual(vm._incus('list', stdin='data'), result)
+            self.assertEqual(run.call_args.kwargs['input'], 'data')
+            self.assertEqual(vm._incus('list'), result)
+            self.assertIsNone(run.call_args.kwargs.get('input'))
+            self.assertEqual(vm._incus_json('list'), {'ok': True})
+
+        failure = SimpleNamespace(returncode=1, stdout='', stderr='boom')
+        with mock.patch.object(vm.subprocess, 'run', return_value=failure):
+            with self.assertRaises(RuntimeError):
+                vm._incus('info', 'missing')
+            self.assertFalse(vm._instance_exists('missing'))
+
+    def test_incus_ip_and_bridge_helpers(self):
+        instances = [{
+            'name': 'vm1',
+            'expanded_devices': {'eth0': {'ipv4.address': 'ip-1'}},
+            'state': {'network': {'eth0': {'addresses': [
+                {'family': 'inet', 'scope': 'global', 'address': 'ip-2'},
+                {'family': 'inet6', 'scope': 'global', 'address': 'ip-6'},
+            ]}}},
+        }]
+        self.assertEqual(vm._live_instance_ips(instances[0]), {'ip-2'})
+        with mock.patch.object(vm, '_incus_json', return_value=instances):
+            self.assertEqual(vm._pinned_ips(), {'vm1': 'ip-1'})
+        with mock.patch.object(vm, '_pinned_ips',
+                               return_value={'vm1': 'ip-1'}), \
+                mock.patch.object(vm, '_incus_json', return_value=instances):
+            self.assertEqual(vm._occupied_ips(), {'ip-1', 'ip-2'})
+        self.assertEqual(vm._pick_vm_ip('ip-1', ['ip-2']), 'ip-1')
+        self.assertEqual(vm._pick_vm_ip(taken=['ip-200']),
+                         f'{vm.VM_IP_SUBNET_PREFIX}.{vm.VM_IP_POOL_START}')
+        with self.assertRaises(RuntimeError):
+            vm._pick_vm_ip(taken=[f'{vm.VM_IP_SUBNET_PREFIX}.{n}'
+                                  for n in range(10, 201)])
+        with mock.patch.object(vm, '_incus', return_value=SimpleNamespace(
+                returncode=1)) as incus:
+            vm._pin_instance_ip('vm1', 'ip-1')
+        self.assertEqual(incus.call_count, 2)
+        with mock.patch.object(vm, '_incus_json', return_value=[
+                {'name': 'incusbr0', 'type': 'bridge', 'managed': True},
+                {'name': 'other', 'type': 'bridge', 'managed': False}]):
+            self.assertEqual(vm._managed_bridges(), ['incusbr0'])
+
+    def test_validation_and_host_config(self):
+        with self.assertRaises(ValueError):
+            vm._valid_vm_name('Bad VM')
+        with self.assertRaises(ValueError):
+            vm._valid_user('bad user')
+        data = 'default_instance_type: "container"\nother: value\n'
+        with mock.patch('builtins.open', mock.mock_open(read_data=data)):
+            self.assertEqual(vm._host_config_value('default_instance_type'),
+                             'container')
+            self.assertEqual(vm._default_instance_type(), 'container')
+        with mock.patch('builtins.open', mock.mock_open(read_data='x')):
+            self.assertIsNone(vm._host_config_value('missing'))
+        with mock.patch('builtins.open', side_effect=OSError):
+            self.assertIsNone(vm._host_config_value('missing'))
+            self.assertEqual(vm._default_instance_type(), 'vm')
+
+    def test_registry_shortcuts(self):
+        fake = FakeEtcd()
+        fake.values = {
+            vm.USERS_PREFIX + 'user': {'keys': []},
+            vm.VM_DESIRED_PREFIX + 'vm1': {'mode': 'on'},
+            vm.GPU_BLOCKS_PREFIX + 'block': {'gpus': 1},
+            vm.VM_STATE_PREFIX + 'host': {'status': 'Running'},
+        }
+        fake.prefix = {
+            vm.USERS_PREFIX: [
+                (b'{"keys":[]}',
+                 SimpleNamespace(key=b'/cluster/users/user')),
+            ],
+            vm.VM_DESIRED_PREFIX: [
+                (b'{"mode":"on"}',
+                 SimpleNamespace(key=b'/cluster/vm-desired/vm1')),
+            ],
+            vm.GPU_BLOCKS_PREFIX: [
+                (b'{"mode":"on"}',
+                 SimpleNamespace(key=b'/cluster/gpu-blocks/block')),
+            ],
+            vm.VM_GRACE_PREFIX: [
+                (b'{"warned_at":"now"}',
+                 SimpleNamespace(key=b'/cluster/vm-grace/vm1')),
+            ],
+            vm.VM_ISSUE_PREFIX: [
+                (b'{"op":"start"}',
+                 SimpleNamespace(key=b'/cluster/vm-issue/vm1')),
+            ],
+            vm.VM_STATE_PREFIX: [
+                (b'{"status":"Running"}',
+                 SimpleNamespace(key=b'/cluster/vm-state/host')),
+            ],
+        }
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake):
+            self.assertEqual(vm.user_get('user'), {'keys': []})
+            self.assertEqual(vm.users_all(), {'user': {'keys': []}})
+            self.assertEqual(vm.desired_get('vm1'), {'mode': 'on'})
+            vm.desired_set('vm1', {'mode': 'off'})
+            vm.desired_delete('vm1')
+            self.assertEqual(vm.desired_all(), {'vm1': {'mode': 'on'}})
+            self.assertEqual(vm.gpu_block_get('block'), {'gpus': 1})
+            vm.gpu_block_set('block', {'gpus': 2})
+            vm.gpu_block_delete('block')
+            self.assertEqual(vm.gpu_blocks_all(), {'block': {'mode': 'on'}})
+            vm.grace_set('vm1', {'warned_at': 'now'})
+            vm.grace_delete('vm1')
+            self.assertEqual(vm.grace_all(),
+                             {'vm1': {'warned_at': 'now'}})
+            self.assertEqual(vm.issues_all(), {'vm1': {'op': 'start'}})
+            self.assertEqual(vm.state_get('host'), {'status': 'Running'})
+            self.assertEqual(vm.state_all(), {'host': {'status': 'Running'}})
+
+
+class VMListHelperTests(unittest.TestCase):
+    def test_strip_tz(self):
+        self.assertEqual(vm._strip_tz(''), '')
+        self.assertEqual(vm._strip_tz('2026-01-01T00:00:00Z'),
+                         '2026-01-01T00:00:00')
+        self.assertEqual(vm._strip_tz('2026-01-01T00:00:00+02:00'),
+                         '2026-01-01T00:00:00')
+        self.assertEqual(vm._strip_tz('2026-01-01T00:00:00'),
+                         '2026-01-01T00:00:00')
+
+    def test_sampled_states_skips_unnamed(self):
+        states = {
+            'host-a': {'instances': [{'name': 'vm1', 'status': 'Running'},
+                                     {'status': 'Running'}]},
+            'host-b': {'instances': [{'name': 'vm2', 'status': 'Stopped'}]},
+        }
+        self.assertEqual(vm._sampled_states(lambda: states),
+                         {'vm1': 'Running', 'vm2': 'Stopped'})
+
+    def test_vm_list_state_priority(self):
+        self.assertEqual(vm._vm_list_state('vm1', {'state': 'provisioning'},
+                                           'host', {}, {}), 'provisioning')
+        self.assertEqual(vm._vm_list_state('vm1', {'host': 'host'}, 'host',
+                                           {'vm1': 'Running'}, {}), 'Running')
+        self.assertEqual(vm._vm_list_state('vm1', {'host': 'remote'}, 'host',
+                                           {}, {'vm1': 'Stopped'}), 'Stopped')
+        self.assertEqual(vm._vm_list_state('vm1', {'host': 'remote'}, 'host',
+                                           {}, {}), '(remote)')
+
+    def test_sync_limits_backfills_local_vms(self):
+        with mock.patch.object(vm.socket, 'gethostname', return_value='host-a'), \
+                mock.patch.object(vm, 'vms_all',
+                                  return_value={'local': {'host': 'host-a'},
+                                                'remote': {'host': 'host-b'}}), \
+                mock.patch.object(vm, '_sync_vm_limits_once',
+                                  side_effect=[True, False]) as sync_once, \
+                mock.patch('builtins.print') as print_:
+            vm.vm_sync_limits()
+        sync_once.assert_called_once_with('local', {'host': 'host-a'})
+        print_.assert_called_once_with('synced cpu/mem for 1 VM(s) on host-a')
+
+
+    def test_reconcile_cleanup_deletes_orphan_issues(self):
+        issues = {'vm1': True, 'vm2': True}
+        with mock.patch.object(vm, '_delete') as delete:
+            vm._reconcile_cleanup(issues, {'vm2': {}})
+        delete.assert_called_once_with(vm.VM_ISSUE_PREFIX + 'vm1')
+        self.assertEqual(issues, {'vm2': True})
+
+    def test_record_event_from_record_uses_registry(self):
+        with mock.patch.object(vm, 'vm_get',
+                               return_value={'owner': 'alice@x', 'gpus': 2}), \
+                mock.patch.object(vm, '_record_event') as record:
+            vm._record_event_from_record('start', 'vm1', initiator='web',
+                                         billable=True)
+        record.assert_called_once_with('start', 'vm1', owner='alice@x',
+                                       gpus=2, initiator='web', billable=True)
+
+    def test_vm_gpus_reports_assigned_free_and_wedged(self):
+        with mock.patch.object(vm, 'gpu_pool', return_value=[]), \
+                mock.patch('builtins.print') as print_:
+            vm.vm_gpus()
+        print_.assert_called_once_with(
+            'No vfio-pci GPUs found — has the host been rebooted since '
+            'the passthrough binding was configured?')
+
+        with mock.patch.object(vm, 'gpu_pool', return_value=['p1', 'p2', 'p3']), \
+                mock.patch.object(vm, '_assigned_gpus', return_value={'p1'}), \
+                mock.patch.object(vm, '_gpu_healthy',
+                                  side_effect=lambda pci: pci == 'p2'), \
+                mock.patch('builtins.print') as print_:
+            vm.vm_gpus()
+        self.assertEqual(print_.mock_calls[0], mock.call('p1  ASSIGNED'))
+        self.assertEqual(print_.mock_calls[1], mock.call('p2  free'))
+        self.assertEqual(print_.mock_calls[2],
+                         mock.call('p3  WEDGED (PCIe fault? — won\'t be allocated)'))
+
+
+class UserRegistryTests(unittest.TestCase):
+    KEY = 'ssh-ed25519 ' + 'A' * 24 + ' comment'
+
+    def test_add_and_remove_user_keys(self):
+        fake = FakeEtcd({vm.USERS_PREFIX + 'user': {'ssh_keys': []}})
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake), \
+                mock.patch('builtins.print') as print_:
+            vm.user_add_key('user', self.KEY)
+            self.assertEqual(fake.puts[0][1], json.dumps(
+                {'ssh_keys': [self.KEY]}))
+            vm.user_add_key('user', self.KEY)
+            fake.values[vm.USERS_PREFIX + 'user'] = {'ssh_keys': [self.KEY]}
+            vm.user_remove_key('user', self.KEY)
+        self.assertEqual(len(print_.mock_calls), 3)
+
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake):
+            with self.assertRaises(ValueError):
+                vm.user_remove_key('missing', self.KEY)
+
+    def test_user_list_and_key_cap(self):
+        fake = FakeEtcd({
+            vm.USERS_PREFIX + 'user': {'ssh_keys': [self.KEY]},
+            vm.USERS_PREFIX + 'full': {
+                'ssh_keys': ['k'] * vm.MAX_SSH_KEYS_PER_USER},
+        })
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake), \
+                mock.patch('builtins.print') as print_:
+            vm.user_list('user')
+            vm.user_list()
+            with self.assertRaises(ValueError):
+                vm.user_add_key('full', self.KEY)
+        self.assertEqual(len(print_.mock_calls), 3)
+
+        with mock.patch.object(vm, 'get_etcd_client', return_value=fake), \
+                mock.patch('builtins.print') as print_:
+            vm.user_list('missing')
+            vm.user_list()
+        self.assertEqual(len(print_.mock_calls), 2)

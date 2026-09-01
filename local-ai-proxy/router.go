@@ -229,32 +229,11 @@ func (m *ModelRouter) routeMultipart(r *http.Request, boundary string, headerMod
 		return nil, errors.New("request body too large")
 	}
 
-	var model string
-	if headerModel != "" {
-		model = headerModel
-	} else {
-		mr := multipart.NewReader(bytes.NewReader(body), boundary)
-		for {
-			part, err := mr.NextRawPart()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("parse multipart body: %w", err)
-			}
-			if part.FormName() == "model" && part.FileName() == "" {
-				val, readErr := io.ReadAll(io.LimitReader(part, maxFormFieldBytes+1))
-				part.Close()
-				if readErr != nil {
-					return nil, fmt.Errorf("read model form field: %w", readErr)
-				}
-				if len(val) > maxFormFieldBytes {
-					return nil, errors.New("model form field too large")
-				}
-				model = strings.TrimSpace(string(val))
-				break
-			}
-			part.Close()
+	model := headerModel
+	if model == "" {
+		model, err = extractMultipartModel(body, boundary)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -269,6 +248,35 @@ func (m *ModelRouter) routeMultipart(r *http.Request, boundary string, headerMod
 	// Multipart audio endpoints don't stream the way chat completions do;
 	// leave Stream=false (it's only used as a metric label).
 	return &RouteResult{Model: model, Candidates: candidates, Body: body, Stream: false}, nil
+}
+
+// extractMultipartModel scans the multipart body for the `model` form field
+// and returns its trimmed string value. The file part is never decoded — we
+// read it as opaque bytes so binary uploads pass through unchanged.
+func extractMultipartModel(body []byte, boundary string) (string, error) {
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := mr.NextRawPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("parse multipart body: %w", err)
+		}
+		if part.FormName() == "model" && part.FileName() == "" {
+			val, readErr := io.ReadAll(io.LimitReader(part, maxFormFieldBytes+1))
+			part.Close()
+			if readErr != nil {
+				return "", fmt.Errorf("read model form field: %w", readErr)
+			}
+			if len(val) > maxFormFieldBytes {
+				return "", errors.New("model form field too large")
+			}
+			return strings.TrimSpace(string(val)), nil
+		}
+		part.Close()
+	}
+	return "", nil
 }
 
 // candidatesFor looks up backends for a model and filters by health.

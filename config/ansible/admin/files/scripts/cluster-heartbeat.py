@@ -30,6 +30,77 @@ def get_healthchecks_url():
         return None
 
 
+def _node_health_summary(cluster_status):
+    """Count node states and collect names needing attention."""
+    summary = {
+        'healthy': 0, 'unhealthy': 0, 'unreachable': 0,
+        'unhealthy_names': [], 'unreachable_names': [],
+    }
+    for hostname, node_health in cluster_status.get('hostHealth', {}).items():
+        status = node_health.get('overall') or node_health.get('status', '')
+        if status == 'disabled':
+            continue
+        if status == 'healthy':
+            summary['healthy'] += 1
+        elif status in ['timeout', 'unreachable']:
+            summary['unreachable'] += 1
+            summary['unreachable_names'].append(hostname)
+        elif _clock_skew_only(hostname, node_health):
+            summary['healthy'] += 1
+        else:
+            summary['unhealthy'] += 1
+            summary['unhealthy_names'].append(hostname)
+    summary['total'] = (summary['healthy'] + summary['unhealthy'] +
+                        summary['unreachable'])
+    return summary
+
+
+def _clock_skew_only(hostname, node_health):
+    """True for non-core nodes whose only bad service is clock_skew.
+
+    Remote NTP checks flap and aren't worth alerting on. Storage nodes (s*)
+    need tight time sync for Ceph, so clock skew there still counts.
+    """
+    if re.match(r'^s\d+$', hostname):
+        return False
+    bad = [
+        svc for svc, d in node_health.get('services', {}).items()
+        if isinstance(d, dict)
+        and d.get('status') in ('unhealthy', 'error', 'degraded')
+    ]
+    return bool(bad) and all(svc == 'clock_skew' for svc in bad)
+
+
+def _failed_services(services):
+    """Return strings like 'svc(status)' for failed service details."""
+    return [
+        f"{svc}({details['status']})"
+        for svc, details in services.items()
+        if isinstance(details, dict)
+        and details.get('status') in ['unhealthy', 'error', 'degraded']
+    ]
+
+
+def _unreachable_details(cluster_status, hostnames):
+    """Render per-host diagnostics for unreachable/timeout nodes."""
+    details = {}
+    for hostname in hostnames:
+        node_health = cluster_status.get('hostHealth', {}).get(hostname, {})
+        parts = []
+        elapsed = node_health.get('elapsed_ms')
+        exc = node_health.get('exception')
+        err = node_health.get('error')
+        if elapsed is not None:
+            parts.append(f"{elapsed}ms")
+        if exc:
+            parts.append(exc)
+        if err:
+            parts.append(err)
+        if parts:
+            details[hostname] = '; '.join(parts)
+    return details
+
+
 def get_cluster_health():
     """Get comprehensive cluster health status"""
     health_data = {
@@ -39,9 +110,8 @@ def get_cluster_health():
         'nodes': {},
         'overall': 'healthy'
     }
-    
+
     try:
-        # Check local health API
         response = requests.get('http://localhost:12724/api/health', timeout=10)
         if response.status_code in [200, 503]:
             local_health = response.json()
@@ -52,118 +122,50 @@ def get_cluster_health():
     except Exception as e:
         health_data['error'] = f"Failed to get local health: {str(e)}"
         health_data['overall'] = 'error'
-    
-    # Get cluster-wide status
-    try:
-        response = requests.get('http://localhost:12723/api/cluster-status', timeout=30)
-        if response.status_code == 200:
-            cluster_status = response.json()
-            
-            # Count healthy vs unhealthy nodes
-            healthy_nodes = 0
-            unhealthy_nodes = 0
-            unreachable_nodes = 0
-            unhealthy_node_names = []
-            unreachable_node_names = []
-            
-            for hostname, node_health in cluster_status.get('hostHealth', {}).items():
-                node_status = node_health.get('overall') or node_health.get('status', '')
-                if node_status == 'disabled':
-                    continue
-                if node_status == 'healthy':
-                    healthy_nodes += 1
-                elif node_status in ['timeout', 'unreachable']:
-                    unreachable_nodes += 1
-                    unreachable_node_names.append(hostname)
-                else:
-                    # Ignore non-core nodes whose only non-healthy service is
-                    # clock_skew — remote NTP checks flap and aren't worth
-                    # alerting on. Storage nodes (s*) need tight time sync for
-                    # Ceph, so clock skew there still counts as unhealthy.
-                    is_core = re.match(r'^s\d+$', hostname) is not None
-                    services = node_health.get('services', {})
-                    bad = [
-                        svc for svc, d in services.items()
-                        if isinstance(d, dict)
-                        and d.get('status') in ('unhealthy', 'error', 'degraded')
-                    ]
-                    if not is_core and bad and all(svc == 'clock_skew' for svc in bad):
-                        healthy_nodes += 1
-                        continue
-                    unhealthy_nodes += 1
-                    unhealthy_node_names.append(hostname)
-            
-            health_data['nodes'] = {
-                'healthy': healthy_nodes,
-                'unhealthy': unhealthy_nodes,
-                'unreachable': unreachable_nodes,
-                'total': healthy_nodes + unhealthy_nodes + unreachable_nodes,
-                'unhealthy_names': unhealthy_node_names,
-                'unreachable_names': unreachable_node_names
-            }
-            
-            # Collect service details from unhealthy nodes
-            unhealthy_services_by_node = {}
-            for hostname in unhealthy_node_names + unreachable_node_names:
-                node_health = cluster_status.get('hostHealth', {}).get(hostname, {})
-                services = node_health.get('services', {})
-                failed = []
-                for svc, details in services.items():
-                    if isinstance(details, dict):
-                        status = details.get('status', '')
-                        if status in ['unhealthy', 'error', 'degraded']:
-                            failed.append(f"{svc}({status})")
-                if failed:
-                    unhealthy_services_by_node[hostname] = failed
-            
-            if unhealthy_services_by_node:
-                health_data['unhealthy_services_by_node'] = unhealthy_services_by_node
 
-            # Per-host diagnostic detail for unreachable/timeout nodes.
-            # get_host_health now records elapsed_ms + exception class +
-            # connect/read phase so the heartbeat body shows *why* a flap
-            # happened (e.g. "m3(3000.2ms ConnectTimeout)") instead of just
-            # the hostname. Cluster-status already populates these fields.
-            unreachable_details_by_node = {}
-            for hostname in unreachable_node_names:
-                node_health = cluster_status.get('hostHealth', {}).get(hostname, {})
-                parts = []
-                elapsed = node_health.get('elapsed_ms')
-                exc = node_health.get('exception')
-                err = node_health.get('error')
-                if elapsed is not None:
-                    parts.append(f"{elapsed}ms")
-                if exc:
-                    parts.append(exc)
-                if err:
-                    parts.append(err)
-                if parts:
-                    unreachable_details_by_node[hostname] = '; '.join(parts)
-            if unreachable_details_by_node:
-                health_data['unreachable_details_by_node'] = unreachable_details_by_node
-            
-            # Local services
-            local_health = cluster_status.get('hostHealth', {}).get(socket.gethostname(), {})
-            health_data['local_services'] = local_health.get('services', {})
-            
-            # Add leadership info
-            health_data['leadership'] = cluster_status.get('leadership', {})
-            
-            # Add VIP status
-            health_data['vip_status'] = cluster_status.get('vipStatus', {})
-            
-            # Add certificate status
-            cert_status = cluster_status.get('certificateStatus', {})
-            if cert_status:
-                health_data['certificate'] = {
-                    'status': cert_status.get('status'),
-                    'days_until_expiry': cert_status.get('details', {}).get('days_until_expiry')
-                }
+    _add_cluster_status(health_data)
+    return health_data
+
+
+def _add_cluster_status(health_data):
+    """Merge cluster-wide status into the heartbeat payload."""
+    try:
+        response = requests.get('http://localhost:12723/api/cluster-status',
+                                timeout=30)
+        if response.status_code != 200:
+            return
+        cluster_status = response.json()
     except Exception as e:
         health_data['cluster_error'] = f"Failed to get cluster status: {str(e)}"
-    
-    
-    return health_data
+        return
+
+    summary = _node_health_summary(cluster_status)
+    health_data['nodes'] = summary
+
+    failed_by_node = {
+        hostname: _failed_services(
+            cluster_status.get('hostHealth', {}).get(hostname, {}).get('services', {}))
+        for hostname in summary['unhealthy_names'] + summary['unreachable_names']
+    }
+    failed_by_node = {h: services for h, services in failed_by_node.items() if services}
+    if failed_by_node:
+        health_data['unhealthy_services_by_node'] = failed_by_node
+
+    unreachable_details = _unreachable_details(
+        cluster_status, summary['unreachable_names'])
+    if unreachable_details:
+        health_data['unreachable_details_by_node'] = unreachable_details
+
+    health_data['local_services'] = cluster_status.get('hostHealth', {}).get(
+        socket.gethostname(), {}).get('services', {})
+    health_data['leadership'] = cluster_status.get('leadership', {})
+    health_data['vip_status'] = cluster_status.get('vipStatus', {})
+    cert_status = cluster_status.get('certificateStatus', {})
+    if cert_status:
+        health_data['certificate'] = {
+            'status': cert_status.get('status'),
+            'days_until_expiry': cert_status.get('details', {}).get('days_until_expiry')
+        }
 
 def determine_health_status(health_data):
     """Determine overall health status and exit code"""
@@ -193,81 +195,94 @@ def determine_health_status(health_data):
     else:
         return 0, 'healthy'
 
-def format_health_message(health_data, status):
-    """Format health data into a human-readable message"""
+def _node_message_lines(health_data):
+    """Render cluster node health and per-node diagnostics."""
     lines = []
-    lines.append(f"Cluster Status: {status.upper()}")
-    lines.append(f"Time: {health_data['timestamp']}")
-    lines.append(f"Reporting Node: {health_data['hostname']}")
-    
-    # Node status
     nodes = health_data.get('nodes', {})
-    if nodes:
-        lines.append(f"Nodes: {nodes.get('healthy', 0)}/{nodes.get('total', 0)} healthy")
-        if nodes.get('unhealthy_names'):
-            lines.append(f"  Unhealthy: {', '.join(nodes['unhealthy_names'])}")
-        if nodes.get('unreachable_names'):
-            details = health_data.get('unreachable_details_by_node', {})
-            rendered = [
-                f"{h}({details[h]})" if h in details else h
-                for h in nodes['unreachable_names']
-            ]
-            lines.append(f"  Unreachable: {', '.join(rendered)}")
-    
-    # Unhealthy services by node
-    unhealthy_by_node = health_data.get('unhealthy_services_by_node', {})
-    if unhealthy_by_node:
-        for hostname, services in unhealthy_by_node.items():
-            lines.append(f"  {hostname}: {', '.join(services)}")
-    
-    # Leadership
+    if not nodes:
+        return lines
+
+    lines.append(f"Nodes: {nodes.get('healthy', 0)}/{nodes.get('total', 0)} healthy")
+    if nodes.get('unhealthy_names'):
+        lines.append(f"  Unhealthy: {', '.join(nodes['unhealthy_names'])}")
+    if nodes.get('unreachable_names'):
+        details = health_data.get('unreachable_details_by_node', {})
+        rendered = [
+            f"{h}({details[h]})" if h in details else h
+            for h in nodes['unreachable_names']
+        ]
+        lines.append(f"  Unreachable: {', '.join(rendered)}")
+    return lines
+
+
+def _status_message_lines(health_data):
+    """Render leadership, VIPs, and certificate age."""
+    lines = []
     leadership = health_data.get('leadership', {})
     if leadership:
-        lines.append(f"Leadership: Storage: {leadership.get('storage_leader', 'none')} DHCP: {leadership.get('dhcp_leader', 'none')}")
+        lines.append(
+            f"Leadership: Storage: {leadership.get('storage_leader', 'none')} "
+            f"DHCP: {leadership.get('dhcp_leader', 'none')}")
 
-    # VIP status
     vip_status = health_data.get('vip_status', {})
     if vip_status:
         gateway_vip = vip_status.get('gateway_vip', {})
         storage_vip = vip_status.get('storage_vip', {})
         lines.append(
-            f"VIPs: Gateway: {gateway_vip.get('master_hostname')}  Storage: {storage_vip.get('master_hostname')}")
+            f"VIPs: Gateway: {gateway_vip.get('master_hostname')}  "
+            f"Storage: {storage_vip.get('master_hostname')}")
 
-    # Certificate
     cert = health_data.get('certificate', {})
     if cert and cert.get('days_until_expiry') is not None:
         lines.append(f"Certificate expires in {cert['days_until_expiry']} days")
-    
-    # Critical service issues
-    services = health_data.get('services', {})
-    unhealthy_services = []
-    for service, details in services.items():
-        if isinstance(details, dict) and details.get('status') in ['unhealthy', 'error']:
-            unhealthy_services.append(service)
-    
+    return lines
+
+
+def _service_message_lines(health_data):
+    """Render unhealthy and degraded service names."""
+    lines = []
+    unhealthy_services = [
+        service
+        for service, details in health_data.get('services', {}).items()
+        if isinstance(details, dict)
+        and details.get('status') in ['unhealthy', 'error']
+    ]
     if unhealthy_services:
         lines.append(f"Unhealthy Services: {', '.join(unhealthy_services)}")
-    
-    # Local service details
-    local_services = health_data.get('local_services', {})
-    if local_services:
-        failed_services = []
-        for service, details in local_services.items():
-            if isinstance(details, dict):
-                svc_status = details.get('status', '')
-                if svc_status in ['unhealthy', 'error']:
-                    failed_services.append(f"{service}({svc_status})")
-                elif svc_status == 'degraded':
-                    failed_services.append(f"{service}(degraded)")
-        if failed_services:
-            lines.append(f"  Failed: {', '.join(failed_services)}")
-    
-    # Errors
+
+    failed_services = []
+    for service, details in health_data.get('local_services', {}).items():
+        if not isinstance(details, dict):
+            continue
+        svc_status = details.get('status', '')
+        if svc_status in ['unhealthy', 'error', 'degraded']:
+            failed_services.append(f"{service}({svc_status})")
+    if failed_services:
+        lines.append(f"  Failed: {', '.join(failed_services)}")
+    return lines
+
+
+def format_health_message(health_data, status):
+    """Format health data into a human-readable message"""
+    lines = [
+        f"Cluster Status: {status.upper()}",
+        f"Time: {health_data['timestamp']}",
+        f"Reporting Node: {health_data['hostname']}",
+    ]
+    lines.extend(_node_message_lines(health_data))
+
+    for hostname, services in health_data.get(
+            'unhealthy_services_by_node', {}).items():
+        lines.append(f"  {hostname}: {', '.join(services)}")
+
+    lines.extend(_status_message_lines(health_data))
+    lines.extend(_service_message_lines(health_data))
+
     if 'error' in health_data:
         lines.append(f"\nError: {health_data['error']}")
     if 'cluster_error' in health_data:
         lines.append(f"\nCluster Error: {health_data['cluster_error']}")
-    
+
     return '\n'.join(lines)
 
 def send_heartbeat():

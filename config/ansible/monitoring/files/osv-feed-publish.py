@@ -56,14 +56,12 @@ def atomic_copy(src: str, dst_dir: str) -> None:
 
 
 def main() -> int:
-    published = 0
     for name in FILES:
         src = os.path.join(SRC, name)
         if not os.path.isfile(src):
             print(f"osv-feed-publish: skip {name}: not present", file=sys.stderr)
             continue
         atomic_copy(src, DEST)
-        published += 1
         print(f"osv-feed-publish: published {name} -> {DEST}", file=sys.stderr)
     return 0
 

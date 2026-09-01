@@ -1,0 +1,10 @@
+{
+  "cyclomatic": 22,
+  "cognitive": 22,
+  "halstead": 80,
+  "lines": 500,
+  "crap": 25,
+  "coverage": 95,
+  "dead_code": 0,
+  "any_types": 0
+}

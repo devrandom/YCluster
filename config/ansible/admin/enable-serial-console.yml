@@ -11,6 +11,7 @@
     - name: Enable serial-getty@ttyS4.service
       systemd:
         name: serial-getty@ttyS4.service
+        masked: no
         enabled: yes
         state: started
       when: ttys4_dev.stat.exists

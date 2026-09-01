@@ -1,0 +1,123 @@
+"""Tests for wg CLI peer listing helpers."""
+
+import io
+import unittest
+from contextlib import redirect_stdout
+from unittest import mock
+
+from ycluster.cli import wg
+from ycluster.utils import wg_config
+
+
+def peer(hostname, status, ip='ip-a'):
+    node = {'ip': ip, 'type': 'vm'}
+    return (hostname, {'status': status}, node)
+
+
+class FilterPeersTests(unittest.TestCase):
+    def setUp(self):
+        self.peers = [peer('a', 'approved'), peer('b', 'pending'),
+                      peer('c', 'approved')]
+
+    def test_no_filter(self):
+        args = mock.Mock(pending=False, approved=False)
+        self.assertEqual(len(wg._filter_peers(self.peers, args)), 3)
+
+    def test_pending(self):
+        args = mock.Mock(pending=True, approved=False)
+        result = wg._filter_peers(self.peers, args)
+        self.assertEqual([h for h, _, _ in result], ['b'])
+
+    def test_approved(self):
+        args = mock.Mock(pending=False, approved=True)
+        result = wg._filter_peers(self.peers, args)
+        self.assertEqual([h for h, _, _ in result], ['a', 'c'])
+
+
+class PeerJsonTests(unittest.TestCase):
+    def test_with_node(self):
+        p = peer('vm1', 'approved')
+        out = wg._peer_json(*p)
+        self.assertEqual(out['hostname'], 'vm1')
+        self.assertEqual(out['ip'], 'ip-a')
+
+    def test_without_node(self):
+        out = wg._peer_json('vm1', {'status': 'pending'}, None)
+        self.assertIsNone(out['ip'])
+        self.assertIsNone(out['type'])
+
+
+class PrintPeersTableTests(unittest.TestCase):
+    def test_output(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            wg._print_peers_table([peer('vm1', 'approved')])
+        self.assertIn('vm1', out.getvalue())
+        self.assertIn('approved', out.getvalue())
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class ReconcileHelpersTests(unittest.TestCase):
+    def test_reconcile_down_dry_run(self):
+        out = io.StringIO()
+        with mock.patch('ycluster.utils.wg_config.DRY_RUN', True), \
+                mock.patch('ycluster.utils.wg_config._wg_interface_exists', return_value=True), \
+                mock.patch('ycluster.utils.wg_config._log_dry') as log_dry, \
+                redirect_stdout(out):
+            wg_config._reconcile_down()
+        log_dry.assert_called_once_with('wg-quick down wg0')
+        self.assertEqual(out.getvalue(), '')
+
+    def test_sync_missing_interface_dry_run(self):
+        out = io.StringIO()
+        with mock.patch('ycluster.utils.wg_config.DRY_RUN', True), \
+                mock.patch('ycluster.utils.wg_config._wg_interface_exists', return_value=False), \
+                mock.patch('ycluster.utils.wg_config._log_dry') as log_dry, \
+                redirect_stdout(out):
+            wg_config._sync_existing_interface(up=True)
+        log_dry.assert_called_once_with('wg-quick up wg0')
+        self.assertEqual(out.getvalue(), '')
+
+    def test_sync_existing_interface_dry_run(self):
+        out = io.StringIO()
+        with mock.patch('ycluster.utils.wg_config.DRY_RUN', True), \
+                mock.patch('ycluster.utils.wg_config._wg_interface_exists', return_value=True), \
+                mock.patch('ycluster.utils.wg_config._log_dry') as log_dry, \
+                redirect_stdout(out):
+            wg_config._sync_existing_interface(up=False)
+        log_dry.assert_called_once_with('wg syncconf wg0 (from rendered server config)')
+        self.assertEqual(out.getvalue(), '')
+
+
+class InitServerTests(unittest.TestCase):
+    def test_preserves_existing_key_and_port(self):
+        existing = {'privkey': 'old-private', 'pubkey': 'old-public', 'port': 60000}
+        with mock.patch.object(wg_config, '_gen_keypair') as gen:
+            got = wg_config._updated_server(existing, ['host'], None, False)
+        gen.assert_not_called()
+        self.assertEqual(got['port'], 60000)
+        self.assertEqual(got['endpoints'], ['host:51820'])
+
+    def test_rotate_generates_keypair(self):
+        with mock.patch.object(wg_config, '_gen_keypair', return_value=('new-private', 'new-public')):
+            got = wg_config._updated_server({}, ['host'], 60001, True)
+        self.assertEqual(got['privkey'], 'new-private')
+        self.assertEqual(got['pubkey'], 'new-public')
+        self.assertEqual(got['port'], 60001)
+
+
+class WgPublicKeyTests(unittest.TestCase):
+    def test_missing_file_no_pubkey(self):
+        with mock.patch.object(wg_config.os.path, 'exists', return_value=False):
+            self.assertIsNone(wg_config._local_wg_pubkey())
+
+    def test_private_key_converted(self):
+        result = mock.Mock(stdout='pub\n')
+        with mock.patch.object(wg_config.os.path, 'exists', return_value=True), \
+                mock.patch.object(wg_config, '_conf_private_key', return_value='priv'), \
+                mock.patch.object(wg_config, '_run', return_value=result) as run:
+            self.assertEqual(wg_config._local_wg_pubkey(), 'pub')
+        run.assert_called_once_with(['wg', 'pubkey'], input='priv')

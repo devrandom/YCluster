@@ -12,8 +12,10 @@ Peer IP is NOT stored here — it comes from the node allocation at
 
 import hashlib
 import json
+import os
+import os
 import subprocess
-import sys
+import tempfile
 from datetime import datetime, UTC
 
 from ycluster.common.etcd_utils import get_etcd_client
@@ -83,22 +85,22 @@ def get_server():
 
 def init_server(endpoints, port=None, rotate=False):
     """Create or update the server record. Endpoints is a list of 'host[:port]'."""
-    normalized = [_parse_endpoint(e) for e in endpoints]
     client = get_etcd_client()
-    existing = get_server() or {}
-
-    if rotate or 'privkey' not in existing:
-        priv, pub = _gen_keypair()
-        existing['privkey'] = priv
-        existing['pubkey'] = pub
-
-    existing['port'] = port or existing.get('port') or DEFAULT_PORT
-    existing['endpoints'] = normalized
-    existing['server_ip'] = SERVER_IP
+    existing = _updated_server(get_server() or {}, endpoints, port, rotate)
     if DRY_RUN:
         _log_dry(f"etcd put {SERVER_KEY}")
     else:
         client.put(SERVER_KEY, json.dumps(existing))
+    return existing
+
+
+def _updated_server(existing, endpoints, port, rotate):
+    """Return the server record after applying init/rotation fields."""
+    if rotate or 'privkey' not in existing:
+        existing['privkey'], existing['pubkey'] = _gen_keypair()
+    existing['port'] = port or existing.get('port') or DEFAULT_PORT
+    existing['endpoints'] = [_parse_endpoint(e) for e in endpoints]
+    existing['server_ip'] = SERVER_IP
     return existing
 
 
@@ -276,11 +278,8 @@ def _wg_interface_exists():
     return r.returncode == 0
 
 
-def _local_wg_pubkey():
-    """Return the pubkey derived from the existing wg0.conf, or None."""
-    import os
-    if not os.path.exists(WG_CONF_PATH):
-        return None
+def _conf_private_key():
+    """Extract PrivateKey from wg0.conf, or None if absent."""
     try:
         with open(WG_CONF_PATH) as f:
             for line in f:
@@ -288,10 +287,23 @@ def _local_wg_pubkey():
                     _, _, priv = line.partition('=')
                     priv = priv.strip()
                     if priv:
-                        return _run(['wg', 'pubkey'], input=priv).stdout.strip()
+                        return priv
     except Exception:
         return None
     return None
+
+
+def _local_wg_pubkey():
+    """Return the pubkey derived from the existing wg0.conf, or None."""
+    if not os.path.exists(WG_CONF_PATH):
+        return None
+    priv = _conf_private_key()
+    if not priv:
+        return None
+    try:
+        return _run(['wg', 'pubkey'], input=priv).stdout.strip()
+    except Exception:
+        return None
 
 
 def _assert_local_is_server(server):
@@ -311,43 +323,26 @@ def _assert_local_is_server(server):
         )
 
 
-def reconcile(up=False, down=False):
-    """Apply server config to the live wg0 interface.
+def _reconcile_down():
+    if _wg_interface_exists():
+        if DRY_RUN:
+            _log_dry(f"wg-quick down {WG_INTERFACE}")
+        else:
+            _run(['wg-quick', 'down', WG_INTERFACE])
+            print("wg0 down")
 
-    up:   wg-quick up if not running, then syncconf
-    down: wg-quick down if running
-    neither: syncconf only if interface exists (silent no-op otherwise)
-    """
-    import shutil
-    if not shutil.which('wg-quick'):
-        # Called from an admin host that isn't itself a wg server — harmless.
-        print("wg-quick not installed on this host; skipping reconcile")
-        return
 
-    server = get_server()
-    if not server:
-        raise RuntimeError("wg server not initialized — run 'ycluster wg init <endpoint>'")
-    _assert_local_is_server(server)
-
-    if down:
-        if _wg_interface_exists():
-            if DRY_RUN:
-                _log_dry(f"wg-quick down {WG_INTERFACE}")
-            else:
-                _run(['wg-quick', 'down', WG_INTERFACE])
-                print("wg0 down")
-        return
-
-    config = render_server_config()
-    import os, tempfile
+def _write_server_config(config):
     if DRY_RUN:
         _log_dry(f"write {WG_CONF_PATH} ({len(config)} bytes)")
-    else:
-        os.makedirs('/etc/wireguard', mode=0o700, exist_ok=True)
-        with open(WG_CONF_PATH, 'w') as f:
-            f.write(config)
-        os.chmod(WG_CONF_PATH, 0o600)
+        return
+    os.makedirs('/etc/wireguard', mode=0o700, exist_ok=True)
+    with open(WG_CONF_PATH, 'w') as f:
+        f.write(config)
+    os.chmod(WG_CONF_PATH, 0o600)
 
+
+def _sync_existing_interface(up):
     exists = _wg_interface_exists()
     if not exists:
         if up:
@@ -371,3 +366,30 @@ def reconcile(up=False, down=False):
         print("wg0 syncconf applied")
     finally:
         os.unlink(tmp_path)
+
+
+def reconcile(up=False, down=False):
+    """Apply server config to the live wg0 interface.
+
+    up:   wg-quick up if not running, then syncconf
+    down: wg-quick down if running
+    neither: syncconf only if interface exists (silent no-op otherwise)
+    """
+    import shutil
+    if not shutil.which('wg-quick'):
+        # Called from an admin host that isn't itself a wg server — harmless.
+        print("wg-quick not installed on this host; skipping reconcile")
+        return
+
+    server = get_server()
+    if not server:
+        raise RuntimeError("wg server not initialized — run 'ycluster wg init <endpoint>'")
+    _assert_local_is_server(server)
+
+    if down:
+        _reconcile_down()
+        return
+
+    config = render_server_config()
+    _write_server_config(config)
+    _sync_existing_interface(up)
