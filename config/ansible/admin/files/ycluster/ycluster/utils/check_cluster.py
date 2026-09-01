@@ -277,15 +277,15 @@ def _make_marker(enabled: bool):
         timings.append((label, (now - last[0]) * 1000.0))
         last[0] = now
 
-    mark._total_ms = lambda: (time.monotonic() - t0[0]) * 1000.0  # type: ignore[attr-defined]
-    mark._timings = timings  # type: ignore[attr-defined]
+    mark._total_ms = lambda: (time.monotonic() - t0[0]) * 1000.0  # ty: ignore[unresolved-attribute]
+    mark._timings = timings  # ty: ignore[unresolved-attribute]
     return mark
 
 
 def _print_profile(mark) -> None:
     """Print collected phase timings to stderr."""
-    timings = mark._timings  # type: ignore[attr-defined]
-    total = mark._total_ms()  # type: ignore[attr-defined]
+    timings = mark._timings
+    total = mark._total_ms()
     print('\n[profile] phase timings (ms):', file=sys.stderr)
     for label, ms in timings:
         print(f'  {label:<28} {ms:>8.1f}', file=sys.stderr)

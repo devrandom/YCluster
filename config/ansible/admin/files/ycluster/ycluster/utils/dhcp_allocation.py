@@ -35,6 +35,14 @@ logger = logging.getLogger(__name__)
 
 
 class DHCPAllocationMixin:
+    # Provided by the composing server class.
+    leases: dict[str, dict]
+    allocated_ips: set[str]
+
+    def get_etcd_client(self):
+        """Return an etcd client; implemented by the composing class."""
+        raise NotImplementedError
+
     def get_server_ip(self):
         """Get the IP address of the DHCP server from netplan primary interface"""
         try:

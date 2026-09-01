@@ -11,6 +11,18 @@ logger = logging.getLogger(__name__)
 
 
 class DHCPLeaseStore:
+    # Provided by the composing server class.
+    leases: dict[str, dict]
+    allocated_ips: set[str]
+
+    def get_etcd_client(self):
+        """Return an etcd client; implemented by the composing class."""
+        raise NotImplementedError
+
+    def allocate_hostname_and_ip(self, mac_address, requested_hostname=None):
+        """Allocate a lease; implemented by the allocation mixin."""
+        raise NotImplementedError
+
     def migrate_leases_to_normalized_mac(self):
         """Migrate existing leases to use normalized MAC addresses as keys"""
         client = self.get_etcd_client()

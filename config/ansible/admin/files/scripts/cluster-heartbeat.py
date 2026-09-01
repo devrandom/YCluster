@@ -32,27 +32,35 @@ def get_healthchecks_url():
 
 def _node_health_summary(cluster_status):
     """Count node states and collect names needing attention."""
-    summary = {
-        'healthy': 0, 'unhealthy': 0, 'unreachable': 0,
-        'unhealthy_names': [], 'unreachable_names': [],
-    }
+    healthy = 0
+    unhealthy = 0
+    unreachable = 0
+    unhealthy_names = []
+    unreachable_names = []
+
     for hostname, node_health in cluster_status.get('hostHealth', {}).items():
         status = node_health.get('overall') or node_health.get('status', '')
         if status == 'disabled':
             continue
         if status == 'healthy':
-            summary['healthy'] += 1
+            healthy += 1
         elif status in ['timeout', 'unreachable']:
-            summary['unreachable'] += 1
-            summary['unreachable_names'].append(hostname)
+            unreachable += 1
+            unreachable_names.append(hostname)
         elif _clock_skew_only(hostname, node_health):
-            summary['healthy'] += 1
+            healthy += 1
         else:
-            summary['unhealthy'] += 1
-            summary['unhealthy_names'].append(hostname)
-    summary['total'] = (summary['healthy'] + summary['unhealthy'] +
-                        summary['unreachable'])
-    return summary
+            unhealthy += 1
+            unhealthy_names.append(hostname)
+
+    return {
+        'healthy': healthy,
+        'unhealthy': unhealthy,
+        'unreachable': unreachable,
+        'unhealthy_names': unhealthy_names,
+        'unreachable_names': unreachable_names,
+        'total': healthy + unhealthy + unreachable,
+    }
 
 
 def _clock_skew_only(hostname, node_health):

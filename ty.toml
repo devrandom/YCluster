@@ -15,6 +15,8 @@ exclude = [
     "**/node_modules",
     "**/.venv",
     "**/venv",
+    # Vendored upstream patch sources, not maintained as first-party code.
+    "config/ansible/admin/files/glm53-sglang/patches/**",
 ]
 
 # Python deps come from apt, not pip (see AGENTS.md "Python Package
@@ -31,7 +33,18 @@ unresolved-import = "ignore"
 # the whole point of the FakeEtcd DAL seam. Type checkers can't infer
 # that the test's lambda matches the production signature (they're
 # stubs returning Unknown), so every monkey-patch line flags
-# invalid-assignment. Suppress for the tests/ directories only.
+# invalid-assignment. Dynamic test scaffolding also patches attributes
+# onto ModuleType placeholders and indexes fake-client records that are
+# deliberately Optional. Suppress those noisy categories for tests only.
 [[overrides]]
-include = ["config/ansible/admin/files/tests/**", "config/ansible/admin/files/ycluster/tests/**"]
-rules = { invalid-assignment = "ignore" }
+include = [
+    "config/ansible/admin/files/tests/**",
+    "config/ansible/admin/files/ycluster/tests/**",
+    "mcp/cluster-exec/tests/**",
+]
+rules = {
+    invalid-assignment = "ignore",
+    unresolved-attribute = "ignore",
+    invalid-argument-type = "ignore",
+    not-subscriptable = "ignore",
+}

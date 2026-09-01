@@ -83,9 +83,9 @@ def generate_ca():
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.datetime.utcnow()
+        datetime.datetime.now(datetime.timezone.utc)
     ).not_valid_after(
-        datetime.datetime.utcnow() + datetime.timedelta(days=3650)  # 10 years
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650)  # 10 years
     ).add_extension(
         x509.BasicConstraints(ca=True, path_length=None),
         critical=True,
@@ -146,7 +146,7 @@ def _existing_cert_valid(cert_file, ca_cert):
         return False
     if cert.issuer != ca_cert.subject:
         return False
-    return cert.not_valid_after - datetime.datetime.utcnow() > REISSUE_THRESHOLD
+    return cert.not_valid_after - datetime.datetime.now(datetime.timezone.utc) > REISSUE_THRESHOLD
 
 def generate_server_cert(hostname, san_list=None):
     """Generate a server certificate signed by the CA"""
@@ -182,7 +182,7 @@ def generate_server_cert(hostname, san_list=None):
     ])
     
     # Build SAN list
-    san_names = []
+    san_names: list[x509.GeneralName] = []
     for san in san_list:
         try:
             # Try to parse as IP address
@@ -191,7 +191,7 @@ def generate_server_cert(hostname, san_list=None):
         except ValueError:
             # It's a DNS name
             san_names.append(x509.DNSName(san))
-    
+
     server_cert = x509.CertificateBuilder().subject_name(
         subject
     ).issuer_name(
@@ -201,9 +201,9 @@ def generate_server_cert(hostname, san_list=None):
     ).serial_number(
         x509.random_serial_number()
     ).not_valid_before(
-        datetime.datetime.utcnow()
+        datetime.datetime.now(datetime.timezone.utc)
     ).not_valid_after(
-        datetime.datetime.utcnow() + datetime.timedelta(days=365)
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365)
     ).add_extension(
         x509.SubjectAlternativeName(san_names),
         critical=False,

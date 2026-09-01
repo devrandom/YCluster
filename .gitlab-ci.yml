@@ -33,15 +33,12 @@ python-lint:
   variables:
     YAMLLINT_RULES: "{extends: relaxed, rules: {line-length: disable, indentation: disable, comments-indentation: disable, comments: disable, truthy: disable, braces: disable, octal-values: disable, empty-lines: disable, empty-values: disable, quoted-strings: disable, trailing-spaces: disable}}"
   script:
-    - python -m pip install yamllint ty
+    - python -m pip install yamllint 'ty==0.0.77'
     # Match the relaxed yamllint rules in just.d/lint.just. Some root files
     # are deployment-specific and may be absent in a fresh CI checkout.
     - yamllint -d "$YAMLLINT_RULES" config/ansible
     - for file in config.yml docker-compose.yaml opencode.json pyrightconfig.json; do if [ -f "$file" ]; then yamllint -d "$YAMLLINT_RULES" "$file"; fi; done
     - ty check
-  # The current repository baseline fails `ty check`. Keep the findings
-  # visible while repairing that baseline, then remove this marker.
-  allow_failure: true
 
 go-lint:
   stage: lint
