@@ -64,7 +64,7 @@ def determine_ip_from_hostname(hostname, via_wg=False):
     parsed = _parse_host_location(hostname) if hostname else None
     if parsed is None:
         return None
-    return _host_ip(*parsed, via_wg)
+    return _host_ip(*parsed, via_wg=via_wg)
 
 def determine_type_from_mac(mac_address):
     """Determine machine type based on MAC address prefix.

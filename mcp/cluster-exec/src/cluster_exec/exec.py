@@ -553,10 +553,10 @@ async def put_file(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    cat_out: asyncio.StreamReader = cat_proc.stdout  # type: ignore[assignment]
-    ssh_in: asyncio.StreamWriter = ssh_proc.stdin  # type: ignore[assignment]
-    cat_err: asyncio.StreamReader = cat_proc.stderr  # type: ignore[assignment]
-    ssh_err: asyncio.StreamReader = ssh_proc.stderr  # type: ignore[assignment]
+    cat_out = cat_proc.stdout
+    ssh_in = ssh_proc.stdin
+    cat_err = cat_proc.stderr
+    ssh_err = ssh_proc.stderr
     assert cat_out is not None and ssh_in is not None and cat_err is not None and ssh_err is not None
 
     started = time.monotonic()
@@ -745,8 +745,8 @@ async def get_file(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    ssh_out: asyncio.StreamReader = ssh_proc.stdout  # type: ignore[assignment]
-    ssh_err: asyncio.StreamReader = ssh_proc.stderr  # type: ignore[assignment]
+    ssh_out = ssh_proc.stdout
+    ssh_err = ssh_proc.stderr
     assert ssh_out is not None and ssh_err is not None
 
     started = time.monotonic()

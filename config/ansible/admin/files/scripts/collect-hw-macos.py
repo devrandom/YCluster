@@ -27,7 +27,7 @@ sysctl = dict(
 )
 
 facts = {
-    'collected_at': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S+00:00'),
+    'collected_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S+00:00'),
     'os': 'macOS ' + run(['sw_vers', '-productVersion']),
     'kernel': run(['uname', '-r']),
     'cpu': None, 'ram_gb': None,

@@ -41,7 +41,7 @@ import json
 import re
 import secrets
 import sys
-from typing import TypedDict
+from typing import Callable, cast
 
 from flask import Flask, request, jsonify, redirect, render_template, send_from_directory
 import os
@@ -58,8 +58,10 @@ from jinja2 import Template
 
 from app_gpu_blocks import (gpu_block_record, invalid_windows,
                             resolve_gpu_block, validate_gpu_block)
+import app_autoinstall
 import app_inventory
 import app_schedule
+import app_wg
 from app_schedule import schedule_gpu_count, validate_schedule_mode
 from app_allocation import (determine_ip_from_hostname, determine_type_from_mac,
                             get_next_hostname, get_or_create_allocation)
@@ -1904,7 +1906,7 @@ def get_leadership_status():
 # Prometheus itself, so this endpoint can answer target queries dynamically
 # on every scrape interval — disabling a host via `ycluster cluster disable`
 # immediately removes it from the target list without re-running ansible.
-PROMETHEUS_JOB_SPECS = {
+PROMETHEUS_JOB_SPECS: dict[str, dict[str, int | Callable[[dict], bool]]] = {
     'node-exporter': {
         'port': 9100,
         'predicate': lambda h: h['type'] in ('storage', 'nvidia', 'compute', 'nas', 'macos'),
@@ -1935,10 +1937,12 @@ def prometheus_targets(job):
     for host in get_all_hosts():
         if host.get('disabled'):
             continue
-        if not spec['predicate'](host):
+        predicate = cast(Callable[[dict], bool], spec['predicate'])
+        port = cast(int, spec['port'])
+        if not predicate(host):
             continue
         targets.append({
-            'targets': [f"{host['ip']}:{spec['port']}"],
+            'targets': [f"{host['ip']}:{port}"],
             'labels': {
                 'node': host['hostname'],
                 'node_type': host['type'],

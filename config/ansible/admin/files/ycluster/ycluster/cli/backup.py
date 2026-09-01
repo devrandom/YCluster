@@ -143,10 +143,10 @@ def backup_recipients_add(args):
             sys.exit(1)
         
         # Create recipient data
-        from datetime import datetime
+        from datetime import datetime, timezone
         recipient_data = {
             'public_key': args.public_key,
-            'created_at': datetime.utcnow().isoformat() + 'Z'
+            'created_at': datetime.now(timezone.utc).isoformat() + 'Z'
         }
         
         if args.description:
@@ -287,11 +287,11 @@ def backup_destinations_add(args):
             enabled = args.enabled
         
         # Create destination data
-        from datetime import datetime
+        from datetime import datetime, timezone
         destination_data = {
             'url': args.url,
             'enabled': enabled,
-            'created_at': datetime.utcnow().isoformat() + 'Z'
+            'created_at': datetime.now(timezone.utc).isoformat() + 'Z'
         }
         
         # Store in etcd
