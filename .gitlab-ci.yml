@@ -1,0 +1,88 @@
+stages:
+  - lint
+  - test
+
+.default_rules:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.python_job:
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  cache:
+    key:
+      files:
+        - pyproject.toml
+    paths:
+      - .cache/pip/
+
+.python:
+  before_script:
+    - python -m pip install -r config/ansible/admin/files/ycluster/requirements.txt argon2-cffi
+    - python -m pip install -e config/ansible/admin/files/ycluster/
+
+python-lint:
+  stage: lint
+  image: python:3.13-slim
+  extends:
+    - .default_rules
+    - .python_job
+  variables:
+    YAMLLINT_RULES: "{extends: relaxed, rules: {line-length: disable, indentation: disable, comments-indentation: disable, comments: disable, truthy: disable, braces: disable, octal-values: disable, empty-lines: disable, empty-values: disable, quoted-strings: disable, trailing-spaces: disable}}"
+  script:
+    - python -m pip install yamllint ty
+    # Match the relaxed yamllint rules in just.d/lint.just. Some root files
+    # are deployment-specific and may be absent in a fresh CI checkout.
+    - yamllint -d "$YAMLLINT_RULES" config/ansible
+    - for file in config.yml docker-compose.yaml opencode.json pyrightconfig.json; do if [ -f "$file" ]; then yamllint -d "$YAMLLINT_RULES" "$file"; fi; done
+    - ty check
+  # The current repository baseline fails `ty check`. Keep the findings
+  # visible while repairing that baseline, then remove this marker.
+  allow_failure: true
+
+go-lint:
+  stage: lint
+  image: golang:1.25
+  extends: .default_rules
+  variables:
+    GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+    GOPATH: "$CI_PROJECT_DIR/.cache/go-path"
+  cache:
+    key:
+      files:
+        - local-ai-proxy/go.sum
+    paths:
+      - .cache/go-build/
+      - .cache/go-path/
+  script:
+    - make -C local-ai-proxy vet
+
+python-tests:
+  stage: test
+  image: python:3.13
+  extends:
+    - .default_rules
+    - .python_job
+    - .python
+  script:
+    - ./run-tests.sh
+
+go-tests:
+  stage: test
+  image: golang:1.25
+  extends: .default_rules
+  variables:
+    GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+    GOPATH: "$CI_PROJECT_DIR/.cache/go-path"
+  cache:
+    key:
+      files:
+        - local-ai-proxy/go.sum
+    paths:
+      - .cache/go-build/
+      - .cache/go-path/
+  script:
+    - make -C local-ai-proxy test
