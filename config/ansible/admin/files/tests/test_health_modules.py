@@ -313,6 +313,18 @@ class HealthApiRoutesTests(unittest.TestCase):
                                side_effect=RuntimeError('down')):
             response = self.client.get('/metrics')
         self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.headers.get('Content-Type'),
+            'text/plain; version=0.0.4; charset=utf-8')
+        self.assertIn('ycluster_metrics_error', response.get_data(as_text=True))
+
+    def test_production_server_uses_waitress(self):
+        waitress = mock.Mock()
+        with mock.patch.dict(sys.modules, {'waitress': waitress}):
+            self.ha.serve_production()
+        waitress.serve.assert_called_once_with(
+            self.ha.app, host='0.0.0.0', port=self.ha.HEALTH_API_PORT,
+            threads=8)
 
 
 class HealthChecksExtraTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 """Tests for collect-model-stats log aggregation."""
 
 import unittest
+from unittest import mock
 
 import importlib.util
 import os
@@ -81,6 +82,23 @@ class AggregateLogsTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
 class RequestLogDecodeTests(unittest.TestCase):
+    def test_fetch_journal_logs_collects_request_logs(self):
+        class FakeProcess:
+            stdout = [
+                b'{"MESSAGE": "{\\"msg\\": \\"request\\", \\"model\\": \\"m\\"}"}\n',
+                b'{"MESSAGE": "{\\"msg\\": \\"other\\"}"}\n',
+                b'not json\n',
+            ]
+
+            def wait(self):
+                return 0
+
+        with mock.patch.object(_stats.subprocess, 'Popen',
+                               return_value=FakeProcess()):
+            self.assertEqual(
+                _stats.fetch_journal_logs(1000.0),
+                [{'msg': 'request', 'model': 'm'}])
+
     def test_decodes_nested_request(self):
         raw = b'{"MESSAGE": "{\\"msg\\": \\"request\\", \\"model\\": \\"m\\"}"}\n'
         self.assertEqual(_stats._request_log_from_json(raw), {'msg': 'request', 'model': 'm'})

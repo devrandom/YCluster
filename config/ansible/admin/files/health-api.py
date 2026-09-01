@@ -10,6 +10,8 @@ from flask import Flask, jsonify
 from health_common import _HOSTNAME, check_vip_status, init_request_cache
 from health_report import get_comprehensive_health, service_metric_value
 
+HEALTH_API_PORT = 12724
+
 app = Flask(__name__)
 app.before_request(init_request_cache)
 
@@ -57,8 +59,21 @@ def prometheus_metrics():
             "Content-Type": "text/plain; version=0.0.4; charset=utf-8"
         }
     except Exception as e:
-        return f"error collecting health metrics: {e}", 500
+        error = f'ycluster_metrics_error{{node="{_HOSTNAME}"}} 1\n'
+        return error, 500, {
+            "Content-Type": "text/plain; version=0.0.4; charset=utf-8"
+        }
+
+
+def serve_production():
+    """Run waitress: production WSGI with a bounded thread pool.
+
+    This service is scraped cross-node by cluster-heartbeat, so don't use
+    Flask's development server here.
+    """
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=HEALTH_API_PORT, threads=8)
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=12724)
+    serve_production()

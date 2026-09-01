@@ -119,6 +119,15 @@ class ClusterHealthTests(unittest.TestCase):
         self.assertNotIn('cluster_error', health)
         self.assertEqual(health['nodes'], {})
 
+    def test_cluster_status_bad_json_is_recorded(self):
+        response = self.response({}, status=200)
+        response.json = mock.Mock(side_effect=ValueError('bad json'))
+        with mock.patch.object(cluster_heartbeat.requests, 'get',
+                               return_value=response):
+            health = cluster_heartbeat.get_cluster_health()
+        self.assertIn('Failed to get cluster status', health['cluster_error'])
+        self.assertEqual(health['nodes'], {})
+
     def test_healthchecks_url_success_and_failure(self):
         client = mock.Mock()
         client.get.return_value = [b'https://checks']

@@ -78,6 +78,7 @@ func (h *Handler) requestACL(w http.ResponseWriter, r *http.Request, model strin
 		h.logger.Info("acl denied",
 			"model", model, "user", user, "groups", groups,
 			"method", r.Method, "path", r.URL.Path)
+		writeOpenAIError(w, http.StatusForbidden, "permission_denied", err.Error())
 		return false
 	}
 	return true

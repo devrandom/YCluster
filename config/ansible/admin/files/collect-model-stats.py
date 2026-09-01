@@ -67,6 +67,7 @@ def fetch_journal_logs(since_ts: float):
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert proc.stdout is not None
+    entries = []
     for line in proc.stdout:
         log = _request_log_from_json(line)
         if log:

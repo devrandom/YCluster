@@ -132,13 +132,12 @@ def _add_cluster_status(health_data):
     try:
         response = requests.get('http://localhost:12723/api/cluster-status',
                                 timeout=30)
+        if response.status_code != 200:
+            return
+        cluster_status = response.json()
     except Exception as e:
         health_data['cluster_error'] = f"Failed to get cluster status: {str(e)}"
         return
-
-    if response.status_code != 200:
-        return
-    cluster_status = response.json()
 
     summary = _node_health_summary(cluster_status)
     health_data['nodes'] = summary
