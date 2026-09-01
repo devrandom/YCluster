@@ -38,9 +38,20 @@
 
     - name: Copy etcd-based allocation API
       copy:
-        src: "files/app.py"
-        dest: "{{ admin_services_dir }}/app.py"
+        src: "files/{{ item }}"
+        dest: "{{ admin_services_dir }}/{{ item }}"
         mode: '0644'
+      loop:
+        - app.py
+        - app_allocation.py
+        - app_autoinstall.py
+        - app_gpu_blocks.py
+        - app_helpers.py
+        - app_inventory.py
+        - app_schedule.py
+        - app_usage.py
+        - app_users.py
+        - app_wg.py
       notify: restart admin-api
 
     - name: Copy lite health API
