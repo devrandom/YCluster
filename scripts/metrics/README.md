@@ -44,9 +44,8 @@ move such logic into the `ycluster` package where it gets scanned and tested.
   `uv pip install --require-hashes` — every artifact is pinned to its PyPI
   sha256 digest.
 - Go tools: `scripts/metrics/go-tools.txt` pins module@version. `go install`
-  verifies against sum.golang.org, and `scripts/metrics/go-tools.sha256`
-  records the expected binary hashes for this platform,
-  verified by `just metrics-tools`.
+  verifies sources against sum.golang.org at download time. Binary outputs
+  are not hash-pinned; module checksums are the supply-chain control.
 - `scripts/metrics/halstead.go` is stdlib-only and executed via `go run`, so
   it is pinned by being in-tree.
 - Mutation testing (`just metrics-mutate`) uses `gremlins` (pinned v0.6.0)
@@ -60,5 +59,4 @@ move such logic into the `ycluster` package where it gets scanned and tested.
     scripts/metrics/check.py           the gate
     scripts/metrics/halstead.go        Go Halstead difficulty (go run)
     scripts/metrics/go-tools.txt       pinned Go tool versions
-    scripts/metrics/go-tools.sha256    expected binary hashes (linux/amd64)
     scripts/metrics/requirements.txt   pinned Python deps + sha256s

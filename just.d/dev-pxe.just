@@ -29,6 +29,14 @@ _dnsmasq-conf:
         echo "Generated dev/dnsmasq.conf (interface: $DEV_INTERFACE)"; \
     fi
 
+# Full dev host setup: rootless Incus, Go toolchain, Python tooling.
+setup: setup-rootless-incus setup-go setup-tools
+
+# Host-level Go toolchain + pinned quality-metric binaries.
+setup-go:
+    @if ! command -v go >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y golang-go; fi
+    @just metrics-tools
+
 # Privileged: start dnsmasq in foreground with debug (sudo drops to 'dev' after binding)
 dev-dnsmasq-start: _dnsmasq-conf
     sudo dnsmasq -d --log-debug -C "$(pwd)/dev/dnsmasq.conf" --user=dev --group=dev

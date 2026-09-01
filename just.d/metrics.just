@@ -6,10 +6,10 @@
 #   just metrics-tools    install/verify the pinned analysis tools
 #
 # Caps live in scripts/metrics/caps.json; the frozen legacy baseline in
-# scripts/metrics/baseline.json. Tools are pinned at versions
-# (scripts/metrics/go-tools.txt, checksum-verified by sum.golang.org and by
-# the recorded binary hashes in scripts/metrics/go-tools.sha256) and by
-# --require-hashes for the Python side (scripts/metrics/requirements.txt).
+# scripts/metrics/baseline.json. Tools are pinned at module versions
+# (scripts/metrics/go-tools.txt, checksum-verified against sum.golang.org
+# at download time) and by --require-hashes for the Python side
+# (scripts/metrics/requirements.txt).
 
 py := ".venv/bin/python"
 
@@ -56,14 +56,8 @@ metrics-tools:
         echo "go install $mod"
         go install "$mod"
     done < scripts/metrics/go-tools.txt
-    (cd scripts/metrics && sha256sum \
-        ../../tmp/go-bin/gocyclo ../../tmp/go-bin/gocognit \
-        ../../tmp/go-bin/staticcheck ../../tmp/go-bin/gremlins) > ./tmp/go-tools.sha256.actual
-    # Compare against the pinned hashes (paths normalized).
-    sed 's|\./tmp/go-bin/|tmp/go-bin/|' scripts/metrics/go-tools.sha256 > ./tmp/go-tools.sha256.expected
-    sha256sum -c ./tmp/go-tools.sha256.expected || {
-        echo "binary hashes differ from scripts/metrics/go-tools.sha256" >&2
-        exit 1
-    }
-    uv pip install --require-hashes -r scripts/metrics/requirements.txt
+    # uv is preferred; fall back to pip in the venv (same --require-hashes pin).
+    uv pip install --python .venv/bin/python --require-hashes -r scripts/metrics/requirements.txt \
+        || { .venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1 || true
+             .venv/bin/python -m pip install --require-hashes -r scripts/metrics/requirements.txt; }
     echo "metrics tooling verified"

@@ -1,6 +1,6 @@
 # Go analysis tools for the quality-metric gate, built from source via
-# `go install` (module checksums verified against sum.golang.org, then
-# binary hashes recorded in go-tools.sha256 for the current platform).
+# `go install`. Module versions are pinned here and checksum-verified
+# against sum.golang.org at download time.
 # One module@version per line.
 github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
 github.com/uudashr/gocognit/cmd/gocognit@v1.2.1
