@@ -1331,7 +1331,6 @@ def serve_bootstrap(node_type):
     return rendered_content, 200, {'Content-Type': 'text/plain'}
 
 
-@app.route('/metrics')
 def _service_health_value(status):
     """Map a service status string to a numeric Prometheus value."""
     return {'healthy': 0, 'degraded': 1, 'unhealthy': 2,
@@ -1395,6 +1394,7 @@ def _prometheus_health_metrics(health_data):
     return metrics
 
 
+@app.route('/metrics')
 def prometheus_metrics():
     """Prometheus metrics endpoint"""
     try:
