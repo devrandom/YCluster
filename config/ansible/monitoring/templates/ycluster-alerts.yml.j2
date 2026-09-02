@@ -166,6 +166,26 @@ groups:
 
   - name: ycluster-services
     rules:
+      # Clock-skew service health uses node-specific warning/critical bands.
+      # Metric ordinals: healthy=0, warning=1, critical/error=2.
+      - alert: ClockSkewWarning
+        expr: ycluster_service_health{service="clock_skew"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Clock skew warning on {{ $labels.node }}"
+          description: "Clock offset on {{ $labels.node }} has exceeded its warning threshold for more than 10 minutes"
+
+      - alert: ClockSkewCritical
+        expr: ycluster_service_health{service="clock_skew"} >= 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Clock skew critical on {{ $labels.node }}"
+          description: "Clock offset on {{ $labels.node }} has exceeded its critical threshold, or the skew check failed, for more than 5 minutes"
+
       # etcd cluster health - grouped by service to show cluster-wide status
       - alert: EtcdClusterUnhealthy
         expr: count(ycluster_service_health{service="etcd"} >= 2) >= 2
