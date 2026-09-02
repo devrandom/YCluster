@@ -168,6 +168,8 @@
       apt:
         name:
           - qemu-system-x86
+          # qemu-img creates and grows the NAS-backed VM data images.
+          - qemu-utils
           - ovmf
           # virtiofsd: without it, Incus disk shares to VMs fall back to 9p,
           # which is markedly slower for large sequential reads (model loads).

@@ -110,6 +110,13 @@ def register_vm_commands(subparsers):
     rp.add_argument('size', help='New disk size, e.g. 160GiB')
     rp.set_defaults(func=lambda a: vm.vm_resize(a.name, a.size))
 
+    rdp = sub.add_parser('resize-data',
+                         help="Grow a VM's NAS data image and its ext4 "
+                              "filesystem")
+    rdp.add_argument('name')
+    rdp.add_argument('size', help='New data-disk size, e.g. 200GiB')
+    rdp.set_defaults(func=lambda a: vm.vm_resize_data(a.name, a.size))
+
     gp = sub.add_parser('gpus', help='Show passthrough GPU allocation')
     gp.set_defaults(func=lambda a: vm.vm_gpus())
 

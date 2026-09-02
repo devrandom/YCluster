@@ -272,7 +272,7 @@ Grow-only (same constraint as root-disk resize). Requires the image to exist
 3. **Resize the FS.** The image has no partition table (ext4 directly on the
    block device, labelled `vmdata`), so there is no growpart step. Start the
    VM — the guest sees the new size at boot — then grow the mounted
-   filesystem online: `incus exec <vm> -- resize2fs /dev/vdb`. Online
+   filesystem online: `incus exec <vm> -- resize2fs /dev/disk/by-label/vmdata`. Online
    `resize2fs` grow is supported on mounted ext4; the root requirement is
    guest-side (the ENOTSUP-on-virtiofs issue doesn't apply to a block
    device).

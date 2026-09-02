@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..common.etcd_utils import get_etcd_client, reset_etcd_client
+from . import vm_data_block as vdb
 from .vm_desired import desired_conflict as _desired_conflict
 from .vm_gpu_schedule import (_parse_window, combine_gpu_commitments,
                               desired_gpus, desired_on, gpu_available_windows,
@@ -99,10 +100,6 @@ VM_IP_POOL_END = 200
 # parts of /near1. All VMs still write to NAS as the same Samba user (the
 # host's CIFS mount pins uid=1000,gid=1000) — isolation is at the virtiofs
 # export boundary, not at NAS ACL level.
-NAS_HOST_BASE = "/near1/vm"
-NAS_GUEST_PATH = "/data"
-NAS_DEVICE = "data"
-
 _VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")     # Incus instance names
 _USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")        # identifiers / emails
 
@@ -384,47 +381,11 @@ def sync_dns_records():
     return changed
 
 def _ensure_nas_share(name):
-    """Best-effort: provision /near1/vm/<name> on the host and attach it
-    as a virtiofs disk at /data inside the instance. Idempotent — safe to
-    call on every start as a backfill. Silently skips (warning only) if
-    /near1 is unreachable, so a NAS outage doesn't block VM start.
-    """
-    # Per-host opt-out (`vm_nas_share: false` in HOST_CONFIG_PATH) for
-    # hosts without a NAS mount — e.g. the dev container cluster, where
-    # the virtiofs attach can't work anyway (no idmapping under nesting).
-    if _host_config_value("vm_nas_share") == "false":
-        return
-    host_dir = f"{NAS_HOST_BASE}/{name}"
-    # `timeout` guards a hung CIFS automount: if the NAS is down, an
-    # access to /near1 can block forever on the systemd automount.
-    try:
-        subprocess.run(["mkdir", "-p", host_dir],
-                       check=True, timeout=10,
-                       stderr=subprocess.PIPE, text=True)
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-        msg = getattr(e, "stderr", "") or str(e)
-        print(f"  NAS /near1 unreachable — skipping /data attach on "
-              f"'{name}' ({msg.strip() or e.__class__.__name__}).",
-              file=sys.stderr)
-        return
-
-    have = _incus("config", "device", "list", name, check=False)
-    if NAS_DEVICE in have.stdout.split():
-        return
-    # On a VM host the share is served by virtiofsd, which maps uids in
-    # userspace; shift=true is the established working path there. On a
-    # container host the device is an idmapped bind mount, which the
-    # CIFS-backed /near1 cannot provide ("idmapping abilities are
-    # required but aren't supported on system") — so the container fails
-    # to start. Containers instead align ids via the gpu-ct profile's
-    # raw.idmap (uid/gid 1000 == the Samba user the CIFS mount pins), so
-    # a plain bind mount is read/write without an idmapped mount.
-    inst = _instance_info(name)
-    is_vm = bool(inst) and inst.get("type") == "virtual-machine"
-    shift = ["shift=true"] if is_vm else []
-    _incus("config", "device", "add", name, NAS_DEVICE, "disk",
-           f"source={host_dir}", f"path={NAS_GUEST_PATH}",
-           *shift, "required=false")
+    vdb.ensure_nas_share(
+        name, _incus,
+        share_enabled=(_host_config_value("vm_nas_share") != "false"),
+        instance_info=_instance_info,
+        instance_running=_instance_running)
 
 def _instance_running(name):
     r = _incus("list", name, "--format", "csv", "-c", "ns", check=False)
@@ -1243,6 +1204,27 @@ def vm_resize(name, size):
         print("  VM is stopped — the filesystem will grow on next boot "
               "(cloud-init growpart).")
 
+
+def vm_resize_data(name, size):
+    """Grow a VM's NAS data image, then grow ext4 inside the guest."""
+    _valid_vm_name(name)
+    if not _instance_exists(name):
+        raise ValueError(f"No such VM: {name}")
+    image = vdb.data_image_path(name)
+    vdb.assert_resizable(_incus, name, image)
+
+    # qemu-img resize is safe on a running VM's image, but the guest
+    # filesystem resize is not — grow the image, then restart the VM.
+    with vdb.data_migration_lock(name):
+        running = _instance_running(name)
+        if running:
+            _incus_stop(name)
+        vdb.grow_data_image(image, vdb.parse_disk_size(size))
+        _incus("start", name)
+    _wait_agent(name, GPU_VM_AGENT_TIMEOUT
+                if (vm_get(name) or {}).get("gpus") else 180)
+    _incus("exec", name, "--", "resize2fs", vdb.VM_DATA_RESIZE_DEVICE)
+    print(f"Data image for '{name}' is {size}; /data filesystem resized.")
 
 def desired_conflict(desired, action, now):
     return _desired_conflict(desired, action, now, desired_on)
