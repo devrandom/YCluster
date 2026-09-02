@@ -40,6 +40,24 @@ python-lint:
     - for file in config.yml docker-compose.yaml opencode.json pyrightconfig.json; do if [ -f "$file" ]; then yamllint -d "$YAMLLINT_RULES" "$file"; fi; done
     - ty check
 
+ansible-lint:
+  stage: lint
+  image: python:3.13-slim
+  extends:
+    - .default_rules
+    - .python_job
+  variables:
+    ANSIBLE_HOME: "$CI_PROJECT_DIR/.cache/ansible"
+    ANSIBLE_LOCAL_TMP: "$CI_PROJECT_DIR/.cache/ansible/tmp"
+    TMPDIR: "$CI_PROJECT_DIR/.cache/tmp"
+  script:
+    # ansible-lint installs ansible-core only. The full ansible package
+    # supplies the bundled collections needed by our playbooks.
+    - python -m pip install 'ansible==13.2.0' 'ansible-lint==26.6.0'
+    # A fresh checkout has neither the cluster inventory nor vault secrets.
+    # files/ holds runtime assets such as Authentik blueprints, not playbooks.
+    - ansible-lint --profile min --offline --nocolor --exclude config/ansible/vault --exclude 'config/ansible/*/files' config/ansible
+
 go-lint:
   stage: lint
   image: golang:1.25
