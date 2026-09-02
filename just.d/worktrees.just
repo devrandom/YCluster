@@ -1,5 +1,5 @@
 # Recruit isolated git worktrees for parallel branch work. Each worktree is
-# a fresh checkout under ./trees/<branch> (gitignored) on a brand-new branch
+# a fresh checkout under ./work/<branch> (gitignored) on a brand-new branch
 # (`-b`). Tracked shared config (.codex/rules, .codex/skills, .codex/env,
 # AGENTS.md, docs/, ...) comes along automatically from git; only the
 # gitignored, personal files are symlinked back to this main checkout so the
@@ -16,15 +16,16 @@
 # root to suppress that carveout. `config/ansible/host_vars` is likewise
 # ignored, but it is a symlink in the main checkout; we chain the worktree's
 # copy onto that symlink
-# (`.../trees/<branch>/config/ansible/host_vars -> main/config/ansible/host_vars`)
+# (`.../work/<branch>/config/ansible/host_vars -> main/config/ansible/host_vars`)
 # so there remains a single reference to the private ycluster-private/host_vars.
 
-WORKTREE_ROOT := './trees'
+WORKTREE_ROOT := './work'
 
-# Recruit a linked worktree for a new branch under ./trees, sharing main's personal config.
+# Recruit a linked worktree for a new branch under ./work, sharing main's personal config.
 # Idempotent: if the worktree is already registered, it skips `git worktree add` and just
 # refreshes the generated config + symlinks (nothing is removed, no changes are lost).
-worktree name:
+# Set shared_venv to 0 to leave .venv unlinked for `agent-worktree` to create independently.
+worktree name shared_venv='1':
     @mkdir -p {{WORKTREE_ROOT}}
     @wt="{{WORKTREE_ROOT}}/{{name}}"; \
     root="$(pwd)"; \
@@ -35,7 +36,10 @@ worktree name:
         git worktree add -b {{name}} {{WORKTREE_ROOT}}/{{name}}; \
     fi; \
     python3 dev/worktree-config.py "$root" "$wt_abs"; \
-    srcs="AGENTS.local.md .envrc .venv .claude NOTES.md dev1.token dr.token"; \
+    srcs="AGENTS.local.md .envrc .claude NOTES.md dev1.token dr.token"; \
+    if [ "{{shared_venv}}" = "1" ]; then \
+        srcs=".venv $srcs"; \
+    fi; \
     for src in $srcs; do \
         mkdir -p "$wt/$(dirname "$src")"; \
         link="$wt/$src"; \
@@ -49,6 +53,36 @@ worktree name:
     ln -sfn "$rel" "$host_vars"; \
     echo "linked $host_vars -> $rel"
     @echo "worktree ready: {{WORKTREE_ROOT}}/{{name}}"
+
+# Create a decoupled agent worktree. Pass either a todo file (for example
+# todo/code-quality/foo.md) or a slug chosen for a task not tracked in todo/.
+# The worktree and branch use the sanitized slug; a dedicated .venv is created
+# inside the tree so agent tasks cannot mutate the main checkout's environment.
+[doc("Create an isolated worktree + venv from a todo filename or chosen slug")]
+agent-worktree target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="{{target}}"
+    case "$target" in
+        *.md)
+            if [ ! -f "$target" ]; then
+                echo "todo file not found: $target" >&2
+                exit 1
+            fi
+            slug="$(basename "$target" .md)"
+            ;;
+        *)
+            slug="$target"
+            ;;
+    esac
+    slug="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^[-._]+//; s/[-._]+$//')"
+    if [ -z "$slug" ]; then
+        echo "could not derive a non-empty slug from: $target" >&2
+        exit 1
+    fi
+    just worktree "$slug" 0
+    just --justfile {{justfile()}} --working-directory "{{WORKTREE_ROOT}}/$slug" setup-venv
+    echo "agent worktree ready: {{WORKTREE_ROOT}}/$slug"
 
 # Remove a linked worktree (branch is kept; delete it separately if wanted).
 remove-worktree name:

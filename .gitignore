@@ -38,6 +38,7 @@ dev/cluster/.ssh/
 
 # linked git worktrees created by `just worktree`
 /trees/
+/work/
 
 # Cluster-specific inventory (real values); template is inventory_cluster.yml.example
 config/ansible/inventory_cluster.yml

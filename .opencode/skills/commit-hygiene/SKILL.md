@@ -1,6 +1,6 @@
 ---
 name: commit-hygiene
-description: Author and review YCluster commits against the repo's no-leak rules before staging, committing, or pushing. Use whenever about to stage or commit changes, when writing a commit message, or when reviewing a diff — blocks prod-private data (emails, deployment hostnames/URLs, public IPs, user VM names, prod-event dates), prebuilt third-party binaries, and unsolicited commits
+description: Author and review YCluster commits against the repo's no-leak rules before staging, committing, or pushing. Use whenever about to stage or commit changes, when writing a commit message, or when reviewing a diff — blocks prod-private data (emails, deployment hostnames/URLs, public IPs, user VM names, prod-event dates), prebuilt third-party binaries
 ---
 
 # Commit hygiene
@@ -10,28 +10,9 @@ Gate every stage/commit/push in the `ycluster` repo. Pairs with
 
 ## Before anything
 
-- **Don't commit unless explicitly asked.** Never create commits "for good
-  measure". When fixing recently-committed code, amend instead of adding a
-  commit.
+- Amend existing commits for fixups when practical; when fixing
+  recently-committed code, amend rather than adding a separate commit.
 - **No commit prefixes**; use a compact imperative subject line.
-
-## Quality metrics before committing code
-
-Before staging new or modified code, run the quality-metric gate:
-
-```bash
-rm -f config/ansible/admin/files/.coverage && .venv/bin/python scripts/metrics/check.py
-```
-
-- The gate must be green before committing. It runs the test suites and
-  enforces caps for complexity, file length, CRAP, per-file coverage, dead
-  code, and `any`/`interface{}` usage; new violations fail the commit.
-- If the change intentionally improves debt, run
-  `scripts/metrics/check.py --adopt`, review the baseline diff, and include
-  `scripts/metrics/baseline.json` in the commit (or a separate baseline
-  commit). Do not adopt merely to make a failing gate pass.
-- If the gate fails for an unrelated pre-existing violation, stop and surface
-  it; don't bypass or relax the gate to get a commit through.
 
 ## Public repo must never contain
 

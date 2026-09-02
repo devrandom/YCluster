@@ -18,6 +18,7 @@
 setup-venv:
     #!/usr/bin/env bash
     set -euo pipefail
+    unset VIRTUAL_ENV
     if ! command -v uv >/dev/null 2>&1; then
         if [ -x "$HOME/.local/bin/uv" ]; then
             export PATH="$HOME/.local/bin:$PATH"
@@ -28,7 +29,7 @@ setup-venv:
         fi
     fi
     uv sync
-    uv pip install -e config/ansible/admin/files/ycluster/
+    uv pip install --python .venv/bin/python -e config/ansible/admin/files/ycluster/
 
 # Install serena-agent, ty, the local mcp-fstools sibling, and
 # python-gitlab as isolated uv tools. serena is pinned to its git source
