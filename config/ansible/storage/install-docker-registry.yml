@@ -33,7 +33,7 @@
     - name: Create registry user
       user:
         name: registry
-        uid: 1002
+        uid: 9001
         system: yes
         shell: /bin/false
         home: /var/lib/registry
@@ -93,7 +93,7 @@
                 - /etc/docker-registry/config.yml:/etc/docker/registry/config.yml:ro
                 - /rbd/misc/docker-registry/data:/var/lib/registry
                 - /rbd/misc/docker-registry/logs:/var/log
-              user: "1002:1002"  # registry user UID:GID
+              user: "9001:9001"  # registry user UID:GID
               environment:
                 - REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY=/var/lib/registry
 
