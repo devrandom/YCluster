@@ -24,8 +24,7 @@ TEST_LOG := './tmp/system-test.log'
 
 test:
     ./run-tests.sh
-    @mkdir -p ./tmp/go-cache
-    GOCACHE="$(pwd)/tmp/go-cache" make -C local-ai-proxy test
+    make -C local-ai-proxy test
 
 test-system-quick:
     @mkdir -p ./tmp
@@ -33,15 +32,18 @@ test-system-quick:
 
 test-system:
     @mkdir -p ./tmp
-    ./dev/cluster/system-test.sh --background --assert-only
+    ./dev/cluster/system-test.sh --background
     @echo
     @echo "log: {{TEST_LOG}}  (tail -f to watch; grep -E '^(== SECTION|PASS|FAIL)' for summary)"
 
 clear-dev-cluster:
     ./dev/cluster/dev-cluster.sh down
 
-test-system-fresh: clear-dev-cluster test-system
-
+test-system-fresh: clear-dev-cluster
+    @mkdir -p ./tmp
+    ./dev/cluster/system-test.sh --background
+    @echo
+    @echo "log: {{TEST_LOG}}  (tail -f to watch; grep -E '^(== SECTION|PASS|FAIL)' for summary)"
 # Privileged, one-time host prep for rootless dev-cluster runs. Thin alias to
 # ./dev/cluster/dev-cluster.sh setup, which owns the logic (clears a leftover
 # ycdev0 bridge, then reconciles incusbr-<uid> onto 10.0.0.0/16 + installs the
