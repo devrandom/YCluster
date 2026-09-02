@@ -35,13 +35,13 @@ class RegisterPeerTests(unittest.TestCase):
         self.assertEqual(failure, (500, 'allocation failed: down'))
 
     def test_value_error(self):
-        getter = mock.Mock(return_value={'hostname': 'h'})
+        getter = mock.Mock(return_value=({'hostname': 'h'}, False))
         register = mock.Mock(side_effect=ValueError('bad'))
         _, _, failure = app_wg.register_peer(getter, register, 'm', 'compute', 'k')
         self.assertEqual(failure, (400, 'bad'))
 
     def test_success(self):
-        getter = mock.Mock(return_value={'hostname': 'h'})
+        getter = mock.Mock(return_value=({'hostname': 'h'}, False))
         register = mock.Mock(return_value={'status': 'pending'})
         allocation, peer, failure = app_wg.register_peer(
             getter, register, 'm', 'compute', 'k')
@@ -56,7 +56,7 @@ if __name__ == '__main__':
 
 class RegisterFailureTests(unittest.TestCase):
     def test_registration_error(self):
-        getter = mock.Mock(return_value={'hostname': 'h'})
+        getter = mock.Mock(return_value=({'hostname': 'h'}, False))
         register = mock.Mock(side_effect=RuntimeError('boom'))
         _, _, failure = app_wg.register_peer(getter, register, 'm', 'compute', 'k')
         self.assertEqual(failure, (500, 'registration failed: boom'))

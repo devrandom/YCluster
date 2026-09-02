@@ -31,13 +31,19 @@ class LightweightRouteTests(unittest.TestCase):
             'amt_ip': 'ip-amt',
         }
         with mock.patch.object(appmod, 'get_or_create_allocation',
-                               return_value=allocation):
+                               return_value=(allocation, True)):
             response = self.http.get('/api/allocate?mac=AA:BB')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {
             'hostname': 'c1', 'type': 'compute', 'ip': 'ip-c1',
-            'amt_ip': 'ip-amt', 'mac': 'AA:BB', 'existing': True,
+            'amt_ip': 'ip-amt', 'mac': 'AA:BB', 'existing': False,
         })
+
+        with mock.patch.object(appmod, 'get_or_create_allocation',
+                               return_value=(allocation, False)):
+            response = self.http.get('/api/allocate?mac=AA:BB')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['existing'], True)
 
         with mock.patch.object(appmod, 'get_or_create_allocation',
                                side_effect=RuntimeError('etcd down')):

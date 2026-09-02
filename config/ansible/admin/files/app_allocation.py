@@ -135,6 +135,9 @@ def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
         via_wg:    Transport marker — WG-bootstrapped nodes get their IP
                    from 10.0.1.0/24 instead of 10.0.0.0/24. Preserved in
                    the allocation record so list/lookup stays consistent.
+
+    Returns:
+        (allocation, created), where created is False for an existing record.
     """
     client = get_etcd_client()
     normalized_mac = mac_address.lower().replace(':', '').replace('-', '')
@@ -187,7 +190,7 @@ def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
             client.put(f"{ETCD_PREFIX}/by-mac/{normalized_mac}", allocation_json)
             client.put(f"{ETCD_PREFIX}/by-hostname/{new_hostname}", allocation_json)
 
-        return data
+        return data, False
 
 
     # Create new allocation
@@ -195,7 +198,7 @@ def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
         # Double-check after acquiring lock
         existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
         if existing_data[0]:
-            return json.loads(existing_data[0].decode())
+            return json.loads(existing_data[0].decode()), False
 
         # Determine machine type and allocate hostname
         machine_type = node_type or determine_type_from_mac(mac_address)
@@ -231,13 +234,13 @@ def get_or_create_allocation(mac_address, node_type=None, via_wg=False):
                 failure=[]
             )
             if committed:
-                return allocation_data
+                return allocation_data, True
 
             # Lost the race. If this MAC got allocated elsewhere, return that
             # allocation; otherwise the hostname was taken — pick the next.
             existing_data = client.get(f"{ETCD_PREFIX}/by-mac/{normalized_mac}")
             if existing_data[0]:
-                return json.loads(existing_data[0].decode())
+                return json.loads(existing_data[0].decode()), False
 
         raise RuntimeError(
             f"allocation for {normalized_mac} failed: etcd transaction "
