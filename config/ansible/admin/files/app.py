@@ -171,7 +171,8 @@ def allocate_hostname():
         return jsonify({'error': f'Invalid type: {node_type}'}), 400
 
     try:
-        allocation = get_or_create_allocation(mac_address, node_type=node_type)
+        allocation, created = get_or_create_allocation(
+            mac_address, node_type=node_type)
 
         return jsonify({
             'hostname': allocation['hostname'],
@@ -179,7 +180,7 @@ def allocate_hostname():
             'ip': allocation['ip'],
             'amt_ip': allocation['amt_ip'],
             'mac': mac_address,
-            'existing': True  # Always true since we return existing or newly created
+            'existing': not created
         })
     except Exception as e:
         return jsonify({'error': f'Allocation failed: {str(e)}'}), 500
@@ -1220,7 +1221,7 @@ def serve_user_data():
         print(f"MAC from IP lookup: {client_ip} -> {mac_address}", file=sys.stderr)
     
     # Get or create allocation for this MAC address
-    allocation_data = get_or_create_allocation(mac_address)
+    allocation_data, _ = get_or_create_allocation(mac_address)
     
     # Use allocation data
     node_type = allocation_data['type']

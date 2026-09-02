@@ -31,7 +31,7 @@ def valid_pubkey(pubkey):
 def register_peer(allocation_getter, peer_register, mac, node_type, pubkey):
     """Allocate a node and register its peer, returning (allocation, peer, error)."""
     try:
-        allocation = allocation_getter(mac, node_type=node_type, via_wg=True)
+        allocation, _ = allocation_getter(mac, node_type=node_type, via_wg=True)
     except Exception as e:
         return None, None, (500, f'allocation failed: {e}')
     try:

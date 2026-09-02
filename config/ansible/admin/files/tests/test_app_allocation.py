@@ -72,7 +72,7 @@ class GetOrCreateAllocationTests(unittest.TestCase):
                                   side_effect=lambda host, via_wg=False:
                                   'ip-amt' if host == 'c1a' else 'ip-wg'), \
                 mock.patch.object(app_allocation, 'print'):
-            got = app_allocation.get_or_create_allocation(
+            got, created = app_allocation.get_or_create_allocation(
                 'AA:BB', node_type='compute', via_wg=True)
 
         self.assertEqual(got['hostname'], 'c1')
@@ -87,8 +87,9 @@ class GetOrCreateAllocationTests(unittest.TestCase):
         client.get.return_value = (allocation_json().encode(), mock.Mock())
         with mock.patch.object(app_allocation, 'get_etcd_client',
                                return_value=client):
-            got = app_allocation.get_or_create_allocation('aabb')
+            got, created = app_allocation.get_or_create_allocation('aabb')
         self.assertEqual(got['hostname'], 's2')
+        self.assertFalse(created)
         client.put.assert_not_called()
 
     def test_existing_allocation_fills_legacy_amt_ip(self):
@@ -100,7 +101,7 @@ class GetOrCreateAllocationTests(unittest.TestCase):
                                return_value=client), \
                 mock.patch.object(app_allocation, 'determine_ip_from_hostname',
                                   return_value='ip-legacy-amt'):
-            got = app_allocation.get_or_create_allocation('aabb')
+            got, created = app_allocation.get_or_create_allocation('aabb')
         self.assertEqual(got['amt_ip'], 'ip-legacy-amt')
 
     def test_new_allocation_commits_transaction(self):
@@ -111,10 +112,11 @@ class GetOrCreateAllocationTests(unittest.TestCase):
                                return_value=client), \
                 mock.patch.object(app_allocation, 'get_next_hostname',
                                   return_value='c1'):
-            got = app_allocation.get_or_create_allocation(
+            got, created = app_allocation.get_or_create_allocation(
                 'aa:bb', node_type='compute', via_wg=True)
 
         self.assertEqual(got['hostname'], 'c1')
+        self.assertTrue(created)
         self.assertEqual(got['via_wg'], True)
         self.assertEqual(client.transactions.put.call_count, 2)
 
@@ -130,7 +132,7 @@ class GetOrCreateAllocationTests(unittest.TestCase):
                                return_value=client), \
                 mock.patch.object(app_allocation, 'get_next_hostname',
                                   return_value='c1'):
-            got = app_allocation.get_or_create_allocation('aabb')
+            got, created = app_allocation.get_or_create_allocation('aabb')
         self.assertEqual(got['hostname'], 'c3')
 
     def test_double_check_returns_locked_allocation(self):
@@ -140,7 +142,7 @@ class GetOrCreateAllocationTests(unittest.TestCase):
                                    (allocation_json().encode(), meta)]
         with mock.patch.object(app_allocation, 'get_etcd_client',
                                return_value=client):
-            got = app_allocation.get_or_create_allocation('aabb')
+            got, created = app_allocation.get_or_create_allocation('aabb')
         self.assertEqual(got['hostname'], 's2')
 
 
