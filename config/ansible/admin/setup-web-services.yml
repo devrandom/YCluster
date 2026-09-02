@@ -138,6 +138,7 @@
           ProtectSystem=strict
           ProtectHome=yes
           PrivateTmp=yes
+          ProtectKernelModules=yes
 
           [Install]
           WantedBy=multi-user.target

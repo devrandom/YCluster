@@ -52,6 +52,10 @@
           RestartSec=5
           User=root
           EnvironmentFile=/etc/ycluster/etcd-client.env
+          # Raw DHCP sockets require CAP_NET_RAW, so the service stays root.
+          NoNewPrivileges=yes
+          ProtectHome=yes
+          ProtectKernelModules=yes
 
           [Install]
           WantedBy=multi-user.target
