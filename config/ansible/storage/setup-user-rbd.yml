@@ -229,6 +229,7 @@
 
           [Service]
           Type=oneshot
+          EnvironmentFile=/etc/ycluster/etcd-client.env
           ExecStart=/usr/local/bin/backup-databases backup
           User=root
 

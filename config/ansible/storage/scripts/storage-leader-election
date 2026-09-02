@@ -2,7 +2,7 @@
 set -e
 
 # Endpoints from /etc/ycluster/etcd-client.env (ETCDCTL_ENDPOINTS), injected by
-# the systemd unit via EnvironmentFile=; that file also exports ETCDCTL_CACERT/
+# the systemd unit via EnvironmentFile=; that file also provides ETCDCTL_CACERT/
 # CERT/KEY when TLS is on (etcdctl reads them automatically). A positional arg
 # still overrides for manual runs.
 ETCD_ENDPOINTS="${1:-$ETCDCTL_ENDPOINTS}"
@@ -14,7 +14,7 @@ LEASE_TTL=30
 RENEW_INTERVAL=10
 
 if [ -z "$ETCD_ENDPOINTS" ]; then
-    echo "Usage: $0 [etcd_endpoints]  (else set ETCDCTL_ENDPOINTS / source /etc/ycluster/etcd-client.env)"
+    echo "Usage: $0 [etcd_endpoints]  (else set ETCDCTL_ENDPOINTS via /etc/ycluster/etcd-client.env)"
     exit 1
 fi
 

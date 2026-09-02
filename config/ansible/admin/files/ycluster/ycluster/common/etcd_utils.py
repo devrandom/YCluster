@@ -2,36 +2,62 @@ import os
 import time
 import etcd3
 
+ETCD_CLIENT_ENV_PATH = '/etc/ycluster/etcd-client.env'
+
+
+def _etcd_client_env(path=None):
+    """Read the managed etcd client environment, ignoring a missing file."""
+    if path is None:
+        path = ETCD_CLIENT_ENV_PATH
+    values = {}
+    try:
+        with open(path, encoding='utf-8') as env_file:
+            for line in env_file:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    values[key] = value
+    except OSError:
+        pass
+    return values
+
 
 def get_etcd_hosts():
-    """Return etcd hosts from environment.
+    """Return etcd hosts from the environment or managed client env file.
 
-    Checks ETCD_HOSTS (comma separated) then ETCD_HOST.
-    Falls back to localhost if nothing is set.
+    Live ETCD_* variables win over /etc/ycluster/etcd-client.env. If neither
+    source sets an endpoint, returns the explicit localhost fallback.
     """
-    hosts = os.environ.get('ETCD_HOSTS')
+    env = _etcd_client_env()
+    env.update({k: v for k, v in os.environ.items()
+                if k.startswith('ETCD_')})
+
+    hosts = env.get('ETCD_HOSTS')
     if hosts:
         host_list = [h.strip() for h in hosts.split(',') if h.strip()]
         if host_list:
             return host_list
-    host = os.environ.get('ETCD_HOST')
+    host = env.get('ETCD_HOST')
     if host:
         return [host.strip()]
     return ['localhost:2379']
 
 
 def get_tls_kwargs():
-    """Return etcd3.client TLS kwargs from the environment, or {} for plaintext.
+    """Return etcd3.client TLS kwargs from env/client file, or {} for plaintext.
 
     Reads ETCD_CACERT / ETCD_CERT / ETCD_KEY (the same names etcdctl uses, sans
-    the ETCDCTL_ prefix). When set, the etcd3 client uses a secure (TLS) gRPC
-    channel and presents the client cert for mutual auth. When unset, returns
-    {} and the client stays plaintext — so this is a no-op until certs are
-    deployed (see docs/design/etcd-access-hardening.md, Phase 2).
+    the ETCDCTL_ prefix), with live environment values winning over
+    /etc/ycluster/etcd-client.env. When set, the etcd3 client uses a secure
+    (TLS) gRPC channel and presents the client cert for mutual auth. When
+    unset, returns {} and the client stays plaintext.
     """
-    ca = os.environ.get('ETCD_CACERT')
-    cert = os.environ.get('ETCD_CERT')
-    key = os.environ.get('ETCD_KEY')
+    env = _etcd_client_env()
+    env.update({k: v for k, v in os.environ.items()
+                if k.startswith('ETCD_')})
+    ca = env.get('ETCD_CACERT')
+    cert = env.get('ETCD_CERT')
+    key = env.get('ETCD_KEY')
     kwargs = {}
     if ca:
         kwargs['ca_cert'] = ca
