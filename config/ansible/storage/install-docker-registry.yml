@@ -7,6 +7,18 @@
     # inventory) so environments without the Docker apt repo can satisfy
     # the docker + compose-v2 requirement from their own packages.
     docker_packages: "{{ registry_docker_packages | default(['docker-ce', 'docker-ce-cli', 'docker-buildx-plugin', 'docker-compose-plugin']) }}"
+  pre_tasks:
+    # systemctl is-active exits nonzero for inactive units; use the status
+    # text so that an unknown unit also counts as "not running".
+    - name: Check whether docker-registry is running
+      command: systemctl is-active -- docker-registry.service
+      register: registry_service_status
+      changed_when: false
+      failed_when: false
+    - name: Remember whether docker-registry should be restarted
+      set_fact:
+        registry_was_running: "{{ registry_service_status.stdout | trim == 'active' }}"
+
   tasks:
     - name: Ensure Docker is installed (should be done by install-docker-official.yml)
       apt:
@@ -35,6 +47,7 @@
         name: registry
         gid: 9001
         system: yes
+      register: registry_group
 
     - name: Create registry user
       user:
@@ -45,6 +58,11 @@
         shell: /bin/false
         home: /var/lib/registry
         create_home: yes
+      register: registry_user
+
+    - name: Remember whether registry identity changed
+      set_fact:
+        registry_identity_changed: "{{ registry_group.changed or registry_user.changed }}"
 
     - name: Create registry configuration directory
       file:
@@ -189,12 +207,14 @@
       systemd:
         daemon_reload: yes
 
-    # The unit is static, so it cannot be enabled/disabled. Leader election
-    # decides whether it runs.
-    - name: Stop docker-registry service
+    # The unit is static, so it cannot be enabled/disabled. Stop only when the
+    # service identity changed, so normal idempotent site.yml runs leave an
+    # active registry running.
+    - name: Stop docker-registry service for UID/GID migration
       systemd:
         name: docker-registry.service
         state: stopped
+      when: registry_identity_changed | bool
 
     # Docker daemon insecure-registries / buildkit / buildx config now lives
     # in admin/install-docker-official.yml so it's in place before app/app.yml.
@@ -203,6 +223,14 @@
       docker_image:
         name: registry:2
         source: pull
+
+    - name: Restart migrated docker-registry if it was running
+      systemd:
+        name: docker-registry.service
+        state: started
+      when: registry_was_running | bool and registry_identity_changed | bool
+      # The manager chowns registry state before compose starts, so the
+      # restarted container adopts the new service UID/GID.
 
   handlers:
     - name: restart docker
