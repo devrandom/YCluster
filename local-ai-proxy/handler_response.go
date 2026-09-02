@@ -113,3 +113,14 @@ func joinPath(a, b string) string {
 		return a + b
 	}
 }
+
+func retryReasonForStatus(status int) string {
+	switch {
+	case status >= 500:
+		return "http_5xx"
+	case status == http.StatusTooManyRequests:
+		return "http_429"
+	default:
+		return "http_404"
+	}
+}

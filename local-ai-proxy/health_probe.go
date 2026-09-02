@@ -3,7 +3,11 @@ package main
 import (
 	"context"
 	"net/url"
+	"time"
 )
+
+// outOfBandProbeTimeout matches the health checker's HTTP client timeout.
+const outOfBandProbeTimeout = 15 * time.Second
 
 // Probe runs an out-of-band health check on u in a goroutine and
 // returns immediately. Used by the request handler to nudge the
@@ -15,7 +19,11 @@ import (
 // the probe is a no-op.
 func (hc *HealthChecker) Probe(u *url.URL) {
 	if hc.shouldProbe(u) {
-		go hc.checkOne(context.Background(), u)
+		ctx, cancel := context.WithTimeout(context.Background(), outOfBandProbeTimeout)
+		go func() {
+			defer cancel()
+			hc.checkOne(ctx, u)
+		}()
 	}
 }
 

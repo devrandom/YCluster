@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -262,3 +264,92 @@ func readChunkWithTimeout(r io.Reader, d time.Duration) ([]byte, error) {
 		return nil, fmt.Errorf("read timed out after %v", d)
 	}
 }
+
+// TestRetryDoesNotDrainWedgedBody verifies that an abandoned retryable
+// response cannot block failover. It uses a declared body length larger than
+// the bytes the backend writes, then leaves the connection open.
+func TestRetryDoesNotDrainWedgedBody(t *testing.T) {
+	var wedged atomic.Bool
+	released := make(chan struct{})
+	retryBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(64<<10))
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("wedge"))
+		if rc := http.NewResponseController(w); rc != nil {
+			_ = rc.Flush()
+		}
+		wedged.Store(true)
+		select {
+		case <-released:
+		case <-r.Context().Done():
+		}
+	}))
+	defer retryBackend.Close()
+
+	goodBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("from-b"))
+	}))
+	defer goodBackend.Close()
+
+	retryURL, err := url.Parse(retryBackend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodURL, err := url.Parse(goodBackend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The fixed route makes the body replayable. Prefer the wedged backend,
+	// then remove it from the candidate list so the retry target is fixed.
+	h := NewHandler(&fixedRouteRouter{route: &RouteResult{
+		Model:      "test-model",
+		Candidates: []*url.URL{retryURL, goodURL},
+		Body:       []byte(`{"model":"test-model"}`),
+	}})
+	load := NewLoadCounter()
+	load.Inc(goodURL.String())
+	h.Load = load
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+	// This defer runs before proxy.Close, releasing the wedged backend so
+	// the test servers can shut down.
+	defer close(released)
+	// This hard timeout is the bound for the test. Without the upstream
+	// cancellation, draining the wedged body keeps failover from happening.
+	client := &http.Client{Timeout: 2 * time.Second}
+	started := time.Now()
+	resp, err := client.Post(proxy.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"test-model"}`))
+	if err != nil {
+		t.Fatalf("retry path did not fail over within %v: %v", client.Timeout, err)
+	}
+	defer resp.Body.Close()
+	if elapsed := time.Since(started); elapsed >= client.Timeout {
+		t.Fatalf("retry path took %v; wanted failover within %v", elapsed, client.Timeout)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want 200 via failover", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "from-b" {
+		t.Fatalf("body = %q; want from-b", body)
+	}
+	if !wedged.Load() {
+		t.Fatal("retry backend was never wedged")
+	}
+}
+
+type fixedRouteRouter struct {
+	route *RouteResult
+}
+
+func (r *fixedRouteRouter) Route(*http.Request) (*RouteResult, error) {
+	return r.route, nil
+}
+
+func (r *fixedRouteRouter) Models() []string { return []string{r.route.Model} }
