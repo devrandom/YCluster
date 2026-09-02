@@ -186,6 +186,21 @@
       when: ycluster_sync.changed
       failed_when: false
 
+    - name: Check whether dhcp-server is active
+      command: systemctl is-active --quiet dhcp-server
+      register: dhcp_server_active
+      when: ycluster_sync.changed
+      failed_when: false
+      changed_when: false
+
+    - name: Restart active dhcp-server if package was updated
+      systemd:
+        name: dhcp-server
+        state: restarted
+      when:
+        - ycluster_sync.changed
+        - dhcp_server_active.rc == 0
+
     - name: Restart ycluster-bastion-watch if package was updated
       # The bastion-watch daemon loads the vm_manager watcher code at startup;
       # reinstalling the package (and restarting admin-api) does not restart it,
