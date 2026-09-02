@@ -55,7 +55,10 @@
       copy:
         dest: /etc/docker/daemon.json
         content: |
-          {"bip": "172.17.0.1/16"}
+          {
+            "bip": "172.17.0.1/16",
+            "insecure-registries": ["registry.xc:5000", "10.0.0.100:5000"]
+          }
       notify: restart docker
 
     - name: Ensure docker0 bridge gets its gateway IP (rootless Incus workaround)
@@ -527,9 +530,9 @@
 - import_playbook: ../../config/ansible/app/install-authentik.yml
 
 # Pre-pull the authentik image on every storage node: a first-time leader
-# otherwise pulls ~2GB mid-failover and authentik is down for however long
-# that takes. The tag is read from the installed unit, the single source of
-# truth, so this never drifts from install-authentik.yml.
+# otherwise pulls the image mid-failover and authentik is down for however
+# long that takes. The image reference is read from the installed unit, the
+# single source of truth, and points at the cluster registry.
 - name: Pre-pull authentik image on all storage nodes
   hosts: storage
   become: yes
@@ -537,9 +540,9 @@
     - name: Pull the authentik image if absent
       shell: |
         set -e
-        tag=$(grep -oP 'AUTHENTIK_TAG=\K\S+' /etc/systemd/system/authentik.service)
-        if ! docker image inspect "ghcr.io/goauthentik/server:$tag" >/dev/null 2>&1; then
-          docker pull -q "ghcr.io/goauthentik/server:$tag"
+        image=$(grep -oP 'AUTHENTIK_IMAGE=\K\S+' /etc/systemd/system/authentik.service)
+        if ! docker image inspect "$image" >/dev/null 2>&1; then
+          docker pull -q "$image"
           echo pulled
         fi
       register: ak_pull

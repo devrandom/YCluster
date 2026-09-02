@@ -17,6 +17,9 @@
     # manifests; overrides the convenience tag so deploys only change when we
     # deliberately bump the pin (see docs/design/container-image-tracking.md).
     authentik_image: "ghcr.io/goauthentik/server@sha256:5a77d345a63452cda3762c573070e50a9e4be7f500fb1d82de18d95f705a898c"
+    # The cluster registry caches the pinned image so failovers and fresh
+    # nodes do not make a cold GHCR request mid-restart.
+    authentik_registry_image: "registry.xc:5000/authentik:{{ authentik_version }}"
     authentik_port: "{{ authentik_local_port | default('9300') }}"
   tasks:
     - name: Check if this host is the storage leader
@@ -28,6 +31,43 @@
     - name: Set storage leader fact
       set_fact:
         is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    # Re-runs of install-docker-registry.yml stop this leader-gated service;
+    # an already-elected leader does not revisit start_all_services.
+    - name: Ensure the cluster registry is active on the leader
+      systemd:
+        name: docker-registry.service
+        state: started
+      when: is_storage_leader
+
+    - name: Check whether the cluster registry has the authentik image
+      uri:
+        url: "http://registry.xc:5000/v2/authentik/manifests/{{ authentik_version }}"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
+        status_code: 200
+        timeout: 10
+      register: authentik_registry_check
+      failed_when: false
+      until: authentik_registry_check.status | default(-1) in [200, 404]
+      retries: 30
+      delay: 2
+      when: is_storage_leader
+
+    # Pull the digest-pinned upstream image once and cache it under a stable
+    # cluster-registry tag. Later nodes then pull over the LAN instead of from
+    # GHCR, including during a failover.
+    - name: Seed the cluster registry with the pinned authentik image
+      shell: |
+        set -e
+        docker pull -q {{ authentik_image }}
+        docker tag {{ authentik_image }} {{ authentik_registry_image }}
+        docker push -q {{ authentik_registry_image }}
+        echo seeded
+      when: is_storage_leader and authentik_registry_check.status != 200
+      register: authentik_registry_seed
+      changed_when: "'seeded' in authentik_registry_seed.stdout"
 
     - name: Create authentik configuration directory
       file:
@@ -144,7 +184,7 @@
           Restart=on-failure
           RestartSec=10
           Environment=AUTHENTIK_TAG={{ authentik_version }}
-          Environment=AUTHENTIK_IMAGE={{ authentik_image }}
+          Environment=AUTHENTIK_IMAGE={{ authentik_registry_image }}
           Environment=AUTHENTIK_PORT={{ authentik_port }}
 
           [Install]
