@@ -51,7 +51,9 @@ ansible-lint:
     ANSIBLE_LOCAL_TMP: "$CI_PROJECT_DIR/.cache/ansible/tmp"
     TMPDIR: "$CI_PROJECT_DIR/.cache/tmp"
   script:
-    - python -m pip install 'ansible-lint==26.6.0'
+    # ansible-lint installs ansible-core only. The full ansible package
+    # supplies the bundled collections needed by our playbooks.
+    - python -m pip install 'ansible==13.2.0' 'ansible-lint==26.6.0'
     # A fresh checkout has neither the cluster inventory nor vault secrets.
     # files/ holds runtime assets such as Authentik blueprints, not playbooks.
     - ansible-lint --profile min --offline --nocolor --exclude config/ansible/vault --exclude 'config/ansible/*/files' config/ansible

@@ -5,11 +5,7 @@
 #   just lint-yaml        yamllint (config/ansible/**/*.yml + root yamls)
 #   just lint-python      ty (admin-api + ycluster package + contrib/)
 #   just lint-go          go vet on local-ai-proxy
-#
-# ansible-lint is intentionally not wired up: it needs cluster inventory +
-# a vault password to syntax-check our plays, so it's not runnable from a
-# fresh checkout. Add a target when that's solvable (probably a stub
-# playbook set + a `--exclude` for vault-using roles).
+#   just lint-ansible     ansible-lint (config/ansible; no inventory needed)
 
 # yamllint default rules are too strict (line-length 80, document-start
 # required, indentation style mandated) for the codebase as it stands;
@@ -19,7 +15,7 @@
 # Override with `YAMLLINT_EXTRA_ARGS=...`.
 export YAMLLINT_ARGS := "-d '{extends: relaxed, rules: {line-length: disable, indentation: disable, comments-indentation: disable, comments: disable, truthy: disable, braces: disable, octal-values: disable, empty-lines: disable, empty-values: disable, quoted-strings: disable, trailing-spaces: disable}}' " + env_var_or_default('YAMLLINT_EXTRA_ARGS', '')
 
-lint: lint-yaml lint-python lint-go
+lint: lint-yaml lint-python lint-go lint-ansible
 
 lint-yaml:
     yamllint {{YAMLLINT_ARGS}} \
@@ -30,6 +26,13 @@ lint-yaml:
 
 lint-python:
     @if command -v ty >/dev/null 2>&1; then ty check; else echo "ty not installed; skipping lint-python (install with 'just setup-tools')"; fi
+
+lint-ansible:
+    @test -x .venv/bin/ansible-lint || { echo 'ansible-lint not installed; run just setup-venv'; exit 1; }
+    @mkdir -p ./tmp/ansible ./tmp/ansible-tmp
+    @ANSIBLE_HOME="$PWD/tmp/ansible" ANSIBLE_LOCAL_TMP="$PWD/tmp/ansible-tmp" TMPDIR="$PWD/tmp" \
+        .venv/bin/ansible-lint --profile min --offline --nocolor \
+        --exclude config/ansible/vault --exclude 'config/ansible/*/files' config/ansible
 
 lint-go:
     make -C local-ai-proxy vet
