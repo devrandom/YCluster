@@ -45,6 +45,9 @@ just test
 just metrics
 ```
 
+Also run `git diff --check`. If the change touches goroutines, timers, shared
+state, or other concurrency seams, run `make -C local-ai-proxy test-race`.
+
 Fix failures in the issue's scope before publishing. If a metrics change is
 intentional cleanup, run `just metrics-adopt`, review the baseline diff, and
 include `scripts/metrics/baseline.json` in the change. Never adopt a baseline
