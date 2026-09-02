@@ -30,10 +30,17 @@
         state: started
         enabled: yes
 
+    - name: Create registry group
+      group:
+        name: registry
+        gid: 9001
+        system: yes
+
     - name: Create registry user
       user:
         name: registry
         uid: 9001
+        group: registry
         system: yes
         shell: /bin/false
         home: /var/lib/registry
