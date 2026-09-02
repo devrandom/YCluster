@@ -286,7 +286,7 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, 
 		h.Metrics.ObserveAttempt(model, backendStr, resp.StatusCode, false, 0)
 		h.Metrics.ObserveRetry(backendStr, retryReasonForStatus(resp.StatusCode))
 		h.logger.Info("upstream error status, retrying", "status", resp.StatusCode, "backend", backendStr)
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return false
 	}
 
