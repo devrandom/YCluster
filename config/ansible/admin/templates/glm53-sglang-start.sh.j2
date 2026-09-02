@@ -18,7 +18,7 @@
 # performance and concurrency before raising it back toward 0.90.
 #
 # Tunable knobs (env-var overrides):
-#   IMAGE / MODEL_HOST / CONTAINER / PORT / SERVED_NAME / GPUS / MEM / CACHE_DIR / MEM_FRACTION
+#   IMAGE / MODEL_HOST / CONTAINER / PORT / SERVED_NAME / GPUS / MEM / CACHE_DIR / MEM_FRACTION / CHUNKED_PREFILL_SIZE
 #
 # Managed by admin/install-glm53-flash.yml — edit there.
 # See docs/inference/glm-5.3-flash-deploy-2026-08.md.
@@ -63,6 +63,12 @@ MEM="${MEM:-80g}"
 # See the headroom note above; tunable via MEM_FRACTION or the playbook var
 # glm53_mem_fraction_static.
 MEM_FRACTION="${MEM_FRACTION:-{{ glm53_mem_fraction_static }}}"
+# Tokens per chunked-prefill step / max prefill tokens. Lowering this caps the
+# transient per-layer logits workspace on long-context prefills (the
+# deep_gemm.fp8_mqa_logits OOM in sgl-project/sglang#36941) at the cost of a
+# little prefill throughput. Tunable via CHUNKED_PREFILL_SIZE or the playbook
+# var glm53_chunked_prefill_size.
+CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-{{ glm53_chunked_prefill_size | default(8192) }}}"
 
 # pre-flight (no root needed)
 podman image exists "$IMAGE" \
@@ -124,8 +130,8 @@ podman run -d --name "$CONTAINER" \
     --kv-cache-dtype fp8_e4m3 \
     --moe-runner-backend flashinfer_cutlass \
     --disable-shared-experts-fusion \
-    --chunked-prefill-size 8192 \
-    --max-prefill-tokens 8192 \
+    --chunked-prefill-size "$CHUNKED_PREFILL_SIZE" \
+    --max-prefill-tokens "$CHUNKED_PREFILL_SIZE" \
     --max-running-requests 8 \
     --mem-fraction-static "$MEM_FRACTION" \
     --cuda-graph-max-bs-decode 8 \
