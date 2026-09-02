@@ -59,6 +59,7 @@
         dest: "{{ proxy_build_dir }}/"
         delete: yes
         recursive: yes
+        use_ssh_args: true
         rsync_opts:
           - "--exclude=bin/"
           - "--exclude=.git/"

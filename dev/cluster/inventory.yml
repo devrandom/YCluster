@@ -84,6 +84,12 @@ all:
     etcdctl_endpoints: "{{ groups['etcd'] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.+)$', etcd_scheme ~ '://\\1:' ~ etcd_client_port) | join(',') }}"
     etcd_tls_env: "{{ {'ETCD_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCD_CERT': etcd_tls_dir ~ '/client.crt', 'ETCD_KEY': etcd_tls_dir ~ '/client.key', 'ETCDCTL_CACERT': etcd_tls_dir ~ '/ca.crt', 'ETCDCTL_CERT': etcd_tls_dir ~ '/client.crt', 'ETCDCTL_KEY': etcd_tls_dir ~ '/client.key'} if (etcd_client_tls | default(false)) else {} }}"
     etcd_client_env: "{{ {'ETCD_HOSTS': etcd_hosts, 'ETCDCTL_ENDPOINTS': etcdctl_endpoints} | combine(etcd_tls_env) }}"
+  hosts:
+    # Playbooks with delegate_to: localhost use the controller's HOME for
+    # remote_tmp; make that explicit and keep it inside the repo sandbox.
+    localhost:
+      ansible_connection: local
+      ansible_remote_tmp: "{{ inventory_dir }}/../../tmp/ansible-remote"
   children:
     etcd:
       hosts:

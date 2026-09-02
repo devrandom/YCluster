@@ -80,6 +80,7 @@
         src: "templates/"
         dest: "{{ admin_services_dir }}/templates/"
         delete: yes
+        use_ssh_args: true
         rsync_opts:
           - "--checksum"
           - "--no-owner"

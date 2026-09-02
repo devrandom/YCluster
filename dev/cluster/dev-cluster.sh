@@ -290,7 +290,7 @@ configure_net() {
   # ends up with no IP after any docker restart — host.docker.internal
   # breaks inside the authentik container and postgres becomes unreachable.
   local iface
-  iface=$(INCUS exec "$n" -- sh -c 'ip -o link show | grep -vE "(: )(lo|docker|veth|br-)" | awk -F": " "{print \$2}" | awk "{print \$1}" | head -1' 2>/dev/null)
+  iface=$(INCUS exec "$n" -- sh -c 'ip -o link show | grep -vE "(: )(lo|docker|veth|br-|incusbr)" | awk -F": " "{print \$2}" | awk "{print \$1}" | head -1' 2>/dev/null)
   iface="${iface:-eth0}"
   iface="${iface%@*}"  # strip @ifN suffix from veth pairs
   INCUS exec "$n" -- sh -c 'rm -f /etc/netplan/*.yaml /run/systemd/network/*netplan*'

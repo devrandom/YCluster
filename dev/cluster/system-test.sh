@@ -58,6 +58,8 @@ PLAYBOOK="../../.venv/bin/ansible-playbook"
 if [ -z "$PLAYBOOK" ] || ! [ -x "$PLAYBOOK" ]; then
   die "ansible-playbook not found (looked for ../../.venv/bin/ansible-playbook and \$PATH)"
 fi
+# synchronize runs rsync from a different cwd; keep its SSH config path absolute.
+export ANSIBLE_SSH_ARGS="-F ${SCRIPT_PATH%/*}/.ssh/config -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ControlMaster=auto -o ControlPersist=120s -o ControlPath=/tmp/ansible-ssh-%h-%p-%r"
 CORE=(s1 s2 s3)
 declare -A IP=( [s1]=10.0.0.11 [s2]=10.0.0.12 [s3]=10.0.0.13 [c1]=10.0.0.51 [c2]=10.0.0.52 [f1]=10.0.0.41 [pebble]=10.0.0.42 )
 VIP=10.0.0.100

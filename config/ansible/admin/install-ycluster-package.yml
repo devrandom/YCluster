@@ -61,6 +61,7 @@
         dest: "{{ ycluster_package_dir }}/"
         delete: yes
         recursive: yes
+        use_ssh_args: true
         rsync_opts:
           - "--checksum"
           - "--no-owner"
