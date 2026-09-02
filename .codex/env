@@ -1,27 +1,32 @@
-# Codex agent shell environment. This file is loaded via BASH_ENV in *every*
-# bash subshell in this repo (including just recipes), so the redirects below
-# are conditional: they only kick in when the default home locations are not
-# writable (Codex sandbox / restricted environments). On a normal dev machine
-# with writable ~/go, ~/.local, and ~/.cache, uv/go use their defaults.
+# Agent shell environment. This file is loaded via BASH_ENV in *every* bash
+# subshell in this repo (including just recipes).
 #
-#   tmp/gopath/bin  govulncheck, osv-scanner (built here via `go install`
-#                   when the default GOPATH isn't writable)
-#   tmp/bin         uv tool executables (UV_TOOL_BIN_DIR redirect)
-#   tmp/uv-tools    uv tool environments
-#   tmp/xdg-cache   XDG cache for tools that honor it
-#   tmp/gopath, tmp/go-cache, tmp/uv-cache — Go + uv scratch caches
-export PATH=$PWD/tmp/gopath/bin:$PWD/tmp/bin:$PWD/.venv/bin:$PWD/mcp/cluster-exec:$HOME/.opencode/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin
-
-if [ ! -w "$HOME/go" ]; then
-    export GOPATH=$PWD/tmp/gopath
-    export GOMODCACHE=$PWD/tmp/gopath/pkg/mod
-    export GOCACHE=$PWD/tmp/go-cache
+# Resolve the current checkout or worktree even when a shell starts in a
+# subdirectory. All scratch state lives under the matching gitignored ./tmp,
+# so worktrees do not contend for the main checkout's caches.
+if ! _repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    _repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 fi
+YC_TMP_ROOT="$_repo_root/tmp"
+mkdir -p "$YC_TMP_ROOT/xdg-runtime" "$YC_TMP_ROOT/go-cache" \
+    "$YC_TMP_ROOT/gotmp" "$YC_TMP_ROOT/gopath" "$YC_TMP_ROOT/xdg-cache" \
+    "$YC_TMP_ROOT/uv-cache" "$YC_TMP_ROOT/uv-tools" "$YC_TMP_ROOT/bin"
+
+# `just` needs a writable runtime dir; it is under /run in some sandboxes.
+export XDG_RUNTIME_DIR="$YC_TMP_ROOT/xdg-runtime"
+export GOCACHE="$YC_TMP_ROOT/go-cache"
+export GOTMPDIR="$YC_TMP_ROOT/gotmp"
+export GOPATH="$YC_TMP_ROOT/gopath"
+export GOMODCACHE="$GOPATH/pkg/mod"
+
+# uv tools remain global when the normal user locations are writable.
+export PATH=$YC_TMP_ROOT/gopath/bin:$YC_TMP_ROOT/bin:$PWD/.venv/bin:$PWD/mcp/cluster-exec:$HOME/.opencode/bin:$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+
 if [ ! -w "$HOME/.local" ]; then
-    export UV_CACHE_DIR=$PWD/tmp/uv-cache
-    export UV_TOOL_DIR=$PWD/tmp/uv-tools
-    export UV_TOOL_BIN_DIR=$PWD/tmp/bin
+    export UV_CACHE_DIR=$YC_TMP_ROOT/uv-cache
+    export UV_TOOL_DIR=$YC_TMP_ROOT/uv-tools
+    export UV_TOOL_BIN_DIR=$YC_TMP_ROOT/bin
 fi
 if [ ! -w "$HOME/.cache" ]; then
-    export XDG_CACHE_HOME=$PWD/tmp/xdg-cache
+    export XDG_CACHE_HOME=$YC_TMP_ROOT/xdg-cache
 fi

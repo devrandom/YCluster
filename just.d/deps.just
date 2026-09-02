@@ -27,22 +27,19 @@ check: deps-verify vulncheck
 # Static and non-executing; it does need network (or a warm vuln DB cache).
 vulncheck:
     @command -v govulncheck >/dev/null 2>&1 || { echo "govulncheck not installed — run: just deps-tools" >&2; exit 1; }
-    @mkdir -p ./tmp/go-cache
-    @GOCACHE="$(pwd)/tmp/go-cache" bash -c 'cd local-ai-proxy && govulncheck ./...'
+    @bash -c 'cd local-ai-proxy && govulncheck ./...'
 
 # Verify the local module cache still matches the pinned go.sum (integrity
 # check), and that go.sum is tracked so "what you scanned is what you ship".
 deps-verify:
-    @mkdir -p ./tmp/go-cache
-    @GOCACHE="$(pwd)/tmp/go-cache" bash -c 'cd local-ai-proxy && go mod verify'
+    @bash -c 'cd local-ai-proxy && go mod verify'
     @git ls-files --error-unmatch local-ai-proxy/go.sum >/dev/null 2>&1 || { echo "go.sum is not tracked — commit it so the scanned checksums ship" >&2; exit 1; }
 
 # Re-pin go.mod/go.sum to the code's real imports, then verify integrity.
 # Run after adding/removing an import or bumping a dependency. This is the
 # maintenance flow that must land as its own commit (go.mod + go.sum).
 deps-tidy:
-    @mkdir -p ./tmp/go-cache
-    @GOCACHE="$(pwd)/tmp/go-cache" bash -c 'cd local-ai-proxy && go mod tidy && go mod verify'
+    @bash -c 'cd local-ai-proxy && go mod tidy && go mod verify'
 
 # Install (or refresh) the dependency-hygiene audit tooling the gate needs —
 # encodes what were one-off installs so a fresh machine can stand it up:

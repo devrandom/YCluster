@@ -24,14 +24,7 @@ metrics-mutate:
     set -euo pipefail
     LOG="$(pwd)/tmp/metrics-mutants.log"
     ROOT="$(pwd)"
-    # Keep gremlins/go builds off the (small) /tmp tmpfs. GOPATH must be
-    # absolute: a relative one resolves against the cwd, so commands run in
-    # local-ai-proxy would drop their module cache inside the module tree,
-    # where the metric tools' recursive scans then choke on it.
-    mkdir -p "$ROOT/tmp/go-cache" "$ROOT/tmp/gotmp" "$ROOT/tmp/gopath"
-    export GOCACHE="$ROOT/tmp/go-cache" GOTMPDIR="$ROOT/tmp/gotmp" TMPDIR="$ROOT/tmp/gotmp"
-    export GOPATH="$ROOT/tmp/gopath"
-    (cd local-ai-proxy && "$ROOT/tmp/go-bin/gremlins" unleash 2>&1) | tee "$LOG"
+    (cd local-ai-proxy && "$ROOT/tmp/gopath/bin/gremlins" unleash 2>&1) | tee "$LOG"
     # gremlins leaves a module cache inside the module dir when GOPATH is
     # relative; sweep any residue so the metric scans stay clean.
     if [ -d local-ai-proxy/tmp ]; then
@@ -48,8 +41,6 @@ metrics-mutate:
 metrics-tools:
     #!/bin/bash
     set -euo pipefail
-    mkdir -p ./tmp/go-cache ./tmp/go-bin ./tmp/gotmp
-    export GOCACHE="$(pwd)/tmp/go-cache" GOBIN="$(pwd)/tmp/go-bin" GOTMPDIR="$(pwd)/tmp/gotmp"
     while read -r mod; do
         [ -z "$mod" ] && continue
         case "$mod" in \#*) continue ;; esac

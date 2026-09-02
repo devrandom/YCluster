@@ -32,4 +32,4 @@ lint-python:
     @if command -v ty >/dev/null 2>&1; then ty check; else echo "ty not installed; skipping lint-python (install with 'just setup-tools')"; fi
 
 lint-go:
-    GOCACHE="$(pwd)/tmp/go-cache" make -C local-ai-proxy vet
+    make -C local-ai-proxy vet
