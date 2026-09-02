@@ -116,6 +116,7 @@ start_openwebui() {
         echo "OAUTH_CLIENT_ID=open-webui" >> "$env_file"
         echo "OAUTH_CLIENT_SECRET=$oidc_secret" >> "$env_file"
         echo "OPENID_PROVIDER_URL=https://auth.$external_domain/application/o/open-webui/.well-known/openid-configuration" >> "$env_file"
+        echo "OAUTH_SCOPES=openid email profile offline_access" >> "$env_file"
         echo "ENABLE_OAUTH_SIGNUP=True" >> "$env_file"
         echo "OAUTH_MERGE_ACCOUNTS_BY_EMAIL=True" >> "$env_file"
         echo "ENABLE_SIGNUP=False" >> "$env_file"
