@@ -1083,8 +1083,17 @@ class VMMemoryPreflightTests(unittest.TestCase):
         with mock.patch('builtins.open', mock.mock_open(read_data=data)):
             self.assertEqual(vm._meminfo_available_bytes(), 22037852 * 1024)
 
+    def test_meminfo_missing_or_malformed_raises(self):
+        for data in ('MemTotal: 1 kB\n', 'MemAvailable: 12345\n'):
+            with self.subTest(meminfo=data):
+                with mock.patch('builtins.open',
+                                mock.mock_open(read_data=data)):
+                    with self.assertRaisesRegex(RuntimeError,
+                                                'MemAvailable is unavailable'):
+                        vm._meminfo_available_bytes()
+
     @mock.patch.object(vm, '_incus_json')
-    def test_pinned_memory_counts_only_other_running_vms(self, list_json):
+    def test_running_memory_counts_only_running_vms(self, list_json):
         list_json.return_value = [
             {'name': 'target', 'status': 'Running',
              'type': 'virtual-machine', 'config': {'limits.memory': '64GiB'}},
@@ -1096,8 +1105,28 @@ class VMMemoryPreflightTests(unittest.TestCase):
             {'name': 'ct', 'status': 'Running', 'type': 'container',
              'config': {'limits.memory': '16GiB'}},
         ]
-        self.assertEqual(vm._pinned_vm_memory_bytes(exclude='target'),
-                         32 * 1024**3)
+        self.assertEqual(vm._running_vm_memory_bytes(),
+                         {'target': 64 * 1024**3,
+                          'vm2': 32 * 1024**3})
+
+    @mock.patch.object(vm, '_incus_json')
+    def test_preflight_rejects_missing_other_vm_limit(self, list_json):
+        list_json.return_value = [
+            {'name': 'other', 'status': 'Running',
+             'type': 'virtual-machine', 'config': {}},
+        ]
+        with self.assertRaisesRegex(ValueError, 'Invalid memory size'):
+            vm._running_vm_memory_bytes()
+
+    @mock.patch.object(vm, '_incus_json')
+    def test_preflight_rejects_invalid_other_vm_limit(self, list_json):
+        list_json.return_value = [
+            {'name': 'other', 'status': 'Running',
+             'type': 'virtual-machine',
+             'config': {'limits.memory': 'not-a-size'}},
+        ]
+        with self.assertRaisesRegex(ValueError, 'Invalid memory size'):
+            vm._preflight_vm_memory('target', '32GiB', 'start')
 
     @mock.patch.object(vm, '_incus_json', return_value=[])
     def test_preflight_failure_names_constraint(self, list_json):
@@ -1110,6 +1139,50 @@ class VMMemoryPreflightTests(unittest.TestCase):
         self.assertEqual(list_json.call_count, 1)
         self.assertIn(f"need at least {vm._format_memory_bytes(required)}",
                       str(raised.exception))
+
+    @mock.patch.object(vm, '_incus_json', return_value=[])
+    def test_preflight_passes_at_exact_boundary(self, list_json):
+        available = 32 * 1024**3 + vm.VM_MEMORY_MARGIN_BYTES
+        with mock.patch.object(vm, '_meminfo_available_bytes',
+                               return_value=available):
+            vm._preflight_vm_memory('example-vm', '32GiB', 'launch')
+
+    @mock.patch.object(vm, '_incus_json')
+    def test_preflight_counts_running_target_as_replacement(self, list_json):
+        list_json.return_value = [
+            {'name': 'target', 'status': 'Running',
+             'type': 'virtual-machine',
+             'expanded_config': {'limits.memory': '32GiB'}},
+            {'name': 'other', 'status': 'Running',
+             'type': 'virtual-machine',
+             'expanded_config': {'limits.memory': '16GiB'}},
+        ]
+        replacement_required = 16 * 1024**3 + vm.VM_MEMORY_MARGIN_BYTES
+        with mock.patch.object(vm, '_meminfo_available_bytes',
+                               return_value=replacement_required):
+            vm._preflight_vm_memory('target', '32GiB', 'restart')
+        with mock.patch.object(vm, '_meminfo_available_bytes',
+                               return_value=replacement_required - 1):
+            with self.assertRaisesRegex(RuntimeError, 'MemAvailable'):
+                vm._preflight_vm_memory('target', '32GiB', 'restart')
+
+    @mock.patch.object(vm, '_instance_running', return_value=True)
+    @mock.patch.object(vm, '_incus_stop')
+    @mock.patch.object(vm, 'vm_get',
+                       return_value={'gpus': 1, 'mem': '32GiB'})
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_ensure_gpus_attached')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_record_event_from_record')
+    @mock.patch.object(vm, '_warn_desired_conflict')
+    def test_restart_preflight_uses_registered_memory(
+            self, warn, event, incus, attach, share, preflight, vm_get,
+            stop, running):
+        vm.vm_restart('vm1')
+        preflight.assert_called_once_with('vm1', '32GiB', 'restart')
+        stop.assert_called_once_with('vm1')
+        incus.assert_called_once_with('start', 'vm1')
 
     @mock.patch.object(vm, '_validate_vm_launch', return_value='vm')
     @mock.patch.object(vm, '_preflight_vm_memory',

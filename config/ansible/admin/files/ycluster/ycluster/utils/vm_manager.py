@@ -237,24 +237,30 @@ def _meminfo_available_bytes(meminfo_path="/proc/meminfo"):
         raise RuntimeError("host MemAvailable is unavailable") from e
     raise RuntimeError("host MemAvailable is unavailable")
 
-def _pinned_vm_memory_bytes(exclude=None):
-    """Return RAM pinned by other currently running VMs on this host."""
-    total = 0
+def _running_vm_memory_bytes():
+    """Return {name: limits.memory} for currently running VMs."""
+    limits = {}
     for inst in _incus_json("list", "--format", "json"):
         if (inst.get("status") != "Running"
-                or inst.get("type") != "virtual-machine"
-                or inst.get("name") == exclude):
+                or inst.get("type") != "virtual-machine"):
             continue
+        name = inst.get("name")
         config = inst.get("expanded_config") or inst.get("config") or {}
-        total += _memory_bytes(config.get("limits.memory"))
-    return total
+        limits[name] = _memory_bytes(config.get("limits.memory"))
+    return limits
 
 def _preflight_vm_memory(name, requested, action):
     """Refuse to pin guest RAM when the host cannot safely cover it."""
     requested_bytes = _memory_bytes(requested)
     available_bytes = _meminfo_available_bytes()
-    pinned_bytes = _pinned_vm_memory_bytes(exclude=name)
-    required_bytes = (requested_bytes + pinned_bytes
+    running_limits = _running_vm_memory_bytes()
+    pinned_bytes = sum(memory for instance, memory in running_limits.items()
+                       if instance != name)
+    # A restart releases the VM's current pinned RAM before reclaiming the
+    # configured limit, so require only the increase over what it holds.
+    replacement_bytes = min(requested_bytes,
+                            running_limits.get(name, 0))
+    required_bytes = (requested_bytes - replacement_bytes + pinned_bytes
                       + VM_MEMORY_MARGIN_BYTES)
     if available_bytes < required_bytes:
         raise RuntimeError(
@@ -1285,6 +1291,11 @@ def vm_start(name, billable=False, initiator="cli", gpus=None):
         _warn_desired_conflict(name, "start")
 
 def vm_restart(name, billable=False, initiator="cli"):
+    record = vm_get(name) or {}
+    mem = record.get("mem") or _incus_config_value(name, "limits.memory")
+    if not mem:
+        raise RuntimeError(f"Cannot determine memory limit for '{name}'")
+    _preflight_vm_memory(name, mem, "restart")
     if _instance_running(name):
         _incus_stop(name)
     _ensure_nas_share(name)
