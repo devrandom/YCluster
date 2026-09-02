@@ -412,6 +412,13 @@
           || { incus profile device add gpu-ct root disk path=/ pool=default; echo changed; }
         incus profile device get gpu-ct eth0 network >/dev/null 2>&1 \
           || { incus profile device add gpu-ct eth0 nic network=incusbr0; echo changed; }
+        # c2 itself is unprivileged on the host; the nested instance must be
+        # privileged relative to c2 or newuidmap cannot install the second
+        # level of uid/gid mapping.
+        if [ "$(incus profile get gpu-ct security.privileged)" != "true" ]; then
+          incus profile set gpu-ct security.privileged=true
+          echo changed
+        fi
       register: incus_profile
       changed_when: "'changed' in incus_profile.stdout"
 
