@@ -40,7 +40,6 @@ Categories: [security](#security) ·
 DR, backups, node lifecycle, scaling/capacity.
 
 ### Backups & DR
-- **[HIGH]** [DR runbooks](lifecycle/dr-runbooks.md) — etcd quorum loss is the only unrecoverable failure mode; `etcd.md`/`ceph.md` point at procedures that don't exist.
 - **[HIGH]** [Ceph off-cluster backup](lifecycle/ceph-off-cluster-backup.md) — paired with DR; docker registry blobs + any hand-placed RBD content has no off-cluster copy.
 - [Periodic test-restore job](lifecycle/test-restore-job.md)
 - [Backup restore subcommand](lifecycle/backup-restore-subcommand.md)
