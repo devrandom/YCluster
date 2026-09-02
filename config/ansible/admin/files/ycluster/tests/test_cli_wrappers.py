@@ -4,7 +4,6 @@ import argparse
 import io
 import json
 import contextlib
-import requests
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -222,101 +221,134 @@ class TLSWrapperTests(unittest.TestCase):
             call(tls.ca_info)
 
 
+class FakeEtcdClient:
+    def __init__(self, error=None):
+        self.values = {}
+        self.error = error
+
+    def put(self, key, value):
+        if self.error:
+            raise self.error
+        self.values[key] = value
+
+    def get(self, key):
+        if self.error:
+            raise self.error
+        value = self.values.get(key)
+        return (value.encode(), None) if value else (None, None)
+
+    def delete(self, key):
+        if self.error:
+            raise self.error
+        self.values.pop(key, None)
+
+
 class HealthchecksTests(unittest.TestCase):
-    def test_registration_and_url_commands(self):
+    def setUp(self):
         parser = argparse.ArgumentParser()
         healthchecks.register_healthchecks_commands(parser.add_subparsers())
+        self.parser = parser
 
-        client = SimpleNamespace(
-            get=lambda key: (None, None),
-            put=mock.Mock(), delete=mock.Mock())
+    def run_cli(self, argv, client):
+        out = io.StringIO()
+        err = io.StringIO()
         with mock.patch.object(healthchecks, 'get_etcd_client',
                                return_value=client):
-            call(healthchecks.healthchecks_set_url,
-                 url=' https://example.test/ping ')
-            client.put.assert_called_once_with(
-                healthchecks.ETCD_KEY, 'https://example.test/ping')
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_get_url)
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_delete_url)
+            try:
+                args = self.parser.parse_args(argv)
+                with contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(err):
+                    args.func(args)
+            except SystemExit as exc:
+                self.assertEqual(exc.code, 1)
+                return out.getvalue(), err.getvalue(), True
+        return out.getvalue(), err.getvalue(), False
 
-        client.get = lambda key: (b'https://example.test/ping', None)
-        with mock.patch.object(healthchecks, 'get_etcd_client',
-                               return_value=client):
-            call(healthchecks.healthchecks_delete_url)
-            client.delete.assert_called_once_with(healthchecks.ETCD_KEY)
+    def test_registration_and_url_commands(self):
+        client = FakeEtcdClient()
+        out, err, failed = self.run_cli(
+            ['healthchecks', 'set-url', ' https://example.test/ping '],
+            client)
+        self.assertFalse(failed)
+        self.assertIn('https://example.test/ping', out)
+        self.assertEqual(
+            client.values[healthchecks.ETCD_KEY],
+            'https://example.test/ping')
 
-    def test_error_paths(self):
-        bad_client = SimpleNamespace(get=lambda key: (None, None))
-        with mock.patch.object(healthchecks, 'get_etcd_client',
-                               return_value=bad_client), \
-                mock.patch('sys.stderr'):
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_set_url, url='bad')
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_get_url)
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_delete_url)
+        out, err, failed = self.run_cli(['healthchecks', 'get-url'], client)
+        self.assertFalse(failed)
+        self.assertIn('Healthchecks URL: https://example.test/ping', out)
 
-        error_client = SimpleNamespace(
-            get=mock.Mock(side_effect=RuntimeError('boom')),
-            put=mock.Mock(side_effect=RuntimeError('boom')),
-            delete=mock.Mock(side_effect=RuntimeError('boom')))
-        with mock.patch.object(healthchecks, 'get_etcd_client',
-                               return_value=error_client), \
-                mock.patch('sys.stderr'):
-            for func, kwargs in [
-                    (healthchecks.healthchecks_set_url,
-                     {'url': 'https://example.test/ping'}),
-                    (healthchecks.healthchecks_get_url, {}),
-                    (healthchecks.healthchecks_delete_url, {})]:
-                with self.assertRaises(SystemExit):
-                    call(func, **kwargs)
+        out, err, failed = self.run_cli(['healthchecks', 'delete-url'], client)
+        self.assertFalse(failed)
+        self.assertIn('Healthchecks URL deleted', out)
+        self.assertNotIn(healthchecks.ETCD_KEY, client.values)
 
-        no_url_client = SimpleNamespace(get=lambda key: (None, None))
-        with mock.patch.object(healthchecks, 'get_etcd_client',
-                               return_value=no_url_client), \
-                mock.patch('sys.stderr'):
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_test)
+    def test_missing_url_error_paths(self):
+        out, err, failed = self.run_cli(
+            ['healthchecks', 'set-url', 'bad'], FakeEtcdClient())
+        self.assertTrue(failed)
+        self.assertIn('URL must start with', err)
 
-        bad_client = SimpleNamespace(
-            get=mock.Mock(side_effect=RuntimeError('boom')))
-        with mock.patch.object(healthchecks, 'get_etcd_client',
-                               return_value=bad_client), \
-                mock.patch('sys.stderr'):
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_test)
+        out, err, failed = self.run_cli(
+            ['healthchecks', 'get-url'], FakeEtcdClient())
+        self.assertTrue(failed)
+        self.assertIn('No healthchecks URL configured', out)
 
-    def test_test_ping(self):
-        client = SimpleNamespace(get=lambda key: (
-            b'https://example.test/ping', None))
+        out, err, failed = self.run_cli(
+            ['healthchecks', 'delete-url'], FakeEtcdClient())
+        self.assertTrue(failed)
+        self.assertIn('No healthchecks URL configured', out)
+
+    def test_etcd_error_paths(self):
+        for argv in [
+                ['healthchecks', 'set-url', 'https://example.test/ping'],
+                ['healthchecks', 'get-url'],
+                ['healthchecks', 'delete-url'],
+                ['healthchecks', 'test']]:
+            out, err, failed = self.run_cli(argv, FakeEtcdClient(error=RuntimeError('boom')))
+            self.assertTrue(failed)
+            self.assertIn('boom', err)
+
+    def test_test_ping_result(self):
+        client = FakeEtcdClient()
+        client.values[healthchecks.ETCD_KEY] = 'https://example.test/ping'
         response = SimpleNamespace(status_code=200)
+        out = io.StringIO()
+        err = io.StringIO()
         with mock.patch.object(healthchecks, 'get_etcd_client',
                                return_value=client), \
-                mock.patch('requests.post', return_value=response) as post, \
+                mock.patch('requests.post', return_value=response), \
                 mock.patch('socket.gethostname', return_value='host-a'):
-            call(healthchecks.healthchecks_test)
-            post.assert_called_once()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                args = self.parser.parse_args(['healthchecks', 'test'])
+                args.func(args)
+        self.assertIn('Test ping sent successfully', out.getvalue())
 
-        client.get = lambda key: (b'https://example.test/ping', None)
+        client.values[healthchecks.ETCD_KEY] = 'https://example.test/ping'
+        out = io.StringIO()
+        err = io.StringIO()
+        failed = False
         with mock.patch.object(healthchecks, 'get_etcd_client',
                                return_value=client), \
                 mock.patch('requests.post',
                            return_value=SimpleNamespace(status_code=500)), \
-                mock.patch('socket.gethostname', return_value='host-a'), \
-                mock.patch('sys.stderr'):
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_test)
-        with mock.patch.object(healthchecks, 'get_etcd_client',
-                               return_value=client), \
-                mock.patch('requests.post',
-                           side_effect=requests.RequestException('boom')), \
-                mock.patch('socket.gethostname', return_value='host-a'), \
-                mock.patch('sys.stderr'):
-            with self.assertRaises(SystemExit):
-                call(healthchecks.healthchecks_test)
+                mock.patch('socket.gethostname', return_value='host-a'):
+            try:
+                args = self.parser.parse_args(['healthchecks', 'test'])
+                with contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(err):
+                    args.func(args)
+            except SystemExit as exc:
+                failed = exc.code == 1
+        self.assertTrue(failed)
+        self.assertIn('Test ping failed with HTTP 500', err.getvalue())
+
+    def test_test_ping_requires_url(self):
+        out, err, failed = self.run_cli(['healthchecks', 'test'],
+                                        FakeEtcdClient())
+        self.assertTrue(failed)
+        self.assertIn('No healthchecks URL configured', err)
 
 
 if __name__ == '__main__':

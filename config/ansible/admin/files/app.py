@@ -70,6 +70,8 @@ from app_helpers import (_add_health_service, _assemble_intervals,
                          _parse_windows, _required_service_health,
                          _standby_service_health, _storage_vip_health,
                          _usage_row)
+from health_common import (check_port_open, check_service_status,
+                           check_tang_service)
 from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
@@ -399,26 +401,6 @@ def get_hosts():
     return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
 
 
-def check_service_status(service_name):
-    """Check if a systemd service is active"""
-    try:
-        result = subprocess.run(['systemctl', 'is-active', service_name], 
-                              capture_output=True, text=True, timeout=5)
-        return result.stdout.strip() == 'active'
-    except:
-        return False
-
-def check_port_open(host, port, timeout=3):
-    """Check if a port is open on a host"""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
-    except:
-        return False
-
 def check_ceph_status():
     """Check Ceph cluster health"""
     try:
@@ -718,77 +700,6 @@ def check_docker_registry():
             'status': 'error',
             'details': {'message': f'Registry check failed: {str(e)}'}
         }
-
-
-def _tang_advertisement_status():
-    """Probe the Tang advertisement endpoint.
-
-    Returns (healthy, keys, error) — healthy is True when the endpoint
-    returned 200, keys is the advertised key count (or 'unknown'), and
-    error carries a human-readable failure description.
-    """
-    try:
-        response = requests.get('http://localhost:8777/adv', timeout=5)
-    except requests.exceptions.Timeout:
-        return False, None, 'Tang advertisement timeout'
-    except requests.exceptions.ConnectionError:
-        return False, None, 'Tang connection failed'
-    except Exception as e:
-        return False, None, f'Tang advertisement failed: {str(e)}'
-
-    if response.status_code != 200:
-        return False, None, f'Tang advertisement returned HTTP {response.status_code}'
-    try:
-        data = response.json()
-        if isinstance(data, dict) and 'keys' in data:
-            return True, len(data['keys']), None
-        return True, 'unknown', None
-    except Exception:
-        return True, 'unknown', None
-
-
-def _tang_health_from_probe(running, port_open, healthy, keys, error):
-    """Derive status/message from the service, port, and advertisement probes."""
-    if running and port_open and healthy:
-        status = 'healthy'
-        message = f'Tang server running and healthy ({keys} keys)'
-    elif running and port_open:
-        status = 'degraded'
-        message = f'Tang service running but advertisement failed: {error}'
-    elif running:
-        status = 'unhealthy'
-        message = f'Tang service running but port not accessible: {error}'
-    else:
-        status = 'unhealthy'
-        message = 'Tang service not running'
-    return status, message
-
-
-def check_tang_service():
-    """Check Tang server status and functionality"""
-    try:
-        running = check_service_status('tang-server.service')
-        port_open = check_port_open('localhost', 8777)
-
-        healthy, keys, error = (False, None, None)
-        if port_open:
-            healthy, keys, error = _tang_advertisement_status()
-
-        status, message = _tang_health_from_probe(running, port_open, healthy, keys, error)
-        return {
-            'status': status,
-            'details': {
-                'service_active': running,
-                'port_open': port_open,
-                'advertisement_working': healthy,
-                'key_count': keys,
-                'message': message,
-                'error': error
-            }
-        }
-    except Exception as e:
-        return {'status': 'error', 'details': {'message': f'Tang check failed: {str(e)}'}}
-
 
 
 def _secrets_mount_details():
