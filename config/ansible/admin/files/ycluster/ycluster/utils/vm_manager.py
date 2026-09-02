@@ -64,6 +64,8 @@ VM_ISSUE_PREFIX = "/cluster/vm-issue/"
 GPU_BLOCKS_PREFIX = "/cluster/gpu-blocks/"
 
 VM_PROFILE = "gpu-vm"
+# VFIO-pinned guest RAM cannot be overcommitted; reserve host/page-cache room.
+VM_MEMORY_MARGIN_BYTES = 4 * 1024**3
 VM_IMAGE = "ubuntu-cuda-vllm"          # default for VMs (GPU or not):
                                        # ubuntu-cuda + vLLM + FlashInfer AOT
                                        # cache. Pass --image ubuntu-cuda to
@@ -188,6 +190,78 @@ def _incus_stop(name):
 
 def _incus_json(*args):
     return json.loads(_incus(*args).stdout)
+
+_MEMORY_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B?)$",
+                        re.IGNORECASE)
+_MEMORY_SUFFIX_BYTES = {
+    "": 1, "B": 1,
+    "K": 1024, "KIB": 1024,
+    "M": 1024**2, "MIB": 1024**2,
+    "G": 1024**3, "GIB": 1024**3,
+    "T": 1024**4, "TIB": 1024**4,
+}
+
+def _memory_bytes(value):
+    """Parse an Incus limits.memory value into bytes."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value < 0:
+            raise ValueError(f"Invalid memory size: {value}")
+        return value
+    match = _MEMORY_RE.match(str(value).strip())
+    suffix = match.group(2).upper() if match else None
+    if not match or suffix not in _MEMORY_SUFFIX_BYTES:
+        raise ValueError(f"Invalid memory size: {value}")
+    return int(float(match.group(1)) * _MEMORY_SUFFIX_BYTES[suffix])
+
+def _format_memory_bytes(size):
+    """Render a memory size for a human-facing preflight failure."""
+    for divisor, suffix in ((1024**4, "TiB"), (1024**3, "GiB"),
+                            (1024**2, "MiB"), (1024, "KiB")):
+        if size % divisor == 0:
+            return f"{size // divisor}{suffix}"
+    return f"{size / 1024**3:.1f}GiB"
+
+def _meminfo_available_bytes(meminfo_path="/proc/meminfo"):
+    """Return the host's current MemAvailable in bytes."""
+    try:
+        with open(meminfo_path, encoding="ascii") as meminfo:
+            for line in meminfo:
+                key, value = line.split(":", 1)
+                if key.strip() != "MemAvailable":
+                    continue
+                fields = value.split()
+                if len(fields) != 2 or fields[1].lower() != "kb":
+                    break
+                return int(fields[0]) * 1024
+    except (OSError, ValueError) as e:
+        raise RuntimeError("host MemAvailable is unavailable") from e
+    raise RuntimeError("host MemAvailable is unavailable")
+
+def _pinned_vm_memory_bytes(exclude=None):
+    """Return RAM pinned by other currently running VMs on this host."""
+    total = 0
+    for inst in _incus_json("list", "--format", "json"):
+        if (inst.get("status") != "Running"
+                or inst.get("type") != "virtual-machine"
+                or inst.get("name") == exclude):
+            continue
+        config = inst.get("expanded_config") or inst.get("config") or {}
+        total += _memory_bytes(config.get("limits.memory"))
+    return total
+
+def _preflight_vm_memory(name, requested, action):
+    """Refuse to pin guest RAM when the host cannot safely cover it."""
+    requested_bytes = _memory_bytes(requested)
+    available_bytes = _meminfo_available_bytes()
+    pinned_bytes = _pinned_vm_memory_bytes(exclude=name)
+    required_bytes = (requested_bytes + pinned_bytes
+                      + VM_MEMORY_MARGIN_BYTES)
+    if available_bytes < required_bytes:
+        raise RuntimeError(
+            f"Refusing to {action} '{name}' ({requested}): host "
+            f"MemAvailable is {_format_memory_bytes(available_bytes)}, "
+            f"need at least {_format_memory_bytes(required_bytes)}. "
+            "Running VMs pin their RAM (VFIO); free one or lower --mem.")
 
 def _instance_exists(name):
     return _incus("info", name, check=False).returncode == 0
@@ -1085,6 +1159,10 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
         image = VM_IMAGE if instance_type == "vm" else CT_IMAGE
     profile = VM_PROFILE if instance_type == "vm" else CT_PROFILE
 
+    # Containers share host RAM; only a passthrough VM pins all of it.
+    if instance_type == "vm":
+        _preflight_vm_memory(name, mem, "launch")
+
     # GPU selection: VM path pins specific passthrough GPUs from the host's
     # vfio pool; container path shares the host's single GPU via the profile,
     # so 'gpus' here is just a 0/non-zero toggle. Wedged GPUs (PCIe
@@ -1179,12 +1257,17 @@ def vm_start(name, billable=False, initiator="cli", gpus=None):
     the VM's registered count). `gpus` is capped at the registered count
     so a caller can never over-allocate past the VM's allocation; 0
     runs the VM without any passthrough GPUs."""
+    record = vm_get(name) or {}
+    mem = record.get("mem") or _incus_config_value(name, "limits.memory")
+    if not mem:
+        raise RuntimeError(f"Cannot determine memory limit for '{name}'")
+    _preflight_vm_memory(name, mem, "start")
     # Backfill any host-side state added since this instance was created
     # (currently just the /data NAS share). Idempotent.
     _ensure_nas_share(name)
     # Re-acquire GPUs the scheduler released on a previous stop (or drop
     # extras when starting with fewer than registered).
-    registered = (vm_get(name) or {}).get("gpus") or 0
+    registered = record.get("gpus") or 0
     if gpus is not None:
         if not isinstance(gpus, int) or isinstance(gpus, bool) \
                 or gpus < 0 or gpus > registered:

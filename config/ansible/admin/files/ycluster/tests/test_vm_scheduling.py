@@ -1070,6 +1070,126 @@ class ValidateVMLaunchTests(unittest.TestCase):
             vm._validate_vm_launch('vm1', 'a@x', 1, 'vm')
 
 
+class VMMemoryPreflightTests(unittest.TestCase):
+    def test_memory_bytes(self):
+        self.assertEqual(vm._memory_bytes('32GiB'), 32 * 1024**3)
+        self.assertEqual(vm._memory_bytes('16MiB'), 16 * 1024**2)
+        self.assertEqual(vm._memory_bytes(2048), 2048)
+        with self.assertRaisesRegex(ValueError, 'Invalid memory size'):
+            vm._memory_bytes('not-a-size')
+
+    def test_meminfo_available_bytes(self):
+        data = 'MemTotal: 1 kB\nMemAvailable: 22037852 kB\n'
+        with mock.patch('builtins.open', mock.mock_open(read_data=data)):
+            self.assertEqual(vm._meminfo_available_bytes(), 22037852 * 1024)
+
+    @mock.patch.object(vm, '_incus_json')
+    def test_pinned_memory_counts_only_other_running_vms(self, list_json):
+        list_json.return_value = [
+            {'name': 'target', 'status': 'Running',
+             'type': 'virtual-machine', 'config': {'limits.memory': '64GiB'}},
+            {'name': 'vm2', 'status': 'Running',
+             'type': 'virtual-machine',
+             'expanded_config': {'limits.memory': '32GiB'}},
+            {'name': 'stopped', 'status': 'Stopped',
+             'type': 'virtual-machine', 'config': {'limits.memory': '8GiB'}},
+            {'name': 'ct', 'status': 'Running', 'type': 'container',
+             'config': {'limits.memory': '16GiB'}},
+        ]
+        self.assertEqual(vm._pinned_vm_memory_bytes(exclude='target'),
+                         32 * 1024**3)
+
+    @mock.patch.object(vm, '_incus_json', return_value=[])
+    def test_preflight_failure_names_constraint(self, list_json):
+        available = 21 * 1024**3
+        required = 32 * 1024**3 + vm.VM_MEMORY_MARGIN_BYTES
+        with mock.patch.object(vm, '_meminfo_available_bytes',
+                               return_value=available):
+            with self.assertRaisesRegex(RuntimeError, 'MemAvailable') as raised:
+                vm._preflight_vm_memory('example-vm', '32GiB', 'launch')
+        self.assertEqual(list_json.call_count, 1)
+        self.assertIn(f"need at least {vm._format_memory_bytes(required)}",
+                      str(raised.exception))
+
+    @mock.patch.object(vm, '_validate_vm_launch', return_value='vm')
+    @mock.patch.object(vm, '_preflight_vm_memory',
+                       side_effect=RuntimeError('overcommit'))
+    def test_launch_preflight_failure_stops_before_create(self, preflight,
+                                                          validate):
+        with self.assertRaisesRegex(RuntimeError, 'overcommit'):
+            vm.vm_launch('vm1', 'a@x', mem='32GiB')
+        validate.assert_called_once()
+        preflight.assert_called_once_with('vm1', '32GiB', 'launch')
+
+    @mock.patch.object(vm, '_select_free_gpus', return_value=[])
+    @mock.patch.object(vm, '_create_incus_instance')
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_validate_vm_launch', return_value='vm')
+    @mock.patch.object(vm, '_attach_launch_gpus')
+    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_put_json')
+    @mock.patch.object(vm, '_record_event')
+    @mock.patch.object(vm, '_wait_and_provision')
+    def test_launch_preflight_vm(self, wait, event, put, incus, share,
+                                 attach, validate, preflight, create, gpu):
+        vm.vm_launch('vm1', 'a@x', mem='32GiB')
+        preflight.assert_called_once_with('vm1', '32GiB', 'launch')
+        create.assert_called_once()
+
+    @mock.patch.object(vm, '_select_free_gpus', return_value=[])
+    @mock.patch.object(vm, '_create_incus_instance')
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_validate_vm_launch', return_value='container')
+    @mock.patch.object(vm, '_attach_launch_gpus')
+    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_put_json')
+    @mock.patch.object(vm, '_record_event')
+    @mock.patch.object(vm, '_wait_and_provision')
+    def test_launch_skips_container_preflight(self, wait, event, put, incus,
+                                              share, attach, validate,
+                                              preflight, create, gpu):
+        vm.vm_launch('ct1', 'a@x', mem='32GiB', instance_type='container')
+        preflight.assert_not_called()
+        create.assert_called_once()
+
+    @mock.patch.object(vm, 'vm_get',
+                       return_value={'gpus': 1, 'mem': '32GiB'})
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_ensure_gpus_attached')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_record_event_from_record')
+    @mock.patch.object(vm, '_warn_desired_conflict')
+    def test_start_preflight_uses_registered_memory(self, warn, event, incus,
+                                                    attach, share, preflight,
+                                                    vm_get):
+        vm.vm_start('vm1')
+        preflight.assert_called_once_with('vm1', '32GiB', 'start')
+        share.assert_called_once_with('vm1')
+        incus.assert_called_once_with('start', 'vm1')
+
+    @mock.patch.object(vm, 'vm_get',
+                       return_value={'gpus': 1, 'mem': '32GiB'})
+    @mock.patch.object(vm, '_preflight_vm_memory',
+                       side_effect=RuntimeError('overcommit'))
+    @mock.patch.object(vm, '_ensure_nas_share')
+    def test_start_preflight_failure_stops_before_start(self, share,
+                                                        preflight, vm_get):
+        with self.assertRaisesRegex(RuntimeError, 'overcommit'):
+            vm.vm_start('vm1')
+        share.assert_not_called()
+
+    @mock.patch.object(vm, 'vm_get', return_value={})
+    @mock.patch.object(vm, '_incus_config_value', return_value=None)
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    def test_start_requires_memory_limit(self, preflight, config, vm_get):
+        with self.assertRaisesRegex(RuntimeError, 'memory limit'):
+            vm.vm_start('vm1')
+        preflight.assert_not_called()
+
+
 class GpuPoolDiscoveryTests(unittest.TestCase):
     def test_gpu_entry_uses_pci_class(self):
         with mock.patch.object(vm, '_device_pci_class', return_value='0x030200'):
