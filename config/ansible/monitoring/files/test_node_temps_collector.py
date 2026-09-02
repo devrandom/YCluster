@@ -138,7 +138,7 @@ class CollectNvidiaTests(unittest.TestCase):
         return subprocess.CompletedProcess([], returncode, stdout=stdout,
                                           stderr='')
 
-    GPU_ROW = ('0, 00000000:01:00.0, Test GPU, 52, 0, 0, 100, 100, 10.5\n')
+    GPU_ROW = ('0, 00000000:01:00.0, Test GPU, 52, 0, 0, 100, 100, 10.5,N/A,N/A\n')
 
     def test_merges_throttle_flags(self):
         throttle = self.result(
@@ -191,6 +191,54 @@ class CollectNvidiaTests(unittest.TestCase):
             'node_gpu_thermal_slowdown{index="0",'
             'pci_bus_id="00000000:01:00.0",name="Test GPU",reason="sw"} 1',
             body)
+    def test_parses_gpu_health_fields(self):
+        stdout = '0,0000:01:00.0,NVIDIA,45,10,20,1024,2048,300,7,2\n'
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(ntc.collect_nvidia(), [{
+                'index': '0', 'pci_bus_id': '0000:01:00.0',
+                'name': 'NVIDIA', 'temp_c': 45.0,
+                'util_gpu': 10.0, 'util_mem': 20.0,
+                'mem_used_mib': 1024.0, 'mem_total_mib': 2048.0,
+                'power_w': 300.0,
+                'ecc_corrected': 7.0, 'ecc_uncorrected': 2.0,
+                'hw_slow': False, 'sw_slow': False,
+            }])
+
+    def test_preserves_gpu_when_ecc_is_unavailable(self):
+        stdout = '0,0000:01:00.0,NVIDIA,45,10,20,1024,2048,300,N/A,N/A\n'
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            gpu = ntc.collect_nvidia()[0]
+        self.assertIsNone(gpu['ecc_corrected'])
+        self.assertIsNone(gpu['ecc_uncorrected'])
+
+
+class CollectFlrEventsTests(unittest.TestCase):
+    @staticmethod
+    def result(stdout='', returncode=0):
+        return subprocess.CompletedProcess([], returncode, stdout=stdout,
+                                          stderr='')
+
+    def test_counts_matching_journal_lines(self):
+        stdout = (
+            'pcieport: Function Level Reset for 0000:01:00.0\n'
+            'unrelated\n'
+            'FLR completed\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(ntc.collect_flr_events(), (2, 1))
+
+    def test_failure_reports_probe_not_ok(self):
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result('bad', returncode=2)):
+            self.assertEqual(ntc.collect_flr_events(), (0, 0))
+
+    def test_no_matches_reports_probe_ok(self):
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result('', returncode=1)):
+            self.assertEqual(ntc.collect_flr_events(), (0, 1))
 
 
 class SelectCominoDevice(unittest.TestCase):
