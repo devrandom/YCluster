@@ -108,6 +108,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [H4 docker-registry UID](code-quality/h4-docker-registry-uid.md)
 - [dhcp-server restart on package update](code-quality/dhcp-server-restart-on-package-update.md)
 - [Go: health + handler hygiene](code-quality/go-health-probe-context.md)
+- [Python: reduce health and CLI test over-mocking](code-quality/python-health-test-seams.md) — replace private-state patching and call-order assertions with a shared health probe seam and observable behavior tests.
 - [Python: global etcd client cached](code-quality/python-etcd-cached-client.md)
 - [ycluster CLI etcd-client.env autoload](code-quality/ycluster-cli-etcd-hosts-autoload.md)
 - [/api/allocations + /api/health unauth](code-quality/api-allocations-health-unauth.md)
