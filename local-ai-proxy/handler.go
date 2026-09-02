@@ -255,7 +255,11 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, 
 	target.Path = joinPath(target.Path, r.URL.Path)
 	target.RawQuery = r.URL.RawQuery
 
-	upstream, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), upstreamBody)
+	// Cancel the owned upstream context rather than draining a retryable
+	// body; keep-alives are disabled, so the drain would serve no reuse.
+	upstreamCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	upstream, err := http.NewRequestWithContext(upstreamCtx, r.Method, target.String(), upstreamBody)
 	if err != nil {
 		h.logger.Warn("build upstream request failed", "err", err.Error())
 		writeOpenAIError(w, http.StatusInternalServerError, "api_error", "failed to build upstream request")
@@ -286,7 +290,7 @@ func (h *Handler) tryOnce(w http.ResponseWriter, r *http.Request, model string, 
 		h.Metrics.ObserveAttempt(model, backendStr, resp.StatusCode, false, 0)
 		h.Metrics.ObserveRetry(backendStr, retryReasonForStatus(resp.StatusCode))
 		h.logger.Info("upstream error status, retrying", "status", resp.StatusCode, "backend", backendStr)
-		_, _ = io.Copy(io.Discard, resp.Body)
+		cancel()
 		return false
 	}
 
@@ -312,17 +316,6 @@ func retryableStatus(status int) bool {
 	return status >= 500 ||
 		status == http.StatusTooManyRequests ||
 		status == http.StatusNotFound
-}
-
-func retryReasonForStatus(status int) string {
-	switch {
-	case status >= 500:
-		return "http_5xx"
-	case status == http.StatusTooManyRequests:
-		return "http_429"
-	default:
-		return "http_404"
-	}
 }
 
 func (h *Handler) probe(backend *url.URL) {
