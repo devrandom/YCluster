@@ -76,9 +76,17 @@ fi
 # generate` -- lives in clear-benign-failed-units.yml, not here: it doesn't
 # depend on GPU presence.) Reset prior failed state so it only pages if it
 # genuinely breaks on this boot.
+#
+# Note: deliberately no `--now`. nvidia-persistenced.service has
+# After=gpu-passthrough.service, so passing --now here would queue a start
+# job that can't dispatch until this script exits -- and this script can't
+# exit until systemctl returns -- a systemd ordering cycle that hangs the
+# boot indefinitely (gpu-passthrough stays in activating; mineru-podman and
+# the rest of the nvidia-* chain pile up in start waiting). The normal
+# After= chain brings nvidia-persistenced up once gpu-passthrough exits.
 if [ "$host_nvidia" -gt 0 ]; then
     systemctl unmask nvidia-persistenced.service 2>/dev/null || true
-    systemctl enable --now nvidia-persistenced.service 2>/dev/null || true
+    systemctl enable nvidia-persistenced.service 2>/dev/null || true
 else
     systemctl mask nvidia-persistenced.service 2>/dev/null || true
 fi

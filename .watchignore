@@ -39,3 +39,6 @@ tmp/
 # in .gitignore, and must never sync: worktree branch edits would silently
 # overwrite the cluster's main-tree copy of /opt/infrastructure.
 /trees/
+# local throwaway agent worktrees (./work/<branch>) — same rationale as
+# ./trees/: branch edits must not overwrite the cluster's main tree.
+/work/
