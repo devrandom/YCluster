@@ -28,6 +28,7 @@
           - chrony
           - curl
           - wget
+          - python3-pysnmp4
           - git
           - cmake
           - clang

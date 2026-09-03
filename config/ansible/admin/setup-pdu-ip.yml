@@ -1,0 +1,175 @@
+---
+# Set the static IP on an APC PDU (Network Management Card 2).
+#
+# The NMC drops its SSH session as it reconfigures its network stack,
+# so the playbook exits without waiting for the device to come back.
+#
+# Idempotent: looks up the PDU's MAC address in etcd. If already
+# registered, reports the existing slot and exits without changes.
+#
+# Run on the bastion:
+#   cd /etc/ansible && ./run-playbook.sh admin/setup-pdu-ip.yml \
+#     -e pdu_current_ip=10.0.0.211
+#
+# Static IPs are derived from the pdu{N} slot (pdu1 → 10.0.0.141, ...).
+# Run setup-pdu.yml afterwards to enable SNMPv3.
+
+- name: Set static IP on APC PDU
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    pdu_base_ip: "10.0.0.141"
+    pdu_netmask: "255.255.255.0"
+    pdu_gateway: "10.0.0.254"
+    pdu_user: apc
+    # Current IP of the PDU (DHCP-assigned on first run)
+    pdu_current_ip: "10.0.0.211"
+  environment: "{{ etcd_client_env }}"
+
+  tasks:
+    - name: Read PDU admin password from etcd
+      shell: |
+        python3 -c "
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        val = client.get('/cluster/config/pdu/admin-password')[0]
+        if val is None:
+            import sys; sys.exit(1)
+        print(val.decode() if isinstance(val, bytes) else val)
+        "
+      register: pdu_admin_pass
+      changed_when: false
+      no_log: true
+
+    - name: Read PDU MAC from bastion ARP table
+      shell: "ip neigh show {{ pdu_current_ip }} | awk '$4 == \"lladdr\" {print $5; exit}'"
+      register: pdu_mac_raw
+      changed_when: false
+
+    - name: Normalize MAC
+      set_fact:
+        pdu_mac: "{{ pdu_mac_raw.stdout | trim | lower }}"
+
+    - name: Verify MAC is a valid MAC address
+      assert:
+        that: pdu_mac is match('^[0-9a-f]{2}(:[0-9a-f]{2}){5}$')
+        fail_msg: >-
+          No valid MAC learned for {{ pdu_current_ip }} — ping it first
+          so the bastion populates its ARP table (got: '{{ pdu_mac }}')
+
+    - name: Check if this MAC is already registered
+      shell: |
+        python3 -c "
+        import json, sys
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        for value, _meta in client.get_prefix('/cluster/nodes/by-hostname/'):
+            if not value:
+                continue
+            alloc = json.loads(value.decode())
+            if alloc.get('mac', '').lower() == '{{ pdu_mac }}':
+                print(json.dumps(alloc))
+                sys.exit(0)
+        "
+      register: pdu_existing_raw
+      changed_when: false
+
+    - name: Check if PDU is already configured
+      set_fact:
+        pdu_existing: "{{ pdu_existing_raw.stdout | from_json if pdu_existing_raw.stdout | trim | length > 0 else {} }}"
+
+    - name: Report already-configured PDU
+      debug:
+        msg: >-
+          PDU with MAC {{ pdu_mac }} is already registered as
+          {{ pdu_existing.hostname }} at {{ pdu_existing.ip }} — nothing to do
+      when: pdu_existing | length > 0
+
+    - name: Stop — PDU already configured
+      meta: end_play
+      when: pdu_existing | length > 0
+
+    # --- New PDU: allocate next slot ---
+
+    - name: Find next free PDU slot and IP
+      shell: |
+        python3 -c "
+        import json, sys
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        existing = []
+        for value, _meta in client.get_prefix('/cluster/nodes/by-hostname/'):
+            if not value:
+                continue
+            alloc = json.loads(value.decode())
+            hostname = alloc.get('hostname', '')
+            if hostname.startswith('pdu'):
+                try:
+                    existing.append(int(hostname[3:]))
+                except ValueError:
+                    pass
+        slot = max(existing, default=0) + 1
+        base = {{ pdu_base_ip.split('.')[-1] | int }}
+        last_octet = base + slot - 1
+        prefix = '.'.join('{{ pdu_base_ip }}'.split('.')[:3])
+        print(json.dumps({'slot': slot, 'ip': f'{prefix}.{last_octet}', 'hostname': f'pdu{slot}'}))
+        "
+      register: pdu_alloc_raw
+      changed_when: false
+
+    - name: Set PDU allocation
+      set_fact:
+        pdu_alloc: "{{ pdu_alloc_raw.stdout | from_json }}"
+        pdu_static_ip: "{{ (pdu_alloc_raw.stdout | from_json).ip }}"
+        pdu_hostname: "{{ (pdu_alloc_raw.stdout | from_json).hostname }}"
+
+    - name: Show allocation
+      debug:
+        msg: "Setting {{ pdu_hostname }}.xc to {{ pdu_static_ip }} (MAC: {{ pdu_mac }}, current IP: {{ pdu_current_ip }})"
+
+    # Register in etcd now so a re-run is idempotent (matches on MAC).
+    # Keyed by hostname to match the standard by-hostname schema.
+    - name: Register PDU MAC and IP in etcd
+      shell: |
+        python3 -c "
+        import json
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        alloc = {
+            'hostname': '{{ pdu_hostname }}',
+            'type': 'pdu',
+            'ip': '{{ pdu_static_ip }}',
+            'mac': '{{ pdu_mac }}',
+            'allocated_at': 'manual'
+        }
+        client.put('/cluster/nodes/by-hostname/{{ pdu_hostname }}', json.dumps(alloc))
+        print('registered')
+        "
+      changed_when: false
+
+    - name: Set static IP on PDU and reboot
+      shell: |
+        { sleep 5; printf 'tcpip -i {{ pdu_static_ip }} -s {{ pdu_netmask }} -g {{ pdu_gateway }}\n'; sleep 5; printf 'reboot -Y\n'; sleep 5; } | \
+        sshpass -e ssh \
+          -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no -o ConnectTimeout=10 \
+          {{ pdu_user }}@{{ pdu_current_ip }}
+      args:
+        executable: /bin/bash
+      environment:
+        SSHPASS: "{{ pdu_admin_pass.stdout }}"
+      register: pdu_ip_result
+      changed_when: true
+      # The NMC drops the SSH session mid-reboot, which ssh reports as
+      # exit 255 with "Connection closed". That's the only acceptable
+      # non-zero exit — anything else is a real failure.
+      failed_when: >-
+        pdu_ip_result.rc != 0 and
+        not (pdu_ip_result.stderr is search('Connection closed|Connection to .* closed'))
+      no_log: true
+
+    - name: PDU already at static IP — skipping tcpip/reboot
+      debug:
+        msg: "PDU already reachable at {{ pdu_static_ip }} — only etcd registration was needed"
+      when: pdu_current_ip == pdu_static_ip

@@ -50,6 +50,7 @@ def create_parser():
     from .vm import register_vm_commands
     from .user import register_user_commands
     from .storage import register_storage_commands
+    from .snmp import register_snmp_commands
 
     register_cluster_commands(subparsers)
     register_health_alias(subparsers)
@@ -67,6 +68,7 @@ def create_parser():
     register_vm_commands(subparsers)
     register_user_commands(subparsers)
     register_storage_commands(subparsers)
+    register_snmp_commands(subparsers)
 
     return parser
 

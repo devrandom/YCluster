@@ -1,0 +1,152 @@
+---
+# Enable SNMPv3 on an APC PDU (Network Management Card 2) that is already
+# at its static IP. DNS/etcd registration is handled by setup-pdu-ip.yml.
+#
+# Credentials (admin password, SNMPv3 auth/priv passphrases) live in etcd
+# under /cluster/config/pdu/. SNMP passphrases are generated idempotently.
+#
+# Run on the bastion (pdu is the PDU number, 1-5):
+#   cd /etc/ansible && ./run-playbook.sh admin/setup-pdu.yml \
+#     -e pdu=1
+#
+# Use setup-pdu-ip.yml first if the PDU is still on DHCP.
+
+- name: Configure APC PDU
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    pdu_user: apc
+    pdu_snmp_user: ycluster
+    pdu_base_ip: "10.0.0.141"
+    # PDU number, 1-5 (required)
+    pdu: ""
+  environment: "{{ etcd_client_env }}"
+
+  pre_tasks:
+    - name: Verify pdu is set
+      assert:
+        that: pdu | int > 0
+        fail_msg: "Pass -e pdu=<N> (1-5)"
+
+    - name: Derive IP and hostname from slot
+      set_fact:
+        pdu_slot: "{{ pdu }}"
+        pdu_hostname: "pdu{{ pdu }}"
+        pdu_ip: "{{ pdu_base_ip.split('.')[:3] | join('.') }}.{{ pdu_base_ip.split('.')[-1] | int + pdu | int - 1 }}"
+
+    - name: Show allocation
+      debug:
+        msg: "Configuring {{ pdu_hostname }}.xc at {{ pdu_ip }}"
+
+  tasks:
+    - name: Read PDU admin password from etcd
+      shell: |
+        python3 -c "
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        val = client.get('/cluster/config/pdu/admin-password')[0]
+        if val is None:
+            import sys; sys.exit(1)
+        print(val.decode() if isinstance(val, bytes) else val)
+        "
+      register: pdu_admin_pass
+      changed_when: false
+      no_log: true
+
+    - name: Generate SNMPv3 passphrases in etcd (idempotent)
+      shell: |
+        python3 -c "
+        import secrets
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        for suffix in ['snmpv3-auth', 'snmpv3-priv']:
+            key = '/cluster/config/pdu/' + suffix
+            val = client.get(key)[0]
+            if val is None:
+                client.put(key, secrets.token_urlsafe(24))
+        print('ok')
+        "
+      changed_when: false
+
+    - name: Read SNMPv3 passphrases from etcd
+      shell: |
+        python3 -c "
+        import json, sys
+        from ycluster.common.etcd_utils import get_etcd_client
+        client = get_etcd_client()
+        result = {}
+        for key in ['snmpv3-auth', 'snmpv3-priv']:
+            val = client.get('/cluster/config/pdu/' + key)[0]
+            result[key] = val.decode() if isinstance(val, bytes) else val
+        json.dump(result, sys.stdout)
+        "
+      register: pdu_snmp_creds_raw
+      changed_when: false
+      no_log: true
+
+    - name: Parse SNMPv3 passphrases
+      set_fact:
+        pdu_snmp: "{{ pdu_snmp_creds_raw.stdout | from_json }}"
+      no_log: true
+
+    - name: Enable SNMPv3 with SHA/AES and reboot
+      shell: |
+        {
+          sleep 5
+          printf 'snmpv3 -S enable\n'
+          sleep 3
+          printf 'snmpv3 -u1 {{ pdu_snmp_user }} -a1 {{ pdu_snmp["snmpv3-auth"] }} -c1 {{ pdu_snmp["snmpv3-priv"] }} -ap1 sha -pp1 aes -ac1 enable\n'
+          sleep 3
+          printf 'snmpv3 -S enable\n'
+          sleep 3
+          printf 'reboot -Y\n'
+          sleep 3
+        } | \
+        sshpass -e ssh \
+          -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no -o ConnectTimeout=10 \
+          {{ pdu_user }}@{{ pdu_ip }}
+      args:
+        executable: /bin/bash
+      environment:
+        SSHPASS: "{{ pdu_admin_pass.stdout }}"
+      register: pdu_snmp_result
+      # The NMC drops the SSH session mid-reboot, which ssh reports as
+      # exit 255 with "Connection closed". That's the only acceptable
+      # non-zero exit — anything else is a real failure.
+      failed_when: >-
+        pdu_snmp_result.rc != 0 and
+        not (pdu_snmp_result.stderr is search('Connection closed|Connection to .* closed'))
+      changed_when: true
+      no_log: true
+
+    - name: Wait for PDU to come back after reboot
+      wait_for:
+        host: "{{ pdu_ip }}"
+        port: 22
+        timeout: 120
+        delay: 30
+
+    - name: Verify SNMPv3 status
+      shell: |
+        { sleep 5; printf 'snmpv3\n'; sleep 3; } | \
+        sshpass -e ssh \
+          -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o PubkeyAuthentication=no -o ConnectTimeout=10 \
+          {{ pdu_user }}@{{ pdu_ip }}
+      args:
+        executable: /bin/bash
+      environment:
+        SSHPASS: "{{ pdu_admin_pass.stdout }}"
+      register: snmpv3_status
+      changed_when: false
+      no_log: true
+
+    - name: Assert SNMPv3 is enabled and no reboot pending
+      assert:
+        that:
+          - "'SNMPv3             : Enabled' in snmpv3_status.stdout"
+          - "'Reboot required' not in snmpv3_status.stdout"
+        success_msg: "SNMPv3 enabled on {{ pdu_hostname }} ({{ pdu_ip }}), no pending reboot"
+        fail_msg: "SNMPv3 verification failed (status hidden — SSH to the card and run 'snmpv3' to debug)"
