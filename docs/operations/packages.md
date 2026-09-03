@@ -1,5 +1,23 @@
 # Package Management
 
+## Apt freshness monitoring
+
+`monitoring/install-apt-metrics.yml` installs a 15-minute textfile collector that
+publishes apt cache/upgrade age and apt/dpkg lock state, plus a 12h
+`apt-cache-update.timer` that runs `apt-get update` (stamp refreshed only on
+success). It also installs a global `DPkg::Lock::Timeout` of 300s so a hung apt
+run fails after 5 minutes instead of blocking unattended-upgrades for days.
+
+Alerts: cache not successfully updated in over 24h, an apt job active for over
+1h, an apt/dpkg lock held for over 30m, or the collector textfile stale for
+over 30m.
+
+Check current metrics on a node with:
+
+```bash
+cat /var/lib/prometheus/node-exporter/apt_status.prom
+```
+
 ## Held Packages
 
 Some packages are held from automatic upgrades via `dpkg --set-selections` because

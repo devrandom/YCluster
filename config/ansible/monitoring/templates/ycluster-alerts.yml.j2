@@ -23,6 +23,54 @@ groups:
           summary: "Unit {{ $labels.name }} failed on {{ $labels.node }}"
           description: "systemd unit {{ $labels.name }} on {{ $labels.node }} ({{ $labels.instance }}) has been in failed state for more than 15 minutes"
 
+      # Apt jobs can hang without entering failed state (for example while
+      # waiting on a mirror or a lock). Catch long-running units explicitly.
+      - alert: AptJobHung
+        expr: node_systemd_unit_state{name=~"apt-daily.service|apt-daily-upgrade.service|unattended-upgrades.service",state="active"} == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Apt job hung on {{ $labels.node }}"
+          description: "{{ $labels.name }} on {{ $labels.node }} has been active for more than 1h"
+
+      # Apt and dpkg locks are normally held for seconds or minutes. A lock
+      # held for half an hour either means a very large install is running
+      # or something is wedged; DPkg::Lock::Timeout makes the wedge case fail
+      # fast, so a lasting lock is worth seeing.
+      - alert: AptLockHeld
+        expr: ycluster_apt_lock_held > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Apt lock held on {{ $labels.node }}"
+          description: "The {{ $labels.lock }} lock on {{ $labels.node }} has been held for over 30m"
+
+      # update-success-stamp is touched only after a successful apt update.
+      # Missing stamps are reported as an age equal to the current timestamp.
+      # apt-cache-update.timer refreshes every 12h, so 24h gives a 2x margin.
+      - alert: AptCacheStale
+        expr: ycluster_apt_update_age_seconds > 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+          slow_repeat: "true"
+        annotations:
+          summary: "Apt cache stale on {{ $labels.node }}"
+          description: "The apt cache on {{ $labels.node }} has not successfully updated in over 24h"
+
+      # The collector itself runs every 15m; a missing/aged textfile means the
+      # apt freshness signal is absent and should not be silently ignored.
+      - alert: AptMetricsStale
+        expr: time() - node_textfile_mtime_seconds{file="/var/lib/prometheus/node-exporter/apt_status.prom"} > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Apt metrics collector stale on {{ $labels.node }}"
+          description: "apt_status.prom on {{ $labels.node }} has not been updated in over 30m"
+
       # YCluster health API
       - alert: YClusterHealthAPIDown
         expr: up{job="ycluster-health"} == 0

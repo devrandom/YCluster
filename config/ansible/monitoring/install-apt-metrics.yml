@@ -1,0 +1,140 @@
+---
+# Apt jobs can sit for days on a dead mirror or a stuck lock without any
+# failed systemd unit. Two things keep the cache fresh and observable:
+#
+#   1. A DPkg::Lock::Timeout of 300s so any apt run waits at most 5 minutes
+#      for a lock before failing loudly, instead of hanging indefinitely.
+#   2. A dedicated 12h apt-get update timer so the cache stamp advances
+#      predictably (apt-daily only updates when the stamp is older than a
+#      day, and its 12h jitter can stretch the legitimate gap to 48h).
+#
+# The collector publishes freshness and lock state through the
+# node_exporter textfile collector; alerts live in ycluster-alerts.yml.j2.
+- name: Install apt staleness collector and refresh timer
+  hosts: core:storage:compute:nvidia:nas
+  become: yes
+  vars:
+    collector_path: /usr/local/lib/cluster/apt-metrics-collector
+    interval: 15min
+
+  tasks:
+    - name: Install apt metrics collector script
+      copy:
+        src: files/apt-metrics-collector.py
+        dest: "{{ collector_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure apt/dpkg lock timeout
+      copy:
+        dest: /etc/apt/apt.conf.d/95ycluster-lock-timeout
+        content: |
+          // Wait at most 5 minutes for apt/dpkg locks before failing,
+          // so one hung run cannot block unattended-upgrades for days.
+          DPkg::Lock::Timeout "300";
+        mode: '0644'
+
+    - name: Ensure node_exporter textfile directory exists
+      file:
+        path: /var/lib/prometheus/node-exporter
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Create systemd service for apt metrics collector
+      copy:
+        dest: /etc/systemd/system/apt-metrics-collector.service
+        content: |
+          [Unit]
+          Description=Collect apt cache freshness and lock metrics
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 {{ collector_path }}
+          User=root
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths=/var/lib/prometheus/node-exporter
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd timer for apt metrics collector
+      copy:
+        dest: /etc/systemd/system/apt-metrics-collector.timer
+        content: |
+          [Unit]
+          Description=Collect apt cache freshness and lock metrics every {{ interval }}
+
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec={{ interval }}
+          AccuracySec=1min
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable and start apt metrics collector timer
+      systemd:
+        name: apt-metrics-collector.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Create systemd service for apt cache refresh
+      copy:
+        dest: /etc/systemd/system/apt-cache-update.service
+        content: |
+          [Unit]
+          Description=Refresh apt package cache
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=300 update
+          # Only runs if ExecStart succeeded, so the stamp means "last
+          # successful update". Refreshing the stamp also makes apt-daily's
+          # own update pass skip, avoiding duplicate work.
+          ExecStartPost=/bin/touch /var/lib/apt/periodic/update-success-stamp
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd timer for apt cache refresh
+      copy:
+        dest: /etc/systemd/system/apt-cache-update.timer
+        content: |
+          [Unit]
+          Description=Refresh apt package cache every 12h
+
+          [Timer]
+          OnBootSec=5min
+          OnUnitActiveSec=12h
+          AccuracySec=5min
+          RandomizedDelaySec=30min
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable and start apt cache refresh timer
+      systemd:
+        name: apt-cache-update.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Run an initial apt metrics collection
+      command: /usr/bin/python3 {{ collector_path }}
+      changed_when: false
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
