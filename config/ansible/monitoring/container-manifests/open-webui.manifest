@@ -1,4 +1,4 @@
-# open-webui v0.11.1 (source d3e8bf34); runtime Python deps from uv.lock base deps (npm frontend is baked at build, not shipped in image)
+# open-webui v0.11.3 2a960a59fe1dbbd35282f0556b3666d81102e781; mobile upload + nltk 3.10.3 patches
 # PyPI packages (uv.lock)
 PyPI:accelerate=1.13.0
 PyPI:aiocache=0.12.3
@@ -131,7 +131,7 @@ PyPI:multidict=6.7.1
 PyPI:mypy-extensions=1.1.0
 PyPI:narwhals=2.22.1
 PyPI:networkx=3.6.1
-PyPI:nltk=3.9.4
+PyPI:nltk=3.10.3
 PyPI:numpy=2.4.6
 PyPI:nvidia-cublas=13.1.1.3
 PyPI:nvidia-cuda-nvrtc=13.0.88

@@ -11,12 +11,10 @@
     plugins_repo: "https://github.com/devrandom/open-webui-plugins.git"
     # open-webui-plugins (private, no upstream tags) = 746f4b2f296d0b77f341bd646a19d07f49d3dd67.
     plugins_repo_sha: "746f4b2f296d0b77f341bd646a19d07f49d3dd67"
-    webui_repo: "https://github.com/devrandom/open-webui.git"
-    # open-webui v0.11.1-dr (devrandom fork; branch, not tag) =
-    # 1537cc0127538bed5947553316593741cc67acee. Upstream v0.11.1
-    # (d3e8bf34) + mobile-gated image/gallery upload commit; bump this
-    # pin when further -dr commits land.
-    webui_repo_sha: "1537cc0127538bed5947553316593741cc67acee"
+    webui_repo: "https://github.com/open-webui/open-webui.git"
+    # open-webui v0.11.3. Fork-only changes are applied as build-time patches:
+    # mobile-gated image/gallery upload + NLTK CVE bump (3.9.4 -> 3.10.3).
+    webui_repo_sha: "2a960a59fe1dbbd35282f0556b3666d81102e781"
     image_name: "registry.xc:5000/open-webui-with-plugins"
     image_tag: "{{ instance if instance else 'latest' }}"
   tasks:
@@ -41,7 +39,9 @@
             dest: "{{ build_dir }}/open-webui-plugins"
             version: "{{ plugins_repo_sha }}"
             force: yes
-            update: "{{ instance == '' }}"
+            # The build host cannot reach GitHub's smart-HTTP endpoint; update
+            # checkouts manually (docs/OPEN_WEBUI.md) before rebuilding.
+            update: false
 
         - name: Check out open-webui repository
           git:
@@ -49,7 +49,7 @@
             dest: "{{ build_dir }}/open-webui"
             version: "{{ webui_repo_sha }}"
             force: yes
-            update: "{{ instance == '' }}"
+            update: false
 
         - name: Patch upstream Kagi web search (fixes 401; upstream sends Bearer/POST instead of Bot/GET)
           copy:
@@ -97,6 +97,40 @@
             src: files/open-webui-smoke-error.patch
             dest: "{{ build_dir }}/open-webui-smoke-error.patch"
             mode: '0644'
+
+        # Applies a Svelte change (adds a mobile-only "Upload Image" option
+        # backed by a hidden image file input). Idempotent: git apply --check
+        # fails once applied, so stage rebuilds over the same checkout don't
+        # re-apply.
+        - name: Copy Open WebUI mobile upload patch
+          copy:
+            src: files/open-webui-mobile-upload.patch
+            dest: "{{ build_dir }}/open-webui-mobile-upload.patch"
+            mode: '0644'
+
+        - name: Apply Open WebUI mobile upload patch
+          shell: |
+            if git apply --check ../open-webui-mobile-upload.patch 2>/dev/null; then
+              git apply ../open-webui-mobile-upload.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
+        # NLTK 3.10.3 security bump. Carried in the build tree until upstream
+        # merges its Dependabot upgrade.
+        - name: Copy Open WebUI NLTK security patch
+          copy:
+            src: files/open-webui-nltk-3.10.3.patch
+            dest: "{{ build_dir }}/open-webui-nltk-3.10.3.patch"
+            mode: '0644'
+
+        - name: Apply Open WebUI NLTK security patch
+          shell: |
+            if git apply --check ../open-webui-nltk-3.10.3.patch 2>/dev/null; then
+              git apply ../open-webui-nltk-3.10.3.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
 
         # Adds a /__smoke_app_error route that deliberately throws 500 from its
         # load function, exercising the friendly error boundary end-to-end

@@ -142,7 +142,7 @@ perimeter_software:
     # osv-feed [tracking.container]; manifest-driven, no packages list
     osv_packages: []
     # package: container image (PyPI manifest)
-    # pin_source: app/build-open-webui.yml webui_repo_sha 1537cc01... (v0.11.1-dr); plugins 746f4b2f...
+    # pin_source: app/build-open-webui.yml webui_repo_sha 2a960a59... (v0.11.3 + mobile-upload/nltk patches); plugins 746f4b2f...
     # manifest: config/ansible/monitoring/container-manifests/open-webui.manifest (--uv-select base, 265 pkgs)
   - name: zulip
     # zulip.<domain>. The interactive web surface (everything except /api/)

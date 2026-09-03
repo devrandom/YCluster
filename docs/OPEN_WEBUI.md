@@ -20,7 +20,7 @@
 
 ## Building and Upgrading
 
-The build is performed from a fork (`github.com/devrandom/open-webui.git`) with plugins injected from `github.com/devrandom/open-webui-plugins.git`.
+The build is performed from upstream Open WebUI with plugins injected from `github.com/devrandom/open-webui-plugins.git`. Fork-only changes (mobile image upload and the NLTK security bump) are applied as build-time patches from `config/ansible/app/files/`.
 
 Source is checked out to `/opt/src/open-webui-build/` (or `/opt/src/open-webui-build-stage/` for staging). Once the initial checkout is done, the build playbook does not `git pull` — it's up to you to update the repos manually before rebuilding:
 

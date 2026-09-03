@@ -34,7 +34,7 @@ observes it.
   pytest, ruff, daphne, mypy…) never ships in a runtime manifest. Vendored
   manifests:
   - `config/ansible/monitoring/container-manifests/open-webui.manifest` — **265** PyPI packages from
-    open-webui v0.11.1 / `d3e8bf34` with `--uv-select base` (production deps).
+    open-webui v0.11.3 / `2a960a59` with `--uv-select base` (production deps).
   - `config/ansible/monitoring/container-manifests/zulip.manifest` — **182** PyPI packages from zulip
     12.1 / `7d85fc15` with `--uv-select prod` (mirrors upstream
     `create-production-venv`, which runs `uv sync --only-group=prod`).
@@ -61,7 +61,7 @@ observes it.
 | Image | Registry ref today | Source pin | Tier | Runs on |
 |---|---|---|---|---|
 | authentik server+worker | `ghcr.io/goauthentik/server@sha256:5a77d345…` (digest-pinned, repo-landed) | `authentik_image` (digest) + `authentik_version: "2026.5.6"` in `app/install-authentik.yml` | P0-A (IdP + authenticated web) | storage nodes |
-| open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | `webui_repo_sha` v0.11.1-dr `1537cc01…` (upstream v0.11.1 `d3e8bf34…`) + plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
+| open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | upstream v0.11.3 `2a960a59…` + mobile-upload/NLTK patches and plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
 | zulip | `registry.xc:5000/zulip:12.1-0` | docker-zulip `9a0bd360…` + zulip src `7d85fc15…` in `app/build-zulip.yml` | P0-U (login/registration/pre-auth) | storage leader |
 
 open-webui and zulip are built in-cluster from pinned source
