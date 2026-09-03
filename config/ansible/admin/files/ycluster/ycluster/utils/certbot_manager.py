@@ -5,6 +5,7 @@ Library to manage Let's Encrypt certificates using certbot with domains from etc
 
 import json
 import os
+import socket
 import subprocess
 import tempfile
 from jinja2 import Template
@@ -509,8 +510,32 @@ def _store_renewed_certificate(client, fullchain_content):
         start_fetch_tls_timer()
 
 
+def _is_storage_leader(client):
+    """Return True only on the node currently elected to run leader services."""
+    leader_value, _ = client.get('/cluster/leader/app')
+    if not leader_value:
+        print("No storage leader elected; skipping certificate renewal")
+        return False
+
+    leader = leader_value.decode().strip()
+    if leader != socket.gethostname().strip():
+        print(f"Certificate renewal is leader-only; {socket.gethostname()} is not {leader}")
+        return False
+
+    return True
+
+
 def renew_certificates(non_interactive=False):
-    """Renew existing certificates using CSR mode"""
+    """Renew existing certificates using CSR mode
+
+    Returns True on success or on an intentional no-op skip (e.g. this node is
+    not the storage leader), so the systemd timer does not mark the unit failed
+    on every non-leader node.
+    """
+    client = get_etcd_client()
+    if not _is_storage_leader(client):
+        return True
+
     print("Renewing certificates...")
 
     config = get_https_config()
@@ -521,7 +546,6 @@ def renew_certificates(non_interactive=False):
     domains = get_all_domains(config)
 
     # Check if we have a certificate in etcd (our source of truth)
-    client = get_etcd_client()
     cert_value, _ = client.get('/cluster/tls/cert')
     if not cert_value:
         print("No existing certificate found in etcd")
