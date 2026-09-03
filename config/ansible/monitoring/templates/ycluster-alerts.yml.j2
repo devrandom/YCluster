@@ -811,6 +811,22 @@ groups:
           summary: "OSV feed match failing on {{ $labels.node }}"
           description: "osv-feed match is failing on {{ $labels.node }}. CVE metrics are not being produced; check the collector service logs."
 
+      # Early warning for newly-detected critical CVEs. osv_feed_cve_info
+      # emits a series per finding at detection time (acked="false", state is
+      # no_fix_yet or fix_available), so this fires well before the 12h SLA
+      # alert below. The 1h for-debounce absorbs collector jitter; the
+      # critical PerimeterCVECriticalLongPending alert remains the escalation
+      # past the SLA.
+      - alert: PerimeterCVENewCritical
+        expr: osv_feed_cve_info{severity="critical", acked="false"} == 1
+        for: 1h
+        labels:
+          severity: warning
+          perimeter_cve: "true"
+        annotations:
+          summary: "New critical CVE detected: {{ $labels.cve }} in {{ $labels.package }}{{ if $labels.image }} ({{ $labels.image }}){{ end }}"
+          description: "Critical CVE {{ $labels.cve }} in {{ $labels.package }} {{ $labels.version }} ({{ $labels.image }}) has been pending for 1h (12h SLA). Review severity and exposure now — it escalates to PerimeterCVECriticalLongPending at 12h."
+
       # Coalesced perimeter CVE alerts. osv-feed emits one
       # osv_feed_cve_summary series per alert severity (critical / high), with
       # the value = count of non-acked pending (no_fix_yet / fix_available)
