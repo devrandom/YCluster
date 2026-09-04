@@ -1,3 +1,32 @@
+{#- Per-node overrides come from Ansible host_vars:
+   ambient_temperature_warn and ambient_temperature_critical. -#}
+{% set ambient_warn_overrides = {} -%}
+{% set ambient_critical_overrides = {} -%}
+{%- for host in groups['all'] -%}
+  {%- set warn = hostvars[host].get('ambient_temperature_warn') -%}
+  {%- set critical = hostvars[host].get('ambient_temperature_critical') -%}
+  {%- if warn is not none -%}
+    {%- set _ = ambient_warn_overrides.update({host: warn}) -%}
+  {%- endif -%}
+  {%- if critical is not none -%}
+    {%- set _ = ambient_critical_overrides.update({host: critical}) -%}
+  {%- endif -%}
+{%- endfor -%}
+{% macro ambient_temp_expr(overrides, default_threshold) -%}
+{%- set override_nodes = overrides.keys() | sort -%}
+{%- set default_selector = 'node!~"' ~ (override_nodes | join('|')) ~ '"' if override_nodes else '' -%}
+{%- set exprs = [
+  'max by (node) (node_ipmi_temperature_celsius{role="ambient"' ~ (', ' ~ default_selector if default_selector else '') ~ '}) > ' ~ default_threshold,
+  'max by (node) (node_comino_temperature_celsius{role="ambient"' ~ (', ' ~ default_selector if default_selector else '') ~ '}) > ' ~ default_threshold
+] -%}
+{%- for node in override_nodes -%}
+  {%- set threshold = overrides[node] -%}
+  {%- set _ = exprs.append('max by (node) (node_ipmi_temperature_celsius{role="ambient", node="' ~ node ~ '"}) > ' ~ threshold) -%}
+  {%- set _ = exprs.append('max by (node) (node_comino_temperature_celsius{role="ambient", node="' ~ node ~ '"}) > ' ~ threshold) -%}
+{%- endfor -%}
+[% exprs | join('\n          or\n          ') %]
+{%- endmacro -%}
+
 groups:
   - name: ycluster-core
     rules:
@@ -604,27 +633,23 @@ groups:
       # are covered (at higher thresholds) by the chassis-ambient alert below.
       - alert: HighAmbientTemperature
         expr: |
-          max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 25
-          or
-          max by (node) (node_comino_temperature_celsius{role="ambient"}) > 25
+          [% ambient_temp_expr(ambient_warn_overrides, 25) %]
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "High ambient temperature on {{ $labels.node }}"
-          description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (>25°C) for more than 5 minutes"
+          description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (above its warning threshold) for more than 5 minutes"
 
       - alert: CriticalAmbientTemperature
         expr: |
-          max by (node) (node_ipmi_temperature_celsius{role="ambient"}) > 30
-          or
-          max by (node) (node_comino_temperature_celsius{role="ambient"}) > 30
+          [% ambient_temp_expr(ambient_critical_overrides, 30) %]
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "Critical ambient temperature on {{ $labels.node }}"
-          description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (>30°C) — check room HVAC"
+          description: "Intake/ambient sensor on {{ $labels.node }} is {{ $value }}°C (above its critical threshold) — check room HVAC"
 
       # Chassis-ambient (internal board) temperature — a coarser room-temp
       # proxy for chassis that expose no true intake sensor. Sourced from
