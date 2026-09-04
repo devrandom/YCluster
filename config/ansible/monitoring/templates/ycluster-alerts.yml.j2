@@ -25,8 +25,10 @@ groups:
 
       # Apt jobs can hang without entering failed state (for example while
       # waiting on a mirror or a lock). Catch long-running units explicitly.
+      # unattended-upgrades.service is a persistent shutdown helper, not the
+      # upgrade job, so it must not be treated as a hung apt run.
       - alert: AptJobHung
-        expr: node_systemd_unit_state{name=~"apt-daily.service|apt-daily-upgrade.service|unattended-upgrades.service",state="active"} == 1
+        expr: node_systemd_unit_state{name=~"apt-daily.service|apt-daily-upgrade.service",state="active"} == 1
         for: 1h
         labels:
           severity: warning

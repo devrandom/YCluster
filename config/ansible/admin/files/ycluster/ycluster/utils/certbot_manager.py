@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import tempfile
+from datetime import datetime, timedelta, timezone
 from jinja2 import Template
 from pathlib import Path
 
@@ -525,6 +526,49 @@ def _is_storage_leader(client):
     return True
 
 
+def _certificate_needs_renewal(cert_value, now=None, renew_before_days=30):
+    """Return True when the stored certificate is missing, invalid, or due.
+
+    Timer renewals use CSR mode, so certbot cannot decide "not due yet" from
+    its own renewal configs. Gate the request here to avoid issuing a new
+    certificate twice a day and exhausting the exact-set rate limit.
+    """
+    try:
+        result = subprocess.run(
+            ['openssl', 'x509', '-noout', '-enddate'],
+            input=cert_value.decode(), text=True, capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"Failed to read existing certificate expiry: {result.stderr.strip()}")
+            return True
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"Failed to read existing certificate expiry: {exc}")
+        return True
+
+    expiry_text = None
+    for line in result.stdout.splitlines():
+        if line.startswith('notAfter='):
+            expiry_text = line[len('notAfter='):].strip()
+            break
+
+    if not expiry_text:
+        print("Existing certificate has no expiry date")
+        return True
+
+    try:
+        expiry = datetime.strptime(expiry_text, '%b %d %H:%M:%S %Y %Z').replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        print(f"Could not parse existing certificate expiry: {expiry_text}")
+        return True
+
+    now = now or datetime.now(timezone.utc)
+    renew_after = expiry - timedelta(days=renew_before_days)
+    return now >= renew_after
+
+
 def renew_certificates(non_interactive=False):
     """Renew existing certificates using CSR mode
 
@@ -550,6 +594,10 @@ def renew_certificates(non_interactive=False):
     if not cert_value:
         print("No existing certificate found in etcd")
         return False
+
+    if not _certificate_needs_renewal(cert_value):
+        print("Existing certificate is not due for renewal")
+        return True
 
     # Write TLS key to temporary file for CSR generation
     temp_key_path = write_tls_key_to_temp()
