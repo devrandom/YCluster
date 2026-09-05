@@ -19,6 +19,9 @@ services:
       - 'OPENAI_API_KEYS=${INFERENCE_MASTER_KEY}'
       # Enable per-user API keys so users can access inference directly
       - 'ENABLE_API_KEYS=True'
+      # Keep unshared user workspace data out of admin list surfaces. This is
+      # not a privilege boundary; admins can still access resources directly.
+      - 'BYPASS_ADMIN_ACCESS_CONTROL=False'
       # Forward user identity headers downstream for per-user attribution
       - 'ENABLE_FORWARD_USER_INFO_HEADERS=True'
       # mem0 plugin disabled — not used. No OPEN_WEBUI_PLUGINS / MEM_* vars here.
