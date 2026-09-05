@@ -45,6 +45,18 @@ PY_PATHS = [
 ]
 BIN = ROOT / "tmp" / "go-bin"
 
+def _resolve_bin_dir() -> Path:
+    if (BIN / "gocyclo").exists():
+        return BIN
+    # Main checkout's shared bin dir (worktrees share the common git dir).
+    common = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True
+    ).stdout.strip()
+    shared = Path(common).resolve().parent / "tmp" / "go-bin"
+    if (shared / "gocyclo").exists():
+        return shared
+    return BIN
+
 # .codex env may set a relative GOPATH; subprocesses run from local-ai-proxy
 # would then resolve it inside the module tree and pollute the scans.
 _gopath = os.environ.get("GOPATH", "")
@@ -107,7 +119,7 @@ def _go_method_name(raw: str) -> str:
 
 def go_cyclomatic() -> dict[tuple[str, str], float]:
     """Cyclomatic per function, keyed by (file, name) — stable across edits."""
-    out = run([str(BIN / "gocyclo"), "-over", "0", "."], cwd=GO_DIR)
+    out = run([str(_resolve_bin_dir() / "gocyclo"), "-over", "0", "."], cwd=GO_DIR)
     res = {}
     for line in out.splitlines():
         parts = line.split()
@@ -125,7 +137,7 @@ def go_cyclomatic() -> dict[tuple[str, str], float]:
 
 
 def go_cognitive() -> dict[tuple[str, str], float]:
-    out = run([str(BIN / "gocognit"), "-json", "-over", "0", "."], cwd=GO_DIR)
+    out = run([str(_resolve_bin_dir() / "gocognit"), "-json", "-over", "0", "."], cwd=GO_DIR)
     res = {}
     for fn in json.loads(out):
         pos = fn["Pos"]
@@ -143,7 +155,7 @@ def go_halstead() -> dict[str, float]:
 def go_dead_code() -> list[str]:
     # staticcheck exits 1 for findings; other exits are tool errors.
     out = run_findings(
-        [str(BIN / "staticcheck"), "-checks", "U1000", "./..."],
+        [str(_resolve_bin_dir() / "staticcheck"), "-checks", "U1000", "./..."],
         cwd=GO_DIR,
         findings_codes={1},
     )

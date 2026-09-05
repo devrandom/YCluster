@@ -41,11 +41,20 @@ metrics-mutate:
 metrics-tools:
     #!/bin/bash
     set -euo pipefail
+    # Shared user-level install so every worktree sees the same binaries
+    # without re-downloading or rebuilding. Overridable via GOBIN.
+    shared_gobin="${GOBIN:-$(git rev-parse --git-common-dir | sed 's|/\.git$||')/tmp/go-bin}"
+    mkdir -p "$shared_gobin"
     while read -r mod; do
         [ -z "$mod" ] && continue
         case "$mod" in \#*) continue ;; esac
+        bin="$(basename "${mod%%@*}")"
+        if [ -x "$shared_gobin/$bin" ]; then
+            echo "already installed: $shared_gobin/$bin"
+            continue
+        fi
         echo "go install $mod"
-        go install "$mod"
+        GOBIN="$shared_gobin" go install "$mod"
     done < scripts/metrics/go-tools.txt
     # uv is preferred; fall back to pip in the venv (same --require-hashes pin).
     uv pip install --python .venv/bin/python --require-hashes -r scripts/metrics/requirements.txt \
