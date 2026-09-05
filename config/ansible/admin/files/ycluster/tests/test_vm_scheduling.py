@@ -1078,6 +1078,12 @@ class VMMemoryPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Invalid memory size'):
             vm._memory_bytes('not-a-size')
 
+    def test_format_memory_bytes(self):
+        self.assertEqual(vm._format_memory_bytes(32 * 1024**3), '32GiB')
+        self.assertEqual(vm._format_memory_bytes(40061388 * 1024),
+                         '38.2GiB')
+        self.assertEqual(vm._format_memory_bytes(1023), '1023B')
+
     def test_meminfo_available_bytes(self):
         data = 'MemTotal: 1 kB\nMemAvailable: 22037852 kB\n'
         with mock.patch('builtins.open', mock.mock_open(read_data=data)):
@@ -1148,6 +1154,18 @@ class VMMemoryPreflightTests(unittest.TestCase):
             vm._preflight_vm_memory('example-vm', '32GiB', 'launch')
 
     @mock.patch.object(vm, '_incus_json')
+    def test_preflight_does_not_double_count_running_vms(self, list_json):
+        list_json.return_value = [
+            {'name': 'other', 'status': 'Running',
+             'type': 'virtual-machine',
+             'expanded_config': {'limits.memory': '100GiB'}},
+        ]
+        required = 32 * 1024**3 + vm.VM_MEMORY_MARGIN_BYTES
+        with mock.patch.object(vm, '_meminfo_available_bytes',
+                               return_value=required):
+            vm._preflight_vm_memory('pj2', '32GiB', 'start')
+
+    @mock.patch.object(vm, '_incus_json')
     def test_preflight_counts_running_target_as_replacement(self, list_json):
         list_json.return_value = [
             {'name': 'target', 'status': 'Running',
@@ -1157,7 +1175,7 @@ class VMMemoryPreflightTests(unittest.TestCase):
              'type': 'virtual-machine',
              'expanded_config': {'limits.memory': '16GiB'}},
         ]
-        replacement_required = 16 * 1024**3 + vm.VM_MEMORY_MARGIN_BYTES
+        replacement_required = vm.VM_MEMORY_MARGIN_BYTES
         with mock.patch.object(vm, '_meminfo_available_bytes',
                                return_value=replacement_required):
             vm._preflight_vm_memory('target', '32GiB', 'restart')

@@ -217,9 +217,12 @@ def _format_memory_bytes(size):
     """Render a memory size for a human-facing preflight failure."""
     for divisor, suffix in ((1024**4, "TiB"), (1024**3, "GiB"),
                             (1024**2, "MiB"), (1024, "KiB")):
-        if size % divisor == 0:
-            return f"{size // divisor}{suffix}"
-    return f"{size / 1024**3:.1f}GiB"
+        if size >= divisor:
+            units = size / divisor
+            if units.is_integer():
+                return f"{int(units)}{suffix}"
+            return f"{units:.1f}{suffix}"
+    return f"{size}B"
 
 def _meminfo_available_bytes(meminfo_path="/proc/meminfo"):
     """Return the host's current MemAvailable in bytes."""
@@ -254,13 +257,12 @@ def _preflight_vm_memory(name, requested, action):
     requested_bytes = _memory_bytes(requested)
     available_bytes = _meminfo_available_bytes()
     running_limits = _running_vm_memory_bytes()
-    pinned_bytes = sum(memory for instance, memory in running_limits.items()
-                       if instance != name)
-    # A restart releases the VM's current pinned RAM before reclaiming the
+    # MemAvailable already excludes RAM pinned by other running VMs.  A
+    # restart releases the VM's current pinned RAM before reclaiming the
     # configured limit, so require only the increase over what it holds.
     replacement_bytes = min(requested_bytes,
                             running_limits.get(name, 0))
-    required_bytes = (requested_bytes - replacement_bytes + pinned_bytes
+    required_bytes = (requested_bytes - replacement_bytes
                       + VM_MEMORY_MARGIN_BYTES)
     if available_bytes < required_bytes:
         raise RuntimeError(
