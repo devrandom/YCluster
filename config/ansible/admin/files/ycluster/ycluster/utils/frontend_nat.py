@@ -8,6 +8,7 @@ an nftables ruleset; this module owns the data layer and the renderer.
 
 import json
 import re
+import sys
 
 from ..common.etcd_utils import get_etcd_client
 
@@ -141,3 +142,89 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
         '}',
     ]
     return '\n'.join(lines) + '\n'
+
+
+# Transit NIC allocation --------------------------------------------------
+# Compute-side: attach a transit NIC to VMs that have exposures and
+# record the allocated transit IP back into the etcd mapping records so
+# the frontend agent can render DNAT rules. The transit bridge is a
+# dedicated Incus network (created by the frontend-nat Ansible playbook);
+# it is NOT incusbr0, so the host's catch-all masquerade does not apply.
+
+TRANSIT_BRIDGE = 'transit0'
+TRANSIT_NIC_DEVICE = 'transit0'
+TRANSIT_POOL_START = 11  # .2-.10 reserved for infra (gateway, agent, ...)
+TRANSIT_POOL_END = 254
+
+
+def _incus(*args, **kwargs):
+    from .vm_manager import _incus as run
+    return run(*args, **kwargs)
+
+
+def _transit_nics_by_vm():
+    """Return {instance_name: transit_ip} from live `transit0` devices."""
+    out = {}
+    result = _incus('list', '--format', 'json', check=False)
+    try:
+        instances = json.loads(result.stdout)
+    except ValueError:
+        return out
+    for inst in instances:
+        ip = ((inst.get('devices') or {}).get(TRANSIT_NIC_DEVICE) or {}).get('ipv4.address')
+        if ip:
+            out[inst['name']] = ip
+    return out
+
+
+def sync_transit_nics(local_instances):
+    """Attach transit NICs + allocate transit IPs for exposed local VMs.
+
+    `local_instances` is the set of instance names on this host (the
+    caller already has it from reconcile). For each exposure whose VM
+    runs here and has no transit_ip yet, allocate the next free
+    100.100.0.x, attach the NIC, and update every exposure record for
+    that VM. Idempotent: already-allocated VMs are skipped.
+    """
+    exposures = list_exposures()
+    by_vm = {}
+    for e in exposures:
+        by_vm.setdefault(e['vm'], []).append(e)
+
+    allocated = {e['transit_ip'] for e in exposures if e.get('transit_ip')}
+    used = {ip.rsplit('.', 1)[1] for ip in allocated}
+    live = _transit_nics_by_vm()
+
+    changed = False
+    for vm, records in sorted(by_vm.items()):
+        if vm not in local_instances:
+            continue
+        if records[0].get('transit_ip'):
+            continue  # already allocated (idempotent)
+        # Pin the device if it doesn't exist yet (e.g. first tick).
+        if vm not in live:
+            _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE,
+                   'nic', f'network={TRANSIT_BRIDGE}', check=True)
+        else:
+            pass  # device exists; just need the IP in etcd
+        # Re-read live IPs in case the device add above now shows one.
+        live = _transit_nics_by_vm()
+        ip = live.get(vm)
+        if not ip:
+            # Allocate the next free octet in the transit pool.
+            for i in range(TRANSIT_POOL_START, TRANSIT_POOL_END + 1):
+                candidate = f'100.100.0.{i}'
+                if i not in {int(o) for o in used}:
+                    ip = candidate
+                    used.add(str(i))
+                    break
+            if not ip:
+                print(f'Warning: no free transit IPs for {vm}',
+                      file=sys.stderr)
+                continue
+            _incus('config', 'device', 'set', vm, TRANSIT_NIC_DEVICE,
+                   f'ipv4.address={ip}')
+        for e in records:
+            set_exposure(e['vm'], e['proto'], e['ports'], ip)
+            changed = True
+    return changed

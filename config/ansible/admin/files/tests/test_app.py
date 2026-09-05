@@ -1798,5 +1798,24 @@ class AppLandingTests(SchedTestBase):
         self.assertNotIn(b"YCluster Admin", r.data)
 
 
+class FrontendNatRulesApiTest(SchedTestBase):
+    def test_returns_exposures(self):
+        from ycluster.utils import frontend_nat
+        rows = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80-80',
+                 'transit_ip': '100.100.0.11'}]
+        with mock.patch.object(frontend_nat, 'list_exposures',
+                               return_value=rows):
+            r = self.http.get('/api/frontend/nat-rules')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()['exposures'], rows)
+
+    def test_returns_503_on_etcd_error(self):
+        from ycluster.utils import frontend_nat
+        with mock.patch.object(frontend_nat, 'list_exposures',
+                               side_effect=RuntimeError('down')):
+            r = self.http.get('/api/frontend/nat-rules')
+        self.assertEqual(r.status_code, 503)
+
+
 if __name__ == "__main__":
     unittest.main()

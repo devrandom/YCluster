@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Frontend nat-reconciler: pull exposure state, apply nftables.
+
+Runs on frontend nodes (outside the cluster envelope; no etcd access).
+Each tick:
+
+1. GET the exposure list from the admin API (mTLS via nginx location).
+2. Validate + render a complete nftables ruleset.
+3. If the rendered ruleset differs from last-applied, apply atomically
+   with `nft -f` and store the new hash.
+
+Fail-closed: on any error the last known-good ruleset stays in place;
+on first-boot (no last-known-good) the base deny-all table installed by
+Ansible is untouched. An empty or all-quarantined exposure list renders
+as an explicit deny-all ruleset, never as a flush.
+"""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import urllib.request
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'ycluster'))
+from ycluster.utils import frontend_nat  # noqa: E402
+
+API_URL = os.environ.get(
+    'NAT_RULES_URL', 'https://127.0.0.1/api/frontend/nat-rules')
+STATE_PATH = os.environ.get(
+    'NAT_STATE_PATH', '/var/lib/ycluster/nat-reconciler.json')
+PUBLIC_IP = os.environ.get('NAT_PUBLIC_IP', '')
+WAN_IFACE = os.environ.get('NAT_WAN_IFACE', 'eth0')
+TRANSIT_IFACE = os.environ.get('NAT_TRANSIT_IFACE', 'transit0')
+
+
+def fetch_exposures(url):
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = json.load(resp)
+    return body.get('exposures', [])
+
+
+def apply_ruleset(ruleset_text):
+    proc = subprocess.run(['nft', '-f', '-'], input=ruleset_text,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f'nft apply failed: {proc.stderr.strip()}')
+
+
+def main():
+    if not PUBLIC_IP:
+        print('NAT_PUBLIC_IP not set; skipping tick', file=sys.stderr)
+        return 1
+    exposures = fetch_exposures(API_URL)
+    ruleset = frontend_nat.render_nftables(
+        exposures, PUBLIC_IP, WAN_IFACE, TRANSIT_IFACE)
+    digest = hashlib.sha256(ruleset.encode()).hexdigest()
+
+    last = ''
+    if os.path.exists(STATE_PATH):
+        with open(STATE_PATH) as f:
+            last = json.load(f).get('ruleset_hash', '')
+    if digest == last:
+        return 0
+    apply_ruleset(ruleset)
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    with open(STATE_PATH, 'w') as f:
+        json.dump({'ruleset_hash': digest}, f)
+    print(f'applied ruleset {digest[:12]} ({len(exposures)} exposures)')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -52,6 +52,7 @@ users_page
 users_action
 settings_page
 settings_data
+frontend_nat_rules_api
 settings_keys_add
 settings_keys_remove
 settings_api_keys_page

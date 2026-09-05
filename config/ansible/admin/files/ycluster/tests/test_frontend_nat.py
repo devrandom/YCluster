@@ -183,3 +183,67 @@ class RenderNftablesTests(unittest.TestCase):
         self.assertEqual(
             frontend_nat.render_nftables(self.BASE, '203.0.113.10'),
             frontend_nat.render_nftables(reversed_list, '203.0.113.10'))
+
+
+class TransitSyncTests(unittest.TestCase):
+    def _set_exposures(self, exposures):
+        """Mock list_exposures/set_exposure for a sync run."""
+        stored = {e['vm']: e for e in exposures}
+        patches = [
+            mock.patch.object(frontend_nat, 'list_exposures',
+                              return_value=exposures),
+            mock.patch.object(frontend_nat, 'set_exposure',
+                              side_effect=lambda vm, p, ports, ip=None:
+                                  stored[vm].__setitem__('transit_ip', ip)),
+            mock.patch.object(frontend_nat, '_transit_nics_by_vm',
+                              return_value={}),
+        ]
+        return stored, patches
+
+    def test_allocates_and_persists(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': ''}]
+        stored, patches = self._set_exposures(exposures)
+        incus = mock.Mock()
+        with patches[0], patches[1], patches[2], \
+                mock.patch.object(frontend_nat, '_incus', incus):
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertTrue(changed)
+        self.assertEqual(stored['vm-a']['transit_ip'], '100.100.0.11')
+
+    def test_skips_nonlocal_vms(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-other', 'ports': '80',
+                      'transit_ip': ''}]
+        stored, patches = self._set_exposures(exposures)
+        with patches[0], patches[1], patches[2], \
+                mock.patch.object(frontend_nat, '_incus'):
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertFalse(changed)
+        self.assertEqual(stored['vm-other']['transit_ip'], '')
+
+    def test_idempotent_when_already_allocated(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': '100.100.0.11'}]
+        _, patches = self._set_exposures(exposures)
+        with patches[0], patches[1], patches[2], \
+                mock.patch.object(frontend_nat, '_incus') as incus:
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertFalse(changed)
+        incus.assert_not_called()
+
+    def test_transit_nics_by_vm_parses(self):
+        stdout = json.dumps([
+            {'name': 'vm-a',
+             'devices': {'transit0': {'ipv4.address': '100.100.0.11'}}},
+            {'name': 'vm-b', 'devices': {}},
+            {'name': 'vm-c', 'devices': {'transit0': {}}},
+        ])
+        incus = mock.Mock(return_value=mock.Mock(stdout=stdout))
+        with mock.patch.object(frontend_nat, '_incus', incus):
+            self.assertEqual(frontend_nat._transit_nics_by_vm(),
+                             {'vm-a': '100.100.0.11'})
+
+    def test_transit_nics_by_vm_tolerates_bad_json(self):
+        incus = mock.Mock(return_value=mock.Mock(stdout='not json'))
+        with mock.patch.object(frontend_nat, '_incus', incus):
+            self.assertEqual(frontend_nat._transit_nics_by_vm(), {})
