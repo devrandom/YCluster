@@ -123,7 +123,17 @@ start_openwebui() {
         echo "ENABLE_LOGIN_FORM=False" >> "$env_file"
         echo "DEFAULT_USER_ROLE=user" >> "$env_file"
     fi
-    
+
+    # Trust the cluster IdP edge gate (authentik forward-auth) as the auth
+    # boundary for the main instance: nginx validates the edge proxy session
+    # and forwards these headers to OWUI, which creates/looks up the user
+    # server-side. Main instance only — the stage instance has no edge gate,
+    # so trusting client-controlled headers there would be unsafe.
+    if [ -z "$INSTANCE" ]; then
+        echo "WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-Authentik-Email" >> "$env_file"
+        echo "WEBUI_AUTH_TRUSTED_GROUPS_HEADER=X-Authentik-Groups" >> "$env_file"
+    fi
+
     # Ensure temp file is cleaned up on exit
     trap "rm -f '$env_file'" EXIT
 

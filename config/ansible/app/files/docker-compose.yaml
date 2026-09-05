@@ -38,6 +38,11 @@ services:
       # pre-OAuth instance stays reachable.
       - 'ENABLE_LOGIN_FORM=${ENABLE_LOGIN_FORM:-True}'
       - 'DEFAULT_USER_ROLE=${DEFAULT_USER_ROLE:-pending}'
+      # Cluster IdP edge gate (authentik forward-auth): nginx validates the
+      # edge session and passes these identity headers; OWUI trusts them for
+      # server-side login when set (main instance only — see manager).
+      - 'WEBUI_AUTH_TRUSTED_EMAIL_HEADER=${WEBUI_AUTH_TRUSTED_EMAIL_HEADER:-}'
+      - 'WEBUI_AUTH_TRUSTED_GROUPS_HEADER=${WEBUI_AUTH_TRUSTED_GROUPS_HEADER:-}'
     extra_hosts:
       - host.docker.internal:host-gateway
       # Resolve cluster .xc names that aren't in Docker's embedded DNS so the
