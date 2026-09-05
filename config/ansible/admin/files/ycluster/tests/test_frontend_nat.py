@@ -319,18 +319,26 @@ class TransitSyncTests(unittest.TestCase):
 
     def test_reserve_exhausted_pool_returns_none(self):
         client = mock.Mock()
-        client.transactions.put.return_value = False
-        client.transactions.version.return_value = mock.ANY
+        client.transaction.return_value = (False, [])
         with _patched_etcd(client):
             self.assertIsNone(frontend_nat._reserve_transit_ip('vm-a'))
 
     def test_reserve_wins_first_candidate(self):
         client = mock.Mock()
-        client.transactions.put.return_value = True
-        client.transactions.version.return_value = mock.ANY
+        client.transaction.return_value = (True, [])
         with _patched_etcd(client):
             self.assertEqual(frontend_nat._reserve_transit_ip('vm-a'),
                              '100.100.0.11')
+
+    def test_reserve_uses_etcd_transaction(self):
+        client = mock.Mock()
+        client.transaction.return_value = (True, [])
+        with _patched_etcd(client):
+            frontend_nat._reserve_transit_ip('vm-a')
+        client.transaction.assert_called_once()
+        kwargs = client.transaction.call_args[1]
+        self.assertIn('compare', kwargs)
+        self.assertIn('success', kwargs)
 
     def test_conflicting_transit_ips_skips_vm(self):
         exposures = [

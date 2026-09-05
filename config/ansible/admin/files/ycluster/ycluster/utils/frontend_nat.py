@@ -6,6 +6,7 @@ Desired VM -> public-port-range mappings are stored under
 an nftables ruleset; this module owns the data layer and the renderer.
 """
 
+import hashlib
 import json
 import re
 import sys
@@ -121,71 +122,9 @@ def delete_exposure(vm, proto, ports):
 
 def render_nftables(exposures, public_ip, wan_iface='eth0',
                     transit_iface='transit0'):
-    """Render a complete, deterministic nftables ruleset.
-
-    Fail-closed: the table's forward chain policy is drop for every
-    protocol. Only DNAT'd inbound ranges and SNAT'd transit egress are
-    accepted. Anti-spoofing matches on iifname/oifname + source.
-    """
-    validate_exposures(exposures)
-    lines = [
-        # Atomic replace idiom: a bare table declaration followed by a
-        # delete makes the subsequent create succeed whether or not the
-        # table already exists (e.g. the base deny-all installed at
-        # boot). nft -f applies the whole file as one transaction.
-        'table ip ycluster_vm_nat',
-        'delete table ip ycluster_vm_nat',
-        'table ip ycluster_vm_nat {',
-        '  chain prerouting {',
-        '    type nat hook prerouting priority dstnat; policy accept;',
-    ]
-    for e in exposures:
-        first, last = _parse_ports(e['ports'])
-        if not e.get('transit_ip'):
-            continue  # not yet allocated; quarantine until reconciler fills it
-        dport = f'{first}' if first == last else f'{first}-{last}'
-        lines.append(
-            f'    iifname "{wan_iface}" {e["proto"]} dport {dport} '
-            f'dnat to {e["transit_ip"]}')
-    lines += [
-        '  }',
-        '  chain postrouting {',
-        '    type nat hook postrouting priority srcnat; policy accept;',
-        f'    ip saddr {TRANSIT_SUBNET} oifname "{wan_iface}" '
-        f'snat ip to {public_ip}',
-        '  }',
-        '  chain forward {',
-        '    type filter hook forward priority filter; policy drop;',
-        '    ct state established,related accept',
-        '    iifname "zts*" drop',
-    ]
-    for e in exposures:
-        first, last = _parse_ports(e['ports'])
-        if not e.get('transit_ip'):
-            continue
-        dport = f'{first}' if first == last else f'{first}-{last}'
-        lines.append(
-            f'    iifname "{wan_iface}" oifname "{transit_iface}" '
-            f'ip daddr {e["transit_ip"]} {e["proto"]} dport {dport} accept')
-    lines += [
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip daddr 10.0.0.0/8 drop',
-        # Egress is explicit per-protocol (no blanket accept): TCP and
-        # UDP may initiate outbound flows (SNAT'd to the public IP);
-        # ICMP only passes as established/related (error returns for
-        # the VM's own flows). Every other IP protocol is dropped by
-        # the chain's policy — no bypass path.
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} tcp accept',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} udp accept',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} icmp ct state established,related accept',
-        '  }',
-        '}',
-    ]
-    return '\n'.join(lines) + '\n'
-
+    """Delegate to the standalone renderer (see nat_render.py)."""
+    from .nat_render import render_nftables as _render
+    return _render(exposures, public_ip, wan_iface, transit_iface)
 
 # Transit NIC allocation --------------------------------------------------
 # Compute-side: attach a transit NIC to VMs that have exposures and
@@ -234,8 +173,10 @@ def _reserve_transit_ip(vm):
     for i in range(TRANSIT_POOL_START, TRANSIT_POOL_END + 1):
         ip = str(ipaddress.IPv4Address(f'100.100.0.{i}'))
         key = f'{NAT_PREFIX}_ip/{ip}'.encode()
-        ok = client.transactions.put(key, vm.encode(),
-                                     compare=[client.transactions.version(key) == 0])
+        ok, _ = client.transaction(
+            compare=[client.transactions.version(key) == 0],
+            success=[client.transactions.put(key, vm.encode())],
+        )
         if ok:
             return ip
     return None
@@ -261,6 +202,8 @@ def sync_transit_nics(local_instances):
     # Live transit devices count as used so a stale device (VM deleted
     # but NIC lingering) blocks its IP from being handed to a new VM.
     live = _transit_nics_by_vm()
+    used_ips = {e['transit_ip'] for e in exposures if e.get('transit_ip')}
+    used_ips.update(live.values())
 
     changed = False
     for vm, records in sorted(by_vm.items()):
@@ -273,16 +216,19 @@ def sync_transit_nics(local_instances):
             continue
         ip = existing.pop() if existing else None
         if not ip:
-            # Reserve transactionally, then attach the device with the
-            # reserved address.
-            ip = _reserve_transit_ip(vm)
-            if not ip:
-                print(f'Warning: no free transit IPs for {vm}',
-                      file=sys.stderr)
-                continue
-            _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE,
-                   'nic', f'network={TRANSIT_BRIDGE}',
-                   f'ipv4.address={ip}', check=True)
+            if vm in live:
+                # Device exists but etcd has no IP recorded (partial
+                # write or manual attach); adopt the live address.
+                ip = live[vm]
+            else:
+                ip = _reserve_transit_ip(vm)
+                if not ip:
+                    print(f'Warning: no free transit IPs for {vm}',
+                          file=sys.stderr)
+                    continue
+                _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE,
+                       'nic', f'network={TRANSIT_BRIDGE}',
+                       f'ipv4.address={ip}', check=True)
         # Converge every record for this VM (partial writes happen when
         # a tick dies between per-record puts).
         for e in records:

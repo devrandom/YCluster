@@ -20,8 +20,12 @@
       command:
         cmd: >-
           incus network create transit0
-          ipv4.address=100.100.0.1/24 ipv4.nat=false
+          ipv4.address=100.100.0.1/24 ipv4.nat=false ipv6.address=none
         creates: /var/lib/incus/networks/transit0
+      when: incus_vm_host | default(false)
+
+    - name: Disable IPv6 on existing transit0 (fail-closed, no bypass)
+      command: incus network set transit0 ipv6.address none
       when: incus_vm_host | default(false)
 
     - name: Install nat-reconciler agent
@@ -31,6 +35,37 @@
         mode: '0755'
         owner: root
         group: root
+
+    - name: Install standalone renderer module
+      copy:
+        src: "{{ lookup('env', 'PWD') }}/config/ansible/admin/files/ycluster/ycluster/utils/nat_render.py"
+        dest: /usr/local/lib/ycluster/nat_render.py
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Install mTLS client key
+      copy:
+        content: "{{ nat_client_key }}"
+        dest: /etc/ycluster/nat-client.key
+        mode: '0600'
+      no_log: true
+      when: nat_client_key is defined
+
+    - name: Install mTLS client certificate
+      copy:
+        content: "{{ nat_client_cert }}"
+        dest: /etc/ycluster/nat-client.crt
+        mode: '0644'
+      when: nat_client_cert is defined
+
+    - name: Fail if mTLS material is missing
+      fail:
+        msg: >-
+          nat_client_key / nat_client_cert must be provided for
+          {{ inventory_hostname }} — the agent refuses to pull without
+          mTLS (fail-closed).
+      when: nat_client_key is not defined or nat_client_cert is not defined
 
     - name: Install base deny-all nftables table
       copy:
@@ -54,6 +89,8 @@
           NAT_WAN_IFACE={{ nat_wan_iface | default('eth0') }}
           NAT_TRANSIT_IFACE={{ nat_transit_iface | default('transit0') }}
           NAT_RULES_URL=https://127.0.0.1/api/frontend/nat-rules
+          NAT_CLIENT_CERT=/etc/ycluster/nat-client.crt
+          NAT_CLIENT_KEY=/etc/ycluster/nat-client.key
         dest: /etc/ycluster/nat-reconciler.env
         mode: '0600'
       notify: restart nat-reconciler
