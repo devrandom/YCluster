@@ -48,10 +48,26 @@ worktree name shared_venv='1':
         echo "linked $link -> $rel"; \
     done; \
     host_vars="$wt/config/ansible/host_vars"; \
-    mkdir -p "$(dirname "$host_vars")"; \
+    mkdir -p "$wt/config/ansible"; \
     rel="$(realpath --relative-to "$(dirname "$host_vars")" "$root/config/ansible")/host_vars"; \
     ln -sfn "$rel" "$host_vars"; \
-    echo "linked $host_vars -> $rel"
+    echo "linked $host_vars -> $rel"; \
+    mkdir -p "$wt/tmp" "$root/tmp/uv-cache" "$root/tmp/gopath" "$root/tmp/go-cache" "$root/tmp/gotmp"; \
+    rel_uv="$(realpath --relative-to "$wt/tmp" "$root/tmp/uv-cache")"; \
+    if [ -d "$wt/tmp/uv-cache" ] && [ ! -L "$wt/tmp/uv-cache" ]; then \
+        rm -rf "$wt/tmp/uv-cache"; \
+    fi; \
+    ln -sfn "$rel_uv" "$wt/tmp/uv-cache"; \
+    echo "linked $wt/tmp/uv-cache -> $rel_uv (shared uv cache)"; \
+    for d in gopath go-cache gotmp; do \
+        if [ -d "$wt/tmp/$d" ] && [ ! -L "$wt/tmp/$d" ]; then \
+            chmod -R u+w "$wt/tmp/$d" 2>/dev/null || true; \
+            rm -rf "$wt/tmp/$d"; \
+        fi; \
+        rel_d="$(realpath --relative-to "$wt/tmp" "$root/tmp/$d")"; \
+        ln -sfn "$rel_d" "$wt/tmp/$d"; \
+        echo "linked $wt/tmp/$d -> $rel_d (shared Go cache)"; \
+    done
     @echo "worktree ready: {{WORKTREE_ROOT}}/{{name}}"
 
 # Create a decoupled agent worktree. Pass either a todo file (for example
