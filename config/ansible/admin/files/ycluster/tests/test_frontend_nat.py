@@ -4,6 +4,12 @@ from unittest import mock
 
 from ycluster.cli import frontend as frontend_nat_cli
 from ycluster.utils import frontend_nat
+from ycluster.common import etcd_utils
+
+
+def _patched_etcd(client):
+    return mock.patch.object(etcd_utils, 'get_etcd_client',
+                             return_value=client)
 
 
 def _fake_client(keys):
@@ -46,7 +52,7 @@ class ValidateExposuresTests(unittest.TestCase):
 class SetExposureTests(unittest.TestCase):
     def test_set_writes_key(self):
         client = mock.Mock()
-        with mock.patch.object(frontend_nat, 'get_etcd_client', return_value=client):
+        with _patched_etcd(client):
             key = frontend_nat.set_exposure('vm-a', 'tcp', '20000-20099',
                                             '100.100.0.11')
         self.assertEqual(key, '/cluster/frontend/nat/tcp/vm-a/20000-20099')
@@ -54,7 +60,7 @@ class SetExposureTests(unittest.TestCase):
             key, json.dumps({'transit_ip': '100.100.0.11'}))
 
     def test_set_rejects_bad_proto_and_ip(self):
-        with mock.patch.object(frontend_nat, 'get_etcd_client'):
+        with _patched_etcd(mock.Mock()):
             with self.assertRaises(ValueError):
                 frontend_nat.set_exposure('vm-a', 'sctp', '80')
             with self.assertRaises(ValueError):
@@ -69,8 +75,7 @@ class ListExposuresTests(unittest.TestCase):
             '/cluster/frontend/nat/udp/vm-b/80-80':
                 json.dumps({}),
         }
-        with mock.patch.object(frontend_nat, 'get_etcd_client',
-                               return_value=_fake_client(keys)):
+        with _patched_etcd(_fake_client(keys)):
             got = frontend_nat.list_exposures()
         self.assertEqual(got, [
             {'proto': 'tcp', 'vm': 'vm-a', 'ports': '20000-20099',
@@ -83,9 +88,13 @@ class ListExposuresTests(unittest.TestCase):
         keys = {
             '/cluster/frontend/nat/nodashes': 'not json',
             '/cluster/frontend/nat/tcp/vm-a/20000-20099': '{bad',
+            # Injection-style records must be quarantined, not rendered.
+            '/cluster/frontend/nat/sctp/vm-x/80-80': '{}',
+            '/cluster/frontend/nat/tcp/vm-x/99999-99999': '{}',
+            '/cluster/frontend/nat/tcp/vm-x/80-80':
+                '{"transit_ip": "10.0.0.1"}',
         }
-        with mock.patch.object(frontend_nat, 'get_etcd_client',
-                               return_value=_fake_client(keys)):
+        with _patched_etcd(_fake_client(keys)):
             self.assertEqual(frontend_nat.list_exposures(), [])
 
     def test_delete_rejects_bad_proto(self):
@@ -93,7 +102,7 @@ class ListExposuresTests(unittest.TestCase):
             frontend_nat.delete_exposure('vm-a', 'sctp', '80')
 
     def test_set_rejects_bad_vm_name(self):
-        with mock.patch.object(frontend_nat, 'get_etcd_client'):
+        with _patched_etcd(mock.Mock()):
             with self.assertRaises(ValueError):
                 frontend_nat.set_exposure('Bad Name!', 'tcp', '80')
 
@@ -184,52 +193,173 @@ class RenderNftablesTests(unittest.TestCase):
             frontend_nat.render_nftables(self.BASE, '203.0.113.10'),
             frontend_nat.render_nftables(reversed_list, '203.0.113.10'))
 
+    def test_atomic_replace_header(self):
+        text = frontend_nat.render_nftables(self.BASE, '203.0.113.10')
+        self.assertTrue(text.startswith(
+            'table ip ycluster_vm_nat\n'
+            'delete table ip ycluster_vm_nat\n'
+            'table ip ycluster_vm_nat {'))
+
+    def test_egress_is_per_protocol_not_blanket(self):
+        text = frontend_nat.render_nftables(self.BASE, '203.0.113.10')
+        self.assertIn('tcp accept', text)
+        self.assertIn('udp accept', text)
+        self.assertIn('icmp ct state established,related accept', text)
+        self.assertNotIn('ip saddr 100.100.0.0/24 accept', text)
+
 
 class TransitSyncTests(unittest.TestCase):
-    def _set_exposures(self, exposures):
-        """Mock list_exposures/set_exposure for a sync run."""
-        stored = {e['vm']: e for e in exposures}
-        patches = [
+    def _sync_patches(self, exposures, live=None):
+        """Patch list_exposures + _transit_nics_by_vm for a sync run."""
+        return [
             mock.patch.object(frontend_nat, 'list_exposures',
                               return_value=exposures),
-            mock.patch.object(frontend_nat, 'set_exposure',
-                              side_effect=lambda vm, p, ports, ip=None:
-                                  stored[vm].__setitem__('transit_ip', ip)),
             mock.patch.object(frontend_nat, '_transit_nics_by_vm',
-                              return_value={}),
+                              return_value=live or {}),
         ]
-        return stored, patches
 
     def test_allocates_and_persists(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
                       'transit_ip': ''}]
-        stored, patches = self._set_exposures(exposures)
+        patches = self._sync_patches(exposures)
         incus = mock.Mock()
-        with patches[0], patches[1], patches[2], \
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value='100.100.0.11'), \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
                 mock.patch.object(frontend_nat, '_incus', incus):
             changed = frontend_nat.sync_transit_nics({'vm-a'})
         self.assertTrue(changed)
-        self.assertEqual(stored['vm-a']['transit_ip'], '100.100.0.11')
+        set_.assert_called_once_with('vm-a', 'tcp', '80', '100.100.0.11')
+        incus.assert_called_once()
 
     def test_skips_nonlocal_vms(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-other', 'ports': '80',
                       'transit_ip': ''}]
-        stored, patches = self._set_exposures(exposures)
-        with patches[0], patches[1], patches[2], \
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
                 mock.patch.object(frontend_nat, '_incus'):
             changed = frontend_nat.sync_transit_nics({'vm-a'})
         self.assertFalse(changed)
-        self.assertEqual(stored['vm-other']['transit_ip'], '')
+        r.assert_not_called()
+        set_.assert_not_called()
 
     def test_idempotent_when_already_allocated(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
                       'transit_ip': '100.100.0.11'}]
-        _, patches = self._set_exposures(exposures)
-        with patches[0], patches[1], patches[2], \
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
                 mock.patch.object(frontend_nat, '_incus') as incus:
             changed = frontend_nat.sync_transit_nics({'vm-a'})
         self.assertFalse(changed)
+        r.assert_not_called()
+        set_.assert_not_called()
         incus.assert_not_called()
+
+    def test_converges_partial_records(self):
+        # Two records on the same VM, only the first has an IP: the
+        # empty one must be filled in (partial-write convergence).
+        exposures = [
+            {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+             'transit_ip': '100.100.0.11'},
+            {'proto': 'udp', 'vm': 'vm-a', 'ports': '90',
+             'transit_ip': ''},
+        ]
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus'):
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertTrue(changed)
+        set_.assert_called_once_with('vm-a', 'udp', '90', '100.100.0.11')
+        r.assert_not_called()
+
+    def test_stale_live_device_blocks_its_ip(self):
+        # vm-b holds a live transit NIC but has no exposure records; the
+        # allocation for vm-a must not pick vm-b's live IP. (Reservation
+        # is etcd-transactional, so we assert the incus add carries the
+        # reserved IP rather than the live collision.)
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': ''}]
+        patches = self._sync_patches(exposures, live={'vm-b': '100.100.0.11'})
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value='100.100.0.12'), \
+                mock.patch.object(frontend_nat, 'set_exposure'), \
+                mock.patch.object(frontend_nat, '_incus') as incus:
+            frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertIn('ipv4.address=100.100.0.12', incus.call_args[0])
+
+    def test_valid_transit_ip_rejects_out_of_subnet(self):
+        self.assertFalse(frontend_nat._valid_transit_ip('100.100.0.999'))
+        self.assertFalse(frontend_nat._valid_transit_ip('10.0.0.5'))
+        self.assertFalse(frontend_nat._valid_transit_ip('not-an-ip'))
+        self.assertTrue(frontend_nat._valid_transit_ip('100.100.0.254'))
+
+    def test_list_quarantines_bad_vm_name_and_ip(self):
+        keys = {
+            '/cluster/frontend/nat/tcp/vm_bad!name/80-80': '{}',
+            '/cluster/frontend/nat/tcp/vm-ok/80-80':
+                '{"transit_ip": "100.100.0.999"}',
+        }
+        with _patched_etcd(_fake_client(keys)):
+            self.assertEqual(frontend_nat.list_exposures(), [])
+
+    def test_delete_exposure(self):
+        client = mock.Mock()
+        with _patched_etcd(client):
+            frontend_nat.delete_exposure('vm-a', 'tcp', '80')
+        client.delete.assert_called_once_with(
+            '/cluster/frontend/nat/tcp/vm-a/80-80')
+
+    def test_reserve_exhausted_pool_returns_none(self):
+        client = mock.Mock()
+        client.transactions.put.return_value = False
+        client.transactions.version.return_value = mock.ANY
+        with _patched_etcd(client):
+            self.assertIsNone(frontend_nat._reserve_transit_ip('vm-a'))
+
+    def test_reserve_wins_first_candidate(self):
+        client = mock.Mock()
+        client.transactions.put.return_value = True
+        client.transactions.version.return_value = mock.ANY
+        with _patched_etcd(client):
+            self.assertEqual(frontend_nat._reserve_transit_ip('vm-a'),
+                             '100.100.0.11')
+
+    def test_conflicting_transit_ips_skips_vm(self):
+        exposures = [
+            {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+             'transit_ip': '100.100.0.11'},
+            {'proto': 'udp', 'vm': 'vm-a', 'ports': '90',
+             'transit_ip': '100.100.0.99'},
+        ]
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_:
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertFalse(changed)
+        r.assert_not_called()
+        set_.assert_not_called()
+
+    def test_pool_exhaustion_warns_and_continues(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': ''}]
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value=None), \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus'):
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertFalse(changed)
+        set_.assert_not_called()
 
     def test_transit_nics_by_vm_parses(self):
         stdout = json.dumps([

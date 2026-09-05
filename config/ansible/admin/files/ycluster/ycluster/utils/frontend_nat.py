@@ -10,7 +10,10 @@ import json
 import re
 import sys
 
-from ..common.etcd_utils import get_etcd_client
+# NOTE: get_etcd_client is imported lazily inside the functions that use
+# it. The frontend nat-reconciler agent imports this module for
+# render_nftables() and runs OUTSIDE the cluster envelope — it must not
+# need the etcd3 client installed.
 
 NAT_PREFIX = '/cluster/frontend/nat/'
 PROTOS = ('tcp', 'udp')
@@ -51,8 +54,23 @@ def validate_exposures(exposures):
     return True
 
 
+def _valid_transit_ip(value):
+    """True if value is a valid IPv4 address inside TRANSIT_SUBNET."""
+    import ipaddress
+    try:
+        return (ipaddress.ip_address(value) in
+                ipaddress.ip_network(TRANSIT_SUBNET, strict=False))
+    except ValueError:
+        return False
+
+
 def list_exposures():
-    """Return all exposure records as a sorted list of dicts."""
+    """Return all exposure records as a sorted list of dicts.
+
+    Malformed keys or records are skipped (quarantined) so the
+    reconciler never interpolates unvalidated data into nft syntax.
+    """
+    from ..common.etcd_utils import get_etcd_client
     client = get_etcd_client()
     out = []
     for val, meta in client.get_prefix(NAT_PREFIX):
@@ -60,10 +78,18 @@ def list_exposures():
         try:
             proto, vm, ports = key.split('/')
             record = json.loads(val.decode())
+            if proto not in PROTOS:
+                raise ValueError(proto)
+            _parse_ports(ports)
+            if not re.match(r'^[a-z0-9][a-z0-9-]{0,62}$', vm):
+                raise ValueError(vm)
+            transit_ip = record.get('transit_ip', '')
+            if transit_ip and not _valid_transit_ip(transit_ip):
+                raise ValueError(transit_ip)
         except (ValueError, json.JSONDecodeError):
             continue
         out.append({'proto': proto, 'vm': vm, 'ports': ports,
-                    'transit_ip': record.get('transit_ip', '')})
+                    'transit_ip': transit_ip})
     return sorted(out, key=lambda e: (e['proto'], e['vm'], e['ports']))
 
 
@@ -73,13 +99,14 @@ def set_exposure(vm, proto, ports, transit_ip=None):
         raise ValueError(f'proto must be one of {PROTOS}')
     if not re.match(r'^[a-z0-9][a-z0-9-]{0,62}$', vm):
         raise ValueError(f'invalid vm name: {vm!r}')
-    if transit_ip is not None and not re.match(
-            r'^100\.100\.0\.[0-9]{1,3}$', transit_ip):
-        raise ValueError(f'transit_ip must be in {TRANSIT_SUBNET}: {transit_ip!r}')
+    if transit_ip is not None and not _valid_transit_ip(transit_ip):
+        raise ValueError(
+            f'transit_ip must be in {TRANSIT_SUBNET}: {transit_ip!r}')
     key = _key(proto, vm, ports)
     record = {}
     if transit_ip:
         record['transit_ip'] = transit_ip
+    from ..common.etcd_utils import get_etcd_client
     get_etcd_client().put(key, json.dumps(record))
     return key
 
@@ -88,6 +115,7 @@ def delete_exposure(vm, proto, ports):
     """Delete one mapping. Raises ValueError on invalid input."""
     if proto not in PROTOS:
         raise ValueError(f'proto must be one of {PROTOS}')
+    from ..common.etcd_utils import get_etcd_client
     get_etcd_client().delete(_key(proto, vm, ports))
 
 
@@ -101,6 +129,12 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
     """
     validate_exposures(exposures)
     lines = [
+        # Atomic replace idiom: a bare table declaration followed by a
+        # delete makes the subsequent create succeed whether or not the
+        # table already exists (e.g. the base deny-all installed at
+        # boot). nft -f applies the whole file as one transaction.
+        'table ip ycluster_vm_nat',
+        'delete table ip ycluster_vm_nat',
         'table ip ycluster_vm_nat {',
         '  chain prerouting {',
         '    type nat hook prerouting priority dstnat; policy accept;',
@@ -136,8 +170,17 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
     lines += [
         f'    iifname "{transit_iface}" oifname "{wan_iface}" '
         f'ip saddr {TRANSIT_SUBNET} ip daddr 10.0.0.0/8 drop',
+        # Egress is explicit per-protocol (no blanket accept): TCP and
+        # UDP may initiate outbound flows (SNAT'd to the public IP);
+        # ICMP only passes as established/related (error returns for
+        # the VM's own flows). Every other IP protocol is dropped by
+        # the chain's policy — no bypass path.
         f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} accept',
+        f'ip saddr {TRANSIT_SUBNET} tcp accept',
+        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+        f'ip saddr {TRANSIT_SUBNET} udp accept',
+        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+        f'ip saddr {TRANSIT_SUBNET} icmp ct state established,related accept',
         '  }',
         '}',
     ]
@@ -177,54 +220,73 @@ def _transit_nics_by_vm():
     return out
 
 
+def _reserve_transit_ip(vm):
+    """Transactionally reserve the next free transit IP for `vm`.
+
+    Uses an etcd transaction (compare-version=0) so concurrent hosts
+    cannot allocate the same octet to two VMs: only the first put on a
+    given reservation key succeeds; losers retry the next candidate.
+    Returns the reserved IP or None if the pool is exhausted.
+    """
+    import ipaddress
+    from ..common.etcd_utils import get_etcd_client
+    client = get_etcd_client()
+    for i in range(TRANSIT_POOL_START, TRANSIT_POOL_END + 1):
+        ip = str(ipaddress.IPv4Address(f'100.100.0.{i}'))
+        key = f'{NAT_PREFIX}_ip/{ip}'.encode()
+        ok = client.transactions.put(key, vm.encode(),
+                                     compare=[client.transactions.version(key) == 0])
+        if ok:
+            return ip
+    return None
+
+
 def sync_transit_nics(local_instances):
     """Attach transit NICs + allocate transit IPs for exposed local VMs.
 
     `local_instances` is the set of instance names on this host (the
     caller already has it from reconcile). For each exposure whose VM
-    runs here and has no transit_ip yet, allocate the next free
-    100.100.0.x, attach the NIC, and update every exposure record for
-    that VM. Idempotent: already-allocated VMs are skipped.
+    runs here and has no transit_ip yet, reserve an IP transactionally,
+    attach the NIC, and update every exposure record for that VM.
+    Idempotent: already-allocated VMs are converged (missing records on
+    a VM whose first record has an IP are filled in), and live transit
+    devices on unrelated VMs are treated as used so stale devices
+    cannot collide with fresh allocations.
     """
     exposures = list_exposures()
     by_vm = {}
     for e in exposures:
         by_vm.setdefault(e['vm'], []).append(e)
 
-    allocated = {e['transit_ip'] for e in exposures if e.get('transit_ip')}
-    used = {ip.rsplit('.', 1)[1] for ip in allocated}
+    # Live transit devices count as used so a stale device (VM deleted
+    # but NIC lingering) blocks its IP from being handed to a new VM.
     live = _transit_nics_by_vm()
 
     changed = False
     for vm, records in sorted(by_vm.items()):
         if vm not in local_instances:
             continue
-        if records[0].get('transit_ip'):
-            continue  # already allocated (idempotent)
-        # Pin the device if it doesn't exist yet (e.g. first tick).
-        if vm not in live:
-            _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE,
-                   'nic', f'network={TRANSIT_BRIDGE}', check=True)
-        else:
-            pass  # device exists; just need the IP in etcd
-        # Re-read live IPs in case the device add above now shows one.
-        live = _transit_nics_by_vm()
-        ip = live.get(vm)
+        existing = {r.get('transit_ip') for r in records} - {''}
+        if len(existing) > 1:
+            print(f'Warning: {vm} has conflicting transit IPs; skipping',
+                  file=sys.stderr)
+            continue
+        ip = existing.pop() if existing else None
         if not ip:
-            # Allocate the next free octet in the transit pool.
-            for i in range(TRANSIT_POOL_START, TRANSIT_POOL_END + 1):
-                candidate = f'100.100.0.{i}'
-                if i not in {int(o) for o in used}:
-                    ip = candidate
-                    used.add(str(i))
-                    break
+            # Reserve transactionally, then attach the device with the
+            # reserved address.
+            ip = _reserve_transit_ip(vm)
             if not ip:
                 print(f'Warning: no free transit IPs for {vm}',
                       file=sys.stderr)
                 continue
-            _incus('config', 'device', 'set', vm, TRANSIT_NIC_DEVICE,
-                   f'ipv4.address={ip}')
+            _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE,
+                   'nic', f'network={TRANSIT_BRIDGE}',
+                   f'ipv4.address={ip}', check=True)
+        # Converge every record for this VM (partial writes happen when
+        # a tick dies between per-record puts).
         for e in records:
-            set_exposure(e['vm'], e['proto'], e['ports'], ip)
-            changed = True
+            if e.get('transit_ip') != ip:
+                set_exposure(e['vm'], e['proto'], e['ports'], ip)
+                changed = True
     return changed

@@ -48,6 +48,13 @@ def apply_ruleset(ruleset_text):
         raise RuntimeError(f'nft apply failed: {proc.stderr.strip()}')
 
 
+def table_exists():
+    """True if the ycluster_vm_nat table is currently loaded."""
+    proc = subprocess.run(['nft', 'list', 'table', 'ip', 'ycluster_vm_nat'],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
+
+
 def main():
     if not PUBLIC_IP:
         print('NAT_PUBLIC_IP not set; skipping tick', file=sys.stderr)
@@ -61,7 +68,10 @@ def main():
     if os.path.exists(STATE_PATH):
         with open(STATE_PATH) as f:
             last = json.load(f).get('ruleset_hash', '')
-    if digest == last:
+    # A hash match is only a no-op if the table is actually loaded —
+    # after a reboot nftables starts from the base deny-all file, so
+    # the table must be re-applied even though the digest is unchanged.
+    if digest == last and table_exists():
         return 0
     apply_ruleset(ruleset)
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)

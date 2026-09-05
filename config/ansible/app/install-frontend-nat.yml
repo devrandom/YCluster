@@ -16,6 +16,14 @@
 - hosts: frontend
   become: true
   tasks:
+    - name: Ensure transit0 Incus network exists
+      command:
+        cmd: >-
+          incus network create transit0
+          ipv4.address=100.100.0.1/24 ipv4.nat=false
+        creates: /var/lib/incus/networks/transit0
+      when: incus_vm_host | default(false)
+
     - name: Install nat-reconciler agent
       copy:
         src: nat-reconciler
