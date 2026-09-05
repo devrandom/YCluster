@@ -17,6 +17,7 @@
 # Output (atomic write to /var/lib/prometheus/node-exporter/temps.prom):
 #   node_ipmi_temperature_celsius{sensor="...",role="..."} <value>
 #   node_gpu_temperature_celsius{index="...",pci_bus_id="...",name="..."} <value>
+#   node_gpu_thermal_slowdown{index="...",pci_bus_id="...",name="...",reason="hw"|"sw"} 0|1
 #   node_comino_temperature_celsius{sensor="...",role="..."} <value>
 #   node_comino_fan_rpm{channel="...",name="..."} <value>
 import glob
@@ -105,6 +106,37 @@ def collect_ipmi():
     return out
 
 
+def _collect_throttle():
+    """Return {pci_bus_id: (hw_thermal_active, sw_thermal_active)}.
+
+    Runs as a second nvidia-smi call so older drivers without the
+    clocks_throttle_reasons query fields degrade to no throttle metrics
+    instead of losing temperature collection entirely.
+    """
+    query = (
+        "index,pci.bus_id,"
+        "clocks_throttle_reasons.hw_thermal_slowdown,"
+        "clocks_throttle_reasons.sw_thermal_slowdown"
+    )
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={query}",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    if r.returncode != 0:
+        return {}
+    out = {}
+    for line in r.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 4:
+            continue
+        out[parts[1]] = (parts[2] == "Active", parts[3] == "Active")
+    return out
+
+
 def collect_nvidia():
     """Return list of dicts for each host-visible GPU."""
     out = []
@@ -144,6 +176,10 @@ def collect_nvidia():
             })
         except ValueError:
             continue
+    throttle = _collect_throttle()
+    for gpu in out:
+        gpu["hw_slow"], gpu["sw_slow"] = throttle.get(
+            gpu["pci_bus_id"], (False, False))
     return out
 
 
@@ -330,6 +366,14 @@ def _emit_gpu_metrics(lines, gpu):
     _emit_metric(lines, "GPU power draw in watts.",
                  "node_gpu_power_watts",
                  [f'node_gpu_power_watts{{{lbls(g)}}} {g["power_w"]}' for g in gpu])
+    _emit_metric(
+        lines,
+        "GPU thermal slowdown active right now: reason hw (hardware) or "
+        "sw (software/driver). 1 = throttling.",
+        "node_gpu_thermal_slowdown",
+        [f'node_gpu_thermal_slowdown{{{lbls(g)},reason="{r}"}} '
+         f'{1 if g[f"{r}_slow"] else 0}'
+         for g in gpu for r in ("hw", "sw")])
 
 
 def _prom_body(ipmi, gpu, comino_temps, comino_fans):

@@ -735,27 +735,27 @@ groups:
       # max across all GPUs on a node so any hot card fires.
       - alert: HighGPUTemperature
         expr: |
-          max by (node) (node_gpu_temperature_celsius) > 80
+          max by (node) (node_gpu_temperature_celsius) > 88
           or
-          max by (node) (node_ipmi_temperature_celsius{role="gpu"}) > 80
+          max by (node) (node_ipmi_temperature_celsius{role="gpu"}) > 88
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "High GPU temperature on {{ $labels.node }}"
-          description: "A GPU on {{ $labels.node }} has been above 80°C for more than 2 minutes"
+          description: "A GPU on {{ $labels.node }} has been above 88°C for more than 2 minutes"
 
       - alert: CriticalGPUTemperature
         expr: |
-          max by (node) (node_gpu_temperature_celsius) > 90
+          max by (node) (node_gpu_temperature_celsius) > 92
           or
-          max by (node) (node_ipmi_temperature_celsius{role="gpu"}) > 90
+          max by (node) (node_ipmi_temperature_celsius{role="gpu"}) > 92
         for: 30s
         labels:
           severity: critical
         annotations:
           summary: "Critical GPU temperature on {{ $labels.node }}"
-          description: "A GPU on {{ $labels.node }} has been above 90°C — thermal throttling imminent"
+          description: "A GPU on {{ $labels.node }} is above 92°C — at or past the thermal-slowdown point"
 
       # Stale collector output — timers fire every 30s, so anything
       # older than a few minutes means the script or its dependencies

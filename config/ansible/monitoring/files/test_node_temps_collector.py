@@ -132,6 +132,67 @@ class CollectIpmiTests(unittest.TestCase):
                 self.assertEqual(ntc.collect_ipmi(), [])
 
 
+class CollectNvidiaTests(unittest.TestCase):
+    @staticmethod
+    def result(stdout='', returncode=0):
+        return subprocess.CompletedProcess([], returncode, stdout=stdout,
+                                          stderr='')
+
+    GPU_ROW = ('0, 00000000:01:00.0, Test GPU, 52, 0, 0, 100, 100, 10.5\n')
+
+    def test_merges_throttle_flags(self):
+        throttle = self.result(
+            '0, 00000000:01:00.0, Not Active, Active\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               side_effect=[self.result(self.GPU_ROW),
+                                            throttle]):
+            gpus = ntc.collect_nvidia()
+        self.assertEqual(len(gpus), 1)
+        self.assertEqual(gpus[0]["temp_c"], 52.0)
+        self.assertFalse(gpus[0]["hw_slow"])
+        self.assertTrue(gpus[0]["sw_slow"])
+
+    def test_unsupported_throttle_query_degrades_to_false(self):
+        # Older drivers reject the clocks_throttle_reasons fields; temps
+        # must still be collected with throttle flags defaulting to off.
+        with mock.patch.object(ntc.subprocess, 'run',
+                               side_effect=[self.result(self.GPU_ROW),
+                                            self.result(returncode=1)]):
+            gpus = ntc.collect_nvidia()
+        self.assertEqual(len(gpus), 1)
+        self.assertFalse(gpus[0]["hw_slow"])
+        self.assertFalse(gpus[0]["sw_slow"])
+
+    def test_throttle_parser_rejects_malformed_rows(self):
+        stdout = (
+            '0, 00000000:01:00.0, Not Active, Active\n'
+            '1, 00000000:02:00.0, Not Active\n'
+            'garbage\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(ntc._collect_throttle(),
+                             {"00000000:01:00.0": (False, True)})
+
+    def test_emit_gpu_metrics_includes_throttle(self):
+        gpu = {"index": "0", "pci_bus_id": "00000000:01:00.0",
+               "name": "Test GPU", "temp_c": 52.0, "util_gpu": 0.0,
+               "util_mem": 0.0, "mem_used_mib": 100.0, "mem_total_mib": 100.0,
+               "power_w": 10.5, "hw_slow": False, "sw_slow": True}
+        lines = []
+        ntc._emit_gpu_metrics(lines, [gpu])
+        body = "\n".join(lines)
+        self.assertIn(
+            'node_gpu_thermal_slowdown{index="0",'
+            'pci_bus_id="00000000:01:00.0",name="Test GPU",reason="hw"} 0',
+            body)
+        self.assertIn(
+            'node_gpu_thermal_slowdown{index="0",'
+            'pci_bus_id="00000000:01:00.0",name="Test GPU",reason="sw"} 1',
+            body)
+
+
 class SelectCominoDevice(unittest.TestCase):
     def test_skips_crps_and_picks_comino(self):
         # ttyACM0 is the CRPS controller, ttyACM1 is the Comino RM —

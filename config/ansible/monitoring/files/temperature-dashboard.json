@@ -69,8 +69,8 @@
             "steps": [
               { "color": "green", "value": null },
               { "color": "yellow", "value": 70 },
-              { "color": "orange", "value": 80 },
-              { "color": "red", "value": 90 }
+              { "color": "orange", "value": 88 },
+              { "color": "red", "value": 92 }
             ]
           },
           "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line" } }
@@ -432,6 +432,38 @@
           "datasource": { "type": "prometheus", "uid": "prometheus-local" },
           "expr": "increase(node_crps_psu_event_total[$__rate_interval])",
           "legendFormat": "{{node}} PSU{{module}} {{kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU thermal throttling (nvidia-smi, host-visible only)",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 26 },
+      "id": 16,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "thresholdsStyle": { "mode": "line" } }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "max"] } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+          "expr": "max by (node, reason) (node_gpu_thermal_slowdown)",
+          "legendFormat": "{{node}} {{reason}}",
           "refId": "A"
         }
       ]
