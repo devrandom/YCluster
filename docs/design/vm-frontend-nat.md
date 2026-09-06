@@ -2,7 +2,9 @@
 
 ## Status
 
-**Draft — direction decided, nothing implemented.**
+**Implemented.** The NAT gateway state machine and renderer are deployed
+on the designated frontend; the WireGuard transport overlay is
+provisioned by `app/install-vm-nat-wg.yml`.
 
 Selected VMs need a public network identity that is decoupled from the
 compute host they run on, for both directions:
@@ -48,12 +50,12 @@ NAT-gateway role on the frontend.
               │  - SNAT egress      │
               │  - forward filter   │
               └────────┬────────────┘
-                       │ transit network (e.g. 100.100.0.0/24)
+                       │ per-host transit + WireGuard overlay
                        ▼
               ┌────────────────────┐
-              │ compute host (nv2) │
-              │  incus bridge      │
-              │  transit netns     │
+              │ compute host       │
+              │  transit0 bridge   │
+              │  WG spoke          │
               └────────┬──────────┘
                        ▼
                    selected VMs
@@ -61,18 +63,46 @@ NAT-gateway role on the frontend.
 
 ### Transit network
 
-Selected VMs get a second NIC on a dedicated transit bridge/subnet
-(e.g. `100.100.0.0/24`), chosen outside `10.0.0.0/8` so it cannot
-collide with cluster LAN or WireGuard ranges. Each VM is pinned a
-static IP on this bridge by the existing `ycluster vm` pinning logic.
+Each participating compute host owns one /24 in `100.100.0.0/16`. The
+host index selects the third octet by default: a host with index `2`
+uses `100.100.2.0/24` and its bridge gateway is `100.100.2.1/24`. An
+explicit `vm_nat_transit_index` (or a complete `vm_transit_subnet`)
+overrides the derivation. This keeps each subnet uniquely routable to
+one spoke and allows multiple compute hosts behind one frontend. The
+legacy `100.100.0.0/24` remains valid for hosts that have not yet been
+re-run with the per-host configuration; its reservation keys are kept
+unchanged for upgrade compatibility.
 
-The VM's default route (via DHCP or static config) points at the
-frontend-side transit gateway address. The Incus host's existing
-`incusbr0` masquerade must be bypassed for these VMs — either by
-attaching the transit NIC in addition to `eth0` and ensuring the
-transit gateway is the *preferred* (lowest-metric) default route, or by
-running fronted VMs on the transit bridge only. The latter is cleaner
-and avoids the ambiguity of competing default routes.
+Selected VMs get a second NIC on the host's dedicated `transit0` bridge.
+Each VM is pinned a static IP on this bridge by the existing `ycluster
+vm` pinning logic. The VM's default route points at the bridge gateway
+(`.1`), and the compute host policy-routes traffic from that /24 over
+the WireGuard spoke. The Incus host's existing `incusbr0` masquerade
+does not apply because `transit0` is a dedicated bridge.
+
+### Transport overlay
+
+`app/install-vm-nat-wg.yml` builds a hub-and-spoke WireGuard overlay:
+
+- The frontend is the hub at `100.101.0.1/24` on `wg-vm-nat`.
+- Spoke `N` gets `100.101.0.(N+1)/24`. This control range is separate
+  from the transit data range.
+- The hub peer's `AllowedIPs` are that spoke's WG address and exactly
+  that spoke's transit /24. It cannot learn or route a spoke's `10.*`
+  space because those prefixes are never exchanged. wg-quick installs
+  those exact routes on the hub.
+- A spoke's peer accepts the frontend as its default path but uses
+  `Table = off` plus a policy rule so only traffic sourced from its
+  transit /24 is routed over the tunnel; host management traffic keeps
+  the system default route. Compute spokes normally have no host
+  firewall; if a forward chain exists, the overlay playbook fails and
+  requires explicit transit0/WG rules there rather than bypassing it.
+
+Run the playbook with both `frontend` and `compute` selected so spoke
+keys are available when the hub configuration is rendered. Re-run
+`app/install-frontend-nat.yml` afterward when upgrading an already
+deployed frontend, because its environment file must select the
+`wg-vm-nat` transit interface.
 
 ### Frontend NAT (nftables)
 
@@ -198,12 +228,10 @@ reconcilers converge, frontend rules disappear on the next tick.
 
 ## Open questions
 
-- Exact etcd key layout for the mapping records.
+- Mapping records use `/cluster/frontend/nat/<proto>/<vm>/<first>-<last>`.
+  Reservation records use `_ip/` keys; non-legacy pools are namespaced by
+  their /24 to prevent duplicate octets across spokes.
 - Whether the frontend needs a separate "egress-only" mode (SNAT but
   no DNAT) for VMs that should not be reachable inbound.
 - Whether UDP and TCP ranges should always be paired in the CLI or
   independent.
-- Whether the transit bridge is a second Incus network on the same
-  host or a host-level bridge wired into a VLAN/backhaul to the
-  frontend. The former is simpler; the latter is needed if the
-  frontend is not the same physical machine as the Incus host.

@@ -1,0 +1,13 @@
+[Interface]
+Address = 100.101.0.1/24
+ListenPort = {{ vm_nat_wg_port | default('51820') }}
+PrivateKey = {{ hub_private_key }}
+
+{% for host in groups['compute'] | sort %}
+{% if hostvars[host].vm_nat_transit_enabled | default(false) and hostvars[host].vm_nat_wg_public_key is defined %}
+[Peer]
+# {{ host }}
+PublicKey = {{ hostvars[host].vm_nat_wg_public_key }}
+AllowedIPs = {{ hostvars[host].vm_nat_wg_address }}/32, {{ hostvars[host].vm_transit_subnet }}
+{% endif %}
+{% endfor %}

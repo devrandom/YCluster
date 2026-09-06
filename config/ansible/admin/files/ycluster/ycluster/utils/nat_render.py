@@ -9,9 +9,10 @@ install-frontend-nat.yml copies it to /usr/local/lib/ycluster/.
 """
 
 import hashlib
+import ipaddress
 import re
 
-TRANSIT_SUBNET = '100.100.0.0/24'
+TRANSIT_SUPERNET = '100.100.0.0/16'
 PROTOS = ('tcp', 'udp')
 
 _PORT_RE = re.compile(r'^([0-9]{1,5})(?:-([0-9]{1,5}))?$')
@@ -28,13 +29,42 @@ def _parse_ports(spec):
     return first, last
 
 
+def transit_subnet(value):
+    """Normalize an IP or /24 CIDR to its transit /24 network string."""
+    try:
+        if '/' in value:
+            network = ipaddress.ip_network(value, strict=False)
+        else:
+            addr = ipaddress.ip_address(value)
+            network = ipaddress.ip_network(f'{addr}/24', strict=False)
+    except ValueError as exc:
+        raise ValueError(f'invalid transit subnet or IP: {value!r}') from exc
+    if (network.prefixlen != 24 or
+            network.network_address not in
+            ipaddress.ip_network(TRANSIT_SUPERNET)):
+        raise ValueError(
+            f'transit subnet must be a /24 in {TRANSIT_SUPERNET}: '
+            f'{value!r}')
+    return str(network)
+
+
+def _transit_subnets(exposures):
+    """Return the deterministic set of allocated transit /24s."""
+    return sorted({
+        transit_subnet(e['transit_ip']) for e in exposures
+        if e.get('transit_ip')
+    })
+
+
 def validate_exposures(exposures):
-    """Raise ValueError on invalid proto or overlapping same-proto ranges."""
+    """Raise ValueError on invalid proto, IP, or overlapping ranges."""
     by_proto = {}
     for e in exposures:
         if e['proto'] not in PROTOS:
             raise ValueError(f'invalid proto: {e["proto"]!r}')
         first, last = _parse_ports(e['ports'])
+        if e.get('transit_ip'):
+            transit_subnet(e['transit_ip'])
         by_proto.setdefault(e['proto'], []).append((first, last, e))
     for proto, ranges in by_proto.items():
         ranges.sort()
@@ -47,7 +77,7 @@ def validate_exposures(exposures):
 
 
 def digest_of(exposures, public_ip, wan_iface='eth0',
-              transit_iface='transit0'):
+              transit_iface='wg-vm-nat'):
     """Return the 12-char digest embedded in the rendered ruleset.
 
     The agent computes the same digest from the fetched exposure list
@@ -59,7 +89,7 @@ def digest_of(exposures, public_ip, wan_iface='eth0',
 
 
 def render_nftables(exposures, public_ip, wan_iface='eth0',
-                    transit_iface='transit0'):
+                    transit_iface='wg-vm-nat'):
     """Render a complete, deterministic nftables ruleset.
 
     Fail-closed: the table's forward chain policy is drop for every
@@ -83,6 +113,7 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
 
 
 def _render_body(exposures, public_ip, wan_iface, transit_iface):
+    subnets = _transit_subnets(exposures)
     lines = [
         '  chain prerouting {',
         '    type nat hook prerouting priority dstnat; policy accept;',
@@ -99,8 +130,12 @@ def _render_body(exposures, public_ip, wan_iface, transit_iface):
         '  }',
         '  chain postrouting {',
         '    type nat hook postrouting priority srcnat; policy accept;',
-        f'    ip saddr {TRANSIT_SUBNET} oifname "{wan_iface}" '
-        f'snat ip to {public_ip}',
+    ]
+    for subnet in subnets:
+        lines.append(
+            f'    ip saddr {subnet} oifname "{wan_iface}" '
+            f'snat ip to {public_ip}')
+    lines += [
         '  }',
         '  chain forward {',
         '    type filter hook forward priority filter; policy drop;',
@@ -114,28 +149,28 @@ def _render_body(exposures, public_ip, wan_iface, transit_iface):
         lines.append(
             f'    iifname "{wan_iface}" oifname "{transit_iface}" '
             f'ip daddr {e["transit_ip"]} {e["proto"]} dport {dport} accept')
-    lines += [
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip daddr 10.0.0.0/8 drop',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip daddr 172.16.0.0/12 drop',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip daddr 192.168.0.0/16 drop',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip daddr 169.254.0.0/16 drop',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip daddr 100.64.0.0/10 drop',
-        # Egress is explicit per-protocol (no blanket accept): TCP and
-        # UDP may initiate outbound flows (SNAT'd to the public IP);
-        # ICMP only passes as established/related. Every other protocol
-        # hits the chain's drop policy — no bypass path.
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip protocol tcp accept',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip protocol udp accept',
-        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
-        f'ip saddr {TRANSIT_SUBNET} ip protocol icmp '
-        f'ct state established,related accept',
-        '  }',
-    ]
+    for subnet in subnets:
+        lines += [
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip daddr 10.0.0.0/8 drop',
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip daddr 172.16.0.0/12 drop',
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip daddr 192.168.0.0/16 drop',
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip daddr 169.254.0.0/16 drop',
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip daddr 100.64.0.0/10 drop',
+            # Egress is explicit per protocol. Each /24 is also enforced by
+            # the hub's WireGuard peer AllowedIPs, so a spoke cannot spoof
+            # another spoke's subnet.
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip protocol tcp accept',
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip protocol udp accept',
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip protocol icmp '
+            f'ct state established,related accept',
+        ]
+    lines.append('  }')
     return lines

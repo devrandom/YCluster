@@ -1,0 +1,8 @@
+name: vm-transit-isolation
+description: Transit VMs may reach only their local NAT transit gateway
+config: {}
+ingress: []
+egress:
+  - action: allow
+    destination: {{ vm_transit_subnet }}
+    state: enabled

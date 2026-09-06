@@ -1,0 +1,201 @@
+---
+# Layer-3 overlay for the VM frontend NAT gateway.
+# The frontend is the hub. Each participating compute spoke is allowed to
+# announce exactly one /24 transit data subnet; no cluster 10.* route is
+# ever exchanged over this overlay.
+#
+# Run with both groups selected so spoke keys are available when the hub
+# configuration is rendered.
+- name: Prepare VM NAT transit spokes
+  hosts: compute
+  become: yes
+  tasks:
+    - name: Skip non-participating compute hosts
+      meta: end_host
+      when: not vm_nat_transit_enabled | default(false)
+
+    - name: Derive the transit host index
+      set_fact:
+        vm_nat_transit_index: >-
+          {{ inventory_hostname | regex_replace('^[a-z]+', '') | int }}
+      when: vm_nat_transit_index is not defined
+
+    - name: Derive the transit subnet and gateway
+      set_fact:
+        vm_transit_subnet: >-
+          {{ vm_transit_subnet |
+             default('100.100.' ~ (vm_nat_transit_index | int) ~ '.0/24') }}
+        vm_transit_gateway: >-
+          {{ vm_transit_gateway | default('') }}
+
+    - name: Set the transit gateway address
+      set_fact:
+        vm_transit_gateway: >-
+          {{ vm_transit_subnet | regex_replace('\.0/24$', '.1/24') }}
+
+    - name: Validate transit allocation
+      assert:
+        that:
+          - vm_nat_transit_index | int >= 0
+          - vm_nat_transit_index | int <= 254
+          - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
+          - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
+        fail_msg: vm_nat_transit_index must select a /24 in 100.100.0.0/16
+
+    - name: Install WireGuard
+      apt:
+        name:
+          - wireguard
+          - wireguard-tools
+        state: present
+
+    - name: Enable transit forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+
+    - name: Inspect the existing host firewall
+      command: nft list ruleset
+      register: compute_nft_ruleset
+      changed_when: false
+      failed_when: false
+
+    - name: Require explicit integration for an existing forward firewall
+      assert:
+        that: "'chain forward' not in compute_nft_ruleset.stdout"
+        fail_msg: >-
+          This host already has an nftables forward chain. Add explicit
+          transit0 <-> wg-vm-nat forwarding rules in that firewall before
+          enabling the VM NAT spoke; do not rely on this play to bypass it.
+
+    - name: Generate the spoke WireGuard private key
+      shell: |
+        umask 077
+        test -s /etc/wireguard/wg-vm-nat.key || wg genkey > /etc/wireguard/wg-vm-nat.key
+        wg pubkey < /etc/wireguard/wg-vm-nat.key
+      args:
+        executable: /bin/bash
+      register: spoke_public_key
+      changed_when: false
+      no_log: true
+
+    - name: Read the spoke WireGuard private key
+      slurp:
+        src: /etc/wireguard/wg-vm-nat.key
+      register: spoke_private_key_raw
+      no_log: true
+
+    - name: Record spoke facts for the hub play
+      set_fact:
+        vm_nat_wg_public_key: "{{ spoke_public_key.stdout | trim }}"
+        vm_nat_wg_address: >-
+          {{ '100.101.0.' ~ ((vm_nat_transit_index | int) + 1) }}
+        vm_nat_wg_private_key: >-
+          {{ spoke_private_key_raw.content | b64decode | trim }}
+      no_log: true
+
+- name: Install the VM NAT WireGuard hub
+  hosts: frontend
+  become: yes
+  tasks:
+    - name: Skip non-participating frontends
+      meta: end_host
+      when: not vm_frontend_nat_enabled | default(false)
+
+    - name: Install WireGuard
+      apt:
+        name:
+          - wireguard
+          - wireguard-tools
+        state: present
+
+    - name: Enable route forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+
+    - name: Generate the hub WireGuard key
+      shell: |
+        umask 077
+        test -s /etc/wireguard/wg-vm-nat.key || wg genkey > /etc/wireguard/wg-vm-nat.key
+        wg pubkey < /etc/wireguard/wg-vm-nat.key
+      args:
+        executable: /bin/bash
+      register: hub_public_key
+      changed_when: false
+      no_log: true
+
+    - name: Read the hub WireGuard private key
+      slurp:
+        src: /etc/wireguard/wg-vm-nat.key
+      register: hub_private_key_raw
+      no_log: true
+
+    - name: Install the hub WireGuard configuration
+      template:
+        src: vm-nat-wg-hub.conf.j2
+        dest: /etc/wireguard/wg-vm-nat.conf
+        mode: '0600'
+        owner: root
+        group: root
+      vars:
+        hub_private_key: "{{ hub_private_key_raw.content | b64decode | trim }}"
+      no_log: true
+      notify: restart wg-vm-nat
+
+    - name: Allow the WireGuard control port through ufw
+      community.general.ufw:
+        rule: allow
+        port: "{{ vm_nat_wg_port | default('51820') }}"
+        proto: udp
+      when: "'ufw' in ansible_facts.packages | default({})"
+
+    - name: Enable and start the hub tunnel
+      systemd:
+        name: wg-quick@wg-vm-nat
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart wg-vm-nat
+      systemd:
+        name: wg-quick@wg-vm-nat
+        state: restarted
+
+- name: Configure VM NAT transit spokes
+  hosts: compute
+  become: yes
+  tasks:
+    - name: Skip non-participating compute hosts
+      meta: end_host
+      when: not vm_nat_transit_enabled | default(false)
+
+    - name: Install the spoke WireGuard configuration
+      template:
+        src: vm-nat-wg-spoke.conf.j2
+        dest: /etc/wireguard/wg-vm-nat.conf
+        mode: '0600'
+        owner: root
+        group: root
+      no_log: true
+      notify: restart wg-vm-nat
+
+    - name: Enable and start the spoke tunnel
+      systemd:
+        name: wg-quick@wg-vm-nat
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart wg-vm-nat
+      systemd:
+        name: wg-quick@wg-vm-nat
+        state: restarted

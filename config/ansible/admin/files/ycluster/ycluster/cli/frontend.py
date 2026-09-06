@@ -36,7 +36,7 @@ def register_frontend_commands(subparsers):
     expose_parser.add_argument('vm', help='VM name')
     expose_parser.add_argument('--proto', choices=['tcp', 'udp'], required=True)
     expose_parser.add_argument('--ports', required=True, help='Port or range, e.g. 20000-20099')
-    expose_parser.add_argument('--transit-ip', help='Transit network IP (100.100.0.x); set once allocated')
+    expose_parser.add_argument('--transit-ip', help='Transit network IP (100.100.<host>.x); set once allocated')
     expose_parser.set_defaults(func=frontend_expose)
 
     unexpose_parser = frontend_subparsers.add_parser('unexpose', help='Remove a VM port exposure')
@@ -51,7 +51,7 @@ def register_frontend_commands(subparsers):
     render_parser = frontend_subparsers.add_parser('render-nft', help='Render the frontend nftables ruleset to stdout')
     render_parser.add_argument('--public-ip', required=True)
     render_parser.add_argument('--wan-iface', default='eth0')
-    render_parser.add_argument('--transit-iface', default='transit0')
+    render_parser.add_argument('--transit-iface', default='wg-vm-nat')
     render_parser.set_defaults(func=frontend_render_nft)
 
 

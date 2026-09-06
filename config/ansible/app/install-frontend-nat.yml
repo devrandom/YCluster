@@ -130,7 +130,7 @@
         content: |
           NAT_PUBLIC_IP={{ nat_public_ip }}
           NAT_WAN_IFACE={{ nat_wan_iface | default('eth0') }}
-          NAT_TRANSIT_IFACE={{ nat_transit_iface | default('transit0') }}
+          NAT_TRANSIT_IFACE={{ nat_transit_iface | default('wg-vm-nat') }}
           NAT_RULES_URL={{ nat_rules_url | default('https://127.0.0.1/api/frontend/nat-rules') }}
           NAT_CLIENT_CERT=/etc/ycluster/nat-client.crt
           NAT_CLIENT_KEY=/etc/ycluster/nat-client.key

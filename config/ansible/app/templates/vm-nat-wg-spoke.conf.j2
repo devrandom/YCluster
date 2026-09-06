@@ -1,0 +1,14 @@
+[Interface]
+Address = {{ vm_nat_wg_address }}/24
+PrivateKey = {{ vm_nat_wg_private_key }}
+# Host traffic keeps the system default route. Only traffic originating in
+# this host's transit /24 is policy-routed over the overlay.
+Table = off
+PostUp = ip rule del from {{ vm_transit_subnet }} table 100 2>/dev/null || true; ip rule add from {{ vm_transit_subnet }} table 100; ip route replace default dev %i table 100
+PreDown = ip rule del from {{ vm_transit_subnet }} table 100 || true; ip route del default dev %i table 100 || true
+
+[Peer]
+PublicKey = {{ hostvars[groups['frontend'] | first].hub_public_key.stdout | trim }}
+Endpoint = {{ hostvars[groups['frontend'] | first].nat_public_ip }}:{{ vm_nat_wg_port | default('51820') }}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25

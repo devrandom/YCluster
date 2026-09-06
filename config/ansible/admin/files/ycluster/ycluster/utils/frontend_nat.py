@@ -18,7 +18,9 @@ import sys
 
 NAT_PREFIX = '/cluster/frontend/nat/'
 PROTOS = ('tcp', 'udp')
-TRANSIT_SUBNET = '100.100.0.0/24'
+TRANSIT_SUPERNET = '100.100.0.0/16'
+# Hosts provisioned before per-host subnets used this pool.
+LEGACY_TRANSIT_SUBNET = '100.100.0.0/24'
 
 _PORT_RE = re.compile(r'^([0-9]{1,5})(?:-([0-9]{1,5}))?$')
 
@@ -46,11 +48,11 @@ def validate_exposures(exposures):
 
 
 def _valid_transit_ip(value):
-    """True if value is a valid IPv4 address inside TRANSIT_SUBNET."""
+    """True if value is a valid IPv4 address in a transit data subnet."""
     import ipaddress
     try:
         return (ipaddress.ip_address(value) in
-                ipaddress.ip_network(TRANSIT_SUBNET, strict=False))
+                ipaddress.ip_network(TRANSIT_SUPERNET, strict=False))
     except ValueError:
         return False
 
@@ -92,7 +94,7 @@ def set_exposure(vm, proto, ports, transit_ip=None):
         raise ValueError(f'invalid vm name: {vm!r}')
     if transit_ip is not None and not _valid_transit_ip(transit_ip):
         raise ValueError(
-            f'transit_ip must be in {TRANSIT_SUBNET}: {transit_ip!r}')
+            f'transit_ip must be in {TRANSIT_SUPERNET}: {transit_ip!r}')
     key = _key(proto, vm, ports)
     record = {}
     if transit_ip:
@@ -111,7 +113,7 @@ def delete_exposure(vm, proto, ports):
 
 
 def render_nftables(exposures, public_ip, wan_iface='eth0',
-                    transit_iface='transit0'):
+                    transit_iface='wg-vm-nat'):
     """Delegate to the standalone renderer (see nat_render.py)."""
     from .nat_render import render_nftables as _render
     return _render(exposures, public_ip, wan_iface, transit_iface)
@@ -149,7 +151,28 @@ def _transit_nics_by_vm():
     return out
 
 
-def _reserve_transit_ip(vm):
+def _configured_transit_subnet():
+    """Return this host's transit /24, defaulting to the legacy pool."""
+    from .nat_render import transit_subnet
+    from .vm_manager import _host_config_value
+    value = _host_config_value('vm_transit_subnet')
+    return transit_subnet(value) if value else LEGACY_TRANSIT_SUBNET
+
+
+def _transit_reservation_key(ip):
+    """Return the per-subnet reservation key for `ip`.
+
+    The legacy /24 keeps its old key shape so existing reservations remain
+    valid through the upgrade; all other /24s are namespaced by subnet.
+    """
+    from .nat_render import transit_subnet
+    subnet = transit_subnet(ip)
+    if subnet == LEGACY_TRANSIT_SUBNET:
+        return f'{NAT_PREFIX}_ip/{ip}'.encode()
+    return f'{NAT_PREFIX}_ip/{subnet}/{ip}'.encode()
+
+
+def _reserve_transit_ip(vm, subnet):
     """Transactionally reserve the next free transit IP for `vm`.
 
     Uses an etcd transaction (compare-version=0) so concurrent hosts
@@ -160,9 +183,10 @@ def _reserve_transit_ip(vm):
     import ipaddress
     from ..common.etcd_utils import get_etcd_client
     client = get_etcd_client()
+    network = ipaddress.ip_network(subnet, strict=False)
     for i in range(TRANSIT_POOL_START, TRANSIT_POOL_END + 1):
-        ip = str(ipaddress.IPv4Address(f'100.100.0.{i}'))
-        key = f'{NAT_PREFIX}_ip/{ip}'.encode()
+        ip = str(network.network_address + i)
+        key = _transit_reservation_key(ip)
         ok, _ = client.transaction(
             compare=[client.transactions.version(key) == 0],
             success=[client.transactions.put(key, vm.encode())],
@@ -180,7 +204,7 @@ def _claim_transit_ip(vm, ip):
     """
     from ..common.etcd_utils import get_etcd_client
     client = get_etcd_client()
-    key = f'{NAT_PREFIX}_ip/{ip}'.encode()
+    key = _transit_reservation_key(ip)
     ok, _ = client.transaction(
         compare=[client.transactions.version(key) == 0],
         success=[client.transactions.put(key, vm.encode())],
@@ -188,7 +212,7 @@ def _claim_transit_ip(vm, ip):
     return ok
 
 
-def sync_transit_nics(local_instances):
+def sync_transit_nics(local_instances, transit_subnet=None):
     """Attach transit NICs + allocate transit IPs for exposed local VMs.
 
     `local_instances` is the set of instance names on this host (the
@@ -199,6 +223,12 @@ def sync_transit_nics(local_instances):
     transactionally (CAS on the reservation key) so two hosts cannot
     claim the same device for different VMs.
     """
+    from .nat_render import transit_subnet as _subnet
+    if transit_subnet is None:
+        transit_subnet = _configured_transit_subnet()
+    else:
+        transit_subnet = _subnet(transit_subnet)
+
     exposures = list_exposures()
     by_vm = {}
     for e in exposures:
@@ -214,9 +244,17 @@ def sync_transit_nics(local_instances):
                   file=sys.stderr)
             continue
         ip = existing.pop() if existing else None
+        if ip and _subnet(ip) != transit_subnet:
+            print(f'Warning: {vm} transit IP is outside {transit_subnet}; '
+                  'skipping', file=sys.stderr)
+            continue
         if not ip:
             live = _transit_nics_by_vm().get(vm)
             if live:
+                if _subnet(live) != transit_subnet:
+                    print(f'Warning: {vm} live transit IP is outside '
+                          f'{transit_subnet}; skipping', file=sys.stderr)
+                    continue
                 # Device exists but etcd has no IP recorded (partial
                 # write or manual attach): adopt it transactionally so
                 # no other host can claim the same address meanwhile.
@@ -224,7 +262,7 @@ def sync_transit_nics(local_instances):
                     continue
                 ip = live
             else:
-                ip = _reserve_transit_ip(vm)
+                ip = _reserve_transit_ip(vm, transit_subnet)
                 if not ip:
                     print(f'Warning: no free transit IPs for {vm}',
                           file=sys.stderr)

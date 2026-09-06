@@ -148,8 +148,8 @@ class CliTests(unittest.TestCase):
                                   return_value='RULES\n') as render:
             printed = self._run(frontend_nat_cli.frontend_render_nft,
                                 public_ip='203.0.113.10', wan_iface='eth0',
-                                transit_iface='transit0')
-        render.assert_called_once_with([], '203.0.113.10', 'eth0', 'transit0')
+                                transit_iface='wg-vm-nat')
+        render.assert_called_once_with([], '203.0.113.10', 'eth0', 'wg-vm-nat')
         printed.assert_called_once_with('RULES\n', end='')
 
 
@@ -217,6 +217,35 @@ class RenderNftablesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             frontend_nat.validate_exposures([
                 {'proto': 'sctp', 'ports': '80'}])
+
+    def test_multi_spoke_subnets_rendered_per_host(self):
+        exposures = [
+            {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+             'transit_ip': '100.100.2.11'},
+            {'proto': 'udp', 'vm': 'vm-b', 'ports': '53',
+             'transit_ip': '100.100.3.12'},
+        ]
+        text = frontend_nat.render_nftables(exposures, '203.0.113.10',
+                                            transit_iface='wg-vm-nat')
+        self.assertIn('ip saddr 100.100.2.0/24 oifname "eth0" snat', text)
+        self.assertIn('ip saddr 100.100.3.0/24 oifname "eth0" snat', text)
+        self.assertIn('dnat to 100.100.2.11', text)
+        self.assertIn('dnat to 100.100.3.12', text)
+        self.assertNotIn('ip saddr 100.100.0.0/24', text)
+
+    def test_rejects_transit_ip_outside_supernet(self):
+        with self.assertRaises(ValueError):
+            frontend_nat.render_nftables([
+                {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                 'transit_ip': '10.0.0.11'},
+            ], '203.0.113.10')
+
+    def test_transit_subnet_derivation(self):
+        from ycluster.utils import nat_render
+        self.assertEqual(nat_render.transit_subnet('100.100.2.11'),
+                         '100.100.2.0/24')
+        with self.assertRaises(ValueError):
+            nat_render.transit_subnet('not-an-ip')
 
 
 class TransitSyncTests(unittest.TestCase):
@@ -339,6 +368,58 @@ class TransitSyncTests(unittest.TestCase):
         self.assertFalse(frontend_nat._valid_transit_ip('10.0.0.5'))
         self.assertFalse(frontend_nat._valid_transit_ip('not-an-ip'))
         self.assertTrue(frontend_nat._valid_transit_ip('100.100.0.254'))
+        self.assertTrue(frontend_nat._valid_transit_ip('100.100.2.254'))
+
+    def test_configured_host_subnet_is_used(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': ''}]
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch('ycluster.utils.vm_manager._host_config_value',
+                           return_value='100.100.2.0/24'), \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value='100.100.2.11') as reserve, \
+                mock.patch.object(frontend_nat, 'set_exposure'), \
+                mock.patch.object(frontend_nat, '_incus'):
+            frontend_nat.sync_transit_nics({'vm-a'})
+        reserve.assert_called_once_with('vm-a', '100.100.2.0/24')
+
+    def test_mismatched_record_and_live_subnets_are_skipped(self):
+        exposures = [
+            {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+             'transit_ip': '100.100.3.11'},
+            {'proto': 'udp', 'vm': 'vm-b', 'ports': '53',
+             'transit_ip': ''},
+        ]
+        patches = self._sync_patches(exposures, live={'vm-b': '100.100.3.12'})
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, '_claim_transit_ip') as c, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_:
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a', 'vm-b'}, '100.100.2.0/24')
+        self.assertFalse(changed)
+        r.assert_not_called()
+        c.assert_not_called()
+        set_.assert_not_called()
+
+    def test_reservation_keys_are_legacy_and_per_subnet(self):
+        self.assertEqual(
+            frontend_nat._transit_reservation_key('100.100.0.11'),
+            b'/cluster/frontend/nat/_ip/100.100.0.11')
+        self.assertEqual(
+            frontend_nat._transit_reservation_key('100.100.2.11'),
+            b'/cluster/frontend/nat/_ip/100.100.2.0/24/100.100.2.11')
+
+    def test_claim_uses_per_subnet_key(self):
+        client = mock.Mock()
+        client.transaction.return_value = (True, [])
+        with _patched_etcd(client):
+            self.assertTrue(frontend_nat._claim_transit_ip(
+                'vm-a', '100.100.2.11'))
+        client.transactions.put.assert_called_once_with(
+            b'/cluster/frontend/nat/_ip/100.100.2.0/24/100.100.2.11',
+            b'vm-a')
 
     def test_list_quarantines_bad_vm_name_and_ip(self):
         keys = {
@@ -360,20 +441,32 @@ class TransitSyncTests(unittest.TestCase):
         client = mock.Mock()
         client.transaction.return_value = (False, [])
         with _patched_etcd(client):
-            self.assertIsNone(frontend_nat._reserve_transit_ip('vm-a'))
+            self.assertIsNone(frontend_nat._reserve_transit_ip(
+                'vm-a', frontend_nat.LEGACY_TRANSIT_SUBNET))
 
     def test_reserve_wins_first_candidate(self):
         client = mock.Mock()
         client.transaction.return_value = (True, [])
         with _patched_etcd(client):
-            self.assertEqual(frontend_nat._reserve_transit_ip('vm-a'),
+            self.assertEqual(frontend_nat._reserve_transit_ip(
+                'vm-a', frontend_nat.LEGACY_TRANSIT_SUBNET),
                              '100.100.0.11')
+
+    def test_reserve_uses_per_subnet_keys(self):
+        client = mock.Mock()
+        client.transaction.return_value = (True, [])
+        with _patched_etcd(client):
+            frontend_nat._reserve_transit_ip('vm-a', '100.100.2.0/24')
+        client.transactions.put.assert_called_once_with(
+            b'/cluster/frontend/nat/_ip/100.100.2.0/24/100.100.2.11',
+            b'vm-a')
 
     def test_reserve_uses_etcd_transaction(self):
         client = mock.Mock()
         client.transaction.return_value = (True, [])
         with _patched_etcd(client):
-            frontend_nat._reserve_transit_ip('vm-a')
+            frontend_nat._reserve_transit_ip(
+                'vm-a', frontend_nat.LEGACY_TRANSIT_SUBNET)
         client.transaction.assert_called_once()
         kwargs = client.transaction.call_args[1]
         self.assertIn('compare', kwargs)
