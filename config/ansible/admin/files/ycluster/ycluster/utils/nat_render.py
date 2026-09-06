@@ -88,9 +88,15 @@ def digest_of(exposures, public_ip, wan_iface='eth0',
     return hashlib.sha256('\n'.join(body).encode()).hexdigest()[:12]
 
 
+_IFACE_RE = re.compile(r'^[A-Za-z0-9._-]{1,15}$')
+
+
 def render_nftables(exposures, public_ip, wan_iface='eth0',
                     transit_iface='wg-vm-nat'):
     """Render a complete, deterministic nftables ruleset.
+
+    public_ip and the interface names are interpolated into nft syntax,
+    so they are strictly validated before rendering.
 
     Fail-closed: the table's forward chain policy is drop for every
     protocol. Egress is explicit per-protocol (TCP/UDP new flows,
@@ -99,6 +105,14 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
     table comment so the agent can compare live vs applied.
     """
     validate_exposures(exposures)
+    import ipaddress as _ipaddress
+    try:
+        _ipaddress.IPv4Address(public_ip)
+    except ValueError as exc:
+        raise ValueError(f'invalid public ip: {public_ip!r}') from exc
+    for iface in (wan_iface, transit_iface):
+        if not _IFACE_RE.match(iface):
+            raise ValueError(f'invalid interface name: {iface!r}')
     digest = digest_of(exposures, public_ip, wan_iface, transit_iface)
     lines = [
         # Atomic replace idiom: see docs/design/vm-frontend-nat.md.
@@ -115,6 +129,15 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
 def _render_body(exposures, public_ip, wan_iface, transit_iface):
     subnets = _transit_subnets(exposures)
     lines = [
+        # Hub-local input from decapsulated transit traffic is dropped, so
+        # it cannot reach services on the frontend itself. This mirrors the
+        # base table installed at boot (nat-reconciler-base.nft); the
+        # reconciler atomically replaces that table, so it must re-declare
+        # the chain rather than rely on the base file surviving.
+        '  chain input {',
+        '    type filter hook input priority filter; policy accept;',
+        f'    iifname "{transit_iface}" drop;',
+        '  }',
         '  chain prerouting {',
         '    type nat hook prerouting priority dstnat; policy accept;',
     ]

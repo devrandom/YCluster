@@ -50,7 +50,7 @@
           - vm_transit_class_octet | int in [50, 110]
           - vm_nat_transit_index | int > 0
           - vm_nat_transit_index | int < 254
-          - vm_transit_third_octet | int > 0
+          - vm_transit_third_octet | int > 1
           - vm_transit_third_octet | int < 254
           - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
           - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
@@ -83,7 +83,7 @@
     - name: Require explicit integration for an existing forward firewall
       assert:
         that: >-
-          'table ip ycluster_vm_nat_spoke' in compute_nft_ruleset.stdout
+          'table inet ycluster_vm_nat_spoke' in compute_nft_ruleset.stdout
           or 'chain forward' not in compute_nft_ruleset.stdout
         fail_msg: >-
           This host already has an nftables forward chain. Integrate the
@@ -152,7 +152,7 @@
       set_fact:
         vm_nat_wg_public_key: "{{ spoke_public_key.stdout | trim }}"
         vm_nat_wg_address: >-
-          {{ '100.101.0.' ~ ((vm_nat_transit_index | int) + 1) }}
+          {{ '100.101.0.' ~ (vm_transit_third_octet | int) }}
         vm_nat_wg_private_key: >-
           {{ spoke_private_key_raw.content | b64decode | trim }}
       no_log: true
@@ -165,6 +165,28 @@
       meta: end_host
       when: not vm_frontend_nat_enabled | default(false)
 
+    - name: Count opted-in frontends
+      set_fact:
+        vm_nat_enabled_frontends: >-
+          {%- set enabled = [] -%}
+          {%- for host in groups['frontend'] | default([]) -%}
+          {%- if hostvars[host].vm_frontend_nat_enabled | default(false) -%}
+          {%- set _ = enabled.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ enabled }}
+      run_once: true
+
+    - name: Require exactly one frontend hub
+      assert:
+        that: vm_nat_enabled_frontends | length == 1
+        fail_msg: >-
+          Exactly one opted-in frontend is required; the spoke play
+          connects to a single hub. Run this playbook with only one
+          frontend host selected (or opt in additional frontends one at
+          a time with separate hub instances).
+      run_once: true
+
     - name: Collect participating spokes
       set_fact:
         vm_nat_participating_spokes: >-
@@ -174,8 +196,8 @@
                 and hostvars[host].vm_nat_wg_public_key is defined -%}
           {%- set _ = spokes.append({
                 'host': host,
-                'index': hostvars[host].vm_nat_transit_index | int,
                 'subnet': hostvars[host].vm_transit_subnet,
+                'wg_address': hostvars[host].vm_nat_wg_address,
               }) -%}
           {%- endif -%}
           {%- endfor -%}
@@ -195,17 +217,18 @@
       assert:
         that:
           - vm_nat_participating_spokes | length > 0
-          - (vm_nat_participating_spokes | map(attribute='index') | list | unique | length)
+          - (vm_nat_participating_spokes | map(attribute='wg_address') | list | unique | length)
             == (vm_nat_participating_spokes | length)
           - (vm_nat_participating_spokes | map(attribute='subnet') | list | unique | length)
             == (vm_nat_participating_spokes | length)
-          - 0 not in (vm_nat_participating_spokes | map(attribute='index') | list)
-          - 254 not in (vm_nat_participating_spokes | map(attribute='index') | list)
-          - vm_nat_spoke_third_octets | min > 0
+          - vm_nat_spoke_third_octets | min > 1
           - vm_nat_spoke_third_octets | max < 254
         fail_msg: >-
           The hub needs at least one spoke, and each participating spoke
-          must have distinct transit indices and /24 subnets (index 1-253).
+          must have distinct transit /24 subnets and WireGuard control
+          addresses. Spoke WG addresses are derived from the transit third
+          octet (class-partitioned: nv* base 110, c* base 50), so hosts of
+          different classes may share a numeric index.
       run_once: true
 
     - name: Install WireGuard

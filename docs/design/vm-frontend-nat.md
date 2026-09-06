@@ -85,28 +85,39 @@ NIC change.
 
 Selected VMs get a second NIC on the host's dedicated `transit0` bridge.
 Each VM is pinned a static IP on this bridge by the existing `ycluster
-vm` pinning logic. The VM's default route points at the bridge gateway
-(`.1`), and the compute host policy-routes traffic from that /24 over
-the WireGuard spoke. Exposed VMs are transit-only: when the reconciler
+vm` pinning logic; transit0 runs DHCP (dnsmasq) so pinned addresses are
+delivered as static leases along with the default route pointing at the
+bridge gateway (`.1`). The compute host policy-routes transit /24
+traffic over the WireGuard spoke. Exposed VMs are transit-only: when the reconciler
 attaches `transit0`, it overrides the profile's `eth0` device with
 `type=none` and restarts a running VM once if needed. This removes the
 usable `incusbr0` route into `10.*` rather than relying on route metrics.
 The Incus host's existing `incusbr0` masquerade does not apply because
 `transit0` is a dedicated bridge.
 
-The Incus ACL on `transit0` explicitly allows the local transit /24,
-drops the cluster and private ranges, drops all other `100.100.0.0/16`
-transit pools, and default-allows remaining egress. This preserves
-internet-bound traffic while blocking cluster-local destinations; the
-frontend forward chain still applies the NAT policy and final drops.
+The Incus ACL on `transit0` explicitly allows the local transit /24
+and drops private ranges (10/8, 172.16/12, 192.168/16, 169.254/16),
+then default-allows remaining egress. Incus orders ACL rules by action
+(drop before allow), not list order, so broader drops containing the
+local /24 (100.64.0.0/10, 100.100.0.0/16) must not appear in the ACL;
+the hub's forward chain blocks those destinations instead. The hub
+forward chain still applies the NAT policy and final drops. `transit0`
+disables IPv6 (`ipv6.address: none`) so a guest cannot inherit an
+unfiltered IPv6 path that bypasses the IPv4-only firewall, policy
+routing, and NAT chains.
 
 ### Transport overlay
 
 `app/install-vm-nat-wg.yml` builds a hub-and-spoke WireGuard overlay:
 
 - The frontend is the hub at `100.101.0.1/24` on `wg-vm-nat`.
-- Spoke `N` gets `100.101.0.(N+1)/24`. This control range is separate
-  from the transit data range.
+- Spoke `N` gets `100.101.0.<transit-third-octet>/24`. This control
+  range is separate from the transit data range, but the spoke's WG
+  address reuses its transit third octet so the control plane is
+  class-partitioned exactly like the data plane (nv\* base 110, c\* base
+  50). Two hosts of different classes that share a numeric index (e.g.
+  nv3 and c3) therefore get distinct WG addresses. This was previously
+  `100.101.0.(N+1)`, which collided across classes.
 - The hub peer's `AllowedIPs` are that spoke's WG address and exactly
   that spoke's transit /24. It cannot learn or route a spoke's `10.*`
   space because those prefixes are never exchanged. wg-quick installs
@@ -114,9 +125,12 @@ frontend forward chain still applies the NAT policy and final drops.
 - A spoke's peer accepts the frontend as its default path but uses
   `Table = off` plus a policy rule so only traffic sourced from its
   transit /24 is routed over the tunnel; host management traffic keeps
-  the system default route. Compute spokes normally have no host
-  firewall; if a forward chain exists, the overlay playbook fails and
-  requires explicit transit0/WG rules there rather than bypassing it.
+  the system default route. The spoke firewall's input chain drops all
+  `transit0`-originated host-local traffic except DHCP and DNS, so a
+  guest cannot reach other services on the compute host. Compute spokes
+  normally have no host firewall; if a forward chain exists, the
+  overlay playbook fails and requires explicit transit0/WG rules there
+  rather than bypassing it.
 
 Run the playbook with both `frontend` and `compute` selected so spoke
 keys are available when the hub configuration is rendered. Re-run
@@ -126,7 +140,8 @@ deployed frontend, because its environment file must select the
 
 ### Frontend NAT (nftables)
 
-The frontend maintains an nftables table with three chains:
+The frontend maintains an nftables table with four chains
+(input, prerouting, postrouting, forward):
 
 1. **DNAT (prerouting)** — for each mapping, rewrite
    `<public-ip>:<port-range>` to `<vm-transit-ip>:<same-range>` for the

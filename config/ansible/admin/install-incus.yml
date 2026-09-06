@@ -141,7 +141,13 @@
               - vm_transit_class_octet | int in [50, 110]
               - vm_nat_transit_index | int > 0
               - vm_nat_transit_index | int < 254
-              - vm_transit_third_octet | int > 0
+              # Classes must stay disjoint: c* tops out at 109 (50+59) so
+              # it can never reach the nv* base of 110; nv* tops out at 253.
+              - (vm_transit_class_octet | int == 50
+                 and vm_nat_transit_index | int < 60) or
+                (vm_transit_class_octet | int == 110
+                 and vm_nat_transit_index | int < 144)
+              - vm_transit_third_octet | int > 1
               - vm_transit_third_octet | int < 254
               - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
               - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
@@ -371,6 +377,7 @@
           command: >-
             incus network create transit0 --type=bridge
             ipv4.address={{ vm_transit_gateway }}
+            ipv6.address=none
           when: transit_bridge_check.rc != 0
 
         - name: Configure transit0
@@ -378,10 +385,14 @@
           loop:
             - key: ipv4.address
               value: "{{ vm_transit_gateway }}"
+            - key: ipv6.address
+              value: 'none'
             - key: ipv4.nat
               value: 'false'
+            # Pinned NIC ipv4.address values are delivered as dnsmasq
+            # static leases, so DHCP must stay enabled on transit0.
             - key: ipv4.dhcp
-              value: 'false'
+              value: 'true'
             - key: mtu
               value: '1420'
           changed_when: false

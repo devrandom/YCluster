@@ -56,10 +56,45 @@ class WireGuardTemplateTests(unittest.TestCase):
         self.assertIn('Endpoint = 203.0.113.10:51820', text)
 
     def test_spoke_firewall_drops_spoofed_sources(self):
-        root = Path(__file__).resolve().parents[4] / 'app' / 'templates'
-        text = (root / 'vm-nat-spoke-firewall.nft.j2').read_text()
-        self.assertIn('ip saddr {{ vm_transit_subnet }} accept', text)
+        text = self._render(
+            'vm-nat-spoke-firewall.nft.j2',
+            vm_transit_subnet='100.100.2.0/24')
+        # Forward: only this spoke's /24 may leave via the overlay.
+        self.assertIn('iifname "transit0" oifname "wg-vm-nat" '
+                      'ip saddr 100.100.2.0/24 accept', text)
+        # Input: DHCP and DNS are allowed; every other transit0 packet
+        # (including spoofed cluster sources) is dropped, and the input
+        # drop comes after the service allows.
+        self.assertIn('iifname "transit0" udp dport 67 accept', text)
+        self.assertIn('iifname "transit0" ip saddr 100.100.2.0/24 '
+                      'udp dport 53 accept', text)
+        self.assertIn('iifname "transit0" ip saddr 100.100.2.0/24 '
+                      'tcp dport 53 accept', text)
+        drop = text.index('iifname "transit0" drop\n  }\n  chain forward')
+        dns = text.index('tcp dport 53 accept')
+        self.assertLess(dns, drop)
         self.assertIn('iifname "transit0" drop', text)
+
+    def test_transit_acl_does_not_shadow_local_allow(self):
+        # Incus orders ACL rules by action (drop before allow), not list
+        # order. Any drop whose destination contains the local /24 would
+        # therefore shadow the local-transit allow.
+        text = self._render('vm-transit-acl.yml.j2',
+                            vm_transit_subnet='100.100.113.0/24')
+        self.assertIn('destination: 100.100.113.0/24', text)
+        self.assertNotIn('100.64.0.0/10', text)
+        self.assertNotIn('100.100.0.0/16', text)
+        for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+                     '169.254.0.0/16'):
+            self.assertIn(f'destination: {cidr}', text)
+
+    def test_playbook_family_check_matches_template(self):
+        # The existing-forward-chain guard must look for the same table
+        # family the template installs, or re-runs fail spuriously.
+        overlay = (Path(__file__).resolve().parents[4] / 'app' /
+                   'install-vm-nat-wg.yml').read_text()
+        self.assertIn("table inet ycluster_vm_nat_spoke", overlay)
+        self.assertNotIn("table ip ycluster_vm_nat_spoke", overlay)
 
     def test_class_octet_derivation_is_synced(self):
         tests_root = Path(__file__).resolve().parents[2]

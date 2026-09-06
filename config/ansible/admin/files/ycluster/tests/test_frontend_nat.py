@@ -93,11 +93,14 @@ class ListExposuresTests(unittest.TestCase):
             '/cluster/frontend/nat/tcp/vm-x/99999-99999': '{}',
             '/cluster/frontend/nat/tcp/vm-x/80-80':
                 '{"transit_ip": "10.0.0.1"}',
+            # A non-object JSON body must quarantine, not crash.
+            '/cluster/frontend/nat/tcp/vm-arr/80-80': '[]',
+            '/cluster/frontend/nat/tcp/vm-num/80-80': '7',
         }
         with self.assertLogs(frontend_nat._LOG, level='WARNING') as logs:
             with _patched_etcd(_fake_client(keys)):
                 self.assertEqual(frontend_nat.list_exposures(), [])
-        self.assertEqual(len(logs.records), 5)
+        self.assertEqual(len(logs.records), 7)
         self.assertIn('Quarantined', logs.records[0].getMessage())
 
     def test_delete_rejects_bad_proto(self):
@@ -167,6 +170,15 @@ class RenderNftablesTests(unittest.TestCase):
         self.assertIn('policy drop;', text)
         self.assertIn('chain forward', text)
 
+    def test_hub_local_input_from_transit_is_dropped(self):
+        # The reconciler atomically replaces the whole table, so the
+        # hub-local input drop from the base table must be re-rendered or
+        # it silently disappears on the first apply (see design doc
+        # security section).
+        text = frontend_nat.render_nftables(self.BASE, '203.0.113.10')
+        self.assertIn('chain input {', text)
+        self.assertIn('iifname "wg-vm-nat" drop;', text)
+
     def test_dnat_and_snat_rendered(self):
         text = frontend_nat.render_nftables(self.BASE, '203.0.113.10')
         self.assertIn(
@@ -217,6 +229,17 @@ class RenderNftablesTests(unittest.TestCase):
         for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
                      '169.254.0.0/16', '100.64.0.0/10'):
             self.assertIn(f'ip daddr {cidr} drop', text)
+
+    def test_rejects_injection_via_public_ip_or_iface(self):
+        with self.assertRaises(ValueError):
+            frontend_nat.render_nftables(
+                self.BASE, '203.0.113.10; drop table ip filter')
+        with self.assertRaises(ValueError):
+            frontend_nat.render_nftables(
+                self.BASE, '203.0.113.10', wan_iface='eth0; drop')
+        with self.assertRaises(ValueError):
+            frontend_nat.render_nftables(
+                self.BASE, 'not-an-ip')
 
     def test_validate_exposures_rejects_bad_proto(self):
         with self.assertRaises(ValueError):
@@ -335,7 +358,9 @@ class TransitSyncTests(unittest.TestCase):
     def test_idempotent_when_already_allocated(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
                       'transit_ip': '100.100.0.11'}]
-        patches = self._sync_patches(exposures)
+        # The device already exists with this address; nothing to do.
+        patches = self._sync_patches(exposures,
+                                     live={'vm-a': '100.100.0.11'})
         with patches[0], patches[1], \
                 mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
                 mock.patch.object(frontend_nat, 'set_exposure') as set_, \
@@ -416,6 +441,14 @@ class TransitSyncTests(unittest.TestCase):
         self.assertTrue(frontend_nat._valid_transit_ip('100.100.0.254'))
         self.assertTrue(frontend_nat._valid_transit_ip('100.100.2.254'))
 
+    def test_valid_transit_ip_rejects_gateway_and_infra(self):
+        # .0 network, .1 gateway, .2-.10 infra, .255 broadcast are not
+        # valid targets for exposure records.
+        for bad in ('100.100.0.0', '100.100.0.1', '100.100.5.5',
+                    '100.100.2.255'):
+            self.assertFalse(frontend_nat._valid_transit_ip(bad), bad)
+        self.assertTrue(frontend_nat._valid_transit_ip('100.100.5.11'))
+
     def test_configured_host_subnet_is_used(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
                       'transit_ip': ''}]
@@ -464,7 +497,8 @@ class TransitSyncTests(unittest.TestCase):
                 {'vm-a'}, '100.100.2.0/24')
         self.assertTrue(changed)
         reserve.assert_called_once_with('vm-a', '100.100.2.0/24')
-        incus.assert_any_call('config', 'device', 'set', 'vm-a', 'transit0',
+        incus.assert_any_call('config', 'device', 'add', 'vm-a', 'transit0',
+                              'nic', 'network=transit0',
                               'ipv4.address=100.100.2.11', check=True)
         rel.assert_called_once_with('100.100.0.11')
         set_.assert_called_once_with('vm-a', 'tcp', '80', '100.100.2.11')
@@ -504,6 +538,30 @@ class TransitSyncTests(unittest.TestCase):
                               'ipv4.address=100.100.2.12', check=True)
         rel.assert_called_once_with('100.100.0.11')
         set_.assert_called_once_with('vm-a', 'tcp', '80', '100.100.2.12')
+
+    def test_legacy_migration_without_live_device_adds_nic(self):
+        # A legacy record whose transit NIC was removed must not strand the
+        # migration on `device set`; the reconciler creates the device at
+        # the new address instead.
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': '100.100.0.11'}]
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value='100.100.2.11') as reserve, \
+                mock.patch.object(frontend_nat, '_release_transit_ip') as rel, \
+                mock.patch.object(frontend_nat, '_disable_default_nic',
+                                  return_value=False), \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus') as incus:
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a'}, '100.100.2.0/24')
+        self.assertTrue(changed)
+        incus.assert_any_call('config', 'device', 'add', 'vm-a', 'transit0',
+                              'nic', 'network=transit0',
+                              'ipv4.address=100.100.2.11', check=True)
+        rel.assert_called_once_with('100.100.0.11')
+        set_.assert_called_once_with('vm-a', 'tcp', '80', '100.100.2.11')
 
     def test_transit_only_nic_removes_default_route(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
@@ -697,6 +755,83 @@ class TransitSyncTests(unittest.TestCase):
             changed = frontend_nat.sync_transit_nics({'vm-a'})
         self.assertFalse(changed)
         r.assert_not_called()
+        set_.assert_not_called()
+
+    def test_conflicting_transit_ips_resolved_to_live_device(self):
+        # A partial migration can leave two records at different IPs. The
+        # live NIC is ground truth: converge the other record onto it
+        # rather than stranding the VM in a skip-forever state.
+        exposures = [
+            {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+             'transit_ip': '100.100.2.11'},
+            {'proto': 'udp', 'vm': 'vm-a', 'ports': '90',
+             'transit_ip': '100.100.2.99'},
+        ]
+        patches = self._sync_patches(exposures,
+                                     live={'vm-a': '100.100.2.11'})
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus'):
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a'}, '100.100.2.0/24')
+        self.assertTrue(changed)
+        set_.assert_called_once_with('vm-a', 'udp', '90', '100.100.2.11')
+        r.assert_not_called()
+
+    def test_live_device_converged_to_recorded_address(self):
+        # Records agree on one IP but the live NIC holds another address
+        # in the same subnet: the device is converged to the reserved IP.
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': '100.100.2.11'}]
+        patches = self._sync_patches(exposures,
+                                     live={'vm-a': '100.100.2.99'})
+        incus = mock.Mock(returncode=0)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus', incus):
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a'}, '100.100.2.0/24')
+        self.assertTrue(changed)
+        incus.assert_any_call('config', 'device', 'set', 'vm-a', 'transit0',
+                              'ipv4.address=100.100.2.11', check=True)
+        r.assert_not_called()
+        set_.assert_not_called()
+
+    def test_reattaches_missing_transit_nic(self):
+        # A recorded IP with no live transit0 NIC (partial teardown or
+        # manual removal) must be re-attached, otherwise the eth0
+        # type=none override would leave the guest with no network path.
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': '100.100.2.11'}]
+        patches = self._sync_patches(exposures)
+        incus = mock.Mock(returncode=0)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus', incus):
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a'}, '100.100.2.0/24')
+        self.assertTrue(changed)
+        incus.assert_any_call('config', 'device', 'add', 'vm-a', 'transit0',
+                              'nic', 'network=transit0',
+                              'ipv4.address=100.100.2.11', check=True)
+        r.assert_not_called()
+        set_.assert_not_called()
+
+    def test_reattach_failure_skips_vm(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': '100.100.2.11'}]
+        patches = self._sync_patches(exposures)
+        incus = mock.Mock(side_effect=RuntimeError('boom'))
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus', incus):
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a'}, '100.100.2.0/24')
+        self.assertFalse(changed)
         set_.assert_not_called()
 
     def test_pool_exhaustion_warns_and_continues(self):

@@ -50,13 +50,20 @@ def validate_exposures(exposures):
 
 
 def _valid_transit_ip(value):
-    """True if value is a valid IPv4 address in a transit data subnet."""
+    """True if value is a usable transit host address.
+
+    The gateway (.1), infra range (.2-.10), network and broadcast
+    addresses are excluded so a manually-exposed record cannot DNAT to
+    them; the reconciler only ever allocates 11-254.
+    """
     import ipaddress
     try:
-        return (ipaddress.ip_address(value) in
-                ipaddress.ip_network(TRANSIT_SUPERNET, strict=False))
+        addr = ipaddress.ip_address(value)
     except ValueError:
         return False
+    if addr not in ipaddress.ip_network(TRANSIT_SUPERNET, strict=False):
+        return False
+    return 11 <= int(addr) & 0xFF <= 254
 
 
 def list_exposures():
@@ -73,6 +80,8 @@ def list_exposures():
         try:
             proto, vm, ports = key.split('/')
             record = json.loads(val.decode())
+            if not isinstance(record, dict):
+                raise ValueError('record must be a JSON object')
             if proto not in PROTOS:
                 raise ValueError(proto)
             _parse_ports(ports)
@@ -231,8 +240,8 @@ def _gc_transit_reservations(exposures):
     from ..common.etcd_utils import get_etcd_client
     client = get_etcd_client()
     for val, meta in client.get_prefix(NAT_PREFIX + '_ip/'):
-        key = meta.key.decode()
         try:
+            key = meta.key.decode()
             vm = val.decode()
             ip = key.rsplit('/', 1)[-1]
         except (UnicodeDecodeError, ValueError):
@@ -329,7 +338,19 @@ def _migrate_legacy_ip(vm, records, old_ip, live, transit_subnet):
               file=sys.stderr)
         return None
     try:
-        _set_transit_address(vm, new_ip)
+        if live:
+            _set_transit_address(vm, new_ip)
+        else:
+            # No live NIC (partial teardown or manual removal): create it
+            # at the new address rather than setting an address on an
+            # absent device, which would strand the migration forever.
+            _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE, 'nic',
+                   f'network={TRANSIT_BRIDGE}', f'ipv4.address={new_ip}',
+                   check=True)
+        # Close the cluster-side path before the frontend can route to the
+        # new address; publishing records first would leave a window where
+        # the VM is reachable via both eth0 and the new transit IP.
+        _disable_default_nic(vm)
         _converge_records(records, new_ip)
     except Exception:
         _release_transit_ip(new_ip)
@@ -353,21 +374,60 @@ def _allocate_transit_ip(vm, records, live, transit_subnet):
     return ip
 
 
+def _reconcile_device(vm, ip, live, attached):
+    """Point the transit NIC at `ip`; returns True when changed.
+
+    Called with the converged record IP after allocation/migration. A
+    live NIC holding a different address is re-set to the reserved one;
+    a missing NIC is re-created. Returns False when nothing is needed.
+    """
+    if live and live != ip:
+        # Records agree but the live NIC holds a different address in
+        # this subnet (manual change or stale device). Converge the
+        # device to the recorded address, which is the reserved one,
+        # rather than leaving records and device permanently diverged.
+        _set_transit_address(vm, ip)
+        return True
+    if not live and not attached:
+        # A recorded IP with no live NIC (partial teardown or manual
+        # removal): re-attach transit0, otherwise the eth0 type=none
+        # override below would strand the guest with no network path.
+        try:
+            _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE,
+                   'nic', f'network={TRANSIT_BRIDGE}',
+                   f'ipv4.address={ip}', check=True)
+        except Exception as exc:
+            print(f'Warning: failed to reattach transit NIC for {vm}: '
+                  f'{exc}', file=sys.stderr)
+            return None
+        return True
+    return False
+
+
 def _converge_vm(vm, records, live, transit_subnet):
     """Converge one VM; returns `(ip, device_changed)` or `(None, False)`."""
     details = _instance_details(vm)
     device_changed = False
+    attached = False
     existing = {r.get('transit_ip') for r in records} - {''}
     if len(existing) > 1:
-        print(f'Warning: {vm} has conflicting transit IPs; skipping',
-              file=sys.stderr)
-        return None, False
+        if not live:
+            print(f'Warning: {vm} has conflicting transit IPs and no live '
+                  'device; skipping', file=sys.stderr)
+            return None, False
+        # Records disagree (a partial migration or write). The live NIC is
+        # ground truth for what the guest actually holds, so converge every
+        # record onto it rather than guessing and stranding the VM.
+        print(f'Warning: {vm} has conflicting transit IPs; resolving to '
+              f'the live device {live}', file=sys.stderr)
+        existing = {live}
     ip = existing.pop() if existing else None
     if ip and _subnet_for(ip) != transit_subnet:
         migrated = _migrate_legacy_ip(vm, records, ip, live, transit_subnet)
         if not migrated:
             return None, False
         ip = migrated
+        attached = True
         device_changed = True
     if not ip:
         if live and _subnet_for(live) != transit_subnet:
@@ -376,6 +436,7 @@ def _converge_vm(vm, records, live, transit_subnet):
             if not migrated:
                 return None, False
             ip = migrated
+            attached = True
             device_changed = True
         elif live:
             # Device exists but etcd has no IP recorded (partial write or
@@ -388,7 +449,12 @@ def _converge_vm(vm, records, live, transit_subnet):
             ip = _allocate_transit_ip(vm, records, live, transit_subnet)
             if not ip:
                 return None, False
+            attached = True
             device_changed = True
+    reconciled = _reconcile_device(vm, ip, live, attached)
+    if reconciled is None:
+        return None, False
+    device_changed |= reconciled
     # Exposed VMs are transit-only. An inherited primary NIC would
     # otherwise leave a usable default route into cluster 10.* space.
     if _disable_default_nic(vm, details):

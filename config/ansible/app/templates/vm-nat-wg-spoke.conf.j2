@@ -5,8 +5,8 @@ PrivateKey = {{ vm_nat_wg_private_key }}
 # Host traffic keeps the system default route. Only traffic originating in
 # this host's transit /24 is policy-routed over the overlay.
 Table = off
-PostUp = ip rule del from {{ vm_transit_subnet }} table 100 2>/dev/null || true; ip rule add from {{ vm_transit_subnet }} table 100; ip route replace default dev %i table 100
-PreDown = ip rule del from {{ vm_transit_subnet }} table 100 || true; ip route del default dev %i table 100 || true
+PostUp = ip rule del from {{ vm_transit_subnet }} table 100 2>/dev/null || true; ip rule add from {{ vm_transit_subnet }} table 100 priority 100; ip route replace default dev %i table 100
+PreDown = ip rule del from {{ vm_transit_subnet }} table 100 priority 100 || true; ip rule del from {{ vm_transit_subnet }} table 100 || true; ip route del default dev %i table 100 || true
 
 [Peer]
 PublicKey = {{ hostvars[vm_nat_frontend_host].hub_public_key.stdout | trim }}
