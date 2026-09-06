@@ -139,16 +139,9 @@ def _render_body(exposures, public_ip, wan_iface, transit_iface):
         '  }',
         '  chain forward {',
         '    type filter hook forward priority filter; policy drop;',
-        '    ct state established,related accept',
     ]
-    for e in exposures:
-        first, last = _parse_ports(e['ports'])
-        if not e.get('transit_ip'):
-            continue
-        dport = f'{first}' if first == last else f'{first}-{last}'
-        lines.append(
-            f'    iifname "{wan_iface}" oifname "{transit_iface}" '
-            f'ip daddr {e["transit_ip"]} {e["proto"]} dport {dport} accept')
+    # Private/cluster drops must precede established/related. Otherwise a
+    # pre-existing transit -> private flow survives a ruleset apply.
     for subnet in subnets:
         lines += [
             f'    iifname "{transit_iface}" oifname "{wan_iface}" '
@@ -161,6 +154,22 @@ def _render_body(exposures, public_ip, wan_iface, transit_iface):
             f'ip saddr {subnet} ip daddr 169.254.0.0/16 drop',
             f'    iifname "{transit_iface}" oifname "{wan_iface}" '
             f'ip saddr {subnet} ip daddr 100.64.0.0/10 drop',
+            f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+            f'ip saddr {subnet} ip daddr 100.100.0.0/16 drop',
+        ]
+    lines += [
+        '    ct state established,related accept',
+    ]
+    for e in exposures:
+        first, last = _parse_ports(e['ports'])
+        if not e.get('transit_ip'):
+            continue
+        dport = f'{first}' if first == last else f'{first}-{last}'
+        lines.append(
+            f'    iifname "{wan_iface}" oifname "{transit_iface}" '
+            f'ip daddr {e["transit_ip"]} {e["proto"]} dport {dport} accept')
+    for subnet in subnets:
+        lines += [
             # Egress is explicit per protocol. Each /24 is also enforced by
             # the hub's WireGuard peer AllowedIPs, so a spoke cannot spoof
             # another spoke's subnet.

@@ -127,12 +127,13 @@
         - name: Validate the transit allocation
           assert:
             that:
-              - vm_nat_transit_index | int >= 0
-              - vm_nat_transit_index | int <= 254
+              - vm_nat_transit_index | int > 0
+              - vm_nat_transit_index | int < 254
               - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
               - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
             fail_msg: >-
-              vm_nat_transit_index must select a /24 in 100.100.0.0/16.
+              vm_nat_transit_index must be in 1-253 so it does not collide
+              with the hub, broadcast, or another spoke.
 
     - name: Install Incus and jq (shared base)
       apt:
@@ -367,6 +368,8 @@
               value: 'false'
             - key: ipv4.dhcp
               value: 'false'
+            - key: mtu
+              value: '1420'
           changed_when: false
 
         - name: Check whether the transit ACL exists
@@ -389,7 +392,7 @@
           command: "incus network set transit0 {{ item }}"
           loop:
             - "security.acls vm-transit-isolation"
-            - "security.acls.default.egress.action drop"
+            - "security.acls.default.egress.action allow"
             - "security.acls.default.ingress.action allow"
           changed_when: false
 

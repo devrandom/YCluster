@@ -212,6 +212,52 @@ def _claim_transit_ip(vm, ip):
     return ok
 
 
+def _release_transit_ip(ip):
+    """Delete a reservation once a legacy address has been migrated."""
+    from ..common.etcd_utils import get_etcd_client
+    get_etcd_client().delete(_transit_reservation_key(ip))
+
+
+def _instance_details(vm):
+    """Return the first `incus list` record for `vm`, or {}."""
+    result = _incus('list', vm, '--format', 'json', check=False)
+    try:
+        instances = json.loads(result.stdout)
+    except ValueError:
+        return {}
+    return instances[0] if instances else {}
+
+
+def _disable_default_nic(vm, details=None):
+    """Neutralize the profile's primary NIC for transit-only VMs.
+
+    An inherited `eth0` would still give the guest a route into the
+    cluster LAN. Overriding it with the `none` device removes that
+    path, even when the profile later changes.
+    """
+    details = details or _instance_details(vm)
+    eth0 = (details.get('expanded_devices') or {}).get('eth0') or {}
+    if eth0.get('type') == 'none':
+        return False
+    override = _incus('config', 'device', 'override', vm, 'eth0',
+                      'type=none', check=False)
+    if override.returncode != 0:
+        _incus('config', 'device', 'set', vm, 'eth0', 'type=none',
+               check=True)
+    return True
+
+
+def _restart_if_running(vm, details):
+    """Restart once so a running guest cannot keep the old NIC/route."""
+    if (details.get('status') or '').casefold() == 'running':
+        _incus('restart', vm, check=True)
+
+
+def _set_transit_address(vm, ip):
+    _incus('config', 'device', 'set', vm, TRANSIT_NIC_DEVICE,
+           f'ipv4.address={ip}', check=True)
+
+
 def sync_transit_nics(local_instances, transit_subnet=None):
     """Attach transit NICs + allocate transit IPs for exposed local VMs.
 
@@ -222,6 +268,11 @@ def sync_transit_nics(local_instances, transit_subnet=None):
     Live transit devices without a recorded IP are adopted
     transactionally (CAS on the reservation key) so two hosts cannot
     claim the same device for different VMs.
+
+    Legacy addresses are re-addressed into this host's configured /24.
+    The primary NIC is overridden with `type=none` so an exposed VM can
+    only use transit0 for forwarding; running guests are restarted after
+    a NIC change.
     """
     from .nat_render import transit_subnet as _subnet
     if transit_subnet is None:
@@ -238,6 +289,8 @@ def sync_transit_nics(local_instances, transit_subnet=None):
     for vm, records in sorted(by_vm.items()):
         if vm not in local_instances:
             continue
+        details = _instance_details(vm)
+        device_changed = False
         existing = {r.get('transit_ip') for r in records} - {''}
         if len(existing) > 1:
             print(f'Warning: {vm} has conflicting transit IPs; skipping',
@@ -245,22 +298,38 @@ def sync_transit_nics(local_instances, transit_subnet=None):
             continue
         ip = existing.pop() if existing else None
         if ip and _subnet(ip) != transit_subnet:
-            print(f'Warning: {vm} transit IP is outside {transit_subnet}; '
-                  'skipping', file=sys.stderr)
-            continue
+            # Re-address records written by the legacy single-/24 layout.
+            # The device must be rewritten in the same pass or traffic
+            # would continue toward an un-routed legacy address.
+            new_ip = _reserve_transit_ip(vm, transit_subnet)
+            if not new_ip:
+                print(f'Warning: no free transit IPs to migrate {vm}',
+                      file=sys.stderr)
+                continue
+            _set_transit_address(vm, new_ip)
+            _release_transit_ip(ip)
+            device_changed = True
+            ip = new_ip
         if not ip:
             live = _transit_nics_by_vm().get(vm)
             if live:
                 if _subnet(live) != transit_subnet:
-                    print(f'Warning: {vm} live transit IP is outside '
-                          f'{transit_subnet}; skipping', file=sys.stderr)
-                    continue
-                # Device exists but etcd has no IP recorded (partial
-                # write or manual attach): adopt it transactionally so
-                # no other host can claim the same address meanwhile.
-                if not _claim_transit_ip(vm, live):
-                    continue
-                ip = live
+                    new_ip = _reserve_transit_ip(vm, transit_subnet)
+                    if not new_ip:
+                        print(f'Warning: no free transit IPs to migrate '
+                              f'{vm}', file=sys.stderr)
+                        continue
+                    _set_transit_address(vm, new_ip)
+                    _release_transit_ip(live)
+                    device_changed = True
+                    ip = new_ip
+                else:
+                    # Device exists but etcd has no IP recorded (partial
+                    # write or manual attach): adopt it transactionally
+                    # so no other host can claim it meanwhile.
+                    if not _claim_transit_ip(vm, live):
+                        continue
+                    ip = live
             else:
                 ip = _reserve_transit_ip(vm, transit_subnet)
                 if not ip:
@@ -270,6 +339,14 @@ def sync_transit_nics(local_instances, transit_subnet=None):
                 _incus('config', 'device', 'add', vm, TRANSIT_NIC_DEVICE,
                        'nic', f'network={TRANSIT_BRIDGE}',
                        f'ipv4.address={ip}', check=True)
+                device_changed = True
+        # Exposed VMs are transit-only. An inherited primary NIC would
+        # otherwise leave a usable default route into cluster 10.* space.
+        if _disable_default_nic(vm, details):
+            device_changed = True
+        if device_changed:
+            _restart_if_running(vm, details)
+            changed = True
         # Converge every record for this VM (partial writes happen when
         # a tick dies between per-record puts).
         for e in records:

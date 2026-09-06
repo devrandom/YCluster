@@ -1,8 +1,29 @@
 name: vm-transit-isolation
-description: Transit VMs may reach only their local NAT transit gateway
+description: Transit VMs may reach the internet, but not cluster or private ranges
 config: {}
 ingress: []
 egress:
+  # Incus ACLs see the final destination, not the next hop. Allow the local
+  # transit /24 first, then deny private ranges; the default allow provides
+  # internet egress, which the frontend forward chain then filters.
   - action: allow
     destination: {{ vm_transit_subnet }}
+    state: enabled
+  - action: drop
+    destination: 10.0.0.0/8
+    state: enabled
+  - action: drop
+    destination: 172.16.0.0/12
+    state: enabled
+  - action: drop
+    destination: 192.168.0.0/16
+    state: enabled
+  - action: drop
+    destination: 169.254.0.0/16
+    state: enabled
+  - action: drop
+    destination: 100.64.0.0/10
+    state: enabled
+  - action: drop
+    destination: 100.100.0.0/16
     state: enabled

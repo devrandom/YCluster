@@ -75,6 +75,13 @@ func TestResolveRemoveArgs(t *testing.T) {
 	}
 }
 
+func TestPopSubcommand(t *testing.T) {
+	subcmd, rest := popSubcommand([]string{"disable", "--reason", "x"}, "usage")
+	if subcmd != "disable" || len(rest) != 2 || rest[0] != "--reason" {
+		t.Fatalf("unexpected subcommand split: %q %v", subcmd, rest)
+	}
+}
+
 func TestFilterBackends(t *testing.T) {
 	backends := []etcdBackendEntry{
 		{APIBase: "http://a:8000"},

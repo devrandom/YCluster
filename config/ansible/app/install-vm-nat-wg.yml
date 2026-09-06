@@ -36,11 +36,13 @@
     - name: Validate transit allocation
       assert:
         that:
-          - vm_nat_transit_index | int >= 0
-          - vm_nat_transit_index | int <= 254
+          - vm_nat_transit_index | int > 0
+          - vm_nat_transit_index | int < 254
           - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
           - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
-        fail_msg: vm_nat_transit_index must select a /24 in 100.100.0.0/16
+        fail_msg: >-
+          vm_nat_transit_index must be unique and in 1-253 so it does not
+          collide with the hub, broadcast, or another spoke.
 
     - name: Install WireGuard
       apt:
@@ -105,6 +107,35 @@
       meta: end_host
       when: not vm_frontend_nat_enabled | default(false)
 
+    - name: Collect participating spokes
+      set_fact:
+        vm_nat_participating_spokes: >-
+          {%- set spokes = [] -%}
+          {%- for host in groups['compute'] | default([]) -%}
+          {%- if hostvars[host].vm_nat_transit_enabled | default(false)
+                and hostvars[host].vm_nat_wg_public_key is defined -%}
+          {%- set _ = spokes.append({
+                'host': host,
+                'index': hostvars[host].vm_nat_transit_index | int,
+              }) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ spokes }}
+      run_once: true
+
+    - name: Validate the hub peer list
+      assert:
+        that:
+          - vm_nat_participating_spokes | length > 0
+          - (vm_nat_participating_spokes | map(attribute='index') | list | unique | length)
+            == (vm_nat_participating_spokes | length)
+          - 0 not in (vm_nat_participating_spokes | map(attribute='index') | list)
+          - 254 not in (vm_nat_participating_spokes | map(attribute='index') | list)
+        fail_msg: >-
+          The hub needs at least one spoke, and each participating spoke
+          must have a distinct transit index in 1-253.
+      run_once: true
+
     - name: Install WireGuard
       apt:
         name:
@@ -149,6 +180,10 @@
       no_log: true
       notify: restart wg-vm-nat
 
+    - name: Gather apt package facts (detect ufw)
+      package_facts:
+        manager: apt
+
     - name: Allow the WireGuard control port through ufw
       community.general.ufw:
         rule: allow
@@ -176,6 +211,33 @@
     - name: Skip non-participating compute hosts
       meta: end_host
       when: not vm_nat_transit_enabled | default(false)
+
+    - name: Resolve candidate participating frontends
+      set_fact:
+        vm_nat_frontend_candidates: >-
+          {%- set candidates = [] -%}
+          {%- for host in groups['frontend'] | default([]) | sort -%}
+          {%- if hostvars[host].vm_frontend_nat_enabled | default(false)
+                and hostvars[host].nat_public_ip is defined
+                and hostvars[host].hub_public_key is defined -%}
+          {%- set _ = candidates.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ candidates }}
+
+    - name: Select the participating frontend
+      set_fact:
+        vm_nat_frontend_host: >-
+          {{ vm_nat_frontend_candidates | first | default('') }}
+
+    - name: Validate the frontend selection
+      assert:
+        that:
+          - vm_nat_frontend_candidates | length == 1
+          - vm_nat_frontend_host | length > 0
+        fail_msg: >-
+          Exactly one participating frontend with nat_public_ip and a
+          rendered hub key is required before spoke configuration.
 
     - name: Install the spoke WireGuard configuration
       template:

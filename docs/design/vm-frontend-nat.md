@@ -67,18 +67,28 @@ Each participating compute host owns one /24 in `100.100.0.0/16`. The
 host index selects the third octet by default: a host with index `2`
 uses `100.100.2.0/24` and its bridge gateway is `100.100.2.1/24`. An
 explicit `vm_nat_transit_index` (or a complete `vm_transit_subnet`)
-overrides the derivation. This keeps each subnet uniquely routable to
-one spoke and allows multiple compute hosts behind one frontend. The
-legacy `100.100.0.0/24` remains valid for hosts that have not yet been
-re-run with the per-host configuration; its reservation keys are kept
-unchanged for upgrade compatibility.
+overrides the derivation. Valid indices are 1–253, must be unique among
+participating spokes, and are validated before the hub is written. On
+upgrade, the reconciler re-addresses legacy `100.100.0.x` transit NICs
+and mapping records into the host's configured /24; it frees the old
+reservation key and restarts a running guest after the NIC change.
 
 Selected VMs get a second NIC on the host's dedicated `transit0` bridge.
 Each VM is pinned a static IP on this bridge by the existing `ycluster
 vm` pinning logic. The VM's default route points at the bridge gateway
 (`.1`), and the compute host policy-routes traffic from that /24 over
-the WireGuard spoke. The Incus host's existing `incusbr0` masquerade
-does not apply because `transit0` is a dedicated bridge.
+the WireGuard spoke. Exposed VMs are transit-only: when the reconciler
+attaches `transit0`, it overrides the profile's `eth0` device with
+`type=none` and restarts a running VM once if needed. This removes the
+usable `incusbr0` route into `10.*` rather than relying on route metrics.
+The Incus host's existing `incusbr0` masquerade does not apply because
+`transit0` is a dedicated bridge.
+
+The Incus ACL on `transit0` explicitly allows the local transit /24,
+drops the cluster and private ranges, drops all other `100.100.0.0/16`
+transit pools, and default-allows remaining egress. This preserves
+internet-bound traffic while blocking cluster-local destinations; the
+frontend forward chain still applies the NAT policy and final drops.
 
 ### Transport overlay
 
@@ -111,9 +121,11 @@ The frontend maintains an nftables table with three chains:
 1. **DNAT (prerouting)** — for each mapping, rewrite
    `<public-ip>:<port-range>` to `<vm-transit-ip>:<same-range>` for the
    given protocol.
-2. **Forward filter** — default drop. Allow only:
+2. **Forward filter** — default drop. Private/cluster destination drops
+   are installed before established-state acceptance so stale flows
+   cannot survive a ruleset refresh. Allowed traffic is limited to:
    - inbound: WAN → transit VMs on registered protocol/port-range,
-   - established/related return traffic,
+   - established/related return traffic after the private drops,
    - outbound: transit subnet → WAN (egress).
    No allow rule for transit → `10.0.0.0/8` or any private range.
 3. **SNAT (postrouting)** — masquerade or source-NAT transit-subnet
@@ -152,8 +164,8 @@ ycluster frontend unexpose vm-a --proto tcp --ports 20000-20099
 ```
 
 This stores a record under
-`/cluster/frontend/nat/<vm>/<proto>/<port-range>` (exact layout TBD at
-implementation). The compute-side reconciler reads this in addition to
+`/cluster/frontend/nat/<proto>/<vm>/<first>-<last>` (single ports are
+`<port>-<port>`). The compute-side reconciler reads this in addition to
 the VM desired-state it already handles, so a VM launch/start that
 references a mapping attaches the transit NIC and pins its transit IP
 as part of normal reconciliation. The mapping's transit IP is pushed
