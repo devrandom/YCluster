@@ -79,10 +79,13 @@ and `just metrics`.
 
 ## Review subagents
 
-When spawning a review subagent, present the diff and the review focus
-without framing the request in terms of prior review history (e.g. do
-not say "second round", "fixes the previous blockers", or summarise
+When spawning a review subagent, don't hand it a diff file. Have it open
+the worktree (branch `<slug>` checked out at `work/<slug>`) and review
+the changes with respect to the base branch (e.g. `main`), e.g. via
+`git diff <base>...HEAD` inside the worktree. Give it the review focus,
+but without framing the request in terms of prior review history (e.g.
+do not say "second round", "fixes the previous blockers", or summarise
 what earlier reviewers found). Prior-review framing anchors the
 reviewer to the same conclusions and areas the earlier pass covered.
-Ask for a fresh, independent evaluation of the diff on its own merits;
-let the reviewer discover issues without being told where to look.
+Ask for a fresh, independent evaluation of the changes on their own
+merits; let the reviewer discover issues without being told where to look.
