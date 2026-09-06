@@ -1,0 +1,11 @@
+table ip ycluster_vm_nat {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+  }
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+  }
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+}

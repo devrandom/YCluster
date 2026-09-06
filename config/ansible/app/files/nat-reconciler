@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Frontend nat-reconciler: pull exposure state, apply nftables.
+
+Runs on frontend nodes (outside the cluster envelope; no etcd access).
+Each tick:
+
+1. GET the exposure list from the admin API over mTLS (client cert).
+2. Validate + render a complete nftables ruleset (nat_render module).
+3. If the rendered digest differs from live AND state, apply atomically
+   with `nft -f`.
+
+Fail-closed: on any error the last known-good ruleset stays in place;
+after a reboot the digest comment in the live table is absent so the
+agent converges on the next tick regardless of the state file.
+"""
+
+import hashlib
+import json
+import os
+import ssl
+import subprocess
+import sys
+import urllib.request
+
+sys.path.insert(0, '/usr/local/lib/ycluster')
+from nat_render import digest_of, render_nftables  # noqa: E402
+
+API_URL = os.environ.get(
+    'NAT_RULES_URL', 'https://127.0.0.1/api/frontend/nat-rules')
+STATE_PATH = os.environ.get(
+    'NAT_STATE_PATH', '/var/lib/ycluster/nat-reconciler.json')
+PUBLIC_IP = os.environ.get('NAT_PUBLIC_IP', '')
+WAN_IFACE = os.environ.get('NAT_WAN_IFACE', 'eth0')
+TRANSIT_IFACE = os.environ.get('NAT_TRANSIT_IFACE', 'transit0')
+CLIENT_CERT = os.environ.get('NAT_CLIENT_CERT', '')
+CLIENT_KEY = os.environ.get('NAT_CLIENT_KEY', '')
+CA_CERT = os.environ.get('NAT_CA_CERT', '/etc/ssl/certs/ca-certificates.crt')
+
+
+def fetch_exposures(url):
+    if not (CLIENT_CERT and CLIENT_KEY):
+        raise RuntimeError(
+            'NAT_CLIENT_CERT / NAT_CLIENT_KEY not configured; refusing '
+            'to pull without mTLS')
+    ctx = ssl.create_default_context(cafile=CA_CERT or None)
+    ctx.load_cert_chain(CLIENT_CERT, CLIENT_KEY)
+    with urllib.request.urlopen(url, timeout=10, context=ctx) as resp:
+        body = json.load(resp)
+    return body.get('exposures', [])
+
+
+def apply_ruleset(ruleset_text):
+    proc = subprocess.run(['nft', '-f', '-'], input=ruleset_text,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f'nft apply failed: {proc.stderr.strip()}')
+
+
+def applied_digest():
+    """Return the digest recorded in the live table's comment, or ''.
+
+    The rendered ruleset embeds `comment "digest <hex>"`, so after a
+    reboot (base deny-all loaded, no comment) this returns '' and the
+    agent reapplies even though the state file matches.
+    """
+    proc = subprocess.run(['nft', '-j', 'list', 'table', 'ip',
+                           'ycluster_vm_nat'], capture_output=True,
+                          text=True)
+    if proc.returncode != 0:
+        return ''
+    try:
+        tables = json.loads(proc.stdout)['nftables']
+        for obj in tables:
+            if 'table' in obj:
+                return (obj['table'].get('comment') or '') \
+                    .removeprefix('digest ')
+        return ''
+    except (ValueError, KeyError, IndexError):
+        return ''
+
+
+def main():
+    if not PUBLIC_IP:
+        print('NAT_PUBLIC_IP not set; skipping tick', file=sys.stderr)
+        return 1
+    exposures = fetch_exposures(API_URL)
+    ruleset = render_nftables(
+        exposures, PUBLIC_IP, WAN_IFACE, TRANSIT_IFACE)
+    # Must match the digest embedded in the rendered table comment
+    # (digest_of hashes the body only, not the full file).
+    digest = digest_of(exposures, PUBLIC_IP, WAN_IFACE, TRANSIT_IFACE)
+
+    last = ''
+    try:
+        if os.path.exists(STATE_PATH):
+            with open(STATE_PATH) as f:
+                last = json.load(f).get('ruleset_hash', '')
+    except (OSError, ValueError):
+        last = ''  # corrupt state -> treat as empty and reapply
+    # A digest match is only a no-op if the LIVE table carries the same
+    # digest (embedded as a comment). After a reboot the base deny-all
+    # table has no comment, so we converge on the next tick.
+    if digest == last and digest == applied_digest():
+        return 0
+    apply_ruleset(ruleset)
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    with open(STATE_PATH, 'w') as f:
+        json.dump({'ruleset_hash': digest}, f)
+    print(f'applied ruleset {digest[:12]} ({len(exposures)} exposures)')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

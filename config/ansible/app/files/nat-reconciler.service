@@ -1,0 +1,13 @@
+[Unit]
+Description=YCluster VM frontend NAT reconciler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ycluster/nat-reconciler.env
+ExecStart=/usr/local/lib/ycluster/nat-reconciler
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

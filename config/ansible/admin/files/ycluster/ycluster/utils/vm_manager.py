@@ -976,6 +976,16 @@ def reconcile():
     # by hand). Issues for other hosts' VMs are theirs to manage.
     _reconcile_cleanup(issues, all_vms)
 
+    # Frontend NAT: attach transit NICs to exposed VMs on this host.
+    # No host flag needed — sync_transit_nics() is a no-op when no
+    # exposure records reference local VMs, so etcd itself is the
+    # opt-in. Best-effort: must never break power-state convergence.
+    try:
+        from .frontend_nat import sync_transit_nics
+        sync_transit_nics(local_vms)
+    except Exception as e:
+        print(f'Warning: transit NIC sync failed: {e}', file=sys.stderr)
+
 
 def _record_event(event, name, owner=None, gpus=None, initiator="cli",
                   billable=False):

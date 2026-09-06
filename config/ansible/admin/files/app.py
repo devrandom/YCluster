@@ -2030,6 +2030,27 @@ def cluster_status_api():
         'timestamp': datetime.now().isoformat()
     })
 
+@app.route('/api/frontend/nat-rules')
+def frontend_nat_rules_api():
+    """Read-only exposure list for the frontend nat-reconciler agent.
+
+    Scoped: returns only the fields the frontend needs to render its
+    nftables ruleset. Auth is enforced at the nginx layer (mTLS with a
+    frontend-scoped client CA) — see docs/design/vm-frontend-nat.md.
+    Defence in depth: refuse the request unless nginx confirms a
+    verified client cert was presented (fail-closed if the header is
+    absent, so a misconfigured nginx cannot silently expose the data).
+    """
+    if request.headers.get('X-SSL-Client-Verify') != 'SUCCESS':
+        return jsonify({'error': 'client certificate required'}), 401
+    from ycluster.utils import frontend_nat
+    try:
+        return jsonify({'exposures': frontend_nat.list_exposures()})
+    except Exception as e:
+        app.logger.error('frontend nat-rules: %s', e)
+        return jsonify({'error': 'unavailable'}), 503
+
+
 @app.route('/static/<path:filename>')
 def static_files(filename):
     """Serve static files"""
