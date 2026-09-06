@@ -213,6 +213,13 @@
         dest: /etc/nginx/templates/ycluster.conf.j2
       when: "'storage' in group_names"
 
+    - name: Install admin-api alt vhost template (frp-tunnel public surface)
+      copy:
+        src: admin-api-alt.conf.j2
+        dest: /etc/nginx/templates/admin-api-alt.conf.j2
+      notify: restart nginx
+      when: "'storage' in group_names"
+
     - name: Install app.<domain> redirect vhost template
       copy:
         src: ycluster_app.conf.j2

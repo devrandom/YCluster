@@ -76,3 +76,13 @@ Do not URL-encode the `/` in the project path for this CLI; use
 `devrandom01/ycluster` directly. The MR description should include the
 issue/todo path when applicable and verification results from `just test`
 and `just metrics`.
+
+## Review subagents
+
+When spawning a review subagent, present the diff and the review focus
+without framing the request in terms of prior review history (e.g. do
+not say "second round", "fixes the previous blockers", or summarise
+what earlier reviewers found). Prior-review framing anchors the
+reviewer to the same conclusions and areas the earlier pass covered.
+Ask for a fresh, independent evaluation of the diff on its own merits;
+let the reviewer discover issues without being told where to look.

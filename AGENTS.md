@@ -27,6 +27,11 @@ election.
   manually in prod when there's a best-practice way (e.g. running a playbook).
 - **Don't create commits unless explicitly asked.** No commit prefixes; amend
   when fixing recently-committed code.
+- **Never push to `main` without explicit authorization.** Work happens on a
+  branch/worktree and is published as an MR; merging to `main`, direct pushes
+  to `main`, and prod deploys of unmerged changes each require the user's
+  explicit sign-off, even when the individual task ("deploy this") sounds
+  like blanket approval for the whole chain.
 - **Use `./tmp/`, never `/tmp/`, for scratch.** Never `rm -rf` paths that could
   contain user data — use `rmdir` or verify unmounted state first.
 - **Don't swallow errors or stderr output.**
