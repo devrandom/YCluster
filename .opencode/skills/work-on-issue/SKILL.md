@@ -89,3 +89,7 @@ what earlier reviewers found). Prior-review framing anchors the
 reviewer to the same conclusions and areas the earlier pass covered.
 Ask for a fresh, independent evaluation of the changes on their own
 merits; let the reviewer discover issues without being told where to look.
+Ask the reviewer to identify "goodhearting" of test coverage: tests or
+assertions that make coverage metrics look better without really improving
+resilience (e.g. testing implementation details, over-mocking, trivially
+passing tests, or duplicate variants that don't exercise new behavior).
