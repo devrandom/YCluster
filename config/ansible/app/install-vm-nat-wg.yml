@@ -180,16 +180,15 @@
       no_log: true
       notify: restart wg-vm-nat
 
-    - name: Gather apt package facts (detect ufw)
-      package_facts:
-        manager: apt
-
+    # Participating frontends already run ufw via install-frp-server.yml.
+    # If that prerequisite drifts, fail loudly rather than detecting around
+    # an unexpected host-firewall state.
     - name: Allow the WireGuard control port through ufw
       community.general.ufw:
         rule: allow
         port: "{{ vm_nat_wg_port | default('51820') }}"
         proto: udp
-      when: "'ufw' in ansible_facts.packages | default({})"
+      when: vm_frontend_nat_enabled | default(false)
 
     - name: Enable and start the hub tunnel
       systemd:
