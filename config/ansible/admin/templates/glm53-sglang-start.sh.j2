@@ -11,7 +11,7 @@
 # effort) / 208 t/s (max effort) single-stream.
 #
 # --mem-fraction-static is set below the original 0xSero recipe value (0.90 ->
-# 0.85) to hold back a ~5% cushion of each 96 GiB card for multimodal (vision)
+# 0.8) to hold back a larger cushion of each 96 GiB card for multimodal (vision)
 # workspace. At 0.90 the slices ran at ~93-94 GiB / 97.9 GiB and a ~4 MB image
 # upload OOM'd the CUDA allocator (only ~28 MiB free on the card). Trade-off:
 # a smaller fraction shrinks the KV pool / context capacity, so re-qualify

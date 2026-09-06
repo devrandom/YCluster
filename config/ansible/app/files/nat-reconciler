@@ -42,7 +42,8 @@ def fetch_exposures(url):
         raise RuntimeError(
             'NAT_CLIENT_CERT / NAT_CLIENT_KEY not configured; refusing '
             'to pull without mTLS')
-    ctx = ssl.create_default_context(cafile=CA_CERT or None)
+    # System CA store verifies the server; the client cert identifies us.
+    ctx = ssl.create_default_context()
     ctx.load_cert_chain(CLIENT_CERT, CLIENT_KEY)
     with urllib.request.urlopen(url, timeout=10, context=ctx) as resp:
         body = json.load(resp)
