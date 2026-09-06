@@ -9,10 +9,11 @@
 #     nat-reconciler's first successful apply)
 #   - the nat-reconciler agent + systemd timer
 #   - an env file with the frontend's public IP and interface names
+#   - mTLS client material for the admin-API pull
 #
-# The agent pulls from the admin API over the existing frp tunnel; the
-# mTLS client-cert gate is an nginx location block on the public vhost
-# (see the design doc's Security section) and is provisioned separately.
+# The transit bridge (transit0) is created on COMPUTE hosts by
+# admin/install-incus.yml, not here — a frontend is a router for the
+# transit subnet, not an Incus host.
 #
 # Requires for participating hosts: nat_public_ip (plus optional
 # nat_wan_iface / nat_transit_iface) and mTLS material
@@ -27,18 +28,6 @@
           vm_frontend_nat_enabled is not true for {{ inventory_hostname }};
           skipping frontend NAT gateway install.
       when: not vm_frontend_nat_enabled | default(false)
-
-    - name: Ensure transit0 Incus network exists
-      when: vm_frontend_nat_enabled | default(false)
-      command:
-        cmd: >-
-          incus network create transit0
-          ipv4.address=100.100.0.1/24 ipv4.nat=false ipv6.address=none
-        creates: /var/lib/incus/networks/transit0
-
-    - name: Disable IPv6 on existing transit0 (fail-closed, no bypass)
-      when: vm_frontend_nat_enabled | default(false)
-      command: incus network set transit0 ipv6.address none
 
     - name: Install nat-reconciler agent
       when: vm_frontend_nat_enabled | default(false)
@@ -71,6 +60,13 @@
       copy:
         content: "{{ nat_client_cert }}"
         dest: /etc/ycluster/nat-client.crt
+        mode: '0644'
+
+    - name: Install mTLS CA certificate
+      when: vm_frontend_nat_enabled | default(false)
+      copy:
+        content: "{{ nat_client_ca }}"
+        dest: /etc/ycluster/nat-ca.crt
         mode: '0644'
 
     - name: Fail if mTLS material is missing
@@ -109,6 +105,7 @@
           NAT_RULES_URL=https://127.0.0.1/api/frontend/nat-rules
           NAT_CLIENT_CERT=/etc/ycluster/nat-client.crt
           NAT_CLIENT_KEY=/etc/ycluster/nat-client.key
+          NAT_CA_CERT=/etc/ycluster/nat-ca.crt
         dest: /etc/ycluster/nat-reconciler.env
         mode: '0600'
       notify: restart nat-reconciler
