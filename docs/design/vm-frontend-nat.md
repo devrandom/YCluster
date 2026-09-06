@@ -2,7 +2,9 @@
 
 ## Status
 
-**Draft — direction decided, nothing implemented.**
+**Implemented.** The NAT gateway state machine and renderer are deployed
+on the designated frontend; the WireGuard transport overlay is
+provisioned by `app/install-vm-nat-wg.yml`.
 
 Selected VMs need a public network identity that is decoupled from the
 compute host they run on, for both directions:
@@ -48,12 +50,12 @@ NAT-gateway role on the frontend.
               │  - SNAT egress      │
               │  - forward filter   │
               └────────┬────────────┘
-                       │ transit network (e.g. 100.100.0.0/24)
+                       │ per-host transit + WireGuard overlay
                        ▼
               ┌────────────────────┐
-              │ compute host (nv2) │
-              │  incus bridge      │
-              │  transit netns     │
+              │ compute host       │
+              │  transit0 bridge   │
+              │  WG spoke          │
               └────────┬──────────┘
                        ▼
                    selected VMs
@@ -61,29 +63,94 @@ NAT-gateway role on the frontend.
 
 ### Transit network
 
-Selected VMs get a second NIC on a dedicated transit bridge/subnet
-(e.g. `100.100.0.0/24`), chosen outside `10.0.0.0/8` so it cannot
-collide with cluster LAN or WireGuard ranges. Each VM is pinned a
-static IP on this bridge by the existing `ycluster vm` pinning logic.
+Each participating compute host owns one /24 in `100.100.0.0/16`. The
+address space is partitioned by host class so the numeric suffixes of
+different hostname prefixes cannot collide:
 
-The VM's default route (via DHCP or static config) points at the
-frontend-side transit gateway address. The Incus host's existing
-`incusbr0` masquerade must be bypassed for these VMs — either by
-attaching the transit NIC in addition to `eth0` and ensuring the
-transit gateway is the *preferred* (lowest-metric) default route, or by
-running fronted VMs on the transit bridge only. The latter is cleaner
-and avoids the ambiguity of competing default routes.
+| Host class | Hostname prefix | Class octet | Subnet for host index N |
+|---|---|---:|---|
+| GPU-passthrough compute | `nv*` | 110 | `100.100.<110+N>.0/24` |
+| Other compute | `c*` | 50 | `100.100.<50+N>.0/24` |
+
+For example, host index 3 derives `100.100.113.0/24` on an `nv*` host
+and `100.100.53.0/24` on a `c*` host. These class octets deliberately
+mirror the host IP allocation bases used by the DHCP allocator. An
+explicit `vm_nat_transit_index`
+(or a complete `vm_transit_subnet`) overrides the derivation. The
+resulting third octet must be in 1–253 and unique among participating
+spokes. On upgrade, the reconciler re-addresses legacy `100.100.0.x`
+transit NICs and mapping records into the host's configured /24; it
+frees the old reservation key and restarts a running guest after the
+NIC change.
+
+Selected VMs get a second NIC on the host's dedicated `transit0` bridge.
+Each VM is pinned a static IP on this bridge by the existing `ycluster
+vm` pinning logic; transit0 runs DHCP (dnsmasq) so pinned addresses are
+delivered as static leases along with the default route pointing at the
+bridge gateway (`.1`). The compute host policy-routes transit /24
+traffic over the WireGuard spoke. Exposed VMs are transit-only: when the reconciler
+attaches `transit0`, it overrides the profile's `eth0` device with
+`type=none` and restarts a running VM once if needed. This removes the
+usable `incusbr0` route into `10.*` rather than relying on route metrics.
+The Incus host's existing `incusbr0` masquerade does not apply because
+`transit0` is a dedicated bridge.
+
+The Incus ACL on `transit0` explicitly allows the local transit /24
+and drops private ranges (10/8, 172.16/12, 192.168/16, 169.254/16),
+then default-allows remaining egress. Incus orders ACL rules by action
+(drop before allow), not list order, so broader drops containing the
+local /24 (100.64.0.0/10, 100.100.0.0/16) must not appear in the ACL;
+the hub's forward chain blocks those destinations instead. The hub
+forward chain still applies the NAT policy and final drops. `transit0`
+disables IPv6 (`ipv6.address: none`) so a guest cannot inherit an
+unfiltered IPv6 path that bypasses the IPv4-only firewall, policy
+routing, and NAT chains.
+
+### Transport overlay
+
+`app/install-vm-nat-wg.yml` builds a hub-and-spoke WireGuard overlay:
+
+- The frontend is the hub at `100.101.0.1/24` on `wg-vm-nat`.
+- Spoke `N` gets `100.101.0.<transit-third-octet>/24`. This control
+  range is separate from the transit data range, but the spoke's WG
+  address reuses its transit third octet so the control plane is
+  class-partitioned exactly like the data plane (nv\* base 110, c\* base
+  50). Two hosts of different classes that share a numeric index (e.g.
+  nv3 and c3) therefore get distinct WG addresses. This was previously
+  `100.101.0.(N+1)`, which collided across classes.
+- The hub peer's `AllowedIPs` are that spoke's WG address and exactly
+  that spoke's transit /24. It cannot learn or route a spoke's `10.*`
+  space because those prefixes are never exchanged. wg-quick installs
+  those exact routes on the hub.
+- A spoke's peer accepts the frontend as its default path but uses
+  `Table = off` plus a policy rule so only traffic sourced from its
+  transit /24 is routed over the tunnel; host management traffic keeps
+  the system default route. The spoke firewall's input chain drops all
+  `transit0`-originated host-local traffic except DHCP and DNS, so a
+  guest cannot reach other services on the compute host. Compute spokes
+  normally have no host firewall; if a forward chain exists, the
+  overlay playbook fails and requires explicit transit0/WG rules there
+  rather than bypassing it.
+
+Run the playbook with both `frontend` and `compute` selected so spoke
+keys are available when the hub configuration is rendered. Re-run
+`app/install-frontend-nat.yml` afterward when upgrading an already
+deployed frontend, because its environment file must select the
+`wg-vm-nat` transit interface.
 
 ### Frontend NAT (nftables)
 
-The frontend maintains an nftables table with three chains:
+The frontend maintains an nftables table with four chains
+(input, prerouting, postrouting, forward):
 
 1. **DNAT (prerouting)** — for each mapping, rewrite
    `<public-ip>:<port-range>` to `<vm-transit-ip>:<same-range>` for the
    given protocol.
-2. **Forward filter** — default drop. Allow only:
+2. **Forward filter** — default drop. Private/cluster destination drops
+   are installed before established-state acceptance so stale flows
+   cannot survive a ruleset refresh. Allowed traffic is limited to:
    - inbound: WAN → transit VMs on registered protocol/port-range,
-   - established/related return traffic,
+   - established/related return traffic after the private drops,
    - outbound: transit subnet → WAN (egress).
    No allow rule for transit → `10.0.0.0/8` or any private range.
 3. **SNAT (postrouting)** — masquerade or source-NAT transit-subnet
@@ -122,8 +189,8 @@ ycluster frontend unexpose vm-a --proto tcp --ports 20000-20099
 ```
 
 This stores a record under
-`/cluster/frontend/nat/<vm>/<proto>/<port-range>` (exact layout TBD at
-implementation). The compute-side reconciler reads this in addition to
+`/cluster/frontend/nat/<proto>/<vm>/<first>-<last>` (single ports are
+`<port>-<port>`). The compute-side reconciler reads this in addition to
 the VM desired-state it already handles, so a VM launch/start that
 references a mapping attaches the transit NIC and pins its transit IP
 as part of normal reconciliation. The mapping's transit IP is pushed
@@ -142,7 +209,13 @@ allocated.
 5. nftables rules converge to the desired set.
 
 Removal works the same way in reverse: delete the mapping, both
-reconcilers converge, frontend rules disappear on the next tick.
+reconcilers converge, frontend rules disappear on the next tick. When
+the last mapping for a local VM is deleted, the compute reconciler also
+removes its `transit0` device, removes the `eth0 type=none` override so
+the profile NIC is inherited again, releases the transit reservation,
+and restarts a running VM if needed. If the reconciler is unavailable,
+remove those two devices manually with `incus config device remove` and
+let the frontend rules expire on its next pull.
 
 ## Security
 
@@ -160,7 +233,14 @@ reconcilers converge, frontend rules disappear on the next tick.
 - Anti-spoofing: forward rules match on input/output interface and
   source address. Traffic claiming to originate from the transit
   subnet but arriving on the WAN interface is dropped (and vice
-  versa).
+  versa). On a spoke, a dedicated nftables forward chain accepts
+  traffic entering `transit0` only when its source is that spoke's
+  transit /24 and its output interface is `wg-vm-nat`; all other
+  `transit0`-forwarded traffic is dropped. A guest cannot bypass the
+  hub by choosing a spoofed source such as a cluster or another
+  spoke's address. Hub-local input from decapsulated `wg-vm-nat`
+  traffic is dropped; only WireGuard's WAN UDP encapsulation is
+  reachable.
 - The admin API endpoint requires mTLS; the frontend's client cert is
   scoped to this one read-only route. The frontend reaches the
   endpoint via its existing frp tunnel (plain TCP passthrough to the
@@ -198,12 +278,10 @@ reconcilers converge, frontend rules disappear on the next tick.
 
 ## Open questions
 
-- Exact etcd key layout for the mapping records.
+- Mapping records use `/cluster/frontend/nat/<proto>/<vm>/<first>-<last>`.
+  Reservation records use `_ip/` keys; non-legacy pools are namespaced by
+  their /24 to prevent duplicate octets across spokes.
 - Whether the frontend needs a separate "egress-only" mode (SNAT but
   no DNAT) for VMs that should not be reachable inbound.
 - Whether UDP and TCP ranges should always be paired in the CLI or
   independent.
-- Whether the transit bridge is a second Incus network on the same
-  host or a host-level bridge wired into a VLAN/backhaul to the
-  frontend. The former is simpler; the latter is needed if the
-  frontend is not the same physical machine as the Incus host.

@@ -1,0 +1,25 @@
+# Anti-spoofing for traffic leaving a transit VM. A source address outside
+# this spoke's /24 is dropped instead of being routed out the host LAN.
+# Host-local input from transit0 is limited to DHCP and DNS so a guest
+# cannot reach other services on the compute host; everything else on that
+# interface (including spoofed non-transit sources) is dropped.
+table inet ycluster_vm_nat_spoke
+delete table inet ycluster_vm_nat_spoke
+table inet ycluster_vm_nat_spoke {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname "transit0" udp dport 67 accept
+    iifname "transit0" ip saddr {{ vm_transit_subnet }} udp dport 53 accept
+    iifname "transit0" ip saddr {{ vm_transit_subnet }} tcp dport 53 accept
+    iifname "transit0" drop
+  }
+  chain forward {
+    # policy accept is deliberate: this chain only gates transit0. Non-
+    # transit forwarding (e.g. incusbr0 NAT) must keep working; the play
+    # refuses to install if another firewall already owns a forward chain.
+    type filter hook forward priority filter; policy accept;
+    iifname "transit0" oifname "wg-vm-nat" ip saddr {{ vm_transit_subnet }} accept
+    iifname "wg-vm-nat" oifname "transit0" ip daddr {{ vm_transit_subnet }} accept
+    iifname "transit0" drop
+  }
+}

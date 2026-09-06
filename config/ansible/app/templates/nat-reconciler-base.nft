@@ -1,4 +1,11 @@
 table ip ycluster_vm_nat {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    # WireGuard's UDP encapsulation arrives on the WAN and is handled by
+    # ufw. Anything already decapsulated on wg-vm-nat must not reach hub
+    # local services.
+    iifname "wg-vm-nat" drop;
+  }
   chain prerouting {
     type nat hook prerouting priority dstnat; policy accept;
   }

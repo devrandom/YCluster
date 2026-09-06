@@ -1,0 +1,26 @@
+name: vm-transit-isolation
+description: Transit VMs may reach the internet, but not cluster or private ranges
+config: {}
+ingress: []
+egress:
+  # Incus orders ACL rules by action (drop, then reject, then allow),
+  # NOT by list order. Broader drops that contain the local /24 would
+  # therefore shadow the allow below, so only non-overlapping private
+  # ranges may be dropped here. Blocking CGNAT space and other spokes'
+  # transit pools is the hub's job: its forward chain drops those
+  # destinations before any egress accept.
+  - action: allow
+    destination: {{ vm_transit_subnet }}
+    state: enabled
+  - action: drop
+    destination: 10.0.0.0/8
+    state: enabled
+  - action: drop
+    destination: 172.16.0.0/12
+    state: enabled
+  - action: drop
+    destination: 192.168.0.0/16
+    state: enabled
+  - action: drop
+    destination: 169.254.0.0/16
+    state: enabled

@@ -31,7 +31,7 @@ STATE_PATH = os.environ.get(
     'NAT_STATE_PATH', '/var/lib/ycluster/nat-reconciler.json')
 PUBLIC_IP = os.environ.get('NAT_PUBLIC_IP', '')
 WAN_IFACE = os.environ.get('NAT_WAN_IFACE', 'eth0')
-TRANSIT_IFACE = os.environ.get('NAT_TRANSIT_IFACE', 'transit0')
+TRANSIT_IFACE = os.environ.get('NAT_TRANSIT_IFACE', 'wg-vm-nat')
 CLIENT_CERT = os.environ.get('NAT_CLIENT_CERT', '')
 CLIENT_KEY = os.environ.get('NAT_CLIENT_KEY', '')
 CA_CERT = os.environ.get('NAT_CA_CERT', '/etc/ssl/certs/ca-certificates.crt')

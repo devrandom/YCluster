@@ -102,6 +102,59 @@
       set_fact:
         incus_render_gid: "{{ incus_render_gid | default(incus_render_gid_default) }}"
 
+    # VM NAT transit bridge. Each participating host owns a distinct /24
+    # so a frontend hub can route the subnet to exactly one WireGuard peer.
+    - name: Resolve VM NAT transit allocation
+      when: vm_nat_transit_enabled | default(false)
+      block:
+        - name: Derive the transit host class octet
+          set_fact:
+            vm_transit_class_octet: >-
+              {{ vm_transit_class_octet |
+                 default(110 if inventory_hostname.startswith('nv') else 50) }}
+
+        - name: Derive the transit host index
+          set_fact:
+            vm_nat_transit_index: >-
+              {{ inventory_hostname | regex_replace('^[a-z]+', '') | int }}
+          when: vm_nat_transit_index is not defined
+
+        - name: Derive the transit subnet
+          set_fact:
+            vm_transit_subnet: >-
+              {{ vm_transit_subnet |
+                 default('100.100.' ~
+                         (vm_transit_class_octet | int + vm_nat_transit_index | int) ~
+                         '.0/24') }}
+
+        - name: Derive the transit gateway and third octet
+          set_fact:
+            vm_transit_gateway: >-
+              {{ vm_transit_subnet | regex_replace('\.0/24$', '.1/24') }}
+            vm_transit_third_octet: >-
+              {{ vm_transit_subnet | regex_replace('^100\\.100\\.', '') |
+                 regex_replace('\\.0/24$', '') | int }}
+
+        - name: Validate the transit allocation
+          assert:
+            that:
+              - vm_transit_class_octet | int in [50, 110]
+              - vm_nat_transit_index | int > 0
+              - vm_nat_transit_index | int < 254
+              # Classes must stay disjoint: c* tops out at 109 (50+59) so
+              # it can never reach the nv* base of 110; nv* tops out at 253.
+              - (vm_transit_class_octet | int == 50
+                 and vm_nat_transit_index | int < 60) or
+                (vm_transit_class_octet | int == 110
+                 and vm_nat_transit_index | int < 144)
+              - vm_transit_third_octet | int > 1
+              - vm_transit_third_octet | int < 254
+              - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
+              - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
+            fail_msg: >-
+              The transit class octet and host index must produce a /24 in
+              100.100.1.0/24 through 100.100.253.0/24.
+
     - name: Install Incus and jq (shared base)
       apt:
         name:
@@ -311,6 +364,63 @@
         - "security.acls.default.ingress.action allow"
       changed_when: false
 
+    - name: Create the VM NAT transit bridge
+      when: vm_nat_transit_enabled | default(false)
+      block:
+        - name: Check whether transit0 exists
+          command: incus network show transit0
+          register: transit_bridge_check
+          changed_when: false
+          failed_when: false
+
+        - name: Create transit0
+          command: >-
+            incus network create transit0 --type=bridge
+            ipv4.address={{ vm_transit_gateway }}
+            ipv6.address=none
+          when: transit_bridge_check.rc != 0
+
+        - name: Configure transit0
+          command: "incus network set transit0 {{ item.key }}={{ item.value }}"
+          loop:
+            - key: ipv4.address
+              value: "{{ vm_transit_gateway }}"
+            - key: ipv6.address
+              value: 'none'
+            - key: ipv4.nat
+              value: 'false'
+            # Pinned NIC ipv4.address values are delivered as dnsmasq
+            # static leases, so DHCP must stay enabled on transit0.
+            - key: ipv4.dhcp
+              value: 'true'
+            - key: mtu
+              value: '1420'
+          changed_when: false
+
+        - name: Check whether the transit ACL exists
+          command: incus network acl show vm-transit-isolation
+          register: transit_acl_check
+          changed_when: false
+          failed_when: false
+
+        - name: Create the transit isolation ACL
+          command: incus network acl create vm-transit-isolation
+          when: transit_acl_check.rc != 0
+
+        - name: Apply the transit isolation ACL rules
+          shell: incus network acl edit vm-transit-isolation
+          args:
+            stdin: "{{ lookup('template', 'vm-transit-acl.yml.j2') }}"
+          changed_when: false
+
+        - name: Attach ACL and default actions to transit0
+          command: "incus network set transit0 {{ item }}"
+          loop:
+            - "security.acls vm-transit-isolation"
+            - "security.acls.default.egress.action allow"
+            - "security.acls.default.ingress.action allow"
+          changed_when: false
+
     # raw.dnsmasq ownership is split by line type: resolver lines here,
     # host-record lines by `ycluster vm` (sync_dns_records gives pinned
     # instances lease-independent DNS) — preserve them when rewriting.
@@ -425,6 +535,9 @@
           # Set vm_nas_share: false in host_vars for hosts without the NAS
           # mount — `vm launch/start` then skips the /data virtiofs attach.
           vm_nas_share: {{ vm_nas_share | default(true) | string | lower }}
+          {% if vm_nat_transit_enabled | default(false) %}
+          vm_transit_subnet: {{ vm_transit_subnet }}
+          {% endif %}
 
     - name: Install incus image-build helpers (VM hosts only)
       when: incus_vm_host | default(false)
