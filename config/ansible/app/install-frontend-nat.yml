@@ -38,7 +38,7 @@
 
     - name: Install standalone renderer module
       copy:
-        src: "{{ lookup('env', 'PWD') }}/config/ansible/admin/files/ycluster/ycluster/utils/nat_render.py"
+        src: "{{ playbook_dir }}/../admin/files/ycluster/ycluster/utils/nat_render.py"
         dest: /usr/local/lib/ycluster/nat_render.py
         mode: '0644'
         owner: root
@@ -69,7 +69,7 @@
 
     - name: Install base deny-all nftables table
       copy:
-        src: nat-reconciler-base.nft
+        src: templates/nat-reconciler-base.nft
         dest: /etc/nftables.d/ycluster-vm-nat.nft
         mode: '0644'
       notify: reload nftables

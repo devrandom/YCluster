@@ -40,19 +40,9 @@ def _key(proto, vm, spec):
 
 
 def validate_exposures(exposures):
-    """Raise ValueError on overlaps between same-proto ranges."""
-    by_proto = {}
-    for e in exposures:
-        first, last = _parse_ports(e['ports'])
-        by_proto.setdefault(e['proto'], []).append((first, last, e))
-    for proto, ranges in by_proto.items():
-        ranges.sort()
-        for (f1, l1, _), (f2, l2, _) in zip(ranges, ranges[1:]):
-            if f2 <= l1:
-                raise ValueError(
-                    f'overlapping {proto} port ranges: '
-                    f'{f1}-{l1} and {f2}-{l2}')
-    return True
+    """Validate via the standalone renderer (delegates; see nat_render)."""
+    from .nat_render import validate_exposures as _validate
+    return _validate(exposures)
 
 
 def _valid_transit_ip(value):
@@ -182,6 +172,22 @@ def _reserve_transit_ip(vm):
     return None
 
 
+def _claim_transit_ip(vm, ip):
+    """Transactionally claim a specific transit IP for `vm` (CAS).
+
+    Used when adopting a live device address that has no reservation
+    key yet (partial write or manual attach). Returns True on success.
+    """
+    from ..common.etcd_utils import get_etcd_client
+    client = get_etcd_client()
+    key = f'{NAT_PREFIX}_ip/{ip}'.encode()
+    ok, _ = client.transaction(
+        compare=[client.transactions.version(key) == 0],
+        success=[client.transactions.put(key, vm.encode())],
+    )
+    return ok
+
+
 def sync_transit_nics(local_instances):
     """Attach transit NICs + allocate transit IPs for exposed local VMs.
 
@@ -189,21 +195,14 @@ def sync_transit_nics(local_instances):
     caller already has it from reconcile). For each exposure whose VM
     runs here and has no transit_ip yet, reserve an IP transactionally,
     attach the NIC, and update every exposure record for that VM.
-    Idempotent: already-allocated VMs are converged (missing records on
-    a VM whose first record has an IP are filled in), and live transit
-    devices on unrelated VMs are treated as used so stale devices
-    cannot collide with fresh allocations.
+    Live transit devices without a recorded IP are adopted
+    transactionally (CAS on the reservation key) so two hosts cannot
+    claim the same device for different VMs.
     """
     exposures = list_exposures()
     by_vm = {}
     for e in exposures:
         by_vm.setdefault(e['vm'], []).append(e)
-
-    # Live transit devices count as used so a stale device (VM deleted
-    # but NIC lingering) blocks its IP from being handed to a new VM.
-    live = _transit_nics_by_vm()
-    used_ips = {e['transit_ip'] for e in exposures if e.get('transit_ip')}
-    used_ips.update(live.values())
 
     changed = False
     for vm, records in sorted(by_vm.items()):
@@ -216,10 +215,14 @@ def sync_transit_nics(local_instances):
             continue
         ip = existing.pop() if existing else None
         if not ip:
-            if vm in live:
+            live = _transit_nics_by_vm().get(vm)
+            if live:
                 # Device exists but etcd has no IP recorded (partial
-                # write or manual attach); adopt the live address.
-                ip = live[vm]
+                # write or manual attach): adopt it transactionally so
+                # no other host can claim the same address meanwhile.
+                if not _claim_transit_ip(vm, live):
+                    continue
+                ip = live
             else:
                 ip = _reserve_transit_ip(vm)
                 if not ip:

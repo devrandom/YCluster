@@ -23,7 +23,7 @@ import sys
 import urllib.request
 
 sys.path.insert(0, '/usr/local/lib/ycluster')
-from nat_render import render_nftables  # noqa: E402
+from nat_render import digest_of, render_nftables  # noqa: E402
 
 API_URL = os.environ.get(
     'NAT_RULES_URL', 'https://127.0.0.1/api/frontend/nat-rules')
@@ -86,7 +86,9 @@ def main():
     exposures = fetch_exposures(API_URL)
     ruleset = render_nftables(
         exposures, PUBLIC_IP, WAN_IFACE, TRANSIT_IFACE)
-    digest = hashlib.sha256(ruleset.encode()).hexdigest()
+    # Must match the digest embedded in the rendered table comment
+    # (digest_of hashes the body only, not the full file).
+    digest = digest_of(exposures, PUBLIC_IP, WAN_IFACE, TRANSIT_IFACE)
 
     last = ''
     try:

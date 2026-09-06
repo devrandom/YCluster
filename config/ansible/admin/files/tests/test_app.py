@@ -1799,21 +1799,30 @@ class AppLandingTests(SchedTestBase):
 
 
 class FrontendNatRulesApiTest(SchedTestBase):
-    def test_returns_exposures(self):
+    def _get(self):
         from ycluster.utils import frontend_nat
         rows = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80-80',
                  'transit_ip': '100.100.0.11'}]
         with mock.patch.object(frontend_nat, 'list_exposures',
                                return_value=rows):
-            r = self.http.get('/api/frontend/nat-rules')
+            return self.http.get('/api/frontend/nat-rules',
+                                 headers={'X-SSL-Client-Verify': 'SUCCESS'})
+
+    def test_requires_client_cert(self):
+        r = self.http.get('/api/frontend/nat-rules')
+        self.assertEqual(r.status_code, 401)
+
+    def test_returns_exposures(self):
+        r = self._get()
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.get_json()['exposures'], rows)
+        self.assertEqual(r.get_json()['exposures'][0]['vm'], 'vm-a')
 
     def test_returns_503_on_etcd_error(self):
         from ycluster.utils import frontend_nat
         with mock.patch.object(frontend_nat, 'list_exposures',
                                side_effect=RuntimeError('down')):
-            r = self.http.get('/api/frontend/nat-rules')
+            r = self.http.get('/api/frontend/nat-rules',
+                              headers={'X-SSL-Client-Verify': 'SUCCESS'})
         self.assertEqual(r.status_code, 503)
 
 

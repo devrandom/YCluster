@@ -207,6 +207,17 @@ class RenderNftablesTests(unittest.TestCase):
         self.assertIn('icmp ct state established,related accept', text)
         self.assertNotIn('ip saddr 100.100.0.0/24 accept', text)
 
+    def test_private_range_egress_dropped(self):
+        text = frontend_nat.render_nftables(self.BASE, '203.0.113.10')
+        for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+                     '169.254.0.0/16', '100.64.0.0/10'):
+            self.assertIn(f'ip daddr {cidr} drop', text)
+
+    def test_validate_exposures_rejects_bad_proto(self):
+        with self.assertRaises(ValueError):
+            frontend_nat.validate_exposures([
+                {'proto': 'sctp', 'ports': '80'}])
+
 
 class TransitSyncTests(unittest.TestCase):
     def _sync_patches(self, exposures, live=None):
@@ -294,6 +305,34 @@ class TransitSyncTests(unittest.TestCase):
                 mock.patch.object(frontend_nat, '_incus') as incus:
             frontend_nat.sync_transit_nics({'vm-a'})
         self.assertIn('ipv4.address=100.100.0.12', incus.call_args[0])
+
+    def test_adopts_live_device_transactionally(self):
+        # vm-a has a live transit0 NIC but no IP recorded in etcd: the
+        # sync must claim the live address via CAS and converge records.
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': ''}]
+        patches = self._sync_patches(exposures, live={'vm-a': '100.100.0.13'})
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_claim_transit_ip',
+                                  return_value=True) as claim, \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_, \
+                mock.patch.object(frontend_nat, '_incus'):
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertTrue(changed)
+        claim.assert_called_once_with('vm-a', '100.100.0.13')
+        set_.assert_called_once_with('vm-a', 'tcp', '80', '100.100.0.13')
+
+    def test_adopt_failure_skips_vm(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': ''}]
+        patches = self._sync_patches(exposures, live={'vm-a': '100.100.0.13'})
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_claim_transit_ip',
+                                  return_value=False), \
+                mock.patch.object(frontend_nat, 'set_exposure') as set_:
+            changed = frontend_nat.sync_transit_nics({'vm-a'})
+        self.assertFalse(changed)
+        set_.assert_not_called()
 
     def test_valid_transit_ip_rejects_out_of_subnet(self):
         self.assertFalse(frontend_nat._valid_transit_ip('100.100.0.999'))

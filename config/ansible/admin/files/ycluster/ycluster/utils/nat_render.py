@@ -29,9 +29,11 @@ def _parse_ports(spec):
 
 
 def validate_exposures(exposures):
-    """Raise ValueError on overlaps between same-proto ranges."""
+    """Raise ValueError on invalid proto or overlapping same-proto ranges."""
     by_proto = {}
     for e in exposures:
+        if e['proto'] not in PROTOS:
+            raise ValueError(f'invalid proto: {e["proto"]!r}')
         first, last = _parse_ports(e['ports'])
         by_proto.setdefault(e['proto'], []).append((first, last, e))
     for proto, ranges in by_proto.items():
@@ -42,6 +44,18 @@ def validate_exposures(exposures):
                     f'overlapping {proto} port ranges: '
                     f'{f1}-{l1} and {f2}-{l2}')
     return True
+
+
+def digest_of(exposures, public_ip, wan_iface='eth0',
+              transit_iface='transit0'):
+    """Return the 12-char digest embedded in the rendered ruleset.
+
+    The agent computes the same digest from the fetched exposure list
+    and compares it against the live table's comment, so a rebooted
+    frontend (base table, no comment) always converges.
+    """
+    body = _render_body(exposures, public_ip, wan_iface, transit_iface)
+    return hashlib.sha256('\n'.join(body).encode()).hexdigest()[:12]
 
 
 def render_nftables(exposures, public_ip, wan_iface='eth0',
@@ -55,8 +69,7 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
     table comment so the agent can compare live vs applied.
     """
     validate_exposures(exposures)
-    body = _render_body(exposures, public_ip, wan_iface, transit_iface)
-    digest = hashlib.sha256('\n'.join(body).encode()).hexdigest()[:12]
+    digest = digest_of(exposures, public_ip, wan_iface, transit_iface)
     lines = [
         # Atomic replace idiom: see docs/design/vm-frontend-nat.md.
         'table ip ycluster_vm_nat',
@@ -64,7 +77,8 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
         'table ip ycluster_vm_nat {',
         f'  comment "digest {digest}"',
     ]
-    lines += body + ['}']
+    lines += _render_body(exposures, public_ip, wan_iface, transit_iface)
+    lines.append('}')
     return '\n'.join(lines) + '\n'
 
 
@@ -103,6 +117,14 @@ def _render_body(exposures, public_ip, wan_iface, transit_iface):
     lines += [
         f'    iifname "{transit_iface}" oifname "{wan_iface}" '
         f'ip saddr {TRANSIT_SUBNET} ip daddr 10.0.0.0/8 drop',
+        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+        f'ip saddr {TRANSIT_SUBNET} ip daddr 172.16.0.0/12 drop',
+        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+        f'ip saddr {TRANSIT_SUBNET} ip daddr 192.168.0.0/16 drop',
+        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+        f'ip saddr {TRANSIT_SUBNET} ip daddr 169.254.0.0/16 drop',
+        f'    iifname "{transit_iface}" oifname "{wan_iface}" '
+        f'ip saddr {TRANSIT_SUBNET} ip daddr 100.64.0.0/10 drop',
         # Egress is explicit per-protocol (no blanket accept): TCP and
         # UDP may initiate outbound flows (SNAT'd to the public IP);
         # ICMP only passes as established/related. Every other protocol
