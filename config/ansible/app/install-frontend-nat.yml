@@ -29,6 +29,13 @@
           skipping frontend NAT gateway install.
       when: not vm_frontend_nat_enabled | default(false)
 
+    - name: Create ycluster lib directory
+      when: vm_frontend_nat_enabled | default(false)
+      file:
+        path: /usr/local/lib/ycluster
+        state: directory
+        mode: '0755'
+
     - name: Install nat-reconciler agent
       when: vm_frontend_nat_enabled | default(false)
       copy:
