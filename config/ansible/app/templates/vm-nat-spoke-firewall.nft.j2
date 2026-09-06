@@ -1,0 +1,12 @@
+# Anti-spoofing for traffic leaving a transit VM. A source address outside
+# this spoke's /24 is dropped instead of being routed out the host LAN.
+table ip ycluster_vm_nat_spoke
+delete table ip ycluster_vm_nat_spoke
+table ip ycluster_vm_nat_spoke {
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    iifname "transit0" oifname "wg-vm-nat" ip saddr {{ vm_transit_subnet }} accept
+    iifname "wg-vm-nat" oifname "transit0" ip daddr {{ vm_transit_subnet }} accept
+    iifname "transit0" drop
+  }
+}

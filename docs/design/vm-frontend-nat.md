@@ -64,14 +64,24 @@ NAT-gateway role on the frontend.
 ### Transit network
 
 Each participating compute host owns one /24 in `100.100.0.0/16`. The
-host index selects the third octet by default: a host with index `2`
-uses `100.100.2.0/24` and its bridge gateway is `100.100.2.1/24`. An
-explicit `vm_nat_transit_index` (or a complete `vm_transit_subnet`)
-overrides the derivation. Valid indices are 1–253, must be unique among
-participating spokes, and are validated before the hub is written. On
-upgrade, the reconciler re-addresses legacy `100.100.0.x` transit NICs
-and mapping records into the host's configured /24; it frees the old
-reservation key and restarts a running guest after the NIC change.
+address space is partitioned by host class so the numeric suffixes of
+different hostname prefixes cannot collide:
+
+| Host class | Hostname prefix | Class octet | Subnet for host index N |
+|---|---|---:|---|
+| GPU-passthrough compute | `nv*` | 110 | `100.100.<110+N>.0/24` |
+| Other compute | `c*` | 50 | `100.100.<50+N>.0/24` |
+
+For example, host index 3 derives `100.100.113.0/24` on an `nv*` host
+and `100.100.53.0/24` on a `c*` host. These class octets deliberately
+mirror the host IP allocation bases used by the DHCP allocator. An
+explicit `vm_nat_transit_index`
+(or a complete `vm_transit_subnet`) overrides the derivation. The
+resulting third octet must be in 1–253 and unique among participating
+spokes. On upgrade, the reconciler re-addresses legacy `100.100.0.x`
+transit NICs and mapping records into the host's configured /24; it
+frees the old reservation key and restarts a running guest after the
+NIC change.
 
 Selected VMs get a second NIC on the host's dedicated `transit0` bridge.
 Each VM is pinned a static IP on this bridge by the existing `ycluster
@@ -184,7 +194,13 @@ allocated.
 5. nftables rules converge to the desired set.
 
 Removal works the same way in reverse: delete the mapping, both
-reconcilers converge, frontend rules disappear on the next tick.
+reconcilers converge, frontend rules disappear on the next tick. When
+the last mapping for a local VM is deleted, the compute reconciler also
+removes its `transit0` device, removes the `eth0 type=none` override so
+the profile NIC is inherited again, releases the transit reservation,
+and restarts a running VM if needed. If the reconciler is unavailable,
+remove those two devices manually with `incus config device remove` and
+let the frontend rules expire on its next pull.
 
 ## Security
 
@@ -202,7 +218,14 @@ reconcilers converge, frontend rules disappear on the next tick.
 - Anti-spoofing: forward rules match on input/output interface and
   source address. Traffic claiming to originate from the transit
   subnet but arriving on the WAN interface is dropped (and vice
-  versa).
+  versa). On a spoke, a dedicated nftables forward chain accepts
+  traffic entering `transit0` only when its source is that spoke's
+  transit /24 and its output interface is `wg-vm-nat`; all other
+  `transit0`-forwarded traffic is dropped. A guest cannot bypass the
+  hub by choosing a spoofed source such as a cluster or another
+  spoke's address. Hub-local input from decapsulated `wg-vm-nat`
+  traffic is dropped; only WireGuard's WAN UDP encapsulation is
+  reachable.
 - The admin API endpoint requires mTLS; the frontend's client cert is
   scoped to this one read-only route. The frontend reaches the
   endpoint via its existing frp tunnel (plain TCP passthrough to the

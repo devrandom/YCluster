@@ -124,7 +124,8 @@ def _render_body(exposures, public_ip, wan_iface, transit_iface):
             continue  # quarantined until the reconciler allocates an IP
         dport = f'{first}' if first == last else f'{first}-{last}'
         lines.append(
-            f'    iifname "{wan_iface}" {e["proto"]} dport {dport} '
+            f'    iifname "{wan_iface}" ip daddr {public_ip} '
+            f'{e["proto"]} dport {dport} '
             f'dnat to {e["transit_ip"]}')
     lines += [
         '  }',

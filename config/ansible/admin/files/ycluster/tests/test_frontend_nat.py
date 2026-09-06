@@ -94,8 +94,11 @@ class ListExposuresTests(unittest.TestCase):
             '/cluster/frontend/nat/tcp/vm-x/80-80':
                 '{"transit_ip": "10.0.0.1"}',
         }
-        with _patched_etcd(_fake_client(keys)):
-            self.assertEqual(frontend_nat.list_exposures(), [])
+        with self.assertLogs(frontend_nat._LOG, level='WARNING') as logs:
+            with _patched_etcd(_fake_client(keys)):
+                self.assertEqual(frontend_nat.list_exposures(), [])
+        self.assertEqual(len(logs.records), 5)
+        self.assertIn('Quarantined', logs.records[0].getMessage())
 
     def test_delete_rejects_bad_proto(self):
         with self.assertRaises(ValueError):
@@ -166,7 +169,9 @@ class RenderNftablesTests(unittest.TestCase):
 
     def test_dnat_and_snat_rendered(self):
         text = frontend_nat.render_nftables(self.BASE, '203.0.113.10')
-        self.assertIn('tcp dport 20000-20099 dnat to 100.100.0.11', text)
+        self.assertIn(
+            'iifname "eth0" ip daddr 203.0.113.10 '
+            'tcp dport 20000-20099 dnat to 100.100.0.11', text)
         self.assertIn('snat ip to 203.0.113.10', text)
 
     def test_cluster_egress_dropped(self):
@@ -283,6 +288,12 @@ class TransitSyncTests(unittest.TestCase):
                           'expanded_devices': {'eth0': {'type': 'none'}}})
         patcher.start()
         self.addCleanup(patcher.stop)
+        original_gc = frontend_nat._gc_transit_reservations
+        gc_patcher = mock.patch.object(frontend_nat,
+                                       '_gc_transit_reservations')
+        gc_patcher.start()
+        self.addCleanup(gc_patcher.stop)
+        self._original_gc = original_gc
 
     def _sync_patches(self, exposures, live=None):
         """Patch list_exposures + _transit_nics_by_vm for a sync run."""
@@ -419,6 +430,24 @@ class TransitSyncTests(unittest.TestCase):
             frontend_nat.sync_transit_nics({'vm-a'})
         reserve.assert_called_once_with('vm-a', '100.100.2.0/24')
 
+    def test_legacy_migration_failure_releases_new_reservation(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': '100.100.0.11'}]
+        patches = self._sync_patches(exposures)
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value='100.100.2.11'), \
+                mock.patch.object(frontend_nat, '_disable_default_nic',
+                                  return_value=False), \
+                mock.patch.object(frontend_nat, 'set_exposure',
+                                  side_effect=RuntimeError('etcd down')), \
+                mock.patch.object(frontend_nat, '_release_transit_ip') as rel, \
+                mock.patch.object(frontend_nat, '_incus'):
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a'}, '100.100.2.0/24')
+        self.assertFalse(changed)
+        rel.assert_called_once_with('100.100.2.11')
+
     def test_legacy_record_is_migrated_and_released(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
                       'transit_ip': '100.100.0.11'}]
@@ -527,6 +556,81 @@ class TransitSyncTests(unittest.TestCase):
             frontend_nat._release_transit_ip('100.100.2.11')
         client.delete.assert_called_once_with(
             b'/cluster/frontend/nat/_ip/100.100.2.0/24/100.100.2.11')
+
+    def test_gc_deletes_only_orphaned_reservations(self):
+        keys = {
+            '/cluster/frontend/nat/_ip/100.100.2.11': 'vm-active',
+            '/cluster/frontend/nat/_ip/100.100.2.0/24/100.100.2.12':
+                'vm-gone',
+            '/cluster/frontend/nat/_ip/100.100.2.13': 'not_an_ip',
+        }
+        client = _fake_client(keys)
+        exposures = [{'proto': 'tcp', 'vm': 'vm-active', 'ports': '80',
+                      'transit_ip': '100.100.2.11'}]
+        with mock.patch.object(frontend_nat, '_gc_transit_reservations',
+                               self._original_gc), _patched_etcd(client):
+            frontend_nat._gc_transit_reservations(exposures)
+        client.delete.assert_called_once_with(
+            b'/cluster/frontend/nat/_ip/100.100.2.0/24/100.100.2.12')
+
+    def test_decommission_removes_devices_and_reservation(self):
+        details = {'status': 'Running',
+                   'expanded_devices': {'eth0': {'type': 'none'}}}
+        incus = mock.Mock(returncode=0)
+        with mock.patch.object(frontend_nat, '_instance_details',
+                               return_value=details), \
+                mock.patch.object(frontend_nat, '_incus', incus), \
+                mock.patch.object(frontend_nat, '_release_transit_ip') as rel:
+            changed = frontend_nat._decommission_transit_nic(
+                'vm-a', '100.100.2.11')
+        self.assertTrue(changed)
+        incus.assert_any_call('config', 'device', 'remove', 'vm-a',
+                              'transit0', check=True)
+        incus.assert_any_call('config', 'device', 'remove', 'vm-a', 'eth0',
+                              check=True)
+        incus.assert_any_call('restart', 'vm-a', check=True)
+        rel.assert_called_once_with('100.100.2.11')
+
+    def test_unexposed_local_vm_is_decommissioned(self):
+        live = {'vm-a': '100.100.2.11', 'vm-other': '100.100.3.12'}
+        with mock.patch.object(frontend_nat, 'list_exposures',
+                               return_value=[]), \
+                mock.patch.object(frontend_nat, '_transit_nics_by_vm',
+                                  return_value=live), \
+                mock.patch.object(frontend_nat, '_decommission_transit_nic',
+                                  return_value=True) as decommission:
+            changed = frontend_nat.sync_transit_nics({'vm-a'},
+                                                     '100.100.2.0/24')
+        self.assertTrue(changed)
+        decommission.assert_called_once_with('vm-a', '100.100.2.11')
+
+    def test_one_failing_vm_does_not_starve_another(self):
+        exposures = [
+            {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80', 'transit_ip': ''},
+            {'proto': 'tcp', 'vm': 'vm-b', 'ports': '81', 'transit_ip': ''},
+        ]
+        live = {'vm-a': '100.100.2.11'}
+        details = [
+            RuntimeError('boom'),
+            {'status': 'Stopped',
+             'expanded_devices': {'eth0': {'type': 'none'}}},
+        ]
+        with mock.patch.object(frontend_nat, 'list_exposures',
+                               return_value=exposures), \
+                mock.patch.object(frontend_nat, '_transit_nics_by_vm',
+                                  return_value=live), \
+                mock.patch.object(frontend_nat, '_instance_details',
+                                  side_effect=details), \
+                mock.patch.object(frontend_nat, '_claim_transit_ip',
+                                  return_value=True), \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value='100.100.2.12') as reserve, \
+                mock.patch.object(frontend_nat, 'set_exposure'), \
+                mock.patch.object(frontend_nat, '_incus'):
+            changed = frontend_nat.sync_transit_nics(
+                {'vm-a', 'vm-b'}, '100.100.2.0/24')
+        self.assertTrue(changed)
+        reserve.assert_called_once_with('vm-b', '100.100.2.0/24')
 
     def test_list_quarantines_bad_vm_name_and_ip(self):
         keys = {
