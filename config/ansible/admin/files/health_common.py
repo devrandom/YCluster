@@ -3,6 +3,10 @@
 import json
 import socket
 import subprocess
+from dataclasses import dataclass
+from typing import Any, Callable
+
+import requests
 
 from flask import g
 
@@ -59,6 +63,26 @@ def check_port_open(host, port, timeout=3):
         return result == 0
     except Exception:
         return False
+
+
+@dataclass(frozen=True)
+class HealthProbeContext:
+    """Injectable I/O seam for health checks.
+
+    Callables let tests provide complete fake probe data without reaching
+    into private module state.
+    """
+
+    is_etcd_node: bool
+    is_storage_node: bool
+    etcd_client: Callable[[], Any]
+    service_status: Callable[[str], bool]
+    port_open: Callable[..., bool]
+    http_get: Callable[..., Any]
+    storage_leader: Callable[[], bool]
+    dhcp_leader: Callable[[], bool]
+    node_drained: Callable[[], bool]
+    core_node: Callable[[], bool]
 
 
 # ---- etcd helpers --------------------------------------------------------
@@ -179,6 +203,22 @@ def is_core_node():
         return True
 
 
+def runtime_probe_context():
+    """Build the production probe seam for the lite health API."""
+    return HealthProbeContext(
+        is_etcd_node=_IS_ETCD_NODE,
+        is_storage_node=_IS_STORAGE_NODE,
+        etcd_client=_get_etcd_client,
+        service_status=check_service_status,
+        port_open=check_port_open,
+        http_get=requests.get,
+        storage_leader=is_storage_leader,
+        dhcp_leader=is_dhcp_leader,
+        node_drained=is_node_drained,
+        core_node=is_core_node,
+    )
+
+
 # ---- check functions (ported from app.py) --------------------------------
 
 
@@ -222,5 +262,113 @@ def check_vip_status():
         }
 
     return vip_status
+
+
+def _add_health_service(health_status, name, result, unhealthy_statuses=('unhealthy', 'error'),
+                        degraded_statuses=('degraded',)):
+    """Record one service result and roll it into the overall status."""
+    health_status['services'][name] = result
+    status = result['status']
+    if status in unhealthy_statuses:
+        health_status['overall'] = 'unhealthy'
+    elif status in degraded_statuses and health_status['overall'] == 'healthy':
+        health_status['overall'] = 'degraded'
+
+
+def _required_service_health(active, port, service, leader_reason):
+    """Status for a service required on the current leader."""
+    del service
+    healthy = active and port
+    return {
+        'status': 'healthy' if healthy else 'unhealthy',
+        'details': {
+            'service_active': active,
+            'port_open': port,
+            'required': True,
+            'reason': leader_reason,
+        }
+    }
+
+
+def _standby_service_health(active, port, service_reason):
+    """Status for a leader-elected service on a non-leader."""
+    running = active or port
+    reason = ('split-brain: running on non-leader' if running
+              else service_reason)
+    return {
+        'status': 'unhealthy' if running else 'standby',
+        'details': {
+            'service_active': active,
+            'port_open': port,
+            'required': False,
+            'reason': reason,
+        }
+    }
+
+
+def _tang_advertisement_status(probe):
+    """Probe the Tang advertisement endpoint.
+
+    Returns (healthy, keys, error) — healthy is True for an HTTP 200,
+    keys is the advertised key count (or 'unknown'), and error carries a
+    human-readable failure description.
+    """
+    try:
+        response = probe.http_get('http://localhost:8777/adv', timeout=5)
+    except requests.exceptions.Timeout:
+        return False, None, 'Tang advertisement timeout'
+    except requests.exceptions.ConnectionError:
+        return False, None, 'Tang connection failed'
+    except Exception as e:
+        return False, None, f'Tang advertisement failed: {str(e)}'
+
+    if response.status_code != 200:
+        return False, None, f'Tang advertisement returned HTTP {response.status_code}'
+    try:
+        data = response.json()
+        if isinstance(data, dict) and 'keys' in data:
+            return True, len(data['keys']), None
+        return True, 'unknown', None
+    except Exception:
+        return True, 'unknown', None
+
+
+def _tang_health_from_probe(running, port_open, healthy, keys, error):
+    """Derive status/message from the service, port, and advertisement probes."""
+    if running and port_open and healthy:
+        return 'healthy', f'Tang server running and healthy ({keys} keys)'
+    if running and port_open:
+        return 'degraded', f'Tang service running but advertisement failed: {error}'
+    if running:
+        return 'unhealthy', f'Tang service running but port not accessible: {error}'
+    return 'unhealthy', 'Tang service not running'
+
+
+def check_tang_service(probe=None):
+    """Check Tang server status and functionality."""
+    probe = probe or runtime_probe_context()
+    try:
+        running = probe.service_status('tang-server.service')
+        port_open = probe.port_open('localhost', 8777)
+
+        healthy, keys, error = (False, None, None)
+        if port_open:
+            healthy, keys, error = _tang_advertisement_status(probe)
+
+        status, message = _tang_health_from_probe(
+            running, port_open, healthy, keys, error)
+        return {
+            'status': status,
+            'details': {
+                'service_active': running,
+                'port_open': port_open,
+                'advertisement_working': healthy,
+                'key_count': keys,
+                'message': message,
+                'error': error
+            }
+        }
+    except Exception as e:
+        return {'status': 'error', 'details': {'message': f'Tang check failed: {str(e)}'}}
 
 

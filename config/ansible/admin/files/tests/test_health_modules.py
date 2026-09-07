@@ -7,6 +7,7 @@ import json
 import socket
 import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +18,7 @@ for _path in (_HERE, _FILES, os.path.join(_FILES, 'ycluster')):
 
 import health_common as hc
 import health_report as hr
+from probe_fakes import make_probe                    # noqa: E402
 
 
 class HealthCommonTests(unittest.TestCase):
@@ -122,6 +124,27 @@ class HealthCommonTests(unittest.TestCase):
             self.assertFalse(hc.is_node_drained())
             self.assertTrue(hc.is_core_node())
 
+    def test_tang_service_probe_context(self):
+        response = SimpleNamespace(status_code=200,
+                                   json=lambda: {'keys': ['a', 'b', 'c']})
+        probe = make_probe(
+            services={'tang-server.service'}, ports={8777},
+            responses={'http://localhost:8777/adv': response})
+        self.assertEqual(hc.check_tang_service(probe), {
+            'status': 'healthy',
+            'details': {
+                'service_active': True,
+                'port_open': True,
+                'advertisement_working': True,
+                'key_count': 3,
+                'message': 'Tang server running and healthy (3 keys)',
+                'error': None,
+            },
+        })
+        stopped = make_probe()
+        self.assertEqual(hc.check_tang_service(stopped)['status'],
+                         'unhealthy')
+
     def test_vip_status(self):
         results = [
             subprocess.CompletedProcess([], 0, stdout='[{"ifname":"eth0"}]',
@@ -149,18 +172,17 @@ class HealthReportHelperTests(unittest.TestCase):
         self.assertEqual(health['services']['c']['status'], 'healthy')
 
     def test_etcd_health(self):
-        self.assertEqual(hr._etcd_health(), {'status': 'not_applicable',
-                                             'details': {'reason': 'admin-api uses etcd only on storage nodes'}})
-        with mock.patch.object(hr, '_IS_ETCD_NODE', True), \
-                mock.patch.object(hr, '_get_etcd_client',
-                                  return_value=mock.Mock(get=lambda _: None)):
-            self.assertEqual(hr._etcd_health(),
-                             {'status': 'healthy', 'details': 'connected'})
-        with mock.patch.object(hr, '_IS_ETCD_NODE', True), \
-                mock.patch.object(hr, '_get_etcd_client',
-                                  side_effect=RuntimeError('down')):
-            self.assertEqual(hr._etcd_health(),
-                             {'status': 'unhealthy', 'details': 'down'})
+        self.assertEqual(hr._etcd_health(make_probe(is_etcd_node=False)),
+                         {'status': 'not_applicable',
+                          'details': {'reason': 'admin-api uses etcd only on storage nodes'}})
+        self.assertEqual(
+            hr._etcd_health(make_probe(etcd_client=mock.Mock(get=lambda _: None))),
+            {'status': 'healthy', 'details': 'connected'})
+        class FailingEtcd:
+            def get(self, key):
+                raise RuntimeError('down')
+        self.assertEqual(hr._etcd_health(make_probe(etcd_client=FailingEtcd())),
+                         {'status': 'unhealthy', 'details': 'down'})
 
     def test_ceph_health(self):
         self.assertEqual(hr._ceph_health(False),
@@ -171,72 +193,71 @@ class HealthReportHelperTests(unittest.TestCase):
             self.assertEqual(hr._ceph_health(True), {'status': 'healthy'})
 
     def test_service_helpers(self):
-        self.assertEqual(hr._required_service_health(True, True)['status'],
-                         'healthy')
-        self.assertEqual(hr._required_service_health(True, False)['status'],
-                         'unhealthy')
-        self.assertEqual(hr._standby_service_health(False, False, 'why'),
-                         {'status': 'standby',
-                          'details': {'service_active': False, 'port_open': False,
-                                      'required': False, 'reason': 'why'}})
-        with mock.patch.object(hr, 'check_service_status', return_value=True), \
-                mock.patch.object(hr, 'check_port_open', return_value=True):
-            self.assertEqual(hr._postgres_health(True)['status'], 'healthy')
-            self.assertEqual(hr._qdrant_health(False)['status'], 'unhealthy')
+        probe = make_probe(
+            services={'postgresql@16-main', 'qdrant', 'ntp', 'keepalived', 'svc'},
+            ports={5432, 6333})
+        self.assertEqual(hr._required_service_health(True, True, 'svc', 'why')['status'], 'healthy')
+        self.assertEqual(hr._required_service_health(True, False, 'svc', 'why')['status'], 'unhealthy')
         self.assertEqual(
-            hr._standby_service_health(True, False, 'why')['status'],
-            'unhealthy')
-        self.assertEqual(hr._leader_election_health(False, 'svc'),
-                         {'status': 'not_applicable',
-                          'details': {'reason': 'not required on compute nodes'}})
-        with mock.patch.object(hr, 'check_service_status', return_value=True):
-            self.assertEqual(hr._leader_election_health(True, 'svc')['status'],
-                             'healthy')
-        self.assertEqual(hr._dhcp_health(True),
-                         {'status': 'unhealthy',
-                          'details': {'health_port_open': False, 'required': True,
-                                      'reason': 'dhcp leader'}})
-        self.assertEqual(hr._dhcp_health(False),
-                         {'status': 'standby',
-                          'details': {'health_port_open': False, 'required': False,
-                                      'reason': 'not dhcp leader'}})
-        with mock.patch.object(hr, 'check_service_status',
-                               side_effect=[True, False]):
-            self.assertEqual(hr._ntp_health()['status'], 'healthy')
-        with mock.patch.object(hr, 'check_service_status', return_value=True), \
-                mock.patch.object(hr, 'check_port_open', return_value=True), \
-                mock.patch.object(hr.requests, 'get',
-                                  side_effect=hr.requests.exceptions.ProxyError):
-            self.assertEqual(hr._squid_health()['status'], 'unhealthy')
+            hr._standby_service_health(False, False, 'why'),
+            {'status': 'standby', 'details': {'service_active': False,
+                                              'port_open': False, 'required': False,
+                                              'reason': 'why'}})
+        self.assertEqual(hr._postgres_health(True, probe)['status'], 'healthy')
+        self.assertEqual(hr._postgres_health(False, probe)['status'], 'unhealthy')
+        self.assertEqual(hr._qdrant_health(True, probe)['status'], 'healthy')
+        self.assertEqual(hr._qdrant_health(False, probe)['status'], 'unhealthy')
+        self.assertEqual(hr._standby_service_health(True, False, 'why')['status'], 'unhealthy')
+        self.assertEqual(
+            hr._leader_election_health(False, 'svc', probe),
+            {'status': 'not_applicable', 'details': {'reason': 'not required on compute nodes'}})
+        self.assertEqual(hr._leader_election_health(True, 'svc', probe)['status'], 'healthy')
+        self.assertEqual(
+            hr._dhcp_health(True, probe),
+            {'status': 'unhealthy', 'details': {'health_port_open': False,
+                                                'required': True,
+                                                'reason': 'dhcp leader'}})
+        self.assertEqual(
+            hr._dhcp_health(False, probe),
+            {'status': 'standby', 'details': {'health_port_open': False,
+                                              'required': False,
+                                              'reason': 'not dhcp leader'}})
+        self.assertEqual(hr._ntp_health(probe)['status'], 'healthy')
         self.assertEqual(hr._storage_only_health('x', lambda: 'ok', False),
                          {'status': 'not_applicable',
                           'details': {'reason': 'not required on compute nodes'}})
 
-    def test_keepalived_health(self):
-        with mock.patch.object(hr, 'is_core_node', return_value=True), \
-                mock.patch.object(hr, 'check_service_status',
-                                  return_value=True):
-            self.assertEqual(hr._keepalived_health()['status'], 'healthy')
-        with mock.patch.object(hr, 'is_core_node', return_value=False), \
-                mock.patch.object(hr, 'check_service_status',
-                                  return_value=True):
-            self.assertEqual(hr._keepalived_health()['status'], 'unhealthy')
-        with mock.patch.object(hr, 'is_core_node', return_value=False), \
-                mock.patch.object(hr, 'check_service_status',
-                                  return_value=False):
-            self.assertEqual(hr._keepalived_health()['status'], 'standby')
+    def test_squid_probe(self):
+        responses = {
+            'http://localhost:12723/api/ping': SimpleNamespace(status_code=503)}
+        probe = make_probe(
+            services={'squid'}, ports={3128}, responses=responses)
+        self.assertEqual(hr._squid_health(probe)['status'], 'healthy')
+        responses['http://localhost:12723/api/ping'] = SimpleNamespace(status_code=500)
+        self.assertEqual(hr._squid_health(probe)['status'], 'unhealthy')
 
-    def test_squid_health(self):
-        with mock.patch.object(hr, 'check_service_status', return_value=True), \
-                mock.patch.object(hr, 'check_port_open', return_value=True), \
-                mock.patch.object(hr.requests, 'get', return_value=mock.Mock(
-                    status_code=503)):
-            self.assertEqual(hr._squid_health()['status'], 'healthy')
-        with mock.patch.object(hr, 'check_service_status', return_value=True), \
-                mock.patch.object(hr, 'check_port_open', return_value=True), \
-                mock.patch.object(hr.requests, 'get',
-                                  side_effect=hr.requests.exceptions.Timeout):
-            self.assertEqual(hr._squid_health()['status'], 'unhealthy')
+    def test_squid_probe_error_paths(self):
+        def raising_get(exc):
+            def get(*args, **kwargs):
+                raise exc
+            return get
+        for exc, expected_error in [
+                (hr.requests.exceptions.ProxyError('no'), 'Proxy error: no'),
+                (hr.requests.exceptions.Timeout(), 'Proxy timeout'),
+                (OSError('bad'), 'Proxy test failed: bad')]:
+            probe = make_probe(
+                services={'squid'}, ports={3128}, http_get=raising_get(exc))
+            result = hr._squid_health(probe)
+            self.assertEqual(result['status'], 'unhealthy')
+            self.assertEqual(result['details']['error'], expected_error)
+
+    def test_keepalived_health(self):
+        probe = make_probe(services={'keepalived'})
+        self.assertEqual(hr._keepalived_health(probe)['status'], 'healthy')
+        noncore = make_probe(services={'keepalived'}, core_node=False)
+        self.assertEqual(hr._keepalived_health(noncore)['status'], 'unhealthy')
+        stopped = make_probe(core_node=False)
+        self.assertEqual(hr._keepalived_health(stopped)['status'], 'standby')
 
 
 class ComprehensiveHealthTests(unittest.TestCase):
@@ -245,10 +266,6 @@ class ComprehensiveHealthTests(unittest.TestCase):
                          {'status': 'not_applicable',
                           'details': {'reason': 'not required on compute nodes'}})
         self.assertEqual(hr._storage_only_health('x', lambda: 'ok', True), 'ok')
-        with mock.patch.object(hr, 'check_service_status', return_value=True), \
-                mock.patch.object(hr, 'check_port_open', return_value=True), \
-                mock.patch.object(hr.requests, 'get', side_effect=OSError('bad')):
-            self.assertEqual(hr._squid_health()['status'], 'unhealthy')
 
     def test_comprehensive_health(self):
         result = {'status': 'healthy'}
@@ -271,12 +288,9 @@ class ComprehensiveHealthTests(unittest.TestCase):
             'check_vip_status': mock.Mock(return_value={
                 'gateway_vip': {'active': True},
                 'storage_vip': {'active': False}}),
-            'is_storage_leader': mock.Mock(return_value=True),
-            'is_dhcp_leader': mock.Mock(return_value=False),
-            'is_node_drained': mock.Mock(return_value=False),
         }
         with mock.patch.multiple(hr, **patches):
-            health = hr.get_comprehensive_health()
+            health = hr.get_comprehensive_health(make_probe())
         self.assertEqual(health['overall'], 'healthy')
         self.assertTrue(health['storage_leader'])
         self.assertFalse(health['dhcp_leader'])
@@ -389,13 +403,24 @@ class HealthChecksExtraTests(unittest.TestCase):
                 self.hs.check_certificate_expiry()['status'],
                 'not_configured')
         client = mock.Mock(get=lambda _: (b'not-a-cert', None))
+        for expires_in, expected in [
+                (-1, 'expired'), (3, 'critical'), (20, 'warning'),
+                (40, 'healthy')]:
+            cert.not_valid_after = datetime.now() + timedelta(days=expires_in)
+            with mock.patch.object(self.hs, '_IS_ETCD_NODE', True), \
+                    mock.patch.object(self.hs, '_get_etcd_client',
+                                      return_value=client), \
+                    mock.patch.object(x509, 'load_pem_x509_certificate',
+                                      return_value=cert):
+                result = self.hs.check_certificate_expiry()
+            self.assertEqual(result['status'], expected)
         with mock.patch.object(self.hs, '_IS_ETCD_NODE', True), \
                 mock.patch.object(self.hs, '_get_etcd_client',
                                   return_value=client), \
                 mock.patch.object(x509, 'load_pem_x509_certificate',
-                                  return_value=cert):
+                                  side_effect=RuntimeError('bad cert')):
             result = self.hs.check_certificate_expiry()
-        self.assertEqual(result['status'], 'warning')
+        self.assertEqual(result['status'], 'error')
 
     def test_registry_checks(self):
         response = mock.Mock(status_code=200,
@@ -464,6 +489,21 @@ class HealthChecksExtraTests(unittest.TestCase):
             self.assertEqual(
                 self.hs._open_webui_health_probe(),
                 (False, None, 'Open-WebUI health check timeout'))
+        with mock.patch.object(
+                self.hs.requests, 'get',
+                side_effect=self.hs.requests.exceptions.ConnectionError):
+            self.assertEqual(
+                self.hs._open_webui_health_probe(),
+                (False, None, 'Open-WebUI connection failed'))
+        response = mock.Mock(status_code=404)
+        with mock.patch.object(self.hs.requests, 'get', return_value=response):
+            self.assertEqual(
+                self.hs._open_webui_health_probe(),
+                (False, None, 'Open-WebUI health check returned HTTP 404'))
+        response = mock.Mock(status_code=200, json=mock.Mock(side_effect=ValueError))
+        with mock.patch.object(self.hs.requests, 'get', return_value=response):
+            self.assertEqual(self.hs._open_webui_health_probe(),
+                             (True, 'unknown', None))
         with mock.patch.object(self.hs, 'check_service_status',
                                return_value=False), \
                 mock.patch.object(self.hs, 'check_port_open',
@@ -474,6 +514,10 @@ class HealthChecksExtraTests(unittest.TestCase):
         with mock.patch.object(self.hs, 'check_service_status',
                                side_effect=RuntimeError('bad')):
             self.assertEqual(self.hs.check_open_webui()['status'], 'error')
+        with mock.patch.object(self.hs, 'check_service_status',
+                               side_effect=RuntimeError('bad')):
+            result = self.hs.check_docker_daemon()
+        self.assertEqual(result['status'], 'error')
 
     def test_dns_status_more_branches(self):
         resolver = mock.Mock()
@@ -549,21 +593,6 @@ class HealthChecksExtraTests(unittest.TestCase):
             self.assertEqual(self.hs.check_docker_registry()['status'],
                              'healthy')
 
-    def test_tang_service_paths(self):
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=True), \
-                mock.patch.object(self.hs, 'check_port_open',
-                                  return_value=True), \
-                mock.patch.object(self.hs, '_tang_advertisement_status',
-                                  return_value=(True, 2, None)):
-            self.assertEqual(self.hs.check_tang_service()['status'], 'healthy')
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=False), \
-                mock.patch.object(self.hs, 'check_port_open',
-                                  return_value=False):
-            self.assertEqual(self.hs.check_tang_service()['status'],
-                             'unhealthy')
-
     def test_secrets_mount_branches(self):
         with mock.patch.object(self.hs, '_secrets_mount_details',
                                return_value=(True, 'details')), \
@@ -604,33 +633,28 @@ class HealthChecksExtraTests(unittest.TestCase):
                 self.hs._registry_probe_status()[2],
                 'Registry health check failed: bad')
             self.assertEqual(
-                self.hs._tang_advertisement_status()[2],
-                'Tang advertisement failed: bad')
-            self.assertEqual(
                 self.hs._open_webui_health_probe()[2],
                 'Open-WebUI health check failed: bad')
+        def bad_get(url, timeout=5):
+            raise OSError('bad')
+        bad_probe = make_probe(http_get=bad_get)
+        self.assertEqual(
+            self.hs._tang_advertisement_status(bad_probe)[2],
+            'Tang advertisement failed: bad')
         response = mock.Mock(status_code=404, json=lambda: {})
-        with mock.patch.object(self.hs.requests, 'get',
-                               return_value=response):
-            self.assertEqual(
-                self.hs._open_webui_health_probe()[2],
-                'Open-WebUI health check returned HTTP 404')
-            self.assertEqual(self.hs._tang_advertisement_status()[2],
-                             'Tang advertisement returned HTTP 404')
-        with mock.patch.object(self.hs.requests, 'get',
-                               return_value=mock.Mock(
-                                   status_code=200,
-                                   json=mock.Mock(side_effect=ValueError))):
-            self.assertEqual(self.hs._tang_advertisement_status()[1], 'unknown')
-            self.assertEqual(self.hs._open_webui_health_probe()[1], 'unknown')
+        not_found = make_probe(
+            responses={'http://localhost:8777/adv': response})
+        self.assertEqual(
+            self.hs._tang_advertisement_status(not_found)[2],
+            'Tang advertisement returned HTTP 404')
+        response = mock.Mock(status_code=200,
+                             json=mock.Mock(side_effect=ValueError))
+        unknown = make_probe(responses={'http://localhost:8777/adv': response})
+        self.assertEqual(self.hs._tang_advertisement_status(unknown)[1], 'unknown')
 
     def test_error_paths(self):
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=True), \
-                mock.patch.object(self.hs, 'check_port_open',
-                                  return_value=False):
-            self.assertEqual(self.hs.check_tang_service()['status'],
-                             'unhealthy')
+        self.assertEqual(hc.check_tang_service(make_probe())['status'],
+                         'unhealthy')
         with mock.patch.object(self.hs, '_secrets_mount_details',
                                side_effect=RuntimeError('bad')):
             self.assertEqual(self.hs.check_secrets_mount()['status'], 'error')

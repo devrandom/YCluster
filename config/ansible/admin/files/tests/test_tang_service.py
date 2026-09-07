@@ -1,6 +1,7 @@
 """Tests for the decomposed Tang service check."""
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import importlib.util
@@ -18,44 +19,49 @@ ha = importlib.util.module_from_spec(_spec)
 sys.modules['health_api'] = ha
 _spec.loader.exec_module(ha)
 
-import app as appmod
 import health_api as ha
 import health_checks as hs
 import health_common as hc
 import health_report as hr
+from probe_fakes import make_probe                    # noqa: E402
+
+
+def tang_probe(http_get=None):
+    return make_probe(
+        services={'tang-server.service'}, ports={8777}, http_get=http_get)
 
 
 class TangAdvertisementTests(unittest.TestCase):
     def test_200_with_key_count(self):
-        response = mock.Mock(status_code=200)
-        response.json.return_value = {'keys': [1, 2, 3]}
-        with mock.patch.object(hs.requests, 'get', return_value=response):
-            healthy, keys, error = hs._tang_advertisement_status()
+        response = SimpleNamespace(status_code=200,
+                                   json=lambda: {'keys': [1, 2, 3]})
+        healthy, keys, error = hs._tang_advertisement_status(
+            tang_probe(lambda *args, **kwargs: response))
         self.assertTrue(healthy)
         self.assertEqual(keys, 3)
         self.assertIsNone(error)
 
     def test_200_with_unexpected_payload(self):
-        response = mock.Mock(status_code=200)
-        response.json.return_value = 'not a dict'
-        with mock.patch.object(hs.requests, 'get', return_value=response):
-            healthy, keys, error = hs._tang_advertisement_status()
+        response = SimpleNamespace(status_code=200, json=lambda: 'not a dict')
+        healthy, keys, error = hs._tang_advertisement_status(
+            tang_probe(lambda *args, **kwargs: response))
         self.assertTrue(healthy)
         self.assertEqual(keys, 'unknown')
         self.assertIsNone(error)
 
     def test_non_200(self):
-        response = mock.Mock(status_code=500)
-        with mock.patch.object(hs.requests, 'get', return_value=response):
-            healthy, keys, error = hs._tang_advertisement_status()
+        response = SimpleNamespace(status_code=500, json=lambda: {})
+        healthy, keys, error = hs._tang_advertisement_status(
+            tang_probe(lambda *args, **kwargs: response))
         self.assertFalse(healthy)
         self.assertIn('HTTP 500', error)
 
     def test_timeout(self):
         import requests
-        with mock.patch.object(hs.requests, 'get',
-                               side_effect=requests.exceptions.Timeout()):
-            healthy, keys, error = hs._tang_advertisement_status()
+        def timeout_get(*args, **kwargs):
+            raise requests.exceptions.Timeout()
+        healthy, keys, error = hs._tang_advertisement_status(
+            tang_probe(timeout_get))
         self.assertFalse(healthy)
         self.assertIn('timeout', error)
 
@@ -84,10 +90,20 @@ class TangHealthFromProbeTests(unittest.TestCase):
 
 class CheckTangServiceTests(unittest.TestCase):
     def test_error_returns_error_status(self):
-        with mock.patch.object(hs, 'check_service_status',
-                               side_effect=RuntimeError('boom')):
-            result = hs.check_tang_service()
-        self.assertEqual(result['status'], 'error')
+        def failing_service(service):
+            raise RuntimeError('boom')
+        probe = hc.HealthProbeContext(
+            is_etcd_node=True, is_storage_node=True,
+            etcd_client=lambda: mock.Mock(),
+            service_status=failing_service,
+            port_open=lambda host, port, timeout=3: False,
+            http_get=lambda *args, **kwargs: None,
+            storage_leader=lambda: True,
+            dhcp_leader=lambda: False,
+            node_drained=lambda: False,
+            core_node=lambda: True,
+        )
+        self.assertEqual(hs.check_tang_service(probe)['status'], 'error')
 
 
 
@@ -169,52 +185,6 @@ class OpenWebuiHealthTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-if __name__ == '__main__':
-    unittest.main()
-
-
-class AppTangAdvertisementTests(unittest.TestCase):
-    def test_200_with_key_count(self):
-        response = mock.Mock(status_code=200)
-        response.json.return_value = {'keys': [1, 2, 3]}
-        with mock.patch.object(appmod.requests, 'get', return_value=response):
-            healthy, keys, error = appmod._tang_advertisement_status()
-        self.assertTrue(healthy)
-        self.assertEqual(keys, 3)
-        self.assertIsNone(error)
-
-    def test_non_200(self):
-        response = mock.Mock(status_code=500)
-        with mock.patch.object(appmod.requests, 'get', return_value=response):
-            healthy, keys, error = appmod._tang_advertisement_status()
-        self.assertFalse(healthy)
-        self.assertIn('HTTP 500', error)
-
-    def test_timeout(self):
-        import requests
-        with mock.patch.object(appmod.requests, 'get',
-                               side_effect=requests.exceptions.Timeout()):
-            healthy, keys, error = appmod._tang_advertisement_status()
-        self.assertFalse(healthy)
-        self.assertIn('timeout', error)
-
-
-class AppTangHealthFromProbeTests(unittest.TestCase):
-    def test_healthy(self):
-        status, msg = appmod._tang_health_from_probe(True, True, True, 3, None)
-        self.assertEqual(status, 'healthy')
-
-    def test_degraded(self):
-        status, msg = appmod._tang_health_from_probe(True, True, False, None, 'bad')
-        self.assertEqual(status, 'degraded')
-
-    def test_port_closed(self):
-        status, msg = appmod._tang_health_from_probe(True, False, False, None, None)
-        self.assertEqual(status, 'unhealthy')
-
-    def test_not_running(self):
-        status, msg = appmod._tang_health_from_probe(False, False, False, None, None)
-        self.assertEqual(status, 'unhealthy')
 
 
 class HealthApiLeaderTests(unittest.TestCase):
@@ -290,16 +260,15 @@ class HealthApiServiceTests(unittest.TestCase):
         self.assertTrue(status['keepalived_service']['active'])
 
     def test_squid_health_unavailable(self):
-        with mock.patch.object(hc, 'check_service_status', return_value=False), \
-             mock.patch.object(hc, 'check_port_open', return_value=False):
-            self.assertEqual(hr._squid_health()['status'], 'unhealthy')
+        probe = make_probe()
+        self.assertEqual(hr._squid_health(probe)['status'], 'unhealthy')
 
     def test_squid_health_functional(self):
-        response = mock.Mock(status_code=200)
-        with mock.patch.object(hr, 'check_service_status', return_value=True), \
-             mock.patch.object(hr, 'check_port_open', return_value=True), \
-             mock.patch.object(hr.requests, 'get', return_value=response):
-            self.assertEqual(hr._squid_health()['status'], 'healthy')
+        response = SimpleNamespace(status_code=200)
+        probe = make_probe(
+            services={'squid'}, ports={3128},
+            http_get=lambda *args, **kwargs: response)
+        self.assertEqual(hr._squid_health(probe)['status'], 'healthy')
 
 
 class HealthApiDnsTests(unittest.TestCase):

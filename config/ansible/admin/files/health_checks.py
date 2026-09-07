@@ -15,8 +15,11 @@ from health_common import (
     _HOSTNAME,
     _IS_ETCD_NODE,
     _IS_STORAGE_NODE,
+    _tang_advertisement_status,
+    _tang_health_from_probe,
     check_port_open,
     check_service_status,
+    check_tang_service,
     is_core_node,
     is_dhcp_leader,
     is_node_drained,
@@ -301,77 +304,6 @@ def check_docker_registry():
         }
     except Exception as e:
         return {'status': 'error', 'details': {'message': f'Registry check failed: {str(e)}'}}
-
-
-def _tang_advertisement_status():
-    """Probe the Tang advertisement endpoint.
-
-    Returns (healthy, keys, error) — healthy is True when the endpoint
-    returned 200, keys is the advertised key count (or 'unknown'), and
-    error carries a human-readable failure description.
-    """
-    try:
-        response = requests.get('http://localhost:8777/adv', timeout=5)
-    except requests.exceptions.Timeout:
-        return False, None, 'Tang advertisement timeout'
-    except requests.exceptions.ConnectionError:
-        return False, None, 'Tang connection failed'
-    except Exception as e:
-        return False, None, f'Tang advertisement failed: {str(e)}'
-
-    if response.status_code != 200:
-        return False, None, f'Tang advertisement returned HTTP {response.status_code}'
-    try:
-        data = response.json()
-        if isinstance(data, dict) and 'keys' in data:
-            return True, len(data['keys']), None
-        return True, 'unknown', None
-    except Exception:
-        return True, 'unknown', None
-
-
-def _tang_health_from_probe(running, port_open, healthy, keys, error):
-    """Derive status/message from the service, port, and advertisement probes."""
-    if running and port_open and healthy:
-        status = 'healthy'
-        message = f'Tang server running and healthy ({keys} keys)'
-    elif running and port_open:
-        status = 'degraded'
-        message = f'Tang service running but advertisement failed: {error}'
-    elif running:
-        status = 'unhealthy'
-        message = f'Tang service running but port not accessible: {error}'
-    else:
-        status = 'unhealthy'
-        message = 'Tang service not running'
-    return status, message
-
-
-def check_tang_service():
-    """Check Tang server status and functionality"""
-    try:
-        running = check_service_status('tang-server.service')
-        port_open = check_port_open('localhost', 8777)
-
-        healthy, keys, error = (False, None, None)
-        if port_open:
-            healthy, keys, error = _tang_advertisement_status()
-
-        status, message = _tang_health_from_probe(running, port_open, healthy, keys, error)
-        return {
-            'status': status,
-            'details': {
-                'service_active': running,
-                'port_open': port_open,
-                'advertisement_working': healthy,
-                'key_count': keys,
-                'message': message,
-                'error': error
-            }
-        }
-    except Exception as e:
-        return {'status': 'error', 'details': {'message': f'Tang check failed: {str(e)}'}}
-
 
 
 def _secrets_mount_details():

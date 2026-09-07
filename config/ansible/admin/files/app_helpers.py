@@ -1,47 +1,8 @@
 """Pure helpers shared by the admin app's health, scheduling, and usage views."""
 from datetime import datetime, UTC
 
-def _add_health_service(health_status, name, result, unhealthy_statuses=('unhealthy', 'error'),
-                        degraded_statuses=('degraded',)):
-    """Record one service result and roll it into the overall status."""
-    health_status['services'][name] = result
-    status = result['status']
-    if status in unhealthy_statuses:
-        health_status['overall'] = 'unhealthy'
-    elif status in degraded_statuses and health_status['overall'] == 'healthy':
-        health_status['overall'] = 'degraded'
-
-def _required_service_health(active, port, service, leader_reason):
-    """Status for a service required on the current leader."""
-    healthy = active and port
-    return {
-        'status': 'healthy' if healthy else 'unhealthy',
-        'details': {
-            'service_active': active,
-            'port_open': port,
-            'required': True,
-            'reason': leader_reason,
-        }
-    }
-
-def _standby_service_health(active, port, service_reason):
-    """Status for a leader-elected service on a non-leader."""
-    running = active or port
-    if running:
-        details = {
-            'service_active': active,
-            'port_open': port,
-            'required': False,
-            'reason': 'split-brain: running on non-leader',
-        }
-    else:
-        details = {
-            'service_active': active,
-            'port_open': port,
-            'required': False,
-            'reason': service_reason,
-        }
-    return {'status': 'unhealthy' if running else 'standby', 'details': details}
+from health_common import (_add_health_service, _required_service_health,
+                           _standby_service_health)
 
 def _gateway_vip_health(vip_health):
     active = vip_health['gateway_vip']['active']
