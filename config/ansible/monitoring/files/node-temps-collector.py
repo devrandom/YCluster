@@ -18,8 +18,11 @@
 #   node_ipmi_temperature_celsius{sensor="...",role="..."} <value>
 #   node_gpu_temperature_celsius{index="...",pci_bus_id="...",name="..."} <value>
 #   node_gpu_thermal_slowdown{index="...",pci_bus_id="...",name="...",reason="hw"|"sw"} 0|1
+#   node_gpu_ecc_errors_{corrected,uncorrected}_total{...} <value>
 #   node_comino_temperature_celsius{sensor="...",role="..."} <value>
 #   node_comino_fan_rpm{channel="...",name="..."} <value>
+#   node_gpu_flr_events_total <value>
+#   node_gpu_flr_probe_ok <value>
 import glob
 import os
 import re
@@ -29,6 +32,12 @@ import tempfile
 import time
 
 OUT = "/var/lib/prometheus/node-exporter/temps.prom"
+
+# Host-journal evidence of a PCIe Function Level Reset (FLR). A reset is
+# node-level evidence: journals generally do not identify the GPU in the
+# same field across drivers/kernels, so the metric is deliberately not
+# GPU-labeled.
+FLR_PATTERN = re.compile(r"function level reset|\bFLR\b", re.I)
 
 # Comino RM cooling controller (STM32 USB-CDC). If present, the inlet
 # air sensor (T3) is our true ambient on workstation-class chassis where
@@ -137,13 +146,24 @@ def _collect_throttle():
     return out
 
 
+def _optional_float(value):
+    """Parse nvidia-smi numbers, returning None for N/A/unsupported fields."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+
 def collect_nvidia():
     """Return list of dicts for each host-visible GPU."""
     out = []
     query = (
         "index,pci.bus_id,name,"
         "temperature.gpu,utilization.gpu,utilization.memory,"
-        "memory.used,memory.total,power.draw"
+        "memory.used,memory.total,power.draw,"
+        "ecc.errors.corrected.volatile.total,"
+        "ecc.errors.uncorrected.volatile.total"
     )
     try:
         r = subprocess.run(
@@ -160,27 +180,59 @@ def collect_nvidia():
         return out
     for line in r.stdout.splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) != 9:
+        if len(parts) != 11:
             continue
-        try:
-            out.append({
-                "index":         parts[0],
-                "pci_bus_id":    parts[1],
-                "name":          parts[2],
-                "temp_c":        float(parts[3]),
-                "util_gpu":      float(parts[4]),
-                "util_mem":      float(parts[5]),
-                "mem_used_mib":  float(parts[6]),
-                "mem_total_mib": float(parts[7]),
-                "power_w":       float(parts[8]),
-            })
-        except ValueError:
+        temp_c = _optional_float(parts[3])
+        util_gpu = _optional_float(parts[4])
+        util_mem = _optional_float(parts[5])
+        mem_used_mib = _optional_float(parts[6])
+        mem_total_mib = _optional_float(parts[7])
+        power_w = _optional_float(parts[8])
+        if None in (temp_c, util_gpu, util_mem, mem_used_mib,
+                    mem_total_mib, power_w):
             continue
+        out.append({
+            "index":         parts[0],
+            "pci_bus_id":    parts[1],
+            "name":          parts[2],
+            "temp_c":        temp_c,
+            "util_gpu":      util_gpu,
+            "util_mem":      util_mem,
+            "mem_used_mib":  mem_used_mib,
+            "mem_total_mib": mem_total_mib,
+            "power_w":       power_w,
+            "ecc_corrected": _optional_float(parts[9]),
+            "ecc_uncorrected": _optional_float(parts[10]),
+        })
+
     throttle = _collect_throttle()
     for gpu in out:
         gpu["hw_slow"], gpu["sw_slow"] = throttle.get(
             gpu["pci_bus_id"], (False, False))
     return out
+
+
+def collect_flr_events():
+    """Return (events_since_boot, probe_ok) from the current boot's journal."""
+    try:
+        r = subprocess.run(
+            ["journalctl", "--boot", "--no-pager", "--output=cat",
+             "--grep", "function level reset|\\bFLR\\b"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"# journalctl failed: {e}", file=sys.stderr)
+        return 0, 0
+    if r.returncode != 0:
+        # journalctl has no "exactly zero matches" success status; rc=1
+        # with no stderr means no matching journal records this boot.
+        if r.returncode != 1 or r.stderr.strip():
+            print(f"# journalctl rc={r.returncode}: {r.stderr.strip()}",
+                  file=sys.stderr)
+            return 0, 0
+        return 0, 1
+    return sum(1 for line in r.stdout.splitlines()
+               if FLR_PATTERN.search(line)), 1
 
 
 def _comino_query(port, cmd, read_timeout=0.5):
@@ -340,9 +392,9 @@ def _gpu_labels(g):
     )
 
 
-def _emit_metric(lines, help_text, name, samples):
+def _emit_metric(lines, help_text, name, samples, metric_type="gauge"):
     lines.append(f"# HELP {name} {help_text}")
-    lines.append(f"# TYPE {name} gauge")
+    lines.append(f"# TYPE {name} {metric_type}")
     lines.extend(samples)
 
 
@@ -374,9 +426,38 @@ def _emit_gpu_metrics(lines, gpu):
         [f'node_gpu_thermal_slowdown{{{lbls(g)},reason="{r}"}} '
          f'{1 if g[f"{r}_slow"] else 0}'
          for g in gpu for r in ("hw", "sw")])
+    _emit_metric(
+        lines,
+        "Corrected volatile ECC errors reported by nvidia-smi.",
+        "node_gpu_ecc_errors_corrected_total",
+        [f'node_gpu_ecc_errors_corrected_total{{{lbls(g)}}} {g["ecc_corrected"]}'
+         for g in gpu if g.get("ecc_corrected") is not None],
+        metric_type="counter")
+    _emit_metric(
+        lines,
+        "Uncorrected volatile ECC errors reported by nvidia-smi.",
+        "node_gpu_ecc_errors_uncorrected_total",
+        [f'node_gpu_ecc_errors_uncorrected_total{{{lbls(g)}}} {g["ecc_uncorrected"]}'
+         for g in gpu if g.get("ecc_uncorrected") is not None],
+        metric_type="counter")
 
 
-def _prom_body(ipmi, gpu, comino_temps, comino_fans):
+def _emit_flr_metrics(lines, flr_events, flr_probe_ok):
+    _emit_metric(
+        lines,
+        "PCIe Function Level Resets seen in the host journal this boot.",
+        "node_gpu_flr_events_total",
+        [f"node_gpu_flr_events_total {flr_events}"],
+        metric_type="counter")
+    _emit_metric(
+        lines,
+        "Whether the host journal FLR probe completed successfully.",
+        "node_gpu_flr_probe_ok",
+        [f"node_gpu_flr_probe_ok {flr_probe_ok}"])
+
+
+def _prom_body(ipmi, gpu, comino_temps, comino_fans,
+               flr_events, flr_probe_ok):
     """Render all collected metrics in Prometheus text format."""
     lines = []
     _emit_metric(lines, "Chassis temperature sensor reading via IPMI.",
@@ -384,6 +465,7 @@ def _prom_body(ipmi, gpu, comino_temps, comino_fans):
                  [f'node_ipmi_temperature_celsius{{sensor="{esc(sensor)}",role="{role}"}} {val}'
                   for sensor, role, val in ipmi])
     _emit_gpu_metrics(lines, gpu)
+    _emit_flr_metrics(lines, flr_events, flr_probe_ok)
     _emit_metric(lines, "Temperature from a Comino RM cooling controller.",
                  "node_comino_temperature_celsius",
                  [f'node_comino_temperature_celsius{{sensor="{esc(sensor)}",role="{role}"}} {val}'
@@ -395,8 +477,10 @@ def _prom_body(ipmi, gpu, comino_temps, comino_fans):
     return "\n".join(lines) + "\n"
 
 
-def write_prom(ipmi, gpu, comino_temps, comino_fans):
-    body = _prom_body(ipmi, gpu, comino_temps, comino_fans)
+def write_prom(ipmi, gpu, comino_temps, comino_fans,
+               flr_events, flr_probe_ok):
+    body = _prom_body(ipmi, gpu, comino_temps, comino_fans,
+                      flr_events, flr_probe_ok)
 
     d = os.path.dirname(OUT)
     fd, tmp = tempfile.mkstemp(prefix=".temps.", suffix=".prom", dir=d)
@@ -417,10 +501,12 @@ def main():
     ipmi = collect_ipmi()
     gpu = collect_nvidia()
     comino_temps, comino_fans = collect_comino()
+    flr_events, flr_probe_ok = collect_flr_events()
     # Always rewrite the file so node_textfile_mtime_seconds advances
     # even when individual sub-collectors come up empty. The mtime
     # staleness alert fires only when the script itself stops running.
-    write_prom(ipmi, gpu, comino_temps, comino_fans)
+    write_prom(ipmi, gpu, comino_temps, comino_fans,
+               flr_events, flr_probe_ok)
     return 0
 
 

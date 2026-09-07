@@ -623,6 +623,68 @@ groups:
           summary: "{{ $labels.component }} backup is stale (>2 days old)"
           description: "The newest encrypted {{ $labels.component }} backup on {{ $labels.node }} (storage leader) is over 48h old — the daily backup may be failing"
 
+  - name: ycluster-gpu
+    rules:
+      # ECC counts are cumulative driver counters. Track the rate over the
+      # alert window so a card with pre-existing corrected errors does not
+      # page forever.
+      - alert: GPUCorrectedECCError
+        expr: increase(node_gpu_ecc_errors_corrected_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Corrected GPU ECC errors on {{ $labels.node }}"
+          description: "GPU {{ $labels.index }} on {{ $labels.node }} reported {{ $value | humanize }} corrected ECC errors in 15 minutes"
+
+      - alert: GPUUncorrectedECCError
+        expr: increase(node_gpu_ecc_errors_uncorrected_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Uncorrected GPU ECC errors on {{ $labels.node }}"
+          description: "GPU {{ $labels.index }} on {{ $labels.node }} reported {{ $value | humanize }} uncorrected ECC errors in 15 minutes — validate memory and driver health"
+
+      # Compare each GPU's used/total ratio before aggregating, then page on
+      # the hottest card on the node. Covers host-visible and VM-passthrough
+      # nvidia-smi collectors.
+      - alert: HighGPUMemoryUsage
+        expr: |
+          max by (node) (
+            node_gpu_memory_used_bytes / node_gpu_memory_total_bytes * 100
+          ) > 95
+          or
+          max by (node) (
+            node_vm_gpu_memory_used_bytes / node_vm_gpu_memory_total_bytes * 100
+          ) > 95
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High GPU memory usage on {{ $labels.node }}"
+          description: "A GPU on {{ $labels.node }} has been above 95% memory usage for more than 5 minutes"
+
+      # A Function Level Reset during normal operation is evidence of a
+      # PCIe/driver/device fault. Counted per boot from the host journal.
+      - alert: GPUFunctionLevelReset
+        expr: increase(node_gpu_flr_events_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU PCIe Function Level Reset on {{ $labels.node }}"
+          description: "The host journal on {{ $labels.node }} recorded {{ $value | humanize }} PCIe Function Level Resets in 5 minutes"
+
+      - alert: GPUFLRProbeFailed
+        expr: node_gpu_flr_probe_ok == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU FLR probe failed on {{ $labels.node }}"
+          description: "The node-exporter textfile collector on {{ $labels.node }} could not query the host journal for Function Level Resets"
+
   - name: ycluster-temperature
     rules:
       # Ambient (intake) temperature — true room/inlet air only. Sources:
