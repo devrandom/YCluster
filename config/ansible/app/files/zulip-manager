@@ -217,6 +217,26 @@ start_zulip() {
     # SAMLAuthBackend) boots with the backend active but no
     # SOCIAL_AUTH_SAML_ENABLED_IDPS config, which 500s on SAML logout
     # (KeyError: 'authentik') and breaks new SAML logins.
+    case ",$auth_backends," in
+        ",SAMLAuthBackend,")
+            # SAML-only starts are unusable without the IdP config, so retry
+            # briefly while Authentik finishes starting rather than exposing a
+            # login button that cannot complete its round trip.
+            if ! grep -q -- "-----BEGIN CERTIFICATE-----" "$SAML_IDP_CERT" 2>/dev/null; then
+                local attempt=0
+                while ! grep -q -- "-----BEGIN CERTIFICATE-----" "$SAML_IDP_CERT" 2>/dev/null; do
+                    if [ "$attempt" -eq 30 ]; then
+                        echo "SAML: IdP certificate unavailable for SAML-only start"
+                        return 1
+                    fi
+                    echo "SAML: waiting for Authentik IdP certificate ($((attempt + 1))/30)"
+                    attempt=$((attempt + 1))
+                    sleep 2
+                    ensure_saml_cert || true
+                done
+            fi
+            ;;
+    esac
     if grep -q -- "-----BEGIN CERTIFICATE-----" "$SAML_IDP_CERT" 2>/dev/null; then
         case ",$auth_backends," in
             *,SAMLAuthBackend,*) render_saml_env "$external_domain" >> "$env_file" ;;
