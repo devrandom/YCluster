@@ -20,6 +20,11 @@ table inet ycluster_vm_nat_spoke {
     type filter hook forward priority filter; policy accept;
     iifname "transit0" oifname "wg-vm-nat" ip saddr {{ vm_transit_subnet }} accept
     iifname "wg-vm-nat" oifname "transit0" ip daddr {{ vm_transit_subnet }} accept
+    # Management-plane return path: the bastion (on the VM bridge) reaches
+    # exposed guests via the transit bridge with the gateway as source
+    # (SNAT below). Guests may only reply; they cannot initiate into the
+    # bridge subnet because new connections are not established state.
+    iifname "transit0" oifname "incusbr0" ip saddr {{ vm_transit_subnet }} ct state established,related accept
     iifname "transit0" drop
   }
 }

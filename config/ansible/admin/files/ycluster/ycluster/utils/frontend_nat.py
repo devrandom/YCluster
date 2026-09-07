@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 import sys
 
 # NOTE: get_etcd_client is imported lazily inside the functions that use
@@ -142,6 +143,9 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
 TRANSIT_BRIDGE = 'transit0'
 TRANSIT_NIC_DEVICE = 'transit0'
 SHADOW_BRIDGE = 'eth0-shadow'
+BASTION_CONTAINER = 'bastion'
+TRANSIT_HOSTS_BEGIN = '# ycluster-transit begin'
+TRANSIT_HOSTS_END = '# ycluster-transit end'
 TRANSIT_POOL_START = 11  # .2-.10 reserved for infra (gateway, agent, ...)
 TRANSIT_POOL_END = 254
 
@@ -268,6 +272,48 @@ def _instance_details(vm):
     except ValueError:
         return {}
     return instances[0] if instances else {}
+
+
+NETPLAN_TRANSIT_DROPIN = "90-transit.yaml"
+NETPLAN_TRANSIT_CONFIG = (
+    "network:\n"
+    "  version: 2\n"
+    "  ethernets:\n"
+    "    all-eth:\n"
+    "      match:\n"
+    "        name: \"en*\"\n"
+    "      dhcp4: true\n"
+    "      dhcp4-overrides:\n"
+    "        route-metric: 100\n"
+)
+
+
+def _ensure_guest_transit_netplan(vm):
+    """Make the guest DHCP on every ethernet interface.
+
+    Base images commonly netplan-match only the first NIC, so a hot-added
+    transit NIC stays down and the guest is unreachable. Idempotently
+    drop in a wildcard-match config and apply it; no-op when the drop-in
+    is already present (re-running netplan apply on every tick would be
+    disruptive).
+    """
+    r = _incus("exec", vm, "--", "cat",
+               f"/etc/netplan/{NETPLAN_TRANSIT_DROPIN}", check=False)
+    existing = getattr(r, "stdout", None)
+    if existing is not None and r.returncode == 0 \
+            and existing == NETPLAN_TRANSIT_CONFIG:
+        return False
+    _incus("exec", vm, "--", "sh", "-c",
+           f"printf '%s' {shlex.quote(NETPLAN_TRANSIT_CONFIG)} > "
+           f"/etc/netplan/{NETPLAN_TRANSIT_DROPIN} && "
+           f"chmod 600 /etc/netplan/{NETPLAN_TRANSIT_DROPIN}",
+           check=True)
+    return True
+
+
+def _apply_guest_netplan(vm):
+    """Apply netplan inside the guest."""
+    _incus("exec", vm, "--", "netplan", "apply", check=True)
 
 
 def _disable_default_nic(vm, details=None):
@@ -475,9 +521,71 @@ def _converge_vm(vm, records, live, transit_subnet):
     # otherwise leave a usable default route into cluster 10.* space.
     if _disable_default_nic(vm, details):
         device_changed = True
-    if device_changed:
+    # Guests commonly netplan-match only their first NIC, so the hot-added
+    # transit NIC stays down. Ensure the wildcard drop-in exists (idempotent
+    # probe; cheap) and apply/restart when anything changed.
+    netplan_changed = _ensure_guest_transit_netplan(vm)
+    if device_changed or netplan_changed:
+        if netplan_changed:
+            _apply_guest_netplan(vm)
         _restart_if_running(vm, details)
-    return ip, device_changed
+    return ip, device_changed or netplan_changed
+
+
+def _replace_hosts_block(current, entries):
+    """Return /etc/hosts content with the transit block set to `entries`.
+
+    `entries` is an iterable of `(vm, ip)` pairs. The managed block is
+    replaced in place when present and appended otherwise.
+    """
+    block = [TRANSIT_HOSTS_BEGIN]
+    block += [f'{ip} {vm}' for vm, ip in sorted(entries, key=lambda e: e[1])]
+    block.append(TRANSIT_HOSTS_END)
+    lines = (current or '').splitlines()
+    try:
+        b = lines.index(TRANSIT_HOSTS_BEGIN)
+        e = lines.index(TRANSIT_HOSTS_END, b + 1)
+        kept = lines[:b] + block + lines[e + 1:]
+    except ValueError:
+        kept = lines + [''] + block if lines and lines[-1].strip() else lines + block
+    return '\n'.join(kept) + '\n'
+
+
+def _instance_exists(name):
+    from .vm_manager import _instance_exists as exists
+    return exists(name)
+
+
+def _read_file(inst, path):
+    from .vm_manager import _read_file as read
+    return read(inst, path)
+
+
+def _push_file(inst, path, content, owner, mode="0600"):
+    from .vm_manager import _push_file as push
+    push(inst, path, content, owner, mode)
+
+
+def _sync_bastion_hosts(ip_by_vm):
+    """Point the local bastion's name resolution at transit IPs.
+
+    `ssh -J jump@... <vm>` resolves `<vm>` on the bastion; Incus dnsmasq
+    answers with the VM-bridge address, which a transit-only guest no
+    longer has. Keep a managed /etc/hosts block on the bastion so exposed
+    VM names resolve to their transit addresses instead.
+    """
+    if not _instance_exists(BASTION_CONTAINER):
+        return False
+    hosts_path = '/etc/hosts'
+    current = _read_file(BASTION_CONTAINER, hosts_path) or ''
+    updated = _replace_hosts_block(current, ip_by_vm.items())
+    if updated == current:
+        return False
+    # Not _push_file: it hardens the parent directory to 0700, which is
+    # right for .ssh but would lock non-root users out of /etc.
+    _incus('exec', BASTION_CONTAINER, '--', 'tee', hosts_path,
+           stdin=updated, check=True)
+    return True
 
 
 def sync_transit_nics(local_instances, transit_subnet=None):
@@ -511,6 +619,7 @@ def sync_transit_nics(local_instances, transit_subnet=None):
     live_by_vm = _transit_nics_by_vm()
 
     changed = False
+    ip_by_vm = {}
     for vm, ip in sorted(live_by_vm.items()):
         if vm in local_instances and vm not in by_vm:
             try:
@@ -527,10 +636,15 @@ def sync_transit_nics(local_instances, transit_subnet=None):
                 vm, records, live_by_vm.get(vm), transit_subnet)
             if ip is None:
                 continue
+            ip_by_vm[vm] = ip
             changed |= device_changed
             changed |= _converge_records(records, ip)
         except Exception as exc:
             print(f'Warning: transit NIC sync failed for {vm}: {exc}',
                   file=sys.stderr)
             continue
+    try:
+        changed |= _sync_bastion_hosts(ip_by_vm)
+    except Exception as exc:
+        print(f'Warning: bastion hosts sync failed: {exc}', file=sys.stderr)
     return changed

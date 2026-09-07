@@ -53,6 +53,9 @@ class WireGuardTemplateTests(unittest.TestCase):
         )
         self.assertIn('MTU = 1420', text)
         self.assertIn('ip rule add from 100.100.2.0/24 iif transit0 table 100', text)
+        self.assertIn(
+            'ip rule add from 100.100.2.0/24 iif transit0 lookup main '
+            'suppress_prefixlength 0 priority 90', text)
         self.assertIn('Endpoint = 203.0.113.10:51820', text)
 
     def test_spoke_firewall_drops_spoofed_sources(self):
@@ -70,10 +73,17 @@ class WireGuardTemplateTests(unittest.TestCase):
                       'udp dport 53 accept', text)
         self.assertIn('iifname "transit0" ip saddr 100.100.2.0/24 '
                       'tcp dport 53 accept', text)
-        drop = text.index('iifname "transit0" drop\n  }\n  chain forward')
+        drop = text.index('iifname "transit0" drop')
         dns = text.index('tcp dport 53 accept')
         self.assertLess(dns, drop)
         self.assertIn('iifname "transit0" drop', text)
+        # Management return path: established replies to the bastion are
+        # allowed before the drop; guest-initiated flows are not.
+        self.assertIn(
+            'iifname "transit0" oifname "incusbr0" '
+            'ip saddr 100.100.2.0/24 ct state established,related accept',
+            text)
+
 
     def test_transit_acl_does_not_shadow_local_allow(self):
         # Incus orders ACL rules by action (drop before allow), not list

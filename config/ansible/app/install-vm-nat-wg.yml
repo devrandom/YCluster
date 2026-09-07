@@ -96,6 +96,7 @@
         state: directory
         mode: '0755'
 
+
     - name: Install the spoke anti-spoofing firewall
       template:
         src: vm-nat-spoke-firewall.nft.j2

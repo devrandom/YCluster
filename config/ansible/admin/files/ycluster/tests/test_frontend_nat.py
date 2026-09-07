@@ -341,7 +341,7 @@ class TransitSyncTests(unittest.TestCase):
             changed = frontend_nat.sync_transit_nics({'vm-a'})
         self.assertTrue(changed)
         set_.assert_called_once_with('vm-a', 'tcp', '80', '100.100.0.11')
-        incus.assert_called_once()
+        self.assertGreaterEqual(incus.call_count, 1)
 
     def test_skips_nonlocal_vms(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-other', 'ports': '80',
@@ -359,18 +359,25 @@ class TransitSyncTests(unittest.TestCase):
     def test_idempotent_when_already_allocated(self):
         exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
                       'transit_ip': '100.100.0.11'}]
-        # The device already exists with this address; nothing to do.
+        # The device already exists with this address, and the guest
+        # already has the transit netplan drop-in: nothing to do.
         patches = self._sync_patches(exposures,
                                      live={'vm-a': '100.100.0.11'})
+        probe = mock.Mock(returncode=0,
+                          stdout=frontend_nat.NETPLAN_TRANSIT_CONFIG)
         with patches[0], patches[1], \
                 mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
                 mock.patch.object(frontend_nat, 'set_exposure') as set_, \
-                mock.patch.object(frontend_nat, '_incus') as incus:
+                mock.patch.object(frontend_nat, '_incus',
+                                  return_value=probe) as incus:
             changed = frontend_nat.sync_transit_nics({'vm-a'})
         self.assertFalse(changed)
         r.assert_not_called()
         set_.assert_not_called()
-        incus.assert_not_called()
+        for c in incus.call_args_list:
+            self.assertNotIn('netplan apply', ' '.join(map(str, c[0])))
+            self.assertNotIn('restart', ' '.join(map(str, c[0])))
+        incus.assert_called_once()  # only the idempotent cat probe
 
     def test_converges_partial_records(self):
         # Two records on the same VM, only the first has an IP: the
@@ -405,7 +412,9 @@ class TransitSyncTests(unittest.TestCase):
                 mock.patch.object(frontend_nat, 'set_exposure'), \
                 mock.patch.object(frontend_nat, '_incus') as incus:
             frontend_nat.sync_transit_nics({'vm-a'})
-        self.assertIn('ipv4.address=100.100.0.12', incus.call_args[0])
+        add_calls = [c for c in incus.call_args_list
+                     if 'ipv4.address=100.100.0.12' in c[0]]
+        self.assertTrue(add_calls)
 
     def test_adopts_live_device_transactionally(self):
         # vm-a has a live transit0 NIC but no IP recorded in etcd: the
@@ -780,12 +789,15 @@ class TransitSyncTests(unittest.TestCase):
         with patches[0], patches[1], \
                 mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
                 mock.patch.object(frontend_nat, 'set_exposure') as set_, \
-                mock.patch.object(frontend_nat, '_incus'):
+                mock.patch.object(frontend_nat, '_incus') as incus:
             changed = frontend_nat.sync_transit_nics(
                 {'vm-a'}, '100.100.2.0/24')
         self.assertTrue(changed)
         set_.assert_called_once_with('vm-a', 'udp', '90', '100.100.2.11')
         r.assert_not_called()
+        # netplan probe runs even when nothing changed; ensure no restart
+        self.assertFalse(any('restart' in ' '.join(map(str, c[0]))
+                             for c in incus.call_args_list))
 
     def test_live_device_converged_to_recorded_address(self):
         # Records agree on one IP but the live NIC holds another address
@@ -806,6 +818,65 @@ class TransitSyncTests(unittest.TestCase):
                               'ipv4.address=100.100.2.11', check=True)
         r.assert_not_called()
         set_.assert_not_called()
+
+    def test_bastion_hosts_block_replaced(self):
+        current = "127.0.0.1 localhost\n"
+        out = frontend_nat._replace_hosts_block(
+            current, [('vm-a', '100.100.2.11'), ('vm-b', '100.100.2.12')])
+        self.assertIn('# ycluster-transit begin', out)
+        self.assertIn('100.100.2.11 vm-a', out)
+        self.assertIn('100.100.2.12 vm-b', out)
+        self.assertIn('127.0.0.1 localhost', out)
+
+    def test_bastion_hosts_block_updates_in_place(self):
+        current = ("keep\n# ycluster-transit begin\n1.1.1.1 old\n"
+                   "# ycluster-transit end\n")
+        out = frontend_nat._replace_hosts_block(current, [('vm-a', '100.100.2.11')])
+        self.assertIn('keep', out)
+        self.assertNotIn('old', out)
+        self.assertIn('100.100.2.11 vm-a', out)
+
+    def test_bastion_hosts_sync_pushes_and_skips_when_unchanged(self):
+        incus = mock.Mock(returncode=0)
+        with mock.patch.object(frontend_nat, '_instance_exists',
+                               return_value=True), \
+                mock.patch.object(frontend_nat, '_read_file',
+                                  return_value='x\n'), \
+                mock.patch.object(frontend_nat, '_incus', incus):
+            self.assertTrue(frontend_nat._sync_bastion_hosts(
+                {'vm-a': '100.100.2.11'}))
+        incus.assert_called_once_with(
+            'exec', 'bastion', '--', 'tee', '/etc/hosts',
+            stdin=mock.ANY, check=True)
+        pushed = incus.call_args[1]['stdin']
+        with mock.patch.object(frontend_nat, '_instance_exists',
+                               return_value=True), \
+                mock.patch.object(frontend_nat, '_read_file',
+                                  return_value=pushed), \
+                mock.patch.object(frontend_nat, '_incus') as incus2:
+            self.assertFalse(frontend_nat._sync_bastion_hosts(
+                {'vm-a': '100.100.2.11'}))
+        incus2.assert_not_called()
+
+    def test_guest_transit_netplan_pushed_when_changed(self):
+        # A fresh attach must push the netplan drop-in and apply it, or
+        # the transit NIC stays down in guests with first-NIC-only
+        # netplan matching.
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': ''}]
+        patches = self._sync_patches(exposures)
+        calls = []
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_reserve_transit_ip',
+                                  return_value='100.100.2.11'), \
+                mock.patch.object(frontend_nat, 'set_exposure'), \
+                mock.patch.object(frontend_nat, '_incus',
+                                  side_effect=lambda *a, **k:
+                                  calls.append(a) or
+                                  mock.Mock(returncode=1, stdout='')):
+            frontend_nat.sync_transit_nics({'vm-a'}, '100.100.2.0/24')
+        self.assertTrue(any('netplan apply' in ' '.join(map(str, c))
+                            for c in calls))
 
     def test_reattaches_missing_transit_nic(self):
         # A recorded IP with no live transit0 NIC (partial teardown or

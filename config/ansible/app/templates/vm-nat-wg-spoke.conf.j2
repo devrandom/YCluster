@@ -8,8 +8,13 @@ Table = off
 # iif transit0 scopes the rule to guest traffic forwarded by the host.
 # Without it, the gateway's own replies (dnsmasq, source .1 in the same
 # /24) would be policy-routed into the tunnel and escape via the hub.
-PostUp = ip rule del from {{ vm_transit_subnet }} iif transit0 table 100 2>/dev/null || true; ip rule add from {{ vm_transit_subnet }} iif transit0 table 100 priority 100; ip route replace default dev %i table 100
-PreDown = ip rule del from {{ vm_transit_subnet }} iif transit0 table 100 priority 100 || true; ip rule del from {{ vm_transit_subnet }} iif transit0 table 100 || true; ip route del default dev %i table 100 || true
+# iif transit0 scopes the rule to guest traffic forwarded by the host;
+# the gateway's own replies (dnsmasq) are locally generated and must use
+# the main table. suppress_prefixlength 0 lets specific main-table routes
+# (the VM bridge subnet, for the bastion management return path) win while
+# the default route falls through to table 100 (the tunnel).
+PostUp = ip rule del from {{ vm_transit_subnet }} iif transit0 table 100 2>/dev/null || true; ip rule del from {{ vm_transit_subnet }} iif transit0 lookup main suppress_prefixlength 0 2>/dev/null || true; ip rule add from {{ vm_transit_subnet }} iif transit0 lookup main suppress_prefixlength 0 priority 90; ip rule add from {{ vm_transit_subnet }} iif transit0 table 100 priority 100; ip route replace default dev %i table 100
+PreDown = ip rule del from {{ vm_transit_subnet }} iif transit0 table 100 priority 100 || true; ip rule del from {{ vm_transit_subnet }} iif transit0 lookup main suppress_prefixlength 0 priority 90 || true; ip rule del from {{ vm_transit_subnet }} iif transit0 table 100 || true; ip route del default dev %i table 100 || true
 
 [Peer]
 PublicKey = {{ hostvars[vm_nat_frontend_host].hub_public_key.stdout | trim }}
