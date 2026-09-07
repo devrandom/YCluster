@@ -52,7 +52,7 @@ class WireGuardTemplateTests(unittest.TestCase):
             },
         )
         self.assertIn('MTU = 1420', text)
-        self.assertIn('ip rule add from 100.100.2.0/24 table 100', text)
+        self.assertIn('ip rule add from 100.100.2.0/24 iif transit0 table 100', text)
         self.assertIn('Endpoint = 203.0.113.10:51820', text)
 
     def test_spoke_firewall_drops_spoofed_sources(self):
@@ -79,8 +79,10 @@ class WireGuardTemplateTests(unittest.TestCase):
         # Incus orders ACL rules by action (drop before allow), not list
         # order. Any drop whose destination contains the local /24 would
         # therefore shadow the local-transit allow.
-        text = self._render('vm-transit-acl.yml.j2',
-                            vm_transit_subnet='100.100.113.0/24')
+        acl_root = (Path(__file__).resolve().parents[3] / 'templates')
+        source = (acl_root / 'vm-transit-acl.yml.j2').read_text()
+        text = Environment().from_string(source).render(
+            vm_transit_subnet='100.100.113.0/24')
         self.assertIn('destination: 100.100.113.0/24', text)
         self.assertNotIn('100.64.0.0/10', text)
         self.assertNotIn('100.100.0.0/16', text)
@@ -106,3 +108,8 @@ class WireGuardTemplateTests(unittest.TestCase):
             self.assertIn(derivation, text)
             self.assertIn('vm_transit_class_octet | int + '
                           'vm_nat_transit_index | int', text)
+            # YAML single quotes do not process backslash escapes: a
+            # double backslash reaches the regex engine as a literal
+            # backslash and the substitution silently never matches.
+            self.assertNotIn(r"regex_replace('^100\\.100\\.', '')", text)
+            self.assertNotIn(r"match('^100\\.100\\.", text)

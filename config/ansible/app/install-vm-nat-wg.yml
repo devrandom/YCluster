@@ -41,8 +41,8 @@
         vm_transit_gateway: >-
           {{ vm_transit_subnet | regex_replace('\.0/24$', '.1/24') }}
         vm_transit_third_octet: >-
-          {{ vm_transit_subnet | regex_replace('^100\\.100\\.', '') |
-             regex_replace('\\.0/24$', '') | int }}
+          {{ vm_transit_subnet | regex_replace('^100\.100\.', '') |
+             regex_replace('\.0/24$', '') | int }}
 
     - name: Validate transit allocation
       assert:
@@ -52,8 +52,8 @@
           - vm_nat_transit_index | int < 254
           - vm_transit_third_octet | int > 1
           - vm_transit_third_octet | int < 254
-          - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
-          - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
+          - vm_transit_subnet is match('^100\.100\.[0-9]{1,3}\.0/24$')
+          - vm_transit_gateway is match('^100\.100\.[0-9]{1,3}\.1/24$')
         fail_msg: >-
           The transit class octet and host index must produce a unique
           /24 in 100.100.1.0/24 through 100.100.253.0/24.
@@ -208,8 +208,8 @@
       set_fact:
         vm_nat_spoke_third_octets: >-
           {{ vm_nat_participating_spokes | map(attribute='subnet') |
-             map('regex_replace', '^100\\.100\\.', '') |
-             map('regex_replace', '\\.0/24$', '') |
+             map('regex_replace', '^100\.100\.', '') |
+             map('regex_replace', '\.0/24$', '') |
              map('int') | list }}
       run_once: true
 
@@ -283,6 +283,25 @@
         rule: allow
         port: "{{ vm_nat_wg_port | default('51820') }}"
         proto: udp
+      when: vm_frontend_nat_enabled | default(false)
+
+    # ufw's default routed policy is deny, which sits in the iptables
+    # layer alongside the nft NAT table and drops forwarded transit
+    # traffic even though the nft chain accepts it.
+    - name: Allow routed egress from transit subnets through ufw
+      community.general.ufw:
+        route: yes
+        rule: allow
+        interface_in: wg-vm-nat
+        from_ip: 100.100.0.0/16
+      when: vm_frontend_nat_enabled | default(false)
+
+    - name: Allow routed ingress (DNAT) to transit subnets through ufw
+      community.general.ufw:
+        route: yes
+        rule: allow
+        interface_in: "{{ nat_wan_iface | default('eth0') }}"
+        to_ip: 100.100.0.0/16
       when: vm_frontend_nat_enabled | default(false)
 
     - name: Enable and start the hub tunnel

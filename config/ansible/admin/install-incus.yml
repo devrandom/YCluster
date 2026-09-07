@@ -132,8 +132,8 @@
             vm_transit_gateway: >-
               {{ vm_transit_subnet | regex_replace('\.0/24$', '.1/24') }}
             vm_transit_third_octet: >-
-              {{ vm_transit_subnet | regex_replace('^100\\.100\\.', '') |
-                 regex_replace('\\.0/24$', '') | int }}
+              {{ vm_transit_subnet | regex_replace('^100\.100\.', '') |
+                 regex_replace('\.0/24$', '') | int }}
 
         - name: Validate the transit allocation
           assert:
@@ -149,8 +149,8 @@
                  and vm_nat_transit_index | int < 144)
               - vm_transit_third_octet | int > 1
               - vm_transit_third_octet | int < 254
-              - vm_transit_subnet is match('^100\\.100\\.[0-9]{1,3}\\.0/24$')
-              - vm_transit_gateway is match('^100\\.100\\.[0-9]{1,3}\\.1/24$')
+              - vm_transit_subnet is match('^100\.100\.[0-9]{1,3}\.0/24$')
+              - vm_transit_gateway is match('^100\.100\.[0-9]{1,3}\.1/24$')
             fail_msg: >-
               The transit class octet and host index must produce a /24 in
               100.100.1.0/24 through 100.100.253.0/24.
@@ -393,9 +393,19 @@
             # static leases, so DHCP must stay enabled on transit0.
             - key: ipv4.dhcp
               value: 'true'
-            - key: mtu
-              value: '1420'
           changed_when: false
+
+        - name: Check whether the eth0 shadow bridge exists
+          command: incus network show eth0-shadow
+          register: shadow_bridge_check
+          changed_when: false
+          failed_when: false
+
+        - name: Create the eth0 shadow bridge
+          command: >-
+            incus network create eth0-shadow --type=bridge
+            ipv4.address=none ipv6.address=none
+          when: shadow_bridge_check.rc != 0
 
         - name: Check whether the transit ACL exists
           command: incus network acl show vm-transit-isolation

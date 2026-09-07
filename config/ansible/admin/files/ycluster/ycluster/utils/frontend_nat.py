@@ -77,6 +77,8 @@ def list_exposures():
     out = []
     for val, meta in client.get_prefix(NAT_PREFIX):
         key = meta.key.decode()[len(NAT_PREFIX):]
+        if key.startswith('_ip/'):
+            continue  # reservation keys, not exposure records
         try:
             proto, vm, ports = key.split('/')
             record = json.loads(val.decode())
@@ -139,6 +141,7 @@ def render_nftables(exposures, public_ip, wan_iface='eth0',
 
 TRANSIT_BRIDGE = 'transit0'
 TRANSIT_NIC_DEVICE = 'transit0'
+SHADOW_BRIDGE = 'eth0-shadow'
 TRANSIT_POOL_START = 11  # .2-.10 reserved for infra (gateway, agent, ...)
 TRANSIT_POOL_END = 254
 
@@ -202,6 +205,7 @@ def _reserve_transit_ip(vm, subnet):
         ok, _ = client.transaction(
             compare=[client.transactions.version(key) == 0],
             success=[client.transactions.put(key, vm.encode())],
+            failure=[],
         )
         if ok:
             return ip
@@ -211,8 +215,9 @@ def _reserve_transit_ip(vm, subnet):
 def _claim_transit_ip(vm, ip):
     """Transactionally claim a specific transit IP for `vm` (CAS).
 
-    Used when adopting a live device address that has no reservation
-    key yet (partial write or manual attach). Returns True on success.
+    Used when adopting a live device address. Returns True when the
+    claim succeeded or the reservation already belongs to this VM (a
+    prior partial run created it); False when another VM holds it.
     """
     from ..common.etcd_utils import get_etcd_client
     client = get_etcd_client()
@@ -220,8 +225,12 @@ def _claim_transit_ip(vm, ip):
     ok, _ = client.transaction(
         compare=[client.transactions.version(key) == 0],
         success=[client.transactions.put(key, vm.encode())],
+        failure=[],
     )
-    return ok
+    if ok:
+        return True
+    existing, _ = client.get(key)
+    return existing is not None and existing.decode() == vm
 
 
 def _release_transit_ip(ip):
@@ -262,21 +271,27 @@ def _instance_details(vm):
 
 
 def _disable_default_nic(vm, details=None):
-    """Neutralize the profile's primary NIC for transit-only VMs.
+    """Neutralize the primary NIC for transit-only VMs.
 
     An inherited `eth0` would still give the guest a route into the
-    cluster LAN. Overriding it with the `none` device removes that
-    path, even when the profile later changes.
+    cluster LAN. Incus has no `type=none` device, so the device is
+    overridden onto a dead-end shadow bridge (no gateway, no uplink),
+    even when the profile later changes.
     """
     details = details or _instance_details(vm)
     eth0 = (details.get('expanded_devices') or {}).get('eth0') or {}
-    if eth0.get('type') == 'none':
+    if eth0.get('network') == SHADOW_BRIDGE:
         return False
-    override = _incus('config', 'device', 'override', vm, 'eth0',
-                      'type=none', check=False)
-    if override.returncode != 0:
-        _incus('config', 'device', 'set', vm, 'eth0', 'type=none',
-               check=True)
+    # A local eth0 (pinned IP, filtering options) would fail override
+    # validation, so remove it first; the override then re-creates it
+    # detached from the cluster bridge.
+    _incus('config', 'device', 'remove', vm, 'eth0', check=False)
+    try:
+        _incus('config', 'device', 'override', vm, 'eth0',
+               f'network={SHADOW_BRIDGE}', check=True)
+    except Exception:
+        _incus('config', 'device', 'add', vm, 'eth0', 'nic',
+               f'network={SHADOW_BRIDGE}', check=True)
     return True
 
 
@@ -307,7 +322,8 @@ def _remove_transit_device(vm, details):
     _incus('config', 'device', 'remove', vm, TRANSIT_NIC_DEVICE,
            check=True)
     eth0 = (details.get('expanded_devices') or {}).get('eth0') or {}
-    if eth0.get('type') == 'none':
+    if eth0.get('network') == SHADOW_BRIDGE:
+        # Drop the shadow override so the profile NIC is inherited again.
         _incus('config', 'device', 'remove', vm, 'eth0', check=True)
 
 

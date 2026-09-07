@@ -308,7 +308,8 @@ class TransitSyncTests(unittest.TestCase):
         patcher = mock.patch.object(
             frontend_nat, '_instance_details',
             return_value={'status': 'Stopped',
-                          'expanded_devices': {'eth0': {'type': 'none'}}})
+                          'expanded_devices': {'eth0': {
+                              'network': 'eth0-shadow'}}})
         patcher.start()
         self.addCleanup(patcher.stop)
         original_gc = frontend_nat._gc_transit_reservations
@@ -577,18 +578,25 @@ class TransitSyncTests(unittest.TestCase):
             changed = frontend_nat.sync_transit_nics(
                 {'vm-a'}, '100.100.2.0/24')
         self.assertTrue(changed)
+        incus.assert_any_call('config', 'device', 'remove', 'vm-a',
+                              'eth0', check=False)
         incus.assert_any_call('config', 'device', 'override', 'vm-a',
-                              'eth0', 'type=none', check=False)
+                              'eth0', 'network=eth0-shadow', check=True)
         incus.assert_any_call('restart', 'vm-a', check=True)
 
-    def test_default_nic_falls_back_to_set_for_existing_override(self):
-        override = mock.Mock(returncode=1)
-        incus = mock.Mock(return_value=override)
-        details = {'expanded_devices': {'eth0': {'type': 'nic'}}}
+    def test_default_nic_adds_shadow_when_override_fails(self):
+        # Without a profile eth0 to override, `override` fails and the
+        # code falls back to adding a shadowed device directly.
+        def incus_side_effect(*args, **kwargs):
+            if args[:3] == ('config', 'device', 'override'):
+                raise RuntimeError('not found')
+            return mock.Mock(returncode=0)
+        incus = mock.Mock(side_effect=incus_side_effect)
+        details = {'expanded_devices': {}}
         with mock.patch.object(frontend_nat, '_incus', incus):
             self.assertTrue(frontend_nat._disable_default_nic('vm-a', details))
-        incus.assert_any_call('config', 'device', 'set', 'vm-a', 'eth0',
-                              'type=none', check=True)
+        incus.assert_any_call('config', 'device', 'add', 'vm-a', 'eth0',
+                              'nic', 'network=eth0-shadow', check=True)
 
     def test_reservation_keys_are_legacy_and_per_subnet(self):
         self.assertEqual(
@@ -633,7 +641,7 @@ class TransitSyncTests(unittest.TestCase):
 
     def test_decommission_removes_devices_and_reservation(self):
         details = {'status': 'Running',
-                   'expanded_devices': {'eth0': {'type': 'none'}}}
+                   'expanded_devices': {'eth0': {'network': 'eth0-shadow'}}}
         incus = mock.Mock(returncode=0)
         with mock.patch.object(frontend_nat, '_instance_details',
                                return_value=details), \
