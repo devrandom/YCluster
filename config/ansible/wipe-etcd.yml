@@ -4,27 +4,31 @@
   become: true
   vars:
     etcd_data_dir: "/var/lib/etcd"
-    
+    etcd_stop_timeout: 30
+
   tasks:
     - name: Stop cluster leader election service
-      systemd:
-        name: cluster-leader-election.service
-        state: stopped
-      ignore_errors: yes
+      command: systemctl stop cluster-leader-election.service
+      register: leader_election_stop
+      failed_when: >-
+        leader_election_stop.rc != 0
+        and not (leader_election_stop.stderr | default('') is search('not loaded|not found', ignorecase=True))
+      changed_when: leader_election_stop.rc == 0
 
     - name: Stop etcd service
-      systemd:
-        name: etcd
-        state: stopped
-      ignore_errors: yes
+      command: systemctl stop etcd.service
+      register: etcd_stop
+      failed_when: etcd_stop.rc != 0
+      changed_when: etcd_stop.rc == 0
 
     - name: Wait for etcd to fully stop
       wait_for:
         port: 2379
         host: localhost
         state: stopped
-        timeout: 30
-      ignore_errors: yes
+        timeout: "{{ etcd_stop_timeout }}"
+      register: etcd_port_wait
+      failed_when: etcd_port_wait.elapsed | int >= etcd_stop_timeout | int
 
     - name: Remove etcd data directory
       file:
