@@ -1,0 +1,417 @@
+"""Tests for VM data block-image sizing and device switching."""
+
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+from ycluster.utils import vm_data_block as vdb
+from ycluster.utils import vm_manager as vm
+
+
+def _proc(cmd, returncode=0, stdout=""):
+    return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+
+
+def _happy_run(cmd, *args, **kwargs):
+    if cmd[0] == "du":
+        return _proc(cmd, stdout="1 /mnt/vm\n")
+    if cmd[0] == "losetup" and "--find" in cmd:
+        return _proc(cmd, stdout="/dev/loop0\n")
+    return _proc(cmd)
+
+
+class VMDataBlockTests(unittest.TestCase):
+    def test_migration_size_uses_allocated_with_200gib_floor(self):
+        self.assertEqual(vdb.migration_size_mib(0),
+                         vdb.VM_DATA_MIN_BYTES // (1024 * 1024))
+        self.assertEqual(vdb.migration_size_mib(100 * 1024), 200 * 1024)
+        # 150 GiB allocated * 1.5 = 225 GiB.
+        self.assertEqual(vdb.migration_size_mib(150 * 1024), 225 * 1024)
+
+    def test_disk_size_parsing(self):
+        self.assertEqual(vdb.parse_disk_size("200GiB"), 200 * 1024**3)
+        self.assertEqual(vdb.parse_disk_size("2TiB"), 2 * 1024**4)
+        # Decimal-style aliases must not crash: parse binary-consistent.
+        self.assertEqual(vdb.parse_disk_size("200GB"), 200 * 1024**3)
+        self.assertEqual(vdb.parse_disk_size("1MB"), 1024**2)
+        self.assertEqual(vdb.parse_disk_size("1TB"), 1024**4)
+        self.assertEqual(vdb.parse_disk_size("512B"), 512)
+        with self.assertRaises(ValueError):
+            vdb.parse_disk_size("not-a-size")
+
+    def test_grow_data_image_refuses_to_shrink(self):
+        with mock.patch.object(vdb.subprocess, "run") as run:
+            run.return_value = _proc(["qemu-img"],
+                                     stdout='{"virtual-size": 300}')
+            with self.assertRaises(ValueError):
+                vdb.grow_data_image("img", 100)
+        self.assertEqual(run.call_args.args[0][:2], ["qemu-img", "info"])
+
+    def test_grow_data_image_resizes_only_when_growing(self):
+        def run(cmd, *args, **kwargs):
+            if cmd[1] == "info":
+                return _proc(cmd, stdout='{"virtual-size": 300}')
+            return _proc(cmd)
+
+        with mock.patch.object(vdb.subprocess, "run",
+                               side_effect=run) as run_mock:
+            vdb.grow_data_image("img", 300)
+            self.assertNotIn(
+                "resize", [c.args[0][1] for c in run_mock.call_args_list])
+            vdb.grow_data_image("img", 500)
+        self.assertIn(["qemu-img", "resize", "img", "500"],
+                      [c.args[0] for c in run_mock.call_args_list])
+
+    def test_existing_image_attaches_block_device(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run"),
+            mock.patch.object(vm, "_instance_info",
+                              return_value={"type": "virtual-machine"}),
+            mock.patch.object(vdb.os.path, "exists", return_value=True),
+            mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
+            mock.patch.object(vdb, "replace_data_device") as replace,
+        ):
+            vm._ensure_nas_share("vm1")
+
+        replace.assert_called_once_with(
+            vm._incus, "vm1", f"{vdb.NAS_NFS_MOUNT}/vm1.img",
+            "io.cache=none", "io.bus=virtio-blk", "required=true")
+
+    def test_migration_success_renames_verified_image(self):
+        image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
+        tmp = f"{image}.tmp"
+        with (
+            mock.patch.object(vdb.subprocess, "run",
+                              side_effect=_happy_run) as run,
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb.os, "statvfs") as statvfs,
+            mock.patch.object(vdb.tempfile, "mkdtemp",
+                              return_value="/mnt/vm1-data") as mkdtemp,
+            mock.patch.object(vdb.os, "replace") as replace,
+            mock.patch.object(vdb.os, "rmdir") as rmdir,
+        ):
+            statvfs.return_value = mock.Mock(f_bavail=300, f_frsize=1024**3)
+            with (
+                mock.patch.object(vdb, "_regular_file_stats",
+                                  return_value=(2, 30)),
+                mock.patch.object(vdb, "_append_vmdata_fstab") as fstab,
+            ):
+                vdb.migrate_vm_data_to_image("vm1", image, is_running=lambda: False)
+
+        commands = [tuple(call.args[0]) for call in run.call_args_list]
+        self.assertIn(("qemu-img", "create", "-f", "raw", tmp, "204800M"),
+                      commands)
+        self.assertIn(("rsync", "-aHAXS", f"{vdb.NAS_NFS_MOUNT}/vm1/",
+                       "/mnt/vm1-data/"), commands)
+        fstab.assert_called_once_with("/mnt/vm1-data")
+        replace.assert_called_once_with(tmp, image)
+
+    def test_migration_aborts_if_vm_starts_before_commit(self):
+        image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
+        running = iter([False, True])
+        with (
+            mock.patch.object(vdb.subprocess, "run",
+                              side_effect=_happy_run),
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb.os, "statvfs",
+                              return_value=mock.Mock(f_bavail=300,
+                                                     f_frsize=1024**3)),
+            mock.patch.object(vdb.tempfile, "mkdtemp",
+                              return_value="/mnt/vm1-data"),
+            mock.patch.object(vdb.os, "replace") as replace,
+            mock.patch.object(vdb.os, "rmdir"),
+            mock.patch.object(vdb, "_regular_file_stats",
+                              return_value=(2, 30)),
+            mock.patch.object(vdb, "_append_vmdata_fstab"),
+        ):
+            with self.assertRaises(RuntimeError):
+                vdb.migrate_vm_data_to_image(
+                    "vm1", image, is_running=lambda: next(running))
+
+        replace.assert_not_called()
+
+    def test_failed_copy_cleans_up_temporary_image(self):
+        image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
+        tmp = f"{image}.tmp"
+
+        def run(cmd, *args, **kwargs):
+            if cmd[0] == "du":
+                return _proc(cmd, stdout="1 /mnt/vm\n")
+            if cmd[0] == "rsync":
+                raise subprocess.CalledProcessError(1, cmd)
+            if cmd[0] == "losetup" and "--find" in cmd:
+                return _proc(cmd, stdout="/dev/loop0\n")
+            return _proc(cmd)
+
+        with (
+            mock.patch.object(vdb.subprocess, "run", side_effect=run),
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb.os.path, "exists",
+                              side_effect=lambda path: path == tmp),
+            mock.patch.object(vdb.os, "statvfs") as statvfs,
+            mock.patch.object(vdb.tempfile, "mkdtemp",
+                              return_value="/mnt/vm1-data"),
+            mock.patch.object(vdb.os, "replace") as replace,
+            mock.patch.object(vdb.os, "unlink") as unlink,
+            mock.patch.object(vdb.os, "rmdir"),
+            mock.patch.object(vdb, "_append_vmdata_fstab"),
+        ):
+            statvfs.return_value = mock.Mock(f_bavail=300, f_frsize=1024**3)
+            with self.assertRaises(subprocess.CalledProcessError):
+                vdb.migrate_vm_data_to_image(
+                    "vm1", image, is_running=lambda: False)
+
+        replace.assert_not_called()
+        self.assertEqual(unlink.call_args_list,
+                         [mock.call(tmp), mock.call(tmp)])
+
+    def test_regular_file_stats_counts_and_sums(self):
+        with mock.patch.object(vdb.subprocess, "run") as run:
+            run.return_value = _proc(["find"], stdout="10\n5\n")
+            self.assertEqual(vdb._regular_file_stats("src"), (2, 15))
+
+    def test_fstab_entry_is_idempotent(self):
+        created = mock.mock_open()
+        with (
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch("builtins.open", created),
+        ):
+            vdb._append_vmdata_fstab("/mnt/vm1-data")
+        created.assert_called_once_with("/mnt/vm1-data/etc/fstab", "a",
+                                        encoding="utf-8")
+        created.return_value.write.assert_called_once_with(
+            vdb.VM_DATA_FSTAB_ENTRY)
+
+        existing = mock.mock_open(read_data="LABEL=vmdata /data ext4\n")
+        with (
+            mock.patch.object(vdb.os.path, "exists", return_value=True),
+            mock.patch("builtins.open", existing),
+        ):
+            vdb._append_vmdata_fstab("/mnt/vm1-data")
+        existing.return_value.write.assert_not_called()
+
+    def test_migration_preflight_rejections(self):
+        image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
+        with mock.patch.object(vdb.subprocess, "run") as run:
+            with self.assertRaises(RuntimeError):
+                vdb.migrate_vm_data_to_image(
+                    "vm1", image, is_running=lambda: True)
+            run.assert_not_called()
+
+        with mock.patch.object(vdb.subprocess, "run",
+                               return_value=_proc(["mountpoint"], returncode=1)):
+            with self.assertRaises(RuntimeError):
+                vdb.migrate_vm_data_to_image(
+                    "vm1", image, is_running=lambda: False)
+
+        with (
+            mock.patch.object(vdb.subprocess, "run",
+                              return_value=_proc(["mountpoint"])),
+            mock.patch.object(vdb.os.path, "isdir", return_value=False),
+        ):
+            with self.assertRaises(RuntimeError):
+                vdb.migrate_vm_data_to_image(
+                    "vm1", image, is_running=lambda: False)
+
+        with (
+            mock.patch.object(vdb.subprocess, "run",
+                              return_value=_proc(["mountpoint"])),
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb.os.path, "exists", return_value=True),
+        ):
+            with self.assertRaises(RuntimeError):
+                vdb.migrate_vm_data_to_image(
+                    "vm1", image, is_running=lambda: False)
+
+        with (
+            mock.patch.object(vdb.subprocess, "run",
+                              side_effect=_happy_run),
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb.os, "statvfs",
+                              return_value=mock.Mock(
+                                  f_bavail=1, f_frsize=1024**3)),
+        ):
+            with self.assertRaises(RuntimeError):
+                vdb.migrate_vm_data_to_image(
+                    "vm1", image, is_running=lambda: False)
+
+    def test_migration_verification_failure_cleans_up(self):
+        image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
+        tmp = f"{image}.tmp"
+        with (
+            mock.patch.object(vdb.subprocess, "run",
+                              side_effect=_happy_run) as run,
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb.os.path, "exists",
+                              side_effect=[False, False, True]),
+            mock.patch.object(vdb.os, "statvfs") as statvfs,
+            mock.patch.object(vdb.tempfile, "mkdtemp",
+                              return_value="/mnt/vm1-data"),
+            mock.patch.object(vdb.os, "replace") as replace,
+            mock.patch.object(vdb.os, "unlink") as unlink,
+            mock.patch.object(vdb.os, "rmdir"),
+        ):
+            statvfs.return_value = mock.Mock(f_bavail=300, f_frsize=1024**3)
+            with (
+                mock.patch.object(vdb, "_regular_file_stats",
+                                  side_effect=[(1, 10), (2, 20)]),
+                mock.patch.object(vdb, "_append_vmdata_fstab"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    vdb.migrate_vm_data_to_image(
+                        "vm1", image, is_running=lambda: False)
+
+        replace.assert_not_called()
+        unlink.assert_called_once_with(tmp)
+
+    def test_migration_failure_falls_back_to_directory_share(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run"),
+            mock.patch.object(vm, "_instance_info",
+                              return_value={"type": "virtual-machine"}),
+            mock.patch.object(vm, "_instance_running", return_value=False),
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
+            mock.patch.object(vdb, "migrate_vm_data_to_image",
+                              side_effect=RuntimeError("no space")),
+            mock.patch.object(vdb, "replace_data_device") as replace,
+        ):
+            vm._ensure_nas_share("vm1")
+
+        replace.assert_called_once_with(
+            vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false")
+
+    def test_migration_failure_leaves_running_vm_untouched(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run"),
+            mock.patch.object(vm, "_instance_info",
+                              return_value={"type": "virtual-machine"}),
+            mock.patch.object(vm, "_instance_running", return_value=True),
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
+            mock.patch.object(vdb, "migrate_vm_data_to_image",
+                              side_effect=RuntimeError("no space")),
+            mock.patch.object(vdb, "replace_data_device") as replace,
+        ):
+            vm._ensure_nas_share("vm1")
+
+        replace.assert_not_called()
+
+    def test_committed_image_attach_failure_fails_start(self):
+        committed = {"image": False}
+
+        def exists(path):
+            return committed["image"]
+
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run"),
+            mock.patch.object(vm, "_instance_info",
+                              return_value={"type": "virtual-machine"}),
+            mock.patch.object(vdb.os.path, "exists", side_effect=exists),
+            mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
+            mock.patch.object(vdb, "migrate_vm_data_to_image",
+                              side_effect=lambda *a, **k:
+                                  committed.__setitem__("image", True)),
+            mock.patch.object(vdb, "replace_data_device",
+                              side_effect=RuntimeError("attach failed")),
+        ):
+            with self.assertRaises(RuntimeError):
+                vm._ensure_nas_share("vm1")
+
+    def test_resize_refuses_legacy_attached_vm(self):
+        image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
+        with (
+            mock.patch.object(vdb.os.path, "exists", return_value=True),
+            mock.patch.object(vdb.subprocess, "run") as run,
+        ):
+            run.return_value = _proc(["incus"], returncode=1, stdout="")
+            with self.assertRaises(ValueError):
+                vdb.assert_resizable(
+                    lambda *a, **k: run.return_value, "vm1", image)
+            # Image attached: passes.
+            run.return_value = _proc(["incus"], stdout=f"{image}\n")
+            vdb.assert_resizable(
+                lambda *a, **k: run.return_value, "vm1", image)
+
+    def test_replace_data_device_swaps_sources(self):
+        calls = []
+
+        def make_incus(current):
+            def incus(*args, **kwargs):
+                calls.append(args)
+                get = args[:4] == ("config", "device", "get", "vm1")
+                if get:
+                    missing = current is None
+                    return _proc(args, 1 if missing else 0,
+                                 "" if missing else f"{current}\n")
+                return _proc(args)
+            return incus
+
+        # Same source: no change.
+        vdb.replace_data_device(make_incus("old-src"), "vm1", "old-src")
+        self.assertEqual(calls, [("config", "device", "get", "vm1",
+                                  "data", "source")])
+        # Different source: remove then add.
+        calls.clear()
+        vdb.replace_data_device(make_incus("old-src"), "vm1", "new-src",
+                                "required=true")
+        self.assertIn(("config", "device", "remove", "vm1", "data"), calls)
+        self.assertIn(("config", "device", "add", "vm1", "data", "disk",
+                       "source=new-src", "path=/data", "required=true"),
+                      calls)
+        # Not attached: add only.
+        calls.clear()
+        vdb.replace_data_device(make_incus(None), "vm1", "new-src")
+        self.assertNotIn(("config", "device", "remove", "vm1", "data"), calls)
+        self.assertIn(("config", "device", "add", "vm1", "data", "disk",
+                       "source=new-src", "path=/data"), calls)
+
+    def test_disabled_share_attaches_nothing(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value="false"),
+            mock.patch.object(vdb.subprocess, "run") as run,
+            mock.patch.object(vdb, "replace_data_device") as replace,
+        ):
+            vm._ensure_nas_share("vm1")
+
+        run.assert_not_called()
+        replace.assert_not_called()
+
+    def test_unreachable_nas_skips_attach(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run") as run,
+            mock.patch.object(vdb, "replace_data_device") as replace,
+            mock.patch.object(vdb, "migrate_vm_data_to_image") as migrate,
+        ):
+            run.side_effect = subprocess.TimeoutExpired(cmd="mkdir", timeout=10)
+            vm._ensure_nas_share("vm1")
+
+        migrate.assert_not_called()
+        replace.assert_not_called()
+
+    def test_container_gets_directory_share(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run"),
+            mock.patch.object(vm, "_instance_info",
+                              return_value={"type": "container"}),
+            mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
+            mock.patch.object(vdb, "replace_data_device") as replace,
+        ):
+            vm._ensure_nas_share("vm1")
+
+        replace.assert_called_once_with(
+            vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false")
+
+
+if __name__ == "__main__":
+    unittest.main()
