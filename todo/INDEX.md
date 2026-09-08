@@ -114,6 +114,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [/api/allocations + /api/health unauth](code-quality/api-allocations-health-unauth.md)
 
 ## Inference
+- [OWUI: validate tool-call arguments at ingest, not on replay](inference/owui-validate-tool-calls-at-ingest.md) — a malformed tool call from SGLang's `glm47` parser got persisted into chat history; every subsequent request 400s on replayed history and the chat is permanently stuck. Fix: validate/sanitize `function.arguments` when the assistant response arrives, before persisting.
 - [GLM-5.3-Flash: evaluate higher concurrency](inference/glm53-higher-concurrency.md) — `max-running-requests 8` is clamped to the `cuda-graph-max-bs-decode 8` ceiling (decode past it falls back to eager, ~4× slower); aggregate tok/s plateaus at ~550. To go faster, raise both knobs together and requalify.
 - [DS4 infernal: watch for DCP support, then TP2+DCP2 vs TP4](inference/ds4-infernal-dcp.md) — II launcher gates `DCP_SIZE=1` for DS4 DSpark and has no PP axis, leaving TP4 as the only 4-GPU 256K shape; re-test TP2+DCP2 once a build lifts the gate.
 - [vllm-mlx on m1 ops gaps](inference/vllm-mlx-ops.md)
