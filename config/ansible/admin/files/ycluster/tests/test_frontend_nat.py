@@ -84,6 +84,18 @@ class ListExposuresTests(unittest.TestCase):
              'transit_ip': ''},
         ])
 
+    def test_list_skips_reservation_keys(self):
+        keys = {
+            '/cluster/frontend/nat/_ip/100.100.2.11': 'vm-reserved',
+            '/cluster/frontend/nat/tcp/vm-a/80-80':
+                json.dumps({'transit_ip': '100.100.2.11'}),
+        }
+        with _patched_etcd(_fake_client(keys)):
+            self.assertEqual(frontend_nat.list_exposures(), [
+                {'proto': 'tcp', 'vm': 'vm-a', 'ports': '80-80',
+                 'transit_ip': '100.100.2.11'},
+            ])
+
     def test_list_skips_malformed_records(self):
         keys = {
             '/cluster/frontend/nat/nodashes': 'not json',
@@ -942,3 +954,30 @@ class TransitSyncTests(unittest.TestCase):
         incus = mock.Mock(return_value=mock.Mock(stdout='not json'))
         with mock.patch.object(frontend_nat, '_incus', incus):
             self.assertEqual(frontend_nat._transit_nics_by_vm(), {})
+
+
+class DelegationWrappersTests(unittest.TestCase):
+    def test_incus_delegates(self):
+        run = mock.Mock()
+        with mock.patch('ycluster.utils.vm_manager._incus', run):
+            result = frontend_nat._incus('list', check=False)
+        run.assert_called_once_with('list', check=False)
+        self.assertIs(result, run.return_value)
+
+    def test_instance_helpers_delegate(self):
+        exists = mock.Mock(return_value=True)
+        read = mock.Mock(return_value='content')
+        push = mock.Mock()
+        with mock.patch('ycluster.utils.vm_manager._instance_exists',
+                        exists), \
+                mock.patch('ycluster.utils.vm_manager._read_file', read), \
+                mock.patch('ycluster.utils.vm_manager._push_file', push):
+            self.assertTrue(frontend_nat._instance_exists('vm-a'))
+            self.assertEqual(frontend_nat._read_file('vm-a', '/etc/hosts'),
+                             'content')
+            frontend_nat._push_file('vm-a', '/etc/hosts', 'content',
+                                    'root', '0644')
+        exists.assert_called_once_with('vm-a')
+        read.assert_called_once_with('vm-a', '/etc/hosts')
+        push.assert_called_once_with('vm-a', '/etc/hosts', 'content',
+                                     'root', '0644')

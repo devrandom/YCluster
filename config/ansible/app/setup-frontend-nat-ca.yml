@@ -1,0 +1,225 @@
+---
+# Seed the frontend NAT mTLS material into etcd (docs/design/vm-frontend-nat.md).
+#
+# Creates, if missing:
+#   /cluster/config/frontend-nat/ca.crt       — self-signed CA (public)
+#   /cluster/config/frontend-nat/ca.key       — CA private key (for issuing)
+#   /cluster/config/frontend-nat/client.crt   — nat-reconciler client identity
+#   /cluster/config/frontend-nat/client.key   — matching private key
+#
+# Downstream consumers fetch these from etcd at install time:
+#   - setup-web-services.yml    → /etc/nginx/nat-ca.crt (ssl_verify_client)
+#   - install-frontend-nat.yml  → /etc/ycluster/nat-{ca.crt,client.crt,client.key}
+#
+# Idempotent per key: an existing CA with its key is left alone and only a
+# missing client pair is issued. If the CA cert exists but its key does not
+# (out-of-band generation), the whole set is regenerated — signed client
+# identities from the old CA would be unverifiable anyway, so every consumer
+# must be re-installed after this play (re-run setup-web-services.yml and
+# install-frontend-nat.yml).
+- hosts: "{{ frontend_nat_ca_seed_host | default(groups.get('storage', ['localhost']) | first) }}"
+  become: true
+  vars:
+    nat_ca_etcd_prefix: /cluster/config/frontend-nat
+    nat_ca_scratch_dir: /var/lib/ycluster/nat-ca
+    nat_ca_subject: "/CN=ycluster-frontend-nat-ca"
+    nat_client_subject: "/CN=ycluster-frontend-nat-agent"
+
+  tasks:
+    - name: Check which NAT CA keys already exist in etcd
+      command:
+        cmd: etcdctl get {{ item }} --print-value-only
+      environment: "{{ etcd_client_env }}"
+      loop:
+        - "{{ nat_ca_etcd_prefix }}/ca.crt"
+        - "{{ nat_ca_etcd_prefix }}/ca.key"
+      register: nat_ca_existing
+      changed_when: false
+      no_log: true
+
+    - name: Record whether CA cert and key are present
+      set_fact:
+        nat_ca_cert_present: "{{ (nat_ca_existing.results[0].stdout | trim) != '' }}"
+        nat_ca_key_present: "{{ (nat_ca_existing.results[1].stdout | trim) != '' }}"
+
+    - name: Regenerate everything when the CA key is unrecoverable
+      when: nat_ca_cert_present and not nat_ca_key_present
+      command:
+        cmd: etcdctl del --prefix {{ nat_ca_etcd_prefix }}/
+      environment: "{{ etcd_client_env }}"
+      changed_when: true
+
+    - name: Seed the frontend NAT CA and client identity into etcd
+      when: not nat_ca_cert_present or not nat_ca_key_present
+      block:
+        - name: Create scratch directory for key material
+          file:
+            path: "{{ nat_ca_scratch_dir }}"
+            state: directory
+            mode: '0700'
+
+        - name: Generate CA private key
+          command:
+            cmd: openssl genrsa -out {{ nat_ca_scratch_dir }}/ca.key 4096
+          no_log: true
+
+        - name: Generate self-signed CA certificate (10 years)
+          command:
+            cmd: >
+              openssl req -x509 -new -key {{ nat_ca_scratch_dir }}/ca.key
+              -subj {{ nat_ca_subject }} -days 3650
+              -out {{ nat_ca_scratch_dir }}/ca.crt
+
+        - name: Generate client private key
+          command:
+            cmd: openssl genrsa -out {{ nat_ca_scratch_dir }}/client.key 4096
+          no_log: true
+
+        - name: Generate client CSR
+          command:
+            cmd: >
+              openssl req -new -key {{ nat_ca_scratch_dir }}/client.key
+              -subj {{ nat_client_subject }}
+              -out {{ nat_ca_scratch_dir }}/client.csr
+
+        - name: Write clientAuth extension file
+          copy:
+            content: "extendedKeyUsage=clientAuth\n"
+            dest: "{{ nat_ca_scratch_dir }}/client.ext"
+            mode: '0644'
+
+        - name: Sign client certificate with the CA (10 years)
+          command:
+            cmd: >
+              openssl x509 -req
+              -in {{ nat_ca_scratch_dir }}/client.csr
+              -CA {{ nat_ca_scratch_dir }}/ca.crt
+              -CAkey {{ nat_ca_scratch_dir }}/ca.key
+              -CAcreateserial
+              -days 3650 -extfile {{ nat_ca_scratch_dir }}/client.ext
+              -out {{ nat_ca_scratch_dir }}/client.crt
+
+        - name: Store CA certificate in etcd
+          shell:
+            cmd: cat {{ nat_ca_scratch_dir }}/ca.crt | etcdctl put {{ nat_ca_etcd_prefix }}/ca.crt
+          environment: "{{ etcd_client_env }}"
+          no_log: true
+
+        - name: Store CA private key in etcd
+          shell:
+            cmd: cat {{ nat_ca_scratch_dir }}/ca.key | etcdctl put {{ nat_ca_etcd_prefix }}/ca.key
+          environment: "{{ etcd_client_env }}"
+          no_log: true
+
+        - name: Store client certificate in etcd
+          shell:
+            cmd: cat {{ nat_ca_scratch_dir }}/client.crt | etcdctl put {{ nat_ca_etcd_prefix }}/client.crt
+          environment: "{{ etcd_client_env }}"
+          no_log: true
+
+        - name: Store client private key in etcd
+          shell:
+            cmd: cat {{ nat_ca_scratch_dir }}/client.key | etcdctl put {{ nat_ca_etcd_prefix }}/client.key
+          environment: "{{ etcd_client_env }}"
+          no_log: true
+
+        - name: Remove scratch directory
+          file:
+            path: "{{ nat_ca_scratch_dir }}"
+            state: absent
+
+    - name: Issue only the client pair when the CA is complete
+      when: nat_ca_cert_present and nat_ca_key_present
+      block:
+        - name: Check whether the client identity already exists
+          command:
+            cmd: etcdctl get {{ nat_ca_etcd_prefix }}/client.crt --print-value-only
+          environment: "{{ etcd_client_env }}"
+          register: nat_client_existing
+          changed_when: false
+          no_log: true
+
+        - name: Issue client identity signed by the existing CA
+          when: (nat_client_existing.stdout | trim) == ''
+          block:
+            - name: Create scratch directory for key material
+              file:
+                path: "{{ nat_ca_scratch_dir }}"
+                state: directory
+                mode: '0700'
+
+            - name: Fetch CA certificate from etcd
+              command:
+                cmd: etcdctl get {{ nat_ca_etcd_prefix }}/ca.crt --print-value-only
+              environment: "{{ etcd_client_env }}"
+              register: nat_ca_crt
+              changed_when: false
+              no_log: true
+
+            - name: Fetch CA private key from etcd
+              command:
+                cmd: etcdctl get {{ nat_ca_etcd_prefix }}/ca.key --print-value-only
+              environment: "{{ etcd_client_env }}"
+              register: nat_ca_key
+              changed_when: false
+              no_log: true
+
+            - name: Write CA material to scratch
+              copy:
+                content: "{{ item.content }}"
+                dest: "{{ item.path }}"
+                mode: "{{ item.mode }}"
+              loop:
+                - content: "{{ nat_ca_crt.stdout }}"
+                  path: "{{ nat_ca_scratch_dir }}/ca.crt"
+                  mode: '0644'
+                - content: "{{ nat_ca_key.stdout }}"
+                  path: "{{ nat_ca_scratch_dir }}/ca.key"
+                  mode: '0600'
+              no_log: true
+
+            - name: Generate client private key
+              command:
+                cmd: openssl genrsa -out {{ nat_ca_scratch_dir }}/client.key 4096
+              no_log: true
+
+            - name: Generate client CSR
+              command:
+                cmd: >
+                  openssl req -new -key {{ nat_ca_scratch_dir }}/client.key
+                  -subj {{ nat_client_subject }}
+                  -out {{ nat_ca_scratch_dir }}/client.csr
+
+            - name: Write clientAuth extension file
+              copy:
+                content: "extendedKeyUsage=clientAuth\n"
+                dest: "{{ nat_ca_scratch_dir }}/client.ext"
+                mode: '0644'
+
+            - name: Sign client certificate with the CA (10 years)
+              command:
+                cmd: >
+                  openssl x509 -req
+                  -in {{ nat_ca_scratch_dir }}/client.csr
+                  -CA {{ nat_ca_scratch_dir }}/ca.crt
+                  -CAkey {{ nat_ca_scratch_dir }}/ca.key
+                  -CAcreateserial
+                  -days 3650 -extfile {{ nat_ca_scratch_dir }}/client.ext
+                  -out {{ nat_ca_scratch_dir }}/client.crt
+
+            - name: Store client certificate in etcd
+              shell:
+                cmd: cat {{ nat_ca_scratch_dir }}/client.crt | etcdctl put {{ nat_ca_etcd_prefix }}/client.crt
+              environment: "{{ etcd_client_env }}"
+              no_log: true
+
+            - name: Store client private key in etcd
+              shell:
+                cmd: cat {{ nat_ca_scratch_dir }}/client.key | etcdctl put {{ nat_ca_etcd_prefix }}/client.key
+              environment: "{{ etcd_client_env }}"
+              no_log: true
+
+            - name: Remove scratch directory
+              file:
+                path: "{{ nat_ca_scratch_dir }}"
+                state: absent

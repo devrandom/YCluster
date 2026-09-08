@@ -244,10 +244,11 @@ let the frontend rules expire on its next pull.
 - The admin API endpoint requires mTLS; the frontend's client cert is
   scoped to this one read-only route. The frontend reaches the
   endpoint via its existing frp tunnel (plain TCP passthrough to the
-  leader's nginx `127.0.0.2:443` listener). A dedicated location block
-  on the public vhost (e.g. `/api/frontend/nat-rules`) is configured
-  with `ssl_verify_client on` and a CA restricted to the frontend's
-  client cert; other locations on the same vhost are unaffected.
+  leader's nginx `127.0.0.2:17443` listener). The vhost requests
+  optional client certificates and the dedicated location block
+  (e.g. `/api/frontend/nat-rules`) enforces
+  `$ssl_client_verify == SUCCESS`; other locations on the same vhost
+  are unaffected.
 - The nat-reconciler validates the full desired set before applying.
   Invalid or incomplete records (e.g. overlapping port ranges, or a
   mapping whose transit IP has not yet been allocated) are

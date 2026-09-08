@@ -221,6 +221,27 @@
       notify: restart nginx
       when: "'storage' in group_names"
 
+    - name: Fetch frontend NAT CA from etcd
+      command:
+        cmd: etcdctl get /cluster/config/frontend-nat/ca.crt --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: nat_ca_result
+      changed_when: false
+      when: "'storage' in group_names"
+
+    - name: Fail if the frontend NAT CA is missing
+      fail:
+        msg: Frontend NAT CA missing from etcd — run setup-frontend-nat-ca.yml
+      when: "'storage' in group_names and (nat_ca_result.stdout | trim) == ''"
+
+    - name: Install frontend NAT CA for nginx mTLS
+      copy:
+        content: "{{ nat_ca_result.stdout }}"
+        dest: /etc/nginx/nat-ca.crt
+        mode: '0644'
+      notify: restart nginx
+      when: "'storage' in group_names"
+
     - name: Install app.<domain> redirect vhost template
       copy:
         src: ycluster_app.conf.j2

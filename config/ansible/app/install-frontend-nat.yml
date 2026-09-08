@@ -16,11 +16,14 @@
 # transit subnet, not an Incus host.
 #
 # Requires for participating hosts: nat_public_ip (plus optional
-# nat_wan_iface / nat_transit_iface) and mTLS material
-# (nat_client_key / nat_client_cert) in host_vars.
+# nat_wan_iface / nat_transit_iface) in host_vars. All mTLS material
+# (CA, client cert, client key) is fetched from etcd under
+# /cluster/config/frontend-nat/ — seed it with setup-frontend-nat-ca.yml.
 
 - hosts: frontend
   become: true
+  vars:
+    nat_ca_etcd_prefix: /cluster/config/frontend-nat
   tasks:
     - name: Skip non-participating frontends
       debug:
@@ -60,36 +63,47 @@
         owner: root
         group: root
 
-    - name: Install mTLS client key
+    - name: Fetch NAT mTLS material from etcd
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+      command:
+        cmd: etcdctl get {{ nat_ca_etcd_prefix }}/{{ item }} --print-value-only
+      environment: "{{ etcd_client_env }}"
+      loop: [ca.crt, client.crt, client.key]
+      register: nat_mtls_material
+      changed_when: false
+      no_log: true
+
+    - name: Install mTLS CA certificate (from etcd)
       when: vm_frontend_nat_enabled | default(false)
       copy:
-        content: "{{ nat_client_key }}"
+        content: "{{ nat_mtls_material.results[0].stdout }}"
+        dest: /etc/ycluster/nat-ca.crt
+        mode: '0644'
+
+    - name: Install mTLS client certificate (from etcd)
+      when: vm_frontend_nat_enabled | default(false)
+      copy:
+        content: "{{ nat_mtls_material.results[1].stdout }}"
+        dest: /etc/ycluster/nat-client.crt
+        mode: '0644'
+
+    - name: Install mTLS client key (from etcd)
+      when: vm_frontend_nat_enabled | default(false)
+      copy:
+        content: "{{ nat_mtls_material.results[2].stdout }}"
         dest: /etc/ycluster/nat-client.key
         mode: '0600'
       no_log: true
 
-    - name: Install mTLS client certificate
-      when: vm_frontend_nat_enabled | default(false)
-      copy:
-        content: "{{ nat_client_cert }}"
-        dest: /etc/ycluster/nat-client.crt
-        mode: '0644'
-
-    - name: Install mTLS CA certificate
-      when: vm_frontend_nat_enabled | default(false)
-      copy:
-        content: "{{ nat_client_ca }}"
-        dest: /etc/ycluster/nat-ca.crt
-        mode: '0644'
-
     - name: Fail if mTLS material is missing
       when: vm_frontend_nat_enabled | default(false) and
-            (nat_client_key is not defined or nat_client_cert is not defined)
+            (nat_mtls_material.results | map(attribute='stdout') | map('trim') | select('equalto', '') | list | length > 0)
       fail:
         msg: >-
-          nat_client_key / nat_client_cert must be provided for
-          {{ inventory_hostname }} — the agent refuses to pull without
-          mTLS (fail-closed).
+          NAT mTLS material missing from etcd ({{ nat_ca_etcd_prefix }})
+          — run setup-frontend-nat-ca.yml to seed it. The agent refuses to
+          pull without mTLS (fail-closed).
 
     - name: Create nftables.d include directory
       when: vm_frontend_nat_enabled | default(false)
