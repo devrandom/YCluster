@@ -75,6 +75,17 @@ _URL_BASE = f"http://{_HOST}:{_PORT}"
 _BEARER_PATH = auth.default_token_path()
 _BEARER_TOKEN = auth.load_or_create_token(_BEARER_PATH)
 
+# Anti busy-polling guard for the `tail`/`status` tools. Applied per
+# (tool, session) key: refuse calls more often than `_TAIL_STATUS_MAX_CALLS`
+# in `_TAIL_STATUS_WINDOW_S` seconds and tell the agent to sleep at least
+# `_TAIL_STATUS_RECOMMENDED_SLEEP_S` before polling again. Defined here so
+# the server instructions can inline the effective values.
+_TAIL_STATUS_MAX_CALLS = _env_int("CE_TAIL_STATUS_MAX_CALLS", 3)
+_TAIL_STATUS_WINDOW_S = _env_float("CE_TAIL_STATUS_WINDOW_S", 20.0)
+_TAIL_STATUS_RECOMMENDED_SLEEP_S = _env_float(
+    "CE_TAIL_STATUS_RECOMMENDED_SLEEP_S", 10.0
+)
+
 SERVER = MCPServer(
     "cluster-exec",
     instructions=(
@@ -93,7 +104,12 @@ SERVER = MCPServer(
         "hard-kills after `timeout_s` (default 1800s, `CE_TIMEOUT_S`; "
         "set to 0 to disable). Backgrounded runs return `BACKGROUNDED "
         "session=<id>` \u2014 poll with `tail -s <id>`, inspect with "
-        "`status`, terminate with `kill`. `status` and `kill` only see "
+        "`status`, terminate with `kill`. Pace polls: wait at least "
+        f"{_TAIL_STATUS_RECOMMENDED_SLEEP_S:.0f}s (the recommended sleep) "
+        "between `status`/`tail` calls instead of busy-looping \u2014 the "
+        f"rate limiter refuses calls beyond {_TAIL_STATUS_MAX_CALLS} per "
+        f"{_TAIL_STATUS_WINDOW_S:.0f}s. "
+        "`status` and `kill` only see "
         "the caller's own backgrounded runs (filtered by the caller's "
         "`_meta.threadId`, falling back to the `mcp-session-id` header); "
         "other clients' runs are not enumerable. If the HTTP client "
@@ -103,10 +119,7 @@ SERVER = MCPServer(
         "recover with `tail`/`kill`. Full "
         "`run` output is logged to the same JSONL file; the returned "
         "text is the head/tail-truncated merged stream with `[stderr]` "
-        "tags on stderr lines. `tail` and `status` polling is rate-limited "
-        "per session (max `CE_TAIL_STATUS_MAX_CALLS` per "
-        "`CE_TAIL_STATUS_WINDOW_S`s) \u2014 over the limit calls are refused "
-        "with a backoff recommendation. `put` and `get` are foreground only (no "
+        "tags on stderr lines. `put` and `get` are foreground only (no "
         "auto-backgrounding) and honor the same hard `timeout_s` (default "
         "1800s; set to 0 to disable). All three exec tools accept "
         "`hostname=\"localhost\"` to skip the inner ssh and run directly "
@@ -146,11 +159,6 @@ _PROGRESS_TAIL_LINES = _env_int("CE_PROGRESS_TAIL_LINES", 50)
 # (tool, session) key: refuse calls more often than `_TAIL_STATUS_MAX_CALLS`
 # in `_TAIL_STATUS_WINDOW_S` seconds and tell the agent to sleep at least
 # `_TAIL_STATUS_RECOMMENDED_SLEEP_S` before polling again.
-_TAIL_STATUS_MAX_CALLS = _env_int("CE_TAIL_STATUS_MAX_CALLS", 3)
-_TAIL_STATUS_WINDOW_S = _env_float("CE_TAIL_STATUS_WINDOW_S", 20.0)
-_TAIL_STATUS_RECOMMENDED_SLEEP_S = _env_float(
-    "CE_TAIL_STATUS_RECOMMENDED_SLEEP_S", 10.0
-)
 _TAIL_STATUS_LIMITER = ratelimit.RateLimiter(
     max_calls=_TAIL_STATUS_MAX_CALLS,
     window_s=_TAIL_STATUS_WINDOW_S,
