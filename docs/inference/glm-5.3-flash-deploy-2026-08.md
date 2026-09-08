@@ -365,6 +365,58 @@ NVFP4 checkpoint is **182 GiB** staged under the model dir; node root has
 ~200 GiB free at verify time (plenty for the checkpoint + build context).
 Weights load direct-to-GPU with the fast loader (see host-RAM OOM gotcha above).
 
+## Known incident: ~4 min decode past apparent response completion
+
+An incident against the SGLang A1 deployment exposed a termination bug worth
+re-testing after any image upgrade. A local trace proxy (full request/response
+capture with per-request IDs) confirmed the sequence:
+
+- The incident request was sent at T+0 and prefilled as 128 new tokens on a
+  ~240k cached prefix; the gateway logged it as one 326s streaming request.
+- The engine decoded ~10.8k tokens in the first ~70s, then the stream stalled
+  somewhere between the engine and the client. The engine did **not** stop: it
+  decoded ~71k more tokens over the next ~4m13s (`#running-req: 1`
+  continuously, token pool 251k → 322k), with no abort/cancel/disconnect
+  entries.
+- At exactly T+301s the client gave up (looks like a 300s client timeout) and
+  retried the identical turn (`request_kind: turn`, same turn/prompt-cache
+  IDs). The retry completed in ~7s with 50 output tokens — **while the
+  abandoned original was still decoding**, confirming the engine was healthy
+  and concurrent.
+- The trace proxy has no completion record for the original request at all —
+  its streaming handler apparently never observed end-of-stream — while the
+  gateway logged the original connection closing only when the engine finished
+  the sequence (~4min after the visible output had stopped advancing).
+
+Net effect: ~71k tokens (~4 GPU-minutes) were generated for a request whose
+client had already timed out and moved on, because nothing in the chain
+propagated the client-side abort to the engine. Follow-ups:
+
+- Reproduce with a client that disconnects mid-stream and verify the engine
+  aborts the sequence; if not, open an issue upstream (SGLang / the 0xSero
+  bundle) with this signature (decode continues, `#running-req` stays 1, no
+  abort log, long after client abandonment).
+- Add request-ID correlation across gateway/proxy/engine logs so lingering
+  requests are trivially diagnosable.
+- Check every hop's disconnect handling: a logging proxy that only detects
+  client disconnects when it writes a chunk will never notice if it is itself
+  blocked reading a stalled upstream.
+
+Attribution notes from the same incident window:
+
+- A concurrent ~78k-token cache-miss prefill (chunked at 4096) sustained
+  ~3.8–3.9k tok/s and took ~21s. It briefly competed with an in-flight decode
+  but was **not** the main stall.
+- Prefilling a small suffix on top of a ~240k-token cached context measured as
+  low as ~15–90 tok/s. This is not a slow cache lookup: on a cache hit the
+  prefix KV is reused directly. The cost is that every new token must attend
+  over the entire cached prefix, so attention work and KV reads scale with
+  `new_tokens × context_len`. Small suffix chunks (e.g. 128–256 tokens) cannot
+  amortize per-step overhead, which is worse because **prefill CUDA graph is
+  disabled for this model** (incompatible with KDA/linear attention). Large
+  cache-miss chunks (~4k tokens) amortize much better and reached ~3.8–3.9k
+  tok/s in the same window.
+
 ## Open questions before committing
 
 - Confirm the **voipmonitor b12x vLLM `glm53-flash-nvfp4-jovian`** launch flags
