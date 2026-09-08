@@ -20,6 +20,7 @@ from typing import Optional
 from unittest import mock
 
 from ycluster.utils import vm_manager as vm
+from ycluster.utils import vm_ip_pinning
 from ycluster.utils import vm_alter
 
 UTC = timezone.utc
@@ -935,9 +936,10 @@ class SyncDnsRecordsTests(unittest.TestCase):
     def output(text):
         return subprocess.CompletedProcess([], 0, stdout=text, stderr='')
 
-    @mock.patch.object(vm, '_incus')
-    @mock.patch.object(vm, '_managed_bridges', return_value=['br0', 'br1'])
-    @mock.patch.object(vm, '_incus_json')
+    @mock.patch.object(vm_ip_pinning, '_incus')
+    @mock.patch.object(vm_ip_pinning, '_managed_bridges',
+                       return_value=['br0', 'br1'])
+    @mock.patch.object(vm_ip_pinning, '_incus_json')
     def test_sync_dns_records_reconciles_and_returns_changed(self, list_json,
                                                              bridges, incus):
         list_json.return_value = [
@@ -1367,11 +1369,13 @@ class VMHelperTests(unittest.TestCase):
             ]}}},
         }]
         self.assertEqual(vm._live_instance_ips(instances[0]), {'ip-2'})
-        with mock.patch.object(vm, '_incus_json', return_value=instances):
+        with mock.patch.object(vm_ip_pinning, '_incus_json',
+                               return_value=instances):
             self.assertEqual(vm._pinned_ips(), {'vm1': 'ip-1'})
         with mock.patch.object(vm, '_pinned_ips',
                                return_value={'vm1': 'ip-1'}), \
-                mock.patch.object(vm, '_incus_json', return_value=instances):
+                mock.patch.object(vm_ip_pinning, '_incus_json',
+                                  return_value=instances):
             self.assertEqual(vm._occupied_ips(), {'ip-1', 'ip-2'})
         self.assertEqual(vm._pick_vm_ip('ip-1', ['ip-2']), 'ip-1')
         self.assertEqual(vm._pick_vm_ip(taken=['ip-200']),
@@ -1379,14 +1383,16 @@ class VMHelperTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             vm._pick_vm_ip(taken=[f'{vm.VM_IP_SUBNET_PREFIX}.{n}'
                                   for n in range(10, 201)])
-        with mock.patch.object(vm, '_incus', return_value=SimpleNamespace(
-                returncode=1)) as incus:
-            vm._pin_instance_ip('vm1', 'ip-1')
+        with mock.patch.object(vm_ip_pinning, '_incus',
+                               return_value=SimpleNamespace(returncode=1)) \
+                as incus:
+            vm_ip_pinning._pin_instance_ip('vm1', 'ip-1')
         self.assertEqual(incus.call_count, 2)
-        with mock.patch.object(vm, '_incus_json', return_value=[
+        with mock.patch.object(vm_ip_pinning, '_incus_json', return_value=[
                 {'name': 'incusbr0', 'type': 'bridge', 'managed': True},
                 {'name': 'other', 'type': 'bridge', 'managed': False}]):
-            self.assertEqual(vm._managed_bridges(), ['incusbr0'])
+            self.assertEqual(vm_ip_pinning._managed_bridges(),
+                             ['incusbr0'])
 
     def test_validation_and_host_config(self):
         with self.assertRaises(ValueError):
