@@ -103,7 +103,6 @@
         - https-config
         - frontend-manager
         - frp_config
-        - rathole-config
 
     - name: Ensure /etc/ycluster exists
       file:

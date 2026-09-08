@@ -643,7 +643,7 @@ sec_frp() {
 
   # Each core node's sshd is reachable through f1's per-node frp tunnel
   # port (17201..17203, bound to f1 localhost) — read the banner through
-  # the tunnel. Disjoint from the rathole 2201..2203 range.
+  # the tunnel. Disjoint from the legacy 2201..2203 bastion range.
   for n in "${CORE[@]}"; do
     local port=$((17200 + ${n#s}))
     $SSH f1 "timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$port; head -c 7 <&3'" \
@@ -678,8 +678,6 @@ sec_frp() {
   # Verify PROXY protocol actually delivers the client IP: the alt
   # vhost's nginx access log (on the storage leader — f1 only carries
   # frps + ufw, no nginx) should show c1's cluster IP, not 127.0.0.1.
-  # This is the validation the rathole-PROXY-protocol item was waiting
-  # for — folded into the frp migration plan.
   local leader log_line
   leader=$(app_leader)
   [ -n "$leader" ] || die "no /cluster/leader/app for alt vhost access log check"

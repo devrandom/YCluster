@@ -22,7 +22,7 @@ A. The lite profile is therefore small *by construction*.
 listening on `127.0.0.1:12723`) deployed by `setup-web-services.yml`
 on every `managed` host (storage + compute + nvidia + adhoc + nas).
 nginx fronts it cluster-internal as `admin.<domain>`. External
-traffic arrives via rathole → `127.0.0.2:443` on the **storage
+traffic arrives via frp → `127.0.0.2:17443` on the **storage
 leader**, where the authed public vhost runs.
 
 ### Cluster leadership
@@ -50,7 +50,7 @@ are restricted to storage by ansible gating (`hosts: core` or
 | `/autoinstall/{meta-data,user-data}` | PXE GRUB (tftp is `hosts: core`) | core only |
 | `/api/cluster-status`, `/api/ping`, `/api/time` | operator/probes (public vhost on leader) or localhost (squid self-check, storage-only) | leader-only |
 | `/bootstrap/{macos,nas,nvidia}` + `/api/allocate` | LAN bootstrap → calls back to `/api/allocate` | leader-only after structural move (a) |
-| `/bootstrap/wg*`, `/api/wg/*` | rathole (public vhost) | leader-only |
+| `/bootstrap/wg*`, `/api/wg/*` | frp (public vhost) | leader-only |
 | `/admin/*`, `/api/inventory*`, `/api/{dhcp-config,hosts,drain,status,allocations,alert-webhook}` | operator browser or `update_dhcp_hosts.py` / dnsmasq (storage-only) | leader-only |
 | `/static/*`, `/`, `/assets/*` | pages above | leader-only |
 
@@ -292,7 +292,7 @@ separation.
   is probably already gated. Confirm.
 - **Frontend `f*` nodes.** Don't run admin-api (`managed` excludes
   `frontend`). Confirm no caller hits `<frontend>.xc:12723` —
-  review rathole config + forward-auth setup. If they do, we
+  review frp config + forward-auth setup. If they do, we
   need a strategy.
 - **`/autoinstall/user-data` requires etcd** for the allocation
   write. Two reads: (i) keep admin-api's etcd-client capability on

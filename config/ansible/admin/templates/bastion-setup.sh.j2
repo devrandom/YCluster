@@ -90,19 +90,6 @@ if ! systemctl is-enabled ssh.service >/dev/null 2>&1; then
     restart_ssh=1
 fi
 
-# --- retire the legacy rathole client inside migrated bastions ---
-# Pre-frp bastions ran rathole-bastion.service, which kept the rathole
-# server bound to this host's public port. Once frp takes that port over,
-# only one client can own it, so stop + remove the old unit when present.
-# Idempotent: on the second run the unit file is gone and this is a no-op.
-if [ -e /etc/systemd/system/rathole-bastion.service ]; then
-    systemctl stop rathole-bastion.service 2>/dev/null || true
-    systemctl disable rathole-bastion.service 2>/dev/null || true
-    rm -f /etc/systemd/system/rathole-bastion.service
-    systemctl daemon-reload
-    changed=1
-fi
-
 # --- frp client ---
 install -d -m 755 /etc/frp
 
@@ -116,7 +103,7 @@ auth.token = "${FRP_TOKEN}"
 transport.heartbeatInterval = 40
 transport.heartbeatTimeout = 40
 
-# Publish this VM host's bastion on the same public port rathole used, so
+# Publish this VM host's bastion on its established public port so
 # existing `ssh -J jump@<host>:<port>` commands keep working unchanged.
 # frps binds the remotePort dynamically from this registration.
 [[proxies]]

@@ -120,7 +120,7 @@ internal login, or the admin links the source to their account manually.
   state in a dedicated Postgres database; providers/sources/flows
   declared as blueprints rendered by Ansible.
 - nginx vhost `auth.xc` internally; exposed externally through the
-  existing rathole/nginx front — needed for users logging in from outside
+  existing frp/nginx front — needed for users logging in from outside
   and for GitHub/GitLab OAuth callbacks.
 - GitHub / GitLab OAuth apps are **optional**: when configured (client
   IDs/secrets in the Ansible vault) they appear as alternate login
@@ -187,8 +187,8 @@ to assume that. Two tiers in `_authentik_identity()`:
    without a verified email) — using it instead of email for the
    "is this a headerless request?" check means an OAuth user without a
    verified email isn't accidentally promoted to admin via the
-   shortcut. nginx upstream from the public rathole-tunnel vhost
-   (listen `127.0.0.2:443`) may arrive on `127.0.0.2` if the kernel
+   shortcut. nginx upstream from the public frp-tunnel vhost
+   (listen `127.0.0.2:17443`) may arrive on `127.0.0.2` if the kernel
    picks that loopback address; a public request that bypassed
    forward-auth would land here headerless, and we don't want it
    treated as admin.

@@ -2,7 +2,7 @@
 # Deploys a bastion container on the Incus VM bridge. The bastion runs a
 # jump-only sshd plus an frp client, giving external SSH access to GPU
 # VMs via:  ssh -J jump@<frps-host>:<port> ubuntu@<vm-name>
-# (public port is derived per node type, preserving the legacy rathole
+# (public port is derived per node type, preserving the legacy port
 #  numbering so existing ssh -J invocations keep working:
 #  idx 1-3 keep legacy 2210+idx/2213+idx; idx>3 use nvidia 2220+idx,
 #  compute(c) 2240+idx)
@@ -63,7 +63,7 @@
         frp_token: "{{ (frp_cfg_raw.stdout | from_json).token }}"
       no_log: true
 
-    # Same per-node-type derivation as the retired rathole server template,
+    # Same per-node-type port derivation as the frps template,
     # so the bastion keeps its historical public port (existing ssh -J
     # invocations are untouched). nvidia is a child of compute, so the
     # node-name prefix selects the block; idx comes from the hostname.

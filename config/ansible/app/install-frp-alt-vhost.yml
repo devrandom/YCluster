@@ -7,8 +7,7 @@
 # admin public/authed), the `_` 17443 404 fallback, and the forward-authed
 # public admin.<domain> block. The app/auth/comfy/open-webui surfaces live
 # in their own per-app templates (each declares its plain :443 listener
-# alongside the 127.0.0.2:17443 PROXY landing). It replaces rathole's
-# public http/https vhost (now fully removed). Split out of
+# alongside the 127.0.0.2:17443 PROXY landing). Split out of
 # install-frp-server.yml so the frontend frps install and the storage
 # vhost install are two focused playbooks.
 #

@@ -8,8 +8,7 @@ auth.token = "{{ token }}"
 transport.heartbeatInterval = 40
 transport.heartbeatTimeout = 40
 
-# One SSH proxy per core node. The remote port follows the historical
-# rathole convention (17200+idx). The idx comes from the hostname `s<N>`.
+# One SSH proxy per core node. The idx comes from the hostname `s<N>`.
 [[proxies]]
 name = "ssh{{ idx }}"
 type = "tcp"

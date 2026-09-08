@@ -11,7 +11,7 @@
 #
 # No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
 # Source is vendored under /opt/src/podman/ and pinned to a git SHA in the
-# vars below (matches the frp/rathole pattern of inlining the repo URL + SHA
+# vars below (matches the frp pattern of inlining the repo URL + SHA
 # in the build playbook itself).
 #
 # The play runs on localhost (so import_playbook can resolve `hosts`

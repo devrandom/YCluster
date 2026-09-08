@@ -2,11 +2,9 @@
 # 127.0.0.2 on the backend ports (17080 / 17443), and frps uses PROXY
 # protocol v2 — so this vhost picks up real client IPs and rate-limit
 # zones can drop back to per-client semantics. See
-# todo/networking/switch-rathole-to-frp.md and
 # docs/archive/frp-migration.md.
 #
-# frp serves the production primary public HTTP/HTTPS (:80 / :443) —
-# rathole's public HTTP (:80) and HTTPS rollback (:14443) are gone.
+# frp serves the production primary public HTTP/HTTPS (:80 / :443).
 #
 # This vhost is now the DEFAULT server on the frp proxy ports only. The
 # per-hostname app surfaces (open-webui, app., comfy., auth., and the

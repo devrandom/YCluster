@@ -21,7 +21,7 @@
 #    The proxy forwards the full client path (including /v1/...) to
 #    the backend, so backend_url is host-only — no /v1 suffix.
 #
-# Build follows the rathole/frp pattern: build-local-ai-proxy.yml builds
+# Build follows the frp pattern: build-local-ai-proxy.yml builds
 # on {{ buildhost }} at /opt/src/local-ai-proxy/bin/; this play fetches the
 # artifact to the controller cache and copies it to each target. Run
 # build-local-ai-proxy.yml first if you haven't already.

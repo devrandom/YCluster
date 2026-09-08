@@ -14,8 +14,7 @@
 #
 # Single source of truth for the comfy.<domain> surface: this server
 # block declares both the cluster-internal / direct listener (plain :443)
-# and the frp tunnel landing (127.0.0.2:17443, PROXY protocol v2). The
-# rathole public endpoint (127.0.0.2:443, no PROXY) is gone.
+# and the frp tunnel landing (127.0.0.2:17443, PROXY protocol v2).
 #
 # The location body is shared across the plain and proxy listeners via
 # comfyui-locations.conf; the ComfyUI backend (host:port, e.g. the GPU

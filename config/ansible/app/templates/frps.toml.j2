@@ -14,11 +14,10 @@ bindAddr = "0.0.0.0"
 bindPort = {{ frp_bind_port | default(7000) }}
 # frp v0.70.0's ProxyBindAddr is global (server-side, applies to every
 # dynamically-registered proxy — see pkg/config/v1/server.go), so we
-# can't replicate rathole's per-service bind_addr pattern here. Instead
 # all listeners bind to 0.0.0.0 and the firewall (UFW) lets HTTP/HTTPS
 # through while keeping SSH tunnels reachable only from the local
 # bastion jump. frp's http/https tunnels listen on :80/:443 (production
-# primary — rathole is out of the public http path); the SSH tunnels
+# primary); the SSH tunnels
 # (17201-17204) are blocked externally by the install playbook's UFW
 # rules.
 

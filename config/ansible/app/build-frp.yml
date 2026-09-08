@@ -6,7 +6,7 @@
 #
 # No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
 # Source is vendored under /opt/src/frp/ and pinned to a git SHA in the
-# vars below (matches the rathole/open-webui pattern of inlining the
+# vars below (matches the open-webui pattern of inlining the
 # repo URL + SHA in the build playbook itself).
 - name: Build frp from source
   hosts: localhost

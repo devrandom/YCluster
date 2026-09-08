@@ -11,7 +11,6 @@
 # declares both the cluster-internal / direct listener (plain :443) and
 # the frp tunnel landing (127.0.0.2:17443, PROXY protocol v2), so the
 # OAuth round-trip works over both the tunnel and internal/direct hits.
-# The rathole public endpoint (127.0.0.2:443, no PROXY) is gone.
 server {
     {% if use_tls %}
     listen 443 ssl http2;

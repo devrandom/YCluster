@@ -6,9 +6,8 @@
 #   - the frp tunnel landing (127.0.0.2:17080/17443, PROXY protocol v2).
 # External traffic arrives via frps -> frpc on the loopback alt address,
 # where frps injects the PROXY header so real client IPs survive; internal
-# or direct hits use the plain listener. The rathole public endpoint
-# (127.0.0.2:443, no PROXY protocol) is gone — frp is the only tunnel, so
-# per-client rate-limit semantics are now possible on the proxy path.
+# or direct hits use the plain listener. frp is the only tunnel, so
+# per-client rate-limit semantics are possible on the proxy path.
 server {
     {% if use_tls %}
     listen 443 ssl http2;
