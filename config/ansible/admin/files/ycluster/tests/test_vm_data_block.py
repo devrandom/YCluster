@@ -97,7 +97,6 @@ class VMDataBlockTests(unittest.TestCase):
             with (
                 mock.patch.object(vdb, "_regular_file_stats",
                                   return_value=(2, 30)),
-                mock.patch.object(vdb, "_append_vmdata_fstab") as fstab,
             ):
                 vdb.migrate_vm_data_to_image("vm1", image, is_running=lambda: False)
 
@@ -106,7 +105,6 @@ class VMDataBlockTests(unittest.TestCase):
                       commands)
         self.assertIn(("rsync", "-aHAXS", f"{vdb.NAS_NFS_MOUNT}/vm1/",
                        "/mnt/vm1-data/"), commands)
-        fstab.assert_called_once_with("/mnt/vm1-data")
         replace.assert_called_once_with(tmp, image)
 
     def test_migration_aborts_if_vm_starts_before_commit(self):
@@ -126,7 +124,6 @@ class VMDataBlockTests(unittest.TestCase):
             mock.patch.object(vdb.os, "rmdir"),
             mock.patch.object(vdb, "_regular_file_stats",
                               return_value=(2, 30)),
-            mock.patch.object(vdb, "_append_vmdata_fstab"),
         ):
             with self.assertRaises(RuntimeError):
                 vdb.migrate_vm_data_to_image(
@@ -158,7 +155,6 @@ class VMDataBlockTests(unittest.TestCase):
             mock.patch.object(vdb.os, "replace") as replace,
             mock.patch.object(vdb.os, "unlink") as unlink,
             mock.patch.object(vdb.os, "rmdir"),
-            mock.patch.object(vdb, "_append_vmdata_fstab"),
         ):
             statvfs.return_value = mock.Mock(f_bavail=300, f_frsize=1024**3)
             with self.assertRaises(subprocess.CalledProcessError):
@@ -173,26 +169,6 @@ class VMDataBlockTests(unittest.TestCase):
         with mock.patch.object(vdb.subprocess, "run") as run:
             run.return_value = _proc(["find"], stdout="10\n5\n")
             self.assertEqual(vdb._regular_file_stats("src"), (2, 15))
-
-    def test_fstab_entry_is_idempotent(self):
-        created = mock.mock_open()
-        with (
-            mock.patch.object(vdb.os.path, "exists", return_value=False),
-            mock.patch("builtins.open", created),
-        ):
-            vdb._append_vmdata_fstab("/mnt/vm1-data")
-        created.assert_called_once_with("/mnt/vm1-data/etc/fstab", "a",
-                                        encoding="utf-8")
-        created.return_value.write.assert_called_once_with(
-            vdb.VM_DATA_FSTAB_ENTRY)
-
-        existing = mock.mock_open(read_data="LABEL=vmdata /data ext4\n")
-        with (
-            mock.patch.object(vdb.os.path, "exists", return_value=True),
-            mock.patch("builtins.open", existing),
-        ):
-            vdb._append_vmdata_fstab("/mnt/vm1-data")
-        existing.return_value.write.assert_not_called()
 
     def test_migration_preflight_rejections(self):
         image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
@@ -260,7 +236,6 @@ class VMDataBlockTests(unittest.TestCase):
             with (
                 mock.patch.object(vdb, "_regular_file_stats",
                                   side_effect=[(1, 10), (2, 20)]),
-                mock.patch.object(vdb, "_append_vmdata_fstab"),
             ):
                 with self.assertRaises(RuntimeError):
                     vdb.migrate_vm_data_to_image(
@@ -282,10 +257,11 @@ class VMDataBlockTests(unittest.TestCase):
                               side_effect=RuntimeError("no space")),
             mock.patch.object(vdb, "replace_data_device") as replace,
         ):
-            vm._ensure_nas_share("vm1")
+            vm._ensure_nas_share("vm1", migrate=True)
 
         replace.assert_called_once_with(
-            vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false")
+            vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false",
+            f"path={vdb.VM_DATA_GUEST_PATH}")
 
     def test_migration_failure_leaves_running_vm_untouched(self):
         with (
@@ -300,9 +276,27 @@ class VMDataBlockTests(unittest.TestCase):
                               side_effect=RuntimeError("no space")),
             mock.patch.object(vdb, "replace_data_device") as replace,
         ):
-            vm._ensure_nas_share("vm1")
+            vm._ensure_nas_share("vm1", migrate=True)
 
         replace.assert_not_called()
+
+    def test_no_migrate_attaches_legacy_share_without_migrating(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run"),
+            mock.patch.object(vm, "_instance_info",
+                              return_value={"type": "virtual-machine"}),
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
+            mock.patch.object(vdb, "migrate_vm_data_to_image") as migrate,
+            mock.patch.object(vdb, "replace_data_device") as replace,
+        ):
+            self.assertFalse(vm._ensure_nas_share("vm1"))
+
+        migrate.assert_not_called()
+        replace.assert_called_once_with(
+            vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false",
+            f"path={vdb.VM_DATA_GUEST_PATH}")
 
     def test_committed_image_attach_failure_fails_start(self):
         committed = {"image": False}
@@ -324,7 +318,7 @@ class VMDataBlockTests(unittest.TestCase):
                               side_effect=RuntimeError("attach failed")),
         ):
             with self.assertRaises(RuntimeError):
-                vm._ensure_nas_share("vm1")
+                vm._ensure_nas_share("vm1", migrate=True)
 
     def test_resize_refuses_legacy_attached_vm(self):
         image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
@@ -362,17 +356,36 @@ class VMDataBlockTests(unittest.TestCase):
         # Different source: remove then add.
         calls.clear()
         vdb.replace_data_device(make_incus("old-src"), "vm1", "new-src",
-                                "required=true")
+                                "required=true", "path=/data")
         self.assertIn(("config", "device", "remove", "vm1", "data"), calls)
         self.assertIn(("config", "device", "add", "vm1", "data", "disk",
-                       "source=new-src", "path=/data", "required=true"),
+                       "source=new-src", "required=true", "path=/data"),
                       calls)
         # Not attached: add only.
         calls.clear()
         vdb.replace_data_device(make_incus(None), "vm1", "new-src")
         self.assertNotIn(("config", "device", "remove", "vm1", "data"), calls)
         self.assertIn(("config", "device", "add", "vm1", "data", "disk",
-                       "source=new-src", "path=/data"), calls)
+                       "source=new-src"), calls)
+
+    def test_guest_mount_only_for_image_device(self):
+        image = f"{vdb.NAS_NFS_MOUNT}/vm1.img"
+        incus = mock.Mock()
+        # Device source != image: no-op.
+        incus.return_value = _proc(["incus"], returncode=1, stdout="")
+        vdb.ensure_guest_mount(incus, "vm1")
+        self.assertEqual(incus.call_count, 1)
+        # Device source == image: fstab + mount script runs in the guest.
+        incus.reset_mock()
+        incus.return_value = _proc(["incus"], stdout=f"{image}\n")
+        vdb.ensure_guest_mount(incus, "vm1")
+        self.assertEqual(incus.call_args.args[:2], ("exec", "vm1"))
+        script = incus.call_args.args[5]
+        self.assertIn("set -e", script)
+        self.assertIn("mount LABEL=vmdata /data", script)
+        # fstab append comes after the mount (mount-first ordering).
+        self.assertLess(script.index("mount LABEL=vmdata"),
+                        script.index(">> /etc/fstab"))
 
     def test_disabled_share_attaches_nothing(self):
         with (
@@ -410,7 +423,8 @@ class VMDataBlockTests(unittest.TestCase):
             vm._ensure_nas_share("vm1")
 
         replace.assert_called_once_with(
-            vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false")
+            vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false",
+            f"path={vdb.VM_DATA_GUEST_PATH}")
 
 
 if __name__ == "__main__":

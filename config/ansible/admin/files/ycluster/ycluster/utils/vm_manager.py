@@ -380,12 +380,20 @@ def sync_dns_records():
             changed[bridge] = records
     return changed
 
-def _ensure_nas_share(name):
-    vdb.ensure_nas_share(
+def _ensure_nas_share(name, migrate=False):
+    """Returns True when the data image was just created (first migration)."""
+    return vdb.ensure_nas_share(
         name, _incus,
         share_enabled=(_host_config_value("vm_nas_share") != "false"),
+        migrate=migrate,
         instance_info=_instance_info,
         instance_running=_instance_running)
+
+def _mount_data_in_guest(name):
+    """fstab + mount /data in the guest after first boot on the image."""
+    vdb.guest_mount_after_boot(
+        _incus, name, _wait_agent,
+        GPU_VM_AGENT_TIMEOUT if (vm_get(name) or {}).get("gpus") else 180)
 
 def _instance_running(name):
     r = _incus("list", name, "--format", "csv", "-c", "ns", check=False)
@@ -1154,7 +1162,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     _create_incus_instance(name, instance_type, image, profile, cpu, mem,
                            gpus, owner)
     _attach_launch_gpus(name, instance_type, gpus, picked)
-    _ensure_nas_share(name)
+    migrated = _ensure_nas_share(name)
     _incus("start", name)
 
     # Register immediately, before SSH provisioning, so the instance is
@@ -1166,6 +1174,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     _record_event("launch", name, owner=owner, gpus=gpus, billable=billable)
 
     _wait_and_provision(name, record, instance_type, gpus)
+    if migrated: _mount_data_in_guest(name)
 
     record["state"] = "ready"
     _put_json(VMS_PREFIX + name, record)
@@ -1221,8 +1230,7 @@ def vm_resize_data(name, size):
             _incus_stop(name)
         vdb.grow_data_image(image, vdb.parse_disk_size(size))
         _incus("start", name)
-    _wait_agent(name, GPU_VM_AGENT_TIMEOUT
-                if (vm_get(name) or {}).get("gpus") else 180)
+    _mount_data_in_guest(name)
     _incus("exec", name, "--", "resize2fs", vdb.VM_DATA_RESIZE_DEVICE)
     print(f"Data image for '{name}' is {size}; /data filesystem resized.")
 
@@ -1252,7 +1260,7 @@ def vm_stop(name, billable=False, initiator="cli", release=False):
     if initiator == "cli":
         _warn_desired_conflict(name, "stop")
 
-def vm_start(name, billable=False, initiator="cli", gpus=None):
+def vm_start(name, billable=False, initiator="cli", gpus=None, migrate=False):
     """Start a VM, converging its passthrough GPUs to `gpus` (default:
     the VM's registered count). `gpus` is capped at the registered count
     so a caller can never over-allocate past the VM's allocation; 0
@@ -1263,8 +1271,9 @@ def vm_start(name, billable=False, initiator="cli", gpus=None):
         raise RuntimeError(f"Cannot determine memory limit for '{name}'")
     _preflight_vm_memory(name, mem, "start")
     # Backfill any host-side state added since this instance was created
-    # (currently just the /data NAS share). Idempotent.
-    _ensure_nas_share(name)
+    # (currently just the /data NAS share). Idempotent. Migration only
+    # runs when explicitly requested via `vm start --migrate`.
+    migrated = _ensure_nas_share(name, migrate=migrate)
     # Re-acquire GPUs the scheduler released on a previous stop (or drop
     # extras when starting with fewer than registered).
     registered = record.get("gpus") or 0
@@ -1281,6 +1290,7 @@ def vm_start(name, billable=False, initiator="cli", gpus=None):
     _record_event_from_record("start", name, initiator=initiator,
                               billable=billable)
     print(f"Started '{name}'.")
+    if migrated: _mount_data_in_guest(name)
     if initiator == "cli":
         _warn_desired_conflict(name, "start")
 
@@ -1292,7 +1302,7 @@ def vm_restart(name, billable=False, initiator="cli"):
     _preflight_vm_memory(name, mem, "restart")
     if _instance_running(name):
         _incus_stop(name)
-    _ensure_nas_share(name)
+    migrated = _ensure_nas_share(name)
     _ensure_gpus_attached(name)
     _incus("start", name)
     # Continuity event: interval assembly treats a restart as uninterrupted
@@ -1300,6 +1310,7 @@ def vm_restart(name, billable=False, initiator="cli"):
     _record_event_from_record("restart", name, initiator=initiator,
                               billable=billable)
     print(f"Restarted '{name}'.")
+    if migrated: _mount_data_in_guest(name)
     if initiator == "cli":
         _warn_desired_conflict(name, "restart")
 

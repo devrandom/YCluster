@@ -223,13 +223,12 @@ guest.
       (no preallocation), `mkfs.ext4 -L vmdata` the image, loop-mount it,
       then `rsync -aHAXS` the NAS directory tree into the mount. Ownership
       inside the image is uid/gid 1000 (matching the single-UID squash on the
-      NFS export and the guest's `ubuntu` user). While the image is
-      loop-mounted, append a `/etc/fstab` entry
-      (`LABEL=vmdata  /data  ext4  defaults  0  2`) so the guest mounts
-      `/data` from the block device on every boot — virtiofs was
-      Incus-managed and needed no fstab, but a raw block disk does. The
-      legacy virtiofs share stays untouched — it is the source, and remains
-      the rollback copy.
+      NFS export and the guest's `ubuntu` user). Incus VMs reject `path=`
+      on non-directory disk sources, so the guest mounts the image itself:
+      after the first boot on the new device, `incus exec` adds
+      `LABEL=vmdata  /data  ext4  defaults  0  2` to the guest's
+      `/etc/fstab` and mounts `/data`. The legacy virtiofs share stays
+      untouched — it is the source, and remains the rollback copy.
    d. **Verify, clean up, and commit.** Compare file counts and byte totals
       between source and target, unmount, detach the loop device, then
       `rename()` `<img>.tmp` → `<img>`. The rename is atomic on the same NFS

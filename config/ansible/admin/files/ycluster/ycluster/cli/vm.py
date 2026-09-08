@@ -92,8 +92,13 @@ def register_vm_commands(subparsers):
                          'capped at that count; 0 runs without GPUs)')
     stp.add_argument('--bill', action='store_true',
                     help='Bill this runtime to the owner (CLI default: non-billable)')
+    stp.add_argument('--migrate', action='store_true',
+                    help='Migrate the legacy virtiofs share to a block '
+                         'image before starting (otherwise migrates never '
+                         'run automatically)')
     stp.set_defaults(func=lambda a: vm.vm_start(a.name, billable=a.bill,
-                                                gpus=a.gpus))
+                                                gpus=a.gpus,
+                                                migrate=a.migrate))
 
     rsp = sub.add_parser('restart', help='Stop (if running) and start a VM')
     rsp.add_argument('name')

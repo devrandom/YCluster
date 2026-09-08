@@ -19,7 +19,6 @@ NAS_HOST_BASE = "/near1/vm"
 # ext4, no partition table: resize2fs grows online and no growpart step is
 # needed. The floor leaves room for metadata and near-term guest growth.
 VM_DATA_MIN_BYTES = 200 * 1024 * 1024 * 1024
-VM_DATA_FSTAB_ENTRY = "LABEL=vmdata  /data  ext4  defaults  0  2\n"
 
 # Incus disk device carrying the VM data image.
 VM_DATA_DEVICE = "data"
@@ -27,6 +26,7 @@ VM_DATA_GUEST_PATH = "/data"
 # The image's ext4 label is the stable handle for guest-side operations:
 # device indexes (/dev/vdb) shift when other disks are attached.
 VM_DATA_RESIZE_DEVICE = "/dev/disk/by-label/vmdata"
+VM_DATA_FSTAB_LINE = "LABEL=vmdata  /data  ext4  defaults  0  2"
 
 LOCK_DIR = "/run/lock"
 
@@ -85,18 +85,6 @@ def _regular_file_stats(path):
                        check=True, capture_output=True, text=True)
     sizes = [int(line) for line in r.stdout.splitlines()]
     return len(sizes), sum(sizes)
-
-
-def _append_vmdata_fstab(mountpoint):
-    fstab = os.path.join(mountpoint, "etc", "fstab")
-    current = ""
-    if os.path.exists(fstab):
-        with open(fstab, "r", encoding="utf-8") as f:
-            current = f.read()
-    if "LABEL=vmdata" in current:
-        return
-    with open(fstab, "a", encoding="utf-8") as f:
-        f.write(VM_DATA_FSTAB_ENTRY)
 
 
 def _release_image_mount(loop_dev, mountpoint):
@@ -167,7 +155,6 @@ def migrate_vm_data_to_image(name, image, *, is_running):
                 f"copy verification failed: source files/bytes "
                 f"{source_stats[0]}/{source_stats[1]}, target "
                 f"{target_stats[0]}/{target_stats[1]}")
-        _append_vmdata_fstab(mountpoint)
 
         subprocess.run(["umount", mountpoint], check=True,
                        capture_output=True, text=True)
@@ -193,7 +180,11 @@ def migrate_vm_data_to_image(name, image, *, is_running):
 
 
 def replace_data_device(incus, name, source, *extra):
-    """Attach `source` as the `data` disk, replacing a different backing."""
+    """Attach `source` as the `data` disk, replacing a different backing.
+
+    Callers must pass `path=` themselves: block-image sources reject `path=`
+    on VMs, while directory sources need it.
+    """
     r = incus("config", "device", "get", name, VM_DATA_DEVICE, "source",
               check=False)
     current = r.stdout.strip() if r.returncode == 0 else None
@@ -202,7 +193,47 @@ def replace_data_device(incus, name, source, *extra):
     if current is not None:
         incus("config", "device", "remove", name, VM_DATA_DEVICE)
     incus("config", "device", "add", name, VM_DATA_DEVICE, "disk",
-          f"source={source}", f"path={VM_DATA_GUEST_PATH}", *extra)
+          f"source={source}", *extra)
+
+
+def ensure_guest_mount(incus, name):
+    """fstab + mount `/data` in the guest for an image-backed data device.
+
+    Incus VMs reject `path=` on non-directory disk sources, so the guest
+    mounts the image itself. Idempotent; no-op unless the data device is
+    the block image (directory-backed shares are mounted by Incus and
+    containers don't run an agent).
+
+    The mount happens before the fstab append: a fstab entry for a device
+    that failed to mount would risk boot hangs if the image is ever
+    detached. Without the fstab entry the guest still works — /data is
+    just unmounted until the next `ensure_guest_mount` call.
+    """
+    r = incus("config", "device", "get", name, VM_DATA_DEVICE, "source",
+              check=False)
+    if r.returncode != 0 or r.stdout.strip() != data_image_path(name):
+        return
+    script = (
+        f"set -e; mkdir -p {VM_DATA_GUEST_PATH}; "
+        f"mountpoint -q {VM_DATA_GUEST_PATH} || "
+        f"mount LABEL=vmdata {VM_DATA_GUEST_PATH}; "
+        f"grep -q '^LABEL=vmdata' /etc/fstab || "
+        f"echo '{VM_DATA_FSTAB_LINE}' >> /etc/fstab")
+    incus("exec", name, "--", "sh", "-c", script)
+
+
+def guest_mount_after_boot(incus, name, wait_agent, agent_timeout):
+    """Wait for the agent, then fstab+mount /data; warn (don't raise) on
+    failure — the VM itself started fine, and `vm_resize_data` re-runs
+    `ensure_guest_mount` as a self-heal."""
+    try:
+        print(f"  Waiting for '{name}' agent to configure /data...")
+        wait_agent(name, agent_timeout)
+        ensure_guest_mount(incus, name)
+        print(f"  /data in '{name}' now comes from the block image.")
+    except Exception as e:
+        print(f"  WARNING: /data mount setup failed for '{name}': {e}",
+              file=sys.stderr)
 
 
 def assert_resizable(incus, name, image):
@@ -238,19 +269,24 @@ def grow_data_image(image, new_bytes):
     return current_bytes
 
 
-def ensure_nas_share(name, incus, *, share_enabled,
+def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
                      instance_info, instance_running):
-    """Attach the VM data disk, migrating from virtiofs to block on start.
+    """Attach the VM data disk for `name`.
 
-    For VMs, the image path is the completion marker for a verified
-    host-side copy. If it exists, attach it as virtio-blk. If not, run the
-    host-side migration while the VM is stopped; any failure falls back to
-    the legacy directory share so the VM still boots (a VM that is already
-    running keeps its current device). Containers always keep the directory
-    share.
+    For VMs, an existing image (`<mount>/<name>.img`) is attached as
+    virtio-blk. With `migrate=True` and no image, the host-side migration
+    runs while the VM is stopped; any failure falls back to the legacy
+    directory share so the VM still boots (a VM that is already running
+    keeps its current device). With `migrate=False` a missing image just
+    attaches the legacy directory share — migration never happens
+    implicitly. Containers always keep the directory share.
+
+    Returns True when migration ran in this call — the caller should run
+    `ensure_guest_mount` after the first boot, since the guest needs a new
+    fstab entry for the image-backed device.
     """
     if not share_enabled:
-        return
+        return False
     host_dir = f"{NAS_HOST_BASE}/{name}"
     # `timeout` guards a hung CIFS automount: if the NAS is down, an
     # access to /near1 can block forever on the systemd automount.
@@ -263,20 +299,33 @@ def ensure_nas_share(name, incus, *, share_enabled,
         print(f"  NAS /near1 unreachable — skipping /data attach on "
               f"'{name}' ({msg.strip() or e.__class__.__name__}).",
               file=sys.stderr)
-        return
+        return False
 
     inst = instance_info(name)
     if not (inst or {}).get("type") == "virtual-machine":
-        replace_data_device(incus, name, host_dir, "required=false")
-        return
+        replace_data_device(incus, name, host_dir, "required=false",
+                            f"path={VM_DATA_GUEST_PATH}")
+        return False
 
     image = data_image_path(name)
+    migrated = False
     try:
         with data_migration_lock(name):
             if not os.path.exists(image):
+                if not migrate:
+                    # Migration is opt-in (`vm start --migrate`): attach
+                    # the legacy directory share instead.
+                    replace_data_device(incus, name, host_dir,
+                                        "required=false",
+                                        f"path={VM_DATA_GUEST_PATH}")
+                    return False
+                print(f"  Migrating '{name}' data to a block image "
+                      f"(legacy share is kept until verified)...")
                 migrate_vm_data_to_image(
                     name, image,
                     is_running=lambda: instance_running(name))
+                migrated = True
+                print(f"  Data image for '{name}' is ready; attaching.")
             replace_data_device(incus, name, image, "io.cache=none",
                                 "io.bus=virtio-blk", "required=true")
     except Exception as e:
@@ -287,4 +336,7 @@ def ensure_nas_share(name, incus, *, share_enabled,
         print(f"  VM data migration skipped for '{name}': {e}",
               file=sys.stderr)
         if not instance_running(name):
-            replace_data_device(incus, name, host_dir, "required=false")
+            replace_data_device(incus, name, host_dir, "required=false",
+                                f"path={VM_DATA_GUEST_PATH}")
+        return False
+    return migrated

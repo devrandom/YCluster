@@ -741,7 +741,7 @@ class VMAlterHelperTests(unittest.TestCase):
     @mock.patch.object(vm, "_verify_guest_gpus")
     @mock.patch.object(vm, "_wait_agent")
     @mock.patch.object(vm, "_incus")
-    @mock.patch.object(vm, "_ensure_nas_share")
+    @mock.patch.object(vm, "_ensure_nas_share", return_value=False)
     @mock.patch.object(vm, "_ensure_gpus_attached")
     @mock.patch.object(vm, "_put_json")
     @mock.patch.object(vm, "release_gpus")
@@ -1189,7 +1189,7 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, 'vm_get',
                        return_value={'gpus': 1, 'mem': '32GiB'})
     @mock.patch.object(vm, '_preflight_vm_memory')
-    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
     @mock.patch.object(vm, '_ensure_gpus_attached')
     @mock.patch.object(vm, '_incus')
     @mock.patch.object(vm, '_record_event_from_record')
@@ -1217,7 +1217,7 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, '_preflight_vm_memory')
     @mock.patch.object(vm, '_validate_vm_launch', return_value='vm')
     @mock.patch.object(vm, '_attach_launch_gpus')
-    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
     @mock.patch.object(vm, '_incus')
     @mock.patch.object(vm, '_put_json')
     @mock.patch.object(vm, '_record_event')
@@ -1233,7 +1233,7 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, '_preflight_vm_memory')
     @mock.patch.object(vm, '_validate_vm_launch', return_value='container')
     @mock.patch.object(vm, '_attach_launch_gpus')
-    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
     @mock.patch.object(vm, '_incus')
     @mock.patch.object(vm, '_put_json')
     @mock.patch.object(vm, '_record_event')
@@ -1248,7 +1248,7 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, 'vm_get',
                        return_value={'gpus': 1, 'mem': '32GiB'})
     @mock.patch.object(vm, '_preflight_vm_memory')
-    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
     @mock.patch.object(vm, '_ensure_gpus_attached')
     @mock.patch.object(vm, '_incus')
     @mock.patch.object(vm, '_record_event_from_record')
@@ -1258,14 +1258,14 @@ class VMMemoryPreflightTests(unittest.TestCase):
                                                     vm_get):
         vm.vm_start('vm1')
         preflight.assert_called_once_with('vm1', '32GiB', 'start')
-        share.assert_called_once_with('vm1')
+        share.assert_called_once_with('vm1', migrate=False)
         incus.assert_called_once_with('start', 'vm1')
 
     @mock.patch.object(vm, 'vm_get',
                        return_value={'gpus': 1, 'mem': '32GiB'})
     @mock.patch.object(vm, '_preflight_vm_memory',
                        side_effect=RuntimeError('overcommit'))
-    @mock.patch.object(vm, '_ensure_nas_share')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
     def test_start_preflight_failure_stops_before_start(self, share,
                                                         preflight, vm_get):
         with self.assertRaisesRegex(RuntimeError, 'overcommit'):
