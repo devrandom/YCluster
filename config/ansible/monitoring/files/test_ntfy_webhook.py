@@ -30,13 +30,17 @@ class AlertKey(unittest.TestCase):
 
     def test_uses_fingerprint(self):
         alert = {"status": "firing", "fingerprint": "abc123", "labels": {"alertname": "X"}}
-        self.assertEqual(wh.alert_key(alert), "abc123")
+        self.assertEqual(wh.alert_key(alert), "firing:abc123")
 
     def test_marks_status_without_fingerprint(self):
         alert = {"status": "firing", "labels": {"alertname": "X", "node": "n1"}}
         firing = wh.alert_key(alert)
         resolved = wh.alert_key(dict(alert, status="resolved"))
         self.assertNotEqual(firing, resolved)
+
+    def test_fingerprint_status_allows_resolution_notification(self):
+        alert = {"status": "firing", "fingerprint": "abc123", "labels": {"alertname": "X"}}
+        self.assertNotEqual(wh.alert_key(alert), wh.alert_key(dict(alert, status="resolved")))
 
 
 class Admit(unittest.TestCase):
@@ -176,7 +180,7 @@ class WebhookHttp(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
 
     def test_deduped_returns_200_without_calling_send(self):
-        wh._admit("fp-1", now=wh_time.monotonic())
+        wh._admit("firing:fp-1", now=wh_time.monotonic())
         with unittest.mock.patch.object(wh, "send_to_ntfy") as m:
             resp = post()
         self.assertEqual(resp.status_code, 200)

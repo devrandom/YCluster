@@ -119,7 +119,10 @@ def alert_key(alert):
     """Return a stable key identifying one (status, alert) instance."""
     fingerprint = alert.get("fingerprint")
     if fingerprint:
-        return fingerprint
+        # Alertmanager keeps the same fingerprint when an alert resolves, so
+        # include status or else resolved notifications are deduped as their
+        # corresponding firing notification within this short-lived window.
+        return f"{alert.get('status')}:{fingerprint}"
     labels = alert.get("labels", {})
     return json.dumps((alert.get("status"), sorted(labels.items())), sort_keys=True)
 
