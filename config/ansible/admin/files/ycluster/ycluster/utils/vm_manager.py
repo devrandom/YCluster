@@ -1254,13 +1254,31 @@ def _vm_list_state(name, rec, local, live_states, sampled):
     return sampled.get(name, "(remote)")
 
 
-def vm_list():
+def _vm_list_row(name, rec, local, live_states, sampled):
+    """Render one `vm list` table row as a formatted string."""
+    host = rec.get("host")
+    state = _vm_list_state(name, rec, local, live_states, sampled)
+    notes = ""
+    if host == local:
+        image = vdb.data_image_path(name)
+        notes = vdb.migration_note(
+            os.path.exists(image),
+            os.path.isdir(f"{vdb.NAS_HOST_BASE}/{name}"))
+    return (f"{name:<20} {rec.get('owner', '?'):<24} {host or '?':<8} "
+            f"{str(rec.get('gpus', '?')):<5} {state:<14} "
+            f"{notes:<12} {_strip_tz(rec.get('created', ''))}")
+
+def vm_list(global_=False):
     vms = vms_all()
-    if not vms:
-        print("No VMs registered.")
-        return
     local = socket.gethostname()
-    # Live state from local incus (always authoritative for this host).
+    shown = vms if global_ else {n: r for n, r in vms.items()
+                                 if r.get("host") == local}
+    if not shown:
+        scope = "" if global_ else f" on {local} (use --global for all hosts)"
+        print(f"No VMs registered{scope}.")
+        return
+    # Live state from local incus (authoritative for this host only; a
+    # --global list can't query other hosts' incus daemons).
     try:
         live_states = {i["name"]: i.get("status", "?")
                        for i in _incus_json("list", "--format", "json")}
@@ -1268,13 +1286,9 @@ def vm_list():
         live_states = {}
     sampled = _sampled_states()
     print(f"{'NAME':<20} {'OWNER':<24} {'HOST':<8} {'GPUS':<5} "
-          f"{'STATE':<14} CREATED")
-    for name, rec in sorted(vms.items()):
-        host = rec.get("host")
-        state = _vm_list_state(name, rec, local, live_states, sampled)
-        print(f"{name:<20} {rec.get('owner', '?'):<24} {host or '?':<8} "
-              f"{str(rec.get('gpus', '?')):<5} {state:<14} "
-              f"{_strip_tz(rec.get('created', ''))}")
+          f"{'STATE':<14} {'NOTES':<12} CREATED")
+    for name, rec in sorted(shown.items()):
+        print(_vm_list_row(name, rec, local, live_states, sampled))
 
 
 def vm_sync_keys(user):

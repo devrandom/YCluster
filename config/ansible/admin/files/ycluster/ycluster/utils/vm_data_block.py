@@ -145,8 +145,12 @@ def migrate_vm_data_to_image(name, image, *, is_running):
         mountpoint = tempfile.mkdtemp(prefix=f"{name}.data-", dir="/mnt")
         subprocess.run(["mount", loop_dev, mountpoint], check=True,
                        capture_output=True, text=True)
-        subprocess.run(["rsync", "-aHAXS", f"{source}/", f"{mountpoint}/"],
-                       check=True, capture_output=True, text=True)
+        # No capture: --info=progress2 streams live progress to the
+        # terminal, and errors surface directly instead of being buffered.
+        subprocess.run(
+            ["rsync", "-aHAXS", "--info=progress2",
+             f"{source}/", f"{mountpoint}/"],
+            check=True)
 
         source_stats = _regular_file_stats(source)
         target_stats = _regular_file_stats(mountpoint)
@@ -220,6 +224,13 @@ def ensure_guest_mount(incus, name):
         f"grep -q '^LABEL=vmdata' /etc/fstab || "
         f"echo '{VM_DATA_FSTAB_LINE}' >> /etc/fstab")
     incus("exec", name, "--", "sh", "-c", script)
+
+
+def migration_note(image_exists, legacy_dir_exists):
+    """NOTES-column value for `vm list` describing migration state."""
+    if image_exists:
+        return ""
+    return "unmigrated" if legacy_dir_exists else ""
 
 
 def guest_mount_after_boot(incus, name, wait_agent, agent_timeout):

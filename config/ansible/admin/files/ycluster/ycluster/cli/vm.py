@@ -71,7 +71,9 @@ def register_vm_commands(subparsers):
         add_users=a.add_user, remove_users=a.remove_user))
 
     lsp = sub.add_parser('list', help='List registered VMs')
-    lsp.set_defaults(func=lambda a: vm.vm_list())
+    lsp.add_argument('--global', dest='global_', action='store_true',
+                     help='List VMs on every host, not just this one')
+    lsp.set_defaults(func=lambda a: vm.vm_list(global_=a.global_))
 
     sp = sub.add_parser('stop', help='Stop a VM')
     sp.add_argument('name')

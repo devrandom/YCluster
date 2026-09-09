@@ -103,8 +103,9 @@ class VMDataBlockTests(unittest.TestCase):
         commands = [tuple(call.args[0]) for call in run.call_args_list]
         self.assertIn(("qemu-img", "create", "-f", "raw", tmp, "204800M"),
                       commands)
-        self.assertIn(("rsync", "-aHAXS", f"{vdb.NAS_NFS_MOUNT}/vm1/",
-                       "/mnt/vm1-data/"), commands)
+        self.assertIn(("rsync", "-aHAXS", "--info=progress2",
+                       f"{vdb.NAS_NFS_MOUNT}/vm1/", "/mnt/vm1-data/"),
+                      commands)
         replace.assert_called_once_with(tmp, image)
 
     def test_migration_aborts_if_vm_starts_before_commit(self):

@@ -10,6 +10,7 @@ or a single module:
     python3 -m unittest tests.test_vm_scheduling
 """
 
+import io
 import json
 import subprocess
 import contextlib
@@ -1473,6 +1474,58 @@ class VMListHelperTests(unittest.TestCase):
                          '2026-01-01T00:00:00')
         self.assertEqual(vm._strip_tz('2026-01-01T00:00:00'),
                          '2026-01-01T00:00:00')
+
+    @mock.patch.object(vm, '_sampled_states', return_value={})
+    @mock.patch.object(vm, '_incus_json', return_value=[])
+    def test_vm_list_local_filters_and_notes(self, sampled, incus):
+        vms = {
+            'local-migrated': {'host': 'nv1', 'owner': 'a', 'gpus': 1,
+                               'created': ''},
+            'local-legacy': {'host': 'nv1', 'owner': 'b', 'gpus': 2,
+                             'created': ''},
+            'remote': {'host': 'nv2', 'owner': 'c', 'gpus': 1,
+                       'created': ''},
+        }
+        image = vm.vdb.data_image_path('local-migrated')
+        legacy = f'{vm.vdb.NAS_HOST_BASE}/local-legacy'
+
+        with mock.patch.object(vm, 'vms_all', return_value=vms), \
+                mock.patch.object(vm.socket, 'gethostname',
+                                  return_value='nv1'), \
+                mock.patch.object(vm.os.path, 'exists',
+                                  side_effect=lambda p: p == image), \
+                mock.patch.object(vm.os.path, 'isdir',
+                                  side_effect=lambda p: p != legacy):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                vm.vm_list()
+            self.assertIn('local-migrated', out.getvalue())
+            self.assertIn('local-legacy', out.getvalue())
+            self.assertNotIn('remote', out.getvalue())
+            self.assertNotIn('unmigrated', out.getvalue())
+
+        with mock.patch.object(vm, 'vms_all', return_value=vms), \
+                mock.patch.object(vm.socket, 'gethostname',
+                                  return_value='nv1'), \
+                mock.patch.object(vm.os.path, 'exists', return_value=False), \
+                mock.patch.object(vm.os.path, 'isdir', return_value=True):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                vm.vm_list()
+            self.assertIn('unmigrated', out.getvalue())
+
+        with mock.patch.object(vm, 'vms_all', return_value=vms), \
+                mock.patch.object(vm.socket, 'gethostname',
+                                  return_value='nv1'), \
+                mock.patch.object(vm.os.path, 'exists', return_value=False), \
+                mock.patch.object(vm.os.path, 'isdir', return_value=True), \
+                mock.patch.object(vm, '_sampled_states',
+                                  return_value={'remote': 'Running'}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                vm.vm_list(global_=True)
+            self.assertIn('remote', out.getvalue())
+            self.assertRegex(out.getvalue(), r'remote\s+.*\sRunning\s')
 
     def test_sampled_states_skips_unnamed(self):
         states = {
