@@ -1,7 +1,9 @@
 # Cluster users (IdP accounts)
 
 Accounts live in the cluster IdP (authentik) — there is no separate user
-database. Authentik is provisioned by
+database. See [authentik-groups.md](authentik-groups.md) for the
+distinction between app-role groups and IdP-superuser groups. Authentik is
+provisioned by
 [`install-authentik.yml`](../../config/ansible/app/install-authentik.yml);
 its admin blueprint (`ycluster-admin.yaml`, written by `authentik-manager`)
 creates two groups the web app cares about:

@@ -55,6 +55,8 @@ election.
   ranges, repo layout, inventory).
 - **etcd** — `docs/operations/etcd.md`. Backing store, not the interface: use
   the `ycluster` CLI and ansible, not `etcdctl`.
+- **Authentik groups** — `docs/operations/authentik-groups.md` (app-role vs
+  IdP-superuser groups; how to add members).
 - **Inference gateway** — `docs/operations/inference.md` and
   `docs/local-ai-proxy.md`.
 - **Dev PXE & dev cluster** — `docs/DEVELOPMENT.md`,
