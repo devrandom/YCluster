@@ -23,8 +23,10 @@
 TEST_LOG := './tmp/system-test.log'
 
 test:
-    ./run-tests.sh
-    make -C local-ai-proxy test
+    @echo "== test: Python =="
+    @./run-tests.sh
+    @echo "== test: Go =="
+    @make -s -C local-ai-proxy test
 
 test-system-quick:
     @mkdir -p ./tmp

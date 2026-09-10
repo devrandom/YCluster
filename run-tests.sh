@@ -17,10 +17,18 @@ FILES="$ROOT/config/ansible/admin/files"
 PY="${PYTHON:-}"
 [ -z "$PY" ] && PY="$([ -x "$ROOT/.venv/bin/python" ] && echo "$ROOT/.venv/bin/python" || echo python3)"
 
+run_unittests() {
+    local dir="$1" pythonpath="$2"
+    (
+        cd "$dir"
+        PYTHONPATH="$pythonpath" "$PY" -c 'import logging; logging.getLogger().addHandler(logging.NullHandler()); import unittest; unittest.main(module=None, argv=["unittest", "discover", "-s", "tests", "--buffer"], exit=True)'
+    )
+}
+
 echo "== vm_manager (domain + DAL) tests =="
-( cd "$FILES/ycluster" && PYTHONPATH=. "$PY" -m unittest discover -s tests )
+run_unittests "$FILES/ycluster" .
 
 echo "== admin web-app tests =="
-( cd "$FILES" && PYTHONPATH=".:ycluster" "$PY" -m unittest discover -s tests )
+run_unittests "$FILES" ".:ycluster"
 
 echo "All tests passed."

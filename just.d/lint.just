@@ -22,16 +22,19 @@ lint: lint-yaml lint-python lint-jinja lint-go lint-ansible
 check: test lint
 
 lint-yaml:
-    yamllint {{YAMLLINT_ARGS}} \
+    @echo "== lint: yamllint =="
+    @yamllint {{YAMLLINT_ARGS}} \
         config/ansible \
         config.yml docker-compose.yaml opencode.json \
         pyrightconfig.json
     @test -f secrets.yml && yamllint {{YAMLLINT_ARGS}} secrets.yml || true
 
 lint-python:
+    @echo "== lint: ty =="
     @if command -v ty >/dev/null 2>&1; then ty check; else echo "ty not installed; skipping lint-python (install with 'just setup-tools')"; fi
 
 lint-jinja:
+    @echo "== lint: j2lint =="
     @test -x .venv/bin/j2lint || { echo 'j2lint not installed; run just setup-venv'; exit 1; }
     @find config/ansible -type f \( -name '*.j2' -o -name '*.jinja' -o -name '*.jinja2' \) \
         ! -path 'config/ansible/monitoring/templates/ycluster-alerts*.j2' \
@@ -39,6 +42,7 @@ lint-jinja:
         | xargs -0 .venv/bin/j2lint --ignore single-space-decorator operator-enclosed-by-spaces jinja-statements-single-space jinja-statements-indentation jinja-statements-no-tabs single-statement-per-line jinja-statements-delimiter jinja-variable-lower-case jinja-variable-format --
 
 lint-ansible:
+    @echo "== lint: ansible-lint =="
     @test -x .venv/bin/ansible-lint || { echo 'ansible-lint not installed; run just setup-venv'; exit 1; }
     @mkdir -p ./tmp/ansible ./tmp/ansible-tmp
     @ANSIBLE_HOME="$PWD/tmp/ansible" ANSIBLE_LOCAL_TMP="$PWD/tmp/ansible-tmp" TMPDIR="$PWD/tmp" \
@@ -46,4 +50,5 @@ lint-ansible:
         --exclude config/ansible/vault --exclude 'config/ansible/*/files' config/ansible
 
 lint-go:
-    make -C local-ai-proxy vet
+    @echo "== lint: go vet =="
+    @make -s -C local-ai-proxy vet
