@@ -7,6 +7,7 @@ import signal
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
@@ -228,7 +229,7 @@ def _scrub_git_remote(url: object) -> object:
     return host
 
 
-def _scrub_body_json(obj: object) -> object:
+def _scrub_body_json(obj: Any) -> Any:
     """Walk a parsed JSON body and redact known sensitive fields.
 
     Currently handles codex's `x-codex-turn-metadata.workspaces[*]`:
@@ -237,10 +238,13 @@ def _scrub_body_json(obj: object) -> object:
     """
     if not isinstance(obj, dict):
         return obj
-    try:
-        turn_md = obj.get("params", {}).get("_meta", {}).get("x-codex-turn-metadata")  # type: ignore[union-attr]
-    except AttributeError:
-        turn_md = None
+    params = obj.get("params")
+    if not isinstance(params, dict):
+        return obj
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        return obj
+    turn_md = meta.get("x-codex-turn-metadata")
     if isinstance(turn_md, dict):
         workspaces = turn_md.get("workspaces")
         if isinstance(workspaces, dict):

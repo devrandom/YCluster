@@ -47,7 +47,7 @@ unit-test flow.
 From the worktree, run both gates **before** making changes:
 
 ```bash
-just test
+just check
 just metrics
 ```
 
@@ -65,7 +65,7 @@ satisfies the issue. Preserve existing patterns and avoid unrelated cleanup.
 After implementing, rerun both gates from the worktree:
 
 ```bash
-just test
+just check
 just metrics
 ```
 
@@ -98,7 +98,7 @@ gitlab -o json -f iid,title,web_url project-merge-request create \
 
 Do not URL-encode the `/` in the project path for this CLI; use
 `devrandom01/ycluster` directly. The MR description should include the
-issue/todo path when applicable and verification results from `just test`
+issue/todo path when applicable and verification results from `just check`
 and `just metrics`.
 
 After the MR is created, stop. Do not merge it, monitor CI, or make further

@@ -28,6 +28,7 @@ dependencies = [
 [tool.uv]
 dev-dependencies = [
     "ansible-lint>=6.0.0",
+    "j2lint==1.3.0",
     # Type stubs for LSP support
     "types-requests",
     "types-PyYAML",

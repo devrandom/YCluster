@@ -43,7 +43,7 @@ is organized around the **shipped pin**, not the checkout directory.
 
 | # | Surface | Where pinned | Ecosystem | Audit today |
 |---|---------|--------------|-----------|-------------|
-| S1 | `local-ai-proxy` | `local-ai-proxy/go.mod` + `go.sum` | Go | ✅ govulncheck (`just check`) |
+| S1 | `local-ai-proxy` | `local-ai-proxy/go.mod` + `go.sum` | Go | ✅ govulncheck (`just deps-check-go`) |
 | S2 | Python dev/control plane | root `pyproject.toml` + `uv.lock` | Python (uv) | ❌ |
 | S3 | ycluster CLI runtime | `config/ansible/admin/files/ycluster/requirements.txt` (+ `setup.py`) | Python (pip) | ❌ |
 | S4 | MCP server | `mcp/cluster-exec/pyproject.toml` + `uv.lock` | Python (uv) | ❌ |
@@ -187,7 +187,7 @@ for that surface's gate.
 
 | # | Surface | Audit now | Plan | Exit criteria |
 |---|---------|-----------|------|---------------|
-| S1 | local-ai-proxy (Go) | ✅ `just check` | Already wired; extend only to ensure it's included in the aggregate `deps-check`. | `govulncheck ./...` exit 0, `go.sum` tracked |
+| S1 | local-ai-proxy (Go) | ✅ `just deps-check-go` | Already wired; extend only to ensure it's included in the aggregate `deps-check`. | `govulncheck ./...` exit 0, `go.sum` tracked |
 | S2 | Python dev/control plane (root uv.lock) | ❌ | Add `uv lock --check` + `osv-scanner` to `deps-vuln-py`; baseline ledger. | clean osv on `uv.lock` + `uv lock --check` passes |
 | S3 | ycluster CLI runtime (pip) | ❌ | Decide lock vs loose (see Open Q1). Default: keep loose, gate via `pip-audit` against `requirements.txt`. | `pip-audit` clean; manually re-verified against apt runtime deps |
 | S4 | MCP server (uv.lock) | ❌ | Same as S2 (`uv lock --check` + osv). | clean osv + lock-check |

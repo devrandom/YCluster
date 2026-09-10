@@ -4,7 +4,7 @@
 #
 #   just vulncheck    reachability-aware CVE scan (read-only, no pin writes)
 #   just deps-verify  confirm the module cache still matches the pinned go.sum
-#   just check        read-only audit gate = deps-verify + vulncheck
+#   just deps-check-go read-only audit gate = deps-verify + vulncheck
 #   just deps-tidy    re-pin go.mod/go.sum to the code's real imports
 #
 # Why separate? `go mod tidy` / go.sum changes alter what a future scan
@@ -14,13 +14,13 @@
 # commit local-ai-proxy/go.mod + local-ai-proxy/go.sum together. go.sum is
 # tracked so the checksummed set that was scanned is the set that ships.
 #
-# `just check` combines the two read-only audits (deps-verify + vulncheck).
-# It never touches go.mod/go.sum, so running it routinely is safe; the
-# mutation-prone deps-tidy stays a separate, deliberate step.
+# `just deps-check-go` combines the two read-only audits (deps-verify +
+# vulncheck). It never touches go.mod/go.sum, so running it routinely is safe;
+# the mutation-prone deps-tidy stays a separate, deliberate step.
 
 # Aggregate read-only audit gate: verify the pinned checksums, then run the
 # reachability-aware CVE scan. Never rewrites go.mod/go.sum.
-check: deps-verify vulncheck
+deps-check-go: deps-verify vulncheck
     @echo "ok: checksums verified and no reachable vulnerabilities"
 
 # Reachability-aware scan of local-ai-proxy deps against the OSV Go vuln DB.

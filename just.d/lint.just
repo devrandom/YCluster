@@ -1,9 +1,11 @@
-# Static checks across the surfaces ty / yamllint / go vet cover.
+# Static checks across the surfaces ty / yamllint / j2lint / go vet cover.
 # Run `just lint` before committing.
 #
-#   just lint             aggregate (lint-yaml lint-python lint-go)
+#   just lint             aggregate (lint-yaml lint-python lint-jinja lint-go lint-ansible)
+#   just check            test + lint
 #   just lint-yaml        yamllint (config/ansible/**/*.yml + root yamls)
 #   just lint-python      ty (admin-api + ycluster package + contrib/)
+#   just lint-jinja       j2lint (syntax-first over Jinja templates)
 #   just lint-go          go vet on local-ai-proxy
 #   just lint-ansible     ansible-lint (config/ansible; no inventory needed)
 
@@ -15,7 +17,9 @@
 # Override with `YAMLLINT_EXTRA_ARGS=...`.
 export YAMLLINT_ARGS := "-d '{extends: relaxed, rules: {line-length: disable, indentation: disable, comments-indentation: disable, comments: disable, truthy: disable, braces: disable, octal-values: disable, empty-lines: disable, empty-values: disable, quoted-strings: disable, trailing-spaces: disable}}' " + env_var_or_default('YAMLLINT_EXTRA_ARGS', '')
 
-lint: lint-yaml lint-python lint-go lint-ansible
+lint: lint-yaml lint-python lint-jinja lint-go lint-ansible
+
+check: test lint
 
 lint-yaml:
     yamllint {{YAMLLINT_ARGS}} \
@@ -26,6 +30,13 @@ lint-yaml:
 
 lint-python:
     @if command -v ty >/dev/null 2>&1; then ty check; else echo "ty not installed; skipping lint-python (install with 'just setup-tools')"; fi
+
+lint-jinja:
+    @test -x .venv/bin/j2lint || { echo 'j2lint not installed; run just setup-venv'; exit 1; }
+    @find config/ansible -type f \( -name '*.j2' -o -name '*.jinja' -o -name '*.jinja2' \) \
+        ! -path 'config/ansible/monitoring/templates/ycluster-alerts*.j2' \
+        ! -path 'config/ansible/monitoring/templates/ycluster-federated-alerts.yml.j2' -print0 \
+        | xargs -0 .venv/bin/j2lint --ignore single-space-decorator operator-enclosed-by-spaces jinja-statements-single-space jinja-statements-indentation jinja-statements-no-tabs single-statement-per-line jinja-statements-delimiter jinja-variable-lower-case jinja-variable-format --
 
 lint-ansible:
     @test -x .venv/bin/ansible-lint || { echo 'ansible-lint not installed; run just setup-venv'; exit 1; }

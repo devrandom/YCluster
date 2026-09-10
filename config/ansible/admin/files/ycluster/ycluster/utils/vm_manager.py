@@ -21,7 +21,8 @@ from .vm_ip_pinning import (BASTION_CONTAINER, VM_IP_POOL_END,
                             VM_IP_POOL_START, VM_IP_SUBNET_PREFIX,
                             _live_instance_ips, _live_ipv4, _managed_bridges,
                             _pick_vm_ip, _pin_instance_ip, _pin_queues,
-                            _occupied_ips, _pinned_ips, sync_dns_records)
+                            _occupied_ips, _pinned_ips, pin_existing_vms,
+                            sync_dns_records)
 from .vm_desired import desired_conflict as _desired_conflict
 from .vm_gpu_schedule import (_parse_window, combine_gpu_commitments,
                               desired_gpus, desired_on, gpu_available_windows,

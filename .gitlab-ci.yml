@@ -40,6 +40,18 @@ python-lint:
     - for file in config.yml docker-compose.yaml opencode.json pyrightconfig.json; do if [ -f "$file" ]; then yamllint -d "$YAMLLINT_RULES" "$file"; fi; done
     - ty check
 
+jinja-lint:
+  stage: lint
+  image: python:3.13-slim
+  extends:
+    - .default_rules
+    - .python_job
+  script:
+    - python -m pip install 'j2lint==1.3.0'
+    # The Prometheus rule templates use custom [% %] delimiters in their
+    # template tasks, so j2lint cannot parse their Prometheus expressions.
+    - find config/ansible -type f \( -name '*.j2' -o -name '*.jinja' -o -name '*.jinja2' \) ! -path 'config/ansible/monitoring/templates/ycluster-alerts*.j2' ! -path 'config/ansible/monitoring/templates/ycluster-federated-alerts.yml.j2' -print0 | xargs -0 j2lint --ignore single-space-decorator operator-enclosed-by-spaces jinja-statements-single-space jinja-statements-indentation jinja-statements-no-tabs single-statement-per-line jinja-statements-delimiter jinja-variable-lower-case jinja-variable-format --
+
 ansible-lint:
   stage: lint
   image: python:3.13-slim
