@@ -649,21 +649,23 @@ groups:
       # Compare each GPU's used/total ratio before aggregating, then page on
       # the hottest card on the node. Covers host-visible and VM-passthrough
       # nvidia-smi collectors.
-      - alert: HighGPUMemoryUsage
-        expr: |
-          max by (node) (
-            node_gpu_memory_used_bytes / node_gpu_memory_total_bytes * 100
-          ) > 95
-          or
-          max by (node) (
-            node_vm_gpu_memory_used_bytes / node_vm_gpu_memory_total_bytes * 100
-          ) > 95
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High GPU memory usage on {{ $labels.node }}"
-          description: "A GPU on {{ $labels.node }} has been above 95% memory usage for more than 5 minutes"
+      # Disabled: too noisy — legitimate high memory use (e.g. large model
+      # loaded across all cards) is normal and not actionable.
+      # - alert: HighGPUMemoryUsage
+      #   expr: |
+      #     max by (node) (
+      #       node_gpu_memory_used_bytes / node_gpu_memory_total_bytes * 100
+      #     ) > 95
+      #     or
+      #     max by (node) (
+      #       node_vm_gpu_memory_used_bytes / node_vm_gpu_memory_total_bytes * 100
+      #     ) > 95
+      #   for: 5m
+      #   labels:
+      #     severity: warning
+      #   annotations:
+      #     summary: "High GPU memory usage on {{ $labels.node }}"
+      #     description: "A GPU on {{ $labels.node }} has been above 95% memory usage for more than 5 minutes"
 
       # A Function Level Reset during normal operation is evidence of a
       # PCIe/driver/device fault. Counted per boot from the host journal.
