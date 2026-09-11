@@ -216,8 +216,9 @@ def collect_flr_events():
     """Return (events_since_boot, probe_ok) from the current boot's journal."""
     try:
         r = subprocess.run(
-            ["journalctl", "--boot", "--no-pager", "--output=cat",
-             "--grep", "function level reset|\\bFLR\\b"],
+            ["journalctl", "--boot", "--dmesg", "--no-pager",
+             "--output=cat", "--grep",
+             "function level reset|\\bFLR\\b"],
             capture_output=True, text=True, timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -232,7 +233,8 @@ def collect_flr_events():
             return 0, 0
         return 0, 1
     return sum(1 for line in r.stdout.splitlines()
-               if FLR_PATTERN.search(line)), 1
+               if not line.startswith("#")
+               and FLR_PATTERN.search(line)), 1
 
 
 def _comino_query(port, cmd, read_timeout=0.5):

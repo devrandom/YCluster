@@ -230,6 +230,25 @@ class CollectFlrEventsTests(unittest.TestCase):
                                return_value=self.result(stdout)):
             self.assertEqual(ntc.collect_flr_events(), (2, 1))
 
+    def test_ignores_collector_comment_lines(self):
+        # The collector's own stderr mentions "FLR" in error messages and
+        # can end up in the journal; it must not be self-counted.
+        stdout = (
+            '# journalctl failed: Command ... timed out\n'
+            'pcieport: Function Level Reset for 0000:01:00.0\n'
+        )
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result(stdout)):
+            self.assertEqual(ntc.collect_flr_events(), (1, 1))
+
+    def test_uses_dmesg_flag(self):
+        with mock.patch.object(
+            ntc.subprocess, 'run',
+            return_value=self.result('', returncode=1),
+        ) as run:
+            ntc.collect_flr_events()
+        self.assertIn('--dmesg', run.call_args[0][0])
+
     def test_failure_reports_probe_not_ok(self):
         with mock.patch.object(ntc.subprocess, 'run',
                                return_value=self.result('bad', returncode=2)):

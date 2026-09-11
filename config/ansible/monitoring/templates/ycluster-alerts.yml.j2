@@ -667,14 +667,16 @@ groups:
 
       # A Function Level Reset during normal operation is evidence of a
       # PCIe/driver/device fault. Counted per boot from the host journal.
+      # The collector timer fires every 15m, so the rate window must span
+      # at least two samples to avoid extrapolation artifacts.
       - alert: GPUFunctionLevelReset
-        expr: increase(node_gpu_flr_events_total[5m]) > 0
+        expr: increase(node_gpu_flr_events_total[20m]) > 0
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "GPU PCIe Function Level Reset on {{ $labels.node }}"
-          description: "The host journal on {{ $labels.node }} recorded {{ $value | humanize }} PCIe Function Level Resets in 5 minutes"
+          description: "The host journal on {{ $labels.node }} recorded {{ $value | humanize }} PCIe Function Level Resets in 20 minutes"
 
       - alert: GPUFLRProbeFailed
         expr: node_gpu_flr_probe_ok == 0
