@@ -213,13 +213,38 @@ def collect_nvidia():
 
 
 def collect_flr_events():
-    """Return (events_since_boot, probe_ok) from the current boot's journal."""
+    """Return (events_since_boot, probe_ok) from the kernel journal.
+
+    Reads incrementally via a persisted journal cursor so each run only
+    scans lines logged since the previous run, regardless of how large
+    the boot journal has grown. A running total is persisted next to the
+    cursor so the exported metric stays a monotonic counter.
+    """
+    state_dir = os.path.dirname(OUT)
+    cursor_file = os.path.join(state_dir, "flr-cursor")
+    count_file = os.path.join(state_dir, "flr-count")
+    try:
+        with open(cursor_file) as f:
+            cursor = f.read().strip()
+    except OSError:
+        cursor = None
+    if cursor is None:
+        # Cold start: the boot journal may be huge, so don't scan it.
+        # Start the counter at 0 from here and anchor the cursor at the
+        # current end of the journal.
+        try:
+            os.unlink(count_file)
+        except OSError:
+            pass
+        _advance_flr_cursor(cursor_file)
+        return 0, 1
+    cmd = ["journalctl", "--boot", "--dmesg", "--no-pager",
+           "--output=cat", "--show-cursor", "--grep",
+           "function level reset|\\bFLR\\b",
+           "--after-cursor", cursor]
     try:
         r = subprocess.run(
-            ["journalctl", "--boot", "--dmesg", "--no-pager",
-             "--output=cat", "--grep",
-             "function level reset|\\bFLR\\b"],
-            capture_output=True, text=True, timeout=5,
+            cmd, capture_output=True, text=True, timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         print(f"# journalctl failed: {e}", file=sys.stderr)
@@ -230,11 +255,63 @@ def collect_flr_events():
         if r.returncode != 1 or r.stderr.strip():
             print(f"# journalctl rc={r.returncode}: {r.stderr.strip()}",
                   file=sys.stderr)
+            # A stale cursor (e.g. after reboot) fails the seek; reset.
+            if "Failed to seek to cursor" in r.stderr:
+                os.unlink(cursor_file)
+                return collect_flr_events()
             return 0, 0
-        return 0, 1
-    return sum(1 for line in r.stdout.splitlines()
-               if not line.startswith("#")
-               and FLR_PATTERN.search(line)), 1
+        # No new matches, but advance the cursor past what we scanned.
+        _advance_flr_cursor(cursor_file)
+        return _flr_total(count_file, 0), 1
+    events = sum(1 for line in r.stdout.splitlines()
+                 if not line.startswith("#")
+                 and FLR_PATTERN.search(line))
+    _advance_flr_cursor(cursor_file)
+    return _flr_total(count_file, events), 1
+
+
+def _flr_total(count_file, new_events):
+    """Add new_events to the persisted running total and return it."""
+    total = new_events
+    try:
+        with open(count_file) as f:
+            total += int(f.read().strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        tmp = count_file + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(str(total) + "\n")
+        os.rename(tmp, count_file)
+    except OSError:
+        pass
+    return total
+
+
+def _advance_flr_cursor(cursor_file):
+    """Persist the latest journal cursor so the next run is incremental."""
+    try:
+        r = subprocess.run(
+            ["journalctl", "--boot", "--dmesg", "--no-pager",
+             "--output=cat", "--show-cursor", "--lines=1"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"# journalctl cursor failed: {e}", file=sys.stderr)
+        return
+    if r.returncode != 0:
+        return
+    for line in r.stdout.splitlines():
+        m = re.search(r"-- cursor: (\S+)", line)
+        if m:
+            tmp = cursor_file + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    f.write(m.group(1) + "\n")
+                os.rename(tmp, cursor_file)
+            except OSError:
+                pass
+            return
 
 
 def _comino_query(port, cmd, read_timeout=0.5):

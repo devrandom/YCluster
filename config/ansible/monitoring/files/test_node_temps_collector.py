@@ -6,6 +6,7 @@ Run:  python3 -m unittest test_node_temps_collector  (from this dir)
 import importlib.util
 import os
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -215,12 +216,36 @@ class CollectNvidiaTests(unittest.TestCase):
 
 
 class CollectFlrEventsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # Point the state files at a temp dir; tests run unprivileged and
+        # the real path lives under /var/lib.
+        self.out = ntc.OUT
+        ntc.OUT = os.path.join(self.tmp.name, "temps.prom")
+        self.addCleanup(setattr, ntc, "OUT", self.out)
+
+    def cursor_path(self):
+        return os.path.join(self.tmp.name, "flr-cursor")
+
+    def count_path(self):
+        return os.path.join(self.tmp.name, "flr-count")
+
+    def write_cursor(self, cursor):
+        with open(self.cursor_path(), "w") as f:
+            f.write(cursor + "\n")
+
+    def read_count(self):
+        with open(self.count_path()) as f:
+            return int(f.read().strip())
+
     @staticmethod
     def result(stdout='', returncode=0):
         return subprocess.CompletedProcess([], returncode, stdout=stdout,
                                           stderr='')
 
     def test_counts_matching_journal_lines(self):
+        self.write_cursor('s=seed')
         stdout = (
             'pcieport: Function Level Reset for 0000:01:00.0\n'
             'unrelated\n'
@@ -229,10 +254,43 @@ class CollectFlrEventsTests(unittest.TestCase):
         with mock.patch.object(ntc.subprocess, 'run',
                                return_value=self.result(stdout)):
             self.assertEqual(ntc.collect_flr_events(), (2, 1))
+        self.assertEqual(self.read_count(), 2)
+
+    def test_counter_accumulates_across_runs(self):
+        self.write_cursor('s=seed')
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result('FLR completed')):
+            self.assertEqual(ntc.collect_flr_events(), (1, 1))
+        self.write_cursor('s=seed')
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result('FLR again')):
+            self.assertEqual(ntc.collect_flr_events(), (2, 1))
+
+    def test_incremental_run_uses_stored_cursor(self):
+        self.write_cursor('s=abc123')
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if '--after-cursor' in cmd:
+                return self.result('', returncode=1)
+            return self.result(
+                '-- cursor: s=def456\n', returncode=0)
+
+        with mock.patch.object(ntc.subprocess, 'run', side_effect=fake_run):
+            self.assertEqual(ntc.collect_flr_events(), (0, 1))
+        probe = calls[0]
+        self.assertIn('--after-cursor', probe)
+        self.assertEqual(probe[probe.index('--after-cursor') + 1],
+                         's=abc123')
+        # Cursor must advance to the latest journal position.
+        with open(self.cursor_path()) as f:
+            self.assertEqual(f.read().strip(), 's=def456')
 
     def test_ignores_collector_comment_lines(self):
         # The collector's own stderr mentions "FLR" in error messages and
         # can end up in the journal; it must not be self-counted.
+        self.write_cursor('s=seed')
         stdout = (
             '# journalctl failed: Command ... timed out\n'
             'pcieport: Function Level Reset for 0000:01:00.0\n'
@@ -242,6 +300,7 @@ class CollectFlrEventsTests(unittest.TestCase):
             self.assertEqual(ntc.collect_flr_events(), (1, 1))
 
     def test_uses_dmesg_flag(self):
+        self.write_cursor('s=seed')
         with mock.patch.object(
             ntc.subprocess, 'run',
             return_value=self.result('', returncode=1),
@@ -250,14 +309,24 @@ class CollectFlrEventsTests(unittest.TestCase):
         self.assertIn('--dmesg', run.call_args[0][0])
 
     def test_failure_reports_probe_not_ok(self):
+        self.write_cursor('s=seed')
         with mock.patch.object(ntc.subprocess, 'run',
                                return_value=self.result('bad', returncode=2)):
             self.assertEqual(ntc.collect_flr_events(), (0, 0))
 
     def test_no_matches_reports_probe_ok(self):
+        self.write_cursor('s=seed')
         with mock.patch.object(ntc.subprocess, 'run',
                                return_value=self.result('', returncode=1)):
             self.assertEqual(ntc.collect_flr_events(), (0, 1))
+
+    def test_cold_start_skips_grep_and_resets_counter(self):
+        with open(self.count_path(), 'w') as f:
+            f.write('7\n')
+        with mock.patch.object(ntc.subprocess, 'run',
+                               return_value=self.result('', returncode=1)):
+            self.assertEqual(ntc.collect_flr_events(), (0, 1))
+        self.assertFalse(os.path.exists(self.count_path()))
 
 
 class SelectCominoDevice(unittest.TestCase):
