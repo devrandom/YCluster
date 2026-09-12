@@ -67,6 +67,11 @@
           domain-needed
 
           bind-interfaces
+          {% if vm_nat_transit_enabled | default(false) %}
+          # The Incus-managed transit bridge runs its own dnsmasq for
+          # DHCP/DNS; avoid trying to bind its gateway address.
+          except-interface=transit0
+          {% endif %}
           # DNS only, no DHCP
           port=53
           # Only answer queries from clients on a directly-attached subnet.
