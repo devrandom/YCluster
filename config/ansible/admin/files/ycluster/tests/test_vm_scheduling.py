@@ -1077,9 +1077,20 @@ class VMMemoryPreflightTests(unittest.TestCase):
     def test_memory_bytes(self):
         self.assertEqual(vm._memory_bytes('32GiB'), 32 * 1024**3)
         self.assertEqual(vm._memory_bytes('16MiB'), 16 * 1024**2)
+        self.assertEqual(vm._memory_bytes('24GB'), 24 * 1000**3)
+        self.assertNotEqual(vm._memory_bytes('24GB'),
+                            vm._memory_bytes('24GiB'))
         self.assertEqual(vm._memory_bytes(2048), 2048)
         with self.assertRaisesRegex(ValueError, 'Invalid memory size'):
             vm._memory_bytes('not-a-size')
+
+    def test_validate_memory_size(self):
+        self.assertEqual(vm._validate_memory_size('24GB'), '24GB')
+        self.assertEqual(vm._validate_memory_size('32GiB'), '32GiB')
+        with self.assertRaisesRegex(ValueError, 'Invalid memory size'):
+            vm._validate_memory_size('not-a-size')
+        with self.assertRaisesRegex(ValueError, 'must be positive'):
+            vm._validate_memory_size('0')
 
     def test_format_memory_bytes(self):
         self.assertEqual(vm._format_memory_bytes(32 * 1024**3), '32GiB')
@@ -1263,6 +1274,38 @@ class VMMemoryPreflightTests(unittest.TestCase):
         preflight.assert_called_once_with('vm1', '32GiB', 'start')
         share.assert_called_once_with('vm1', migrate=False)
         incus.assert_called_once_with('start', 'vm1')
+
+    @mock.patch.object(vm, 'vm_get',
+                       return_value={'gpus': 1, 'mem': '24GB',
+                                     'type': 'container'})
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
+    @mock.patch.object(vm, '_ensure_gpus_attached')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_record_event_from_record')
+    @mock.patch.object(vm, '_warn_desired_conflict')
+    def test_start_skips_container_preflight(self, warn, event, incus,
+                                             attach, share, preflight,
+                                             vm_get):
+        vm.vm_start('ct1')
+        preflight.assert_not_called()
+        incus.assert_called_once_with('start', 'ct1')
+
+    @mock.patch.object(vm, 'vm_get',
+                       return_value={'mem': '32GiB', 'type': 'container'})
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
+    @mock.patch.object(vm, '_instance_running', return_value=False)
+    @mock.patch.object(vm, '_ensure_gpus_attached')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_record_event_from_record')
+    @mock.patch.object(vm, '_warn_desired_conflict')
+    def test_restart_skips_container_preflight(self, warn, event, incus,
+                                               attach, running, share,
+                                               preflight, vm_get):
+        vm.vm_restart('ct1')
+        preflight.assert_not_called()
+        incus.assert_called_once_with('start', 'ct1')
 
     @mock.patch.object(vm, 'vm_get',
                        return_value={'gpus': 1, 'mem': '32GiB'})

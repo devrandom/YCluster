@@ -186,12 +186,14 @@ def _incus_json(*args):
 
 _MEMORY_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B?)$",
                         re.IGNORECASE)
+# Incus preserves the configured string and distinguishes decimal from
+# binary units: GB is 10^9 bytes, GiB is 2^30 bytes.
 _MEMORY_SUFFIX_BYTES = {
     "": 1, "B": 1,
-    "K": 1024, "KIB": 1024,
-    "M": 1024**2, "MIB": 1024**2,
-    "G": 1024**3, "GIB": 1024**3,
-    "T": 1024**4, "TIB": 1024**4,
+    "K": 1000, "KB": 1000, "KIB": 1024,
+    "M": 1000**2, "MB": 1000**2, "MIB": 1024**2,
+    "G": 1000**3, "GB": 1000**3, "GIB": 1024**3,
+    "T": 1000**4, "TB": 1000**4, "TIB": 1024**4,
 }
 
 def _memory_bytes(value):
@@ -205,6 +207,13 @@ def _memory_bytes(value):
     if not match or suffix not in _MEMORY_SUFFIX_BYTES:
         raise ValueError(f"Invalid memory size: {value}")
     return int(float(match.group(1)) * _MEMORY_SUFFIX_BYTES[suffix])
+
+def _validate_memory_size(value):
+    """Validate a launch/alter memory limit the same way Incus parses it."""
+    size = _memory_bytes(value)
+    if size <= 0:
+        raise ValueError(f"Memory size must be positive: {value}")
+    return value
 
 def _format_memory_bytes(size):
     """Render a memory size for a human-facing preflight failure."""
@@ -1029,6 +1038,7 @@ def vm_launch(name, owner, gpus=1, cpu=8, mem="32GiB", image=None,
     profile's device (there's no per-GPU pinning on a single-GPU host).
     """
     instance_type = _validate_vm_launch(name, owner, gpus, instance_type)
+    _validate_memory_size(mem)
     if image is None:
         image = VM_IMAGE if instance_type == "vm" else CT_IMAGE
     profile = VM_PROFILE if instance_type == "vm" else CT_PROFILE
@@ -1156,7 +1166,10 @@ def vm_start(name, billable=False, initiator="cli", gpus=None, migrate=False):
     mem = record.get("mem") or _incus_config_value(name, "limits.memory")
     if not mem:
         raise RuntimeError(f"Cannot determine memory limit for '{name}'")
-    _preflight_vm_memory(name, mem, "start")
+    # Containers share host RAM (no VFIO pinning), so the strict
+    # MemAvailable check only applies to VMs.
+    if record.get("type") != "container":
+        _preflight_vm_memory(name, mem, "start")
     # Backfill any host-side state added since this instance was created
     # (currently just the /data NAS share). Idempotent. Migration only
     # runs when explicitly requested via `vm start --migrate`.
@@ -1186,7 +1199,8 @@ def vm_restart(name, billable=False, initiator="cli"):
     mem = record.get("mem") or _incus_config_value(name, "limits.memory")
     if not mem:
         raise RuntimeError(f"Cannot determine memory limit for '{name}'")
-    _preflight_vm_memory(name, mem, "restart")
+    if record.get("type") != "container":
+        _preflight_vm_memory(name, mem, "restart")
     if _instance_running(name):
         _incus_stop(name)
     migrated = _ensure_nas_share(name)

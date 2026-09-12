@@ -170,6 +170,8 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
         raise ValueError(f"No registered VM named '{name}'.")
     cur_type = rec.get("type") or vm._default_instance_type()
     _validate_vm_alter(name, rec, image, instance_type, gpus, cur_type)
+    if mem is not None:
+        vm._validate_memory_size(mem)
 
     owner_changed = _alter_owner(rec, owner)
     new_add, access_changed = _altered_access(rec, add_users, remove_users)
