@@ -45,10 +45,22 @@
       set_fact:
         whisperx_uid: "{{ getent_passwd[whisperx_user][1] }}"
 
-    - name: Ensure podman is installed
+    # Podman must already be the custom 5.x binary from
+    # admin/install-podman.yml (distro 4.9.3 can't parse CDI 0.7.0 specs, and
+    # apt-installing the distro package here would overwrite the custom
+    # binary). uidmap/slirp4netns are runtime deps the install play keeps
+    # present, but verify them here since this play can run standalone.
+    - name: Require custom podman 5.x
+      command: podman --version
+      register: whisperx_podman_version
+      changed_when: false
+      failed_when: >
+        whisperx_podman_version.rc != 0 or
+        whisperx_podman_version.stdout is not match('^podman version 5\\.')
+
+    - name: Ensure podman runtime dependencies are installed
       apt:
         name:
-          - podman
           - uidmap
           - slirp4netns
         state: present

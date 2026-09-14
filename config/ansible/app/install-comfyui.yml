@@ -103,17 +103,21 @@
       register: comfyui_dev_uid
       changed_when: false
 
-    # Podman + NVIDIA CDI are required for `--device nvidia.com/gpu=N`.
+    # Podman 5.x + NVIDIA CDI are required for `--device nvidia.com/gpu=N`.
     # setup-gpu-podman.yml runs before this in the app chain, but check
-    # defensively in case the play is run standalone.
-    - name: Ensure podman is installed
-      apt:
-        name: podman
-        state: present
-        update_cache: yes
+    # defensively in case the play is run standalone. Do not apt-install
+    # podman here: that would replace the required custom 5.x binary with
+    # distro 4.9.3, which cannot parse the current CDI spec.
+    - name: Require custom podman 5.x
+      command: podman --version
+      register: comfyui_podman_version
+      changed_when: false
+      failed_when: >
+        comfyui_podman_version.rc != 0 or
+        comfyui_podman_version.stdout is not match('^podman version 5\\.')
 
     - name: Ensure NVIDIA CDI spec exists
-      command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+      command: nvidia-ctk cdi generate --device-name-strategy=index --output=/etc/cdi/nvidia.yaml
       args:
         creates: /etc/cdi/nvidia.yaml
       changed_when: true
