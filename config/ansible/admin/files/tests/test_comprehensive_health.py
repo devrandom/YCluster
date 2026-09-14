@@ -103,6 +103,20 @@ class HealthHelpersTests(unittest.TestCase):
             self.assertEqual(appmod._squid_health()['status'], 'unhealthy')
 
 
+class HostHealthFanoutTests(unittest.TestCase):
+    def test_only_health_api_hosts_are_probed(self):
+        hosts = [
+            {'hostname': 'pdu1', 'type': 'pdu', 'disabled': False},
+            {'hostname': 's1', 'type': 'storage', 'disabled': False},
+        ]
+        with mock.patch.object(appmod, 'get_host_health') as get_health:
+            get_health.return_value = {'overall': 'healthy'}
+            host_health = appmod.get_all_host_health(hosts)
+
+        get_health.assert_called_once_with('s1')
+        self.assertNotIn('pdu1', host_health)
+
+
 class ComprehensiveHealthTests(unittest.TestCase):
     def test_all_healthy_storage_leader(self):
         vip = {

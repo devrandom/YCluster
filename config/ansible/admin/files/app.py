@@ -1899,12 +1899,18 @@ def _disabled_health(hosts):
             for h in hosts if h.get('disabled', False)}
 
 
+HEALTH_API_HOST_TYPES = frozenset(
+    {'storage', 'compute', 'nvidia', 'nas', 'macos'})
+
+
 def get_all_host_health(hosts):
-    """Fetch health for all non-disabled hosts in parallel."""
+    """Fetch health for non-disabled hosts that serve health-api."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     types = {h['hostname']: h.get('type') for h in hosts}
     host_health = _disabled_health(hosts)
-    active = [h for h in hosts if h['hostname'] not in host_health]
+    active = [h for h in hosts
+              if h['hostname'] not in host_health
+              and h.get('type') in HEALTH_API_HOST_TYPES]
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         # Use hostname, not IP — etcd's IP field can be stale (e.g. after a
