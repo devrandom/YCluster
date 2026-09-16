@@ -1,6 +1,6 @@
 ---
-# Install ComfyUI (MiniMax H3) on Linux/Nvidia GPU nodes (nv*) as a podman
-# container, serving the MiniMax H3 omni-modal video model on a single pinned
+# Install ComfyUI on Linux/Nvidia GPU nodes (nv*) as a podman container,
+# serving MiniMax H3 plus additional video model families from a single pinned
 # GPU. See docs/design/comfyui-h3.md for the technology choice + architecture.
 #
 # Scope: the full ComfyUI backend in one container. All graph execution,
@@ -14,7 +14,7 @@
 #   venv + torch CUDA wheels + ffmpeg). Model weights are NEVER baked into the
 #   image and never fetched at runtime — they are bound-mounted read-only from
 #   /home/dev/comfyui/models (local NVMe, seeded one-time by
-#   ~/bin/seed-comfyui-h3.sh) and the durable user tree from /near1/comfyui
+#   ~/bin/seed-comfyui-models.sh) and the durable user tree from /near1/comfyui
 #   (NAS). The image is built once on the first Nvidia host and pushed to the
 #   cluster registry (registry.xc:5000/comfyui:VERSION); future hosts pull
 #   instead of rebuild.
@@ -58,15 +58,12 @@
     comfyui_containerfile_dest: /home/dev/.comfyui-build/Containerfile
     comfyui_service_unit_src: files/comfyui/comfyui.service.j2
     comfyui_service_unit_dest: /etc/systemd/system/comfyui.service
-    comfyui_seed_src: files/comfyui/seed-comfyui-h3.sh.j2
-    comfyui_seed_dest: /home/dev/bin/seed-comfyui-h3.sh
-    # Model weights: pinned, one-time staging (NOT a runtime fetch). These
-    # come from Comfy-Org's repackaging of MiniMaxAI/MiniMax-H3 into
-    # ComfyUI-loadable quantized single-file formats. Pin REVISION to the
-    # exact HF git revision when the first host is staged (open design TODO);
-    # HEAD lets the initial --download work before the pin is finalized.
-    comfyui_models_repo: "Comfy-Org/MiniMax-H3"
-    comfyui_models_revision: "HEAD"
+    comfyui_seed_src: files/comfyui/seed-comfyui-models.sh.j2
+    comfyui_seed_dest: /home/dev/bin/seed-comfyui-models.sh
+    # Model weights: pinned, one-time staging (NOT a runtime fetch). The seed
+    # script's manifest pins both the H3 assets and the additional Wan 2.2,
+    # LTX 2.3 (+ ID-LoRA), and HunyuanVideo 1.5 families. Each entry names the
+    # exact Hugging Face revision and expected SHA-256 for reproducibility.
     comfyui_model_root: /home/dev/comfyui/models
     # /near1 is the compute NAS (Samba/CIFS) mount root; comfyui_nas_root is a
     # subdir created by this play. The mountpoint check below targets the mount
@@ -178,7 +175,8 @@
         - input
 
     # Pre-create the static model tree on local NVMe (owned by dev). Weights
-    # are staged here by ~/bin/seed-comfyui-h3.sh and bind-mounted read-only.
+    # are staged here by ~/bin/seed-comfyui-models.sh and bind-mounted
+    # read-only.
     - name: Ensure ComfyUI model root subdirs exist
       file:
         path: "{{ item }}"
@@ -191,6 +189,10 @@
         - "{{ comfyui_model_root }}/diffusion_models"
         - "{{ comfyui_model_root }}/text_encoders"
         - "{{ comfyui_model_root }}/vae"
+        - "{{ comfyui_model_root }}/checkpoints"
+        - "{{ comfyui_model_root }}/loras"
+        - "{{ comfyui_model_root }}/clip_vision"
+        - "{{ comfyui_model_root }}/latent_upscale_models"
 
     - name: Ensure ComfyUI HF cache directory exists
       file:
@@ -277,12 +279,13 @@
       when: comfyui_registry_exists.status != 200
 
     # Seed script for the model weights. This is a one-time, operator-run,
-    # pinned asset-staging step (~59 GB) — deliberately NOT an automatic
-    # playbook download, matching the design's "staging, not a per-deploy
-    # runtime fetch". The playbook installs the script and verifies the tree;
-    # the operator runs `~/bin/seed-comfyui-h3.sh --download` once before the
-    # first real workflow. The service can start and pass /system_stats
-    # without models (they are only required when a workflow loads a node).
+    # pinned asset-staging step (~108 GB of additional assets) — deliberately
+    # NOT an automatic playbook download, matching the design's "staging, not
+    # a per-deploy runtime fetch". The playbook installs the script and
+    # verifies the tree; the operator runs
+    # `~/bin/seed-comfyui-models.sh --download` once before the first real
+    # workflow. The service can start and pass /system_stats without models
+    # (they are only required when a workflow loads a node).
     - name: Ensure ~dev/bin exists
       file:
         path: /home/dev/bin
