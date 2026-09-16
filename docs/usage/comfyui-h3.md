@@ -25,9 +25,10 @@ Cluster-internal, without the tunnel, the UI+API is `http://<comfyui-host>.xc:81
 > ```
 
 The service must be active and the model tree fully seeded first. Model
-weights (ls under `~/comfyui/models` on the host; `~/bin/seed-comfyui-h3.sh`
-verifies) are bind-mounted into the container and loaded on demand — no
-service restart is needed once a file finishes downloading.
+weights (ls under `~/comfyui/models` on the host;
+`~/bin/seed-comfyui-models.sh --verify-only` verifies) are bind-mounted into
+the container and loaded on demand — no service restart is needed once a file
+finishes downloading.
 
 ## Loading a pre-built workflow (recommended)
 
@@ -67,6 +68,20 @@ the text encoder, downloads last):
 - `vae/minimax_h3_audio_vae_fp32.safetensors`
 
 If the `Load CLIP` / `Load VAE` dropdowns are empty, seeding isn't done yet.
+
+## Additional model families
+
+The same seeder also stages these video-model families. Use the official
+Template Library entries for each model:
+
+- **Wan 2.2 5B TI2V** and **Wan 2.2 14B** T2V/I2V.
+- **LTX 2.3** T2V/I2V plus **ID-LoRA** (TalkVid).
+- **HunyuanVideo 1.5** 720p T2V/I2V.
+
+Files are pinned in the seed script's manifest, downloaded only during the
+operator staging step, and verified against SHA-256. LTX checkpoint files are
+under `checkpoints/`; LoRAs, vision encoders, and latent upscalers are under
+their normal ComfyUI model directories.
 
 ## Output
 

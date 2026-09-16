@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Stage ComfyUI model assets onto local host NVMe. The container never fetches
+# models at runtime — it bind-mounts this dir read-only at /opt/comfyui/models
+# (see comfyui.service). This is a one-time asset-staging step, run by an
+# operator as the dev user:
+#
+#   ~/bin/seed-comfyui-models.sh                # verify already-staged weights
+#   ~/bin/seed-comfyui-models.sh --download     # pull missing/invalid weights
+#
+# Managed by app/install-comfyui.yml — edit there.
+#
+# Each manifest row is tab-separated:
+#   id  repo  revision  repo_path  destination_relative_path  sha256
+set -eu
+
+MODEL_HOST="${MODEL_HOST:-{{ comfyui_model_root }}}"
+STAGE_ROOT="${MODEL_HOST}/.seed-staging"
+
+# ---- flags ----
+action="verify"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --download)     action="download"; shift ;;
+    --verify-only)  action="verify"; shift ;;
+    -h|--help)
+      sed -n '2,12p' "$0"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+# ---- pinned manifest ----
+MANIFEST=(
+  'h3_fl2va	Comfy-Org/MiniMax-H3	HEAD	diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors	diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors	skip'
+  'h3_ref2va	Comfy-Org/MiniMax-H3	HEAD	diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors	diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors	skip'
+  'h3_qwen3vl	Comfy-Org/MiniMax-H3	HEAD	text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors	text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors	skip'
+  'h3_video_vae	Comfy-Org/MiniMax-H3	HEAD	vae/minimax_h3_video_vae_fp16.safetensors	vae/minimax_h3_video_vae_fp16.safetensors	skip'
+  'h3_audio_vae	Comfy-Org/MiniMax-H3	HEAD	vae/minimax_h3_audio_vae_fp32.safetensors	vae/minimax_h3_audio_vae_fp32.safetensors	skip'
+  'wan22_ti2v_5b	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors	diffusion_models/wan2.2_ti2v_5B_fp16.safetensors	456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e'
+  'wan22_t2v_high	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors	diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors	cad711ae211c8b23455ec68cd6a190a33a3d874234a77eb57266d73f8f0e6c9f'
+  'wan22_t2v_low	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors	diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors	e71b96d7c82e638694c5e7fb98fac4bfb0e4ddc5fbbb4b1df40da8f0f1278a97'
+  'wan22_i2v_high	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	6122e79d55e0f235698d11d657f3b196c5273c830da00b2b013c5a048d5e6a42'
+  'wan22_i2v_low	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	5471a457b6ac404202a5fbe6c11595a3d5641fc766b00f38763f72303fffc21e'
+  'wan22_umt5	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors	text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors	c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68'
+  'wan22_vae	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/vae/wan2.2_vae.safetensors	vae/wan2.2_vae.safetensors	e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156'
+  'wan21_vae	Comfy-Org/Wan_2.2_ComfyUI_Repackaged	c4f60d30c55a624e35427060fdd217579a6c1d77	split_files/vae/wan_2.1_vae.safetensors	vae/wan_2.1_vae.safetensors	2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b'
+  'ltx23_dev_fp8	Lightricks/LTX-2.3-fp8	1d756cd27fa11c0896c4dfee093cd1bf36c7f7a1	ltx-2.3-22b-dev-fp8.safetensors	checkpoints/ltx-2.3-22b-dev-fp8.safetensors	28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450'
+  'ltx23_gemma_fp4	Comfy-Org/ltx-2	101c239b4b64dd1b45d645365339c56e0e7df4c3	split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors	text_encoders/gemma_3_12B_it_fp4_mixed.safetensors	aaca463d11e6d8d2a4bdb0d6299214c15ef78a3f73e0ef8113d5a9d0219b3f6d'
+  'ltx23_gemma_lora	Comfy-Org/ltx-2	101c239b4b64dd1b45d645365339c56e0e7df4c3	split_files/loras/gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors	loras/gemma-3-12b-it-abliterated_lora_rank64_bf16.safetensors	87bcabeac9bec9f374232b5122d6511c2b2112d479e50176149e944b3712eb4a'
+  'ltx23_distill_lora	Comfy-Org/ltx-2.3	f246c0865f5214499a12b72d47464ac8f4f54bee	split_files/loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors	loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors	31e0c0195fb841bf31af78e8b60858f489e87ddcea4a5239abc80943da65e3ac'
+  'ltx23_id_lora	Comfy-Org/ltx-2.3	f246c0865f5214499a12b72d47464ac8f4f54bee	split_files/loras/ltx-2.3-id-lora-talkvid-3k.safetensors	loras/ltx-2.3-id-lora-talkvid-3k.safetensors	e5af73441743b4852f228b03e444888dff3da80d2666033af2367ab7bda6d8b9'
+  'ltx23_upscaler	Lightricks/LTX-2.3	5948be4ced3a4493d1f836df64378ff136ddb770	ltx-2.3-spatial-upscaler-x2-1.1.safetensors	latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors	5f416311fa8172b65af67530758964708d29a317b830d689a51143b7f91913ed'
+  'hv15_t2v	Comfy-Org/HunyuanVideo_1.5_repackaged	144e6ea259230936cdc6f140b3fe69c8529b5c47	split_files/diffusion_models/hunyuanvideo1.5_720p_t2v_fp16.safetensors	diffusion_models/hunyuanvideo1.5_720p_t2v_fp16.safetensors	4f05e2a31b51b7ddee3ef336d234e0932001cbdc85887da15451069fda3e1d05'
+  'hv15_i2v	Comfy-Org/HunyuanVideo_1.5_repackaged	144e6ea259230936cdc6f140b3fe69c8529b5c47	split_files/diffusion_models/hunyuanvideo1.5_720p_i2v_fp16.safetensors	diffusion_models/hunyuanvideo1.5_720p_i2v_fp16.safetensors	96883b154e4231e6106515bdef53a091085d5821518c387eb28609fde77e4bf1'
+  'hv15_qwen25vl	Comfy-Org/HunyuanVideo_1.5_repackaged	144e6ea259230936cdc6f140b3fe69c8529b5c47	split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors	text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors	cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4'
+  'hv15_byt5	Comfy-Org/HunyuanVideo_1.5_repackaged	144e6ea259230936cdc6f140b3fe69c8529b5c47	split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors	text_encoders/byt5_small_glyphxl_fp16.safetensors	516910bb4c9b225370290e40585d1b0e6c8cd3583690f7eec2f7fb593990fb48'
+  'hv15_vae	Comfy-Org/HunyuanVideo_1.5_repackaged	144e6ea259230936cdc6f140b3fe69c8529b5c47	split_files/vae/hunyuanvideo15_vae_fp16.safetensors	vae/hunyuanvideo15_vae_fp16.safetensors	e7c3091949c27e2d55ae6d5df917b99dadfebbf308e5a50d0ade0d16c90297ae'
+  'hv15_clip_vision	Comfy-Org/HunyuanVideo_1.5_repackaged	144e6ea259230936cdc6f140b3fe69c8529b5c47	split_files/clip_vision/sigclip_vision_patch14_384.safetensors	clip_vision/sigclip_vision_patch14_384.safetensors	1fee501deabac72f0ed17610307d7131e3e9d1e838d0363aa3c2b97a6e03fb33'
+)
+
+verify_file() {
+  file="$1"
+  expected="$2"
+  if [ ! -f "$file" ]; then
+    echo "  missing: $file" >&2
+    return 1
+  fi
+  if [ "$expected" = "skip" ]; then
+    echo "  present: $file"
+    return 0
+  fi
+  actual=$(sha256sum "$file" | awk '{print $1}')
+  if [ "$actual" != "$expected" ]; then
+    echo "  hash mismatch: $file" >&2
+    echo "    expected: $expected" >&2
+    echo "    actual:   $actual" >&2
+    return 1
+  fi
+  echo "  verified: $file"
+}
+
+download_one() {
+  id="$1"
+  repo="$2"
+  revision="$3"
+  source_rel="$4"
+  dest_rel="$5"
+  expected="$6"
+  final="$MODEL_HOST/$dest_rel"
+  stage="$STAGE_ROOT/$id"
+
+  echo "== $id =="
+  if verify_file "$final" "$expected"; then
+    return 0
+  fi
+  if [ "$action" != "download" ]; then
+    missing=1
+    return 0
+  fi
+
+  rm -f "$final"
+  mkdir -p "$stage" "$MODEL_HOST/$(dirname "$dest_rel")"
+  # HF_HUB_DISABLE_XET=1 keeps large files on the regular CDN. The compute
+  # node stalls against the Xet CAS endpoint, as with the original H3 seeding.
+  HF_HUB_DISABLE_XET=1 uv tool run --from huggingface-hub==1.24.0 hf download \
+    "$repo" \
+    --revision "$revision" \
+    --include "$source_rel" \
+    --local-dir "$stage"
+
+  staged="$stage/$source_rel"
+  if [ ! -f "$staged" ]; then
+    echo "download did not create $staged" >&2
+    missing=1
+    return 0
+  fi
+  if [ "$expected" != "skip" ]; then
+    actual=$(sha256sum "$staged" | awk '{print $1}')
+    if [ "$actual" != "$expected" ]; then
+      echo "downloaded hash mismatch for $id" >&2
+      echo "  expected: $expected" >&2
+      echo "  actual:   $actual" >&2
+      rm -f "$staged"
+      missing=1
+      return 0
+    fi
+  fi
+  mv "$staged" "$final"
+  chmod 0644 "$final"
+  rm -f "$staged"
+  rmdir "$(dirname "$staged")" "$stage" 2>/dev/null || true
+  verify_file "$final" "$expected"
+}
+
+missing=0
+mkdir -p "$MODEL_HOST" "$STAGE_ROOT"
+echo "== ${action} under $MODEL_HOST =="
+for row in "${MANIFEST[@]}"; do
+  IFS=$'\t' read -r id repo revision source_rel dest_rel expected <<<"$row"
+  download_one "$id" "$repo" "$revision" "$source_rel" "$dest_rel" "$expected"
+done
+
+if [ "$missing" -ne 0 ]; then
+  echo "Incomplete model tree at $MODEL_HOST — re-run with --download" >&2
+  exit 1
+fi
+echo
+echo "Model tree is complete. Start the service with:  systemctl start comfyui"
