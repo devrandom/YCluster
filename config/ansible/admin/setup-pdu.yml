@@ -113,11 +113,11 @@
         SSHPASS: "{{ pdu_admin_pass.stdout }}"
       register: pdu_snmp_result
       # The NMC drops the SSH session mid-reboot, which ssh reports as
-      # exit 255 with "Connection closed". That's the only acceptable
-      # non-zero exit — anything else is a real failure.
+      # exit 255 with "Connection closed". With -tt the disconnect message
+      # goes to stdout (pty-allocated), so check both streams.
       failed_when: >-
         pdu_snmp_result.rc != 0 and
-        not (pdu_snmp_result.stderr is search('Connection closed|Connection to .* closed'))
+        not (pdu_snmp_result.stderr ~ pdu_snmp_result.stdout is search('Connection closed|Connection to .* closed'))
       changed_when: true
       no_log: true
 

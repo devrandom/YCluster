@@ -92,6 +92,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [ansible-lint CI](operations/ansible-lint-ci.md)
 - [ansible-playbook --check](operations/ansible-playbook-check.md)
 - [Pre-commit yaml/jinja lint](operations/pre-commit-yaml-jinja.md)
+- [Auto-clean stale DHCP allocations before PDU setup](operations/pdu-dhcp-stale-entry.md)
 
 ## Architecture
 - **[MEDIUM]** [A1 bootstrap trust model](architecture/a1-bootstrap-trust-model.md) — TOFU on MAC + unsigned `/bootstrap/*`; rogue LAN device can PXE-join as any node type. Document + cheap hardening (MAC-OUI, checksum).
