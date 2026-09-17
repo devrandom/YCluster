@@ -54,15 +54,15 @@ RUN echo "${UV_SHA256}  /uv.tar.gz" | sha256sum -c - \
 # NAS user-data roots -> /opt/comfyui/{output,input,user}).
 #
 # COMFYUI_REVISION / COMFYUI_REF: ComfyUI has native MiniMax H3 support since
-# 0.30.0 (nodes in comfy_extras/nodes_minimax_h3.py, model in
-# comfy/ldm/minimax/model.py). COMFYUI_REVISION is pinned to the exact commit
-# SHA of the v0.30.0 release (the first release shipping the H3 nodes).
-# buildah's COPY of this ASG layer caches on the literal value, so bumping
-# the SHA forces a rebuild + push. A `--depth 1` clone can't reliably fetch a
-# bare SHA from GitHub, so we fetch by the tag ref (COMFYUI_REF) to bring the
-# commit into the object store, then `git checkout --detach` the pinned SHA.
-ARG COMFYUI_REVISION=b1693ecba9f5b65f8c80ab36b195ab963ec92413
-ARG COMFYUI_REF=v0.30.0
+# 0.30.0, while the official FastH3 templates require newer core nodes and
+# comfy-kitchen attention. COMFYUI_REVISION is pinned to the exact commit SHA
+# of the v0.36.0 release. buildah's COPY of this ASG layer caches on the
+# literal value, so bumping the SHA forces a rebuild + push. A `--depth 1`
+# clone can't reliably fetch a bare SHA from GitHub, so we fetch by the tag
+# ref (COMFYUI_REF) to bring the commit into the object store, then
+# `git checkout --detach` the pinned SHA.
+ARG COMFYUI_REVISION=ee71d5c4993f29086b27fde1629a945ae48425bf
+ARG COMFYUI_REF=v0.36.0
 RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI /opt/comfyui \
     && git -C /opt/comfyui fetch --depth 1 origin "$COMFYUI_REF" \
     && git -C /opt/comfyui checkout --detach "$COMFYUI_REVISION"

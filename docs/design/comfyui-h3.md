@@ -174,6 +174,10 @@ We run the NVIDIA-friendly file set, not the AMD one:
 
 - Diffusion (FL2VA + Ref2VA): `pruned_int8_convrot` (19.5 GB each) — the
   default the official T2V/I2V/R2V templates reference.
+- FastH3 diffusion: `fastvideo_fasth3_8step_v2_pruned_int8_convrot` (22.1 GB)
+  — the official 8-step T2V template references this distilled checkpoint. It
+  requires the `vsa` BlockSparseAttention mode and newer comfy-kitchen RoPE
+  support in ComfyUI.
 - Text encoder: `qwen3vl_32b_minimax_h3_nvfp4_awq` (14.6 GB) — the NVFP4 AWQ
   encoder runs fine on NVIDIA (unlike on ROCm).
 - VAEs: `minimax_h3_video_vae_fp16` (4.9 GB) + `minimax_h3_audio_vae_fp32`
@@ -191,6 +195,7 @@ unchanged.
 |---|---|---|
 | `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` | 19.5 GB | T2V / I2V / first+last-frame |
 | `diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors` | 19.5 GB | R2V (reference mode) |
+| `diffusion_models/fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors` | 22.1 GB | FastH3 T2V (8-step distillation) |
 | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | 14.6 GB | shared text encoder |
 | `vae/minimax_h3_video_vae_fp16.safetensors` | 4.9 GB | video decode |
 | `vae/minimax_h3_audio_vae_fp32.safetensors` | 0.6 GB | audio decode |

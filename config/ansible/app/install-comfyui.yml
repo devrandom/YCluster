@@ -47,11 +47,11 @@
   become: yes
   vars:
     # Bump VERSION to ship a release. The image tag matches the ComfyUI
-    # revision `0.30.0` (the first release with native MiniMax H3 nodes); the
-    # Containerfile pins the git SHA behind this tag via COMFYUI_REVISION.
-    # The build step is keyed on this tag — changing VERSION forces a
-    # rebuild + push even if the Containerfile hasn't changed.
-    comfyui_image_tag: "0.30.0"
+    # release used by the official FastH3 templates; the Containerfile pins
+    # the git SHA behind this tag via COMFYUI_REVISION. The build step is
+    # keyed on this tag — changing VERSION forces a rebuild + push even if the
+    # Containerfile hasn't changed.
+    comfyui_image_tag: "0.36.0"
     comfyui_image_local: "comfyui:{{ comfyui_image_tag }}"
     comfyui_image_registry: "registry.xc:5000/comfyui:{{ comfyui_image_tag }}"
     comfyui_containerfile_src: files/comfyui/Containerfile
@@ -279,7 +279,7 @@
       when: comfyui_registry_exists.status != 200
 
     # Seed script for the model weights. This is a one-time, operator-run,
-    # pinned asset-staging step (~108 GB of additional assets) — deliberately
+    # pinned asset-staging step (~130 GB of additional assets) — deliberately
     # NOT an automatic playbook download, matching the design's "staging, not
     # a per-deploy runtime fetch". The playbook installs the script and
     # verifies the tree; the operator runs

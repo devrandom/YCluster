@@ -42,11 +42,23 @@ T2V / I2V / R2V graphs that reference the exact files we seed.
    - **MiniMax H3 T2V** — text-to-video (the quick start)
    - **MiniMax H3 I2V** — image/video to video
    - **MiniMax H3 R2V** — reference-to-video
+   - **FastH3 T2V** — the 8-step distilled MiniMax H3 model
 4. Fill in your `prompt` (and keyframes/inputs for I2V/R2V) and hit
    **Queue**.
 
 The templates resolve the model files locally from the bind-mounted
 `models/` tree, so nothing downloads at runtime.
+
+## FastH3 (8-step distillation)
+
+FastH3 8-Step V2 is a distilled MiniMax H3 checkpoint for faster text-to-video
+and audio generation. It shares the base H3 text encoder and VAEs, but uses a
+separate 22.1 GB diffusion model. The official T2V template sets the required
+`vsa` BlockSparseAttention mode; use that template rather than substituting
+FastH3 into a base-H3 workflow.
+
+FastH3 does **not** cover image/first-last-frame conditioning or
+reference-to-video. For those, use the base MiniMax H3 I2V/R2V templates.
 
 ### Fallback: drag-and-drop the JSON
 
