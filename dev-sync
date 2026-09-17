@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
 Sync the ycluster repo to $YC_SYNC_HOST:/opt/infrastructure/ (default s1.yc).
 
@@ -52,8 +52,8 @@ DEST = os.environ.get('YC_SYNC_HOST', 's1.yc') + ':/opt/infrastructure/'
 # real contents land on the cluster; in-tree links (dev/ansible/prod, CLAUDE.md)
 # stay as symlinks. .watchignore is the source of truth for both rsync and the
 # daemon's debounce, so they cannot drift.
-RSYNC_OPTS = ['-az', '--copy-unsafe-links', f'--exclude-from={REPO / ".watchignore"}']
-RSYNC_CHECK_OPTS = ['-naci', '--copy-unsafe-links', f'--exclude-from={REPO / ".watchignore"}']
+RSYNC_OPTS = ['-az', '--no-owner', '--no-group', '--copy-unsafe-links', f'--exclude-from={REPO / ".watchignore"}']
+RSYNC_CHECK_OPTS = ['-naci', '--no-owner', '--no-group', '--copy-unsafe-links', f'--exclude-from={REPO / ".watchignore"}']
 
 # Match a path component exactly (.git, tmp, ...) at any depth: anchored at
 # either start-of-path or after a slash, and either end-of-path or before a

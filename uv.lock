@@ -792,6 +792,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyasyncore"
+version = "1.0.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/43/035dfe0cb01687c1940fdc008f46a43c41067e226e862df49327469764a0/pyasyncore-1.0.5.tar.gz", hash = "sha256:dd483d5103a6d59b66b86e0ca2334ad43dca732ff23a0ac5d63c88c52510542e", size = 15854, upload-time = "2026-01-05T19:59:31.893Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1f/ab/b10cee56269ae150763f3f83b3e9305a11f42f50b3dcd58eeb8f7988f0bb/pyasyncore-1.0.5-py3-none-any.whl", hash = "sha256:269bbc5252671827387636822841a1fb721ec6e858b23a3e12cf92eb1f97da2a", size = 10237, upload-time = "2026-01-05T19:59:30.824Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "2.23"
 source = { registry = "https://pypi.org/simple" }
@@ -808,6 +817,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
 ]
+
+[[package]]
+name = "pyinotify"
+version = "0.9.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/c0/fd5b18dde17c1249658521f69598f3252f11d9d7a980c5be8619970646e1/pyinotify-0.9.6.tar.gz", hash = "sha256:9c998a5d7606ca835065cdabc013ae6c66eb9ea76a00a1e3bc6e0cfe2b4f71f4", size = 60998, upload-time = "2015-06-04T15:50:23.633Z" }
 
 [[package]]
 name = "pytokens"
@@ -1278,6 +1293,8 @@ dependencies = [
 dev = [
     { name = "ansible-lint" },
     { name = "j2lint" },
+    { name = "pyasyncore" },
+    { name = "pyinotify" },
     { name = "types-cryptography" },
     { name = "types-netifaces" },
     { name = "types-protobuf" },
@@ -1306,6 +1323,8 @@ requires-dist = [
 dev = [
     { name = "ansible-lint", specifier = ">=6.0.0" },
     { name = "j2lint", specifier = "==1.3.0" },
+    { name = "pyasyncore", specifier = ">=1.0.5" },
+    { name = "pyinotify", specifier = ">=0.9.6" },
     { name = "types-cryptography" },
     { name = "types-netifaces" },
     { name = "types-protobuf" },

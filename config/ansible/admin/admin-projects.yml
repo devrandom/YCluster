@@ -37,7 +37,8 @@
 
     - name: Read admin DB password from etcd
       # Runs as root: only root can read the etcd client certs.
-      ansible.builtin.command: python3 -c "
+      ansible.builtin.command: |
+        python3 -c "
         from ycluster.common.etcd_utils import get_etcd_client
         pw = get_etcd_client().get('/cluster/config/ycluster/db-password')[0]
         if pw is None: raise SystemExit('password not found in etcd')
@@ -83,17 +84,44 @@
       when: is_storage_leader
 
     - name: Seed default projects from Authentik user accounts
-      # Two-phase: fetch users as root (etcd client certs), then apply as
-      # the postgres OS user so peer authentication maps to the DB role.
-      # All user data is passed via JSON stdin and parameterized queries.
-      ansible.builtin.shell: |
-        set -o pipefail
-        /usr/local/bin/migrate-project-defaults --from-authentik \
-          | su postgres -c "/usr/local/bin/migrate-project-defaults --apply"
-      args:
-        executable: /bin/bash
       when: is_storage_leader
-      changed_when: false
+      block:
+        - name: Prepare Authentik user export file
+          # Pre-created postgres-owned with a fixed mode so permissions
+          # don't depend on the invoking umask and the postgres-user apply
+          # task can read it. The root fetch task can still overwrite it.
+          ansible.builtin.copy:
+            dest: /run/project-migration-users.json
+            content: ""
+            owner: postgres
+            group: postgres
+            mode: '0600'
+
+        - name: Fetch Authentik users for default-project migration
+          # Runs as root: only root can read the etcd client certs.
+          ansible.builtin.shell:
+            cmd: >-
+              /usr/local/bin/migrate-project-defaults --from-authentik
+              > /run/project-migration-users.json
+          changed_when: false
+          no_log: true
+
+        - name: Apply default-project migration
+          # Runs as the postgres OS user so peer authentication maps to the
+          # postgres DB user. User data is passed via a root-owned JSON file
+          # and parameterized queries; the migration itself is idempotent.
+          ansible.builtin.shell:
+            cmd: /usr/local/bin/migrate-project-defaults --apply < /run/project-migration-users.json
+          become_user: postgres
+          register: migration_apply
+          changed_when: "'changed: 0' not in migration_apply.stdout"
+
+      always:
+        - name: Remove Authentik user export
+          ansible.builtin.file:
+            path: /run/project-migration-users.json
+            state: absent
+          when: is_storage_leader
 
   handlers:
     - name: reload postgresql

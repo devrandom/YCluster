@@ -42,9 +42,19 @@ def db_connect():
     return psycopg2.connect(dbname="ycluster", user="postgres")
 
 
+def idp_project(user):
+    """The user's IdP project, tolerating legacy list-shaped values."""
+    project = user.get("project_name") or ""
+    if isinstance(project, list):
+        project = next((item for item in project
+                        if str(item or "").strip()), "")
+    return str(project).strip()
+
+
 def migrate(conn, users):
     """Create one project per user (named by username) and set it default."""
-    count = 0
+    processed = 0
+    changed = 0
     seen_project_ids = {}
     with conn:
         with conn.cursor() as cur:
@@ -63,18 +73,27 @@ def migrate(conn, users):
                         f"project id {project_id!r}; rename one user")
                 seen_project_ids[project_id] = username
                 cur.execute(
-                    """INSERT INTO projects (id, name) VALUES (%s, %s)
-                       ON CONFLICT DO NOTHING""",
-                    (project_id, username))
+                    """INSERT INTO projects (id, name, idp_project)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (id) DO NOTHING""",
+                    (project_id, username, idp_project(user)))
+                cur.execute(
+                    """UPDATE projects
+                       SET idp_project = %s, updated_at = now()
+                       WHERE id = %s AND idp_project = '' AND %s <> ''""",
+                    (idp_project(user), project_id, idp_project(user)))
+
+                # Never move an existing default: admins may have reassigned
+                # it since the first run. Only seed users with no default.
+                cur.execute(
+                    """SELECT project_id FROM project_members
+                       WHERE authentik_uid = %s AND is_default""",
+                    (user["uid"],))
+                if cur.fetchone() is not None:
+                    processed += 1
+                    continue
 
                 email = user.get("email") or user["uid"]
-                # Clear the previous default first: the partial unique index
-                # on (authentik_uid) WHERE is_default fires immediately on
-                # INSERT, so the old default row must be cleared before the
-                # new one is added.
-                cur.execute(
-                    "UPDATE project_members SET is_default = FALSE"
-                    " WHERE authentik_uid = %s", (user["uid"],))
                 cur.execute(
                     """INSERT INTO project_members
                        (project_id, authentik_uid, email_at_assignment,
@@ -83,8 +102,9 @@ def migrate(conn, users):
                        ON CONFLICT (project_id, authentik_uid)
                        DO UPDATE SET is_default = TRUE""",
                     (project_id, user["uid"], email))
-                count += 1
-    return count
+                processed += 1
+                changed += 1
+    return processed, changed
 
 
 def main():
@@ -104,8 +124,9 @@ def main():
         users = json.load(sys.stdin)
         conn = db_connect()
         try:
-            count = migrate(conn, users)
-            print(f"migration complete: {count} default projects seeded")
+            processed, changed = migrate(conn, users)
+            print(f"migration changed: {changed} "
+                  f"({processed} users processed)")
         finally:
             conn.close()
         return
