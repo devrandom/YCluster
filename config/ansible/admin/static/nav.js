@@ -89,6 +89,13 @@
             return resp.json();
         }).then(function (ident) {
             if (!ident || !ident.is_admin) return;
+            var projects = document.createElement('a');
+            projects.href = '/admin/projects';
+            projects.textContent = 'Projects';
+            if ('/admin/projects' === here) projects.className = 'cur';
+            var users = nav.querySelector('a[href="/admin/users"]');
+            nav.insertBefore(projects, users);
+
             var link = document.createElement('a');
             link.href = '/admin/model-usage';
             link.textContent = 'Model Usage';

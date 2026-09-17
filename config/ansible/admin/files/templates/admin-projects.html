@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Projects</title>
+  <script src="/static/nav.js" defer></script>
+  <script src="/static/alpine-3.14.1.min.js" defer></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+    h1, h2 { color: #333; }
+    h2 { font-size: 1.05rem; margin: 1.25rem 0 0.5rem; }
+    .card { background: white; border: 1px solid #d8dce1; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.6rem; align-items: end; }
+    label { display: block; font-size: 0.78rem; color: #555; }
+    input, select, textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 0.2rem; padding: 0.35rem; border: 1px solid #ccc; border-radius: 4px; }
+    textarea { resize: vertical; }
+    button { padding: 0.35rem 0.7rem; border-radius: 4px; border: none; background: #3b82f6; color: white; cursor: pointer; font-size: 0.8rem; }
+    button.minor { background: #e5e7eb; color: #333; }
+    button.danger { background: #dc2626; }
+    table { width: 100%; border-collapse: collapse; background-color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    th { text-align: left; padding: 8px 10px; border-bottom: 1px solid #ddd; background-color: #f8f9fa; font-size: 0.8rem; text-transform: uppercase; }
+    td { padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 0.85rem; vertical-align: top; }
+    .badge { display: inline-block; font-size: 0.7rem; font-weight: 600; border-radius: 999px; padding: 0.05rem 0.5rem; }
+    .badge.active { color: #14532d; background: #d1fae5; }
+    .badge.inactive { color: #721c24; background: #f8d7da; }
+    .muted { color: #666; font-style: italic; }
+    .result { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin: 0.75rem 0; font-size: 0.85rem; }
+    .error { background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 0.6rem 1rem; margin: 0.75rem 0; color: #b91c1c; font-size: 0.85rem; }
+    .actions { white-space: nowrap; }
+    .project-details { margin-top: 0.75rem; display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .description { white-space: pre-line; color: #555; font-size: 0.85rem; margin-top: 0.25rem; }
+    #project-list { max-height: 50vh; overflow-y: auto; }
+    @media (max-width: 900px) { .project-details { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body x-data="projectsApp()" x-init="load()">
+  <h1>User Projects</h1>
+  <template x-if="error"><div class="error" x-text="error"></div></template>
+  <template x-if="result"><div class="result" x-text="result"></div></template>
+
+  <h2>User projects</h2>
+  <div class="card">
+    <form @submit.prevent="false" class="grid">
+      <label>Filter <input type="text" x-model="filter" placeholder="searches ID, name, description (min 2 chars)"></label>
+    </form>
+    <template x-if="filter && filter.length < 2"><p class="muted">Type at least 2 characters to filter.</p></template>
+  </div>
+  <template x-if="loading"><p class="muted">Loading…</p></template>
+  <div id="project-list">
+    <template x-if="!loading && filteredProjects().length === 0"><p class="muted">No matching projects</p></template>
+    <template x-for="p in filteredProjects()" :key="p.id">
+    <div class="card">
+      <div class="grid">
+        <div><strong x-text="p.name"></strong> <span x-text="p.id" class="muted"></span>
+          <div x-show="p.idp_project" class="muted">IdP project: <span x-text="p.idp_project"></span></div>
+          <div x-show="p.description" class="description" x-text="p.description"></div>
+          <div><span class="badge active" x-show="p.active">active</span>
+          <span class="badge inactive" x-show="!p.active">inactive</span></div>
+        </div>
+        <button class="minor" x-show="isAdmin" @click="toggle(p)" x-text="expanded.has(p.id) ? 'Collapse' : 'Manage'"></button>
+      </div>
+      <template x-if="expanded.has(p.id)">
+        <div class="project-details">
+          <div>
+            <h2>Project settings</h2>
+            <form @submit.prevent="act('/admin/projects/update', p.id, editForm, 'Project updated')" class="grid">
+              <label>Name <input type="text" x-model="editForm.name" required></label>
+              <label>IdP project
+                <select x-model="editForm.idp_project">
+                  <option value="">(admin-only)</option>
+                  <template x-for="p in idpProjectsWith(editForm.idp_project)" :key="p"><option :value="p" x-text="p"></option></template>
+                </select>
+              </label>
+              <label>Description <textarea x-model="editForm.description" rows="3"></textarea></label>
+              <button>Save</button>
+            </form>
+          </div>
+          <div>
+            <h2>Members</h2>
+            <table>
+              <thead><tr><th>Email</th><th>UID</th><th>Default</th><th></th></tr></thead>
+              <tbody>
+                <template x-for="m in p.members" :key="m.authentik_uid">
+                  <tr>
+                    <td x-text="usernameFor(m.authentik_uid, m.email_at_assignment)"></td>
+                    <td x-text="m.authentik_uid"></td>
+                    <td><span class="badge active" x-show="m.is_default">default</span></td>
+                    <td class="actions">
+                      <button class="minor" x-show="!m.is_default" @click="act('/admin/projects/member/default', p.id, {uid: m.authentik_uid, email: m.email_at_assignment}, 'Default project set')">Make default</button>
+                      <button class="danger" @click="act(`/admin/projects/member/remove`, p.id, {uid: m.authentik_uid}, 'Member removed')">Remove</button>
+                    </td>
+                  </tr>
+                </template>
+                <tr x-show="p.members.length === 0"><td colspan="4" class="muted">No members</td></tr>
+              </tbody>
+            </table>
+            <form @submit.prevent="act('/admin/projects/member/add', p.id, memberForm, 'Member added')" class="grid">
+              <label>User
+                <select x-model="memberForm.uid" @change="memberForm.email = (users.find(u => u.uid === memberForm.uid) || {}).email || ''" required>
+                  <option value=""></option>
+                  <template x-for="u in users" :key="u.uid"><option :value="u.uid" x-text="u.username || u.email"></option></template>
+                </select>
+              </label>
+              <label>Set as default <input type="checkbox" x-model="memberForm.is_default"></label>
+              <button>Add member</button>
+            </form>
+          </div>
+          <div>
+            <h2>Quotas</h2>
+            <table>
+              <thead><tr><th>Type</th><th>ID</th><th>Value</th><th></th></tr></thead>
+              <tbody>
+                <template x-for="q in p.quotas" :key="q.quota_type + ':' + q.quota_id">
+                  <tr>
+                    <td x-text="q.quota_type"></td><td x-text="q.quota_id"></td><td x-text="q.value"></td>
+                    <td>
+                      <button class="minor" @click="editQuota(p, q)">Edit</button>
+                      <button class="danger" @click="act('/admin/projects/quotas/delete', p.id, {quota_type: q.quota_type, quota_id: q.quota_id}, 'Quota deleted')">Delete</button>
+                    </td>
+                  </tr>
+                </template>
+                <tr x-show="p.quotas.length === 0"><td colspan="4" class="muted">No quotas</td></tr>
+              </tbody>
+            </table>
+            <form @submit.prevent="saveQuota(p)" class="grid">
+              <label>Type <input type="text" x-model="quotaForm.quota_type" required></label>
+              <label>ID <input type="text" x-model="quotaForm.quota_id" required></label>
+              <label>Value <input type="number" x-model="quotaForm.value" min="0" step="0.0001" required></label>
+              <button x-text="quotaForm._editing ? 'Update' : 'Insert'"></button>
+              <button type="button" class="minor" x-show="quotaForm._editing" @click="resetQuotaForm()">Cancel</button>
+            </form>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+  </div>
+
+  <h2>Create user project</h2>
+  <div class="card" x-show="isAdmin">
+    <form @submit.prevent="post('/admin/projects/create', newProject, 'Project created')" class="grid">
+      <label>ID <input type="text" x-model="newProject.id" placeholder="acme-demo" required></label>
+      <label>Name <input type="text" x-model="newProject.name" required></label>
+      <label>IdP project
+        <select x-model="newProject.idp_project">
+          <option value="">(admin-only)</option>
+          <template x-for="p in idpProjects" :key="p"><option :value="p" x-text="p"></option></template>
+        </select>
+      </label>
+      <label>Description <textarea x-model="newProject.description" rows="3"></textarea></label>
+      <button>Create</button>
+    </form>
+  </div>
+
+  <h2>Import quotas</h2>
+  <div class="card" x-show="isAdmin">
+    <form @submit.prevent="importCsv" class="grid">
+      <label>CSV file <input type="file" accept=".csv,text/csv" @change="selectedFile = $event.target.files[0]"></label>
+      <button type="submit" :disabled="!selectedFile">Import</button>
+    </form>
+    <p class="muted">Headers: project-id,quota-type,quota-id,value. The import is atomic.</p>
+  </div>
+
+  <h2>Audit log</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Object</th><th>Entity</th></tr></thead>
+    <tbody>
+      <template x-for="e in audit" :key="e.id">
+        <tr><td x-text="e.ts"></td><td x-text="e.actor_email || e.actor_uid"></td><td x-text="e.action"></td><td x-text="e.table_name"></td><td x-text="e.entity_id"></td></tr>
+      </template>
+      <tr x-show="audit.length === 0"><td colspan="5" class="muted">No events</td></tr>
+    </tbody>
+  </table>
+
+<script>
+function projectsApp() {
+  return {
+    loading: true, error: '', result: '', projects: [], users: [], audit: [],
+    filter: '', isAdmin: false, idpProjects: [],
+    expanded: new Set(), selectedFile: null,
+    newProject: {id: '', name: '', description: ''},
+    memberForm: {uid: '', email: '', is_default: false},
+    editForm: {name: '', description: ''},
+    quotaForm: {quota_type: 'gpu-hours', quota_id: '', value: 0, _editing: false, _project: null},
+    async load() {
+      this.loading = true
+      try {
+        const [data, audit] = await Promise.all([
+          fetch('/admin/projects/data').then(r => { if (!r.ok) throw new Error(r.statusText); return r.json() }),
+          fetch('/admin/projects/audit?limit=200').then(r => { if (!r.ok) throw new Error(r.statusText); return r.json() })
+        ])
+        if (data.error) throw new Error(data.error)
+        if (audit.error) throw new Error(audit.error)
+        this.projects = data.projects || []
+        this.users = data.users || []
+        this.audit = audit.events || []
+        this.isAdmin = !!data.is_admin
+        this.idpProjects = data.idp_projects || []
+      } catch (e) { this.error = e.message } finally { this.loading = false }
+    },
+    toggle(p) {
+      this.expanded.has(p.id) ? this.expanded.delete(p.id) : this.expanded.add(p.id)
+      this.expanded = new Set(this.expanded)
+      if (this.expanded.has(p.id)) {
+        this.editForm = {name: p.name, description: p.description || '',
+                         idp_project: p.idp_project || ''}
+      }
+    },
+    filteredProjects() {
+      const needle = (this.filter || '').trim().toLowerCase()
+      if (needle.length < 2) return this.projects
+      return this.projects.filter(p =>
+        (p.id || '').toLowerCase().includes(needle) ||
+        (p.name || '').toLowerCase().includes(needle) ||
+        (p.description || '').toLowerCase().includes(needle))
+    },
+    usernameFor(uid, fallback) {
+      const u = this.users.find(u => u.uid === String(uid))
+      return (u && (u.username || u.email)) || fallback || uid
+    },
+    idpProjectsWith(extra) {
+      // Ensure the current value is selectable even if it is no longer in
+      // the known IdP-project list (e.g. renamed after assignment).
+      const set = new Set(this.idpProjects)
+      if (extra) set.add(extra)
+      return Array.from(set).sort()
+    },
+    saveQuota(p) {
+      this.act('/admin/projects/quotas/upsert', p.id, {...this.quotaForm}, this.quotaForm._editing ? 'Quota updated' : 'Quota inserted')
+      this.resetQuotaForm()
+    },
+    editQuota(p, q) {
+      this.quotaForm = {quota_type: q.quota_type, quota_id: q.quota_id, value: q.value, _editing: true, _project: p.id}
+    },
+    resetQuotaForm() { this.quotaForm = {quota_type: 'gpu-hours', quota_id: '', value: 0, _editing: false, _project: null} },
+    async importCsv() {
+      if (!this.selectedFile) return
+      const body = new FormData(); body.append('file', this.selectedFile)
+      await this.send('/admin/projects/import', body, 'Import complete', false)
+    },
+    async act(url, projectId, payload, message) {
+      await this.send(url, JSON.stringify({...payload, project_id: projectId}), message, true)
+    },
+    async send(url, body, message, json) {
+      this.error = ''; this.result = ''
+      try {
+        const r = await fetch(url, {method: 'POST', headers: json ? {'Content-Type': 'application/json'} : {}, body})
+        const data = await r.json().catch(() => ({}))
+        if (!r.ok || data.error) throw new Error(data.error || r.statusText)
+        this.result = message + (data.changed !== undefined ? `: ${data.changed} changed of ${data.rows} rows` : '')
+        await this.load()
+      } catch (e) { this.error = e.message }
+    },
+    post(url, payload, message) { return this.send(url, JSON.stringify(payload), message, true) }
+  }
+}
+</script>
+</body>
+</html>

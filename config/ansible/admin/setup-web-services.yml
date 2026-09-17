@@ -48,6 +48,8 @@
         - app_gpu_blocks.py
         - app_helpers.py
         - app_inventory.py
+        - app_project_db.py
+        - app_projects.py
         - app_schedule.py
         - app_usage.py
         - app_users.py

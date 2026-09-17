@@ -197,9 +197,9 @@ def invite_user(email, name=None, days=7, project=None):
     return f"{_link_base_url()}/if/flow/{ENROLLMENT_FLOW_SLUG}/?itoken={invitation['pk']}"
 
 def users_data():
-    """Accounts as a list of dicts (email, name, type, active, last_login,
-    is_admin, is_manager, date_joined, project_name, admin_notes,
-    manager_projects), service accounts excluded."""
+    """Accounts as a list of dicts (uid, email, name, type, active,
+    last_login, is_admin, is_manager, date_joined, project_name,
+    admin_notes, manager_projects), service accounts excluded."""
     api = AuthentikAPI()
     users = api.get('/core/users/', params={'page_size': 500})['results']
     rows = []
@@ -209,6 +209,8 @@ def users_data():
         group_names = [g.get('name') for g in (u.get('groups_obj') or [])]
         attrs = u.get('attributes') or {}
         rows.append({
+            'uid': str(u['pk']),
+            'username': u['username'],
             'email': u['email'] or u['username'],
             'name': u['name'],
             'type': u['type'],

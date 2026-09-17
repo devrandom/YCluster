@@ -560,6 +560,11 @@
 # /cluster/vms-events/ + /cluster/vm-state/ into postgres.
 - import_playbook: ../../config/ansible/admin/admin-stats.yml
 
+# Projects + quotas storage (admin database on the leader), the
+# backing store for the admin projects page. The system test exercises the
+# admin API surface in section 19.
+- import_playbook: ../../config/ansible/admin/admin-projects.yml
+
 # The inference gateway: build-local-ai-proxy.yml compiles the Go binary
 # on {{ buildhost }} (s1) following the same pattern as build-frp.yml /
 # build-frp.yml; install-local-ai-proxy.yml fetches the artifact and

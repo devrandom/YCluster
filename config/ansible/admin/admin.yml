@@ -16,6 +16,7 @@
 - import_playbook: install-certbot.yml
 - import_playbook: setup-web-services.yml
 - import_playbook: admin-stats.yml
+- import_playbook: admin-projects.yml
 - import_playbook: setup-secrets-volume.yml
 - import_playbook: setup-tang.yml
 - import_playbook: enable-serial-console.yml

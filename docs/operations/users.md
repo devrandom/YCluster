@@ -2,7 +2,9 @@
 
 Accounts live in the cluster IdP (authentik) — there is no separate user
 database. See [authentik-groups.md](authentik-groups.md) for the
-distinction between app-role groups and IdP-superuser groups. Authentik is
+distinction between app-role groups and IdP-superuser groups. For the
+distinction between IdP projects and quota projects, see
+[projects.md](projects.md). Authentik is
 provisioned by
 [`install-authentik.yml`](../../config/ansible/app/install-authentik.yml);
 its admin blueprint (`ycluster-admin.yaml`, written by `authentik-manager`)
@@ -206,6 +208,25 @@ ycluster user edit alice@x --name "Alice Doe"     # name still editable too
 
 Visible to anyone who can view `/admin/users` (admins and managers —
 same scope as the rest of the page).
+
+## User projects and quotas
+
+User projects and quotas are two separate concepts — see
+[projects.md](projects.md) for the distinction. The summary below covers
+only user projects; the `project_name` attribute in this page's earlier
+sections is the IdP project.
+
+User project objects, membership, and quota definitions live in the
+dedicated `admin` PostgreSQL database. Authentik remains the
+identity source; membership is keyed by Authentik UID, with the email
+captured only as assignment-time metadata. The initial quota type is
+`gpu-hours`. The `/admin/projects` page gives admins full control over user
+project membership, quotas, and an atomic CSV import with headers
+`project-id,quota-type,quota-id,value`; managers get read-only visibility
+scoped to their authorized IdP projects. PostgreSQL triggers maintain an
+append-only audit log of every user project, membership, and quota mutation.
+Quotas are tracked only in this phase; alerting and enforcement are
+intentionally not implemented yet.
 
 ## Internal space (operators)
 

@@ -1,0 +1,100 @@
+---
+- name: Setup admin project quota storage
+  hosts: storage
+  become: yes
+  environment: "{{ etcd_client_env }}"
+
+  tasks:
+    - name: Check if storage leader
+      ansible.builtin.command: mountpoint -q /rbd/user
+      register: rbd_mounted
+      changed_when: false
+      failed_when: false
+
+    - name: Set storage leader fact
+      ansible.builtin.set_fact:
+        is_storage_leader: "{{ rbd_mounted.rc == 0 }}"
+
+    - name: Generate admin password in etcd
+      ansible.builtin.shell: |
+        python3 -c "
+        import secrets
+        from ycluster.common.etcd_utils import get_etcd_client
+        key = '/cluster/config/ycluster/db-password'
+        client = get_etcd_client()
+        if client.get(key)[0] is None:
+            client.put(key, secrets.token_urlsafe(24))
+        "
+      changed_when: false
+      run_once: yes
+
+    - name: Copy admin project provisioning script
+      ansible.builtin.copy:
+        src: files/provision-admin.py
+        dest: /usr/local/bin/provision-admin
+        mode: '0755'
+      when: is_storage_leader
+
+    - name: Read admin DB password from etcd
+      # Runs as root: only root can read the etcd client certs.
+      ansible.builtin.command: python3 -c "
+        from ycluster.common.etcd_utils import get_etcd_client
+        pw = get_etcd_client().get('/cluster/config/ycluster/db-password')[0]
+        if pw is None: raise SystemExit('password not found in etcd')
+        print(pw.decode())
+        "
+      register: db_password
+      when: is_storage_leader
+      changed_when: false
+      no_log: true
+
+    - name: Grant admin TCP access in pg_hba.conf
+      # Runs as root: pg_hba.conf is root-owned and the reload needs root.
+      ansible.builtin.blockinfile:
+        path: /etc/postgresql/16/main/pg_hba.conf
+        marker: "# {mark} admin (ansible-managed)"
+        block: |
+          host    admin    admin    10.0.0.0/24    scram-sha-256
+          host    admin    admin    127.0.0.1/32    scram-sha-256
+      when: is_storage_leader
+      notify: reload postgresql
+
+    - name: Provision admin project database
+      # Runs as the postgres OS user so peer authentication maps to the
+      # postgres DB superuser. The password is fetched as root (etcd client
+      # certs are root-only) and passed via environment variable.
+      ansible.builtin.command: /usr/local/bin/provision-admin
+      environment:
+        ADMIN_DB_PASSWORD: "{{ db_password.stdout }}"
+      when: is_storage_leader
+      become_user: postgres
+      changed_when: false
+      no_log: true
+
+    - name: Flush handlers so the app role can connect
+      ansible.builtin.meta: flush_handlers
+      when: is_storage_leader
+
+    - name: Copy project-defaults migration script
+      ansible.builtin.copy:
+        src: files/migrate-project-defaults.py
+        dest: /usr/local/bin/migrate-project-defaults
+        mode: '0755'
+      when: is_storage_leader
+
+    - name: Seed default projects from Authentik user accounts
+      # Two-phase: fetch users as root (etcd client certs), then apply as
+      # the postgres OS user so peer authentication maps to the DB role.
+      # All user data is passed via JSON stdin and parameterized queries.
+      ansible.builtin.shell: |
+        set -o pipefail
+        /usr/local/bin/migrate-project-defaults --from-authentik \
+          | su postgres -c "/usr/local/bin/migrate-project-defaults --apply"
+      args:
+        executable: /bin/bash
+      when: is_storage_leader
+      changed_when: false
+
+  handlers:
+    - name: reload postgresql
+      ansible.builtin.command: systemctl reload postgresql@16-main

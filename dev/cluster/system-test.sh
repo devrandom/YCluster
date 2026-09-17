@@ -1052,6 +1052,89 @@ sec_backup() {
 }
 
 # --------------------------------------------------------------------------
+# 19. projects + quotas (admin postgres via admin API)
+# --------------------------------------------------------------------------
+sec_projects() {
+  local pid=smoke-projects
+  local api="http://admin.xc/admin/projects"
+  local email=smoke-user@dev.test
+
+  # Create is idempotent across re-runs (an existing project is not an error).
+  local out
+  out=$($SSH c1 "curl -sS --max-time 10 -H 'Content-Type: application/json' -d '{\"id\":\"$pid\",\"name\":\"Smoke Projects\"}' $api/create") \
+    || die "project create request failed: $out"
+  echo "$out" | grep -qE "\"id\":\"$pid\"|already exists" \
+    || die "project create: $out"
+  ok "project create (idempotent)"
+
+  $SSH c1 "curl -fsS --max-time 10 $api/data" | grep -q "\"id\":\"$pid\"" \
+    || die "project missing from /admin/projects/data"
+  ok "project visible in data endpoint"
+
+  # Membership: UID-keyed with one default project per user. Uses a synthetic
+  # UID + email so the fixture can never be confused with a real account.
+  local member_uid=9999 member_email=smoke-member@fixture.invalid
+  out=$($SSH c1 "curl -sS --max-time 10 -H 'Content-Type: application/json' -d '{\"project_id\":\"$pid\",\"uid\":\"$member_uid\",\"email\":\"$member_email\",\"is_default\":true}' $api/member/add") \
+    || die "member add failed: $out"
+  echo "$out" | grep -q '"ok":true' || die "member add: $out"
+  $SSH c1 "curl -fsS --max-time 10 $api/data" | grep -q '"authentik_uid":"9999"' \
+    || die "member missing in data"
+  ok "member added with default project flag"
+
+  out=$($SSH c1 "curl -sS --max-time 10 -H 'Content-Type: application/json' -d '{\"project_id\":\"$pid\",\"quota_type\":\"gpu-hours\",\"quota_id\":\"smoke-q1\",\"value\":5}' $api/quotas/upsert") \
+    || die "quota upsert failed: $out"
+  echo "$out" | grep -q '"value":"5"' || die "quota upsert: $out"
+  ok "gpu-hours quota upserted"
+
+  # CSV import (all-or-nothing). Establish a known value, verify a bad
+  # import leaves it unchanged, then a valid import updates it. Rerunnable.
+  local act
+  act=$($SSH c1 "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"project_id\":\"$pid\",\"quota_type\":\"gpu-hours\",\"quota_id\":\"smoke-q2\",\"value\":7}' $api/quotas/upsert")
+  echo "$act" | grep -q '"value":"7"' || die "quota setup: $act"
+  local bad
+  bad=$($SSH c1 "printf 'project-id,quota-type,quota-id,value\n$pid,gpu-hours,smoke-q2,5\nnope,gpu-hours,smoke-q2,6\n' > /dev/shm/import.csv; curl -sS --max-time 10 -o /dev/shm/resp.txt -w '%{http_code}' -F 'file=@/dev/shm/import.csv' $api/import; cat /dev/shm/resp.txt; rm -f /dev/shm/import.csv /dev/shm/resp.txt")
+  echo "$bad" | grep -q '^400' || die "bad CSV import should fail with 400: $bad"
+  echo "$bad" | grep -q 'unknown project' || die "unexpected import error: $bad"
+  local qval
+  qval=$($SSH c1 "curl -fsS --max-time 10 $api/data" | python3 -c "
+import json, sys
+from decimal import Decimal
+data = json.load(sys.stdin)
+for p in data['projects']:
+    for q in p['quotas']:
+        if q['quota_id'] == 'smoke-q2':
+            print(Decimal(q['value']).normalize())
+            break
+")
+  [ "$qval" = "7" ] || die "failed import modified rows (value=$qval)"
+  out=$($SSH c1 "printf 'project-id,quota-type,quota-id,value\n$pid,gpu-hours,smoke-q2,8\n' > /dev/shm/import.csv; curl -fsS --max-time 10 -F 'file=@/dev/shm/import.csv' $api/import; rm -f /dev/shm/import.csv") \
+    || die "CSV import failed: $out"
+  echo "$out" | grep -q '"changed":1' || die "CSV import: $out"
+  ok "CSV import atomic + applied (bad batch rejected)"
+
+  # Audit log captures the import batch and row-level changes.
+  $SSH c1 "curl -fsS --max-time 10 '$api/audit?limit=100'" \
+    | grep -q '"action":"import"' || die "import not in audit log"
+  $SSH c1 "curl -fsS --max-time 10 '$api/audit?limit=100'" \
+    | grep -q 'smoke-q2' || die "quota row change not in audit log"
+  ok "audit log records import + row changes"
+
+  # Non-admin identity must be rejected (operator-space is headerless; a
+  # request carrying a UID but no admin group is a plain user).
+  local code
+  code=$($SSH c1 "curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'X-Authentik-UID: smoke-user' $api/data")
+  [ "$code" = 403 ] || die "UID-bearing request should be 403, got $code"
+  ok "UID without admin group rejected"
+
+  # Leave the project archived so re-runs and later enforcement work start
+  # from a known state but history remains.
+  out=$($SSH c1 "curl -sS --max-time 10 -H 'Content-Type: application/json' -d '{\"id\":\"$pid\",\"active\":false}' $api/update") \
+    || die "project archive failed: $out"
+  echo "$out" | grep -q '"active":false' || die "archive: $out"
+  ok "project archived"
+}
+
+# --------------------------------------------------------------------------
 # Section registry: maps section number to "name|func".  Number is 1-based.
 # To add a section, append "N.name|sec_func" here and define sec_func above.
 SECTION_REGISTRY=(
@@ -1073,6 +1156,7 @@ SECTION_REGISTRY=(
   "16.leadership + VIP failover/failback|sec_failover"
   "17.backup + verify-restore|sec_backup"
   "18.frp public http/https + ssh tunnels via f1 (PROXY protocol)|sec_frp"
+  "19.projects + quotas (admin)|sec_projects"
 )
 
 # Parse a section filter spec (e.g. "15", "1-5,15", "acme") into a list of
