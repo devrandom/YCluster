@@ -117,11 +117,46 @@ def socket_loop(state):
             pass
 
 
-def should_skip(path):
+def unsafe_link_targets(root):
+    """Real dirs targeted by symlinks under root that point outside root.
+
+    inotify does not follow directory symlinks when adding watches
+    recursively, so edits inside e.g. config/ansible/host_vars ->
+    ../../../ycluster-private/host_vars never fire an event on the repo
+    watch. Return the resolved external targets so the daemon can watch
+    them directly too. The rsync side already dereferences these via
+    --copy-unsafe-links, so the two stay in sync.
+    """
+    targets = []
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in list(dirnames) + filenames:
+            p = Path(dirpath) / name
+            if p.is_symlink() and p.is_dir():
+                real = p.resolve()
+                try:
+                    real.relative_to(root)  # in-tree link: keep as-is
+                except ValueError:
+                    if real not in seen:
+                        seen.add(real)
+                        targets.append(real)
+    return targets
+
+
+def should_skip(path, extra_roots=()):
+    rel = None
+    resolved = Path(path).resolve()
     try:
-        rel = str(Path(path).resolve().relative_to(REPO))
+        rel = str(resolved.relative_to(REPO))
     except ValueError:
-        return True  # outside the repo
+        for r in extra_roots:
+            try:
+                rel = str(resolved.relative_to(r))
+                break
+            except ValueError:
+                continue
+    if rel is None:
+        return True  # nothing under the repo or a synced external target
     return bool(SKIP_RE.search(rel))
 
 
@@ -218,14 +253,18 @@ def main_daemon():
     t.start()
 
     def on_event(event):
-        if not should_skip(event.pathname):
+        if not should_skip(event.pathname, extra_roots):
             state['dirty'] = True
+
+    extra_roots = unsafe_link_targets(REPO)
 
     wm = pyinotify.WatchManager()
     mask = (pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CREATE
             | pyinotify.IN_DELETE | pyinotify.IN_MOVED_TO
             | pyinotify.IN_MOVED_FROM)
     wm.add_watch(str(REPO), mask, rec=True)
+    for r in extra_roots:
+        wm.add_watch(str(r), mask, rec=True)
     notifier = pyinotify.Notifier(wm, on_event)
 
     def shutdown(signum, frame):
