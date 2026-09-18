@@ -58,6 +58,20 @@ def _actor(identity):
     }
 
 
+def assert_project_in_scope(cur, project_id, allowed_idp_projects):
+    """Raise ValidationError unless the project is under one of the given
+    IdP projects. Managers pass their authorized set; admins pass None
+    (unrestricted)."""
+    if allowed_idp_projects is None:
+        return
+    cur.execute(
+        "SELECT idp_project FROM projects WHERE id = %s",
+        (clean_project_id(project_id),),
+    )
+    row = cur.fetchone()
+    if not row or row[0] not in allowed_idp_projects:
+        raise ValidationError("project outside your managed projects")
+
 def set_actor(cur, identity):
     """Expose actor identity to database audit triggers for this transaction."""
     actor = _actor(identity)
@@ -112,10 +126,17 @@ def create_project(cur, identity, project_id, name, description="",
 
 
 def update_project(cur, identity, project_id, name=None, description=None,
-                   active=None, idp_project=None):
+                   active=None, idp_project=None, allowed_idp_projects=None):
     current = get_project(cur, project_id)
     if not current:
         raise ValidationError("no such project")
+    assert_project_in_scope(cur, project_id, allowed_idp_projects)
+    if idp_project is not None:
+        idp_project = clean_text(idp_project, "IdP project", max_length=200)
+        if allowed_idp_projects is not None \
+                and idp_project not in allowed_idp_projects:
+            raise ValidationError(
+                "cannot move project outside your managed projects")
     if name is None and description is None and active is None \
             and idp_project is None:
         return current
@@ -129,7 +150,7 @@ def update_project(cur, identity, project_id, name=None, description=None,
         values.append(clean_text(description, "description", max_length=1000))
     if idp_project is not None:
         fields.append("idp_project = %s")
-        values.append(clean_text(idp_project, "IdP project", max_length=200))
+        values.append(idp_project)
     if active is not None:
         if not isinstance(active, bool):
             raise ValidationError("active must be boolean")
@@ -212,9 +233,11 @@ def list_quotas(cur, project_id):
     return [_quota_row(row) for row in cur.fetchall()]
 
 
-def add_member(cur, identity, project_id, uid, email, is_default=False):
+def add_member(cur, identity, project_id, uid, email, is_default=False,
+               allowed_idp_projects=None):
     if not get_project(cur, project_id):
         raise ValidationError("no such project")
+    assert_project_in_scope(cur, project_id, allowed_idp_projects)
     uid = clean_text(uid, "user id", max_length=128, required=True)
     email = clean_text(email, "email", max_length=254)
     if not email:
@@ -249,7 +272,8 @@ def add_member(cur, identity, project_id, uid, email, is_default=False):
     )
 
 
-def remove_member(cur, identity, project_id, uid):
+def remove_member(cur, identity, project_id, uid, allowed_idp_projects=None):
+    assert_project_in_scope(cur, project_id, allowed_idp_projects)
     uid = clean_text(uid, "user id", max_length=128, required=True)
     cur.execute(
         """DELETE FROM project_members
@@ -260,7 +284,9 @@ def remove_member(cur, identity, project_id, uid):
         raise ValidationError("membership not found")
 
 
-def set_default_member(cur, identity, project_id, uid, email=None):
+def set_default_member(cur, identity, project_id, uid, email=None,
+                     allowed_idp_projects=None):
+    assert_project_in_scope(cur, project_id, allowed_idp_projects)
     uid = clean_text(uid, "user id", max_length=128, required=True)
     project_id = clean_project_id(project_id)
     # Ensure membership exists, but never clobber the email captured at the
@@ -285,9 +311,11 @@ def set_default_member(cur, identity, project_id, uid, email=None):
         raise ValidationError("membership not found")
 
 
-def upsert_quota(cur, identity, project_id, quota_type, quota_id, value):
+def upsert_quota(cur, identity, project_id, quota_type, quota_id, value,
+                 allowed_idp_projects=None):
     if not get_project(cur, project_id):
         raise ValidationError("no such project")
+    assert_project_in_scope(cur, project_id, allowed_idp_projects)
     cur.execute("SELECT 1 FROM quota_types WHERE id = %s AND active",
                 (clean_text(quota_type, "quota type", required=True),))
     if not cur.fetchone():
@@ -305,7 +333,9 @@ def upsert_quota(cur, identity, project_id, quota_type, quota_id, value):
     return _quota_row((project_id, quota_type, quota_id, value, None))
 
 
-def delete_quota(cur, identity, project_id, quota_type, quota_id):
+def delete_quota(cur, identity, project_id, quota_type, quota_id,
+                  allowed_idp_projects=None):
+    assert_project_in_scope(cur, project_id, allowed_idp_projects)
     cur.execute(
         """DELETE FROM project_quotas
            WHERE project_id = %s AND quota_type = %s AND quota_id = %s""",
@@ -354,9 +384,14 @@ def parse_quota_csv(text):
         raise ValidationError(f"invalid CSV: {e}") from e
 
 
-def import_quotas(cur, identity, text):
+def import_quotas(cur, identity, text, allowed_idp_projects=None):
     """Upsert every valid CSV row or change nothing (transaction is owned by
-    the caller). Triggers create one audit event for each changed row."""
+    the caller). Triggers create one audit event for each changed row.
+
+    ``allowed_idp_projects`` (a set of IdP project names), when not None,
+    restricts the import to quotas of projects under those IdP projects
+    (manager scoping). Admins pass None for unrestricted imports.
+    """
     rows = parse_quota_csv(text)
     project_ids = sorted({row["project_id"] for row in rows})
     quota_types = sorted({row["quota_type"] for row in rows})
@@ -368,6 +403,17 @@ def import_quotas(cur, identity, text):
     unknown = sorted(set(project_ids) - known_projects)
     if unknown:
         raise ValidationError("unknown project id: " + ", ".join(unknown))
+    if allowed_idp_projects is not None:
+        cur.execute(
+            "SELECT id FROM projects WHERE idp_project = ANY(%s)",
+            (sorted(allowed_idp_projects),),
+        )
+        scoped = {row[0] for row in cur.fetchall()}
+        outside = sorted(set(project_ids) - scoped)
+        if outside:
+            raise ValidationError(
+                "project id outside your managed projects: "
+                + ", ".join(outside))
     cur.execute("SELECT id FROM quota_types WHERE id = ANY(%s) AND active",
                 (quota_types,))
     known_types = {row[0] for row in cur.fetchall()}

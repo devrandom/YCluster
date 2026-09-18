@@ -39,19 +39,19 @@
   <template x-if="error"><div class="error" x-text="error"></div></template>
   <template x-if="result"><div class="result" x-text="result"></div></template>
 
-  <div x-show="isAdmin" style="margin-bottom: 0.75rem;">
+  <div x-show="canManage" style="margin-bottom: 0.75rem;">
     <button x-show="!showCreate" @click="showCreate = true; showImport = false">Create project</button>
     <button x-show="!showImport" @click="showImport = true; showCreate = false">Import quotas</button>
     <button class="minor" x-show="showCreate || showImport" @click="showCreate = false; showImport = false">Close</button>
   </div>
 
-  <div class="card" x-show="isAdmin && showCreate" style="margin-top: 0.75rem;">
+  <div class="card" x-show="canManage && showCreate" style="margin-top: 0.75rem;">
     <form @submit.prevent="post('/admin/projects/create', newProject, 'Project created')" class="grid">
       <label>ID <input type="text" x-model="newProject.id" placeholder="acme-demo" required></label>
       <label>Name <input type="text" x-model="newProject.name" required></label>
       <label>IdP project
         <select x-model="newProject.idp_project">
-          <option value="">(admin-only)</option>
+          <template x-if="isAdmin"><option value="">(admin-only)</option></template>
           <template x-for="p in idpProjects" :key="p"><option :value="p" x-text="p"></option></template>
         </select>
       </label>
@@ -60,7 +60,7 @@
     </form>
   </div>
 
-  <div class="card" x-show="isAdmin && showImport" style="margin-top: 0.75rem;">
+  <div class="card" x-show="canManage && showImport" style="margin-top: 0.75rem;">
     <form @submit.prevent="importCsv" class="grid">
       <label>CSV file <input type="file" accept=".csv,text/csv" @change="selectedFile = $event.target.files[0]"></label>
       <button type="submit" :disabled="!selectedFile">Import</button>
@@ -87,7 +87,7 @@
           <div><span class="badge active" x-show="p.active">active</span>
           <span class="badge inactive" x-show="!p.active">inactive</span></div>
         </div>
-        <button class="minor" x-show="isAdmin" @click="toggle(p)" x-text="expanded.has(p.id) ? 'Collapse' : 'Manage'"></button>
+        <button class="minor" x-show="canManage" @click="toggle(p)" x-text="expanded.has(p.id) ? 'Collapse' : 'Manage'"></button>
       </div>
       <template x-if="expanded.has(p.id)">
         <div class="project-details">
@@ -97,7 +97,7 @@
               <label>Name <input type="text" x-model="editForm.name" required></label>
               <label>IdP project
                 <select x-model="editForm.idp_project">
-                  <option value="">(admin-only)</option>
+                  <template x-if="isAdmin"><option value="">(admin-only)</option></template>
                   <template x-for="p in idpProjectsWith(editForm.idp_project)" :key="p"><option :value="p" x-text="p"></option></template>
                 </select>
               </label>
@@ -170,7 +170,7 @@
 function projectsApp() {
   return {
     loading: true, error: '', result: '', projects: [], users: [],
-    filter: '', isAdmin: false, idpProjects: [],
+    filter: '', isAdmin: false, canManage: false, idpProjects: [],
     expanded: new Set(), selectedFile: null,
     showCreate: false, showImport: false,
     newProject: {id: '', name: '', description: ''},
@@ -185,6 +185,7 @@ function projectsApp() {
         this.projects = data.projects || []
         this.users = data.users || []
         this.isAdmin = !!data.is_admin
+        this.canManage = !!(data.is_admin || data.is_manager)
         this.idpProjects = data.idp_projects || []
       } catch (e) { this.error = e.message } finally { this.loading = false }
     },

@@ -180,6 +180,46 @@ class ProjectDomainTests(unittest.TestCase):
                 app_projects.clean_quota_value(value)
         self.assertEqual(str(app_projects.clean_quota_value('1.0000')), '1')
 
+    def test_assert_project_in_scope(self):
+        identity = mock.Mock(uid='mgr', email='mgr@x')
+        # Out of scope: the mutation is rejected before writing anything.
+        conn = FakeConn()
+        with conn.cursor() as cur:
+            with self.assertRaisesRegex(ValidationError,
+                                        'outside your managed'):
+                app_projects.upsert_quota(cur, identity, 'p', 'gpu-hours',
+                                          'x', '2', {'other'})
+        # In scope: the same mutation succeeds for a manager.
+        conn = FakeConn()
+        with conn.cursor() as cur:
+            result = app_projects.upsert_quota(cur, identity, 'p',
+                                               'gpu-hours', 'x', '2', {'p'})
+            self.assertEqual(result['project_id'], 'p')
+        # Admins (None) are unrestricted and skip the scope query.
+        conn = FakeConn()
+        with conn.cursor() as cur:
+            app_projects.assert_project_in_scope(cur, 'p', None)
+            self.assertEqual(cur.executed, [])
+
+    def test_import_scoped_to_managed_idp_projects(self):
+        csv = 'project-id,quota-type,quota-id,value\np,gpu-hours,x,2\n'
+        identity = mock.Mock(uid='mgr', email='mgr@x')
+        # In scope: the CSV project id is under a managed IdP project.
+        conn = FakeConn()
+        with conn.cursor() as cur:
+            app_projects.import_quotas(cur, identity, csv, {'p'})
+            self.assertTrue(any('INSERT INTO project_quotas' in sql
+                                for sql, _ in cur.executed))
+        # Out of scope: rejected atomically, nothing written.
+        conn = FakeConn()
+        with conn.cursor() as cur:
+            with self.assertRaisesRegex(ValidationError,
+                                        'outside your managed'):
+                app_projects.import_quotas(cur, identity, csv, {'other'})
+            writes = [sql for sql, _ in cur.executed
+                      if 'INSERT INTO project_quotas' in sql]
+            self.assertEqual(writes, [])
+
 
 class ManagerScopingTests(unittest.TestCase):
     def setUp(self):
@@ -277,6 +317,8 @@ class ProjectRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertEqual(data['is_admin'], False)
+        self.assertEqual(data['is_manager'], True)
+        self.assertEqual(data['can_manage'], True)
         self.assertEqual([u['uid'] for u in data['users']], ['1'])
         self.assertTrue(seen.get('called'))
 
@@ -299,6 +341,7 @@ class ProjectRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertEqual(data['is_admin'], True)
+        self.assertEqual(data['can_manage'], True)
         self.assertEqual(len(data['users']), 2)
 
     def test_create_project_uses_transaction(self):
@@ -326,6 +369,95 @@ class ProjectRoutesTests(unittest.TestCase):
             response = self.http.post('/admin/projects/import', json={'csv': ''})
         self.assertEqual(response.status_code, 400)
         self.assertIn('CSV headers', response.get_json()['error'])
+
+    def test_manager_create_allowed_within_managed_idp_project(self):
+        headers = {'X-Authentik-UID': 'uid-mgr',
+                   'X-Authentik-Email': 'mgr@example.com',
+                   'X-Authentik-Groups': 'ycluster-managers'}
+        conn = FakeConn()
+        from ycluster.utils import authentik_manager
+        with mock.patch('app_project_db.connect', return_value=conn), \
+                mock.patch.object(authentik_manager, 'manager_projects',
+                                  lambda email: ['acme']), \
+                mock.patch.object(appmod.app_projects, 'create_project',
+                                  return_value={'id': 'p'}) as op:
+            response = self.http.post(
+                '/admin/projects/create',
+                json={'id': 'p', 'name': 'P', 'idp_project': 'acme'},
+                headers=headers)
+        self.assertEqual(response.status_code, 200)
+        op.assert_called_once()
+        self.assertEqual(op.call_args.args[5], 'acme')
+
+    def test_manager_create_rejected_outside_managed_idp_project(self):
+        headers = {'X-Authentik-UID': 'uid-mgr',
+                   'X-Authentik-Email': 'mgr@example.com',
+                   'X-Authentik-Groups': 'ycluster-managers'}
+        from ycluster.utils import authentik_manager
+        with mock.patch.object(authentik_manager, 'manager_projects',
+                               lambda email: ['acme']):
+            response = self.http.post(
+                '/admin/projects/create',
+                json={'id': 'p', 'name': 'P', 'idp_project': 'other'},
+                headers=headers)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn('managed IdP projects',
+                      response.get_json()['error'])
+
+    def test_manager_import_rejected_outside_scope(self):
+        headers = {'X-Authentik-UID': 'uid-mgr',
+                   'X-Authentik-Email': 'mgr@example.com',
+                   'X-Authentik-Groups': 'ycluster-managers'}
+        conn = FakeConn()
+        from ycluster.utils import authentik_manager
+        with mock.patch('app_project_db.connect', return_value=conn), \
+                mock.patch.object(authentik_manager, 'manager_projects',
+                                  lambda email: ['acme']):
+            response = self.http.post(
+                '/admin/projects/import',
+                json={'csv': 'project-id,quota-type,quota-id,value\n'
+                             'p,gpu-hours,x,1\n'},
+                headers=headers)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('outside your managed projects',
+                      response.get_json()['error'])
+
+    def test_manager_can_write_within_scope(self):
+        headers = {'X-Authentik-UID': 'uid-mgr',
+                   'X-Authentik-Email': 'mgr@example.com',
+                   'X-Authentik-Groups': 'ycluster-managers'}
+        conn = FakeConn()
+        from ycluster.utils import authentik_manager
+        cases = [
+            ('/admin/projects/update', 'update_project',
+             {'id': 'p', 'name': 'P2'}, {'id': 'p'}),
+            ('/admin/projects/member/add', 'add_member',
+             {'project_id': 'p', 'uid': 'u2', 'email': 'u2@x'}, {'ok': True}),
+            ('/admin/projects/member/default', 'set_default_member',
+             {'project_id': 'p', 'uid': 'u2'}, {'ok': True}),
+            ('/admin/projects/member/remove', 'remove_member',
+             {'project_id': 'p', 'uid': 'u2'}, {'ok': True}),
+            ('/admin/projects/quotas/upsert', 'upsert_quota',
+             {'project_id': 'p', 'quota_type': 'gpu-hours',
+              'quota_id': 'x', 'value': '2'}, {'ok': True}),
+            ('/admin/projects/quotas/delete', 'delete_quota',
+             {'project_id': 'p', 'quota_type': 'gpu-hours',
+              'quota_id': 'x'}, {'ok': True}),
+        ]
+        for url, attr, payload, expected in cases:
+            with self.subTest(url=url), \
+                    mock.patch('app_project_db.connect',
+                               return_value=conn), \
+                    mock.patch.object(authentik_manager, 'manager_projects',
+                                      lambda email: ['acme']), \
+                    mock.patch.object(appmod.app_projects, attr,
+                                      return_value=expected) as op:
+                response = self.http.post(url, headers=headers,
+                                          json=payload)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(op.called)
+            # Every scoped mutation receives the manager's IdP scope last.
+            self.assertIn(['acme'], op.call_args.args)
 
 
 if __name__ == '__main__':
