@@ -39,6 +39,35 @@
   <template x-if="error"><div class="error" x-text="error"></div></template>
   <template x-if="result"><div class="result" x-text="result"></div></template>
 
+  <div x-show="isAdmin" style="margin-bottom: 0.75rem;">
+    <button x-show="!showCreate" @click="showCreate = true; showImport = false">Create project</button>
+    <button x-show="!showImport" @click="showImport = true; showCreate = false">Import quotas</button>
+    <button class="minor" x-show="showCreate || showImport" @click="showCreate = false; showImport = false">Close</button>
+  </div>
+
+  <div class="card" x-show="isAdmin && showCreate" style="margin-top: 0.75rem;">
+    <form @submit.prevent="post('/admin/projects/create', newProject, 'Project created')" class="grid">
+      <label>ID <input type="text" x-model="newProject.id" placeholder="acme-demo" required></label>
+      <label>Name <input type="text" x-model="newProject.name" required></label>
+      <label>IdP project
+        <select x-model="newProject.idp_project">
+          <option value="">(admin-only)</option>
+          <template x-for="p in idpProjects" :key="p"><option :value="p" x-text="p"></option></template>
+        </select>
+      </label>
+      <label>Description <textarea x-model="newProject.description" rows="3"></textarea></label>
+      <button>Create</button>
+    </form>
+  </div>
+
+  <div class="card" x-show="isAdmin && showImport" style="margin-top: 0.75rem;">
+    <form @submit.prevent="importCsv" class="grid">
+      <label>CSV file <input type="file" accept=".csv,text/csv" @change="selectedFile = $event.target.files[0]"></label>
+      <button type="submit" :disabled="!selectedFile">Import</button>
+    </form>
+    <p class="muted">Headers: project-id,quota-type,quota-id,value. The import is atomic.</p>
+  </div>
+
   <h2>User projects</h2>
   <div class="card">
     <form @submit.prevent="false" class="grid">
@@ -137,48 +166,13 @@
   </template>
   </div>
 
-  <h2>Create user project</h2>
-  <div class="card" x-show="isAdmin">
-    <form @submit.prevent="post('/admin/projects/create', newProject, 'Project created')" class="grid">
-      <label>ID <input type="text" x-model="newProject.id" placeholder="acme-demo" required></label>
-      <label>Name <input type="text" x-model="newProject.name" required></label>
-      <label>IdP project
-        <select x-model="newProject.idp_project">
-          <option value="">(admin-only)</option>
-          <template x-for="p in idpProjects" :key="p"><option :value="p" x-text="p"></option></template>
-        </select>
-      </label>
-      <label>Description <textarea x-model="newProject.description" rows="3"></textarea></label>
-      <button>Create</button>
-    </form>
-  </div>
-
-  <h2>Import quotas</h2>
-  <div class="card" x-show="isAdmin">
-    <form @submit.prevent="importCsv" class="grid">
-      <label>CSV file <input type="file" accept=".csv,text/csv" @change="selectedFile = $event.target.files[0]"></label>
-      <button type="submit" :disabled="!selectedFile">Import</button>
-    </form>
-    <p class="muted">Headers: project-id,quota-type,quota-id,value. The import is atomic.</p>
-  </div>
-
-  <h2>Audit log</h2>
-  <table>
-    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Object</th><th>Entity</th></tr></thead>
-    <tbody>
-      <template x-for="e in audit" :key="e.id">
-        <tr><td x-text="e.ts"></td><td x-text="e.actor_email || e.actor_uid"></td><td x-text="e.action"></td><td x-text="e.table_name"></td><td x-text="e.entity_id"></td></tr>
-      </template>
-      <tr x-show="audit.length === 0"><td colspan="5" class="muted">No events</td></tr>
-    </tbody>
-  </table>
-
 <script>
 function projectsApp() {
   return {
-    loading: true, error: '', result: '', projects: [], users: [], audit: [],
+    loading: true, error: '', result: '', projects: [], users: [],
     filter: '', isAdmin: false, idpProjects: [],
     expanded: new Set(), selectedFile: null,
+    showCreate: false, showImport: false,
     newProject: {id: '', name: '', description: ''},
     memberForm: {uid: '', email: '', is_default: false},
     editForm: {name: '', description: ''},
@@ -186,15 +180,10 @@ function projectsApp() {
     async load() {
       this.loading = true
       try {
-        const [data, audit] = await Promise.all([
-          fetch('/admin/projects/data').then(r => { if (!r.ok) throw new Error(r.statusText); return r.json() }),
-          fetch('/admin/projects/audit?limit=200').then(r => { if (!r.ok) throw new Error(r.statusText); return r.json() })
-        ])
+        const data = await fetch('/admin/projects/data').then(r => { if (!r.ok) throw new Error(r.statusText); return r.json() })
         if (data.error) throw new Error(data.error)
-        if (audit.error) throw new Error(audit.error)
         this.projects = data.projects || []
         this.users = data.users || []
-        this.audit = audit.events || []
         this.isAdmin = !!data.is_admin
         this.idpProjects = data.idp_projects || []
       } catch (e) { this.error = e.message } finally { this.loading = false }
