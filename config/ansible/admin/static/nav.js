@@ -88,7 +88,7 @@
             if (!resp.ok) return;
             return resp.json();
         }).then(function (ident) {
-            if (!ident || !ident.is_admin) return;
+            if (!ident || !(ident.is_admin || ident.is_manager)) return;
             var projects = document.createElement('a');
             projects.href = '/admin/projects';
             projects.textContent = 'Projects';
@@ -96,6 +96,7 @@
             var users = nav.querySelector('a[href="/admin/users"]');
             nav.insertBefore(projects, users);
 
+            if (!ident.is_admin) return;
             var link = document.createElement('a');
             link.href = '/admin/model-usage';
             link.textContent = 'Model Usage';
