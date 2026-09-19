@@ -256,12 +256,11 @@
   hosts: core:compute
   become: yes
   tasks:
-    # Rollout switch: the NFS client mount is only provisioned on hosts that
-    # opt in by setting `vm_data_nfs: true` (host_vars). Hosts still using the
-    # shared CIFS /near1 for VM data skip this play entirely.
+    # Rollout switch: hosts opt out by setting `vm_data_nfs: false` (host_vars).
+    # Hosts still using the shared CIFS /near1 for VM data skip this play.
     - name: Skip hosts not opted into the NFS VM-data switch
       meta: end_host
-      when: not (vm_data_nfs | default(false))
+      when: not (vm_data_nfs | default(true))
 
     - name: Install NFS client utilities
       apt:

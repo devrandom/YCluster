@@ -331,8 +331,8 @@ so the durable fix is moving this protocol to NFS, which has no
   anongid=1000`) to mirror the CIFS `uid=1000,gid=1000` arrangement. The shared
   `/near1` CIFS export stays for its existing non-VM consumers.
 - **Client (rollout switch):** the client mount is gated by a per-host Ansible
-  flag, `vm_data_nfs` (default `false`; set `true` in `host_vars/<host>.yml`).
-  When set, `mount-nas-share.yml` installs `nfs-common`, writes a static
+  flag, `vm_data_nfs` (default `true`; set `false` in `host_vars/<host>.yml`
+  to opt out). When enabled, `mount-nas-share.yml` installs `nfs-common`, writes a static
   `vm-data.mount` systemd unit (`TimeoutSec=60`, no automount), enables/starts
   it, and fails if the mount is not actually present.
 - **Mount check (for scripts):** scripts that touch VM `data` paths run
