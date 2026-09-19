@@ -1081,8 +1081,8 @@ def vm_resize(name, size):
 
     The root disk is inherited from the 'gpu-vm' profile; this creates a
     per-instance override. Incus only applies a new root-disk size when the
-    VM starts, so a running VM is restarted; cloud-init then grows the
-    partition and filesystem on boot. Incus only supports growing.
+    VM next starts; cloud-init then grows the partition and filesystem on
+    boot. Incus only supports growing.
     """
     _valid_vm_name(name)
     if not _instance_exists(name):
@@ -1094,42 +1094,27 @@ def vm_resize(name, size):
     if ov.returncode != 0:
         _incus("config", "device", "set", name, "root", f"size={size}")
     print(f"Root disk of '{name}' set to {size}.")
-
-    running = any(i.get("status") == "Running"
-                  for i in _incus_json("list", name, "--format", "json"))
-    if running:
-        print("Restarting the VM so the new size takes effect...")
-        _incus("restart", name)
-        rec = vm_get(name)
-        _wait_agent(name, GPU_VM_AGENT_TIMEOUT
-                    if (rec or {}).get("gpus") else 180)
-        _incus("exec", name, "--", "cloud-init", "status", "--wait",
-               check=False)
-        print("  Restarted; cloud-init grew the filesystem.")
-    else:
-        print("  VM is stopped — the filesystem will grow on next boot "
-              "(cloud-init growpart).")
+    print("  The filesystem will grow on next boot (cloud-init growpart).")
 
 
 def vm_resize_data(name, size):
-    """Grow a VM's NAS data image, then grow ext4 inside the guest."""
+    """Grow a VM's NAS data image and its ext4 filesystem while stopped."""
     _valid_vm_name(name)
     if not _instance_exists(name):
         raise ValueError(f"No such VM: {name}")
     image = vdb.data_image_path(name)
     vdb.assert_resizable(_incus, name, image)
 
-    # qemu-img resize is safe on a running VM's image, but the guest
-    # filesystem resize is not — grow the image, then restart the VM.
+    # The running-state check must happen under the same lock the start path
+    # holds across `incus start`, or a concurrent start could attach the
+    # image between our check and the resize.
     with vdb.data_migration_lock(name):
-        running = _instance_running(name)
-        if running:
-            _incus_stop(name)
-        vdb.grow_data_image(image, vdb.parse_disk_size(size))
-        _incus("start", name)
-    _mount_data_in_guest(name)
-    _incus("exec", name, "--", "resize2fs", vdb.VM_DATA_RESIZE_DEVICE)
+        if _instance_running(name):
+            raise ValueError(
+                f"'{name}' is running; stop it before changing the data image")
+        vdb.grow_data_image_and_fs(image, vdb.parse_disk_size(size))
     print(f"Data image for '{name}' is {size}; /data filesystem resized.")
+
 
 def desired_conflict(desired, action, now):
     return _desired_conflict(desired, action, now, desired_on)
@@ -1186,7 +1171,11 @@ def vm_start(name, billable=False, initiator="cli", gpus=None, migrate=False):
         _ensure_gpus_attached(name, want=gpus)
     else:
         _ensure_gpus_attached(name)
-    _incus("start", name)
+    # Hold the data-image lock across start so a concurrent resize-data
+    # cannot grow the image while qemu opens it (resize-data checks its
+    # stopped-state under the same lock).
+    with vdb.data_migration_lock(name):
+        _incus("start", name)
     _record_event_from_record("start", name, initiator=initiator,
                               billable=billable)
     print(f"Started '{name}'.")
@@ -1205,7 +1194,8 @@ def vm_restart(name, billable=False, initiator="cli"):
         _incus_stop(name)
     migrated = _ensure_nas_share(name)
     _ensure_gpus_attached(name)
-    _incus("start", name)
+    with vdb.data_migration_lock(name):
+        _incus("start", name)
     # Continuity event: interval assembly treats a restart as uninterrupted
     # running time (the stop/start gap is seconds).
     _record_event_from_record("restart", name, initiator=initiator,

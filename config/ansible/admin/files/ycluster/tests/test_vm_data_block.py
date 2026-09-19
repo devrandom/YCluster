@@ -63,6 +63,45 @@ class VMDataBlockTests(unittest.TestCase):
         self.assertIn(["qemu-img", "resize", "img", "500"],
                       [c.args[0] for c in run_mock.call_args_list])
 
+    def test_grow_data_image_and_fs_order_and_cleanup(self):
+        calls = []
+
+        def run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd[1] == "info":
+                return _proc(cmd, stdout='{"virtual-size": 300}')
+            if cmd[0] == "losetup" and "--find" in cmd:
+                return _proc(cmd, stdout="/dev/loop7\n")
+            return _proc(cmd)
+
+        with mock.patch.object(vdb.subprocess, "run", side_effect=run):
+            vdb.grow_data_image_and_fs("img", 500)
+        self.assertEqual(calls, [
+            ["qemu-img", "info", "--output=json", "img"],
+            ["qemu-img", "resize", "img", "500"],
+            ["losetup", "--find", "--show", "img"],
+            ["e2fsck", "-fp", "/dev/loop7"],
+            ["resize2fs", "/dev/loop7"],
+            ["losetup", "-d", "/dev/loop7"],
+        ])
+
+    def test_grow_data_image_and_fs_detaches_loop_on_failure(self):
+        def run(cmd, *args, **kwargs):
+            if cmd[1] == "info":
+                return _proc(cmd, stdout='{"virtual-size": 300}')
+            if cmd[0] == "losetup" and "--find" in cmd:
+                return _proc(cmd, stdout="/dev/loop7\n")
+            if cmd[0] == "e2fsck":
+                raise subprocess.CalledProcessError(1, cmd)
+            return _proc(cmd)
+
+        with mock.patch.object(vdb.subprocess, "run",
+                               side_effect=run) as run_mock:
+            with self.assertRaises(subprocess.CalledProcessError):
+                vdb.grow_data_image_and_fs("img", 500)
+        self.assertIn(["losetup", "-d", "/dev/loop7"],
+                      [c.args[0] for c in run_mock.call_args_list])
+
     def test_existing_image_attaches_block_device(self):
         with (
             mock.patch.object(vm, "_host_config_value", return_value=None),

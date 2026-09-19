@@ -280,6 +280,28 @@ def grow_data_image(image, new_bytes):
     return current_bytes
 
 
+def grow_data_image_and_fs(image, new_bytes):
+    """Grow a raw ext4 data image and its filesystem; refuse to shrink.
+
+    The caller must hold the per-VM data migration lock and ensure the VM is
+    stopped. Keeping the filesystem resize on the host avoids an implicit VM
+    start/restart just to run resize2fs in the guest.
+    """
+    old_bytes = grow_data_image(image, new_bytes)
+    r = subprocess.run(
+        ["losetup", "--find", "--show", image],
+        check=True, capture_output=True, text=True)
+    loop_dev = r.stdout.strip()
+    try:
+        subprocess.run(["e2fsck", "-fp", loop_dev], check=True,
+                       capture_output=True, text=True)
+        subprocess.run(["resize2fs", loop_dev], check=True,
+                       capture_output=True, text=True)
+    finally:
+        _release_image_mount(loop_dev, None)
+    return old_bytes
+
+
 def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
                      instance_info, instance_running):
     """Attach the VM data disk for `name`.

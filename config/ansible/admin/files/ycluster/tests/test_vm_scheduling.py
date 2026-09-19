@@ -749,19 +749,21 @@ class VMAlterHelperTests(unittest.TestCase):
     @mock.patch.object(vm, "release_gpus")
     @mock.patch.object(vm, "_incus_stop")
     @mock.patch.object(vm, "_instance_info")
-    def test_vm_gpu_change_running(self, info, stop, release, put, attach,
-                                   nas, incus, wait, verify):
+    def test_vm_gpu_change_running_does_not_restart(
+            self, info, stop, release, put, attach, nas, incus, wait, verify):
         rec = self._rec()
         info.return_value = {"status": "Running"}
-        self.assertTrue(vm_alter._alter_vm_gpus("vm1", rec, "vm", 2))
-        stop.assert_called_once_with("vm1")
-        release.assert_called_once_with("vm1")
-        put.assert_called_once()
-        attach.assert_called_once_with("vm1")
-        nas.assert_called_once_with("vm1")
-        incus.assert_any_call("start", "vm1")
-        verify.assert_called_once_with("vm1", 2)
-        self.assertEqual(rec["gpus"], 2)
+        with self.assertRaisesRegex(ValueError, "stop it before changing"):
+            vm_alter._alter_vm_gpus("vm1", rec, "vm", 2)
+        stop.assert_not_called()
+        release.assert_not_called()
+        put.assert_not_called()
+        attach.assert_not_called()
+        nas.assert_not_called()
+        incus.assert_not_called()
+        wait.assert_not_called()
+        verify.assert_not_called()
+        self.assertEqual(rec["gpus"], 1)
 
     @mock.patch.object(vm, "_instance_info",
                        return_value={"status": "Stopped"})
@@ -878,6 +880,67 @@ class VMAlterOrchestratorTests(unittest.TestCase):
             vm_alter.vm_alter("vm1", instance_type="container")
         with self.assertRaises(ValueError):
             vm_alter.vm_alter("vm1", gpus=-1)
+
+
+class VMResizeTests(unittest.TestCase):
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_root_resize_does_not_restart(self, valid, exists, incus):
+        incus.return_value = mock.Mock(returncode=0)
+        vm.vm_resize("vm1", "160GiB")
+        for c in incus.call_args_list:
+            self.assertNotIn("restart", c.args)
+            self.assertNotEqual(c.args[:2], ("start", "vm1"))
+
+    @mock.patch.object(vm.vdb, "assert_resizable")
+    @mock.patch.object(vm.vdb, "data_migration_lock")
+    @mock.patch.object(vm.vdb, "grow_data_image_and_fs")
+    @mock.patch.object(vm, "_incus")
+    @mock.patch.object(vm, "_instance_running", return_value=False)
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_data_resize_stopped_grows_without_starting(
+            self, valid, exists, running, incus, grow, lock, resizable):
+        lock.return_value = contextlib.nullcontext()
+        vm.vm_resize_data("vm1", "200GiB")
+        grow.assert_called_once_with(mock.ANY, 200 * 1024**3)
+        incus.assert_not_called()
+
+    @mock.patch.object(vm.vdb, "assert_resizable")
+    @mock.patch.object(vm.vdb, "data_migration_lock",
+                       return_value=contextlib.nullcontext())
+    @mock.patch.object(vm.vdb, "grow_data_image_and_fs")
+    @mock.patch.object(vm, "_instance_running", return_value=True)
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_data_resize_refuses_running_vm(self, valid, exists, running,
+                                            grow, lock, resizable):
+        with self.assertRaisesRegex(ValueError, "stop it before changing"):
+            vm.vm_resize_data("vm1", "200GiB")
+        grow.assert_not_called()
+
+    @mock.patch.object(vm.vdb, "assert_resizable")
+    @mock.patch.object(vm.vdb, "grow_data_image_and_fs")
+    @mock.patch.object(vm, "_instance_running")
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "_valid_vm_name")
+    def test_data_resize_checks_running_under_lock(
+            self, valid, exists, running, grow, resizable):
+        # The stopped-state check must run while the data lock is held so a
+        # concurrent start cannot attach the image between check and resize.
+        locked = []
+
+        @contextlib.contextmanager
+        def fake_lock(name):
+            locked.append(True)
+            yield
+
+        running.side_effect = lambda name: self.assertTrue(locked)
+        with mock.patch.object(vm.vdb, "data_migration_lock", fake_lock):
+            vm.vm_resize_data("vm1", "200GiB")
+        running.assert_called_once()
+        grow.assert_called_once()
 
 
 class ReconcileStopTests(unittest.TestCase):
@@ -1198,6 +1261,8 @@ class VMMemoryPreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'MemAvailable'):
                 vm._preflight_vm_memory('target', '32GiB', 'restart')
 
+    @mock.patch.object(vm.vdb, 'data_migration_lock',
+                       return_value=contextlib.nullcontext())
     @mock.patch.object(vm, '_instance_running', return_value=True)
     @mock.patch.object(vm, '_incus_stop')
     @mock.patch.object(vm, 'vm_get',
@@ -1210,7 +1275,7 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, '_warn_desired_conflict')
     def test_restart_preflight_uses_registered_memory(
             self, warn, event, incus, attach, share, preflight, vm_get,
-            stop, running):
+            stop, running, data_lock):
         vm.vm_restart('vm1')
         preflight.assert_called_once_with('vm1', '32GiB', 'restart')
         stop.assert_called_once_with('vm1')
@@ -1259,6 +1324,8 @@ class VMMemoryPreflightTests(unittest.TestCase):
         preflight.assert_not_called()
         create.assert_called_once()
 
+    @mock.patch.object(vm.vdb, 'data_migration_lock',
+                       return_value=contextlib.nullcontext())
     @mock.patch.object(vm, 'vm_get',
                        return_value={'gpus': 1, 'mem': '32GiB'})
     @mock.patch.object(vm, '_preflight_vm_memory')
@@ -1269,12 +1336,14 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, '_warn_desired_conflict')
     def test_start_preflight_uses_registered_memory(self, warn, event, incus,
                                                     attach, share, preflight,
-                                                    vm_get):
+                                                    vm_get, data_lock):
         vm.vm_start('vm1')
         preflight.assert_called_once_with('vm1', '32GiB', 'start')
         share.assert_called_once_with('vm1', migrate=False)
         incus.assert_called_once_with('start', 'vm1')
 
+    @mock.patch.object(vm.vdb, 'data_migration_lock',
+                       return_value=contextlib.nullcontext())
     @mock.patch.object(vm, 'vm_get',
                        return_value={'gpus': 1, 'mem': '24GB',
                                      'type': 'container'})
@@ -1286,11 +1355,13 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, '_warn_desired_conflict')
     def test_start_skips_container_preflight(self, warn, event, incus,
                                              attach, share, preflight,
-                                             vm_get):
+                                             vm_get, data_lock):
         vm.vm_start('ct1')
         preflight.assert_not_called()
         incus.assert_called_once_with('start', 'ct1')
 
+    @mock.patch.object(vm.vdb, 'data_migration_lock',
+                       return_value=contextlib.nullcontext())
     @mock.patch.object(vm, 'vm_get',
                        return_value={'mem': '32GiB', 'type': 'container'})
     @mock.patch.object(vm, '_preflight_vm_memory')
@@ -1302,7 +1373,7 @@ class VMMemoryPreflightTests(unittest.TestCase):
     @mock.patch.object(vm, '_warn_desired_conflict')
     def test_restart_skips_container_preflight(self, warn, event, incus,
                                                attach, running, share,
-                                               preflight, vm_get):
+                                               preflight, vm_get, data_lock):
         vm.vm_restart('ct1')
         preflight.assert_not_called()
         incus.assert_called_once_with('start', 'ct1')

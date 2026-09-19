@@ -69,30 +69,23 @@ def _altered_access(rec, add_users, remove_users):
 def _alter_vm_gpus(name, rec, cur_type, gpus):
     """Apply a GPU change; returns True when the registry value changes.
 
-    VMs require stop + start; containers use the launch-style 0/non-zero
-    toggle on the profile device.
+    Passthrough GPUs can only be detached while a VM is stopped, so this
+    never restarts a running VM. Containers use the launch-style
+    0/non-zero toggle on the profile device.
     """
     if gpus is None or gpus == (rec.get("gpus") or 0):
         return False
 
     if cur_type == "vm":
-        instance = vm._instance_info(name)
-        was_running = instance.get("status") == "Running"
-        if was_running:
-            print(f"Stopping '{name}' to change GPU count "
-                  f"({rec.get('gpus') or 0} -> {gpus})...")
-            vm._incus_stop(name)
+        if vm._instance_info(name).get("status") == "Running":
+            raise ValueError(
+                f"'{name}' is running; stop it before changing GPUs. "
+                "Start it again after the alter to apply the new count.")
         vm.release_gpus(name)                 # detach current physical GPUs
         rec["gpus"] = gpus
         vm._put_json(vm.VMS_PREFIX + name, rec)
         if gpus:
             vm._ensure_gpus_attached(name)    # attach new count from pool
-        if was_running:
-            vm._ensure_nas_share(name)
-            vm._incus("start", name)
-            vm._wait_agent(name, vm.GPU_VM_AGENT_TIMEOUT if gpus else 180)
-            if gpus:
-                vm._verify_guest_gpus(name, gpus)
     else:
         # Container: gpu-ct profile bakes in a shared gpu0 device;
         # --gpus 0 strips it, any positive value keeps/adds it.
@@ -149,11 +142,11 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
     Live-applies: cpu, mem (mem visible to the guest on next reboot —
     Incus sets the qemu limit immediately but the in-guest kernel keeps
     its view until restart), owner and additional users (registry +
-    bastion + key resync). Requires stop + start for VMs: gpus (detach
-    the current physical GPUs, attach the new count from the host pool;
-    the VM is restarted in-place if it was running, otherwise left
-    stopped). For containers --gpus is the same 0/non-zero toggle as
-    launch (profile device add/remove); only the registry is updated.
+    bastion + key resync). For VMs, --gpus requires the VM to be stopped:
+    it detaches the current physical GPUs and attaches the new count from
+    the host pool, but never restarts a running VM. For containers --gpus
+    is the same 0/non-zero toggle as launch (profile device add/remove);
+    only the registry is updated.
     Not supported on an existing VM (would require destroy + relaunch):
     image, type.
 

@@ -47,9 +47,10 @@ def register_vm_commands(subparsers):
                          '(repeatable). Re-syncs bastion + injected SSH keys.')
     ap.add_argument('--gpus', type=int, default=None,
                     help='New GPU count. Live-applies for containers '
-                         '(profile device add/remove); for VMs the VM '
-                         'is stopped, GPUs detached, new count attached '
-                         'from the pool, then the VM is started.')
+                         '(profile device add/remove); for VMs, the VM '
+                         'must be stopped, then GPUs are detached and the '
+                         'new count is attached from the pool. Never '
+                         'restarts a running VM.')
     ap.add_argument('--cpu', type=int, default=None,
                     help='New vCPU count (live-applies).')
     ap.add_argument('--mem', default=None,
@@ -119,7 +120,7 @@ def register_vm_commands(subparsers):
 
     rdp = sub.add_parser('resize-data',
                          help="Grow a VM's NAS data image and its ext4 "
-                              "filesystem")
+                              "filesystem (VM must be stopped)")
     rdp.add_argument('name')
     rdp.add_argument('size', help='New data-disk size, e.g. 200GiB')
     rdp.set_defaults(func=lambda a: vm.vm_resize_data(a.name, a.size))

@@ -262,9 +262,9 @@ VM), but the owner remains the billing/accounting identity.
 
 ### Disk resize
 
-`ycluster vm resize` overrides the profile root-disk size, then restarts
-the VM (Incus only applies a new size on start). cloud-init grows the
-partition and filesystem on boot. Grow-only — Incus cannot shrink.
+`ycluster vm resize` overrides the profile root-disk size. The VM is not
+restarted automatically; the new size and filesystem growth take effect on
+the next boot (cloud-init growpart). Grow-only — Incus cannot shrink.
 
 ## Images
 
