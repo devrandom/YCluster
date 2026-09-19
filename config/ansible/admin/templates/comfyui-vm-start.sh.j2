@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# (Re)build + start the ComfyUI container inside the {{ comfyui_vm_name }} VM.
+# Run as the dev user on the VM host:
+#
+#   ~/bin/comfyui-vm-start.sh
+#
+# Pushes the pinned Containerfile and the inner build/run script into the VM
+# via incus file push, then incus exec's the inner script as root. Idempotent:
+# the inner script skips the image build when the tag already exists and
+# replaces any existing comfyui container.
+set -euo pipefail
+
+VM="{{ comfyui_vm_name }}"
+STAGE="/home/dev/.comfyui-vm"
+INNER="${STAGE}/comfyui-vm-inner.sh"
+CONTAINERFILE="${STAGE}/Containerfile"
+
+command -v incus >/dev/null \
+  || { echo "incus missing - an operator must run admin/install-incus.yml" >&2; exit 1; }
+
+incus info "$VM" | grep -q "^Status: RUNNING$" \
+  || { echo "VM '$VM' is not running. Start it: incus start $VM" >&2; exit 1; }
+
+# incus exec must be available (9p/lima agent up) before file push.
+for i in $(seq 1 30); do
+  incus exec "$VM" -- true 2>/dev/null && break
+  [ "$i" = 30 ] && { echo "VM agent not reachable" >&2; exit 1; }
+  sleep 2
+done
+
+# incus file push target syntax is instance/path (slash, no colon) — a colon
+# would be parsed as a remote name. NOTE: this VM image's agent refuses file
+# pushes into /tmp (permission denied), so stage under /root/comfyui-build.
+incus exec "$VM" -- mkdir -p /root/comfyui-build
+incus file push "$CONTAINERFILE" "$VM/root/comfyui-build/Containerfile" --quiet
+incus file push "$INNER" "$VM/root/comfyui-build/inner.sh" --quiet
+incus exec "$VM" -- chmod +x /root/comfyui-build/inner.sh
+incus exec "$VM" -- /root/comfyui-build/inner.sh

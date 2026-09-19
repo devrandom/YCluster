@@ -64,10 +64,14 @@ Environment="NVIDIA_VISIBLE_DEVICES={{ comfyui_gpu }}"
 # unit with full caps; the wrapper process exits, leaving the inner podman to
 # run normally (same pattern as mineru-podman.service).
 #
-# ExecStartPre pulls the image into root's podman storage. The pull is a no-op
-# when the image is already present at the right digest; we always do it so a
-# fresh host converges even if it never built/pushed the image.
-ExecStartPre=/usr/bin/systemd-run --scope --unit=comfyui-pull /usr/bin/podman pull registry.xc:5000/comfyui:{{ comfyui_image_tag }}
+# ExecStartPre pulls the image into root's podman storage for hosts that run
+# from the cluster registry (a host that never built it locally). It's a no-op
+# when the image is already present at the right digest. The host that built
+# the image runs it directly (comfyui_image_run is the localhost ref), so it
+# does NOT pull a multi-GB image back over a slow link.
+{% if not comfyui_image_run.startswith('localhost/comfyui:') %}
+ExecStartPre=/usr/bin/systemd-run --scope --unit=comfyui-pull /usr/bin/podman pull {{ comfyui_image_run }}
+{% endif %}
 ExecStart=/usr/bin/systemd-run --scope --unit=comfyui-run /usr/bin/podman run --rm --name comfyui \
     --userns=keep-id \
     --group-add 1000 \
@@ -79,7 +83,7 @@ ExecStart=/usr/bin/systemd-run --scope --unit=comfyui-run /usr/bin/podman run --
     -v /home/dev/comfyui/user:/opt/comfyui/user \
     -v /home/dev/.cache/huggingface:/home/dev/.cache/huggingface \
     -p {{ comfyui_port }}:8188 \
-    registry.xc:5000/comfyui:{{ comfyui_image_tag }}
+    {{ comfyui_image_run }}
 # systemd-run --scope detaches the podman run into a transient comfyui-run.scope
 # that is NOT a child of this unit. A `systemctl restart comfyui` (or the
 # install playbook's restart handler) would then try to start a NEW

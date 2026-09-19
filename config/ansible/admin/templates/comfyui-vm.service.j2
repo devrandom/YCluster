@@ -1,0 +1,17 @@
+[Unit]
+Description=ComfyUI container autostart (runs the managed inner script)
+# The inner script is the single source of truth: it mounts the models disk,
+# recreates the container from the pinned image with the managed flags, and
+# health-checks it. This unit only makes that happen at VM boot.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/root/comfyui-build/inner.sh
+# Recreating the container + cold start takes a couple of minutes; a full
+# image build (only if the image is missing) can take much longer.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

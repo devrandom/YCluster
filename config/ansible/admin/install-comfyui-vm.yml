@@ -1,0 +1,226 @@
+---
+# Deploy ComfyUI inside a dedicated GPU-passthrough VM on an Incus VM host.
+# Companion to app/install-comfyui.yml (bare-metal podman path) — use this
+# playbook instead when the host's GPUs are (or should stay) in the vfio-pci
+# passthrough pool, or when workflow/node code needs stronger containment than
+# a root-owned podman container on the host.
+#
+# Architecture (mirrors admin/install-glm52-exl3-tr3.yml):
+#   - `ycluster vm launch` creates the VM with 1 passthrough GPU from the
+#     host's vfio pool (set incus_passthrough_gpu_pci in host_vars first and
+#     reboot if the card was recently released/bound).
+#   - The ComfyUI image is BUILT INSIDE THE VM from the pinned Containerfile
+#     (app/files/comfyui/Containerfile). Build steps execute third-party code
+#     (git clone, pip installs); building in the VM keeps that off the host.
+#   - Model weights NFS-mounted read-only from the host's
+#     /home/dev/comfyui/models (staged by the seed script, ~130 GB, operator
+#     one-time).
+#   - Outputs land on the VM's persistent /data disk (NAS-backed vmdata
+#     image), not the shared /near1/comfyui tree.
+#   - The container uses --network=host inside the VM; an incus proxy device
+#     forwards the host's cluster-LAN :8188 to the VM, which is what
+#     comfyui_backend_url points the public vhost at.
+#
+# The storage/nginx vhost is NOT managed here — run
+# `app/install-comfyui.yml --limit storage` after this playbook; it resolves
+# comfyui_backend_url from host_vars.
+#
+# Idempotency: VM launch/compare is gated, the proxy-device add is gated, and
+# the inner script skips the image build when the tag exists. Re-runs just
+# replace the container.
+
+- name: Install ComfyUI VM scripts and launch the VM
+  hosts: nvidia
+  become: yes
+  vars:
+    comfyui_port: 8188
+    comfyui_image_tag: "0.36.0"
+    # Incus bridge gateway (the VM host) as seen from inside the VM — NFS
+    # server address for the read-only model export.
+    comfyui_nfs_gw: "10.100.0.1"
+    comfyui_nfs_subnet: "10.100.0.0/24"
+    # Per-host values (comfyui_vm_name/owner/gpus/mem/cpu) come from
+    # host_vars/<node>.yml, same convention as install-glm52-exl3-tr3.yml.
+
+  tasks:
+    - name: End play for nodes that have not opted into the ComfyUI VM
+      meta: end_host
+      when: not (comfyui_vm_enabled | default(false))
+
+    - name: Ensure ~dev/bin and staging dir exist
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '{{ item.mode }}'
+      loop:
+        - { path: /home/dev/bin, mode: '0755' }
+        - { path: /home/dev/.comfyui-vm, mode: '0755' }
+
+    - name: Stage Containerfile for the VM
+      copy:
+        src: ../app/files/comfyui/Containerfile
+        dest: /home/dev/.comfyui-vm/Containerfile
+        owner: dev
+        group: dev
+        mode: '0644'
+
+    - name: Stage VM scripts
+      template:
+        src: "{{ item.src }}.j2"
+        dest: "{{ item.dest }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - src: templates/comfyui-vm-inner.sh
+          dest: /home/dev/.comfyui-vm/comfyui-vm-inner.sh
+        - src: templates/comfyui-vm-start.sh
+          dest: /home/dev/bin/comfyui-vm-start.sh
+        - src: templates/comfyui-vm.service
+          dest: /home/dev/.comfyui-vm/comfyui-vm.service
+
+    # Models live on a dedicated local-NVMe raw image attached to the VM as a
+    # block device (LABEL=comfymodels). NOT NFS: model loading + the 0.36
+    # asset scanner over NFS caused lockups, and local NVMe is faster. Seeding
+    # happens INSIDE the VM (uv + hf download), so no host export is needed.
+    - name: Ensure models image directory exists
+      file:
+        path: /var/lib/comfy-vm
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create models disk image if missing
+      command:
+        cmd: truncate -s 200G /var/lib/comfy-vm/models.img
+        creates: /var/lib/comfy-vm/models.img
+
+    - name: Check whether the models disk is already attached
+      command: incus config device get {{ comfyui_vm_name }} models type
+      register: comfyui_models_disk_check
+      changed_when: false
+      failed_when: false
+
+    - name: Attach the models disk (local NVMe image)
+      command: incus config device add {{ comfyui_vm_name }} models disk source=/var/lib/comfy-vm/models.img
+      when: comfyui_models_disk_check.rc != 0
+
+    # ---- NFS cleanup (models moved to the VM's local disk) ----------------
+    - name: Remove obsolete model-tree NFS export
+      blockinfile:
+        path: /etc/exports
+        marker: "# {mark} ANSIBLE MANAGED - comfyui-vm model share"
+        state: absent
+      register: comfyui_exports
+      changed_when: comfyui_exports is changed
+
+    # Outputs land on the VM's persistent /data block device (NAS-backed
+    # vmdata image, ext4 — no CIFS/NFS-in-guest deadlock risk). The legacy
+    # /near1/comfyui tree is kept renamed as a backup.
+    - name: Remove obsolete output/input NFS exports
+      blockinfile:
+        path: /etc/exports
+        marker: "# {mark} ANSIBLE MANAGED - comfyui-vm data share"
+        state: absent
+      register: comfyui_exports_data
+      changed_when: comfyui_exports_data is changed
+
+    - name: Re-export NFS (immediate)
+      command: exportfs -ra
+      when: comfyui_exports is changed or comfyui_exports_data is changed
+
+    - name: Ensure nfs-kernel-server is installed
+      apt:
+        name: nfs-kernel-server
+        state: present
+
+    - name: Enable and start nfs-kernel-server
+      systemd:
+        name: nfs-kernel-server
+        enabled: yes
+        state: started
+
+    # ---- VM lifecycle ----------------------------------------------------
+    - name: Check if the ComfyUI VM exists
+      command: incus list --format csv {{ comfyui_vm_name }}
+      register: comfyui_vm_check
+      changed_when: false
+
+    - name: Launch the ComfyUI VM if missing
+      command: >-
+        ycluster vm launch {{ comfyui_vm_name }}
+        --owner {{ comfyui_vm_owner }}
+        --gpus {{ comfyui_vm_gpus }}
+        --mem {{ comfyui_vm_mem }}
+        --cpu {{ comfyui_vm_cpu }}
+      when: comfyui_vm_check.stdout == ""
+
+    - name: Start the ComfyUI VM if stopped
+      command: incus start {{ comfyui_vm_name }}
+      register: comfyui_vm_start
+      changed_when: comfyui_vm_start.rc == 0
+      failed_when: false
+
+    - name: Resolve the ComfyUI VM bridge IP
+      command: incus config device get {{ comfyui_vm_name }} eth0 ipv4.address
+      register: comfyui_vm_ip_raw
+      changed_when: false
+
+    - name: Set ComfyUI VM IP fact
+      set_fact:
+        comfyui_vm_ip: "{{ comfyui_vm_ip_raw.stdout | trim }}"
+
+    - name: Assert the VM has an address
+      assert:
+        that: comfyui_vm_ip | length > 0
+        fail_msg: "Could not resolve an incusbr0 IP for VM {{ comfyui_vm_name }}"
+
+    # ---- Network exposure (host :8188 → VM :8188) ------------------------
+    - name: Check whether the ComfyUI proxy device is already attached
+      command: incus config device get {{ comfyui_vm_name }} comfyui-proxy type
+      register: comfyui_proxy_check
+      changed_when: false
+      failed_when: false
+
+    - name: Attach the ComfyUI proxy device (host port → VM port)
+      command: >-
+        incus config device add {{ comfyui_vm_name }} comfyui-proxy proxy
+        listen=tcp:{{ ansible_host }}:{{ comfyui_port }}
+        connect=tcp:{{ comfyui_vm_ip }}:{{ comfyui_port }}
+        nat=true
+      when: comfyui_proxy_check.rc != 0
+
+    # ---- Build + run inside the VM ---------------------------------------
+    # Cold image build is ~10-20 min inside the VM; no remote registry
+    # round-trip is involved.
+    - name: Build and start ComfyUI inside the VM
+      become: yes
+      command: /home/dev/bin/comfyui-vm-start.sh
+      register: comfyui_vm_build
+      changed_when: "'already present, skipping build' not in comfyui_vm_build.stdout"
+
+    # Autostart: a unit inside the VM re-runs the inner script at boot (the
+    # script is the single source of truth — it recreates the container with
+    # the managed flags and health-checks it). Static unit: the inner script
+    # lives at a fixed path, and nothing inside it is templated here.
+    - name: Install autostart unit inside the VM
+      command: >-
+        incus file push /home/dev/.comfyui-vm/comfyui-vm.service
+        {{ comfyui_vm_name }}/etc/systemd/system/comfyui-vm.service --quiet
+
+    - name: Enable the autostart unit
+      command: incus exec {{ comfyui_vm_name }} -- systemctl enable comfyui-vm.service
+      changed_when: true
+
+    - name: Wait for ComfyUI /system_stats on the host-forwarded port
+      uri:
+        url: "http://{{ ansible_host }}:{{ comfyui_port }}/system_stats"
+        status_code: 200
+        timeout: 10
+      register: comfyui_stats
+      until: comfyui_stats.status == 200
+      retries: 30
+      delay: 10

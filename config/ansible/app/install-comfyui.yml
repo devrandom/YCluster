@@ -274,9 +274,23 @@
       # so a tweak higher up the file (e.g. the entrypoint) pushes just that
       # layer + a new manifest instead of re-uploading the whole multi-GB image.
 
+    # Push to the cluster registry once so fresh hosts can pull instead of
+    # rebuilding. Skippable per-host with `comfyui_skip_image_push: true`
+    # (e.g. a single remote host deploy where a 10+ GB push over a slow
+    # WireGuard link isn't worth it); the built image is still used locally.
     - name: Push comfyui image to cluster registry (root)
       command: buildah push {{ comfyui_image_local }} {{ comfyui_image_registry }}
-      when: comfyui_registry_exists.status != 200
+      when: comfyui_registry_exists.status != 200 and not (comfyui_skip_image_push | default(false))
+
+    # Which image the host actually runs and smoke-tests. Prefer the
+    # locally-built image on the host that built it — avoids a push then
+    # pull-back of a multi-GB image over a slow link. Fresh hosts that never
+    # built it use the registry ref so they converge via the ExecStartPre pull.
+    # `comfyui_skip_image_push` also forces local usage (it implies this host
+    # performed the build).
+    - name: Resolve ComfyUI image reference (local build vs registry)
+      set_fact:
+        comfyui_image_run: "{{ 'localhost/comfyui:' ~ comfyui_image_tag if (comfyui_registry_exists.status != 200 or comfyui_skip_image_push | default(false)) else comfyui_image_registry }}"
 
     # Seed script for the model weights. This is a one-time, operator-run,
     # pinned asset-staging step (~130 GB of additional assets) — deliberately
@@ -323,15 +337,19 @@
     #
     # Pull first (idempotent) so the run below resolves locally and doesn't
     # race the build/push task running concurrently on the first Nvidia host.
-    - name: Pull comfyui image for NAS write smoke test
-      command: podman pull {{ comfyui_image_registry }}
+    # Skipped on the host that built the image locally (comfyui_image_run is
+    # the localhost ref there), so we don't round-trip the image via the
+    # registry over a slow link.
+    - name: Pull comfyui image for NAS write smoke test (registry hosts)
+      command: podman pull {{ comfyui_image_run }}
+      when: not comfyui_image_run.startswith('localhost/comfyui:')
 
     - name: Smoke test NAS group-write via container (--group-add 1000)
       command: >-
         podman run --rm --userns=keep-id --group-add 1000
         --entrypoint /bin/bash
         -v {{ comfyui_nas_root }}/output:/opt/comfyui/output
-        {{ comfyui_image_registry }}
+        {{ comfyui_image_run }}
         -c 'f=/opt/comfyui/output/.comfyui-nas-write-check; touch "$f" && rm -f "$f"'
       # Failed_when is not set: a nonzero exit (EACCES on touch) surfaces as a
       # task failure with podman's stderr, which is exactly what we want —

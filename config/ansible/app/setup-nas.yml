@@ -182,7 +182,9 @@
         content: |
           # VM passthrough data subtree — exported unconditionally for the
           # Incus VM hosts. Single-UID squash mirrors the CIFS uid/gid=1000.
-          {{ vm_data_nfs_export }} {{ vm_data_nfs_export_net }}(rw,sync,no_subtree_check,all_squash,anonuid={{ vm_data_nfs_anon_uid }},anongid={{ vm_data_nfs_anon_gid }})
+          {% for net in vm_data_nfs_export_net %}
+          {{ vm_data_nfs_export }} {{ net }}(rw,sync,no_subtree_check,all_squash,anonuid={{ vm_data_nfs_anon_uid }},anongid={{ vm_data_nfs_anon_gid }})
+          {% endfor %}
         mode: '0644'
       register: nfs_exports
       notify: re-export nfs

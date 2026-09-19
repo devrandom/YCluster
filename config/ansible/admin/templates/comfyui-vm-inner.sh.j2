@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Build (if needed) and start the ComfyUI container inside {{ comfyui_vm_name }}.
+# Pushed into the VM and run as root by comfyui-vm-start.sh via incus exec.
+#
+# The image is built INSIDE the VM from the pinned Containerfile — buildah
+# executes untrusted-ish build steps (git clone + pip install of ComfyUI
+# code), so it stays inside the VM boundary rather than running on the host.
+# The image is local to the VM (localhost/comfyui:{{ comfyui_image_tag }}); it
+# is intentionally NOT pushed to the cluster registry from remote VM hosts
+# (slow uplink). Other hosts that want it should build their own or pull
+# from a LAN-side push.
+#
+# Storage layout inside the VM:
+#   /mnt/models         NFS read-only mount of host /home/dev/comfyui/models
+#   /data/comfyui/{output,input,user}
+#                       persistent VM data disk (NAS-backed vmdata image);
+#                       user holds the SQLite DB (ext4, locks fine).
+set -euo pipefail
+
+IMAGE="localhost/comfyui:{{ comfyui_image_tag }}"
+CONTAINER="comfyui"
+PORT="{{ comfyui_port }}"
+MODEL_DIR="/mnt/models"
+
+echo "== packages =="
+if ! dpkg -s nfs-common >/dev/null 2>&1 || ! dpkg -s podman >/dev/null 2>&1; then
+  apt-get update
+  dpkg -s nfs-common >/dev/null 2>&1 || apt-get install -y nfs-common
+  dpkg -s podman >/dev/null 2>&1 || apt-get install -y podman
+fi
+
+echo "== model mount (local NVMe block device) =="
+# Models live on the VM's dedicated models disk (LABEL=comfymodels, a raw
+# image on the host's local storage). NOT NFS: the asset scanner + model
+# loading over NFS caused lockups, and local NVMe is faster.
+mkdir -p /mnt/models
+if ! mountpoint -q "$MODEL_DIR"; then
+  mount LABEL=comfymodels "$MODEL_DIR" \
+    || { echo "models disk mount failed — is the models.img device attached?" >&2; exit 1; }
+  grep -q "^LABEL=comfymodels" /etc/fstab || \
+    printf 'LABEL=comfymodels\t/mnt/models\text4\tdefaults,nofail\t0\t2\n' >> /etc/fstab
+fi
+# Clean up any stale NFS fstab entry from the pre-block-device setup.
+sed -i '/comfyui\/models/d' /etc/fstab
+
+echo "== data dirs (persistent /data block device) =="
+# /data is the NAS-backed vmdata block image (ext4), attached by the
+# gpu-vm profile migration path. SQLite user dir lives here too — ext4
+# locking is fine, unlike NFS/CIFS.
+mkdir -p /data/comfyui/output /data/comfyui/input /data/comfyui/user
+
+echo "== image build =="
+if podman image exists "$IMAGE"; then
+  echo "  $IMAGE already present, skipping build"
+else
+  # Containerfile is staged at /root/comfyui-build by the outer script; that
+  # directory is the build context.
+  podman build --layers \
+    --build-arg DEV_UID=1000 \
+    -f /root/comfyui-build/Containerfile \
+    -t "$IMAGE" /root/comfyui-build
+fi
+
+echo "== GPU passthrough pre-flight =="
+for d in /dev/nvidia0 /dev/nvidia-uvm /dev/nvidiactl; do
+  [ -e "$d" ] || { echo "missing $d — is vfio-pci passthrough working?" >&2; exit 1; }
+done
+
+# The container needs the VM's (host module's) libcuda. Detect the installed
+# version and bind-mount it plus its usual symlink names.
+LIBCUDA="$(find /usr/lib/x86_64-linux-gnu -maxdepth 1 -name 'libcuda.so.*.*.*' | sort -V | tail -1)"
+LIBCUDA_VER="$(basename "$LIBCUDA" | sed 's/libcuda.so.//')"
+[ -n "$LIBCUDA" ] || { echo "libcuda not found in VM" >&2; exit 1; }
+
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+echo "== start container =="
+podman run -d --name "$CONTAINER" \
+  --network=host \
+  --security-opt seccomp=unconfined \
+  --shm-size=8g \
+  --device /dev/nvidia0:/dev/nvidia0:rwm \
+  --device /dev/nvidia-uvm:/dev/nvidia-uvm:rwm \
+  --device /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools:rwm \
+  --device /dev/nvidiactl:/dev/nvidiactl:rwm \
+  -v "$LIBCUDA":/usr/lib/x86_64-linux-gnu/libcuda.so."$LIBCUDA_VER":ro \
+  -v "$LIBCUDA":/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-ml.so."$LIBCUDA_VER":/usr/lib/x86_64-linux-gnu/libnvidia-ml.so."$LIBCUDA_VER":ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro \
+  -e LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu \
+  -e NVIDIA_VISIBLE_DEVICES=0 \
+  -e HF_HUB_DISABLE_XET=1 \
+  -v "$MODEL_DIR":/opt/comfyui/models:ro \
+  -v /data/comfyui/output:/opt/comfyui/output \
+  -v /data/comfyui/input:/opt/comfyui/input \
+  -v /data/comfyui/user:/opt/comfyui/user \
+  "$IMAGE" \
+  --listen 0.0.0.0 --port "$PORT"
+# NOTE: upstream's 0.36 assets system (--enable-assets) is opt-in and gated to
+# Comfy Cloud in the shipped frontend; we deploy vanilla. Old outputs are
+# copied under input/legacy-outputs/ on the /data disk for manual access.
+
+echo "== health wait =="
+for i in $(seq 1 60); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:${PORT}/system_stats"; then
+    echo "ComfyUI is up on :${PORT}"
+    exit 0
+  fi
+  sleep 5
+done
+echo "ComfyUI did not become healthy within 300s" >&2
+podman logs --tail 50 "$CONTAINER" >&2 || true
+exit 1
