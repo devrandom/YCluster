@@ -80,6 +80,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [Move NTFY_TOPIC out of repo](monitoring/ntfy-topic-out-of-repo.md) — production UUID hardcoded in ntfy-webhook.py; read from env/vault instead.
 
 ## Operations
+- **[HIGH]** [Storage-leader election: renew lease during startup](operations/storage-leader-rbd-renewal.md) — startup blocks on `user-rbd` while holding leadership without renewing the 30s etcd lease; a slow RBD acquire produced two simultaneous leaders and teardown churn. Renew concurrently and re-check leadership before `rbd map --exclusive`.
 - **[HIGH]** [Storage-leader election: graceful teardown](operations/storage-leader-graceful-teardown.md) — every routine failover today takes the aggressive path; postgres crash-stops on every drain.
 - **[HIGH]** [admin-api etcd client failover](operations/admin-api-etcd-failover.md) — cached client pinned to first reachable host; on drain the health surface goes blank with a fresh timestamp, looking like a stuck failover.
 - [Clean up searxng-docker stack](operations/searxng-cleanup.md) — stack removed 2026-08-01; remaining sub-items are certbot warts + container-state alerting.
