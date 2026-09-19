@@ -9,6 +9,10 @@ auth.token = "{{ token }}"
 
 transport.heartbeatInterval = 40
 transport.heartbeatTimeout = 40
+# Pre-establish work connections so each new request does not negotiate
+# over the single muxed control stream. Without a pool, transient loss on
+# that stream can head-of-line block new HTTPS requests for seconds.
+transport.poolCount = 16
 
 # Forward to 127.0.0.2 so the alt nginx vhost (admin-api-alt.conf.j2)
 # can serve the frp tunnel with PROXY-protocol-real client IPs. 127.0.0.1
