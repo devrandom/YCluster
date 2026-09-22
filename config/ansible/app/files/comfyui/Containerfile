@@ -8,7 +8,7 @@
 # and errors if a file is absent. We bind-mount the seeded host model tree
 # read-only at /opt/comfyui/models (see install-comfyui.yml + comfyui.service),
 # so the image stays small (~12 GB), stays egress-free in steady state, and
-# survives `podman rm` / rebuilds without re-staging ~59 GB of models.
+# survives `podman rm` / rebuilds without re-staging ~180 GB of models.
 #
 # Model assets (one-time, pinned, from Comfy-Org/MiniMax-H3) live on the host
 # at /home/dev/comfyui/models and are staged by ~/bin/seed-comfyui-h3.sh, never
@@ -96,6 +96,21 @@ RUN uv pip install --python /opt/comfyui/.venv/bin/python \
 # ComfyUI's own requirements (the app code).
 RUN uv pip install --python /opt/comfyui/.venv/bin/python \
         -r /opt/comfyui/requirements.txt
+
+# HunyuanImage 3.0 is not supported by core ComfyUI nodes. Pin the custom node
+# release and its quantization dependencies; the model weights stay on the host
+# and are staged by seed-comfyui-models.sh into models/hunyuan.
+ARG HUNYUAN_NODE_REVISION=ea06cf91577cfaf6adf04091cf8b0531985bae84
+ARG HUNYUAN_NODE_REF=v1.3.0
+RUN git clone --depth 1 https://github.com/EricRollei/Comfy_HunyuanImage3 \
+        /opt/comfyui/custom_nodes/Comfy_HunyuanImage3 \
+    && git -C /opt/comfyui/custom_nodes/Comfy_HunyuanImage3 fetch --depth 1 origin "$HUNYUAN_NODE_REF" \
+    && git -C /opt/comfyui/custom_nodes/Comfy_HunyuanImage3 checkout --detach "$HUNYUAN_NODE_REVISION"
+
+RUN uv pip install --python /opt/comfyui/.venv/bin/python \
+        "transformers==5.17.0" \
+        "accelerate==1.15.0" \
+        "bitsandbytes==0.50.2"
 
 # Sanity check — fails the build if the ComfyUI package is missing. Run from
 # /opt/comfyui so the source tree's `comfy/` package is on sys.path (python -c

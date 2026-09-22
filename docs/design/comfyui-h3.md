@@ -201,11 +201,12 @@ unchanged.
 | `vae/minimax_h3_audio_vae_fp32.safetensors` | 0.6 GB | audio decode |
 
 Baseline (FL2VA) ≈ **40 GB**; adding Ref2VA ≈ **59 GB** of model files, plus
-the ~12 GB image. These are static and sit on local NVMe — user data no longer
-counts against this. Size the host home volume with headroom (≥100 GB) for a
-future bf16 fallback. A NAS-hosted model tree for multi-host dedup is a later
-optimization, not the default (per-host duplication is acceptable with one
-Nvidia host today).
+the ~12 GB image. The current full seeder manifest adds Wan 2.2, LTX 2.3,
+HunyuanVideo 1.5, HunyuanImage 3.0 NF4-v2 (45 GB), and Z-Image Turbo, so size
+the staging volume for roughly **180 GB**. These are static and sit on local
+NVMe — user data no longer counts against this. A NAS-hosted model tree for
+multi-host dedup is a later optimization, not the default (per-host
+duplication is acceptable with one Nvidia host today).
 
 ## Architecture
 

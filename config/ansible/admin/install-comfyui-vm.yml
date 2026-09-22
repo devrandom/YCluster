@@ -12,9 +12,8 @@
 #   - The ComfyUI image is BUILT INSIDE THE VM from the pinned Containerfile
 #     (app/files/comfyui/Containerfile). Build steps execute third-party code
 #     (git clone, pip installs); building in the VM keeps that off the host.
-#   - Model weights NFS-mounted read-only from the host's
-#     /home/dev/comfyui/models (staged by the seed script, ~130 GB, operator
-#     one-time).
+#   - Model weights on a dedicated local-NVMe image (staged by the seed script,
+#     ~180 GB with the current families, operator one-time).
 #   - Outputs land on the VM's persistent /data disk (NAS-backed vmdata
 #     image), not the shared /near1/comfyui tree.
 #   - The container uses --network=host inside the VM; an incus proxy device
@@ -32,9 +31,15 @@
 - name: Install ComfyUI VM scripts and launch the VM
   hosts: nvidia
   become: yes
+  # Deployment-specific credential (gitignored private-repo file).
+  vars_files:
+    - ../../../ycluster-private/vars/comfyui-hf-token.yml
   vars:
     comfyui_port: 8188
-    comfyui_image_tag: "0.36.0"
+    comfyui_image_tag: "0.36.0-yc1"
+    # Seed script's default MODEL_HOST inside the VM (the dedicated models
+    # block device mounted by the inner script).
+    comfyui_model_root: /mnt/models
     # Incus bridge gateway (the VM host) as seen from inside the VM — NFS
     # server address for the read-only model export.
     comfyui_nfs_gw: "10.100.0.1"
@@ -95,7 +100,7 @@
 
     - name: Create models disk image if missing
       command:
-        cmd: truncate -s 200G /var/lib/comfy-vm/models.img
+        cmd: truncate -s 300G /var/lib/comfy-vm/models.img
         creates: /var/lib/comfy-vm/models.img
 
     - name: Check whether the models disk is already attached
@@ -192,6 +197,57 @@
         connect=tcp:{{ comfyui_vm_ip }}:{{ comfyui_port }}
         nat=true
       when: comfyui_proxy_check.rc != 0
+
+    # ---- Model seeding ---------------------------------------------------
+    # The seeder runs natively in the VM (it needs uv + network access) while
+    # the image build proceeds below. It is pinned, operator-initiated asset
+    # staging — the container itself never downloads models at runtime.
+    - name: Stage ComfyUI model seed script
+      template:
+        src: ../app/files/comfyui/seed-comfyui-models.sh.j2
+        dest: /home/dev/.comfyui-vm/seed-comfyui-models.sh
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Push seed script into the VM
+      command: incus file push /home/dev/.comfyui-vm/seed-comfyui-models.sh {{ comfyui_vm_name }}/root/seed-comfyui-models.sh --quiet
+      changed_when: true
+
+    - name: Check whether uv is available in the VM
+      command: incus exec {{ comfyui_vm_name }} -- test -x /usr/local/bin/uv
+      register: comfyui_vm_uv
+      changed_when: false
+      failed_when: false
+
+    # Same pinned, checksummed artifact as the ComfyUI Containerfile. Needed
+    # only on fresh VMs; existing seeded VMs already carry uv.
+    - name: Install pinned uv in the VM when missing
+      command: >-
+        incus exec {{ comfyui_vm_name }} -- bash -c
+        'set -eu; curl -fsSL -o /tmp/uv.tar.gz
+        https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz;
+        echo "90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb  /tmp/uv.tar.gz" | sha256sum -c -;
+        tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1;
+        rm -f /tmp/uv.tar.gz'
+      when: comfyui_vm_uv.rc != 0
+      changed_when: true
+
+    - name: Check whether model seeding is already running
+      command: incus exec {{ comfyui_vm_name }} -- pgrep -f '[s]eed-comfyui-models.sh --download'
+      register: comfyui_seed_running
+      changed_when: false
+      failed_when: false
+
+    - name: Start model seeding in the background
+      command: >-
+        incus exec {{ comfyui_vm_name }}
+        --env HF_TOKEN={{ comfyui_hf_token | default('') }} --
+        bash -c 'nohup /root/seed-comfyui-models.sh --download
+        >/root/seed-comfyui-models.log 2>&1 & echo started=$!'
+      when: comfyui_seed_running.rc != 0
+      changed_when: true
+      no_log: true
 
     # ---- Build + run inside the VM ---------------------------------------
     # Cold image build is ~10-20 min inside the VM; no remote registry

@@ -83,12 +83,20 @@ If the `Load CLIP` / `Load VAE` dropdowns are empty, seeding isn't done yet.
 
 ## Additional model families
 
-The same seeder also stages these video-model families. Use the official
+The same seeder also stages these image/video-model families. Use the official
 Template Library entries for each model:
 
 - **Wan 2.2 5B TI2V** and **Wan 2.2 14B** T2V/I2V.
 - **LTX 2.3** T2V/I2V plus **ID-LoRA** (TalkVid).
 - **HunyuanVideo 1.5** 720p T2V/I2V.
+- **HunyuanImage 3.0** NF4-v2 T2I via the pinned `Comfy_HunyuanImage3` custom
+  node (about 45 GB on disk; see the license note below).
+- **Z-Image Turbo** BF16 T2I via the native ComfyUI template.
+
+The HunyuanImage node is CC BY-NC 4.0 and the model carries Tencent's
+Hunyuan community license; review both licenses before use. Use the `hunyuan`
+loader and generator nodes with `models/hunyuan/HunyuanImage-3-NF4-v2`. Use
+the official `image_z_image_turbo` template for Z-Image Turbo.
 
 Files are pinned in the seed script's manifest, downloaded only during the
 operator staging step, and verified against SHA-256. LTX checkpoint files are

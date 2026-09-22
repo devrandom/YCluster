@@ -46,12 +46,10 @@
   hosts: nvidia
   become: yes
   vars:
-    # Bump VERSION to ship a release. The image tag matches the ComfyUI
-    # release used by the official FastH3 templates; the Containerfile pins
-    # the git SHA behind this tag via COMFYUI_REVISION. The build step is
-    # keyed on this tag — changing VERSION forces a rebuild + push even if the
-    # Containerfile hasn't changed.
-    comfyui_image_tag: "0.36.0"
+    # Bump VERSION to ship a release. The -yc suffix denotes app-image changes
+    # (currently the pinned HunyuanImage 3.0 custom node) on top of ComfyUI
+    # v0.36.0; the Containerfile still pins the core git SHA.
+    comfyui_image_tag: "0.36.0-yc1"
     comfyui_image_local: "comfyui:{{ comfyui_image_tag }}"
     comfyui_image_registry: "registry.xc:5000/comfyui:{{ comfyui_image_tag }}"
     comfyui_containerfile_src: files/comfyui/Containerfile
@@ -61,9 +59,9 @@
     comfyui_seed_src: files/comfyui/seed-comfyui-models.sh.j2
     comfyui_seed_dest: /home/dev/bin/seed-comfyui-models.sh
     # Model weights: pinned, one-time staging (NOT a runtime fetch). The seed
-    # script's manifest pins both the H3 assets and the additional Wan 2.2,
-    # LTX 2.3 (+ ID-LoRA), and HunyuanVideo 1.5 families. Each entry names the
-    # exact Hugging Face revision and expected SHA-256 for reproducibility.
+    # script's manifest pins the H3 assets, Z-Image Turbo, and the additional
+    # Wan 2.2, LTX 2.3 (+ ID-LoRA), and HunyuanVideo 1.5 families. Each entry
+    # names the exact Hugging Face revision and expected SHA-256.
     comfyui_model_root: /home/dev/comfyui/models
     # /near1 is the compute NAS (Samba/CIFS) mount root; comfyui_nas_root is a
     # subdir created by this play. The mountpoint check below targets the mount
@@ -193,6 +191,7 @@
         - "{{ comfyui_model_root }}/loras"
         - "{{ comfyui_model_root }}/clip_vision"
         - "{{ comfyui_model_root }}/latent_upscale_models"
+        - "{{ comfyui_model_root }}/hunyuan"
 
     - name: Ensure ComfyUI HF cache directory exists
       file:
