@@ -103,6 +103,19 @@ operator staging step, and verified against SHA-256. LTX checkpoint files are
 under `checkpoints/`; LoRAs, vision encoders, and latent upscalers are under
 their normal ComfyUI model directories.
 
+## Troubleshooting: CUBLAS_STATUS_ALLOC_FAILED
+
+If H3 (or HunyuanImage 3.0) generation fails with `CUDA error:
+CUBLAS_STATUS_ALLOC_FAILED when calling cublasCreate(handle)` — especially
+when it works once after a container restart, then fails instantly on
+subsequent runs — the `--disable-cuda-malloc` flag is missing from the
+container args. This is already applied in
+`config/ansible/admin/templates/comfyui-vm-inner.sh.j2` and survives playbook
+re-runs; re-run `admin/install-comfyui-vm.yml --limit <host>` if the flag is
+somehow absent. Do not remove the flag: the failure it prevents is
+deterministic once the HunyuanImage3 node's memory manager is active in the
+process.
+
 ## Output
 
 Generated videos and audio are written to `output/` inside the container,

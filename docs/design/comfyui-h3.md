@@ -189,6 +189,23 @@ and its global `--use-sage-attention` path is buggy for H3. If we want it,
 add a `build-sage-attention.yml` source build later. Stock attention works
 unchanged.
 
+### 7. cudaMallocAsync must stay disabled in the ComfyUI VM
+
+ComfyUI 0.36 enables `cudaMallocAsync` by default on torch 2.9, and the
+`Comfy_HunyuanImage3` custom node's memory manager (block swap, RAM-pressure
+cache integration) conflicts with it: the first H3/HunyuanImage cuBLAS matmul
+fails with `CUBLAS_STATUS_ALLOC_FAILED when calling cublasCreate(handle)`,
+after which every subsequent prompt fails instantly. The failure occurs even
+with abundant free VRAM and host RAM — the allocator pool itself is poisoned,
+not the environment. Verified: a fresh process in the same container runs
+CUDA/cuBLAS fine, imports of `bitsandbytes`/`transformers`/the custom node are
+all clean, and adding `--disable-cuda-malloc` to the container args (in
+`comfyui-vm-inner.sh.j2`) fixes the error completely.
+
+If a future image bump reintroduces the failure, re-check this flag before
+touching VRAM settings or model staging — and change only one variable at a
+time when debugging.
+
 ## Model assets on host
 
 | File (under `/home/dev/comfyui/models/`) | Size | Purpose |
