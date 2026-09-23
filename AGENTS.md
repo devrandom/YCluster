@@ -25,6 +25,12 @@ election.
 - **Don't change prod security or stability (e.g. firewall) and don't reboot
   any prod machine without checking with the user first.** Avoid doing things
   manually in prod when there's a best-practice way (e.g. running a playbook).
+- **Never start, stop, restart, or resize VMs or containers (Incus, podman,
+  Docker, systemd units that wrap them) without explicit user authorization
+  for that specific action.** This includes `incus start/stop/restart/set`,
+  `podman run/stop/restart`, and playbook tasks that trigger them. Changing
+  resource limits (`limits.memory`, etc.) counts as resizing. Read-only
+  inspection (`incus list`, `podman ps`, logs, config get) is always fine.
 - **Don't create commits unless explicitly asked.** No commit prefixes; amend
   when fixing recently-committed code.
 - **Never push to `main` without explicit authorization.** Work happens on a
