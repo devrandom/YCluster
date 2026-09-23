@@ -1,7 +1,10 @@
 """Helpers for the per-VM GPU usage endpoint."""
 
-def fetch_usage_state(cur, since_dt):
-    """Read lifecycle events, sample aggregates, and latest VM state."""
+def fetch_usage_state(cur, since_dt, until_dt=None):
+    """Read lifecycle events, sample aggregates, and latest VM state.
+
+    until_dt bounds the sample aggregation (year windows need a hard end);
+    None leaves it open-ended for day windows ending at "now"."""
     # The latest pre-window event decides whether an interval was open (and
     # with what gpus/billable) at the window start, bounding the scan.
     cur.execute('''SELECT DISTINCT ON (vm) ts, vm, event, owner, gpus, billable
@@ -13,13 +16,15 @@ def fetch_usage_state(cur, since_dt):
                    ORDER BY vm, ts''', [since_dt])
     events = pre_events + cur.fetchall()
 
-    cur.execute('''
+    sample_where = 'WHERE ts >= %s' if until_dt is None else 'WHERE ts >= %s AND ts < %s'
+    sample_params = [since_dt] if until_dt is None else [since_dt, until_dt]
+    cur.execute(f'''
         SELECT vm, MAX(COALESCE(owner, '')),
                SUM(CASE WHEN state = 'Running' THEN gpus * interval_s ELSE 0 END)::float / 3600,
                COUNT(*) FILTER (WHERE state = 'Running')
-        FROM vm_samples WHERE ts >= %s
+        FROM vm_samples {sample_where}
         GROUP BY vm
-    ''', [since_dt])
+    ''', sample_params)
     sampled = {r[0]: {'owner': r[1], 'observed': r[2] or 0.0,
                       'samples': r[3]} for r in cur.fetchall()}
     cur.execute('''SELECT DISTINCT ON (vm) vm, state

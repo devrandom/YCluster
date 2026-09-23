@@ -2177,7 +2177,7 @@ def model_usage_data():
     user_filter = request.args.get('user', '')
     model_filter = request.args.get('model', '')
 
-    conn, since_dt, err = _usage_stats_cursor(since_days)
+    conn, since_dt, err = _usage_stats_cursor(_since_days_dt(since_days))
     if err:
         return jsonify({'error': err}), 500
     assert conn is not None
@@ -2213,11 +2213,14 @@ def model_usage_data():
     return jsonify(rows)
 
 
-def _usage_stats_cursor(since_days):
+def _since_days_dt(days):
     # timedelta, not day-field arithmetic: replace(day=...) raises whenever
     # the window crosses a month boundary (since_days >= current day).
-    since_dt = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    since_dt = since_dt - timedelta(days=since_days)
+    midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight - timedelta(days=days)
+
+
+def _usage_stats_cursor(since_dt):
     try:
         etcd = get_etcd_client()
         password_bytes = etcd.get('/cluster/config/usage_stats/db-password')[0]
@@ -2232,6 +2235,27 @@ def _usage_stats_cursor(since_days):
     except Exception as e:
         return None, since_dt, str(e)
     return conn, since_dt, None
+
+
+_VM_USAGE_SINCE_VALUES = {'1', '7', '14', '30', '60', '90',
+                          'this-year', 'previous-year'}
+
+
+def _vm_usage_since():
+    """Raw ?since value for the VM usage page, validated against the UI."""
+    raw = request.args.get('since', '7')
+    return raw if raw in _VM_USAGE_SINCE_VALUES else '7'
+
+
+def _vm_usage_window():
+    """UTC (start, end) for the VM usage query: ?since=N days (max 90),
+    'this-year' (Jan 1 → now), or 'previous-year' (capped at Dec 31)."""
+    raw = _vm_usage_since()
+    now = datetime.now(UTC)
+    if raw in ('this-year', 'previous-year'):
+        year = now.year if raw == 'this-year' else now.year - 1
+        return datetime(year, 1, 1, tzinfo=UTC), min(datetime(year + 1, 1, 1, tzinfo=UTC), now)
+    return _since_days_dt(int(raw)), now
 
 
 # Single sources of truth: the etcd schema + data-access layer belong to
@@ -3172,31 +3196,26 @@ def settings_api_keys_revoke():
 @app.route('/admin/vm-usage')
 def vm_usage_page():
     """VM GPU-hour accounting: billable/tracked (events) vs observed (samples)."""
-    since_days = max(1, min(90, request.args.get('since', 7, type=int)))
-    return render_template('admin-vm-usage.html', since_days=since_days)
+    return render_template('admin-vm-usage.html', since=_vm_usage_since())
 
 
 @app.route('/admin/vm-usage/data')
-
-
-
-
 def vm_usage_data():
     """Per-VM GPU-hours in the window: billable + tracked from lifecycle
     events (interval assembly), observed from incus-state samples."""
     from app_usage import fetch_usage_state, owner_visibility, registry_snapshots, usage_rows
-    since_days = max(1, min(90, request.args.get('since', 7, type=int)))
-    conn, since_dt, err = _usage_stats_cursor(since_days)
+    since_dt, until_dt = _vm_usage_window()
+    conn, _, err = _usage_stats_cursor(since_dt)
     if err:
         return jsonify({'error': err}), 500
     assert conn is not None
 
     with conn:
         with conn.cursor() as cur:
-            events, sampled, last_state = fetch_usage_state(cur, since_dt)
+            events, sampled, last_state = fetch_usage_state(cur, since_dt, until_dt)
 
     registry, desired_all = registry_snapshots(vmm)
-    per_vm = _assemble_intervals(events, since_dt, datetime.now(UTC))
+    per_vm = _assemble_intervals(events, since_dt, until_dt)
     from ycluster.utils import authentik_manager
     visible = owner_visibility(_authentik_identity(), authentik_manager)
     rows = usage_rows(per_vm, sampled, registry, desired_all, last_state, visible, _usage_row)
@@ -3211,7 +3230,7 @@ def model_usage_options():
         return jsonify({'error': 'admin only'}), 403
     since_days = max(1, min(90, request.args.get('since', 7, type=int)))
 
-    conn, since_dt, err = _usage_stats_cursor(since_days)
+    conn, since_dt, err = _usage_stats_cursor(_since_days_dt(since_days))
     if err:
         return jsonify({'error': err}), 500
     assert conn is not None
