@@ -110,7 +110,8 @@ RUN git clone --depth 1 https://github.com/EricRollei/Comfy_HunyuanImage3 \
 RUN uv pip install --python /opt/comfyui/.venv/bin/python \
         "transformers==5.17.0" \
         "accelerate==1.15.0" \
-        "bitsandbytes==0.50.2"
+        "bitsandbytes==0.50.2" \
+        "diffusers==0.40.0"
 
 # Sanity check — fails the build if the ComfyUI package is missing. Run from
 # /opt/comfyui so the source tree's `comfy/` package is on sys.path (python -c

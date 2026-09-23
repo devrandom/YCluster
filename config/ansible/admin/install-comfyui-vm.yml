@@ -36,7 +36,7 @@
     - ../../../ycluster-private/vars/comfyui-hf-token.yml
   vars:
     comfyui_port: 8188
-    comfyui_image_tag: "0.36.0-yc1"
+    comfyui_image_tag: "0.36.0-yc2"
     # Seed script's default MODEL_HOST inside the VM (the dedicated models
     # block device mounted by the inner script).
     comfyui_model_root: /mnt/models
