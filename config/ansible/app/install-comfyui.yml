@@ -191,7 +191,6 @@
         - "{{ comfyui_model_root }}/loras"
         - "{{ comfyui_model_root }}/clip_vision"
         - "{{ comfyui_model_root }}/latent_upscale_models"
-        - "{{ comfyui_model_root }}/hunyuan"
 
     - name: Ensure ComfyUI HF cache directory exists
       file:
