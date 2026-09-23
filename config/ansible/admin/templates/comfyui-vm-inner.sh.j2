@@ -43,6 +43,23 @@ fi
 # Clean up any stale NFS fstab entry from the pre-block-device setup.
 sed -i '/comfyui\/models/d' /etc/fstab
 
+echo "== VM swap (models disk) =="
+# The VM intentionally has a modest RAM limit (guest RAM is pinned on the
+# host, and overcommitting it wedges the host). H3/HunyuanImage-style model
+# staging needs overflow space, so keep a swapfile next to the models instead
+# of asking the host for more pinned RAM.
+SWAPFILE="$MODEL_DIR/.vm-swap"
+if ! swapon --show=NAME | grep -q "^${SWAPFILE}$"; then
+  if [ ! -f "$SWAPFILE" ]; then
+    fallocate -l 24G "$SWAPFILE"
+    chmod 600 "$SWAPFILE"
+    mkswap "$SWAPFILE"
+  fi
+  swapon "$SWAPFILE"
+fi
+grep -q "$SWAPFILE" /etc/fstab || \
+  printf '%s\tnone\tswap\tsw\t0\t0\n' "$SWAPFILE" >> /etc/fstab
+
 echo "== data dirs (persistent /data block device) =="
 # /data is the NAS-backed vmdata block image (ext4), attached by the
 # gpu-vm profile migration path. SQLite user dir lives here too — ext4

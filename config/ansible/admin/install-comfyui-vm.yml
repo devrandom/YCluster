@@ -52,6 +52,27 @@
       meta: end_host
       when: not (comfyui_vm_enabled | default(false))
 
+    # GPU-passthrough VMs pin their guest RAM upfront. Starting one without
+    # enough *available* host RAM wedges the whole node (page-allocator
+    # exhaustion stalls blk-mq; see ycluster-private incidents
+    # 2026-08-30-nv3-vm-launch-memory-exhaustion and
+    # 2026-09-23-nv3-comfy-vm-memory-wedge). Parse comfyui_vm_mem (e.g.
+    # "11GiB") and require that much free RAM plus an 8 GiB host margin.
+    - name: Parse ComfyUI VM memory limit
+      set_fact:
+        comfyui_vm_mem_mib: "{{ comfyui_vm_mem | string | regex_replace('^([0-9]+)GiB$', '\\1') | int }}"
+
+    - name: Check host has enough available RAM for the ComfyUI VM
+      fail:
+        msg: >-
+          Host has only {{ ansible_memory_mb.real.available | default(ansible_memfree_mb) }} MiB
+          available; the ComfyUI VM is configured for {{ comfyui_vm_mem_mib }} MiB plus
+          an 8192 MiB host margin. Stop or resize other workloads first — starting
+          the VM anyway can wedge the host because guest RAM is pinned.
+      when: >
+        (ansible_memory_mb.real.available | default(ansible_memfree_mb) | int)
+        < (comfyui_vm_mem_mib | int) + 8192
+
     - name: Ensure ~dev/bin and staging dir exist
       file:
         path: "{{ item.path }}"
