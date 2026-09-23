@@ -112,7 +112,8 @@ podman run -d --name "$CONTAINER" \
   -v /data/comfyui/input:/opt/comfyui/input \
   -v /data/comfyui/user:/opt/comfyui/user \
   "$IMAGE" \
-  --listen 0.0.0.0 --port "$PORT"
+  --listen 0.0.0.0 --port "$PORT" \
+  --disable-cuda-malloc
 # NOTE: upstream's 0.36 assets system (--enable-assets) is opt-in and gated to
 # Comfy Cloud in the shipped frontend; we deploy vanilla. Old outputs are
 # copied under input/legacy-outputs/ on the /data disk for manual access.
