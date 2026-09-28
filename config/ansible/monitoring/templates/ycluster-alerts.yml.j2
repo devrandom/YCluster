@@ -774,13 +774,13 @@ groups:
             node_hwmon_temp_celsius{sensor="temp1"}
             * on(chip, instance) group_left()
             node_hwmon_chip_names{chip_name="k10temp"}
-          ) > 85
-        for: 5m
+          ) > 90
+        for: 15m
         labels:
           severity: warning
         annotations:
           summary: "High CPU temperature on {{ $labels.node }}"
-          description: "CPU Tctl on {{ $labels.node }} is {{ $value }}°C (>85°C) for more than 5 minutes"
+          description: "CPU Tctl on {{ $labels.node }} is {{ $value }}°C (>90°C) for more than 15 minutes"
 
       - alert: CriticalCPUTemperature
         expr: |
@@ -788,13 +788,13 @@ groups:
             node_hwmon_temp_celsius{sensor="temp1"}
             * on(chip, instance) group_left()
             node_hwmon_chip_names{chip_name="k10temp"}
-          ) > 95
-        for: 1m
+          ) > 97
+        for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Critical CPU temperature on {{ $labels.node }}"
-          description: "CPU Tctl on {{ $labels.node }} is {{ $value }}°C — at or past TJMax, thermal throttling"
+          description: "CPU Tctl on {{ $labels.node }} is {{ $value }}°C (>97°C) — above TJMax even after boost-clock throttling, cooling is not keeping up"
 
       # GPU temperature — covers both host-visible GPUs (via nvidia-smi)
       # and VFIO-passthrough GPUs (via IPMI per-slot sensors). Take the
