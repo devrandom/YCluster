@@ -110,9 +110,15 @@ Still worth a follow-up over the coming days:
   (`open-webui-edge` proxy, `provider-chat`, `access_token_validity:
   days=1`) still bounces users every 24h regardless of OWUI's session. That
   is the remaining #1 follow-up (raise edge `access_token_validity` to match
-  OWUI's ~4-week session) — tracked as the remaining task in
-  `authentik/open-webui-edge-pre-auth-paths.md`. #2 only addresses the
-  app-level (OWUI) session, not the nginx-gate session.
+  OWUI's runtime 30d session) — tracked as the remaining task in
+  `authentik/open-webui-edge-pre-auth-paths.md`.
+  **UPDATE: this is now fixed.** `open-webui-edge` was raised to
+  `days=30` to match OWUI's runtime `auth.jwt_expiry=30d` (not the `4w`
+  default), deployed and verified in the cluster. Authentik's proxy provider
+  does not support a refresh flow at the `auth_request` boundary, so
+  lifetime alignment is the intended fix, not refresh-token plumbing.
+  #2 only addresses the app-level (OWUI) session, not the nginx-gate
+  session.
 - No firewall / reboot / security-stability change.
 
 ## Refs

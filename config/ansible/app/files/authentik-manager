@@ -66,7 +66,8 @@ entries:
       # Let Open WebUI silently refresh its 1-day access token instead of
       # dropping its OAuth session when it expires (OWUI requests whatever
       # scopes the server advertises, incl. offline_access). 30d covers the
-      # app's ~4-week JWT (JWT_EXPIRES_IN=4w in open-webui-manager).
+      # app's 30-day runtime session (auth.jwt_expiry=30d in the OWUI
+      # database config, overriding the JWT_EXPIRES_IN=4w default).
       refresh_token_validity: days=30
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
@@ -160,7 +161,8 @@ entries:
     attrs:
       mode: forward_single
       external_host: https://$external_domain
-      access_token_validity: days=1
+      # Match the OWUI 30d session; see provider-chat comment.
+      access_token_validity: days=30
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
   - model: authentik_core.application
@@ -185,7 +187,8 @@ entries:
     attrs:
       mode: forward_single
       external_host: https://comfy.$external_domain
-      access_token_validity: days=1
+      # Match the OWUI 30d session; see provider-chat comment.
+      access_token_validity: days=30
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
   - model: authentik_core.application
@@ -212,7 +215,9 @@ entries:
     attrs:
       mode: forward_single
       external_host: https://chat.$external_domain
-      access_token_validity: days=1
+      # Match the OWUI runtime auth.jwt_expiry setting so the edge gate does
+      # not invalidate the browser session while OWUI still considers it valid.
+      access_token_validity: days=30
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
   - model: authentik_core.application

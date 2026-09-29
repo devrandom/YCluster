@@ -119,14 +119,17 @@ commits unless asked).
 1. **Validate in practice** — confirm the OIDC round-trip / health probes no
    longer go through the outpost and there are no new regressions; watch for
    the daily-kick / 500 reports going quiet.
-2. **Follow-up — fix the edge daily kick (ask before changing).** The
-   refresh-token half of the daily-kick root cause is now done (#2,
+2. **Follow-up — edge daily kick: RESOLVED.** The refresh-token
+   half of the daily-kick root cause was fixed earlier (#2,
    `offline_access` + `refresh_token_validity` on `provider-owui` — see
-   `owui-oidc-refresh-token.md`). What remains here is only:
-   - Raise `access_token_validity` on `open-webui-edge` (currently
-     `days=1`) or align it with OWUI's ~4-week session
-     (`JWT_EXPIRES_IN=4w`). This edge-gate session still bounces users every
-     24h regardless of OWUI's (now refreshable) app session.
+   `owui-oidc-refresh-token.md`). The edge half is now fixed too:
+   `open-webui-edge` (`provider-chat`) `access_token_validity` raised from
+   `days=1` to `days=30` to match the OWUI runtime `auth.jwt_expiry=30d`
+   (not the default `4w`; check `openwebui.config` for the runtime value).
+   Deployed via `app/install-authentik.yml --limit <leader>` and verified
+   live in `authentik_providers_oauth2_oauth2provider`. Existing sessions
+   that already expired still needed one manual re-login; after that, edge
+   and app session lifetimes align.
 3. **Keep docs/comments consistent:**
    - `config/ansible/app/files/open-webui.conf.j2` still implies all
      `chat.<domain>` bytes are edge-gated before the app; that's now less
