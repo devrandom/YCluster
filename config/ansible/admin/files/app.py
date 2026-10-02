@@ -189,6 +189,7 @@ def allocate_hostname():
     except Exception as e:
         return jsonify({'error': f'Allocation failed: {str(e)}'}), 500
 
+@app.route('/api/wg/register', methods=['POST'])
 def wg_register():
     """Allocate a node and register a WireGuard peer in one atomic call."""
     from ycluster.utils import wg_config
