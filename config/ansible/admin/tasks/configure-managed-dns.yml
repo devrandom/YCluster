@@ -1,19 +1,50 @@
 # Idempotent DNS setup for managed cluster nodes.
 #
-# End state: a static /etc/resolv.conf with the local dnsmasq forwarder
-# (127.0.0.1) preferred and the cluster gateway VIP as the fallback.
-# We write this content once and never mutate it across stages.
+# The default mode is the historical local-forwarder setup: a static
+# /etc/resolv.conf with local dnsmasq (127.0.0.1) preferred and the cluster
+# gateway VIP as the fallback. We write this content once and never mutate it
+# across stages.
 #
 #   nameserver 127.0.0.1     # local dnsmasq once it's installed
 #   nameserver {gateway_vip} # cluster forwarder via keepalived VIP
 #   search xc
 #   options timeout:1        # fail-fast to the fallback before dnsmasq is up
 #
-# Sequencing implication: before dnsmasq is installed locally, glibc
-# tries 127.0.0.1, fails within ~1s, then succeeds against the gateway
-# VIP. That covers the bootstrap window for nodes joining a running
-# cluster (the gateway VIP must already be up — cold-cluster bootstrap
-# of the very first core node still depends on uplink DHCP DNS).
+# In resolved mode, systemd-resolved owns /etc/resolv.conf instead. The
+# cluster VIP handles only the xc domain, so DNS learned from the physical
+# uplink (for example a site-local LAN resolver) remains usable. This mode is
+# opt-in per host with managed_dns_mode: resolved.
+#
+# Sequencing implication for the default mode: before dnsmasq is installed
+# locally, glibc tries 127.0.0.1, fails within ~1s, then succeeds against the
+# gateway VIP. That covers the bootstrap window for nodes joining a running
+# cluster (the gateway VIP must already be up — cold-cluster bootstrap of the
+# very first core node still depends on uplink DHCP DNS).
+
+- name: Select managed-node DNS mode
+  set_fact:
+    dns_mode: "{{ managed_dns_mode | default('dnsmasq') }}"
+
+- name: Validate managed-node DNS mode
+  assert:
+    that:
+      - dns_mode in ['dnsmasq', 'resolved']
+    fail_msg: "managed_dns_mode must be 'dnsmasq' or 'resolved'"
+
+- name: Check if dnsmasq is installed
+  command: systemctl list-unit-files dnsmasq.service
+  register: _dnsmasq_unit
+  changed_when: false
+  failed_when: false
+
+- name: Disable legacy host dnsmasq (resolved mode)
+  systemd:
+    name: dnsmasq
+    state: stopped
+    enabled: no
+  when:
+    - dns_mode == 'resolved'
+    - "'dnsmasq.service' in _dnsmasq_unit.stdout"
 
 - name: Check if systemd-resolved is installed
   command: systemctl list-unit-files systemd-resolved.service
@@ -26,18 +57,79 @@
     name: systemd-resolved
     state: stopped
     enabled: no
-  when: "'systemd-resolved.service' in _resolved_unit.stdout"
+  when:
+    - dns_mode == 'dnsmasq'
+    - "'systemd-resolved.service' in _resolved_unit.stdout"
+
+- name: Require systemd-resolved (resolved mode)
+  assert:
+    that:
+      - "'systemd-resolved.service' in _resolved_unit.stdout"
+    fail_msg: "managed_dns_mode=resolved requires systemd-resolved"
+
+- name: Enable systemd-resolved (resolved mode)
+  systemd:
+    name: systemd-resolved
+    state: started
+    enabled: yes
+  when:
+    - dns_mode == 'resolved'
+    - "'systemd-resolved.service' in _resolved_unit.stdout"
+
+- name: Create systemd-resolved configuration directory
+  file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    mode: '0755'
+  when: dns_mode == 'resolved'
+
+- name: Configure cluster-domain DNS routing (resolved mode)
+  copy:
+    dest: /etc/systemd/resolved.conf.d/ycluster.conf
+    mode: '0644'
+    content: |
+      # Managed by Ansible — admin/tasks/configure-managed-dns.yml
+      [Resolve]
+      DNS={{ gateway_vip }}
+      Domains=~xc
+  register: _resolved_cluster_config
+  when: dns_mode == 'resolved'
+
+- name: Remove cluster-domain routing from resolved (dnsmasq mode rollback)
+  file:
+    path: /etc/systemd/resolved.conf.d/ycluster.conf
+    state: absent
+  when: dns_mode == 'dnsmasq'
+
+- name: Point /etc/resolv.conf at systemd-resolved (resolved mode)
+  file:
+    src: /run/systemd/resolve/stub-resolv.conf
+    dest: /etc/resolv.conf
+    state: link
+    force: true
+  when: dns_mode == 'resolved'
+
+- name: Restart systemd-resolved after cluster routing change
+  systemd:
+    name: systemd-resolved
+    state: restarted
+  when:
+    - dns_mode == 'resolved'
+    - _resolved_cluster_config is changed
 
 - name: Check if /etc/resolv.conf is a symlink (systemd-resolved stub)
   stat:
     path: /etc/resolv.conf
   register: _resolv_stat
+  when: dns_mode == 'dnsmasq'
 
 - name: Remove systemd-resolved symlink at /etc/resolv.conf
   file:
     path: /etc/resolv.conf
     state: absent
-  when: _resolv_stat.stat.islnk is defined and _resolv_stat.stat.islnk
+  when:
+    - dns_mode == 'dnsmasq'
+    - _resolv_stat.stat.islnk is defined and _resolv_stat.stat.islnk
 
 - name: Write static /etc/resolv.conf (loopback + gateway fallback)
   copy:
@@ -49,3 +141,4 @@
       nameserver {{ gateway_vip }}
       search xc
       options timeout:1
+  when: dns_mode == 'dnsmasq'

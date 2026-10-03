@@ -1,5 +1,5 @@
 ---
-- name: Setup base configuration for non-core managed nodes (local dnsmasq forwarder)
+- name: Setup base configuration for non-core managed nodes
   hosts: compute:adhoc:nas
   become: yes
 
@@ -10,83 +10,86 @@
         state: restarted
 
   tasks:
-    - name: Install dnsmasq
-      apt:
-        name: dnsmasq
-        state: present
-
-    - name: Configure managed-node DNS (loopback + gateway fallback)
+    - name: Configure managed-node DNS
       include_tasks: tasks/configure-managed-dns.yml
 
-    - name: Clear default dnsmasq.conf to avoid conflicts
-      copy:
-        dest: /etc/dnsmasq.conf
-        content: |
-          # Main dnsmasq configuration
-          # All configuration is in /etc/dnsmasq.d/
-          conf-dir=/etc/dnsmasq.d/,*.conf
-          # Use additional hosts file for static DNS entries
-          addn-hosts=/etc/static-hosts
-          server=208.67.222.222
-          server=8.8.8.8
-          server=1.1.1.1
-        backup: yes
-      notify: restart dnsmasq
+    - name: Configure local dnsmasq forwarder
+      when: managed_dns_mode | default('dnsmasq') == 'dnsmasq'
+      block:
+        - name: Install dnsmasq
+          apt:
+            name: dnsmasq
+            state: present
 
-    - name: Create empty static hosts file for dnsmasq
-      copy:
-        dest: /etc/static-hosts
-        content: ""
-        force: no
-        owner: root
-        group: root
-        mode: '0644'
+        - name: Clear default dnsmasq.conf to avoid conflicts
+          copy:
+            dest: /etc/dnsmasq.conf
+            content: |
+              # Main dnsmasq configuration
+              # All configuration is in /etc/dnsmasq.d/
+              conf-dir=/etc/dnsmasq.d/,*.conf
+              # Use additional hosts file for static DNS entries
+              addn-hosts=/etc/static-hosts
+              server=208.67.222.222
+              server=8.8.8.8
+              server=1.1.1.1
+            backup: yes
+          notify: restart dnsmasq
 
-    - name: Create dnsmasq configuration directory
-      file:
-        path: /etc/dnsmasq.d
-        state: directory
-        mode: '0755'
-        owner: root
-        group: root
+        - name: Create empty static hosts file for dnsmasq
+          copy:
+            dest: /etc/static-hosts
+            content: ""
+            force: no
+            owner: root
+            group: root
+            mode: '0644'
 
-    # Compute nodes don't hold the gateway VIP, so they don't need
-    # bind-dynamic.  All compute hosts run Incus, whose package drops
-    # /etc/dnsmasq.d/incus with 'bind-interfaces' + 'except-interface=incusbr0'.
-    # dnsmasq refuses to combine bind-interfaces with bind-dynamic, so
-    # we use bind-interfaces here to match the Incus drop-in.
-    - name: Create dnsmasq configuration (DNS only)
-      copy:
-        dest: /etc/dnsmasq.d/dns.conf
-        mode: '0644'
-        content: |
-          # DNS configuration
-          # Forward .xc queries to gateway VIP
-          server=/xc/{{ gateway_vip }}
-          domain=xc
-          domain-needed
+        - name: Create dnsmasq configuration directory
+          file:
+            path: /etc/dnsmasq.d
+            state: directory
+            mode: '0755'
+            owner: root
+            group: root
 
-          bind-interfaces
-          {% if vm_nat_transit_enabled | default(false) %}
-          # The Incus-managed transit bridge runs its own dnsmasq for
-          # DHCP/DNS; avoid trying to bind its gateway address.
-          except-interface=transit0
-          {% endif %}
-          # DNS only, no DHCP
-          port=53
-          # Only answer queries from clients on a directly-attached subnet.
-          # Matters on nodes with public-routable interfaces (e.g. c3's
-          # public IPv6) so we don't run an open recursive resolver. No-op
-          # on LAN-only nodes.
-          local-service
-      notify: restart dnsmasq
+        # Compute nodes don't hold the gateway VIP, so they don't need
+        # bind-dynamic.  All compute hosts run Incus, whose package drops
+        # /etc/dnsmasq.d/incus with 'bind-interfaces' + 'except-interface=incusbr0'.
+        # dnsmasq refuses to combine bind-interfaces with bind-dynamic, so
+        # we use bind-interfaces here to match the Incus drop-in.
+        - name: Create dnsmasq configuration (DNS only)
+          copy:
+            dest: /etc/dnsmasq.d/dns.conf
+            mode: '0644'
+            content: |
+              # DNS configuration
+              # Forward .xc queries to gateway VIP
+              server=/xc/{{ gateway_vip }}
+              domain=xc
+              domain-needed
 
-    - name: Enable and start dnsmasq service
-      systemd:
-        name: dnsmasq
-        enabled: yes
-        state: started
-        daemon_reload: yes
+              bind-interfaces
+              {% if vm_nat_transit_enabled | default(false) %}
+              # The Incus-managed transit bridge runs its own dnsmasq for
+              # DHCP/DNS; avoid trying to bind its gateway address.
+              except-interface=transit0
+              {% endif %}
+              # DNS only, no DHCP
+              port=53
+              # Only answer queries from clients on a directly-attached subnet.
+              # Matters on nodes with public-routable interfaces (e.g. c3's
+              # public IPv6) so we don't run an open recursive resolver. No-op
+              # on LAN-only nodes.
+              local-service
+          notify: restart dnsmasq
+
+        - name: Enable and start dnsmasq service
+          systemd:
+            name: dnsmasq
+            enabled: yes
+            state: started
+            daemon_reload: yes
 
     - name: Ensure dev user exists
       user:

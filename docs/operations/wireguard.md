@@ -146,6 +146,30 @@ Then run the playbook to install the reconcile timer:
 - Linux: `resolvectl status` — the `wg0` interface should use the cluster VIP as DNS
 - macOS: see the DNS section in [macos.md](macos.md#dns-split-dns)
 
+**Managed-node DNS mode.** Non-core nodes use one of two resolver modes, set
+per host via `managed_dns_mode` in `host_vars/<node>.yml` (private repo):
+
+- `dnsmasq` (default) — static `/etc/resolv.conf` pointing at local dnsmasq
+  (`127.0.0.1`) with the gateway VIP as fallback. Only `.xc` is routed to the
+  cluster; everything else goes to hardcoded public resolvers, so DNS learned
+  from the physical LAN (e.g. a site-local `.lan` resolver) is lost.
+- `resolved` — systemd-resolved owns `/etc/resolv.conf`. A drop-in routes only
+  the `xc` domain to the cluster VIP (`Domains=~xc`), while the physical
+  uplink keeps DNS learned from DHCP. Site-local names (`.lan`) resolve
+  normally.
+
+To switch a host to `resolved` mode, set the variable and rerun
+`admin/setup-base-compute.yml --limit <hostname>`. To roll back, remove the
+variable (or set it to `dnsmasq`) and rerun — the playbook cleans up the
+resolved drop-in.
+
+Verify after switching:
+```bash
+resolvectl status                   # xc routed to VIP, uplink has +DefaultRoute
+resolvectl query <peer>.lan         # LAN names resolve via the uplink
+resolvectl query s1.xc              # cluster names resolve via the VIP
+```
+
 **A LAN node is reachable from most core nodes but not the gateway/VIP holder (stale peer hijacks routing).** Symptom: a node that has been migrated wg→LAN (now on `10.0.0.x`) can be pinged from non-VIP core nodes but not from whichever node currently holds the gateway VIP — so it loses its gateway, NTP, DNS and internet whenever the VIP lands there. Cause: a leftover **approved wg peer** for that node whose `AllowedIPs` followed its allocation to the new **LAN** IP. `wg0` runs only on the VIP holder, so only that node installs the poisoned `10.0.0.x dev wg0` route; it receives the node's packets fine but sends the replies into the (dead) tunnel.
 
 Diagnose on the VIP holder:
