@@ -154,6 +154,12 @@ responsible for queue state, batch composition, and final verification.
   their own merits; do not mention prior review history or summarize what
   earlier reviewers found. Prior-review framing anchors the reviewer to the
   same conclusions and areas the earlier pass covered.
+- When the user says "spawn a subagent to review" (or similar), treat that as
+  an instruction to the orchestrator, not as the reviewer's prompt. Compose a
+  self-contained task description for the reviewer: what to read, what to
+  evaluate, and what to report. Never relay the user's meta-instruction
+  verbatim — the subagent may try to spawn its own nested agent instead of
+  doing the review itself.
 - Ask the reviewer to identify "goodhearting" of test coverage: tests or
   assertions that make coverage metrics look better without really improving
   resilience (e.g. testing implementation details, over-mocking, trivially
