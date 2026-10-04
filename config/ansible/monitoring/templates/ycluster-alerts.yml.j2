@@ -998,3 +998,47 @@ groups:
         annotations:
           summary: "{{ $value }} high CVEs pending beyond the 2-day SLA{{ if $labels.cves }}: {{ $labels.cves }}{{ end }}"
           description: "{{ $value }} non-acked high-severity CVEs have been pending longer than the 2-day perimeter SLA{{ if $labels.cves }} (up to 5 examples: {{ $labels.cves }}){{ end }}. Review and decide within the perimeter SLA."
+
+  # Hosting provider balances come from deployment-specific plugins installed
+  # on the balance collector node. The public metrics are provider-agnostic:
+  # each plugin emits provider/account-labeled balance and up series.
+  - name: ycluster-hosting
+    rules:
+      - alert: HostingBalanceLow
+        expr: ycluster_hosting_balance_dollars < 50
+        for: 15m
+        labels:
+          severity: warning
+          slow_repeat: "12h"
+        annotations:
+          summary: "Hosting balance low for {{ $labels.provider }}/{{ $labels.account }}"
+          description: "The {{ $labels.provider }} account {{ $labels.account }} balance is {{ $value | printf \"$%.2f\" }}, below the $50 warning threshold."
+
+      - alert: HostingBalanceCritical
+        expr: ycluster_hosting_balance_dollars < 20
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hosting balance critical for {{ $labels.provider }}/{{ $labels.account }}"
+          description: "The {{ $labels.provider }} account {{ $labels.account }} balance is {{ $value | printf \"$%.2f\" }}, below the $20 critical threshold."
+
+      - alert: HostingBalanceCollectorError
+        expr: ycluster_hosting_balance_up == 0
+        for: 30m
+        labels:
+          severity: warning
+          slow_repeat: "12h"
+        annotations:
+          summary: "Hosting balance collection failing for {{ $labels.provider }}/{{ $labels.account }}"
+          description: "The hosting-balance collector could not collect {{ $labels.provider }} account {{ $labels.account }}; balance alerts are stale or absent."
+
+      - alert: HostingBalanceCollectorStale
+        expr: time() - node_textfile_mtime_seconds{file=~".*hosting_balance.prom"} > 1800
+        for: 15m
+        labels:
+          severity: warning
+          slow_repeat: "12h"
+        annotations:
+          summary: "Hosting balance collector stale on {{ $labels.node }}"
+          description: "hosting_balance.prom on {{ $labels.node }} has not been refreshed in over 30m; check hosting-balance-collector.service/timer."

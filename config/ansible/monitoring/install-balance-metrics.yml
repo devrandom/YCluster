@@ -1,0 +1,89 @@
+---
+# Install the provider-agnostic hosting-balance collector.  Provider plugins
+# and their credentials are deployment-specific and are installed separately
+# from the private configuration repo into hosting-balance-provider.d.
+#
+# The collector writes:
+#   ycluster_hosting_balance_dollars{provider,account}
+#   ycluster_hosting_balance_up{provider,account}
+#
+# Alerts live in templates/ycluster-alerts.yml.j2.
+- name: Install hosting-balance collector
+  hosts: "{{ hosting_balance_collector | default('core[0]') }}"
+  become: yes
+  vars:
+    collector_path: /usr/local/lib/cluster/hosting-balance-collector
+    interval: 15min
+
+  tasks:
+    - name: Install hosting-balance collector script
+      copy:
+        src: files/hosting-balance-collector.py
+        dest: "{{ collector_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure provider plugin directory exists
+      file:
+        path: /usr/local/lib/cluster/hosting-balance-provider.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure node_exporter textfile directory exists
+      file:
+        path: /var/lib/prometheus/node-exporter
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Create systemd service for hosting-balance collector
+      copy:
+        dest: /etc/systemd/system/hosting-balance-collector.service
+        content: |
+          [Unit]
+          Description=Collect hosting account balance metrics
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 {{ collector_path }}
+          User=root
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths=/var/lib/prometheus/node-exporter
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create systemd timer for hosting-balance collector
+      copy:
+        dest: /etc/systemd/system/hosting-balance-collector.timer
+        content: |
+          [Unit]
+          Description=Collect hosting account balance every {{ interval }}
+
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec={{ interval }}
+          AccuracySec=1min
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable and start hosting-balance collector timer
+      systemd:
+        name: hosting-balance-collector.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
