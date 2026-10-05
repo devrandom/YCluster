@@ -119,6 +119,12 @@
         dest: /etc/authentik/blueprints/ycluster-user-settings.yaml
         mode: '0644'
 
+    - name: Install auth-session blueprint (align IdP login session with edge/app sessions)
+      copy:
+        src: files/authentik-blueprint-auth-session.yaml
+        dest: /etc/authentik/blueprints/ycluster-auth-session.yaml
+        mode: '0644'
+
     # The media dir is on the leader's RBD volume (compose mounts it at
     # /media); the brand blueprint references these relative to
     # media/public, where authentik serves files from.

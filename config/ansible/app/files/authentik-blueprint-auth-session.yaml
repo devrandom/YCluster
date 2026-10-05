@@ -1,0 +1,14 @@
+# Keep the IdP's own login session aligned with the 30-day edge/app
+# sessions. Without this, the user-login stage inherits Django's
+# SESSION_COOKIE_AGE (24h), so proxy-provider sessions are invalidated even
+# though the proxy provider's access token is valid for 30 days.
+version: 1
+metadata:
+  name: ycluster-auth-session
+entries:
+  - model: authentik_stages_user_login.userloginstage
+    identifiers:
+      name: default-authentication-login
+    attrs:
+      session_duration: days=30
+      remember_me_offset: seconds=0
