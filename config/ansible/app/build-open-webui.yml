@@ -92,6 +92,24 @@
           args:
             chdir: "{{ build_dir }}/open-webui"
 
+        - name: Copy Open WebUI edge-auth redirect frontend patch
+          copy:
+            src: files/open-webui-edge-auth-redirect.patch
+            dest: "{{ build_dir }}/open-webui-edge-auth-redirect.patch"
+            mode: '0644'
+
+        # Treat a 401 from /api/config as an auth-proxy interception and do a
+        # full navigation to /, where nginx can redirect to the IdP. Without
+        # this, a stale edge session is misreported by the SPA as "Backend
+        # Required" instead of starting a fresh sign-in.
+        - name: Apply Open WebUI edge-auth redirect frontend patch
+          shell: |
+            if git apply --check ../open-webui-edge-auth-redirect.patch 2>/dev/null; then
+              git apply ../open-webui-edge-auth-redirect.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
         - name: Copy Open WebUI smoke-error route patch
           copy:
             src: files/open-webui-smoke-error.patch

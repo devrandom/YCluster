@@ -1,0 +1,18 @@
+diff --git a/src/lib/apis/index.ts b/src/lib/apis/index.ts
+index 04d832317..df6e2b79c 100644
+--- a/src/lib/apis/index.ts
++++ b/src/lib/apis/index.ts
+@@ -1458,7 +1458,12 @@ export const getBackendConfig = async () => {
+ 		}
+ 	})
+ 		.then(async (res) => {
+-			if (!res.ok) throw await res.json();
++			if (!res.ok) {
++				if (res.status === 401) {
++					throw { authRedirect: true };
++				}
++				throw await res.json();
++			}
+ 			return res.json();
+ 		})
+ 		.catch((err) => {

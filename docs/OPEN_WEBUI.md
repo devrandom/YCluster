@@ -20,7 +20,9 @@
 
 ## Building and Upgrading
 
-The build is performed from upstream Open WebUI with plugins injected from `github.com/devrandom/open-webui-plugins.git`. Fork-only changes (mobile image upload and the NLTK security bump) are applied as build-time patches from `config/ansible/app/files/`.
+The build is performed from upstream Open WebUI with plugins injected from `github.com/devrandom/open-webui-plugins.git`. Fork-only changes (mobile image upload, the NLTK security bump, and edge-auth redirect handling) are applied as build-time patches from `config/ansible/app/files/`.
+
+The edge-auth redirect patch keeps the cluster IdP as the navigation gate: when `/api/config` returns 401 because the edge session is stale, the SPA performs a full navigation to `/` so nginx can redirect to the IdP instead of showing "Backend Required".
 
 Source is checked out to `/opt/src/open-webui-build/` (or `/opt/src/open-webui-build-stage/` for staging). Once the initial checkout is done, the build playbook does not `git pull` — it's up to you to update the repos manually before rebuilding:
 

@@ -40,7 +40,7 @@ P1 and P2 remain the remote/trust and interior tiers from the earlier model.
 | P0-A | frp control channel (`bindPort`) and tunnel registration/token path | frontends + core frpc clients | frp pin; token/config in etcd, rendered at service start |
 | P0-A | Per-core SSH tunnels | core nodes | frp pin; `app/install-frp.yml` |
 | P0-A | VM-access bastion `frpc` + jump sshd | Incus/Nvidia VM hosts | `admin/install-vm-bastion.yml`, in-container binary push |
-| P0-A | Open WebUI (chat.<domain>): nginx `auth_request` edge forward-auth on `location /` (OIDC-via-authentik app login, local login disabled) | storage leader | source-built image + `app/build-open-webui.yml` pin; osv-feed manifest |
+| P0-A | Open WebUI (chat.<domain>): nginx `auth_request` edge forward-auth on `location /` (OIDC-via-authentik app login, local login disabled); the SPA converts an edge 401 on `/api/config` into a full navigation back through the gate | storage leader | source-built image + `app/build-open-webui.yml` pin; osv-feed manifest |
 | P0-U | Zulip (zulip.<domain>): `/api/` pre-auth surface (apps/bots/`zulip-send` use Zulip API keys / basic auth; web UI is IdP edge-gated, SAML-only app login) | storage leader | source-built image + `app/build-zulip.yml` pin; osv-feed manifest |
 | P0-A | ComfyUI (comfy.<domain>): nginx forward-auth gate before the app | storage leader (vhost) + GPU host (backend) | `app/install-comfyui.yml` buildah image; not yet osv-feed scanned |
 | P0-U | OpenSSH server (pre-auth wire protocol, KEX, auth negotiation) + admin TOTP/SSH key path | frontends, core, bastion containers, managed nodes | apt `openssh-server` + `unattended-upgrades`; config from setup playbooks |
