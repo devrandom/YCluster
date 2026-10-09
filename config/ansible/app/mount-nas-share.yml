@@ -18,6 +18,8 @@
   vars_files:
     - ../vault/general.yml
   vars:
+    # Legacy CIFS mount — hardcoded and frozen. NFS is the general path now;
+    # this exists only to serve (or retire) the original near1 share.
     samba_user: cluster
     samba_share_name: near1
     nas_host: nas1.xc
@@ -26,77 +28,131 @@
     mount_gid: 1000
 
   tasks:
-    - name: Install CIFS utilities
-      apt:
-        name: cifs-utils
-        state: present
-        update_cache: yes
+    - name: Check for the legacy CIFS mount unit
+      stat:
+        path: /etc/systemd/system/near1.mount
+      register: near1_mount_unit
+      when: not (nas_cifs_enabled | bool)
 
-    - name: Create mount point
-      file:
-        path: "{{ mount_point }}"
-        state: directory
-        mode: '0755'
+    - name: Check for the legacy CIFS automount unit
+      stat:
+        path: /etc/systemd/system/near1.automount
+      register: near1_automount_unit
+      when: not (nas_cifs_enabled | bool)
 
-    - name: Create credentials directory
-      file:
-        path: /etc/samba
-        state: directory
-        mode: '0755'
-
-    - name: Create credentials file
-      copy:
-        dest: /etc/samba/nas-credentials
-        content: |
-          username={{ samba_user }}
-          password={{ vault_samba_secret }}
-        mode: '0600'
-      no_log: true
-
-    - name: Create systemd mount unit
-      copy:
-        dest: /etc/systemd/system/near1.mount
-        content: |
-          [Unit]
-          Description=NAS Share {{ samba_share_name }}
-          After=network-online.target
-          Wants=network-online.target
-
-          [Mount]
-          What=//{{ nas_host }}/{{ samba_share_name }}
-          Where={{ mount_point }}
-          Type=cifs
-          Options=credentials=/etc/samba/nas-credentials,uid={{ mount_uid }},gid={{ mount_gid }},file_mode=0664,dir_mode=0775,_netdev,x-systemd.automount
-
-          [Install]
-          WantedBy=multi-user.target
-        mode: '0644'
-      notify: reload systemd
-
-    - name: Create systemd automount unit
-      copy:
-        dest: /etc/systemd/system/near1.automount
-        content: |
-          [Unit]
-          Description=Automount NAS Share {{ samba_share_name }}
-
-          [Automount]
-          Where={{ mount_point }}
-          TimeoutIdleSec=0
-
-          [Install]
-          WantedBy=multi-user.target
-        mode: '0644'
-      notify: reload systemd
-
-    - name: Flush handlers
-      meta: flush_handlers
-
-    - name: Enable and start automount
+    - name: Disable the legacy CIFS automount
       systemd:
         name: near1.automount
-        enabled: yes
-        state: started
+        enabled: no
+        state: stopped
+      when: >-
+        not (nas_cifs_enabled | bool)
+        and near1_automount_unit.stat is defined
+        and near1_automount_unit.stat.exists
+
+    - name: Disable the legacy CIFS mount
+      systemd:
+        name: near1.mount
+        enabled: no
+        state: stopped
+      when: >-
+        not (nas_cifs_enabled | bool)
+        and near1_mount_unit.stat is defined
+        and near1_mount_unit.stat.exists
+
+    - name: Remove legacy CIFS units when disabled
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/near1.mount
+        - /etc/systemd/system/near1.automount
+      when: not (nas_cifs_enabled | bool)
+      notify: reload systemd
+
+    - name: Remove stale CIFS credentials when disabled
+      file:
+        path: /etc/samba/nas-credentials
+        state: absent
+      when: not (nas_cifs_enabled | bool)
+
+    - name: Flush systemd handlers before configuring CIFS
+      meta: flush_handlers
+
+    - name: Configure and enable CIFS NAS automount
+      when: nas_cifs_enabled | bool
+      block:
+        - name: Install CIFS utilities
+          apt:
+            name: cifs-utils
+            state: present
+            update_cache: yes
+
+        - name: Create mount point
+          file:
+            path: "{{ mount_point }}"
+            state: directory
+            mode: '0755'
+
+        - name: Create credentials directory
+          file:
+            path: /etc/samba
+            state: directory
+            mode: '0755'
+
+        - name: Create credentials file
+          copy:
+            dest: /etc/samba/nas-credentials
+            content: |
+              username={{ samba_user }}
+              password={{ vault_samba_secret }}
+            mode: '0600'
+          no_log: true
+
+        - name: Create systemd mount unit
+          copy:
+            dest: "/etc/systemd/system/{{ samba_share_name }}.mount"
+            content: |
+              [Unit]
+              Description=NAS Share {{ samba_share_name }}
+              After=network-online.target
+              Wants=network-online.target
+
+              [Mount]
+              What=//{{ nas_host }}/{{ samba_share_name }}
+              Where={{ mount_point }}
+              Type=cifs
+              Options=credentials=/etc/samba/nas-credentials,uid={{ mount_uid }},gid={{ mount_gid }},file_mode=0664,dir_mode=0775,_netdev,x-systemd.automount
+
+              [Install]
+              WantedBy=multi-user.target
+            mode: '0644'
+          notify: reload systemd
+
+        - name: Create systemd automount unit
+          copy:
+            dest: "/etc/systemd/system/{{ samba_share_name }}.automount"
+            content: |
+              [Unit]
+              Description=Automount NAS Share {{ samba_share_name }}
+
+              [Automount]
+              Where={{ mount_point }}
+              TimeoutIdleSec=0
+
+              [Install]
+              WantedBy=multi-user.target
+            mode: '0644'
+          notify: reload systemd
+
+        - name: Flush handlers
+          meta: flush_handlers
+
+        - name: Enable and start automount
+          systemd:
+            name: "{{ samba_share_name }}.automount"
+            enabled: yes
+            state: started
 
   handlers:
     - name: reload systemd
@@ -107,6 +163,10 @@
 - name: Mount NAS share on macOS nodes
   hosts: macos
   become: yes
+  pre_tasks:
+    - name: Skip macOS hosts when the CIFS NAS mount is disabled
+      meta: end_host
+      when: not (nas_cifs_enabled | bool)
   # Pulled by explicit file reference, not a group_vars/all auto-load, so it
   # stays out of `ansible-inventory --host` dumps (vault/general.yml).
   vars_files:
@@ -252,15 +312,16 @@
         launchctl load /Library/LaunchDaemons/com.ycluster.mount-near1.plist
 
 
-- name: Mount VM-data NFS subtree on Linux nodes
+- name: Mount NFS subtrees on Linux nodes
   hosts: core:compute
   become: yes
   tasks:
-    # Rollout switch: hosts opt out by setting `vm_data_nfs: false` (host_vars).
-    # Hosts still using the shared CIFS /near1 for VM data skip this play.
-    - name: Skip hosts not opted into the NFS VM-data switch
+    - name: Skip hosts with no enabled NAS NFS mounts
       meta: end_host
-      when: not (vm_data_nfs | default(true))
+      when: >-
+        nas_nfs_mounts_effective | default([])
+        | selectattr('enabled', 'defined')
+        | selectattr('enabled') | list | length == 0
 
     - name: Install NFS client utilities
       apt:
@@ -268,16 +329,33 @@
         state: present
         update_cache: yes
 
-    - name: Create NFS mount point
-      file:
-        path: "{{ vm_data_nfs_mount }}"
-        state: directory
-        mode: '0755'
-
-    - name: Compute the systemd mount unit name
-      command: "systemd-escape --path --suffix=mount {{ vm_data_nfs_mount }}"
-      register: vm_data_nfs_unit
+    - name: Compute the systemd mount unit names
+      command: "systemd-escape --path --suffix=mount {{ item.mount_point }}"
+      loop: "{{ nas_nfs_mounts_effective }}"
       changed_when: false
+      register: nas_nfs_mount_units
+
+    - name: Disable stopped NAS NFS mounts that are now disabled
+      systemd:
+        name: "{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"
+        enabled: no
+        state: stopped
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: not (item.enabled | bool)
+      register: nas_nfs_disable
+      ignore_errors: true
+
+    - name: Remove disabled NAS NFS mount units
+      file:
+        path: "/etc/systemd/system/{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"
+        state: absent
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: not (item.enabled | bool)
+      notify: reload systemd
 
     - name: Remove any stale wrongly-named VM-data mount unit
       file:
@@ -285,52 +363,76 @@
         state: absent
       notify: reload systemd
 
-    - name: Create systemd mount unit for VM-data NFS
+    - name: Create NAS NFS mount points
+      file:
+        path: "{{ item.mount_point }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ nas_nfs_mounts_effective }}"
+      when: item.enabled | bool
+
+    - name: Create systemd mount units for NAS NFS
       copy:
-        dest: "/etc/systemd/system/{{ vm_data_nfs_unit.stdout }}"
+        dest: "/etc/systemd/system/{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"
         content: |
           [Unit]
-          Description=Incus VM data NFS mount
+          Description=NAS NFS mount {{ item.name }}
           After=network-online.target
           Wants=network-online.target
 
           [Mount]
-          What={{ vm_data_nfs_server }}:{{ vm_data_nfs_export }}
-          Where={{ vm_data_nfs_mount }}
+          What={{ item.server }}:{{ item.export }}
+          Where={{ item.mount_point }}
           Type=nfs
-          Options={{ vm_data_nfs_client_opts }}
-          TimeoutSec=60
+          Options={{ item.options }}
+          TimeoutSec={{ item.timeout_sec | default(60) }}
 
           [Install]
           WantedBy=multi-user.target
         mode: '0644'
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: item.enabled | bool
       notify: reload systemd
 
     - name: Flush handlers
       meta: flush_handlers
 
-    - name: Enable and start the VM-data NFS mount
+    - name: Enable and start the NAS NFS mounts
       systemd:
-        name: "{{ vm_data_nfs_unit.stdout }}"
+        name: "{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"
         enabled: yes
         state: started
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: item.enabled | bool
 
-    - name: Check the VM-data NFS mount is present
-      command: "mountpoint -q {{ vm_data_nfs_mount }}"
+    - name: Check the NAS NFS mounts are present
+      command: "mountpoint -q {{ item.mount_point }}"
       failed_when: false
       changed_when: false
-      register: vm_data_nfs_mounted
+      loop: "{{ nas_nfs_mounts_effective }}"
+      when: item.enabled | bool
+      register: nas_nfs_mounted
 
-    - name: Fail if the VM-data NFS mount is missing
+    - name: Fail if a NAS NFS mount is missing
       fail:
-        msg: "{{ vm_data_nfs_mount }} is not an active mount; Incus VM `data` disks need the NFS VM-data mount (vm_data_nfs switch)."
-      when: vm_data_nfs_mounted.rc != 0
+        msg: "{{ item.mount_point }} is not an active mount ({{ item.name }})."
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: >-
+        item.enabled | bool
+        and nas_nfs_mounted.results[nas_nfs_mounts_idx].rc | default(1) != 0
 
     - name: Install the VM-data NFS mount check (for scripts)
       copy:
         src: "{{ playbook_dir }}/../scripts/check-vm-data-nfs-mount.sh"
         dest: /usr/local/bin/check-vm-data-nfs-mount
         mode: '0755'
+      when: vm_data_nfs | default(false) | bool
 
   handlers:
     - name: reload systemd

@@ -113,3 +113,33 @@ vm_data_nfs_export_net:
   - 10.0.1.0/24
 vm_data_nfs_anon_uid: 1000
 vm_data_nfs_anon_gid: 1000
+
+# --- Generic NAS mounts -------------------------------------------------------
+# Legacy CIFS mount, hardcoded to near1. CIFS is deprecated in favor of the
+# generic NFS mount list below; `nas_cifs_enabled: false` retires it per host
+# (disabling units and removing credentials).
+nas_cifs_enabled: true
+
+# NFS mounts provisioned by mount-nas-share.yml. The first entry preserves the
+# existing VM-data mount and its rollout switch; hosts can extend the list via
+# `nas_nfs_mounts_extra` without replacing the shared VM-data entry.
+nas_nfs_mounts:
+  - name: vm-data
+    enabled: "{{ vm_data_nfs }}"
+    server: "{{ vm_data_nfs_server }}"
+    export: "{{ vm_data_nfs_export }}"
+    mount_point: "{{ vm_data_nfs_mount }}"
+    options: "{{ vm_data_nfs_client_opts }}"
+    timeout_sec: 60
+nas_nfs_mounts_extra: []
+nas_nfs_mounts_effective: "{{ nas_nfs_mounts + nas_nfs_mounts_extra }}"
+
+# Server-side NFS exports, configured by setup-nas.yml on each NAS host in
+# cluster inventory. The default preserves the historical /near1/vm VM-data
+# export; a managed NAS can override `nas_nfs_export` (or the full
+# `nas_nfs_exports` list) in host_vars. Non-cluster NAS hosts are configured
+# directly and are not represented here.
+nas_nfs_export: "{{ vm_data_nfs_export }}"
+nas_nfs_exports:
+  - path: "{{ nas_nfs_export }}"
+    networks: "{{ vm_data_nfs_export_net }}"

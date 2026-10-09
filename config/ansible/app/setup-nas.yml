@@ -17,6 +17,8 @@
     - ../vault/general.yml
   vars:
     samba_user: cluster
+    # Legacy CIFS share, kept hardcoded: NFS is the general path now and the
+    # CIFS side exists only to keep existing near1 consumers working.
     samba_share_name: near1
     samba_share_path: /near1
 
@@ -160,30 +162,34 @@
         state: present
         update_cache: yes
 
-    - name: Ensure NFS export directory exists
+    - name: Ensure NFS export directories exist
       file:
-        path: "{{ vm_data_nfs_export }}"
+        path: "{{ item.path }}"
         state: directory
         owner: "{{ vm_data_nfs_anon_uid }}"
         group: "{{ vm_data_nfs_anon_gid }}"
         mode: '0775'
+      loop: "{{ nas_nfs_exports }}"
 
-    - name: Own the VM-data subtree as uid/gid 1000 (NFS single-UID parity)
+    - name: Own the NFS export subtrees as uid/gid 1000 (NFS single-UID parity)
       file:
-        path: "{{ vm_data_nfs_export }}"
+        path: "{{ item.path }}"
         state: directory
         owner: "{{ vm_data_nfs_anon_uid }}"
         group: "{{ vm_data_nfs_anon_gid }}"
         recurse: yes
+      loop: "{{ nas_nfs_exports }}"
 
     - name: Configure NFS /etc/exports
       copy:
         dest: /etc/exports
         content: |
-          # VM passthrough data subtree — exported unconditionally for the
-          # Incus VM hosts. Single-UID squash mirrors the CIFS uid/gid=1000.
-          {% for net in vm_data_nfs_export_net %}
-          {{ vm_data_nfs_export }} {{ net }}(rw,sync,no_subtree_check,all_squash,anonuid={{ vm_data_nfs_anon_uid }},anongid={{ vm_data_nfs_anon_gid }})
+          # NAS exports — configured by setup-nas.yml. Single-UID squash
+          # mirrors the CIFS uid/gid=1000.
+          {% for export in nas_nfs_exports %}
+          {% for net in export.networks %}
+          {{ export.path }} {{ net }}(rw,sync,no_subtree_check,all_squash,anonuid={{ vm_data_nfs_anon_uid }},anongid={{ vm_data_nfs_anon_gid }})
+          {% endfor %}
           {% endfor %}
         mode: '0644'
       register: nfs_exports
