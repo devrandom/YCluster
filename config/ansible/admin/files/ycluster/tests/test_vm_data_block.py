@@ -22,6 +22,21 @@ def _happy_run(cmd, *args, **kwargs):
 
 
 class VMDataBlockTests(unittest.TestCase):
+    def setUp(self):
+        # Default: NAS reachable, no legacy data (fresh-VM shape). Tests
+        # exercising legacy shares override _legacy_share_has_data.
+        for target, value in (
+                ("_nas_reachable", True),
+                ("_legacy_share_has_data", False)):
+            patcher = mock.patch.object(vdb, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        # Fresh-image creation is mocked so orchestration tests don't touch
+        # the filesystem; its internals are covered by create/mkfs mocks.
+        patcher = mock.patch.object(vdb, "create_data_image")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_migration_size_uses_allocated_with_200gib_floor(self):
         self.assertEqual(vdb.migration_size_mib(0),
                          vdb.VM_DATA_MIN_BYTES // (1024 * 1024))
@@ -292,6 +307,9 @@ class VMDataBlockTests(unittest.TestCase):
                               return_value={"type": "virtual-machine"}),
             mock.patch.object(vm, "_instance_running", return_value=False),
             mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb, "_legacy_share_has_data",
+                              return_value=True),
             mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
             mock.patch.object(vdb, "migrate_vm_data_to_image",
                               side_effect=RuntimeError("no space")),
@@ -311,6 +329,9 @@ class VMDataBlockTests(unittest.TestCase):
                               return_value={"type": "virtual-machine"}),
             mock.patch.object(vm, "_instance_running", return_value=True),
             mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb.os.path, "isdir", return_value=True),
+            mock.patch.object(vdb, "_legacy_share_has_data",
+                              return_value=True),
             mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
             mock.patch.object(vdb, "migrate_vm_data_to_image",
                               side_effect=RuntimeError("no space")),
@@ -327,6 +348,8 @@ class VMDataBlockTests(unittest.TestCase):
             mock.patch.object(vm, "_instance_info",
                               return_value={"type": "virtual-machine"}),
             mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb, "_legacy_share_has_data",
+                              return_value=True),
             mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
             mock.patch.object(vdb, "migrate_vm_data_to_image") as migrate,
             mock.patch.object(vdb, "replace_data_device") as replace,
@@ -337,6 +360,24 @@ class VMDataBlockTests(unittest.TestCase):
         replace.assert_called_once_with(
             vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false",
             f"path={vdb.VM_DATA_GUEST_PATH}")
+
+    def test_fresh_image_creation_failure_attaches_nothing(self):
+        with (
+            mock.patch.object(vm, "_host_config_value", return_value=None),
+            mock.patch.object(vdb.subprocess, "run"),
+            mock.patch.object(vm, "_instance_info",
+                              return_value={"type": "virtual-machine"}),
+            mock.patch.object(vm, "_instance_running", return_value=False),
+            mock.patch.object(vdb.os.path, "exists", return_value=False),
+            mock.patch.object(vdb.os.path, "isdir", return_value=False),
+            mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
+            mock.patch.object(vdb, "create_data_image",
+                              side_effect=RuntimeError("no space")),
+            mock.patch.object(vdb, "replace_data_device") as replace,
+        ):
+            self.assertFalse(vm._ensure_nas_share("vm1", migrate=True))
+
+        replace.assert_not_called()
 
     def test_committed_image_attach_failure_fails_start(self):
         committed = {"image": False}
@@ -350,6 +391,8 @@ class VMDataBlockTests(unittest.TestCase):
             mock.patch.object(vm, "_instance_info",
                               return_value={"type": "virtual-machine"}),
             mock.patch.object(vdb.os.path, "exists", side_effect=exists),
+            mock.patch.object(vdb, "_legacy_share_has_data",
+                              return_value=True),
             mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
             mock.patch.object(vdb, "migrate_vm_data_to_image",
                               side_effect=lambda *a, **k:
@@ -441,11 +484,10 @@ class VMDataBlockTests(unittest.TestCase):
     def test_unreachable_nas_skips_attach(self):
         with (
             mock.patch.object(vm, "_host_config_value", return_value=None),
-            mock.patch.object(vdb.subprocess, "run") as run,
+            mock.patch.object(vdb, "_nas_reachable", return_value=False),
             mock.patch.object(vdb, "replace_data_device") as replace,
             mock.patch.object(vdb, "migrate_vm_data_to_image") as migrate,
         ):
-            run.side_effect = subprocess.TimeoutExpired(cmd="mkdir", timeout=10)
             vm._ensure_nas_share("vm1")
 
         migrate.assert_not_called()

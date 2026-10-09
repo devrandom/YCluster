@@ -547,6 +547,11 @@
           # Set vm_nas_share: false in host_vars for hosts without the NAS
           # mount — `vm launch/start` then skips the /data virtiofs attach.
           vm_nas_share: {{ vm_nas_share | default(true) | string | lower }}
+          # Per-host VM-data paths consumed by ycluster's vm tooling
+          # (vm_data_block). The tool's built-in defaults preserve the
+          # historical layout when these keys are absent.
+          vm_data_mount: "{{ vm_data_nfs_mount }}"
+          vm_data_host_base: "{{ vm_data_host_base | default(vm_data_nfs_export) }}"
           {% if vm_nat_transit_enabled | default(false) %}
           vm_transit_subnet: {{ vm_transit_subnet }}
           {% endif %}

@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from ..common.etcd_utils import get_etcd_client, reset_etcd_client
 from . import vm_data_block as vdb
 from . import vm_ip_pinning
+from .host_config import host_config_value as _host_config_value
 from .vm_ip_pinning import (BASTION_CONTAINER, VM_IP_POOL_END,
                             VM_IP_POOL_START, VM_IP_SUBNET_PREFIX,
                             _live_instance_ips, _live_ipv4, _managed_bridges,
@@ -88,14 +89,13 @@ CT_IMAGE = "ubuntu-rocm"               # default for containers: Ubuntu
                                        # use the plain upstream base.
 VM_GUEST_USER = "ubuntu"               # default user in the Ubuntu cloud image
 BASTION_JUMP_USER = "jump"
-HOST_CONFIG_PATH = "/etc/ycluster/host.yml"
 
-# NAS share: each instance gets a dedicated subdir under /near1/vm/<name>
-# on the host, attached as /data inside the guest. virtiofsd sandboxes the
-# export, so the guest cannot escape to sibling VMs' subdirs or to other
-# parts of /near1. All VMs still write to NAS as the same Samba user (the
-# host's CIFS mount pins uid=1000,gid=1000) — isolation is at the virtiofs
-# export boundary, not at NAS ACL level.
+# NAS share: each instance gets a dedicated subdir under the NAS VM-data base
+# (per-host, /etc/ycluster/host.yml -> vm_data_host_base) on the host, attached
+# as /data inside the guest. virtiofsd sandboxes the export, so the guest
+# cannot escape to sibling VMs' subdirs or to other parts of the NAS. All VMs
+# still write to the NAS as the same squashed uid/gid — isolation is at the
+# virtiofs export boundary, not at NAS ACL level.
 _VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")     # Incus instance names
 _USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")        # identifiers / emails
 
@@ -525,19 +525,6 @@ def _valid_user(name):
     if not _USER_RE.match(name):
         raise ValueError(f"Invalid user '{name}': allowed characters are "
                          f"letters, digits and . _ % + @ -")
-
-def _host_config_value(wanted):
-    """Read one key from HOST_CONFIG_PATH (written by install-incus.yml).
-    Line-based on purpose — no PyYAML dependency. None when absent."""
-    try:
-        with open(HOST_CONFIG_PATH) as f:
-            for line in f:
-                key, _, val = line.partition(":")
-                if key.strip() == wanted:
-                    return val.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return None
 
 def _default_instance_type():
     """Per-host default ('vm' or 'container') from HOST_CONFIG_PATH,

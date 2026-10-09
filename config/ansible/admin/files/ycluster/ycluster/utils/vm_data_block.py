@@ -14,8 +14,18 @@ import sys
 import tempfile
 from contextlib import contextmanager
 
-NAS_NFS_MOUNT = "/mnt/near1-vm"
-NAS_HOST_BASE = "/near1/vm"
+from .host_config import host_config_value
+
+
+def _host_path(key, default):
+    return host_config_value(key) or default
+
+
+# VM-data paths are per-host (written into host.yml by install-incus.yml) so
+# hosts can source VM data from any NAS export. Defaults preserve the
+# historical layout for hosts whose host.yml predates the keys.
+NAS_NFS_MOUNT = _host_path("vm_data_mount", "/mnt/near1-vm")
+NAS_HOST_BASE = _host_path("vm_data_host_base", "/near1/vm")
 # ext4, no partition table: resize2fs grows online and no growpart step is
 # needed. The floor leaves room for metadata and near-term guest growth.
 VM_DATA_MIN_BYTES = 200 * 1024 * 1024 * 1024
@@ -94,6 +104,61 @@ def _release_image_mount(loop_dev, mountpoint):
     if mountpoint:
         subprocess.run(["rmdir", mountpoint], check=False,
                        capture_output=True, text=True)
+
+
+def _legacy_share_has_data(host_dir):
+    """True when a legacy directory share exists with anything in it.
+
+    Uses the same abandon-on-timeout probe pattern as `_nas_reachable`:
+    the legacy base can live on a different mount from the image mount,
+    and a dead hard mount must never wedge `vm start`.
+    """
+    try:
+        proc = subprocess.Popen(["ls", "-A", "--", host_dir],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return False
+    try:
+        out, _ = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        return False
+    return proc.returncode == 0 and bool(out.strip())
+
+
+def create_data_image(name, image):
+    """Create an empty labelled ext4 data image at the 200 GiB floor.
+
+    Used for fresh VMs that have no legacy directory share to migrate.
+    The caller holds the per-VM data migration lock and ensures no image
+    exists yet; the VM must not be running. Built in a `.tmp` sibling and
+    atomically renamed so a mid-format failure never leaves a broken image
+    at the final path.
+    """
+    size_mib = VM_DATA_MIN_BYTES // (1024 * 1024)
+    st = os.statvfs(NAS_NFS_MOUNT)
+    free_bytes = st.f_bavail * st.f_frsize
+    if free_bytes < size_mib * 1024 * 1024:
+        raise RuntimeError(
+            f"NAS has {free_bytes // (1024**3)} GiB free; need "
+            f"{size_mib // 1024} GiB")
+    tmp = f"{image}.tmp"
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    try:
+        subprocess.run(["qemu-img", "create", "-f", "raw", tmp,
+                        f"{size_mib}M"], check=True, capture_output=True,
+                       text=True)
+        subprocess.run(["mkfs.ext4", "-F", "-L", "vmdata", tmp], check=True,
+                       capture_output=True, text=True)
+        os.replace(tmp, image)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def migrate_vm_data_to_image(name, image, *, is_running):
@@ -302,17 +367,46 @@ def grow_data_image_and_fs(image, new_bytes):
     return old_bytes
 
 
+def _nas_reachable():
+    """Probe the NAS mount without ever blocking on a dead hard mount.
+
+    A hard NFS mount can leave any accessor stuck in uninterruptible D-state
+    until the server returns. SIGKILL cannot break that, so we don't wait()
+    on the probe: poll for 10s and, if it hasn't exited, abandon the orphan
+    and report unreachable. The orphan stays a zombie until this (short-lived
+    CLI) process exits; init reaps it then, once the syscall returns.
+    """
+    try:
+        proc = subprocess.Popen(["ls", NAS_NFS_MOUNT],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    except OSError as e:
+        print(f"  NAS probe failed to start ({e.__class__.__name__}).",
+              file=sys.stderr)
+        return False
+    try:
+        rc = proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        print(f"  NAS {NAS_NFS_MOUNT} unreachable (probe timed out) — "
+              f"skipping /data attach.", file=sys.stderr)
+        return False
+    if rc != 0:
+        print(f"  NAS {NAS_NFS_MOUNT} unreachable (ls rc={rc}) — "
+              f"skipping /data attach.", file=sys.stderr)
+        return False
+    return True
+
+
 def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
                      instance_info, instance_running):
     """Attach the VM data disk for `name`.
 
     For VMs, an existing image (`<mount>/<name>.img`) is attached as
-    virtio-blk. With `migrate=True` and no image, the host-side migration
-    runs while the VM is stopped; any failure falls back to the legacy
-    directory share so the VM still boots (a VM that is already running
-    keeps its current device). With `migrate=False` a missing image just
-    attaches the legacy directory share — migration never happens
-    implicitly. Containers always keep the directory share.
+    virtio-blk. With no image and a non-empty legacy directory share,
+    migration is opt-in (`migrate=True`); with no image and no legacy data a
+    fresh block image is created directly. Containers always keep the
+    directory share. The legacy directory is only created when it is the
+    thing being attached or migrated — never for image-backed VMs.
 
     Returns True when migration ran in this call — the caller should run
     `ensure_guest_mount` after the first boot, since the guest needs a new
@@ -320,22 +414,20 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
     """
     if not share_enabled:
         return False
-    host_dir = f"{NAS_HOST_BASE}/{name}"
-    # `timeout` guards a hung CIFS automount: if the NAS is down, an
-    # access to /near1 can block forever on the systemd automount.
-    try:
-        subprocess.run(["mkdir", "-p", host_dir],
-                       check=True, timeout=10,
-                       stderr=subprocess.PIPE, text=True)
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-        msg = getattr(e, "stderr", "") or str(e)
-        print(f"  NAS /near1 unreachable — skipping /data attach on "
-              f"'{name}' ({msg.strip() or e.__class__.__name__}).",
-              file=sys.stderr)
+    if not _nas_reachable():
         return False
+    host_dir = f"{NAS_HOST_BASE}/{name}"
 
     inst = instance_info(name)
     if not (inst or {}).get("type") == "virtual-machine":
+        try:
+            subprocess.run(["mkdir", "-p", host_dir], check=True, timeout=10,
+                           capture_output=True, text=True)
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError,
+                OSError) as e:
+            print(f"  NAS {NAS_HOST_BASE} unreachable — skipping /data attach "
+                  f"on '{name}' ({e.__class__.__name__}).", file=sys.stderr)
+            return False
         replace_data_device(incus, name, host_dir, "required=false",
                             f"path={VM_DATA_GUEST_PATH}")
         return False
@@ -344,10 +436,15 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
     migrated = False
     try:
         with data_migration_lock(name):
-            if not os.path.exists(image):
+            if os.path.exists(image):
+                replace_data_device(incus, name, image, "io.cache=none",
+                                    "io.bus=virtio-blk", "required=true")
+                return migrated
+
+            if _legacy_share_has_data(host_dir):
                 if not migrate:
-                    # Migration is opt-in (`vm start --migrate`): attach
-                    # the legacy directory share instead.
+                    # Migration is opt-in (`vm start --migrate`) whenever a
+                    # real legacy share exists: never convert implicitly.
                     replace_data_device(incus, name, host_dir,
                                         "required=false",
                                         f"path={VM_DATA_GUEST_PATH}")
@@ -359,6 +456,12 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
                     is_running=lambda: instance_running(name))
                 migrated = True
                 print(f"  Data image for '{name}' is ready; attaching.")
+            else:
+                # Fresh VM: no legacy data to preserve, so create the
+                # image directly instead of a directory share.
+                print(f"  Creating block image for '{name}' data...")
+                create_data_image(name, image)
+                print(f"  Data image for '{name}' is ready; attaching.")
             replace_data_device(incus, name, image, "io.cache=none",
                                 "io.bus=virtio-blk", "required=true")
     except Exception as e:
@@ -368,7 +471,11 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
             raise
         print(f"  VM data migration skipped for '{name}': {e}",
               file=sys.stderr)
-        if not instance_running(name):
+        # Fall back to the legacy share only when it actually exists
+        # (a real migration attempt). A fresh VM whose image creation
+        # failed has no fallback — start without /data rather than
+        # attaching a nonexistent source.
+        if not instance_running(name) and os.path.isdir(host_dir):
             replace_data_device(incus, name, host_dir, "required=false",
                                 f"path={VM_DATA_GUEST_PATH}")
         return False

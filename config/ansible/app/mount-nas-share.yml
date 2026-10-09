@@ -363,6 +363,31 @@
         state: absent
       notify: reload systemd
 
+    - name: Compute the stale NAS mount unit names
+      command: "systemd-escape --path --suffix=mount {{ item }}"
+      loop: "{{ nas_nfs_stale_mounts | default([]) }}"
+      changed_when: false
+      register: nas_nfs_stale_units
+
+    - name: Disable stale NAS NFS mounts
+      systemd:
+        name: "{{ nas_nfs_stale_units.results[nas_nfs_stale_idx].stdout }}"
+        enabled: no
+        state: stopped
+      loop: "{{ nas_nfs_stale_mounts | default([]) }}"
+      loop_control:
+        index_var: nas_nfs_stale_idx
+      ignore_errors: true
+
+    - name: Remove stale NAS NFS mount units
+      file:
+        path: "/etc/systemd/system/{{ nas_nfs_stale_units.results[nas_nfs_stale_idx].stdout }}"
+        state: absent
+      loop: "{{ nas_nfs_stale_mounts | default([]) }}"
+      loop_control:
+        index_var: nas_nfs_stale_idx
+      notify: reload systemd
+
     - name: Create NAS NFS mount points
       file:
         path: "{{ item.mount_point }}"

@@ -133,6 +133,9 @@ nas_nfs_mounts:
     timeout_sec: 60
 nas_nfs_mounts_extra: []
 nas_nfs_mounts_effective: "{{ nas_nfs_mounts + nas_nfs_mounts_extra }}"
+# Mount points whose units should be removed (e.g. after moving a mount to a
+# new path). Each is stopped/disabled, then its unit file is deleted.
+nas_nfs_stale_mounts: []
 
 # Server-side NFS exports, configured by setup-nas.yml on each NAS host in
 # cluster inventory. The default preserves the historical /near1/vm VM-data
