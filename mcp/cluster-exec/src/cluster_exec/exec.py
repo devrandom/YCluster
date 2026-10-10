@@ -22,6 +22,7 @@ class _Backgrounded:
     readers: tuple[asyncio.Task, asyncio.Task]
     timeout_watcher: asyncio.Task | None = None
     orphaned: bool = False
+    finished_at: float | None = None
     # `principal` ties the session to the client that started it (the MCP
     # session ID from `mcp-session-id`). `list_backgrounded` filters by it
     # so the no-arg `status` listing only shows the caller's own runs.
@@ -148,8 +149,10 @@ def register_backgrounded(
     )
 
 
-def _drop_backgrounded(session_id: str) -> None:
-    _BACKGROUNDED.pop(session_id, None)
+def _mark_backgrounded_finished(session_id: str) -> None:
+    bg = _BACKGROUNDED.get(session_id)
+    if bg is not None and bg.finished_at is None:
+        bg.finished_at = time.monotonic()
 
 
 async def run(
@@ -265,12 +268,9 @@ async def run(
     )
 
     async def finalize_backgrounded() -> None:
-        # Drop the session so `status` no longer lists it, and cancel the
-        # leak-prone watchdogs (cancel_watcher waits on cancel forever if
-        # nothing sets it; progress_task emits MCP notifications every
-        # progress_interval_s even though the request stream is closed).
-        # Idempotent — safe to call from either timeout_watcher_fn branch.
-        _drop_backgrounded(session_id)
+        # Keep the session in the registry so `status` can still show its
+        # terminal state; `kill` (or a server restart) removes it.
+        _mark_backgrounded_finished(session_id)
         cancel.set()
         watcher_task.cancel()
         try:

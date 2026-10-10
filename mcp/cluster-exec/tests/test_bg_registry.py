@@ -177,7 +177,7 @@ class SessionByIDCrossPrincipalTests(unittest.TestCase):
     def tearDown(self):
         exec_mod._BACKGROUNDED.clear()
 
-    def _register(self, session_id: str, principal: str | None) -> None:
+    def _register(self, session_id: str, principal: str | None, proc: _StubProcess | None = None) -> None:
         async def setup():
             watcher = asyncio.create_task(asyncio.sleep(0))
             exec_mod.register_backgrounded(
@@ -186,7 +186,7 @@ class SessionByIDCrossPrincipalTests(unittest.TestCase):
                 command="cmd",
                 started=0.0,
                 timeout_s=1800.0,
-                proc=_stub_as_proc(_StubProcess()),
+                proc=_stub_as_proc(proc or _StubProcess()),
                 readers=(asyncio.create_task(asyncio.sleep(0)), asyncio.create_task(asyncio.sleep(0))),
                 timeout_watcher=watcher,
                 principal=principal,
@@ -216,6 +216,14 @@ class SessionByIDCrossPrincipalTests(unittest.TestCase):
         text = _run(server.status("statusB0001"))[0].text
         self.assertIn("statusB0001", text)
         self.assertIn("host=dummy", text)
+
+    def test_status_by_id_shows_finished_session(self):
+        proc = _StubProcess()
+        proc.returncode = 0
+        self._register("statusF0001", "thread-1", proc)
+        text = _run(server.status("statusF0001"))[0].text
+        self.assertIn("statusF0001", text)
+        self.assertIn("exited exit=0", text)
 
     def test_status_listing_is_scoped_to_own_thread(self):
         self._register("statusA0002", "thread-1")

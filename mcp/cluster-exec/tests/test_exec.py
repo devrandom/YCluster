@@ -629,12 +629,11 @@ class ExecTests(unittest.TestCase):
         self.assertNotIn("notify01", exec_mod.list_backgrounded())
         exec_mod._BACKGROUNDED.clear()
 
-    def test_bg_session_dropped_on_natural_exit(self):
+    def test_bg_session_retained_after_natural_exit(self):
         # After a soft auto-bg fires, the proc is registered as a
         # backgrounded session. When the SSH child exits on its own
-        # (before the hard timeout), the session must be dropped from
-        # `_BACKGROUNDED` so `status` doesn't list it as a stale
-        # `exited exit=0` entry.
+        # (before the hard timeout), keep the terminal state visible to
+        # `status` until the session is killed or the server restarts.
         proc = _FakeProcess(
             stdout_lines=[b"running\n"],
             stderr_lines=[],
@@ -664,12 +663,16 @@ class ExecTests(unittest.TestCase):
             # Wait long enough for the proc to exit naturally and the
             # timeout_watcher to observe it and finalize the session.
             await asyncio.sleep(1.0)
-            self.assertNotIn("natex01", exec_mod.list_backgrounded())
+            self.assertIn("natex01", exec_mod.list_backgrounded())
+            bg = exec_mod.get_backgrounded("natex01")
+            self.assertIsNotNone(bg)
+            self.assertIsNotNone(bg.finished_at)
+            self.assertIsNotNone(bg.proc.returncode)
 
         asyncio.run(runner())
         exec_mod._BACKGROUNDED.clear()
 
-    def test_orphan_session_dropped_on_natural_exit(self):
+    def test_orphan_session_retained_after_natural_exit(self):
         # Same as above but for the orphan-on-disconnect path.
         proc = _FakeProcess(
             stdout_lines=[b"hello\n"],
@@ -701,9 +704,13 @@ class ExecTests(unittest.TestCase):
                     )
             self.assertIn("orphnx01", exec_mod.list_backgrounded())
             # Wait for the proc to exit and the timeout_watcher to
-            # observe it.
+            # observe it; the terminal state remains available to status.
             await asyncio.sleep(1.0)
-            self.assertNotIn("orphnx01", exec_mod.list_backgrounded())
+            self.assertIn("orphnx01", exec_mod.list_backgrounded())
+            bg = exec_mod.get_backgrounded("orphnx01")
+            self.assertIsNotNone(bg)
+            self.assertIsNotNone(bg.finished_at)
+            self.assertIsNotNone(bg.proc.returncode)
 
         asyncio.run(runner())
         exec_mod._BACKGROUNDED.clear()

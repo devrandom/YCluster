@@ -50,7 +50,7 @@ Exposes six tools:
 
 - **`tail`** — render the tail of the JSONL log (see [Logging](#logging)) as a human-readable transcript. Takes `tail_lines` (default 50) and an optional `session` filter. Useful for inspecting what just ran, recovering output that was truncated in a `run` result, or watching a backgrounded session.
 
-- **`status`** — list or inspect backgrounded runs **owned by the caller's MCP session** (filtered by the caller's `_meta.threadId`, falling back to the `mcp-session-id` header). With no argument, lists all active sessions (session_id, target_host, command, elapsed, line count, hard-timeout countdown). With a `session_id`, shows detailed state for that session including whether the process is still running or has exited. Other clients' sessions are not enumerable — the bearer token alone authenticates the connection, but per-client visibility is scoped by the caller's stable identifier.
+- **`status`** — list or inspect backgrounded runs **owned by the caller's MCP session** (filtered by the caller's `_meta.threadId`, falling back to the `mcp-session-id` header). With no argument, lists all sessions (session_id, target_host, command, elapsed, line count, hard-timeout countdown), including completed runs that haven't been removed. With a `session_id`, shows detailed state for that session including whether the process is still running or has exited. Other clients' sessions are not enumerable — the bearer token alone authenticates the connection, but per-client visibility is scoped by the caller's stable identifier.
 
 - **`kill`** — terminate a backgrounded run by `session_id`. Only kills sessions owned by the caller's MCP session; attempts on other clients' sessions return `ERROR: session not found`. SIGTERM, then SIGKILL after 2s. Returns how many lines of output were captured before the kill.
 
@@ -153,11 +153,11 @@ Long-running commands auto-background after `auto_bg_after_s`. They keep executi
 ```text
 run    → returns "BACKGROUNDED session=abcd1234 after 30.0s"
 tail   → render the latest transcript (pass session=abcd1234 to filter)
-status → see all active sessions, with elapsed time and hard-timeout countdown
+status → see all sessions (running and exited), with elapsed time and hard-timeout countdown
 kill   → terminate by session_id
 ```
 
-Backgrounded runs are still subject to `timeout_s` (the hard timeout). The `timeout_watcher` is registered when a run backgrounds; when it fires, the proc + readers are terminated and the session is removed from the registry.
+Backgrounded runs are still subject to `timeout_s` (the hard timeout). The `timeout_watcher` is registered when a run backgrounds; when it fires, the proc + readers are terminated and the session is marked exited in the registry.
 
 ## Ansible
 

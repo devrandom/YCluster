@@ -671,7 +671,7 @@ async def kill(
         return [
             TextContent(
                 type="text",
-                text=f"ERROR: session {session_id!r} not found (already finished, killed, or never existed)",
+                text=f"ERROR: session {session_id!r} not found (killed or never existed)",
             )
         ]
     started = bg.started
@@ -710,8 +710,9 @@ def _session_state(bg, log_path: Path) -> str:
     name="status",
     description=(
         "Report the state of backgrounded runs. With no argument, lists the "
-        "active sessions owned by the caller's thread (filtered by "
-        "`_meta.threadId`, falling back to `mcp-session-id`). With a "
+        "sessions owned by the caller's thread (filtered by "
+        "`_meta.threadId`, falling back to `mcp-session-id`), including "
+        "sessions that have finished but not yet been removed. With a "
         "`session_id` it reports any run on this server \u2014 including one "
         "started by another thread/agent that handed you the id \u2014 showing "
         "whether the process is still running or has exited, line count so "
@@ -739,7 +740,7 @@ async def status(
             return [
                 TextContent(
                     type="text",
-                    text=f"ERROR: session {session_id!r} not found (already finished, killed, or never existed)",
+                    text=f"ERROR: session {session_id!r} not found (killed or never existed)",
                 )
             ]
         text = (
