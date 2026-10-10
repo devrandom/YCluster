@@ -508,6 +508,49 @@ class VMDataBlockTests(unittest.TestCase):
             vm._incus, "vm1", f"{vdb.NAS_HOST_BASE}/vm1", "required=false",
             f"path={vdb.VM_DATA_GUEST_PATH}")
 
+    def test_guest_mount_after_boot_retries_transient_failure(self):
+        calls = {"mount": 0}
+        clock = {"now": 0.0}
+
+        def fake_ensure(incus, name):
+            calls["mount"] += 1
+            if calls["mount"] < 3:
+                raise RuntimeError("agent not ready")
+        with (
+            mock.patch.object(vdb.time, "sleep") as sleep,
+            mock.patch.object(vdb.time, "time",
+                              side_effect=lambda: clock["now"]),
+            mock.patch.object(vdb, "ensure_guest_mount",
+                              side_effect=fake_ensure),
+        ):
+            # Advance the fake clock on each sleep call.
+            def fake_sleep(_):
+                clock["now"] += 5
+            sleep.side_effect = fake_sleep
+            vdb.guest_mount_after_boot(
+                None, "vm1",
+                wait_agent=lambda name, timeout: None,
+                agent_timeout=10)
+        self.assertEqual(calls["mount"], 3)
+
+    def test_guest_mount_after_boot_warns_after_deadline(self):
+        clock = {"now": 0.0}
+
+        def fake_sleep(_):
+            clock["now"] += 5
+        with (
+            mock.patch.object(vdb.time, "sleep", side_effect=fake_sleep),
+            mock.patch.object(vdb.time, "time",
+                              side_effect=lambda: clock["now"]),
+            mock.patch.object(vdb, "ensure_guest_mount",
+                              side_effect=RuntimeError("no agent")),
+        ):
+            # Must not raise — the warning path is the contract.
+            vdb.guest_mount_after_boot(
+                None, "vm1",
+                wait_agent=lambda name, timeout: None,
+                agent_timeout=10)
+
 
 if __name__ == "__main__":
     unittest.main()

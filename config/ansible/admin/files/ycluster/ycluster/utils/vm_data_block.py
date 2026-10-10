@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 
 from .host_config import host_config_value
@@ -301,11 +302,26 @@ def migration_note(image_exists, legacy_dir_exists):
 def guest_mount_after_boot(incus, name, wait_agent, agent_timeout):
     """Wait for the agent, then fstab+mount /data; warn (don't raise) on
     failure — the VM itself started fine, and `vm_resize_data` re-runs
-    `ensure_guest_mount` as a self-heal."""
+    `ensure_guest_mount` as a self-heal.
+
+    The mount is retried with a short backoff: right after the agent comes
+    up the guest can still reject execs while services initialize, and a
+    single failure would leave /data unmounted until the next boot.
+    """
     try:
         print(f"  Waiting for '{name}' agent to configure /data...")
         wait_agent(name, agent_timeout)
-        ensure_guest_mount(incus, name)
+        deadline = time.time() + 30
+        while True:
+            try:
+                ensure_guest_mount(incus, name)
+                break
+            except Exception as e:
+                if time.time() >= deadline:
+                    raise
+                print(f"  /data mount failed ({e}); retrying...", 
+                      file=sys.stderr)
+                time.sleep(5)
         print(f"  /data in '{name}' now comes from the block image.")
     except Exception as e:
         print(f"  WARNING: /data mount setup failed for '{name}': {e}",
