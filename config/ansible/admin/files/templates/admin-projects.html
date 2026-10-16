@@ -50,15 +50,17 @@
       <label>ID <input type="text" x-model="newProject.id" placeholder="acme-demo" required></label>
       <label>Name <input type="text" x-model="newProject.name" required></label>
       <label>IdP project
-        <select x-model="newProject.idp_project">
-          <template x-if="isAdmin"><option value="">(admin-only)</option></template>
-          <template x-for="p in idpProjects" :key="p"><option :value="p" x-text="p"></option></template>
-        </select>
+        <input type="text" x-model="newProject.idp_project" list="idp-project-options"
+               placeholder="(empty = admin-only)">
       </label>
       <label>Description <textarea x-model="newProject.description" rows="3"></textarea></label>
       <button>Create</button>
     </form>
   </div>
+
+  <datalist id="idp-project-options">
+    <template x-for="p in idpProjects" :key="p"><option :value="p"></option></template>
+  </datalist>
 
   <div class="card" x-show="canManage && showImport" style="margin-top: 0.75rem;">
     <form @submit.prevent="importCsv" class="grid">
@@ -72,11 +74,21 @@
   <div class="card">
     <form @submit.prevent="false" class="grid">
       <label>Filter <input type="text" x-model="filter" placeholder="searches ID, name, description (min 2 chars)"></label>
+      <label>View
+        <select x-model="viewMode">
+          <option value="detailed">Detailed</option>
+          <option value="compact">Compact</option>
+        </select>
+      </label>
+      <label style="display:flex; align-items:center; gap:0.4rem;">
+        <input type="checkbox" x-model="quotaOnly" style="width:auto; margin-top:0;">
+        Has quotas
+      </label>
     </form>
     <template x-if="filter && filter.length < 2"><p class="muted">Type at least 2 characters to filter.</p></template>
   </div>
   <template x-if="loading"><p class="muted">Loading…</p></template>
-  <div id="project-list">
+  <div id="project-list" x-show="viewMode === 'detailed'">
     <template x-if="!loading && filteredProjects().length === 0"><p class="muted">No matching projects</p></template>
     <template x-for="p in filteredProjects()" :key="p.id">
     <div class="card">
@@ -96,10 +108,8 @@
             <form @submit.prevent="act('/admin/projects/update', p.id, editForm, 'Project updated')" class="grid">
               <label>Name <input type="text" x-model="editForm.name" required></label>
               <label>IdP project
-                <select x-model="editForm.idp_project">
-                  <template x-if="isAdmin"><option value="">(admin-only)</option></template>
-                  <template x-for="p in idpProjectsWith(editForm.idp_project)" :key="p"><option :value="p" x-text="p"></option></template>
-                </select>
+                <input type="text" x-model="editForm.idp_project" list="idp-project-options"
+                       placeholder="(empty = admin-only)">
               </label>
               <label>Description <textarea x-model="editForm.description" rows="3"></textarea></label>
               <button>Save</button>
@@ -166,14 +176,38 @@
   </template>
   </div>
 
+  <template x-if="viewMode === 'compact'">
+    <div class="card">
+      <table>
+        <thead><tr><th>Project</th><th>IdP project</th><th>Quotas</th></tr></thead>
+        <tbody>
+          <template x-for="p in filteredProjects()" :key="p.id">
+            <tr>
+              <td><strong x-text="p.name"></strong> <span class="muted" x-text="p.id"></span></td>
+              <td x-text="p.idp_project || '—'"></td>
+              <td>
+                <template x-for="q in p.quotas" :key="q.quota_type + ':' + q.quota_id">
+                  <div x-text="q.quota_type + ' / ' + q.quota_id + ': ' + q.value"></div>
+                </template>
+                <span class="muted" x-show="p.quotas.length === 0">No quotas</span>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!loading && filteredProjects().length === 0"><td colspan="3" class="muted">No matching projects</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </template>
+
 <script>
 function projectsApp() {
   return {
     loading: true, error: '', result: '', projects: [], users: [],
     filter: '', isAdmin: false, canManage: false, idpProjects: [],
+    viewMode: 'compact', quotaOnly: false,
     expanded: new Set(), selectedFile: null,
     showCreate: false, showImport: false,
-    newProject: {id: '', name: '', description: ''},
+    newProject: {id: '', name: '', description: '', idp_project: ''},
     memberForm: {uid: '', email: '', is_default: false},
     editForm: {name: '', description: ''},
     quotaForm: {quota_type: 'gpu-hours', quota_id: '', value: 0, _editing: false, _project: null},
@@ -198,9 +232,11 @@ function projectsApp() {
       }
     },
     filteredProjects() {
+      let list = this.projects
+      if (this.quotaOnly) list = list.filter(p => (p.quotas || []).length > 0)
       const needle = (this.filter || '').trim().toLowerCase()
-      if (needle.length < 2) return this.projects
-      return this.projects.filter(p =>
+      if (needle.length < 2) return list
+      return list.filter(p =>
         (p.id || '').toLowerCase().includes(needle) ||
         (p.name || '').toLowerCase().includes(needle) ||
         (p.description || '').toLowerCase().includes(needle))
@@ -208,13 +244,6 @@ function projectsApp() {
     usernameFor(uid, fallback) {
       const u = this.users.find(u => u.uid === String(uid))
       return (u && (u.username || u.email)) || fallback || uid
-    },
-    idpProjectsWith(extra) {
-      // Ensure the current value is selectable even if it is no longer in
-      // the known IdP-project list (e.g. renamed after assignment).
-      const set = new Set(this.idpProjects)
-      if (extra) set.add(extra)
-      return Array.from(set).sort()
     },
     saveQuota(p) {
       this.act('/admin/projects/quotas/upsert', p.id, {...this.quotaForm}, this.quotaForm._editing ? 'Quota updated' : 'Quota inserted')
