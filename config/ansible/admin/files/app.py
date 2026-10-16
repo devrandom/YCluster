@@ -2764,6 +2764,17 @@ def users_data():
 def users_action():
     id = _authentik_identity()
     if not id.is_manager:
+        try:
+            app.logger.info('admin-user-audit %s', json.dumps({
+                'action': 'unauthorized',
+                'target': '',
+                'actor_uid': id.uid,
+                'actor_email': id.email,
+                'remote_addr': request.remote_addr,
+                'status': '403',
+            }))
+        except Exception:
+            app.logger.exception('admin-user-audit failed')
         return jsonify({'error': 'admin only'}), 403
     from app_users import (admin_user_action, authorized_projects,
                            edit_user, invite_user, recovery_user)
@@ -2773,6 +2784,20 @@ def users_action():
     email = (data.get('email') or '').strip()
     if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
         return jsonify({'error': 'invalid email'}), 400
+
+    def _audit(status):
+        try:
+            app.logger.info('admin-user-audit %s', json.dumps({
+                'action': action,
+                'target': email,
+                'actor_uid': id.uid,
+                'actor_email': id.email,
+                'remote_addr': request.remote_addr,
+                'status': status,
+            }))
+        except Exception:
+            app.logger.exception('admin-user-audit failed')
+
     admin = id.is_admin
     try:
         projects = authorized_projects(id, admin, authentik_manager)
@@ -2794,8 +2819,10 @@ def users_action():
                 email, data, projects, authentik_manager, admin=admin)
         else:
             payload, status = {'error': 'unknown action'}, 400
+        _audit(status if status else (payload or {}).get('error') or 'ok')
         return jsonify(payload), status
     except Exception as e:
+        _audit(f'exception: {e}')
         return jsonify({'error': str(e)}), 400
 
 
