@@ -63,7 +63,8 @@ Users → edit).
 | `/admin/vm-schedule/set mode=unmanaged` (admin escape hatch) | yes | **403** | 403 |
 | `/admin/users` (roster + invitations) | yes | roster + invites for **authorized projects only** | 403 |
 | `/admin/users/action` (invite / reset / edit notes) | yes | **authorized-projects only** | 403 |
-| `/admin/users/action` (role changes, enable/disable, revoke invite) | yes | **403** | 403 |
+| `/admin/users/action` (enable/disable) | yes | **authorized-projects only** | 403 |
+| `/admin/users/action` (role changes, revoke invite) | yes | **403** | 403 |
 | `/api/inventory/asset/<host>` PUT/POST | yes | **403** | 403 |
 | `/admin/settings` (own SSH keys for VM access) | self | self | self |
 
@@ -104,12 +105,12 @@ With projects authorized, on `/admin/users` a manager can:
   the enrolled account are tagged with that project; a manager cannot make
   untagged invites).
 - **Issue a password (re)set link** for a user in an authorized project.
+- **Enable/disable** a user in an authorized project.
 - See **outstanding invitations** only for their authorized projects.
 
 Everything else on the users page stays admin-only: making/revoking
-admin or manager, enable/disable, editing name/project, and revoking
-invitations. The backend enforces these checks regardless of what the UI
-shows.
+admin or manager, editing name/project, and revoking invitations. The
+backend enforces these checks regardless of what the UI shows.
 
 ## Granting / revoking roles
 

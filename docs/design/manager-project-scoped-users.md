@@ -13,7 +13,8 @@ the Users page (`/admin/users`):
 3. See **outstanding invitations** only for projects they're authorized for.
 
 Everything else stays admin-only: role changes (make/revoke admin or
-manager), enable/disable, name/project editing, and revoking invitations.
+manager), name/project editing, and revoking invitations. (Enable/disable
+was later made project-scoped as well.)
 
 ## Data model
 
@@ -46,8 +47,9 @@ manager's `manager_projects` list and `user.project_name` (or
 | Edit Notes field | any user | **only users whose `project_name` is in their `manager_projects`** |
 | Invite | any (project optional) | **only into a project in `manager_projects`** (project required) |
 | Password (re)set link | any user | **only users whose `project_name` is in `manager_projects`** |
+| Enable/disable | any user | **only users whose `project_name` is in `manager_projects`** |
 | See outstanding invites | all | **only invites tagged with a project in `manager_projects`** |
-| Revoke invite / role changes / enable / disable / edit name+project | yes | 403 (unchanged) |
+| Revoke invite / role changes / edit name+project | yes | 403 (unchanged) |
 
 A manager with no `manager_projects` gets no invite form, no
 reset/edit affordances, and an empty invitations table — the "default to
@@ -80,8 +82,9 @@ backend is the gate):
   (project-optional) path.
 - `recovery`: managers only when target user's `project_name` ∈
   `manager_projects`. Admins unchanged.
-- `uninvite`, `admin_*`, `manager_*`, `activate`, `deactivate`: still
-  `is_admin`-only.
+- `activate` / `deactivate`: managers only when target user's
+  `project_name` ∈ `manager_projects`. Admins unchanged.
+- `uninvite`, `admin_*`, `manager_*`: still `is_admin`-only.
 
 **Enrollment blueprint** (`authentik-blueprint-enrollment.yaml`) — so an
 invited user actually lands in their project, extend the `user-write` stage
@@ -97,8 +100,9 @@ friction — see Decisions.)
   project `<select>` populated from `manager_projects`; required; the whole
   form is hidden when the list is empty.
 - **Row action menu**: admins get the full menu. Managers get a reduced
-  menu with only "Edit notes…" and "Reset link", each only presented when
-  the row's user is in an authorized project (server still enforces).
+  menu with "Edit notes…", "Reset link", and "Enable"/"Disable", each only
+  presented when the row's user is in an authorized project (server still
+  enforces).
 - **Edit modal**: for managers, render only the *Notes* textarea
   (email/name/project read-only or hidden); admins keep the current full
   form.

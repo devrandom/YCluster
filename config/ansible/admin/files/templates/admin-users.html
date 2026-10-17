@@ -145,7 +145,10 @@
                   <li x-show="isAdmin"><button type="button" class="menu-item"
                       @click="open=false; act(u.is_manager ? 'manager_remove' : 'manager_add', u.email, {}, '')"
                       x-text="u.is_manager ? 'Revoke manager' : 'Make manager'"></button></li>
-                  <li x-show="isAdmin"><button type="button" class="menu-item"
+                  <!-- Enable/disable are project-scoped for managers; role
+                       changes remain admin-only. x-show on a manager roster
+                       row already means the row is authorized. -->
+                  <li><button type="button" class="menu-item"
                       @click="open=false; act(u.active ? 'deactivate' : 'activate', u.email, {}, '')"
                       x-text="u.active ? 'Disable' : 'Enable'"></button></li>
                 </ul>

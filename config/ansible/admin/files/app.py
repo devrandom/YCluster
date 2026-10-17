@@ -2777,7 +2777,8 @@ def users_action():
             app.logger.exception('admin-user-audit failed')
         return jsonify({'error': 'admin only'}), 403
     from app_users import (admin_user_action, authorized_projects,
-                           edit_user, invite_user, recovery_user)
+                           edit_user, invite_user, recovery_user,
+                           set_active_user)
     from ycluster.utils import authentik_manager
     data = request.get_json(silent=True) or {}
     action = data.get('action')
@@ -2802,12 +2803,15 @@ def users_action():
     try:
         projects = authorized_projects(id, admin, authentik_manager)
         if action in ('uninvite', 'admin_add', 'admin_remove',
-                      'manager_add', 'manager_remove', 'activate',
-                      'deactivate'):
+                      'manager_add', 'manager_remove'):
             if not admin:
                 return jsonify({'error': 'admin only'}), 403
             payload, status = admin_user_action(
                 action, email, authentik_manager)
+        elif action in ('activate', 'deactivate'):
+            payload, status = set_active_user(
+                email, action == 'activate', projects, authentik_manager,
+                admin=admin)
         elif action == 'invite':
             payload, status = invite_user(
                 email, data, projects, authentik_manager, admin=admin)

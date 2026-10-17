@@ -48,6 +48,14 @@ def recovery_user(email, projects, authentik_manager, admin=False):
     return {'ok': True, 'url': authentik_manager.recovery_link(email)}, None
 
 
+def set_active_user(email, active, projects, authentik_manager, admin=False):
+    """Activate or deactivate an account after manager project check."""
+    if not admin and (authentik_manager.user_project(email) or '') not in projects:
+        return {'error': 'not authorized for this user'}, 403
+    return admin_user_action(
+        'activate' if active else 'deactivate', email, authentik_manager)
+
+
 def edit_user(email, data, projects, authentik_manager, admin=False):
     """Edit an account, limiting managers to the Notes field."""
     if not admin and (authentik_manager.user_project(email) or '') not in projects:

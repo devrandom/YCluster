@@ -1261,18 +1261,43 @@ class ManagerRoleTests(SchedTestBase):
         self.assertEqual(d["invitations"][0]["project_name"], "demo")
 
     def test_manager_still_403_on_admin_only_actions(self):
-        # Role changes, enable/disable, and invitation revocation stay
-        # admin-only even for managers with authorized projects.
+        # Role changes and invitation revocation stay admin-only even for
+        # managers with authorized projects.
         from ycluster.utils import authentik_manager as am
         am.manager_projects = lambda email: ["demo"]
         for action in ('uninvite', 'admin_add', 'admin_remove',
-                       'manager_add', 'manager_remove', 'activate',
-                       'deactivate'):
+                       'manager_add', 'manager_remove'):
             r = self.post("/admin/users/action",
                           {"action": action, "email": "bob@x.org"},
                           manager=True, email="carol@x")
             self.assertEqual(r.status_code, 403,
                              f"action {action!r} should be 403 for manager")
+
+    def test_manager_can_activate_and_deactivate_authorized_user(self):
+        from ycluster.utils import authentik_manager as am
+        calls = []
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "demo"
+        am.set_active = lambda email, active: (
+            calls.append((email, active)) or f"active {email}")
+        for action, active in (("deactivate", False), ("activate", True)):
+            r = self.post("/admin/users/action",
+                          {"action": action, "email": "bob@x.org"},
+                          manager=True, email="carol@x")
+            self.assertEqual(r.status_code, 200)
+        self.assertEqual(calls, [("bob@x.org", False), ("bob@x.org", True)])
+
+    def test_manager_cannot_activate_or_deactivate_outside_project(self):
+        from ycluster.utils import authentik_manager as am
+        am.manager_projects = lambda email: ["demo"]
+        am.user_project = lambda email: "other"
+        am.set_active = lambda *a, **k: (
+            (_ for _ in ()).throw(AssertionError("set_active must not run")))
+        for action in ("deactivate", "activate"):
+            r = self.post("/admin/users/action",
+                          {"action": action, "email": "bob@x.org"},
+                          manager=True, email="carol@x")
+            self.assertEqual(r.status_code, 403)
 
     def test_admin_can_invite_with_optional_project(self):
         # Admins keep the existing invite path: project is optional and
