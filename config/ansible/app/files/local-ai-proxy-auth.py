@@ -39,6 +39,7 @@ from ycluster.common.apikeys import (
     KEYS_SUFFIX,
     USERS_PREFIX,
     _TOKEN_PREFIX,
+    token_digest,
 )
 from ycluster.common.etcd_utils import get_etcd_client
 
@@ -68,19 +69,22 @@ class UserStore:
 
     Loaded once and refreshed on etcd watch events (hot-reload over the
     /cluster/users/ prefix) so per-request auth does no etcd round-trip.
-    Only argon2id *hashes* are held in memory — never plaintext tokens.
+    Only argon2id *hashes* and sha256 *digests* are held in memory — never
+    plaintext tokens.
     """
 
     def __init__(self, client, hasher=None):
         self._client = client
         self._hasher = hasher or PasswordHasher()
         self._lock = threading.RLock()
-        self._keys = {}    # email -> {key_id: hash}
-        self._groups = {}  # email -> [group names]
+        self._keys = {}     # email -> {key_id: argon2 hash}
+        self._digests = {}  # email -> {key_id: sha256(token) or None (legacy)}
+        self._groups = {}   # email -> [group names]
         self.reload()
 
     def reload(self):
         keys = {}
+        digests = {}
         groups = {}
         try:
             for val, meta in self._client.get_prefix(USERS_PREFIX):
@@ -95,11 +99,16 @@ class UserStore:
                     except (ValueError, TypeError):
                         continue
                 elif tail.startswith(KEYS_SUFFIX.lstrip("/")):
-                    key_id = tail[len(KEYS_SUFFIX):]
+                    # tail is "keys/<key_id>": KEYS_SUFFIX carries a leading
+                    # slash that partition() already consumed, so measure the
+                    # stripped prefix (using len(KEYS_SUFFIX) here silently
+                    # drops the first character of every key id).
+                    key_id = tail[len(KEYS_SUFFIX.lstrip("/")):]
                     if key_id and "/" not in key_id:
                         try:
                             data = json.loads(val.decode())
                             keys.setdefault(email, {})[key_id] = data.get("hash")
+                            digests.setdefault(email, {})[key_id] = data.get("digest")
                         except (ValueError, TypeError):
                             continue
         except Exception as e:
@@ -108,6 +117,7 @@ class UserStore:
             return
         with self._lock:
             self._keys = keys
+            self._digests = digests
             self._groups = groups
 
     def start_watch(self):
@@ -127,24 +137,59 @@ class UserStore:
         t.start()
 
     def auth_user(self, token):
-        """Return (email, groups) if `token` matches a stored hash, else None."""
+        """Return (email, groups) if `token` matches a stored hash, else None.
+
+        Digest-indexed lookup first (sha256(token) -> one candidate record,
+        then a single argon2 verify); legacy digest-less records still
+        require an argon2 scan and are backfilled on first success."""
         if not token or not token.startswith(_TOKEN_PREFIX):
             return None
+        digest = token_digest(token)
         with self._lock:
-            for email, recs in self._keys.items():
-                for _key_id, h in recs.items():
-                    try:
-                        if self._hasher.verify(h, token):
-                            return email, list(self._groups.get(email, []))
-                    # Catch base names that exist across argon2 versions: on
-                    # Ubuntu's apt python3-argon2 (21.1.0) the names are
-                    # VerificationError + InvalidHash (no InvalidHashError),
-                    # while newer releases alias InvalidHash as
-                    # InvalidHashError. VerificationError covers the
-                    # VerifyMismatchError subclass on both.
-                    except (exceptions.InvalidHash, exceptions.VerificationError):
+            for email, recs in self._digests.items():
+                for key_id, d in recs.items():
+                    if d != digest:
                         continue
+                    if self._verify(self._keys[email][key_id], token):
+                        return email, list(self._groups.get(email, []))
+            for email, recs in self._keys.items():
+                for key_id, h in recs.items():
+                    if self._digests.get(email, {}).get(key_id):
+                        continue
+                    if self._verify(h, token):
+                        self._backfill_digest(email, key_id, token)
+                        return email, list(self._groups.get(email, []))
         return None
+
+    def _verify(self, stored_hash, token):
+        try:
+            return self._hasher.verify(stored_hash, token)
+        # Catch base names that exist across argon2 versions: on
+        # Ubuntu's apt python3-argon2 (21.1.0) the names are
+        # VerificationError + InvalidHash (no InvalidHashError),
+        # while newer releases alias InvalidHash as
+        # InvalidHashError. VerificationError covers the
+        # VerifyMismatchError subclass on both.
+        except (exceptions.InvalidHash, exceptions.VerificationError):
+            return False
+
+    def _backfill_digest(self, email, key_id, token):
+        """Persist sha256(token) into a legacy record so future auths skip
+        the argon2 scan. Best-effort: failure only costs performance."""
+        try:
+            path = USERS_PREFIX + email + KEYS_SUFFIX + key_id
+            val, _ = self._client.get(path)
+            if val is None:
+                return
+            data = json.loads(val.decode())
+            if data.get("digest"):
+                self._digests.setdefault(email, {})[key_id] = data["digest"]
+                return
+            data["digest"] = token_digest(token)
+            self._client.put(path, json.dumps(data))
+            self._digests.setdefault(email, {})[key_id] = data["digest"]
+        except Exception as e:
+            log.warning("digest backfill for %s/%s failed: %s", email, key_id, e)
 
 
 def get_store():

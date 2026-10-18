@@ -9,9 +9,18 @@ hashed (argon2id, per-key salt); the plaintext exists only transiently
 etcd layout (the existing SSH-key blob is left untouched):
   /cluster/users/<email>               -> {"ssh_keys": [...]}        # existing
   /cluster/users/<email>/groups        -> ["group-a", "admin"]        # new
-  /cluster/users/<email>/keys/<key-id> -> {"hash","created_at","label"}
+  /cluster/users/<email>/keys/<key-id> -> {"hash","digest","created_at","label"}
+
+`hash` is the argon2id verification hash (per-key salt). `digest` is
+sha256(plaintext) — an unsalted, non-secret lookup index. The plaintext
+tokens are 256-bit random secrets, so a stolen digest reveals nothing
+that isn't already guessable by brute-forcing the token itself; that
+makes the fast digest safe as a lookup handle where it would not be for
+passwords. Legacy records created before the digest field exist have no
+`digest`; validate_key() backfills it on first successful verification.
 """
 
+import hashlib
 import json
 import re
 import secrets
@@ -29,6 +38,15 @@ KEYS_SUFFIX = "/keys/"
 _USER_RE = re.compile(r"^[A-Za-z0-9._%+@-]{1,128}$")
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9-]+$")
 _TOKEN_PREFIX = "sk-"
+
+
+def token_digest(token):
+    """Unsalted sha256 hex digest of a plaintext token — lookup index only.
+
+    Safe to index on because minted tokens are 256-bit random secrets
+    (secrets.token_urlsafe(32)); see module docstring. Do NOT use this for
+    low-entropy secrets."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _get(key):
@@ -78,6 +96,7 @@ def create_key(owner, groups=None, label=None, hasher=None):
     key_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     rec = {"hash": hasher.hash(secret),
+           "digest": token_digest(secret),
            "created_at": now,
            "label": label or ""}
     _put(USERS_PREFIX + owner + KEYS_SUFFIX + key_id, rec)
@@ -127,37 +146,78 @@ def revoke_key(key_id):
 def validate_key(presented, hasher=None):
     """Return (email, groups) authenticating the presented token, or None.
 
-    Iterates every stored key record and argon2-verifies the presented
-    secret against each hash — intentionally not a plaintext lookup."""
+    First tries a single-record lookup via the stored sha256 token digest;
+    only records without a digest (legacy) fall back to an argon2 scan of
+    every stored hash. A legacy record that verifies gains its digest in
+    etcd, so the scan cost is paid at most once per legacy key."""
     if not presented or not presented.startswith(_TOKEN_PREFIX):
         return None
     hasher = hasher or PasswordHasher()
     client = get_etcd_client()
+    digest = token_digest(presented)
+    legacy = []  # (path, hash, email) for records still missing a digest
     for owner in _owners():
         prefix = USERS_PREFIX + owner + KEYS_SUFFIX
-        for val, _meta in client.get_prefix(prefix):
+        for val, meta in client.get_prefix(prefix):
             data = json.loads(val.decode())
-            try:
-                if hasher.verify(data["hash"], presented):
+            path = meta.key.decode()
+            if data.get("digest"):
+                if data["digest"] == digest:
+                    try:
+                        hasher.verify(data["hash"], presented)
+                    except exceptions.InvalidHashError:
+                        continue
+                    except exceptions.VerificationError:
+                        continue
                     groups = _get(USERS_PREFIX + owner + GROUPS_SUFFIX) or []
                     return owner, list(groups)
-            except exceptions.VerifyMismatchError:
-                continue
-            except exceptions.InvalidHashError:
-                continue
+            else:
+                legacy.append((path, data["hash"], owner))
+    for path, stored_hash, owner in legacy:
+        try:
+            hasher.verify(stored_hash, presented)
+        except exceptions.InvalidHashError:
+            continue
+        except exceptions.VerificationError:
+            continue
+        _backfill_digest(path, presented)
+        groups = _get(USERS_PREFIX + owner + GROUPS_SUFFIX) or []
+        return owner, list(groups)
     return None
+
+
+def _backfill_digest(path, presented):
+    """Add the sha256 token digest to a legacy key record. Best-effort."""
+    try:
+        val, _ = get_etcd_client().get(path)
+        if val is None:
+            return
+        data = json.loads(val.decode())
+        if data.get("digest"):
+            return
+        data["digest"] = token_digest(presented)
+        _put(path, data)
+    except Exception:
+        # Backfill is an optimization; auth must succeed even if the
+        # write fails (e.g. read-only replica during failover).
+        pass
 
 
 def _has_owner_token(email, plaintext, hasher):
     """True if an existing etcd key-record for `email` hashes to `plaintext`.
 
-    Argon2 uses a per-key salt, so two hashes of the same plaintext differ;
-    detecting an already-migrated token therefore means verifying the
-    presented secret against each stored hash, exactly as the auth path
-    does."""
+    Digest records (sha256 of the plaintext) are checked first — an exact,
+    cheap comparison. Legacy digest-less records fall back to argon2
+    verification against each stored hash (argon2 uses a per-key salt, so
+    two hashes of the same plaintext differ)."""
+    digest = token_digest(plaintext)
     prefix = USERS_PREFIX + email + KEYS_SUFFIX
     for val, _meta in get_etcd_client().get_prefix(prefix):
         data = json.loads(val.decode())
+        if data.get("digest"):
+            if data["digest"] == digest:
+                return True
+            continue
         try:
             if hasher.verify(data["hash"], plaintext):
                 return True
@@ -216,6 +276,7 @@ def migrate_owui_keys(hasher=None, owui_dsn=None):
                 key_id = str(uuid.uuid4())
                 now = datetime.now(timezone.utc).isoformat()
                 rec = {"hash": hasher.hash(plaintext),
+                       "digest": token_digest(plaintext),
                        "created_at": now}
                 _put(USERS_PREFIX + email + KEYS_SUFFIX + key_id, rec)
                 if groups:

@@ -160,6 +160,50 @@ class CreateListRevokeTests(ApiKeysTestBase):
             ak.revoke_key("../../bad")
 
 
+class DigestIndexTests(ApiKeysTestBase):
+    def _key_path(self, email, key_id="k1"):
+        return ak.USERS_PREFIX + email + ak.KEYS_SUFFIX + key_id
+
+    def test_create_stores_digest_index(self):
+        secret = ak.create_key("alice@x", hasher=self.hasher)
+        key_id = ak.list_keys("alice@x")["alice@x"][0]["key_id"]
+        rec = self.etcd.get_json(self._key_path("alice@x", key_id))
+        self.assertEqual(rec["digest"], ak.token_digest(secret))
+        self.assertNotIn(secret, self.etcd.store.values())
+        self.assertEqual(ak.validate_key(secret, hasher=self.hasher),
+                         ("alice@x", []))
+
+    def test_legacy_record_validates_and_backfills(self):
+        # Pre-digest record: validate_key must fall back to the argon2
+        # scan, succeed, and write the digest back to etcd.
+        token = "sk-legacy"
+        self.etcd.seed_json(self._key_path("alice@x"), {
+            "hash": self.hasher.hash(token),
+            "created_at": "t",
+            "label": "",
+        })
+        self.assertEqual(ak.validate_key(token, hasher=self.hasher),
+                         ("alice@x", []))
+        rec = self.etcd.get_json(self._key_path("alice@x"))
+        self.assertEqual(rec["digest"], ak.token_digest(token))
+        # Still validates afterwards (digest path now).
+        self.assertEqual(ak.validate_key(token, hasher=self.hasher),
+                         ("alice@x", []))
+
+    def test_digest_mismatch_falls_through_to_legacy_scan(self):
+        # A digest record that doesn't match the presented token must not
+        # shadow a legacy record for the same owner that does.
+        ak.create_key("alice@x", hasher=self.hasher)
+        token = "sk-legacy"
+        self.etcd.seed_json(self._key_path("alice@x", "legacy"), {
+            "hash": self.hasher.hash(token),
+            "created_at": "t",
+            "label": "",
+        })
+        self.assertEqual(ak.validate_key(token, hasher=self.hasher),
+                         ("alice@x", []))
+
+
 class MigrateTests(ApiKeysTestBase):
     def test_migrate_copies_and_hashes_same_token(self):
         existing = "sk-existingtoken"

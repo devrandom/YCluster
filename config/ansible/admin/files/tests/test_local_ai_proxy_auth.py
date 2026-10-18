@@ -60,8 +60,10 @@ class ValidatorTestBase(unittest.TestCase):
         self.validator.get_etcd_client = self._v_orig
 
     # --- seeding ---
-    def seed_key(self, email, token, groups=None, key_id="k1"):
+    def seed_key(self, email, token, groups=None, key_id="k1", digest=True):
         rec = {"hash": self.hasher.hash(token), "created_at": "t", "label": ""}
+        if digest:
+            rec["digest"] = ak.token_digest(token)
         self.etcd.seed_json(ak.USERS_PREFIX + email + ak.KEYS_SUFFIX + key_id, rec)
         if groups is not None:
             self.etcd.seed_json(ak.USERS_PREFIX + email + ak.GROUPS_SUFFIX, groups)
@@ -100,6 +102,28 @@ class UserStoreTests(ValidatorTestBase):
     def test_auth_user_empty_store(self):
         store = self.validator.UserStore(self.etcd, hasher=self.hasher)
         self.assertIsNone(store.auth_user("sk-anything"))
+
+    def test_legacy_record_auths_and_backfills_digest(self):
+        # Pre-digest record: first auth pays the argon2 scan, then writes
+        # the sha256 digest into etcd so later auths hit the index.
+        self.seed_key("alice@x", "sk-legacy", groups=["g1"], digest=False)
+        store = self.validator.UserStore(self.etcd, hasher=self.hasher)
+        self.assertEqual(store.auth_user("sk-legacy"), ("alice@x", ["g1"]))
+        rec = self.etcd.get_json(
+            ak.USERS_PREFIX + "alice@x" + ak.KEYS_SUFFIX + "k1")
+        self.assertEqual(rec["digest"], ak.token_digest("sk-legacy"))
+        # A fresh store (simulating restart) uses the digest path.
+        store2 = self.validator.UserStore(self.etcd, hasher=self.hasher)
+        self.assertEqual(store2.auth_user("sk-legacy"), ("alice@x", ["g1"]))
+
+    def test_digest_record_skips_scan_of_other_keys(self):
+        # Digest-indexed auth must not depend on record ordering: seed a
+        # legacy record for another user *after* the digest record and
+        # confirm the digest path still authenticates.
+        self.seed_key("alice@x", "sk-alice", key_id="a", digest=True)
+        self.seed_key("bob@x", "sk-bob", key_id="b", digest=False)
+        store = self.validator.UserStore(self.etcd, hasher=self.hasher)
+        self.assertEqual(store.auth_user("sk-alice"), ("alice@x", []))
 
 
 class AuthRouteTests(ValidatorTestBase):
