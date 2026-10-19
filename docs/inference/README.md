@@ -35,6 +35,9 @@ deployment-agnostic — no node names, IPs, or account specifics.
   stock tool calling), serving on the whole 8-GPU node at PP=2×TP=4 (~2.2×
   prefill vs flat TP=8 on this no-NVLink box). Includes the node-crash incident
   and the retired-REAP history.
+- [DeepSeek-V4.1-Flash staging](deepseek-v4.1-flash-staging.md)
+  — new architecture (`deepseek_v41`) alongside the DS4 backend; B12X R36
+  image, TP4/DCP1, SSD Engram, ~510 GB checkpoint. Staged but not deployed.
 - [GLM-5.3-Flash on 2- or 4-GPU SM120 slices](glm-5.3-flash-deploy-2026-08.md)
   — 320B/18B hybrid KDA+sparse-MLA MoE (MIT weights). **Serving via Path A**
   (0xSero SGLang NVFP4 @ TP4/EP4 on 4 GPUs, 1M ctx, ~531 tok/s aggregate @conc 8),

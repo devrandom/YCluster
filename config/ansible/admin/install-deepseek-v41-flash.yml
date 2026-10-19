@@ -1,0 +1,132 @@
+---
+# Deploy DeepSeek-V4.1-Flash-1017 staging scripts to Nvidia GPU nodes.
+#
+# This is a NEW alongside backend, not an in-place upgrade of DS4
+# (deepseek-v4-flash). V4.1-Flash is a different architecture
+# (deepseek_v41 vs deepseek_v4) and cannot reuse the V4 DSpark r16/r10
+# images. It requires TP4 (4× 96 GB RTX PRO 6000) and ~510 GB of NVMe.
+#
+# Model: deepseek-ai/DeepSeek-V4.1-Flash-1017 (2026-10-17 weights update).
+# Image: localinferencelab/vllm:jovian-judgement-community-20260912-r36 —
+# the B12X community runtime receipt-qualified for TP4/DCP1 with both RAM
+# and SSD Engram (see rtx6kpro/models/deepseek-v4.1-flash/r36). R37/R38
+# exist but only qualify RAM Engram; our target host has <189 GiB RAM
+# free, so we use the R36 SSD-qualified build.
+#
+# Runtime profile (from the R36 compose/qualification):
+#   TP4/DCP1, DSpark K5, FP8 KV, 128K context, disk Engram, 4 max seqs.
+#   The 1017 checkpoint shares config with the 0909 launch model, so the
+#   R36 image should load it, but it has NOT been independently qualified
+#   — qualification runs below are ours to execute.
+#
+# Gating:
+#   Per-host `ds41_enabled: true` in private host_vars/<node>.yml opts in.
+#   Per-host `ds41_gpus: "<4 CDI indices>"` selects the GPUs.
+#
+# Run after setup-gpu-podman.yml. To bring up:
+#   ssh <host>.yc
+#   ~/bin/ds41-setup.sh --download   # pull image + checkpoint (~510 GB)
+#   ~/bin/ds41-setup.sh              # subsequent: image pull + verify
+#   ~/bin/ds41-start.sh              # launch (idempotent)
+
+- name: Deploy DeepSeek-V4.1-Flash staging scripts to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # B12X community runtime, R36 — the SSD-Engram-qualified build.
+    # Digest from rtx6kpro/models/deepseek-v4.1-flash/r36/registry.json.
+    ds41_image: "docker.io/localinferencelab/vllm@sha256:23ab683d7ce32083f33c163df7dfe554b59aba75bbae8f5b8e4b5a2ef590209b"
+    ds41_image_tag: "docker.io/localinferencelab/vllm:jovian-judgement-community-20260912-r36"
+    ds41_repo: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    ds41_revision: "1bae0e1088993b9b82de08f59de5be5a34e42170"
+    ds41_model_dir: "/home/dev/models/DeepSeek-V4.1-Flash"
+    # The R36 entrypoint ignores SERVED_NAME and always serves the model as
+    # `DeepSeek-V4.1-Flash` (derived from the checkpoint path). Register it
+    # under our lowercase routing key; local-ai-proxy forwards by the key.
+    ds41_served_name: "deepseek-v4_1-flash"
+    ds41_port: 9218
+    ds41_cache_dir: "/home/dev/.cache/ds41-r36"
+    # Engram placement: disk (default) for hosts without 189 GiB spare RAM.
+    # Override per-host with ds41_engram_memory: "ram" on larger hosts.
+    ds41_engram_memory: "disk"
+
+  tasks:
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: End play for nodes that have not opted into DS4.1
+      meta: end_host
+      when: not (ds41_enabled | default(false))
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install DS4.1 staging scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - ds41-setup.sh
+        - ds41-start.sh
+
+- name: Register the DS4.1 backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    ds41_nvidia_host: >-
+      {{ (groups['nvidia']
+          | select('in', hostvars.keys())
+          | list)
+         | map('extract', hostvars, 'ds41_enabled')
+         | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+         | selectattr(0, 'defined')
+         | selectattr(0, 'equalto', true)
+         | map(attribute=1)
+         | first
+         | default('') }}
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: End play when no DS4.1 host is opted in
+      meta: end_host
+      when: ds41_nvidia_host | length == 0
+
+    - name: Set DS4.1 backend facts
+      set_fact:
+        ds41_backend_url: "http://{{ ds41_nvidia_host }}.xc:{{ hostvars[ds41_nvidia_host]['ds41_port'] | default(9218) }}"
+        ds41_served_name: "{{ hostvars[ds41_nvidia_host]['ds41_served_name'] | default('deepseek-v4_1-flash') }}"
+
+    - name: Register the DS4.1 backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ ds41_backend_url }} {{ ds41_served_name }}
+      register: ds41_proxy_register
+      changed_when: "'added' in ds41_proxy_register.stdout or 'registered' in ds41_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+
+    - name: Report DS4.1 registration
+      debug:
+        msg: >-
+          DS4.1 backend registered at {{ ds41_backend_url }}
+          (served: {{ ds41_served_name }})
+      when:
+        - is_storage_leader
+        - not ansible_check_mode

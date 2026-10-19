@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Launch DeepSeek-V4.1-Flash on the B12X R36 image.
+# Run as the dev user:
+#
+#   ~/bin/ds41-start.sh
+#
+# This is a NEW alongside container (ds41-flash on port 9218). It does NOT
+# touch the existing ds4-dspark container or its GPUs. Requires 4 GPUs
+# configured via ds41_gpus in private host_vars.
+#
+# Profile mirrors the R36 qualification: TP4/DCP1, DSpark K5, FP8 KV,
+# 128K context, disk Engram, 4 max seqs, no generic CPU offload.
+set -euo pipefail
+
+IMAGE="${IMAGE:-{{ ds41_image }}}"
+MODEL_HOST="${MODEL_HOST:-{{ ds41_model_dir }}}"
+CONTAINER="${CONTAINER:-ds41-flash}"
+PORT="${PORT:-{{ ds41_port }}}"
+SERVED_NAME="${SERVED_NAME:-{{ ds41_served_name }}}"
+
+# CDI GPU indices — deployment-specific. Set ds41_gpus in private
+# host_vars/<node>.yml. Must be exactly 4 cards for TP4.
+GPUS="${GPUS:-{{ ds41_gpus | default('') }}}"
+[ -n "$GPUS" ] || { echo "no GPUs configured for $CONTAINER - set ds41_gpus in host_vars/<node>.yml (or override GPUS)" >&2; exit 1; }
+ngpu=0
+for _g in $GPUS; do ngpu=$((ngpu + 1)); done
+[ "$ngpu" -eq 4 ] || { echo "$CONTAINER requires exactly 4 GPUs, got: $GPUS" >&2; exit 1; }
+
+# ---- R36 profile defaults ----
+TP_SIZE="${TP_SIZE:-4}"
+DCP_SIZE="${DCP_SIZE:-1}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
+GPU_UTIL="${GPU_UTIL:-0.95}"
+ENGRAM_TABLE_MEMORY="${ENGRAM_TABLE_MEMORY:-{{ ds41_engram_memory | default('disk') }}}"
+CACHE_DIR="${CACHE_DIR:-{{ ds41_cache_dir | default('/home/dev/.cache/ds41-r36') }}}"
+MEM="${MEM:-120g}"
+
+# pre-flight
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - run: ~/bin/ds41-setup.sh" >&2; exit 1; }
+[ -f "$MODEL_HOST/config.json" ] && [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+  || { echo "checkpoint missing at $MODEL_HOST - run: ~/bin/ds41-setup.sh --download" >&2; exit 1; }
+
+mkdir -p "$CACHE_DIR"
+dev_args=()
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
+cvd="$(seq -s, 0 $((ngpu - 1)))"
+
+# The R36 entrypoint expects the checkpoint at /model.
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+# The patched tokenizer file (cache_dir/patches) accepts Responses API
+# input_text/output_text part types the stock deepseek_v41 normalizer
+# rejects. It is generated from the image's own file by ds41-setup.sh.
+podman run -d --name "$CONTAINER" \
+  --entrypoint /usr/local/bin/serve-ds41-jovian.sh \
+  "${dev_args[@]}" \
+  --network=host \
+  --ipc=host --init \
+  --security-opt seccomp=unconfined \
+  --ulimit memlock=-1:-1 \
+  --ulimit stack=67108864:67108864 \
+  --memory "$MEM" --memory-swap "$MEM" \
+  -e CUDA_VISIBLE_DEVICES="$cvd" \
+  -e MODEL_PATH=/model \
+  -e HOST=0.0.0.0 \
+  -e PORT="$PORT" \
+  -e TP_SIZE="$TP_SIZE" \
+  -e DCP_SIZE="$DCP_SIZE" \
+  -e MAX_MODEL_LEN="$MAX_MODEL_LEN" \
+  -e MAX_NUM_SEQS="$MAX_NUM_SEQS" \
+  -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
+  -e GPU_MEMORY_UTILIZATION="$GPU_UTIL" \
+  -e ENGRAM_TABLE_MEMORY="$ENGRAM_TABLE_MEMORY" \
+  -e SERVED_MODEL_NAME="$SERVED_NAME" \
+  -e HF_HUB_OFFLINE=1 \
+  -e TRANSFORMERS_OFFLINE=1 \
+  -v "$MODEL_HOST":/model:ro \
+  -v "$CACHE_DIR/patches/deepseek_v41.py":/opt/glm53-flash/vllm/vllm/tokenizers/deepseek_v41.py:ro \
+  -v "$CACHE_DIR":/cache \
+  "$IMAGE"
+
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=$TP_SIZE max_model_len=$MAX_MODEL_LEN engram=$ENGRAM_TABLE_MEMORY"
+echo "  (existing ds4-dspark / ds4-infernal containers are untouched)"
+echo "  watch:  podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/health"
