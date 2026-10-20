@@ -31,7 +31,9 @@ disasters.
 `backup-databases` (`storage/scripts/backup-databases`, daily timer on the
 storage leader, installed by `storage/setup-user-rbd.yml`) dumps three engines,
 encrypts each with `age` to the configured recipients, and rsyncs the encrypted
-copies to every enabled offsite destination.
+copies to every enabled offsite destination. Offsite retention keeps the newest
+7 daily sets, then one per ISO week for 60 days (override with
+`OFFSITE_DAILY_DAYS` / `OFFSITE_WEEKLY_DAYS`).
 
 | Engine | Captures | Plaintext path | Encrypted path |
 |---|---|---|---|

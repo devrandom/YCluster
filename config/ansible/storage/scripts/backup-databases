@@ -12,6 +12,8 @@ RETENTION_DAYS=30
 # re-uploading the 8-30d files that offsite rotation just pruned, without touching
 # anything locally or on the remote.
 OFFSITE_SYNC_DAYS="${OFFSITE_SYNC_DAYS:-7}"
+OFFSITE_DAILY_DAYS="${OFFSITE_DAILY_DAYS:-7}"
+OFFSITE_WEEKLY_DAYS="${OFFSITE_WEEKLY_DAYS:-60}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OFFSITE_METRICS_FILE="${OFFSITE_METRICS_FILE:-/var/lib/prometheus/node-exporter/offsite_disk.prom}"
 
@@ -341,9 +343,10 @@ sync_backups() {
 
 # Apply retention rotation to every enabled destination, freeing space on the
 # (small) offsite disks ahead of the nightly rsync. Policy lives in
-# ycluster.utils.backup_rotation (pure, unit-tested): newest 7 days kept daily,
-# then one per ISO week to 180 days, one per month older. This only ever
-# deletes `.age` files — never anything on-cluster. `$1` non-empty = dry-run
+# ycluster.utils.backup_rotation (pure, unit-tested): newest OFFSITE_DAILY_DAYS
+# kept daily, then one per ISO week to OFFSITE_WEEKLY_DAYS, one per month
+# older. This only ever deletes `.age` files — never anything on-cluster.
+# `$1` non-empty = dry-run
 # (report what would be deleted without touching the remote).
 rotate_backups() {
     local dry_run="${1:-}"
@@ -399,7 +402,9 @@ rotate_destination() {
 
     local plan_json
     plan_json=$(printf '%s\n' "$listing" | \
-        python3 -m ycluster.utils.backup_rotation) || {
+        python3 -m ycluster.utils.backup_rotation \
+            --daily-days "$OFFSITE_DAILY_DAYS" \
+            --weekly-days "$OFFSITE_WEEKLY_DAYS") || {
         log "ERROR: rotate: rotation plan failed for $dest_name"
         return 1
     }

@@ -27,6 +27,11 @@ ETCD_INITIAL_ADVERTISE_PEER_URLS="{{ etcd_scheme }}://{{ ansible_host }}:{{ etcd
 ETCD_INITIAL_CLUSTER="{{ etcd_initial_cluster_value }}"
 ETCD_INITIAL_CLUSTER_STATE="{{ etcd_cluster_state_value }}"
 ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+# Bound MVCC history. The vm-state sampler overwrites one key per host every
+# minute; without compaction every revision is retained forever and the nightly
+# snapshot grows with it.
+ETCD_AUTO_COMPACTION_MODE="periodic"
+ETCD_AUTO_COMPACTION_RETENTION="1h"
 {% if etcd_tls_listening | default(false) %}
 ETCD_CERT_FILE="{{ etcd_tls_dir }}/server.crt"
 ETCD_KEY_FILE="{{ etcd_tls_dir }}/server.key"

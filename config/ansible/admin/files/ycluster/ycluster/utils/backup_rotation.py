@@ -33,7 +33,7 @@ import json
 import sys
 
 DEFAULT_DAILY_DAYS = 7
-DEFAULT_WEEKLY_DAYS = 180
+DEFAULT_WEEKLY_DAYS = 60
 
 
 def parse_backup_date(name: str) -> _dt.date | None:
