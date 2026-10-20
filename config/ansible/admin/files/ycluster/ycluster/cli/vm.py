@@ -1,5 +1,8 @@
 """GPU VM hosting and per-user SSH access management."""
 
+from datetime import timedelta
+
+from ..utils import vm_idle
 from ..utils import vm_manager as vm
 
 
@@ -163,6 +166,24 @@ def register_vm_commands(subparsers):
              'run this after manual incus changes or to backfill).')
     sdp.set_defaults(func=lambda a: _print_dns_sync(vm.sync_dns_records()))
 
+    idp = sub.add_parser(
+        'idle',
+        help='Report VMs that have been running without meaningful GPU '
+             'activity for a day (vm-idle-alert timer runs --notify)')
+    idp.add_argument('--notify', action='store_true',
+                     help='Send a Zulip DM to each idle VM\'s owner '
+                          '(once per idle episode, re-alerted daily)')
+    idp.add_argument('--stream', default=None,
+                     help='Zulip stream to post to when the owner has no '
+                          'account in the realm')
+    idp.add_argument('--hours', type=float, default=24,
+                     help='Idle window in hours (default: 24)')
+    idp.add_argument('--mute-owner', metavar='EMAIL',
+                     help='Stop alerting this owner about any VM, then exit')
+    idp.add_argument('--unmute-owner', metavar='EMAIL',
+                     help='Resume alerting this owner, then exit')
+    idp.set_defaults(func=_vm_idle)
+
     bp = sub.add_parser('bastion-sync',
                         help='Regenerate the bastion SSH access list from etcd')
     bp.set_defaults(func=lambda a: vm.bastion_sync())
@@ -190,6 +211,22 @@ def register_vm_commands(subparsers):
     srp.add_argument('user')
     srp.add_argument('key', help='Key text or a unique substring to match')
     srp.set_defaults(func=_ssh_remove)
+
+
+def _vm_idle(args):
+    if args.mute_owner and args.unmute_owner:
+        raise SystemExit('use only one of --mute-owner and --unmute-owner')
+    if args.mute_owner or args.unmute_owner:
+        owner = args.mute_owner or args.unmute_owner
+        muted = vm_idle.set_suppressed(owner, bool(args.mute_owner))
+        print(('Muted ' if args.mute_owner else 'Unmuted ') + owner)
+        print('Muted owners: ' + (', '.join(muted) or '(none)'))
+        return
+    idle_after = timedelta(hours=args.hours)
+    results = vm_idle.report(idle_after=idle_after)
+    print(vm_idle.format_report(results))
+    if args.notify:
+        vm_idle.notify(results, idle_after=idle_after, stream=args.stream)
 
 
 def _ssh_add(args):

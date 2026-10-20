@@ -260,6 +260,30 @@ VM), but the owner remains the billing/accounting identity.
   (`vm list` shows runtime state only for the local host's VMs; others
   show `(remote)`).
 
+### Idle GPU alerts
+
+`ycluster vm idle` reports VMs that have been running for 24h without
+meaningful GPU use, and `vm-idle-alert.timer` runs it hourly on the storage
+leader with `--notify` to DM each owner on Zulip (once per idle episode,
+re-alerted daily while the VM stays idle). GPU utilization comes from the
+per-VM `node_vm_gpu_utilization_percent` series that `vm-gpu-collector`
+reads with `nvidia-smi` inside passthrough VMs; the 30s scrapes are averaged
+into one-minute points. A VM counts as in use if it is above 20% in at least
+10 points or above 5% in at least 20 points in the trailing window, so a VM
+is only idle when neither threshold is met. Coverage must span the whole
+window, including the latest minutes, with no gap over 10 minutes, so a VM
+that was stopped recently is reported as `insufficient data` rather than idle.
+
+VMs without GPUs never alert. Shared AMD GPU containers have no per-container
+utilization metric, so they show `no GPU data` and do not alert either.
+
+The DM points owners at the VM page in the admin web UI, where **Stop now**
+stops the VM; owners have no admin CLI access. To stop alerting an owner
+entirely (for example after they ask), use
+`ycluster vm idle --mute-owner EMAIL`; `--unmute-owner EMAIL` resumes. The list
+lives in etcd (`/cluster/config/vm-idle/suppress`) rather than the repo, since
+owner addresses are deployment data.
+
 ### Disk resize
 
 `ycluster vm resize` overrides the profile root-disk size. The VM is not

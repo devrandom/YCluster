@@ -265,6 +265,14 @@
         - zulip_auto_join | bool
         - zulip_service_active.stdout == "active"
 
+    - name: Ensure the VM idle alert bot exists and its credentials are in etcd
+      command: /usr/local/lib/cluster/zulip-manager ensure-vm-idle-bot
+      environment: "{{ etcd_client_env }}"
+      changed_when: false
+      when:
+        - is_storage_leader
+        - zulip_service_active.stdout == "active"
+
     # Internal vhost: zulip.xc (plain HTTP, restricted to the cluster subnet),
     # served on the storage VIP. Same shape as authentik-internal.conf.j2.
     - name: Install Zulip internal nginx site (zulip.xc)

@@ -143,6 +143,51 @@
         state: started
         daemon_reload: yes
 
+    - name: Create systemd service for vm-idle-alert
+      copy:
+        dest: /etc/systemd/system/vm-idle-alert.service
+        content: |
+          [Unit]
+          Description=Alert VM owners about GPU instances idle for over a day
+          After=network.target
+
+          [Service]
+          Type=oneshot
+          EnvironmentFile=/etc/ycluster/etcd-client.env
+          # The report queries the central Prometheus; only the leader
+          # should evaluate and alert, or every storage node would notify.
+          ExecCondition=/bin/sh -c 'mountpoint -q /rbd/user'
+          ExecStart=/usr/local/bin/ycluster vm idle --notify
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart vm-idle-alert
+
+    - name: Create systemd timer for vm-idle-alert
+      copy:
+        dest: /etc/systemd/system/vm-idle-alert.timer
+        content: |
+          [Unit]
+          Description=Run vm-idle-alert hourly
+
+          [Timer]
+          OnBootSec=5min
+          OnUnitActiveSec=1h
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+      notify: restart vm-idle-alert
+
+    - name: Enable and start vm-idle-alert timer
+      systemd:
+        name: vm-idle-alert.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
   handlers:
     - name: restart collect-model-stats
       systemd:
@@ -152,4 +197,9 @@
     - name: restart collect-vm-stats
       systemd:
         name: collect-vm-stats.timer
+        state: restarted
+
+    - name: restart vm-idle-alert
+      systemd:
+        name: vm-idle-alert.timer
         state: restarted

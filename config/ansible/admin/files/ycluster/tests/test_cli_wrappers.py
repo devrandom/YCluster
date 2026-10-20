@@ -5,6 +5,7 @@ import io
 import json
 import contextlib
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
@@ -144,6 +145,42 @@ class VMTests(unittest.TestCase):
         self.assertIn('br0: 1 host-record(s)', output.getvalue())
         self.assertIn('Pinned 1 instance(s)', output.getvalue())
         self.assertIn('next DHCP renewal', output.getvalue())
+
+    def test_idle_command(self):
+        with mock.patch.object(vm.vm_idle, 'report', return_value=[]) as report, \
+                mock.patch.object(vm.vm_idle, 'format_report',
+                                  return_value='table'), \
+                mock.patch.object(vm.vm_idle, 'notify') as notify:
+            call(vm._vm_idle, notify=True, stream='ops', hours=24,
+                 mute_owner=None, unmute_owner=None)
+        report.assert_called_once_with(idle_after=timedelta(hours=24))
+        notify.assert_called_once_with([], idle_after=timedelta(hours=24),
+                                      stream='ops')
+
+    def test_idle_command_without_notify(self):
+        with mock.patch.object(vm.vm_idle, 'report', return_value=[]), \
+                mock.patch.object(vm.vm_idle, 'format_report',
+                                  return_value='table'), \
+                mock.patch.object(vm.vm_idle, 'notify') as notify:
+            call(vm._vm_idle, notify=False, stream=None, hours=24,
+                 mute_owner=None, unmute_owner=None)
+        notify.assert_not_called()
+
+    def test_idle_mute_owner(self):
+        with mock.patch.object(vm.vm_idle, 'set_suppressed',
+                                  return_value=['a@example.test']) as mute, \
+                mock.patch.object(vm.vm_idle, 'report') as report:
+            call(vm._vm_idle, notify=False, stream=None, hours=24,
+                 mute_owner='a@example.test', unmute_owner=None)
+        mute.assert_called_once_with('a@example.test', True)
+        report.assert_not_called()
+
+    def test_idle_unmute_owner(self):
+        with mock.patch.object(vm.vm_idle, 'set_suppressed',
+                                  return_value=[]) as mute:
+            call(vm._vm_idle, notify=False, stream=None, hours=24,
+                 mute_owner=None, unmute_owner='a@example.test')
+        mute.assert_called_once_with('a@example.test', False)
 
 
 class TLSTests(unittest.TestCase):

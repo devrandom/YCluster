@@ -276,6 +276,66 @@ stop_zulip() {
     echo "Zulip stopped"
 }
 
+# Create the bot that DMs VM owners about idle instances and store its
+# credentials in etcd, where `ycluster vm idle --notify` reads them. The bot
+# email is derived from the realm host, so it stays inside the realm and can
+# DM any member. Re-running is a no-op once etcd holds both values; if the
+# bot exists but etcd lost them, the existing key is read back rather than a
+# second bot being created.
+ensure_vm_idle_bot() {
+    local email_key="$ETCD_KEY_PREFIX/vm-idle-bot-email"
+    local api_key_key="$ETCD_KEY_PREFIX/vm-idle-bot-api-key"
+    local existing_email existing_key
+    existing_email=$(etcdctl get "$email_key" --print-value-only 2>/dev/null || true)
+    existing_key=$(etcdctl get "$api_key_key" --print-value-only 2>/dev/null || true)
+    if [ -n "$existing_email" ] && [ -n "$existing_key" ]; then
+        echo "VM idle bot credentials already in etcd"
+        return 0
+    fi
+
+    cd /etc/zulip
+    local out
+    out=$(docker compose -p "$COMPOSE_PROJECT" exec -T zulip su zulip -c \
+        '/home/zulip/deployments/current/manage.py shell' <<'PY'
+from zerver.actions.create_user import do_create_user
+from zerver.models import Realm, UserProfile
+
+realm = Realm.objects.get(string_id="")
+email = f"vm-idle-bot@{realm.host}"
+bot = UserProfile.objects.filter(realm=realm, email=email).first()
+if bot is not None and not bot.is_active:
+    raise SystemExit(f"{email} exists but is deactivated; reactivate it first")
+if bot is None:
+    # A realm bot needs an owner; use the most privileged human account.
+    owner = (UserProfile.objects
+             .filter(realm=realm, is_bot=False, is_active=True,
+                     role__in=[UserProfile.ROLE_REALM_OWNER,
+                               UserProfile.ROLE_REALM_ADMINISTRATOR])
+             .order_by("id").first())
+    if owner is None:
+        raise SystemExit("no active realm owner or administrator to own the bot")
+    bot = do_create_user(
+        email=email, password=None, realm=realm,
+        full_name="VM idle alert bot",
+        bot_type=UserProfile.DEFAULT_BOT,
+        bot_owner=owner, acting_user=None)
+print(f"BOT_EMAIL={bot.email}")
+print(f"BOT_API_KEY={bot.api_key}")
+PY
+)
+    local bot_email bot_key
+    bot_email=$(printf '%s\n' "$out" | sed -n 's/^BOT_EMAIL=//p' | tail -1)
+    bot_key=$(printf '%s\n' "$out" | sed -n 's/^BOT_API_KEY=//p' | tail -1)
+    if [ -z "$bot_email" ] || [ -z "$bot_key" ]; then
+        echo "VM idle bot provisioning failed" >&2
+        printf '%s\n' "$out" >&2
+        return 1
+    fi
+    etcdctl put "$email_key" "$bot_email" >/dev/null
+    etcdctl put "$api_key_key" "$bot_key" >/dev/null
+    echo "Stored VM idle bot credentials in etcd"
+}
+
 case "$1" in
     start)
         if start_zulip; then
@@ -294,6 +354,12 @@ case "$1" in
         # created with the same password Zulip will read at first boot.
         ensure_secrets
         ;;
+    ensure-vm-idle-bot)
+        # Used by install-zulip.yml on the leader after the stack is up. Creates
+        # the bot that `ycluster vm idle --notify` sends DMs as, and stores its
+        # credentials in etcd. Idempotent.
+        ensure_vm_idle_bot
+        ;;
     register-push)
         # Register this server with the Zulip-hosted push-notification service
         # (push.zulipchat.com). Requires the stack to be running. Re-running is
@@ -306,7 +372,7 @@ case "$1" in
             '/home/zulip/deployments/current/manage.py register_server --agree-to-terms-of-service'
         ;;
     *)
-        echo "Usage: $0 {start|stop|ensure-secrets|register-push}"
+        echo "Usage: $0 {start|stop|ensure-secrets|ensure-vm-idle-bot|register-push}"
         exit 1
         ;;
 esac
