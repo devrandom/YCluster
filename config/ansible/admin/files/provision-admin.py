@@ -1,170 +1,31 @@
 #!/usr/bin/env python3
-"""Provision the admin database, role, schema, and audit triggers.
+"""Provision the admin database, role, and schema migrations.
 
 Runs as the postgres OS user (peer authentication) so it can create the
 role and database. All statements go through psycopg2 with parameter
 binding; the only interpolated values are the fixed ROLE/DATABASE names
 this script owns.
 """
+import hashlib
+import logging
 import os
-import subprocess
-import sys
+import re
 
 PASSWORD_KEY = "/cluster/config/ycluster/db-password"
 ROLE = "ycluster"
 DATABASE = "ycluster"
 
-SCHEMA = r"""
-CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    -- The Authentik IdP project this user project is nested under.
-    -- Controls manager visibility: managers see user projects whose
-    -- idp_project is in their manager_projects list. Empty = admin-only.
-    idp_project TEXT NOT NULL DEFAULT '',
-    active BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+# Versioned SQL migrations are copied next to the provisioning script by
+# admin-projects.yml. The env override keeps local runs and tests explicit.
+MIGRATIONS_DIR = os.environ.get(
+    "ADMIN_MIGRATIONS_DIR", "/usr/local/lib/ycluster/migrations")
+MIGRATIONS_TABLE = "schema_migrations"
+MIGRATION_FILENAME_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
+# Session-level advisory lock so two provisioning runs can't race. The value is
+# arbitrary but stable; it must not change after migrations have shipped.
+MIGRATION_LOCK_KEY = 0x59434C5553544552
 
-CREATE TABLE IF NOT EXISTS project_members (
-    project_id TEXT NOT NULL REFERENCES projects(id),
-    authentik_uid TEXT NOT NULL,
-    email_at_assignment TEXT NOT NULL,
-    is_default BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, authentik_uid)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS project_members_default_uid_idx
-    ON project_members (authentik_uid) WHERE is_default;
-
-CREATE TABLE IF NOT EXISTS quota_types (
-    id TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    unit TEXT NOT NULL,
-    active BOOLEAN NOT NULL DEFAULT TRUE
-);
-
-CREATE TABLE IF NOT EXISTS project_quotas (
-    project_id TEXT NOT NULL REFERENCES projects(id),
-    quota_type TEXT NOT NULL REFERENCES quota_types(id),
-    quota_id TEXT NOT NULL,
-    value NUMERIC(18,4) NOT NULL CHECK (value >= 0),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, quota_type, quota_id)
-);
-
-CREATE TABLE IF NOT EXISTS audit_events (
-    id BIGSERIAL PRIMARY KEY,
-    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-    actor_uid TEXT NOT NULL,
-    actor_email TEXT NOT NULL DEFAULT '',
-    action TEXT NOT NULL,
-    table_name TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    before_data JSONB,
-    after_data JSONB,
-    request_id TEXT NOT NULL DEFAULT '',
-    import_batch_id TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS audit_events_ts_idx ON audit_events (ts);
-CREATE INDEX IF NOT EXISTS audit_events_entity_idx
-    ON audit_events (table_name, entity_id);
-
-CREATE OR REPLACE FUNCTION ycluster_audit_function() RETURNS trigger
-LANGUAGE plpgsql AS $$
-DECLARE
-    old_data JSONB;
-    new_data JSONB;
-    entity_id TEXT;
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        old_data := to_jsonb(OLD);
-        new_data := NULL;
-    ELSE
-        old_data := CASE WHEN TG_OP = 'UPDATE' THEN to_jsonb(OLD) END;
-        new_data := to_jsonb(NEW);
-    END IF;
-    entity_id := COALESCE(
-        new_data ->> 'id',
-        old_data ->> 'id',
-        COALESCE(new_data ->> 'project_id', old_data ->> 'project_id') ||
-        '/' || COALESCE(new_data ->> 'authentik_uid',
-                        old_data ->> 'authentik_uid',
-                        new_data ->> 'quota_id', old_data ->> 'quota_id'),
-        new_data ->> 'quota_id', old_data ->> 'quota_id');
-    IF entity_id IS NULL OR entity_id = '/' THEN
-        entity_id := COALESCE(new_data ->> 'quota_id',
-                              old_data ->> 'quota_id', '');
-    END IF;
-    INSERT INTO audit_events (
-        actor_uid, actor_email, action, table_name, entity_type,
-        entity_id, before_data, after_data, request_id, import_batch_id
-    ) VALUES (
-        COALESCE(NULLIF(current_setting('ycluster.actor_uid', true), ''),
-                 'unknown'),
-        COALESCE(current_setting('ycluster.actor_email', true), ''),
-        lower(TG_OP),
-        TG_TABLE_NAME,
-        TG_TABLE_NAME,
-        entity_id,
-        old_data,
-        new_data,
-        COALESCE(current_setting('ycluster.request_id', true), ''),
-        COALESCE(current_setting('ycluster.import_batch_id', true), '')
-    );
-    RETURN COALESCE(NEW, OLD);
-END;
-$$;
-
-DO $$
-DECLARE table_name TEXT;
-BEGIN
-    FOREACH table_name IN ARRAY ARRAY['projects', 'project_members',
-                                      'project_quotas'] LOOP
-        EXECUTE format('DROP TRIGGER IF EXISTS ycluster_audit ON %I', table_name);
-        EXECUTE format(
-            'CREATE TRIGGER ycluster_audit AFTER INSERT OR UPDATE OR DELETE
-             ON %I FOR EACH ROW EXECUTE FUNCTION ycluster_audit_function()',
-            table_name);
-    END LOOP;
-END $$;
-
-CREATE OR REPLACE FUNCTION ycluster_audit_immutable() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    RAISE EXCEPTION 'audit_events is append-only';
-    RETURN NULL;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS audit_events_immutable ON audit_events;
-CREATE TRIGGER audit_events_immutable
-BEFORE UPDATE OR DELETE ON audit_events
-FOR EACH ROW EXECUTE FUNCTION ycluster_audit_immutable();
-
--- TRUNCATE bypasses row-level triggers, so guard it with a statement-level
--- trigger as well; without this the app role could wipe the audit trail.
-CREATE OR REPLACE FUNCTION ycluster_audit_no_truncate() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    RAISE EXCEPTION 'audit_events is append-only (TRUNCATE blocked)';
-    RETURN NULL;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS audit_events_no_truncate ON audit_events;
-CREATE TRIGGER audit_events_no_truncate
-BEFORE TRUNCATE ON audit_events
-FOR EACH STATEMENT EXECUTE FUNCTION ycluster_audit_no_truncate();
-
-INSERT INTO quota_types (id, display_name, unit)
-VALUES ('gpu-hours', 'GPU hours', 'gpu-hours')
-ON CONFLICT (id) DO UPDATE
-SET display_name = EXCLUDED.display_name, unit = EXCLUDED.unit;
-"""
+LOG = logging.getLogger(__name__)
 
 
 def get_password():
@@ -183,7 +44,7 @@ def get_password():
 def connect(db):
     """Peer-authenticated connection as the postgres OS user."""
     # Lazy import: other admin test modules stub psycopg2 in sys.modules,
-    # so importing at module scope would break test isolation.
+    # so importing it at module scope would break test isolation.
     import psycopg2
     return psycopg2.connect(dbname=db, user="postgres")
 
@@ -193,6 +54,115 @@ def database_exists(conn):
         cur.execute("SELECT 1 FROM pg_database WHERE datname = %s",
                     (DATABASE,))
         return cur.fetchone() is not None
+
+
+def discover_migrations(directory):
+    """Return SQL migrations in version order.
+
+    Files must be named ``<version>_<slug>.sql``. Versions are unique and
+    ordered lexicographically, so zero-pad them (``0001``, ``0002``, ...).
+    """
+    if not os.path.isdir(directory):
+        raise RuntimeError(f"migration directory not found: {directory}")
+    migrations = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".sql"):
+            continue
+        match = MIGRATION_FILENAME_RE.match(name)
+        if not match:
+            raise RuntimeError(f"invalid migration filename: {name}")
+        path = os.path.join(directory, name)
+        with open(path, "rb") as handle:
+            body = handle.read()
+        migrations.append({
+            "version": match.group(1),
+            "name": name,
+            "path": path,
+            "checksum": hashlib.sha256(body).hexdigest(),
+            "sql": body.decode("utf-8"),
+        })
+    versions = [migration["version"] for migration in migrations]
+    if len(versions) != len(set(versions)):
+        raise RuntimeError("duplicate migration version")
+    return migrations
+
+
+def ensure_migrations_table(cur):
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
+            version TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            applied_by TEXT NOT NULL DEFAULT ''
+        )
+    """)
+
+
+def applied_migrations(cur):
+    cur.execute(f"SELECT version, checksum FROM {MIGRATIONS_TABLE}")
+    return dict(cur.fetchall())
+
+
+def apply_migrations(conn, directory=None):
+    """Apply pending migrations, one transaction per migration.
+
+    A session-level advisory lock serializes concurrent provisioning runs.
+    Already-applied migrations are checksummed so an edited file fails loudly
+    instead of silently diverging from the database.
+    """
+    migrations = discover_migrations(directory or MIGRATIONS_DIR)
+    known = {migration["version"] for migration in migrations}
+
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                ensure_migrations_table(cur)
+        with conn:
+            with conn.cursor() as cur:
+                applied = applied_migrations(cur)
+
+        unknown = sorted(set(applied) - known)
+        if unknown:
+            raise RuntimeError(
+                "database has migrations not present on disk: "
+                + ", ".join(unknown))
+
+        versions = [migration["version"] for migration in migrations]
+        applied_prefix = [version for version in versions
+                          if version in applied]
+        if applied_prefix != versions[:len(applied_prefix)]:
+            raise RuntimeError(
+                "applied migrations are not a prefix of the migration files")
+
+        for migration in migrations:
+            version = migration["version"]
+            if version in applied:
+                if applied[version] != migration["checksum"]:
+                    raise RuntimeError(
+                        f"migration {migration['name']} changed after it "
+                        "was applied")
+                continue
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(migration["sql"])
+                    cur.execute(
+                        f"""INSERT INTO {MIGRATIONS_TABLE}
+                            (version, name, checksum, applied_by)
+                            VALUES (%s, %s, %s, current_user)""",
+                        (version, migration["name"], migration["checksum"]),
+                    )
+    finally:
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)",
+                                (MIGRATION_LOCK_KEY,))
+        except Exception:
+            LOG.exception("failed to release admin migration lock")
 
 
 # ROLE and DATABASE are fixed constants owned by this script, so they are
@@ -212,6 +182,9 @@ GRANT_SEQUENCES_SQL = \
 REVOKE_AUDIT_SQL = \
     f"REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM {ROLE}"
 GRANT_AUDIT_SQL = f"GRANT INSERT, SELECT ON audit_events TO {ROLE}"
+# Migration bookkeeping is operator-only; the app role must not rewrite it.
+REVOKE_MIGRATIONS_SQL = \
+    f"REVOKE ALL PRIVILEGES ON {MIGRATIONS_TABLE} FROM {ROLE}"
 
 
 def create_role(cur, password):
@@ -226,11 +199,7 @@ def create_database(cur):
     cur.execute(CREATE_DATABASE_SQL)
 
 
-def apply_schema(cur):
-    cur.execute(SCHEMA)
-    # Additive migration for deployments created before idp_project existed.
-    cur.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS idp_project "
-                "TEXT NOT NULL DEFAULT ''")
+def apply_grants(cur):
     cur.execute(GRANT_CONNECT_SQL)
     cur.execute(GRANT_SCHEMA_SQL)
     cur.execute(GRANT_TABLES_SQL)
@@ -239,9 +208,10 @@ def apply_schema(cur):
     # but never UPDATE, DELETE, or TRUNCATE audit history.
     cur.execute(REVOKE_AUDIT_SQL)
     cur.execute(GRANT_AUDIT_SQL)
+    cur.execute(REVOKE_MIGRATIONS_SQL)
 
 
-def provision(connect, password):
+def provision(connect, password, migrations_dir=None):
     """Idempotent provision; `connect` takes a dbname and returns a conn."""
     # CREATE DATABASE/USER cannot run inside a transaction block, so this
     # phase needs autocommit.
@@ -257,9 +227,10 @@ def provision(connect, password):
 
     conn = connect(DATABASE)
     try:
+        apply_migrations(conn, migrations_dir)
         with conn:
             with conn.cursor() as cur:
-                apply_schema(cur)
+                apply_grants(cur)
     finally:
         conn.close()
 

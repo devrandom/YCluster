@@ -2,7 +2,8 @@
 
 The module is deliberately database-first: callers pass a DB-API cursor and
 transaction context, which keeps request handlers testable without a live
-PostgreSQL server. Schema ownership lives in provision-ycluster-admin.py.
+PostgreSQL server. Schema ownership lives in `provision-admin.py` and its
+versioned `migrations/` directory.
 """
 import csv
 import io

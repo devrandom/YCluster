@@ -35,6 +35,26 @@
         mode: '0755'
       when: is_storage_leader
 
+    - name: Create admin database migrations directory
+      ansible.builtin.file:
+        path: /usr/local/lib/ycluster/migrations
+        state: directory
+        mode: '0755'
+      when: is_storage_leader
+
+    - name: Copy admin database migrations
+      ansible.posix.synchronize:
+        src: "files/migrations/"
+        dest: /usr/local/lib/ycluster/migrations/
+        delete: yes
+        use_ssh_args: true
+        rsync_opts:
+          - "--checksum"
+          - "--no-owner"
+          - "--no-group"
+          - "--chmod=F0644"
+      when: is_storage_leader
+
     - name: Read admin DB password from etcd
       # Runs as root: only root can read the etcd client certs.
       ansible.builtin.command: |

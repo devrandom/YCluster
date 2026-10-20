@@ -1135,6 +1135,55 @@ for p in data['projects']:
 }
 
 # --------------------------------------------------------------------------
+# 20. admin database migrations (schema_migrations + grants)
+# --------------------------------------------------------------------------
+sec_admin_migrations() {
+  local leader
+  leader=$(app_leader)
+  [ -n "$leader" ] || die "no /cluster/leader/app"
+
+  local migdir=/usr/local/lib/ycluster/migrations
+  $SSH "$leader" "test -f $migdir/0001_baseline.sql" \
+    || die "baseline migration not installed on $leader"
+
+  local checksum row
+  checksum=$($SSH "$leader" "sha256sum $migdir/0001_baseline.sql" \
+    | cut -d' ' -f1)
+  [ -n "$checksum" ] || die "could not checksum baseline migration"
+  row=$($SSH "$leader" "su - postgres -c \"psql -At ycluster -c \\\"select version || '|' || name || '|' || checksum from schema_migrations where version = '0001'\\\"\"")
+  [ "$row" = "0001|0001_baseline.sql|$checksum" ] \
+    || die "schema_migrations baseline mismatch: $row"
+
+  local table reg
+  for table in projects project_members quota_types project_quotas audit_events; do
+    reg=$($SSH "$leader" "su - postgres -c \"psql -At ycluster -c \\\"select to_regclass('public.$table')\\\"\"")
+    [ "$reg" = "$table" ] || die "missing baseline table $table"
+  done
+  ok "baseline migration recorded; baseline tables present"
+
+  $SSH "$leader" "su - postgres -c \"psql -At ycluster -v ON_ERROR_STOP=1 -c 'SET ROLE ycluster' -c 'select count(*) from projects'\"" >/dev/null \
+    || die "app role cannot read projects"
+  if $SSH "$leader" "su - postgres -c \"psql -At ycluster -v ON_ERROR_STOP=1 -c 'SET ROLE ycluster' -c 'select count(*) from schema_migrations'\"" >/dev/null 2>&1; then
+    die "app role can read schema_migrations"
+  fi
+  if $SSH "$leader" "su - postgres -c \"psql -At ycluster -v ON_ERROR_STOP=1 -c 'SET ROLE ycluster' -c 'update audit_events set action = action where false'\"" >/dev/null 2>&1; then
+    die "app role can update audit_events"
+  fi
+  ok "app role denied migration bookkeeping and audit updates"
+
+  local pw before after
+  pw=$($SSH "$leader" "$E python3 -c \"from ycluster.common.etcd_utils import get_etcd_client; print(get_etcd_client().get('/cluster/config/ycluster/db-password')[0].decode())\"")
+  [ -n "$pw" ] || die "could not read admin DB password"
+  before=$($SSH "$leader" "su - postgres -c \"psql -At ycluster -c 'select count(*) from schema_migrations'\"")
+  $SSH "$leader" "su - postgres -c \"ADMIN_DB_PASSWORD='$pw' /usr/local/bin/provision-admin\"" >/dev/null \
+    || die "provision-admin rerun failed"
+  after=$($SSH "$leader" "su - postgres -c \"psql -At ycluster -c 'select count(*) from schema_migrations'\"")
+  [ "$before" = "$after" ] \
+    || die "provision-admin rerun changed migration count ($before -> $after)"
+  ok "provision-admin rerun is idempotent"
+}
+
+# --------------------------------------------------------------------------
 # Section registry: maps section number to "name|func".  Number is 1-based.
 # To add a section, append "N.name|sec_func" here and define sec_func above.
 SECTION_REGISTRY=(
@@ -1157,6 +1206,7 @@ SECTION_REGISTRY=(
   "17.backup + verify-restore|sec_backup"
   "18.frp public http/https + ssh tunnels via f1 (PROXY protocol)|sec_frp"
   "19.projects + quotas (admin)|sec_projects"
+  "20.admin database migrations|sec_admin_migrations"
 )
 
 # Parse a section filter spec (e.g. "15", "1-5,15", "acme") into a list of
