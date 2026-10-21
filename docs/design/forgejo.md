@@ -255,6 +255,10 @@ failover with a clone, a push, and a login during the window.
   `alice-example.com`, so two users on different domains do not collide.
   A user's `forgejo_username` attribute overrides the derived name for a
   residual collision or a preferred spelling.
+- Set `allow-username-change` on the OAuth2 source so OIDC users can
+  rename themselves under **Settings → Account**. The initial name still
+  comes from the claim; the external login binding is by `sub`, so a rename
+  does not break login. No rename cooldown is configured.
 - Set `ACCOUNT_LINKING = auto` only because Authentik is the cluster's
   authoritative IdP and its email claim is verified. If that assumption
   stops holding, switch to `login` and require a one-time link.

@@ -271,8 +271,10 @@ ensure_oauth_source() {
     local discovery_url="$auth_base/application/o/forgejo/.well-known/openid-configuration"
     local source_name="$FORGEJO_OAUTH_SOURCE_NAME"
     local secret_hash stored_hash source_id
-    secret_hash=$(printf '%s\n%s\n%s' "$client_secret" "$discovery_url" "$source_name" \
-        | sha256sum | awk '{print $1}')
+    # Cover every source field this manager owns, so changing a flag updates an
+    # existing source instead of leaving it stale.
+    secret_hash=$(printf '%s\n%s\n%s\n%s' "$client_secret" "$discovery_url" \
+        "$source_name" "allow-username-change" | sha256sum | awk '{print $1}')
     source_id=$(docker exec -u git forgejo forgejo admin auth list \
         | awk -v name="$source_name" '$2==name {print $1; exit}')
     # Rename the original source in place instead of leaving a duplicate
@@ -296,7 +298,8 @@ ensure_oauth_source() {
             --secret "$client_secret" \
             --auto-discover-url "$discovery_url" \
             --scopes profile \
-            --scopes email > /dev/null
+            --scopes email \
+            --allow-username-change > /dev/null
     else
         docker exec -u git forgejo forgejo admin auth add-oauth \
             --name "$source_name" \
@@ -305,7 +308,8 @@ ensure_oauth_source() {
             --secret "$client_secret" \
             --auto-discover-url "$discovery_url" \
             --scopes profile \
-            --scopes email > /dev/null
+            --scopes email \
+            --allow-username-change > /dev/null
     fi
 
     printf '%s' "$secret_hash" \
