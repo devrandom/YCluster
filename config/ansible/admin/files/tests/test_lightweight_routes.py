@@ -89,6 +89,7 @@ class LightweightRouteTests(unittest.TestCase):
         self.assertEqual(response.mimetype, 'text/plain')
         self.assertIn('ip-node node1 node1.xc', response.text)
         self.assertIn('ip-frontend frontend frontend.xc', response.text)
+        self.assertIn(f'{appmod.STORAGE_VIP} forgejo.xc', response.text)
 
 
 if __name__ == '__main__':

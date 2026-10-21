@@ -1,0 +1,39 @@
+# HTTP - forgejo.xc (cluster-internal)
+#
+# Forgejo git forge, internal access. External access is the separate
+# certbot-managed git.<domain> vhost (forgejo_git.conf.j2).
+# Restricted to the cluster subnet and the host's Docker bridges.
+server {
+    listen 80;
+    server_name forgejo.xc;
+
+    # Git LFS and release uploads; keep this generous but bounded.
+    client_max_body_size 100M;
+
+    location / {
+        allow 10.0.0.0/24;
+        allow 127.0.0.0/8;
+        allow 172.16.0.0/12;
+        deny all;
+
+        proxy_pass http://127.0.0.1:{{ forgejo_port }}/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Git smart HTTP and LFS stream large request/response bodies;
+        # buffering would break the protocol or duplicate writes.
+        proxy_request_buffering off;
+        proxy_buffering off;
+
+        # Forgejo uses websockets for live notifications and events.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+}

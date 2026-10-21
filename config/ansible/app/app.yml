@@ -42,5 +42,8 @@
 # Authentik (storage leader, leader-gated)
 - import_playbook: install-authentik.yml
 
+# Forgejo (storage leader, leader-gated; OIDC client in Authentik)
+- import_playbook: install-forgejo.yml
+
 # WhisperX (compute, opt-in via whisperx_enabled in host_vars)
 - import_playbook: install-whisperx.yml

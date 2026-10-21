@@ -2,9 +2,15 @@
 
 ## Status
 
-**Draft — direction decided, nothing implemented. (Researched 2026-10-21
-against Forgejo 17.0.0, Gitea 1.27.3, OneDev 16.9.5, Soft Serve
-0.12.3, and current GitLab installation requirements.)**
+**Trial-deployed on the storage leader, internal-only.** The server,
+internal OIDC client, nginx vhost, and CI workflow are in the tree and
+running at `forgejo.xc`; OIDC discovery and the login redirect were
+verified, and HTTP token plus SSH-key clone/push were smoke-tested and cleaned
+up. External `git.<domain>`, the Actions runner, the perimeter
+CVE manifest, and the off-cluster forge-data dump are still pending.
+(Researched 2026-10-21 against Forgejo 17.0.0, Gitea 1.27.3, OneDev
+16.9.5, Soft Serve 0.12.3, and current GitLab installation
+requirements.)**
 
 Decided so far:
 
@@ -22,12 +28,39 @@ Decided so far:
   break-glass administrator account and no open registration.
 - Use Forgejo Actions with a repository-scoped, ephemeral runner on a
   compute node, not on the storage leader.
-- Serve internally at `forgejo.xc`; optionally expose `git.<domain>` through
-  the existing frp/nginx/certbot path.
+- Serve internally at `forgejo.xc`. The external `git.<domain>` vhost is
+  gated by `forgejo_external` (default `false`) and uses the existing
+  frp/nginx/certbot path when enabled.
 - Seed the new forge from the existing git refs. There is no issue, milestone,
   release, or wiki migration because those features are not in active use.
 - Do not migrate `.gitlab-ci.yml` as-is. Rewrite the six jobs as a Forgejo
   Actions workflow and run both pipelines in parallel before cutover.
+
+Implementation in the tree:
+
+- `config/ansible/app/install-forgejo.yml`, `files/forgejo-manager`,
+  and `files/forgejo-compose.yaml` deploy the server on the storage leader,
+  create the PostgreSQL database/role, seed the digest-pinned image into
+  `registry.xc`, and render `app.ini` with generated secrets.
+- `files/authentik-manager` always writes the `forgejo` OIDC provider,
+  including the internal callback and the external callback when a domain is
+  configured; `forgejo-manager` creates or updates the matching
+  `authentik` OAuth2 source using the internal discovery URL unless
+  external mode is enabled.
+- `templates/forgejo-internal.conf.j2` serves `forgejo.xc`;
+  `files/forgejo_git.conf.j2` serves the external `git.<domain>` surface
+  only when `forgejo_external=true`, without Authentik forward-auth,
+  because git clients and API tokens are not Authentik sessions.
+- `app.py` adds `forgejo.xc` to the generated static DNS hosts so every
+  cluster node resolves the internal name through the storage VIP.
+- `.forgejo/workflows/ci.yml` mirrors the six GitLab jobs with a manual
+  token checkout, so it does not need `actions/checkout` or Node in the job
+  image.
+- The repository-scoped runner is not installed yet. The workflow is ready,
+  but it will stay queued until the runner playbook lands.
+- The forge data currently has no off-cluster file backup; only the
+  PostgreSQL metadata is in `pg_dumpall`. See
+  `docs/operations/disaster-recovery.md` for the open gap.
 
 ## Motivation
 
@@ -197,11 +230,15 @@ failover with a clone, a push, and a login during the window.
 ### OIDC through Authentik
 
 - Create an Authentik OAuth2/OpenID provider for Forgejo and a matching
-  application. The redirect URI is the source-specific callback shown in
-  Forgejo's authentication source form, typically
-  `/user/oauth2/<source>/callback` on `https://forgejo.xc`.
+  application. The provider always includes the internal callback
+  `http://forgejo.xc/user/oauth2/authentik/callback` and adds the external
+  callback `https://git.<domain>/user/oauth2/authentik/callback` when a
+  domain is configured.
 - Configure Forgejo's OAuth2 source with the Authentik discovery URL,
-  client ID, and client secret. Request `openid profile email`.
+  client ID, and client secret. Internal mode uses
+  `http://auth.xc/application/o/forgejo/.well-known/openid-configuration`;
+  external mode uses the equivalent `https://auth.<domain>` URL. Request
+  `openid profile email`.
 - Set `ENABLE_AUTO_REGISTRATION = true` so the first Authentik login
   creates the Forgejo account.
 - Set `ACCOUNT_LINKING = auto` only because Authentik is the cluster's
@@ -211,17 +248,37 @@ failover with a clone, a push, and a login during the window.
 - Keep `ENABLE_INTERNAL_SIGNIN = true` for the single local
   break-glass administrator. The local account is not a normal user path.
 
+The break-glass account is `forgejo-admin`. Its generated password is
+stored in etcd at `/cluster/config/forgejo/admin-password`. It is not in
+`app.ini` and is not committed to the repo; retrieve it with the etcd
+client environment from a core node.
+
 The Authentik manager owns the provider and client secret, following the
 Open-WebUI pattern. The Forgejo manager reads the secret from etcd and
-renders `app.ini` with mode `0600`; the secret is never committed to the
-repo.
+writes it into Forgejo's OAuth2 source in the database, not `app.ini`;
+the secret is never committed to the repo. `app.ini` holds only Forgejo's
+own generated secrets and is mode `0600`.
 
 ### Git authentication
 
-- HTTPS git uses Forgejo access tokens, not account passwords.
-- SSH uses Forgejo's built-in SSH server on port 2222. If external SSH is
-  required, the edge must forward a TCP port; that is a separate public
-  surface decision and should not be bundled into the first internal deploy.
+Users access git with a normal git client:
+
+```bash
+# HTTPS: username + a Forgejo access token as the password
+git clone http://forgejo.xc/<owner>/<repo>.git
+
+# SSH: a key registered in Forgejo
+git clone ssh://git@forgejo.xc:2222/<owner>/<repo>.git
+```
+
+- HTTPS git uses Forgejo access tokens, not account passwords. Create one
+  under **Settings → Applications → Generate token** with repository
+  read/write scope. Use the Forgejo username and that token when git prompts.
+- SSH uses Forgejo's built-in SSH server on port 2222. Users add their public
+  key under **Settings → SSH / GPG Keys**; the private key stays local.
+- If external SSH is required, the edge must forward a TCP port; that is a
+  separate public surface decision and should not be bundled into the first
+  internal deploy.
 - Existing SSH keys are user-managed in Forgejo. The cutover does not
   carry GitLab SSH keys; users re-add them or use a token.
 
@@ -255,15 +312,15 @@ Ansible lint, Go lint, Python tests, and Go tests. They map to a single
 
 - `on: [push, pull_request]`
 - `runs-on: docker`
-- `actions/checkout` first, with `persist-credentials: false`
+- manual token checkout first (`git init` + `git fetch` with
+  `FORGEJO_TOKEN`), so no `actions/checkout` and no Node.js requirement
 - `run:` steps for the existing commands
-- a job image with both the language toolchain and Node.js, mirrored into
-  `registry.xc`
+- `python:3.13` and `golang:1.25` job images, mirrored into `registry.xc`
 
-The Node requirement is a real migration wrinkle: `actions/checkout` needs
-Node.js in the job image, and `python:3.13-slim` does not include it. Use a
-Node-bearing image with Python installed, or replace checkout with a local
-composite action that uses only `run:` steps.
+The manual checkout avoids both the external action dependency and the
+Node.js requirement that `actions/checkout` would impose on a slim Python
+image. The tradeoff is that the same checkout snippet is repeated in each
+job.
 
 Forgejo Actions is GitHub-Actions-like but not compatible. The migration
 must be validated by running both pipelines on the same commit and comparing
@@ -271,21 +328,19 @@ results, not by assuming the YAML translates.
 
 ### Action and image supply chain
 
-By default, `uses: actions/checkout@v7` is fetched from
-`https://data.forgejo.org`, and job images are pulled from public
-registries. That is an external dependency and a supply-chain surface.
+The current workflow uses no `uses:` actions, so it has no remote-action
+supply chain. Job images are still pulled from public registries, which is an
+external dependency and a supply-chain surface.
 
-- Pin actions by commit SHA and mirror the needed action repositories into
-  the internal Forgejo instance.
-- Set `DEFAULT_ACTIONS_URL` to the internal forge, or use fully qualified
-  internal URLs in workflows.
+- Set `DEFAULT_ACTIONS_URL` to the internal forge, and mirror any future
+  action repositories into it before use.
+- Pin any future actions by commit SHA.
 - Mirror job images into `registry.xc` and reference them by digest.
-- If the runner must be fully offline, use only `run:` steps and local
-  actions, and pre-seed every image.
+- If the runner must be fully offline, pre-seed every image and keep using
+  `run:` steps only.
 
 This is more work than the GitLab pipeline, but it is bounded: the current
-pipeline needs one checkout action, a few language images, and the existing
-test commands.
+pipeline needs two language images and the existing test commands.
 
 ## Cutover from the existing GitLab remote
 
@@ -326,8 +381,13 @@ Forgejo's backup set is not just the git repositories:
 - PostgreSQL database `forgejo`.
 - `/rbd/user/forgejo` (repositories, LFS, attachments, avatars,
   Actions logs/artifacts, indexes, queues).
-- `app.ini`, including `SECRET_KEY` and `JWT_SECRET`, plus the SSH
-  host key files referenced by `SSH_SERVER_HOST_KEYS`.
+- `app.ini`, including `SECRET_KEY`, `INTERNAL_TOKEN`, `JWT_SECRET`, and
+  `LFS_JWT_SECRET`, plus the SSH host key files referenced by
+  `SSH_SERVER_HOST_KEYS`.
+- The generated PostgreSQL password in etcd at
+  `/cluster/config/forgejo/db-password`, covered by the etcd backup.
+- The generated break-glass admin password in etcd at
+  `/cluster/config/forgejo/admin-password`, covered by the etcd backup.
 - The Authentik OIDC client secret, in the Authentik backup.
 
 Forgejo's docs strongly recommend shutting down the instance for a
@@ -363,6 +423,10 @@ At minimum, monitor:
   decision, not an automatic part of the install.
 - If exposed, put it behind the existing nginx/certbot/frp path. Do not
   publish the Forgejo container port directly.
+- Do **not** put `git.<domain>` behind Authentik forward-auth. Git clients
+  and API tokens are not Authentik sessions; Forgejo's token auth and OIDC
+  login are the boundary. This is the deliberate exception to the usual
+  public-vhost checklist.
 - The runner is remote code execution. Isolate it on a compute node or VM,
   restrict its network reachability, and do not give it storage-leader
   credentials or the Docker socket of a shared host.
@@ -378,7 +442,8 @@ At minimum, monitor:
 
 ## Acceptance criteria
 
-- `forgejo.xc` serves the web UI over HTTPS on the storage VIP.
+- `forgejo.xc` serves the web UI over HTTP inside the cluster;
+  `git.<domain>` serves it over HTTPS when `forgejo_external=true`.
 - Authentik OIDC login works for a normal user; local admin login works
   as break-glass.
 - HTTPS and SSH clone/push work with a token and a user key.

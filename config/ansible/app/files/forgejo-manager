@@ -1,0 +1,377 @@
+#!/bin/bash
+set -e
+
+# etcd client config (endpoints + TLS certs) from the single source; set -a
+# exports the ETCDCTL_* vars so the bare etcdctl calls below pick them up.
+set -a; . /etc/ycluster/etcd-client.env 2>/dev/null || true; set +a
+
+FORGEJO_DATA_DIR="${FORGEJO_DATA_DIR:-/rbd/user/forgejo}"
+FORGEJO_CONFIG_DIR="${FORGEJO_CONFIG_DIR:-/etc/forgejo}"
+FORGEJO_CONFIG_FILE="$FORGEJO_CONFIG_DIR/app.ini"
+COMPOSE_PROJECT="forgejo"
+ETCD_KEY_PREFIX="/cluster/config/forgejo"
+# `admin` is reserved by Forgejo, so the local break-glass account needs a
+# distinct name.
+FORGEJO_ADMIN_USERNAME="forgejo-admin"
+
+# Get an existing secret from etcd, or generate one and store it atomically
+# (txn: put only if the key doesn't exist, then read back whatever won).
+get_or_generate_secret() {
+    local etcd_key="${ETCD_KEY_PREFIX}/$1"
+    local generator="$2"
+
+    local existing
+    existing=$(etcdctl get "$etcd_key" --print-value-only 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+        echo "$existing"
+        return 0
+    fi
+
+    local new_value
+    new_value=$($generator)
+    local txn
+    txn=$(cat <<EOF
+version("$etcd_key") = "0"
+
+put "$etcd_key" "$new_value"
+
+get "$etcd_key" --print-value-only
+EOF
+)
+    # need to echo trailing newlines because here-doc strips them
+    echo -e "$txn\n\n" | etcdctl txn > /dev/null
+
+    etcdctl get "$etcd_key" --print-value-only
+}
+
+gen_secret_key() { openssl rand -base64 48 | tr -d '\n'; }
+gen_jwt_secret() { openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'; }
+gen_password()   { openssl rand -base64 24 | tr -d '\n'; }
+gen_token()      { openssl rand -hex 32; }
+
+wait_for_registry() {
+    local max_attempts=12
+    local delay=5
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://registry.xc:5000/v2/" > /dev/null 2>&1; then
+            return 0
+        fi
+        echo "Waiting for registry (attempt $attempt/$max_attempts)..."
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Registry not available after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+wait_for_forgejo() {
+    local max_attempts=60
+    local delay=2
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://127.0.0.1:${FORGEJO_PORT:-3000}/api/healthz" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Forgejo did not become healthy after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+write_config() {
+    local external_domain="$1"
+    local db_password="$2"
+    local secret_key="$3"
+    local internal_token="$4"
+    local jwt_secret="$5"
+    local lfs_jwt_secret="$6"
+
+    local domain root_url ssh_domain cookie_secure actions_url
+    if [ -n "$external_domain" ]; then
+        domain="git.$external_domain"
+        root_url="https://git.$external_domain/"
+        # SSH is an internal surface in this design; external SSH is a
+        # separate edge decision. Do not advertise a hostname that is not
+        # forwarded on the SSH port.
+        ssh_domain="forgejo.xc"
+        cookie_secure="true"
+        actions_url="https://git.$external_domain"
+    else
+        domain="forgejo.xc"
+        root_url="http://forgejo.xc/"
+        ssh_domain="forgejo.xc"
+        cookie_secure="false"
+        actions_url="http://forgejo.xc"
+    fi
+
+    cat > "$FORGEJO_CONFIG_FILE" <<EOF
+# Written by forgejo-manager at service start — do not edit.
+APP_NAME = Forgejo
+RUN_USER = git
+
+[server]
+APP_DATA_PATH = /data
+DOMAIN = $domain
+ROOT_URL = $root_url
+HTTP_ADDR = 0.0.0.0
+HTTP_PORT = 3000
+SSH_DOMAIN = $ssh_domain
+SSH_PORT = 2222
+SSH_LISTEN_PORT = 2222
+START_SSH_SERVER = true
+SSH_SERVER_HOST_KEYS = ssh/forgejo.rsa
+LFS_START_SERVER = true
+LFS_JWT_SECRET = $lfs_jwt_secret
+OFFLINE_MODE = true
+ENABLE_GZIP = true
+COOKIE_SECURE = $cookie_secure
+LANDING_PAGE = login
+
+[database]
+DB_TYPE = postgres
+HOST = host.docker.internal:5432
+NAME = forgejo
+USER = forgejo
+PASSWD = $db_password
+SSL_MODE = disable
+
+[lfs]
+PATH = /data/lfs
+
+[security]
+INSTALL_LOCK = true
+SECRET_KEY = $secret_key
+INTERNAL_TOKEN = $internal_token
+
+[service]
+DISABLE_REGISTRATION = true
+ENABLE_INTERNAL_SIGNIN = true
+REGISTER_EMAIL_CONFIRM = false
+ENABLE_NOTIFY_MAIL = false
+DEFAULT_KEEP_EMAIL_PRIVATE = true
+DEFAULT_ALLOW_CREATE_ORGANIZATION = false
+DEFAULT_USER_IS_RESTRICTED = false
+ENABLE_CAPTCHA = false
+
+[oauth2]
+JWT_SECRET = $jwt_secret
+
+[oauth2_client]
+ENABLE_AUTO_REGISTRATION = true
+ACCOUNT_LINKING = auto
+OPENID_CONNECT_SCOPES = profile email
+USERNAME = nickname
+UPDATE_AVATAR = true
+
+[repository]
+ROOT = /data/git/repositories
+DEFAULT_PRIVATE = private
+
+[actions]
+ENABLED = true
+DEFAULT_ACTIONS_URL = $actions_url
+
+[packages]
+ENABLED = false
+
+[mailer]
+ENABLED = false
+
+[openid]
+ENABLE_OPENID_SIGNIN = false
+
+[log]
+MODE = console
+LEVEL = Info
+
+[metrics]
+ENABLED = true
+ENABLED_ISSUE_BY_LABEL = true
+ENABLED_ISSUE_BY_REPOSITORY = true
+
+[cron.update_checker]
+ENABLED = false
+
+[ui]
+DEFAULT_THEME = forgejo-auto
+SHOW_USER_EMAIL = false
+EOF
+    chown 1000:1000 "$FORGEJO_CONFIG_FILE"
+    chmod 600 "$FORGEJO_CONFIG_FILE"
+}
+
+ensure_admin() {
+    local existing admin_password create_output
+    existing=$(docker exec -u git forgejo forgejo admin user list \
+        | awk -v user="$FORGEJO_ADMIN_USERNAME" '$2==user {print $1; exit}')
+
+    if [ -n "$existing" ]; then
+        admin_password=$(etcdctl get "${ETCD_KEY_PREFIX}/admin-password" --print-value-only 2>/dev/null || true)
+        if [ -n "$admin_password" ]; then
+            # Keep the etcd password authoritative for break-glass access.
+            return 0
+        fi
+
+        # Recovery path for an admin created before the etcd key existed.
+        admin_password=$(gen_password)
+        docker exec -u git forgejo forgejo admin user change-password \
+            --username "$FORGEJO_ADMIN_USERNAME" --password "$admin_password" > /dev/null
+    else
+        # Let Forgejo generate the password so it never appears in the
+        # docker exec command line; capture it and store it in etcd.
+        create_output=$(docker exec -u git forgejo forgejo admin user create \
+            --username "$FORGEJO_ADMIN_USERNAME" \
+            --email "forgejo-admin@forgejo.xc" \
+            --admin \
+            --must-change-password=false \
+            --random-password \
+            --random-password-length 32)
+        admin_password=$(printf '%s\n' "$create_output" \
+            | sed -n "s/^generated random password is '\(.*\)'$/\1/p")
+        if [ -z "$admin_password" ]; then
+            echo "Could not parse the generated Forgejo admin password"
+            return 1
+        fi
+    fi
+
+    printf '%s' "$admin_password" \
+        | etcdctl put "${ETCD_KEY_PREFIX}/admin-password"
+}
+
+ensure_oauth_source() {
+    local external_domain="$1"
+
+    local client_secret
+    local attempt=1
+    while [ $attempt -le 30 ]; do
+        client_secret=$(etcdctl get /cluster/config/authentik/forgejo-client-secret --print-value-only 2>/dev/null || true)
+        [ -n "$client_secret" ] && break
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    if [ -z "$client_secret" ]; then
+        echo "Forgejo OIDC client secret not published yet; skipping OAuth source"
+        return 0
+    fi
+
+    local auth_base="http://auth.xc"
+    if [ -n "$external_domain" ]; then
+        auth_base="https://auth.$external_domain"
+    fi
+    local discovery_url="$auth_base/application/o/forgejo/.well-known/openid-configuration"
+    local secret_hash stored_hash source_id
+    secret_hash=$(printf '%s\n%s' "$client_secret" "$discovery_url" \
+        | sha256sum | awk '{print $1}')
+    source_id=$(docker exec -u git forgejo forgejo admin auth list | awk '$2=="authentik" {print $1; exit}')
+    stored_hash=$(etcdctl get "${ETCD_KEY_PREFIX}/oidc-secret-hash" --print-value-only 2>/dev/null || true)
+
+    if [ -n "$source_id" ] && [ "$stored_hash" = "$secret_hash" ]; then
+        return 0
+    fi
+
+    if [ -n "$source_id" ]; then
+        docker exec -u git forgejo forgejo admin auth update-oauth \
+            --id "$source_id" \
+            --name authentik \
+            --provider openidConnect \
+            --key forgejo \
+            --secret "$client_secret" \
+            --auto-discover-url "$discovery_url" \
+            --scopes profile \
+            --scopes email > /dev/null
+    else
+        docker exec -u git forgejo forgejo admin auth add-oauth \
+            --name authentik \
+            --provider openidConnect \
+            --key forgejo \
+            --secret "$client_secret" \
+            --auto-discover-url "$discovery_url" \
+            --scopes profile \
+            --scopes email > /dev/null
+    fi
+
+    printf '%s' "$secret_hash" \
+        | etcdctl put "${ETCD_KEY_PREFIX}/oidc-secret-hash"
+}
+
+start_forgejo() {
+    mkdir -p "$FORGEJO_DATA_DIR"/{gitea/conf,git/repositories,lfs,attachments,avatars,actions_log,actions_artifacts}
+    chown -R 1000:1000 "$FORGEJO_DATA_DIR"
+
+    local db_password
+    db_password=$(etcdctl get "${ETCD_KEY_PREFIX}/db-password" --print-value-only 2>/dev/null || true)
+    if [ -z "$db_password" ]; then
+        echo "Forgejo database password missing from etcd; run install-forgejo.yml first"
+        return 1
+    fi
+
+    local secret_key internal_token jwt_secret lfs_jwt_secret
+    secret_key=$(get_or_generate_secret secret-key gen_secret_key)
+    internal_token=$(get_or_generate_secret internal-token gen_token)
+    # Forgejo requires raw-URL-safe base64 that decodes to exactly 32 bytes.
+    # The v2 keys avoid reusing the earlier 48-byte values from failed runs.
+    jwt_secret=$(get_or_generate_secret oauth2-jwt-secret-v2 gen_jwt_secret)
+    lfs_jwt_secret=$(get_or_generate_secret lfs-jwt-secret-v2 gen_jwt_secret)
+
+    local external_domain=""
+    if [ "${FORGEJO_EXTERNAL_ENABLED:-false}" = "true" ]; then
+        external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+    fi
+    write_config "$external_domain" "$db_password" "$secret_key" \
+        "$internal_token" "$jwt_secret" "$lfs_jwt_secret"
+
+    local env_file
+    env_file=$(mktemp --tmpdir=/dev/shm)
+    trap "rm -f '$env_file'" EXIT
+
+    echo "FORGEJO_IMAGE=${FORGEJO_IMAGE:?FORGEJO_IMAGE must be set by the unit}" > "$env_file"
+    echo "FORGEJO_PORT=${FORGEJO_PORT:-3000}" >> "$env_file"
+    echo "FORGEJO_SSH_PORT=${FORGEJO_SSH_PORT:-2222}" >> "$env_file"
+    echo "FORGEJO_DATA_DIR=$FORGEJO_DATA_DIR" >> "$env_file"
+
+    if ! wait_for_registry; then
+        echo "Failed to connect to registry, aborting startup"
+        return 1
+    fi
+
+    cd "$FORGEJO_CONFIG_DIR"
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up -d --pull=always
+
+    if ! wait_for_forgejo; then
+        return 1
+    fi
+
+    ensure_admin
+    ensure_oauth_source "$external_domain"
+
+    # Re-attach in the foreground so systemd sees the service alive.
+    # On SIGTERM, stop_forgejo runs `docker compose down`.
+    exec docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
+}
+
+stop_forgejo() {
+    echo "Stopping Forgejo"
+    cd "$FORGEJO_CONFIG_DIR"
+    docker compose -p "$COMPOSE_PROJECT" down
+    echo "Forgejo stopped"
+}
+
+case "$1" in
+    start)
+        start_forgejo
+        ;;
+    stop)
+        stop_forgejo
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,25 @@
+services:
+  forgejo:
+    # FORGEJO_IMAGE overrides the whole reference; the fallback is the
+    # digest-pinned upstream image so a manual compose run cannot float.
+    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo@sha256:c6931ca2926185d129aee8e28f1c6f42fbd8c1bb6b14dbac38873e06a8948a8a}
+    container_name: forgejo
+    environment:
+      USER_UID: 1000
+      USER_GID: 1000
+    volumes:
+      - ${FORGEJO_DATA_DIR:-/rbd/user/forgejo}:/data
+      # Written by forgejo-manager at service start; read-only in the
+      # container. Holds SECRET_KEY, INTERNAL_TOKEN, the OAuth2/LFS
+      # JWT secrets, and the PostgreSQL password.
+      - /etc/forgejo/app.ini:/data/gitea/conf/app.ini:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      # Host nginx is the only web ingress. SSH is published on the
+      # storage leader for internal clone/push; external SSH is a separate
+      # edge decision and must not be assumed by this port mapping.
+      - 127.0.0.1:${FORGEJO_PORT:-3000}:3000
+      - ${FORGEJO_SSH_PORT:-2222}:2222
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped

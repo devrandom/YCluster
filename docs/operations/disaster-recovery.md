@@ -60,6 +60,11 @@ backup-databases status        # newest backup per engine, sizes, sync state
   open-webui images: rebuildable, but at cost) and anything an operator parked
   on the volumes by hand. (authentik's `/rbd/misc/authentik` is just
   Ansible-deployed branding — reproducible, not a gap.)
+- **Forgejo state** (`/rbd/user/forgejo`: git repositories, LFS,
+  attachments, avatars, Actions logs/artifacts) — the PostgreSQL metadata is
+  in `pg_dumpall`, but the repositories themselves have no off-cluster file
+  backup today. Add a `forgejo dump`/RBD snapshot path before treating the
+  forge as production.
 - **Everything Ansible renders** — service configs, blueprints, certs issued by
   the cluster CA. Recovered by re-running playbooks, not from backup.
 

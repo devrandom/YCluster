@@ -67,6 +67,11 @@ See `config/ansible/app/install-comfyui.yml` end of file for a worked
 example (resolves a backend URL from host_vars, installs template, renders
 with certbot-manager, symlinks into sites-enabled, reloads nginx).
 
+**Exception:** `git.<domain>` (Forgejo) has no Authentik forward-auth.
+Git clients and API tokens are not Authentik sessions, so Forgejo itself is
+the auth boundary there; the web login is OIDC. Do not add the outpost
+include to `forgejo_git.conf.j2`.
+
 ## Adding a new public vhost — checklist
 
 1. Add a `files/<app>/<app>_<name>.conf.j2` template (mirror

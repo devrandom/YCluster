@@ -397,6 +397,7 @@ def get_hosts():
         f"{STORAGE_VIP} admin.xc",
         f"{STORAGE_VIP} inference.xc",
         f"{STORAGE_VIP} auth.xc",
+        f"{STORAGE_VIP} forgejo.xc",
     ])
 
     if hosts_entries:

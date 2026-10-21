@@ -333,11 +333,76 @@ EOF
     chmod 600 "$bp"
 }
 
-# Write the domain-dependent blueprints (OWUI OIDC client + admin/app
-# forward-auth + Zulip SAML). Only once an external domain exists — redirect
-# URIs and launch URLs are external-only. The authentik worker watches the
+# Forgejo OIDC client (forgejo.xc, plus git.<domain> when external).
+# Forgejo owns the web login and the git/API token boundary; Authentik
+# only supplies the identity. The client secret is read by forgejo-manager
+# from the same etcd key and passed to Forgejo's OAuth2 source. The internal
+# redirect is always present so the default internal-only install has a usable
+# login path; the external redirect is added only when a domain exists.
+write_forgejo_blueprint() {
+    local external_domain="$1"
+    local client_secret="$2"
+    local redirect_uris launch_url
+    redirect_uris="        - matching_mode: strict
+          url: http://forgejo.xc/user/oauth2/authentik/callback"
+    launch_url="http://forgejo.xc/"
+    if [ -n "$external_domain" ]; then
+        redirect_uris="$redirect_uris
+        - matching_mode: strict
+          url: https://git.$external_domain/user/oauth2/authentik/callback"
+    fi
+    local bp=/etc/authentik/blueprints/ycluster-forgejo.yaml
+    cat > "$bp" <<EOF
+# Written by authentik-manager at service start — do not edit.
+version: 1
+metadata:
+  name: ycluster-forgejo
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: provider-forgejo
+    identifiers:
+      name: forgejo
+    attrs:
+      client_type: confidential
+      client_id: forgejo
+      client_secret: "$client_secret"
+      access_token_validity: days=1
+      refresh_token_validity: days=30
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      sub_mode: user_email
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+      redirect_uris:
+$redirect_uris
+  - model: authentik_core.application
+    identifiers:
+      slug: forgejo
+    attrs:
+      # App-login integration only. There is no edge forward-auth for
+      # Forgejo: git clients and API tokens are not Authentik sessions.
+      # The launch URL stays internal so the default internal-only
+      # install has a working Authentik app link. External mode is reached
+      # directly at git.<domain>.
+      name: Forgejo — SSO
+      provider: !KeyOf provider-forgejo
+      meta_hide: true
+      meta_launch_url: $launch_url
+EOF
+    chown 1000:1000 "$bp"
+    chmod 600 "$bp"
+}
+
+# Write the runtime blueprints. The external-domain apps (OWUI OIDC,
+# admin/app forward-auth, Zulip SAML) only exist once a domain is
+# configured. Forgejo is always written because its internal HTTP login path
+# does not depend on external DNS or TLS; the external redirect is added to
+# the same provider when a domain exists. The authentik worker watches the
 # blueprint dir and auto-applies on change, so refreshing these needs no
-# container restart (see the `write-blueprints` command).
+# container restart (see `write-blueprints`).
 write_all_blueprints() {
     local external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
     if [ -n "$external_domain" ]; then
@@ -346,6 +411,8 @@ write_all_blueprints() {
         write_admin_blueprint "$external_domain"
         write_zulip_blueprint "$external_domain"
     fi
+    write_forgejo_blueprint "$external_domain" \
+        "$(get_or_generate_secret forgejo-client-secret gen_token)"
 }
 
 start_authentik() {
@@ -434,11 +501,20 @@ case "$1" in
         stop_authentik
         ;;
     write-blueprints)
-        # Rewrite the domain-dependent blueprints without restarting the
-        # containers; the worker auto-applies. Used by install-authentik's
-        # handler so a manager update refreshes blueprints with no outage,
-        # and by `ycluster https set-domain`.
+        # Rewrite the runtime blueprints without restarting the containers.
+        # Existing files are picked up by the worker; applying the Forgejo
+        # blueprint explicitly also covers a newly added file that the
+        # already-running worker did not discover at startup. Used by
+        # install-authentik's handler and `ycluster https set-domain`.
         write_all_blueprints
+        if [ "$(docker inspect -f '{{.State.Running}}' authentik-server 2>/dev/null || true)" = "true" ]; then
+            if ! output=$(docker exec authentik-server ak apply_blueprint \
+                    /blueprints/custom/ycluster-forgejo.yaml 2>&1); then
+                echo "$output" >&2
+                echo "Failed to apply Forgejo blueprint" >&2
+                exit 1
+            fi
+        fi
         ;;
     *)
         echo "Usage: $0 {start|stop|write-blueprints}"

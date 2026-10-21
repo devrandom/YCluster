@@ -186,3 +186,17 @@ perimeter_software:
     # package: container image (PyPI manifest, digest-pinned)
     # pin_source: app/install-authentik.yml authentik_image @sha256:5a77d345... (2026.5.6)
     # manifest: config/ansible/monitoring/container-manifests/authentik.manifest (--uv-select base, 158 pkgs)
+  - name: forgejo
+    # git.<domain>. No edge forward-auth: git clients and API tokens are
+    # not Authentik sessions, so Forgejo itself is the auth boundary. The
+    # web login is OIDC via Authentik. Tier P0-U by the pre-auth git/API
+    # surface.
+    tier: P0-U
+    osv_category: container
+    osv_packages: []
+    untracked: true
+    # package: container image (Alpine base + Forgejo Go module, digest-pinned)
+    # pin_source: app/install-forgejo.yml forgejo_image @sha256:c6931ca... (17.0.0)
+    # manifest: none yet — Alpine base package inventory is not enumerated
+    # (untracked today); add a container manifest when the image inventory is
+    # generated.

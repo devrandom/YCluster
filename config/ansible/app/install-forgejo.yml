@@ -1,0 +1,279 @@
+---
+# Forgejo (cluster git forge) on the storage leader.
+#
+# State lives on /rbd/user/forgejo (repositories, LFS, attachments,
+# avatars, Actions logs/artifacts, indexes, queues); relational state lives
+# in the cluster's shared PostgreSQL. The service follows the storage leader
+# through ycluster-apps.target, like Authentik and Zulip.
+#
+# The official image is pinned by digest and mirrored into registry.xc so a
+# failover or fresh node does not make a cold Codeberg request. app.ini is
+# rendered by forgejo-manager at service start; it is not templated here
+# because the OIDC client secret is only known after Authentik publishes it.
+- name: Install Forgejo on storage nodes
+  hosts: storage
+  become: yes
+  vars:
+    forgejo_version: "17.0.0"
+    # amd64 digest from the official Forgejo 17.0.0 image index. Bump
+    # deliberately; osv-feed container manifests track the Alpine base and
+    # the Forgejo Go module.
+    forgejo_image: "codeberg.org/forgejo/forgejo@sha256:c6931ca2926185d129aee8e28f1c6f42fbd8c1bb6b14dbac38873e06a8948a8a"
+    # Include the digest prefix in the mirror tag so a digest bump without a
+    # version bump still reseeds the cluster registry.
+    forgejo_image_tag: "{{ forgejo_version }}-{{ forgejo_image.split('@sha256:')[1][:12] }}"
+    forgejo_registry_image: "registry.xc:5000/forgejo:{{ forgejo_image_tag }}"
+    forgejo_port: "{{ forgejo_local_port | default('3000') }}"
+    forgejo_ssh_port: "{{ forgejo_local_ssh_port | default('2222') }}"
+    # Internal-only by default. Set -e forgejo_external=true only after the
+    # public git.<domain> exposure is explicitly approved.
+    forgejo_external_enabled: "{{ forgejo_external | default(false) }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Ensure the cluster registry is active on the leader
+      systemd:
+        name: docker-registry.service
+        state: started
+      when: is_storage_leader
+
+    - name: Check whether the cluster registry has the Forgejo image
+      uri:
+        url: "http://registry.xc:5000/v2/forgejo/manifests/{{ forgejo_image_tag }}"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
+        status_code: 200
+        timeout: 10
+      register: forgejo_registry_check
+      failed_when: false
+      until: forgejo_registry_check.status | default(-1) in [200, 404]
+      retries: 30
+      delay: 2
+      when: is_storage_leader
+
+    - name: Seed the cluster registry with the pinned Forgejo image
+      shell: |
+        set -e
+        docker pull -q {{ forgejo_image }}
+        docker tag {{ forgejo_image }} {{ forgejo_registry_image }}
+        docker push -q {{ forgejo_registry_image }}
+        echo seeded
+      when: is_storage_leader and forgejo_registry_check.status != 200
+      register: forgejo_registry_seed
+      changed_when: "'seeded' in forgejo_registry_seed.stdout"
+
+    - name: Read Forgejo database password from etcd
+      command: etcdctl get /cluster/config/forgejo/db-password --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: forgejo_db_password_read
+      changed_when: false
+      failed_when: false
+      no_log: true
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+
+    - name: Generate Forgejo database password
+      command: openssl rand -base64 24
+      register: forgejo_db_password_generated
+      changed_when: false
+      no_log: true
+      run_once: true
+      when: forgejo_db_password_read.stdout | trim == ''
+
+    - name: Store Forgejo database password in etcd
+      command: etcdctl put /cluster/config/forgejo/db-password
+      args:
+        stdin: "{{ forgejo_db_password_generated.stdout }}"
+        stdin_add_newline: false
+      environment: "{{ etcd_client_env }}"
+      no_log: true
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+      when: forgejo_db_password_read.stdout | trim == ''
+
+    - name: Set Forgejo database password fact from etcd
+      set_fact:
+        forgejo_db_password: "{{ forgejo_db_password_read.stdout | trim }}"
+      no_log: true
+      when: forgejo_db_password_read.stdout | trim != ''
+
+    - name: Set Forgejo database password fact from generated value
+      set_fact:
+        forgejo_db_password: "{{ forgejo_db_password_generated.stdout | trim }}"
+      no_log: true
+      when: forgejo_db_password_read.stdout | trim == ''
+
+    - name: Create Forgejo configuration directory
+      file:
+        path: /etc/forgejo
+        state: directory
+        mode: '0755'
+
+    - name: Copy Forgejo compose file
+      copy:
+        src: files/forgejo-compose.yaml
+        dest: /etc/forgejo/docker-compose.yml
+        mode: '0644'
+      notify: restart forgejo
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
+    - name: Create Forgejo manager script
+      copy:
+        src: files/forgejo-manager
+        dest: /usr/local/lib/cluster/forgejo-manager
+        mode: '0755'
+      notify: restart forgejo
+
+    - name: Create Forgejo systemd service
+      copy:
+        dest: /etc/systemd/system/forgejo.service
+        content: |
+          [Unit]
+          Description=Forgejo (cluster git forge)
+          After=network.target docker.service user-rbd.service authentik.service
+          Requires=docker.service user-rbd.service
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/lib/cluster/forgejo-manager start
+          ExecStop=/usr/local/lib/cluster/forgejo-manager stop
+          TimeoutStartSec=600
+          TimeoutStopSec=90
+          User=root
+          Restart=on-failure
+          RestartSec=10
+          Environment=FORGEJO_IMAGE={{ forgejo_registry_image }}
+          Environment=FORGEJO_PORT={{ forgejo_port }}
+          Environment=FORGEJO_SSH_PORT={{ forgejo_ssh_port }}
+          Environment=FORGEJO_EXTERNAL_ENABLED={{ 'true' if forgejo_external_enabled | bool else 'false' }}
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: forgejo_service_file
+      notify: restart forgejo
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Re-enable Forgejo service to update symlinks
+      command: systemctl reenable forgejo.service
+      when: forgejo_service_file.changed
+
+    - name: Enable Forgejo service (part of storage-apps target)
+      systemd:
+        name: forgejo.service
+        enabled: yes
+
+    - name: Configure PostgreSQL for Forgejo
+      when: is_storage_leader
+      block:
+        - name: Create PostgreSQL database for Forgejo
+          postgresql_db:
+            name: forgejo
+            state: present
+          become_user: postgres
+
+        - name: Create PostgreSQL user for Forgejo
+          postgresql_user:
+            name: forgejo
+            password: "{{ forgejo_db_password }}"
+            db: forgejo
+            priv: ALL
+            state: present
+          become_user: postgres
+          no_log: true
+
+        - name: Grant schema permissions to Forgejo user
+          postgresql_privs:
+            database: forgejo
+            state: present
+            privs: ALL
+            type: schema
+            objs: public
+            roles: forgejo
+          become_user: postgres
+
+        - name: Make Forgejo owner of the database
+          postgresql_owner:
+            db: forgejo
+            obj_name: forgejo
+            new_owner: forgejo
+            obj_type: database
+          become_user: postgres
+
+    - name: Install Forgejo internal nginx site (forgejo.xc)
+      template:
+        src: templates/forgejo-internal.conf.j2
+        dest: /etc/nginx/sites-available/forgejo-internal
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable Forgejo internal nginx site
+      file:
+        src: /etc/nginx/sites-available/forgejo-internal
+        dest: /etc/nginx/sites-enabled/forgejo-internal
+        state: link
+      notify: reload nginx
+
+    - name: Install Forgejo external nginx template
+      template:
+        src: files/forgejo_git.conf.j2
+        dest: /etc/nginx/templates/forgejo_git.conf.j2
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      vars:
+        proxy_port: "{{ forgejo_port }}"
+      notify: reload nginx
+      when: forgejo_external_enabled | bool
+
+    - name: Generate Forgejo nginx configuration from template
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
+      environment: "{{ etcd_client_env }}"
+      register: forgejo_nginx_update
+      changed_when: "'configuration updated' in forgejo_nginx_update.stdout"
+      failed_when: forgejo_nginx_update.rc != 0
+      notify: reload nginx
+      when: forgejo_external_enabled | bool
+
+    - name: Enable git.<domain> Forgejo nginx site
+      file:
+        src: /etc/nginx/sites-available/forgejo_git
+        dest: /etc/nginx/sites-enabled/forgejo_git
+        state: link
+      notify: reload nginx
+      when: forgejo_external_enabled | bool
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    # Leader-only: the unit Requires=user-rbd.service and /rbd/user is
+    # mounted only on the leader, so a restart on a non-leader would fail.
+    # Picks up compose/manager/unit changes (brief forge outage).
+    - name: restart forgejo
+      systemd:
+        name: forgejo.service
+        state: restarted
+        daemon_reload: yes
+      when: is_storage_leader
