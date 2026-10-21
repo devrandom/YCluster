@@ -12,7 +12,7 @@
 # and the git smart-HTTP/API surfaces without an auth_request gate.
 #
 # This one server block declares both the plain :443 listener and the frp
-# tunnel landing (127.0.0.2:17443, PROXY protocol v2). The `(( port ))`
+# tunnel landing (127.0.0.2:17443, PROXY protocol v2). The proxy_port
 # marker is substituted by the install-forgejo.yml render step.
 server {
     {% if use_tls %}

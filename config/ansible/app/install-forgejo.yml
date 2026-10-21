@@ -262,6 +262,25 @@
       notify: reload nginx
       when: forgejo_external_enabled | bool
 
+    # A failed run can update the unit but not reach the restart handler.
+    # On the next run the unit is already current, so check the rendered
+    # app.ini mode and restart only when the running config has not caught up.
+    - name: Check that Forgejo external mode is applied
+      command: grep -q '^ROOT_URL = https://git\.' /etc/forgejo/app.ini
+      register: forgejo_external_applied
+      changed_when: forgejo_external_applied.rc != 0
+      failed_when: false
+      notify: restart forgejo
+      when: is_storage_leader and (forgejo_external_enabled | bool)
+
+    - name: Check that Forgejo internal mode is applied
+      command: grep -q '^ROOT_URL = http://forgejo.xc/' /etc/forgejo/app.ini
+      register: forgejo_internal_applied
+      changed_when: forgejo_internal_applied.rc != 0
+      failed_when: false
+      notify: restart forgejo
+      when: is_storage_leader and not (forgejo_external_enabled | bool)
+
   handlers:
     - name: reload nginx
       systemd:

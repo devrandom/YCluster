@@ -2,15 +2,15 @@
 
 ## Status
 
-**Trial-deployed on the storage leader, internal-only.** The server,
-internal OIDC client, nginx vhost, and CI workflow are in the tree and
-running at `forgejo.xc`; OIDC discovery and the login redirect were
-verified, and HTTP token plus SSH-key clone/push were smoke-tested and cleaned
-up. External `git.<domain>`, the Actions runner, the perimeter
-CVE manifest, and the off-cluster forge-data dump are still pending.
-(Researched 2026-10-21 against Forgejo 17.0.0, Gitea 1.27.3, OneDev
-16.9.5, Soft Serve 0.12.3, and current GitLab installation
-requirements.)**
+**Trial-deployed on the storage leader, internal plus external HTTPS.**
+The server, OIDC client, nginx vhosts, and CI workflow are in the tree and
+running at `forgejo.xc` and `https://git.<domain>`; OIDC discovery and the
+login redirect were verified, and internal/external HTTP token plus internal
+SSH-key clone/push were smoke-tested and cleaned up. External SSH, the
+Actions runner, the perimeter CVE manifest, and the off-cluster forge-data
+dump are still pending. (Researched 2026-10-21 against Forgejo 17.0.0, Gitea
+1.27.3, OneDev 16.9.5, Soft Serve 0.12.3, and current GitLab
+installation requirements.)**
 
 Decided so far:
 
