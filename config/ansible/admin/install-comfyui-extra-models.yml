@@ -1,0 +1,238 @@
+---
+# Stage operator-supplied ComfyUI model files from a private TSV manifest.
+#
+# Host and VM discovery is inventory-driven: this play targets the `nvidia`
+# group and ends on hosts without `comfyui_vm_enabled`, then uses
+# `comfyui_vm_name` from the private host_vars. No deployment hostname or VM
+# name is hardcoded here.
+#
+# The manifest is an absolute path on the Ansible controller. Set
+# `comfyui_extra_models_manifest` in the host's private host_vars, or pass it
+# explicitly:
+#
+#   ./run-playbook.sh admin/install-comfyui-extra-models.yml \
+#     -e comfyui_extra_models_manifest=/path/to/models.tsv
+#
+# Use `-e comfyui_extra_models_download=false` to verify only.
+#
+# Manifest format (tab-separated):
+#   id  repo  revision  repo_path  destination_relative_path  sha256
+#
+# The manifest and model files stay outside the public repo.
+- name: Stage additional ComfyUI model files
+  hosts: nvidia
+  become: yes
+  vars:
+    comfyui_extra_models_download: true
+    comfyui_extra_models_model_root: /mnt/models
+    comfyui_extra_models_host_stage: /home/dev/.comfyui-vm
+    comfyui_extra_models_vm_script: /root/.local/bin/seed-comfyui-extra-models.sh
+    comfyui_extra_models_vm_manifest: /root/.local/share/comfyui/extra-models.tsv
+
+  tasks:
+    - name: End play for hosts without a ComfyUI VM
+      meta: end_host
+      when: not (comfyui_vm_enabled | default(false))
+
+    - name: Require the ComfyUI VM name from host_vars
+      assert:
+        that:
+          - comfyui_vm_name is defined
+          - comfyui_vm_name | length > 0
+        fail_msg: >-
+          Set comfyui_vm_name in the private host_vars for
+          {{ inventory_hostname }}.
+
+    - name: Require an absolute extra-model manifest path
+      assert:
+        that:
+          - comfyui_extra_models_manifest is defined
+          - comfyui_extra_models_manifest | length > 0
+          - comfyui_extra_models_manifest is match('^/')
+        fail_msg: >-
+          Set comfyui_extra_models_manifest to an absolute controller path,
+          or pass -e comfyui_extra_models_manifest=/path/to/models.tsv.
+
+    - name: Check the extra-model manifest on the controller
+      stat:
+        path: "{{ comfyui_extra_models_manifest }}"
+      delegate_to: localhost
+      become: false
+      register: comfyui_extra_models_manifest_stat
+
+    - name: Require a non-empty manifest
+      assert:
+        that:
+          - comfyui_extra_models_manifest_stat.stat.exists
+          - comfyui_extra_models_manifest_stat.stat.isreg
+          - comfyui_extra_models_manifest_stat.stat.size > 0
+        fail_msg: >-
+          Manifest is missing, not a regular file, or empty:
+          {{ comfyui_extra_models_manifest }}
+
+    - name: Verify the ComfyUI VM is running
+      command: incus list name={{ comfyui_vm_name }} status=running --format csv
+      register: comfyui_extra_models_vm_check
+      changed_when: false
+
+    - name: Assert the ComfyUI VM is running
+      assert:
+        that: comfyui_extra_models_vm_check.stdout | length > 0
+        fail_msg: >-
+          Incus VM {{ comfyui_vm_name }} is not running on
+          {{ inventory_hostname }}.
+
+    - name: Check for an in-flight built-in model seeder
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        pgrep -f '[s]eed-comfyui-models.sh --download'
+      register: comfyui_extra_models_builtin_running
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse concurrent model staging
+      assert:
+        that: comfyui_extra_models_builtin_running.rc != 0
+        fail_msg: >-
+          The built-in ComfyUI model seeder is still running in
+          {{ comfyui_vm_name }}; wait for it to finish before staging
+          the extra manifest.
+
+    - name: Check for an in-flight extra-model seeder
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        pgrep -f '[s]eed-comfyui-extra-models.sh --download'
+      register: comfyui_extra_models_running
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse concurrent extra-model staging
+      assert:
+        that: comfyui_extra_models_running.rc != 0
+        fail_msg: >-
+          Another extra-model seeder is already running in
+          {{ comfyui_vm_name }}.
+
+    - name: Check free space on the VM model disk
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        df --output=avail -B1G {{ comfyui_extra_models_model_root }}
+      register: comfyui_extra_models_disk_free
+      changed_when: false
+
+    - name: Report free space on the VM model disk
+      debug:
+        msg: >-
+          {{ comfyui_extra_models_disk_free.stdout_lines[-1] | trim }} GiB
+          free on {{ comfyui_extra_models_model_root }}
+
+    - name: Set the extra-model free-space floor
+      set_fact:
+        comfyui_extra_models_min_free_gb_effective: >-
+          {{ comfyui_extra_models_min_free_gb | default(0) | int }}
+
+    - name: Require the configured minimum free space
+      assert:
+        that: >-
+          (comfyui_extra_models_disk_free.stdout_lines[-1] | trim | int)
+          >= (comfyui_extra_models_min_free_gb_effective | int)
+        fail_msg: >-
+          Not enough free space on {{ comfyui_extra_models_model_root }}:
+          need at least {{ comfyui_extra_models_min_free_gb_effective }} GiB.
+
+    - name: Ensure the host staging directory exists
+      file:
+        path: "{{ comfyui_extra_models_host_stage }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Stage the extra-model seeder script
+      copy:
+        src: ../app/files/comfyui/seed-comfyui-extra-models.sh
+        dest: "{{ comfyui_extra_models_host_stage }}/seed-comfyui-extra-models.sh"
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Stage the extra-model manifest
+      copy:
+        src: "{{ comfyui_extra_models_manifest }}"
+        dest: "{{ comfyui_extra_models_host_stage }}/extra-models.tsv"
+        owner: dev
+        group: dev
+        mode: '0640'
+
+    - name: Ensure the VM staging directories exist
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        install -d -m 0755
+        {{ comfyui_extra_models_vm_script | dirname }}
+        {{ comfyui_extra_models_vm_manifest | dirname }}
+      changed_when: false
+
+    - name: Push the extra-model seeder script into the VM
+      command: >-
+        incus file push
+        {{ comfyui_extra_models_host_stage }}/seed-comfyui-extra-models.sh
+        {{ comfyui_vm_name }}{{ comfyui_extra_models_vm_script }} --quiet
+      changed_when: false
+
+    - name: Push the extra-model manifest into the VM
+      command: >-
+        incus file push
+        {{ comfyui_extra_models_host_stage }}/extra-models.tsv
+        {{ comfyui_vm_name }}{{ comfyui_extra_models_vm_manifest }} --quiet
+      changed_when: false
+
+    - name: Make the extra-model seeder executable
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        chmod 0755 {{ comfyui_extra_models_vm_script }}
+      changed_when: false
+
+    - name: Restrict the extra-model manifest in the VM
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        chmod 0640 {{ comfyui_extra_models_vm_manifest }}
+      changed_when: false
+
+    - name: Verify the extra-model tree before downloading
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        env MANIFEST={{ comfyui_extra_models_vm_manifest }}
+        MODEL_ROOT={{ comfyui_extra_models_model_root }}
+        {{ comfyui_extra_models_vm_script }} --verify-only
+      register: comfyui_extra_models_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Report the current extra-model state
+      debug:
+        var: comfyui_extra_models_verify.stdout_lines
+
+    - name: Download missing or invalid extra-model files
+      command: >-
+        incus exec {{ comfyui_vm_name }}
+        --env HF_TOKEN={{ comfyui_hf_token | default(lookup('env', 'HF_TOKEN')) | default('') }} --
+        env HF_HUB_DISABLE_XET=1
+        MANIFEST={{ comfyui_extra_models_vm_manifest }}
+        MODEL_ROOT={{ comfyui_extra_models_model_root }}
+        {{ comfyui_extra_models_vm_script }} --download
+      when:
+        - comfyui_extra_models_download | bool
+        - comfyui_extra_models_verify.rc != 0
+      register: comfyui_extra_models_download_result
+      changed_when: comfyui_extra_models_download_result.rc == 0
+      no_log: true
+
+    - name: Verify the extra-model tree after staging
+      command: >-
+        incus exec {{ comfyui_vm_name }} --
+        env MANIFEST={{ comfyui_extra_models_vm_manifest }}
+        MODEL_ROOT={{ comfyui_extra_models_model_root }}
+        {{ comfyui_extra_models_vm_script }} --verify-only
+      register: comfyui_extra_models_final_verify
+      changed_when: false
+      failed_when: comfyui_extra_models_final_verify.rc != 0

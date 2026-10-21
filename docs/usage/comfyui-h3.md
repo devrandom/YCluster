@@ -103,6 +103,33 @@ operator staging step, and verified against SHA-256. LTX checkpoint files are
 under `checkpoints/`; LoRAs, vision encoders, and latent upscalers are under
 their normal ComfyUI model directories.
 
+### Operator-supplied extra models
+
+The built-in seeder is fixed. To stage an additional, deployment-specific model
+set, run:
+
+```bash
+./run-playbook.sh admin/install-comfyui-extra-models.yml
+```
+
+The play targets the `nvidia` group and selects the host from private host_vars
+using `comfyui_vm_enabled`, then uses `comfyui_vm_name` for the VM. No hostname
+or VM name is hardcoded. The manifest path defaults to
+`comfyui_extra_models_manifest` in host_vars; override it with
+`-e comfyui_extra_models_manifest=/path/to/extra-models.tsv`. Use
+`-e comfyui_extra_models_download=false` for a verify-only run.
+
+Manifest rows are tab-separated:
+
+```text
+id  repo  revision  repo_path  destination_relative_path  sha256
+```
+
+The manifest and model files stay outside the public repo. Destination paths are
+relative to the VM's model root and are rejected if they escape it. Gated Hugging
+Face repos use `HF_TOKEN` from the controller environment; set
+`comfyui_hf_token` to override it explicitly.
+
 ## Troubleshooting: CUBLAS_STATUS_ALLOC_FAILED
 
 If H3 (or HunyuanImage 3.0) generation fails with `CUDA error:
