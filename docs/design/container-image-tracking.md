@@ -39,13 +39,15 @@ observes it.
     12.1 / `7d85fc15` with `--uv-select prod` (mirrors upstream
     `create-production-venv`, which runs `uv sync --only-group=prod`).
   - `config/ansible/monitoring/container-manifests/authentik.manifest` — **158** PyPI packages from
-    authentik 2026.5.6 / `0c67ea476` with `--uv-select base` (web frontend is
+    authentik 2026.8.5 / `4ec0d19b98` with `--uv-select base` (web frontend is
     baked at build).
   All three re-matched end-to-end against a real PyPI mirror with no dev
   tooling present (see per-image results below).
-- **P3 (authentik digest pin) — repo-landed, not deployed.** `app/install-authentik.yml`
+- **P3 (authentik digest pin) — done + deployed.** `app/install-authentik.yml`
   pins the amd64 server image by digest
-  (`ghcr.io/goauthentik/server@sha256:5a77d345…`, var `authentik_image`);
+  (`ghcr.io/goauthentik/server@sha256:6b924afb…`, var `authentik_image`), cached
+  under a digest-suffixed registry tag
+  (`registry.xc:5000/authentik:2026.8.5-<digest>`);
   `files/authentik-compose.yaml` lets `AUTHENTIK_IMAGE` override the whole
   reference (falls back to `:tag`), and `authentik-manager` writes it to the
   compose env like the tag.
@@ -60,7 +62,7 @@ observes it.
 
 | Image | Registry ref today | Source pin | Tier | Runs on |
 |---|---|---|---|---|
-| authentik server+worker | `ghcr.io/goauthentik/server@sha256:5a77d345…` (digest-pinned, repo-landed) | `authentik_image` (digest) + `authentik_version: "2026.5.6"` in `app/install-authentik.yml` | P0-A (IdP + authenticated web) | storage nodes |
+| authentik server+worker | `registry.xc:5000/authentik:2026.8.5-6b924afb9705` | `ghcr.io/goauthentik/server@sha256:6b924afb…` (var `authentik_image`) + `authentik_version: "2026.8.5"` in `app/install-authentik.yml` | P0-A (IdP + authenticated web) | storage nodes |
 | open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | upstream v0.11.3 `2a960a59…` + mobile-upload/NLTK patches and plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
 | zulip | `registry.xc:5000/zulip:12.1-0` | docker-zulip `9a0bd360…` + zulip src `7d85fc15…` in `app/build-zulip.yml` | P0-U (login/registration/pre-auth) | storage leader |
 
@@ -80,12 +82,12 @@ SLA once deployed; regenerate manifests and re-run after any image bump.
 |---|---|---|---|---|---|
 | open-webui | 248 | 1 | 61 | 3 | aiohttp, chromadb, cryptography, httplib2, mcp, nltk, pillow, pyarrow, pyasn1, pymdown-extensions, pypdf |
 | zulip | 84 | 0 | 21 | 0 | cryptography, msgpack, pyasn1, pyjwt, soupsieve, tornado |
-| authentik | 160 | 2 | 38 | 0 | aiohttp, click, cryptography, httplib2, lxml, microsoft-kiota-http, msgpack, pyasn1, pyjwt, pyopenssl, urllib3 |
+| authentik | 5 | 0 | 5 | 0 | aiohttp, urllib3 |
 
-Notable unresolved surface: authentik's `no_fix_yet`-free but high pipeline
-includes cryptography / pyopenssl (authentik criticals: cryptography
-`PYSEC-2026-36`, pyopenssl `PYSEC-2026-2269`); open-webui carries a
-`no_fix_yet` critical (chromadb `GHSA-f4j7-r4q5-qw2c`) plus two nltk highs.
+Notable unresolved surface: authentik 2026.8.5 clears the prior
+cryptography/pyopenssl criticals (`PYSEC-2026-36`, `PYSEC-2026-2269`) and
+now carries five high aiohttp/urllib3 findings with fixes; open-webui carries
+a `no_fix_yet` critical (chromadb `GHSA-f4j7-r4q5-qw2c`) plus two nltk highs.
 
 
 ## Vulnerability surface per image

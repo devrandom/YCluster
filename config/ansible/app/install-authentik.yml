@@ -12,14 +12,17 @@
   hosts: storage
   become: yes
   vars:
-    authentik_version: "2026.5.6"
+    authentik_version: "2026.8.5"
     # Digest pin for the amd64 server image, tracked by osv-feed container
     # manifests; overrides the convenience tag so deploys only change when we
     # deliberately bump the pin (see docs/design/container-image-tracking.md).
-    authentik_image: "ghcr.io/goauthentik/server@sha256:5a77d345a63452cda3762c573070e50a9e4be7f500fb1d82de18d95f705a898c"
-    # The cluster registry caches the pinned image so failovers and fresh
-    # nodes do not make a cold GHCR request mid-restart.
-    authentik_registry_image: "registry.xc:5000/authentik:{{ authentik_version }}"
+    authentik_image: "ghcr.io/goauthentik/server@sha256:6b924afb97053a27ca3f42f006c920464fb77763558c72219019365db191827b"
+    authentik_image_digest: "{{ authentik_image.split('@')[1] }}"
+    # The cluster registry caches the pinned image under a digest-suffixed
+    # tag, so a re-seed is a new tag for compose and cannot leave an older
+    # build running under the same tag.
+    authentik_registry_tag: "{{ authentik_version }}-{{ authentik_image_digest[7:19] }}"
+    authentik_registry_image: "registry.xc:5000/authentik:{{ authentik_registry_tag }}"
     authentik_port: "{{ authentik_local_port | default('9300') }}"
   tasks:
     - name: Check if this host is the storage leader
@@ -40,9 +43,9 @@
         state: started
       when: is_storage_leader
 
-    - name: Check whether the cluster registry has the authentik image
+    - name: Check whether the cluster registry has the pinned authentik digest
       uri:
-        url: "http://registry.xc:5000/v2/authentik/manifests/{{ authentik_version }}"
+        url: "http://registry.xc:5000/v2/authentik/manifests/{{ authentik_registry_tag }}"
         method: HEAD
         headers:
           Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
@@ -55,9 +58,10 @@
       delay: 2
       when: is_storage_leader
 
-    # Pull the digest-pinned upstream image once and cache it under a stable
-    # cluster-registry tag. Later nodes then pull over the LAN instead of from
-    # GHCR, including during a failover.
+    # Pull the digest-pinned upstream image once and cache it under a
+    # digest-suffixed cluster-registry tag. Later nodes then pull over the LAN
+    # instead of from GHCR, including during a failover. The tag is unique per
+    # pinned digest, so an existing tag cannot be an older build.
     - name: Seed the cluster registry with the pinned authentik image
       shell: |
         set -e
@@ -65,7 +69,7 @@
         docker tag {{ authentik_image }} {{ authentik_registry_image }}
         docker push -q {{ authentik_registry_image }}
         echo seeded
-      when: is_storage_leader and authentik_registry_check.status != 200
+      when: is_storage_leader and authentik_registry_check.status | default(-1) != 200
       register: authentik_registry_seed
       changed_when: "'seeded' in authentik_registry_seed.stdout"
 
