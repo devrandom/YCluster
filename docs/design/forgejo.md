@@ -240,7 +240,8 @@ failover with a clone, a push, and a login during the window.
   button reads **Sign in with YCluster**. Internal mode uses
   `http://auth.xc/application/o/forgejo/.well-known/openid-configuration`;
   external mode uses the equivalent `https://auth.<domain>` URL. Request
-  `openid profile email`.
+  `openid profile email`. The provider grants `authorization_code` and
+  `refresh_token`.
 - Publish the `Forgejo` application in the Authentik app library and on the
   root `<domain>` landing page.
 - Set `ENABLE_AUTO_REGISTRATION = true` so the first Authentik login

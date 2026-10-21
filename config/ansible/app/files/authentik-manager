@@ -366,6 +366,9 @@ entries:
       name: forgejo
     attrs:
       client_type: confidential
+      grant_types:
+        - authorization_code
+        - refresh_token
       client_id: forgejo
       client_secret: "$client_secret"
       access_token_validity: days=1
