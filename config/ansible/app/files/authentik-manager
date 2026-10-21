@@ -86,7 +86,7 @@ entries:
       slug: open-webui
     attrs:
       # App-login integration (OIDC for OWUI's own session), distinct from the
-      # `chat` edge forward-auth app. SSO-suffixed and hidden from the Library
+      # 'chat' edge forward-auth app. SSO-suffixed and hidden from the Library
       # page so the dashboard shows one Open WebUI entry.
       name: Open WebUI — SSO
       provider: !KeyOf provider-owui
@@ -174,7 +174,7 @@ entries:
       provider: !KeyOf provider-app
       meta_launch_url: https://$external_domain/
   # ComfyUI (comfy.<domain>): the MiniMax H3 video backend. Access is granted
-  # only to members of the `comfy` group (members added by an admin); anyone
+  # only to members of the 'comfy' group (members added by an admin); anyone
   # else sees no entry and the auth subrequest 401s.
   - model: authentik_core.group
     id: group-comfy
@@ -270,7 +270,7 @@ EOF
 
 # Zulip SAML provider (zulip.<domain> -> cluster IdP). Mirrors
 # write_owui_blueprint but for SAML: a provider that signs responses with
-# the shared `authentik Self-signed Certificate`, plus the `zulip`
+# the shared 'authentik Self-signed Certificate', plus the 'zulip'
 # application. Attribute claims reuse Authentik's managed SAML property
 # mappings so the URIs Zulip's SOCIAL_AUTH_SAML_ENABLED_IDPS references are
 # what Authentik actually emits:
@@ -279,7 +279,7 @@ EOF
 #   - permanent-id (user pk) -> goauthentik.io .../saml/uid (differs from
 #     email, so Zulip keeps email-change sync enabled)
 # The SSO URL Authentik exposes is derived from the application slug
-# (`zulip`) and the IdP base URL (https://auth.<domain>/); zulip-manager
+# ('zulip') and the IdP base URL (https://auth.<domain>/); zulip-manager
 # reads the same domain so the Zulip-side entity_id/url stay in sync.
 write_zulip_blueprint() {
     local external_domain="$1"
@@ -323,7 +323,7 @@ entries:
       slug: zulip
     attrs:
       # App-login integration (SAML for Zulip's own session), distinct from the
-      # `zulip-web` edge forward-auth app. SSO-suffixed and hidden from the
+      # 'zulip-web' edge forward-auth app. SSO-suffixed and hidden from the
       # Library page so the dashboard shows one Zulip entry.
       name: Zulip — SSO
       provider: !KeyOf provider-zulip
@@ -431,7 +431,7 @@ EOF
 # does not depend on external DNS or TLS; the external redirect is added to
 # the same provider when a domain exists. The authentik worker watches the
 # blueprint dir and auto-applies on change, so refreshing these needs no
-# container restart (see `write-blueprints`).
+# container restart (see 'write-blueprints').
 write_all_blueprints() {
     local external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
     if [ -n "$external_domain" ]; then
@@ -511,7 +511,7 @@ else:
     done
 
     # Re-attach in the foreground so systemd sees the service alive.
-    # On SIGTERM, stop_authentik runs `docker compose down`.
+    # On SIGTERM, stop_authentik runs 'docker compose down'.
     exec docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
 }
 
@@ -534,7 +534,7 @@ case "$1" in
         # Existing files are picked up by the worker; applying the Forgejo
         # blueprint explicitly also covers a newly added file that the
         # already-running worker did not discover at startup. Used by
-        # install-authentik's handler and `ycluster https set-domain`.
+        # install-authentik's handler and 'ycluster https set-domain'.
         write_all_blueprints
         if [ "$(docker inspect -f '{{.State.Running}}' authentik-server 2>/dev/null || true)" = "true" ]; then
             if ! output=$(docker exec authentik-server ak apply_blueprint \
