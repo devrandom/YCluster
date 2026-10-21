@@ -246,6 +246,15 @@ failover with a clone, a push, and a login during the window.
   root `<domain>` landing page.
 - Set `ENABLE_AUTO_REGISTRATION = true` so the first Authentik login
   creates the Forgejo account.
+- Give the provider its own `profile` scope mapping and set
+  `USERNAME = nickname`. Authentik usernames are email addresses, and
+  Forgejo rejects `@` in account names. The mapping replaces characters
+  Forgejo does not allow with `-`, collapses runs, trims the ends, caps the
+  name at 40 characters, and prefixes `user-` if the result would not start
+  with a letter or digit. `alice@example.com` becomes
+  `alice-example.com`, so two users on different domains do not collide.
+  A user's `forgejo_username` attribute overrides the derived name for a
+  residual collision or a preferred spelling.
 - Set `ACCOUNT_LINKING = auto` only because Authentik is the cluster's
   authoritative IdP and its email claim is verified. If that assumption
   stops holding, switch to `login` and require a one-time link.

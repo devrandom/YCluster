@@ -167,6 +167,8 @@ JWT_SECRET = $jwt_secret
 ENABLE_AUTO_REGISTRATION = true
 ACCOUNT_LINKING = auto
 OPENID_CONNECT_SCOPES = profile email
+# Authentik emits a sanitized nickname for this provider: email-style
+# usernames become dash-separated account names.
 USERNAME = nickname
 UPDATE_AVATAR = true
 
