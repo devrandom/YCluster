@@ -342,14 +342,16 @@ EOF
 write_forgejo_blueprint() {
     local external_domain="$1"
     local client_secret="$2"
+    local source_name="YCluster"
     local redirect_uris launch_url
     redirect_uris="        - matching_mode: strict
-          url: http://forgejo.xc/user/oauth2/authentik/callback"
+          url: http://forgejo.xc/user/oauth2/$source_name/callback"
     launch_url="http://forgejo.xc/"
     if [ -n "$external_domain" ]; then
         redirect_uris="$redirect_uris
         - matching_mode: strict
-          url: https://git.$external_domain/user/oauth2/authentik/callback"
+          url: https://git.$external_domain/user/oauth2/$source_name/callback"
+        launch_url="https://git.$external_domain/"
     fi
     local bp=/etc/authentik/blueprints/ycluster-forgejo.yaml
     cat > "$bp" <<EOF
@@ -384,12 +386,9 @@ $redirect_uris
     attrs:
       # App-login integration only. There is no edge forward-auth for
       # Forgejo: git clients and API tokens are not Authentik sessions.
-      # The launch URL stays internal so the default internal-only
-      # install has a working Authentik app link. External mode is reached
-      # directly at git.<domain>.
-      name: Forgejo — SSO
+      name: Forgejo
       provider: !KeyOf provider-forgejo
-      meta_hide: true
+      meta_hide: false
       meta_launch_url: $launch_url
 EOF
     chown 1000:1000 "$bp"

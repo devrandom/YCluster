@@ -4,11 +4,12 @@
 
 **Trial-deployed on the storage leader, internal plus external HTTPS.**
 The server, OIDC client, nginx vhosts, and CI workflow are in the tree and
-running at `forgejo.xc` and `https://git.<domain>`; OIDC discovery and the
-login redirect were verified, and internal/external HTTP token plus internal
-SSH-key clone/push were smoke-tested and cleaned up. External SSH, the
-Actions runner, the perimeter CVE manifest, and the off-cluster forge-data
-dump are still pending. (Researched 2026-10-21 against Forgejo 17.0.0, Gitea
+running at `forgejo.xc` and `https://git.<domain>`; OIDC discovery and
+the **Sign in with YCluster** redirect were verified, the app appears in the
+Authentik library and the root landing page, and internal/external HTTP token
+plus internal SSH-key clone/push were smoke-tested and cleaned up. External
+SSH, the Actions runner, the perimeter CVE manifest, and the off-cluster
+forge-data dump are still pending. (Researched 2026-10-21 against Forgejo 17.0.0, Gitea
 1.27.3, OneDev 16.9.5, Soft Serve 0.12.3, and current GitLab
 installation requirements.)**
 
@@ -45,7 +46,7 @@ Implementation in the tree:
 - `files/authentik-manager` always writes the `forgejo` OIDC provider,
   including the internal callback and the external callback when a domain is
   configured; `forgejo-manager` creates or updates the matching
-  `authentik` OAuth2 source using the internal discovery URL unless
+  `YCluster` OAuth2 source using the internal discovery URL unless
   external mode is enabled.
 - `templates/forgejo-internal.conf.j2` serves `forgejo.xc`;
   `files/forgejo_git.conf.j2` serves the external `git.<domain>` surface
@@ -231,14 +232,17 @@ failover with a clone, a push, and a login during the window.
 
 - Create an Authentik OAuth2/OpenID provider for Forgejo and a matching
   application. The provider always includes the internal callback
-  `http://forgejo.xc/user/oauth2/authentik/callback` and adds the external
-  callback `https://git.<domain>/user/oauth2/authentik/callback` when a
+  `http://forgejo.xc/user/oauth2/YCluster/callback` and adds the external
+  callback `https://git.<domain>/user/oauth2/YCluster/callback` when a
   domain is configured.
 - Configure Forgejo's OAuth2 source with the Authentik discovery URL,
-  client ID, and client secret. Internal mode uses
+  client ID, and client secret. The source is named `YCluster`, so the login
+  button reads **Sign in with YCluster**. Internal mode uses
   `http://auth.xc/application/o/forgejo/.well-known/openid-configuration`;
   external mode uses the equivalent `https://auth.<domain>` URL. Request
   `openid profile email`.
+- Publish the `Forgejo` application in the Authentik app library and on the
+  root `<domain>` landing page.
 - Set `ENABLE_AUTO_REGISTRATION = true` so the first Authentik login
   creates the Forgejo account.
 - Set `ACCOUNT_LINKING = auto` only because Authentik is the cluster's

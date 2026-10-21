@@ -13,6 +13,7 @@ ETCD_KEY_PREFIX="/cluster/config/forgejo"
 # `admin` is reserved by Forgejo, so the local break-glass account needs a
 # distinct name.
 FORGEJO_ADMIN_USERNAME="forgejo-admin"
+FORGEJO_OAUTH_SOURCE_NAME="YCluster"
 
 # Get an existing secret from etcd, or generate one and store it atomically
 # (txn: put only if the key doesn't exist, then read back whatever won).
@@ -266,10 +267,18 @@ ensure_oauth_source() {
         auth_base="https://auth.$external_domain"
     fi
     local discovery_url="$auth_base/application/o/forgejo/.well-known/openid-configuration"
+    local source_name="$FORGEJO_OAUTH_SOURCE_NAME"
     local secret_hash stored_hash source_id
-    secret_hash=$(printf '%s\n%s' "$client_secret" "$discovery_url" \
+    secret_hash=$(printf '%s\n%s\n%s' "$client_secret" "$discovery_url" "$source_name" \
         | sha256sum | awk '{print $1}')
-    source_id=$(docker exec -u git forgejo forgejo admin auth list | awk '$2=="authentik" {print $1; exit}')
+    source_id=$(docker exec -u git forgejo forgejo admin auth list \
+        | awk -v name="$source_name" '$2==name {print $1; exit}')
+    # Rename the original source in place instead of leaving a duplicate
+    # "authentik" entry behind.
+    if [ -z "$source_id" ]; then
+        source_id=$(docker exec -u git forgejo forgejo admin auth list \
+            | awk '$2=="authentik" {print $1; exit}')
+    fi
     stored_hash=$(etcdctl get "${ETCD_KEY_PREFIX}/oidc-secret-hash" --print-value-only 2>/dev/null || true)
 
     if [ -n "$source_id" ] && [ "$stored_hash" = "$secret_hash" ]; then
@@ -279,7 +288,7 @@ ensure_oauth_source() {
     if [ -n "$source_id" ]; then
         docker exec -u git forgejo forgejo admin auth update-oauth \
             --id "$source_id" \
-            --name authentik \
+            --name "$source_name" \
             --provider openidConnect \
             --key forgejo \
             --secret "$client_secret" \
@@ -288,7 +297,7 @@ ensure_oauth_source() {
             --scopes email > /dev/null
     else
         docker exec -u git forgejo forgejo admin auth add-oauth \
-            --name authentik \
+            --name "$source_name" \
             --provider openidConnect \
             --key forgejo \
             --secret "$client_secret" \

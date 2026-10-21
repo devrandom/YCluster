@@ -2460,6 +2460,9 @@ def app_landing():
             {'name': 'Zulip', 'url': f'https://zulip.{domain}/',
              'logo': '/static/zulip.svg',
              'desc': 'Team chat and discussions'},
+            {'name': 'Forgejo', 'url': f'https://git.{domain}/',
+             'logo': '/static/forgejo.svg',
+             'desc': 'Git repositories, reviews, and Actions'},
         ]
         if id.is_admin or id.is_manager:
             apps.append({'name': 'YCluster Admin',
