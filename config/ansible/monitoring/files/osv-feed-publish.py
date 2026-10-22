@@ -35,6 +35,7 @@ FILES = (
     "Debian.cursor",
     "Go.cursor",
     "PyPI.cursor",
+    "Alpine.cursor",
     "epss.cursor",
 )
 
