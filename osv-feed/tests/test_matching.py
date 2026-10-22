@@ -394,5 +394,95 @@ class MatchSpecsTest(unittest.TestCase):
         self.assertEqual(0.0, findings[0]["epss_percentile"])
 
 
+class EcosystemVersionCompareTest(unittest.TestCase):
+    def test_go_versions_strip_v_prefix(self):
+        self.assertLess(matching.go_version_compare("v0.1.0", "0.52.0"), 0)
+        self.assertEqual(matching.go_version_compare("v1.2.3", "v1.2.3"), 0)
+
+    def test_go_prerelease_sorts_before_release(self):
+        self.assertLess(
+            matching.go_version_compare("v1.2.3-rc1", "v1.2.3"), 0
+        )
+        self.assertGreater(
+            matching.go_version_compare("v1.2.3", "v1.2.3-rc1"), 0
+        )
+
+    def test_go_pseudo_version_compares(self):
+        self.assertEqual(
+            matching.go_version_compare(
+                "v0.0.0-20201216223049-8b5274cf687f",
+                "0.0.0-20201216223049-8b5274cf687f",
+            ),
+            0,
+        )
+
+    def test_alpine_revision_and_suffix_order(self):
+        self.assertLess(
+            matching.alpine_version_compare("1.2.3-r1", "1.2.3-r2"), 0
+        )
+        self.assertGreater(
+            matching.alpine_version_compare("1.2.3-r10", "1.2.3-r2"), 0
+        )
+        self.assertLess(
+            matching.alpine_version_compare("1.2.3_alpha1", "1.2.3"), 0
+        )
+        self.assertGreater(
+            matching.alpine_version_compare("1.2.3_p1", "1.2.3"), 0
+        )
+
+    def test_match_specs_uses_go_comparator(self):
+        db = tempfile.mkdtemp(prefix="osv-feed-test-")
+        self.addCleanup(shutil.rmtree, db, ignore_errors=True)
+        _write_record(
+            db,
+            "Go",
+            _basic_record("GO-CVE-VPREFIX", "example.com/mod", fixed="0.52.0"),
+        )
+        findings = matching.match_specs(
+            db,
+            [{"ecosystem": "Go", "package": "example.com/mod", "version": "v0.1.0"}],
+        )
+        self.assertEqual(1, len(findings))
+        self.assertEqual("fix_available", findings[0]["state"])
+
+    def test_match_specs_uses_alpine_comparator(self):
+        db = tempfile.mkdtemp(prefix="osv-feed-test-")
+        self.addCleanup(shutil.rmtree, db, ignore_errors=True)
+        record = _basic_record("ALPINE-CVE-REV", "openssl", fixed="1.2.3-r2")
+        record["affected"][0]["package"]["ecosystem"] = "Alpine:v3.24"
+        _write_record(db, "Alpine", record)
+        finding = matching.match_specs(
+            db,
+            [{"ecosystem": "Alpine:v3.24", "package": "openssl", "version": "1.2.3_alpha1"}],
+        )
+        self.assertEqual("fix_available", finding[0]["state"])
+        patched = matching.match_specs(
+            db,
+            [{"ecosystem": "Alpine:v3.24", "package": "openssl", "version": "1.2.3-r2"}],
+        )
+        self.assertEqual("patched", patched[0]["state"])
+
+    def test_alpine_release_filters_other_release_entries(self):
+        db = tempfile.mkdtemp(prefix="osv-feed-test-")
+        self.addCleanup(shutil.rmtree, db, ignore_errors=True)
+        record = _basic_record("ALPINE-CVE-RELEASES", "gnutls", fixed="3.5.13-r0")
+        record["affected"].append(
+            {
+                "package": {"ecosystem": "Alpine:v3.3", "name": "gnutls"},
+                "ranges": [
+                    {"type": "ECOSYSTEM",
+                     "events": [{"introduced": "0"}, {"fixed": "3.14.17-r1"}]}
+                ],
+            }
+        )
+        record["affected"][0]["package"]["ecosystem"] = "Alpine:v3.24"
+        _write_record(db, "Alpine", record)
+        findings = matching.match_specs(
+            db,
+            [{"ecosystem": "Alpine:v3.24", "package": "gnutls", "version": "3.8.13-r0"}],
+        )
+        self.assertEqual("patched", findings[0]["state"])
+
+
 if __name__ == "__main__":
     unittest.main()

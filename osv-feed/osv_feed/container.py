@@ -14,6 +14,7 @@ Manifest format (one spec per line; ``#`` starts a comment):
     npm:express=4.19.2
     Go:github.com/example/lib=1.2.3
     Ubuntu:libssl3=3.0.13-1ubuntu0.1
+    Alpine:v3.24:gnutls=3.8.13-r0
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def load_manifest(path: str) -> list[dict]:
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        ecosystem, sep, rest = line.partition(":")
+        ecosystem, sep, rest = line.rpartition(":")
         name, eq, version = rest.partition("=")
         if not sep or not eq:
             raise ManifestError(

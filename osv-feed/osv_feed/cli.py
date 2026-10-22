@@ -304,7 +304,8 @@ def _mirror_ecosystems(args: argparse.Namespace) -> list[str]:
 def _warn_stale_feeds(db_dir: str, specs: list[dict]) -> bool:
     missing = False
     for ecosystem in sorted({spec["ecosystem"] for spec in specs}):
-        status = feed_status(db_dir, ecosystem)
+        base_ecosystem = ecosystem.split(":", 1)[0] if ecosystem.startswith("Alpine:") else ecosystem
+        status = feed_status(db_dir, base_ecosystem)
         if status == "absent":
             missing = True
             print(

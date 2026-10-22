@@ -17,7 +17,8 @@
     forgejo_version: "17.0.0"
     # amd64 digest from the official Forgejo 17.0.0 image index. Bump
     # deliberately; osv-feed container manifests track the Alpine base and
-    # the Forgejo Go module.
+    # the Forgejo Go modules, so regenerate
+    # config/ansible/monitoring/container-manifests/forgejo.manifest too.
     forgejo_image: "codeberg.org/forgejo/forgejo@sha256:c6931ca2926185d129aee8e28f1c6f42fbd8c1bb6b14dbac38873e06a8948a8a"
     # Include the digest prefix in the mirror tag so a digest bump without a
     # version bump still reseeds the cluster registry.

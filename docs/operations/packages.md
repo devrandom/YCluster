@@ -223,6 +223,7 @@ generated deterministically from the pinned source tree via
 | open-webui | `app/build-open-webui.yml` `webui_repo_sha` | `--uv-select base` |
 | zulip | `app/build-zulip.yml` (docker-zulip + src SHAs) | `--uv-select prod` |
 | authentik | `app/install-authentik.yml` `authentik_image` (digest) + `authentik_version` | `--uv-select base` |
+| forgejo | `app/install-forgejo.yml` `forgejo_image` (digest) | read the image layers: `/lib/apk/db/installed` + `/etc/alpine-release` (apk specs), and the linked `forgejo` binary's Go buildinfo (`Go:` specs) |
 
 To regenerate a manifest after an image/lockfile bump:
 

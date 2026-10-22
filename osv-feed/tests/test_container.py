@@ -50,6 +50,7 @@ class LoadManifestTest(unittest.TestCase):
                 "\n"
                 "npm:express=4.19.2   # trailing comment\n"
                 "Go:github.com/example/lib=1.2.3\n"
+                "Alpine:v3.24:gnutls=3.8.13-r0\n"
             )
         self.assertEqual(
             [
@@ -59,6 +60,11 @@ class LoadManifestTest(unittest.TestCase):
                     "ecosystem": "Go",
                     "package": "github.com/example/lib",
                     "version": "1.2.3",
+                },
+                {
+                    "ecosystem": "Alpine:v3.24",
+                    "package": "gnutls",
+                    "version": "3.8.13-r0",
                 },
             ],
             container.load_manifest(path),

@@ -194,9 +194,7 @@ perimeter_software:
     tier: P0-U
     osv_category: container
     osv_packages: []
-    untracked: true
-    # package: container image (Alpine base + Forgejo Go module, digest-pinned)
+    # package: container image (Alpine base + Forgejo Go modules, digest-pinned)
     # pin_source: app/install-forgejo.yml forgejo_image @sha256:c6931ca... (17.0.0)
-    # manifest: none yet — Alpine base package inventory is not enumerated
-    # (untracked today); add a container manifest when the image inventory is
-    # generated.
+    # manifest: config/ansible/monitoring/container-manifests/forgejo.manifest
+    # (Alpine apk packages + linked Go module buildinfo, 312 specs)

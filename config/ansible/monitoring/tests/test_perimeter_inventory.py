@@ -102,6 +102,20 @@ class TestPerimeterInventory(unittest.TestCase):
         # contribute no packages to the derived list.
         self.assertEqual(incus[0].get("osv_packages", []), [])
 
+    def test_forgejo_has_a_container_manifest(self):
+        forgejo = [e for e in self.entries if e["name"] == "forgejo"]
+        self.assertEqual(len(forgejo), 1)
+        self.assertEqual(forgejo[0]["osv_category"], "container")
+        self.assertNotIn("untracked", forgejo[0])
+        manifest = os.path.normpath(
+            os.path.join(os.path.dirname(INVENTORY),
+                         "monitoring/container-manifests/forgejo.manifest"))
+        self.assertTrue(os.path.isfile(manifest), manifest)
+        with open(manifest) as fh:
+            specs = [line.split("#", 1)[0].strip() for line in fh]
+        self.assertIn("Alpine:v3.24:busybox=1.37.0-r31", specs)
+        self.assertTrue(any(s.startswith("Go:") for s in specs))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,8 @@ Implements the OSV range semantics needed by distro ecosystems: a package
 is affected when the version falls inside an ECOSYSTEM/SEMVER range
 (introduced / fixed / last_affected events). Debian-family comparison uses
 `dpkg --compare-versions` when available, with a numeric-run fallback key
-for generic environments.
+for generic environments. Go and Alpine use their own version ordering so
+`v`-prefixed semver and apk suffixes are compared correctly.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import re
 import subprocess
 import tempfile
 import time
+from itertools import zip_longest
 from typing import Callable
 
 import sqlite3
@@ -90,6 +92,126 @@ def _fallback_key(version: str) -> tuple:
     for piece in re.split(r"(\d+)", version.lower()):
         parts.append(int(piece) if piece.isdigit() else piece)
     return tuple(parts)
+
+
+def _parse_semver(version: str) -> tuple[list[int], list[str]]:
+    value = version.strip()
+    if value.startswith("v"):
+        value = value[1:]
+    value = value.split("+", 1)[0]
+    core, _, prerelease = value.partition("-")
+    numbers = []
+    for part in core.split("."):
+        numbers.append(int(part) if part.isdigit() else 0)
+    while len(numbers) < 3:
+        numbers.append(0)
+    return numbers, prerelease.split(".") if prerelease else []
+
+
+def go_version_compare(a: str, b: str) -> int:
+    """Compare Go module versions (``v``-prefixed semver)."""
+    if a == b:
+        return 0
+    a_nums, a_pre = _parse_semver(a)
+    b_nums, b_pre = _parse_semver(b)
+    if a_nums != b_nums:
+        return (a_nums > b_nums) - (a_nums < b_nums)
+    if not a_pre and not b_pre:
+        return 0
+    if not a_pre:
+        return 1
+    if not b_pre:
+        return -1
+    for left, right in zip_longest(a_pre, b_pre):
+        if left is None:
+            return -1
+        if right is None:
+            return 1
+        left_num, right_num = left.isdigit(), right.isdigit()
+        if left_num and right_num:
+            if int(left) != int(right):
+                return (int(left) > int(right)) - (int(left) < int(right))
+        elif left_num:
+            return -1
+        elif right_num:
+            return 1
+        elif left != right:
+            return (left > right) - (left < right)
+    return 0
+
+
+_APK_SUFFIX = {
+    "alpha": 0,
+    "beta": 1,
+    "pre": 2,
+    "rc": 3,
+    "cvs": 5,
+    "svn": 6,
+    "git": 7,
+    "hg": 8,
+    "p": 9,
+}
+_APK_NONE = 4
+
+
+def _apk_components(version: str) -> list[tuple[int, int]]:
+    value = version.strip().lower()
+    if ":" in value:
+        _epoch, value = value.split(":", 1)
+    if "-r" in value:
+        value, _revision = value.rsplit("-r", 1)
+    parts: list[tuple[int, int]] = []
+    for part in re.split(r"[._]", value):
+        match = re.fullmatch(r"([a-z]+)(\d*)", part)
+        if match and match.group(1) in _APK_SUFFIX:
+            parts.append((1, _APK_SUFFIX[match.group(1)] * 100000 + int(match.group(2) or 0)))
+        elif part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((0, 0))
+    return parts
+
+
+def alpine_version_compare(a: str, b: str) -> int:
+    """Compare Alpine apk versions, including suffixes and ``-r`` revisions."""
+    if a == b:
+        return 0
+
+    def split(value: str) -> tuple[int, list[tuple[int, int]], int]:
+        epoch = 0
+        if ":" in value:
+            epoch_text, value = value.split(":", 1)
+            epoch = int(epoch_text) if epoch_text.isdigit() else 0
+        revision = 0
+        if "-r" in value:
+            value, revision_text = value.rsplit("-r", 1)
+            revision = int(revision_text) if revision_text.isdigit() else 0
+        return epoch, _apk_components(value), revision
+
+    a_epoch, a_parts, a_rev = split(a)
+    b_epoch, b_parts, b_rev = split(b)
+    if a_epoch != b_epoch:
+        return (a_epoch > b_epoch) - (a_epoch < b_epoch)
+    for left, right in zip_longest(a_parts, b_parts):
+        if left is None:
+            if right[0] == 0:
+                return -1
+            return 1 if right[1] < _APK_NONE * 100000 else -1
+        if right is None:
+            if left[0] == 0:
+                return 1
+            return -1 if left[1] < _APK_NONE * 100000 else 1
+        if left != right:
+            return (left > right) - (left < right)
+    return (a_rev > b_rev) - (a_rev < b_rev)
+
+
+def compare_for_ecosystem(ecosystem: str, default: VersionCompare) -> VersionCompare:
+    if ecosystem == "Go":
+        return go_version_compare
+    if ecosystem == "Alpine" or ecosystem.startswith("Alpine:"):
+        return alpine_version_compare
+    return default
 
 
 def iter_records(db_dir: str, ecosystem: str):
@@ -192,13 +314,26 @@ def _has_fixed(affected: dict) -> bool:
     return False
 
 
-def _affected_entries(record: dict, package: str) -> list[dict]:
+def _affected_entries(
+    record: dict, package: str, ecosystem: str | None = None
+) -> list[dict]:
     wanted = package.lower()
-    return [
+    wanted_ecosystem = ecosystem.lower() if ecosystem else None
+    entries = [
         entry
         for entry in record.get("affected") or []
         if (entry.get("package") or {}).get("name", "").lower() == wanted
     ]
+    if wanted_ecosystem and ":" in wanted_ecosystem:
+        # Alpine records carry one affected entry per release
+        # (``Alpine:v3.24``); a base entry applies to every release.
+        entries = [
+            entry
+            for entry in entries
+            if (entry.get("package") or {}).get("ecosystem", "").lower()
+            in (wanted_ecosystem, wanted_ecosystem.split(":", 1)[0])
+        ]
+    return entries
 
 
 def _cvss3_qualitative(vector: str) -> str | None:
@@ -308,11 +443,12 @@ def classify_record(
     package: str,
     version: str,
     cmp: VersionCompare = version_compare,
+    ecosystem: str | None = None,
 ) -> str:
     """Classify one record/package/version as patched, fix_available, or
     no_fix_yet. Records that do not mention the package are patched."""
     state = PATCHED
-    for entry in _affected_entries(record, package):
+    for entry in _affected_entries(record, package, ecosystem):
         status = _range_fix_status(entry, version, cmp)
         if status is True:
             return FIX_AVAILABLE
@@ -423,9 +559,11 @@ def match_specs(
 
     findings: list[dict] = []
     for ecosystem, ecosystem_specs in by_ecosystem.items():
+        ecosystem_cmp = compare_for_ecosystem(ecosystem, cmp)
+        base_ecosystem = ecosystem.split(":", 1)[0] if ecosystem.startswith("Alpine:") else ecosystem
         records = _candidate_records(
             db_dir,
-            ecosystem,
+            base_ecosystem,
             [spec["package"] for spec in ecosystem_specs],
             immutable=immutable,
         )
@@ -453,7 +591,7 @@ def match_specs(
                 findings.append(finding)
                 continue
             for record in records:
-                if not _affected_entries(record, spec["package"]):
+                if not _affected_entries(record, spec["package"], ecosystem):
                     continue
                 epss_hit = _epss_for(epss, record)
                 finding = {
@@ -474,7 +612,11 @@ def match_specs(
                     "modified": record.get("modified", ""),
                     "severity": _severity_label(record, spec["package"]),
                     "state": classify_record(
-                        record, spec["package"], spec["version"], cmp
+                        record,
+                        spec["package"],
+                        spec["version"],
+                        ecosystem_cmp,
+                        ecosystem,
                     ),
                     "epss_score": epss_hit["score"] if epss_hit else 0.0,
                     "epss_percentile": (

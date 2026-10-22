@@ -1,9 +1,9 @@
 ---
 # Install and wire the local OSV CVE feed (osv-feed) on a single collector
-# node. The mirror writes Debian/Ubuntu/Go + EPSS into a local SQLite store on
-# the node's disk (SQLite over a network share is fragile), then a publish
-# job snapshots that store to the shared /near1 dir; the collector matches
-# the snapshot read-only and writes CVE state to the node_exporter textfile
+# node. The mirror writes Debian/Ubuntu/Go/PyPI/Alpine + EPSS into a local
+# SQLite store on the node's disk (SQLite over a network share is fragile),
+# then a publish job snapshots that store to the shared /near1 dir; the collector
+# matches the snapshot read-only and writes CVE state to the node_exporter textfile
 # directory.
 #
 # Single writer: the daily mirror (which owns <db_dir>'s cursors,
@@ -169,7 +169,7 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI
+          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI --ecosystem Alpine
           # Publish the read-only snapshot to the shared dir only once the
           # local writable store is fully written and closed.
           ExecStartPost=/usr/bin/python3 {{ osv_feed_publish_path }}
@@ -284,7 +284,7 @@
 
     - name: Run the initial mirror and publish so the feed exists before matching
       shell: |
-        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI \
+        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI --ecosystem Alpine \
           && /usr/bin/python3 {{ osv_feed_publish_path }}
       environment:
         OSV_FEED_DB_DIR: "{{ osv_feed_db_dir }}"
