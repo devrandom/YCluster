@@ -79,8 +79,18 @@ else
 fi
 
 echo "== GPU passthrough pre-flight =="
+# NVIDIA device nodes are created asynchronously after the vfio-pci device is
+# handed to the VM; a cold boot can reach this point before they exist.
 for d in /dev/nvidia0 /dev/nvidia-uvm /dev/nvidiactl; do
-  [ -e "$d" ] || { echo "missing $d — is vfio-pci passthrough working?" >&2; exit 1; }
+  i=0
+  until [ -e "$d" ]; do
+    i=$((i + 1))
+    if [ "$i" -gt 120 ]; then
+      echo "missing $d after 120s — is vfio-pci passthrough working?" >&2
+      exit 1
+    fi
+    sleep 1
+  done
 done
 
 # The container needs the VM's (host module's) libcuda. Detect the installed
