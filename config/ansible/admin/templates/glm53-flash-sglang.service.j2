@@ -1,0 +1,22 @@
+[Unit]
+Description=GLM-5.3-Flash inference API
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/dev
+# The container definition lives in dev's rootless Podman storage. If the
+# container is already running, attach to it so systemd still supervises exit
+# and restarts it; if it is stopped, start it attached.
+ExecStart=/bin/sh -c '/usr/sbin/runuser -u dev -- /usr/bin/podman start --attach glm53-flash-sglang || /usr/sbin/runuser -u dev -- /usr/bin/podman wait glm53-flash-sglang'
+ExecStop=/usr/sbin/runuser -u dev -- /usr/bin/podman stop --time 60 glm53-flash-sglang
+Restart=always
+RestartSec=10
+TimeoutStartSec=15min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

@@ -119,6 +119,24 @@
         - glm53-sglang-setup.sh
         - glm53-sglang-start.sh
 
+    - name: Install GLM-5.3 systemd unit
+      template:
+        src: templates/glm53-flash-sglang.service.j2
+        dest: /etc/systemd/system/glm53-flash-sglang.service
+        owner: root
+        group: root
+        mode: '0644'
+      register: glm53_service
+
+    # Do not restart the service here: attaching to an already-healthy
+    # container is non-disruptive, but restarting would bounce inference.
+    - name: Enable GLM-5.3 boot-start service
+      systemd:
+        name: glm53-flash-sglang.service
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
 - name: Register the GLM-5.3 backend with local-ai-proxy
   hosts: storage
   become: yes
