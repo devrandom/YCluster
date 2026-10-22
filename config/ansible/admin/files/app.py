@@ -400,6 +400,17 @@ def get_hosts():
         f"{STORAGE_VIP} forgejo.xc",
     ])
 
+    # Forgejo advertises git.<domain> for SSH clone URLs when external SSH
+    # is enabled. Resolve it to the storage leader internally so cluster
+    # clients don't hairpin through the public frontend. auth.<domain> gets
+    # the same treatment: the IdP discovery URL is the public hostname.
+    domain = _configured_external_domain(client)
+    if domain:
+        hosts_entries.extend([
+            f"{STORAGE_VIP} git.{domain}",
+            f"{STORAGE_VIP} auth.{domain}",
+        ])
+
     if hosts_entries:
         return '\n'.join(sorted(hosts_entries)) + '\n', 200, {'Content-Type': 'text/plain'}
     return "# No static hosts configured yet\n", 200, {'Content-Type': 'text/plain'}
@@ -2329,6 +2340,15 @@ def _authentik_identity():
     return Identity(uid, email, is_admin, is_manager)
 
 
+def _configured_external_domain(client):
+    """Return the canonical external `<domain>` from etcd, or '' when unset."""
+    try:
+        value, _ = client.get('/cluster/https/domain')
+        return value.decode().strip() if value else ''
+    except Exception:
+        return ''
+
+
 def _external_domain():
     """External `<domain>` suffix used to build cross-subdomain app links
     (chat.<domain>, zulip.<domain>, admin.<domain>). Prefers the canonical
@@ -2337,9 +2357,9 @@ def _external_domain():
     the domain still renders links. The landing page is served at the bare
     <domain> (previously app.<domain>), so the fallback accepts both shapes."""
     try:
-        value, _ = get_etcd_client().get('/cluster/https/domain')
-        if value:
-            return value.decode().strip()
+        domain = _configured_external_domain(get_etcd_client())
+        if domain:
+            return domain
     except Exception:
         pass
     host = (request.host or '').split(':', 1)[0]

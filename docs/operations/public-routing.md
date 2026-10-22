@@ -72,6 +72,13 @@ Git clients and API tokens are not Authentik sessions, so Forgejo itself is
 the auth boundary there; the web login is OIDC. Do not add the outpost
 include to `forgejo_git.conf.j2`.
 
+Forgejo SSH is not an nginx vhost at all. It is a raw TCP proxy registered
+by the leader-gated `frpc` (`name = "forgejo-ssh"`, frontend port 2222,
+backend `127.0.0.1:2222`). The frontend UFW opens 2222 by default; set
+`forgejo_external_ssh=false` to keep it closed. The frontend sshd stays on 22.
+Internal clients resolve `git.<domain>` to the storage VIP through `/api/hosts`,
+so they reach Forgejo directly instead of hairpinning through the frontend.
+
 ## Adding a new public vhost — checklist
 
 1. Add a `files/<app>/<app>_<name>.conf.j2` template (mirror

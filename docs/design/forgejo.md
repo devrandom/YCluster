@@ -2,14 +2,16 @@
 
 ## Status
 
-**Trial-deployed on the storage leader, internal plus external HTTPS.**
+**Trial-deployed on the storage leader, internal plus external HTTPS and SSH.**
 The server, OIDC client, nginx vhosts, and CI workflow are in the tree and
 running at `forgejo.xc` and `https://git.<domain>`; OIDC discovery and
 the **Sign in with YCluster** redirect were verified, the app appears in the
 Authentik library and the root landing page, and internal/external HTTP token
-plus internal SSH-key clone/push were smoke-tested and cleaned up. External
-SSH, the Actions runner, the perimeter CVE manifest, and the off-cluster
-forge-data dump are still pending. (Researched 2026-10-21 against Forgejo 17.0.0, Gitea
+plus internal SSH-key clone/push were smoke-tested and cleaned up. The external
+SSH endpoint is live at `ssh://git@git.<domain>:2222` through the leader-gated
+frp TCP proxy; a key-auth clone/push still needs a user-key smoke test. The
+Actions runner, the perimeter CVE manifest, and the off-cluster forge-data dump
+are still pending. (Researched 2026-10-21 against Forgejo 17.0.0, Gitea
 1.27.3, OneDev 16.9.5, Soft Serve 0.12.3, and current GitLab
 installation requirements.)**
 
@@ -30,8 +32,13 @@ Decided so far:
 - Use Forgejo Actions with a repository-scoped, ephemeral runner on a
   compute node, not on the storage leader.
 - Serve internally at `forgejo.xc`. The external `git.<domain>` vhost is
-  gated by `forgejo_external` (default `false`) and uses the existing
-  frp/nginx/certbot path when enabled.
+  gated by `forgejo_external` (default `true`) and uses the existing
+  frp/nginx/certbot path. Disable it with `-e forgejo_external=false`.
+- External SSH is a separate raw TCP surface on frontend port 2222, gated by
+  `forgejo_external_ssh` (default `true`). It does not touch the frontend's
+  own sshd on port 22. Disable it by running `install-frp-server.yml` on the
+  frontend and `install-forgejo.yml` on storage with
+  `-e forgejo_external_ssh=false`.
 - Seed the new forge from the existing git refs. There is no issue, milestone,
   release, or wiki migration because those features are not in active use.
 - Do not migrate `.gitlab-ci.yml` as-is. Rewrite the six jobs as a Forgejo
@@ -50,10 +57,16 @@ Implementation in the tree:
   external mode is enabled.
 - `templates/forgejo-internal.conf.j2` serves `forgejo.xc`;
   `files/forgejo_git.conf.j2` serves the external `git.<domain>` surface
-  only when `forgejo_external=true`, without Authentik forward-auth,
+  by default (`forgejo_external=true`), without Authentik forward-auth,
   because git clients and API tokens are not Authentik sessions.
 - `app.py` adds `forgejo.xc` to the generated static DNS hosts so every
-  cluster node resolves the internal name through the storage VIP.
+  cluster node resolves the internal name through the storage VIP. When a domain
+  is configured it also adds `git.<domain>`, so external SSH clone URLs resolve
+  to the storage leader internally instead of hairpinning through the frontend.
+- `files/frpc.toml.j2` registers a raw TCP `forgejo-ssh` proxy on frontend
+  port 2222. The proxy follows the leader-gated `frpc`; `install-frp-server.yml`
+  opens the port in the frontend UFW by default, with
+  `forgejo_external_ssh=false` as the opt-out.
 - `.forgejo/workflows/ci.yml` mirrors the six GitLab jobs with a manual
   token checkout, so it does not need `actions/checkout` or Node in the job
   image.
@@ -197,9 +210,9 @@ compute node / isolated VM
   Non-leaders do not run the stack.
 - The web port is published on loopback only. Host nginx is the single
   ingress point, as with Open-WebUI.
-- The built-in SSH server is enabled on port 2222. External SSH, if
-  needed, is a separate TCP edge decision; internal clone URLs use
-  `forgejo.xc`.
+- The built-in SSH server is enabled on port 2222. Internal clone URLs use
+  `forgejo.xc:2222`; external SSH uses a leader-gated frp raw TCP proxy on
+  the frontend's port 2222, gated by `forgejo_external_ssh`.
 - State lives on `/rbd/user/forgejo`; the database lives in the existing
   PostgreSQL 16 instance. `pg_hba.conf` already permits
   `172.0.0.0/8` with `scram-sha-256`.
@@ -237,11 +250,11 @@ failover with a clone, a push, and a login during the window.
   domain is configured.
 - Configure Forgejo's OAuth2 source with the Authentik discovery URL,
   client ID, and client secret. The source is named `YCluster`, so the login
-  button reads **Sign in with YCluster**. Internal mode uses
-  `http://auth.xc/application/o/forgejo/.well-known/openid-configuration`;
-  external mode uses the equivalent `https://auth.<domain>` URL. Request
-  `openid profile email`. The provider grants `authorization_code` and
-  `refresh_token`.
+  button reads **Sign in with YCluster**. Discovery always uses the public
+  IdP hostname `https://auth.<domain>`; `auth.xc` is not an SSO surface.
+  Internal clients resolve `auth.<domain>` to the storage VIP through the
+  generated hosts file. Request `openid profile email`. The provider grants
+  `authorization_code` and `refresh_token`.
 - Publish the `Forgejo` application in the Authentik app library and on the
   root `<domain>` landing page.
 - Set `ENABLE_AUTO_REGISTRATION = true` so the first Authentik login
@@ -285,8 +298,11 @@ Users access git with a normal git client:
 # HTTPS: username + a Forgejo access token as the password
 git clone http://forgejo.xc/<owner>/<repo>.git
 
-# SSH: a key registered in Forgejo
+# SSH: a key registered in Forgejo (internal)
 git clone ssh://git@forgejo.xc:2222/<owner>/<repo>.git
+
+# SSH from outside the cluster, when external SSH is enabled
+git clone ssh://git@git.<domain>:2222/<owner>/<repo>.git
 ```
 
 - HTTPS git uses Forgejo access tokens, not account passwords. Create one
@@ -294,9 +310,10 @@ git clone ssh://git@forgejo.xc:2222/<owner>/<repo>.git
   read/write scope. Use the Forgejo username and that token when git prompts.
 - SSH uses Forgejo's built-in SSH server on port 2222. Users add their public
   key under **Settings → SSH / GPG Keys**; the private key stays local.
-- If external SSH is required, the edge must forward a TCP port; that is a
-  separate public surface decision and should not be bundled into the first
-  internal deploy.
+- With `forgejo_external_ssh=true`, `SSH_DOMAIN` becomes `git.<domain>` so
+  the clone button advertises the external endpoint. Internal clients resolve
+  that name to the storage VIP through the generated hosts file; external
+  clients use the frontend's frp tunnel.
 - Existing SSH keys are user-managed in Forgejo. The cutover does not
   carry GitLab SSH keys; users re-add them or use a token.
 
@@ -437,10 +454,13 @@ At minimum, monitor:
 
 ## Security
 
-- The forge is internal by default. External exposure is a separate
-  decision, not an automatic part of the install.
-- If exposed, put it behind the existing nginx/certbot/frp path. Do not
+- External HTTPS and SSH are enabled by default. Disable either surface
+  with `-e forgejo_external=false` or `-e forgejo_external_ssh=false`.
+- The web surface goes behind the existing nginx/certbot/frp path. Do not
   publish the Forgejo container port directly.
+- External SSH is the exception to the nginx path: it is a raw TCP frp proxy
+  on port 2222, gated separately by `forgejo_external_ssh`. It does not
+  change the frontend's own sshd on port 22.
 - Do **not** put `git.<domain>` behind Authentik forward-auth. Git clients
   and API tokens are not Authentik sessions; Forgejo's token auth and OIDC
   login are the boundary. This is the deliberate exception to the usual
@@ -461,10 +481,13 @@ At minimum, monitor:
 ## Acceptance criteria
 
 - `forgejo.xc` serves the web UI over HTTP inside the cluster;
-  `git.<domain>` serves it over HTTPS when `forgejo_external=true`.
+  `git.<domain>` serves it over HTTPS by default (`forgejo_external=true`).
 - Authentik OIDC login works for a normal user; local admin login works
   as break-glass.
 - HTTPS and SSH clone/push work with a token and a user key.
+- With `forgejo_external_ssh=true` (default), SSH clone/push works from
+  outside the cluster through `ssh://git@git.<domain>:2222/...`; the
+  frontend's port 22 is unchanged.
 - All branches and tags from the old remote are present with matching SHAs.
 - The Forgejo Actions workflow passes the same six checks as the GitLab
   pipeline on the same commit.

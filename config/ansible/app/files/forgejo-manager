@@ -87,28 +87,33 @@ wait_for_forgejo() {
 
 write_config() {
     local external_domain="$1"
-    local db_password="$2"
-    local secret_key="$3"
-    local internal_token="$4"
-    local jwt_secret="$5"
-    local lfs_jwt_secret="$6"
+    local external_ssh_domain="$2"
+    local db_password="$3"
+    local secret_key="$4"
+    local internal_token="$5"
+    local jwt_secret="$6"
+    local lfs_jwt_secret="$7"
 
     local domain root_url ssh_domain cookie_secure actions_url
     if [ -n "$external_domain" ]; then
         domain="git.$external_domain"
         root_url="https://git.$external_domain/"
-        # SSH is an internal surface in this design; external SSH is a
-        # separate edge decision. Do not advertise a hostname that is not
-        # forwarded on the SSH port.
-        ssh_domain="forgejo.xc"
         cookie_secure="true"
         actions_url="https://git.$external_domain"
     else
         domain="forgejo.xc"
         root_url="http://forgejo.xc/"
-        ssh_domain="forgejo.xc"
         cookie_secure="false"
         actions_url="http://forgejo.xc"
+    fi
+
+    # SSH is a separate public surface: advertise the external hostname only
+    # when the frontend TCP proxy is actually exposed. Internal users still
+    # resolve git.<domain> to the storage VIP through the generated hosts file.
+    if [ -n "$external_ssh_domain" ]; then
+        ssh_domain="git.$external_ssh_domain"
+    else
+        ssh_domain="forgejo.xc"
     fi
 
     cat > "$FORGEJO_CONFIG_FILE" <<EOF
@@ -264,10 +269,14 @@ ensure_oauth_source() {
         return 0
     fi
 
-    local auth_base="http://auth.xc"
-    if [ -n "$external_domain" ]; then
-        auth_base="https://auth.$external_domain"
+    # Always discover through the public IdP hostname. auth.xc is no longer a
+    # supported SSO surface; internal clients resolve auth.<domain> to the
+    # storage VIP through the generated hosts file.
+    if [ -z "$external_domain" ]; then
+        echo "External domain not configured; skipping OAuth source update"
+        return 0
     fi
+    local auth_base="https://auth.$external_domain"
     local discovery_url="$auth_base/application/o/forgejo/.well-known/openid-configuration"
     local source_name="$FORGEJO_OAUTH_SOURCE_NAME"
     local secret_hash stored_hash source_id
@@ -335,12 +344,19 @@ start_forgejo() {
     jwt_secret=$(get_or_generate_secret oauth2-jwt-secret-v2 gen_jwt_secret)
     lfs_jwt_secret=$(get_or_generate_secret lfs-jwt-secret-v2 gen_jwt_secret)
 
-    local external_domain=""
-    if [ "${FORGEJO_EXTERNAL_ENABLED:-false}" = "true" ]; then
-        external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+    local external_domain="" external_ssh_domain="" domain=""
+    if [ "${FORGEJO_EXTERNAL_ENABLED:-false}" = "true" ] || \
+       [ "${FORGEJO_EXTERNAL_SSH_ENABLED:-false}" = "true" ]; then
+        domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
     fi
-    write_config "$external_domain" "$db_password" "$secret_key" \
-        "$internal_token" "$jwt_secret" "$lfs_jwt_secret"
+    if [ "${FORGEJO_EXTERNAL_ENABLED:-false}" = "true" ]; then
+        external_domain="$domain"
+    fi
+    if [ "${FORGEJO_EXTERNAL_SSH_ENABLED:-false}" = "true" ]; then
+        external_ssh_domain="$domain"
+    fi
+    write_config "$external_domain" "$external_ssh_domain" "$db_password" \
+        "$secret_key" "$internal_token" "$jwt_secret" "$lfs_jwt_secret"
 
     local env_file
     env_file=$(mktemp --tmpdir=/dev/shm)

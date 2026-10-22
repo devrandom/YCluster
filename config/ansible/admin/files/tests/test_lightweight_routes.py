@@ -83,13 +83,17 @@ class LightweightRouteTests(unittest.TestCase):
                 mock.patch.object(appmod, '_node_hosts_entries',
                                   return_value=['ip-node node1 node1.xc']), \
                 mock.patch.object(appmod, '_frontend_hosts_entries',
-                                  return_value=['ip-frontend frontend frontend.xc']):
+                                  return_value=['ip-frontend frontend frontend.xc']), \
+                mock.patch.object(appmod, '_configured_external_domain',
+                                  return_value='example.com'):
             response = self.http.get('/api/hosts')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.mimetype, 'text/plain')
         self.assertIn('ip-node node1 node1.xc', response.text)
         self.assertIn('ip-frontend frontend frontend.xc', response.text)
         self.assertIn(f'{appmod.STORAGE_VIP} forgejo.xc', response.text)
+        self.assertIn(f'{appmod.STORAGE_VIP} git.example.com', response.text)
+        self.assertIn(f'{appmod.STORAGE_VIP} auth.example.com', response.text)
 
 
 if __name__ == '__main__':

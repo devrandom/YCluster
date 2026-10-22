@@ -15,6 +15,10 @@
     frp_server_binary_src: "/opt/src/frp/bin/frps"
     # Control port (frpc <-> frps).
     frp_bind_port: 7000
+    # External Forgejo SSH is a separate public surface from external HTTPS.
+    # The leader-gated frpc always registers the forgejo-ssh proxy; this flag
+    # opens its public port in the frontend firewall.
+    forgejo_external_ssh_enabled: "{{ forgejo_external_ssh | default(true) }}"
 
   tasks:
     - name: Check if frps binary exists on buildhost
@@ -194,6 +198,16 @@
         port: "{{ item }}"
         proto: tcp
       loop: "{{ vm_bastion_public_ports }}"
+
+    # Forgejo's built-in SSH server is registered by the leader-gated frpc
+    # as a raw TCP proxy. Open the port by default; set
+    # forgejo_external_ssh=false to keep it firewall-closed.
+    - name: Allow Forgejo SSH through ufw
+      community.general.ufw:
+        rule: allow
+        port: '2222'
+        proto: tcp
+      when: forgejo_external_ssh_enabled | bool
 
     - name: Set default-deny incoming and enable ufw
       community.general.ufw:

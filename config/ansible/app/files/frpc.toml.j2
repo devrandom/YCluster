@@ -39,3 +39,15 @@ remotePort = 443
 localIP = "127.0.0.2"
 localPort = 17443
 transport.proxyProtocolVersion = "v2"
+
+# Forgejo's built-in SSH server. This is a raw TCP proxy because SSH is not
+# HTTP and cannot be routed by nginx. The proxy is registered whenever frpc
+# runs on the storage leader (where Forgejo also runs); the frontend UFW opens
+# the public port by default and `forgejo_external_ssh=false` opts out; see
+# install-frp-server.yml. No PROXY protocol: SSH clients don't speak it.
+[[proxies]]
+name = "forgejo-ssh"
+type = "tcp"
+remotePort = 2222
+localIP = "127.0.0.1"
+localPort = 2222

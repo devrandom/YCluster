@@ -26,9 +26,12 @@
     forgejo_registry_image: "registry.xc:5000/forgejo:{{ forgejo_image_tag }}"
     forgejo_port: "{{ forgejo_local_port | default('3000') }}"
     forgejo_ssh_port: "{{ forgejo_local_ssh_port | default('2222') }}"
-    # Internal-only by default. Set -e forgejo_external=true only after the
-    # public git.<domain> exposure is explicitly approved.
-    forgejo_external_enabled: "{{ forgejo_external | default(false) }}"
+    # External HTTPS is enabled by default. Set -e forgejo_external=false to
+    # keep the forge internal-only.
+    forgejo_external_enabled: "{{ forgejo_external | default(true) }}"
+    # External SSH uses the leader-gated frpc TCP proxy on frontend port 2222.
+    # Set -e forgejo_external_ssh=false to keep it firewall-closed.
+    forgejo_external_ssh_enabled: "{{ forgejo_external_ssh | default(true) }}"
   tasks:
     - name: Check if this host is the storage leader
       shell: mountpoint -q /rbd/user
@@ -162,6 +165,7 @@
           Environment=FORGEJO_PORT={{ forgejo_port }}
           Environment=FORGEJO_SSH_PORT={{ forgejo_ssh_port }}
           Environment=FORGEJO_EXTERNAL_ENABLED={{ 'true' if forgejo_external_enabled | bool else 'false' }}
+          Environment=FORGEJO_EXTERNAL_SSH_ENABLED={{ 'true' if forgejo_external_ssh_enabled | bool else 'false' }}
 
           [Install]
           WantedBy=ycluster-apps.target
