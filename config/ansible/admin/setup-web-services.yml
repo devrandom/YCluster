@@ -341,15 +341,16 @@
       notify: restart nginx
       when: "'storage' in group_names"
 
-    # ycluster_app-locations.conf has no Jinja2 markers — plain copy.
-    # Included by ycluster_app.conf.j2 (single source: certbot-manager
+    # ycluster_app-locations.conf.j2 carries the configurable unlinked terms
+    # path. Included by ycluster_app.conf.j2 (single source: certbot-manager
     # renders the plain :443 and frp tunnel landing listeners).
     - name: Install ycluster_app locations (shared include for plain + proxy listeners)
-      copy:
-        src: files/ycluster_app-locations.conf
+      template:
+        src: files/ycluster_app-locations.conf.j2
         dest: /etc/nginx/ycluster_app-locations.conf
         mode: '0644'
       notify: restart nginx
+      tags: nginx-terms
       when: "'storage' in group_names"
 
     - name: Install nginx rate-limit zones for public paths
@@ -366,6 +367,7 @@
       changed_when: "'configuration updated' in nginx_update_result.stdout"
       failed_when: nginx_update_result.rc != 0
       notify: restart nginx
+      tags: nginx-terms
       when: "'storage' in group_names"
 
     - name: Enable nginx site
@@ -385,6 +387,7 @@
         dest: /etc/nginx/sites-enabled/ycluster
         state: link
       notify: restart nginx
+      tags: nginx-terms
       when: "'storage' in group_names"
 
     # Rendered by certbot-manager update-nginx (above) from the

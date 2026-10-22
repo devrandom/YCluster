@@ -11,6 +11,27 @@
 # level, once.
 include /etc/nginx/friendly-50x.conf;
 
+# Unlinked generic legal terms page. Served directly from disk without
+# forward-auth so it is reachable before sign-in, and marked noindex because
+# nothing links it.
+location = /terms {
+    limit_except GET HEAD { deny all; }
+    root /var/www/html;
+    try_files /terms.html =404;
+    add_header Cache-Control "no-cache" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+}
+
+# Optional deployment-specific terms page. The path and HTML filename are
+# deployment-configurable; the HTML is installed by a playbook in ycluster-private.
+location = /{{ ycluster_terms_path | default('legal/terms') }} {
+    limit_except GET HEAD { deny all; }
+    root /var/www/html;
+    try_files /{{ ycluster_terms_file | default('terms.html') }} =404;
+    add_header Cache-Control "no-cache" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+}
+
 # The root is a landing page linking the user-facing apps (chat.<domain>,
 # zulip.<domain>, admin.<domain>). It also keeps serving the OpenAI-compatible
 # inference API at /v1/ — clients and docs still point at the root domain for
