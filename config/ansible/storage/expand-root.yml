@@ -1,0 +1,72 @@
+---
+- name: Expand storage node root volumes to 400 GiB
+  hosts: storage
+  become: true
+  gather_facts: false
+  vars:
+    root_vg: vg0
+    root_lv: root
+    root_target_size_gib: 400
+
+  tasks:
+    - name: Read current root LV size
+      command: lvs --noheadings --nosuffix --units g -o lv_size {{ root_vg }}/{{ root_lv }}
+      register: root_lv_size
+      changed_when: false
+      check_mode: false
+
+    - name: Read free space in root volume group
+      command: vgs --noheadings --nosuffix --units g -o vg_free {{ root_vg }}
+      register: root_vg_free
+      changed_when: false
+      check_mode: false
+
+    - name: Record current root LV and VG free space
+      set_fact:
+        root_lv_current_gib: "{{ root_lv_size.stdout | trim | float }}"
+        root_vg_free_gib: "{{ root_vg_free.stdout | trim | float }}"
+
+    - name: Verify the root LV can grow to the target size
+      assert:
+        that:
+          - (root_lv_current_gib | float) <= root_target_size_gib
+          - (root_lv_current_gib | float) == root_target_size_gib or (root_vg_free_gib | float) >= (root_target_size_gib - (root_lv_current_gib | float))
+        fail_msg: >-
+          Cannot grow {{ root_vg }}/{{ root_lv }} to {{ root_target_size_gib }} GiB on
+          {{ inventory_hostname }}: current={{ root_lv_current_gib }} GiB,
+          free={{ root_vg_free_gib }} GiB
+
+    - name: Grow root LV and ext4 filesystem online
+      community.general.lvol:
+        vg: "{{ root_vg }}"
+        lv: "{{ root_lv }}"
+        size: "{{ root_target_size_gib }}g"
+        resizefs: true
+        shrink: false
+      when: (root_lv_current_gib | float) < root_target_size_gib
+
+    - name: Read resulting root LV size
+      command: lvs --noheadings --nosuffix --units g -o lv_size {{ root_vg }}/{{ root_lv }}
+      register: root_lv_size_after
+      changed_when: false
+      check_mode: false
+
+    - name: Verify root LV and filesystem size
+      assert:
+        that:
+          - (root_lv_size_after.stdout | trim | float) >= root_target_size_gib
+        fail_msg: >-
+          {{ root_vg }}/{{ root_lv }} on {{ inventory_hostname }} is
+          {{ root_lv_size_after.stdout | trim }} GiB after resize, expected at
+          least {{ root_target_size_gib }} GiB
+      when: not ansible_check_mode
+
+    - name: Show root filesystem size
+      command: df -h /
+      register: root_df
+      changed_when: false
+      check_mode: false
+
+    - name: Display root filesystem
+      debug:
+        var: root_df.stdout_lines
