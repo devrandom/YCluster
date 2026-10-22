@@ -17,6 +17,9 @@ services:
       # For existing deployments, update via Admin Panel -> Settings -> Connections.
       - 'OPENAI_API_BASE_URLS=http://inference.xc/v1'
       - 'OPENAI_API_KEYS=${INFERENCE_MASTER_KEY}'
+      # Instance display name (tab title / sidebar). "Open WebUI" for the
+      # primary instance; named stages get "Open WebUI (stage)" from the manager.
+      - 'WEBUI_NAME=${WEBUI_NAME:-Open WebUI}'
       # Enable per-user API keys so users can access inference directly
       - 'ENABLE_API_KEYS=True'
       # Keep unshared user workspace data out of admin list surfaces. This is

@@ -1,5 +1,5 @@
 diff --git a/src/lib/components/chat/MessageInput/InputMenu.svelte b/src/lib/components/chat/MessageInput/InputMenu.svelte
-index 2b81e1d83..975866934 100644
+index a0649f4f1..eb1fc904b 100644
 --- a/src/lib/components/chat/MessageInput/InputMenu.svelte
 +++ b/src/lib/components/chat/MessageInput/InputMenu.svelte
 @@ -27,6 +27,7 @@
@@ -8,9 +8,9 @@ index 2b81e1d83..975866934 100644
  	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
 +	import Photo from '$lib/components/icons/Photo.svelte';
  
- 	const i18n = getContext('i18n');
+ 	const i18n: any = getContext('i18n');
  
-@@ -123,6 +124,16 @@
+@@ -124,6 +125,16 @@
  	class="hidden"
  />
  
@@ -27,7 +27,7 @@ index 2b81e1d83..975866934 100644
  <Dropdown
  	bind:show
  	visualViewportAware
-@@ -210,6 +221,38 @@
+@@ -211,6 +222,38 @@
  						</button>
  					</Tooltip>
  
@@ -41,7 +41,7 @@ index 2b81e1d83..975866934 100644
 +							className="w-full"
 +						>
 +							<button
-+								class="flex w-full gap-2 items-center h-[1.6875rem] px-2 text-[13px] font-normal select-none cursor-pointer hover:bg-gray-50/40 dark:hover:bg-gray-800/40 rounded-xl {!fileUploadEnabled
++								class="flex w-full gap-2 items-center h-[1.6875rem] px-2 text-[0.8125rem] font-normal select-none cursor-pointer hover:bg-gray-50/40 dark:hover:bg-gray-800/40 rounded-xl text-left {!fileUploadEnabled
 +									? 'opacity-50'
 +									: ''}"
 +								type="button"
@@ -67,14 +67,14 @@ index 2b81e1d83..975866934 100644
  						content={fileUploadCapableModels.length !== selectedModels.length
  							? $i18n.t('Model(s) do not support file upload')
 diff --git a/src/lib/i18n/locales/en-US/translation.json b/src/lib/i18n/locales/en-US/translation.json
-index 112d1776a..f072a615f 100644
+index 2c4d70a9a..fd3f97c72 100644
 --- a/src/lib/i18n/locales/en-US/translation.json
 +++ b/src/lib/i18n/locales/en-US/translation.json
-@@ -2887,6 +2887,7 @@
- 	"Upload failed for {{failed}} of {{total}} files.": "",
- 	"Upload files": "",
- 	"Upload Files": "",
+@@ -3882,6 +3882,7 @@
+ 	"Upload files or add sources in the Knowledge workspace.": "Upload files or add sources in the Knowledge workspace.",
+ 	"Upload Folder": "",
+ 	"Upload gesture": "",
 +	"Upload Image": "",
  	"Upload Model": "",
- 	"Upload or reset the image shown behind chat content.": "",
  	"Upload Photo": "",
+ 	"Upload profile image": "",

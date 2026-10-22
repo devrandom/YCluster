@@ -1,0 +1,13 @@
+diff --git a/Dockerfile b/Dockerfile
+index 4bf9cfc57..05969b140 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -33,7 +33,7 @@ ARG UID
+ ARG GID
+ 
+ # Set Node.js options (heap limit Allocation failed - JavaScript heap out of memory)
+-# ENV NODE_OPTIONS="--max-old-space-size=4096"
++ENV NODE_OPTIONS="--max-old-space-size=8192"
+ 
+ WORKDIR /app
+ 

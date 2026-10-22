@@ -12,9 +12,11 @@
     # open-webui-plugins (private, no upstream tags) = 746f4b2f296d0b77f341bd646a19d07f49d3dd67.
     plugins_repo_sha: "746f4b2f296d0b77f341bd646a19d07f49d3dd67"
     webui_repo: "https://github.com/open-webui/open-webui.git"
-    # open-webui v0.11.3. Fork-only changes are applied as build-time patches:
-    # mobile-gated image/gallery upload + NLTK CVE bump (3.9.4 -> 3.10.3).
-    webui_repo_sha: "2a960a59fe1dbbd35282f0556b3666d81102e781"
+    # open-webui v0.12.3. Fork-only changes are applied as build-time patches:
+    # mobile-gated image/gallery upload + Pillow/certifi CVE bump.
+    # Build the standard image: v0.12.x slim drops Chroma and local embeddings,
+    # which the knowledge base still uses.
+    webui_repo_sha: "91ea4e3421d1d8069f13d4a463fcb5986d94ea60"
     image_name: "registry.xc:5000/open-webui-with-plugins"
     image_tag: "{{ instance if instance else 'latest' }}"
   tasks:
@@ -50,6 +52,31 @@
             version: "{{ webui_repo_sha }}"
             force: yes
             update: false
+
+        # `git` with update: false can leave a stale checkout in place; fail
+        # loudly instead of building an older tree under the new tag.
+        - name: Verify Open WebUI checkout is at the requested revision
+          command: git rev-parse HEAD
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+          register: webui_head
+          changed_when: false
+          failed_when: webui_head.stdout != webui_repo_sha
+
+        - name: Copy Open WebUI Node heap patch
+          copy:
+            src: files/open-webui-node-heap.patch
+            dest: "{{ build_dir }}/open-webui-node-heap.patch"
+            mode: '0644'
+
+        # v0.12.x frontend build needs more than Node's 4 GiB default heap.
+        - name: Apply Open WebUI Node heap patch
+          shell: |
+            if git apply --check ../open-webui-node-heap.patch 2>/dev/null; then
+              git apply ../open-webui-node-heap.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
 
         - name: Patch upstream Kagi web search (fixes 401; upstream sends Bearer/POST instead of Bot/GET)
           copy:
@@ -134,24 +161,9 @@
           args:
             chdir: "{{ build_dir }}/open-webui"
 
-        # NLTK 3.10.3 security bump. Carried in the build tree until upstream
-        # merges its Dependabot upgrade.
-        - name: Copy Open WebUI NLTK security patch
-          copy:
-            src: files/open-webui-nltk-3.10.3.patch
-            dest: "{{ build_dir }}/open-webui-nltk-3.10.3.patch"
-            mode: '0644'
-
-        - name: Apply Open WebUI NLTK security patch
-          shell: |
-            if git apply --check ../open-webui-nltk-3.10.3.patch 2>/dev/null; then
-              git apply ../open-webui-nltk-3.10.3.patch
-            fi
-          args:
-            chdir: "{{ build_dir }}/open-webui"
-
-        # Pillow 13.0.0 and certifi 2026.10.19 security bump. The image
-        # installs requirements.txt, so these pins are what the runtime sees.
+        # Pillow 13.0.0 and certifi 2026.10.19 security bump. The standard
+        # image installs requirements.txt; the slim variant installs
+        # requirements-slim.txt, so the patch covers both.
         - name: Copy Open WebUI pillow/certifi security patch
           copy:
             src: files/open-webui-pillow-certifi.patch
@@ -179,9 +191,11 @@
 
         - name: Build and push with buildx using registry cache
           shell: |
+            set -o pipefail
             docker buildx build \
               --build-arg http_proxy=http://10.0.0.254:3128 \
-              --build-arg USE_SLIM=true \
+              --build-arg USE_SLIM=false \
+              --build-arg BUILD_HASH={{ instance if instance else 'dev-build' }} \
               --cache-from type=registry,ref={{ image_name }}:cache \
               --cache-to type=registry,ref={{ image_name }}:cache,mode=max \
               --build-context plugins=open-webui-plugins \
@@ -191,6 +205,7 @@
               ./open-webui | tee /tmp/build-open-webui.log 2>&1
           args:
             chdir: "{{ build_dir }}"
+            executable: /bin/bash
           no_log: false
 
         - name: Display build completion message

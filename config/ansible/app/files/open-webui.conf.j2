@@ -45,6 +45,7 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header X-XSS-Protection "1; mode=block" always;
 
+    {% if domain == primary %}
     # IdP outpost plumbing (login redirect, OAuth callback, auth subrequest)
     # for the edge forward-auth gate on location /. The outpost selects the
     # matching application for chat.<domain> by the request Host.
@@ -57,4 +58,9 @@ server {
     # (`/v1/`) and its `/healthz` probe live at the root <domain> vhost,
     # not on chat.<domain>.
     include /etc/nginx/open-webui-locations.conf;
+    {% else %}
+    # Named stages are not edge-gated (the manager does not trust the
+    # Authentik headers there); Open WebUI's own login form handles auth.
+    include /etc/nginx/open-webui-stage-locations.conf;
+    {% endif %}
 }

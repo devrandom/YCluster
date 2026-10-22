@@ -298,9 +298,7 @@
     # source: certbot-manager-rendered for both the plain :443 and the frp
     # tunnel landing). The `(( port ))` marker is substituted here with the
     # open-webui port — same pattern as install-open-webui.yml uses for
-    # open-webui.conf.j2. Hardcoded 8380 (the default openwebui_port) — the
-    # staged instance is on a separate nginx site, so this file doesn't
-    # need to vary.
+    # open-webui.conf.j2. Hardcoded 8380 (the default openwebui_port).
     - name: Install Open WebUI locations (shared include for plain + proxy listeners)
       template:
         src: files/open-webui-locations.conf
@@ -312,6 +310,21 @@
         block_end_string: '#))'
       vars:
         port: "8380"
+      notify: restart nginx
+      when: "'storage' in group_names"
+
+    # Named stages proxy straight to their own port and are not edge-gated.
+    - name: Install Open WebUI stage locations
+      template:
+        src: files/open-webui-stage-locations.conf
+        dest: /etc/nginx/open-webui-stage-locations.conf
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      vars:
+        port: "8381"
       notify: restart nginx
       when: "'storage' in group_names"
 
