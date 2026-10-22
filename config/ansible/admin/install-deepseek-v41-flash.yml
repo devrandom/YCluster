@@ -28,7 +28,11 @@
 #   ssh <host>.yc
 #   ~/bin/ds41-setup.sh --download   # pull image + checkpoint (~510 GB)
 #   ~/bin/ds41-setup.sh              # subsequent: image pull + verify
-#   ~/bin/ds41-start.sh              # launch (idempotent)
+#   ~/bin/ds41-start.sh              # manual launch (idempotent)
+#
+# Runtime service is a system-level systemd unit that starts the existing
+# rootless container, so the backend starts after a host reboot and restarts
+# after an engine failure.
 
 - name: Deploy DeepSeek-V4.1-Flash staging scripts to Nvidia GPU nodes
   hosts: nvidia
@@ -78,6 +82,27 @@
       loop:
         - ds41-setup.sh
         - ds41-start.sh
+
+    - name: Remove obsolete DS4.1 Quadlet probe
+      file:
+        path: /home/dev/.config/containers/systemd/ds41-flash.container
+        state: absent
+
+    - name: Install DS4.1 systemd unit
+      template:
+        src: templates/ds41-flash.service.j2
+        dest: /etc/systemd/system/ds41-flash.service
+        owner: root
+        group: root
+        mode: '0644'
+      register: ds41_service
+
+    - name: Enable and start DS4.1 service
+      systemd:
+        name: ds41-flash.service
+        state: "{{ 'restarted' if ds41_service.changed else 'started' }}"
+        enabled: yes
+        daemon_reload: yes
 
 - name: Register the DS4.1 backend with local-ai-proxy
   hosts: storage

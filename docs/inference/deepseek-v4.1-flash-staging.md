@@ -57,21 +57,22 @@ IOMMU off is required, target the all-passthrough four-GPU host instead. See
 
 - `config/ansible/admin/install-deepseek-v41-flash.yml` — playbook
 - `config/ansible/admin/templates/ds41-setup.sh.j2` — image pull + checkpoint stage/verify
-- `config/ansible/admin/templates/ds41-start.sh.j2` — container launch
+- `config/ansible/admin/templates/ds41-start.sh.j2` — manual container launch/update
+- `config/ansible/admin/templates/ds41-flash.service.j2` — systemd boot-start unit
 
 ## Deploy checklist
 
 1. In private host_vars, set `ds41_enabled: true` and `ds41_gpus: "<4 CDI indices>"` on the target node.
-2. Run the playbook (setup scripts only; does not start the container).
+2. Run the playbook. It installs the setup/launch scripts and the systemd unit, and enables the unit.
 3. On the host, as dev: `~/bin/ds41-setup.sh --download` (~510 GB transfer).
 4. `~/bin/ds41-setup.sh` to verify revision + config.
-5. `~/bin/ds41-start.sh` (TP4, disk Engram, port 9218).
+5. Start it with `sudo systemctl start ds41-flash` (TP4, disk Engram, port 9218). Use `~/bin/ds41-start.sh` only to recreate/update the container definition.
 6. Qualify: `/health`, `/v1/models`, arithmetic smoke, image smoke, ≥100K needle test, tool-call smoke.
 7. Soak overnight; check for silent-corruption signatures (the V4.1 SM120 field reports flag FP8 KV scale-layout corruption at ≥100K as the killer).
 8. Register with gateway (playbook second play does this on the storage leader) and alert-audit.
 
 ## Rollback
 
-The container is standalone (`ds41-flash` on port 9218). Existing
+The service unit manages the standalone container (`ds41-flash` on port 9218). Existing
 `deepseek-v4-flash` (r16) and `deepseek-v4-flash-infernal` (r10) are
-untouched. To remove: `podman stop ds41-flash && podman rm ds41-flash`.
+untouched. To remove: `sudo systemctl disable --now ds41-flash && podman rm ds41-flash`.
