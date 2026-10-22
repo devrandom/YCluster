@@ -1,4 +1,4 @@
-# open-webui v0.11.3 2a960a59fe1dbbd35282f0556b3666d81102e781; image runtime inventory (Dockerfile installs requirements.txt, so versions are image-observed, not uv.lock)
+# open-webui v0.11.3 2a960a59fe1dbbd35282f0556b3666d81102e781; image runtime inventory (Dockerfile installs requirements.txt; certifi/pillow are direct pins, the rest are image-observed)
 PyPI:accelerate=1.13.0
 PyPI:aiocache=0.12.3
 PyPI:aiodns=3.6.1
@@ -40,7 +40,7 @@ PyPI:brotlicffi=1.2.0.1
 PyPI:build=1.6.0
 PyPI:cachetools=7.1.8
 PyPI:catalogue=2.0.10
-PyPI:certifi=2026.7.22
+PyPI:certifi=2026.10.19
 PyPI:cffi=2.1.1
 PyPI:chardet=7.4.3
 PyPI:charset-normalizer=3.5.1
@@ -201,7 +201,7 @@ PyPI:packaging=26.3
 PyPI:pandas=3.0.3
 PyPI:pathspec=1.1.1
 PyPI:pgvector=0.4.2
-PyPI:pillow=12.2.0
+PyPI:pillow=13.0.0
 PyPI:pinecone-plugin-interface=0.0.7
 PyPI:pinecone=6.0.2
 PyPI:pip=24.0

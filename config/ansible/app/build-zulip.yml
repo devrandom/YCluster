@@ -82,6 +82,30 @@
           args:
             chdir: "{{ build_dir }}/zulip-src"
 
+        # certifi 2026.10.19 security bump. The docker-zulip Dockerfile
+        # clones Zulip inside the build context, so patch the lockfile there
+        # after checkout. The Dockerfile patch sits after the cached clone /
+        # checkout layers to avoid invalidating them.
+        - name: Copy Zulip certifi security patch
+          copy:
+            src: files/zulip-certifi.patch
+            dest: "{{ build_dir }}/docker-zulip/zulip-certifi.patch"
+            mode: '0644'
+
+        - name: Copy Zulip Dockerfile certifi patch
+          copy:
+            src: files/zulip-dockerfile-certifi.patch
+            dest: "{{ build_dir }}/docker-zulip/zulip-dockerfile-certifi.patch"
+            mode: '0644'
+
+        - name: Apply Zulip Dockerfile certifi patch
+          shell: |
+            if git apply --check zulip-dockerfile-certifi.patch 2>/dev/null; then
+              git apply zulip-dockerfile-certifi.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/docker-zulip"
+
         - name: Create custom_zulip_files overlay directory for the home-button patch
           file:
             path: "{{ build_dir }}/docker-zulip/custom_zulip_files/templates/zerver/app"

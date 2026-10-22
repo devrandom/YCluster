@@ -1,0 +1,17 @@
+diff --git a/Dockerfile b/Dockerfile
+index 2e54a00..c2800af 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -41,6 +41,12 @@ WORKDIR /home/zulip/zulip
+ 
+ RUN git checkout "$ZULIP_GIT_REF"
+ 
++# Security bump: apply the patched uv.lock in the build context. This sits
++# after the clone/checkout layers so cached base and source layers are reused.
++COPY zulip-certifi.patch /tmp/zulip-certifi.patch
++RUN git apply /tmp/zulip-certifi.patch && git add uv.lock && \
++    git -c user.email=build@example.invalid -c user.name=build commit -q -m "Security bump: certifi 2026.10.19"
++
+ # Finally, we provision the development environment and build a release tarball
+ RUN SKIP_VENV_SHELL_WARNING=1 ./tools/provision --build-release-tarball-only && \
+     uv run --no-sync ./tools/build-release-tarball docker && \

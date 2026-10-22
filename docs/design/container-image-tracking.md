@@ -90,15 +90,18 @@ SLA once deployed; regenerate manifests and re-run after any image bump.
 
 | Image | findings | critical | high | no_fix_yet | affected packages |
 |---|---|---|---|---|---|
-| open-webui | 248 | 1 | 61 | 3 | aiohttp, chromadb, cryptography, httplib2, mcp, nltk, pillow, pyarrow, pyasn1, pymdown-extensions, pypdf |
-| zulip | 84 | 0 | 21 | 0 | cryptography, msgpack, pyasn1, pyjwt, soupsieve, tornado |
+| open-webui | 42 | 0 | 42 | 6 | aiohttp, fsspec, gitpython, langgraph-sdk, nltk, pyjwt, pymongo, pypdf, restrictedpython, transformers, urllib3 |
+| zulip | 16 | 0 | 16 | 0 | django, pyjwt, pymongo, social-auth-core, tornado, urllib3 |
 | authentik | 5 | 0 | 5 | 0 | aiohttp, urllib3 |
 | forgejo | 0 | 0 | 0 | 0 | none |
 
 Notable unresolved surface: authentik 2026.8.5 clears the prior
 cryptography/pyopenssl criticals (`PYSEC-2026-36`, `PYSEC-2026-2269`) and
-now carries five high aiohttp/urllib3 findings with fixes; open-webui carries
-a `no_fix_yet` critical (chromadb `GHSA-f4j7-r4q5-qw2c`) plus two nltk highs.
+now carries five high aiohttp/urllib3 findings with fixes. After the
+certifi/pillow bump, open-webui and zulip have no unacked criticals; the
+remaining criticals (anyio, chromadb, pyjwt, sentence-transformers,
+unstructured, uv) are acknowledged. open-webui's pending surface is now
+mostly pypdf/pyjwt highs plus six `no_fix_yet` findings.
 Forgejo 17.0.0 has no pending findings in the current OSV Go and
 Alpine 3.24 mirrors. Its apk specs carry the release (`Alpine:v3.24`) so
 OSV's per-release entries are filtered to the branch the image actually runs

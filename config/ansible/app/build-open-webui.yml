@@ -150,6 +150,22 @@
           args:
             chdir: "{{ build_dir }}/open-webui"
 
+        # Pillow 13.0.0 and certifi 2026.10.19 security bump. The image
+        # installs requirements.txt, so these pins are what the runtime sees.
+        - name: Copy Open WebUI pillow/certifi security patch
+          copy:
+            src: files/open-webui-pillow-certifi.patch
+            dest: "{{ build_dir }}/open-webui-pillow-certifi.patch"
+            mode: '0644'
+
+        - name: Apply Open WebUI pillow/certifi security patch
+          shell: |
+            if git apply --check ../open-webui-pillow-certifi.patch 2>/dev/null; then
+              git apply ../open-webui-pillow-certifi.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
         # Adds a /__smoke_app_error route that deliberately throws 500 from its
         # load function, exercising the friendly error boundary end-to-end
         # (parity with nginx /__smoke_50x). Same idempotent apply pattern.
