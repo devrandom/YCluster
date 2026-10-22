@@ -135,6 +135,12 @@ once at boot:
    host GPUs bind nvidia; the passthrough GPUs are skipped because their
    `driver_override` forces `vfio-pci`.
 
+### PCIe P2P vs. VFIO
+
+Host-visible inference can use PCIe P2P, but `amd_iommu=off` breaks the VFIO
+split above. Do not apply a P2P host fix to a host that still needs GPU
+passthrough. See [GPU PCIe P2P](../inference/gpu-p2p-iommu.md).
+
 `/etc/modprobe.d/nvidia-deferred.conf` contains `install nvidia /bin/false`
 (and submodules). This blocks **every** nvidia load path — including
 explicit `modprobe` by services like `nvidia-cdi-refresh` — so nvidia

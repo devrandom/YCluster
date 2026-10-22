@@ -8,8 +8,9 @@
 # touch the existing ds4-dspark container or its GPUs. Requires 4 GPUs
 # configured via ds41_gpus in private host_vars.
 #
-# Profile mirrors the R36 qualification: TP4/DCP1, DSpark K5, FP8 KV,
-# 128K context, disk Engram, 4 max seqs, no generic CPU offload.
+# Profile mirrors the R36 qualification: TP4/DCP1, DSpark K7, FP8 KV,
+# disk Engram, 4 max seqs, no generic CPU offload. The R36 receipt uses
+# 128K context; this launcher defaults to a 512K cap.
 set -euo pipefail
 
 IMAGE="${IMAGE:-{{ ds41_image }}}"

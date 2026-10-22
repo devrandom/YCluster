@@ -37,7 +37,12 @@ deployment-agnostic — no node names, IPs, or account specifics.
   and the retired-REAP history.
 - [DeepSeek-V4.1-Flash staging](deepseek-v4.1-flash-staging.md)
   — new architecture (`deepseek_v41`) alongside the DS4 backend; B12X R36
-  image, TP4/DCP1, SSD Engram, ~510 GB checkpoint. Staged but not deployed.
+  image, TP4/DCP1, SSD Engram, ~510 GB checkpoint. Serving on the four-GPU
+  spare node.
+- [GPU PCIe P2P: host IOMMU fix vs. 0xSero recipe](gpu-p2p-iommu.md)
+  — the DS4.1 host is in the public 237→444 tok/s report's "before" state.
+  Prefer 0xSero's recipe; use the all-passthrough host if IOMMU off is
+  required. Tracks the unpublished codegen kernel and the Flare runtime too.
 - [GLM-5.3-Flash on 2- or 4-GPU SM120 slices](glm-5.3-flash-deploy-2026-08.md)
   — 320B/18B hybrid KDA+sparse-MLA MoE (MIT weights). **Serving via Path A**
   (0xSero SGLang NVFP4 @ TP4/EP4 on 4 GPUs, 1M ctx, ~531 tok/s aggregate @conc 8),

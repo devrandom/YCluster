@@ -14,7 +14,8 @@
 # free, so we use the R36 SSD-qualified build.
 #
 # Runtime profile (from the R36 compose/qualification):
-#   TP4/DCP1, DSpark K5, FP8 KV, 128K context, disk Engram, 4 max seqs.
+#   TP4/DCP1, DSpark K7, FP8 KV, 128K context, disk Engram, 4 max seqs.
+#   Our launcher raises the context cap to 512K and keeps the 4-sequence limit.
 #   The 1017 checkpoint shares config with the 0909 launch model, so the
 #   R36 image should load it, but it has NOT been independently qualified
 #   — qualification runs below are ours to execute.

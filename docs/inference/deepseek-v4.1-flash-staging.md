@@ -43,6 +43,16 @@ ours to execute.
 | NVMe | ≥ 510 GB free for checkpoint + cache headroom | Local SSD, not network FS |
 | Host RAM | 64 GiB staging buffer (disk Engram) | ~189 GiB if RAM Engram (not recommended here) |
 
+## Host PCIe P2P path
+
+The current host is in the public "before" state: IOMMU on, no NVreg P2P
+registry keys, ReBAR off, and ACS enabled on the GPU root ports. C1 codegen
+decode measures 208–250 tok/s. A public Max-Q report moved 237 → 444 tok/s after
+`amd_iommu=off` + NVreg P2P keys + reboot, but that costs VFIO GPU
+passthrough. Do not apply it to this host. Prefer 0xSero's DS4.1 recipe; if
+IOMMU off is required, target the all-passthrough four-GPU host instead. See
+[gpu-p2p-iommu.md](gpu-p2p-iommu.md).
+
 ## Files added
 
 - `config/ansible/admin/install-deepseek-v41-flash.yml` — playbook
