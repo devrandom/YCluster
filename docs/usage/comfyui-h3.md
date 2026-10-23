@@ -92,16 +92,30 @@ Template Library entries for each model:
 - **HunyuanImage 3.0** NF4-v2 T2I via the pinned `Comfy_HunyuanImage3` custom
   node (about 45 GB on disk; see the license note below).
 - **Z-Image Turbo** BF16 T2I via the native ComfyUI template.
+- **Flux.1 Dev** fp8 T2I checkpoint (about 17 GB) via the native
+  `CheckpointLoaderSimple` node.
 
 The HunyuanImage node is CC BY-NC 4.0 and the model carries Tencent's
 Hunyuan community license; review both licenses before use. Use the `hunyuan`
 loader and generator nodes with `models/hunyuan/HunyuanImage-3-NF4-v2`. Use
-the official `image_z_image_turbo` template for Z-Image Turbo.
+the official `image_z_image_turbo` template for Z-Image Turbo. Flux.1 [dev]
+is covered by Black Forest Labs' non-commercial license.
 
 Files are pinned in the seed script's manifest, downloaded only during the
-operator staging step, and verified against SHA-256. LTX checkpoint files are
-under `checkpoints/`; LoRAs, vision encoders, and latent upscalers are under
+operator staging step, and verified against SHA-256. Checkpoint files are under
+`checkpoints/`; LoRAs, vision encoders, and latent upscalers are under
 their normal ComfyUI model directories.
+
+To stage missing files without rebuilding or restarting ComfyUI, run the
+seed-tagged tasks:
+
+```bash
+./run-playbook.sh admin/install-comfyui-vm.yml --limit nvidia --tags comfyui-seed
+```
+
+The download runs in the VM in the background and logs to
+`/root/seed-comfyui-models.log`. ComfyUI sees a completed file without a
+restart.
 
 ### Operator-supplied extra models
 

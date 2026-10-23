@@ -50,6 +50,7 @@
   tasks:
     - name: End play for nodes that have not opted into the ComfyUI VM
       meta: end_host
+      tags: [comfyui-seed]
       when: not (comfyui_vm_enabled | default(false))
 
     # GPU-passthrough VMs pin their guest RAM upfront. Starting one without
@@ -74,6 +75,7 @@
         < (comfyui_vm_mem_mib | int) + 8192
 
     - name: Ensure ~dev/bin and staging dir exist
+      tags: [comfyui-seed]
       file:
         path: "{{ item.path }}"
         state: directory
@@ -224,6 +226,7 @@
     # the image build proceeds below. It is pinned, operator-initiated asset
     # staging — the container itself never downloads models at runtime.
     - name: Stage ComfyUI model seed script
+      tags: [comfyui-seed]
       template:
         src: ../app/files/comfyui/seed-comfyui-models.sh.j2
         dest: /home/dev/.comfyui-vm/seed-comfyui-models.sh
@@ -232,10 +235,12 @@
         mode: '0755'
 
     - name: Push seed script into the VM
+      tags: [comfyui-seed]
       command: incus file push /home/dev/.comfyui-vm/seed-comfyui-models.sh {{ comfyui_vm_name }}/root/seed-comfyui-models.sh --quiet
       changed_when: true
 
     - name: Check whether uv is available in the VM
+      tags: [comfyui-seed]
       command: incus exec {{ comfyui_vm_name }} -- test -x /usr/local/bin/uv
       register: comfyui_vm_uv
       changed_when: false
@@ -244,6 +249,7 @@
     # Same pinned, checksummed artifact as the ComfyUI Containerfile. Needed
     # only on fresh VMs; existing seeded VMs already carry uv.
     - name: Install pinned uv in the VM when missing
+      tags: [comfyui-seed]
       command: >-
         incus exec {{ comfyui_vm_name }} -- bash -c
         'set -eu; curl -fsSL -o /tmp/uv.tar.gz
@@ -255,12 +261,14 @@
       changed_when: true
 
     - name: Check whether model seeding is already running
+      tags: [comfyui-seed]
       command: incus exec {{ comfyui_vm_name }} -- pgrep -f '[s]eed-comfyui-models.sh --download'
       register: comfyui_seed_running
       changed_when: false
       failed_when: false
 
     - name: Start model seeding in the background
+      tags: [comfyui-seed]
       command: >-
         incus exec {{ comfyui_vm_name }}
         --env HF_TOKEN={{ comfyui_hf_token | default('') }} --
