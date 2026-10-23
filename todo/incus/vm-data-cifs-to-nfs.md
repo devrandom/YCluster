@@ -61,14 +61,16 @@ maintenance window (see "Test").
 ## Proposed client flags
 
 ```
-nfsvers=4.2,hard,bg,rsize=1048576,wsize=1048576,nconnect=4,actimeo=60,nocto,noatime,async
+nfsvers=4.2,hard,rsize=1048576,wsize=1048576,nconnect=4,actimeo=60,nocto,noatime,async
 ```
 
 - `hard` — never surface a fake EIO to the guest on a transient blip.
 - `nconnect=4` — 10G link; multiple TCP connections to saturate it.
 - **No automount** (VM data must be present whenever virtiofsd starts); mount
-  statically. `bg` retries in the background instead of blocking boot; the
-  systemd `vm-data.mount` unit caps boot with `TimeoutSec=60`.
+  statically. Do **not** use `bg`: it makes `mount.nfs` fork, systemd sees no
+  mount at process exit, and the unit fails. A `nas-nfs-mount-retry.timer` starts
+  failed enabled mounts every 30s; the systemd mount unit caps each attempt with
+  `TimeoutSec=60`.
 - `_netdev` is **not** in the client options; the `.mount` unit orders itself
   after `network-online.target` via `After=`/`Wants=` instead.
 - Keep the shared NAS export's CIFS automount untouched.

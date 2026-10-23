@@ -434,6 +434,50 @@
         index_var: nas_nfs_mounts_idx
       when: item.enabled | bool
 
+    - name: Install the NAS NFS mount retry service
+      copy:
+        dest: /etc/systemd/system/nas-nfs-mount-retry.service
+        content: |
+          [Unit]
+          Description=Retry failed NAS NFS mounts
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          TimeoutStartSec=5min
+          {% for mount in nas_nfs_mounts_effective %}
+          {% if mount.enabled | bool %}
+          ExecStart=-/bin/sh -c 'systemctl start "$(systemd-escape \
+          --path --suffix=mount {{ mount.mount_point }})"'
+          {% endif %}
+          {% endfor %}
+        mode: '0644'
+
+    - name: Install the NAS NFS mount retry timer
+      copy:
+        dest: /etc/systemd/system/nas-nfs-mount-retry.timer
+        content: |
+          [Unit]
+          Description=Retry failed NAS NFS mounts
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec=30s
+          AccuracySec=1s
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+
+    - name: Enable and start the NAS NFS mount retry timer
+      systemd:
+        name: nas-nfs-mount-retry.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
     - name: Check the NAS NFS mounts are present
       command: "mountpoint -q {{ item.mount_point }}"
       failed_when: false

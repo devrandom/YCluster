@@ -363,8 +363,11 @@ so the durable fix is moving this protocol to NFS, which has no
 - **Client (rollout switch):** the client mount is gated by a per-host Ansible
   flag, `vm_data_nfs` (default `true`; set `false` in `host_vars/<host>.yml`
   to opt out). When enabled, `mount-nas-share.yml` installs `nfs-common`, writes a static
-  `vm-data.mount` systemd unit (`TimeoutSec=60`, no automount), enables/starts
-  it, and fails if the mount is not actually present.
+  systemd mount unit (`TimeoutSec=60`, no automount), enables/starts
+  it, and fails if the mount is not actually present. It also installs
+  `nas-nfs-mount-retry.timer`, which starts failed enabled mounts every
+  30s. The mount options use `hard` without `bg`: `bg` makes `mount.nfs`
+  fork, so systemd sees no mount and marks the unit failed.
 - **Mount check (for scripts):** scripts that touch VM `data` paths run
   `/usr/local/bin/check-vm-data-nfs-mount` (installed by the play) to fail fast
   if the mount is missing instead of writing into an empty directory.

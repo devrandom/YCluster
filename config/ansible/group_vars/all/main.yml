@@ -100,9 +100,11 @@ vm_data_nfs_server: nas1.xc
 vm_data_nfs_export: /near1/vm # NAS-side subtree exported unconditionally
 vm_data_nfs_mount: /mnt/near1-vm
 # NFSv4 client options (genuine NFS mount options). No automount (VM data must
-# be present for virtiofsd); bg+hard keep boot from hanging. The 60s boot
-# timeout is set as TimeoutSec=60 on the .mount unit in mount-nas-share.yml.
-vm_data_nfs_client_opts: "nfsvers=4.2,hard,bg,rsize=1048576,wsize=1048576,nconnect=4,actimeo=60,nocto,noatime,async"
+# be present for virtiofsd). `hard` keeps retrying, and the retry timer in
+# mount-nas-share.yml starts the .mount unit again after a NAS outage. Do not add
+# `bg`: mount.nfs forks, systemd sees no mount at exit, and marks the unit failed.
+# The 60s boot timeout is set as TimeoutSec=60 on the .mount unit.
+vm_data_nfs_client_opts: "nfsvers=4.2,hard,rsize=1048576,wsize=1048576,nconnect=4,actimeo=60,nocto,noatime,async"
 # Export network(s) + single-UID mapping. NFS has no forceuid/forcegid, so the
 # server squashes every access to uid/gid 1000 (mirrors CIFS uid/gid=1000) and
 # the exported tree must be owned by 1000:1000 (setup-nas.yml ensures it).
