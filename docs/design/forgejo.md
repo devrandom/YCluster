@@ -49,7 +49,10 @@ Implementation in the tree:
 - `config/ansible/app/install-forgejo.yml`, `files/forgejo-manager`,
   and `files/forgejo-compose.yaml` deploy the server on the storage leader,
   create the PostgreSQL database/role, seed the digest-pinned image into
-  `registry.xc`, and render `app.ini` with generated secrets.
+  `registry.xc`, and render `app.ini` with generated secrets. The built-in
+  SSH host key is ed25519 at `/data/gitea/ssh/forgejo.ed25519`, outside
+  `/data/ssh`: the image's OpenSSH service resets ownership of everything in
+  `/data/ssh` to root on every container start.
 - `files/authentik-manager` always writes the `forgejo` OIDC provider,
   including the internal callback and the external callback when a domain is
   configured; `forgejo-manager` creates or updates the matching

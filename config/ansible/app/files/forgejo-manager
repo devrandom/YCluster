@@ -131,7 +131,11 @@ SSH_DOMAIN = $ssh_domain
 SSH_PORT = 2222
 SSH_LISTEN_PORT = 2222
 START_SSH_SERVER = true
-SSH_SERVER_HOST_KEYS = ssh/forgejo.rsa
+# Keep the built-in SSH host key out of /data/ssh: the image's OpenSSH
+# service owns that directory and chowns everything in it to root on every
+# container start, which makes the key unreadable to the git user. Forgejo then
+# falls back to a fresh in-memory key on each restart.
+SSH_SERVER_HOST_KEYS = /data/gitea/ssh/forgejo.ed25519
 LFS_START_SERVER = true
 LFS_JWT_SECRET = $lfs_jwt_secret
 OFFLINE_MODE = true
@@ -326,7 +330,26 @@ ensure_oauth_source() {
 }
 
 start_forgejo() {
-    mkdir -p "$FORGEJO_DATA_DIR"/{gitea/conf,git/repositories,lfs,attachments,avatars,actions_log,actions_artifacts}
+    local ssh_key_dir="$FORGEJO_DATA_DIR/gitea/ssh"
+    local ssh_key="$ssh_key_dir/forgejo.ed25519"
+    local openssh_ed25519_key="$FORGEJO_DATA_DIR/ssh/ssh_host_ed25519_key"
+
+    mkdir -p "$FORGEJO_DATA_DIR"/{gitea/conf,git/repositories,lfs,attachments,avatars,actions_log,actions_artifacts} "$ssh_key_dir"
+
+    # Use ed25519 for the built-in SSH host key. Reuse the image's OpenSSH
+    # ed25519 key when it exists; otherwise generate a dedicated one.
+    # Forgejo's own fallback generator creates RSA-4096, so create it explicitly.
+    if [ ! -f "$ssh_key" ]; then
+        if [ -f "$openssh_ed25519_key" ]; then
+            cp -p "$openssh_ed25519_key" "$ssh_key"
+            if [ -f "$openssh_ed25519_key.pub" ]; then
+                cp -p "$openssh_ed25519_key.pub" "$ssh_key.pub"
+            fi
+        else
+            ssh-keygen -q -t ed25519 -N '' -f "$ssh_key"
+        fi
+    fi
+
     chown -R 1000:1000 "$FORGEJO_DATA_DIR"
 
     local db_password
