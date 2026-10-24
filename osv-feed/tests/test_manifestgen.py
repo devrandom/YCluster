@@ -50,6 +50,80 @@ wheels = []
 """
 
 
+APK_FIXTURE = """\
+C:Q1test=
+P:brotli-libs
+V:1.2.0-r1
+A:x86_64
+o:brotli
+
+C:Q1test=
+P:brotli
+V:1.2.0-r1
+A:x86_64
+o:brotli
+
+C:Q1test=
+P:openssh-client
+V:10.3_p1-r1
+A:x86_64
+o:openssh
+
+C:Q1test=
+P:openssh
+V:10.3_p1-r1
+A:x86_64
+o:openssh
+"""
+
+GO_BUILDINFO_FIXTURE = """\
+/tmp/forgejo: go1.26.9
+\tpath\tcode.gitea.io/gitea
+\tmod\tcode.gitea.io/gitea\t(devel)\t
+\tdep\tgithub.com/andybalholm/brotli\tv1.2.0\th1:abc
+"""
+
+
+class SpecsFromApkInstalledTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="osv-mgen-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.apk = os.path.join(self.tmp, "installed")
+        with open(self.apk, "w", encoding="utf-8") as fh:
+            fh.write(APK_FIXTURE)
+
+    def test_uses_source_origin_and_deduplicates_subpackages(self):
+        self.assertEqual(
+            [("brotli", "1.2.0-r1"), ("openssh", "10.3_p1-r1")],
+            manifestgen.specs_from_apk_installed(self.apk, "v3.24"),
+        )
+
+    def test_release_accepts_full_version(self):
+        self.assertEqual(
+            [("brotli", "1.2.0-r1"), ("openssh", "10.3_p1-r1")],
+            manifestgen.specs_from_apk_installed(self.apk, "3.24.2"),
+        )
+
+    def test_rejects_invalid_release(self):
+        with self.assertRaisesRegex(ValueError, "invalid Alpine release"):
+            manifestgen.specs_from_apk_installed(self.apk, "alpine")
+
+
+class SpecsFromGoBuildinfoTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="osv-mgen-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.buildinfo = os.path.join(self.tmp, "buildinfo")
+        with open(self.buildinfo, "w", encoding="utf-8") as fh:
+            fh.write(GO_BUILDINFO_FIXTURE)
+
+    def test_returns_dependency_modules(self):
+        self.assertEqual(
+            [("github.com/andybalholm/brotli", "v1.2.0")],
+            manifestgen.specs_from_go_buildinfo(self.buildinfo),
+        )
+
+
 class SpecsFromUvLockTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="osv-mgen-")
@@ -162,6 +236,12 @@ class GenerateTest(unittest.TestCase):
                     {"node_modules/@scope/pkg": {"version": "1.2.0"}}
                 )
             )
+        self.apk = os.path.join(self.tmp, "installed")
+        with open(self.apk, "w", encoding="utf-8") as fh:
+            fh.write(APK_FIXTURE)
+        self.buildinfo = os.path.join(self.tmp, "buildinfo")
+        with open(self.buildinfo, "w", encoding="utf-8") as fh:
+            fh.write(GO_BUILDINFO_FIXTURE)
 
     def test_renders_ecosystem_lines(self):
         lines = manifestgen.generate(
@@ -170,6 +250,22 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(lines[0], "# pin abc")
         self.assertIn("PyPI:requests=2.32.3", lines)
         self.assertIn("npm:@scope/pkg=1.2.0", lines)
+
+    def test_renders_apk_and_go_lines(self):
+        lines = manifestgen.generate(
+            "forgejo",
+            apk_installed=self.apk,
+            apk_release="v3.24",
+            go_buildinfo=self.buildinfo,
+        )
+        self.assertIn("Alpine:v3.24:brotli=1.2.0-r1", lines)
+        self.assertIn("Alpine:v3.24:openssh=10.3_p1-r1", lines)
+        self.assertNotIn("Alpine:v3.24:brotli-libs=1.2.0-r1", lines)
+        self.assertIn("Go:github.com/andybalholm/brotli=v1.2.0", lines)
+
+    def test_apk_requires_release(self):
+        with self.assertRaisesRegex(ValueError, "apk_release is required"):
+            manifestgen.generate("forgejo", apk_installed=self.apk)
 
     def test_missing_input_contributes_nothing(self):
         lines = manifestgen.generate("image", uv_lock=os.path.join(self.tmp, "nope"))

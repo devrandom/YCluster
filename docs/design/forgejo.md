@@ -10,10 +10,12 @@ Authentik library and the root landing page, and internal/external HTTP token
 plus internal SSH-key clone/push were smoke-tested and cleaned up. The external
 SSH endpoint is live at `ssh://git@git.<domain>:2222` through the leader-gated
 frp TCP proxy; a key-auth clone/push still needs a user-key smoke test. The
-Actions runner, the perimeter CVE manifest, and the off-cluster forge-data dump
-are still pending. (Researched 2026-10-21 against Forgejo 17.0.0, Gitea
-1.27.3, OneDev 16.9.5, Soft Serve 0.12.3, and current GitLab
-installation requirements.)**
+Actions runner and the off-cluster forge-data dump are still pending. The
+perimeter CVE manifest is deployed: `forgejo.manifest` tracks the patched
+runtime image's Alpine source packages and Go modules, and the image upgrades
+the upstream Brotli/expat/zlib packages. (Researched 2026-10-21 against
+Forgejo 17.0.0, Gitea 1.27.3, OneDev 16.9.5, Soft Serve 0.12.3, and
+current GitLab installation requirements.)**
 
 Decided so far:
 
@@ -23,10 +25,11 @@ Decided so far:
 - Run it leader-gated on the storage leader, like Authentik and Open-WebUI,
   with state on `/rbd/user/forgejo` and relational state in the cluster's
   shared PostgreSQL.
-- Deploy the official Forgejo container image pinned by digest, mirror it
-  into `registry.xc`, and track it with the `osv-feed` container
-  manifests (Alpine base packages plus the Forgejo Go module) — the same
-  digest-pinned pattern as Authentik.
+- Deploy the official Forgejo container image pinned by digest, build a
+  patched in-cluster image on top of it for Brotli/expat/zlib security
+  updates (`app/build-forgejo.yml`), mirror it into `registry.xc`, and track
+  the patched image with the `osv-feed` container manifest (Alpine source
+  packages via the installed DB's `o:` origins plus the Forgejo Go module).
 - Authenticate users through Authentik over OIDC. Keep one local
   break-glass administrator account and no open registration.
 - Use Forgejo Actions with a repository-scoped, ephemeral runner on a

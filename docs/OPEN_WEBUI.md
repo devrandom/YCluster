@@ -18,9 +18,21 @@
   - change some models to public visibility in the *Settings -> Models* tab
 - most modern models support "native" tools calls - enable this in "Advanced Params -> Function Calling" under the model configuration.
 
+## Current deployment
+
+Prod and stage both run upstream v0.12.3. Prod is the `:latest` image,
+served at `chat.<domain>` behind the Authentik edge gate; stage is the `:stage`
+image, served at `stage.<domain>` with its own OIDC provider and no edge gate.
+Both databases are on the same alembic head. The cutover kept the pre-cutover
+prod dump under `/rbd/misc/backups/`.
+
 ## Building and Upgrading
 
-The build is performed from upstream Open WebUI with plugins injected from `github.com/devrandom/open-webui-plugins.git`. Fork-only changes (mobile image upload, the NLTK security bump, and edge-auth redirect handling) are applied as build-time patches from `config/ansible/app/files/`.
+The build is performed from upstream Open WebUI v0.12.3 with plugins injected
+from `github.com/devrandom/open-webui-plugins.git`. Fork-only changes (mobile
+image upload, the Node heap bump, the Pillow/certifi/Brotli security bumps, and
+edge-auth redirect handling) are applied as build-time patches from
+`config/ansible/app/files/`.
 
 The edge-auth redirect patch keeps the cluster IdP as the navigation gate: when `/api/config` returns 401 because the edge session is stale, the SPA performs a full navigation to `/` so nginx can redirect to the IdP instead of showing "Backend Required".
 

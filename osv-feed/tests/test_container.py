@@ -124,6 +124,45 @@ class MatchContainerTest(unittest.TestCase):
         self.assertEqual("PyPI", findings[0]["ecosystem"])
         self.assertEqual("no_fix_yet", findings[0]["state"])
 
+    def test_matches_alpine_source_origin_spec(self):
+        record = {
+            "id": "ALPINE-CVE-2026-111497",
+            "summary": "brotli decoder out-of-bounds write",
+            "affected": [
+                {
+                    "package": {"ecosystem": "Alpine:v3.24", "name": "brotli"},
+                    "ranges": [
+                        {
+                            "type": "ECOSYSTEM",
+                            "events": [
+                                {"introduced": "0"},
+                                {"fixed": "1.2.1-r0"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "severity": [
+                {
+                    "type": "CVSS_V3",
+                    "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                }
+            ],
+        }
+        _write_record(self.db, "Alpine", record)
+        self._manifest(
+            "forgejo.manifest",
+            ["Alpine:v3.24:brotli=1.2.0-r1"],
+        )
+        findings = matching.match_container(self.db, self.manifest_dir)
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("forgejo", finding["image"])
+        self.assertEqual("Alpine:v3.24", finding["ecosystem"])
+        self.assertEqual("brotli", finding["package"])
+        self.assertEqual("ALPINE-CVE-2026-111497", finding["cve"])
+        self.assertEqual("fix_available", finding["state"])
+
     def test_first_seen_is_per_image(self):
         _write_record(
             self.db,

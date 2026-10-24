@@ -174,7 +174,9 @@ self-built `local-ai-proxy` (Go ecosystem). An empty surface is a wildcard
 (keeps the legacy three-part key), so a surface-less ack suppresses the CVE on
 every surface, while a surface-scoped ack suppresses it only there. Matching
 prefers the most specific ack (exact ecosystem + exact surface, then
-wildcard surface, then wildcard ecosystem, then wildcard both).
+wildcard surface, then wildcard ecosystem, then wildcard both), and it matches
+the finding's `aliases` too, so acknowledging a GHSA also suppresses the same
+advisory when another feed reports it as `PYSEC-…` or `CVE-…`.
 
 ```bash
 # On the collector node (config already points --ack-db at /near1/...):
@@ -223,7 +225,13 @@ image's actual `pip list`, because the Dockerfile installs `requirements.txt`.
 | open-webui | built image from `app/build-open-webui.yml` `webui_repo_sha` | `pip list --format=json` from the built image; certifi/pillow/Brotli are patched direct pins |
 | zulip | `app/build-zulip.yml` (docker-zulip + src SHAs) | `--uv-select prod` |
 | authentik | `app/install-authentik.yml` `authentik_image` (digest) + `authentik_version` | `--uv-select base` |
-| forgejo | `app/install-forgejo.yml` `forgejo_image` (digest) | read the image layers: `/lib/apk/db/installed` + `/etc/alpine-release` (apk specs), and the linked `forgejo` binary's Go buildinfo (`Go:` specs) |
+| forgejo | patched in-cluster image from `app/build-forgejo.yml` (upstream digest + brotli/expat/zlib security bumps) | `manifestgen forgejo --apk-installed <installed> --apk-release v3.24 --go-buildinfo <buildinfo>`; apk specs use the installed DB's `o:` source origin, Go specs use the linked binary's buildinfo |
+
+Alpine advisories are keyed on the **source** package, while
+`/lib/apk/db/installed` records binary subpackages (`P`, e.g.
+`brotli-libs`) with their origin in `o:`. Emit `o:` (falling back to `P`
+only when no origin is recorded), or the matcher silently misses advisories
+such as `ALPINE-CVE-2026-111497` for `brotli`.
 
 To regenerate a manifest after an image/lockfile bump:
 
@@ -233,6 +241,17 @@ docker exec <container> python -m pip list --format=json \
   > ./tmp/openwebui-piplist.json
 # Convert each {"name","version"} pair to PyPI:<name>=<version> and
 # write the version-pinned manifest (see the existing manifest header).
+
+# From the built Forgejo image:
+docker create --name forgejo-extract <image>
+docker cp forgejo-extract:/lib/apk/db/installed ./tmp/forgejo-installed
+docker cp forgejo-extract:/app/gitea/gitea ./tmp/forgejo-gitea
+docker rm forgejo-extract
+go version -m ./tmp/forgejo-gitea > ./tmp/forgejo-buildinfo
+PYTHONPATH=osv-feed python3 -m osv_feed.manifestgen forgejo \
+  --apk-installed ./tmp/forgejo-installed --apk-release v3.24 \
+  --go-buildinfo ./tmp/forgejo-buildinfo \
+  --out config/ansible/monitoring/container-manifests/forgejo.manifest
 ```
 
 Commit the regenerated manifest and redeploy `install-osv-feed.yml` so it

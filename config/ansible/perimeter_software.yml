@@ -194,7 +194,8 @@ perimeter_software:
     tier: P0-U
     osv_category: container
     osv_packages: []
-    # package: container image (Alpine base + Forgejo Go modules, digest-pinned)
-    # pin_source: app/install-forgejo.yml forgejo_image @sha256:c6931ca... (17.0.0)
+    # package: container image (Alpine source packages + Forgejo Go modules)
+    # pin_source: app/build-forgejo.yml (upstream @sha256:c6931ca... 17.0.0
+    #             + brotli/expat/zlib security bumps)
     # manifest: config/ansible/monitoring/container-manifests/forgejo.manifest
-    # (Alpine apk packages + linked Go module buildinfo, 312 specs)
+    # (Alpine apk source origins + linked Go module buildinfo, 280 specs)

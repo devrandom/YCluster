@@ -1,0 +1,82 @@
+---
+# Build the cluster Forgejo image from the digest-pinned upstream image.
+#
+# The upstream 17.0.0 image ships brotli-libs 1.2.0-r1, expat 2.8.5-r0, and
+# zlib 1.3.2-r0, which are affected by ALPINE-CVE-2026-111497,
+# ALPINE-CVE-2026-77214, and ALPINE-CVE-2026-85091 respectively. Alpine
+# v3.24 already has the fixed versions, so derive a minimal image that upgrades
+# those packages and push it to the cluster registry. This keeps the official image
+# as the base while making the runtime package set match the osv-feed Alpine
+# manifest.
+- name: Build patched Forgejo image
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # The upstream digest is seeded into registry.xc by this playbook; the
+    # local registry tag resolves to the amd64 manifest for that digest.
+    forgejo_upstream_image: "codeberg.org/forgejo/forgejo@sha256:c6931ca2926185d129aee8e28f1c6f42fbd8c1bb6b14dbac38873e06a8948a8a"
+    forgejo_base_image: "registry.xc:5000/forgejo:17.0.0-c6931ca29261"
+    forgejo_image_name: registry.xc:5000/forgejo
+    forgejo_image_tag: "17.0.0-c6931ca29261-brotli1.2.1-expat2.9.0-zlib1.3.2r1"
+    forgejo_build_dir: /opt/src/forgejo-build
+  tasks:
+    - block:
+        - name: Verify registry is ready for push operations
+          uri:
+            url: "http://registry.xc:5000/v2/_catalog"
+            method: GET
+            timeout: 10
+          register: registry_catalog
+          failed_when: registry_catalog.status != 200
+
+        - name: Check whether the upstream Forgejo base image is mirrored
+          uri:
+            url: "http://registry.xc:5000/v2/forgejo/manifests/17.0.0-c6931ca29261"
+            method: HEAD
+            headers:
+              Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json"
+            status_code: 200
+            timeout: 10
+          register: forgejo_base_check
+          failed_when: false
+
+        - name: Seed the cluster registry with the upstream Forgejo base image
+          shell: |
+            set -e
+            docker pull -q {{ forgejo_upstream_image }}
+            docker tag {{ forgejo_upstream_image }} {{ forgejo_base_image }}
+            docker push -q {{ forgejo_base_image }}
+          when: forgejo_base_check.status != 200
+
+        - name: Create Forgejo build directory
+          file:
+            path: "{{ forgejo_build_dir }}"
+            state: directory
+            mode: '0755'
+
+        - name: Copy Forgejo Dockerfile
+          copy:
+            src: files/forgejo/Dockerfile
+            dest: "{{ forgejo_build_dir }}/Dockerfile"
+            mode: '0644'
+
+        - name: Build and push the patched Forgejo image
+          shell: |
+            set -o pipefail
+            docker buildx build \
+              --build-arg http_proxy=http://10.0.0.254:3128 \
+              --build-arg https_proxy=http://10.0.0.254:3128 \
+              --build-arg FORGEJO_BASE_IMAGE={{ forgejo_base_image }} \
+              --progress plain \
+              --tag {{ forgejo_image_name }}:{{ forgejo_image_tag }} \
+              --push \
+              . | tee build-forgejo.log 2>&1
+          args:
+            chdir: "{{ forgejo_build_dir }}"
+            executable: /bin/bash
+          no_log: false
+
+        - name: Display build completion message
+          debug:
+            msg: "Docker image {{ forgejo_image_name }}:{{ forgejo_image_tag }} built and pushed to registry successfully"
+      delegate_to: "{{ buildhost }}"

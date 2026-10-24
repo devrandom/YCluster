@@ -1,8 +1,9 @@
 services:
   forgejo:
     # FORGEJO_IMAGE overrides the whole reference; the fallback is the
-    # digest-pinned upstream image so a manual compose run cannot float.
-    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo@sha256:c6931ca2926185d129aee8e28f1c6f42fbd8c1bb6b14dbac38873e06a8948a8a}
+    # patched in-cluster image so a manual compose run cannot fall back to
+    # the vulnerable upstream package set.
+    image: ${FORGEJO_IMAGE:-registry.xc:5000/forgejo:17.0.0-c6931ca29261-brotli1.2.1-expat2.9.0-zlib1.3.2r1}
     container_name: forgejo
     environment:
       USER_UID: 1000

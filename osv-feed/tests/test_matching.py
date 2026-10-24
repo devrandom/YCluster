@@ -191,6 +191,63 @@ class MatchSpecsTest(unittest.TestCase):
         )
         self.assertEqual("high", findings[0]["severity"])
 
+    def test_severity_cvss4_vector_without_label_is_conservative(self):
+        # Alpine OSV records publish a CVSS 4.0 vector but no qualitative
+        # label; a network-reachable high-impact vector must still classify as
+        # critical so the container policy does not drop it.
+        record = {
+            "id": "ALPINE-CVE-CVSS4",
+            "severity": [
+                {
+                    "type": "CVSS_V4",
+                    "score": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+                }
+            ],
+            "affected": [{"package": {"name": "brotli"}}],
+        }
+        _write_record(self.db, "Alpine", record)
+        findings = matching.match_specs(
+            self.db,
+            [{"ecosystem": "Alpine", "package": "brotli", "version": "1.2.0-r1"}],
+        )
+        self.assertEqual("critical", findings[0]["severity"])
+
+    def test_severity_cvss4_availability_only_is_high(self):
+        record = {
+            "id": "PYSEC-CVSS4-DOS",
+            "severity": [
+                {
+                    "type": "CVSS_V4",
+                    "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+                }
+            ],
+            "affected": [{"package": {"name": "pypdf"}}],
+        }
+        _write_record(self.db, "PyPI", record)
+        findings = matching.match_specs(
+            self.db,
+            [{"ecosystem": "PyPI", "package": "pypdf", "version": "6.7.5"}],
+        )
+        self.assertEqual("high", findings[0]["severity"])
+
+    def test_severity_cvss4_confidentiality_only_is_high(self):
+        record = {
+            "id": "ALPINE-CVE-CVSS4-READ",
+            "severity": [
+                {
+                    "type": "CVSS_V4",
+                    "score": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:N/VA:L/SC:N/SI:N/SA:N",
+                }
+            ],
+            "affected": [{"package": {"name": "expat"}}],
+        }
+        _write_record(self.db, "Alpine", record)
+        findings = matching.match_specs(
+            self.db,
+            [{"ecosystem": "Alpine", "package": "expat", "version": "2.8.5-r0"}],
+        )
+        self.assertEqual("high", findings[0]["severity"])
+
     def test_go_semver_frp_range_and_patch(self):
         record = {
             "id": "GHSA-26gq-p25f-99cp",

@@ -173,6 +173,33 @@ class AcksTest(unittest.TestCase):
         self.assertIsNotNone(acks.find_ack(store, "container", "PyPI", "G1", "open-webui"))
         self.assertFalse(acks.find_ack(store, "container", "PyPI", "G2", "open-webui"))
 
+    def test_find_ack_matches_alias(self):
+        store = {
+            acks.ack_key("container", "PyPI", "GHSA-1", "open-webui"): {
+                "surface": "open-webui"
+            }
+        }
+        got = acks.find_ack(
+            store,
+            "container",
+            "PyPI",
+            "PYSEC-1",
+            "open-webui",
+            aliases=["CVE-1", "GHSA-1"],
+        )
+        self.assertEqual("open-webui", got["surface"])
+        # The alias ack is still surface-scoped.
+        self.assertFalse(
+            acks.find_ack(
+                store,
+                "container",
+                "PyPI",
+                "PYSEC-1",
+                "zulip",
+                aliases=["GHSA-1"],
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

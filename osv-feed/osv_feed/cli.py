@@ -476,7 +476,14 @@ def _tag_finding(finding: dict, category: str, category_cfg: dict | None, acks: 
         matched_interests(entry, category_cfg) if category_cfg is not None else []
     )
     surface = entry.get("surface") or entry.get("image") or ""
-    ack = find_ack(acks, category, entry["ecosystem"], entry["cve"], surface)
+    ack = find_ack(
+        acks,
+        category,
+        entry["ecosystem"],
+        entry["cve"],
+        surface,
+        entry.get("aliases") or (),
+    )
     entry["acked"] = ack is not None
     if ack:
         entry["acked_at"] = ack.get("acked_at", "")

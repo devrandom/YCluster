@@ -10,12 +10,19 @@ Supported inputs (stdlib-only; run at build time from the pinned checkout):
 - ``uv.lock`` (uv) -> ``PyPI:name=version`` for every resolved package
 - ``package-lock.json`` (npm) -> ``npm:name=version`` for every installed
   package (dependencies and their transitive tree)
+- an APK installed database -> ``Alpine:v<release>:origin=version`` using each
+  package's ``o:`` source-package origin, not its binary ``P:`` name
+- ``go version -m`` buildinfo -> ``Go:module=version``
 
 CLI::
 
     python3 -m osv_feed.manifestgen webapp \\
       --uv uv.lock --package-lock package-lock.json \\
       --out webapp.manifest
+
+    python3 -m osv_feed.manifestgen forgejo \\
+      --apk-installed installed --apk-release v3.24 \\
+      --go-buildinfo buildinfo --out forgejo.manifest
 """
 
 from __future__ import annotations
@@ -36,6 +43,64 @@ def _sort_specs(specs: Iterable[Spec]) -> list[Spec]:
 
 def _dependency_names(entries) -> set[str]:
     return {d["name"] for d in entries if isinstance(d, dict) and d.get("name")}
+
+
+def _apk_release(value: str) -> str:
+    """Normalize an Alpine release to the OSV ``v<major>.<minor>`` form."""
+    release = value.strip()
+    if release.startswith("v"):
+        release = release[1:]
+    parts = release.split(".")
+    if len(parts) < 2 or not all(part.isdigit() for part in parts[:2]):
+        raise ValueError(f"invalid Alpine release {value!r}")
+    return f"v{parts[0]}.{parts[1]}"
+
+
+def specs_from_apk_installed(path: str, release: str) -> list[Spec]:
+    """Return ``(origin, version)`` specs from an APK installed database.
+
+    OSV's Alpine advisories are keyed on the source package. The installed
+    database's ``P:`` field is the binary package name, while ``o:`` is the
+    source-package origin; subpackages such as ``brotli-libs`` and
+    ``openssh-client`` must therefore be emitted under their ``o:`` name.
+    Source packages and their subpackages collapse to one spec per origin and
+    version.
+    """
+    _apk_release(release)
+    specs: list[Spec] = []
+    entry: dict[str, str] = {}
+
+    def flush() -> None:
+        package = entry.get("o") or entry.get("P")
+        version = entry.get("V")
+        if package and version:
+            specs.append((package, version))
+
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if not line:
+                flush()
+                entry = {}
+                continue
+            key, sep, value = line.partition(":")
+            if sep:
+                entry[key] = value
+    flush()
+    return _sort_specs(specs)
+
+
+def specs_from_go_buildinfo(path: str) -> list[Spec]:
+    """Return ``(module, version)`` for ``dep`` lines in ``go version -m``."""
+    specs: list[Spec] = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            fields = raw.strip().split("\t")
+            if len(fields) >= 3 and fields[0] == "dep":
+                name, version = fields[1], fields[2]
+                if name and version:
+                    specs.append((name, version))
+    return _sort_specs(specs)
 
 
 def _root_project(data: dict) -> dict | None:
@@ -173,17 +238,22 @@ def generate(
     image: str,
     uv_lock: str | None = None,
     package_lock: str | None = None,
+    apk_installed: str | None = None,
+    apk_release: str | None = None,
+    go_buildinfo: str | None = None,
     comment: str | None = None,
     uv_select: str = "all",
 ) -> list[str]:
-    """Generate manifest lines for ``image`` from the given lockfiles.
+    """Generate manifest lines for ``image`` from the given inputs.
 
     ``comment`` is emitted as a leading ``#`` line identifying the pin.
     ``uv_select`` restricts ``uv_lock`` to a runtime surface (``all``,
     ``base``, or a group name like ``prod``) so dev-only tooling is not
     shipped in the manifest. Inputs that are not supplied or whose file is
-    missing contribute nothing.
+    missing contribute nothing. An APK database requires ``apk_release``.
     """
+    if apk_installed and not apk_release:
+        raise ValueError("apk_release is required with apk_installed")
     lines: list[str] = []
     if comment:
         lines.append(f"# {comment}".rstrip())
@@ -198,6 +268,25 @@ def generate(
         lines.append("# npm packages (package-lock.json)")
         lines.extend(
             render_manifest_lines([("npm", specs_from_package_lock(package_lock))])
+        )
+    if apk_installed and os.path.isfile(apk_installed):
+        lines.append("# Alpine packages (apk installed DB, source origins)")
+        lines.extend(
+            render_manifest_lines(
+                [
+                    (
+                        f"Alpine:{_apk_release(apk_release or '')}",
+                        specs_from_apk_installed(apk_installed, apk_release or ""),
+                    )
+                ]
+            )
+        )
+    if go_buildinfo and os.path.isfile(go_buildinfo):
+        lines.append("# Go modules (go version -m)")
+        lines.extend(
+            render_manifest_lines(
+                [("Go", specs_from_go_buildinfo(go_buildinfo))]
+            )
         )
     return lines
 
@@ -214,14 +303,28 @@ def main(argv: list[str] | None = None) -> int:
         help="uv packages to include: all, base, or a dependency group (e.g. prod)",
     )
     parser.add_argument("--package-lock", help="path to package-lock.json")
+    parser.add_argument("--apk-installed", help="path to an APK installed database")
+    parser.add_argument(
+        "--apk-release",
+        help="Alpine release for APK specs, e.g. v3.24 or 3.24.2",
+    )
+    parser.add_argument(
+        "--go-buildinfo",
+        help="path to `go version -m` buildinfo output",
+    )
     parser.add_argument("--comment", help="leading # comment describing the pin")
     parser.add_argument("--out", help="write manifest here (default: <image>.manifest)")
     args = parser.parse_args(argv)
+    if args.apk_installed and not args.apk_release:
+        parser.error("--apk-release is required with --apk-installed")
 
     lines = generate(
         args.image,
         uv_lock=args.uv,
         package_lock=args.package_lock,
+        apk_installed=args.apk_installed,
+        apk_release=args.apk_release,
+        go_buildinfo=args.go_buildinfo,
         comment=args.comment,
         uv_select=args.uv_select,
     )

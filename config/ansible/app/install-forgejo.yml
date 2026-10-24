@@ -6,23 +6,23 @@
 # in the cluster's shared PostgreSQL. The service follows the storage leader
 # through ycluster-apps.target, like Authentik and Zulip.
 #
-# The official image is pinned by digest and mirrored into registry.xc so a
-# failover or fresh node does not make a cold Codeberg request. app.ini is
-# rendered by forgejo-manager at service start; it is not templated here
-# because the OIDC client secret is only known after Authentik publishes it.
+# The runtime image is built from the official image pinned by digest (see
+# app/build-forgejo.yml) and pushed to registry.xc, so a failover or fresh
+# node does not make a cold Codeberg request. app.ini is rendered by
+# forgejo-manager at service start; it is not templated here because the OIDC
+# client secret is only known after Authentik publishes it.
 - name: Install Forgejo on storage nodes
   hosts: storage
   become: yes
   vars:
     forgejo_version: "17.0.0"
-    # amd64 digest from the official Forgejo 17.0.0 image index. Bump
-    # deliberately; osv-feed container manifests track the Alpine base and
-    # the Forgejo Go modules, so regenerate
+    # amd64 digest from the official Forgejo 17.0.0 image index. The runtime
+    # image is built from it by app/build-forgejo.yml (brotli-libs 1.2.1-r0,
+    # expat 2.9.0-r0, zlib 1.3.2-r1). Bump deliberately; osv-feed container
+    # manifests track the Alpine base and the Forgejo Go modules, so regenerate
     # config/ansible/monitoring/container-manifests/forgejo.manifest too.
-    forgejo_image: "codeberg.org/forgejo/forgejo@sha256:c6931ca2926185d129aee8e28f1c6f42fbd8c1bb6b14dbac38873e06a8948a8a"
-    # Include the digest prefix in the mirror tag so a digest bump without a
-    # version bump still reseeds the cluster registry.
-    forgejo_image_tag: "{{ forgejo_version }}-{{ forgejo_image.split('@sha256:')[1][:12] }}"
+    forgejo_upstream_image: "codeberg.org/forgejo/forgejo@sha256:c6931ca2926185d129aee8e28f1c6f42fbd8c1bb6b14dbac38873e06a8948a8a"
+    forgejo_image_tag: "{{ forgejo_version }}-c6931ca29261-brotli1.2.1-expat2.9.0-zlib1.3.2r1"
     forgejo_registry_image: "registry.xc:5000/forgejo:{{ forgejo_image_tag }}"
     forgejo_port: "{{ forgejo_local_port | default('3000') }}"
     forgejo_ssh_port: "{{ forgejo_local_ssh_port | default('2222') }}"
@@ -54,7 +54,9 @@
         url: "http://registry.xc:5000/v2/forgejo/manifests/{{ forgejo_image_tag }}"
         method: HEAD
         headers:
-          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
+          # buildx pushes an OCI image index; the registry returns 404 when
+          # the Accept header does not advertise that media type.
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.oci.image.index.v1+json"
         status_code: 200
         timeout: 10
       register: forgejo_registry_check
@@ -64,16 +66,18 @@
       delay: 2
       when: is_storage_leader
 
-    - name: Seed the cluster registry with the pinned Forgejo image
-      shell: |
-        set -e
-        docker pull -q {{ forgejo_image }}
-        docker tag {{ forgejo_image }} {{ forgejo_registry_image }}
-        docker push -q {{ forgejo_registry_image }}
-        echo seeded
+    - name: Require the patched Forgejo image in the cluster registry
+      fail:
+        msg: >-
+          {{ forgejo_registry_image }} is missing; run
+          app/build-forgejo.yml first
       when: is_storage_leader and forgejo_registry_check.status != 200
-      register: forgejo_registry_seed
-      changed_when: "'seeded' in forgejo_registry_seed.stdout"
+
+    - name: Pull the patched Forgejo image from the cluster registry
+      docker_image:
+        name: "{{ forgejo_registry_image }}"
+        source: pull
+      when: is_storage_leader
 
     - name: Read Forgejo database password from etcd
       command: etcdctl get /cluster/config/forgejo/db-password --print-value-only

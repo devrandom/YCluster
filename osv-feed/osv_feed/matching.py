@@ -379,11 +379,46 @@ def _cvss3_qualitative(vector: str) -> str | None:
     return "critical"
 
 
+def _cvss4_qualitative(vector: str) -> str | None:
+    """Qualitative label for a vector-only CVSS 4.0 record.
+
+    The official CVSS 4.0 base score needs the FIRST macrovector lookup; when
+    an advisory publishes only the vector (as the Alpine OSV records do), use the
+    impact and exploitability metrics. Critical requires both confidentiality
+    and integrity impact (code/data compromise) at network reachability; an
+    availability-only DoS is high, not critical.
+    """
+    if not vector.startswith("CVSS:4."):
+        return None
+    metrics: dict[str, str] = {}
+    for part in vector.split("/")[1:]:
+        key, sep, value = part.partition(":")
+        if sep:
+            metrics[key] = value
+    primary = [metrics.get(key, "N") for key in ("VC", "VI", "VA")]
+    impacts = primary + [metrics.get(key, "N") for key in ("SC", "SI", "SA")]
+    if not any(level in ("H", "L") for level in impacts):
+        return "low"
+    if (
+        metrics.get("VC") == "H"
+        and metrics.get("VI") == "H"
+        and metrics.get("AV") == "N"
+        and metrics.get("AC") == "L"
+        and metrics.get("PR") == "N"
+        and metrics.get("UI") == "N"
+    ):
+        return "critical"
+    if "H" in impacts:
+        return "high"
+    return "medium"
+
+
 # CVSS 4.0 has no stable vector-only qualitative rating (the base score uses
-# a macrovector lookup), so CVSS 4.0 records fall back to the advisory's own
+# a macrovector lookup), so CVSS 4.0 records prefer the advisory's own
 # qualitative label published in OSV ``database_specific.severity`` (GitHub's
 # rating on GHSA/Go records), same trust model as Debian urgency / Ubuntu
-# priority labels.
+# priority labels. Alpine records publish only the vector, so fall back to the
+# conservative impact/exploitability mapping above.
 _GHSA_SEVERITY = {
     "CRITICAL": "critical",
     "HIGH": "high",
@@ -418,9 +453,15 @@ def _severity_label(record: dict, package: str) -> str:
             score = sev.get("score")
             if not score:
                 continue
-            if (sev.get("type") or "").upper() == "CVSS_V3":
+            severity_type = (sev.get("type") or "").upper()
+            if severity_type == "CVSS_V3":
                 qual = _cvss3_qualitative(str(score))
-                if qual and qual not in cvss:
+            elif severity_type == "CVSS_V4":
+                qual = _cvss4_qualitative(str(score))
+            else:
+                qual = None
+            if qual:
+                if qual not in cvss:
                     cvss.append(qual)
             elif str(score) not in distro:
                 distro.append(str(score))

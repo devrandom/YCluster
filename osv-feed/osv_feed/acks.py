@@ -13,6 +13,7 @@ import datetime
 import json
 import os
 import tempfile
+from typing import Iterable
 
 
 def ack_key(category: str, ecosystem: str, cve: str, surface: str = "") -> str:
@@ -34,6 +35,7 @@ def find_ack(
     ecosystem: str,
     cve: str,
     surface: str = "",
+    aliases: Iterable[str] = (),
 ) -> dict | None:
     """Return the most specific ack matching a finding, or None.
 
@@ -45,17 +47,22 @@ def find_ack(
     empty ``ecosystem`` is likewise a wildcard across categories. Legacy
     surface-less acks keep the three-part key and are found through the
     wildcard-surface tiers, so existing acks stay valid.
+
+    ``aliases`` are the finding's alternate IDs (CVE/GHSA/PYSEC). An ack on
+    any alias suppresses the finding, so the same advisory does not reappear
+    under a second feed's identifier.
     """
-    candidates = (
-        ack_key(category, ecosystem, cve, surface),
-        ack_key(category, ecosystem, cve, ""),
-        ack_key(category, "", cve, surface),
-        ack_key(category, "", cve, ""),
-    )
-    for key in candidates:
-        ack = acks.get(key)
-        if ack is not None:
-            return ack
+    for identifier in (cve, *aliases):
+        candidates = (
+            ack_key(category, ecosystem, identifier, surface),
+            ack_key(category, ecosystem, identifier, ""),
+            ack_key(category, "", identifier, surface),
+            ack_key(category, "", identifier, ""),
+        )
+        for key in candidates:
+            ack = acks.get(key)
+            if ack is not None:
+                return ack
     return None
 
 
