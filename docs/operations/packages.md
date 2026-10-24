@@ -214,13 +214,13 @@ mirror/Go ecosystem and `[tracking.selfbuilt]` land on the collector.
 
 Each public image is tracked via a manifest at
 `config/ansible/monitoring/container-manifests/<image>.manifest` (vendored, synced to
-`/near1/osv-feed/container` by `install-osv-feed.yml`). The manifest is
-generated deterministically from the pinned source tree via
-`manifestgen`; dev-only tooling is excluded with `--uv-select`.
+`/near1/osv-feed/container` by `install-osv-feed.yml`). Lockfile-backed
+manifests use `manifestgen`; the open-webui manifest reflects the built
+image's actual `pip list`, because the Dockerfile installs `requirements.txt`.
 
 | Image | Pin source | Manifest generation |
 |---|---|---|
-| open-webui | `app/build-open-webui.yml` `webui_repo_sha` | `--uv-select base` |
+| open-webui | built image from `app/build-open-webui.yml` `webui_repo_sha` | `pip list --format=json` from the built image; certifi/pillow/Brotli are patched direct pins |
 | zulip | `app/build-zulip.yml` (docker-zulip + src SHAs) | `--uv-select prod` |
 | authentik | `app/install-authentik.yml` `authentik_image` (digest) + `authentik_version` | `--uv-select base` |
 | forgejo | `app/install-forgejo.yml` `forgejo_image` (digest) | read the image layers: `/lib/apk/db/installed` + `/etc/alpine-release` (apk specs), and the linked `forgejo` binary's Go buildinfo (`Go:` specs) |
@@ -228,11 +228,11 @@ generated deterministically from the pinned source tree via
 To regenerate a manifest after an image/lockfile bump:
 
 ```bash
-# From a checkout of the pinned tree containing uv.lock:
-python3 -m osv_feed.manifestgen open-webui \
-  --uv uv.lock --uv-select base \
-  --comment "open-webui v0.11.1 <sha>" \
-  --out open-webui.manifest
+# From the built open-webui container:
+docker exec <container> python -m pip list --format=json \
+  > ./tmp/openwebui-piplist.json
+# Convert each {"name","version"} pair to PyPI:<name>=<version> and
+# write the version-pinned manifest (see the existing manifest header).
 ```
 
 Commit the regenerated manifest and redeploy `install-osv-feed.yml` so it

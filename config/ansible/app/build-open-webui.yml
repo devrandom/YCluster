@@ -13,7 +13,7 @@
     plugins_repo_sha: "746f4b2f296d0b77f341bd646a19d07f49d3dd67"
     webui_repo: "https://github.com/open-webui/open-webui.git"
     # open-webui v0.12.3. Fork-only changes are applied as build-time patches:
-    # mobile-gated image/gallery upload + Pillow/certifi CVE bump.
+    # mobile-gated image/gallery upload + Pillow/certifi/Brotli CVE bumps.
     # Build the standard image: v0.12.x slim drops Chroma and local embeddings,
     # which the knowledge base still uses.
     webui_repo_sha: "91ea4e3421d1d8069f13d4a463fcb5986d94ea60"
@@ -174,6 +174,24 @@
           shell: |
             if git apply --check ../open-webui-pillow-certifi.patch 2>/dev/null; then
               git apply ../open-webui-pillow-certifi.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
+        # Brotli 1.2.1 / brotlicffi 1.2.1.0 security bump for
+        # GHSA-9v8h-qqgm-4m35 (CVE-2026-111497). aiohttp auto-decompresses
+        # user-supplied URL responses with brotlicffi, so this is a reachable
+        # decoder path, not just a scanner finding.
+        - name: Copy Open WebUI Brotli security patch
+          copy:
+            src: files/open-webui-brotli.patch
+            dest: "{{ build_dir }}/open-webui-brotli.patch"
+            mode: '0644'
+
+        - name: Apply Open WebUI Brotli security patch
+          shell: |
+            if git apply --check ../open-webui-brotli.patch 2>/dev/null; then
+              git apply ../open-webui-brotli.patch
             fi
           args:
             chdir: "{{ build_dir }}/open-webui"

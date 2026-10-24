@@ -19,23 +19,23 @@ observes it.
   server-free tests (manifest fixture → expected findings, per-image
   first-seen, prometheus `image` label); a bare `match` run plus
   `--container-dir` covers host + container CVEs in one collector pass.
-- **P2 (deploy wiring) — repo-landed, not deployed.** `install-osv-feed.yml`
+- **P2 (deploy wiring) — deployed.** `install-osv-feed.yml`
   mirrors `PyPI` and `Alpine` alongside Ubuntu/Debian/Go, publishes their
   cursors, adds
   `[tracking.container]` to the collector config, points the collector at
-  `OSV_FEED_CONTAINER_DIR` (`/near1/osv-feed/container`), and now syncs
+  `OSV_FEED_CONTAINER_DIR` (`/near1/osv-feed/container`), and syncs
   `config/ansible/monitoring/container-manifests/*.manifest` into that shared dir. The pending-CVE
   alerts (`PerimeterCVE*LongPending`) join on `image` so container images
-  stay distinct perimeter surfaces. Deploying to the live collector is
-  blocked until prod access is re-enabled.
-- **P2/P3 (manifests, open-webui/zulip/authentik) — done + verified.** A
-  stdlib-only lockfile→manifest generator
-  (`osv-feed/osv_feed/manifestgen.py`, parses `uv.lock`) with a runtime
-  `--uv-select` filter (`all`/`base`/`<group>`) so dev-only tooling (black,
-  pytest, ruff, daphne, mypy…) never ships in a runtime manifest. Vendored
-  manifests:
-  - `config/ansible/monitoring/container-manifests/open-webui.manifest` — **265** PyPI packages from
-    open-webui v0.11.3 / `2a960a59` with `--uv-select base` (production deps).
+  stay distinct perimeter surfaces. Manifest sync and collector runs are
+  verified on the collector node.
+- **P2/P3 (manifests, open-webui/zulip/authentik) — done + verified.**
+  Lockfile-backed manifests use the stdlib-only
+  `osv-feed/osv_feed/manifestgen.py` with a runtime `--uv-select` filter
+  (`all`/`base`/`<group>`); open-webui is generated from the built image's
+  actual `pip list` because its Dockerfile installs `requirements.txt`.
+  Vendored manifests:
+  - `config/ansible/monitoring/container-manifests/open-webui.manifest` — **317** PyPI packages from
+    the built open-webui v0.12.3 / `91ea4e34` image (`pip list`; certifi/pillow/Brotli are direct pins).
   - `config/ansible/monitoring/container-manifests/zulip.manifest` — **182** PyPI packages from zulip
     12.1 / `7d85fc15` with `--uv-select prod` (mirrors upstream
     `create-production-venv`, which runs `uv sync --only-group=prod`).
@@ -72,7 +72,7 @@ observes it.
 | Image | Registry ref today | Source pin | Tier | Runs on |
 |---|---|---|---|---|
 | authentik server+worker | `registry.xc:5000/authentik:2026.8.5-6b924afb9705` | `ghcr.io/goauthentik/server@sha256:6b924afb…` (var `authentik_image`) + `authentik_version: "2026.8.5"` in `app/install-authentik.yml` | P0-A (IdP + authenticated web) | storage nodes |
-| open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | upstream v0.11.3 `2a960a59…` + mobile-upload/NLTK patches and plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
+| open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | upstream v0.12.3 `91ea4e34…` + mobile-upload/pillow/certifi/Brotli patches and plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
 | zulip | `registry.xc:5000/zulip:12.1-0` | docker-zulip `9a0bd360…` + zulip src `7d85fc15…` in `app/build-zulip.yml` | P0-U (login/registration/pre-auth) | storage leader |
 | forgejo | `registry.xc:5000/forgejo:17.0.0-c6931ca29261` | `codeberg.org/forgejo/forgejo@sha256:c6931ca…` (17.0.0) in `app/install-forgejo.yml` | P0-U (pre-auth git/API) | storage leader |
 
@@ -90,7 +90,7 @@ SLA once deployed; regenerate manifests and re-run after any image bump.
 
 | Image | findings | critical | high | no_fix_yet | affected packages |
 |---|---|---|---|---|---|
-| open-webui | 42 | 0 | 42 | 6 | aiohttp, fsspec, gitpython, langgraph-sdk, nltk, pyjwt, pymongo, pypdf, restrictedpython, transformers, urllib3 |
+| open-webui | 51 | 7 | 44 | 6 | aiohttp, black, chromadb, cryptography, filelock, fsspec, mcp, pyarrow, pypdf, pyjwt, sentence-transformers, transformers, unstructured |
 | zulip | 16 | 0 | 16 | 0 | django, pyjwt, pymongo, social-auth-core, tornado, urllib3 |
 | authentik | 5 | 0 | 5 | 0 | aiohttp, urllib3 |
 | forgejo | 0 | 0 | 0 | 0 | none |
@@ -98,9 +98,9 @@ SLA once deployed; regenerate manifests and re-run after any image bump.
 Notable unresolved surface: authentik 2026.8.5 clears the prior
 cryptography/pyopenssl criticals (`PYSEC-2026-36`, `PYSEC-2026-2269`) and
 now carries five high aiohttp/urllib3 findings with fixes. After the
-certifi/pillow bump, open-webui and zulip have no unacked criticals; the
-remaining criticals (anyio, chromadb, pyjwt, sentence-transformers,
-unstructured, uv) are acknowledged. open-webui's pending surface is now
+certifi/pillow/Brotli bumps, open-webui and zulip have no unacked
+criticals; the remaining open-webui criticals (chromadb, pyjwt,
+sentence-transformers, unstructured) are acknowledged. open-webui's pending surface is now
 mostly pypdf/pyjwt highs plus six `no_fix_yet` findings.
 Forgejo 17.0.0 has no pending findings in the current OSV Go and
 Alpine 3.24 mirrors. Its apk specs carry the release (`Alpine:v3.24`) so

@@ -91,5 +91,24 @@ class ProcessNginxSiteTests(unittest.TestCase):
         self.assertIn('error processing template', output.getvalue())
 
 
+class OpenWebuiTemplateTests(unittest.TestCase):
+    def render(self, domain):
+        from jinja2 import Template
+        template = (Path(__file__).resolve().parents[4]
+                    / 'app/files/open-webui.conf.j2')
+        return Template(template.read_text()).render(
+            domain=domain, primary='example.test', use_tls=True)
+
+    def test_chat_host_uses_edge_gated_prod_locations(self):
+        rendered = self.render('chat.example.test')
+        self.assertIn('open-webui-locations.conf', rendered)
+        self.assertNotIn('open-webui-stage-locations.conf', rendered)
+
+    def test_named_stage_uses_ungated_stage_locations(self):
+        rendered = self.render('stage.example.test')
+        self.assertIn('open-webui-stage-locations.conf', rendered)
+        self.assertNotIn('open-webui-locations.conf', rendered)
+
+
 if __name__ == '__main__':
     unittest.main()
