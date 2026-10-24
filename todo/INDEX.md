@@ -25,6 +25,8 @@ Categories: [security](#security) ·
 - **[MEDIUM]** [SSH-key rotation](security/ssh-key-rotation.md) — no procedure; full cluster compromise if the Ansible key leaks.
 - **[MEDIUM]** [Secrets-rotation](security/secrets-rotation.md) — paired; etcd `master-key` and vault secrets have no rotation flow.
 - [Audit-log story](security/audit-log-story.md)
+- [Intrusion detection system](security/intrusion-detection.md) — no HIDS/NIDS today; hostile process, file, login or network behaviour only surfaces if a human reads the logs. Cover external attackers and malicious users across host, network and Incus layers: per-host sensors on every node including remote hosts, plus an in-cluster network sensor; no user-IP retention beyond the existing nginx/SSH access-log window; scope packet capture separately for detection vs incident response and route findings through Alertmanager/ntfy.
+- [User-data retention lifecycle](security/user-data-retention-lifecycle.md) — user data is spread across Open WebUI, Authentik, ComfyUI, MinerU, Forgejo, the inference gateway, VM disks, caches, logs and backups, each with its own default; inventory the stores, define retention and deletion per data class, make deletion propagate through caches/indexes/backups, and add an audit plus a deletion drill.
 - [Reconsider become usage](security/become-model-audit.md)
 - [core group definition](security/core-group-definition.md)
 
