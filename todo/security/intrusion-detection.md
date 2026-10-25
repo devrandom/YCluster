@@ -105,6 +105,13 @@ must not become a second, longer-lived access log.
   local-only for log behaviour, and the in-repo Go `ids-forwarder`. Build from
   source at pinned versions; no prebuilt binaries. Wazuh and the other C/C++
   parsers are rejected as core sensors in the design.
+  - Done: `ids-forwarder` (`ids-forwarder/`) with Tetragon JSON tailer,
+    optional CrowdSec HTTP receiver, IP redaction, dedup, bounded queue,
+    Alertmanager v2 posting, and localhost metrics; build and install
+    playbooks (`app/build-ids-forwarder.yml`,
+    `monitoring/install-ids-forwarder.yml`).
+  - Remaining: source builds and per-host rollout for Tetragon and CrowdSec,
+    policy/scenario pinning, tuning window.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.

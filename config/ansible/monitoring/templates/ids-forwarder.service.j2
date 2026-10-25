@@ -1,0 +1,24 @@
+[Unit]
+Description=IDS forwarder (Tetragon/CrowdSec -> Alertmanager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ids-forwarder \
+    -alertmanager-url {{ ids_forwarder_alertmanager_url }} \
+    -tetragon-log {{ ids_forwarder_tetragon_log }} \
+    -events {{ ids_forwarder_events }} \
+    -http-listen {{ ids_forwarder_http_listen | default('""') }} \
+    -metrics-listen {{ ids_forwarder_metrics_listen }}
+Restart=on-failure
+RestartSec=5
+# Hardening: no inbound listener beyond the optional localhost receiver.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths={{ ids_forwarder_tetragon_log | dirname }}
+
+[Install]
+WantedBy=multi-user.target

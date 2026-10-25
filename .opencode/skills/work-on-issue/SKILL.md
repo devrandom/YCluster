@@ -51,9 +51,12 @@ just check
 just metrics
 ```
 
-Record a clean baseline. If metrics fail before implementation starts, that is
-a pre-existing violation: stop and surface it. Do not fix unrelated debt and
-do not adopt a new baseline just to unblock the issue.
+Record the baseline. If `just metrics` fails before implementation starts,
+the failure is pre-existing debt on the base branch: record it in the MR
+description and proceed. The stop-gate applies **before merging to main**
+(MR review), not before performing work. The implementation must add zero new
+violations relative to the base branch. Do not fix unrelated debt and do not
+adopt a new baseline just to unblock the issue.
 
 ## Implement
 

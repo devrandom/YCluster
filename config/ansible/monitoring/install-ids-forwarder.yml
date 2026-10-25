@@ -1,0 +1,50 @@
+---
+# Install the ids-forwarder on the monitoring node(s). The binary is
+# built by app/build-ids-forwarder.yml on the buildhost and fetched
+# here. The forwarder posts to Alertmanager's v2 API; Tetragon/CrowdSec
+# deployment is tracked separately in todo/security/intrusion-detection.md.
+- name: Install ids-forwarder
+  hosts: "{{ ids_forwarder_target | default('monitoring') }}"
+  become: yes
+  vars:
+    ids_forwarder_binary_local: "{{ playbook_dir }}/../tmp/ids-forwarder"
+    ids_forwarder_alertmanager_url: "http://localhost:9093"
+    ids_forwarder_tetragon_log: "/var/log/tetragon/tetragon.log"
+    ids_forwarder_events: "process_kprobe"
+    ids_forwarder_http_listen: ""
+    ids_forwarder_metrics_listen: "127.0.0.1:2113"
+  tasks:
+    - name: Fetch binary from buildhost
+      command:
+        cmd: "rsync -a {{ buildhost }}:/opt/src/ids-forwarder/ids-forwarder {{ ids_forwarder_binary_local }}"
+      delegate_to: localhost
+      register: fetch_result
+      changed_when: fetch_result.rc == 0
+
+    - name: Install binary
+      copy:
+        src: "{{ ids_forwarder_binary_local }}"
+        dest: /usr/local/bin/ids-forwarder
+        mode: '0755'
+      notify: restart ids-forwarder
+
+    - name: Install systemd unit
+      template:
+        src: ids-forwarder.service.j2
+        dest: /etc/systemd/system/ids-forwarder.service
+        mode: '0644'
+      notify: restart ids-forwarder
+
+    - name: Enable and start ids-forwarder
+      systemd:
+        name: ids-forwarder
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart ids-forwarder
+      systemd:
+        name: ids-forwarder
+        state: restarted
+        daemon_reload: yes

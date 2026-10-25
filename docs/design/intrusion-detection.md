@@ -21,8 +21,9 @@ Adopt a Go-first design:
 2. **CrowdSec** on nodes that produce authentication and HTTP logs for log-based
    detection (SSH brute force, nginx abuse, Authentik failures). Run it in local-only
    mode with no console enrollment, no community blocklist, and no bouncers.
-3. A small **`ids-forwarder`** Go service on each host. It reads the Tetragon
-   gRPC unix socket and the CrowdSec local API, maps events to Alertmanager's
+3. A small **`ids-forwarder`** Go service on each host. It tails the Tetragon
+   JSON events file (gRPC unix socket reserved for operator tooling), accepts
+   CrowdSec notification-http POSTs on localhost, maps events to Alertmanager's
    `v2/alerts` API, and keeps a bounded local queue.
 4. **No Wazuh.** Wazuh is a C/C++/Python manager plus a root agent, with a large
    parser and command-execution surface. Its recent critical advisories make it a poor
@@ -267,7 +268,8 @@ per Linux cluster node
     └── local DB retention capped at the access-log window
 
   ids-forwarder (Go, in-repo)
-    ├── reads Tetragon gRPC + CrowdSec local API
+    ├── tails Tetragon JSON events file; gRPC unix socket reserved for ops
+    ├── optional localhost HTTP receiver for CrowdSec notification-http
     ├── maps to Alertmanager v2/alerts
     ├── bounded queue; drops expired events
     └── pushes over WireGuard; no central manager
@@ -301,8 +303,8 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - gRPC on the unix socket only. Do not enable a TCP listener. If a TCP listener
   is ever required, require mTLS and restrict it to WireGuard.
 - Metrics on `localhost:2112`, scraped by the existing Prometheus.
-- JSON events written to a bounded local file with rotation. The forwarder reads
-  the gRPC stream, not the file, when it is running.
+- JSON events written to a bounded local file with rotation. The forwarder
+  tails that file; the gRPC unix socket stays reserved for operator tooling.
 - Policies pinned in Ansible: process exec, file writes to `/etc` and systemd
   paths, capability changes, kernel module loads, network connects, and container
   namespace access. Start with the policy library and a small local set.
@@ -319,7 +321,8 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 ### Forwarder
 
 - Small Go service in the repo, stdlib only.
-- Reads Tetragon gRPC on the unix socket and CrowdSec local API on localhost.
+- Tails the Tetragon JSON events file; optional localhost HTTP receiver for
+  CrowdSec notification-http POSTs.
 - Maps severity and rule metadata to Alertmanager `v2/alerts`.
 - Keeps a bounded queue; drops expired events instead of growing.
 - Does not store alerts, does not write to a database, and does not put IPs in

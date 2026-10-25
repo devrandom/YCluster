@@ -1,0 +1,51 @@
+---
+# Build ids-forwarder from source on the buildhost (default s1).
+# Source is vendored under /opt/src/ids-forwarder/ from this repo's
+# ids-forwarder/ directory (stdlib-only Go; no module downloads).
+# The install play (monitoring/install-ids-forwarder.yml) fetches the
+# binary from the buildhost.
+#
+# No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
+- name: Build ids-forwarder from source
+  hosts: localhost
+  vars:
+    ids_forwarder_build_dir: "/opt/src/ids-forwarder"
+    ids_forwarder_binary: "{{ ids_forwarder_build_dir }}/ids-forwarder"
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
+  tasks:
+    - name: Check if ids-forwarder binary already exists
+      stat:
+        path: "{{ ids_forwarder_binary }}"
+      register: binary_stat
+      delegate_to: "{{ buildhost }}"
+
+    - name: Install build dependencies (go + git)
+      apt:
+        name:
+          - golang-1.24
+          - git
+        state: present
+      become: yes
+      delegate_to: "{{ buildhost }}"
+
+    - name: Create build directory
+      file:
+        path: "{{ ids_forwarder_build_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: "{{ buildhost }}"
+
+    - name: Copy source to buildhost
+      copy:
+        src: "{{ playbook_dir | dirname | dirname }}/ids-forwarder/"
+        dest: "{{ ids_forwarder_build_dir }}/"
+        mode: preserve
+      delegate_to: "{{ buildhost }}"
+
+    - name: Build ids-forwarder
+      command:
+        cmd: "{{ go_bin }} build -trimpath -o {{ ids_forwarder_binary }} ."
+        chdir: "{{ ids_forwarder_build_dir }}"
+      register: build_result
+      changed_when: build_result.rc == 0
+      delegate_to: "{{ buildhost }}"
