@@ -1,4 +1,4 @@
-# DeepSeek-V4.1-Flash on RTX PRO 6000 / SM120 — staging
+# DeepSeek-V4.1-Flash on RTX PRO 6000 / SM120
 
 Status: **SERVING** on the four-GPU spare node (`ds41-flash`, port 9218,
 gateway key `deepseek-v4_1-flash`). Context cap 512K (`MAX_MODEL_LEN=524288`,
@@ -35,6 +35,10 @@ The 1017 checkpoint shares config with the 0909 launch model the R36
 receipt tested, but has not been independently re-run. Qualification is
 ours to execute.
 
+R37, R38, and the newer Karmic Kraken profile channel exist; see
+[Karmic Kraken upgrade notes](#karmic-kraken-upgrade-notes). R36 stays
+deployed until a newer build is qualified with disk Engram on this host.
+
 ## Hardware requirements
 
 | Resource | Requirement | Notes |
@@ -52,6 +56,61 @@ decode measures 208–250 tok/s. A public Max-Q report moved 237 → 444 tok/s a
 passthrough. Do not apply it to this host. Prefer 0xSero's DS4.1 recipe; if
 IOMMU off is required, target the all-passthrough four-GPU host instead. See
 [gpu-p2p-iommu.md](gpu-p2p-iommu.md).
+
+## Karmic Kraken upgrade notes (researched 2026-10-25, not applied)
+
+Upstream moved past the per-model R36–R38 entrypoints to a shared profile
+runner (`PROFILE=ds41-flash`, `lil-serve`). Latest channel builds as of
+this note:
+
+| Image | Digest |
+|---|---|
+| `ghcr.io/local-inference-lab/vllm:karmic-kraken-beta-20261020` | `sha256:bc48d33ee167fb7675a59889fe0a7fea539bc6700c53cada89284d594a754b54` |
+| `ghcr.io/local-inference-lab/vllm:karmic-kraken-20261020` (stable) | `sha256:94887a58d4c003a06cb2d96ee5522eb7cea216838cfdad318076f9a08e2e762c` |
+
+What changes on top of R36:
+
+- **R37**: kernel-dispatch and projection-tile tuning (+17.7% C1 vs a
+  public-source control on +6000-VRAM hardware); corrects named reasoning
+  budget `high` to 75. RAM-Engram qualification only.
+- **R38**: adaptive-verification padded-graph pricing, page geometry
+  256/128, corrected speculative-token metrics. Stock-clock matched run
+  vs R37: C1 +14.5%, C8 aggregate +36.8%, prefill +0.4%, KV pool
+  1.55M → 4.57M. RAM-Engram qualification only.
+- **Karmic Kraken beta (2026-09-20/22)**: shared profile runner, wheel-built
+  components, CUDA 13.4.1 / PyTorch 2.14. vs saved R38 on Max-Q clocks:
+  C1 +8.0%, C8 +7.65%, prefill +2.7%. Component PRs not yet merged
+  upstream ([checklist #808](https://github.com/local-inference-lab/vllm/issues/808)).
+- **2026-10-20 builds**: DS4.1 server default `top_p` 0.95 → 1.0, matching
+  the 1017 model card. The stable build is wheel-built with only native
+  smoke and LMCache contract tests qualified; serving performance is
+  unqualified.
+
+Migration notes if we move:
+
+- Not a drop-in image bump: `serve-ds41-jovian.sh` is gone. Launch with
+  `-e PROFILE=ds41-flash -e HARDWARE_PROFILE=rtx-pro-6000-pcie` and
+  re-declare deployment-specific choices: `PORT=9218`,
+  `ENGRAM_TABLE_MEMORY=disk`, served name `deepseek-v4_1-flash` (the
+  profile default serves `DeepSeek-V4.1-Flash`), plus context/slot
+  overrides.
+- Profile defaults differ from ours: RAM Engram (needs ~189 GiB pinned),
+  32 slots, automatic context. Our host wants disk Engram, and at the
+  512K cap the worst-case slot bound is ~9 (see
+  [scheduler fairness](#scheduler-fairness)).
+- The staged original checkpoint is supported: mount it and pass
+  `MODEL=<path>`; the runner detects an HF-layout original directory.
+  Dry-check with `--print-config` before recreating the container.
+- Optional lossless FP4-CSF repack
+  (`local-inference-lab/DeepSeek-V4.1-Flash-1017-lossless-CSF`): +35% KV
+  capacity at a measured 1.2–3.5% decode cost for DS4.1. Separate
+  download and qualification.
+- The Responses API tokenizer patch is upstream now (the KK tokenizer
+  accepts `input_text`/`output_text`); drop the bind mount on KK.
+- Disk Engram is functionally tested past R36 but has no repeated
+  throughput benchmark in R37/R38/KK receipts — their numbers are
+  RAM-Engram on different clocks. Any upgrade re-runs the smoke/needle
+  suite plus a matched short benchmark against R36 before serving traffic.
 
 ## Files added
 
@@ -71,6 +130,12 @@ leave them off. Long-lived requests can also fill every `MAX_NUM_SEQS` slot whil
 KV usage stays low, which is an admission-queue problem, not a prefill-compute
 problem. Bound `MAX_NUM_SEQS` by worst-case KV (`KV pool / MAX_MODEL_LEN`) and
 prefer a gateway per-user concurrency cap over a manual ACL deny.
+
+With our 512K cap and 4.7M-token KV pool the worst-case bound is ~9 slots.
+The R38/KK qualification's 32 slots pairs with a 131,072-token cap
+(32 × 128K ≈ 4.2M ≈ pool); at 512K those slots could demand ~16M tokens.
+Keep 4 slots at the 512K cap, or drop the cap to 128K if 32-slot
+concurrency is wanted.
 
 ## Deploy checklist
 

@@ -42,7 +42,7 @@ deployment-agnostic — no node names, IPs, or account specifics.
   stock tool calling), serving on the whole 8-GPU node at PP=2×TP=4 (~2.2×
   prefill vs flat TP=8 on this no-NVLink box). Includes the node-crash incident
   and the retired-REAP history.
-- [DeepSeek-V4.1-Flash staging](deepseek-v4.1-flash-staging.md)
+- [DeepSeek-V4.1-Flash](deepseek-v4.1-flash.md)
   — new architecture (`deepseek_v41`) alongside the DS4 backend; B12X R36
   image, TP4/DCP1, SSD Engram, ~510 GB checkpoint. Serving on the four-GPU
   spare node.
