@@ -60,3 +60,15 @@ groups:
         annotations:
           summary: "KV cache >90% on {{ $labels.backend }} ({{ $labels.model }})"
           description: "vLLM KV cache at {{ $value | humanizePercentage }} on {{ $labels.backend }} for 5m. Expect preemption and TTFT degradation. Cap concurrency, shorten contexts, or scale out."
+
+      # SGLang has the same failure mode with a differently named gauge.
+      # max by collapses TP ranks (only rank 0 emits scheduler metrics unless
+      # --enable-metrics-for-all-schedulers is set).
+      - alert: InferenceSGLangCachePressure
+        expr: max by (backend, model) (sglang_token_usage) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SGLang KV cache >90% on {{ $labels.backend }} ({{ $labels.model }})"
+          description: "SGLang KV cache at {{ $value | humanizePercentage }} on {{ $labels.backend }} for 5m. Expect preemption and TTFT degradation. Cap concurrency, shorten contexts, or scale out."

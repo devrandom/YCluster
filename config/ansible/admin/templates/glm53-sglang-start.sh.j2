@@ -98,6 +98,7 @@ podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 #     gateway port, so we take it as an env knob. Served name defaults to the
 #     recipe's "glm-5.3-flash" (our gateway routing key).
 #   --model-path /model — the checkpoint is bind-mounted read-only at /model.
+#   --enable-metrics — expose sglang:* series on /metrics for Prometheus.
 #   The six SM120 patches + chat template are baked into the image; nothing
 #     else is mounted. Env (CUDA_DEVICE_ORDER=PCI_BUS_ID, TORCH_CUDA_ARCH_LIST
 #     =12.0a, FLASHINFER_CUDA_ARCH_LIST=12.0f, SGLANG_OPT_* toggles) is baked
@@ -142,6 +143,7 @@ podman run -d --name "$CONTAINER" \
     --speculative-adaptive \
     --media-url-max-file-size-mb 1024 \
     --enable-multimodal \
+    --enable-metrics \
     --chat-template /chat-template.jinja \
     --reasoning-parser glm45 \
     --tool-call-parser glm47 \

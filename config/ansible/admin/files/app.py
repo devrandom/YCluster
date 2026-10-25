@@ -41,7 +41,10 @@ import json
 import re
 import secrets
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, cast
+from urllib.parse import urlsplit
 
 from flask import Flask, request, jsonify, redirect, render_template, send_from_directory
 import os
@@ -124,6 +127,13 @@ for node_type in list(NODE_TYPE_INTERFACES.keys()):
 
 # etcd configuration
 ETCD_PREFIX = '/cluster/nodes'
+
+# Inference backend registry, owned by local-ai-proxy. Prometheus uses it
+# via /api/prometheus/targets/vllm to discover vLLM metrics endpoints.
+INFERENCE_MODELS_PREFIX = '/cluster/config/inference/models/'
+VLLM_RUNTIME_CACHE_TTL = 60  # seconds
+_vllm_runtime_cache: dict[str, tuple[float, str | None]] = {}
+_vllm_runtime_lock = threading.Lock()
 
 # Cluster VIPs (follow the storage leader via keepalived). Used to render
 # bootstrap script callbacks that must land on the leader regardless of
@@ -1828,11 +1838,110 @@ def get_leadership_status():
 
 # Prometheus http_sd_configs target definitions.
 #
-# Each job maps to a port and a predicate (applied to get_all_hosts() output)
-# that decides which hosts should be scraped. The admin API is scraped by
-# Prometheus itself, so this endpoint can answer target queries dynamically
-# on every scrape interval — disabling a host via `ycluster cluster disable`
-# immediately removes it from the target list without re-running ansible.
+# The vLLM job is discovered from the inference registry rather than a host
+# list: one host can run several backends on different ports, and only some
+# of them are vLLM. Runtime identity comes from backend /v1/models responses.
+def _inference_backend_urls(client) -> list[str]:
+    """Return the distinct backend URLs registered in the inference tree."""
+    urls = set()
+    for value, metadata in client.get_prefix(INFERENCE_MODELS_PREFIX):
+        key = metadata.key.decode() if isinstance(metadata.key, bytes) else str(metadata.key)
+        try:
+            record = json.loads(value.decode() if isinstance(value, (bytes, bytearray)) else value)
+            backends = record.get('backends') or []
+        except (AttributeError, TypeError, ValueError) as exc:
+            app.logger.warning('inference discovery: skipping malformed %s: %s', key, exc)
+            continue
+        for entry in backends:
+            api_base = entry.get('api_base') if isinstance(entry, dict) else None
+            if isinstance(api_base, str) and api_base:
+                urls.add(api_base.rstrip('/'))
+    return sorted(urls)
+
+
+def _backend_runtime(api_base: str) -> str | None:
+    """Return the engine a backend reports via /v1/models, briefly cached.
+
+    vLLM reports owned_by="vllm"; sglang, mlx_lm and llama.cpp report their
+    own names. None means the probe failed or the response was unusable, in
+    which case the backend is not offered for scraping.
+    """
+    now = time.monotonic()
+    with _vllm_runtime_lock:
+        cached = _vllm_runtime_cache.get(api_base)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    runtime = None
+    try:
+        response = requests.get(f'{api_base}/v1/models', timeout=3)
+        if response.status_code == 200:
+            owners = {
+                str(model.get('owned_by', '')).lower()
+                for model in response.json().get('data') or []
+                if isinstance(model, dict)
+            }
+            if 'vllm' in owners:
+                runtime = 'vllm'
+            elif owners:
+                runtime = sorted(owners)[0]
+    except (AttributeError, TypeError, ValueError, requests.RequestException):
+        runtime = None
+
+    with _vllm_runtime_lock:
+        _vllm_runtime_cache[api_base] = (now + VLLM_RUNTIME_CACHE_TTL, runtime)
+    return runtime
+
+
+def _runtime_sd_targets(runtime: str) -> list[dict]:
+    """Return HTTP SD entries for registered backends serving one engine."""
+    urls = _inference_backend_urls(get_etcd_client())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        runtimes = dict(zip(urls, pool.map(_backend_runtime, urls)))
+
+    targets = []
+    seen = set()
+    for api_base in urls:
+        if runtimes[api_base] != runtime:
+            continue
+        parsed = urlsplit(api_base)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            continue
+        if parsed.netloc in seen:
+            continue
+        seen.add(parsed.netloc)
+        targets.append({
+            'targets': [parsed.netloc],
+            'labels': {'backend': f'{parsed.scheme}://{parsed.netloc}'},
+        })
+    return targets
+
+
+def _serve_runtime_targets(runtime: str):
+    try:
+        return jsonify(_runtime_sd_targets(runtime))
+    except Exception as exc:
+        return jsonify({'error': f'inference discovery failed: {exc}'}), 503
+
+
+@app.route('/api/prometheus/targets/vllm')
+def prometheus_targets_vllm():
+    """Prometheus HTTP SD list of inference backends that report as vLLM."""
+    return _serve_runtime_targets('vllm')
+
+
+@app.route('/api/prometheus/targets/sglang')
+def prometheus_targets_sglang():
+    """Prometheus HTTP SD list of inference backends that report as sglang."""
+    return _serve_runtime_targets('sglang')
+
+
+# Each host job maps to a port and a predicate (applied to get_all_hosts()
+# output) that decides which hosts should be scraped. The admin API is
+# scraped by Prometheus itself, so these endpoints can answer target queries
+# dynamically on every refresh interval — disabling a host via
+# `ycluster cluster disable` immediately removes it from the target list
+# without re-running ansible.
 PROMETHEUS_JOB_SPECS: dict[str, dict[str, int | Callable[[dict], bool]]] = {
     'node-exporter': {
         'port': 9100,

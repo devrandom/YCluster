@@ -76,6 +76,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
       "id": 3,
+      "description": "Distinct backend URLs, deduplicated across the four local-ai-proxy replicas. 'up' counts backends that at least one proxy reports healthy; 'total' counts every registered backend.",
       "options": {
         "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
         "colorMode": "value",
@@ -97,13 +98,13 @@
       },
       "targets": [
         {
-          "expr": "sum(local_ai_proxy_backend_healthy)",
+          "expr": "count(max by (backend) (local_ai_proxy_backend_healthy) == 1)",
           "legendFormat": "up",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
         },
         {
-          "expr": "count(local_ai_proxy_backend_healthy)",
+          "expr": "count(max by (backend) (local_ai_proxy_backend_healthy))",
           "legendFormat": "total",
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
@@ -151,7 +152,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 4},
       "id": 5,
-      "description": "Solid lines: TTFT as the proxy saw it (handler entry -> first body byte). Dashed lines: vLLM's own ttft from its /metrics. The gap between them is proxy + network overhead. If it's growing, investigate the proxy host; if both are growing together, it's a backend (queue depth, compute) issue. vLLM-only — other backend types don't expose a native ttft metric.",
+      "description": "Solid lines: TTFT as the proxy saw it (handler entry -> first body byte). Dashed lines: the backend's own ttft from its /metrics (vLLM or SGLang). The gap between them is proxy + network overhead. If it's growing, investigate the proxy host; if both are growing together, it's a backend (queue depth, compute) issue. Other backend types don't expose a native ttft metric.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -174,6 +175,12 @@
           "legendFormat": "vllm {{model}}",
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (model, le) (rate(sglang_time_to_first_token_seconds_bucket{is_streaming=\"true\"}[5m])))",
+          "legendFormat": "sglang {{model}}",
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
         }
       ],
       "fieldConfig": {
@@ -182,7 +189,7 @@
           "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never"}
         },
         "overrides": [
-          {"matcher": {"id": "byRegexp", "options": "^vllm "}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [5, 5]}}]}
+          {"matcher": {"id": "byRegexp", "options": "^(vllm|sglang) "}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [5, 5]}}]}
         ]
       }
     },
@@ -476,6 +483,122 @@
       "targets": [
         {
           "expr": "sum by (backend) (rate(vllm:prefix_cache_hits_total[5m])) / clamp_min(sum by (backend) (rate(vllm:prefix_cache_queries_total[5m])), 1)",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
+    },
+    {
+      "title": "Generation tokens/sec (SGLang)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 0, "y": 40},
+      "id": 21,
+      "description": "Output tokens/sec per backend from sglang_generation_tokens_total, summed across streaming/non-streaming and TP ranks. Drops under queue contention.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never"}
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(sglang_generation_tokens_total[5m]))",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
+    },
+    {
+      "title": "Prompt tokens/sec (SGLang)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 6, "y": 40},
+      "id": 22,
+      "description": "Prefill tokens/sec per backend from sglang_prompt_tokens_total. Dominated by context length; useful to see how much of the GPU is spent on prefill vs decode.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never"}
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (backend) (rate(sglang_prompt_tokens_total[5m]))",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
+    },
+    {
+      "title": "KV cache pressure (SGLang)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 12, "y": 40},
+      "id": 23,
+      "description": "Fraction of KV cache tokens in use (sglang_token_usage), max across TP ranks. Sustained >0.9 means preemption is imminent; cap concurrency, shorten contexts, or scale out.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 15, "showPoints": "never"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.75},
+              {"color": "red", "value": 0.9}
+            ]
+          }
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "max by (backend) (sglang_token_usage)",
+          "legendFormat": "{{backend}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
+    },
+    {
+      "title": "Prefix cache hit rate (SGLang)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 6, "x": 18, "y": 40},
+      "id": 24,
+      "description": "Prefix cache hit rate reported by SGLang (sglang_cache_hit_rate), max across TP ranks. High = clients are reusing prompts; near zero = every request pays full prefill cost.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never"}
+        }
+      },
+      "options": {
+        "legend": {"calcs": ["mean"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "max by (backend) (sglang_cache_hit_rate)",
           "legendFormat": "{{backend}}",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}

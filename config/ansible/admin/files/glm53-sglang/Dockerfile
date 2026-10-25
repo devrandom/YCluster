@@ -67,6 +67,7 @@ CMD ["-m", "sglang.launch_server", \
      "--speculative-adaptive", \
      "--media-url-max-file-size-mb", "1024", \
      "--enable-multimodal", \
+     "--enable-metrics", \
      "--chat-template", "/chat-template.jinja", \
      "--reasoning-parser", "glm45", \
      "--tool-call-parser", "glm47", \

@@ -57,28 +57,38 @@ scrape_configs:
         refresh_interval: 30s
 
   # vLLM backends expose Prometheus metrics natively on the same port
-  # as /v1/. Scrape them so dashboards can join with local-ai-proxy
-  # metrics on the `model` label (vLLM calls it `model_name` — we
-  # relabel), and correlate proxy-side TTFT against vLLM's own.
-  # Static list because backend types aren't tagged in etcd; add a
-  # target here when a new vLLM replica comes online.
+  # as /v1/. Discover them from the inference registry instead of a static
+  # list: the admin API probes each registered backend's /v1/models and
+  # returns only those reporting owned_by=vllm. It also sets the `backend`
+  # label in the same URL form as local_ai_proxy_* metrics, so cross-metric
+  # joins work. Discovery is cached for 60s; a backend that is down at
+  # refresh time drops out until it answers /v1/models again.
   - job_name: 'vllm'
     metrics_path: '/metrics'
     scrape_interval: 15s
-    static_configs:
-      - targets:
-        - 'nv1.xc:8000'
-        - 'nv2.xc:8000'
-    relabel_configs:
-      # Produce a `backend` label matching the URL form used by
-      # local_ai_proxy_* metrics (`http://host:port`), so
-      # cross-metric joins work without extra relabeling.
-      - source_labels: [__address__]
-        regex: '(.+)'
-        replacement: 'http://$1'
-        target_label: backend
+    http_sd_configs:
+      - url: 'http://127.0.0.1:12723/api/prometheus/targets/vllm'
+        refresh_interval: 30s
     metric_relabel_configs:
       # Rename model_name -> model so joins with proxy metrics work.
+      - source_labels: [model_name]
+        target_label: model
+      - regex: 'model_name'
+        action: labeldrop
+
+  # SGLang exposes `sglang:*` metrics on /metrics when started with
+  # --enable-metrics. It negotiates OpenMetrics with escaping=underscores,
+  # so Prometheus stores those names as `sglang_*` — query the underscore
+  # form. Discovery is identical to the vLLM job: the admin API probes each
+  # registered backend's /v1/models and returns owned_by=sglang.
+  - job_name: 'sglang'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    http_sd_configs:
+      - url: 'http://127.0.0.1:12723/api/prometheus/targets/sglang'
+        refresh_interval: 30s
+    metric_relabel_configs:
+      # SGLang labels the served model as model_name too.
       - source_labels: [model_name]
         target_label: model
       - regex: 'model_name'
