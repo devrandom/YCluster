@@ -137,6 +137,38 @@ The R38/KK qualification's 32 slots pairs with a 131,072-token cap
 Keep 4 slots at the 512K cap, or drop the cap to 128K if 32-slot
 concurrency is wanted.
 
+### Qualified fairness settings
+
+Benchmarked with the `inference fairness` prefill-containment benchmark
+(two cold prefills, generations fully inside them):
+
+```
+MAX_NUM_BATCHED_TOKENS=8192
+--long-prefill-token-threshold 4096
+--prefill-compute-share 0.2
+```
+
+These are the `ds41-start.sh` defaults. Measured against the unqualified
+baseline (`MAX_NUM_BATCHED_TOKENS=4096`, both fairness flags off):
+
+- waiting generation requests are admitted during long prefills (TTFT 13.5 s
+  vs 22 s when queued behind two ~98k-token prefills); the unqualified config
+  starves them entirely because a long prefill chunk consumes the whole
+  4096-token step budget;
+- decode holds 0.71× of baseline throughput and p50 inter-token latency is
+  unchanged (0.84×) during full prefill overlap;
+- prefill rate stays near baseline (~6700 vs ~7450 tok/s);
+- the residual cost is decode tail latency: p95 ITL up to 2.4× baseline while
+  a 4096-token chunk is in flight (sub-second stalls). Smaller caps (2048/1024)
+  shrink the stalls but cut prefill throughput to 4.1k/2.4k tok/s; 4096 was
+  chosen because admission stalls dominate user pain.
+
+Both halves matter: without the cap, an 8192-token chunk consumes the whole
+step and reintroduces admission starvation; without the compute share, admitted
+decodes collapse to ~1.7 tok/s while a prefill is active. The container env
+vars `PREFILL_COMPUTE_SHARE`/`PREFILL_SCHEDULE_INTERVAL` in the R36 image are
+inert — pass the CLI flags.
+
 ## Deploy checklist
 
 1. In private host_vars, set `ds41_enabled: true` and `ds41_gpus: "<4 CDI indices>"` on the target node.

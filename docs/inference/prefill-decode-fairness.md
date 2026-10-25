@@ -35,16 +35,41 @@ The fixes are admission fairness (per-user/per-model concurrency caps, priority)
 more slots within the KV and graph limits. An ACL deny is an emergency stop, not a
 scheduler policy.
 
+### 3. Prefill-budget admission starvation
+
+Admission slots are not the only gate. A waiting request also needs token budget
+for its own prompt prefill. With chunked prefill, a long prompt can consume the
+whole `max_num_batched_tokens` budget on every step. A waiting request whose
+prompt needs any uncached prefill then cannot be admitted, even when free
+admission slots and KV capacity exist. It starts only when a long prefill finishes
+or the scheduler leaves budget for it.
+
+This is distinct from step-time dilution: an already-running decode is scheduled
+first and keeps making progress, but a waiting request cannot become running. It is
+also distinct from a full slot table: `num_requests_waiting` can grow while
+`num_requests_running` stays below `max_num_seqs`.
+
+Measured example: two cold ~98k prefills with a 4096-token budget and
+`max_parallel_prefills=1` serialized. Generation requests submitted during the
+prefills got their first token ~22 s later, only ~0.5 s before the last prefill
+finished. Almost their whole decode window ran after the prefills. Decode tok/s
+measured over that window is uncontended decode, not prefill interference.
+
 ## What to measure
 
 Use per-request metrics, not aggregate token counters alone:
 
 - inter-token latency (ITL) per request, especially while a prefill is active
 - TTFT and queue time per request
-- aggregate decode tok/s and per-request decode tok/s
+- first-token time relative to prefill start and end; client request start is
+  submission, not decode start
+- whether each decode window is fully contained inside the prefill span
+- aggregate decode tok/s and per-request decode tok/s, computed only over the
+  contained overlap
 - `num_requests_running` and `num_requests_waiting`, split by reason if exposed
 - KV-cache usage and `max_total_num_tokens`
-- prefix-cache hit rate
+- prefix-cache hit rate for the generation prompts, so the measured window is
+  decode-only
 - speculative acceptance length, if spec decode is enabled
 
 Run two separate experiments: one long prefill with N decodes, then N long prefills
@@ -70,6 +95,16 @@ The R36 fork has explicit scheduler controls. Its defaults keep them off:
 when decode and prefill are both runnable, it selects one service class per step.
 `prefill_schedule_interval` is a simpler fixed cadence. They overlap; start with
 one, not both.
+
+Increasing `max_num_batched_tokens` alone does not reserve room for a waiting
+request: the long prefill simply consumes the larger budget. Increasing
+`max_parallel_prefills` interleaves prefills and improves fairness among them,
+but it still gives a waiting request no budget. To admit a waiting request during a
+long prefill, cap the long prefill chunk with `long_prefill_token_threshold`, or
+reserve service time with `prefill_compute_share`.
+
+`scheduler_reserve_full_isl` is a KV-capacity reservation, not a per-step token
+budget. It does not prevent prefill-budget starvation.
 
 Do **not** lower `max_num_batched_tokens` alone and expect decode to be
 protected. A prefill can consume the whole smaller budget and still leave decode
@@ -113,6 +148,65 @@ hot-reloaded and should carry the user-facing policy:
 A per-user cap is the structural fix for one user occupying every admission
 slot. It does not fix step-time dilution for decodes that are already running.
 
+## Quick qualification benchmark
+
+`contrib/inference` has a `fairness` subcommand for a one-command B-A-B check.
+Run it on a cluster node or the bastion so the client uses the local
+`http://inference.xc` path rather than the public frontend:
+
+```bash
+inference fairness <model>
+inference fairness <model> --prefills 1 --json
+```
+
+The phases are named `baseline`, `with-prefill`, and `baseline-after`.
+The contention shape is deliberate: the generation prompts' prefixes are warmed
+first, so the measured generation is decode-only rather than a mixed
+prefill+decode request. In `with-prefill` the cold prefills are then launched
+first, followed by the generation requests, and every generation stops after
+`--generation-seconds` (default 10 s) of decode. The prefill is extrapolated
+from one cold 32k pilot to last at least `--min-prefill-seconds` (default 12 s),
+so the whole decode window sits inside it. The command fails unless:
+
+- the actual prefill span is at least `--min-prefill-seconds` (default 12 s);
+- every generation ended before the last prefill completed (positive
+  `containment` margin);
+- every generation ran for at least `--min-decode-fraction` of the requested
+  decode window (default 0.9);
+- the generation prompts hit the prefix cache at least 90%, so the phase
+  measures decode, not a second round of prompt prefill.
+
+Defaults:
+
+- 2 generation requests and 2 cold prefill requests
+- 10 s decode deadline per generation (`--generation-seconds`)
+- 4096-token `max_tokens` ceiling (`--max-decode-tokens`)
+- 16k-token generation context (`--context-tokens`)
+- prefill extrapolated from one cold 32k pilot
+- one B-A-B repeat
+- per-request ITL p50/p95/max, decode tok/s, prefill TTFT, and containment
+- start/stop lines per request and per-second momentary decode tok/s for the
+  `with-prefill` generations
+
+`--context-tokens` is the generation prompt length. `--prefill-tokens` accepts
+an integer or `auto`; auto measures one cold 32k prefill, extrapolates the token
+count needed to reach `--min-prefill-seconds`, and caps it at the model context.
+
+The start/stop lines are client submission and return, not decode start and end.
+The first-token time is the decode start. A run that fails containment is a
+valid finding: the engine did not admit the generations during the prefill, so its
+decode ratio is uncontended and must not be read as a fairness pass.
+
+The command also fails if streaming is buffered, the p50 ITL ratio exceeds 1.5,
+the p95 ITL ratio exceeds 2.0, decode drops below 0.7× baseline, or the
+generation requests/prefills diverge from each other. Use `--json` for
+machine-readable output.
+
+To verify the running engine's scheduler configuration, read its startup log for
+the non-default arguments. Config fields absent from that list are at source
+defaults. Environment variables with similar names may be inert if the build does
+not read them.
+
 ## Experiment matrix
 
 Run each change in isolation against the same load, then combine:
@@ -143,3 +237,7 @@ KV usage stays within the pool, and prefix-cache/spec acceptance stay at baselin
   max_model_len` must fit the KV pool.
 - Do not use ACL deny as a routine fairness mechanism. It denies all traffic
   for that user/model and has no TTL.
+- Do not report a decode ratio from a run whose generations were not fully
+  contained in the prefill span. The window is mostly uncontended decode.
+- Do not assume a waiting request will be admitted just because slots and KV are
+  free. It still needs token budget for its own prompt prefill.

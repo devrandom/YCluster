@@ -50,7 +50,7 @@ _inference_completion() {
     fi
 
     if (( cword == 1 )); then
-        COMPREPLY=( $(compgen -W "chat bench batch models image smoke transcribe ocr" -- "$cur") )
+        COMPREPLY=( $(compgen -W "chat bench batch fairness models image smoke transcribe ocr" -- "$cur") )
         return
     fi
 
@@ -72,6 +72,15 @@ _inference_completion() {
         batch)
             if [[ $cur == -* ]]; then
                 COMPREPLY=( $(compgen -W "--concurrency --prompt-tokens --gen --cache --rounds --timeout --json -h --help" -- "$cur") )
+            else
+                local models
+                models="$(_inference_fresh_models)"
+                COMPREPLY=( $(compgen -W "$models" -- "$cur") )
+            fi
+            ;;
+        fairness)
+            if [[ $cur == -* ]]; then
+                COMPREPLY=( $(compgen -W "--generations --prefills --generation-seconds --max-decode-tokens --prefill-tokens --min-prefill-seconds --context-tokens --prefill-settle-ms --repeats --min-chunks --min-decode-fraction --max-itl-p50-ratio --max-itl-p95-ratio --min-decode-tps-ratio --max-generation-spread --max-prefill-spread --no-baseline-after --timeout --json -h --help" -- "$cur") )
             else
                 local models
                 models="$(_inference_fresh_models)"

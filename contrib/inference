@@ -18,6 +18,15 @@ Subcommands:
                     Reports requests/s plus median per-request latency.
                     --cache is the % sharing one prefix (default 100;
                     0 = fresh nonce for every request).
+  fairness <model>   Baseline vs concurrent-prefill fairness test: two
+                    generation requests alone (baseline), then two cold long
+                    prefills with the same generations running entirely
+                    inside them (with-prefill), then baseline again
+                    (baseline-after). Each generation is deadline-limited
+                    to 10s of decode; extrapolates the prefill from one 32k
+                    pilot so it outlasts the whole decode window. Records per-chunk ITL
+                    and fails if any generation was not fully contained.
+                    Defaults finish in ~1-2 minutes.
   models            List model ids available on the gateway.
   image <model>     POST a generated test image (red circle + \"42\") through the
                     gateway and confirm the model actually reads it — the quick
@@ -43,6 +52,8 @@ Usage:
   ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 4 --json
   ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 1,2,4,8 --json
   ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 8 --cache 50
+  ./inference fairness deepseek-v4_1-flash
+  ./inference fairness glm-5.3-flash --prefills 1 --json
   ./inference image nemotron-3-nano-omni
   ./inference smoke MiniMaxAI/MiniMax-M2.7 A C
   ./inference smoke MiniMaxAI/MiniMax-M2.7 B --max 200000 --json
@@ -56,12 +67,14 @@ import argparse
 import base64
 import io
 import json
+import math
 import os
 import re
 import secrets
 import statistics
 import struct
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -79,6 +92,12 @@ DIM, GREEN, RED, RESET = "\033[2m", "\033[32m", "\033[31m", "\033[0m"
 # in both places.
 _BENCH_FILLER = ("The old forest stayed quiet under a pale and even sky. "
                  "Nothing moved between the tall grey trees for a long while. ")
+
+# A warmed generation prompt must hit the prefix cache almost entirely.
+_FAIRNESS_MIN_PREFIX_CACHE_HIT = 0.9
+
+# One cold pilot this size is enough to extrapolate a prefill rate.
+_FAIRNESS_PREFILL_PILOT_TOKENS = 32768
 
 
 def _load_config():
@@ -761,8 +780,25 @@ def _bench_model_max_len(base, key, model):
         return None
 
 
-def _bench_stream(base, key, messages, model, gen, timeout):
-    """Stream a completion. Returns timings + usage, or {'error': ...}."""
+def _bench_stream(base, key, messages, model, gen, timeout,
+                   collect_chunks=False, first_token_event=None,
+                   deadline_s=None, log_label=None, log_t0=None,
+                   progress_label=None, progress_interval_s=None):
+    """Stream a completion. Returns timings + usage, or {'error': ...}.
+
+    With collect_chunks, returns ``chunks`` as (monotonic_time, text_length)
+    pairs. That is the per-chunk data the fairness benchmark needs; the older
+    bench/batch callers keep the cheaper first/last-only path.
+
+    With deadline_s, stop reading that many seconds after the first content chunk
+    and close the connection. The server aborts the request when it sees the
+    disconnect. ``truncated`` in the result distinguishes this from a normal
+    ``max_tokens`` completion.
+
+    log_label/log_t0 print start and stop lines relative to log_t0.
+    progress_label/progress_interval_s print the momentary chunk rate at that
+    interval while decoding.
+    """
     body = {
         "model": model,
         "messages": messages,
@@ -784,11 +820,22 @@ def _bench_stream(base, key, messages, model, gen, timeout):
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         method="POST",
     )
+
+    def signal_first_token():
+        if first_token_event is not None:
+            first_token_event.set()
+
     t0 = time.monotonic()
     t_first = None
     t_last = None
     usage = {}
     timings = {}
+    chunks = []
+    truncated = False
+    progress_last_t = None
+    progress_last_n = 0
+    if log_label is not None:
+        print(f"  {log_label} start +{t0 - (log_t0 or t0):.2f}s")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             for raw in resp:
@@ -812,18 +859,51 @@ def _bench_stream(base, key, messages, model, gen, timeout):
                 choices = obj.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta") or {}
-                    if delta.get("content") or delta.get("reasoning_content") \
-                            or delta.get("reasoning"):
+                    text = (delta.get("content") or delta.get("reasoning_content")
+                            or delta.get("reasoning"))
+                    if text:
                         now = time.monotonic()
                         if t_first is None:
                             t_first = now
+                            signal_first_token()
                         t_last = now
+                        if collect_chunks:
+                            chunks.append((now, len(text)))
+                        if progress_label is not None:
+                            if progress_last_t is None:
+                                progress_last_t = t_first
+                            interval = progress_interval_s or 1.0
+                            elapsed = now - progress_last_t
+                            if elapsed >= interval:
+                                rate = ((len(chunks) - progress_last_n) / elapsed)
+                                print(f"    {progress_label} "
+                                      f"+{now - t_first:.1f}s: "
+                                      f"{rate:.1f} tok/s")
+                                progress_last_t = now
+                                progress_last_n = len(chunks)
+                        if (deadline_s is not None
+                                and now - t_first >= deadline_s):
+                            truncated = True
+                            break
     except urllib.error.HTTPError as e:
+        signal_first_token()
         return {"error": f"HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}"}
     except Exception as e:
+        signal_first_token()
         return {"error": f"{type(e).__name__}: {e}"}
-    return {"t0": t0, "t_first": t_first, "t_last": t_last,
-            "t_end": time.monotonic(), "usage": usage, "timings": timings}
+    finally:
+        if log_label is not None:
+            print(f"  {log_label} stop  "
+                  f"+{time.monotonic() - (log_t0 or t0):.2f}s")
+    if collect_chunks and not chunks:
+        signal_first_token()
+        return {"error": "no streamed content chunks"}
+    result = {"t0": t0, "t_first": t_first, "t_last": t_last,
+              "t_end": time.monotonic(), "usage": usage, "timings": timings,
+              "truncated": truncated}
+    if collect_chunks:
+        result["chunks"] = chunks
+    return result
 
 
 def _server_tps(timings):
@@ -1172,6 +1252,587 @@ def _batch_run(base, key, model, prompt_tokens, gen, timeout, concurrency,
     }
 
 
+def _percentile(values, pct):
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    k = (len(vals) - 1) * pct / 100.0
+    lo, hi = math.floor(k), math.ceil(k)
+    if lo == hi:
+        return vals[lo]
+    return vals[lo] + (vals[hi] - vals[lo]) * (k - lo)
+
+
+def _itl_ms(chunks):
+    times = [t for t, _ in chunks]
+    return [(b - a) * 1000.0 for a, b in zip(times, times[1:])]
+
+
+def _gen_sample_stats(result, decode_tokens):
+    chunks = result.get("chunks") or []
+    itls = _itl_ms(chunks)
+    usage = result.get("usage") or {}
+    truncated = bool(result.get("truncated"))
+    # A deadline-limited stream has no final usage chunk, so the received
+    # content chunks are the token count. One chunk is one decode step on the
+    # backends this benchmarks.
+    ctok = usage.get("completion_tokens") or (len(chunks) if truncated
+                                              else decode_tokens)
+    ptok = usage.get("prompt_tokens")
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    ttft = ((result["t_first"] - result["t0"]) * 1000.0
+            if result.get("t_first") else None)
+    window = (result["t_last"] - result["t_first"]
+              if result.get("t_first") and result.get("t_last") else None)
+    decode_tps = ((ctok - 1) / window
+                  if window and window > 0 and ctok > 1 else None)
+    return {
+        "ttft_ms": ttft,
+        "itl_p50_ms": _percentile(itls, 50),
+        "itl_p95_ms": _percentile(itls, 95),
+        "itl_max_ms": max(itls) if itls else None,
+        "decode_tps": decode_tps,
+        "decode_window_s": window,
+        "prompt_tokens": ptok,
+        "cached_tokens": cached,
+        "completion_tokens": ctok,
+        "chunks": len(chunks),
+        "truncated": truncated,
+        "t_first": result.get("t_first"),
+        "t_end": result.get("t_end"),
+    }
+
+
+def _prefill_sample_stats(result):
+    usage = result.get("usage") or {}
+    ttft = ((result["t_first"] - result["t0"]) * 1000.0
+            if result.get("t_first") else None)
+    return {
+        "ttft_ms": ttft,
+        "latency_ms": (result["t_end"] - result["t0"]) * 1000.0,
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "t_end": result["t_end"],
+    }
+
+
+def _fairness_phase(base, key, model, phase, generation_prompts,
+                    max_decode_tokens, prefills, prefill_context_tokens,
+                    generation_seconds, timeout, settle_ms, progress=False):
+    """Launch cold prefills first, then bounded generations inside them.
+
+    The prefill requests are submitted first, the generations a short settle
+    later, and each generation stops after ``generation_seconds`` of decode. The
+    caller warms the generation prompts' prefixes beforehand, so the measured
+    generation is decode-only rather than a mixed prefill+decode request.
+    """
+    prefill_prompts = [_bench_build_prompt(prefill_context_tokens)
+                       for _ in range(prefills)]
+    phase_start = time.monotonic()
+    prefill_start = None
+    with ThreadPoolExecutor(
+            max_workers=len(generation_prompts) + prefills) as pool:
+        if prefill_prompts:
+            prefill_start = time.monotonic()
+            prefill_futures = [
+                pool.submit(_bench_stream, base, key,
+                            [{"role": "user", "content": prompt}], model,
+                            1, timeout, True, log_label=f"p{i}",
+                            log_t0=phase_start)
+                for i, prompt in enumerate(prefill_prompts, 1)
+            ]
+            if settle_ms > 0:
+                time.sleep(settle_ms / 1000.0)
+        else:
+            prefill_futures = []
+        gen_futures = [
+            pool.submit(_bench_stream, base, key,
+                        [{"role": "user", "content": prompt}], model,
+                        max_decode_tokens, timeout, True, None,
+                        deadline_s=generation_seconds, log_label=f"g{i}",
+                        log_t0=phase_start,
+                        progress_label=(f"g{i}" if progress else None),
+                        progress_interval_s=1.0)
+            for i, prompt in enumerate(generation_prompts, 1)
+        ]
+        gen_results = [f.result() for f in gen_futures]
+        prefill_results = [f.result() for f in prefill_futures]
+
+    gens = []
+    for i, result in enumerate(gen_results):
+        if result.get("error"):
+            gens.append({"id": f"g{i + 1}", "error": result["error"]})
+        else:
+            stats = _gen_sample_stats(result, max_decode_tokens)
+            stats["id"] = f"g{i + 1}"
+            gens.append(stats)
+
+    prefills_out = []
+    for i, result in enumerate(prefill_results):
+        if result.get("error"):
+            prefills_out.append({"id": f"p{i + 1}", "error": result["error"]})
+        else:
+            stats = _prefill_sample_stats(result)
+            stats["id"] = f"p{i + 1}"
+            prefills_out.append(stats)
+
+    prefill_last_end = max((r["t_first"] for r in prefill_results
+                           if not r.get("error") and r.get("t_first")),
+                          default=None)
+    prefill_span_s = (prefill_last_end - prefill_start
+                      if prefill_start is not None
+                      and prefill_last_end is not None else None)
+    # Positive margin means the generation finished before the last prefill
+    # completed, i.e. the whole decode window was inside the prefill phase.
+    # Use the last completion, not the first: with serialized prefills the
+    # first one can finish while another is still computing.
+    containment_margin_s = []
+    if prefill_last_end is not None:
+        for gen in gens:
+            if "error" in gen or not gen.get("t_end"):
+                containment_margin_s.append(None)
+                continue
+            containment_margin_s.append(prefill_last_end - gen["t_end"])
+
+    return {
+        "phase": phase,
+        "generations": gens,
+        "prefills": prefills_out,
+        "prefill_span_s": prefill_span_s,
+        "containment_margin_s": containment_margin_s,
+    }
+
+
+def _phase_median(rows, key):
+    vals = [g[key] for row in rows for g in row["generations"]
+            if "error" not in g and g.get(key) is not None]
+    return statistics.median(vals) if vals else None
+
+
+def _per_generation_ratios(baseline_rows, loaded_rows):
+    count = max((len(row["generations"])
+                 for row in baseline_rows + loaded_rows), default=0)
+    ratios = []
+    for i in range(count):
+        base = [row["generations"][i]["itl_p50_ms"]
+                for row in baseline_rows
+                if i < len(row["generations"])
+                and "error" not in row["generations"][i]
+                and row["generations"][i].get("itl_p50_ms") is not None]
+        treat = [row["generations"][i]["itl_p50_ms"]
+                 for row in loaded_rows
+                 if i < len(row["generations"])
+                 and "error" not in row["generations"][i]
+                 and row["generations"][i].get("itl_p50_ms") is not None]
+        if base and treat and statistics.median(base) > 0:
+            ratios.append(statistics.median(treat) / statistics.median(base))
+    return ratios
+
+
+def _fairness_summary(baseline_rows, loaded_rows, thresholds):
+    base_p50 = _phase_median(baseline_rows, "itl_p50_ms")
+    loaded_p50 = _phase_median(loaded_rows, "itl_p50_ms")
+    base_p95 = _phase_median(baseline_rows, "itl_p95_ms")
+    loaded_p95 = _phase_median(loaded_rows, "itl_p95_ms")
+    base_decode = _phase_median(baseline_rows, "decode_tps")
+    loaded_decode = _phase_median(loaded_rows, "decode_tps")
+    itl_ratio = (loaded_p50 / base_p50
+                  if base_p50 and loaded_p50 is not None else None)
+    itl_p95_ratio = (loaded_p95 / base_p95
+                      if base_p95 and loaded_p95 is not None else None)
+    decode_tps_ratio = (loaded_decode / base_decode
+                    if base_decode and loaded_decode is not None else None)
+    generation_ratios = _per_generation_ratios(baseline_rows, loaded_rows)
+    generation_spread = (max(generation_ratios) / min(generation_ratios)
+                  if len(generation_ratios) >= 2 and min(generation_ratios) > 0 else None)
+
+    prefill_ttfts = [p["ttft_ms"] for row in loaded_rows
+                    for p in row["prefills"]
+                    if "error" not in p and p.get("ttft_ms") is not None]
+    prefill_spread = (max(prefill_ttfts) / min(prefill_ttfts)
+                      if len(prefill_ttfts) >= 2 and min(prefill_ttfts) > 0
+                      else None)
+    prefill_spans = [row["prefill_span_s"] for row in loaded_rows
+                     if row.get("prefill_span_s") is not None]
+    prefill_span_ok = (bool(prefill_spans)
+                       and min(prefill_spans) >= thresholds["min_prefill_seconds"])
+    margins = [m for row in loaded_rows
+               for m in row["containment_margin_s"] if m is not None]
+    contained_ok = (bool(margins) and min(margins) >= 0.0)
+    windows = [g.get("decode_window_s") for row in baseline_rows + loaded_rows
+               for g in row["generations"]
+               if "error" not in g and g.get("decode_window_s") is not None]
+    window_ok = (bool(windows)
+                 and min(windows) >= thresholds["min_decode_seconds"])
+    cached_fractions = [
+        g["cached_tokens"] / g["prompt_tokens"]
+        for row in loaded_rows for g in row["generations"]
+        if "error" not in g and g.get("prompt_tokens")
+        and g.get("cached_tokens") is not None
+    ]
+    cache_ok = (None if not cached_fractions
+                 else min(cached_fractions) >= _FAIRNESS_MIN_PREFIX_CACHE_HIT)
+
+    errors = sum(
+        1 for row in baseline_rows + loaded_rows
+        for req in row["generations"] + row["prefills"]
+        if "error" in req
+    )
+    checks = {
+        "no_errors": errors == 0,
+        "prefill_span": prefill_span_ok,
+        "contained": contained_ok,
+        "decode_window": window_ok,
+        "generation_prefix_cache": cache_ok is not False,
+        "itl_ratio": itl_ratio is not None
+                     and itl_ratio <= thresholds["max_itl_p50_ratio"],
+        "itl_p95_ratio": itl_p95_ratio is not None
+                          and itl_p95_ratio <= thresholds["max_itl_p95_ratio"],
+        "decode_tps_ratio": decode_tps_ratio is not None
+                        and decode_tps_ratio >= thresholds["min_decode_tps_ratio"],
+        "generation_spread": generation_spread is None
+                      or generation_spread <= thresholds["max_generation_spread"],
+        "prefill_spread": prefill_spread is None
+                           or prefill_spread <= thresholds["max_prefill_spread"],
+    }
+    return {
+        "baseline_itl_p50_ms": base_p50,
+        "with_prefill_itl_p50_ms": loaded_p50,
+        "itl_p50_ratio": itl_ratio,
+        "baseline_itl_p95_ms": base_p95,
+        "with_prefill_itl_p95_ms": loaded_p95,
+        "itl_p95_ratio": itl_p95_ratio,
+        "baseline_decode_tps": base_decode,
+        "with_prefill_decode_tps": loaded_decode,
+        "decode_tps_ratio": decode_tps_ratio,
+        "per_generation_itl_ratios": generation_ratios,
+        "generation_spread": generation_spread,
+        "prefill_ttft_ms": prefill_ttfts,
+        "prefill_spread": prefill_spread,
+        "prefill_span_s": prefill_spans,
+        "containment_margin_s": margins,
+        "decode_window_s": windows,
+        "generation_prefix_cache_hit": cached_fractions,
+        "errors": errors,
+        "checks": checks,
+        "passed": all(checks.values()),
+    }
+
+
+def _print_fairness_rows(rows):
+    print(f"  {'phase':>12}  {'req':>4}  {'ttft':>7}  {'itl50':>7}  "
+          f"{'itl95':>7}  {'itlmax':>7}  {'dec t/s':>8}  {'chunks':>7}  "
+          f"{'win':>7}  {'inside':>8}")
+    for row in rows:
+        for i, gen in enumerate(row["generations"]):
+            margin = (row["containment_margin_s"][i]
+                      if i < len(row["containment_margin_s"]) else None)
+            if "error" in gen:
+                print(f"  {row['phase']:>12}  {gen['id']:>4}  {RED}ERR{RESET} "
+                      f"{gen['error'][:60]}")
+                continue
+            print(f"  {row['phase']:>12}  {gen['id']:>4}  "
+                  f"{gen['ttft_ms'] or 0:6.0f}ms  "
+                  f"{gen['itl_p50_ms'] or 0:6.1f}ms  "
+                  f"{gen['itl_p95_ms'] or 0:6.1f}ms  "
+                  f"{gen['itl_max_ms'] or 0:6.1f}ms  "
+                  f"{gen['decode_tps'] or 0:7.1f}  "
+                  f"{gen['chunks']:>7}  "
+                  f"{(gen.get('decode_window_s') or 0):6.2f}s  "
+                  f"{(margin or 0):7.2f}s")
+        for pre in row["prefills"]:
+            if "error" in pre:
+                print(f"  {row['phase']:>12}  {pre['id']:>4}  {RED}ERR{RESET} "
+                      f"{pre['error'][:60]}")
+                continue
+            print(f"  {row['phase']:>12}  {pre['id']:>4}  "
+                  f"{pre['ttft_ms'] or 0:6.0f}ms  "
+                  f"{'-':>7}  {'-':>7}  {'-':>7}  {'-':>8}  {'-':>7}  "
+                  f"{pre['latency_ms'] / 1000.0:6.2f}s  {'-':>8}")
+
+
+def _warm_generation_prefixes(base, key, model, prompts, timeout):
+    """Populate the prefix cache for the measured generation prompts."""
+    for i, prompt in enumerate(prompts, 1):
+        r = _bench_stream(base, key, [{"role": "user", "content": prompt}],
+                            model, 1, timeout, True)
+        if r.get("error"):
+            return f"g{i}: {r['error']}"
+    return None
+
+
+def _size_prefill(base, key, model, mml, min_s, timeout):
+    """Measure one cold 32k prefill and extrapolate the needed token count.
+
+    Cold prefill rate is stable on the backends this benchmarks, so one pilot is
+    enough. The actual prefill span is gated afterwards, which catches a model
+    whose rate degrades at long context.
+    """
+    tokens = _FAIRNESS_PREFILL_PILOT_TOKENS
+    cap = mml - 2000 if mml else None
+    if cap:
+        tokens = min(tokens, cap)
+    prompt = _bench_build_prompt(tokens)
+    r = _bench_stream(base, key, [{"role": "user", "content": prompt}],
+                        model, 1, timeout, True)
+    if r.get("error"):
+        return None, r["error"]
+    stats = _prefill_sample_stats(r)
+    if not stats.get("ttft_ms"):
+        return None, "no TTFT from pilot prefill"
+    duration = stats["ttft_ms"] / 1000.0
+    print(f"Prefill pilot: {tokens} tokens -> {duration:.1f}s "
+          f"({tokens / duration:.0f} tok/s)")
+    # 10% headroom: prefill rate improves slightly with length here, but
+    # do not assume that holds on every backend.
+    target = int(math.ceil(1.1 * min_s * tokens / duration))
+    if cap:
+        target = min(target, cap)
+    target = max(target, 1)
+    print(f"Prefill size: {target} tokens "
+          f"(extrapolated to >= {min_s:.1f}s)")
+    return target, None
+
+
+def cmd_fairness(args):
+    """Baseline vs concurrent-prefill fairness qualification."""
+    parser = argparse.ArgumentParser(
+        prog=f"{sys.argv[0]} fairness",
+        description="Compare two generations alone vs two generations running "
+                    "entirely inside cold long prefills. Defaults to a 10s "
+                    "decode deadline, 32k-pilot extrapolated prefills, and B-A-B.",
+    )
+    parser.add_argument("model")
+    parser.add_argument("--generations", type=int, default=2,
+                        help="concurrent generation requests (default 2)")
+    parser.add_argument("--prefills", type=int, default=2,
+                        help="concurrent cold prefill requests (default 2)")
+    parser.add_argument("--generation-seconds", type=float, default=10.0,
+                        help="decode window per generation request (default 10s)")
+    parser.add_argument("--max-decode-tokens", "--max-gen-tokens",
+                        dest="max_decode_tokens", type=int, default=4096,
+                        help="max_tokens ceiling; the deadline normally stops "
+                             "first (default 4096)")
+    parser.add_argument("--prefill-tokens", default="auto",
+                        help="cold prefill prompt tokens, or 'auto' (default)")
+    parser.add_argument("--min-prefill-seconds", type=float, default=12.0,
+                        help="minimum actual prefill span; fail below this "
+                             "(default 12s)")
+    parser.add_argument("--context-tokens", "--gen-prompt-tokens",
+                        dest="context_tokens", type=int, default=16384,
+                        help="generation request prompt/context tokens (default 16384)")
+    parser.add_argument("--prefill-settle-ms", "--stagger-ms",
+                        dest="settle_ms", type=int, default=500,
+                        help="delay after launching prefills before generations "
+                             "(default 500ms)")
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="B-A-B repeats (default 1)")
+    parser.add_argument("--min-chunks", type=int, default=4,
+                        help="minimum content chunks in warmup (default 4)")
+    parser.add_argument("--min-decode-fraction", type=float, default=0.9,
+                        help="minimum decode window as a fraction of "
+                             "--generation-seconds (default 0.9)")
+    parser.add_argument("--max-itl-p50-ratio", "--max-itl-ratio",
+                        dest="max_itl_p50_ratio", type=float, default=1.5,
+                        help="max with-prefill/baseline ITL p50 ratio (default 1.5)")
+    parser.add_argument("--max-itl-p95-ratio", type=float, default=2.0,
+                        help="max with-prefill/baseline ITL p95 ratio (default 2.0)")
+    parser.add_argument("--min-decode-tps-ratio", "--min-decode-ratio",
+                        dest="min_decode_tps_ratio", type=float, default=0.7,
+                        help="min with-prefill/baseline decode tps ratio (default 0.7)")
+    parser.add_argument("--max-generation-spread", "--max-gen-spread",
+                        dest="max_generation_spread", type=float, default=1.5,
+                        help="max spread across generation degradation ratios (default 1.5)")
+    parser.add_argument("--max-prefill-spread", type=float, default=2.0,
+                        help="max prefill TTFT spread (default 2.0)")
+    parser.add_argument("--no-baseline-after", "--no-post-baseline",
+                        action="store_false", dest="post_baseline",
+                        help="skip the second baseline phase")
+    parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--json", action="store_true", help="emit JSON after the table")
+    a = parser.parse_args(args)
+
+    if a.generations < 1:
+        parser.error("--generations must be >= 1")
+    if a.prefills < 0:
+        parser.error("--prefills must be >= 0")
+    if a.repeats < 1:
+        parser.error("--repeats must be >= 1")
+    if a.context_tokens < 1:
+        parser.error("prompt token counts must be >= 1")
+    if a.generation_seconds <= 0:
+        parser.error("--generation-seconds must be > 0")
+    if a.max_decode_tokens < 1:
+        parser.error("--max-decode-tokens must be >= 1")
+    if a.min_prefill_seconds <= 0:
+        parser.error("--min-prefill-seconds must be > 0")
+    if a.settle_ms < 0:
+        parser.error("--prefill-settle-ms must be >= 0")
+    if a.min_chunks < 1:
+        parser.error("--min-chunks must be >= 1")
+    if not 0 < a.min_decode_fraction <= 1:
+        parser.error("--min-decode-fraction must be > 0 and <= 1")
+
+    auto_prefill = a.prefill_tokens == "auto"
+    if auto_prefill:
+        prefill_tokens = _FAIRNESS_PREFILL_PILOT_TOKENS
+    else:
+        try:
+            prefill_tokens = int(a.prefill_tokens)
+        except ValueError:
+            parser.error("--prefill-tokens must be an integer or 'auto'")
+        if prefill_tokens < 1:
+            parser.error("--prefill-tokens must be >= 1")
+
+    base, key = _load_config()
+    mml = _bench_model_max_len(base, key, a.model)
+
+    sys.stdout.reconfigure(line_buffering=True)
+    print(f"Endpoint: {base}\nModel:    {a.model}"
+          + (f"  (max_model_len {mml})" if mml else ""))
+
+    warm = _bench_stream(
+        base, key, [{"role": "user",
+                     "content": _bench_build_prompt(a.context_tokens)}],
+        a.model, 32, a.timeout, True)
+    if warm.get("error"):
+        print(f"{RED}warmup ERR{RESET}: {warm['error']}")
+        return 1
+    warm_chunks = warm.get("chunks") or []
+    if len(warm_chunks) < a.min_chunks:
+        print(f"{RED}streaming preflight failed{RESET}: warmup returned "
+              f"{len(warm_chunks)} content chunks, need >= {a.min_chunks}. "
+              "A buffering proxy makes ITL meaningless.")
+        return 1
+
+    pilot_stats = None
+    if auto_prefill:
+        prefill_tokens, err = _size_prefill(
+            base, key, a.model, mml, a.min_prefill_seconds, a.timeout)
+        if err:
+            print(f"{RED}prefill sizing failed{RESET}: {err}")
+            return 1
+
+    print(f"Workload: {a.generations} generations x "
+          f"{a.generation_seconds:.1f}s decode, {a.prefills} prefills x "
+          f"{prefill_tokens} tokens, {a.repeats} repeat(s)")
+
+    generation_prompts = [_bench_build_prompt(a.context_tokens)
+                         for _ in range(a.generations)]
+    err = _warm_generation_prefixes(
+        base, key, a.model, generation_prompts, a.timeout)
+    if err:
+        print(f"{RED}generation prefix warmup failed{RESET}: {err}")
+        return 1
+
+    baselines = []
+    loaded_phases = []
+    for repeat in range(1, a.repeats + 1):
+        print(f"\n=== repeat {repeat}/{a.repeats} ===")
+        before = _fairness_phase(
+            base, key, a.model, "baseline", generation_prompts,
+            a.max_decode_tokens, 0, 0,
+            a.generation_seconds, a.timeout, a.settle_ms)
+        loaded = _fairness_phase(
+            base, key, a.model, "with-prefill", generation_prompts,
+            a.max_decode_tokens, a.prefills,
+            prefill_tokens, a.generation_seconds, a.timeout, a.settle_ms,
+            progress=True)
+        baselines.append(before)
+        loaded_phases.append(loaded)
+        phase_rows = [before, loaded]
+        if a.post_baseline:
+            after = _fairness_phase(
+                base, key, a.model, "baseline-after", generation_prompts,
+                a.max_decode_tokens, 0, 0,
+                a.generation_seconds, a.timeout, a.settle_ms)
+            baselines.append(after)
+            phase_rows.append(after)
+        _print_fairness_rows(phase_rows)
+
+    thresholds = {
+        "min_prefill_seconds": a.min_prefill_seconds,
+        "min_decode_seconds": a.generation_seconds * a.min_decode_fraction,
+        "max_itl_p50_ratio": a.max_itl_p50_ratio,
+        "max_itl_p95_ratio": a.max_itl_p95_ratio,
+        "min_decode_tps_ratio": a.min_decode_tps_ratio,
+        "max_generation_spread": a.max_generation_spread,
+        "max_prefill_spread": a.max_prefill_spread,
+    }
+    summary = _fairness_summary(baselines, loaded_phases, thresholds)
+
+    def fmt(value, suffix=""):
+        return f"{value:.2f}{suffix}" if value is not None else "n/a"
+
+    print("\nSummary")
+    print(f"  baseline p50 ITL:  {fmt(summary['baseline_itl_p50_ms'], ' ms')}")
+    print(f"  with-prefill p50 ITL: {fmt(summary['with_prefill_itl_p50_ms'], ' ms')}  "
+          f"ratio {fmt(summary['itl_p50_ratio'])} "
+          f"(<= {a.max_itl_p50_ratio:.2f})")
+    print(f"  baseline p95 ITL:  {fmt(summary['baseline_itl_p95_ms'], ' ms')}")
+    print(f"  with-prefill p95 ITL: {fmt(summary['with_prefill_itl_p95_ms'], ' ms')}  "
+          f"ratio {fmt(summary['itl_p95_ratio'])} "
+          f"(<= {a.max_itl_p95_ratio:.2f})")
+    print(f"  baseline decode:   {fmt(summary['baseline_decode_tps'], ' tok/s')}")
+    print(f"  with-prefill decode:  {fmt(summary['with_prefill_decode_tps'], ' tok/s')}  "
+          f"ratio {fmt(summary['decode_tps_ratio'])} "
+          f"(>= {a.min_decode_tps_ratio:.2f})")
+    print(f"  per-request spread:        {fmt(summary['generation_spread'])} "
+          f"(<= {a.max_generation_spread:.2f})")
+    print(f"  prefill TTFT:      "
+          + (", ".join(f"{v:.0f}ms" for v in summary["prefill_ttft_ms"])
+             or "n/a")
+          + f"  spread {fmt(summary['prefill_spread'])} "
+          f"(<= {a.max_prefill_spread:.2f})")
+    print(f"  prefill span:      "
+          + (", ".join(f"{v:.1f}s" for v in summary["prefill_span_s"])
+             or "n/a")
+          + f"  (>= {a.min_prefill_seconds:.1f}s)")
+    print(f"  containment:       "
+          + (", ".join(f"{v:+.2f}s" for v in summary["containment_margin_s"])
+             or "n/a")
+          + "  (>= 0 = generation ended before prefill)")
+    print(f"  decode window:     "
+          + (f"min {min(summary['decode_window_s']):.2f}s"
+             if summary["decode_window_s"] else "n/a")
+          + f"  (>= {a.generation_seconds * a.min_decode_fraction:.2f}s; "
+          "raise --max-decode-tokens if short)")
+    print(f"  generation prefix cache: "
+          + (f"min {min(summary['generation_prefix_cache_hit']):.2f}"
+             if summary["generation_prefix_cache_hit"] else "n/a")
+          + f" hit  (>= {_FAIRNESS_MIN_PREFIX_CACHE_HIT:.2f}; prefix warmup)")
+    print(f"  errors:            {summary['errors']}")
+    print(f"  result:            "
+          f"{GREEN + 'PASS' + RESET if summary['passed'] else RED + 'FAIL' + RESET}")
+
+    if a.json:
+        print()
+        print(json.dumps({
+            "model": a.model,
+            "config": {
+                "generations": a.generations,
+                "prefills": a.prefills,
+                "generation_seconds": a.generation_seconds,
+                "max_decode_tokens": a.max_decode_tokens,
+                "prefill_tokens": prefill_tokens,
+                "context_tokens": a.context_tokens,
+                "prefill_settle_ms": a.settle_ms,
+                "repeats": a.repeats,
+                "post_baseline": a.post_baseline,
+                "min_prefill_seconds": a.min_prefill_seconds,
+                "min_decode_fraction": a.min_decode_fraction,
+                        "max_itl_p50_ratio": a.max_itl_p50_ratio,
+                "max_itl_p95_ratio": a.max_itl_p95_ratio,
+                "min_decode_tps_ratio": a.min_decode_tps_ratio,
+            },
+            "pilot": pilot_stats,
+            "phases": baselines + loaded_phases,
+            "summary": summary,
+        }, indent=2))
+    return 0 if summary["passed"] else 1
+
+
 def cmd_batch(args):
     """Concurrent throughput/latency-under-load benchmark."""
     parser = argparse.ArgumentParser(
@@ -1514,8 +2175,8 @@ def main():
         return 0
     if (
         len(sys.argv) < 2
-        or sys.argv[1] not in ("chat", "bench", "batch", "models", "image", "smoke",
-                              "transcribe", "ocr")
+        or sys.argv[1] not in ("chat", "bench", "batch", "fairness", "models",
+                              "image", "smoke", "transcribe", "ocr")
     ):
         print(__doc__, file=sys.stderr)
         return 2
@@ -1534,6 +2195,8 @@ def main():
         return cmd_bench(rest)
     if sub == "batch":
         return cmd_batch(rest)
+    if sub == "fairness":
+        return cmd_fairness(rest)
     if sub == "transcribe":
         return cmd_transcribe(rest)
     if sub == "ocr":

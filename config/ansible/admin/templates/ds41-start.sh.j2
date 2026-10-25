@@ -32,7 +32,9 @@ TP_SIZE="${TP_SIZE:-4}"
 DCP_SIZE="${DCP_SIZE:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-4096}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
+LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-4096}"
+PREFILL_COMPUTE_SHARE="${PREFILL_COMPUTE_SHARE:-0.2}"
 GPU_UTIL="${GPU_UTIL:-0.95}"
 ENGRAM_TABLE_MEMORY="${ENGRAM_TABLE_MEMORY:-{{ ds41_engram_memory | default('disk') }}}"
 CACHE_DIR="${CACHE_DIR:-{{ ds41_cache_dir | default('/home/dev/.cache/ds41-r36') }}}"
@@ -81,7 +83,10 @@ podman run -d --name "$CONTAINER" \
   -v "$MODEL_HOST":/model:ro \
   -v "$CACHE_DIR/patches/deepseek_v41.py":/opt/glm53-flash/vllm/vllm/tokenizers/deepseek_v41.py:ro \
   -v "$CACHE_DIR":/cache \
-  "$IMAGE"
+  "$IMAGE" \
+  --long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD" \
+  --prefill-compute-share "$PREFILL_COMPUTE_SHARE" \
+  "$@"
 
 echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=$TP_SIZE max_model_len=$MAX_MODEL_LEN engram=$ENGRAM_TABLE_MEMORY"
 echo "  (existing ds4-dspark / ds4-infernal containers are untouched)"
