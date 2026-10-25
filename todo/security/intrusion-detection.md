@@ -7,6 +7,8 @@ only surface if a human read the logs. This item scopes an IDS that fits the
 existing stack (journald, Prometheus/Alertmanager, ntfy) instead of adding a
 separate SIEM control plane.
 
+Design: [`docs/design/intrusion-detection.md`](../../docs/design/intrusion-detection.md).
+
 ## Threat model
 
 Two classes of adversary, both in scope:
@@ -99,9 +101,10 @@ must not become a second, longer-lived access log.
 
 ## Work
 
-- Pick tools and justify against the no-prebuilt-binary rule: apt-packaged
-  (`auditd`, `suricata`, `zeek`, `falco` from a build playbook) or a
-  source-built `build-<name>.yml`. No `get_url`/`curl` installers.
+- Implement the design's Go-first stack: Tetragon per host, CrowdSec
+  local-only for log behaviour, and the in-repo Go `ids-forwarder`. Build from
+  source at pinned versions; no prebuilt binaries. Wazuh and the other C/C++
+  parsers are rejected as core sensors in the design.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.
