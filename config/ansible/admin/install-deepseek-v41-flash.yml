@@ -7,18 +7,17 @@
 # images. It requires TP4 (4× 96 GB RTX PRO 6000) and ~510 GB of NVMe.
 #
 # Model: deepseek-ai/DeepSeek-V4.1-Flash-1017 (2026-10-17 weights update).
-# Image: localinferencelab/vllm:jovian-judgement-community-20260912-r36 —
-# the B12X community runtime receipt-qualified for TP4/DCP1 with both RAM
-# and SSD Engram (see rtx6kpro/models/deepseek-v4.1-flash/r36). R37/R38
-# exist but only qualify RAM Engram; our target host has <189 GiB RAM
-# free, so we use the R36 SSD-qualified build.
+# Image: ghcr.io/local-inference-lab/vllm karmic-kraken stable channel —
+# the shared profile runner (PROFILE=ds41-flash). See
+# docs/inference/deepseek-v4.1-flash.md for the R36→KK lineage, the
+# digests, and what is qualified upstream vs by us (disk Engram is
+# functionally tested past R36 but has no repeated throughput benchmark
+# upstream; serving performance of the stable build is unqualified).
 #
-# Runtime profile (from the R36 compose/qualification):
-#   TP4/DCP1, DSpark K7, FP8 KV, 128K context, disk Engram, 4 max seqs.
-#   Our launcher raises the context cap to 512K and keeps the 4-sequence limit.
-#   The 1017 checkpoint shares config with the 0909 launch model, so the
-#   R36 image should load it, but it has NOT been independently qualified
-#   — qualification runs below are ours to execute.
+# Runtime profile (this deployment):
+#   TP4/DCP1, DSpark K7 adaptive, FP8 KV, 512K context, disk Engram,
+#   9 max seqs, 8192-token batch budget, prefill-compute-share 0.2,
+#   long-prefill-token-threshold 4096 (qualified fairness settings).
 #
 # Gating:
 #   Per-host `ds41_enabled: true` in private host_vars/<node>.yml opts in.
@@ -38,21 +37,21 @@
   hosts: nvidia
   become: yes
   vars:
-    # B12X community runtime, R36 — the SSD-Engram-qualified build.
-    # Digest from rtx6kpro/models/deepseek-v4.1-flash/r36/registry.json.
-    ds41_image: "docker.io/localinferencelab/vllm@sha256:23ab683d7ce32083f33c163df7dfe554b59aba75bbae8f5b8e4b5a2ef590209b"
-    ds41_image_tag: "docker.io/localinferencelab/vllm:jovian-judgement-community-20260912-r36"
+    # Karmic Kraken stable 20261020, digest-verified against the container
+    # release receipt (blackwell-llm-docker release karmic-kraken-…/…).
+    ds41_image: "ghcr.io/local-inference-lab/vllm@sha256:94887a58d4c003a06cb2d96ee5522eb7cea216838cfdad318076f9a08e2e762c"
+    ds41_image_tag: "ghcr.io/local-inference-lab/vllm:karmic-kraken-20261020"
     ds41_repo: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
     ds41_revision: "1bae0e1088993b9b82de08f59de5be5a34e42170"
     ds41_model_dir: "/home/dev/models/DeepSeek-V4.1-Flash"
-    # The R36 entrypoint ignores SERVED_NAME and always serves the model as
-    # `DeepSeek-V4.1-Flash` (derived from the checkpoint path). Register it
-    # under our lowercase routing key; local-ai-proxy forwards by the key.
+    # The KK profile serves `DeepSeek-V4.1-Flash` by default; the launcher
+    # passes --served-model-name so the gateway can register it under our
+    # lowercase routing key.
     ds41_served_name: "deepseek-v4_1-flash"
     ds41_port: 9218
-    ds41_cache_dir: "/home/dev/.cache/ds41-r36"
-    # Engram placement: disk (default) for hosts without 189 GiB spare RAM.
-    # Override per-host with ds41_engram_memory: "ram" on larger hosts.
+    ds41_cache_dir: "/home/dev/.cache/ds41-kk"
+    # Engram placement: disk for hosts without 189 GiB spare RAM. Override
+    # per-host with ds41_engram_memory: "ram" on larger hosts.
     ds41_engram_memory: "disk"
 
   tasks:

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Launch DeepSeek-V4.1-Flash on the B12X R36 image.
+# Launch DeepSeek-V4.1-Flash on the Karmic Kraken profile runtime.
 # Run as the dev user:
 #
 #   ~/bin/ds41-start.sh
 #
-# This is a NEW alongside container (ds41-flash on port 9218). It does NOT
-# touch the existing ds4-dspark container or its GPUs. Requires 4 GPUs
-# configured via ds41_gpus in private host_vars.
+# This is an alongside container (ds41-flash on port 9218). It does NOT
+# touch the existing ds4-dspark / ds4-infernal containers or their GPUs.
+# Requires 4 GPUs configured via ds41_gpus in private host_vars.
 #
-# Profile mirrors the R36 qualification: TP4/DCP1, DSpark K7, FP8 KV,
-# disk Engram, 4 max seqs, no generic CPU offload. The R36 receipt uses
-# 128K context; this launcher defaults to a 512K cap.
+# Uses the KK shared profile runner (PROFILE=ds41-flash) instead of the
+# retired per-model serve-ds41-jovian.sh entrypoint. Deployment choices
+# that differ from the profile defaults are declared explicitly here:
+# disk Engram, 512K context, 9 slots, 8192-token batch budget, and the
+# qualified fairness flags (prefill-compute-share 0.2, chunk cap 4096).
 set -euo pipefail
 
 IMAGE="${IMAGE:-{{ ds41_image }}}"
@@ -27,17 +29,17 @@ ngpu=0
 for _g in $GPUS; do ngpu=$((ngpu + 1)); done
 [ "$ngpu" -eq 4 ] || { echo "$CONTAINER requires exactly 4 GPUs, got: $GPUS" >&2; exit 1; }
 
-# ---- R36 profile defaults ----
+# ---- KK profile overrides (deployment choices) ----
 TP_SIZE="${TP_SIZE:-4}"
 DCP_SIZE="${DCP_SIZE:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-9}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
 LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-4096}"
 PREFILL_COMPUTE_SHARE="${PREFILL_COMPUTE_SHARE:-0.2}"
 GPU_UTIL="${GPU_UTIL:-0.95}"
 ENGRAM_TABLE_MEMORY="${ENGRAM_TABLE_MEMORY:-{{ ds41_engram_memory | default('disk') }}}"
-CACHE_DIR="${CACHE_DIR:-{{ ds41_cache_dir | default('/home/dev/.cache/ds41-r36') }}}"
+CACHE_DIR="${CACHE_DIR:-{{ ds41_cache_dir | default('/home/dev/.cache/ds41-kk') }}}"
 MEM="${MEM:-120g}"
 
 # pre-flight
@@ -46,19 +48,15 @@ podman image exists "$IMAGE" \
 [ -f "$MODEL_HOST/config.json" ] && [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
   || { echo "checkpoint missing at $MODEL_HOST - run: ~/bin/ds41-setup.sh --download" >&2; exit 1; }
 
+# The cache dir must be writable by the rootless container (dev uid).
 mkdir -p "$CACHE_DIR"
 dev_args=()
 for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
 cvd="$(seq -s, 0 $((ngpu - 1)))"
 
-# The R36 entrypoint expects the checkpoint at /model.
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
-# The patched tokenizer file (cache_dir/patches) accepts Responses API
-# input_text/output_text part types the stock deepseek_v41 normalizer
-# rejects. It is generated from the image's own file by ds41-setup.sh.
 podman run -d --name "$CONTAINER" \
-  --entrypoint /usr/local/bin/serve-ds41-jovian.sh \
   "${dev_args[@]}" \
   --network=host \
   --ipc=host --init \
@@ -67,28 +65,29 @@ podman run -d --name "$CONTAINER" \
   --ulimit stack=67108864:67108864 \
   --memory "$MEM" --memory-swap "$MEM" \
   -e CUDA_VISIBLE_DEVICES="$cvd" \
-  -e MODEL_PATH=/model \
+  -e PROFILE=ds41-flash \
+  -e HARDWARE_PROFILE=rtx-pro-6000-pcie \
+  -e MODEL=/model \
   -e HOST=0.0.0.0 \
   -e PORT="$PORT" \
-  -e TP_SIZE="$TP_SIZE" \
-  -e DCP_SIZE="$DCP_SIZE" \
+  -e TP="$TP_SIZE" \
+  -e DCP="$DCP_SIZE" \
   -e MAX_MODEL_LEN="$MAX_MODEL_LEN" \
   -e MAX_NUM_SEQS="$MAX_NUM_SEQS" \
   -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
   -e GPU_MEMORY_UTILIZATION="$GPU_UTIL" \
   -e ENGRAM_TABLE_MEMORY="$ENGRAM_TABLE_MEMORY" \
-  -e SERVED_MODEL_NAME="$SERVED_NAME" \
   -e HF_HUB_OFFLINE=1 \
   -e TRANSFORMERS_OFFLINE=1 \
   -v "$MODEL_HOST":/model:ro \
-  -v "$CACHE_DIR/patches/deepseek_v41.py":/opt/glm53-flash/vllm/vllm/tokenizers/deepseek_v41.py:ro \
   -v "$CACHE_DIR":/cache \
   "$IMAGE" \
-  --long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD" \
+  --served-model-name "$SERVED_NAME" \
   --prefill-compute-share "$PREFILL_COMPUTE_SHARE" \
+  --long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD" \
   "$@"
 
-echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=$TP_SIZE max_model_len=$MAX_MODEL_LEN engram=$ENGRAM_TABLE_MEMORY"
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=$TP_SIZE max_model_len=$MAX_MODEL_LEN slots=$MAX_NUM_SEQS engram=$ENGRAM_TABLE_MEMORY"
 echo "  (existing ds4-dspark / ds4-infernal containers are untouched)"
 echo "  watch:  podman logs -f $CONTAINER"
 echo "  ready:  curl -fsS http://127.0.0.1:$PORT/health"

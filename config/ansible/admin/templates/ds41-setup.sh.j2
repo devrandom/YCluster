@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Stage the DeepSeek-V4.1-Flash-1017 checkpoint and pull the B12X R36 image.
-# Run as the dev user:
+# Stage the DeepSeek-V4.1-Flash-1017 checkpoint and pull the Karmic Kraken
+# profile image. Run as the dev user:
 #
 #   ~/bin/ds41-setup.sh --download     # pull image + checkpoint (~510 GB)
 #   ~/bin/ds41-setup.sh                # image pull + checkpoint verify
 #   ~/bin/ds41-setup.sh --verify-only  # just verify staged checkpoint
 #
-# Image is digest-pinned from the rtx6kpro R36 qualification receipt.
-# Checkpoint is pinned to the 1017 revision (config-identical to 0909).
+# Image is digest-pinned from the blackwell-llm-docker container release
+# receipt. Checkpoint is pinned to the 1017 revision (config-identical to
+# 0909). The R36-era tokenizer patch is gone: the KK tokenizer accepts
+# Responses API input_text/output_text part types upstream.
 set -eu
 
 IMAGE="{{ ds41_image }}"
@@ -22,7 +24,7 @@ while [ $# -gt 0 ]; do
     --download)     action="download"; shift ;;
     --verify-only)  action="verify-only"; shift ;;
     -h|--help)
-      sed -n '2,9p' "$0"
+      sed -n '2,11p' "$0"
       exit 0
       ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
@@ -31,23 +33,6 @@ done
 
 command -v podman >/dev/null \
   || { echo "podman missing - run admin/setup-gpu-podman.yml first" >&2; exit 1; }
-
-# Generate the tokenizer patch: the stock deepseek_v41 normalizer rejects
-# Responses API input_text/output_text part types (Codex sends these).
-# Extract the file from the image itself and allow those types as text, so
-# the patch always matches the image it ships with.
-PATCH_DIR="{{ ds41_cache_dir }}/patches"
-if [ "$action" != "verify-only" ]; then
-  mkdir -p "$PATCH_DIR"
-  echo "== generating tokenizer patch -> $PATCH_DIR/deepseek_v41.py =="
-  podman run --rm --entrypoint /bin/cat "$IMAGE" \
-    /opt/glm53-flash/vllm/vllm/tokenizers/deepseek_v41.py \
-    > "$PATCH_DIR/deepseek_v41.py"
-  sed -i 's/if part_type == "text":/if part_type in ("text", "input_text", "output_text"):/' \
-    "$PATCH_DIR/deepseek_v41.py"
-  grep -q 'input_text' "$PATCH_DIR/deepseek_v41.py" \
-    || { echo "tokenizer patch not applied - upstream file changed?" >&2; exit 1; }
-fi
 
 if [ "$action" != "verify-only" ]; then
   echo "== pull $IMAGE_TAG (digest $IMAGE) =="

@@ -783,7 +783,8 @@ def _bench_model_max_len(base, key, model):
 def _bench_stream(base, key, messages, model, gen, timeout,
                    collect_chunks=False, first_token_event=None,
                    deadline_s=None, log_label=None, log_t0=None,
-                   progress_label=None, progress_interval_s=None):
+                   progress_label=None, progress_interval_s=None,
+                   temperature=0.0):
     """Stream a completion. Returns timings + usage, or {'error': ...}.
 
     With collect_chunks, returns ``chunks`` as (monotonic_time, text_length)
@@ -803,7 +804,7 @@ def _bench_stream(base, key, messages, model, gen, timeout,
         "model": model,
         "messages": messages,
         "max_tokens": gen,
-        "temperature": 0.0,
+        "temperature": temperature,
         "stream": True,
         "stream_options": {"include_usage": True},
         # ignore_eos: force exactly `gen` decode steps regardless of what the
@@ -1111,10 +1112,10 @@ def _batch_shared_prompt(shared_prefix):
     return shared_prefix + f"\n[leaf {secrets.token_hex(4)}]"
 
 
-def _batch_sample(base, key, model, prompt, gen, timeout):
+def _batch_sample(base, key, model, prompt, gen, timeout, temperature=0.0):
     """One concurrent load request. Returns timings or {'error': ...}."""
     r = _bench_stream(base, key, [{"role": "user", "content": prompt}],
-                      model, gen, timeout)
+                      model, gen, timeout, temperature=temperature)
     if r.get("error"):
         return {"error": r["error"]}
     usage = r["usage"] or {}
@@ -1138,14 +1139,15 @@ def _batch_sample(base, key, model, prompt, gen, timeout):
 
 
 def _batch_round(base, key, model, prompt_tokens, gen, timeout, concurrency,
-                share_pct, shared_prefix, round_no):
+                share_pct, shared_prefix, round_no, temperature=0.0):
     n_shared = round(concurrency * share_pct / 100)
     n_cold = concurrency - n_shared
     prompts = ([_batch_shared_prompt(shared_prefix) for _ in range(n_shared)]
                + [_bench_build_prompt(prompt_tokens) for _ in range(n_cold)])
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(_batch_sample, base, key, model, p, gen, timeout)
+        futures = [pool.submit(_batch_sample, base, key, model, p, gen, timeout,
+                               temperature)
                    for p in prompts]
         samples = [f.result() for f in futures]
     wall = time.monotonic() - t0
@@ -1183,12 +1185,13 @@ def _batch_aggregate_decode_tps(rows):
 
 
 def _batch_run(base, key, model, prompt_tokens, gen, timeout, concurrency,
-              rounds, share_pct, mml=None):
+              rounds, share_pct, mml=None, temperature=0.0):
     shared_prefix = _bench_build_prompt(prompt_tokens) if share_pct else None
     print(f"Endpoint: {base}\nModel:    {model}"
           + (f"  (max_model_len {mml})" if mml else "")
           + f"\nPrompt:   ~{prompt_tokens} tokens   Decode: {gen} tokens"
           + f"   Concurrency: {concurrency}"
+          + f"   Temp: {temperature}"
           + f"   Cache: {share_pct}% shared / {100 - share_pct}% cold"
           + f"   Rounds: {rounds}\n")
     if rounds:
@@ -1205,7 +1208,8 @@ def _batch_run(base, key, model, prompt_tokens, gen, timeout, concurrency,
     t_all0 = time.monotonic()
     for round_no in range(1, rounds + 1):
         row = _batch_round(base, key, model, prompt_tokens, gen, timeout,
-                          concurrency, share_pct, shared_prefix, round_no)
+                          concurrency, share_pct, shared_prefix, round_no,
+                          temperature)
         rows.append(row)
         print(f"  {row['round']:>5}  {row['requests']:>3}  {row['ok']:>3}  "
               f"{row['requests'] - row['ok']:>3}  {row['wall_s']:6.1f}s  "
@@ -1863,6 +1867,11 @@ def cmd_batch(args):
         "--rounds", type=int, default=3,
         help="how many concurrent rounds to run (default 3)",
     )
+    parser.add_argument(
+        "--temp", type=float, default=1.0,
+        help="sampling temperature for load requests (default 1; 0 exercises "
+             "greedy decode but interacts badly with probabilistic drafting)",
+    )
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--json", action="store_true", help="emit JSON after the table")
     a = parser.parse_args(args)
@@ -1874,6 +1883,8 @@ def cmd_batch(args):
         parser.error("--concurrency values must be >= 1")
     if a.rounds < 1:
         parser.error("--rounds must be >= 1")
+    if not 0 <= a.temp <= 2:
+        parser.error("--temp must be 0..2")
     if a.prompt_tokens < 1:
         parser.error("--prompt-tokens must be >= 1")
     if a.gen < 1:
@@ -1895,7 +1906,8 @@ def cmd_batch(args):
         if len(concurrencies) > 1:
             print(f"=== concurrency {concurrency} ===")
         results.append(_batch_run(base, key, a.model, a.prompt_tokens, a.gen,
-                                  a.timeout, concurrency, a.rounds, a.cache, mml))
+                                  a.timeout, concurrency, a.rounds, a.cache, mml,
+                                  temperature=a.temp))
     if a.json:
         print()
         payload = results[0] if len(results) == 1 else results
