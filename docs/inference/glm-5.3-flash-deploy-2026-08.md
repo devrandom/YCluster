@@ -248,6 +248,17 @@ exact GPUs/ports live in host_vars, not here):
 - **KDA conv-state layout pins** (PDL/DS) matter for correctness on SM12x; the
   A1 image bakes them — don't strip the image's baked env.
 
+## Scheduler fairness
+
+SGLang schedules prefill and decode in separate batches here; mixed chunk is
+rejected with speculative decoding. If generation slows while a long prefill is
+active, see [prefill-decode-fairness.md](prefill-decode-fairness.md). The closest
+controls are `--prefill-decode-interval` (default `0`, disabled),
+`--chunked-prefill-size`/`--max-prefill-tokens` (both bound the prefill batch),
+and `--prefill-max-requests`. Keep `--max-running-requests` equal to
+`--cuda-graph-max-bs-decode`; exceeding the captured graph shape is an
+eager-fallback cliff.
+
 ## Gotchas / troubleshooting
 
 | Symptom / risk | Cause | Handling |

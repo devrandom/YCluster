@@ -60,6 +60,18 @@ IOMMU off is required, target the all-passthrough four-GPU host instead. See
 - `config/ansible/admin/templates/ds41-start.sh.j2` — manual container launch/update
 - `config/ansible/admin/templates/ds41-flash.service.j2` — systemd boot-start unit
 
+## Scheduler fairness
+
+Chunked prefill shares the engine step with decode. If generation slows while
+a long prefill is active, see
+[prefill-decode-fairness.md](prefill-decode-fairness.md). The R36 fork exposes
+`--prefill-compute-share`, `--prefill-schedule-interval`,
+`--long-prefill-token-threshold`, and `--max-parallel-prefills`; its defaults
+leave them off. Long-lived requests can also fill every `MAX_NUM_SEQS` slot while
+KV usage stays low, which is an admission-queue problem, not a prefill-compute
+problem. Bound `MAX_NUM_SEQS` by worst-case KV (`KV pool / MAX_MODEL_LEN`) and
+prefer a gateway per-user concurrency cap over a manual ACL deny.
+
 ## Deploy checklist
 
 1. In private host_vars, set `ds41_enabled: true` and `ds41_gpus: "<4 CDI indices>"` on the target node.

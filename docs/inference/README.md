@@ -25,6 +25,13 @@ deployment-agnostic — no node names, IPs, or account specifics.
   pinning MinerU to one host-visible GPU and running Nemotron at a lowered
   `--gpu-memory-utilization` so the two share one card without OOM.
 
+## Serving operations
+
+- [Prefill/decode fairness on single-backend LLM servers](prefill-decode-fairness.md)
+  — why generation slows while a prefill shares the engine step, why long
+  requests can fill every admission slot, and which vLLM/SGLang/gateway controls
+  apply. Includes the token-share-vs-compute-share measurement pitfall.
+
 ## Design / remediation notes
 
 - [Reproducible build of the b12x SM120 vLLM image](b12x-reproducible-build-design-2026-06.md)
