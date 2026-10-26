@@ -13,7 +13,7 @@
 # delivered to ids-forwarder's localhost HTTP receiver via the
 # notification-http plugin.
 - name: Install CrowdSec
-  hosts: "{{ crowdsec_target | default('linux_nodes') }}"
+  hosts: "{{ crowdsec_target | default('managed') }}"
   become: yes
   vars:
     crowdsec_buildhost_path: /opt/src/crowdsec
@@ -39,7 +39,7 @@
 
     - name: Check for built binaries on the buildhost
       stat:
-        path: "{{ crowdsec_buildhost_path }}/crowdsec"
+        path: "{{ crowdsec_buildhost_path }}/cmd/crowdsec/crowdsec"
       register: build_artifacts
       delegate_to: "{{ buildhost }}"
       run_once: true
@@ -78,12 +78,29 @@
         group: root
         mode: '0755'
 
+    - name: Create plugin directory
+      file:
+        path: /usr/local/lib/crowdsec/plugins
+        state: directory
+        owner: crowdsec
+        group: crowdsec
+        mode: '0755'
+
+    - name: Create empty simulation file
+      # crowdsec fails to start if simulation_path is missing.
+      copy:
+        content: "{}\n"
+        dest: /etc/crowdsec/simulation.yaml
+        owner: crowdsec
+        group: crowdsec
+        mode: '0644'
+
     - name: Install notification-http plugin
       copy:
         src: "{{ build_cache_dir }}/notification-http"
         dest: /usr/local/lib/crowdsec/plugins/notification-http
-        owner: root
-        group: root
+        owner: crowdsec
+        group: crowdsec
         mode: '0755'
       notify: restart crowdsec
 
@@ -204,6 +221,29 @@
         enabled: yes
         state: started
         daemon_reload: yes
+
+    - name: Register the local agent with the LAPI
+      # Creates /etc/crowdsec/local_api_credentials.yaml. Ownership is
+      # fixed below because crowdsec runs as the crowdsec user but the
+      # DB/credentials are created as root by this command.
+      command:
+        cmd: "cscli machines add {{ inventory_hostname }}-local --auto"
+        creates: "{{ crowdsec_config_dir }}/local_api_credentials.yaml"
+      notify: restart crowdsec
+
+    - name: Fix ownership of agent credentials
+      file:
+        path: "{{ crowdsec_config_dir }}/local_api_credentials.yaml"
+        owner: crowdsec
+        group: crowdsec
+        mode: '0640'
+
+    - name: Fix ownership of agent state
+      file:
+        path: /var/lib/crowdsec/data
+        owner: crowdsec
+        group: crowdsec
+        recurse: yes
 
   handlers:
     - name: restart crowdsec

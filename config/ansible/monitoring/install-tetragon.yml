@@ -11,11 +11,11 @@
 #   - JSON events to /var/log/tetragon/tetragon.log (read by ids-forwarder)
 #   - policies pinned from config/ansible/app/files/tetragon-policies/
 - name: Install Tetragon
-  hosts: "{{ tetragon_target | default('linux_nodes') }}"
+  hosts: "{{ tetragon_target | default('managed') }}"
   become: yes
   vars:
     tetragon_buildhost_path: /opt/src/tetragon/install
-    tetragon_conf_dir: /etc/tetragon.conf.d
+    tetragon_conf_dir: /etc/tetragon
     tetragon_policy_dir: /etc/tetragon.d
     tetragon_log_dir: /var/log/tetragon
   tasks:
@@ -64,7 +64,7 @@
       # The build play packs install/bpf/ into a tarball so the whole
       # directory transfers as one fetch.
       command:
-        cmd: "tar -czf {{ buildhost }}-tetragon-bpf.tar.gz -C {{ tetragon_buildhost_path }} bpf"
+        cmd: "tar -czf {{ tetragon_buildhost_path }}/tetragon-bpf.tar.gz -C {{ tetragon_buildhost_path }}/bpf/objs ."
       delegate_to: "{{ buildhost }}"
       run_once: true
       register: tar_result
@@ -72,7 +72,7 @@
 
     - name: Fetch eBPF tarball to controller
       fetch:
-        src: "{{ tetragon_buildhost_path }}/../tetragon-bpf.tar.gz"
+        src: "{{ tetragon_buildhost_path }}/tetragon-bpf.tar.gz"
         dest: "{{ build_cache_dir }}/"
         flat: yes
       delegate_to: "{{ buildhost }}"
@@ -109,7 +109,6 @@
         dest: /var/lib/tetragon/
         owner: root
         group: root
-        mode: preserve
       notify: restart tetragon
 
     - name: Create config drop-in directory
@@ -121,9 +120,12 @@
         mode: '0755'
 
     - name: Render observe-only config
+      # Tetragon reads /etc/tetragon/tetragon.yaml via viper; the
+      # --config-dir drop-in mechanism merges raw file contents, not YAML
+      # keys, so it cannot be used for key/value settings.
       template:
         src: tetragon.yaml.j2
-        dest: /etc/tetragon.conf
+        dest: /etc/tetragon/tetragon.yaml
         owner: root
         group: root
         mode: '0644'

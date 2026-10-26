@@ -5,7 +5,7 @@ name: ycluster/nginx-logs
 author: ycluster
 description: "Parse nginx combined-format access logs into http_access-log events"
 filter: "evt.Line.Labels.type == 'nginx'"
-onsuccess: continue_stage
+onsuccess: continue
 nodes:
   - grok:
       pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status:int} %{NUMBER:bytes:int} "%{NOTSPACE:referer}" "%{NOTSPACE:user_agent}"'
@@ -20,6 +20,6 @@ nodes:
       - parsed: verb
         expression: evt.Parsed.verb
       - parsed: file_name
-        expression: "evt.Parsed.request.split(' ')[1] if ' ' in evt.Parsed.request else evt.Parsed.request"
+        expression: "split(evt.Parsed.request, '?')[0]"
       - parsed: static_ressource
-        expression: "evt.Parsed.request matches '.*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$' ? 'false' : 'true'"
+        expression: 'evt.Parsed.request matches ".*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$" ? "false" : "true"'

@@ -7,22 +7,20 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-Group=root
-ExecStart=/usr/local/bin/tetragon --config-dir /etc/tetragon.conf.d
+# Files created by tetragon (event log) get this group so the
+# ids-forwarder user can read them.
+Group=tetragon
+ExecStart=/usr/local/bin/tetragon --health-server-address=127.0.0.1:6790
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=tetragon
 
 # Tetragon needs broad privileges to attach eBPF programs and read
-# kernel state, but we still lock down the filesystem and capabilities
-# as far as it allows.
-AmbientCapabilities=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
+# kernel state (bpffs, tracefs, BTF). Run as root with full caps:
+# this systemd mis-translates the CAP_BPF/CAP_PERFMON names, so a
+# restricted CapabilityBoundingSet drops exactly the caps the sensor
+# needs (verified: it granted MAC_* instead).
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ReadOnlyPaths=/sys/kernel/btf/vmlinux /sys/kernel/debug /etc/tetragon.d
-ReadWritePaths=/var/log/tetragon /var/run/tetragon
 
 [Install]
 WantedBy=multi-user.target

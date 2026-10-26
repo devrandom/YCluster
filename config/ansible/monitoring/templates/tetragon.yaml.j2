@@ -10,16 +10,20 @@
 # disk usage stays bounded (retention matches the nginx/SSH access-log
 # window per the design's IP-retention constraint).
 
-# Serve gRPC on a unix socket only. Do not set --server-address (TCP).
-server-address: /var/run/tetragon/tetragon.sock
+# Serve gRPC on a unix socket only (proto prefix is required).
+server-address: unix:///var/run/tetragon/tetragon.sock
 
 # Metrics on loopback only; scraped by the existing Prometheus.
-metrics-address: 127.0.0.1:2112
+metrics-server: 127.0.0.1:2112
+# Default health port :6789 collides with the Ceph monitor.
+health-server-address: 127.0.0.1:6790
 enable-event-metrics: false
 
 # Export JSON events for ids-forwarder to consume.
 export-filename: /var/log/tetragon/tetragon.log
-export-allowlist: '{"event_set":["PROCESS_EXEC","PROCESS_EXIT","PROCESS_KPROBE","PROCESS_CONNECT"]}'
+# Group-readable so ids-forwarder (member of the tetragon group) can tail.
+export-file-perm: 640
+export-allowlist: '{"event_set":["PROCESS_EXEC","PROCESS_EXIT","PROCESS_KPROBE"]}'
 export-denylist: ''
 
 # Do not include raw file contents or network payloads in events.

@@ -19,9 +19,12 @@
     tetragon_build_dir: "/opt/src/tetragon"
     tetragon_repo_url: "https://github.com/cilium/tetragon.git"
     # v1.7.1 — see docs/design/intrusion-detection.md "Component survey".
-    tetragon_repo_sha: "417c9e0db0cdf1ac872876426ab764063aa293f5"
+    # Commit SHA of the v1.7.1 release, not the annotated tag object SHA
+    # (417c9e0d...), which git dereferences on checkout.
+    tetragon_repo_sha: "99ca93d98710b98a42551bf3c12613e32888885d"
     tetragon_install_dir: "/opt/src/tetragon/install"
     tetragon_version: "1.7.1"
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
   tasks:
     - name: Install build dependencies (go, git, clang, llvm, kernel headers)
       apt:
@@ -88,6 +91,14 @@
       register: go_build
       changed_when: go_build.rc == 0
 
+    - name: Stage eBPF objects into the install dir
+      # Upstream layout: bpf/objs/*.o under the install root. The install
+      # play tars install/bpf and unpacks it as /var/lib/tetragon/bpf.
+      shell:
+        cmd: "mkdir -p {{ tetragon_install_dir }}/bpf/objs && cp bpf/objs/*.o {{ tetragon_install_dir }}/bpf/objs/"
+        chdir: "{{ tetragon_build_dir }}"
+      changed_when: true
+
     - name: Collect built artifacts into the install dir
       copy:
         src: "{{ item }}"
@@ -97,7 +108,6 @@
       loop:
         - "{{ tetragon_build_dir }}/tetragon"
         - "{{ tetragon_build_dir }}/tetra"
-        - "{{ tetragon_build_dir }}/install/bpf"
 
     - name: Verify artifacts exist
       stat:
@@ -106,7 +116,7 @@
       loop:
         - "{{ tetragon_install_dir }}/tetragon"
         - "{{ tetragon_install_dir }}/tetra"
-        - "{{ tetragon_install_dir }}/bpf/bpf_process_exec.o"
+        - "{{ tetragon_install_dir }}/bpf/objs/bpf_execve_event.o"
       failed_when: not artifact_stat.stat.exists
       loop_control:
         label: "{{ item }}"
