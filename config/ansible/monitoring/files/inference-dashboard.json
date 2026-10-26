@@ -606,23 +606,39 @@
       ]
     },
     {
-      "title": "Requests by model/backend/status",
+      "title": "Request rate by target/status",
       "type": "table",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 22},
       "id": 9,
+      "description": "Non-zero 5m request rates grouped by model@backend and HTTP status. Idle label combinations are omitted.",
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
-          "decimals": 3,
           "custom": {"align": "auto", "cellOptions": {"type": "auto"}}
-        }
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "Rate"}, "properties": [
+            {"id": "unit", "value": "reqps"},
+            {"id": "decimals", "value": 3}
+          ]},
+          {"matcher": {"id": "byName", "options": "Status"}, "properties": [
+            {"id": "unit", "value": "none"},
+            {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+            {"id": "mappings", "value": [{"type": "value", "options": {
+              "200": {"color": "green", "text": "200"},
+              "400": {"color": "orange", "text": "400"},
+              "404": {"color": "orange", "text": "404"},
+              "500": {"color": "red", "text": "500"},
+              "transport_error": {"color": "purple", "text": "transport_error"}
+            }}]}
+          ]}
+        ]
       },
       "options": {"showHeader": true, "footer": {"show": false}, "sortBy": [{"displayName": "Rate", "desc": true}]},
       "pluginVersion": "10",
       "targets": [
         {
-          "expr": "sum by (model, backend, status) (rate(local_ai_proxy_requests_total[5m]))",
+          "expr": "label_join(label_replace(sum by (model, backend, status) (rate(local_ai_proxy_requests_total[5m])) > 0, \"backend\", \"$1\", \"backend\", \"https?://(.+)\"), \"target\", \" @ \", \"model\", \"backend\")",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -630,9 +646,12 @@
         }
       ],
       "transformations": [
+        {"id": "labelsToFields", "options": {"mode": "columns"}},
+        {"id": "merge", "options": {}},
         {"id": "organize", "options": {
-          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "cluster": true},
-          "renameByName": {"model": "Model", "backend": "Backend", "status": "Status", "Value": "Rate"}
+          "excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "cluster": true, "model": true, "backend": true},
+          "renameByName": {"target": "Target", "status": "Status", "Value": "Rate"},
+          "indexByName": {"target": 0, "status": 1, "Value": 2}
         }}
       ]
     }
