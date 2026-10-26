@@ -175,6 +175,27 @@ echo u | sudo tee /proc/sysrq-trigger   # remount read-only
 echo b | sudo tee /proc/sysrq-trigger   # reboot now
 ```
 
+### vfio-pci D3cold wake noise from Ansible fact gathering
+
+On VM hosts where all NVIDIA GPUs are bound to `vfio-pci` and
+runtime-suspended, Ansible fact gathering (`setup` with
+`gather_subset=all`) can log repeated:
+
+```
+vfio-pci 0000:c1:00.0: Unable to change power state from D3cold to D0, device inaccessible
+```
+
+Root cause: the custom fact `admin/files/scripts/gpu.fact` runs
+`lspci -n`, which reads PCI config space and wakes the suspended vfio
+device. The wake fails (the device stays in D3cold), the kernel logs the
+warning, and both GPU and audio functions remain suspended.
+
+This is harmless log noise when no VM currently has the GPU assigned.
+Fix is to switch `gpu.fact` to sysfs-based detection (reading `vendor`,
+`class`, and the `driver` symlink under `/sys/bus/pci/devices/`) instead
+of `lspci`. Forcing `power/control` to `on` on the vfio devices also
+suppresses it, at the cost of higher idle power.
+
 ### Why not driverctl
 
 driverctl binds `vfio-pci` by **device-id** (`new_id`). Every GPU in
