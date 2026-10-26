@@ -32,7 +32,7 @@ spec:
       selectors:
         - matchArgs:
             - index: 0
-              operator: "MatchPathSuffix"
+              operator: "Postfix"
               values:
                 - ".ko"
           matchActions:

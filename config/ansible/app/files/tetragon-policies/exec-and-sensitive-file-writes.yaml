@@ -2,10 +2,12 @@
 # Pinned from docs/design/intrusion-detection.md "Detection content".
 #
 # Observe-only: every hook uses `post` (no `notifyEnforcer`).
-# Scope: watch execs of shells and package managers, plus writes to
-# /etc and systemd unit paths. High-volume but cheap to evaluate.
+# Scope: writes to /etc and systemd unit paths. Shell and
+# package-manager execs are already exported as process_exec events by
+# the base sensor; the forwarder filters on binary names there
+# (`exec` is not a valid TracingPolicy field in v1.7.1).
 apiVersion: cilium.io/v1alpha1
-kind: TracingPolicyNamespaced
+kind: TracingPolicy
 metadata:
   name: exec-and-sensitive-file-writes
 spec:
@@ -18,36 +20,28 @@ spec:
         - index: 1
           type: "int"
       selectors:
+          # MAY_WRITE (2) must be set in the permission mask: without
+          # this the hook fires on every read of /etc (health checks
+          # read /etc every second -> hundreds of thousands of events).
         - matchArgs:
             - index: 0
-              operator: "MatchPathPrefix"
+              operator: "Prefix"
               values:
                 - "/etc/"
+            - index: 1
+              operator: "Mask"
+              values:
+                - "2"
           matchActions:
             - action: Post
-    - call: "security_file_permission"
-      syscall: false
-      args:
-        - index: 0
-          type: "file"
-        - index: 1
-          type: "int"
-      selectors:
         - matchArgs:
             - index: 0
-              operator: "MatchPathPrefix"
+              operator: "Prefix"
               values:
                 - "/usr/lib/systemd/system/"
+            - index: 1
+              operator: "Mask"
+              values:
+                - "2"
           matchActions:
             - action: Post
-  exec:
-    matchPaths:
-      - path: "/usr/bin/bash"
-      - path: "/usr/bin/sh"
-      - path: "/usr/bin/dash"
-      - path: "/usr/bin/zsh"
-      - path: "/usr/bin/fish"
-      - path: "/usr/bin/apt"
-      - path: "/usr/bin/apt-get"
-      - path: "/usr/bin/dpkg"
-      - path: "/usr/bin/snap"

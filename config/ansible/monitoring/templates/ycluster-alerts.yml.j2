@@ -1042,3 +1042,34 @@ groups:
         annotations:
           summary: "Hosting balance collector stale on {{ $labels.node }}"
           description: "hosting_balance.prom on {{ $labels.node }} has not been refreshed in over 30m; check hosting-balance-collector.service/timer."
+
+      # IDS coverage — a stopped sensor is a silent coverage gap. The
+      # forwarder also exposes ids_forwarder_up and queue metrics; alert
+      # on the scrape target so a crashed service is caught the same way
+      # for all three components. See docs/design/intrusion-detection.md.
+      - alert: IdsForwarderDown
+        expr: up{job="ids-forwarder"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS forwarder down on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} has been unreachable for 5m; Tetragon and CrowdSec events are not being forwarded from that node."
+
+      - alert: TetragonDown
+        expr: up{job="tetragon"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tetragon down on {{ $labels.node }}"
+          description: "Tetragon on {{ $labels.node }} has been unreachable for 5m; host-level eBPF detection is not running there."
+
+      - alert: CrowdsecDown
+        expr: up{job="crowdsec"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CrowdSec down on {{ $labels.node }}"
+          description: "CrowdSec on {{ $labels.node }} has been unreachable for 5m; log-based detection (sshd/nginx) is not running there."

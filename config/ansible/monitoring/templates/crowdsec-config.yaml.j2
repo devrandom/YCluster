@@ -42,7 +42,7 @@ api:
   server:
     log_level: info
     # Loopback only: no remote LAPI clients, no console enrollment.
-    listen_uri: 127.0.0.1:8080
+    listen_uri: 127.0.0.1:{{ crowdsec_lapi_port | default(8085) }}
     profiles_path: /etc/crowdsec/profiles.yaml
     console_path: /etc/crowdsec/console.yaml
     trusted_ips:

@@ -305,9 +305,12 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - Metrics on `localhost:2112`, scraped by the existing Prometheus.
 - JSON events written to a bounded local file with rotation. The forwarder
   tails that file; the gRPC unix socket stays reserved for operator tooling.
-- Policies pinned in Ansible: process exec, file writes to `/etc` and systemd
-  paths, capability changes, kernel module loads, network connects, and container
-  namespace access. Start with the policy library and a small local set.
+- Policies pinned in Ansible: file writes to `/etc` and systemd paths,
+  capability changes, kernel module loads, and network connects. Shell and
+  package-manager execs are already exported by the base sensor's
+  `process_exec` events and are filtered by the forwarder instead.
+- Health server on `localhost:6790`: the default `:6789` collides with the
+  Ceph monitor.
 
 ### CrowdSec
 
@@ -421,6 +424,69 @@ network coverage.
 - **Rollback.** Stop and remove the forwarder, Tetragon and CrowdSec, and leave
   existing nginx/sshd/auditd logs untouched. A rollback does not delete access logs
   or user data.
+
+## Implementation gotchas (verified against v1.7.1 / v1.8.1)
+
+These were found during the first real rollout and are easy to rediscover the
+hard way. They apply to the pinned versions; re-verify on upgrades.
+
+### Tetragon
+
+- **Pin the commit SHA of a release, not the annotated tag object SHA.**
+  `git checkout` dereferences annotated tags, so a SHA assertion against the
+  tag object can never pass.
+- **Key/value config must be `/etc/tetragon/tetragon.yaml`.** The
+  `--config-dir` drop-in mechanism merges raw file contents as map values; it
+  does not parse YAML keys. Only the drop-in path tolerates non-YAML files.
+- Config keys: `tracing-policy-dir` (not `policies-dir`),
+  `metrics-server` (not `metrics-address`). The gRPC socket address needs the
+  `unix://` scheme. `PROCESS_CONNECT` is not a valid `export-allowlist`
+  event-set enum in v1.7.1 — connect events arrive as `PROCESS_KPROBE`.
+- The default health port `:6789` collides with the Ceph monitor. Set
+  `health-server-address: 127.0.0.1:6790`.
+- **Do not set `AmbientCapabilities`/`CapabilityBoundingSet`.** The systemd on
+  these nodes mis-translates `CAP_BPF`/`CAP_PERFMON` and grants unrelated
+  capabilities instead; the sensor then fails to pin BPF maps with EPERM. Run
+  as root with full capabilities and `NoNewPrivileges=yes`. Filesystem
+  sandboxing (`ProtectSystem=strict`) breaks bpffs/tracefs writes.
+- `RuntimeDirectory=tetragon` is required: mount-namespace setup fails with
+  status 226 if the runtime directory referenced by the unit does not exist.
+- **Policies:** use cluster-wide `TracingPolicy` (the namespaced kind requires
+  a namespace). Match operators are `Prefix`/`Postfix`/`Mask` (not
+  `MatchPathPrefix`/`MatchPathSuffix`). One `kprobes` entry per kernel symbol
+  — merge selectors instead of repeating the call. `exec` is not a policy
+  field; the base sensor already emits `process_exec` for every exec.
+- The eBPF objects land in `bpf/objs/` under the source tree; the runtime
+  expects them flat under `/var/lib/tetragon/`. `tetra` needs
+  `--server-address unix:///var/run/tetragon/tetragon.sock`.
+
+### CrowdSec
+
+- **Bootstrap order matters.** The agent refuses to start without
+  `local_api_credentials.yaml`, but `cscli machines add` writes the database
+  directly. Register the machine (`--auto -f <credentials path>`) before the
+  first start, then fix ownership of the credentials file and the data
+  directory to the `crowdsec` user.
+- The `api.client` section is mandatory even in local-only mode; removing it
+  fails startup with "no API client section in configuration".
+- `simulation.yaml` must exist (an empty `{}` is fine) or init is fatal.
+- The notification plugin binary must be owned by the `crowdsec` user; a
+  root-owned plugin is a fatal load error.
+- **Parsers:** with an empty hub there is no s00-raw syslog stage, so
+  `evt.Parsed.message` never exists. Grok the raw line with
+  `apply_on: Line.Raw` — exactly that string. `raw`, `message` and
+  `evt.Line.Raw` do not work (the last silently looks up a nonexistent
+  parsed field).
+- Parser files need top-level `name:`/`author:`/`description:`. Without a
+  name the file loads and appears in `cscli parsers list`, but its nodes
+  never run and never appear in `cscli explain`.
+- expr-lang in v1.8.1: use the builtin `split(s, sep)`, not method syntax;
+  ternary is `cond ? a : b`; `onsuccess: continue` (not `continue_stage`);
+  use `evt.Line.Labels.type` for acquisition labels (`evt.Labels` does not
+  compile). Escape regexes as `".*\\.(css|...)$"` inside double-quoted YAML.
+- Ansible must escape Go-template fragments destined for CrowdSec's own
+  templating: write `format: "{{ '{{.|toJson}}' }}"` for the
+  notification-http body.
 
 ## Validation
 

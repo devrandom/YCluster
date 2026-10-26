@@ -33,7 +33,7 @@ enable-path-resolution: true
 
 # Watch the pinned policies directory; dropping a file there is how a
 # policy ships (via Ansible), and tetragon picks it up on restart.
-policies-dir: /etc/tetragon.d
+tracing-policy-dir: /etc/tetragon.d
 
 # Event filters: drop noisy cluster-internal traffic. Tuning happens in
 # the tracing policies themselves, not here.

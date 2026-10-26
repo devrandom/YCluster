@@ -139,3 +139,28 @@ scrape_configs:
 {% endfor %}
 {% endif %}
 
+  # IDS components, all loopback-only on their own node. The coverage
+  # alerts in ycluster-alerts.yml rely on these jobs: a down sensor is a
+  # coverage gap, not just a missing metric. See
+  # docs/design/intrusion-detection.md.
+  - job_name: 'tetragon'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['localhost:2112']
+        labels:
+          node: '{{ ansible_hostname }}'
+
+  - job_name: 'crowdsec'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['localhost:6060']
+        labels:
+          node: '{{ ansible_hostname }}'
+
+  - job_name: 'ids-forwarder'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['localhost:2113']
+        labels:
+          node: '{{ ansible_hostname }}'
+

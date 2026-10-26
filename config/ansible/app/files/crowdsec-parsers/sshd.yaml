@@ -1,19 +1,21 @@
 # CrowdSec parser for sshd logs (Debian/Ubuntu /var/log/auth.log).
-# Stage: s01-parse ( CrowdSec derives the pipeline stage from the path).
+# Stage: s01-parse (CrowdSec derives the pipeline stage from the path).
 # Identity metadata (name/author/description) is required for the node
 # to be loaded at all.
 # Extracts source_ip for the ssh-bf leaky bucket; target_user kept for
 # triage though unused by scenarios today.
-# Note: on Debian/Ubuntu, auth.log lines are classic syslog; the
-# "program" field comes from the base syslog parser stage, so we match
-# on the raw message prefix instead of relying on evt.Parsed.program.
-#filter: "evt.Parsed.program == 'sshd'"
+# Note: the hub is empty in this local-only deployment, so there is no
+# base syslog stage: grok runs on the raw line, which on current
+# Debian/Ubuntu carries an ISO-8601 timestamp and hostname prefix.
+name: ycluster/sshd-logs
+author: ycluster
+description: "Parse sshd auth.log lines (no hub: groks the raw line)"
 onsuccess: continue
 nodes:
-  - filter: "evt.Parsed.message contains 'sshd['"
+  - filter: "evt.Line.Raw contains 'sshd['"
     grok:
       pattern: 'sshd\[\d+\]: %{DATA:sshd_event} from %{IPORHOST:source_ip} port \d+ ssh2'
-      apply_on: message
+      apply_on: Line.Raw
     statics:
       - meta: log_type
         value: ssh_failed-auth
@@ -21,10 +23,10 @@ nodes:
         expression: evt.Parsed.source_ip
       - parsed: target_user
         expression: evt.Parsed.sshd_event
-  - filter: "evt.Parsed.message contains 'sshd[' and (evt.Parsed.message contains 'Failed password' or evt.Parsed.message contains 'Invalid user')"
+  - filter: "evt.Line.Raw contains 'sshd[' and (evt.Line.Raw contains 'Failed password' or evt.Line.Raw contains 'Invalid user')"
     grok:
       pattern: 'sshd\[\d+\]: %{DATA:sshd_event} for %{DATA:target_user} from %{IPORHOST:source_ip} port \d+ ssh2'
-      apply_on: message
+      apply_on: Line.Raw
     statics:
       - meta: log_type
         value: ssh_failed-auth

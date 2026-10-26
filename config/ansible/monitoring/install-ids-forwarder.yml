@@ -1,11 +1,11 @@
 ---
-# Install the ids-forwarder on the alerting node (core, where Alertmanager
-# runs). The binary is built by app/build-ids-forwarder.yml on the
-# buildhost and fetched here. The forwarder posts to Alertmanager's v2
-# API; Tetragon/CrowdSec deployment is tracked separately in
+# Install the ids-forwarder on every managed node: it tails the local
+# Tetragon event log and posts to Alertmanager over WireGuard. The
+# binary is built by app/build-ids-forwarder.yml on the buildhost.
+# Tetragon/CrowdSec deployment is tracked separately in
 # todo/security/intrusion-detection.md.
 - name: Install ids-forwarder
-  hosts: "{{ ids_forwarder_target | default('core') }}"
+  hosts: "{{ ids_forwarder_target | default('managed') }}"
   become: yes
   vars:
     ids_forwarder_buildhost_path: /opt/src/ids-forwarder/ids-forwarder

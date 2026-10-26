@@ -8,13 +8,15 @@ filter: "evt.Line.Labels.type == 'nginx'"
 onsuccess: continue
 nodes:
   - grok:
-      pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status:int} %{NUMBER:bytes:int} "%{NOTSPACE:referer}" "%{NOTSPACE:user_agent}"'
-      apply_on: message
+      pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status:int} %{NUMBER:bytes:int} "%{DATA:referer}" "%{DATA:user_agent}"'
+      apply_on: Line.Raw
     statics:
       - meta: log_type
         value: http_access-log
       - meta: source_ip
         expression: evt.Parsed.source_ip
+      - target: evt.StrTime
+        expression: evt.Parsed.time
       - parsed: status
         expression: evt.Parsed.status
       - parsed: verb

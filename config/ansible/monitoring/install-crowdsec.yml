@@ -4,7 +4,7 @@
 # Requires app/build-crowdsec.yml to have run on the buildhost.
 #
 # Local-only posture (docs/design/intrusion-detection.md):
-#   - Local API bound to 127.0.0.1:8080; no public listener.
+#   - Local API bound to 127.0.0.1:{{ crowdsec_lapi_port }}; no public listener.
 #   - No console enrollment, no Central API, no community blocklist.
 #   - No bouncers: the IDS is alert-only.
 #   - Local DB retention capped at the access-log window via flush.max_age.
@@ -20,6 +20,8 @@
     crowdsec_config_dir: /etc/crowdsec
     crowdsec_data_dir: /var/lib/crowdsec/data
     crowdsec_log_retention_days: 7
+    # 8080 collides with llama-server on compute/nvidia nodes.
+    crowdsec_lapi_port: 8085
   tasks:
     - name: Create crowdsec system group
       group:
@@ -86,15 +88,6 @@
         group: crowdsec
         mode: '0755'
 
-    - name: Create empty simulation file
-      # crowdsec fails to start if simulation_path is missing.
-      copy:
-        content: "{}\n"
-        dest: /etc/crowdsec/simulation.yaml
-        owner: crowdsec
-        group: crowdsec
-        mode: '0644'
-
     - name: Install notification-http plugin
       copy:
         src: "{{ build_cache_dir }}/notification-http"
@@ -119,6 +112,15 @@
         owner: crowdsec
         group: crowdsec
         mode: '0750'
+
+    - name: Create empty simulation file
+      # crowdsec fails to start if simulation_path is missing.
+      copy:
+        content: "{}\n"
+        dest: "{{ crowdsec_config_dir }}/simulation.yaml"
+        owner: crowdsec
+        group: crowdsec
+        mode: '0644'
 
     - name: Create notification config directory
       file:
@@ -215,21 +217,21 @@
         mode: '0644'
       notify: restart crowdsec
 
-    - name: Enable and start crowdsec
-      systemd:
-        name: crowdsec
-        enabled: yes
-        state: started
-        daemon_reload: yes
-
     - name: Register the local agent with the LAPI
-      # Creates /etc/crowdsec/local_api_credentials.yaml. Ownership is
-      # fixed below because crowdsec runs as the crowdsec user but the
-      # DB/credentials are created as root by this command.
+      # Runs before the service starts: cscli talks to the database
+      # directly and writes local_api_credentials.yaml, so the agent
+      # finds valid credentials on its first start.
       command:
-        cmd: "cscli machines add {{ inventory_hostname }}-local --auto"
+        cmd: "cscli machines add {{ inventory_hostname }}-local --auto -u http://127.0.0.1:{{ crowdsec_lapi_port }} -f {{ crowdsec_config_dir }}/local_api_credentials.yaml"
         creates: "{{ crowdsec_config_dir }}/local_api_credentials.yaml"
-      notify: restart crowdsec
+
+    - name: Point existing credentials at the configured LAPI port
+      # Nodes registered before the port variable existed still have
+      # :8080 in local_api_credentials.yaml.
+      lineinfile:
+        path: "{{ crowdsec_config_dir }}/local_api_credentials.yaml"
+        regexp: '^url:'
+        line: "url: http://127.0.0.1:{{ crowdsec_lapi_port }}"
 
     - name: Fix ownership of agent credentials
       file:
@@ -244,6 +246,13 @@
         owner: crowdsec
         group: crowdsec
         recurse: yes
+
+    - name: Enable and start crowdsec
+      systemd:
+        name: crowdsec
+        enabled: yes
+        state: started
+        daemon_reload: yes
 
   handlers:
     - name: restart crowdsec
