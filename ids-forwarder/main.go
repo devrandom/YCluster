@@ -1,26 +1,15 @@
-// Command ids-forwarder reads IDS events on a node (Tetragon JSON event
-// export, optional CrowdSec HTTP notifications) and forwards a filtered,
-// IP-redacted, deduplicated stream to Alertmanager's v2 alerts API.
-//
-// Design: docs/design/intrusion-detection.md. The forwarder has no inbound
-// network listener by default; the optional CrowdSec receiver binds to
-// localhost only. Alerts carry host/rule labels, never IPs.
 package main
 
 import (
+	"context"
 	"flag"
-	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatalf("ids-forwarder: %v", err)
-	}
-}
-
-func run() error {
 	cfg := defaultConfig()
 	flag.StringVar(&cfg.alertmanagerURL, "alertmanager-url",
 		cfg.alertmanagerURL, "Alertmanager v2 alerts API base URL")
@@ -42,18 +31,20 @@ func run() error {
 		cfg.alertTTL, "alerts auto-resolve after this duration")
 	flag.DurationVar(&cfg.postTimeout, "post-timeout",
 		cfg.postTimeout, "per-POST timeout to Alertmanager")
+	flag.DurationVar(&cfg.pollInterval, "poll-interval",
+		cfg.pollInterval, "how often to poll the event file and the outbound queue")
 	flag.Parse()
 
 	if cfg.hostname == "" {
 		host, err := os.Hostname()
 		if err != nil {
-			return fmt.Errorf("resolve hostname: %w", err)
+			log.Fatalf("ids-forwarder: resolve hostname: %v", err)
 		}
 		cfg.hostname = host
 	}
-	f, err := newForwarder(cfg)
-	if err != nil {
-		return err
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := runWith(ctx, cfg); err != nil {
+		log.Fatalf("ids-forwarder: %v", err)
 	}
-	return f.run()
 }

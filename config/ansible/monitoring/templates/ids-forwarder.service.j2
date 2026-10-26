@@ -9,11 +9,17 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -alertmanager-url {{ ids_forwarder_alertmanager_url }} \
     -tetragon-log {{ ids_forwarder_tetragon_log }} \
     -events {{ ids_forwarder_events }} \
-    -http-listen {{ ids_forwarder_http_listen | default('""') }} \
     -metrics-listen {{ ids_forwarder_metrics_listen }}
+{% if ids_forwarder_http_listen %}
+    -http-listen {{ ids_forwarder_http_listen }}
+{% endif %}
 Restart=on-failure
 RestartSec=5
-# Hardening: no inbound listener beyond the optional localhost receiver.
+# Hardening: no inbound listener beyond the optional localhost receiver;
+# the process only needs to read the Tetragon event log and reach
+# Alertmanager over loopback/WireGuard.
+User=ids-forwarder
+Group=ids-forwarder
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

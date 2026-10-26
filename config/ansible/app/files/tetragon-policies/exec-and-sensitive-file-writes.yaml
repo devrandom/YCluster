@@ -1,0 +1,53 @@
+# Process execution and file-watch tracing policy for Tetragon.
+# Pinned from docs/design/intrusion-detection.md "Detection content".
+#
+# Observe-only: every hook uses `post` (no `notifyEnforcer`).
+# Scope: watch execs of shells and package managers, plus writes to
+# /etc and systemd unit paths. High-volume but cheap to evaluate.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: exec-and-sensitive-file-writes
+spec:
+  kprobes:
+    - call: "security_file_permission"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "MatchPathPrefix"
+              values:
+                - "/etc/"
+          matchActions:
+            - action: Post
+    - call: "security_file_permission"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+        - index: 1
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "MatchPathPrefix"
+              values:
+                - "/usr/lib/systemd/system/"
+          matchActions:
+            - action: Post
+  exec:
+    matchPaths:
+      - path: "/usr/bin/bash"
+      - path: "/usr/bin/sh"
+      - path: "/usr/bin/dash"
+      - path: "/usr/bin/zsh"
+      - path: "/usr/bin/fish"
+      - path: "/usr/bin/apt"
+      - path: "/usr/bin/apt-get"
+      - path: "/usr/bin/dpkg"
+      - path: "/usr/bin/snap"

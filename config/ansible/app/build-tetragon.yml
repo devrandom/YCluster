@@ -1,0 +1,112 @@
+---
+# Build Tetragon from source on the buildhost (default s1).
+#
+# Two artifacts are needed at runtime:
+#   - the Go control plane (tetragon + tetra binaries), built with go
+#     build from the vendored source tree;
+#   - the eBPF objects (bpf_*.o) compiled from C by clang/llvm. These are
+#     built with LOCAL_CLANG=1 on the buildhost itself (needs clang >=
+#     11 and the kernel headers package) so no container engine is
+#     required at build time.
+#
+# Source is synced from the vendored tree at /opt/src/tetragon (pinned
+# by git SHA below) — upstream does not publish a source tarball that
+# matches the tag, so we pin the clone instead. No prebuilt binaries.
+#
+- name: Build Tetragon from source
+  hosts: "{{ buildhost | default('s1') }}"
+  vars:
+    tetragon_build_dir: "/opt/src/tetragon"
+    tetragon_repo_url: "https://github.com/cilium/tetragon.git"
+    # v1.7.1 — see docs/design/intrusion-detection.md "Component survey".
+    tetragon_repo_sha: "417c9e0db0cdf1ac872876426ab764063aa293f5"
+    tetragon_install_dir: "/opt/src/tetragon/install"
+    tetragon_version: "1.7.1"
+  tasks:
+    - name: Install build dependencies (go, git, clang, llvm, kernel headers)
+      apt:
+        name:
+          - golang-1.24
+          - git
+          - clang
+          - llvm
+          - libelf-dev
+          - linux-headers-{{ ansible_kernel }}
+        state: present
+      become: yes
+
+    - name: Check if the pinned source tree already exists
+      stat:
+        path: "{{ tetragon_build_dir }}/.git"
+      register: source_tree
+
+    - name: Clone tetragon source (first build only)
+      command:
+        cmd: "git clone {{ tetragon_repo_url }} {{ tetragon_build_dir }}"
+      when: not source_tree.stat.exists
+
+    - name: Fetch pinned SHA (existing tree)
+      command:
+        cmd: "git fetch origin {{ tetragon_repo_sha }}"
+        chdir: "{{ tetragon_build_dir }}"
+      when: source_tree.stat.exists
+      changed_when: true
+
+    - name: Checkout pinned SHA
+      command:
+        cmd: "git checkout --detach {{ tetragon_repo_sha }}"
+        chdir: "{{ tetragon_build_dir }}"
+      register: checkout_result
+      changed_when: checkout_result.rc == 0
+
+    - name: Record current checkout SHA
+      command:
+        cmd: "git rev-parse HEAD"
+        chdir: "{{ tetragon_build_dir }}"
+      register: checked_out_sha
+      changed_when: false
+
+    - name: Assert the pinned SHA is checked out
+      assert:
+        that:
+          - checked_out_sha.stdout.strip() == tetragon_repo_sha
+        quiet: true
+
+    - name: Compile eBPF objects (LOCAL_CLANG=1 skips the container build)
+      command:
+        cmd: "make tetragon-bpf-local LOCAL_CLANG=1"
+        chdir: "{{ tetragon_build_dir }}"
+      register: bpf_build
+      changed_when: bpf_build.rc == 0
+
+    - name: Build Go control plane (tetragon + tetra)
+      command:
+        cmd: "make tetragon tetra"
+        chdir: "{{ tetragon_build_dir }}"
+      environment:
+        GO: "{{ go_bin }}"
+      register: go_build
+      changed_when: go_build.rc == 0
+
+    - name: Collect built artifacts into the install dir
+      copy:
+        src: "{{ item }}"
+        dest: "{{ tetragon_install_dir }}/"
+        remote_src: yes
+        mode: preserve
+      loop:
+        - "{{ tetragon_build_dir }}/tetragon"
+        - "{{ tetragon_build_dir }}/tetra"
+        - "{{ tetragon_build_dir }}/install/bpf"
+
+    - name: Verify artifacts exist
+      stat:
+        path: "{{ item }}"
+      register: artifact_stat
+      loop:
+        - "{{ tetragon_install_dir }}/tetragon"
+        - "{{ tetragon_install_dir }}/tetra"
+        - "{{ tetragon_install_dir }}/bpf/bpf_process_exec.o"
+      failed_when: not artifact_stat.stat.exists
+      loop_control:
+        label: "{{ item }}"

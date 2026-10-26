@@ -1,0 +1,28 @@
+[Unit]
+Description=Tetragon eBPF-based security observability
+Documentation=https://tetragon.io/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/tetragon --config-dir /etc/tetragon.conf.d
+Restart=on-failure
+RestartSec=5
+
+# Tetragon needs broad privileges to attach eBPF programs and read
+# kernel state, but we still lock down the filesystem and capabilities
+# as far as it allows.
+AmbientCapabilities=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/sys/kernel/btf/vmlinux /sys/kernel/debug /etc/tetragon.d
+ReadWritePaths=/var/log/tetragon /var/run/tetragon
+
+[Install]
+WantedBy=multi-user.target

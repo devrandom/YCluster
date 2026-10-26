@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type config struct {
 	dedupWindow     time.Duration
 	alertTTL        time.Duration
 	postTimeout     time.Duration
+	pollInterval    time.Duration
 }
 
 func defaultConfig() config {
@@ -43,6 +45,7 @@ func defaultConfig() config {
 		dedupWindow:     5 * time.Minute,
 		alertTTL:        10 * time.Minute,
 		postTimeout:     5 * time.Second,
+		pollInterval:    500 * time.Millisecond,
 	}
 }
 
@@ -52,6 +55,15 @@ type forwarder struct {
 	dedup  dedup
 	client *http.Client
 	stats  metrics
+	stop   chan struct{}
+	once   sync.Once
+
+	// wg tracks background goroutines (tailer, post loop) so tests can
+	// coordinate shutdown.
+	wg sync.WaitGroup
+
+	receiverListen string
+	metricsBind    string
 }
 
 func newForwarder(cfg config) (*forwarder, error) {
@@ -66,10 +78,40 @@ func newForwarder(cfg config) (*forwarder, error) {
 		queue:  alertQueue{max: cfg.queueMax},
 		dedup:  newDedup(cfg.dedupWindow),
 		client: &http.Client{Timeout: cfg.postTimeout},
+		stop:   make(chan struct{}),
 	}, nil
 }
 
-func (f *forwarder) run() error {
+// shutdown signals all loops to exit exactly once.
+func (f *forwarder) shutdown() {
+	f.once.Do(func() { close(f.stop) })
+}
+
+// runWith starts every configured component and blocks until ctx is
+// cancelled or shutdown is requested. This is the production entry point
+// after flag parsing.
+func runWith(ctx context.Context, cfg config) error {
+	f, err := newForwarder(cfg)
+	if err != nil {
+		return err
+	}
+	if err := f.start(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		f.shutdown()
+		f.wg.Wait()
+		return nil
+	case <-f.stop:
+		f.wg.Wait()
+		return nil
+	}
+}
+
+// start launches the tailer, receiver, metrics and post loop according to
+// cfg. It returns once all components are running.
+func (f *forwarder) start() error {
 	if f.cfg.tetragonLog != "" {
 		if err := f.startTailer(); err != nil {
 			return err
@@ -85,39 +127,39 @@ func (f *forwarder) run() error {
 			return err
 		}
 	}
-	f.postLoop()
+	f.wg.Add(1)
+	go f.postLoop()
 	return nil
 }
 
+// receiverAddr returns the address the CrowdSec receiver is listening on,
+// or "" when the receiver is disabled. Used by tests.
+func (f *forwarder) receiverAddr() string { return f.receiverListen }
+
+// metricsAddr returns the address the metrics server is listening on, or
+// "" when metrics are disabled. Used by tests.
+func (f *forwarder) metricsAddr() string { return f.metricsBind }
+
 // startTailer tails the Tetragon JSON events file, forwarding one alert per
-// line. It reopens from the beginning on rotation and starts at the end so a
+// line. The tailer tracks the read offset across EOF, buffers partial
+// lines, and handles rotation and truncation. It starts at the end so a
 // restart does not replay history (Tetragon keeps the authoritative copy).
+// If the file does not exist yet, the tailer retries until it appears.
 func (f *forwarder) startTailer() error {
-	file, _, err := tailOpen(f.cfg.tetragonLog)
+	tl, err := newTailer(f.cfg.tetragonLog, 500*time.Millisecond, func(line []byte) {
+		f.handleLine(string(line))
+	})
 	if err != nil {
-		return fmt.Errorf("open %s: %w", f.cfg.tetragonLog, err)
-	}
-	go func() {
-		buf := make([]byte, 0, 64*1024)
-		scanner := newLineReader(file, buf)
-		for {
-			line, ok := scanner.next()
-			if !ok {
-				time.Sleep(500 * time.Millisecond)
-				nf, rotated, err := tailOpen(f.cfg.tetragonLog)
-				if err != nil {
-					log.Printf("tetragon tail: %v", err)
-					f.stats.dropped.Add(1)
-					continue
-				}
-				scanner.close()
-				scanner = newLineReader(nf, buf)
-				_ = rotated
-				continue
-			}
-			f.handleLine(string(line))
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("open %s: %w", f.cfg.tetragonLog, err)
 		}
-	}()
+		// File may not exist until Tetragon first runs; retry in the
+		// background and require only that the directory exists.
+		tl = startTailerWithRetry(f.cfg.tetragonLog, f.cfg.pollInterval, func(line []byte) {
+			f.handleLine(string(line))
+		})
+	}
+	go tl.run()
 	return nil
 }
 
@@ -135,7 +177,7 @@ func (f *forwarder) handleLine(line string) {
 
 func (f *forwarder) enqueue(a alert) {
 	key := a.dedupKey()
-	if f.dedup.recent(key) {
+	if f.dedup.seenAndMark(key) {
 		f.stats.deduped.Add(1)
 		return
 	}
@@ -144,25 +186,34 @@ func (f *forwarder) enqueue(a alert) {
 		log.Printf("queue full, dropping oldest alert")
 		return
 	}
-	f.dedup.mark(key)
 }
 
 func (f *forwarder) postLoop() {
+	defer f.wg.Done()
+	idle := f.cfg.pollInterval
+	retry := idle * 4
 	for {
 		a, ok := f.queue.pop()
 		if !ok {
-			time.Sleep(500 * time.Millisecond)
-			continue
+			select {
+			case <-f.stop:
+				return
+			case <-time.After(idle):
+				continue
+			}
 		}
 		if err := f.post([]alert{a}); err != nil {
 			log.Printf("post to alertmanager: %v", err)
-			f.stats.failures.Add(1)
 			// Re-queue at the front unless the queue is full.
 			if !f.queue.pushFront(a) {
 				f.stats.dropped.Add(1)
 			}
-			time.Sleep(2 * time.Second)
-			continue
+			select {
+			case <-f.stop:
+				return
+			case <-time.After(retry):
+				continue
+			}
 		}
 		f.stats.forwarded.Add(1)
 	}
@@ -181,15 +232,18 @@ func (f *forwarder) post(alerts []alert) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
 	if err != nil {
+		f.stats.failures.Add(1)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := f.client.Do(req)
 	if err != nil {
+		f.stats.failures.Add(1)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
+		f.stats.failures.Add(1)
 		return fmt.Errorf("alertmanager returned %s", resp.Status)
 	}
 	return nil
@@ -204,13 +258,13 @@ func (f *forwarder) startReceiver() error {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		var payload []map[string]any
+		var payload []crowdsecAlert
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&payload); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		for _, item := range payload {
-			f.enqueue(crowdsecAlert(item, f.cfg))
+			f.enqueue(crowdsecToAlert(item, f.cfg))
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -223,6 +277,7 @@ func (f *forwarder) startReceiver() error {
 		ln.Close()
 		return errors.New("http-listen must bind to a loopback address")
 	}
+	f.receiverListen = ln.Addr().String()
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("receiver: %v", err)
@@ -257,6 +312,11 @@ func (f *forwarder) startMetrics() error {
 	if err != nil {
 		return err
 	}
+	if isNotLoopback(ln.Addr()) {
+		ln.Close()
+		return errors.New("metrics-listen must bind to a loopback address")
+	}
+	f.metricsBind = ln.Addr().String()
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("metrics: %v", err)

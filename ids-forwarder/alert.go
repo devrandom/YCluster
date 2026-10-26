@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"os"
-	"regexp"
+	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,11 +14,10 @@ import (
 
 // alert is an Alertmanager v2 alert payload.
 type alert struct {
-	Labels       map[string]string `json:"labels"`
-	Annotations  map[string]string `json:"annotations"`
-	StartsAt     string            `json:"startsAt"`
-	EndsAt       string            `json:"endsAt"`
-	GeneratorURL string            `json:"generatorURL,omitempty"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	StartsAt    string            `json:"startsAt"`
+	EndsAt      string            `json:"endsAt"`
 }
 
 func (a alert) dedupKey() string {
@@ -47,43 +43,46 @@ func newDedup(window time.Duration) dedup {
 	return dedup{window: window, seen: map[string]time.Time{}}
 }
 
-func (d *dedup) recent(key string) bool {
+// seenAndMark atomically checks whether the key was forwarded within the
+// dedup window and records it. A single operation prevents duplicate
+// forwards when events arrive concurrently.
+func (d *dedup) seenAndMark(key string) bool {
 	if d.window <= 0 {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	last, ok := d.seen[key]
-	return ok && time.Since(last) < d.window
-}
-
-func (d *dedup) mark(key string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	// Bound memory: cap tracked keys at 4096 by dropping expired entries.
+	now := time.Now()
+	if last, ok := d.seen[key]; ok && now.Sub(last) < d.window {
+		return true
+	}
+	// Bound memory: if the map is huge, drop expired entries first.
 	if len(d.seen) > 4096 {
-		now := time.Now()
 		for k, t := range d.seen {
-			if now.Sub(t) > d.window {
+			if now.Sub(t) >= d.window {
 				delete(d.seen, k)
 			}
 		}
 	}
-	d.seen[key] = time.Now()
+	d.seen[key] = now
+	return false
 }
 
 type alertQueue struct {
-	mu     sync.Mutex
-	max    int
-	items  []alert
-	nextID int64
+	mu    sync.Mutex
+	max   int
+	items []alert
 }
 
+// push appends the alert, dropping the oldest when full. It reports
+// whether the new alert was kept (false means the queue rejected it).
 func (q *alertQueue) push(a alert) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.max <= 0 {
+		return false
+	}
 	if len(q.items) >= q.max {
-		// Drop the oldest to keep the queue bounded.
 		q.items = q.items[1:]
 	}
 	q.items = append(q.items, a)
@@ -124,15 +123,155 @@ type metrics struct {
 	failures  atomic.Int64
 }
 
-var ipv4Re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-var ipv6Re = regexp.MustCompile(`\b(?:(?:[0-9a-fA-F]{1,4}:){1,7}|:)(?::[0-9a-fA-F]{1,4})+|:(?::[0-9a-fA-F]{0,4}){1,6}\b`)
-
-// redactIPs replaces IPv4 and plain IPv6 addresses so no user IP reaches
-// Alertmanager labels, annotations, or ntfy messages.
+// redactIPs replaces IPv4 and IPv6 addresses so no user IP reaches
+// Alertmanager labels, annotations, or ntfy messages. Tokens are split on
+// characters that cannot appear in an address, validated with
+// netip.ParseAddr, and replaced individually.
 func redactIPs(s string) string {
-	s = ipv4Re.ReplaceAllString(s, "[ip]")
-	s = ipv6Re.ReplaceAllString(s, "[ip]")
-	return s
+	if !strings.ContainsAny(s, ".:") {
+		return s
+	}
+	var b strings.Builder
+	for _, tok := range splitKeep(s, isSeparator) {
+		b.WriteString(redactToken(tok))
+	}
+	return b.String()
+}
+
+func isSeparator(r rune) bool {
+	switch r {
+	case ' ', '\t', '\n', ',', ';', '"', '\'', '(', ')', '{', '}', '=', '<', '>', '|':
+		return true
+	}
+	return false
+}
+
+func redactToken(tok string) string {
+	if scheme, rest, ok := strings.Cut(tok, "://"); ok && isScheme(scheme) {
+		return redactURL(scheme, rest, tok)
+	}
+	if redacted, ok := redactBracketed(tok); ok {
+		return redacted
+	}
+	trim := strings.Trim(tok, "[]")
+	if trim == "" {
+		return tok
+	}
+	if redacted, ok := redactCIDR(trim, tok); ok {
+		return redacted
+	}
+	if redacted, ok := redactHostPort(trim, tok); ok {
+		return redacted
+	}
+	if isAddr(trim) {
+		return "[ip]"
+	}
+	return tok
+}
+
+// redactURL redacts the host of a scheme://host/... token.
+func redactURL(scheme, rest, tok string) string {
+	if host, trail, ok := cutHost(rest); ok {
+		if redacted := redactToken(host); redacted != host {
+			return scheme + "://" + redacted + trail
+		}
+	}
+	return tok
+}
+
+// redactBracketed handles "[addr]...": bracketed IPv6 with an optional
+// port or trailing path. Returns ok=false when the token is not bracketed
+// or the bracket contents are not an address.
+func redactBracketed(tok string) (string, bool) {
+	if !strings.HasPrefix(tok, "[") {
+		return "", false
+	}
+	closeIdx := strings.Index(tok, "]")
+	if closeIdx < 1 {
+		return "", false
+	}
+	inner := tok[1:closeIdx]
+	if _, err := netip.ParseAddr(inner); err != nil {
+		return "", false
+	}
+	return "[ip]" + tok[closeIdx+1:], true
+}
+
+// redactCIDR handles "addr/len" tokens, keeping the prefix length.
+func redactCIDR(trim, tok string) (string, bool) {
+	host, suffix, ok := strings.Cut(trim, "/")
+	if !ok || suffix == "" {
+		return "", false
+	}
+	if _, err := netip.ParseAddr(host); err != nil || !isPortOrLen(suffix) {
+		return "", false
+	}
+	return "[ip]/" + suffix, true
+}
+
+// redactHostPort handles "ipv4:port" tokens, keeping the port.
+func redactHostPort(trim, tok string) (string, bool) {
+	host, port, ok := strings.Cut(trim, ":")
+	if !ok || strings.Contains(host, ":") {
+		return "", false
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || !ip.Is4() || !isPort(port) {
+		return "", false
+	}
+	return "[ip]:" + port, true
+}
+
+func isAddr(s string) bool {
+	_, err := netip.ParseAddr(s)
+	return err == nil
+}
+
+func isScheme(s string) bool {
+	switch strings.ToLower(s) {
+	case "http", "https", "ws", "wss":
+		return true
+	}
+	return false
+}
+
+// cutHost splits "host[:port][/path]" into host and the remainder.
+func cutHost(rest string) (string, string, bool) {
+	if strings.HasPrefix(rest, "[") {
+		closeIdx := strings.Index(rest, "]")
+		if closeIdx < 0 {
+			return "", "", false
+		}
+		return rest[:closeIdx+1], rest[closeIdx+1:], true
+	}
+	end := strings.IndexAny(rest, "/:")
+	if end < 0 {
+		return rest, "", true
+	}
+	return rest[:end], rest[end:], true
+}
+
+func isPort(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isPortOrLen reports whether s is a valid TCP/UDP port or IP prefix
+// length (0-128, digits only, at most 5 chars). Used to decide whether a
+// "/suffix" after an address is a prefix length worth preserving.
+func isPortOrLen(s string) bool {
+	if !isPort(s) {
+		return false
+	}
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 0 && n <= 128
 }
 
 func redactMap(m map[string]string) {
@@ -155,141 +294,30 @@ func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
 		Annotations: map[string]string{
 			"summary": summary,
 		},
-		StartsAt:     now,
-		EndsAt:       time.Now().Add(cfg.alertTTL).UTC().Format(time.RFC3339Nano),
-		GeneratorURL: "https:// intrusion-detection.invalid",
+		StartsAt: now,
+		EndsAt:   time.Now().Add(cfg.alertTTL).UTC().Format(time.RFC3339Nano),
 	}
-	a.GeneratorURL = ""
 	redactMap(a.Annotations)
 	redactMap(a.Labels)
 	return a
 }
 
-// tetragonAlert maps one Tetragon JSON event line to an alert. It returns
-// ok=false for events that are not configured for forwarding.
-func tetragonAlert(line string, cfg config) (alert, bool) {
-	var ev map[string]any
-	if err := json.Unmarshal([]byte(line), &ev); err != nil {
-		return alert{}, false
-	}
-	include := map[string]bool{}
-	for _, name := range strings.Split(cfg.events, ",") {
-		include[strings.TrimSpace(name)] = true
-	}
-	for evType := range ev {
-		if evType == "time" || evType == "node_name" {
-			continue
-		}
-		if !include[evType] {
-			return alert{}, false
-		}
-		body, ok := ev[evType].(map[string]any)
-		if !ok {
-			return alert{}, false
-		}
-		layer := "host"
-		rule := evType
-		if p, _ := body["policy_name"].(string); p != "" {
-			rule = p
-		}
-		if p, _ := ev["process_exec"].(map[string]any); p != nil {
-			layer = "container"
-		}
-		severity := "warning"
-		if msg, _ := body["message"].(string); strings.Contains(strings.ToLower(msg), "kill") {
-			severity = "critical"
-		}
-		return newAlert(cfg, sourceTetragon, severity, layer, rule, eventSummary(evType, body)), true
-	}
-	return alert{}, false
-}
-
-func eventSummary(evType string, body map[string]any) string {
-	var parts []string
-	if p, ok := body["process"].(map[string]any); ok {
-		if b, _ := p["binary"].(string); b != "" {
-			parts = append(parts, "binary="+b)
-		}
-		if a, _ := p["arguments"].(string); a != "" {
-			parts = append(parts, "args="+a)
+// splitKeep splits s on the rune class but keeps the separators as their
+// own tokens so rejoining reconstructs the original string.
+func splitKeep(s string, sep func(rune) bool) []string {
+	var out []string
+	start := 0
+	for i, r := range s {
+		if sep(r) {
+			if i > start {
+				out = append(out, s[start:i])
+			}
+			out = append(out, string(r))
+			start = i + len(string(r))
 		}
 	}
-	if fa, ok := body["args"].([]any); ok && len(fa) > 0 {
-		if s, err := json.Marshal(fa); err == nil {
-			parts = append(parts, "kprobe_args="+string(s))
-		}
+	if start < len(s) {
+		out = append(out, s[start:])
 	}
-	if msg, _ := body["message"].(string); msg != "" {
-		parts = append(parts, msg)
-	}
-	if len(parts) == 0 {
-		return fmt.Sprintf("tetragon %s event", evType)
-	}
-	return redactIPs(fmt.Sprintf("%s: %s", evType, strings.Join(parts, " ")))
-}
-
-// crowdsecAlert maps one CrowdSec notification-http payload item to an alert.
-func crowdsecAlert(item map[string]any, cfg config) alert {
-	rule, _ := item["scenario"].(string)
-	if rule == "" {
-		rule, _ = item["name"].(string)
-	}
-	if rule == "" {
-		rule = "crowdsec"
-	}
-	severity, _ := item["severity"].(string)
-	if severity == "" {
-		severity = "warning"
-	}
-	summary, _ := item["message"].(string)
-	if summary == "" {
-		summary = "crowdsec alert"
-	}
-	return newAlert(cfg, sourceCrowdSec, severity, "host", rule, summary)
-}
-
-// tailOpen opens the file and returns its size so the caller can detect
-// rotation; the tailer starts at the end of the file.
-func tailOpen(path string) (*os.File, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0, err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, 0, err
-	}
-	if _, err := f.Seek(info.Size(), 0); err != nil {
-		f.Close()
-		return nil, 0, err
-	}
-	return f, info.Size(), nil
-}
-
-// lineReader is a minimal line scanner over an *os.File that tolerates
-// partial writes by buffering incomplete lines until more data arrives.
-type lineReader struct {
-	f   *os.File
-	br  *bufio.Reader
-	buf []byte
-}
-
-func newLineReader(f *os.File, buf []byte) *lineReader {
-	if buf == nil {
-		buf = make([]byte, 0, 64*1024)
-	}
-	return &lineReader{f: f, br: bufio.NewReaderSize(f, 64*1024), buf: buf[:0]}
-}
-
-func (lr *lineReader) next() ([]byte, bool) {
-	line, err := lr.br.ReadBytes('\n')
-	if err != nil {
-		return nil, false
-	}
-	return line, true
-}
-
-func (lr *lineReader) close() {
-	lr.f.Close()
+	return out
 }

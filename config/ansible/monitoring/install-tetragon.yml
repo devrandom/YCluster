@@ -1,0 +1,168 @@
+---
+# Install Tetragon in observe-only mode on every Linux cluster node.
+#
+# Requires app/build-tetragon.yml to have run on the buildhost. The
+# daemon must run as root (it attaches eBPF programs) but only exposes
+# its gRPC API on a unix socket; metrics are loopback-only.
+#
+# Deployment follows docs/design/intrusion-detection.md:
+#   - observe-only (no enforcement)
+#   - gRPC on unix socket only, no TCP listener
+#   - JSON events to /var/log/tetragon/tetragon.log (read by ids-forwarder)
+#   - policies pinned from config/ansible/app/files/tetragon-policies/
+- name: Install Tetragon
+  hosts: "{{ tetragon_target | default('linux_nodes') }}"
+  become: yes
+  vars:
+    tetragon_buildhost_path: /opt/src/tetragon/install
+    tetragon_conf_dir: /etc/tetragon.conf.d
+    tetragon_policy_dir: /etc/tetragon.d
+    tetragon_log_dir: /var/log/tetragon
+  tasks:
+    - name: Check for build artifacts on the buildhost
+      stat:
+        path: "{{ tetragon_buildhost_path }}"
+      register: build_artifacts
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Fail if artifacts missing on buildhost
+      fail:
+        msg: "Tetragon artifacts not found under {{ tetragon_buildhost_path }} on {{ buildhost }}. Run app/build-tetragon.yml first."
+      when: not build_artifacts.stat.exists
+
+    - name: Create tetragon group (read access to the event log)
+      group:
+        name: tetragon
+        system: yes
+
+    - name: Create event log directory
+      file:
+        path: "{{ tetragon_log_dir }}"
+        state: directory
+        owner: root
+        group: tetragon
+        mode: '0750'
+
+    - name: Fetch tetragon binary from buildhost
+      fetch:
+        src: "{{ tetragon_buildhost_path }}/tetragon"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Fetch tetra CLI from buildhost
+      fetch:
+        src: "{{ tetragon_buildhost_path }}/tetra"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Fetch eBPF objects tarball from buildhost
+      # The build play packs install/bpf/ into a tarball so the whole
+      # directory transfers as one fetch.
+      command:
+        cmd: "tar -czf {{ buildhost }}-tetragon-bpf.tar.gz -C {{ tetragon_buildhost_path }} bpf"
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+      register: tar_result
+      changed_when: tar_result.rc == 0
+
+    - name: Fetch eBPF tarball to controller
+      fetch:
+        src: "{{ tetragon_buildhost_path }}/../tetragon-bpf.tar.gz"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Install tetragon binary
+      copy:
+        src: "{{ build_cache_dir }}/tetragon"
+        dest: /usr/local/bin/tetragon
+        owner: root
+        group: root
+        mode: '0755'
+      notify: restart tetragon
+
+    - name: Install tetra CLI
+      copy:
+        src: "{{ build_cache_dir }}/tetra"
+        dest: /usr/local/bin/tetra
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create bpf directory
+      file:
+        path: /var/lib/tetragon/bpf
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Unpack eBPF objects
+      unarchive:
+        src: "{{ build_cache_dir }}/tetragon-bpf.tar.gz"
+        dest: /var/lib/tetragon/
+        owner: root
+        group: root
+        mode: preserve
+      notify: restart tetragon
+
+    - name: Create config drop-in directory
+      file:
+        path: "{{ tetragon_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Render observe-only config
+      template:
+        src: tetragon.yaml.j2
+        dest: /etc/tetragon.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart tetragon
+
+    - name: Create policy directory
+      file:
+        path: "{{ tetragon_policy_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install pinned tracing policies
+      copy:
+        src: "{{ playbook_dir }}/../app/files/tetragon-policies/"
+        dest: "{{ tetragon_policy_dir }}/"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart tetragon
+
+    - name: Install systemd unit
+      template:
+        src: tetragon.service.j2
+        dest: /etc/systemd/system/tetragon.service
+        mode: '0644'
+      notify: restart tetragon
+
+    - name: Enable and start tetragon
+      systemd:
+        name: tetragon
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart tetragon
+      systemd:
+        name: tetragon
+        state: restarted
+        daemon_reload: yes

@@ -52,3 +52,4 @@ lint-ansible:
 lint-go:
     @echo "== lint: go vet =="
     @make -s -C local-ai-proxy vet
+    @go vet -C ids-forwarder ./...

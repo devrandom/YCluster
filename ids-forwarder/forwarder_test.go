@@ -18,13 +18,25 @@ func testConfig() config {
 }
 
 func TestRedactIPs(t *testing.T) {
-	in := "connect 10.0.0.25 -> 203.0.113.9 and 2001:db8::1"
-	got := redactIPs(in)
-	if strings.Contains(got, "10.0.0.25") || strings.Contains(got, "203.0.113.9") || strings.Contains(got, "2001:db8::1") {
-		t.Fatalf("IP survived redaction: %q", got)
+	cases := []struct{ in, want string }{
+		{"connect 10.0.0.25 -> 203.0.113.9", "connect [ip] -> [ip]"},
+		{"v6 compressed 2001:db8::1", "v6 compressed [ip]"},
+		{"v6 full 2001:db8:0:0:0:0:2:1", "v6 full [ip]"},
+		{"bracketed [fe80::1%eth0]", "bracketed [ip]"},
+		{"mapped ::ffff:203.0.113.4", "mapped [ip]"},
+		{"host 10.0.0.5:8080", "host [ip]:8080"},
+		{"not an ip 2001:db8", "not an ip 2001:db8"},
+		{"no ips here", "no ips here"},
+		{"cidr 203.0.113.5/32", "cidr [ip]/32"},
+		{"cidr v6 2001:db8::/64", "cidr v6 [ip]/64"},
+		{"url http://203.0.113.5/path", "url http://[ip]/path"},
+		{"url6 http://[2001:db8::1]:443/x", "url6 http://[ip]:443/x"},
+		{"bracketed port [2001:db8::1]:443", "bracketed port [ip]:443"},
 	}
-	if strings.Count(got, "[ip]") != 3 {
-		t.Fatalf("expected 3 redactions, got %q", got)
+	for _, c := range cases {
+		if got := redactIPs(c.in); got != c.want {
+			t.Errorf("redactIPs(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
@@ -60,17 +72,28 @@ func TestTetragonEventFilter(t *testing.T) {
 
 func TestCrowdsecAlertMapping(t *testing.T) {
 	cfg := testConfig()
-	item := map[string]any{
-		"scenario": "ssh_bruteforce",
-		"message":  "bf from 203.0.113.5",
-		"severity": "critical",
+	// Shape mirrors CrowdSec 1.8.x models.Alert as posted by the
+	// notification-http plugin ({{.|toJson}}).
+	item := crowdsecAlert{
+		Scenario: "ssh_bruteforce",
+		Machine:  &crowdsecMachine{Hostname: "node1"},
+		Source:   &crowdsecSource{IP: "203.0.113.5", Range: "203.0.113.0/24"},
+		Events: []crowdsecEvent{
+			{Message: "ssh bruteforce attempt from 203.0.113.5"},
+		},
 	}
-	a := crowdsecAlert(item, cfg)
+	a := crowdsecToAlert(item, cfg)
 	if a.Labels["source"] != "crowdsec" || a.Labels["rule_id"] != "ssh_bruteforce" {
 		t.Fatalf("unexpected labels: %v", a.Labels)
 	}
+	if a.Labels["severity"] != "warning" {
+		t.Fatalf("crowdsec alerts carry no severity; expected fixed warning, got %q", a.Labels["severity"])
+	}
 	if strings.Contains(a.Annotations["summary"], "203.0.113.5") {
 		t.Fatalf("IP leaked: %q", a.Annotations["summary"])
+	}
+	if !strings.Contains(a.Annotations["summary"], "source=present") {
+		t.Fatalf("expected source marker in summary: %q", a.Annotations["summary"])
 	}
 }
 
@@ -95,11 +118,10 @@ func TestQueueBoundedDropOldest(t *testing.T) {
 func TestDedupWindow(t *testing.T) {
 	d := newDedup(time.Minute)
 	key := "k"
-	if d.recent(key) {
+	if d.seenAndMark(key) {
 		t.Fatal("fresh key should not be recent")
 	}
-	d.mark(key)
-	if !d.recent(key) {
+	if !d.seenAndMark(key) {
 		t.Fatal("marked key should be recent")
 	}
 }

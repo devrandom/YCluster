@@ -27,6 +27,8 @@ test:
     @./run-tests.sh
     @echo "== test: Go =="
     @make -s -C local-ai-proxy test
+    @echo "== test: Go (ids-forwarder) =="
+    @go test -C ids-forwarder ./...
 
 test-system-quick:
     @mkdir -p ./tmp

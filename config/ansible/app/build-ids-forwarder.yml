@@ -1,23 +1,33 @@
 ---
 # Build ids-forwarder from source on the buildhost (default s1).
-# Source is vendored under /opt/src/ids-forwarder/ from this repo's
-# ids-forwarder/ directory (stdlib-only Go; no module downloads).
-# The install play (monitoring/install-ids-forwarder.yml) fetches the
-# binary from the buildhost.
+# Source is synced from this repo's ids-forwarder/ directory into
+# /opt/src/ids-forwarder on the buildhost (stdlib-only Go; no module
+# downloads). The install play (monitoring/install-ids-forwarder.yml)
+# fetches the binary from there.
 #
 # No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
+#
+# The play targets {{ buildhost }} directly (not localhost with
+# delegate_to) because the synchronize module resolves its rsync target
+# from the play's inventory_hostname — the same pattern as
+# build-local-ai-proxy.yml.
 - name: Build ids-forwarder from source
-  hosts: localhost
+  hosts: "{{ buildhost | default('s1') }}"
   vars:
     ids_forwarder_build_dir: "/opt/src/ids-forwarder"
     ids_forwarder_binary: "{{ ids_forwarder_build_dir }}/ids-forwarder"
+    # Repo root on the controller (dev-sync target) — pushed to the
+    # buildhost. This file lives in config/ansible/app/, so the module is
+    # three directories up from the playbook dir.
+    ids_forwarder_repo_dir: "{{ playbook_dir }}/../../../ids-forwarder"
+    # Go toolchain. Installed via apt (golang-1.24) on the buildhost;
+    # >= 1.21 auto-fetches the go.mod toolchain (go 1.25).
     go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
   tasks:
     - name: Check if ids-forwarder binary already exists
       stat:
         path: "{{ ids_forwarder_binary }}"
       register: binary_stat
-      delegate_to: "{{ buildhost }}"
 
     - name: Install build dependencies (go + git)
       apt:
@@ -26,26 +36,27 @@
           - git
         state: present
       become: yes
-      delegate_to: "{{ buildhost }}"
 
-    - name: Create build directory
-      file:
-        path: "{{ ids_forwarder_build_dir }}"
-        state: directory
-        mode: '0755'
-      delegate_to: "{{ buildhost }}"
-
-    - name: Copy source to buildhost
-      copy:
-        src: "{{ playbook_dir | dirname | dirname }}/ids-forwarder/"
+    - name: Sync source to buildhost
+      synchronize:
+        src: "{{ ids_forwarder_repo_dir }}/"
         dest: "{{ ids_forwarder_build_dir }}/"
-        mode: preserve
-      delegate_to: "{{ buildhost }}"
+        delete: yes
+        recursive: yes
+        use_ssh_args: true
+        rsync_opts:
+          - "--exclude=.git/"
+          - "--exclude=*.test"
 
-    - name: Build ids-forwarder
+    - name: Build ids-forwarder binary on buildhost
       command:
         cmd: "{{ go_bin }} build -trimpath -o {{ ids_forwarder_binary }} ."
         chdir: "{{ ids_forwarder_build_dir }}"
       register: build_result
       changed_when: build_result.rc == 0
-      delegate_to: "{{ buildhost }}"
+
+    - name: Verify binary was produced
+      stat:
+        path: "{{ ids_forwarder_binary }}"
+      register: binary_verify
+      failed_when: not binary_verify.stat.exists

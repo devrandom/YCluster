@@ -35,6 +35,9 @@ METRICS_DIR = ROOT / "scripts" / "metrics"
 CAPS_PATH = METRICS_DIR / "caps.json"
 BASELINE_PATH = METRICS_DIR / "baseline.json"
 GO_DIR = ROOT / "local-ai-proxy"
+# Go modules scanned by the metrics gate. The first entry keeps unprefixed
+# baseline keys (compatibility); later entries are prefixed with dir name.
+GO_DIRS = [GO_DIR, ROOT / "ids-forwarder"]
 PY_PATHS = [
     ROOT / "config" / "ansible" / "admin" / "files",
     ROOT / "config" / "ansible" / "monitoring" / "files",
@@ -119,53 +122,74 @@ def _go_method_name(raw: str) -> str:
 
 def go_cyclomatic() -> dict[tuple[str, str], float]:
     """Cyclomatic per function, keyed by (file, name) — stable across edits."""
-    out = run([str(_resolve_bin_dir() / "gocyclo"), "-over", "0", "."], cwd=GO_DIR)
     res = {}
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        cyc = int(parts[0])
-        # format: <cyc> <pkg> <func> <file>:<line>:<col>
-        name = _go_method_name(parts[2])
-        pos = parts[-1]
-        file_part, _line_no, _ = pos.rsplit(":", 2)
-        if file_part.endswith("_test.go") or "/tmp/" in file_part:
-            continue
-        res[(file_part, name)] = cyc
+    for go_dir in GO_DIRS:
+        out = run([str(_resolve_bin_dir() / "gocyclo"), "-over", "0", "."], cwd=go_dir)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            cyc = int(parts[0])
+            # format: <cyc> <pkg> <func> <file>:<line>:<col>
+            name = _go_method_name(parts[2])
+            pos = parts[-1]
+            file_part, _line_no, _ = pos.rsplit(":", 2)
+            if file_part.endswith("_test.go") or "/tmp/" in file_part:
+                continue
+            if go_dir.name != GO_DIR.name:
+                file_part = f"{go_dir.name}/{file_part}"
+            res[(file_part, name)] = cyc
     return res
 
 
 def go_cognitive() -> dict[tuple[str, str], float]:
-    out = run([str(_resolve_bin_dir() / "gocognit"), "-json", "-over", "0", "."], cwd=GO_DIR)
     res = {}
-    for fn in json.loads(out):
-        pos = fn["Pos"]
-        if pos["Filename"].endswith("_test.go") or "/tmp/" in pos["Filename"]:
-            continue
-        res[(pos["Filename"], _go_method_name(fn["FuncName"]))] = fn["Complexity"]
+    for go_dir in GO_DIRS:
+        out = run([str(_resolve_bin_dir() / "gocognit"), "-json", "-over", "0", "."], cwd=go_dir)
+        for fn in json.loads(out):
+            pos = fn["Pos"]
+            if pos["Filename"].endswith("_test.go") or "/tmp/" in pos["Filename"]:
+                continue
+            fname = pos["Filename"]
+            if go_dir.name != GO_DIR.name:
+                fname = f"{go_dir.name}/{fname}"
+            res[(fname, _go_method_name(fn["FuncName"]))] = fn["Complexity"]
     return res
 
 
 def go_halstead() -> dict[str, float]:
-    out = run(["go", "run", str(METRICS_DIR / "halstead.go"), "."], cwd=GO_DIR)
-    return {r["file"]: r["difficulty"] for r in json.loads(out)}
+    res = {}
+    for go_dir in GO_DIRS:
+        out = run(["go", "run", str(METRICS_DIR / "halstead.go"), "."], cwd=go_dir)
+        for r in json.loads(out):
+            fname = r["file"]
+            if go_dir.name != GO_DIR.name:
+                fname = f"{go_dir.name}/{fname}"
+            res[fname] = r["difficulty"]
+    return res
 
 
 def go_dead_code() -> list[str]:
     # staticcheck exits 1 for findings; other exits are tool errors.
-    out = run_findings(
-        [str(_resolve_bin_dir() / "staticcheck"), "-checks", "U1000", "./..."],
-        cwd=GO_DIR,
-        findings_codes={1},
-    )
-    return [line for line in out.splitlines() if line.strip()]
+    hits = []
+    for go_dir in GO_DIRS:
+        out = run_findings(
+            [str(_resolve_bin_dir() / "staticcheck"), "-checks", "U1000", "./..."],
+            cwd=go_dir,
+            findings_codes={1},
+        )
+        hits.extend(
+            (f"{go_dir.name}/{line}" if go_dir.name != GO_DIR.name else line)
+            for line in out.splitlines()
+            if line.strip()
+        )
+    return hits
 
 
-def go_coverage(profile: Path) -> tuple[dict[tuple[str, str], float], float | None]:
+def go_coverage(go_dir: Path, profile: Path) -> tuple[dict[tuple[str, str], float], float | None]:
     """Return (per-func coverage keyed by (file, name), total fraction)."""
-    run(["go", "test", "./...", "-coverprofile=" + profile.name], cwd=GO_DIR)
-    out = run(["go", "tool", "cover", "-func", profile.name], cwd=GO_DIR)
+    run(["go", "test", "./...", "-coverprofile=" + profile.name], cwd=go_dir)
+    out = run(["go", "tool", "cover", "-func", profile.name], cwd=go_dir)
     per_func: dict[tuple[str, str], float] = {}
     total = None
     for line in out.splitlines():
@@ -176,12 +200,16 @@ def go_coverage(profile: Path) -> tuple[dict[tuple[str, str], float], float | No
             continue
         pos, name, pct = line.rsplit(None, 2)
         frac = float(pct.rstrip("%")) / 100
-        # pos is <module>/local-ai-proxy/<file>:<line>; match gocyclo's
-        # module-relative paths.
+        # pos is <module>/<go-dir>/<file>:<line>; match gocyclo's
+        # module-relative paths. Keys for the primary module (local-ai-proxy)
+        # are unprefixed for baseline compatibility; other Go modules are
+        # prefixed with their directory name.
         file_part = pos.rstrip(":").rsplit(":", 1)[0]
-        marker = "local-ai-proxy/"
+        marker = go_dir.name + "/"
         if marker in file_part:
             file_part = file_part.split(marker, 1)[1]
+        if go_dir.name != GO_DIR.name:
+            file_part = f"{go_dir.name}/{file_part}"
         per_func[(file_part, name)] = frac
     return per_func, total
 
@@ -228,17 +256,18 @@ def go_any_types() -> list[str]:
     untyped-data escape hatch and is not flagged.
     """
     hits = []
-    for path in sorted(GO_DIR.rglob("*.go")):
-        if path.name.endswith("_test.go") or "vendor" in path.parts:
-            continue
-        code = _strip_go_noncode(path.read_text())
-        for i, line in enumerate(code.splitlines(), 1):
-            if "...any" in line:
+    for go_dir in GO_DIRS:
+        for path in sorted(go_dir.rglob("*.go")):
+            if path.name.endswith("_test.go") or "vendor" in path.parts:
                 continue
-            if re.search(r"\bany\b", line) or "interface{}" in line:
-                hits.append(
-                    f"{path.relative_to(ROOT)}:{i}: any/interface{{}} use"
-                )
+            code = _strip_go_noncode(path.read_text())
+            for i, line in enumerate(code.splitlines(), 1):
+                if "...any" in line:
+                    continue
+                if re.search(r"\bany\b", line) or "interface{}" in line:
+                    hits.append(
+                        f"{path.relative_to(ROOT)}:{i}: any/interface{{}} use"
+                    )
     return hits
 
 
@@ -269,11 +298,15 @@ def collect_go(skip_coverage: bool) -> list[tuple[str, str, float]]:
     hal = go_halstead()
 
     cov_by_func: dict[tuple[str, int], float] = {}
-    cov_total = None
+    cov_totals: list[tuple[str, float]] = []
     if not skip_coverage:
-        profile = GO_DIR / "metrics.cover.out"
-        cov_by_func, cov_total = go_coverage(profile)
-        profile.unlink(missing_ok=True)
+        for go_dir in GO_DIRS:
+            profile = go_dir / "metrics.cover.out"
+            by_func, total = go_coverage(go_dir, profile)
+            profile.unlink(missing_ok=True)
+            cov_by_func.update(by_func)
+            if total is not None:
+                cov_totals.append((go_dir.name, total))
 
     # Per-function metrics are keyed by (file, name); all three Go tools
     # report the same names for the same functions.
@@ -289,11 +322,12 @@ def collect_go(skip_coverage: bool) -> list[tuple[str, str, float]]:
             out.append(("crap", name, round(crap(c, 0.0), 1)))
     for f, d in hal.items():
         out.append(("halstead", f, round(d, 1)))
-    for path in sorted(GO_DIR.rglob("*.go")):
-        if path.name.endswith("_test.go"):
-            continue
-        n = len(path.read_text().splitlines())
-        out.append(("lines", str(path.relative_to(ROOT)), n))
+    for go_dir in GO_DIRS:
+        for path in sorted(go_dir.rglob("*.go")):
+            if path.name.endswith("_test.go"):
+                continue
+            n = len(path.read_text().splitlines())
+            out.append(("lines", str(path.relative_to(ROOT)), n))
     # any_types: keyed per file with a count so line shifts don't re-fail;
     # adding a new `any`/`interface{}` raises the file's count past baseline.
     any_hits: dict[str, int] = {}
@@ -304,8 +338,8 @@ def collect_go(skip_coverage: bool) -> list[tuple[str, str, float]]:
     dead = go_dead_code()
     for hit in dead:
         out.append(("dead_code", _stable_key(hit), 1))
-    if cov_total is not None:
-        out.append(("coverage", "local-ai-proxy total", cov_total * 100))
+    for name, total in cov_totals:
+        out.append(("coverage", f"{name} total", total * 100))
     return out
 
 

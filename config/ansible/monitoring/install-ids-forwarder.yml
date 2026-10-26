@@ -1,30 +1,75 @@
 ---
-# Install the ids-forwarder on the monitoring node(s). The binary is
-# built by app/build-ids-forwarder.yml on the buildhost and fetched
-# here. The forwarder posts to Alertmanager's v2 API; Tetragon/CrowdSec
-# deployment is tracked separately in todo/security/intrusion-detection.md.
+# Install the ids-forwarder on the alerting node (core, where Alertmanager
+# runs). The binary is built by app/build-ids-forwarder.yml on the
+# buildhost and fetched here. The forwarder posts to Alertmanager's v2
+# API; Tetragon/CrowdSec deployment is tracked separately in
+# todo/security/intrusion-detection.md.
 - name: Install ids-forwarder
-  hosts: "{{ ids_forwarder_target | default('monitoring') }}"
+  hosts: "{{ ids_forwarder_target | default('core') }}"
   become: yes
   vars:
-    ids_forwarder_binary_local: "{{ playbook_dir }}/../tmp/ids-forwarder"
+    ids_forwarder_buildhost_path: /opt/src/ids-forwarder/ids-forwarder
     ids_forwarder_alertmanager_url: "http://localhost:9093"
     ids_forwarder_tetragon_log: "/var/log/tetragon/tetragon.log"
     ids_forwarder_events: "process_kprobe"
     ids_forwarder_http_listen: ""
     ids_forwarder_metrics_listen: "127.0.0.1:2113"
   tasks:
-    - name: Fetch binary from buildhost
+    - name: Check whether the tetragon group exists
       command:
-        cmd: "rsync -a {{ buildhost }}:/opt/src/ids-forwarder/ids-forwarder {{ ids_forwarder_binary_local }}"
-      delegate_to: localhost
-      register: fetch_result
-      changed_when: fetch_result.rc == 0
+        cmd: getent group tetragon
+      register: ids_tetragon_group
+      failed_when: false
+      changed_when: false
+
+    - name: Set tetragon group fact
+      set_fact:
+        ids_forwarder_tetragon_group_exists: "{{ ids_tetragon_group.rc == 0 }}"
+
+    - name: Create ids-forwarder system group
+      group:
+        name: ids-forwarder
+        system: yes
+
+    - name: Create ids-forwarder system user
+      user:
+        name: ids-forwarder
+        group: ids-forwarder
+        system: yes
+        shell: /usr/sbin/nologin
+        home: /var/lib/ids-forwarder
+        create_home: no
+        # The Tetragon deb ships a `tetragon` group with read access to
+        # /var/log/tetragon; join it when present so the forwarder can
+        # tail the event log without root.
+        groups: "{{ 'tetragon' if ids_forwarder_tetragon_group_exists else omit }}"
+
+    - name: Check for binary on buildhost
+      stat:
+        path: "{{ ids_forwarder_buildhost_path }}"
+      register: ids_binary_buildhost
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Fail if binary not found on buildhost
+      fail:
+        msg: "ids-forwarder binary not found at {{ ids_forwarder_buildhost_path }} on {{ buildhost }}. Run app/build-ids-forwarder.yml first."
+      when: not ids_binary_buildhost.stat.exists
+
+    - name: Fetch binary from buildhost to controller
+      fetch:
+        src: "{{ ids_forwarder_buildhost_path }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
 
     - name: Install binary
       copy:
-        src: "{{ ids_forwarder_binary_local }}"
+        src: "{{ build_cache_dir }}/ids-forwarder"
         dest: /usr/local/bin/ids-forwarder
+        owner: root
+        group: root
         mode: '0755'
       notify: restart ids-forwarder
 
