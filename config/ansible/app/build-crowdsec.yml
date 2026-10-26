@@ -21,7 +21,6 @@
     # Fixes GHSA-rh69-4vqj-9gj8, GHSA-g2x2-jgfg-pg7g, CVE-2026-44982 and
     # CVE-2026-44981.
     crowdsec_repo_sha: "909b5157986a2b2c2163300fdaef5ed01289f7d2"
-    crowdsec_bin_dir: "{{ crowdsec_build_dir }}/bin"
     go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
   tasks:
     - name: Install build dependencies (go + git + make)
@@ -30,6 +29,8 @@
           - golang-1.24
           - git
           - make
+          - pkg-config
+          - libre2-dev
         state: present
       become: yes
 
@@ -87,9 +88,9 @@
         path: "{{ item }}"
       register: binary_stat
       loop:
-        - "{{ crowdsec_build_dir }}/crowdsec"
-        - "{{ crowdsec_build_dir }}/cscli"
-        - "{{ crowdsec_build_dir }}/plugins/notification-http"
+        - "{{ crowdsec_build_dir }}/cmd/crowdsec/crowdsec"
+        - "{{ crowdsec_build_dir }}/cmd/crowdsec-cli/cscli"
+        - "{{ crowdsec_build_dir }}/cmd/notification-http/notification-http"
       failed_when: not binary_stat.stat.exists
       loop_control:
         label: "{{ item }}"

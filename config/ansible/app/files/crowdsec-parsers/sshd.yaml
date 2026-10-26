@@ -1,18 +1,34 @@
-# CrowdSec parser configuration for sshd logs (syslog format from
-# /var/log/auth.log). Adapted from crowdsecurity/sshd-logs in the hub,
-# pinned and trimmed to the fields our scenarios need.
-filenames:
-  - /var/log/auth.log
-labels:
-  type: syslog
-filter: "evt.Parsed.program == 'sshd'"
-onsuccess: continue_stage
+# CrowdSec parser for sshd logs (Debian/Ubuntu /var/log/auth.log).
+# Stage: s01-parse ( CrowdSec derives the pipeline stage from the path).
+# Identity metadata (name/author/description) is required for the node
+# to be loaded at all.
+# Extracts source_ip for the ssh-bf leaky bucket; target_user kept for
+# triage though unused by scenarios today.
+# Note: on Debian/Ubuntu, auth.log lines are classic syslog; the
+# "program" field comes from the base syslog parser stage, so we match
+# on the raw message prefix instead of relying on evt.Parsed.program.
+#filter: "evt.Parsed.program == 'sshd'"
+onsuccess: continue
 nodes:
-  - grok:
-      pattern: '%{DATA:sshd.event} from %{IPORHOST:source_ip} port \d+ ssh2.*'
+  - filter: "evt.Parsed.message contains 'sshd['"
+    grok:
+      pattern: 'sshd\[\d+\]: %{DATA:sshd_event} from %{IPORHOST:source_ip} port \d+ ssh2'
       apply_on: message
-      statics:
-        - meta: log_type
-          value: ssh_failed-auth
-        - parsed: target_user
-          expression: evt.Parsed.sshd.event
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+      - meta: source_ip
+        expression: evt.Parsed.source_ip
+      - parsed: target_user
+        expression: evt.Parsed.sshd_event
+  - filter: "evt.Parsed.message contains 'sshd[' and (evt.Parsed.message contains 'Failed password' or evt.Parsed.message contains 'Invalid user')"
+    grok:
+      pattern: 'sshd\[\d+\]: %{DATA:sshd_event} for %{DATA:target_user} from %{IPORHOST:source_ip} port \d+ ssh2'
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+      - meta: source_ip
+        expression: evt.Parsed.source_ip
+      - parsed: target_user
+        expression: evt.Parsed.target_user

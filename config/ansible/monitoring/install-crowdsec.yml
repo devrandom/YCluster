@@ -30,6 +30,8 @@
       user:
         name: crowdsec
         group: crowdsec
+        groups: adm
+        append: yes
         system: yes
         shell: /usr/sbin/nologin
         home: /var/lib/crowdsec
@@ -55,9 +57,9 @@
       delegate_to: "{{ buildhost }}"
       run_once: true
       loop:
-        - crowdsec
-        - cscli
-        - plugins/notification-http
+        - cmd/crowdsec/crowdsec
+        - cmd/crowdsec-cli/cscli
+        - cmd/notification-http/notification-http
 
     - name: Install crowdsec binary
       copy:
@@ -154,22 +156,38 @@
         mode: '0644'
       notify: restart crowdsec
 
-    - name: Install pinned parsers
+    - name: Install pinned parsers (s01-parse stage)
       copy:
         src: "{{ playbook_dir }}/../app/files/crowdsec-parsers/"
-        dest: "{{ crowdsec_config_dir }}/parsers/"
+        dest: "{{ crowdsec_config_dir }}/parsers/s01-parse/"
         owner: root
         group: root
         mode: '0644'
       notify: restart crowdsec
 
-    - name: Create empty hub directory (no hub download in local-only mode)
+    - name: Create patterns directory (crowdsec reads it during parser init)
+      file:
+        path: "{{ crowdsec_config_dir }}/patterns"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create hub directory
       file:
         path: "{{ crowdsec_config_dir }}/hub"
         state: directory
         owner: root
         group: root
         mode: '0755'
+
+    - name: Install minimal hub index (local-only; no hub download)
+      copy:
+        content: "{}\n"
+        dest: "{{ crowdsec_config_dir }}/hub/.index.json"
+        owner: root
+        group: root
+        mode: '0644'
 
     - name: Install systemd unit
       copy:

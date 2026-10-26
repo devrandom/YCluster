@@ -12,7 +12,8 @@
     ids_forwarder_alertmanager_url: "http://localhost:9093"
     ids_forwarder_tetragon_log: "/var/log/tetragon/tetragon.log"
     ids_forwarder_events: "process_kprobe"
-    ids_forwarder_http_listen: ""
+    # Loopback receiver for CrowdSec notification-http POSTs.
+    ids_forwarder_http_listen: "127.0.0.1:9201"
     ids_forwarder_metrics_listen: "127.0.0.1:2113"
   tasks:
     - name: Check whether the tetragon group exists

@@ -1,25 +1,25 @@
-# CrowdSec parser for nginx access logs (combined format), pinned from
-# crowdsecurity/nginx-logs in the hub. Extracts the fields the
-# http-crawl and http-40x scenarios need.
-filenames:
-  - /var/log/nginx/access.log
-labels:
-  type: nginx
-filter: "evt.Parsed.program == 'nginx'"
+# CrowdSec parser for nginx access logs (combined format).
+# Stage: s01-parse. Uses evt.Line.Labels.type (set by acquisition)
+# rather than evt.Parsed.program, which a file source does not set.
+name: ycluster/nginx-logs
+author: ycluster
+description: "Parse nginx combined-format access logs into http_access-log events"
+filter: "evt.Line.Labels.type == 'nginx'"
+onsuccess: continue_stage
 nodes:
   - grok:
-      pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status} %{NUMBER:bytes} "%{NOTSPACE:referer}" "%{NOTSPACE:user_agent}"'
+      pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status:int} %{NUMBER:bytes:int} "%{NOTSPACE:referer}" "%{NOTSPACE:user_agent}"'
       apply_on: message
-      statics:
-        - meta: log_type
-          value: http_access-log
-        - meta: source_ip
-          expression: evt.Parsed.source_ip
-        - parsed: status
-          expression: evt.Parsed.status
-        - parsed: verb
-          expression: evt.Parsed.verb
-        - parsed: file_name
-          expression: evt.Parsed.request
-        - parsed: static_ressource
-          expression: "evt.Parsed.request matches '.*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$' ? 'true' : 'false'"
+    statics:
+      - meta: log_type
+        value: http_access-log
+      - meta: source_ip
+        expression: evt.Parsed.source_ip
+      - parsed: status
+        expression: evt.Parsed.status
+      - parsed: verb
+        expression: evt.Parsed.verb
+      - parsed: file_name
+        expression: "evt.Parsed.request.split(' ')[1] if ' ' in evt.Parsed.request else evt.Parsed.request"
+      - parsed: static_ressource
+        expression: "evt.Parsed.request matches '.*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$' ? 'false' : 'true'"

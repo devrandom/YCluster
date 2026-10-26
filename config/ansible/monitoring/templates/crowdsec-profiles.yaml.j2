@@ -1,8 +1,12 @@
 # CrowdSec profiles config: route fired scenarios to the http_default
 # notification plugin. Local delivery only — no console, no CAPI.
+#
+# The filter matches our scenarios explicitly: they set
+# `remediation: false` (this deployment is alert-only, no bouncers), so
+# the upstream `Alert.Remediation == true` filter would never match.
 name: crowdsec_alerts
 filters:
-  - Alert.Remediation == true
+  - Alert.Remediation == false and Alert.Decisions == []
 decisions: []
 notifications:
   - http_default
