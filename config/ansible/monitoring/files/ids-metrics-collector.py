@@ -31,6 +31,7 @@ COMPONENTS = {
 # loopback-only). Values are copied verbatim from its exposition format.
 FORWARDER_GAUGES = (
     "ids_forwarder_dropped_total",
+    "ids_forwarder_expired_total",
     "ids_forwarder_queue_depth",
 )
 

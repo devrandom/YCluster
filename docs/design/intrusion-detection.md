@@ -415,9 +415,18 @@ network coverage.
   `host`, `layer=host|network|container`, `rule_id`. No IPs.
 - **Grouping.** Group by `alertname`, `host` and `rule_id`; inhibit lower
   severity when a critical alert for the same host and rule is active.
-- **Coverage alerts.** `IDSTetragonDown`, `IDSCrowdSecDown`,
-  `IDSForwarderDown`, `IDSForwarderQueueFull`, `IDSForwarderDropped`,
-  `IDSCoverageGap`, `IDSPolicyStale`. A host that stops reporting is an alert.
+- **Coverage alerts.** `TetragonDown`, `CrowdsecDown`, `IdsForwarderDown`,
+  `IdsForwarderDropping`. A host that stops reporting is an alert. They read
+  `ids_component_up` from the node_exporter textfile collector so they work on
+  every node, not just where Prometheus runs.
+- **Tuning window.** Detection alerts (`alertname=IDSAlert`) route to a silent
+  receiver (`ids-silent`) and are additionally silenced in Alertmanager while
+  policies and scenarios are tuned against real traffic. They stay visible in
+  the Alertmanager API/UI. Remove that route only when the detections are known
+  to be low-noise. Coverage alerts keep their normal routing: a stopped sensor
+  is a blind spot, not tuning noise. Alerts older than their TTL are dropped by
+  the forwarder rather than replayed after an outage, so a delivery gap cannot
+  page with stale events.
 - **Response.** None in phase 1. No bouncers, no active response, no firewall
   change, no account disable, no VM stop. Triage is manual: inspect, isolate the host
   or revoke the WireGuard peer only with explicit approval, then rotate keys.

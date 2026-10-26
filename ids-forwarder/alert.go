@@ -20,6 +20,18 @@ type alert struct {
 	EndsAt      string            `json:"endsAt"`
 }
 
+// expired reports whether the alert's delivery window has passed. A
+// backlog accumulated during an Alertmanager outage is discarded instead
+// of replayed: stale alerts would fire and resolve moments later, which
+// is pure noise for whoever is on call.
+func (a alert) expired(now time.Time) bool {
+	t, err := time.Parse(time.RFC3339Nano, a.EndsAt)
+	if err != nil {
+		return false
+	}
+	return now.After(t)
+}
+
 func (a alert) dedupKey() string {
 	keys := make([]string, 0, len(a.Labels))
 	for k := range a.Labels {
@@ -120,6 +132,7 @@ type metrics struct {
 	forwarded atomic.Int64
 	dropped   atomic.Int64
 	deduped   atomic.Int64
+	expired   atomic.Int64
 	failures  atomic.Int64
 }
 

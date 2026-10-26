@@ -92,6 +92,42 @@ func TestPostLoopRequeuesOnFailure(t *testing.T) {
 	f.wg.Wait()
 }
 
+func TestPostLoopDropsExpiredBacklog(t *testing.T) {
+	var mu sync.Mutex
+	posts := 0
+	srv := httptestAlertmanager(t, func([]byte) {
+		mu.Lock()
+		posts++
+		mu.Unlock()
+	})
+
+	cfg := testConfig()
+	cfg.alertmanagerURL = srv
+	cfg.pollInterval = 10 * time.Millisecond
+	f, _ := newForwarder(cfg)
+
+	a := newAlert(cfg, sourceTetragon, "warning", "host", "r", "stale")
+	a.EndsAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	f.queue.push(a)
+
+	f.wg.Add(1)
+	go f.postLoop()
+	waitFor(t, 3*time.Second, func() bool {
+		return f.stats.expired.Load() == 1
+	})
+	f.shutdown()
+	f.wg.Wait()
+
+	if f.queue.depth() != 0 {
+		t.Fatalf("expired alert must be removed from the queue, depth=%d", f.queue.depth())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 0 {
+		t.Fatalf("expired alert must not be posted, got %d posts", posts)
+	}
+}
+
 func TestReceiverOnlyAcceptsLoopback(t *testing.T) {
 	cfg := testConfig()
 	cfg.httpListen = "0.0.0.0:0"

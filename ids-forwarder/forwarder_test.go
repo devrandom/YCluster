@@ -244,3 +244,19 @@ func TestPostFailsOverBetweenAlertmanagers(t *testing.T) {
 		t.Fatalf("failover success must not count a failure, got %d", f.stats.failures.Load())
 	}
 }
+
+func TestExpiredAlertDropped(t *testing.T) {
+	cfg := testConfig()
+	a := newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")
+	if a.expired(time.Now()) {
+		t.Fatal("fresh alert must not be expired")
+	}
+	a.EndsAt = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+	if !a.expired(time.Now()) {
+		t.Fatal("past EndsAt must be expired")
+	}
+	a.EndsAt = "not-a-time"
+	if a.expired(time.Now()) {
+		t.Fatal("malformed EndsAt must not drop the alert")
+	}
+}

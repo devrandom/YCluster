@@ -8,6 +8,16 @@ route:
   repeat_interval: 1h
   receiver: 'default'
   routes:
+    # IDS detection alerts are observe-only during the tuning window:
+    # record them in Alertmanager but do not deliver them anywhere. Remove
+    # this route (and the ids-silent receiver) once the policies and
+    # scenarios have been tuned against real traffic. Coverage alerts such
+    # as TetragonDown still route normally: a stopped sensor is a blind
+    # spot, not tuning noise.
+    - match:
+        alertname: 'IDSAlert'
+      receiver: 'ids-silent'
+      repeat_interval: 24h
     # Perimeter CVE alerts (osv-feed) repeat daily so an unresolved
     # no_fix_yet/fix_available CVE stays visible instead of being
     # swallowed by the shorter global repeat_interval. Severity still picks
@@ -55,6 +65,10 @@ receivers:
     webhook_configs:
       - url: 'http://localhost:9095/webhook'
         send_resolved: true
+
+  - name: 'ids-silent'
+    # No integrations: IDS alerts stay visible in the Alertmanager UI/API
+    # during the tuning window but are not delivered to anyone.
 
   - name: 'critical-alerts'
     # Critical alerts - immediate notification via ntfy webhook handler

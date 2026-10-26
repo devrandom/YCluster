@@ -201,6 +201,11 @@ func (f *forwarder) postLoop() {
 	retry := idle * 4
 	for {
 		a, ok := f.queue.pop()
+		if ok && a.expired(time.Now()) {
+			f.stats.expired.Add(1)
+			f.cfg.logf("dropping expired alert %s", a.Labels["rule_id"])
+			continue
+		}
 		if !ok {
 			select {
 			case <-f.stop:
@@ -333,6 +338,7 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "ids_forwarder_dropped_total %d\n", f.stats.dropped.Load())
 		fmt.Fprintf(w, "ids_forwarder_deduped_total %d\n", f.stats.deduped.Load())
 		fmt.Fprintf(w, "ids_forwarder_post_failures_total %d\n", f.stats.failures.Load())
+		fmt.Fprintf(w, "ids_forwarder_expired_total %d\n", f.stats.expired.Load())
 	})
 	srv := &http.Server{Addr: f.cfg.metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ln, err := net.Listen("tcp", f.cfg.metricsListen)
