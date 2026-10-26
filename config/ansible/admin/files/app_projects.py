@@ -44,7 +44,11 @@ def clean_quota_value(value):
         raise ValidationError("value must be numeric")
     if not number.is_finite() or number < 0:
         raise ValidationError("value must be a finite non-negative number")
-    if number.as_tuple().exponent < -4:
+    # as_tuple().exponent is a str ("n"/"N"/"F") for NaN/Infinity; the
+    # is_finite() check above guarantees an int here, but narrow it
+    # explicitly so type checkers agree.
+    exponent = number.as_tuple().exponent
+    if not isinstance(exponent, int) or exponent < -4:
         raise ValidationError("value supports at most 4 decimal places")
     # NUMERIC(18,4): 14 integer digits + 4 fractional digits.
     if number.adjusted() + 1 > 14:
