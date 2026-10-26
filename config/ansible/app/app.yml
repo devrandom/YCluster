@@ -45,5 +45,8 @@
 # Forgejo (storage leader, leader-gated; OIDC client in Authentik)
 - import_playbook: install-forgejo.yml
 
+# Vikunja (storage leader, leader-gated; OIDC client in Authentik)
+- import_playbook: install-vikunja.yml
+
 # WhisperX (compute, opt-in via whisperx_enabled in host_vars)
 - import_playbook: install-whisperx.yml

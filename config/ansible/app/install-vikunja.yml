@@ -1,0 +1,356 @@
+---
+# Vikunja (cluster task manager) on the storage leader.
+#
+# State lives on /rbd/user/vikunja (uploaded files); task metadata, users,
+# projects, teams, comments and tokens live in the cluster's shared
+# PostgreSQL. The service follows the storage leader through
+# ycluster-apps.target, like Authentik, Forgejo and Zulip.
+#
+# The runtime image is the official digest-pinned upstream image, copied into
+# registry.xc so a failover or fresh node does not make a cold Docker Hub
+# request. config.yml is rendered by vikunja-manager at service start because
+# the Authentik OIDC client secret is only known after Authentik publishes it.
+#
+# Vikunja 2.7.1 is the minimum supported version: the 2026 CVE series
+# (cross-tenant authorization, link-share, TOTP, rate-limit and
+# resource-exhaustion issues) is fixed across releases up to 2.7.1, which
+# closes it. Bump deliberately, regenerate
+# config/ansible/monitoring/container-manifests/vikunja.manifest, and run the
+# osv-feed collector before relying on the new surface.
+- name: Install Vikunja on storage nodes
+  hosts: storage
+  become: yes
+  vars:
+    vikunja_version: "2.7.1"
+    # amd64 manifest digest from the upstream 2.7.1 image index
+    # (index sha256:f7dc8428d10aef17f3075886d3c1c022f566ec456f88985f02c137f4fc534576).
+    vikunja_upstream_image: "docker.io/vikunja/vikunja@sha256:3a848c83404d59ba9df4d91b92af4c400c8876ccdbbf3b563d41019cee29df39"
+    vikunja_image_digest: "{{ vikunja_upstream_image.split('@')[1] }}"
+    vikunja_registry_tag: "{{ vikunja_version }}-{{ vikunja_image_digest[7:19] }}"
+    vikunja_registry_image: "registry.xc:5000/vikunja:{{ vikunja_registry_tag }}"
+    vikunja_port: "{{ vikunja_local_port | default('3456') }}"
+    # External HTTPS is enabled by default. Set -e vikunja_external=false to
+    # keep the app internal-only; OIDC is also disabled in that mode because
+    # the IdP discovery URL is the public auth.<domain> hostname.
+    vikunja_external_enabled: "{{ vikunja_external | default(true) }}"
+    # Both are attack-surface reductions, not hard requirements. Enable them
+    # per install when CalDAV or public link sharing is actually needed.
+    vikunja_enable_caldav: "{{ vikunja_caldav | default(false) }}"
+    vikunja_enable_link_sharing: "{{ vikunja_link_sharing | default(false) }}"
+    vikunja_breakglass_username: "{{ vikunja_breakglass_user | default('vikunja-breakglass') }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Ensure the cluster registry is active on the leader
+      systemd:
+        name: docker-registry.service
+        state: started
+      when: is_storage_leader
+
+    - name: Check whether the cluster registry has the Vikunja image
+      uri:
+        url: "http://registry.xc:5000/v2/vikunja/manifests/{{ vikunja_registry_tag }}"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
+        status_code: 200
+        timeout: 10
+      register: vikunja_registry_check
+      failed_when: false
+      until: vikunja_registry_check.status | default(-1) in [200, 404]
+      retries: 30
+      delay: 2
+      when: is_storage_leader
+
+    - name: Seed the cluster registry with the pinned Vikunja image
+      shell: |
+        set -e
+        docker pull -q {{ vikunja_upstream_image }}
+        docker tag {{ vikunja_upstream_image }} {{ vikunja_registry_image }}
+        docker push -q {{ vikunja_registry_image }}
+        echo seeded
+      when: is_storage_leader and vikunja_registry_check.status | default(-1) != 200
+      register: vikunja_registry_seed
+      changed_when: "'seeded' in vikunja_registry_seed.stdout"
+
+    - name: Verify the Vikunja image is in the cluster registry
+      uri:
+        url: "http://registry.xc:5000/v2/vikunja/manifests/{{ vikunja_registry_tag }}"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
+        status_code: 200
+        timeout: 10
+      register: vikunja_registry_verify
+      failed_when: false
+      when: is_storage_leader
+
+    - name: Require the pinned Vikunja image in the cluster registry
+      fail:
+        msg: >-
+          {{ vikunja_registry_image }} is missing; seed the registry from
+          {{ vikunja_upstream_image }} and rerun this playbook
+      when: is_storage_leader and vikunja_registry_verify.status | default(-1) != 200
+
+    - name: Pull the pinned Vikunja image from the cluster registry
+      docker_image:
+        name: "{{ vikunja_registry_image }}"
+        source: pull
+      when: is_storage_leader
+
+    - name: Read Vikunja database password from etcd
+      command: etcdctl get /cluster/config/vikunja/db-password --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: vikunja_db_password_read
+      changed_when: false
+      failed_when: false
+      no_log: true
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+
+    - name: Generate Vikunja database password
+      command: openssl rand -base64 32
+      register: vikunja_db_password_generated
+      changed_when: false
+      no_log: true
+      run_once: true
+      when: vikunja_db_password_read.stdout | trim == ''
+
+    - name: Store Vikunja database password in etcd
+      command: etcdctl put /cluster/config/vikunja/db-password
+      args:
+        stdin: "{{ vikunja_db_password_generated.stdout }}"
+        stdin_add_newline: false
+      environment: "{{ etcd_client_env }}"
+      no_log: true
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+      when: vikunja_db_password_read.stdout | trim == ''
+
+    - name: Set Vikunja database password fact from etcd
+      set_fact:
+        vikunja_db_password: "{{ vikunja_db_password_read.stdout | trim }}"
+      no_log: true
+      when: vikunja_db_password_read.stdout | trim != ''
+
+    - name: Set Vikunja database password fact from generated value
+      set_fact:
+        vikunja_db_password: "{{ vikunja_db_password_generated.stdout | trim }}"
+      no_log: true
+      when: vikunja_db_password_read.stdout | trim == ''
+
+    - name: Create Vikunja configuration directory
+      file:
+        path: /etc/vikunja
+        state: directory
+        mode: '0755'
+
+    - name: Copy Vikunja compose file
+      copy:
+        src: files/vikunja-compose.yaml
+        dest: /etc/vikunja/docker-compose.yml
+        mode: '0644'
+      notify: restart vikunja
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
+    - name: Create Vikunja manager script
+      copy:
+        src: files/vikunja-manager
+        dest: /usr/local/lib/cluster/vikunja-manager
+        mode: '0755'
+      notify: restart vikunja
+
+    - name: Create Vikunja systemd service
+      copy:
+        dest: /etc/systemd/system/vikunja.service
+        content: |
+          [Unit]
+          Description=Vikunja (cluster task manager)
+          After=network.target docker.service user-rbd.service authentik.service
+          Requires=docker.service user-rbd.service
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/lib/cluster/vikunja-manager start
+          ExecStop=/usr/local/lib/cluster/vikunja-manager stop
+          TimeoutStartSec=600
+          TimeoutStopSec=90
+          User=root
+          Restart=on-failure
+          RestartSec=10
+          Environment=VIKUNJA_IMAGE={{ vikunja_registry_image }}
+          Environment=VIKUNJA_PORT={{ vikunja_port }}
+          Environment=VIKUNJA_EXTERNAL_ENABLED={{ 'true' if vikunja_external_enabled | bool else 'false' }}
+          Environment=VIKUNJA_ENABLE_CALDAV={{ 'true' if vikunja_enable_caldav | bool else 'false' }}
+          Environment=VIKUNJA_ENABLE_LINK_SHARING={{ 'true' if vikunja_enable_link_sharing | bool else 'false' }}
+          Environment=VIKUNJA_BREAKGLASS_USERNAME={{ vikunja_breakglass_username }}
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: vikunja_service_file
+      notify: restart vikunja
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Re-enable Vikunja service to update symlinks
+      command: systemctl reenable vikunja.service
+      when: vikunja_service_file.changed
+
+    - name: Enable Vikunja service
+      systemd:
+        name: vikunja.service
+        enabled: yes
+
+    - name: Configure PostgreSQL for Vikunja
+      when: is_storage_leader
+      block:
+        - name: Create PostgreSQL database for Vikunja
+          postgresql_db:
+            name: vikunja
+            state: present
+          become_user: postgres
+
+        - name: Create PostgreSQL user for Vikunja
+          postgresql_user:
+            name: vikunja
+            password: "{{ vikunja_db_password }}"
+            db: vikunja
+            priv: ALL
+            state: present
+          become_user: postgres
+          no_log: true
+
+        - name: Grant schema permissions to Vikunja user
+          postgresql_privs:
+            database: vikunja
+            state: present
+            privs: ALL
+            type: schema
+            objs: public
+            roles: vikunja
+          become_user: postgres
+
+        - name: Make Vikunja owner of the database
+          postgresql_owner:
+            db: vikunja
+            obj_name: vikunja
+            new_owner: vikunja
+            obj_type: database
+          become_user: postgres
+
+    - name: Start Vikunja service on the storage leader
+      systemd:
+        name: vikunja.service
+        state: started
+      when: is_storage_leader
+
+    - name: Install Vikunja internal nginx site (vikunja.xc)
+      template:
+        src: templates/vikunja-internal.conf.j2
+        dest: /etc/nginx/sites-available/vikunja-internal
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable Vikunja internal nginx site
+      file:
+        src: /etc/nginx/sites-available/vikunja-internal
+        dest: /etc/nginx/sites-enabled/vikunja-internal
+        state: link
+      notify: reload nginx
+
+    - name: Install Vikunja external nginx template
+      template:
+        src: files/vikunja_tasks.conf.j2
+        dest: /etc/nginx/templates/vikunja_tasks.conf.j2
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      vars:
+        proxy_port: "{{ vikunja_port }}"
+      notify: reload nginx
+      when: vikunja_external_enabled | bool
+
+    - name: Generate Vikunja nginx configuration from template
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
+      environment: "{{ etcd_client_env }}"
+      register: vikunja_nginx_update
+      changed_when: "'configuration updated' in vikunja_nginx_update.stdout"
+      failed_when: vikunja_nginx_update.rc != 0
+      notify: reload nginx
+      when: vikunja_external_enabled | bool
+
+    - name: Enable tasks.<domain> Vikunja nginx site
+      file:
+        src: /etc/nginx/sites-available/vikunja_tasks
+        dest: /etc/nginx/sites-enabled/vikunja_tasks
+        state: link
+      notify: reload nginx
+      when: vikunja_external_enabled | bool
+
+    # Turning external access off must also remove a vhost left by an earlier
+    # run; otherwise the public surface stays enabled while config.yml falls
+    # back to the internal public URL.
+    - name: Remove Vikunja external nginx site when disabled
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/sites-enabled/vikunja_tasks
+        - /etc/nginx/sites-available/vikunja_tasks
+        - /etc/nginx/templates/vikunja_tasks.conf.j2
+      notify: reload nginx
+      when: not (vikunja_external_enabled | bool)
+
+    # A failed run can update the unit but not reach the restart handler.
+    # Check the rendered mode and restart only when the running config has
+    # not caught up.
+    - name: Check that Vikunja external mode is applied
+      command: >-
+        grep -q '^  publicurl: "https://tasks\.' /etc/vikunja/config.yml
+      register: vikunja_external_applied
+      changed_when: vikunja_external_applied.rc != 0
+      failed_when: false
+      notify: restart vikunja
+      when: is_storage_leader and (vikunja_external_enabled | bool)
+
+    - name: Check that Vikunja internal mode is applied
+      command: >-
+        grep -q '^  publicurl: "http://vikunja\.xc/"' /etc/vikunja/config.yml
+      register: vikunja_internal_applied
+      changed_when: vikunja_internal_applied.rc != 0
+      failed_when: false
+      notify: restart vikunja
+      when: is_storage_leader and not (vikunja_external_enabled | bool)
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    # Leader-only: the unit Requires=user-rbd.service and /rbd/user mounts
+    # only on the leader, so a restart on a non-leader would fail.
+    - name: restart vikunja
+      systemd:
+        name: vikunja.service
+        state: restarted
+        daemon_reload: yes
+      when: is_storage_leader

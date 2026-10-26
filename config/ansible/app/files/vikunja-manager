@@ -1,0 +1,284 @@
+#!/bin/bash
+set -euo pipefail
+
+# etcd client config (endpoints + TLS certs) from the single source; set -a
+# exports the ETCDCTL_* vars so the bare etcdctl calls below pick them up.
+set -a; . /etc/ycluster/etcd-client.env 2>/dev/null || true; set +a
+
+VIKUNJA_DATA_DIR="${VIKUNJA_DATA_DIR:-/rbd/user/vikunja}"
+VIKUNJA_CONFIG_DIR="${VIKUNJA_CONFIG_DIR:-/etc/vikunja}"
+VIKUNJA_CONFIG_FILE="$VIKUNJA_CONFIG_DIR/config.yml"
+COMPOSE_PROJECT="vikunja"
+ETCD_KEY_PREFIX="/cluster/config/vikunja"
+VIKUNJA_BREAKGLASS_USERNAME="${VIKUNJA_BREAKGLASS_USERNAME:-vikunja-breakglass}"
+
+# Get an existing secret from etcd, or generate one and store it atomically
+# (txn: put only if the key doesn't exist, then read back whatever won).
+get_or_generate_secret() {
+    local etcd_key="${ETCD_KEY_PREFIX}/$1"
+    local generator="$2"
+
+    local existing
+    existing=$(etcdctl get "$etcd_key" --print-value-only 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+        echo "$existing"
+        return 0
+    fi
+
+    local new_value
+    new_value=$($generator)
+    local txn
+    txn=$(cat <<EOF
+version("$etcd_key") = "0"
+
+put "$etcd_key" "$new_value"
+
+get "$etcd_key" --print-value-only
+EOF
+)
+    # need to echo trailing newlines because here-doc strips them
+    echo -e "$txn\n\n" | etcdctl txn > /dev/null
+
+    etcdctl get "$etcd_key" --print-value-only
+}
+
+gen_secret()   { openssl rand -base64 48 | tr -d '\n'; }
+gen_password() { openssl rand -base64 32 | tr -d '\n'; }
+
+wait_for_registry() {
+    local max_attempts=12
+    local delay=5
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://registry.xc:5000/v2/" > /dev/null 2>&1; then
+            return 0
+        fi
+        echo "Waiting for registry (attempt $attempt/$max_attempts)..."
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Registry not available after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+wait_for_vikunja() {
+    local max_attempts=90
+    local delay=2
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://127.0.0.1:${VIKUNJA_PORT:-3456}/health" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Vikunja did not become healthy after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+write_config() {
+    local external_domain="$1"
+    local db_password="$2"
+    local service_secret="$3"
+    local oidc_secret="$4"
+    local publicurl openid_section
+
+    if [ -n "$external_domain" ]; then
+        publicurl="https://tasks.$external_domain/"
+    else
+        publicurl="http://vikunja.xc/"
+    fi
+
+    if [ -n "$external_domain" ] && [ -n "$oidc_secret" ]; then
+        openid_section=$(cat <<EOF
+  openid:
+    enabled: true
+    providers:
+      authentik:
+        name: Authentik
+        authurl: "https://auth.$external_domain/application/o/vikunja/"
+        clientid: vikunja
+        clientsecret: "$oidc_secret"
+        scope: "openid profile email"
+        forceuserinfo: false
+EOF
+)
+    else
+        openid_section=$(cat <<'EOF'
+  openid:
+    enabled: false
+EOF
+)
+    fi
+
+    cat > "$VIKUNJA_CONFIG_FILE" <<EOF
+# Written by vikunja-manager at service start — do not edit.
+service:
+  rootpath: /app/vikunja
+  publicurl: "$publicurl"
+  secret: "$service_secret"
+  enableregistration: false
+  enablecaldav: ${VIKUNJA_ENABLE_CALDAV:-false}
+  enablelinksharing: ${VIKUNJA_ENABLE_LINK_SHARING:-false}
+  enabletaskattachments: true
+  enabletaskcomments: true
+  enableemailreminders: false
+
+database:
+  type: postgres
+  host: host.docker.internal
+  database: vikunja
+  user: vikunja
+  password: "$db_password"
+  sslmode: disable
+  maxopenconnections: 20
+  maxidleconnections: 10
+
+files:
+  type: local
+  basepath: /data/files
+  maxsize: 100MB
+
+keyvalue:
+  type: memory
+
+auth:
+  local:
+    enabled: true
+$openid_section
+
+cors:
+  enable: false
+
+log:
+  standard: stdout
+  http: stdout
+EOF
+    chown 1000:1000 "$VIKUNJA_CONFIG_FILE"
+    chmod 600 "$VIKUNJA_CONFIG_FILE"
+}
+
+ensure_breakglass_user() {
+    local existing_id password
+
+    # `user list` is a table with box-drawing separators, built from
+    # pkg/cmd/user.go (ID, Username, Email, Status, ...). Field 3 is the
+    # username; match it exactly so an email or project name cannot collide.
+    existing_id=$(docker compose -p "$COMPOSE_PROJECT" exec -T vikunja \
+        /app/vikunja/vikunja user list 2>/dev/null \
+        | awk -F'│' -v user="$VIKUNJA_BREAKGLASS_USERNAME" '
+            {
+                username=$3
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", username)
+                if (username == user) {
+                    id=$2
+                    gsub(/[[:space:]]/, "", id)
+                    print id
+                    exit
+                }
+            }' || true)
+
+    password=$(etcdctl get "${ETCD_KEY_PREFIX}/breakglass-password" --print-value-only 2>/dev/null || true)
+
+    if [ -n "$existing_id" ]; then
+        if [ -n "$password" ]; then
+            return 0
+        fi
+        password=$(gen_password)
+        docker compose -p "$COMPOSE_PROJECT" exec -T vikunja \
+            /app/vikunja/vikunja user reset-password "$existing_id" \
+            --direct --password "$password" > /dev/null
+    else
+        password=$(gen_password)
+        docker compose -p "$COMPOSE_PROJECT" exec -T vikunja \
+            /app/vikunja/vikunja user create \
+            -u "$VIKUNJA_BREAKGLASS_USERNAME" \
+            -e "$VIKUNJA_BREAKGLASS_USERNAME@vikunja.invalid" \
+            -p "$password" > /dev/null
+    fi
+
+    printf '%s' "$password" \
+        | etcdctl put "${ETCD_KEY_PREFIX}/breakglass-password"
+}
+
+start_vikunja() {
+    mkdir -p "$VIKUNJA_DATA_DIR/files"
+    chown -R 1000:1000 "$VIKUNJA_DATA_DIR"
+
+    local db_password
+    db_password=$(etcdctl get "${ETCD_KEY_PREFIX}/db-password" --print-value-only 2>/dev/null || true)
+    if [ -z "$db_password" ]; then
+        echo "Vikunja database password missing from etcd; run install-vikunja.yml first"
+        return 1
+    fi
+
+    local service_secret
+    service_secret=$(get_or_generate_secret service-secret gen_secret)
+
+    local external_domain="" oidc_secret="" attempt
+    if [ "${VIKUNJA_EXTERNAL_ENABLED:-false}" = "true" ]; then
+        external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+    fi
+    if [ -n "$external_domain" ]; then
+        for attempt in $(seq 1 30); do
+            oidc_secret=$(etcdctl get /cluster/config/authentik/vikunja-client-secret --print-value-only 2>/dev/null || true)
+            [ -n "$oidc_secret" ] && break
+            sleep 2
+        done
+        if [ -z "$oidc_secret" ]; then
+            echo "Authentik Vikunja client secret not published yet; starting with local auth only"
+        fi
+    fi
+
+    write_config "$external_domain" "$db_password" "$service_secret" "$oidc_secret"
+
+    local env_file
+    env_file=$(mktemp --tmpdir=/dev/shm)
+    trap "rm -f '$env_file'" EXIT
+
+    echo "VIKUNJA_IMAGE=${VIKUNJA_IMAGE:?VIKUNJA_IMAGE must be set by the unit}" > "$env_file"
+    echo "VIKUNJA_PORT=${VIKUNJA_PORT:-3456}" >> "$env_file"
+    echo "VIKUNJA_DATA_DIR=$VIKUNJA_DATA_DIR" >> "$env_file"
+
+    if ! wait_for_registry; then
+        echo "Failed to connect to registry, aborting startup"
+        return 1
+    fi
+
+    cd "$VIKUNJA_CONFIG_DIR"
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up -d --pull=always
+
+    if ! wait_for_vikunja; then
+        return 1
+    fi
+
+    ensure_breakglass_user
+
+    # Re-attach in the foreground so systemd sees the service alive.
+    # On SIGTERM, stop_vikunja runs `docker compose down`.
+    exec docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
+}
+
+stop_vikunja() {
+    echo "Stopping Vikunja"
+    cd "$VIKUNJA_CONFIG_DIR"
+    docker compose -p "$COMPOSE_PROJECT" down
+    echo "Vikunja stopped"
+}
+
+case "${1:-}" in
+    start)
+        start_vikunja
+        ;;
+    stop)
+        stop_vikunja
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
