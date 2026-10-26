@@ -38,7 +38,8 @@ type tetragonProcess struct {
 }
 
 type tetragonProc struct {
-	Binary string `json:"binary"`
+	Binary string       `json:"binary"`
+	Pod    *tetragonPod `json:"pod"`
 }
 
 type tetragonPod struct {

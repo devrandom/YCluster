@@ -9,12 +9,20 @@
   become: yes
   vars:
     ids_forwarder_buildhost_path: /opt/src/ids-forwarder/ids-forwarder
-    ids_forwarder_alertmanager_url: "http://localhost:9093"
+    # Alertmanager runs on every core node. Non-core hosts cannot reach
+    # their own localhost, so target all core instances; the forwarder
+    # tries each URL in order and the first reachable one wins.
+    ids_forwarder_alertmanager_url: "{{ groups['core'] | map('extract', hostvars, ['ansible_host']) | map('regex_replace', '^(.*)$', 'http://\\1:9093') | join(',') }}"
     ids_forwarder_tetragon_log: "/var/log/tetragon/tetragon.log"
-    ids_forwarder_events: "process_kprobe"
+    # process_kprobe covers policy hits (file writes, cap changes,
+    # connects); process_exec is high-volume and is filtered by binary
+    # in the forwarder.
+    ids_forwarder_events: "process_kprobe,process_exec"
+    ids_forwarder_exec_binaries: "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget"
     # Loopback receiver for CrowdSec notification-http POSTs.
     ids_forwarder_http_listen: "127.0.0.1:9201"
     ids_forwarder_metrics_listen: "127.0.0.1:2113"
+    ids_metrics_textfile_dir: /var/lib/prometheus/node-exporter
   tasks:
     - name: Check whether the tetragon group exists
       command:
@@ -88,9 +96,82 @@
         state: started
         daemon_reload: yes
 
+    # Textfile collector: the IDS metrics endpoints are loopback-only, and
+    # core Prometheus already scrapes node_exporter on every managed node.
+    # Publishing ids_component_up keeps coverage alerts working everywhere
+    # without opening another listener.
+    - name: Install IDS metrics collector script
+      copy:
+        src: files/ids-metrics-collector.py
+        dest: /usr/local/lib/cluster/ids-metrics-collector
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Ensure node_exporter textfile directory exists
+      file:
+        path: "{{ ids_metrics_textfile_dir }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+
+    - name: Install IDS metrics collector service
+      copy:
+        dest: /etc/systemd/system/ids-metrics-collector.service
+        content: |
+          [Unit]
+          Description=Collect IDS component health for node_exporter
+          After=ids-forwarder.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 /usr/local/lib/cluster/ids-metrics-collector
+          User=root
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths={{ ids_metrics_textfile_dir }}
+        mode: '0644'
+      notify: reload systemd ids
+
+    - name: Install IDS metrics collector timer
+      copy:
+        dest: /etc/systemd/system/ids-metrics-collector.timer
+        content: |
+          [Unit]
+          Description=Collect IDS component health every minute
+
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=1min
+          AccuracySec=15s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd ids
+
+    - name: Enable and start IDS metrics collector timer
+      systemd:
+        name: ids-metrics-collector.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Publish IDS metrics immediately
+      systemd:
+        name: ids-metrics-collector.service
+        state: started
+
   handlers:
     - name: restart ids-forwarder
       systemd:
         name: ids-forwarder
         state: restarted
+        daemon_reload: yes
+
+    - name: reload systemd ids
+      systemd:
         daemon_reload: yes

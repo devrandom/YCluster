@@ -23,6 +23,12 @@ enable-event-metrics: false
 export-filename: /var/log/tetragon/tetragon.log
 # Group-readable so ids-forwarder (member of the tetragon group) can tail.
 export-file-perm: 640
+# Bounded retention: rotate daily, keep one week (the access-log window
+# used for the IP-retention constraint), cap each file, compress.
+export-file-rotation-interval: 24h
+export-file-max-backups: 7
+export-file-max-size-mb: 50
+export-file-compress: true
 export-allowlist: '{"event_set":["PROCESS_EXEC","PROCESS_EXIT","PROCESS_KPROBE"]}'
 export-denylist: ''
 

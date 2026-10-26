@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -38,12 +39,31 @@ func tetragonAlert(line string, cfg config) (alert, bool) {
 	if !configuredEvent(cfg.events, evType) {
 		return alert{}, false
 	}
+	// process_exec fires for every exec on the node; forward only the
+	// binaries that matter for detection (shells, privilege tools,
+	// package managers, downloaders).
+	if evType == "process_exec" && !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
+		return alert{}, false
+	}
 	return newAlert(cfg, sourceTetragon, tetragonSeverity(body), tetragonLayer(body), tetragonRule(evType, body), eventSummary(evType, body)), true
 }
 
 func configuredEvent(eventsCSV, evType string) bool {
 	for _, name := range strings.Split(eventsCSV, ",") {
 		if strings.TrimSpace(name) == evType {
+			return true
+		}
+	}
+	return false
+}
+
+func configuredExecBinary(binariesCSV, binary string) bool {
+	base := path.Base(strings.TrimSpace(binary))
+	if base == "." || base == "/" || base == "" {
+		return false
+	}
+	for _, name := range strings.Split(binariesCSV, ",") {
+		if strings.TrimSpace(name) == base {
 			return true
 		}
 	}
@@ -63,7 +83,7 @@ func tetragonLayer(body *tetragonLog) string {
 	if body.Process.Pod != nil {
 		return "container"
 	}
-	if body.Process.Parent != nil && body.Process.Parent.Binary != "" {
+	if body.Process.Parent != nil && body.Process.Parent.Pod != nil {
 		return "container"
 	}
 	return "host"

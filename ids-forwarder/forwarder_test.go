@@ -14,6 +14,7 @@ func testConfig() config {
 	cfg := defaultConfig()
 	cfg.hostname = "test-host"
 	cfg.alertTTL = time.Minute
+	cfg.logf = func(string, ...any) {}
 	return cfg
 }
 
@@ -65,8 +66,12 @@ func TestTetragonEventFilter(t *testing.T) {
 		t.Fatal("process_exec should be filtered by default config")
 	}
 	cfg.events = "process_exec"
-	if _, ok := tetragonAlert(line, cfg); !ok {
-		t.Fatal("process_exec should forward when configured")
+	if _, ok := tetragonAlert(line, cfg); ok {
+		t.Fatal("non-allowlisted exec must stay filtered")
+	}
+	shell := `{"process_exec":{"process":{"binary":"/usr/bin/bash"}}}`
+	if _, ok := tetragonAlert(shell, cfg); !ok {
+		t.Fatal("allowlisted process_exec should forward when configured")
 	}
 }
 
@@ -169,5 +174,73 @@ func TestQueuePushFrontRejectsWhenFull(t *testing.T) {
 	}
 	if f.queue.pushFront(newAlert(cfg, sourceTetragon, "warning", "host", "r", "x")) {
 		t.Fatal("pushFront should reject when full")
+	}
+}
+
+func TestExecBinaryAllowlist(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe,process_exec"
+	shell := `{"process_exec":{"process":{"binary":"/usr/bin/bash","arguments":"-c id"}}}`
+	a, ok := tetragonAlert(shell, cfg)
+	if !ok {
+		t.Fatal("shell exec should be forwarded")
+	}
+	if a.Labels["rule_id"] != "process_exec" {
+		t.Fatalf("rule_id = %q", a.Labels["rule_id"])
+	}
+	noise := `{"process_exec":{"process":{"binary":"/usr/bin/python3.12","arguments":"-m foo"}}}`
+	if _, ok := tetragonAlert(noise, cfg); ok {
+		t.Fatal("python exec must not be forwarded")
+	}
+	empty := `{"process_exec":{"process":{"binary":""}}}`
+	if _, ok := tetragonAlert(empty, cfg); ok {
+		t.Fatal("empty binary must not be forwarded")
+	}
+}
+
+func TestContainerLayerUsesPodMetadataOnly(t *testing.T) {
+	host := tetragonLog{Process: tetragonProcess{
+		Binary: "/usr/bin/bash",
+		Parent: &tetragonProc{Binary: "/usr/bin/sshd"},
+	}}
+	if got := tetragonLayer(&host); got != "host" {
+		t.Fatalf("parent without pod metadata must stay host, got %q", got)
+	}
+	container := tetragonLog{Process: tetragonProcess{
+		Binary: "/usr/bin/bash",
+		Parent: &tetragonProc{Binary: "/usr/bin/containerd-shim", Pod: &tetragonPod{Name: "p"}},
+	}}
+	if got := tetragonLayer(&container); got != "container" {
+		t.Fatalf("parent pod metadata must be container, got %q", got)
+	}
+}
+
+func TestPostFailsOverBetweenAlertmanagers(t *testing.T) {
+	var mu sync.Mutex
+	var got int
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer good.Close()
+
+	cfg := testConfig()
+	cfg.alertmanagerURL = "http://127.0.0.1:1," + good.URL
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.post([]alert{newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")}); err != nil {
+		t.Fatalf("post should succeed via the second URL: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got != 1 {
+		t.Fatalf("healthy instance got %d posts, want 1", got)
+	}
+	if f.stats.failures.Load() != 0 {
+		t.Fatalf("failover success must not count a failure, got %d", f.stats.failures.Load())
 	}
 }

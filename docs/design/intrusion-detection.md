@@ -305,6 +305,8 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - Metrics on `localhost:2112`, scraped by the existing Prometheus.
 - JSON events written to a bounded local file with rotation. The forwarder
   tails that file; the gRPC unix socket stays reserved for operator tooling.
+- Retention matches the access-log window: Tetragon rotates the event file
+  daily, keeps seven compressed backups, and caps each file at 50 MB.
 - Policies pinned in Ansible: file writes to `/etc` and systemd paths,
   capability changes, kernel module loads, and network connects. Shell and
   package-manager execs are already exported by the base sensor's
@@ -326,12 +328,24 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - Small Go service in the repo, stdlib only.
 - Tails the Tetragon JSON events file; optional localhost HTTP receiver for
   CrowdSec notification-http POSTs.
+- Forwards `process_kprobe` events plus `process_exec` events for an
+  allowlist of binaries (interactive shells, privilege tools, package
+  managers, downloaders). Other execs are dropped in-process: the base
+  sensor emits one event per exec and that volume is not useful as alerts.
 - Maps severity and rule metadata to Alertmanager `v2/alerts`.
-- Keeps a bounded queue; drops expired events instead of growing.
+- Posts to every core Alertmanager instance over the cluster network, in
+  order, and stops at the first that accepts the alert. Non-core nodes have
+  no local Alertmanager.
+- Keeps a bounded queue; drops expired events instead of growing, and
+  exposes the drop counter so a delivery problem is visible.
 - Does not store alerts, does not write to a database, and does not put IPs in
   labels or annotations.
 - Emits `ids_forwarder_up`, `ids_forwarder_queue_depth`,
-  `ids_forwarder_dropped_total` and a heartbeat timestamp.
+  `ids_forwarder_dropped_total`, `ids_forwarder_forwarded_total` and
+  `ids_forwarder_deduped_total`.
+- Coverage is republished through the node_exporter textfile collector
+  (`ids_component_up{component=...}`) so core Prometheus can alert on a
+  stopped sensor on any node without opening the loopback metrics endpoints.
 
 ### Network sensor
 
@@ -354,10 +368,13 @@ network coverage.
 
 ## Detection content
 
-- **Tetragon policies.** Process execution from service users, writes below
-  `/etc` and systemd unit paths, setuid/capability changes, kernel module loads,
-  namespace changes, unexpected container exec, and network connects to unexpected
+- **Tetragon policies.** Writes below `/etc` and systemd unit paths,
+  setuid/capability changes, kernel module loads, namespace changes,
+  unexpected container exec, and network connects to unexpected
   destinations.
+- **Tetragon process execs.** The forwarder forwards `process_exec` only for
+  shells, privilege tools (`sudo`, `su`), package managers and downloaders.
+  The binary allowlist is a playbook variable (`ids_forwarder_exec_binaries`).
 - **Tetragon FIM.** Real-time file access and modification on `/etc`, systemd unit
   paths, SSH config, cron paths and Ansible-managed config directories. This is
   access/modification detection, not a periodic hash baseline.
@@ -374,9 +391,9 @@ network coverage.
 
 ## Data and retention
 
-- **Tetragon events.** Bounded local file; rotate daily; purge on the nginx/SSH
-  access-log retention schedule. Network events contain IPs, so they are subject to
-  the same cutoff.
+- **Tetragon events.** Bounded local file; Tetragon rotates daily and keeps
+  seven compressed backups, matching the nginx/SSH access-log retention
+  window. Network events contain IPs, so they are subject to the same cutoff.
 - **CrowdSec database.** Cap retention at the access-log window. No console or
   community sync means no second copy leaves the cluster.
 - **Forwarder queue.** Bounded in memory and on local disk; drop expired events at

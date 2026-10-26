@@ -17,6 +17,8 @@ func main() {
 		cfg.tetragonLog, "Tetragon JSON events file (empty disables the tailer)")
 	flag.StringVar(&cfg.events, "events",
 		cfg.events, "comma-separated Tetragon event types to forward")
+	flag.StringVar(&cfg.execBinaries, "exec-binaries",
+		cfg.execBinaries, "comma-separated binary basenames forwarded for process_exec events")
 	flag.StringVar(&cfg.httpListen, "http-listen",
 		cfg.httpListen, "optional localhost HTTP receiver for CrowdSec notifications")
 	flag.StringVar(&cfg.metricsListen, "metrics-listen",

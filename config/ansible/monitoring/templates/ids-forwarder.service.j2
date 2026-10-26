@@ -9,6 +9,7 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -alertmanager-url {{ ids_forwarder_alertmanager_url }} \
     -tetragon-log {{ ids_forwarder_tetragon_log }} \
     -events {{ ids_forwarder_events }} \
+    -exec-binaries {{ ids_forwarder_exec_binaries }} \
     -metrics-listen {{ ids_forwarder_metrics_listen }} \
 {% if ids_forwarder_http_listen %}
     -http-listen {{ ids_forwarder_http_listen }}

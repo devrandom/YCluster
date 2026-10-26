@@ -86,7 +86,7 @@ func TestEventTypeVariants(t *testing.T) {
 	cfg := testConfig()
 	cfg.events = "process_exec,process_exit,process_connect"
 	for _, line := range []string{
-		`{"process_exec":{"process":{"binary":"/bin/a"}}}`,
+		`{"process_exec":{"process":{"binary":"/usr/bin/bash"}}}`,
 		`{"process_exit":{"process":{"binary":"/bin/a"},"status":0}}`,
 		`{"process_connect":{"process":{"binary":"/bin/a"}}}`,
 	} {

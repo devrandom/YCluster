@@ -24,6 +24,7 @@ type config struct {
 	alertmanagerURL string
 	tetragonLog     string
 	events          string
+	execBinaries    string
 	httpListen      string
 	metricsListen   string
 	hostname        string
@@ -32,6 +33,7 @@ type config struct {
 	alertTTL        time.Duration
 	postTimeout     time.Duration
 	pollInterval    time.Duration
+	logf            func(format string, args ...any)
 }
 
 func defaultConfig() config {
@@ -39,6 +41,7 @@ func defaultConfig() config {
 		alertmanagerURL: "http://127.0.0.1:9093",
 		tetragonLog:     "/var/log/tetragon/tetragon.log",
 		events:          "process_kprobe",
+		execBinaries:    "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget",
 		httpListen:      "",
 		metricsListen:   "127.0.0.1:2113",
 		queueMax:        1000,
@@ -46,6 +49,7 @@ func defaultConfig() config {
 		alertTTL:        10 * time.Minute,
 		postTimeout:     5 * time.Second,
 		pollInterval:    500 * time.Millisecond,
+		logf:            log.Printf,
 	}
 }
 
@@ -72,6 +76,9 @@ func newForwarder(cfg config) (*forwarder, error) {
 	}
 	if cfg.dedupWindow < 0 {
 		return nil, errors.New("dedup-window must be >= 0")
+	}
+	if cfg.logf == nil {
+		cfg.logf = log.Printf
 	}
 	return &forwarder{
 		cfg:    cfg,
@@ -183,7 +190,7 @@ func (f *forwarder) enqueue(a alert) {
 	}
 	if !f.queue.push(a) {
 		f.stats.dropped.Add(1)
-		log.Printf("queue full, dropping oldest alert")
+		f.cfg.logf("queue full, dropping oldest alert")
 		return
 	}
 }
@@ -203,7 +210,7 @@ func (f *forwarder) postLoop() {
 			}
 		}
 		if err := f.post([]alert{a}); err != nil {
-			log.Printf("post to alertmanager: %v", err)
+			f.cfg.logf("post to alertmanager: %v", err)
 			// Re-queue at the front unless the queue is full.
 			if !f.queue.pushFront(a) {
 				f.stats.dropped.Add(1)
@@ -227,23 +234,43 @@ func (f *forwarder) post(alerts []alert) error {
 	if err != nil {
 		return err
 	}
-	url := strings.TrimRight(f.cfg.alertmanagerURL, "/") + "/api/v2/alerts"
+	// alertmanager-url may be a comma-separated list (the cluster runs
+	// Alertmanager on every core node). Try each in order; a single
+	// reachable instance is enough for the alert to be accepted.
+	var lastErr error
+	for _, base := range strings.Split(f.cfg.alertmanagerURL, ",") {
+		base = strings.TrimSpace(base)
+		if base == "" {
+			continue
+		}
+		if err := f.postOne(base, body); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	f.stats.failures.Add(1)
+	if lastErr == nil {
+		lastErr = errors.New("no alertmanager URL configured")
+	}
+	return lastErr
+}
+
+func (f *forwarder) postOne(base string, body []byte) error {
+	url := strings.TrimRight(base, "/") + "/api/v2/alerts"
 	ctx, cancel := context.WithTimeout(context.Background(), f.cfg.postTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
 	if err != nil {
-		f.stats.failures.Add(1)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := f.client.Do(req)
 	if err != nil {
-		f.stats.failures.Add(1)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		f.stats.failures.Add(1)
 		return fmt.Errorf("alertmanager returned %s", resp.Status)
 	}
 	return nil
@@ -280,7 +307,7 @@ func (f *forwarder) startReceiver() error {
 	f.receiverListen = ln.Addr().String()
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("receiver: %v", err)
+			f.cfg.logf("receiver: %v", err)
 			os.Exit(1)
 		}
 	}()
@@ -319,7 +346,7 @@ func (f *forwarder) startMetrics() error {
 	f.metricsBind = ln.Addr().String()
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("metrics: %v", err)
+			f.cfg.logf("metrics: %v", err)
 		}
 	}()
 	return nil
