@@ -408,17 +408,20 @@ def get_hosts():
         f"{STORAGE_VIP} inference.xc",
         f"{STORAGE_VIP} auth.xc",
         f"{STORAGE_VIP} forgejo.xc",
+        f"{STORAGE_VIP} vikunja.xc",
     ])
 
     # Forgejo advertises git.<domain> for SSH clone URLs when external SSH
     # is enabled. Resolve it to the storage leader internally so cluster
     # clients don't hairpin through the public frontend. auth.<domain> gets
     # the same treatment: the IdP discovery URL is the public hostname.
+    # Vikunja's external hostname is resolved internally for the same reason.
     domain = _configured_external_domain(client)
     if domain:
         hosts_entries.extend([
             f"{STORAGE_VIP} git.{domain}",
             f"{STORAGE_VIP} auth.{domain}",
+            f"{STORAGE_VIP} tasks.{domain}",
         ])
 
     if hosts_entries:

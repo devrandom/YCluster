@@ -72,6 +72,11 @@ Git clients and API tokens are not Authentik sessions, so Forgejo itself is
 the auth boundary there; the web login is OIDC. Do not add the outpost
 include to `forgejo_git.conf.j2`.
 
+`tasks.<domain>` (Vikunja) is the same exception for a different client mix:
+the web UI uses OIDC and API/CalDAV clients use Vikunja tokens, so Vikunja is
+its own credential boundary. Do not add the outpost include to
+`vikunja_tasks.conf.j2`; it is tiered P0-U in `perimeter_software.yml`.
+
 Forgejo SSH is not an nginx vhost at all. It is a raw TCP proxy registered
 by the leader-gated `frpc` (`name = "forgejo-ssh"`, frontend port 2222,
 backend `127.0.0.1:2222`). The frontend UFW opens 2222 by default; set
@@ -88,7 +93,9 @@ so they reach Forgejo directly instead of hairpinning through the frontend.
    on the storage leader (same shape as the comfy vhost tasks).
 3. Add the IdP side: an application + forward provider + policy bindings to
    a group in `authentik-manager` (the `comfy` group / `ycluster-admins`
-   pattern), then run `install-authentik.yml`.
+   pattern), then run `install-authentik.yml`. App-owned OIDC services
+   (Forgejo, Vikunja) instead use an OAuth2 provider + application and keep
+   their own login boundary; see the exception note above.
 4. Deploy via the `deploy-to-cluster` workflow, then verify on the **storage
    leader's `127.0.0.2:443`**:
    ```bash
@@ -96,5 +103,9 @@ so they reach Forgejo directly instead of hairpinning through the frontend.
         https://name.<domain>/
    # unauthenticated -> 302 to /outpost.goauthentik.io/start (expected)
    ```
-5. DNS: `name.<domain>` must resolve to the frontend public IP. No per-vhost
-   DNS is set up by ansible; add the record out of band.
+5. DNS: `name.<domain>` must resolve to the frontend public IP before the
+   vhost goes live. No per-vhost DNS is set up by ansible; add the record out
+   of band. A missing record fails the next certificate renewal for the
+   whole certificate, because renewal includes every template's subdomain.
+6. Add the SAN: run `ycluster certbot obtain` on the storage leader after the
+   vhost is rendered. Rendering a vhost does not re-issue the certificate.

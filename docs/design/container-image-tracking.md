@@ -56,6 +56,13 @@ observes it.
   that runtime image. apk specs carry the release (`Alpine:v3.24:...`), so OSV's
   per-release entries do not leak historical-branch findings into the current
   image.
+- **Vikunja manifest — generated, not yet deployed.** `vikunja.manifest`
+  tracks the official 2.7.1 distroless image's Go module buildinfo (159
+  specs, no apk layer). It is generated with
+  `manifestgen vikunja --go-buildinfo <buildinfo>` from
+  `/app/vikunja/vikunja`; `app/install-vikunja.yml` pins the amd64 digest
+  `sha256:3a848c83404d…` and caches it under
+  `registry.xc:5000/vikunja:2.7.1-3a848c83404d`. Re-match after first deploy.
 - **P3 (authentik digest pin) — done + deployed.** `app/install-authentik.yml`
   pins the amd64 server image by digest
   (`ghcr.io/goauthentik/server@sha256:6b924afb…`, var `authentik_image`), cached
@@ -79,11 +86,14 @@ observes it.
 | open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | upstream v0.12.3 `91ea4e34…` + mobile-upload/pillow/certifi/Brotli patches and plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
 | zulip | `registry.xc:5000/zulip:12.1-0` | docker-zulip `9a0bd360…` + zulip src `7d85fc15…` in `app/build-zulip.yml` | P0-U (login/registration/pre-auth) | storage leader |
 | forgejo | `registry.xc:5000/forgejo:17.0.0-c6931ca29261-brotli1.2.1-expat2.9.0-zlib1.3.2r1` | upstream `codeberg.org/forgejo/forgejo@sha256:c6931ca…` (17.0.0) + brotli/expat/zlib security bumps in `app/build-forgejo.yml` | P0-U (pre-auth git/API) | storage leader |
+| vikunja | `registry.xc:5000/vikunja:2.7.1-3a848c83404d` (repo-landed, not deployed) | upstream `docker.io/vikunja/vikunja@sha256:3a848c83404d…` (2.7.1) in `app/install-vikunja.yml` | P0-U (pre-auth login/API) | storage leader |
 
 open-webui and zulip are built in-cluster from pinned source
 (`build-*.yml`, no prebuilt images); authentik was previously an upstream
 image pulled by mutable tag (`:2026.2.4`) and is now digest-pinned via
 `authentik_image` in the service unit (repo-landed, not yet deployed).
+Vikunja is an upstream distroless image pinned by amd64 manifest digest and
+copied into `registry.xc`; it has no in-cluster build step.
 
 ## Per-image CVE findings (real PyPI mirror, current manifests)
 
@@ -98,6 +108,10 @@ SLA once deployed; regenerate manifests and re-run after any image bump.
 | zulip | 58 | 4 | 54 | 0 | anyio, cryptography, django, msgpack, pyasn1, pyjwt, pymongo, social-auth-core, soupsieve, sqlparse, tornado, urllib3 |
 | authentik | 10 | 0 | 10 | 0 | aiohttp, djangorestframework, urllib3 |
 | forgejo | 0 | 0 | 0 | 0 | none |
+
+Vikunja is not in this re-match yet: its 159-spec Go manifest is generated
+but has not been run against the populated mirror. Run the collector after
+the first deploy and record the result here.
 
 Counts include acknowledged findings. The `critical` column is every critical
 finding, not only the unacked ones; all currently open criticals are

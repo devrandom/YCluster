@@ -226,6 +226,7 @@ image's actual `pip list`, because the Dockerfile installs `requirements.txt`.
 | zulip | `app/build-zulip.yml` (docker-zulip + src SHAs) | `--uv-select prod` |
 | authentik | `app/install-authentik.yml` `authentik_image` (digest) + `authentik_version` | `--uv-select base` |
 | forgejo | patched in-cluster image from `app/build-forgejo.yml` (upstream digest + brotli/expat/zlib security bumps) | `manifestgen forgejo --apk-installed <installed> --apk-release v3.24 --go-buildinfo <buildinfo>`; apk specs use the installed DB's `o:` source origin, Go specs use the linked binary's buildinfo |
+| vikunja | `app/install-vikunja.yml` `vikunja_upstream_image` (amd64 digest) + `vikunja_version` | `manifestgen vikunja --go-buildinfo <buildinfo>` from the distroless binary; no apk layer |
 
 Alpine advisories are keyed on the **source** package, while
 `/lib/apk/db/installed` records binary subpackages (`P`, e.g.
@@ -252,6 +253,15 @@ PYTHONPATH=osv-feed python3 -m osv_feed.manifestgen forgejo \
   --apk-installed ./tmp/forgejo-installed --apk-release v3.24 \
   --go-buildinfo ./tmp/forgejo-buildinfo \
   --out config/ansible/monitoring/container-manifests/forgejo.manifest
+
+# From the pinned Vikunja image (distroless: only the Go binary):
+docker create --name vikunja-extract <image>
+docker cp vikunja-extract:/app/vikunja/vikunja ./tmp/vikunja
+docker rm vikunja-extract
+go version -m ./tmp/vikunja > ./tmp/vikunja-buildinfo
+PYTHONPATH=osv-feed python3 -m osv_feed.manifestgen vikunja \
+  --go-buildinfo ./tmp/vikunja-buildinfo \
+  --out config/ansible/monitoring/container-manifests/vikunja.manifest
 ```
 
 Commit the regenerated manifest and redeploy `install-osv-feed.yml` so it

@@ -1,0 +1,28 @@
+services:
+  vikunja:
+    # VIKUNJA_IMAGE is set by the systemd unit. The fallback is the
+    # digest-derived in-cluster tag so a manual compose run cannot silently
+    # fall back to a mutable upstream tag.
+    image: ${VIKUNJA_IMAGE:-registry.xc:5000/vikunja:2.7.1-3a848c83404d}
+    container_name: vikunja
+    volumes:
+      - ${VIKUNJA_DATA_DIR:-/rbd/user/vikunja}:/data
+      # Written by vikunja-manager at service start; read-only in the
+      # container. Holds the persistent JWT secret, Postgres password and
+      # the Authentik OIDC client secret.
+      - /etc/vikunja/config.yml:/etc/vikunja/config.yml:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      # Host nginx is the only web ingress. The API is not published on the
+      # cluster interface.
+      - 127.0.0.1:${VIKUNJA_PORT:-3456}:3456
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    healthcheck:
+      # The image is distroless; use Vikunja's own healthcheck command.
+      test: ["CMD", "/app/vikunja/vikunja", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped

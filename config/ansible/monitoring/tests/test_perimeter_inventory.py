@@ -116,6 +116,20 @@ class TestPerimeterInventory(unittest.TestCase):
         self.assertIn("Alpine:v3.24:busybox=1.37.0-r31", specs)
         self.assertTrue(any(s.startswith("Go:") for s in specs))
 
+    def test_vikunja_has_a_container_manifest(self):
+        vikunja = [e for e in self.entries if e["name"] == "vikunja"]
+        self.assertEqual(len(vikunja), 1)
+        self.assertEqual(vikunja[0]["osv_category"], "container")
+        self.assertNotIn("untracked", vikunja[0])
+        manifest = os.path.normpath(
+            os.path.join(os.path.dirname(INVENTORY),
+                         "monitoring/container-manifests/vikunja.manifest"))
+        self.assertTrue(os.path.isfile(manifest), manifest)
+        with open(manifest) as fh:
+            specs = [line.split("#", 1)[0].strip() for line in fh]
+        self.assertIn("Go:github.com/labstack/echo/v5=v5.3.1", specs)
+        self.assertIn("Go:github.com/redis/go-redis/v9=v9.22.0", specs)
+
 
 if __name__ == "__main__":
     unittest.main()

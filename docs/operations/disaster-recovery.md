@@ -65,6 +65,10 @@ backup-databases status        # newest backup per engine, sizes, sync state
   in `pg_dumpall`, but the repositories themselves have no off-cluster file
   backup today. Add a `forgejo dump`/RBD snapshot path before treating the
   forge as production.
+- **Vikunja state** (`/rbd/user/vikunja/files`: task attachments) — task
+  metadata is in the `vikunja` Postgres database and included in
+  `pg_dumpall`; attachments share the RBD no-off-cluster-backup gap. A restore
+  needs the database dump plus the files directory.
 - **Everything Ansible renders** — service configs, blueprints, certs issued by
   the cluster CA. Recovered by re-running playbooks, not from backup.
 
