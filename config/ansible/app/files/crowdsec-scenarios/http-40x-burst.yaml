@@ -1,0 +1,20 @@
+# HTTP 40x burst detection: many not-found or forbidden responses in a
+# short window is a scanner or a probes-for-vulnerabilities pattern.
+# Adapted from crowdsecurity/http-probing and http-bad-user-agent.
+type: leaky
+name: ycluster/http-40x-burst
+description: "Detect burst of 40x responses from one source"
+filter: "evt.Meta.log_type == 'http_access-log' && evt.Parsed.status in ['401', '403', '404']"
+leakspeed: "1s"
+capacity: 20
+groupby: evt.Meta.source_ip
+blackhole: 1m
+labels:
+  confidence: 2
+  spoofable: 0
+  classification:
+    - attack.T1595
+  behavior: "http:scan"
+  service: http
+  label: "HTTP 40x Burst"
+  remediation: false

@@ -1,0 +1,95 @@
+---
+# Build CrowdSec v1.8.1 from source on the buildhost (default s1).
+#
+# The build produces the crowdsec daemon, the cscli management CLI, and
+# the notification plugins (including notification-http, which
+# ids-forwarder consumes). Source is cloned at a pinned SHA; module
+# dependencies are vendored into the tree by `go mod vendor` so the
+# build needs no network beyond the initial clone.
+#
+# No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
+#
+# The play targets {{ buildhost }} directly — synchronize resolves its
+# rsync target from inventory_hostname, the same pattern as
+# build-local-ai-proxy.yml and build-tetragon.yml.
+- name: Build CrowdSec from source
+  hosts: "{{ buildhost | default('s1') }}"
+  vars:
+    crowdsec_build_dir: "/opt/src/crowdsec"
+    crowdsec_repo_url: "https://github.com/crowdsecurity/crowdsec.git"
+    # v1.8.1 — see docs/design/intrusion-detection.md "Component survey".
+    # Fixes GHSA-rh69-4vqj-9gj8, GHSA-g2x2-jgfg-pg7g, CVE-2026-44982 and
+    # CVE-2026-44981.
+    crowdsec_repo_sha: "909b5157986a2b2c2163300fdaef5ed01289f7d2"
+    crowdsec_bin_dir: "{{ crowdsec_build_dir }}/bin"
+    go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
+  tasks:
+    - name: Install build dependencies (go + git + make)
+      apt:
+        name:
+          - golang-1.24
+          - git
+          - make
+        state: present
+      become: yes
+
+    - name: Check if the pinned source tree already exists
+      stat:
+        path: "{{ crowdsec_build_dir }}/.git"
+      register: source_tree
+
+    - name: Clone crowdsec source (first build only)
+      command:
+        cmd: "git clone {{ crowdsec_repo_url }} {{ crowdsec_build_dir }}"
+      when: not source_tree.stat.exists
+
+    - name: Fetch pinned SHA (existing tree)
+      command:
+        cmd: "git fetch origin {{ crowdsec_repo_sha }}"
+        chdir: "{{ crowdsec_build_dir }}"
+      when: source_tree.stat.exists
+      changed_when: true
+
+    - name: Checkout pinned SHA
+      command:
+        cmd: "git checkout --detach {{ crowdsec_repo_sha }}"
+        chdir: "{{ crowdsec_build_dir }}"
+      changed_when: true
+
+    - name: Record current checkout SHA
+      command:
+        cmd: "git rev-parse HEAD"
+        chdir: "{{ crowdsec_build_dir }}"
+      register: checked_out_sha
+      changed_when: false
+
+    - name: Assert the pinned SHA is checked out
+      assert:
+        that:
+          - checked_out_sha.stdout.strip() == crowdsec_repo_sha
+        quiet: true
+
+    - name: Vendor Go module dependencies
+      command:
+        cmd: "{{ go_bin }} mod vendor"
+        chdir: "{{ crowdsec_build_dir }}"
+      changed_when: true
+
+    - name: Build crowdsec, cscli and notification plugins
+      command:
+        cmd: "make build GO={{ go_bin }} BUILD_MODE=release"
+        chdir: "{{ crowdsec_build_dir }}"
+      register: build_result
+      changed_when: build_result.rc == 0
+
+    - name: Verify built binaries exist
+      stat:
+        path: "{{ item }}"
+      register: binary_stat
+      loop:
+        - "{{ crowdsec_build_dir }}/crowdsec"
+        - "{{ crowdsec_build_dir }}/cscli"
+        - "{{ crowdsec_build_dir }}/plugins/notification-http"
+      failed_when: not binary_stat.stat.exists
+      loop_control:
+        label: "{{ item }}"

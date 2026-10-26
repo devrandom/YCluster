@@ -110,8 +110,19 @@ must not become a second, longer-lived access log.
     Alertmanager v2 posting, and localhost metrics; build and install
     playbooks (`app/build-ids-forwarder.yml`,
     `monitoring/install-ids-forwarder.yml`).
-  - Remaining: source builds and per-host rollout for Tetragon and CrowdSec,
-    policy/scenario pinning, tuning window.
+  - Done: Tetragon build (`app/build-tetragon.yml`, source at pinned SHA,
+    eBPF compiled with LOCAL_CLANG) and observe-only deployment
+    (`monitoring/install-tetragon.yml`): gRPC on unix socket only,
+    loopback metrics, JSON event export for ids-forwarder, pinned
+    policies for exec/sensitive-file/capability/kernel-module/connect.
+  - Done: CrowdSec build (`app/build-crowdsec.yml`, v1.8.1 source) and
+    local-only deployment (`monitoring/install-crowdsec.yml`): LAPI on
+    loopback, no console/CAPI/community blocklist, no bouncers, pinned
+    scenarios (ssh-bf, http-crawl, http-40x-burst) and parsers, alerts
+    delivered to ids-forwarder's localhost receiver via notification-http.
+  - Remaining: policy/scenario tuning window on the dev cluster, raising
+    ids-forwarder module coverage to the 95% cap, Authentik log shipping
+    into /var/log/crowdsec/ids-authentik.log.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.

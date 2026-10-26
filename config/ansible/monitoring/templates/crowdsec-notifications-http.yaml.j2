@@ -1,0 +1,11 @@
+# CrowdSec notification-http plugin config.
+# Posts alerts as JSON to ids-forwarder's localhost receiver.
+# Docs: docs/crowdsec.net docs/next/local_api/notification_plugins/http/
+type: http
+name: http_default
+log_level: info
+# The template receives a list of models.Alert; serialized as JSON body.
+format: '{{.|toJson}}'
+# ids-forwarder binds its receiver to loopback only.
+url: http://127.0.0.1:9201/crowdsec
+method: POST

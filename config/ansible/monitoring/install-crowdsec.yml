@@ -1,0 +1,195 @@
+---
+# Install CrowdSec in local-only mode on every Linux cluster node.
+#
+# Requires app/build-crowdsec.yml to have run on the buildhost.
+#
+# Local-only posture (docs/design/intrusion-detection.md):
+#   - Local API bound to 127.0.0.1:8080; no public listener.
+#   - No console enrollment, no Central API, no community blocklist.
+#   - No bouncers: the IDS is alert-only.
+#   - Local DB retention capped at the access-log window via flush.max_age.
+#
+# Detection sources: sshd, nginx access logs, Authentik logs. Alerts are
+# delivered to ids-forwarder's localhost HTTP receiver via the
+# notification-http plugin.
+- name: Install CrowdSec
+  hosts: "{{ crowdsec_target | default('linux_nodes') }}"
+  become: yes
+  vars:
+    crowdsec_buildhost_path: /opt/src/crowdsec
+    crowdsec_config_dir: /etc/crowdsec
+    crowdsec_data_dir: /var/lib/crowdsec/data
+    crowdsec_log_retention_days: 7
+  tasks:
+    - name: Create crowdsec system group
+      group:
+        name: crowdsec
+        system: yes
+
+    - name: Create crowdsec system user
+      user:
+        name: crowdsec
+        group: crowdsec
+        system: yes
+        shell: /usr/sbin/nologin
+        home: /var/lib/crowdsec
+        create_home: no
+
+    - name: Check for built binaries on the buildhost
+      stat:
+        path: "{{ crowdsec_buildhost_path }}/crowdsec"
+      register: build_artifacts
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Fail if binaries missing on buildhost
+      fail:
+        msg: "CrowdSec binaries not found under {{ crowdsec_buildhost_path }} on {{ buildhost }}. Run app/build-crowdsec.yml first."
+      when: not build_artifacts.stat.exists
+
+    - name: Fetch binaries from buildhost
+      fetch:
+        src: "{{ crowdsec_buildhost_path }}/{{ item }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+      loop:
+        - crowdsec
+        - cscli
+        - plugins/notification-http
+
+    - name: Install crowdsec binary
+      copy:
+        src: "{{ build_cache_dir }}/crowdsec"
+        dest: /usr/local/bin/crowdsec
+        owner: root
+        group: root
+        mode: '0755'
+      notify: restart crowdsec
+
+    - name: Install cscli binary
+      copy:
+        src: "{{ build_cache_dir }}/cscli"
+        dest: /usr/local/bin/cscli
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install notification-http plugin
+      copy:
+        src: "{{ build_cache_dir }}/notification-http"
+        dest: /usr/local/lib/crowdsec/plugins/notification-http
+        owner: root
+        group: root
+        mode: '0755'
+      notify: restart crowdsec
+
+    - name: Create config directory
+      file:
+        path: "{{ crowdsec_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create data directory
+      file:
+        path: "{{ crowdsec_data_dir }}"
+        state: directory
+        owner: crowdsec
+        group: crowdsec
+        mode: '0750'
+
+    - name: Create notification config directory
+      file:
+        path: "{{ crowdsec_config_dir }}/notifications"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Render main config
+      template:
+        src: crowdsec-config.yaml.j2
+        dest: "{{ crowdsec_config_dir }}/config.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart crowdsec
+
+    - name: Render acquisition config
+      template:
+        src: crowdsec-acquis.yaml.j2
+        dest: "{{ crowdsec_config_dir }}/acquis.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart crowdsec
+
+    - name: Render notification profile
+      template:
+        src: crowdsec-notifications-http.yaml.j2
+        dest: "{{ crowdsec_config_dir }}/notifications/http.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart crowdsec
+
+    - name: Render notification routing profile
+      template:
+        src: crowdsec-profiles.yaml.j2
+        dest: "{{ crowdsec_config_dir }}/profiles.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart crowdsec
+
+    - name: Install pinned scenarios
+      copy:
+        src: "{{ playbook_dir }}/../app/files/crowdsec-scenarios/"
+        dest: "{{ crowdsec_config_dir }}/scenarios/"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart crowdsec
+
+    - name: Install pinned parsers
+      copy:
+        src: "{{ playbook_dir }}/../app/files/crowdsec-parsers/"
+        dest: "{{ crowdsec_config_dir }}/parsers/"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart crowdsec
+
+    - name: Create empty hub directory (no hub download in local-only mode)
+      file:
+        path: "{{ crowdsec_config_dir }}/hub"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install systemd unit
+      copy:
+        src: "{{ playbook_dir }}/../app/files/crowdsec/crowdsec.service"
+        dest: /etc/systemd/system/crowdsec.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart crowdsec
+
+    - name: Enable and start crowdsec
+      systemd:
+        name: crowdsec
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart crowdsec
+      systemd:
+        name: crowdsec
+        state: restarted
+        daemon_reload: yes

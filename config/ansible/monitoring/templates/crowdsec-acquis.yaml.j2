@@ -1,0 +1,19 @@
+# Log acquisition for CrowdSec, rendered by Ansible.
+# Each node tails the logs it actually has; missing files are tolerated
+# by crowdsec (it warns and skips).
+filenames:
+  - /var/log/auth.log
+labels:
+  type: syslog
+---
+{% if 'storage' in group_names or 'frontend' in group_names %}
+filenames:
+  - /var/log/nginx/access.log
+labels:
+  type: nginx
+---
+{% endif %}
+filenames:
+  - /var/log/crowdsec/ids-authentik.log
+labels:
+  type: authentik

@@ -1,0 +1,25 @@
+# CrowdSec parser for nginx access logs (combined format), pinned from
+# crowdsecurity/nginx-logs in the hub. Extracts the fields the
+# http-crawl and http-40x scenarios need.
+filenames:
+  - /var/log/nginx/access.log
+labels:
+  type: nginx
+filter: "evt.Parsed.program == 'nginx'"
+nodes:
+  - grok:
+      pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status} %{NUMBER:bytes} "%{NOTSPACE:referer}" "%{NOTSPACE:user_agent}"'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: http_access-log
+        - meta: source_ip
+          expression: evt.Parsed.source_ip
+        - parsed: status
+          expression: evt.Parsed.status
+        - parsed: verb
+          expression: evt.Parsed.verb
+        - parsed: file_name
+          expression: evt.Parsed.request
+        - parsed: static_ressource
+          expression: "evt.Parsed.request matches '.*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$' ? 'true' : 'false'"

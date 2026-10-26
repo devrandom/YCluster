@@ -1,0 +1,18 @@
+# CrowdSec parser configuration for sshd logs (syslog format from
+# /var/log/auth.log). Adapted from crowdsecurity/sshd-logs in the hub,
+# pinned and trimmed to the fields our scenarios need.
+filenames:
+  - /var/log/auth.log
+labels:
+  type: syslog
+filter: "evt.Parsed.program == 'sshd'"
+onsuccess: continue_stage
+nodes:
+  - grok:
+      pattern: '%{DATA:sshd.event} from %{IPORHOST:source_ip} port \d+ ssh2.*'
+      apply_on: message
+      statics:
+        - meta: log_type
+          value: ssh_failed-auth
+        - parsed: target_user
+          expression: evt.Parsed.sshd.event

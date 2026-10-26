@@ -1,0 +1,10 @@
+# CrowdSec profiles config: route fired scenarios to the http_default
+# notification plugin. Local delivery only — no console, no CAPI.
+name: crowdsec_alerts
+filters:
+  - Alert.Remediation == true
+decisions: []
+notifications:
+  - http_default
+on_success: continue
+on_failure: continue

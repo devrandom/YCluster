@@ -1,0 +1,21 @@
+# SSH brute-force detection, adapted from crowdsecurity/ssh-bf.
+# Pinned: vendored into the repo rather than fetched from the hub, so
+# the rules cannot drift between nodes and no network is needed.
+type: leaky
+name: ycluster/ssh-bf
+description: "Detect ssh bruteforce"
+filter: "evt.Meta.log_type == 'ssh_failed-auth'"
+leakspeed: "10s"
+capacity: 5
+groupby: evt.Meta.source_ip
+blackhole: 1m
+reprocess: true
+labels:
+  service: ssh
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1110
+  label: "SSH Bruteforce"
+  behavior: "ssh:bruteforce"
+  remediation: false

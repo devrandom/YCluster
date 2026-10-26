@@ -1,0 +1,27 @@
+[Unit]
+Description=Crowdsec agent (local-only, alerting to ids-forwarder)
+After=syslog.target network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=notify
+Environment=LC_ALL=C LANG=C
+ExecStartPre=/usr/local/bin/crowdsec -c /etc/crowdsec/config.yaml -t -error
+ExecStart=/usr/local/bin/crowdsec -c /etc/crowdsec/config.yaml
+ExecReload=/usr/local/bin/crowdsec -c /etc/crowdsec/config.yaml -t -error
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=60
+
+# The daemon reads logs and writes to its sqlite DB under
+# /var/lib/crowdsec; no capabilities needed beyond a normal user.
+User=crowdsec
+Group=crowdsec
+StateDirectory=crowdsec
+LogsDirectory=crowdsec
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

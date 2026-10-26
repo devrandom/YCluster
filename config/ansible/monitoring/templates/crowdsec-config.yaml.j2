@@ -1,0 +1,55 @@
+# CrowdSec main config, rendered by Ansible. Based on upstream
+# config/config.yaml at v1.8.1, trimmed to the local-only posture.
+common:
+  daemonize: false
+  log_media: file
+  log_level: info
+  log_dir: /var/log/crowdsec/
+  log_max_size: 5
+  compress_logs: true
+  log_max_files: 3
+config_paths:
+  config_dir: /etc/crowdsec/
+  data_dir: /var/lib/crowdsec/data/
+  simulation_path: /etc/crowdsec/simulation.yaml
+  hub_dir: /etc/crowdsec/hub/
+  index_path: /etc/crowdsec/hub/.index.json
+  notification_dir: /etc/crowdsec/notifications/
+  plugin_dir: /usr/local/lib/crowdsec/plugins/
+crowdsec_service:
+  acquisition_path: /etc/crowdsec/acquis.yaml
+  acquisition_dir: /etc/crowdsec/acquis.d
+  parser_routines: 1
+cscli:
+  output: human
+  color: auto
+db_config:
+  log_level: info
+  type: sqlite
+  db_path: /var/lib/crowdsec/data/crowdsec.db
+  flush:
+    # Retention is capped at the access-log window (see the IP-retention
+    # constraint in docs/design/intrusion-detection.md).
+    max_items: 5000
+    max_age: {{ crowdsec_log_retention_days }}d
+plugin_config:
+  user: crowdsec
+  group: crowdsec
+api:
+  client:
+    insecure_skip_verify: false
+    credentials_path: /etc/crowdsec/local_api_credentials.yaml
+  server:
+    log_level: info
+    # Loopback only: no remote LAPI clients, no console enrollment.
+    listen_uri: 127.0.0.1:8080
+    profiles_path: /etc/crowdsec/profiles.yaml
+    console_path: /etc/crowdsec/console.yaml
+    trusted_ips:
+      - 127.0.0.1
+      - ::1
+    # online_client is deliberately NOT configured: no Central API
+    # connection, no community blocklist downloads.
+prometheus:
+  enabled: true
+  level: full
