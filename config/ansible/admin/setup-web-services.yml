@@ -107,6 +107,7 @@
         - open-webui.svg
         - zulip.svg
         - forgejo.svg
+        - vikunja.svg
       notify: restart admin-api
 
     # Canonical copy lives with the IdP branding assets (app/files) so the

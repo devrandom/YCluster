@@ -2595,6 +2595,9 @@ def app_landing():
             {'name': 'Forgejo', 'url': f'https://git.{domain}/',
              'logo': '/static/forgejo.svg',
              'desc': 'Git repositories, reviews, and Actions'},
+            {'name': 'Vikunja', 'url': f'https://tasks.{domain}/',
+             'logo': '/static/vikunja.svg',
+             'desc': 'Tasks, projects, and boards'},
         ]
         if id.is_admin or id.is_manager:
             apps.append({'name': 'YCluster Admin',

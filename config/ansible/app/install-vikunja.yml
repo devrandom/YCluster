@@ -33,6 +33,13 @@
     # keep the app internal-only; OIDC is also disabled in that mode because
     # the IdP discovery URL is the public auth.<domain> hostname.
     vikunja_external_enabled: "{{ vikunja_external | default(true) }}"
+    # SSO-only by default: the login page offers only Authentik. Local
+    # password auth stays on when the external vhost (and therefore OIDC) is
+    # disabled, otherwise the instance would have no login path. Override
+    # with -e vikunja_local_auth_enabled=true|false.
+    vikunja_local_auth: >-
+      {{ (vikunja_local_auth_enabled
+          | default(not (vikunja_external_enabled | bool))) | bool }}
     # Both are attack-surface reductions, not hard requirements. Enable them
     # per install when CalDAV or public link sharing is actually needed.
     vikunja_enable_caldav: "{{ vikunja_caldav | default(false) }}"
@@ -195,6 +202,7 @@
           Environment=VIKUNJA_IMAGE={{ vikunja_registry_image }}
           Environment=VIKUNJA_PORT={{ vikunja_port }}
           Environment=VIKUNJA_EXTERNAL_ENABLED={{ 'true' if vikunja_external_enabled | bool else 'false' }}
+          Environment=VIKUNJA_LOCAL_AUTH={{ 'true' if vikunja_local_auth | bool else 'false' }}
           Environment=VIKUNJA_ENABLE_CALDAV={{ 'true' if vikunja_enable_caldav | bool else 'false' }}
           Environment=VIKUNJA_ENABLE_LINK_SHARING={{ 'true' if vikunja_enable_link_sharing | bool else 'false' }}
           Environment=VIKUNJA_BREAKGLASS_USERNAME={{ vikunja_breakglass_username }}
@@ -254,12 +262,6 @@
             obj_type: database
           become_user: postgres
 
-    - name: Start Vikunja service on the storage leader
-      systemd:
-        name: vikunja.service
-        state: started
-      when: is_storage_leader
-
     - name: Install Vikunja internal nginx site (vikunja.xc)
       template:
         src: templates/vikunja-internal.conf.j2
@@ -318,6 +320,40 @@
         - /etc/nginx/templates/vikunja_tasks.conf.j2
       notify: reload nginx
       when: not (vikunja_external_enabled | bool)
+
+    # Start only after the database, compose file, manager and unit are in
+    # place, and flush their restart handler first. A start that races the
+    # database creation, or a restart that lands while the first migration
+    # run is still writing its history, leaves the database with SCHEMA_INIT
+    # plus a prefix of migration rows; every later start then fails on the
+    # first migration that expects the old schema.
+    - name: Apply pending Vikunja service changes
+      meta: flush_handlers
+
+    - name: Start Vikunja service on the storage leader
+      systemd:
+        name: vikunja.service
+        state: started
+      when: is_storage_leader
+
+    - name: Wait for Vikunja to become healthy
+      uri:
+        url: "http://127.0.0.1:{{ vikunja_port }}/health"
+        status_code: 200
+        timeout: 5
+      register: vikunja_health
+      until: vikunja_health.status | default(0) == 200
+      retries: 60
+      delay: 3
+      failed_when: false
+      when: is_storage_leader
+
+    - name: Require Vikunja to be healthy
+      fail:
+        msg: >-
+          Vikunja did not become healthy; check
+          journalctl -u vikunja and docker logs vikunja on the leader
+      when: is_storage_leader and vikunja_health.status | default(0) != 200
 
     # A failed run can update the unit but not reach the restart handler.
     # Check the rendered mode and restart only when the running config has

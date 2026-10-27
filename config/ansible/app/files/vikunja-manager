@@ -148,7 +148,7 @@ keyvalue:
 
 auth:
   local:
-    enabled: true
+    enabled: ${VIKUNJA_LOCAL_AUTH:-true}
 $openid_section
 
 cors:
@@ -256,7 +256,12 @@ start_vikunja() {
         return 1
     fi
 
-    ensure_breakglass_user
+    # A local password account is only usable while local auth is enabled.
+    # SSO-only installs skip it; re-enable local auth to recover from an IdP
+    # outage (see docs/operations/vikunja.md).
+    if [ "${VIKUNJA_LOCAL_AUTH:-true}" = "true" ]; then
+        ensure_breakglass_user
+    fi
 
     # Re-attach in the foreground so systemd sees the service alive.
     # On SIGTERM, stop_vikunja runs `docker compose down`.

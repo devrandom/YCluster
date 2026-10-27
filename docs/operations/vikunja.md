@@ -13,8 +13,9 @@ Design boundaries:
   `registry.xc`.
 - **Metadata:** shared PostgreSQL, database and role `vikunja`.
 - **Files:** local filesystem under `/rbd/user/vikunja/files`.
-- **Identity:** Authentik OIDC at `tasks.<domain>`; local login remains as a
-  break-glass path, but registration is disabled.
+- **Identity:** Authentik OIDC at `tasks.<domain>`, SSO-only. Local password
+  auth is off, so the login page has no password form; re-enable it
+  temporarily to recover if the IdP is unavailable.
 - **External URL:** `https://tasks.<domain>` (the DNS record is out of band).
 - **Internal URL:** `http://vikunja.xc` on the storage VIP.
 - **No edge forward-auth:** Vikunja is its own OIDC/API credential boundary.
@@ -74,13 +75,17 @@ Optional overrides:
 # Enable CalDAV or public link sharing (both are off by default)
 ./run-playbook.sh app/install-vikunja.yml --limit storage \
   -e vikunja_caldav=true -e vikunja_link_sharing=true
+
+# IdP outage: put the local password form back (SSO stays enabled)
+./run-playbook.sh app/install-vikunja.yml --limit storage \
+  -e vikunja_local_auth_enabled=true
 ```
 
 Re-running the playbook is idempotent and refreshes compose, the manager,
 vhosts, Postgres credentials and the service. It does not re-issue
 certificates; only do that when a vhost is added or the domain changes.
 
-## First login and break-glass
+## First login and IdP recovery
 
 OIDC users are provisioned on first login. Vikunja creates OIDC users even
 with local registration disabled, so the access boundary is the Authentik
@@ -88,26 +93,36 @@ application policy: any IdP user allowed to reach the `vikunja` provider can
 create an account. Bind the provider to a group policy if not every
 Authentik user should have access.
 
-The manager also creates one local break-glass account:
+The default install is SSO-only (`auth.local.enabled: false`), so the login
+page has no password form. The local break-glass account exists only while
+local auth is enabled; on an existing install it is still in the database
+but cannot sign in.
+
+To recover during an IdP outage:
+
+1. Redeploy with `-e vikunja_local_auth_enabled=true`.
+2. Read the break-glass credentials on the storage leader:
 
 ```bash
-# username
 systemctl show -p Environment vikunja.service | tr ' ' '\n' \
   | sed -n 's/^VIKUNJA_BREAKGLASS_USERNAME=//p'
 
-# password (root on the storage leader)
 set -a; . /etc/ycluster/etcd-client.env; set +a
 etcdctl get /cluster/config/vikunja/breakglass-password --print-value-only
 ```
 
+3. Fix the IdP, then redeploy with `-e vikunja_local_auth_enabled=false`.
+
+The manager creates the account on start when local auth is on, so a fresh
+SSO-only install gets one at the first recovery deploy. The etcd value is
+whatever was generated at creation; a password changed in the UI leaves it
+stale. To reset, delete `/cluster/config/vikunja/breakglass-password` and
+restart the unit: the manager resets the existing account and stores the
+new password.
+
 The break-glass account is a normal Vikunja user. Instance-wide admin UI,
 time tracking and audit logs are Vikunja Pro features and are not part of
 this install.
-
-The etcd value is whatever the manager generated at creation; a password
-changed in the UI leaves it stale. To reset, delete
-`/cluster/config/vikunja/breakglass-password` and restart the unit: the
-manager resets the existing account and stores the new password.
 
 ## Health and logs
 
@@ -178,6 +193,8 @@ authorization, link-share, TOTP, rate-limit and resource-exhaustion issues;
 - **OIDC button missing** — the external domain or
   `vikunja-client-secret` was unavailable when the manager last rendered
   `config.yml`. Confirm the etcd key exists, then restart the unit.
+- **Break-glass login rejected** — local auth is off in the default
+  SSO-only install. Redeploy with `-e vikunja_local_auth_enabled=true`.
 - **OIDC callback mismatch** — Authentik must contain both
   `http://vikunja.xc/auth/openid/authentik` and
   `https://tasks.<domain>/auth/openid/authentik`. Re-run

@@ -1773,6 +1773,7 @@ class AppLandingTests(SchedTestBase):
         self.assertIn(b"Open WebUI", r.data)
         self.assertIn(b"Zulip", r.data)
         self.assertIn(b"Forgejo", r.data)
+        self.assertIn(b"Vikunja", r.data)
         # The root's own pages are nav, not apps — not listed here.
         self.assertNotIn(b"VM Schedule", r.data)
         self.assertNotIn(b"Settings", r.data)
@@ -1785,6 +1786,7 @@ class AppLandingTests(SchedTestBase):
         self.assertIn(b"https://chat.example.com/", r.data)
         self.assertIn(b"https://zulip.example.com/", r.data)
         self.assertIn(b"https://git.example.com/", r.data)
+        self.assertIn(b"https://tasks.example.com/", r.data)
 
     def test_landing_apps_have_logos(self):
         self.seed_domain("example.com")
@@ -1792,6 +1794,7 @@ class AppLandingTests(SchedTestBase):
         self.assertIn(b'src="/static/open-webui.svg"', r.data)
         self.assertIn(b'src="/static/zulip.svg"', r.data)
         self.assertIn(b'src="/static/forgejo.svg"', r.data)
+        self.assertIn(b'src="/static/vikunja.svg"', r.data)
         self.assertIn(b'src="/static/ycluster-favicon.svg"', r.data)
 
     def test_comfy_is_hidden_from_everyone(self):
