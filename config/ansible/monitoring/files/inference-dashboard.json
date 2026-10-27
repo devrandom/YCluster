@@ -400,12 +400,12 @@
       ]
     },
     {
-      "title": "Prompt tokens/sec (vLLM)",
+      "title": "Prefill compute tokens/sec (vLLM)",
       "type": "timeseries",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 6, "x": 6, "y": 31},
       "id": 12,
-      "description": "Input tokens/sec per backend — prompt-processing throughput. Dominated by context length; useful to see how much of the GPU is spent on prefill vs decode.",
+      "description": "New tokens actually computed during prefill per backend, from vllm:request_prefill_kv_computed_tokens_sum. Excludes prefix-cache hits; use this for real prefill workload, not prompt-token throughput.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -418,7 +418,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (backend) (rate(vllm:prompt_tokens_total[5m]))",
+          "expr": "sum by (backend) (rate(vllm:request_prefill_kv_computed_tokens_sum[5m]))",
           "legendFormat": "{{backend}}",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
@@ -516,12 +516,12 @@
       ]
     },
     {
-      "title": "Prompt tokens/sec (SGLang)",
+      "title": "Prefill compute tokens/sec (SGLang)",
       "type": "timeseries",
       "datasource": {"type": "prometheus", "uid": "prometheus-local"},
       "gridPos": {"h": 9, "w": 6, "x": 6, "y": 40},
       "id": 22,
-      "description": "Prefill tokens/sec per backend from sglang_prompt_tokens_total. Dominated by context length; useful to see how much of the GPU is spent on prefill vs decode.",
+      "description": "New tokens actually computed during prefill per backend, from sglang_uncached_prompt_tokens_histogram_sum. Excludes prefix-cache hits; use this for real prefill workload, not prompt-token throughput.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -534,7 +534,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (backend) (rate(sglang_prompt_tokens_total[5m]))",
+          "expr": "sum by (backend) (rate(sglang_uncached_prompt_tokens_histogram_sum[5m]))",
           "legendFormat": "{{backend}}",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "prometheus-local"}
