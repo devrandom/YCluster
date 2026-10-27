@@ -1,19 +1,17 @@
-# Network connect tracing policy: every TCP connect with process
-# context, so unexpected destinations can be correlated to the process
-# that opened them. This is metadata only — no payload capture.
+# Non-loopback TCP connects with process context. tcp_connect exposes the
+# socket fields needed for NotDAddr; security_socket_connect's sockaddr
+# argument does not support destination-address operators.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
   name: tcp-connect
 spec:
   kprobes:
-    - call: "security_socket_connect"
+    - call: "tcp_connect"
       syscall: false
       args:
         - index: 0
           type: "sock"
-        - index: 1
-          type: "sockaddr"
       selectors:
         - matchArgs:
             - index: 0
@@ -23,3 +21,5 @@ spec:
                 - "::1/128"
           matchActions:
             - action: Post
+              rateLimit: "1m"
+              rateLimitScope: "process"

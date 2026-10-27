@@ -1,0 +1,33 @@
+# Kernel module loading. Match actual module initialization and reads of
+# module files, not request_module() autoload attempts for netdev names.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: kernel-modules
+spec:
+  kprobes:
+    - call: "security_kernel_read_file"
+      syscall: false
+      args:
+        - index: 0
+          type: "file"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+                - ".ko"
+                - ".ko.gz"
+                - ".ko.xz"
+                - ".ko.zst"
+          matchActions:
+            - action: Post
+              rateLimit: "1m"
+              rateLimitScope: "process"
+    - call: "do_init_module"
+      syscall: false
+      selectors:
+        - matchActions:
+            - action: Post
+              rateLimit: "1m"
+              rateLimitScope: "process"

@@ -29,6 +29,8 @@ test:
     @make -s -C local-ai-proxy test
     @echo "== test: Go (ids-forwarder) =="
     @go test -C ids-forwarder ./...
+    @echo "== test: IDS policies =="
+    @.venv/bin/python -m unittest discover -s config/ansible/monitoring/tests -p 'test_ids_policies.py'
 
 test-system-quick:
     @mkdir -p ./tmp

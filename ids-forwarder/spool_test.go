@@ -170,7 +170,8 @@ func TestSpoolAppendRejectsOversizedAlert(t *testing.T) {
 	s, _ := testSpool(t, 100<<20)
 	defer s.close()
 	cfg := testConfig()
-	huge := newAlert(cfg, sourceTetragon, "warning", "host", "huge", strings.Repeat("x", spoolMaxEntryBytes+1))
+	huge := newAlert(cfg, sourceTetragon, "warning", "host", "huge", "bounded summary")
+	huge.Labels["padding"] = strings.Repeat("x", spoolMaxEntryBytes+1)
 	if err := s.append(huge); !errors.Is(err, errSpoolEntryTooLarge) {
 		t.Fatalf("expected size rejection, got %v", err)
 	}
@@ -182,7 +183,8 @@ func TestSpoolAppendRejectsOversizedAlert(t *testing.T) {
 func TestSpoolCompactsAfterAck(t *testing.T) {
 	s, _ := testSpool(t, 10<<20)
 	cfg := testConfig()
-	big := newAlert(cfg, sourceTetragon, "warning", "host", "big", strings.Repeat("x", 2<<20))
+	big := newAlert(cfg, sourceTetragon, "warning", "host", "big", "summary")
+	big.Labels["padding"] = strings.Repeat("x", 2<<20)
 	small := newAlert(cfg, sourceTetragon, "warning", "host", "small", "tail")
 	if err := s.append(big); err != nil {
 		t.Fatal(err)
@@ -197,7 +199,7 @@ func TestSpoolCompactsAfterAck(t *testing.T) {
 	if err := s.ackTo(item.token); err != nil {
 		t.Fatal(err)
 	}
-	if s.depth() != 1 || s.pendingBytes() >= int64(len(big.Annotations["summary"])) {
+	if s.depth() != 1 || s.pendingBytes() >= int64(len(big.Labels["padding"])) {
 		t.Fatalf("compaction did not shrink spool: depth=%d bytes=%d", s.depth(), s.pendingBytes())
 	}
 	item, ok, err = s.next()
@@ -213,7 +215,8 @@ func TestSpoolCompactsAfterAck(t *testing.T) {
 func TestSpoolRecoveryAfterCompactionCrashWindow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "spool.jsonl")
 	cfg := testConfig()
-	big := newAlert(cfg, sourceTetragon, "warning", "host", "big", strings.Repeat("y", 2<<20))
+	big := newAlert(cfg, sourceTetragon, "warning", "host", "big", "summary")
+	big.Labels["padding"] = strings.Repeat("y", 2<<20)
 	small := newAlert(cfg, sourceTetragon, "warning", "host", "small", "tail")
 
 	s, err := openAlertSpool(path, 10<<20, func(string, ...any) {})

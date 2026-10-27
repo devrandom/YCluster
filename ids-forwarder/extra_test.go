@@ -92,7 +92,8 @@ func TestEnqueueDropsOversizedWithMetric(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.closeState()
-	huge := newAlert(cfg, sourceTetragon, "warning", "host", "huge", string(make([]byte, spoolMaxEntryBytes+1)))
+	huge := newAlert(cfg, sourceTetragon, "warning", "host", "huge", "bounded summary")
+	huge.Labels["padding"] = strings.Repeat("x", spoolMaxEntryBytes+1)
 	if err := f.enqueue(huge); err != nil {
 		t.Fatalf("oversized alerts are dropped, not fatal: %v", err)
 	}

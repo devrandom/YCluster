@@ -60,7 +60,8 @@ func (a alert) dedupKey() string {
 		keys = append(keys, k+"="+a.Labels[k])
 	}
 	sort.Strings(keys)
-	sum := sha256.Sum256([]byte(strings.Join(keys, "|") + "|" + a.Annotations["summary"]))
+	summary := normalizeDedupSummary(a.Annotations["summary"])
+	sum := sha256.Sum256([]byte(strings.Join(keys, "|") + "|" + summary))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -164,6 +165,31 @@ type metrics struct {
 	rejected     atomic.Int64
 	cursorErrors atomic.Int64
 	failures     atomic.Int64
+
+	suppressedMu sync.Mutex
+	suppressed   map[string]int64
+}
+
+func (m *metrics) suppress(reason string) {
+	if reason == "" {
+		return
+	}
+	m.suppressedMu.Lock()
+	defer m.suppressedMu.Unlock()
+	if m.suppressed == nil {
+		m.suppressed = map[string]int64{}
+	}
+	m.suppressed[reason]++
+}
+
+func (m *metrics) suppressedCounts() map[string]int64 {
+	m.suppressedMu.Lock()
+	defer m.suppressedMu.Unlock()
+	out := make(map[string]int64, len(m.suppressed))
+	for reason, count := range m.suppressed {
+		out[reason] = count
+	}
+	return out
 }
 
 func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
@@ -185,6 +211,7 @@ func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
 	}
 	redactMap(a.Annotations)
 	redactMap(a.Labels)
+	a.Annotations["summary"] = boundSummary(a.Annotations["summary"])
 	return a
 }
 

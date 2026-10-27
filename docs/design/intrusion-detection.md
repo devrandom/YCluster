@@ -312,9 +312,11 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   compressed backups. Under heavy event volume the size cap dominates, so
   the retained window can be well under a day. Do not assume a daily file.
 - Policies pinned in Ansible: file writes to `/etc` and systemd paths,
-  capability changes, kernel module loads, and network connects. Shell and
-  package-manager execs are already exported by the base sensor's
-  `process_exec` events and are filtered by the forwarder instead.
+  targeted root uid/gid transitions and capability gains, actual kernel
+  module loads, and non-loopback TCP connects. Shell and package-manager
+  execs are already exported by the base sensor's `process_exec` events and
+  are filtered by the forwarder instead. `PROCESS_EXIT` is not exported
+  because the forwarder does not consume it.
 - Health server on `localhost:6790`: the default `:6789` collides with the
   Ceph monitor.
 
@@ -336,6 +338,10 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   allowlist of binaries (interactive shells, privilege tools, package
   managers, downloaders). Other execs are dropped in-process: the base
   sensor emits one event per exec and that volume is not useful as alerts.
+  The forwarder also suppresses recognized loopback health probes,
+  container health checks, node-exporter collectors, Ansible connection
+  probes, and package-architecture queries, counted by reason in
+  `ids_forwarder_suppressed_total`.
 - Maps severity and rule metadata to Alertmanager `v2/alerts`.
 - Posts to every core Alertmanager instance over the cluster network, in
   order, and stops at the first that accepts the alert. Non-core nodes have
@@ -377,8 +383,9 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   `ids_forwarder_spool_bytes`, `ids_forwarder_dropped_total`,
   `ids_forwarder_expired_total`, `ids_forwarder_gap_total`,
   `ids_forwarder_oversized_total`, `ids_forwarder_rejected_total`,
-  `ids_forwarder_cursor_errors_total`, `ids_forwarder_forwarded_total` and
-  `ids_forwarder_deduped_total`.
+  `ids_forwarder_cursor_errors_total`, `ids_forwarder_forwarded_total`,
+  `ids_forwarder_deduped_total` and
+  `ids_forwarder_suppressed_total{reason=...}`.
 - Does not copy raw Tetragon events into the spool and does not put IPs in
   labels, annotations, or the spool.
 - Coverage is republished through the node_exporter textfile collector
@@ -407,12 +414,16 @@ network coverage.
 ## Detection content
 
 - **Tetragon policies.** Writes below `/etc` and systemd unit paths,
-  setuid/capability changes, kernel module loads, namespace changes,
-  unexpected container exec, and network connects to unexpected
-  destinations.
+  targeted root uid/gid transitions and capability gains, actual kernel
+  module loads, and non-loopback TCP connects. The generic
+  `commit_creds`, broad `security_capset`, and module-request hooks are
+  deliberately excluded: they match normal credential commits and netdev
+  autoload requests, not escalation.
 - **Tetragon process execs.** The forwarder forwards `process_exec` only for
   shells, privilege tools (`sudo`, `su`), package managers and downloaders.
-  The binary allowlist is a playbook variable (`ids_forwarder_exec_binaries`).
+  The binary allowlist is a playbook variable
+  (`ids_forwarder_exec_binaries`). Recognized health probes and collector
+  scripts are suppressed before alert creation.
 - **Tetragon FIM.** Real-time file access and modification on `/etc`, systemd unit
   paths, SSH config, cron paths and Ansible-managed config directories. This is
   access/modification detection, not a periodic hash baseline.
@@ -425,7 +436,12 @@ network coverage.
   Sigma engine.
 - **Tuning.** Run the full policy/scenario set in the dev cluster for two weeks,
   suppress expected package updates, Ansible runs, container builds and health probes,
-  then enable alerts on core, storage and frontend first.
+  then enable alerts on core, storage and frontend first. The first production
+  pass targets raw event volume: process exits are not exported, routine exec
+  probes are filtered, and noisy credential hooks are replaced with narrow
+  privilege-gain and module-load matches. The TCP policy is canaried separately
+  before fleet rollout because a corrected matcher can expose a large
+  connection population.
 
 ## Data and retention
 
@@ -531,6 +547,10 @@ hard way. They apply to the pinned versions; re-verify on upgrades.
   `MatchPathPrefix`/`MatchPathSuffix`). One `kprobes` entry per kernel symbol
   — merge selectors instead of repeating the call. `exec` is not a policy
   field; the base sensor already emits `process_exec` for every exec.
+- **Ansible `copy` does not delete retired policy files.** Removing a policy
+  from the source tree leaves the old file active on disk; the install
+  playbook explicitly removes retired policy names after copying the
+  current set, including when a stale synced source file is still present.
 - The eBPF objects land in `bpf/objs/` under the source tree; the runtime
   expects them flat under `/var/lib/tetragon/`. `tetra` needs
   `--server-address unix:///var/run/tetragon/tetragon.sock`.

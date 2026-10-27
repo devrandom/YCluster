@@ -125,6 +125,10 @@ must not become a second, longer-lived access log.
     loopback, no console/CAPI/community blocklist, no bouncers, pinned
     scenarios (ssh-bf, http-crawl, http-40x-burst) and parsers, alerts
     delivered to ids-forwarder's localhost receiver via notification-http.
+  - Done: first-pass volume tuning: targeted privilege-gain and actual
+    module-load policies, corrected TCP-connect matching, process-exit
+    export removed, routine exec probes suppressed, and volatile
+    identifiers normalized for deduplication.
   - Remaining: policy/scenario tuning window on the dev cluster, raising
     ids-forwarder module coverage to the 95% cap, Authentik log shipping
     into /var/log/crowdsec/ids-authentik.log.

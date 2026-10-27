@@ -148,6 +148,17 @@
         mode: '0644'
       notify: restart tetragon
 
+    # copy does not delete destination files absent from the source tree.
+    # Run this after the copy in case a stale synced source file is still
+    # present on the controller.
+    - name: Remove retired tracing policies
+      file:
+        path: "{{ tetragon_policy_dir }}/{{ item }}"
+        state: absent
+      loop:
+        - privilege-and-capability-changes.yaml
+      notify: restart tetragon
+
     - name: Install systemd unit
       template:
         src: tetragon.service.j2

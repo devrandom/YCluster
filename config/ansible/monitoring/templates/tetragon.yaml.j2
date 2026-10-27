@@ -29,7 +29,9 @@ export-file-rotation-interval: 24h
 export-file-max-backups: 7
 export-file-max-size-mb: 50
 export-file-compress: true
-export-allowlist: '{"event_set":["PROCESS_EXEC","PROCESS_EXIT","PROCESS_KPROBE"]}'
+# PROCESS_EXIT is intentionally omitted: the forwarder does not consume it,
+# and exporting it doubles the event-log volume on several node types.
+export-allowlist: '{"event_set":["PROCESS_EXEC","PROCESS_KPROBE"]}'
 export-denylist: ''
 
 # Do not include raw file contents or network payloads in events.
@@ -41,7 +43,8 @@ enable-path-resolution: true
 # policy ships (via Ansible), and tetragon picks it up on restart.
 tracing-policy-dir: /etc/tetragon.d
 
-# Event filters: drop noisy cluster-internal traffic. Tuning happens in
-# the tracing policies themselves, not here.
+# Event filters: drop noisy cluster-internal traffic. Keep the export set
+# limited to event types the forwarder consumes; matching stays in the
+# tracing policies.
 filters:
   - tags-unset: ["cpu_clock"]

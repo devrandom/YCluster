@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -56,25 +58,37 @@ func eventType(line string) (string, *tetragonEnvelope, *tetragonLog) {
 // filtered events; meta is still returned when the line is valid so the
 // caller can advance its replay cursor past it.
 func tetragonAlertWithMeta(line string, cfg config) (alert, eventMeta, bool) {
+	a, meta, ok, _ := tetragonAlertDecision(line, cfg)
+	return a, meta, ok
+}
+
+// tetragonAlertDecision is tetragonAlertWithMeta plus the routine-exec
+// suppression reason, so the caller can count why an event was dropped.
+func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, string) {
 	evType, env, body := eventType(line)
 	meta := parseEventMeta(line, env)
 	if evType == "" || body == nil {
-		return alert{}, eventMeta{}, false
+		return alert{}, eventMeta{}, false, ""
 	}
 	if !configuredEvent(cfg.events, evType) {
-		return alert{}, meta, false
+		return alert{}, meta, false, ""
 	}
 	// process_exec fires for every exec on the node; forward only the
 	// binaries that matter for detection (shells, privilege tools,
 	// package managers, downloaders).
-	if evType == "process_exec" && !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
-		return alert{}, meta, false
+	if evType == "process_exec" {
+		if !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
+			return alert{}, meta, false, ""
+		}
+		if reason := routineExecReason(body.Process); reason != "" {
+			return alert{}, meta, false, reason
+		}
 	}
 	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), tetragonLayer(body), tetragonRule(evType, body), eventSummary(evType, body))
 	a.StartsAt = meta.time.Format(time.RFC3339Nano)
 	a.eventTime = meta.time
 	a.eventHash = meta.hash
-	return a, meta, true
+	return a, meta, true, ""
 }
 
 // tetragonAlert is the mapping-only view used by tests and callers that do
@@ -100,6 +114,76 @@ func configuredExecBinary(binariesCSV, binary string) bool {
 	}
 	for _, name := range strings.Split(binariesCSV, ",") {
 		if strings.TrimSpace(name) == base {
+			return true
+		}
+	}
+	return false
+}
+
+// routineExecReason classifies known cluster probes and automation. The
+// binary allowlist is intentionally broad; without this filter, health
+// checks and package introspection dominate process_exec alerts.
+func routineExecReason(process tetragonProcess) string {
+	base := path.Base(process.Binary)
+	parent := ""
+	if process.Parent != nil {
+		parent = process.Parent.Binary
+	}
+	args := process.Arguments
+
+	switch base {
+	case "curl", "wget":
+		if argumentsHaveLoopbackURL(args) {
+			return "loopback_http"
+		}
+	case "sh", "bash", "dash", "zsh", "fish":
+		if parent == "/proc/self/fd/9" &&
+			strings.Contains(args, "/usr/share/prometheus-node-exporter-collectors/") {
+			return "node_exporter"
+		}
+		if healthCheckArgs(args) &&
+			(parent == "/lifecycle/ak" ||
+				parent == "/usr/bin/containerd-shim-runc-v2" ||
+				parent == "/usr/bin/runc" ||
+				parent == "/bin/sh" ||
+				parent == "/bin/bash") {
+			return "health_check"
+		}
+		if parent == "/usr/sbin/sshd" {
+			if strings.Contains(args, "&& sleep 0") ||
+				strings.Contains(args, "/etc/update-motd.d") {
+				return "ansible_probe"
+			}
+		}
+	case "sudo":
+		if strings.Contains(args, "BECOME-SUCCESS-") {
+			return "ansible_probe"
+		}
+	case "dpkg":
+		if strings.Contains(args, "--print-foreign-architectures") {
+			return "package_query"
+		}
+	}
+	return ""
+}
+
+func healthCheckArgs(args string) bool {
+	lower := strings.ToLower(args)
+	return strings.Contains(lower, "/health") || strings.Contains(lower, "healthcheck")
+}
+
+func argumentsHaveLoopbackURL(args string) bool {
+	for _, field := range strings.Fields(args) {
+		field = strings.Trim(field, "\"'")
+		u, err := url.Parse(field)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			continue
+		}
+		host := u.Hostname()
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return true
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 			return true
 		}
 	}

@@ -384,11 +384,12 @@ func (f *forwarder) handleLine(line string) error {
 	if line == "" {
 		return nil
 	}
-	a, meta, ok := tetragonAlertWithMeta(line, f.cfg)
+	a, meta, ok, suppressed := tetragonAlertDecision(line, f.cfg)
 	if meta.time.IsZero() {
 		return nil
 	}
 	if !ok {
+		f.stats.suppress(suppressed)
 		f.cursor.advance(meta.time, meta.hash)
 		return nil
 	}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -92,6 +93,17 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "ids_forwarder_oversized_total %d\n", f.stats.oversized.Load())
 		fmt.Fprintf(w, "ids_forwarder_rejected_total %d\n", f.stats.rejected.Load())
 		fmt.Fprintf(w, "ids_forwarder_cursor_errors_total %d\n", f.stats.cursorErrors.Load())
+		fmt.Fprintf(w, "# HELP ids_forwarder_suppressed_total Events suppressed by routine-exec classification.\n")
+		fmt.Fprintf(w, "# TYPE ids_forwarder_suppressed_total counter\n")
+		suppressed := f.stats.suppressedCounts()
+		reasons := make([]string, 0, len(suppressed))
+		for reason := range suppressed {
+			reasons = append(reasons, reason)
+		}
+		sort.Strings(reasons)
+		for _, reason := range reasons {
+			fmt.Fprintf(w, "ids_forwarder_suppressed_total{reason=%q} %d\n", reason, suppressed[reason])
+		}
 	})
 	srv := &http.Server{Addr: f.cfg.metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ln, err := net.Listen("tcp", f.cfg.metricsListen)

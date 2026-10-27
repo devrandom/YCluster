@@ -38,6 +38,7 @@ FORWARDER_GAUGES = (
     "ids_forwarder_queue_depth",
     "ids_forwarder_rejected_total",
     "ids_forwarder_spool_bytes",
+    "ids_forwarder_suppressed_total",
 )
 
 
