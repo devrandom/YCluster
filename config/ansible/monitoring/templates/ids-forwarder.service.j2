@@ -11,9 +11,12 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -events {{ ids_forwarder_events }} \
     -exec-binaries {{ ids_forwarder_exec_binaries }} \
     -metrics-listen {{ ids_forwarder_metrics_listen }} \
-{% if ids_forwarder_http_listen %}
+    -cursor-file {{ ids_forwarder_cursor_file }} \
+    -spool-file {{ ids_forwarder_spool_file }} \
+    -spool-max-bytes {{ ids_forwarder_spool_max_bytes }} \
+    -max-event-age {{ ids_forwarder_max_event_age }} \
+    -startup-grace {{ ids_forwarder_startup_grace }} \
     -http-listen {{ ids_forwarder_http_listen }}
-{% endif %}
 Restart=on-failure
 RestartSec=5
 # Hardening: no inbound listener beyond the optional localhost receiver;
@@ -21,11 +24,14 @@ RestartSec=5
 # Alertmanager over loopback/WireGuard.
 User=ids-forwarder
 Group=ids-forwarder
+StateDirectory=ids-forwarder
+StateDirectoryMode=0750
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadOnlyPaths={{ ids_forwarder_tetragon_log | dirname }}
+ReadWritePaths={{ ids_forwarder_state_dir }}
 
 [Install]
 WantedBy=multi-user.target

@@ -33,6 +33,13 @@ func TestRedactIPs(t *testing.T) {
 		{"url http://203.0.113.5/path", "url http://[ip]/path"},
 		{"url6 http://[2001:db8::1]:443/x", "url6 http://[ip]:443/x"},
 		{"bracketed port [2001:db8::1]:443", "bracketed port [ip]:443"},
+		{"scp file root@10.0.0.7:/tmp", "scp file root@[ip]:/tmp"},
+		{"scp ipv6 root@[2001:db8::1]:/tmp", "scp ipv6 root@[ip]:/tmp"},
+		{"user:pass@10.0.0.7", "user:pass@[ip]"},
+		{"url userinfo https://user:pass@10.0.0.7/admin", "url userinfo https://user:pass@[ip]/admin"},
+		{"url userinfo v6 https://u:p@[2001:db8::1]:8443/x", "url userinfo v6 https://u:p@[ip]:8443/x"},
+		{"ssh jump root@10.0.0.7 host", "ssh jump root@[ip] host"},
+		{"at hostname user@example.com", "at hostname user@example.com"},
 	}
 	for _, c := range cases {
 		if got := redactIPs(c.in); got != c.want {
@@ -54,8 +61,11 @@ func TestTetragonAlertMappingAndRedaction(t *testing.T) {
 	if strings.Contains(a.Annotations["summary"], "10.0.0.7") {
 		t.Fatalf("IP leaked into summary: %q", a.Annotations["summary"])
 	}
-	if a.EndsAt == "" || a.StartsAt == "" {
-		t.Fatal("missing timestamps")
+	if a.StartsAt == "" || a.StartsAt[:4] != "2026" {
+		t.Fatalf("StartsAt must carry the event time, got %q", a.StartsAt)
+	}
+	if a.eventTime.IsZero() || a.eventHash == "" {
+		t.Fatal("missing replay metadata")
 	}
 }
 
@@ -123,10 +133,11 @@ func TestQueueBoundedDropOldest(t *testing.T) {
 func TestDedupWindow(t *testing.T) {
 	d := newDedup(time.Minute)
 	key := "k"
-	if d.seenAndMark(key) {
+	if d.seen(key) {
 		t.Fatal("fresh key should not be recent")
 	}
-	if !d.seenAndMark(key) {
+	d.mark(key)
+	if !d.seen(key) {
 		t.Fatal("marked key should be recent")
 	}
 }
@@ -153,13 +164,27 @@ func TestPostSendsToAlertmanager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.post([]alert{newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")}); err != nil {
+	a := newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")
+	eventTime := time.Now().Add(-time.Minute).UTC()
+	a.eventTime = eventTime
+	a.StartsAt = eventTime.Format(time.RFC3339Nano)
+	if err := f.post([]alert{a}); err != nil {
 		t.Fatalf("post: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 1 {
 		t.Fatalf("expected 1 alert, got %d", len(got))
+	}
+	if got[0]["startsAt"] != a.StartsAt {
+		t.Fatalf("StartsAt changed: got %v want %s", got[0]["startsAt"], a.StartsAt)
+	}
+	ends, err := time.Parse(time.RFC3339Nano, got[0]["endsAt"].(string))
+	if err != nil {
+		t.Fatalf("endsAt: %v", err)
+	}
+	if ends.Before(time.Now().Add(30 * time.Second)) {
+		t.Fatalf("EndsAt was not refreshed at delivery: %v", ends)
 	}
 }
 
@@ -245,18 +270,20 @@ func TestPostFailsOverBetweenAlertmanagers(t *testing.T) {
 	}
 }
 
-func TestExpiredAlertDropped(t *testing.T) {
+func TestTooOldUsesEventTime(t *testing.T) {
 	cfg := testConfig()
+	cfg.maxEventAge = 10 * time.Minute
 	a := newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")
-	if a.expired(time.Now()) {
-		t.Fatal("fresh alert must not be expired")
+	if a.tooOld(time.Now(), cfg.maxEventAge) {
+		t.Fatal("fresh alert must not be too old")
 	}
-	a.EndsAt = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
-	if !a.expired(time.Now()) {
-		t.Fatal("past EndsAt must be expired")
+	a.eventTime = time.Now().Add(-20 * time.Minute)
+	if !a.tooOld(time.Now(), cfg.maxEventAge) {
+		t.Fatal("event past max age must be dropped")
 	}
-	a.EndsAt = "not-a-time"
-	if a.expired(time.Now()) {
-		t.Fatal("malformed EndsAt must not drop the alert")
+	a.eventTime = time.Time{}
+	a.StartsAt = "not-a-time"
+	if a.tooOld(time.Now(), cfg.maxEventAge) {
+		t.Fatal("malformed timestamp must not drop the alert")
 	}
 }

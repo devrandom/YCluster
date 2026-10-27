@@ -1083,4 +1083,31 @@ groups:
           severity: warning
         annotations:
           summary: "IDS forwarder dropped alerts on {{ $labels.node }}"
-          description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} alerts in the last 15m; Alertmanager was unreachable or the queue overflowed."
+          description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} alerts in the last 15m; the durable spool could not be written, a spooled record was unreadable or over the size cap, or Alertmanager rejected it permanently."
+
+      - alert: IdsForwarderCursorFailing
+        expr: increase(ids_forwarder_cursor_errors_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS forwarder cannot save its replay cursor on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} failed to persist its Tetragon replay cursor; a restart resumes from an older boundary, so already-delivered alerts may be replayed."
+
+      - alert: IdsForwarderBacklog
+        expr: (ids_forwarder_queue_depth > 1000) or (ids_forwarder_spool_bytes > 83886080)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS forwarder backlog on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} has a backlog (over 1000 queued alerts or more than 80 MiB spooled); Alertmanager delivery is behind and new sensor events may be back-pressured."
+
+      - alert: IdsForwarderExpired
+        expr: increase(ids_forwarder_expired_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS forwarder expired events on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} events older than the replay cutoff in the last 15m; inspect the sensor backlog and retention window."

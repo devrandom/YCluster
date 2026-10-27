@@ -30,9 +30,14 @@ COMPONENTS = {
 # Forwarder counters worth surfacing cluster-wide (the endpoint itself is
 # loopback-only). Values are copied verbatim from its exposition format.
 FORWARDER_GAUGES = (
+    "ids_forwarder_cursor_errors_total",
     "ids_forwarder_dropped_total",
     "ids_forwarder_expired_total",
+    "ids_forwarder_gap_total",
+    "ids_forwarder_oversized_total",
     "ids_forwarder_queue_depth",
+    "ids_forwarder_rejected_total",
+    "ids_forwarder_spool_bytes",
 )
 
 

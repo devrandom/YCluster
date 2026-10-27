@@ -3,33 +3,52 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// alert is an Alertmanager v2 alert payload.
+// alert is an Alertmanager v2 alert payload. The unexported fields carry
+// the source event's position through the in-memory queue; persisted
+// alerts recover the event time from StartsAt.
 type alert struct {
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
 	StartsAt    string            `json:"startsAt"`
 	EndsAt      string            `json:"endsAt"`
+
+	eventTime time.Time
+	eventHash string
 }
 
-// expired reports whether the alert's delivery window has passed. A
-// backlog accumulated during an Alertmanager outage is discarded instead
-// of replayed: stale alerts would fire and resolve moments later, which
-// is pure noise for whoever is on call.
-func (a alert) expired(now time.Time) bool {
-	t, err := time.Parse(time.RFC3339Nano, a.EndsAt)
+// eventTimestamp returns the event's original time. Spooled alerts lose
+// the unexported eventTime field, so StartsAt is the durable copy.
+func (a alert) eventTimestamp() time.Time {
+	if !a.eventTime.IsZero() {
+		return a.eventTime
+	}
+	t, err := time.Parse(time.RFC3339Nano, a.StartsAt)
 	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// tooOld reports whether the event is beyond the replay cutoff. This is
+// deliberately separate from alertTTL: delivery delay must not discard an
+// event that is still in the sensor's retained log, while a very old event
+// should not page as if it happened now.
+func (a alert) tooOld(now time.Time, maxAge time.Duration) bool {
+	if maxAge <= 0 {
 		return false
 	}
-	return now.After(t)
+	t := a.eventTimestamp()
+	if t.IsZero() {
+		return false
+	}
+	return now.Sub(t) > maxAge
 }
 
 func (a alert) dedupKey() string {
@@ -48,36 +67,43 @@ func (a alert) dedupKey() string {
 type dedup struct {
 	window time.Duration
 	mu     sync.Mutex
-	seen   map[string]time.Time
+	keys   map[string]time.Time
 }
 
 func newDedup(window time.Duration) dedup {
-	return dedup{window: window, seen: map[string]time.Time{}}
+	return dedup{window: window, keys: map[string]time.Time{}}
 }
 
-// seenAndMark atomically checks whether the key was forwarded within the
-// dedup window and records it. A single operation prevents duplicate
-// forwards when events arrive concurrently.
-func (d *dedup) seenAndMark(key string) bool {
+// seen reports whether key was forwarded within the dedup window. The
+// caller marks it only after the alert is durably stored, so a failed
+// append stays retryable.
+func (d *dedup) seen(key string) bool {
 	if d.window <= 0 {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	now := time.Now()
-	if last, ok := d.seen[key]; ok && now.Sub(last) < d.window {
-		return true
+	last, ok := d.keys[key]
+	return ok && time.Since(last) < d.window
+}
+
+// mark records that key is now durable.
+func (d *dedup) mark(key string) {
+	if d.window <= 0 {
+		return
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := time.Now()
 	// Bound memory: if the map is huge, drop expired entries first.
-	if len(d.seen) > 4096 {
-		for k, t := range d.seen {
+	if len(d.keys) > 4096 {
+		for k, t := range d.keys {
 			if now.Sub(t) >= d.window {
-				delete(d.seen, k)
+				delete(d.keys, k)
 			}
 		}
 	}
-	d.seen[key] = now
-	return false
+	d.keys[key] = now
 }
 
 type alertQueue struct {
@@ -129,172 +155,19 @@ func (q *alertQueue) depth() int {
 }
 
 type metrics struct {
-	forwarded atomic.Int64
-	dropped   atomic.Int64
-	deduped   atomic.Int64
-	expired   atomic.Int64
-	failures  atomic.Int64
-}
-
-// redactIPs replaces IPv4 and IPv6 addresses so no user IP reaches
-// Alertmanager labels, annotations, or ntfy messages. Tokens are split on
-// characters that cannot appear in an address, validated with
-// netip.ParseAddr, and replaced individually.
-func redactIPs(s string) string {
-	if !strings.ContainsAny(s, ".:") {
-		return s
-	}
-	var b strings.Builder
-	for _, tok := range splitKeep(s, isSeparator) {
-		b.WriteString(redactToken(tok))
-	}
-	return b.String()
-}
-
-func isSeparator(r rune) bool {
-	switch r {
-	case ' ', '\t', '\n', ',', ';', '"', '\'', '(', ')', '{', '}', '=', '<', '>', '|':
-		return true
-	}
-	return false
-}
-
-func redactToken(tok string) string {
-	if scheme, rest, ok := strings.Cut(tok, "://"); ok && isScheme(scheme) {
-		return redactURL(scheme, rest, tok)
-	}
-	if redacted, ok := redactBracketed(tok); ok {
-		return redacted
-	}
-	trim := strings.Trim(tok, "[]")
-	if trim == "" {
-		return tok
-	}
-	if redacted, ok := redactCIDR(trim, tok); ok {
-		return redacted
-	}
-	if redacted, ok := redactHostPort(trim, tok); ok {
-		return redacted
-	}
-	if isAddr(trim) {
-		return "[ip]"
-	}
-	return tok
-}
-
-// redactURL redacts the host of a scheme://host/... token.
-func redactURL(scheme, rest, tok string) string {
-	if host, trail, ok := cutHost(rest); ok {
-		if redacted := redactToken(host); redacted != host {
-			return scheme + "://" + redacted + trail
-		}
-	}
-	return tok
-}
-
-// redactBracketed handles "[addr]...": bracketed IPv6 with an optional
-// port or trailing path. Returns ok=false when the token is not bracketed
-// or the bracket contents are not an address.
-func redactBracketed(tok string) (string, bool) {
-	if !strings.HasPrefix(tok, "[") {
-		return "", false
-	}
-	closeIdx := strings.Index(tok, "]")
-	if closeIdx < 1 {
-		return "", false
-	}
-	inner := tok[1:closeIdx]
-	if _, err := netip.ParseAddr(inner); err != nil {
-		return "", false
-	}
-	return "[ip]" + tok[closeIdx+1:], true
-}
-
-// redactCIDR handles "addr/len" tokens, keeping the prefix length.
-func redactCIDR(trim, tok string) (string, bool) {
-	host, suffix, ok := strings.Cut(trim, "/")
-	if !ok || suffix == "" {
-		return "", false
-	}
-	if _, err := netip.ParseAddr(host); err != nil || !isPortOrLen(suffix) {
-		return "", false
-	}
-	return "[ip]/" + suffix, true
-}
-
-// redactHostPort handles "ipv4:port" tokens, keeping the port.
-func redactHostPort(trim, tok string) (string, bool) {
-	host, port, ok := strings.Cut(trim, ":")
-	if !ok || strings.Contains(host, ":") {
-		return "", false
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil || !ip.Is4() || !isPort(port) {
-		return "", false
-	}
-	return "[ip]:" + port, true
-}
-
-func isAddr(s string) bool {
-	_, err := netip.ParseAddr(s)
-	return err == nil
-}
-
-func isScheme(s string) bool {
-	switch strings.ToLower(s) {
-	case "http", "https", "ws", "wss":
-		return true
-	}
-	return false
-}
-
-// cutHost splits "host[:port][/path]" into host and the remainder.
-func cutHost(rest string) (string, string, bool) {
-	if strings.HasPrefix(rest, "[") {
-		closeIdx := strings.Index(rest, "]")
-		if closeIdx < 0 {
-			return "", "", false
-		}
-		return rest[:closeIdx+1], rest[closeIdx+1:], true
-	}
-	end := strings.IndexAny(rest, "/:")
-	if end < 0 {
-		return rest, "", true
-	}
-	return rest[:end], rest[end:], true
-}
-
-func isPort(s string) bool {
-	if s == "" || len(s) > 5 {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// isPortOrLen reports whether s is a valid TCP/UDP port or IP prefix
-// length (0-128, digits only, at most 5 chars). Used to decide whether a
-// "/suffix" after an address is a prefix length worth preserving.
-func isPortOrLen(s string) bool {
-	if !isPort(s) {
-		return false
-	}
-	n, err := strconv.Atoi(s)
-	return err == nil && n >= 0 && n <= 128
-}
-
-func redactMap(m map[string]string) {
-	for k, v := range m {
-		m[k] = redactIPs(v)
-	}
+	forwarded    atomic.Int64
+	dropped      atomic.Int64
+	deduped      atomic.Int64
+	expired      atomic.Int64
+	gaps         atomic.Int64
+	oversized    atomic.Int64
+	rejected     atomic.Int64
+	cursorErrors atomic.Int64
+	failures     atomic.Int64
 }
 
 func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC()
 	a := alert{
 		Labels: map[string]string{
 			"alertname": alertName,
@@ -307,30 +180,15 @@ func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
 		Annotations: map[string]string{
 			"summary": summary,
 		},
-		StartsAt: now,
-		EndsAt:   time.Now().Add(cfg.alertTTL).UTC().Format(time.RFC3339Nano),
+		StartsAt:  now.Format(time.RFC3339Nano),
+		eventTime: now,
 	}
 	redactMap(a.Annotations)
 	redactMap(a.Labels)
 	return a
 }
 
-// splitKeep splits s on the rune class but keeps the separators as their
-// own tokens so rejoining reconstructs the original string.
-func splitKeep(s string, sep func(rune) bool) []string {
-	var out []string
-	start := 0
-	for i, r := range s {
-		if sep(r) {
-			if i > start {
-				out = append(out, s[start:i])
-			}
-			out = append(out, string(r))
-			start = i + len(string(r))
-		}
-	}
-	if start < len(s) {
-		out = append(out, s[start:])
-	}
-	return out
+func lineHash(line string) string {
+	sum := sha256.Sum256([]byte(line))
+	return hex.EncodeToString(sum[:])
 }

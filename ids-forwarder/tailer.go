@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io"
 	"os"
 	"sync"
 	"time"
@@ -11,70 +10,39 @@ import (
 // rotation. It keeps the read offset across EOF so no appended line is
 // skipped, buffers partial lines until a newline arrives, and only reopens
 // when the inode changes (rotation) or the file shrinks (truncation).
-type tailer struct {
-	path     string
-	poll     time.Duration
-	onLine   func([]byte)
-	onRotate func()
+const tailChunkBytes = 64 * 1024
 
-	mu      sync.Mutex
-	f       *os.File
-	pathDev uint64 // inode identity across rename
-	pathIno uint64
-	offset  int64
-	partial []byte
-	closed  bool
+type tailer struct {
+	path       string
+	poll       time.Duration
+	onLine     func([]byte)
+	onRotate   func()
+	startAtEnd bool
+
+	mu         sync.Mutex
+	f          *os.File
+	pathDev    uint64 // inode identity across rename
+	pathIno    uint64
+	offset     int64
+	partial    []byte
+	closed     bool
+	openedOnce bool
 }
 
 func newTailer(path string, poll time.Duration, onLine func([]byte)) (*tailer, error) {
-	t := &tailer{path: path, poll: poll, onLine: onLine}
+	return newTailerWithOptions(path, poll, false, onLine)
+}
+
+func newTailerAtEnd(path string, poll time.Duration, onLine func([]byte)) (*tailer, error) {
+	return newTailerWithOptions(path, poll, true, onLine)
+}
+
+func newTailerWithOptions(path string, poll time.Duration, startAtEnd bool, onLine func([]byte)) (*tailer, error) {
+	t := &tailer{path: path, poll: poll, onLine: onLine, startAtEnd: startAtEnd}
 	if err := t.open(); err != nil {
 		return nil, err
 	}
 	return t, nil
-}
-
-func (t *tailer) close() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.closed = true
-	if t.f != nil {
-		t.f.Close()
-		t.f = nil
-	}
-}
-
-func (t *tailer) open() error {
-	f, err := os.Open(t.path)
-	if err != nil {
-		return err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return err
-	}
-	dev, ino := fileIdentity(info)
-	rotated := t.f == nil && (t.pathDev != 0 || t.pathIno != 0) &&
-		(dev != t.pathDev || ino != t.pathIno)
-	t.f = f
-	t.pathDev, t.pathIno = dev, ino
-	if rotated {
-		// New file after rotation: start from its beginning.
-		t.offset = 0
-		t.partial = t.partial[:0]
-	}
-	if t.offset > info.Size() {
-		// Truncated or rotated: start over from the beginning.
-		t.offset = 0
-		t.partial = t.partial[:0]
-	}
-	if _, err := f.Seek(t.offset, io.SeekStart); err != nil {
-		f.Close()
-		t.f = nil
-		return err
-	}
-	return nil
 }
 
 // run blocks, polling the file until Close. Each newline-terminated chunk
@@ -88,67 +56,73 @@ func (t *tailer) run() {
 		if closed {
 			return
 		}
-		t.readOnce()
+		rotated := t.readOnce()
+		if rotated {
+			// Reopen first, then let the replay hook scan every file that
+			// exists now. If the hook blocks on backpressure, the next
+			// rotation pass catches any files created meanwhile.
+			_ = t.reopen()
+			if t.onRotate != nil {
+				t.onRotate()
+			}
+		}
 		time.Sleep(t.poll)
 	}
 }
 
-func (t *tailer) readOnce() {
+// readOnce returns true when the open handle must be replaced: rotation,
+// truncation, or a read/stat error. The caller invokes onRotate outside
+// the tailer lock, then reopens the current path.
+func (t *tailer) readOnce() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.f == nil {
 		// The previous open failed (file briefly missing after rotation);
 		// keep retrying so the tailer recovers when the file reappears.
 		if err := t.open(); err != nil {
-			return
+			return false
 		}
 	}
 	// Drain everything currently available from the open handle BEFORE
 	// checking for rotation, so a rename+replace between polls never
-	// discards unread tail bytes of the old file.
-	data, err := readAvailable(t.f, 64*1024)
-	if err != nil {
-		t.reopen()
-		return
+	// discards unread tail bytes of the old file. Draining to EOF also
+	// lets the startup replay gate skip a large already-processed prefix
+	// in one pass instead of waiting a poll interval per 64 KiB.
+	for {
+		data, err := readAvailable(t.f, tailChunkBytes)
+		if err != nil {
+			t.closeFileLocked()
+			return true
+		}
+		if len(data) == 0 {
+			break
+		}
+		t.consume(data)
+		if len(data) < tailChunkBytes {
+			break
+		}
 	}
-	t.consume(data)
 	info, err := t.f.Stat()
 	if err != nil {
-		t.reopen()
-		return
+		t.closeFileLocked()
+		return true
 	}
 	if t.rotated(info) {
-		t.reopen()
-		return
+		t.closeFileLocked()
+		return true
 	}
 	if t.truncated(info) {
 		if err := t.reset(); err != nil {
-			t.reopen()
-			return
+			t.closeFileLocked()
+			return true
 		}
 	}
+	return false
 }
 
-// rotated reports whether the file at the configured path now has a
-// different identity than the open handle (rename/replacement).
-func (t *tailer) rotated(info os.FileInfo) bool {
-	st, err := os.Stat(t.path)
-	if err != nil {
-		return true
+func (t *tailer) closeFileLocked() {
+	if t.f != nil {
+		t.f.Close()
+		t.f = nil
 	}
-	return !sameIdentity(t.pathDev, t.pathIno, st)
-}
-
-// truncated reports whether the open file shrank below the read offset.
-func (t *tailer) truncated(info os.FileInfo) bool {
-	return info.Size() < t.offset
-}
-
-// reset seeks back to the start after a truncation and drops the
-// buffered partial line.
-func (t *tailer) reset() error {
-	t.offset = 0
-	t.partial = t.partial[:0]
-	_, err := t.f.Seek(0, io.SeekStart)
-	return err
 }

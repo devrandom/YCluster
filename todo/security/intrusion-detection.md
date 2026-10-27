@@ -106,10 +106,15 @@ must not become a second, longer-lived access log.
   source at pinned versions; no prebuilt binaries. Wazuh and the other C/C++
   parsers are rejected as core sensors in the design.
   - Done: `ids-forwarder` (`ids-forwarder/`) with Tetragon JSON tailer,
-    optional CrowdSec HTTP receiver, IP redaction, dedup, bounded queue,
-    Alertmanager v2 posting, and localhost metrics; build and install
-    playbooks (`app/build-ids-forwarder.yml`,
-    `monitoring/install-ids-forwarder.yml`).
+    optional CrowdSec HTTP receiver, IP redaction, dedup, durable replay
+    cursor, bounded fsynced spool with backpressure, Alertmanager v2
+    posting, and localhost metrics; build and install playbooks
+    (`app/build-ids-forwarder.yml`, `monitoring/install-ids-forwarder.yml`).
+  - Done: retention-aware replay: restart and rotation recovery from
+    current and gzip-rotated Tetragon files, an exact scan-order cursor
+    boundary (no timestamp watermark), a distinct `IDSForwarderGap` alert
+    when the boundary has aged out, and Prometheus backlog alerts for queue
+    depth and spool bytes.
   - Done: Tetragon build (`app/build-tetragon.yml`, source at pinned SHA,
     eBPF compiled with LOCAL_CLANG) and observe-only deployment
     (`monitoring/install-tetragon.yml`): gRPC on unix socket only,

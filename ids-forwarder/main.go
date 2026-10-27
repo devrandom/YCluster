@@ -26,11 +26,21 @@ func main() {
 	flag.StringVar(&cfg.hostname, "hostname",
 		cfg.hostname, "host label (defaults to the local hostname)")
 	flag.IntVar(&cfg.queueMax, "queue-max",
-		cfg.queueMax, "maximum queued alerts before dropping the oldest")
+		cfg.queueMax, "maximum in-memory queued alerts when no spool is configured")
 	flag.DurationVar(&cfg.dedupWindow, "dedup-window",
 		cfg.dedupWindow, "suppress repeat alerts with the same key within this window")
 	flag.DurationVar(&cfg.alertTTL, "alert-ttl",
-		cfg.alertTTL, "alerts auto-resolve after this duration")
+		cfg.alertTTL, "how long a delivered alert stays active in Alertmanager")
+	flag.DurationVar(&cfg.maxEventAge, "max-event-age",
+		cfg.maxEventAge, "drop events older than this instead of delivering them")
+	flag.DurationVar(&cfg.startupGrace, "startup-grace",
+		cfg.startupGrace, "first-run replay window used to cover a process restart")
+	flag.StringVar(&cfg.cursorFile, "cursor-file",
+		cfg.cursorFile, "durable Tetragon replay cursor (empty disables replay)")
+	flag.StringVar(&cfg.spoolFile, "spool-file",
+		cfg.spoolFile, "durable outbound alert spool (empty uses the in-memory queue)")
+	flag.Int64Var(&cfg.spoolMaxBytes, "spool-max-bytes",
+		cfg.spoolMaxBytes, "maximum unacknowledged spool bytes before applying backpressure")
 	flag.DurationVar(&cfg.postTimeout, "post-timeout",
 		cfg.postTimeout, "per-POST timeout to Alertmanager")
 	flag.DurationVar(&cfg.pollInterval, "poll-interval",

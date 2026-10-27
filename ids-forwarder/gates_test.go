@@ -106,13 +106,13 @@ func TestSeenAndMarkExpiryBoundsMemory(t *testing.T) {
 	// cleanup pass evicts them, regardless of test-runner timing.
 	d.mu.Lock()
 	for i := 0; i < 4200; i++ {
-		d.seen[fmt.Sprintf("k%d", i)] = time.Now().Add(-2 * time.Minute)
+		d.keys[fmt.Sprintf("k%d", i)] = time.Now().Add(-2 * time.Minute)
 	}
 	d.mu.Unlock()
 	// The next insert triggers the cleanup pass at >4096.
-	d.seenAndMark("trigger")
+	d.mark("trigger")
 	// All expired keys must be evicted; only "trigger" remains.
-	if got := len(d.seen); got > 1 {
+	if got := len(d.keys); got > 1 {
 		t.Fatalf("expected eviction to leave at most 1 entry, got %d", got)
 	}
 }
@@ -147,6 +147,8 @@ func TestStartTailerMissingFileRetries(t *testing.T) {
 		t.Fatalf("missing file should defer to the retry tailer: %v", err)
 	}
 	f.shutdown()
+	f.wg.Wait()
+	f.closeState()
 }
 
 func TestStartTailerWithRetryPicksUpNewFile(t *testing.T) {

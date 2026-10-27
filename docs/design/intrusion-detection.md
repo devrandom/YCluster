@@ -24,7 +24,8 @@ Adopt a Go-first design:
 3. A small **`ids-forwarder`** Go service on each host. It tails the Tetragon
    JSON events file (gRPC unix socket reserved for operator tooling), accepts
    CrowdSec notification-http POSTs on localhost, maps events to Alertmanager's
-   `v2/alerts` API, and keeps a bounded local queue.
+   `v2/alerts` API, and persists a bounded local spool plus a Tetragon replay
+   cursor.
 4. **No Wazuh.** Wazuh is a C/C++/Python manager plus a root agent, with a large
    parser and command-execution surface. Its recent critical advisories make it a poor
    fit for a critical system.
@@ -271,7 +272,8 @@ per Linux cluster node
     ├── tails Tetragon JSON events file; gRPC unix socket reserved for ops
     ├── optional localhost HTTP receiver for CrowdSec notification-http
     ├── maps to Alertmanager v2/alerts
-    ├── bounded queue; drops expired events
+    ├── durable cursor; replays rotated Tetragon files after restart
+    ├── bounded fsynced spool; backpressure instead of dropping
     └── pushes over WireGuard; no central manager
 
 Alertmanager (existing HA)
@@ -305,8 +307,10 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - Metrics on `localhost:2112`, scraped by the existing Prometheus.
 - JSON events written to a bounded local file with rotation. The forwarder
   tails that file; the gRPC unix socket stays reserved for operator tooling.
-- Retention matches the access-log window: Tetragon rotates the event file
-  daily, keeps seven compressed backups, and caps each file at 50 MB.
+- Retention matches the access-log window but is volume-dependent: Tetragon
+  rotates at 24h **or** 50 MB, whichever comes first, and keeps seven
+  compressed backups. Under heavy event volume the size cap dominates, so
+  the retained window can be well under a day. Do not assume a daily file.
 - Policies pinned in Ansible: file writes to `/etc` and systemd paths,
   capability changes, kernel module loads, and network connects. Shell and
   package-manager execs are already exported by the base sensor's
@@ -336,13 +340,47 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - Posts to every core Alertmanager instance over the cluster network, in
   order, and stops at the first that accepts the alert. Non-core nodes have
   no local Alertmanager.
-- Keeps a bounded queue; drops expired events instead of growing, and
-  exposes the drop counter so a delivery problem is visible.
-- Does not store alerts, does not write to a database, and does not put IPs in
-  labels or annotations.
+- Persists the exact last Tetragon line processed (event time plus a content
+  hash), not a timestamp watermark. Tetragon can write events with older
+  timestamps, and a watermark would discard them. On restart the forwarder
+  finds that line in the current file or the rotated gzip backups, forwards
+  everything after it in scan order, and resumes live tailing after skipping
+  the already-replayed prefix. A fresh install replays a bounded startup
+  grace (one minute) so events written while an old process was stopping are
+  not silently skipped.
+- If the boundary line is no longer in the retained files, the forwarder
+  replays everything retained and emits `IDSForwarderGap` once per episode.
+  A corrupt or unreadable cursor is treated the same way instead of
+  restarting at EOF.
+- Persists redacted alerts in a bounded local spool before advancing the
+  cursor. The spool is fsynced, acknowledged only after Alertmanager accepts
+  the alert, and applies backpressure when full instead of dropping the
+  oldest entry. A crash can replay an alert; it cannot silently lose one.
+  Acks are replaced atomically and carry a content anchor, and compaction
+  moves the ack to the replacement before swapping the file, so a crash in
+  either window replays rather than skips. Entries above 4 MiB are dropped
+  and counted in `ids_forwarder_oversized_total` so one pathological event
+  cannot wedge the queue, and a record Alertmanager rejects with a
+  non-retryable 4xx is dropped and counted in
+  `ids_forwarder_rejected_total` instead of blocking every later alert. A
+  spool read or write failure makes the process exit non-zero so systemd
+  restarts it; the localhost receiver answers 503 and also exits for the
+  same reason. `-cursor-file` is rejected without `-spool-file`, because an
+  in-memory queue may drop an alert the cursor has already passed. A cursor
+  that cannot be persisted is not fatal (the spool is still durable) but is
+  counted in `ids_forwarder_cursor_errors_total`, because a restart would
+  replay from an older boundary.
+- Refreshes `EndsAt` at delivery so a queued alert's active window starts
+  when it is sent. A separate `-max-event-age` cutoff (24h by default)
+  prevents very old events from paging; it is not the alert TTL.
 - Emits `ids_forwarder_up`, `ids_forwarder_queue_depth`,
-  `ids_forwarder_dropped_total`, `ids_forwarder_forwarded_total` and
+  `ids_forwarder_spool_bytes`, `ids_forwarder_dropped_total`,
+  `ids_forwarder_expired_total`, `ids_forwarder_gap_total`,
+  `ids_forwarder_oversized_total`, `ids_forwarder_rejected_total`,
+  `ids_forwarder_cursor_errors_total`, `ids_forwarder_forwarded_total` and
   `ids_forwarder_deduped_total`.
+- Does not copy raw Tetragon events into the spool and does not put IPs in
+  labels, annotations, or the spool.
 - Coverage is republished through the node_exporter textfile collector
   (`ids_component_up{component=...}`) so core Prometheus can alert on a
   stopped sensor on any node without opening the loopback metrics endpoints.
@@ -391,13 +429,19 @@ network coverage.
 
 ## Data and retention
 
-- **Tetragon events.** Bounded local file; Tetragon rotates daily and keeps
-  seven compressed backups, matching the nginx/SSH access-log retention
-  window. Network events contain IPs, so they are subject to the same cutoff.
+- **Tetragon events.** Bounded local files; rotate at 24h or 50 MB and keep
+  seven compressed backups. The effective window is the smaller of the time
+  and volume caps and can be much shorter than a day under load. Network
+  events contain IPs, so they are subject to the same cutoff.
 - **CrowdSec database.** Cap retention at the access-log window. No console or
   community sync means no second copy leaves the cluster.
-- **Forwarder queue.** Bounded in memory and on local disk; drop expired events at
-  replay time. No central event store.
+- **Forwarder cursor and spool.** The cursor is the event time and content
+  hash of the last line processed, replayed in scan order; the live tailer
+  resumes at the exact byte offset replay consumed in the held inode. The spool is a
+  100 MB append-only JSONL file of already-redacted alerts, fsynced before the
+  cursor advances. It applies backpressure rather than dropping; if Tetragon
+  rotation deletes the events the cursor needed, the forwarder replays what is
+  left and emits an `IDSForwarderGap` alert. No central event store.
 - **No IPs in labels.** Do not put client or VM-tenant IPs in Prometheus labels,
   Alertmanager labels/annotations, ntfy messages or incident notes. Use host, VM
   identity, rule ID and event type. Central Prometheus retention is 90 days, so an IP
@@ -416,17 +460,22 @@ network coverage.
 - **Grouping.** Group by `alertname`, `host` and `rule_id`; inhibit lower
   severity when a critical alert for the same host and rule is active.
 - **Coverage alerts.** `TetragonDown`, `CrowdsecDown`, `IdsForwarderDown`,
-  `IdsForwarderDropping`. A host that stops reporting is an alert. They read
-  `ids_component_up` from the node_exporter textfile collector so they work on
-  every node, not just where Prometheus runs.
+  `IdsForwarderDropping`, `IdsForwarderBacklog`, `IdsForwarderExpired`,
+  `IdsForwarderCursorFailing` and `IDSForwarderGap`. A
+  host that stops reporting is an alert. Component alerts read
+  `ids_component_up` from the node_exporter textfile collector so they work
+  on every node, not just where Prometheus runs. `IDSForwarderGap` is sent by
+  the forwarder itself when Tetragon has already deleted events the cursor
+  still needed.
 - **Tuning window.** Detection alerts (`alertname=IDSAlert`) route to a silent
   receiver (`ids-silent`) and are additionally silenced in Alertmanager while
   policies and scenarios are tuned against real traffic. They stay visible in
   the Alertmanager API/UI. Remove that route only when the detections are known
   to be low-noise. Coverage alerts keep their normal routing: a stopped sensor
-  is a blind spot, not tuning noise. Alerts older than their TTL are dropped by
-  the forwarder rather than replayed after an outage, so a delivery gap cannot
-  page with stale events.
+  is a blind spot, not tuning noise. Detection events are replayed after an
+  outage while they remain in the sensor log; only events older than
+  `-max-event-age` are dropped, and an exhausted replay window produces a
+  separate gap alert.
 - **Response.** None in phase 1. No bouncers, no active response, no firewall
   change, no account disable, no VM stop. Triage is manual: inspect, isolate the host
   or revoke the WireGuard peer only with explicit approval, then rotate keys.
@@ -485,6 +534,11 @@ hard way. They apply to the pinned versions; re-verify on upgrades.
 - The eBPF objects land in `bpf/objs/` under the source tree; the runtime
   expects them flat under `/var/lib/tetragon/`. `tetra` needs
   `--server-address unix:///var/run/tetragon/tetragon.sock`.
+- **`export-file-rotation-interval` is not a retention guarantee.** The
+  `export-file-max-size-mb` cap also rotates. With a noisy policy the
+  current file can rotate every few minutes, so seven backups may cover only
+  tens of minutes, not a week. The forwarder replays rotated `.gz` files and
+  emits `IDSForwarderGap` when the cursor has fallen out of that window.
 
 ### CrowdSec
 
@@ -516,14 +570,18 @@ hard way. They apply to the pinned versions; re-verify on upgrades.
 
 ## Validation
 
-- **Unit tests.** Forwarder severity mapping, deduplication, bounded queue,
-  IP-field rejection, retention cutoff and Alertmanager payload.
+- **Unit tests.** Forwarder severity mapping, deduplication, durable spool
+  (torn appends, crash windows around compaction and acks, oversized entries),
+  out-of-order and same-timestamp cursor replay, rotated gzip replay, gap
+  detection, shutdown during a backlog, IP-field rejection, retention cutoff
+  and Alertmanager payload.
 - **Dev cluster.** Trigger a watched-file change, a service-user shell, a network
   connect and an SSH failure; verify one Alertmanager alert reaches ntfy and no second
   copy is stored.
 - **Remote node.** Disconnect WireGuard, generate events, reconnect, and verify
-  buffered events replay in order, expired events are dropped, and a coverage gap is
-  recorded if the queue overflows.
+  buffered events replay in order without duplicates. Restart the forwarder across
+  a Tetragon rotation and verify rotated events replay; verify the gap alert when
+  the cursor is older than the retained files.
 - **Coverage.** Stop Tetragon, CrowdSec and the forwarder in turn; verify the
   corresponding coverage alert fires and clears.
 - **Retention.** Inject a synthetic IP-bearing event, advance the retention clock, and

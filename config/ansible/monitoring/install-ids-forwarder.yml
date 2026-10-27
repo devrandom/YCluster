@@ -22,6 +22,15 @@
     # Loopback receiver for CrowdSec notification-http POSTs.
     ids_forwarder_http_listen: "127.0.0.1:9201"
     ids_forwarder_metrics_listen: "127.0.0.1:2113"
+    # Durable replay and outbound queue. The spool holds redacted alerts,
+    # not raw events; Tetragon's retained event files remain the upstream
+    # buffer. The byte cap applies backpressure instead of dropping.
+    ids_forwarder_state_dir: /var/lib/ids-forwarder
+    ids_forwarder_cursor_file: "{{ ids_forwarder_state_dir }}/cursor.json"
+    ids_forwarder_spool_file: "{{ ids_forwarder_state_dir }}/spool.jsonl"
+    ids_forwarder_spool_max_bytes: 104857600
+    ids_forwarder_max_event_age: 24h
+    ids_forwarder_startup_grace: 1m
     ids_metrics_textfile_dir: /var/lib/prometheus/node-exporter
   tasks:
     - name: Check whether the tetragon group exists
@@ -52,6 +61,14 @@
         # /var/log/tetragon; join it when present so the forwarder can
         # tail the event log without root.
         groups: "{{ 'tetragon' if ids_forwarder_tetragon_group_exists else omit }}"
+
+    - name: Ensure ids-forwarder state directory exists
+      file:
+        path: "{{ ids_forwarder_state_dir }}"
+        state: directory
+        owner: ids-forwarder
+        group: ids-forwarder
+        mode: '0750'
 
     - name: Check for binary on buildhost
       stat:

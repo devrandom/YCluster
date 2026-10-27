@@ -5,7 +5,29 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 )
+
+// eventMeta identifies one source line for durable replay. The hash is
+// the cursor boundary; the event time is used for age filtering and gap
+// reporting, never as a watermark.
+type eventMeta struct {
+	time time.Time
+	hash string
+}
+
+func parseEventMeta(line string, env *tetragonEnvelope) eventMeta {
+	meta := eventMeta{hash: lineHash(line)}
+	if env != nil {
+		if t, err := time.Parse(time.RFC3339Nano, env.Time); err == nil {
+			meta.time = t.UTC()
+		}
+	}
+	if meta.time.IsZero() {
+		meta.time = time.Now().UTC()
+	}
+	return meta
+}
 
 // eventType returns the Tetragon event type name present in the line, or
 // "" when the line is not a known event.
@@ -29,23 +51,37 @@ func eventType(line string) (string, *tetragonEnvelope, *tetragonLog) {
 	return "", nil, nil
 }
 
-// tetragonAlert maps one Tetragon JSON event line to an alert. It returns
-// ok=false for events that are not configured for forwarding.
-func tetragonAlert(line string, cfg config) (alert, bool) {
-	evType, _, body := eventType(line)
+// tetragonAlertWithMeta maps one Tetragon JSON event line to an alert and
+// its source position. ok=false covers malformed, unconfigured and
+// filtered events; meta is still returned when the line is valid so the
+// caller can advance its replay cursor past it.
+func tetragonAlertWithMeta(line string, cfg config) (alert, eventMeta, bool) {
+	evType, env, body := eventType(line)
+	meta := parseEventMeta(line, env)
 	if evType == "" || body == nil {
-		return alert{}, false
+		return alert{}, eventMeta{}, false
 	}
 	if !configuredEvent(cfg.events, evType) {
-		return alert{}, false
+		return alert{}, meta, false
 	}
 	// process_exec fires for every exec on the node; forward only the
 	// binaries that matter for detection (shells, privilege tools,
 	// package managers, downloaders).
 	if evType == "process_exec" && !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
-		return alert{}, false
+		return alert{}, meta, false
 	}
-	return newAlert(cfg, sourceTetragon, tetragonSeverity(body), tetragonLayer(body), tetragonRule(evType, body), eventSummary(evType, body)), true
+	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), tetragonLayer(body), tetragonRule(evType, body), eventSummary(evType, body))
+	a.StartsAt = meta.time.Format(time.RFC3339Nano)
+	a.eventTime = meta.time
+	a.eventHash = meta.hash
+	return a, meta, true
+}
+
+// tetragonAlert is the mapping-only view used by tests and callers that do
+// not need the replay cursor metadata.
+func tetragonAlert(line string, cfg config) (alert, bool) {
+	a, _, ok := tetragonAlertWithMeta(line, cfg)
+	return a, ok
 }
 
 func configuredEvent(eventsCSV, evType string) bool {

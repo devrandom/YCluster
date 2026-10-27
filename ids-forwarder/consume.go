@@ -29,37 +29,26 @@ func (t *tailer) consume(data []byte) {
 }
 
 // tailerForExisting tolerates a missing file: it retries opening until the
-// file appears, then tails it.
+// file appears, then tails it. The file is new, so start at its beginning
+// rather than skipping events written while Tetragon was starting.
 func startTailerWithRetry(path string, poll time.Duration, onLine func([]byte)) *tailer {
-	t := &tailer{path: path, poll: poll, onLine: onLine}
-	go func() {
-		for {
-			t.mu.Lock()
-			closed := t.closed
-			t.mu.Unlock()
-			if closed {
-				return
-			}
-			t.mu.Lock()
-			_ = t.open() // retry silently; readOnce handles nil f
-			t.mu.Unlock()
-			t.readOnce()
-			time.Sleep(t.poll)
-		}
-	}()
+	t := newRetryTailer(path, poll, onLine)
+	go t.run()
 	return t
 }
 
-func (t *tailer) reopen() {
-	t.f.Close()
-	t.f = nil
-	if err := t.open(); err != nil {
-		// Keep the offset and retry on the next poll.
-		return
+func newRetryTailer(path string, poll time.Duration, onLine func([]byte)) *tailer {
+	return &tailer{path: path, poll: poll, onLine: onLine}
+}
+
+func (t *tailer) reopen() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.f != nil {
+		t.f.Close()
+		t.f = nil
 	}
-	if t.onRotate != nil {
-		t.onRotate()
-	}
+	return t.open()
 }
 
 func readAvailable(f *os.File, max int) ([]byte, error) {

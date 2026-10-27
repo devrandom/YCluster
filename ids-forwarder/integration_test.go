@@ -104,10 +104,11 @@ func TestPostLoopDropsExpiredBacklog(t *testing.T) {
 	cfg := testConfig()
 	cfg.alertmanagerURL = srv
 	cfg.pollInterval = 10 * time.Millisecond
+	cfg.maxEventAge = 10 * time.Minute
 	f, _ := newForwarder(cfg)
 
 	a := newAlert(cfg, sourceTetragon, "warning", "host", "r", "stale")
-	a.EndsAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	a.eventTime = time.Now().Add(-20 * time.Minute)
 	f.queue.push(a)
 
 	f.wg.Add(1)
