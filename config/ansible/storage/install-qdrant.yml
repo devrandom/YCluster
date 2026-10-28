@@ -89,6 +89,7 @@
             grpc_port: 6334
             static_content_dir: /opt/qdrant/static
           log_level: INFO
+          telemetry_disabled: true
 
 
     - name: Create Qdrant systemd service
