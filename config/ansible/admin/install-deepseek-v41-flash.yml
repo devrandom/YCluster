@@ -94,12 +94,13 @@
         owner: root
         group: root
         mode: '0644'
-      register: ds41_service
 
+    # Do not restart the service here: attaching to an already-healthy
+    # container is non-disruptive, but restarting would bounce inference.
     - name: Enable and start DS4.1 service
       systemd:
         name: ds41-flash.service
-        state: "{{ 'restarted' if ds41_service.changed else 'started' }}"
+        state: started
         enabled: yes
         daemon_reload: yes
 

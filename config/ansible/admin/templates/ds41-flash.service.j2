@@ -8,9 +8,11 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/home/dev
-# The container definition lives in dev's rootless Podman storage. Start the
-# existing container attached so systemd detects and restarts engine failures.
-ExecStart=/usr/bin/systemd-run --scope --unit=ds41-flash-run /usr/sbin/runuser -u dev -- /usr/bin/podman start --attach ds41-flash
+# The container definition lives in dev's rootless Podman storage. If it is
+# already running, wait for it instead of failing with "cannot start an already
+# running container"; if it is stopped, start it attached. Either way systemd
+# supervises the exit and restarts the container after an engine failure.
+ExecStart=/usr/bin/systemd-run --scope --unit=ds41-flash-run /bin/sh -c '/usr/sbin/runuser -u dev -- /usr/bin/podman start --attach ds41-flash || /usr/sbin/runuser -u dev -- /usr/bin/podman wait ds41-flash'
 ExecStop=/usr/sbin/runuser -u dev -- /usr/bin/podman stop --time 60 ds41-flash
 Restart=always
 RestartSec=10
