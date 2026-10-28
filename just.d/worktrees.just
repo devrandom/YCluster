@@ -6,7 +6,7 @@
 # worktree is immediately usable (codex auth, direnv, venv, notes, tokens).
 #
 # We symlink individual ignored leaf files, never a tracked directory (.codex,
-# .serena, .opencode are committed) — that would dirty the worktree's status
+# .opencode are committed) — that would dirty the worktree's status
 # with deletions. The one exception is .codex/config.toml: it must NOT be a
 # symlink. Codex resolves a linked worktree's .git pointer and marks the
 # resolved gitdir (~/.git/worktrees/<name>) read-only by default, which beats
