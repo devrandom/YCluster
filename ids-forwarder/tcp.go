@@ -58,7 +58,9 @@ func expectedTCPReason(body *tetragonLog) string {
 		return ""
 	}
 
-	base := path.Base(body.Process.Binary)
+	// Tetragon keeps the " (deleted)" suffix after an in-place binary
+	// update; it is not part of the process identity.
+	base := strings.TrimSuffix(path.Base(body.Process.Binary), " (deleted)")
 	args := body.Process.Arguments
 
 	// A container's sshd dials the next hop's SSH port when a client uses
@@ -83,6 +85,10 @@ func expectedTCPReason(body *tetragonLog) string {
 	case base == "ntfy-webhook.py" || strings.Contains(args, "ntfy-webhook.py"):
 		return "expected_tcp"
 	case base == "squid":
+		return "expected_tcp"
+	case strings.HasPrefix(base, "smokescreen"):
+		return "expected_tcp"
+	case (base == "fwupd" || base == "snapd") && port == 443:
 		return "expected_tcp"
 	case strings.Contains(body.Process.Binary, "/apt/methods/") && (port == 443 || port == 3128):
 		return "expected_tcp"
@@ -124,9 +130,14 @@ func expectedTCPReason(body *tetragonLog) string {
 	if base == "rootlessport" || base == "docker-proxy" {
 		return "expected_tcp"
 	}
+	// The FRP client and nginx proxy dial their configured upstreams on
+	// the cluster network.
+	if (base == "frpc" && port == 7000) || (base == "nginx" && port == 8188) {
+		return "expected_tcp"
+	}
 	switch base {
 	case "etcdctl", "ycluster":
-		if port == 2381 {
+		if port == 2381 || (base == "ycluster" && (port == 9091 || port == 5432)) {
 			return "expected_tcp"
 		}
 	case "etcd":

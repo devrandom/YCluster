@@ -1,0 +1,17 @@
+title: Suppress PCP log rotation cleanup
+id: f3981d6d-acc5-44d7-81c9-c50950970a4f
+description: |
+  Local tuning for the IDS pilot. PCP's pmlogger/pmie janitors remove their
+  own rotated logs under /var/log/pcp every 30 minutes, which the upstream
+  Linux Logs Clearing Attempts rule flags as log tampering.
+author: YCluster IDS pilot
+logsource:
+    product: linux
+    category: process_creation
+filter:
+    rules:
+        - 80915f59-9b56-4616-9de0-fd0dea6c12fe
+    pcp_cleanup:
+        Image|endswith: '/rm'
+        CommandLine|contains: '/var/log/pcp/'
+    condition: not pcp_cleanup

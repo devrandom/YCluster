@@ -25,6 +25,9 @@ func routineFileWriteReason(body *tetragonLog) string {
 		if reason := blackboxTargetsRewrite(body); reason != "" {
 			return reason
 		}
+		if reason := zulipPushHostsWrite(body); reason != "" {
+			return reason
+		}
 		return daemonConfigWrite(body)
 	}
 	path, ok := fileArgPath(body.Args)
@@ -46,6 +49,31 @@ func blackboxTargetsRewrite(body *tetragonLog) string {
 	path, ok := fileArgPath(body.Args)
 	if ok && strings.HasPrefix(path, "/etc/prometheus/tmp") {
 		return "expected_file_write"
+	}
+	return ""
+}
+
+// zulipPushHostsWrite suppresses the managed egress-allowlist update: the
+// helper writes a temp file, reads it back through cat and renames it over
+// /etc/zulip/push-hosts. Any other writer touching that path stays alertable.
+func zulipPushHostsWrite(body *tetragonLog) string {
+	filePath, ok := fileArgPath(body.Args)
+	if !ok {
+		return ""
+	}
+	switch path.Base(body.Process.Binary) {
+	case "setup-zulip-egress":
+		// The helper writes /etc/zulip/push-hosts.<random> and renames it
+		// over the target.
+		if filePath == "/etc/zulip/push-hosts" ||
+			strings.HasPrefix(filePath, "/etc/zulip/push-hosts.") {
+			return "expected_file_write"
+		}
+	case "cat":
+		if filePath == "/etc/zulip/push-hosts" &&
+			strings.HasPrefix(strings.TrimSpace(body.Process.Arguments), "/etc/zulip/push-hosts.") {
+			return "expected_file_write"
+		}
 	}
 	return ""
 }

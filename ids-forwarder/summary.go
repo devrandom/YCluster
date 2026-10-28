@@ -38,6 +38,15 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`--connection-token \S+`),
 }
 
+// ipmiPasswordPattern covers ipmitool's -P flag, which carries the BMC
+// password on the command line.
+var ipmiPasswordPattern = regexp.MustCompile(`(ipmitool\b[^\n]*?\s-P\s+)("[^"]*"|'[^']*'|\S+)`)
+
+// base64DecodePattern covers an inline decoded literal. Wrapping the secret
+// in base64 keeps it out of shell history but the decoder's own argv still
+// carries the encoded value.
+var base64DecodePattern = regexp.MustCompile(`(base64\s+(?:-d|--decode)\s*<<<\s*)("[^"]*"|'[^']*'|\S+)`)
+
 func redactSecrets(summary string) string {
 	for _, re := range secretPatterns {
 		summary = re.ReplaceAllStringFunc(summary, func(m string) string {
@@ -49,6 +58,8 @@ func redactSecrets(summary string) string {
 			}
 		})
 	}
+	summary = ipmiPasswordPattern.ReplaceAllString(summary, `${1}<redacted>`)
+	summary = base64DecodePattern.ReplaceAllString(summary, `${1}<redacted>`)
 	return summary
 }
 

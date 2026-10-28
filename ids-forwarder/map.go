@@ -161,6 +161,22 @@ func routineExecReason(process tetragonProcess) string {
 		if strings.Contains(args, "/etc/cron.") {
 			return "cron"
 		}
+		// Ansible's become handshake and its connectivity/interpreter
+		// probes run on every task; they are fixed shell shapes, not
+		// workload execs.
+		if strings.Contains(args, "BECOME-SUCCESS-") ||
+			strings.Contains(args, "echo ~ && sleep 0") ||
+			(strings.Contains(args, "echo PLATFORM") && strings.Contains(args, "command -v")) ||
+			(strings.Contains(args, "python3.") && strings.Contains(args, "&& sleep 0")) {
+			return "ansible_probe"
+		}
+		// The storage health probe runs the same mountpoint check from a
+		// shell wrapper on a short timer.
+		trimmed := strings.TrimSpace(args)
+		if strings.HasSuffix(trimmed, `-c "mountpoint -q /rbd/user"`) ||
+			strings.HasSuffix(trimmed, `-c 'mountpoint -q /rbd/user'`) {
+			return "storage_probe"
+		}
 		// Containers use a literal false command as a liveness placeholder.
 		if strings.TrimSpace(args) == "-c -- /bin/false" {
 			return "health_check"
@@ -226,6 +242,12 @@ func routinePrivilegeReason(body *tetragonLog) string {
 	switch body.Process.Binary {
 	case "/proc/self/fd/9", "/usr/lib/systemd/systemd", "/lib/systemd/systemd":
 		return "expected_privilege"
+	case "/usr/bin/sudo":
+		// Ansible's become wrapper raises privileges for every task.
+		if strings.Contains(body.Process.Arguments, "BECOME-SUCCESS-") &&
+			strings.Contains(body.Process.Arguments, "/usr/bin/python3") {
+			return "ansible_probe"
+		}
 	case "/usr/bin/runc",
 		"/usr/bin/containerd-shim-runc-v2",
 		"/usr/bin/docker-proxy",

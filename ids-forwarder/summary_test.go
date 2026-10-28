@@ -60,6 +60,34 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "sysstat",
 		},
 		{
+			name:   "ansible platform probe",
+			binary: "/bin/sh",
+			args:   `-c "echo PLATFORM; uname; echo FOUND; command -v 'python3.12'; command -v 'python3.11'"`,
+			parent: "/bin/bash",
+			reason: "ansible_probe",
+		},
+		{
+			name:   "ansible connectivity wrapper",
+			binary: "/bin/bash",
+			args:   `-c "/bin/sh -c 'echo ~ && sleep 0'"`,
+			parent: "/usr/sbin/sshd",
+			reason: "ansible_probe",
+		},
+		{
+			name:   "ansible become handshake",
+			binary: "/bin/sh",
+			args:   `-c "echo BECOME-SUCCESS-abc123 ; /usr/bin/python3"`,
+			parent: "/usr/bin/bash",
+			reason: "ansible_probe",
+		},
+		{
+			name:   "storage mount probe",
+			binary: "/bin/sh",
+			args:   `-c "mountpoint -q /rbd/user"`,
+			parent: "/usr/bin/bash",
+			reason: "storage_probe",
+		},
+		{
 			name:   "login motd",
 			binary: "/bin/sh",
 			args:   `-c -- "/usr/bin/env -i PATH=/usr/bin run-parts --lsbsysinit /etc/update-motd.d"`,
@@ -116,6 +144,7 @@ func TestRoutineExecKeepsUsefulCommands(t *testing.T) {
 		{"/usr/bin/bash", `-c "id"`, "/usr/sbin/sshd"},
 		{"/usr/bin/apt-get", "install nginx", "/usr/bin/sudo"},
 		{"/bin/sh", `-c "git-upload-pack '/srv/git/project.git'"`, "/usr/bin/runc"},
+		{"/bin/sh", `-c "mountpoint -q /mnt/data"`, "/usr/bin/bash"},
 	}
 
 	for _, tc := range cases {
@@ -399,6 +428,21 @@ func TestConnectionTokensAreRedacted(t *testing.T) {
 	}
 }
 
+func TestCommandLineSecretsAreRedacted(t *testing.T) {
+	cfg := testConfig()
+	a := newAlert(cfg, sourceTetragon, "warning", "host", "process_exec",
+		`process_exec: binary=/bin/bash args=-c "P=$(base64 -d <<< 'c2VjcmV0LWJtYy1wYXNz') && ipmitool -I lanplus -H 203.0.113.10 -U admin -P '$P' mc info"`)
+	got := a.Annotations["summary"]
+	for _, secret := range []string{"c2VjcmV0LWJtYy1wYXNz", "'$P'"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("secret %q leaked into the summary: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, "base64 -d <<< <redacted>") || !strings.Contains(got, "-P <redacted>") {
+		t.Fatalf("redaction placeholders missing: %s", got)
+	}
+}
+
 func TestAnsibleAndSnapNoiseIsSuppressed(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -444,5 +488,45 @@ func TestAnsibleAndSnapNoiseIsSuppressed(t *testing.T) {
 				t.Fatalf("reason = %q, want %q", reason, tc.reason)
 			}
 		})
+	}
+}
+
+func TestAnsibleSudoPrivilegeRaiseIsSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+	line, err := json.Marshal(map[string]any{
+		"process_kprobe": map[string]any{
+			"policy_name":   "privilege-raises",
+			"function_name": "security_capset",
+			"process": map[string]any{
+				"binary":    "/usr/bin/sudo",
+				"arguments": `-H -S -n -u root /bin/sh -c "echo BECOME-SUCCESS-abc123 ; /usr/bin/python3"`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, ok, reason := tetragonAlertDecision(string(line), cfg)
+	if ok {
+		t.Fatal("expected the Ansible become transition to be suppressed")
+	}
+	if reason != "ansible_probe" {
+		t.Fatalf("reason = %q, want ansible_probe", reason)
+	}
+
+	// A sudo transition outside the become wrapper stays signal.
+	line, err = json.Marshal(map[string]any{
+		"process_kprobe": map[string]any{
+			"policy_name":   "privilege-raises",
+			"function_name": "security_capset",
+			"process":       map[string]any{"binary": "/usr/bin/sudo", "arguments": "-u root /bin/bash"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, reason := tetragonAlertDecision(string(line), cfg); !ok {
+		t.Fatalf("unrelated sudo transition was suppressed as %q", reason)
 	}
 }

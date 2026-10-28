@@ -21,13 +21,14 @@ RSigma service; this directory is the offline, reproducible harness for them.
   `process_creation` rules and five `network_connection` rules from
   `r2026-07-01`, vendored under DRL 1.1 (`rules/LICENSE`), plus
   `zz-local-suppressions.yml` for the root interactive shell tuning found in
-  the replay. The install playbook ships these same files.
+  the replay and `zz-local-suppression-pcp.yml` for PCP log rotation. The
+  install playbook ships these same files.
 - `../../config/ansible/monitoring/files/rsigma/pipeline.yml` — RSigma
   pipeline that adds a per-category `EventType` guard to the Linux
   `process_creation` and `network_connection` rules so they cannot fire on the
   wrong event type.
 - `samples/tetragon.jsonl` — synthetic Tetragon events: eight malicious
-  behaviours and six benign controls.
+  behaviours and seven benign controls.
 - `samples/expected.json` — expected rule per PID, including empty lists for
   the benign controls.
 - `run.sh` — builds the bridge, normalizes the samples, runs RSigma, and
@@ -57,14 +58,15 @@ The script exits 2 with build instructions if RSigma is missing.
 `run.sh` currently prints:
 
 ```
-ok: 8 detections across 14 events, no benign matches
+ok: 8 detections across 15 events, no benign matches
 ```
 
 The eight malicious events are the webshell parent/child, netcat reverse
 shell, base64 pipe to shell, curl/wget download-and-execute, log clearing,
 crontab enumeration, apt pre-invoke shell, and interactive bash. The benign
 controls are ordinary apt, nginx worker, `rm` under `/tmp`, HTTPS curl, a
-container health probe, and a TCP connect event; none matched. The sample
+container health probe, a PCP log-rotation cleanup, and a TCP connect
+event; none matched. The sample
 interactive shell runs as a non-root user, so the local root-session filter
 does not hide it.
 

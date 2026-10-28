@@ -115,3 +115,37 @@ func TestDaemonConfigWritesAreSuppressed(t *testing.T) {
 		})
 	}
 }
+
+func TestZulipPushHostsWritesAreSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	cases := []struct{ binary, args, path string }{
+		{"/usr/local/lib/cluster/setup-zulip-egress", "/usr/local/lib/cluster/setup-zulip-egress", "/etc/zulip/push-hosts.5uEW6O"},
+		{"/usr/local/lib/cluster/setup-zulip-egress", "/usr/local/lib/cluster/setup-zulip-egress", "/etc/zulip/push-hosts"},
+		{"/usr/bin/cat", "/etc/zulip/push-hosts.hNNBma", "/etc/zulip/push-hosts"},
+	}
+	for _, tc := range cases {
+		line := fileWriteLine(t, tc.binary, tc.args, tc.path)
+		_, _, ok, reason := tetragonAlertDecision(line, cfg)
+		if ok {
+			t.Fatalf("%s write was forwarded", tc.binary)
+		}
+		if reason != "expected_file_write" {
+			t.Fatalf("reason = %q, want expected_file_write", reason)
+		}
+	}
+
+	for _, tc := range []struct{ name, binary, args, path string }{
+		{"other writer", "/bin/sh", "", "/etc/zulip/push-hosts"},
+		{"other zulip path", "/usr/local/lib/cluster/setup-zulip-egress", "", "/etc/zulip/zulip.conf"},
+		{"unrelated cat", "/usr/bin/cat", "/etc/ssh/sshd_config", "/etc/zulip/push-hosts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := fileWriteLine(t, tc.binary, tc.args, tc.path)
+			if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+				t.Fatalf("unexpected write was suppressed as %q", reason)
+			}
+		})
+	}
+}

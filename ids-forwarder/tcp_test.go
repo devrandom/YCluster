@@ -44,6 +44,14 @@ func TestExpectedTCPIsSuppressed(t *testing.T) {
 		{"cluster heartbeat ping", "/usr/bin/python3", "/usr/local/lib/cluster/cluster-heartbeat", "203.0.113.80", 443},
 		{"podman port forwarder", "/usr/libexec/podman/rootlessport", "", "10.88.0.4", 9000},
 		{"ycluster cli", "/usr/local/bin/ycluster", "wg reconcile --up", "10.0.0.13", 2381},
+		{"ycluster vm idle notify", "/usr/local/bin/ycluster", "/usr/local/bin/ycluster vm idle --notify", "10.0.0.12", 9091},
+		{"ycluster vm idle database", "/usr/local/bin/ycluster", "/usr/local/bin/ycluster vm idle --notify", "10.0.0.12", 5432},
+		{"deleted podman port forwarder", "/usr/libexec/podman/rootlessport (deleted)", "", "10.88.0.4", 9000},
+		{"frp tunnel client", "/usr/local/bin/frpc", "-c /etc/frp/ssh-client.toml", "10.0.0.12", 7000},
+		{"smokescreen egress proxy", "/usr/local/bin/smokescreen-abc123-go-1.26.0", "--listen-ip 127.0.0.1", "203.0.113.90", 443},
+		{"nginx upstream", "/usr/sbin/nginx", "", "10.0.0.12", 8188},
+		{"fwupd firmware check", "/usr/libexec/fwupd/fwupd", "", "203.0.113.91", 443},
+		{"snapd store check", "/snap/snapd/28254/usr/lib/snapd/snapd", "", "203.0.113.92", 443},
 		{"ipv6 cluster", "/usr/bin/etcdctl", "get /cluster/leader/app", "fd00::11", 2381},
 	}
 
@@ -86,6 +94,11 @@ func TestUnexpectedTCPIsForwarded(t *testing.T) {
 		{"other process to heartbeat destination", "/usr/bin/python3", "-m mystery", "203.0.113.80", 443},
 		{"unexpected proxy port on external host", "/usr/bin/curl", "https://203.0.113.10:3128/", "203.0.113.10", 3128},
 		{"apt method on unusual port", "/usr/lib/apt/methods/http", "", "10.0.0.11", 8443},
+		{"nginx on unexpected port", "/usr/sbin/nginx", "", "10.0.0.11", 8189},
+		{"frp client on unexpected port", "/usr/local/bin/frpc", "-c /etc/frp/ssh-client.toml", "10.0.0.11", 7001},
+		{"fwupd on unexpected port", "/usr/libexec/fwupd/fwupd", "", "203.0.113.91", 80},
+		{"ycluster notify to external host", "/usr/local/bin/ycluster", "/usr/local/bin/ycluster vm idle --notify", "203.0.113.10", 9091},
+		{"other process to notify port", "/usr/bin/curl", "", "10.0.0.12", 9091},
 	}
 
 	for _, tc := range cases {
