@@ -50,3 +50,12 @@ setup-tools:
     fi
     uv tool install ty
     uv tool install python-gitlab
+
+    # tea (Gitea/Forgejo CLI), pinned to the v0.16.0 release commit.
+    # Requires go >= 1.26 (auto-switched via GOTOOLCHAIN=auto).
+    # Re-running reinstalls the pinned commit; bump the hash to upgrade.
+    if ! command -v go >/dev/null 2>&1; then
+        echo "go not found; install go to get tea" >&2
+        exit 1
+    fi
+    go install gitea.dev/tea@9c12138d6273ba8feb6e7578833cc330c0cd6461
