@@ -201,7 +201,8 @@ argument against running it as a privileged per-host sensor.
 |---|---|---|---|
 | Tetragon policy library | Apache-2.0 | Process/file/network/capability policies | Adopt pinned |
 | CrowdSec scenarios | MIT (hub content varies) | SSH/HTTP/auth behaviour | Adopt pinned, review each scenario |
-| Sigma | DRL 1.1 | Rule source for new detections | Use offline only |
+| Sigma | DRL 1.1 | Rule source for new detections | Port rules into the forwarder, named after the upstream rule |
+| Falco rules | Apache-2.0 | Rule source for new detections | Port rules into the forwarder, named after the upstream rule |
 | ET Open | MIT | Suricata rules, if Suricata is used | Optional pinned |
 
 ## Why Tetragon
@@ -242,7 +243,9 @@ API. Its local database retention is capped at the access-log window.
 - **Wazuh** is a large C/C++ parser with a root agent and a central manager. Its
   recent critical advisories include agent-to-manager heap corruption and root RCE
   paths. Reject as the centerpiece.
-- **Falco** is C++ and overlaps with Tetragon's process/file/network surface.
+- **Falco** is C++ and overlaps with Tetragon's process/file/network surface, so it
+  is not adopted as a sensor. Its rule set is used as a detection source; see
+  "The behavioural-rule gap".
 - **auditd** is C userspace. Tetragon covers the process/file events without a
   second kernel audit consumer.
 - **AIDE** is C and periodic. Tetragon FIM is real-time; add a small Go baseline
@@ -253,6 +256,127 @@ API. Its local database retention is capped at the access-log window.
 - **ntopng** is C++ and is a flow dashboard, not an IDS.
 - **OpenSCAP and YARA** are C tools for compliance and signatures, not the
   detection loop.
+
+## The behavioural-rule gap
+
+The component survey above rejected Falco on language and duplication grounds:
+a C++ core, a second privileged syscall sensor, and no package in noble. Those
+reasons still hold and the sensor choice is unchanged. What the survey did *not*
+evaluate is the **rule language**, and the tuning work showed that is the piece
+this design actually lacks.
+
+Tetragon's `TracingPolicy` is a matching language. It selects syscalls and
+arguments. Tetragon 1.7 added `matchParentBinaries`, so a policy can match the
+immediate or, with `followChildren`, a transitive parent binary. That covers
+some single-event rules, but it requires `--parents-map-enabled` (a bounded BPF
+map, 32768 entries by default), matches only the binary path and not the
+parent's arguments, and has an open setup bug (`cilium/tetragon#5069`; a fix is
+proposed in `#4888` but not merged as of 2026-10-28), so it is not yet a
+dependable foundation. It still has no rule composition and no notion of a
+detection with a name and a rationale. A single event can sometimes be
+approximated now — "a shell was spawned by a service" is a parent-binary
+selector — but "a service spawned a shell and then made an outbound connection"
+is a sequence, and "a sensitive file was read by something that is not a
+package manager" is a list-based predicate with exceptions, neither of which a
+`TracingPolicy` can express. The plan in the survey assumed the policy
+library plus Sigma used offline would be enough; it was not, and the shortfall
+was discovered by writing the matching logic by hand in `ids-forwarder`, one
+noise source at a time.
+
+That hand-written layer is what Falco and Sigma already ship: macros over
+process name and parent, container awareness, and a decade of tuning against
+exactly the noise this fleet produced (container health probes, collector
+wrappers, package-manager queries, control-plane service pairs). Re-deriving
+them locally loses that provenance and makes every rule locally un-reviewable
+against a known reference.
+
+**Decision: keep the pipeline, borrow the rule layer.**
+
+- Detections in `ids-forwarder` are named after the Falco or Sigma rule they
+  implement, and the design records that mapping. A rule that cannot be named
+  after an upstream rule is not added.
+- Suppression stays local, because it encodes this cluster's traffic — which
+  Ceph port is expected, which container bridge is local. That knowledge has no
+  upstream equivalent and is correctly ours.
+- Reopening the stack question is justified when the named watch list outgrows
+  roughly a dozen rules, or when a required detection needs composition the
+  forwarder cannot express. At that point the candidates are Sigma rules on
+  RSigma (keeps the sensor) or Falco (a second sensor or a sensor swap); see
+  the off-the-shelf survey below.
+
+Two pipeline gaps are independent of this decision and worth fixing first:
+
+- The `execBinaries` allowlist drops every non-shell exec before any rule sees
+  it, so a service executing a binary directly is invisible. A rule engine
+  given the same truncated stream would have the same blind spot.
+- Identity attributes cannot substitute for behaviour. `auid` is unset for
+  anything systemd started, is stamped by `pam_loginuid` for cron jobs (so a
+  root cron job looks like a root login), and persists on daemons started from
+  a shell. It is useful as a label on stored detections, not as a filter.
+
+### Off-the-shelf rule-layer options (2026-10-28)
+
+No project is a drop-in Falco rule layer for Tetragon events. The credible
+options, checked on 2026-10-28, are:
+
+| Option | Keeps Tetragon | Rule format | Upstream content | Language | Main cost |
+|---|---|---|---|---|---|
+| Tetragon `matchParentBinaries` | yes | `TracingPolicy` | policy library only | Go + C eBPF | binary-only parent match; open bug `#5069`; no composition |
+| Falco, plugin-only (`collector` + `json`) | yes | Falco rules over `json.value[...]` | Falco rules must be rewritten for the JSON schema | C++ core, Go plugins | unprivileged, but no upstream rules as-is; `collector` is v0.1.1 |
+| Falco as a second sensor | no | Falco rules | `falcosecurity/rules` | C++ | second privileged syscall consumer; contradicts the sensor decision |
+| Tracee, sensor swap | no | Go signatures, rebuilt into Tracee | 30 documented built-in signatures | Go + C eBPF | loses Tetragon tuning and kernel-side filtering; custom rules are code |
+| Sigma + RSigma | yes | Sigma YAML | 146 Linux SigmaHQ rules (r2026-07-01) | Rust | new daemon; young engine; needs a Tetragon field-mapping pipeline |
+| Sigma + a Go library (`sigmalite`, `go-sigma-rule-engine`) | yes | Sigma subset | depends on library | Go | embeddable, but no correlation/full Sigma coverage |
+
+**Recommendation: pilot Sigma rules on RSigma, not Falco.** It is the only
+option that keeps Tetragon and the forwarder, runs unprivileged and
+memory-safe in user space, and brings an upstream Linux rule library with
+correlation, linting and backtesting. The engine is `timescale/rsigma` (Rust,
+MIT); the rules are `SigmaHQ/sigma`. A field-mapping pipeline maps the
+normalized event fields (`Image`, `CommandLine`, `ParentImage`,
+`ParentCommandLine`, `User`, `EventType`, destination address and port) onto
+the Sigma schema. The forwarder already has the parent process block in each
+Tetragon event, so this does not depend on the broken
+`matchParentBinaries` path.
+
+The caveats are material and are why this is a pilot, not a decision to
+replace the Go rules yet:
+
+- RSigma is young: first release 2026-02, v0.25.0 on 2026-10-19, 177 GitHub
+  stars. It published five advisories in that window (three high); all are
+  fixed by v0.25.0 (two at v0.23.0). The pilot must pin `>= 0.25.0`, disable
+  the HTTP event input, OTLP and MCP, and keep only a unix-socket input and a
+  loopback management API.
+- SigmaHQ's Linux coverage is process-centric: 123 `process_creation`, 8
+  `file_event`, 5 `network_connection` and 10 `auditd` rules at
+  `r2026-07-01`. Tetragon FIM events need argument mapping before the
+  `file_event` rules can be used; start with `process_creation` and
+  `network_connection`.
+- The engine is a second per-host process. Measure CPU, RSS and detection
+  latency on a storage node and a GPU node before fleet rollout.
+- A rule that exists only in Falco still has to be ported to Sigma once. The
+  naming/provenance rule above does not change.
+
+Pilot shape: run RSigma as a hardened `DynamicUser` systemd service, rules and
+pipelines read-only under `/etc`, SQLite state under `/var/lib`, detections in
+a file sink with external rotation; feed it normalized NDJSON over a unix
+socket from `ids-forwarder`; keep the forwarder as the only Alertmanager client
+and spool owner. Compare its detections with the current hand-written rules
+for two weeks on the dev cluster. Adopt only if it catches the same events with
+acceptable noise and resource use.
+
+Fallbacks if the pilot fails:
+
+- Falco's `collector` and `json` plugins can run Falco as an unprivileged
+  userspace rule engine over Tetragon JSON. This is the most mature rule
+  language, but every rule must be rewritten against JSON pointers, so the
+  upstream Falco content is not reusable as-is.
+- A Tracee sensor swap is justified if the host-mode/resource risk of Tetragon
+  becomes the larger problem. It is the lowest-advisory option (zero published
+  advisories) and has a built-in signature library, but it is a sensor swap,
+  not a rule-layer addition.
+- Do not adopt Tracee only for its signatures while keeping Tetragon: the two
+  sensors would duplicate the same kernel surface.
 
 ## Architecture
 
@@ -344,13 +468,26 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   private-network TCP service/port pairs, the exact gateway-health probe to
   its public endpoint, systemd's transient `/proc/self/fd/9` privilege
   transitions, sysstat's `debian-sa1` cron wrapper, the temp file of the
-  managed blackbox-target rewrite, and the exact `ycluster wg reconcile`
+  managed blackbox-target rewrite, the leader's healthchecks.io heartbeat,
+  and the exact `ycluster wg reconcile`
   write to its managed WireGuard config, counted by reason in
   `ids_forwarder_suppressed_total`. The underlying events remain in the
   Tetragon log. Shell execs and every other writer or file path remain
   alertable. TCP summaries drop per-connection socket fields (source port,
   cookie, state) so repeat connects to the same destination deduplicate.
+  The heartbeat is matched on its script path rather than its destination:
+  its failure mode is an unanswered check on the far side, and a repointed
+  URL is visible only through the write to its environment file, which is
+  mode 0640 because the ping URL is a bearer token.
 - Maps severity and rule metadata to Alertmanager `v2/alerts`.
+- Appends every classified detection to `detections.jsonl` in the forwarder
+  state directory, one JSON object per line, rotated by size. Alertmanager is
+  the paging path only: it keeps minutes of state and has no query, so the
+  history of what the sensor classified belongs in this file. Records carry
+  time, host, source, rule, severity, layer and the already-redacted summary;
+  suppressed events are counted in `ids_forwarder_suppressed_total` instead
+  of being written. The same shape can later be shipped to a central store
+  without changing the forwarder.
 - Posts to every core Alertmanager instance over the cluster network, in
   order, and stops at the first that accepts the alert. Non-core nodes have
   no local Alertmanager.
@@ -478,7 +615,9 @@ network coverage.
   100 MB append-only JSONL file of already-redacted alerts, fsynced before the
   cursor advances. It applies backpressure rather than dropping; if Tetragon
   rotation deletes the events the cursor needed, the forwarder replays what is
-  left and emits an `IDSForwarderGap` alert. No central event store.
+  left and emits an `IDSForwarderGap` alert. No central event store: raw
+  events stay on the node that produced them, and only the classified
+  detection record (`detections.jsonl`) is kept beyond the sensor's rotation.
 - **No IPs in labels.** Do not put client or VM-tenant IPs in Prometheus labels,
   Alertmanager labels/annotations, ntfy messages or incident notes. Use host, VM
   identity, rule ID and event type. Central Prometheus retention is 90 days, so an IP
@@ -689,6 +828,20 @@ hard way. They apply to the pinned versions; re-verify on upgrades.
   `osquery/osquery` (5.24.0, Apache-2.0 OR GPL-2.0),
   `OISF/suricata` (8.0.7, GPLv2), `zeek/zeek` (v9.0.0, BSD-3-Clause),
   `arkime/arkime` (v6.9.1, Apache-2.0), and `snort3/snort3` (3.12.4, GPLv2).
+- Tetragon selectors, including `matchParentBinaries`: <https://tetragon.io/docs/concepts/tracing-policy/selectors/>
+- Tetragon `matchParentBinaries` setup bug: <https://github.com/cilium/tetragon/issues/5069>
+- Tetragon 1.7 parent-process visibility: <https://isovalent.com/blog/post/tetragon-v1.7-release>
+- Falco event sources and plugin-only mode: <https://falco.org/docs/concepts/event-sources/>
+- Falco `collector` plugin: <https://github.com/falcosecurity/plugins/tree/main/plugins/collector>
+- Falco `json` plugin: <https://github.com/falcosecurity/plugins/tree/main/plugins/json>
+- Tracee `tracee-rules` JSON input: <https://github.com/aquasecurity/tracee/tree/v0.24.1/cmd/tracee-rules>
+- Tracee built-in signatures: <https://aquasecurity.github.io/tracee/v0.24.1/docs/events/builtin/security-events/>
+- SigmaHQ Linux rules (`r2026-07-01`): <https://github.com/SigmaHQ/sigma/tree/r2026-07-01/rules/linux>
+- RSigma: <https://github.com/timescale/rsigma>
+- RSigma streaming daemon: <https://rsigma.io/guide/streaming-detection/>
+- RSigma processing pipelines: <https://rsigma.io/guide/processing-pipelines/>
+- RSigma systemd deployment: <https://rsigma.io/deployment/systemd/>
+- RSigma security advisories: <https://github.com/timescale/rsigma/security/advisories>
 - Repository context: `docs/design/perimeter-software-tracking.md`,
   `docs/operations/disaster-recovery.md`, and
   `todo/security/user-data-retention-lifecycle.md`.
