@@ -52,7 +52,13 @@ podman image exists "$IMAGE" \
 mkdir -p "$CACHE_DIR"
 dev_args=()
 for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
-cvd="$(seq -s, 0 $((ngpu - 1)))"
+
+# CUDA_VISIBLE_DEVICES: the container only has the devices injected via
+# CDI above, so ordinals 0..N-1 always address exactly the intended cards.
+# Do not replace this with host smi indices: the /dev/nvidiaN node suffix
+# is the driver minor number, which is NOT the nvidia-smi index on all
+# hosts (see the CDI map comment in private host_vars).
+CVD="$(seq -s, 0 $((ngpu - 1)))"
 
 podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
@@ -64,7 +70,7 @@ podman run -d --name "$CONTAINER" \
   --ulimit memlock=-1:-1 \
   --ulimit stack=67108864:67108864 \
   --memory "$MEM" --memory-swap "$MEM" \
-  -e CUDA_VISIBLE_DEVICES="$cvd" \
+  -e CUDA_VISIBLE_DEVICES="$CVD" \
   -e PROFILE=ds41-flash \
   -e HARDWARE_PROFILE=rtx-pro-6000-pcie \
   -e MODEL=/model \
