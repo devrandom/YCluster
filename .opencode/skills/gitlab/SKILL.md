@@ -1,9 +1,13 @@
 ---
 name: gitlab
-description: Interact with GitLab MRs, issues, branches, and CI using the `gitlab` CLI (python-gitlab). Use when asked to close/review/create MRs, list issues, or query GitLab for this project.
+description: Interact with the GitLab mirror of YCluster using the `gitlab` CLI (python-gitlab). Use when asked about the mirror's MRs, issues, branches, or CI. Pull requests for this project are created on Forgejo, not here.
 ---
 
-# GitLab
+# GitLab (mirror)
+
+The project's pull requests are created on Forgejo (`tea`). This GitLab
+project is the mirror that branches are pushed to alongside Forgejo; do not
+open new MRs here unless explicitly asked.
 
 Use the `gitlab` CLI (`~/.local/bin/gitlab`, python-gitlab wrapper).
 Configuration lives in `~/.python-gitlab.cfg` under the `ycluster` profile;

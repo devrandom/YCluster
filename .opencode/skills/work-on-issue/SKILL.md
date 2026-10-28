@@ -1,6 +1,6 @@
 ---
 name: work-on-issue
-description: Implement a YCluster issue in an isolated worktree with test and quality-metric baselines, then publish the result as a GitLab merge request. Use when asked to work on or implement a todo issue, or to open an MR for a change.
+description: Implement a YCluster issue in an isolated worktree with test and quality-metric baselines, then publish the result as a Forgejo pull request. Use when asked to work on or implement a todo issue, or to open a PR for a change.
 ---
 
 # Work on an issue
@@ -52,9 +52,9 @@ just metrics
 ```
 
 Record the baseline. If `just metrics` fails before implementation starts,
-the failure is pre-existing debt on the base branch: record it in the MR
+the failure is pre-existing debt on the base branch: record it in the PR
 description and proceed. The stop-gate applies **before merging to main**
-(MR review), not before performing work. The implementation must add zero new
+(PR review), not before performing work. The implementation must add zero new
 violations relative to the base branch. Do not fix unrelated debt and do not
 adopt a new baseline just to unblock the issue.
 
@@ -80,31 +80,29 @@ intentional cleanup, run `just metrics-adopt`, review the baseline diff, and
 include `scripts/metrics/baseline.json` in the change. Never adopt a baseline
 merely to make a failing gate pass.
 
-## GitLab merge request
+## Pull request (Forgejo)
 
 Review the full diff before publishing. Follow `commit-hygiene` for leak
 scanning and commit messages. A request for this workflow is authorization to
-create the commits needed to publish the merge request, but not to commit
+create the commits needed to publish the pull request, but not to commit
 unrelated work.
 
-Push the branch to `origin`, then create a GitLab merge request targeting
-`main` with the `gitlab` CLI:
+Push the branch to **both** remotes — `origin` (Forgejo, where PRs live) and
+`gitlab` (mirror) — then create a Forgejo pull request targeting `main` with
+the `tea` CLI:
 
 ```bash
-gitlab -o json -f iid,title,web_url project-merge-request create \
-  --project-id devrandom01/ycluster \
-  --source-branch <slug> \
-  --target-branch main \
+tea pulls create --login YCluster \
+  --repo devrandom/ycluster \
+  --head <slug> --base main \
   --title "<compact imperative title>" \
   --description "<what/why, issue path, and verification results>"
 ```
 
-Do not URL-encode the `/` in the project path for this CLI; use
-`devrandom01/ycluster` directly. The MR description should include the
-issue/todo path when applicable and verification results from `just check`
-and `just metrics`.
+The PR description should include the issue/todo path when applicable and
+verification results from `just check` and `just metrics`.
 
-After the MR is created, stop. Do not merge it, monitor CI, or make further
+After the PR is created, stop. Do not merge it, monitor CI, or make further
 changes unless the orchestrator asks for follow-up.
 
 ## Orchestrator workflow (main agent only)
@@ -128,9 +126,9 @@ responsible for queue state, batch composition, and final verification.
 ### Queue state
 
 - Track batches in `NOTES.md` under "Agent todo queue" with checkboxes and
-  MR numbers: in-flight, in-review, and done sections.
+  PR numbers: in-flight, in-review, and done sections.
 - After each batch completes, update the queue before spawning the next one.
-- The main agent never merges MRs; merging is always the user's action. Move
+- The main agent never merges PRs; merging is always the user's action. Move
   an issue to "done" only after the user has merged it.
 
 ### Waiting and wake-ups
@@ -138,7 +136,7 @@ responsible for queue state, batch composition, and final verification.
 - After spawning a batch, wait with the longest available agent-wait call;
   do not poll with short timeouts. Subagent completions are also delivered
   automatically between user turns.
-- When a completion notification arrives: record the MR/commit in the queue,
+- When a completion notification arrives: record the PR/commit in the queue,
   spot-check the worktree state (clean tree, commit pushed), and continue
   waiting for the rest of the batch.
 - If a subagent stalls or fails a gate, stop it only after the user is
@@ -146,9 +144,9 @@ responsible for queue state, batch composition, and final verification.
 
 ### Review pass
 
-- After each implementation subagent finishes and publishes its MR, spawn a
-  separate review subagent using the `review-agent` skill. Give it the MR
-  iid, todo path, worktree path, and branch.
+- After each implementation subagent finishes and publishes its PR, spawn a
+  separate review subagent using the `review-agent` skill. Give it the PR
+  number, todo path, worktree path, and branch.
 - Don't hand the reviewer a diff file. Have it open the worktree (branch
   `<slug>` checked out at `work/<slug>`) and review the changes with respect
   to the base branch (e.g. `main`), e.g. via `git diff <base>...HEAD` inside
@@ -168,7 +166,7 @@ responsible for queue state, batch composition, and final verification.
   resilience (e.g. testing implementation details, over-mocking, trivially
   passing tests, or duplicate variants that don't exercise new behavior).
 - Wait for the review verdict before treating the issue as ready for the
-  user. On approval, move the issue to in-review with its MR number. On
+  user. On approval, move the issue to in-review with its PR number. On
   "request changes", send the findings back to the implementation subagent
   or report the blocker if that agent is no longer available.
 - Do not have the reviewer implement fixes; keep review and implementation
@@ -176,9 +174,9 @@ responsible for queue state, batch composition, and final verification.
 
 ### Verification of subagent work
 
-- The main agent never merges MRs; merging is always the user's action. Check
-  the worktree diff, branch cleanliness, and MR state, then move the issue to
+- The main agent never merges PRs; merging is always the user's action. Check
+  the worktree diff, branch cleanliness, and PR state, then move the issue to
   in-review for the user to merge.
-- When the user asks to review a batch, verify each MR: CI status, the diff
+- When the user asks to review a batch, verify each PR: CI status, the diff
   matches the todo scope, and no unrelated files were touched. The user
   performs the merge.

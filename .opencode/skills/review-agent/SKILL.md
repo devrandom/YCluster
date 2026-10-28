@@ -1,25 +1,23 @@
 ---
 name: review-agent
-description: Review a YCluster GitLab merge request for scope, correctness, leaks, and verification quality. Use when an MR needs a second-pass review before the user merges it.
+description: Review a YCluster Forgejo pull request for scope, correctness, leaks, and verification quality. Use when a PR needs a second-pass review before the user merges it.
 ---
 
-# Review a merge request
+# Review a pull request
 
-Review one MR as a second pass. You are a reviewer, not an implementer:
-do not push commits, modify MR settings, or merge it. If fixes are needed,
+Review one PR as a second pass. You are a reviewer, not an implementer:
+do not push commits, modify PR settings, or merge it. If fixes are needed,
 return a precise, actionable list to the orchestrator.
 
 ## Posting the review
 
-After completing the review, post the full findings as a note on the MR using
-the `gitlab` CLI. The comment is part of the MR's auditable trail. Use this
-pattern:
+After completing the review, post the full findings as a comment on the PR
+using the `tea` CLI. The comment is part of the PR's auditable trail. Use
+this pattern:
 
 ```bash
-gitlab project-merge-request-note create \
-  --project-id devrandom01/ycluster \
-  --mr-iid <iid> \
-  --body "## Agent review: <verdict>
+tea comments add --login YCluster --repo devrandom/ycluster <pr-number> \
+  "## Agent review: <verdict>
 
 ### Findings
 - ...
@@ -30,25 +28,24 @@ gitlab project-merge-request-note create \
 - ..."
 ```
 
-Do not modify the MR title, labels, approvals, or settings — only add a note.
-If note creation fails, report the failure to the orchestrator along with the
-verdict rather than retrying indefinitely.
+Do not modify the PR title, labels, approvals, or settings — only add a
+comment. If comment creation fails, report the failure to the orchestrator
+along with the verdict rather than retrying indefinitely.
 
 ## Inputs
 
 Ask for or read from the orchestrator context:
 
-- MR identifier (project `devrandom01/ycluster`)
+- PR identifier (repo `devrandom/ycluster`)
 - corresponding todo file, if any
 - local worktree path and branch, if present
 
 ## Review steps
 
-1. Fetch MR metadata and the diff:
+1. Fetch PR metadata and the diff:
 
    ```bash
-   gitlab -o json -f iid,title,state,source_branch,target_branch,web_url \
-     project-merge-request get --project-id devrandom01/ycluster --iid <iid>
+   tea pulls <number> --login YCluster --repo devrandom/ycluster
    git fetch origin <source-branch>
    git diff origin/main...FETCH_HEAD
    ```
@@ -70,7 +67,7 @@ Ask for or read from the orchestrator context:
 
 Return one of:
 
-- **approve** — MR is ready for user review/merge; summarize key findings.
+- **approve** — PR is ready for user review/merge; summarize key findings.
 - **request changes** — list required fixes, file paths, and concrete
   suggestions; do not implement them.
 - **block** — leak, prod-risk, or fundamental scope problem; explain why.

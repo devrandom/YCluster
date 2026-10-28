@@ -20,7 +20,7 @@ Gate every stage/commit/push in the `ycluster` repo. Pairs with
   `dev.test`) are fine.
 - **Deployment hostnames / URLs / FQDNs** — especially any with index > 3
   (`c4`, `s5`, `nv4`, `s5`, `s4`) and any real hostname beyond `s1-s3`
-  (`nv*`, `m1`, `m2`, …). `s1-s3` and generic placeholders (`host.ycluster.net`,
+  (`nv*`, `m1`, `m2`, …). `s1-s3` and generic placeholders (`host.example.net`,
   `DOMAIN`) are fine.
 - **Public IPs** (use RFC 5737 `203.0.113.x` in docs/example/tests).
 - **User-chosen VM names**.
