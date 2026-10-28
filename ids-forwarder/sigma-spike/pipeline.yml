@@ -1,0 +1,21 @@
+name: tetragon-linux
+priority: 20
+transformations:
+  - id: process_exec_only
+    type: add_condition
+    name: tetragon_process_exec
+    conditions:
+      EventType: process_exec
+    rule_conditions:
+      - type: logsource
+        product: linux
+        category: process_creation
+  - id: network_connection_only
+    type: add_condition
+    name: tetragon_network_connection
+    conditions:
+      EventType: network_connection
+    rule_conditions:
+      - type: logsource
+        product: linux
+        category: network_connection

@@ -142,6 +142,9 @@ must not become a second, longer-lived access log.
     rule sees them, so a service executing a binary directly is invisible.
     Decide whether to widen the forwarded exec set before reliance on
     behaviour rules grows.
+  - Remaining: two-week Sigma/RSigma pilot on a BTF-capable host, using the
+    curated rules under `ids-forwarder/sigma-spike/` and the replay results in
+    "The behavioural-rule gap"; keep the hand-written rules until it passes.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.

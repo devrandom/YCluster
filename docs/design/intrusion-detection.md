@@ -325,7 +325,7 @@ options, checked on 2026-10-28, are:
 | Falco, plugin-only (`collector` + `json`) | yes | Falco rules over `json.value[...]` | Falco rules must be rewritten for the JSON schema | C++ core, Go plugins | unprivileged, but no upstream rules as-is; `collector` is v0.1.1 |
 | Falco as a second sensor | no | Falco rules | `falcosecurity/rules` | C++ | second privileged syscall consumer; contradicts the sensor decision |
 | Tracee, sensor swap | no | Go signatures, rebuilt into Tracee | 30 documented built-in signatures | Go + C eBPF | loses Tetragon tuning and kernel-side filtering; custom rules are code |
-| Sigma + RSigma | yes | Sigma YAML | 146 Linux SigmaHQ rules (r2026-07-01) | Rust | new daemon; young engine; needs a Tetragon field-mapping pipeline |
+| Sigma + RSigma | yes | Sigma YAML | 141 SigmaHQ Linux rules (4 log-source categories, r2026-07-01) | Rust | new daemon; young engine; needs a Tetragon field-mapping pipeline |
 | Sigma + a Go library (`sigmalite`, `go-sigma-rule-engine`) | yes | Sigma subset | depends on library | Go | embeddable, but no correlation/full Sigma coverage |
 
 **Recommendation: pilot Sigma rules on RSigma, not Falco.** It is the only
@@ -345,10 +345,10 @@ replace the Go rules yet:
 - RSigma is young: first release 2026-02, v0.25.0 on 2026-10-19, 177 GitHub
   stars. It published five advisories in that window (three high); all are
   fixed by v0.25.0 (two at v0.23.0). The pilot must pin `>= 0.25.0`, disable
-  the HTTP event input, OTLP and MCP, and keep only a unix-socket input and a
-  loopback management API.
-- SigmaHQ's Linux coverage is process-centric: 123 `process_creation`, 8
-  `file_event`, 5 `network_connection` and 10 `auditd` rules at
+  the HTTP event input, OTLP, MCP, enrichers and outbound webhooks, and keep
+  only a unix-socket input and a loopback management API.
+- SigmaHQ's Linux coverage is process-centric: 122 `process_creation`, 8
+  `file_event`, 5 `network_connection` and 6 `auditd` rules at
   `r2026-07-01`. Tetragon FIM events need argument mapping before the
   `file_event` rules can be used; start with `process_creation` and
   `network_connection`.
@@ -362,8 +362,57 @@ pipelines read-only under `/etc`, SQLite state under `/var/lib`, detections in
 a file sink with external rotation; feed it normalized NDJSON over a unix
 socket from `ids-forwarder`; keep the forwarder as the only Alertmanager client
 and spool owner. Compare its detections with the current hand-written rules
-for two weeks on the dev cluster. Adopt only if it catches the same events with
-acceptable noise and resource use.
+for two weeks on a BTF-capable VM or physical host. Adopt only if it catches
+the same events with acceptable noise and resource use.
+
+**Spike result (2026-10-28).** The offline harness at
+`ids-forwarder/sigma-spike/` normalizes synthetic Tetragon `process_exec`
+events and evaluates them with RSigma 0.25.0. Eight curated process rules
+caught all eight malicious samples and none of the six benign controls; five
+network rules were added after the guarded replay below.
+The full 122-rule `process_creation` set added two benign matches (`File
+Deletion` on `rm -f /tmp/scratch`, `Curl Usage on Linux` on a plain HTTPS
+request) and duplicated two malicious events with generic rules, so the pilot
+must start from a curated subset and tune against a benign baseline.
+Rule loading was under 0.05 s; 10,000 events took 0.08 s and 16.6 MB max RSS
+with the 13 curated rules, and 0.28 s and 19.5 MB with 122 rules. The daemon also
+accepted NDJSON on a unix socket, wrote a file sink, and persisted SQLite
+state locally. The Incus dev nodes cannot run Tetragon itself: they lack
+`/sys/kernel/btf/vmlinux` and have `kernel.unprivileged_bpf_disabled=2`. A
+real sensor-to-rule end-to-end test needs a VM or a physical host.
+
+CVE check (2026-10-28): the SigmaHQ rule repository has no published security
+advisories. The separate pySigma tooling has five advisories, fixed in
+2.0.0/2.0.1; it is not used by RSigma, but pin `pySigma >= 2.0.1` if
+`sigma-cli` is used for conversion or validation. RSigma has five GitHub
+advisories, all fixed by 0.25.0. Its
+upstream 0.25.0 lockfile still resolves four vulnerable crates in the Linux
+release graph: `ctutils` 0.4.2 (`RUSTSEC-2026-0385`), `rustls-webpki` 0.103.15
+and `webpki-roots` 1.0.9 (`CVE-2026-111943`), and `tokio` 1.53.2
+(`RUSTSEC-2026-0386`). The pilot has no outbound TLS and does not call
+`AsyncFd`, so the TLS and I/O-safety paths are not reachable, but the lockfile
+must be patched before deployment. Updating to `ctutils` 0.4.4,
+`rustls-webpki` 0.103.16, `tokio` 1.53.3 and `webpki-roots` 1.0.10 builds
+cleanly, reduces the release graph to zero OSV advisories, and still passes
+the spike.
+
+Two production replays exercised the curated set on real output. A
+~27-minute storage-leader window had 37,956 `process_exec` and 13,758
+normalized `tcp_connect` events; a GPU-node window had 12,486 `process_exec`
+and 150 `tcp_connect` events. The 13 curated rules plus a local filter for
+routine root interactive shells produced zero detections in both windows.
+Synthetic positive controls on the real streams produced one webshell
+detection and one reverse-shell detection, so the process and network paths
+work. Before the filter, the storage window had one and the GPU window had two
+`Bash Interactive Shell` hits, all root with no parent binary. The full
+122-rule process set produced 7,019 detections in the storage window and 1,498
+on the GPU node, dominated by routine `ip`, `hostname`, `curl` and `findmnt`
+discovery rules. Five SigmaHQ `network_connection` rules initially produced
+199 false positives, all on `process_exec` events with no `DestinationIp`; a
+per-category `EventType` guard reduced that to zero. The evaluator does not
+enforce `logsource.category`, so every category needs its own guard. The
+curated set is quiet on these two windows; the next gate is a two-week
+BTF-capable host run, not more offline replay.
 
 Fallbacks if the pilot fails:
 
