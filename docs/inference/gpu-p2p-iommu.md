@@ -29,6 +29,85 @@ implements SSD Engram but does not claim a repeated SSD benchmark; R38's public
 deployment uses RAM Engram. The 670 number needs the unpublished kernel, not a
 newer R-tag.
 
+## Checking P2P capability and bandwidth
+
+Run these from a host or guest where the NVIDIA driver owns the GPUs:
+
+```bash
+nvidia-smi topo -m
+nvidia-smi topo -p2p r
+nvidia-smi topo -p2p w
+nvidia-smi --query-gpu=index,pci.bus_id,pcie.link.gen.max,pcie.link.gen.current,pcie.link.width.max,pcie.link.width.current --format=csv
+```
+
+`topo -p2p` is a capability matrix, not a bandwidth result. `OK` means the
+driver permits peer access; `NS`, `TNS`, `CNS`, and `GNS` mean the topology,
+chipset, or GPU does not support it; `DR` means a registry key disabled it.
+`topo -m` gives the path: `PIX`/`PXB` are direct through PCIe switches, while
+`PHB`, `NODE`, and `SYS` traverse host bridges. P2P can be `OK` through a host
+bridge, but that is not the same path as a direct switch hop.
+
+Validate the capability with a real transfer:
+
+```bash
+nvidia-smi -L
+nvbandwidth -p device_to_device -b 512
+# or the CUDA sample:
+p2pBandwidthLatencyTest
+```
+
+`nvbandwidth` was not available in the test environment. The measurements
+below used an equivalent CUDA runtime loop: `cudaDeviceEnablePeerAccess()`
+followed by `cudaMemcpyPeer` with 64 MiB buffers and 3 repetitions (256 MiB and
+5 repetitions on the 3-GPU test). Every tested pair returned success from
+`cudaDeviceEnablePeerAccess()`.
+
+If `nvidia-smi` fails with `couldn't communicate with the NVIDIA driver`, the
+GPUs may be bound to `vfio-pci`. Check the host and any multi-GPU guests:
+
+```bash
+lspci -nnk -d 10de:
+incus list
+incus config show <vm> | grep -A4 gpu
+incus exec <vm> -- nvidia-smi topo -p2p r
+```
+
+A guest needs at least two GPUs to test a pair. A host that assigns one GPU to
+each VM cannot measure P2P without a maintenance change.
+
+If the GPUs are host-bound, record the host-side path too:
+
+```bash
+cat /proc/cmdline
+ls /sys/kernel/iommu_groups
+lspci -vv -s "$BDF" | grep -E 'ACSCtl:|LnkCap:|LnkSta:'
+grep -E 'EnableResizableBar|RegistryDwords' /proc/driver/nvidia/params
+```
+
+ACS redirect/upstream-forwarding does not necessarily block peer access, but it
+forces traffic through the host bridge. Do not disable ACS or IOMMU just to
+change the reported path; that costs VFIO isolation.
+
+### Measured results
+
+| Host profile | GPUs | Capability | Path / link | Measured one-way BW |
+|---|---:|---|---|---|
+| 4-GPU Gen5 server, one GPU per VM | 4 | not measurable at host | Gen5 x16; separate VMs | not measured |
+| 3-GPU Gen5 host | 3 | all pairs `OK` r/w | `NODE`, Gen5 x16 | 53.0–55.2 GB/s |
+| 4-GPU Gen5 all-VFIO host | 4 (3 tested) | tested pairs `OK` r/w | `PHB`, Gen5 x16 | 52.9–54.5 GB/s |
+| 6-GPU Gen5 host | 6 | all 30 ordered pairs `OK` r/w | `PHB`/`NODE`; one card Gen5 x8 | 53.2–55.3 GB/s on x16 pairs; 27.0–28.4 GB/s on pairs involving the x8 card |
+| 4-GPU Gen4 host | 4 | all pairs `OK` r/w | `NODE`, Gen4 x16 | 26.6–28.0 GB/s |
+
+Results are per direction. The Gen4 host is limited by its PCIe generation,
+not by a P2P failure. On the 6-GPU host, the x8 card caps every pair that
+includes it; a 64 MiB GPU 3→5 sample measured 40.9 GB/s, but a 256 MiB retest
+measured 52.7 GB/s, so the lower sample was treated as contention noise. The
+all-VFIO host has one GPU isolated in a single-GPU guest, so only three of its
+four GPUs were tested.
+
+The exact host-to-profile mapping is deployment-specific and kept in the
+private deployment notes, not in this public doc.
+
 ## Options
 
 | Lead | What it changes | Fit |

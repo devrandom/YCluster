@@ -57,6 +57,27 @@ passthrough. Do not apply it to this host. Prefer 0xSero's DS4.1 recipe; if
 IOMMU off is required, target the all-passthrough four-GPU host instead. See
 [gpu-p2p-iommu.md](gpu-p2p-iommu.md).
 
+## Measured prompt-depth throughput
+
+Single-stream sweep through the gateway on 2026-10-28, using
+`inference bench deepseek-v4_1-flash`: 256 decode tokens, warmup enabled,
+three repeats, temperature 0, `ignore_eos`, and a unique prefix so every
+prompt is a cold prefill (`cached=0`). This is a prompt-length curve, not the
+C1 codegen benchmark in [gpu-p2p-iommu.md](gpu-p2p-iommu.md), and it does not
+measure concurrent throughput.
+
+| Prompt tokens | TTFT | Prefill tok/s, median [min-max] | Decode tok/s, median [min-max] |
+|---:|---:|---:|---:|
+| 865 | 0.57 s | 1,517 [1,459-1,545] | 194.8 [93.5-197.0] |
+| 3,387 | 0.71 s | 4,753 [4,688-4,808] | 209.8 [195.5-229.2] |
+| 13,469 | 1.88 s | 7,180 [6,918-7,278] | 186.0 [112.0-205.9] |
+| 53,739 | 5.74 s | 9,363 [9,087-9,467] | 230.8 [206.5-231.1] |
+
+Decode medians stay in the 186-231 tok/s band across prompt depth. Prefill
+throughput rises from 1.5k to 9.4k tok/s as the prompt grows, while TTFT rises
+from 0.57 s to 5.74 s. The low decode minima on the short and 13k prompts are
+individual-repeat outliers; medians are the useful comparison.
+
 ## Karmic Kraken upgrade notes (researched 2026-10-25, not applied)
 
 Upstream moved past the per-model R36–R38 entrypoints to a shared profile
