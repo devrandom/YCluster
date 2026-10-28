@@ -9,6 +9,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SPIKE="$ROOT/ids-forwarder/sigma-spike"
+RULES="$ROOT/config/ansible/monitoring/files/rsigma"
 OUT="$SPIKE/out"
 RSIGMA_BIN=${RSIGMA_BIN:-"$ROOT/ext/rsigma/target/release/rsigma"}
 
@@ -26,8 +27,8 @@ mkdir -p "$OUT"
   -output "$OUT/normalized.ndjson"
 
 "$RSIGMA_BIN" engine eval \
-  -r "$SPIKE/rules" \
-  -p "$SPIKE/pipeline.yml" \
+  -r "$RULES/rules" \
+  -p "$RULES/pipeline.yml" \
   -e @"$OUT/normalized.ndjson" \
   --include-event \
   --no-stats \

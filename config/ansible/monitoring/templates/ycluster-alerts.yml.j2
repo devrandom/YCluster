@@ -1076,6 +1076,33 @@ groups:
           summary: "CrowdSec down on {{ $labels.node }}"
           description: "CrowdSec on {{ $labels.node }} has been unreachable for 5m; log-based detection (sshd/nginx) is not running there."
 
+      - alert: RsigmaDown
+        expr: ids_component_up{component="rsigma"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sigma rule engine down on {{ $labels.node }}"
+          description: "rsigma on {{ $labels.node }} has been unreachable for 5m; Sigma rules are not evaluating Tetragon events there."
+
+      - alert: IdsSigmaDropping
+        expr: increase(ids_forwarder_sigma_dropped_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS Sigma events dropped on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} normalized events before the Sigma engine in the last 15m; the rule layer has a coverage gap on that node."
+
+      - alert: IdsSigmaTailFailing
+        expr: increase(ids_forwarder_sigma_tail_errors_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS Sigma detections disabled on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} could not open the RSigma detection sink in the last 15m; Sigma detections are not reaching Alertmanager from that node."
+
       - alert: IdsForwarderDropping
         expr: increase(ids_forwarder_dropped_total[15m]) > 0
         for: 5m

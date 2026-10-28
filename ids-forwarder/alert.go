@@ -156,17 +156,19 @@ func (q *alertQueue) depth() int {
 }
 
 type metrics struct {
-	forwarded    atomic.Int64
-	dropped      atomic.Int64
-	deduped      atomic.Int64
-	expired      atomic.Int64
-	gaps         atomic.Int64
-	oversized    atomic.Int64
-	rejected     atomic.Int64
-	cursorErrors atomic.Int64
-	failures     atomic.Int64
-	recorded     atomic.Int64
-	recordErrors atomic.Int64
+	forwarded       atomic.Int64
+	dropped         atomic.Int64
+	deduped         atomic.Int64
+	expired         atomic.Int64
+	gaps            atomic.Int64
+	oversized       atomic.Int64
+	rejected        atomic.Int64
+	cursorErrors    atomic.Int64
+	failures        atomic.Int64
+	recorded        atomic.Int64
+	recordErrors    atomic.Int64
+	sigmaBad        atomic.Int64
+	sigmaTailErrors atomic.Int64
 
 	suppressedMu sync.Mutex
 	suppressed   map[string]int64

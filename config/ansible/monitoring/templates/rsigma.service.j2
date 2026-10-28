@@ -1,0 +1,48 @@
+[Unit]
+Description=RSigma Sigma rule engine for Tetragon events
+After=network.target tetragon.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rsigma engine daemon \
+    --rules /etc/rsigma/rules \
+    --pipeline /etc/rsigma/pipeline.yml \
+    --input unix:///run/rsigma/events.sock \
+    --input-format json \
+    --output file:///var/log/rsigma/detections.ndjson \
+    --include-event \
+    --state-db /var/lib/rsigma/state.db \
+    --api-addr {{ rsigma_api_addr }} \
+    --buffer-size 20000 \
+    --batch-size 128 \
+    --drain-timeout 10
+Restart=on-failure
+RestartSec=5
+# RSigma chmods its unix input socket to 0600, so it runs as the same
+# unprivileged user as ids-forwarder. No TCP listener is exposed: the
+# management API and metrics are loopback-only.
+User=ids-forwarder
+Group=ids-forwarder
+RuntimeDirectory=rsigma
+RuntimeDirectoryMode=0750
+StateDirectory=rsigma
+StateDirectoryMode=0750
+LogsDirectory=rsigma
+LogsDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

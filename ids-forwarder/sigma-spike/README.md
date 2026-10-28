@@ -6,8 +6,8 @@ It answers the narrow question the current forwarder cannot: can Tetragon
 `process_exec` events be normalized into Sigma fields and evaluated by an
 off-the-shelf Sigma engine without adding a second kernel sensor?
 
-It is not integrated into `ids-forwarder` yet and it does not touch the
-cluster.
+The normalizer and curated rules are now wired into `ids-forwarder` and the
+RSigma service; this directory is the offline, reproducible harness for them.
 
 ## What is here
 
@@ -17,13 +17,15 @@ cluster.
   `EventType`, destination address/port).
 - `../../cmd/ids-sigma-bridge` — tiny stdin/file to NDJSON harness around that
   normalizer.
-- `rules/` — eight SigmaHQ Linux `process_creation` rules and five
-  `network_connection` rules from `r2026-07-01`, vendored under DRL 1.1
-  (`rules/LICENSE`), plus `zz-local-suppressions.yml` for the root interactive
-  shell tuning found in the replay.
-- `pipeline.yml` — RSigma pipeline that adds a per-category `EventType` guard
-  to the Linux `process_creation` and `network_connection` rules so they
-  cannot fire on the wrong event type.
+- `../../config/ansible/monitoring/files/rsigma/rules/` — eight SigmaHQ Linux
+  `process_creation` rules and five `network_connection` rules from
+  `r2026-07-01`, vendored under DRL 1.1 (`rules/LICENSE`), plus
+  `zz-local-suppressions.yml` for the root interactive shell tuning found in
+  the replay. The install playbook ships these same files.
+- `../../config/ansible/monitoring/files/rsigma/pipeline.yml` — RSigma
+  pipeline that adds a per-category `EventType` guard to the Linux
+  `process_creation` and `network_connection` rules so they cannot fire on the
+  wrong event type.
 - `samples/tetragon.jsonl` — synthetic Tetragon events: eight malicious
   behaviours and six benign controls.
 - `samples/expected.json` — expected rule per PID, including empty lists for
@@ -195,16 +197,17 @@ The Incus dev nodes cannot run Tetragon: they have no
 userspace RSigma side can run there. A real end-to-end event test needs a VM
 or a physical host with BTF and BPF privileges.
 
-## Next step
+## Production shape
 
-If this direction is accepted, the smallest production-shaped change is:
+- `ids-forwarder -sigma-socket` writes normalized NDJSON to
+  `/run/rsigma/events.sock` through a bounded queue. A missing or slow engine
+  increments `ids_forwarder_sigma_{sent,errors,dropped}_total` and never
+  blocks the Alertmanager path.
+- RSigma runs as `rsigma.service` with a unix-socket input, a file sink at
+  `/var/log/rsigma/detections.ndjson`, SQLite state, and a loopback API. The
+  input socket is mode `0600`, so both services run as `ids-forwarder`.
+- `ids-forwarder -sigma-detections` tails the sink with a durable byte cursor
+  and maps every result back to a normal `IDSAlert`.
 
-1. Add a `-sigma-socket` output to `ids-forwarder` using the same normalizer,
-   with a bounded queue and sent/error/dropped counters.
-2. Start RSigma as a hardened `DynamicUser` systemd unit with a Unix-socket
-   input, loopback API, file sink, and SQLite state.
-3. Have the forwarder tail the RSigma detection sink and keep owning the
-   Alertmanager spool and redaction path.
-
-Do not replace the existing Go rules until the pilot has run against a
+Do not replace the existing Go rules until the service has run against a
 BTF-capable host baseline for two weeks.

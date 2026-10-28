@@ -357,11 +357,12 @@ replace the Go rules yet:
 - A rule that exists only in Falco still has to be ported to Sigma once. The
   naming/provenance rule above does not change.
 
-Pilot shape: run RSigma as a hardened `DynamicUser` systemd service, rules and
-pipelines read-only under `/etc`, SQLite state under `/var/lib`, detections in
-a file sink with external rotation; feed it normalized NDJSON over a unix
-socket from `ids-forwarder`; keep the forwarder as the only Alertmanager client
-and spool owner. Compare its detections with the current hand-written rules
+Pilot shape: run RSigma as a hardened systemd service under the same
+unprivileged user as `ids-forwarder` (RSigma restricts its unix input socket to
+mode `0600`), rules and pipelines read-only under `/etc`, SQLite state under
+`/var/lib`, detections in a file sink with external rotation; feed it
+normalized NDJSON over a unix socket from `ids-forwarder`; keep the forwarder
+as the only Alertmanager client and spool owner. Compare its detections with the current hand-written rules
 for two weeks on a BTF-capable VM or physical host. Adopt only if it catches
 the same events with acceptable noise and resource use.
 
@@ -441,8 +442,15 @@ per Linux cluster node
     ├── local API on localhost
     └── local DB retention capped at the access-log window
 
+  RSigma (Rust, Sigma rule engine)
+    ├── normalized NDJSON in on a unix socket (/run/rsigma/events.sock)
+    ├── detections out to a file sink (/var/log/rsigma/detections.ndjson)
+    └── loopback management API and metrics (127.0.0.1:9290)
+
   ids-forwarder (Go, in-repo)
     ├── tails Tetragon JSON events file; gRPC unix socket reserved for ops
+    ├── copies a bounded, normalized stream to RSigma (never blocks paging)
+    ├── tails the RSigma detection sink with a durable byte cursor
     ├── optional localhost HTTP receiver for CrowdSec notification-http
     ├── maps to Alertmanager v2/alerts
     ├── durable cursor; replays rotated Tetragon files after restart
@@ -452,6 +460,15 @@ per Linux cluster node
 Alertmanager (existing HA)
   └── ntfy-webhook (existing)
 ```
+
+The Sigma path is additive. `ids-forwarder` only copies events into the
+RSigma socket when `-sigma-socket` is set; a missing or slow engine increments
+drop/error counters and cannot backpressure Tetragon tailing or the
+Alertmanager spool. Detections are mapped back to normal `IDSAlert` records,
+so redaction, dedup, spooling and replay stay in one component. Both services
+run as the `ids-forwarder` user because RSigma restricts its input socket to
+mode `0600`. The service is deployed to the `managed` group; the go/no-go
+gate is a two-week baseline against the hand-written rules.
 
 ### Placement
 

@@ -13,10 +13,13 @@ import (
 const tailChunkBytes = 64 * 1024
 
 type tailer struct {
-	path       string
-	poll       time.Duration
-	onLine     func([]byte)
-	onRotate   func()
+	path     string
+	poll     time.Duration
+	onLine   func([]byte)
+	onRotate func()
+	// onProgress is called after each complete line with the position just
+	// past it, for sinks that need a durable byte cursor.
+	onProgress func(dev, ino uint64, offset int64)
 	startAtEnd bool
 
 	mu         sync.Mutex

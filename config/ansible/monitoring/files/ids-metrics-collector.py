@@ -25,6 +25,7 @@ COMPONENTS = {
     "tetragon": "http://127.0.0.1:2112/metrics",
     "crowdsec": "http://127.0.0.1:6060/metrics",
     "ids-forwarder": "http://127.0.0.1:2113/metrics",
+    "rsigma": "http://127.0.0.1:9290/metrics",
 }
 
 # Forwarder counters worth surfacing cluster-wide (the endpoint itself is
@@ -41,6 +42,12 @@ FORWARDER_GAUGES = (
     "ids_forwarder_record_errors_total",
     "ids_forwarder_recorded_total",
     "ids_forwarder_rejected_total",
+    "ids_forwarder_sigma_bad_total",
+    "ids_forwarder_sigma_dropped_total",
+    "ids_forwarder_sigma_errors_total",
+    "ids_forwarder_sigma_queue_depth",
+    "ids_forwarder_sigma_sent_total",
+    "ids_forwarder_sigma_tail_errors_total",
     "ids_forwarder_spool_bytes",
     "ids_forwarder_suppressed_total",
 )

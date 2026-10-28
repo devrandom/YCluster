@@ -38,6 +38,9 @@ type config struct {
 	detectionsFile  string
 	detectionsBytes int64
 	detectionsKeep  int
+	sigmaSocket     string
+	sigmaDetections string
+	sigmaCursorFile string
 	postTimeout     time.Duration
 	pollInterval    time.Duration
 	logf            func(format string, args ...any)
@@ -67,17 +70,19 @@ func defaultConfig() config {
 }
 
 type forwarder struct {
-	cfg    config
-	queue  alertQueue
-	dedup  dedup
-	client *http.Client
-	stats  metrics
-	stop   chan struct{}
-	once   sync.Once
-	spool  *alertSpool
-	cursor *replayCursor
-	tail   atomic.Pointer[tailer]
-	record *detectionLog
+	cfg       config
+	queue     alertQueue
+	dedup     dedup
+	client    *http.Client
+	stats     metrics
+	stop      chan struct{}
+	once      sync.Once
+	spool     *alertSpool
+	cursor    *replayCursor
+	tail      atomic.Pointer[tailer]
+	sigmaTail *tailer
+	sigma     *sigmaSink
+	record    *detectionLog
 
 	// wg tracks background goroutines (tailer, post loop) so tests can
 	// coordinate shutdown.
@@ -137,6 +142,9 @@ func newForwarder(cfg config) (*forwarder, error) {
 		}
 		f.record = record
 	}
+	if cfg.sigmaSocket != "" {
+		f.sigma = newSigmaSink(cfg.sigmaSocket, sigmaSocketQueue, cfg.logf)
+	}
 	return f, nil
 }
 
@@ -149,6 +157,12 @@ func (f *forwarder) shutdown() {
 		}
 		if tl := f.tail.Load(); tl != nil {
 			tl.close()
+		}
+		if f.sigmaTail != nil {
+			f.sigmaTail.close()
+		}
+		if f.sigma != nil {
+			f.sigma.close()
 		}
 		if f.receiverSrv != nil {
 			_ = f.receiverSrv.Close()
@@ -251,6 +265,17 @@ func (f *forwarder) start() error {
 	if f.cfg.httpListen != "" {
 		if err := f.startReceiver(); err != nil {
 			return err
+		}
+	}
+	if f.stopping() {
+		return nil
+	}
+	if f.cfg.sigmaDetections != "" {
+		// The Sigma path is additive: a bad detection sink must not take
+		// down the hand-written rules or the Alertmanager spool.
+		if err := f.startSigmaDetections(); err != nil {
+			f.stats.sigmaTailErrors.Add(1)
+			f.cfg.logf("sigma detections disabled: %v", err)
 		}
 	}
 	if f.stopping() {
@@ -400,6 +425,11 @@ func (f *forwarder) handleLine(line string) error {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil
+	}
+	if f.sigma != nil {
+		// Best-effort copy for the rule engine: never blocks and never
+		// changes the alert decision below.
+		f.sigma.offer(line)
 	}
 	a, meta, ok, suppressed := tetragonAlertDecision(line, f.cfg)
 	if meta.time.IsZero() {

@@ -47,6 +47,12 @@ func main() {
 		cfg.detectionsBytes, "rotate the detections file at this size")
 	flag.IntVar(&cfg.detectionsKeep, "detections-keep",
 		cfg.detectionsKeep, "number of rotated detections files to retain")
+	flag.StringVar(&cfg.sigmaSocket, "sigma-socket",
+		cfg.sigmaSocket, "unix socket of the RSigma rule engine (empty disables the Sigma event copy)")
+	flag.StringVar(&cfg.sigmaDetections, "sigma-detections",
+		cfg.sigmaDetections, "RSigma detection sink to tail (empty disables)")
+	flag.StringVar(&cfg.sigmaCursorFile, "sigma-cursor",
+		cfg.sigmaCursorFile, "durable byte cursor for the RSigma detection sink (default: <detections>.cursor)")
 	flag.DurationVar(&cfg.postTimeout, "post-timeout",
 		cfg.postTimeout, "per-POST timeout to Alertmanager")
 	flag.DurationVar(&cfg.pollInterval, "poll-interval",

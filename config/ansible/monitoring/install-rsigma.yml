@@ -1,0 +1,136 @@
+---
+# Install RSigma on every managed node and point it at the normalized
+# Tetragon stream that ids-forwarder writes to /run/rsigma/events.sock.
+# Tetragon/CrowdSec/ids-forwarder deployment is tracked separately in
+# todo/security/intrusion-detection.md; this play is additive and does not
+# replace the hand-written rules.
+#
+# Requires app/build-rsigma.yml to have run on the buildhost.
+- name: Install RSigma
+  hosts: "{{ rsigma_target | default('managed') }}"
+  become: yes
+  vars:
+    rsigma_buildhost_path: /opt/src/rsigma/rsigma
+    rsigma_conf_dir: /etc/rsigma
+    rsigma_rules_dir: "{{ rsigma_conf_dir }}/rules"
+    rsigma_state_dir: /var/lib/rsigma
+    rsigma_log_dir: /var/log/rsigma
+    rsigma_socket_dir: /run/rsigma
+    rsigma_api_addr: 127.0.0.1:9290
+  tasks:
+    - name: Ensure ids-forwarder group exists
+      group:
+        name: ids-forwarder
+        system: yes
+
+    - name: Ensure ids-forwarder user exists
+      user:
+        name: ids-forwarder
+        group: ids-forwarder
+        system: yes
+        shell: /usr/sbin/nologin
+        home: /var/lib/ids-forwarder
+        create_home: no
+
+    - name: Create RSigma configuration directory
+      file:
+        path: "{{ rsigma_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install RSigma rules
+      copy:
+        src: files/rsigma/rules/
+        dest: "{{ rsigma_rules_dir }}/"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install RSigma pipeline
+      copy:
+        src: files/rsigma/pipeline.yml
+        dest: "{{ rsigma_conf_dir }}/pipeline.yml"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create RSigma state directory
+      file:
+        path: "{{ rsigma_state_dir }}"
+        state: directory
+        owner: ids-forwarder
+        group: ids-forwarder
+        mode: '0750'
+
+    - name: Install RSigma log rotation
+      copy:
+        src: files/rsigma/logrotate
+        dest: /etc/logrotate.d/rsigma
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create RSigma log directory
+      file:
+        path: "{{ rsigma_log_dir }}"
+        state: directory
+        owner: ids-forwarder
+        group: ids-forwarder
+        mode: '0750'
+
+    - name: Check for binary on buildhost
+      stat:
+        path: "{{ rsigma_buildhost_path }}"
+      register: rsigma_binary_buildhost
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Fail if binary not found on buildhost
+      fail:
+        msg: "rsigma binary not found at {{ rsigma_buildhost_path }} on {{ buildhost }}. Run app/build-rsigma.yml first."
+      when: not rsigma_binary_buildhost.stat.exists
+
+    - name: Fetch binary from buildhost to controller
+      fetch:
+        src: "{{ rsigma_buildhost_path }}"
+        dest: "{{ build_cache_dir }}/"
+        flat: yes
+      delegate_to: "{{ buildhost }}"
+      run_once: true
+
+    - name: Install rsigma binary
+      copy:
+        src: "{{ build_cache_dir }}/rsigma"
+        dest: /usr/local/bin/rsigma
+        owner: root
+        group: root
+        mode: '0755'
+      notify: restart rsigma
+
+    - name: Install systemd unit
+      template:
+        src: rsigma.service.j2
+        dest: /etc/systemd/system/rsigma.service
+        mode: '0644'
+      notify: restart rsigma
+
+    - name: Enable and start rsigma
+      systemd:
+        name: rsigma
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Wait for the RSigma event socket
+      wait_for:
+        path: "{{ rsigma_socket_dir }}/events.sock"
+        timeout: 30
+
+  handlers:
+    - name: restart rsigma
+      systemd:
+        name: rsigma
+        state: restarted
+        daemon_reload: yes

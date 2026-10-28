@@ -36,6 +36,12 @@
     ids_forwarder_detections_file: "{{ ids_forwarder_state_dir }}/detections.jsonl"
     ids_forwarder_detections_max_bytes: 52428800
     ids_forwarder_detections_keep: 10
+    # Sigma rule layer: a bounded, best-effort copy of normalized events
+    # goes to RSigma; its detection sink is tailed back into the same
+    # Alertmanager spool. See docs/design/intrusion-detection.md.
+    ids_forwarder_sigma_socket: /run/rsigma/events.sock
+    ids_forwarder_sigma_detections: /var/log/rsigma/detections.ndjson
+    ids_forwarder_sigma_cursor: "{{ ids_forwarder_state_dir }}/sigma.cursor.json"
     ids_forwarder_max_event_age: 24h
     ids_forwarder_startup_grace: 1m
     ids_metrics_textfile_dir: /var/lib/prometheus/node-exporter

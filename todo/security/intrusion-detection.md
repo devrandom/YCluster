@@ -138,13 +138,16 @@ must not become a second, longer-lived access log.
   - Remaining: name every detection after the Falco or Sigma rule it ports,
     per "The behavioural-rule gap" in the design; do not add a rule without an
     upstream counterpart.
-  - Remaining: the `execBinaries` allowlist drops non-shell execs before any
-    rule sees them, so a service executing a binary directly is invisible.
-    Decide whether to widen the forwarded exec set before reliance on
-    behaviour rules grows.
-  - Remaining: two-week Sigma/RSigma pilot on a BTF-capable host, using the
-    curated rules under `ids-forwarder/sigma-spike/` and the replay results in
-    "The behavioural-rule gap"; keep the hand-written rules until it passes.
+  - Done: `ids-forwarder` copies every `process_exec` and `tcp_connect` event
+    to RSigma over a bounded unix-socket queue, bypassing the `execBinaries`
+    allowlist for the Sigma path only. RSigma detections return through the
+    forwarder's normal Alertmanager spool. The hand-written Go rules still see
+    only the allowlist; decide whether to widen it before retiring the
+    duplicate coverage.
+  - Remaining: two-week Sigma/RSigma pilot on the installed service, using the
+    curated rules under `config/ansible/monitoring/files/rsigma/rules/` and
+    the replay results in "The behavioural-rule gap"; keep the hand-written
+    rules until it passes.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.

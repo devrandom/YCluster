@@ -1,0 +1,99 @@
+---
+# Build RSigma v0.25.0 from source on the buildhost (default s1).
+#
+# Source is cloned at the pinned release SHA. The upstream lockfile is
+# replaced with the audited one under files/rsigma/Cargo.lock, which pins
+# ctutils, rustls-webpki, tokio and webpki-roots to patched versions (zero
+# OSV advisories in the Linux release graph; ids-forwarder/sigma-spike/
+# audit-cves.sh reproduces the check).
+#
+# RSigma needs Rust 1.96, which Ubuntu 24.04 does not package. The play
+# installs the apt rustup launcher and fetches that pinned toolchain; the
+# compiler is build tooling, not a shipped artifact.
+#
+# No prebuilt runtime binaries: see AGENTS.md.
+- name: Build RSigma from source
+  hosts: "{{ buildhost | default('s1') }}"
+  vars:
+    rsigma_build_dir: "/opt/src/rsigma"
+    rsigma_repo_url: "https://github.com/timescale/rsigma.git"
+    rsigma_repo_sha: "457aaf93253211c6386213e7dd7bcecfcf160f3a"
+    rsigma_rust_version: "1.96.0"
+    rsigma_binary: "{{ rsigma_build_dir }}/rsigma"
+  tasks:
+    - name: Install build dependencies (Rust launcher, git, C toolchain)
+      apt:
+        name:
+          - rustup
+          - git
+          - build-essential
+          - pkg-config
+        state: present
+      become: yes
+
+    - name: Check if the pinned source tree already exists
+      stat:
+        path: "{{ rsigma_build_dir }}/.git"
+      register: source_tree
+
+    - name: Clone rsigma source (first build only)
+      command:
+        cmd: "git clone {{ rsigma_repo_url }} {{ rsigma_build_dir }}"
+      when: not source_tree.stat.exists
+
+    - name: Fetch pinned SHA (existing tree)
+      command:
+        cmd: "git fetch origin {{ rsigma_repo_sha }}"
+        chdir: "{{ rsigma_build_dir }}"
+      when: source_tree.stat.exists
+      changed_when: true
+
+    - name: Checkout pinned SHA
+      command:
+        cmd: "git checkout --detach {{ rsigma_repo_sha }}"
+        chdir: "{{ rsigma_build_dir }}"
+      changed_when: true
+
+    - name: Record current checkout SHA
+      command:
+        cmd: "git rev-parse HEAD"
+        chdir: "{{ rsigma_build_dir }}"
+      register: checked_out_sha
+      changed_when: false
+
+    - name: Assert the pinned SHA is checked out
+      assert:
+        that:
+          - checked_out_sha.stdout.strip() == rsigma_repo_sha
+        quiet: true
+
+    - name: Install pinned Rust toolchain
+      command:
+        cmd: "rustup toolchain install {{ rsigma_rust_version }} --profile minimal --no-self-update"
+        creates: "/root/.rustup/toolchains/{{ rsigma_rust_version }}-x86_64-unknown-linux-gnu"
+
+    - name: Install audited Cargo.lock
+      copy:
+        src: files/rsigma/Cargo.lock
+        dest: "{{ rsigma_build_dir }}/Cargo.lock"
+        mode: '0644'
+
+    - name: Build rsigma release binary
+      command:
+        cmd: "rustup run {{ rsigma_rust_version }} cargo build --release --locked"
+        chdir: "{{ rsigma_build_dir }}"
+      register: build_result
+      changed_when: build_result.rc == 0
+
+    - name: Stage rsigma binary
+      copy:
+        src: "{{ rsigma_build_dir }}/target/release/rsigma"
+        dest: "{{ rsigma_binary }}"
+        remote_src: yes
+        mode: '0755'
+
+    - name: Verify binary was produced
+      stat:
+        path: "{{ rsigma_binary }}"
+      register: binary_verify
+      failed_when: not binary_verify.stat.exists

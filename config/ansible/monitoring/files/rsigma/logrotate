@@ -1,0 +1,12 @@
+# RSigma keeps the detection sink open across rotation, so copytruncate is
+# required; a create/rename rotation would leave it writing to the old inode.
+# The forwarder's byte cursor resets when it sees the truncation.
+/var/log/rsigma/detections.ndjson {
+    size 100M
+    rotate 2
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

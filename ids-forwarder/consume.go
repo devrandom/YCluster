@@ -25,6 +25,9 @@ func (t *tailer) consume(data []byte) {
 			t.onLine(line)
 		}
 		t.partial = t.partial[idx+1:]
+		if t.onProgress != nil {
+			t.onProgress(t.pathDev, t.pathIno, t.offset-int64(len(t.partial)))
+		}
 	}
 }
 

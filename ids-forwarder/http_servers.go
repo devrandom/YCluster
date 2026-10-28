@@ -95,6 +95,19 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "ids_forwarder_cursor_errors_total %d\n", f.stats.cursorErrors.Load())
 		fmt.Fprintf(w, "ids_forwarder_recorded_total %d\n", f.stats.recorded.Load())
 		fmt.Fprintf(w, "ids_forwarder_record_errors_total %d\n", f.stats.recordErrors.Load())
+		var sigmaSent, sigmaErrors, sigmaDropped, sigmaDepth int64
+		if f.sigma != nil {
+			sigmaSent = f.sigma.sent.Load()
+			sigmaErrors = f.sigma.errors.Load()
+			sigmaDropped = f.sigma.dropped.Load()
+			sigmaDepth = f.sigma.depth()
+		}
+		fmt.Fprintf(w, "ids_forwarder_sigma_sent_total %d\n", sigmaSent)
+		fmt.Fprintf(w, "ids_forwarder_sigma_errors_total %d\n", sigmaErrors)
+		fmt.Fprintf(w, "ids_forwarder_sigma_dropped_total %d\n", sigmaDropped)
+		fmt.Fprintf(w, "ids_forwarder_sigma_queue_depth %d\n", sigmaDepth)
+		fmt.Fprintf(w, "ids_forwarder_sigma_bad_total %d\n", f.stats.sigmaBad.Load())
+		fmt.Fprintf(w, "ids_forwarder_sigma_tail_errors_total %d\n", f.stats.sigmaTailErrors.Load())
 		fmt.Fprintf(w, "# HELP ids_forwarder_suppressed_total Events suppressed by routine-exec classification.\n")
 		fmt.Fprintf(w, "# TYPE ids_forwarder_suppressed_total counter\n")
 		suppressed := f.stats.suppressedCounts()
