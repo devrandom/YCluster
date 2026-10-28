@@ -30,7 +30,13 @@ server {
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
 
-    client_max_body_size 100M;
+    client_max_body_size 1G;
+
+    # Bound concurrent write requests per client IP. GET/HEAD are exempt
+    # via the map in forgejo-ratelimit.conf, so web UI asset loads are not
+    # counted; git push (POST) and LFS uploads (PUT) share this cap.
+    limit_conn forgejo_write_conn 4;
+    limit_conn_status 429;
 
     {% if use_tls %}
     ssl_certificate /etc/nginx/ssl/cert.pem;

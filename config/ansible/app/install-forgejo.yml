@@ -240,6 +240,14 @@
         state: link
       notify: reload nginx
 
+    - name: Install Forgejo nginx connection-limit zone
+      copy:
+        src: files/forgejo-ratelimit.conf
+        dest: /etc/nginx/conf.d/forgejo-ratelimit.conf
+        mode: '0644'
+      notify: reload nginx
+      when: forgejo_external_enabled | bool
+
     - name: Install Forgejo external nginx template
       template:
         src: files/forgejo_git.conf.j2

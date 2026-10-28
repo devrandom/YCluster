@@ -8,7 +8,7 @@ server {
     server_name forgejo.xc;
 
     # Git LFS and release uploads; keep this generous but bounded.
-    client_max_body_size 100M;
+    client_max_body_size 1G;
 
     location / {
         allow 10.0.0.0/24;
