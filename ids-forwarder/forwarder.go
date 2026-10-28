@@ -35,6 +35,9 @@ type config struct {
 	cursorFile      string
 	spoolFile       string
 	spoolMaxBytes   int64
+	detectionsFile  string
+	detectionsBytes int64
+	detectionsKeep  int
 	postTimeout     time.Duration
 	pollInterval    time.Duration
 	logf            func(format string, args ...any)
@@ -54,6 +57,9 @@ func defaultConfig() config {
 		maxEventAge:     24 * time.Hour,
 		startupGrace:    time.Minute,
 		spoolMaxBytes:   100 << 20,
+		detectionsFile:  "/var/lib/ids-forwarder/detections.jsonl",
+		detectionsBytes: 50 << 20,
+		detectionsKeep:  10,
 		postTimeout:     5 * time.Second,
 		pollInterval:    500 * time.Millisecond,
 		logf:            log.Printf,
@@ -71,6 +77,7 @@ type forwarder struct {
 	spool  *alertSpool
 	cursor *replayCursor
 	tail   atomic.Pointer[tailer]
+	record *detectionLog
 
 	// wg tracks background goroutines (tailer, post loop) so tests can
 	// coordinate shutdown.
@@ -123,6 +130,13 @@ func newForwarder(cfg config) (*forwarder, error) {
 		f.cursor.onError = func(error) { f.stats.cursorErrors.Add(1) }
 		f.cursor.load()
 	}
+	if cfg.detectionsFile != "" {
+		record, err := openDetectionLog(cfg.detectionsFile, cfg.detectionsBytes, cfg.detectionsKeep)
+		if err != nil {
+			return nil, fmt.Errorf("open detections file: %w", err)
+		}
+		f.record = record
+	}
 	return f, nil
 }
 
@@ -174,6 +188,9 @@ func (f *forwarder) closeState() {
 	}
 	if f.spool != nil {
 		f.spool.close()
+	}
+	if err := f.record.close(); err != nil {
+		f.cfg.logf("close detections file: %v", err)
 	}
 }
 
@@ -424,6 +441,7 @@ func (f *forwarder) enqueue(a alert) error {
 		// Mark only after the append is durable: a failed append must stay
 		// retryable instead of being suppressed as a duplicate.
 		f.dedup.mark(key)
+		f.recordDetection(a)
 		return nil
 	}
 	if !f.queue.push(a) {
@@ -432,5 +450,23 @@ func (f *forwarder) enqueue(a alert) error {
 		return nil
 	}
 	f.dedup.mark(key)
+	f.recordDetection(a)
 	return nil
+}
+
+// recordDetection appends the detection to the local record file. This is
+// the durable history of what the sensor classified as a detection, kept
+// separately from Alertmanager, which is only the paging path. A write
+// failure is counted and logged rather than returned: a full disk must not
+// stall the cursor or stop coverage alerts from being delivered.
+func (f *forwarder) recordDetection(a alert) {
+	if f.record == nil {
+		return
+	}
+	if err := f.record.append(newDetectionRecord(a)); err != nil {
+		f.stats.recordErrors.Add(1)
+		f.cfg.logf("record detection %s: %v", a.Labels["rule_id"], err)
+		return
+	}
+	f.stats.recorded.Add(1)
 }

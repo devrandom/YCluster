@@ -41,6 +41,12 @@ func main() {
 		cfg.spoolFile, "durable outbound alert spool (empty uses the in-memory queue)")
 	flag.Int64Var(&cfg.spoolMaxBytes, "spool-max-bytes",
 		cfg.spoolMaxBytes, "maximum unacknowledged spool bytes before applying backpressure")
+	flag.StringVar(&cfg.detectionsFile, "detections-file",
+		cfg.detectionsFile, "durable JSONL record of classified detections (empty disables)")
+	flag.Int64Var(&cfg.detectionsBytes, "detections-max-bytes",
+		cfg.detectionsBytes, "rotate the detections file at this size")
+	flag.IntVar(&cfg.detectionsKeep, "detections-keep",
+		cfg.detectionsKeep, "number of rotated detections files to retain")
 	flag.DurationVar(&cfg.postTimeout, "post-timeout",
 		cfg.postTimeout, "per-POST timeout to Alertmanager")
 	flag.DurationVar(&cfg.pollInterval, "poll-interval",

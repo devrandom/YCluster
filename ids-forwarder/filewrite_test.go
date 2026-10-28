@@ -79,3 +79,39 @@ func fileWriteLine(t *testing.T, binary, args, path string) string {
 	}
 	return string(line)
 }
+
+func TestDaemonConfigWritesAreSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	cases := []struct{ binary, args, path string }{
+		{"/usr/bin/pmiectl", "/usr/bin/pmiectl -m check", "/etc/pcp/pmie/lock"},
+		{"/usr/bin/pmlogctl", "/usr/bin/pmlogctl -m check", "/etc/pcp/pmlogger/lock"},
+		{"/usr/sbin/iptables-save", "", "/etc/iptables/rules.v4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			line := fileWriteLine(t, tc.binary, tc.args, tc.path)
+			_, _, ok, reason := tetragonAlertDecision(line, cfg)
+			if ok {
+				t.Fatal("expected daemon config write to be suppressed")
+			}
+			if reason != "expected_file_write" {
+				t.Fatalf("reason = %q, want expected_file_write", reason)
+			}
+		})
+	}
+
+	// A different writer touching the same paths is still signal.
+	for _, tc := range []struct{ binary, path string }{
+		{"/bin/sh", "/etc/iptables/rules.v4"},
+		{"/tmp/evil", "/etc/pcp/pmie/lock"},
+	} {
+		t.Run("other writer "+tc.path, func(t *testing.T) {
+			line := fileWriteLine(t, tc.binary, "", tc.path)
+			if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+				t.Fatalf("unexpected writer was suppressed as %q", reason)
+			}
+		})
+	}
+}

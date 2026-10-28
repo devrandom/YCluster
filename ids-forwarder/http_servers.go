@@ -93,6 +93,8 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "ids_forwarder_oversized_total %d\n", f.stats.oversized.Load())
 		fmt.Fprintf(w, "ids_forwarder_rejected_total %d\n", f.stats.rejected.Load())
 		fmt.Fprintf(w, "ids_forwarder_cursor_errors_total %d\n", f.stats.cursorErrors.Load())
+		fmt.Fprintf(w, "ids_forwarder_recorded_total %d\n", f.stats.recorded.Load())
+		fmt.Fprintf(w, "ids_forwarder_record_errors_total %d\n", f.stats.recordErrors.Load())
 		fmt.Fprintf(w, "# HELP ids_forwarder_suppressed_total Events suppressed by routine-exec classification.\n")
 		fmt.Fprintf(w, "# TYPE ids_forwarder_suppressed_total counter\n")
 		suppressed := f.stats.suppressedCounts()

@@ -165,6 +165,8 @@ type metrics struct {
 	rejected     atomic.Int64
 	cursorErrors atomic.Int64
 	failures     atomic.Int64
+	recorded     atomic.Int64
+	recordErrors atomic.Int64
 
 	suppressedMu sync.Mutex
 	suppressed   map[string]int64
@@ -211,7 +213,7 @@ func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
 	}
 	redactMap(a.Annotations)
 	redactMap(a.Labels)
-	a.Annotations["summary"] = boundSummary(a.Annotations["summary"])
+	a.Annotations["summary"] = boundSummary(redactSecrets(a.Annotations["summary"]))
 	return a
 }
 

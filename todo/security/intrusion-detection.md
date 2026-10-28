@@ -135,6 +135,13 @@ must not become a second, longer-lived access log.
   - Remaining: policy/scenario tuning window on the dev cluster, raising
     ids-forwarder module coverage to the 95% cap, Authentik log shipping
     into /var/log/crowdsec/ids-authentik.log.
+  - Remaining: name every detection after the Falco or Sigma rule it ports,
+    per "The behavioural-rule gap" in the design; do not add a rule without an
+    upstream counterpart.
+  - Remaining: the `execBinaries` allowlist drops non-shell execs before any
+    rule sees them, so a service executing a binary directly is invisible.
+    Decide whether to widen the forwarded exec set before reliance on
+    behaviour rules grows.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.

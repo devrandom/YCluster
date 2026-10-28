@@ -14,6 +14,9 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -cursor-file {{ ids_forwarder_cursor_file }} \
     -spool-file {{ ids_forwarder_spool_file }} \
     -spool-max-bytes {{ ids_forwarder_spool_max_bytes }} \
+    -detections-file {{ ids_forwarder_detections_file }} \
+    -detections-max-bytes {{ ids_forwarder_detections_max_bytes }} \
+    -detections-keep {{ ids_forwarder_detections_keep }} \
     -max-event-age {{ ids_forwarder_max_event_age }} \
     -startup-grace {{ ids_forwarder_startup_grace }} \
     -http-listen {{ ids_forwarder_http_listen }}

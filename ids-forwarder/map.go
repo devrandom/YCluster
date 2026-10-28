@@ -157,6 +157,33 @@ func routineExecReason(process tetragonProcess) string {
 		if strings.Contains(args, "debian-sa1") {
 			return "sysstat"
 		}
+		// Debian's cron.d wrappers run through this exact shell command.
+		if strings.Contains(args, "/etc/cron.") {
+			return "cron"
+		}
+		// Containers use a literal false command as a liveness placeholder.
+		if strings.TrimSpace(args) == "-c -- /bin/false" {
+			return "health_check"
+		}
+		// Ansible runs its file transfer through a shell wrapper around
+		// sftp-server.
+		if strings.Contains(args, "/usr/lib/openssh/sftp-server") {
+			return "ansible_probe"
+		}
+		// Ansible's per-task temp directory is created, chmodded and
+		// removed with the same fixed command shapes.
+		if strings.Contains(args, "/root/.ansible/tmp/") {
+			return "ansible_probe"
+		}
+		// Container health checks run without a stable parent: the shim,
+		// tini or the workload itself forks them, so match the probe shape
+		// instead of the parent binary.
+		if healthCheckArgs(args) &&
+			(strings.Contains(args, "localhost") ||
+				strings.Contains(args, "127.0.0.1") ||
+				strings.Contains(args, "/lifecycle/")) {
+			return "health_check"
+		}
 		if healthCheckArgs(args) &&
 			(parent == "/lifecycle/ak" ||
 				parent == "/usr/bin/containerd-shim-runc-v2" ||
@@ -173,23 +200,45 @@ func routineExecReason(process tetragonProcess) string {
 			return "ansible_probe"
 		}
 	case "dpkg":
-		if strings.Contains(args, "--print-foreign-architectures") {
+		if strings.Contains(args, "--print-foreign-architectures") ||
+			strings.Contains(args, "--compare-versions") ||
+			args == "--version" {
 			return "package_query"
 		}
 	}
 	return ""
 }
 
-// routinePrivilegeReason is limited to systemd's transient re-exec, whose
-// binary path is /proc/self/fd/9 and cannot be matched by Tetragon's
-// matchBinaries. The sshd and cron transitions are filtered in the policy.
+// routinePrivilegeReason covers process binaries whose privilege transitions
+// are their normal operation. systemd's transient re-exec presents as
+// /proc/self/fd/9, which matchBinaries cannot resolve, so it is handled here;
+// sshd and cron transitions are filtered in the policy instead. Container
+// runtimes change credentials every time they start a container, and the PCP
+// collector drops to the metric user on each sample.
 func routinePrivilegeReason(body *tetragonLog) string {
-	if body == nil || body.PolicyName != "privilege-raises" ||
-		!strings.HasPrefix(body.FunctionName, "__sys_set") {
+	if body == nil || body.PolicyName != "privilege-raises" {
+		return ""
+	}
+	if !strings.HasPrefix(body.FunctionName, "__sys_set") &&
+		body.FunctionName != "security_capset" {
 		return ""
 	}
 	switch body.Process.Binary {
 	case "/proc/self/fd/9", "/usr/lib/systemd/systemd", "/lib/systemd/systemd":
+		return "expected_privilege"
+	case "/usr/bin/runc",
+		"/usr/bin/containerd-shim-runc-v2",
+		"/usr/bin/docker-proxy",
+		"/usr/libexec/incus/incusd",
+		"/usr/libexec/virtiofsd",
+		"/usr/libexec/podman/rootlessport",
+		"/usr/lib/pcp/pmdas/proc/pmdaproc":
+		return "expected_privilege"
+	}
+	// snap-confine sets up the mount namespace and capabilities for every
+	// confined application start; its version directory changes on update.
+	if strings.HasPrefix(body.Process.Binary, "/snap/snapd/") &&
+		strings.HasSuffix(body.Process.Binary, "/usr/lib/snapd/snap-confine") {
 		return "expected_privilege"
 	}
 	return ""

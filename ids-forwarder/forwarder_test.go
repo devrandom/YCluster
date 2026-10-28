@@ -15,6 +15,8 @@ func testConfig() config {
 	cfg.hostname = "test-host"
 	cfg.alertTTL = time.Minute
 	cfg.logf = func(string, ...any) {}
+	// Only tests that exercise the record file point this at a temp dir.
+	cfg.detectionsFile = ""
 	return cfg
 }
 

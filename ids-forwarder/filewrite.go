@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"path"
 	"strings"
 )
 
@@ -21,7 +22,10 @@ func routineFileWriteReason(body *tetragonLog) string {
 	}
 	if body.Process.Binary != "/usr/local/bin/ycluster" ||
 		!strings.Contains(body.Process.Arguments, "wg reconcile --up") {
-		return blackboxTargetsRewrite(body)
+		if reason := blackboxTargetsRewrite(body); reason != "" {
+			return reason
+		}
+		return daemonConfigWrite(body)
 	}
 	path, ok := fileArgPath(body.Args)
 	if ok && path == "/etc/wireguard/wg0.conf" {
@@ -42,6 +46,32 @@ func blackboxTargetsRewrite(body *tetragonLog) string {
 	path, ok := fileArgPath(body.Args)
 	if ok && strings.HasPrefix(path, "/etc/prometheus/tmp") {
 		return "expected_file_write"
+	}
+	return ""
+}
+
+// daemonConfigWrite covers writers that persist a fixed config file as their
+// normal operation: the PCP collectors take a lock file per sample, and
+// netfilter-persistent saves the running ruleset. Any other writer touching
+// these paths stays alertable.
+func daemonConfigWrite(body *tetragonLog) string {
+	filePath, ok := fileArgPath(body.Args)
+	if !ok {
+		return ""
+	}
+	switch filePath {
+	case "/etc/pcp/pmie/lock":
+		if path.Base(body.Process.Binary) == "pmiectl" {
+			return "expected_file_write"
+		}
+	case "/etc/pcp/pmlogger/lock":
+		if path.Base(body.Process.Binary) == "pmlogctl" {
+			return "expected_file_write"
+		}
+	case "/etc/iptables/rules.v4":
+		if path.Base(body.Process.Binary) == "iptables-save" {
+			return "expected_file_write"
+		}
 	}
 	return ""
 }

@@ -29,6 +29,13 @@
     ids_forwarder_cursor_file: "{{ ids_forwarder_state_dir }}/cursor.json"
     ids_forwarder_spool_file: "{{ ids_forwarder_state_dir }}/spool.jsonl"
     ids_forwarder_spool_max_bytes: 104857600
+    # Durable record of classified detections, one JSON object per line and
+    # rotated by size. Alertmanager is only the paging path: it holds minutes
+    # of state and has no query, so the history lives here. Query with jq;
+    # the same shape can be shipped to a central store later.
+    ids_forwarder_detections_file: "{{ ids_forwarder_state_dir }}/detections.jsonl"
+    ids_forwarder_detections_max_bytes: 52428800
+    ids_forwarder_detections_keep: 10
     ids_forwarder_max_event_age: 24h
     ids_forwarder_startup_grace: 1m
     ids_metrics_textfile_dir: /var/lib/prometheus/node-exporter

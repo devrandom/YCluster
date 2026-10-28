@@ -22,9 +22,14 @@
         group: root
 
     - name: Create healthchecks.io environment file
+      # The ping URL is a bearer token: whoever can read it can spoof
+      # heartbeats or learn the check id. Only root needs it, and systemd
+      # reads EnvironmentFile as root before starting the unit.
       copy:
         dest: /etc/default/cluster-heartbeat
-        mode: '0644'
+        mode: '0640'
+        owner: root
+        group: root
         content: |
           # Healthchecks.io configuration
           HEALTHCHECKS_URL={{ healthchecks_url }}

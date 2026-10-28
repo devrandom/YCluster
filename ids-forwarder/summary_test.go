@@ -198,7 +198,7 @@ func TestTCPSummaryDropsPerConnectionFields(t *testing.T) {
 	cfg.events = "process_kprobe"
 
 	line := func(sport, cookie string) string {
-		return `{"process_kprobe":{"function_name":"tcp_connect","process":{"binary":"/usr/bin/docker-proxy","arguments":"-host-port 8380"},"args":[{"sock_arg":{"family":"AF_INET","saddr":"10.0.0.12","daddr":"172.21.0.2","sport":` +
+		return `{"process_kprobe":{"function_name":"tcp_connect","process":{"binary":"/opt/app/worker","arguments":"--serve"},"args":[{"sock_arg":{"family":"AF_INET","saddr":"10.0.0.12","daddr":"172.21.0.2","sport":` +
 			sport + `,"dport":8080,"cookie":"` + cookie + `","state":"TCP_SYN_SENT"}}]},"time":"2024-01-01T00:00:00Z"}`
 	}
 	first, _, ok := tetragonAlertWithMeta(line("35052", "18446617195950414784"), cfg)
@@ -278,4 +278,171 @@ func execLine(t *testing.T, binary, args, parent string) string {
 		t.Fatal(err)
 	}
 	return string(line)
+}
+
+func TestRuntimePrivilegeTransitionsAreSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	for _, binary := range []string{
+		"/usr/bin/runc",
+		"/usr/bin/containerd-shim-runc-v2",
+		"/usr/bin/docker-proxy",
+		"/usr/libexec/incus/incusd",
+		"/usr/libexec/virtiofsd",
+		"/usr/libexec/podman/rootlessport",
+		"/usr/lib/pcp/pmdas/proc/pmdaproc",
+	} {
+		for _, function := range []string{"__sys_setresuid", "security_capset"} {
+			t.Run(binary+" "+function, func(t *testing.T) {
+				line := privilegeLine(t, "privilege-raises", function, binary)
+				_, _, ok, reason := tetragonAlertDecision(line, cfg)
+				if ok {
+					t.Fatal("expected container runtime privilege transition to be suppressed")
+				}
+				if reason != "expected_privilege" {
+					t.Fatalf("reason = %q, want expected_privilege", reason)
+				}
+			})
+		}
+	}
+
+	// A shell raising to root is still the signal we want.
+	line := privilegeLine(t, "privilege-raises", "__sys_setresuid", "/bin/sh")
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+		t.Fatalf("shell privilege raise was suppressed as %q", reason)
+	}
+}
+
+func TestContainerWorkloadNoise_isSuppressed(t *testing.T) {
+	cfg := testConfig()
+
+	cases := []struct {
+		name   string
+		events string
+		binary string
+		args   string
+		parent string
+		reason string
+	}{
+		{"container health probe", "process_exec", "/bin/sh", `-c "curl --silent --fail http://localhost:8080/health | jq -n"`, "/usr/bin/tini", "health_check"},
+		{"lifecycle healthcheck", "process_exec", "/usr/bin/bash", "/lifecycle/ak healthcheck", "/usr/bin/tini", "health_check"},
+		{"false liveness probe", "process_exec", "/bin/sh", "-c -- /bin/false", "", "health_check"},
+		{"cron.d wrapper", "process_exec", "/bin/sh", `-c "cd / && run-parts --report /etc/cron.hourly"`, "/usr/sbin/cron", "cron"},
+		{"dpkg version compare", "process_exec", "/usr/bin/dpkg", "--compare-versions 1.0 lt 2.0", "/usr/bin/needrestart", "package_query"},
+		{"dpkg version", "process_exec", "/usr/bin/dpkg", "--version", "/usr/bin/needrestart", "package_query"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.events = tc.events
+			line := privilegeLine(t, "no-policy", "no_function", tc.binary)
+			if tc.events == "process_exec" {
+				line = execLine(t, tc.binary, tc.args, tc.parent)
+			}
+			_, _, ok, reason := tetragonAlertDecision(line, cfg)
+			if ok {
+				t.Fatal("expected container or package noise to be suppressed")
+			}
+			if reason != tc.reason {
+				t.Fatalf("reason = %q, want %q", reason, tc.reason)
+			}
+		})
+	}
+}
+
+func TestVolatileIdentifiersCollapseUnderDedup(t *testing.T) {
+	cfg := testConfig()
+
+	cases := []struct{ name, first, second string }{
+		{
+			name:   "ansible temp directory",
+			first:  `/bin/sh -c "( umask 77 && mkdir -p /root/.ansible/tmp/ansible-tmp-1793194027.3013685-1620546-16158262709775 )"`,
+			second: `/bin/sh -c "( umask 77 && mkdir -p /root/.ansible/tmp/ansible-tmp-1793194058.9370801-1622223-28773565743219 )"`,
+		},
+		{
+			name:   "cpu usage sampler",
+			first:  `/bin/sh -c "/home/dev/.vscode-server/server/out/vs/base/node/cpuUsage.sh" 2345934 2346105`,
+			second: `/bin/sh -c "/home/dev/.vscode-server/server/out/vs/base/node/cpuUsage.sh" 2359120 2359121`,
+		},
+		{
+			name:   "editor server launch",
+			first:  `/usr/bin/sh /home/dev/.vscode-server/cli/servers/Stable-aaa/server/bin/code-server --agent-host-bridge-port=45713 --socket-path=/tmp/code-3ccebbf3-0280-42ad-befc-3566a4c6ed82 --start-server`,
+			second: `/usr/bin/sh /home/dev/.vscode-server/cli/servers/Stable-aaa/server/bin/code-server --agent-host-bridge-port=39001 --socket-path=/tmp/code-86948d08-171f-4d27-8528-c3e6e3270ac1 --start-server`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			first := newAlert(cfg, sourceTetragon, "warning", "host", "process_exec", tc.first)
+			second := newAlert(cfg, sourceTetragon, "warning", "host", "process_exec", tc.second)
+			if first.dedupKey() != second.dedupKey() {
+				t.Fatalf("volatile identifiers defeat dedup:\n  %s\n  %s", tc.first, tc.second)
+			}
+			if first.dedupKey() == newAlert(cfg, sourceTetragon, "warning", "host", "process_exec", "/usr/bin/systemctl restart nginx").dedupKey() {
+				t.Fatal("distinct behaviours collapsed")
+			}
+		})
+	}
+}
+
+func TestConnectionTokensAreRedacted(t *testing.T) {
+	cfg := testConfig()
+	a := newAlert(cfg, sourceTetragon, "warning", "host", "process_exec",
+		`process_exec: binary=/usr/bin/sh args=/home/dev/.vscode-server/server/bin/code-server --connection-token=s3cr3t-token-value --start-server`)
+	got := a.Annotations["summary"]
+	if strings.Contains(got, "s3cr3t-token-value") {
+		t.Fatalf("connection token leaked into the summary: %s", got)
+	}
+	if !strings.Contains(got, "--connection-token=<redacted>") {
+		t.Fatalf("token placeholder missing: %s", got)
+	}
+}
+
+func TestAnsibleAndSnapNoiseIsSuppressed(t *testing.T) {
+	cases := []struct {
+		name   string
+		events string
+		line   func(t *testing.T) string
+		reason string
+	}{
+		{
+			name:   "ansible temp dir",
+			events: "process_exec",
+			line: func(t *testing.T) string {
+				return execLine(t, "/bin/sh", `-c "( umask 77 && mkdir -p /root/.ansible/tmp/ansible-tmp-1.2-3-4 )"`, "/usr/bin/bash")
+			},
+			reason: "ansible_probe",
+		},
+		{
+			name:   "ansible file transfer",
+			events: "process_exec",
+			line: func(t *testing.T) string {
+				return execLine(t, "/usr/bin/bash", `-c "/usr/lib/openssh/sftp-server "`, "/usr/bin/ssh")
+			},
+			reason: "ansible_probe",
+		},
+		{
+			name:   "snap application start",
+			events: "process_kprobe",
+			line: func(t *testing.T) string {
+				return privilegeLine(t, "privilege-raises", "security_capset", "/snap/snapd/28254/usr/lib/snapd/snap-confine")
+			},
+			reason: "expected_privilege",
+		},
+	}
+
+	cfg := testConfig()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.events = tc.events
+			_, _, ok, reason := tetragonAlertDecision(tc.line(t), cfg)
+			if ok {
+				t.Fatal("expected routine event to be suppressed")
+			}
+			if reason != tc.reason {
+				t.Fatalf("reason = %q, want %q", reason, tc.reason)
+			}
+		})
+	}
 }
