@@ -1,0 +1,21 @@
+diff --git a/backend/requirements-slim.txt b/backend/requirements-slim.txt
+--- a/backend/requirements-slim.txt
++++ b/backend/requirements-slim.txt
+@@ -20,2 +20,2 @@
+-authlib==1.7.2
++authlib==1.9.1
+ joserfc==1.7.4
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -15,2 +15,2 @@
+-authlib==1.7.2
++authlib==1.9.1
+ joserfc==1.7.4
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -23,2 +23,2 @@ dependencies = [
+-    "authlib==1.7.2",
++    "authlib==1.9.1",
+     "joserfc==1.7.4",

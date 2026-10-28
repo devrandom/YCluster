@@ -13,7 +13,7 @@
     plugins_repo_sha: "746f4b2f296d0b77f341bd646a19d07f49d3dd67"
     webui_repo: "https://github.com/open-webui/open-webui.git"
     # open-webui v0.12.3. Fork-only changes are applied as build-time patches:
-    # mobile-gated image/gallery upload + Pillow/certifi/Brotli CVE bumps.
+    # mobile-gated image/gallery upload + Authlib/Pillow/certifi/Brotli CVE bumps.
     # Build the standard image: v0.12.x slim drops Chroma and local embeddings,
     # which the knowledge base still uses.
     webui_repo_sha: "91ea4e3421d1d8069f13d4a463fcb5986d94ea60"
@@ -192,6 +192,24 @@
           shell: |
             if git apply --check ../open-webui-brotli.patch 2>/dev/null; then
               git apply ../open-webui-brotli.patch
+            fi
+          args:
+            chdir: "{{ build_dir }}/open-webui"
+
+        # Authlib 1.9.1 security bump for CVE-2026-96760 (JWS JSON
+        # empty-signature bypass) plus CVE-2026-114615/114616. The app uses
+        # Authlib's OAuth integration even though OIDC ID-token validation is
+        # delegated to joserfc.
+        - name: Copy Open WebUI authlib security patch
+          copy:
+            src: files/open-webui-authlib.patch
+            dest: "{{ build_dir }}/open-webui-authlib.patch"
+            mode: '0644'
+
+        - name: Apply Open WebUI authlib security patch
+          shell: |
+            if git apply --check ../open-webui-authlib.patch 2>/dev/null; then
+              git apply ../open-webui-authlib.patch
             fi
           args:
             chdir: "{{ build_dir }}/open-webui"

@@ -70,6 +70,17 @@ class MatchSpecsTest(unittest.TestCase):
         )
         self.assertEqual("no_fix_yet", findings[0]["state"])
 
+    def test_withdrawn_record_is_ignored(self):
+        record = _basic_record("UBUNTU-CVE-WITHDRAWN", "openssh")
+        record["withdrawn"] = "2026-10-27T14:50:09Z"
+        _write_record(self.db, "Ubuntu", record)
+        findings = matching.match_specs(
+            self.db,
+            [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}],
+        )
+        self.assertEqual([], findings)
+        self.assertEqual([], list(matching.iter_records(self.db, "Ubuntu")))
+
     def test_last_affected_bound(self):
         _write_record(
             self.db,

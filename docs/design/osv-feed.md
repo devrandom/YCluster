@@ -24,11 +24,13 @@ versions. It is designed to move to its own repository unchanged; see
 
 - `osv-feed/mirror.py` — initial full download of `<ecosystem>/all.zip`
   and incremental sync via `<ecosystem>/modified_id.csv`; withdrawn records
-  (404) are removed locally. All ecosystems are held in one SQLite database
-  (`<db_dir>/osv-feed.sqlite`, rollback-journal mode so the single file is
-  always a valid snapshot), under a configurable DB directory
-  (default `~/.cache/osv-feed`; TOML configs at `/etc/osv-feed/config.toml`
-  and `~/.config/osv-feed.toml`, env `OSV_FEED_DB_DIR`, or `--db-dir`).
+  (404) are removed locally, and records carrying OSV's `withdrawn` timestamp
+  are retained for audit but ignored by matching. All ecosystems are held in
+  one SQLite database (`<db_dir>/osv-feed.sqlite`, rollback-journal mode so
+  the single file is always a valid snapshot), under a configurable DB
+  directory (default `~/.cache/osv-feed`; TOML configs at
+  `/etc/osv-feed/config.toml` and `~/.config/osv-feed.toml`, env
+  `OSV_FEED_DB_DIR`, or `--db-dir`).
   An in-database `packages` table lets `match` load only relevant records.
 - `osv-feed/matching.py` — OSV range evaluation, dpkg-native version
   comparison with a fallback key, and the three-state classification.

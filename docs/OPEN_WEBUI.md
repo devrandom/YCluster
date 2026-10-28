@@ -30,9 +30,9 @@ prod dump under `/rbd/misc/backups/`.
 
 The build is performed from upstream Open WebUI v0.12.3 with plugins injected
 from `github.com/devrandom/open-webui-plugins.git`. Fork-only changes (mobile
-image upload, the Node heap bump, the Pillow/certifi/Brotli security bumps, and
-edge-auth redirect handling) are applied as build-time patches from
-`config/ansible/app/files/`.
+image upload, the Node heap bump, the Authlib/Pillow/certifi/Brotli
+security bumps, and edge-auth redirect handling) are applied as build-time
+patches from `config/ansible/app/files/`.
 
 The edge-auth redirect patch keeps the cluster IdP as the navigation gate: when `/api/config` returns 401 because the edge session is stale, the SPA performs a full navigation to `/` so nginx can redirect to the IdP instead of showing "Backend Required".
 

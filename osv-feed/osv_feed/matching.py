@@ -215,7 +215,12 @@ def compare_for_ecosystem(ecosystem: str, default: VersionCompare) -> VersionCom
 
 
 def iter_records(db_dir: str, ecosystem: str):
-    """Yield every OSV record for ``ecosystem`` from the SQLite store."""
+    """Yield every active OSV record for ``ecosystem``.
+
+    OSV archives retain withdrawn advisories so external references keep
+    resolving. They are not vulnerabilities, though; a withdrawn duplicate
+    must not produce a finding or inflate an alert count.
+    """
     try:
         conn = connect(db_dir, read_only=True)
     except sqlite3.OperationalError:
@@ -226,11 +231,14 @@ def iter_records(db_dir: str, ecosystem: str):
         )
         for row in rows:
             try:
-                yield json.loads(row[0])
+                record = json.loads(row[0])
             except ValueError as exc:
                 raise ValueError(
                     f"cannot read OSV record in {db_path(db_dir)}: {exc}"
                 ) from exc
+            if record.get("withdrawn"):
+                continue
+            yield record
     finally:
         conn.close()
 
@@ -257,10 +265,12 @@ def _candidate_records(
     except sqlite3.OperationalError:
         return []
     try:
-        return [
-            json.loads(row[0])
-            for row in conn.execute(sql, [ecosystem, *wanted]).fetchall()
-        ]
+        records = []
+        for row in conn.execute(sql, [ecosystem, *wanted]).fetchall():
+            record = json.loads(row[0])
+            if not record.get("withdrawn"):
+                records.append(record)
+        return records
     finally:
         conn.close()
 
