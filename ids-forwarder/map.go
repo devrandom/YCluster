@@ -84,6 +84,15 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 			return alert{}, meta, false, reason
 		}
 	}
+	if reason := expectedTCPReason(body); reason != "" {
+		return alert{}, meta, false, reason
+	}
+	if reason := routinePrivilegeReason(body); reason != "" {
+		return alert{}, meta, false, reason
+	}
+	if reason := routineFileWriteReason(body); reason != "" {
+		return alert{}, meta, false, reason
+	}
 	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), tetragonLayer(body), tetragonRule(evType, body), eventSummary(evType, body))
 	a.StartsAt = meta.time.Format(time.RFC3339Nano)
 	a.eventTime = meta.time
@@ -137,9 +146,16 @@ func routineExecReason(process tetragonProcess) string {
 			return "loopback_http"
 		}
 	case "sh", "bash", "dash", "zsh", "fish":
-		if parent == "/proc/self/fd/9" &&
-			strings.Contains(args, "/usr/share/prometheus-node-exporter-collectors/") {
+		if strings.Contains(args, "/usr/share/prometheus-node-exporter-collectors/") {
 			return "node_exporter"
+		}
+		if strings.Contains(args, "/etc/update-motd.d") {
+			return "motd"
+		}
+		// sysstat's daily-activity collector runs from cron every ten
+		// minutes on every node with a fixed command line.
+		if strings.Contains(args, "debian-sa1") {
+			return "sysstat"
 		}
 		if healthCheckArgs(args) &&
 			(parent == "/lifecycle/ak" ||
@@ -149,11 +165,8 @@ func routineExecReason(process tetragonProcess) string {
 				parent == "/bin/bash") {
 			return "health_check"
 		}
-		if parent == "/usr/sbin/sshd" {
-			if strings.Contains(args, "&& sleep 0") ||
-				strings.Contains(args, "/etc/update-motd.d") {
-				return "ansible_probe"
-			}
+		if parent == "/usr/sbin/sshd" && strings.Contains(args, "&& sleep 0") {
+			return "ansible_probe"
 		}
 	case "sudo":
 		if strings.Contains(args, "BECOME-SUCCESS-") {
@@ -163,6 +176,21 @@ func routineExecReason(process tetragonProcess) string {
 		if strings.Contains(args, "--print-foreign-architectures") {
 			return "package_query"
 		}
+	}
+	return ""
+}
+
+// routinePrivilegeReason is limited to systemd's transient re-exec, whose
+// binary path is /proc/self/fd/9 and cannot be matched by Tetragon's
+// matchBinaries. The sshd and cron transitions are filtered in the policy.
+func routinePrivilegeReason(body *tetragonLog) string {
+	if body == nil || body.PolicyName != "privilege-raises" ||
+		!strings.HasPrefix(body.FunctionName, "__sys_set") {
+		return ""
+	}
+	switch body.Process.Binary {
+	case "/proc/self/fd/9", "/usr/lib/systemd/systemd", "/lib/systemd/systemd":
+		return "expected_privilege"
 	}
 	return ""
 }
@@ -225,7 +253,7 @@ func eventSummary(evType string, body *tetragonLog) string {
 		parts = append(parts, "args="+body.Process.Arguments)
 	}
 	if len(body.Args) > 0 && string(body.Args) != "null" {
-		parts = append(parts, "kprobe_args="+string(body.Args))
+		parts = append(parts, "kprobe_args="+normalizeSocketArgs(string(body.Args)))
 	}
 	if body.Message != "" {
 		parts = append(parts, body.Message)

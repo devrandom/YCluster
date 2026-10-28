@@ -19,6 +19,22 @@ var dedupVolatilePatterns = []struct {
 	{regexp.MustCompile(`(?i)\b[0-9a-f]{32,64}\b`), "<hex-id>"},
 }
 
+// socketArgVolatile strips per-connection fields from serialized Tetragon
+// socket arguments. The source port, socket cookie and TCP state differ for
+// every connect, so keeping them would give each event a unique summary and
+// defeat deduplication; only the destination identifies the event.
+var socketArgVolatile = []*regexp.Regexp{
+	regexp.MustCompile(`"sport":\d+,\s*`),
+	regexp.MustCompile(`"cookie":"\d+",\s*`),
+}
+
+func normalizeSocketArgs(raw string) string {
+	for _, re := range socketArgVolatile {
+		raw = re.ReplaceAllString(raw, "")
+	}
+	return raw
+}
+
 // normalizeDedupSummary removes volatile identifiers from the dedup key
 // while leaving the alert's visible summary intact for triage.
 func normalizeDedupSummary(summary string) string {

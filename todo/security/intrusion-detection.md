@@ -126,9 +126,12 @@ must not become a second, longer-lived access log.
     scenarios (ssh-bf, http-crawl, http-40x-burst) and parsers, alerts
     delivered to ids-forwarder's localhost receiver via notification-http.
   - Done: first-pass volume tuning: targeted privilege-gain and actual
-    module-load policies, corrected TCP-connect matching, process-exit
-    export removed, routine exec probes suppressed, and volatile
-    identifiers normalized for deduplication.
+    module-load policies, corrected TCP-connect matching, expected private
+    control-plane TCP pairs classified at the policy/forwarder boundary,
+    process-exit export removed, routine exec probes and the managed
+    WireGuard reconcile write suppressed, sshd/cron root transitions
+    filtered at the policy, systemd's transient fallback handled by the
+    forwarder, and volatile identifiers normalized for deduplication.
   - Remaining: policy/scenario tuning window on the dev cluster, raising
     ids-forwarder module coverage to the 95% cap, Authentik log shipping
     into /var/log/crowdsec/ids-authentik.log.

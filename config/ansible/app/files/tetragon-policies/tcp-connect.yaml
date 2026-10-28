@@ -1,6 +1,19 @@
 # Non-loopback TCP connects with process context. tcp_connect exposes the
-# socket fields needed for NotDAddr; security_socket_connect's sockaddr
-# argument does not support destination-address operators.
+# socket fields needed for destination operators; security_socket_connect's
+# sockaddr argument does not support them.
+#
+# Loopback and container-bridge destinations are omitted: both are local to
+# the host, and a container reaching another node shows up with the cluster
+# or public destination address.
+#
+# High-volume trusted control-plane services still generate events when they
+# connect to an external address or to an unexpected port on the private
+# network. Only the known service/port pairs are kept out of the event log at
+# the kernel level. Tetragon supports at most five selectors per kprobe.
+#
+# The ceph and ycluster CLIs are Python scripts; matchBinaries sees the
+# interpreter rather than their command paths. Their expected port pairs stay
+# policy-visible and are suppressed by the forwarder instead.
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
@@ -13,12 +26,139 @@ spec:
         - index: 0
           type: "sock"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/bin/etcdctl"
+                - "/usr/bin/etcd"
+                - "/usr/bin/prometheus"
+                - "/usr/local/bin/local-ai-proxy"
+          matchArgs:
             - index: 0
               operator: "NotDAddr"
               values:
                 - "127.0.0.0/8"
                 - "::1/128"
+                # Container bridges (docker's 172.17-172.31 default pool
+                # and the per-service subnets) are host-local, like loopback.
+                # Traffic that leaves the host carries the cluster or public
+                # address and stays visible.
+                - "172.16.0.0/12"
+          matchActions:
+            - action: Post
+              rateLimit: "1m"
+              rateLimitScope: "process"
+
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/usr/bin/etcdctl"
+                - "/usr/bin/etcd"
+                - "/usr/bin/prometheus"
+                - "/usr/local/bin/local-ai-proxy"
+          matchArgs:
+            - index: 0
+              operator: "NotDAddr"
+              values:
+                - "127.0.0.0/8"
+                - "::1/128"
+                - "172.16.0.0/12"
+            - index: 0
+              operator: "NotDAddr"
+              values:
+                - "10.0.0.0/8"
+                - "172.16.0.0/12"
+                - "192.168.0.0/16"
+                - "fc00::/7"
+          matchActions:
+            - action: Post
+              rateLimit: "1m"
+              rateLimitScope: "process"
+
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/usr/bin/etcdctl"
+                - "/usr/bin/etcd"
+          matchArgs:
+            - index: 0
+              operator: "DAddr"
+              values:
+                - "10.0.0.0/8"
+                - "172.16.0.0/12"
+                - "192.168.0.0/16"
+                - "fc00::/7"
+            - index: 0
+              operator: "NotDPort"
+              values:
+                - "2381"
+                - "2382"
+          matchActions:
+            - action: Post
+              rateLimit: "1m"
+              rateLimitScope: "process"
+
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/usr/local/bin/local-ai-proxy"
+          matchArgs:
+            - index: 0
+              operator: "DAddr"
+              values:
+                - "10.0.0.0/8"
+                - "172.16.0.0/12"
+                - "192.168.0.0/16"
+                - "fc00::/7"
+            - index: 0
+              operator: "NotDPort"
+              values:
+                - "8000"
+                - "8001"
+                - "8080"
+                - "8081"
+                - "9000"
+                - "9216"
+                - "9217"
+                - "9218"
+                - "11434"
+                - "52415"
+          matchActions:
+            - action: Post
+              rateLimit: "1m"
+              rateLimitScope: "process"
+
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/usr/bin/prometheus"
+          matchArgs:
+            - index: 0
+              operator: "DAddr"
+              values:
+                - "10.0.0.0/8"
+                - "172.16.0.0/12"
+                - "192.168.0.0/16"
+                - "fc00::/7"
+            - index: 0
+              operator: "NotDPort"
+              values:
+                - "8067"
+                - "9090"
+                - "9093"
+                - "9094"
+                - "9095"
+                - "9100"
+                - "9101"
+                - "9115"
+                - "9187"
+                - "9216"
+                - "9217"
+                - "9218"
+                - "9222"
+                - "9283"
+                - "9400"
+                - "9443"
           matchActions:
             - action: Post
               rateLimit: "1m"

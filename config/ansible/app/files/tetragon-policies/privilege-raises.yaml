@@ -45,7 +45,13 @@ spec:
         - index: 0
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 0
               operator: "Equal"
               values:
@@ -60,7 +66,13 @@ spec:
         - index: 0
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 0
               operator: "Equal"
               values:
@@ -77,7 +89,13 @@ spec:
         - index: 1
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 0
               operator: "Equal"
               values:
@@ -86,7 +104,13 @@ spec:
             - action: Post
               rateLimit: "1m"
               rateLimitScope: "process"
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 1
               operator: "Equal"
               values:
@@ -103,7 +127,13 @@ spec:
         - index: 1
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 0
               operator: "Equal"
               values:
@@ -112,7 +142,13 @@ spec:
             - action: Post
               rateLimit: "1m"
               rateLimitScope: "process"
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 1
               operator: "Equal"
               values:
@@ -131,7 +167,13 @@ spec:
         - index: 2
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 1
               operator: "Equal"
               values:
@@ -140,7 +182,13 @@ spec:
             - action: Post
               rateLimit: "1m"
               rateLimitScope: "process"
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 2
               operator: "Equal"
               values:
@@ -159,7 +207,13 @@ spec:
         - index: 2
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 1
               operator: "Equal"
               values:
@@ -168,7 +222,13 @@ spec:
             - action: Post
               rateLimit: "1m"
               rateLimitScope: "process"
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 2
               operator: "Equal"
               values:
@@ -183,7 +243,13 @@ spec:
         - index: 0
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 0
               operator: "Equal"
               values:
@@ -198,7 +264,13 @@ spec:
         - index: 0
           type: "int"
       selectors:
-        - matchArgs:
+        - matchBinaries:
+            - operator: "NotIn"
+              values:
+                - "/usr/sbin/sshd"
+                - "/usr/sbin/cron"
+                - "/usr/bin/cron"
+          matchArgs:
             - index: 0
               operator: "Equal"
               values:

@@ -46,6 +46,27 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "node_exporter",
 		},
 		{
+			name:   "node exporter without parent attribution",
+			binary: "/bin/sh",
+			args:   `-c "/usr/share/prometheus-node-exporter-collectors/nvme_metrics.py | sponge out"`,
+			parent: "",
+			reason: "node_exporter",
+		},
+		{
+			name:   "sysstat collector",
+			binary: "/bin/sh",
+			args:   `-c "command -v debian-sa1 > /dev/null && debian-sa1 1 1"`,
+			parent: "/usr/sbin/cron",
+			reason: "sysstat",
+		},
+		{
+			name:   "login motd",
+			binary: "/bin/sh",
+			args:   `-c -- "/usr/bin/env -i PATH=/usr/bin run-parts --lsbsysinit /etc/update-motd.d"`,
+			parent: "",
+			reason: "motd",
+		},
+		{
 			name:   "ansible sudo probe",
 			binary: "/usr/bin/sudo",
 			args:   `-H -S -n -u root /bin/sh -c "echo BECOME-SUCCESS-abc123 ; /usr/bin/python3"`,
@@ -105,6 +126,52 @@ func TestRoutineExecKeepsUsefulCommands(t *testing.T) {
 	}
 }
 
+func TestSystemdPrivilegeFallback(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	for _, binary := range []string{
+		"/proc/self/fd/9",
+		"/usr/lib/systemd/systemd",
+		"/lib/systemd/systemd",
+	} {
+		t.Run(binary, func(t *testing.T) {
+			line := privilegeLine(t, "privilege-raises", "__sys_setresuid", binary)
+			_, _, ok, reason := tetragonAlertDecision(line, cfg)
+			if ok {
+				t.Fatal("expected systemd transient privilege transition to be suppressed")
+			}
+			if reason != "expected_privilege" {
+				t.Fatalf("reason = %q, want expected_privilege", reason)
+			}
+		})
+	}
+
+	for _, binary := range []string{"/usr/sbin/sshd", "/usr/sbin/cron"} {
+		t.Run(binary+" policy-owned", func(t *testing.T) {
+			line := privilegeLine(t, "privilege-raises", "__sys_setresuid", binary)
+			if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+				t.Fatalf("policy-owned privilege event was suppressed as %q", reason)
+			}
+		})
+	}
+}
+
+func privilegeLine(t *testing.T, policy, function, binary string) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"process_kprobe": map[string]any{
+			"policy_name":   policy,
+			"function_name": function,
+			"process":       map[string]any{"binary": binary},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
 func TestDedupSummaryNormalizesVolatileValues(t *testing.T) {
 	cfg := testConfig()
 	first := newAlert(cfg, sourceTetragon, "warning", "host", "process_exec",
@@ -123,6 +190,35 @@ func TestDedupSummaryNormalizesVolatileValues(t *testing.T) {
 		`process_exec: binary=/usr/bin/bash args=-c "id"`)
 	if first.dedupKey() == other.dedupKey() {
 		t.Fatal("distinct stable commands must not collapse")
+	}
+}
+
+func TestTCPSummaryDropsPerConnectionFields(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	line := func(sport, cookie string) string {
+		return `{"process_kprobe":{"function_name":"tcp_connect","process":{"binary":"/usr/bin/docker-proxy","arguments":"-host-port 8380"},"args":[{"sock_arg":{"family":"AF_INET","saddr":"10.0.0.12","daddr":"172.21.0.2","sport":` +
+			sport + `,"dport":8080,"cookie":"` + cookie + `","state":"TCP_SYN_SENT"}}]},"time":"2024-01-01T00:00:00Z"}`
+	}
+	first, _, ok := tetragonAlertWithMeta(line("35052", "18446617195950414784"), cfg)
+	if !ok {
+		t.Fatal("tcp event should be forwarded")
+	}
+	second, _, ok := tetragonAlertWithMeta(line("41234", "18446617199922085888"), cfg)
+	if !ok {
+		t.Fatal("tcp event should be forwarded")
+	}
+
+	if strings.Contains(first.Annotations["summary"], "sport") ||
+		strings.Contains(first.Annotations["summary"], "cookie") {
+		t.Fatalf("summary keeps per-connection fields: %s", first.Annotations["summary"])
+	}
+	if first.dedupKey() != second.dedupKey() {
+		t.Fatalf("per-connection fields defeat dedup: %s != %s", first.dedupKey(), second.dedupKey())
+	}
+	if !strings.Contains(first.Annotations["summary"], "dport") {
+		t.Fatalf("summary should keep the destination: %s", first.Annotations["summary"])
 	}
 }
 

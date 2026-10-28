@@ -339,9 +339,17 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   managers, downloaders). Other execs are dropped in-process: the base
   sensor emits one event per exec and that volume is not useful as alerts.
   The forwarder also suppresses recognized loopback health probes,
-  container health checks, node-exporter collectors, Ansible connection
-  probes, and package-architecture queries, counted by reason in
-  `ids_forwarder_suppressed_total`.
+  container health checks, node-exporter collectors, login MOTD generation,
+  Ansible connection probes, package-architecture queries, expected
+  private-network TCP service/port pairs, the exact gateway-health probe to
+  its public endpoint, systemd's transient `/proc/self/fd/9` privilege
+  transitions, sysstat's `debian-sa1` cron wrapper, the temp file of the
+  managed blackbox-target rewrite, and the exact `ycluster wg reconcile`
+  write to its managed WireGuard config, counted by reason in
+  `ids_forwarder_suppressed_total`. The underlying events remain in the
+  Tetragon log. Shell execs and every other writer or file path remain
+  alertable. TCP summaries drop per-connection socket fields (source port,
+  cookie, state) so repeat connects to the same destination deduplicate.
 - Maps severity and rule metadata to Alertmanager `v2/alerts`.
 - Posts to every core Alertmanager instance over the cluster network, in
   order, and stops at the first that accepts the alert. Non-core nodes have
@@ -418,7 +426,20 @@ network coverage.
   module loads, and non-loopback TCP connects. The generic
   `commit_creds`, broad `security_capset`, and module-request hooks are
   deliberately excluded: they match normal credential commits and netdev
-  autoload requests, not escalation.
+  autoload requests, not escalation. High-volume compiled control-plane
+  clients (`etcdctl`, `etcd`, Prometheus, and `local-ai-proxy`) have their
+  expected private-network port pairs filtered in the kernel; unexpected
+  ports and external destinations still generate events. Container bridges
+  (`172.16.0.0/12`) are excluded alongside loopback: they are host-local,
+  and a container reaching another node appears with the cluster or public
+  destination address. Root uid/gid
+  transitions made by `sshd` and cron are also filtered in the policy.
+  systemd's transient re-exec presents as `/proc/self/fd/9`, which
+  `matchBinaries` cannot resolve, so that single path remains visible and is
+  suppressed by the forwarder. Every other process raising to root remains
+  event-generating. The Ceph and `ycluster` CLIs are Python scripts, so
+  `matchBinaries` does not identify them reliably; their expected pairs
+  remain visible and are suppressed by the forwarder.
 - **Tetragon process execs.** The forwarder forwards `process_exec` only for
   shells, privilege tools (`sudo`, `su`), package managers and downloaders.
   The binary allowlist is a playbook variable
@@ -547,6 +568,10 @@ hard way. They apply to the pinned versions; re-verify on upgrades.
   `MatchPathPrefix`/`MatchPathSuffix`). One `kprobes` entry per kernel symbol
   — merge selectors instead of repeating the call. `exec` is not a policy
   field; the base sensor already emits `process_exec` for every exec.
+- **Tetragon supports at most five selectors per kprobe.** Keep expected
+  service filters consolidated, and remember that `matchBinaries` does not
+  reliably identify interpreted scripts such as the Ceph and `ycluster`
+  CLIs.
 - **Ansible `copy` does not delete retired policy files.** Removing a policy
   from the source tree leaves the old file active on disk; the install
   playbook explicitly removes retired policy names after copying the

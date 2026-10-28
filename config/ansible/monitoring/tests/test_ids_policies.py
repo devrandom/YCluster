@@ -62,6 +62,23 @@ class TestIDSPolicies(unittest.TestCase):
         self.assertEqual(selector["matchActions"][0]["rateLimit"], "1m")
         self.assertEqual(selector["matchActions"][0]["rateLimitScope"], "process")
 
+    def test_privilege_manager_transitions_filtered_at_policy(self):
+        policy = self.load_policy("privilege-raises.yaml")
+        probes = [
+            probe for probe in policy["spec"]["kprobes"]
+            if probe["call"].startswith("__sys_set")
+        ]
+        self.assertGreaterEqual(len(probes), 8)
+        for probe in probes:
+            for selector in probe["selectors"]:
+                binaries = selector.get("matchBinaries")
+                self.assertIsNotNone(binaries, probe["call"])
+                self.assertEqual(binaries[0]["operator"], "NotIn")
+                values = binaries[0]["values"]
+                self.assertIn("/usr/sbin/sshd", values)
+                self.assertIn("/usr/sbin/cron", values)
+                self.assertNotIn("/usr/lib/systemd/systemd", values)
+
     def test_kernel_modules_match_actual_loads(self):
         policy = self.load_policy("kernel-modules.yaml")
         calls = {probe["call"] for probe in policy["spec"]["kprobes"]}
@@ -79,13 +96,48 @@ class TestIDSPolicies(unittest.TestCase):
         probe = policy["spec"]["kprobes"][0]
         self.assertEqual(probe["call"], "tcp_connect")
         self.assertEqual(probe["args"], [{"index": 0, "type": "sock"}])
-        selector = probe["selectors"][0]["matchArgs"][0]
-        self.assertEqual(selector["operator"], "NotDAddr")
-        self.assertIn("127.0.0.0/8", selector["values"])
-        self.assertIn("::1/128", selector["values"])
-        action = probe["selectors"][0]["matchActions"][0]
-        self.assertEqual(action["rateLimit"], "1m")
-        self.assertEqual(action["rateLimitScope"], "process")
+
+        selectors = probe["selectors"]
+        self.assertEqual(len(selectors), 5)
+        untrusted = selectors[0]
+        self.assertEqual(untrusted["matchBinaries"][0]["operator"], "NotIn")
+        self.assertIn("/usr/bin/etcdctl", untrusted["matchBinaries"][0]["values"])
+        self.assertIn("/usr/local/bin/local-ai-proxy", untrusted["matchBinaries"][0]["values"])
+        self.assertNotIn("/usr/bin/ceph", untrusted["matchBinaries"][0]["values"])
+        self.assertNotIn("/usr/local/bin/ycluster", untrusted["matchBinaries"][0]["values"])
+        self.assertEqual(untrusted["matchArgs"][0]["operator"], "NotDAddr")
+        self.assertIn("127.0.0.0/8", untrusted["matchArgs"][0]["values"])
+        self.assertIn("::1/128", untrusted["matchArgs"][0]["values"])
+        # Container bridges are host-local and excluded for the same reason
+        # as loopback: a container reaching another node is seen with the
+        # cluster or public destination address.
+        self.assertIn("172.16.0.0/12", untrusted["matchArgs"][0]["values"])
+
+        trusted_external = next(
+            selector for selector in selectors
+            if selector.get("matchBinaries", [{}])[0].get("operator") == "In"
+            and len([
+                arg for arg in selector["matchArgs"]
+                if arg["operator"] == "NotDAddr"
+            ]) == 2
+        )
+        external_values = trusted_external["matchArgs"][1]["values"]
+        self.assertIn("10.0.0.0/8", external_values)
+        self.assertIn("fc00::/7", external_values)
+
+        unexpected_ports = [
+            selector for selector in selectors
+            if any(arg["operator"] == "NotDPort" for arg in selector["matchArgs"])
+        ]
+        self.assertEqual(len(unexpected_ports), 3)
+        for selector in unexpected_ports:
+            self.assertEqual(selector["matchArgs"][0]["operator"], "DAddr")
+            self.assertIn("10.0.0.0/8", selector["matchArgs"][0]["values"])
+
+        for selector in selectors:
+            action = selector["matchActions"][0]
+            self.assertEqual(action["rateLimit"], "1m")
+            self.assertEqual(action["rateLimitScope"], "process")
 
     def test_process_exit_is_not_exported(self):
         text = TETRAGON_CONFIG.read_text()

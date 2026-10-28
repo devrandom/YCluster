@@ -31,8 +31,10 @@ COMPONENTS = {
 # loopback-only). Values are copied verbatim from its exposition format.
 FORWARDER_GAUGES = (
     "ids_forwarder_cursor_errors_total",
+    "ids_forwarder_deduped_total",
     "ids_forwarder_dropped_total",
     "ids_forwarder_expired_total",
+    "ids_forwarder_forwarded_total",
     "ids_forwarder_gap_total",
     "ids_forwarder_oversized_total",
     "ids_forwarder_queue_depth",

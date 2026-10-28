@@ -15,10 +15,11 @@ type tetragonEnvelope struct {
 }
 
 type tetragonLog struct {
-	PolicyName string          `json:"policy_name"`
-	Message    string          `json:"message"`
-	Process    tetragonProcess `json:"process"`
-	Args       json.RawMessage `json:"args"`
+	PolicyName   string          `json:"policy_name"`
+	FunctionName string          `json:"function_name"`
+	Message      string          `json:"message"`
+	Process      tetragonProcess `json:"process"`
+	Args         json.RawMessage `json:"args"`
 }
 
 type tetragonExit struct {
