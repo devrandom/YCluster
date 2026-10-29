@@ -53,23 +53,26 @@
     mineru_containerfile_dest: /home/dev/.mineru-build/Containerfile
     mineru_uds_wrapper_src: files/mineru/run-mineru-uds.py
     mineru_uds_wrapper_dest: /home/dev/.mineru-build/run-mineru-uds.py
-    mineru_service_unit_src: files/mineru/mineru-podman.service
+    mineru_service_unit_src: files/mineru/mineru-podman.service.j2
     mineru_service_unit_dest: /etc/systemd/system/mineru-podman.service
     mineru_proxy_unit_src: files/mineru/mineru-podman-proxy.service
     mineru_proxy_unit_dest: /etc/systemd/system/mineru-podman-proxy.service
     # mineru-api inside the container (--network=none) binds a Unix
     # domain socket at this path; the host's socat bridge listens on
-    # TCP:{{ mineru_port }} and forwards to it. The directory must be
-    # owned by `dev` (UID 1002) because the container's mineru process
-    # runs as dev via --userns=keep-id and creates the socket file
-    # there. See todo/archive/sandbox-mineru-outbound.md.
+    # TCP:{{ mineru_port }} and forwards to it. The directory is owned by
+    # `dev` because the container's mineru process runs as the host dev UID
+    # via --userns=keep-id and creates the socket file there. See
+    # todo/archive/sandbox-mineru-outbound.md.
     mineru_uds_path: /run/mineru/mineru.sock
     mineru_uds_dir: /run/mineru
     mineru_port: 8000
     mineru_hf_cache: /home/dev/.cache/huggingface
     mineru_mineru_json: /home/dev/mineru.json
     mineru_max_concurrent: 3
-
+    # Container runtime UID/GID must match the host's dev user because
+    # /home/dev and /run/mineru are bind-mounted and userns=keep-id preserves
+    # numeric IDs. Default 1002 is the bootstrap UID; a host that provisions
+    # dev differently overrides mineru_run_uid/mineru_run_gid in host_vars.
   tasks:
     # Skip hosts with no host-usable NVIDIA GPU — either no NVIDIA
     # hardware at all, or every NVIDIA card is bound to vfio-pci for
@@ -83,34 +86,60 @@
       meta: end_host
       when: not (mineru_enabled | default(false))
 
-    # Pre-flight: the Containerfile bakes `useradd --uid 1002 dev`
-    # (line 84), and the systemd unit bind-mounts /home/dev/* from the
-    # host. `--userns=keep-id` maps container UIDs 1:1 to host UIDs,
-    # so the in-container mineru process (running as UID 1002) can
-    # only read /home/dev/* if the host's `dev` user is also UID
-    # 1002 — otherwise it sees EACCES on every HF cache read and
-    # mineru.json parse. The bootstrap endpoint (/bootstrap/nvidia)
-    # creates the user with a fixed UID; this task is the deploy-time
-    # guard that catches a divergence before it becomes a production
-    # outage. Fail with a clear pointer to the bootstrap step.
-    - name: Pre-flight check that host dev user is UID 1002
+    # Pre-flight: the systemd unit bind-mounts /home/dev/* and runs the
+    # container with --userns=keep-id, which preserves numeric IDs. The
+    # container runtime UID/GID must therefore match the host dev user
+    # (mineru_run_uid/mineru_run_gid), or mineru sees EACCES on the HF
+    # cache and mineru.json. A host whose dev user was provisioned with a
+    # different UID (e.g. 1000) must set both vars in host_vars.
+    - name: Read host dev UID
       command: id -u dev
       register: dev_uid
       changed_when: false
-      failed_when: dev_uid.stdout != "1002"
+      check_mode: no
+
+    - name: Read host dev GID
+      command: id -g dev
+      register: dev_gid
+      changed_when: false
+      check_mode: no
+
+    - name: Pre-flight check that container runtime IDs match host dev
+      assert:
+        that:
+          - (dev_uid.stdout | int) == (mineru_run_uid | default(1002) | int)
+          - (dev_gid.stdout | int) == (mineru_run_gid | default(1002) | int)
+        fail_msg: >-
+          mineru_run_uid/mineru_run_gid ({{ mineru_run_uid | default(1002)
+          }}:{{ mineru_run_gid | default(1002) }}) do not match host dev ({{
+          dev_uid.stdout }}:{{ dev_gid.stdout }}). Set both vars in
+          host_vars/<node>.yml, or reprovision the dev user with the
+          bootstrap UID.
 
     # Podman + NVIDIA CDI are required for `--device nvidia.com/gpu=all`.
     # socat is the TCP→UDS bridge that fronts the container's UDS
     # listener (see mineru-podman-proxy.service + todo/archive/sandbox-mineru-outbound.md). setup-gpu-podman.yml runs
     # before this in the app chain, but check defensively in case the
     # play is run standalone.
-    - name: Ensure podman + socat are installed
+    #
+    # Never apt-install `podman` here: the cluster runs the custom 5.x build
+    # from admin/install-podman.yml, and the distro package would overwrite
+    # /usr/bin/podman with 4.9.3 (which cannot parse current CDI specs) while
+    # GPU containers are running.
+    - name: Ensure socat is installed
       apt:
-        name:
-          - podman
-          - socat
+        name: socat
         state: present
         update_cache: yes
+
+    - name: Require custom podman 5.x
+      command: podman --version
+      register: mineru_podman_version
+      changed_when: false
+      check_mode: no
+      failed_when: >
+        mineru_podman_version.rc != 0 or
+        mineru_podman_version.stdout is not match('^podman version 5\.')
 
     - name: Ensure NVIDIA CDI spec exists
       command: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
@@ -165,6 +194,23 @@
         group: dev
         mode: '0755'
 
+    # Writable HOME subdirectories used by vLLM/Triton/CUDA. /home/dev/.cache
+    # is bind-mounted separately; these cover ~/.config usage stats, ~/.local,
+    # Triton's ~/.triton cache, and CUDA's ~/.nv cache.
+    - name: Ensure MinerU runtime home directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - /home/dev/.config
+        - /home/dev/.local
+        - /home/dev/.triton
+        - /home/dev/.nv
+        - /home/dev/.cache/mineru-output
+
     # Pre-create /run/mineru for the container's UDS bind-mount.
     # mineru-api inside the container binds /run/mineru/mineru.sock;
     # with --network=none there is no TCP listener — a host socat
@@ -186,6 +232,14 @@
     # directory containing the Containerfile; buildah reads it
     # locally (no daemon). We build from /home/dev/.mineru-build so
     # the build context is small and self-contained.
+    - name: Ensure MinerU build context directory exists
+      file:
+        path: /home/dev/.mineru-build
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
     - name: Stage Containerfile for buildah
       copy:
         src: "{{ mineru_containerfile_src }}"
@@ -309,7 +363,7 @@
       # cached. ~22 GB total downloaded into the bind-mounted cache.
 
     - name: Install mineru-podman systemd unit
-      copy:
+      template:
         src: "{{ mineru_service_unit_src }}"
         dest: "{{ mineru_service_unit_dest }}"
         owner: root

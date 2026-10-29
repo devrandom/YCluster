@@ -10,15 +10,14 @@ Wants=nvidia-persistenced.service
 
 [Service]
 Type=simple
-# Run podman as root, then map the container's UID to dev's
-# (1002) via `--userns=keep-id`. The reason for this oddity:
-# podman under systemd's User=dev can't do CLONE_NEWUSER for its
-# re-exec path (sudo/systemd-restricted caps strip the capability
-# that lets podman fork into a fresh user namespace). Running
-# podman as root avoids the re-exec failure; --userns=keep-id
-# keeps host UIDs 1:1 inside the container, so bind-mounted
-# /home/dev/* (owned by UID 1002) is writable by the container
-# process.
+# Run podman as root, then map the container's runtime UID to the host
+# dev user's UID via `--userns=keep-id` and `--user`. The reason for this
+# oddity: podman under systemd's User=dev can't do CLONE_NEWUSER for its
+# re-exec path (sudo/systemd-restricted caps strip the capability that lets
+# podman fork into a fresh user namespace). Running podman as root avoids
+# the re-exec failure; --userns=keep-id keeps host UIDs 1:1 inside the
+# container, so bind-mounted /home/dev/* is writable by the container
+# process. mineru_run_uid/mineru_run_gid are set from the host's dev user.
 User=root
 Group=root
 WorkingDirectory=/home/dev
@@ -35,11 +34,10 @@ WorkingDirectory=/home/dev
 # explicit install -d in ExecStartPre, no RuntimeDirectory
 # involvement.
 #
-# Owned by dev:dev (UID 1002) because the container's mineru
-# process runs as dev via --userns=keep-id and creates the socket
-# file here. Mode 0755: dev rwx (can create the socket), everyone
-# else rx (so root-run socat in mineru-podman-proxy.service can
-# connect).
+# Owned by dev:dev because the container's mineru process runs as the
+# host dev UID via --userns=keep-id and creates the socket file here.
+# Mode 0755: dev rwx (can create the socket), everyone else rx (so
+# root-run socat in mineru-podman-proxy.service can connect).
 #
 # install-mineru.yml also has a `file:` task creating this dir at
 # install time (belt-and-suspenders + makes the ownership visible
@@ -75,7 +73,7 @@ Environment="MINERU_API_MAX_CONCURRENT_REQUESTS=3"
 #                            binds inside the container (see
 #                            run-mineru-uds.py + --network=none
 #                            below). The container's UID matches
-#                            the host's dev (1002) via --userns=
+#                            the host's dev UID via --userns=
 #                            keep-id, so the UDS file is created
 #                            by the same UID that owns the
 #                            directory (the ExecStartPre above
@@ -126,13 +124,20 @@ Environment="MINERU_API_MAX_CONCURRENT_REQUESTS=3"
 ExecStartPre=/usr/bin/systemd-run --scope --unit=mineru-pull /usr/bin/podman pull registry.xc:5000/mineru:3.4.3-all-vllm
 ExecStart=/usr/bin/systemd-run --scope --unit=mineru-run /usr/bin/podman run --rm --name mineru \
     --userns=keep-id \
+    --user {{ mineru_run_uid | default(1002) }}:{{ mineru_run_gid | default(1002) }} \
     --network=none \
     --device nvidia.com/gpu=0 \
     -v /home/dev/.cache:/home/dev/.cache \
+    -v /home/dev/.config:/home/dev/.config \
+    -v /home/dev/.local:/home/dev/.local \
+    -v /home/dev/.triton:/home/dev/.triton \
+    -v /home/dev/.nv:/home/dev/.nv \
     -v /home/dev/mineru.json:/home/dev/mineru.json \
     -v /run/mineru:/run/mineru \
     -e MINERU_UDS_PATH=/run/mineru/mineru.sock \
+    -e MINERU_API_OUTPUT_ROOT=/home/dev/.cache/mineru-output \
     -e CUDA_VISIBLE_DEVICES=0 \
+    -e USER=dev -e LOGNAME=dev \
     registry.xc:5000/mineru:3.4.3-all-vllm \
     --host 0.0.0.0 --port 8000 --enable-vlm-preload true \
     --gpu-memory-utilization 0.2 --max-model-len 8192

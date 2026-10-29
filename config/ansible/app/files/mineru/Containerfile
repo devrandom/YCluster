@@ -75,17 +75,12 @@ RUN uv pip install --system --break-system-packages \
 # Sanity check — fails the build if mineru-api is missing.
 RUN mineru-api --help >/dev/null
 
-# Run as the host `dev` user (UID 1002 on the cluster) so
-# bind-mounts of /home/dev/* are writable. The systemd unit pairs
-# this with `--userns=keep-id` so the container UID matches the
-# host UID 1:1 (no remap). HOME=/home/dev matches the bind-mount
-# layout and lets mineru read ~/mineru.json without an explicit
-# MINERU_TOOLS_CONFIG_JSON override.
-#
-# Note: buildah creates this user with a fixed UID; if the host
-# user `dev` ever changes UID, both this Containerfile and any
-# already-built images need a rebuild (image UIDs are baked at
-# build time, not mapped at run).
+# Default to a non-root `dev` user so bind-mounts of /home/dev/* are
+# writable. The systemd unit runs the container with `--userns=keep-id`
+# and an explicit `--user <host dev uid>:<gid>` (mineru_run_uid/gid), so
+# hosts whose dev user is not UID 1002 do not need a different image.
+# HOME=/home/dev matches the bind-mount layout and lets mineru read
+# ~/mineru.json without an explicit MINERU_TOOLS_CONFIG_JSON override.
 RUN groupadd --gid 1002 dev \
     && useradd --uid 1002 --gid 1002 --home-dir /home/dev --shell /bin/bash dev \
     && mkdir -p /home/dev \

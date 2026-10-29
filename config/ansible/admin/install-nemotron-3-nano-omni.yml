@@ -6,7 +6,13 @@
 #                                 Flags:
 #                                   --download     pull the checkpoint (~22 GB)
 #                                   --verify-only  just check the staged revision
-#   ~dev/bin/nemotron-start.sh  - (re)launch the vLLM server, e.g. after reboot
+#   ~dev/bin/nemotron-start.sh  - create/replace the vLLM container (foreground
+#                                 start is left to systemd; see below)
+#
+# Lifecycle: nemotron.service supervises the rootless container (start at
+# boot, restart on engine exit), the same way ds41-flash.service does. The
+# start script defines the container; after changing its settings re-run it,
+# then `systemctl restart nemotron` so systemd re-attaches.
 #
 # Model: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 at the pinned
 # revision (nemotron_revision). NVIDIA's first-party ModelOpt NVFP4 quant of
@@ -37,12 +43,10 @@
 #
 #   Per-host `nemotron_gpus: "<space-separated CDI indices>"` (default "0")
 #   picks the GPUs this container uses (TP=1 on a single card). On a MinerU
-#   host this SHARES MinerU's card (CDI 0 on nv2) — MinerU is pinned to CDI 0
-#   (app/files/mineru/mineru-podman.service), so Nemotron must run with a
-#   lowered --gpu-memory-utilization (0.45 default in nemotron-start.sh.j2) to
-#   fit in the ~48 GB MinerU leaves free; Nemotron must NOT be given a budget
-#   that, added to MinerU's, exceeds the card. This play's GPU index is purely
-#   a CDI index into the host's host-visible cards.
+#   host use a different CDI index from MinerU's pinned CDI 0
+#   (app/files/mineru/mineru-podman.service). Set `nemotron_gpu_util` to 0.80
+#   on a dedicated card, or ~0.45 when sharing the card with MinerU. This
+#   play's GPU index is purely a CDI index into the host's host-visible cards.
 #
 #   Per-host `nemotron_port: <port>` (default 9217) overrides the listening port.
 #   Per-host `nemotron_served_name: "<name>"` (default "nemotron-3-nano-omni")
@@ -82,6 +86,9 @@
     # Port convention: 9212=b12x, 9213=FullKD (retired), 9214=EXL3 TR3,
     # 9215=spare, 9216=DS4, 9217=Nemotron-3 Omni.
     nemotron_port: 9217
+    # Container name in dev's rootless podman storage; must match
+    # ~/bin/nemotron-start.sh (CONTAINER).
+    nemotron_container: "nemotron-3-omni"
   tasks:
     # Same guard as install-deepseek-v4-flash.yml / install-minimax-m3.yml:
     # skip nodes with no host-visible NVIDIA GPU (no NVIDIA hardware, or all
@@ -95,14 +102,14 @@
       meta: end_host
       when: not (nemotron_enabled | default(false))
 
-    # Guard the co-tenant GPU pinning: never let a node render the start script
-    # without an explicit card, because silently defaulting to CDI 0 would put
-    # Nemotron on top of MinerU (which is pinned to GPU 0 on these hosts).
+    # Guard the GPU pinning: never let a node render the start script without
+    # an explicit card, because silently defaulting to CDI 0 would put
+    # Nemotron on top of MinerU (which is pinned to CDI 0 on these hosts).
     - name: Fail if an opted-in host has no explicit nemotron_gpus
       fail:
         msg: >-
           nemotron_gpus must be set in host_vars/<node>.yml for a
-          nemotron_enabled host. On a MinerU host use the non-MinerU card
+          nemotron_enabled host. On a MinerU host use a different card
           (e.g. nemotron_gpus: "1"); do not default to CDI 0, which is
           MinerU's pinned GPU.
       when: nemotron_gpus is undefined
@@ -126,18 +133,68 @@
         - nemotron-setup.sh
         - nemotron-start.sh
 
+    # The container itself lives in dev's rootless podman storage (created by
+    # ~/bin/nemotron-start.sh); this unit supervises it so the server comes
+    # back after a reboot and after an engine crash. Same pattern as
+    # ds41-flash.service, which also wraps a rootless container.
+    - name: Install nemotron systemd unit
+      template:
+        src: nemotron.service.j2
+        dest: /etc/systemd/system/nemotron.service
+        owner: root
+        group: root
+        mode: '0644'
+      register: nemotron_unit
+
+    - name: Read host dev UID
+      command: id -u dev
+      register: nemotron_dev_uid
+      changed_when: false
+      check_mode: no
+
+    - name: Check whether the Nemotron container has been created
+      become_user: dev
+      command: podman container exists {{ nemotron_container }}
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ nemotron_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ nemotron_dev_uid.stdout }}/bus"
+      register: nemotron_container_present
+      changed_when: false
+      failed_when: false
+      check_mode: no
+
+    # `started` (not `restarted`): when the container is already running the
+    # unit's ExecStart falls through to `podman wait`, so systemd adopts it
+    # without a ~7 minute model reload. Restart explicitly after changing the
+    # container definition.
+    - name: Enable and start the nemotron service
+      systemd:
+        name: nemotron.service
+        enabled: yes
+        state: started
+        daemon_reload: "{{ nemotron_unit.changed | default(false) }}"
+      when: nemotron_container_present.rc == 0
+
+    - name: Note that nemotron stays unmanaged until its container is created
+      debug:
+        msg: >-
+          nemotron.service is installed but not enabled: no
+          {{ nemotron_container }} container exists yet. Run
+          ~/bin/nemotron-start.sh as dev (after ~/bin/nemotron-setup.sh
+          --download), then re-run this play to hand it over to systemd.
+      when: nemotron_container_present.rc != 0
+
 - name: Register the Nemotron backend with local-ai-proxy
   hosts: storage
   become: yes
   vars:
     # Mirror the DS4 storage play: local-ai-proxy etcd-watches
     # /cluster/config/inference/models/ and hot-reloads on add/remove — no
-    # proxy restart needed. The backend URL is the opted-in nvidia host on
-    # its Nemotron port. Default host is nv2 (today's MinerU + Nemotron
-    # co-tenant node); a different opted-in host overrides via the set_fact.
-    nemotron_nvidia_host: nv2
-    nemotron_backend_url: "http://{{ nemotron_nvidia_host }}.xc:{{ hostvars[nemotron_nvidia_host]['nemotron_port'] | default(9217) }}"
-    nemotron_served_name: "{{ hostvars[nemotron_nvidia_host]['nemotron_served_name'] | default('nemotron-3-nano-omni') }}"
+    # proxy restart needed. The backend URL is resolved from the opted-in
+    # nvidia host and its Nemotron port below.
+    nemotron_nvidia_host: ""
+    nemotron_backend_url: ""
+    nemotron_served_name: "nemotron-3-nano-omni"
   tasks:
     - name: Check if this host is the storage leader
       shell: mountpoint -q /rbd/user
@@ -161,11 +218,18 @@
              | selectattr(0, 'equalto', true)
              | map(attribute=1)
              | first
-             | default('nv2') }}
+             | default('') }}
       when: is_storage_leader
       # Picks the first nvidia host that defines nemotron_enabled=true in
-      # host_vars. Defaults to nv2 so a future host that only sets the opt-in
-      # without overriding the URL will register correctly.
+      # host_vars. An empty result leaves the backend unregistered.
+
+    - name: Resolve the Nemotron backend URL
+      set_fact:
+        nemotron_backend_url: "http://{{ nemotron_nvidia_host }}.xc:{{ hostvars[nemotron_nvidia_host]['nemotron_port'] | default(9217) }}"
+        nemotron_served_name: "{{ hostvars[nemotron_nvidia_host]['nemotron_served_name'] | default('nemotron-3-nano-omni') }}"
+      when:
+        - is_storage_leader
+        - nemotron_nvidia_host | length > 0
 
     - name: Register the Nemotron backend with local-ai-proxy
       command: >-
@@ -175,6 +239,7 @@
       when:
         - is_storage_leader
         - not ansible_check_mode
+        - nemotron_nvidia_host | length > 0
       # Idempotent on subsequent runs: local-ai-proxy models add is a
       # no-op when the (backend, model) pair is already registered.
 
@@ -191,6 +256,7 @@
       when:
         - is_storage_leader
         - not ansible_check_mode
+        - nemotron_nvidia_host | length > 0
 
     - name: Report smoke check
       debug:
@@ -202,3 +268,4 @@
       when:
         - is_storage_leader
         - not ansible_check_mode
+        - nemotron_nvidia_host | length > 0

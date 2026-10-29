@@ -47,30 +47,31 @@ Alternative official image if you prefer NGC: `nvcr.io/nvidia/vllm:26.05-py3`
   NvFP4 MoE"); the supported backends are `cutlass`, `flashinfer_*`, and
   `marlin`. Use `flashinfer_cutlass` (the model-card default for this quant).
 
-## Co-tenancy with MinerU on one host
+## Sharing a host with MinerU
 
-MinerU and Nemotron share the same host-visible GPU (CDI index 0) on nv2.
-MinerU keeps its own pin (`mineru-podman.service` → `--device
-nvidia.com/gpu=0`) but its vLLM budget is now lowered from the 0.5
-auto-default to `--gpu-memory-utilization 0.2 --max-model-len 8192`, so
-instead of holding ~48 GB of the 96 GB card it holds ~20 GB idle. Nemotron
-is pinned to the same card (`nemotron_gpus: "0"`) with a **lowered
-`gpu-memory-utilization` (0.45, ~43 GB budget)**: ~21 GB NVFP4 weights + a
-~15-20 GB FP8 KV pool — far above the real need (~0.38 GiB per 128K seq,
-~12 GiB worst case with all 32 slots full). GPU 1 stays completely
-unrestricted. The two never collide because each container is pinned to one
-CDI GPU and both are capped underneath the card total — do not fall back to
-`gpu=all` for either while they share the host. Verify with `nvidia-smi`
-(summed usage < 96 GB) after a live parse + Nemotron prompt. See
-Admin-deployment below for the host_var opt-in.
+MinerU is pinned to one host-visible card (`mineru-podman.service` →
+`--device nvidia.com/gpu=0`) and its vLLM budget is capped at
+`--gpu-memory-utilization 0.2 --max-model-len 8192`, so it holds ~20 GB idle.
+Nemotron must use a **different CDI index** from MinerU. Two layouts are
+supported:
 
-Measured (nv2, vLLM 0.20.0, `--gpu-memory-utilization 0.45`,
-`--moe-backend flashinfer_cutlass`): Nemotron model stack ~21.5 GiB, KV pool
-~16.3 GiB, Nemotron EngineCore ~47.2 GiB. MinerU EngineCore with the 0.2
-budget is ~19.8 GiB idle (was ~48 GiB at the 0.5 default). The card sits at
-~68 / 97.9 GiB (**~29 GiB free headroom**), so there is real room to raise
-Nemotron's KV pool or `--max-num-seqs` if needed without touching MinerU.
-GPU 1 stays idle.
+- **Separate cards (preferred when two cards are free):** set
+  `nemotron_gpus: "1"` and `nemotron_gpu_util: 0.80`. The dedicated card gets
+  the normal full-card budget; MinerU and Nemotron cannot contend for memory.
+- **Same card:** set `nemotron_gpus: "0"` and keep the 0.45 shared-card
+  default. The two containers are each CDI-pinned and capped below the card
+  total; do not use `gpu=all` for either.
+
+Verify with `nvidia-smi` after a live parse and a Nemotron prompt. In the
+shared-card layout, summed usage must stay below the card total (~68 / 97.9
+GiB measured, ~29 GiB free headroom). The dedicated-card layout leaves each
+workload independently bounded.
+
+Historical shared-card measurement (vLLM 0.20.0,
+`--gpu-memory-utilization 0.45`, `--moe-backend flashinfer_cutlass`):
+Nemotron model stack ~21.5 GiB, KV pool ~16.3 GiB, Nemotron EngineCore
+~47.2 GiB. MinerU EngineCore with the 0.2 budget is ~19.8 GiB idle (was ~48
+GiB at the 0.5 default).
 
 ## Launch (vLLM — text / image / video; audio caveat below)
 
@@ -81,7 +82,7 @@ vllm serve /models/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
   --tensor-parallel-size 1 \
   --max-model-len 131072 \
   --kv-cache-dtype fp8 \
-  --gpu-memory-utilization 0.45 \
+  --gpu-memory-utilization 0.80 \
   --max-num-seqs 32 \
   --moe-backend flashinfer_cutlass \
   --reasoning-parser nemotron_v3 \
@@ -89,6 +90,8 @@ vllm serve /models/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
   --limit-mm-per-prompt '{"image":8,"video":1,"audio":1}' \
   --host 0.0.0.0 --port 9217
 ```
+
+Use `--gpu-memory-utilization 0.45` instead when sharing the card with MinerU.
 
 The per-prompt counts are **cumulative over the whole conversation**, not per
 user turn — Open-WebUI re-sends every prior image into each new message, so an
@@ -111,15 +114,22 @@ pattern).
 scripts (`~/bin/nemotron-setup.sh`, `~/bin/nemotron-start.sh`) and, on the
 storage leader, registers the backend with `ycluster inference add
 http://<host>.xc:9217 nemotron-3-nano-omni`. Per-model opt-in: set
-`nemotron_enabled: true` and `nemotron_gpus: "1"` in host_vars (same pattern as
-`ds4_enabled` / `mineru_enabled`). Then:
+`nemotron_enabled: true`, `nemotron_gpus: "1"`, and
+`nemotron_gpu_util: 0.80` in host_vars (same pattern as `ds4_enabled` /
+`mineru_enabled`). Then:
 
 ```
 ssh <host>.yc
 ~/bin/nemotron-setup.sh --download   # pull image + CDI smoke + ~22 GB checkpoint
 ~/bin/nemotron-setup.sh              # later runs: just image pull + smoke
-~/bin/nemotron-start.sh              # launch (idempotent)
+~/bin/nemotron-start.sh              # create/replace the container (idempotent)
 ```
+Then run the play again (or `systemctl enable --now nemotron` on the host) to
+hand the container to systemd. `nemotron.service` starts it at boot and
+restarts it if the engine exits — same pattern as `ds41-flash.service`, which
+also wraps a rootless container. After changing container settings (GPU, util,
+context) re-run `nemotron-start.sh`, then `systemctl restart nemotron` so the
+unit re-attaches.
 
 ## Verification
 
@@ -127,7 +137,6 @@ ssh <host>.yc
 - Through the gateway: `https://inference.xc/v1/chat/completions` with
   `"model": "nemotron-3-nano-omni"` — a reasoning request should stream
   `reasoning_content`, and an image request should actually see the image.
-- `nvidia-smi` on the host: MinerU and Nemotron both live on GPU 0 (summed
-  usage below 96 GB, currently ~20 MinerU + ~47 Nemotron with ~29 GB free);
-  GPU 1 stays unrestricted. Both can
-  warm/cold-start without OOM given the summed budget is under the card.
+- `nvidia-smi` on the host: with separate cards, MinerU and Nemotron each
+  occupy their assigned CDI device and neither is capped by the other. In the
+  shared-card layout, summed usage must stay below the card total.

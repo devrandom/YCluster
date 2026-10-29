@@ -1,0 +1,28 @@
+[Unit]
+Description=Nemotron-3 Nano Omni ({{ nemotron_served_name }}) inference API
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/dev
+# The container definition lives in dev's rootless podman storage and is
+# created by ~/bin/nemotron-start.sh (image + checkpoint pre-flight, GPU
+# pinning, vLLM flags). This unit only supervises the lifecycle: if the
+# container is already running, wait for it instead of failing with
+# "cannot start an already running container"; if it is stopped (e.g. after a
+# reboot), start it attached. Either way systemd observes the exit and
+# restarts the container after an engine failure.
+ExecStart=/usr/bin/systemd-run --scope --unit=nemotron-run /bin/sh -c '/usr/sbin/runuser -u dev -- /usr/bin/podman start --attach {{ nemotron_container }} || /usr/sbin/runuser -u dev -- /usr/bin/podman wait {{ nemotron_container }}'
+ExecStop=/usr/sbin/runuser -u dev -- /usr/bin/podman stop --time 60 {{ nemotron_container }}
+Restart=always
+RestartSec=10
+# Cold start loads ~21 GB of NVFP4 weights and profiles the omni encoder
+# cache; measured ~7 minutes on a dedicated card.
+TimeoutStartSec=20min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

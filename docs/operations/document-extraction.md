@@ -126,10 +126,11 @@ Host (Nvidia)
 
 The systemd unit runs `podman run` as root (the user-mode podman
 re-exec path is blocked by CLONE_NEWUSER restrictions on this
-kernel/buildah combo); `--userns=keep-id` keeps host UIDs 1:1 inside
-the container, so bind-mounted `/home/dev/*` (owned by UID 1002) is
-writable by the container process. `Delegate=true` lets podman
-create user namespaces under systemd.
+kernel/buildah combo); `--userns=keep-id` plus `--user` keeps the
+container runtime UID/GID equal to the host's `dev` user, so
+bind-mounted `/home/dev/*` is writable. Set `mineru_run_uid` /
+`mineru_run_gid` in host_vars when `dev` is not UID/GID 1002.
+`Delegate=true` lets podman create user namespaces under systemd.
 
 ## Deploying / Updating
 
