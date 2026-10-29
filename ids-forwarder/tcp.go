@@ -86,6 +86,8 @@ func expectedTCPReason(body *tetragonLog) string {
 		return "expected_tcp"
 	case base == "squid":
 		return "expected_tcp"
+	case base == "frpc" && port == 7000:
+		return "expected_tcp"
 	case strings.HasPrefix(base, "smokescreen"):
 		return "expected_tcp"
 	case (base == "fwupd" || base == "snapd") && port == 443:
@@ -130,9 +132,8 @@ func expectedTCPReason(body *tetragonLog) string {
 	if base == "rootlessport" || base == "docker-proxy" {
 		return "expected_tcp"
 	}
-	// The FRP client and nginx proxy dial their configured upstreams on
-	// the cluster network.
-	if (base == "frpc" && port == 7000) || (base == "nginx" && port == 8188) {
+	// nginx dials its configured upstreams on the cluster network.
+	if base == "nginx" && port == 8188 {
 		return "expected_tcp"
 	}
 	switch base {
@@ -198,6 +199,24 @@ func expectedTCPReason(body *tetragonLog) string {
 		}
 	}
 	return ""
+}
+
+// containerEgressReason suppresses ordinary internet egress from a user
+// container. Containers have no route into the cluster, so a connect to a
+// private address is not ordinary egress: it means the network policy was
+// bypassed or misconfigured, and it stays alertable.
+func containerEgressReason(body *tetragonLog, layer string) string {
+	if layer != "container" || body == nil || body.FunctionName != "tcp_connect" {
+		return ""
+	}
+	addr, _, ok := tcpDestination(body.Args)
+	if !ok {
+		return ""
+	}
+	if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
+		return ""
+	}
+	return "tenant_egress"
 }
 
 func tcpDestination(raw json.RawMessage) (netip.Addr, uint16, bool) {

@@ -146,8 +146,19 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	if ev.DestinationIp != "" {
 		parts = append(parts, fmt.Sprintf("dst=%s:%d", ev.DestinationIp, ev.DestinationPort))
 	}
-	a := newAlert(cfg, sourceSigma, sigmaSeverity(det.Level), sigmaLayer(ev), rule,
+	layer := sigmaLayer(ev)
+	containerName := ""
+	if layer == "host" {
+		if name, ok := containerForProcess(ev.ProcessId, ev.StartTime); ok {
+			layer = "container"
+			containerName = name
+		}
+	}
+	a := newAlert(cfg, sourceSigma, sigmaSeverity(det.Level), layer, rule,
 		redactIPs(strings.Join(parts, " ")))
+	if containerName != "" {
+		a.Labels["container"] = containerName
+	}
 	if t, err := time.Parse(time.RFC3339Nano, ev.Timestamp); err == nil {
 		a.StartsAt = t.UTC().Format(time.RFC3339Nano)
 		a.eventTime = t.UTC()

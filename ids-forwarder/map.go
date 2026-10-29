@@ -93,7 +93,21 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	if reason := routineFileWriteReason(body); reason != "" {
 		return alert{}, meta, false, reason
 	}
-	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), tetragonLayer(body), tetragonRule(evType, body), eventSummary(evType, body))
+	layer := tetragonLayer(body)
+	containerName := ""
+	if layer == "host" {
+		if name, ok := containerForProcess(body.Process.PID, body.Process.StartTime); ok {
+			layer = "container"
+			containerName = name
+		}
+	}
+	if reason := containerEgressReason(body, layer); reason != "" {
+		return alert{}, meta, false, reason
+	}
+	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), eventSummary(evType, body))
+	if containerName != "" {
+		a.Labels["container"] = containerName
+	}
 	a.StartsAt = meta.time.Format(time.RFC3339Nano)
 	a.eventTime = meta.time
 	a.eventHash = meta.hash
@@ -254,7 +268,8 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		"/usr/libexec/incus/incusd",
 		"/usr/libexec/virtiofsd",
 		"/usr/libexec/podman/rootlessport",
-		"/usr/lib/pcp/pmdas/proc/pmdaproc":
+		"/usr/lib/pcp/pmdas/proc/pmdaproc",
+		"/usr/sbin/smbd":
 		return "expected_privilege"
 	}
 	// snap-confine sets up the mount namespace and capabilities for every
@@ -297,8 +312,12 @@ func tetragonRule(evType string, body *tetragonLog) string {
 }
 
 // tetragonLayer reports "container" when pod metadata is attached to the
-// process (or its parent), and "host" otherwise.
+// process or its parent. Incus containers carry no pod metadata, so callers
+// fall back to the /proc cgroup lookup in containerForProcess.
 func tetragonLayer(body *tetragonLog) string {
+	if body == nil {
+		return "host"
+	}
 	if body.Process.Pod != nil {
 		return "container"
 	}

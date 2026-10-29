@@ -474,6 +474,14 @@ func TestAnsibleAndSnapNoiseIsSuppressed(t *testing.T) {
 			},
 			reason: "expected_privilege",
 		},
+		{
+			name:   "samba session credential change",
+			events: "process_kprobe",
+			line: func(t *testing.T) string {
+				return privilegeLine(t, "privilege-raises", "security_capset", "/usr/sbin/smbd")
+			},
+			reason: "expected_privilege",
+		},
 	}
 
 	cfg := testConfig()

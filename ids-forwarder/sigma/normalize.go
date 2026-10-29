@@ -24,6 +24,7 @@ type Event struct {
 	ParentProcessId   uint32 `json:"ParentProcessId,omitempty"`
 	ContainerName     string `json:"ContainerName,omitempty"`
 	ContainerImage    string `json:"ContainerImage,omitempty"`
+	StartTime         string `json:"StartTime,omitempty"`
 	DestinationIp     string `json:"DestinationIp,omitempty"`
 	DestinationPort   uint16 `json:"DestinationPort,omitempty"`
 }
@@ -45,6 +46,7 @@ type process struct {
 	UID       uint32   `json:"uid"`
 	Binary    string   `json:"binary"`
 	Arguments string   `json:"arguments"`
+	StartTime string   `json:"start_time"`
 	Pod       *pod     `json:"pod"`
 	Parent    *process `json:"parent"`
 }
@@ -104,6 +106,7 @@ func normalizeProcess(ts, eventType string, p *process) *Event {
 		CommandLine: commandLine(p.Binary, p.Arguments),
 		User:        user(p.UID),
 		ProcessId:   p.PID,
+		StartTime:   p.StartTime,
 	}
 	if p.Parent != nil {
 		ev.ParentImage = p.Parent.Binary

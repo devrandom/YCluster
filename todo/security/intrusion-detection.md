@@ -148,6 +148,27 @@ must not become a second, longer-lived access log.
     curated rules under `config/ansible/monitoring/files/rsigma/rules/` and
     the replay results in "The behavioural-rule gap"; keep the hand-written
     rules until it passes.
+  - Done: tenant-container egress is classified by layer. Internet egress from
+    an Incus container is suppressed as routine tenant traffic, while a
+    container connecting to a cluster-private address still alerts: such a
+    connection should be impossible, so the alert fires when network policy is
+    broken or bypassed. Container identity comes from `/proc/<pid>/cgroup`
+    with a PID/start-time check, recorded as a `container` label.
+  - Remaining: VM lateral-movement visibility. Host-side Tetragon cannot see
+    guest sockets — the hypervisor only exposes the QEMU process — so a VM
+    reaching a cluster address produces no kprobe event and cannot be
+    attributed to an instance. Isolation is already enforced for containers
+    and VMs by the Incus network ACL on the tenant bridge (deny the
+    cluster-private ranges, allow the bridge and the internet), but those
+    drops are silent, so a VM attempt is invisible today while the equivalent
+    container attempt alerts. Proposed, not implemented: a log-only nftables
+    rule matching tenant-bridge traffic to the cluster-private ranges, placed
+    ahead of the ACL verdict so it still fires when the ACL is removed or
+    edited, plus a small consumer that maps the source to an instance name at
+    the host and posts a CrowdSec-shaped alert to the forwarder's localhost
+    receiver — the tenant address never leaves the host. Note that
+    established flows are accepted ahead of the ACL drops, so a policy change
+    does not contain connections that are already up.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.

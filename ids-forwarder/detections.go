@@ -14,24 +14,26 @@ import (
 // payload carries, minus the routing metadata. Anything that later wants
 // to read these (jq, a digest job, a log store) depends on this shape.
 type detectionRecord struct {
-	Time     string `json:"time"`
-	Host     string `json:"host"`
-	Source   string `json:"source"`
-	RuleID   string `json:"rule_id"`
-	Severity string `json:"severity"`
-	Layer    string `json:"layer"`
-	Summary  string `json:"summary"`
+	Time      string `json:"time"`
+	Host      string `json:"host"`
+	Source    string `json:"source"`
+	RuleID    string `json:"rule_id"`
+	Severity  string `json:"severity"`
+	Layer     string `json:"layer"`
+	Container string `json:"container,omitempty"`
+	Summary   string `json:"summary"`
 }
 
 func newDetectionRecord(a alert) detectionRecord {
 	return detectionRecord{
-		Time:     a.eventTimestamp().UTC().Format(time.RFC3339Nano),
-		Host:     a.Labels["host"],
-		Source:   a.Labels["source"],
-		RuleID:   a.Labels["rule_id"],
-		Severity: a.Labels["severity"],
-		Layer:    a.Labels["layer"],
-		Summary:  a.Annotations["summary"],
+		Time:      a.eventTimestamp().UTC().Format(time.RFC3339Nano),
+		Host:      a.Labels["host"],
+		Source:    a.Labels["source"],
+		RuleID:    a.Labels["rule_id"],
+		Severity:  a.Labels["severity"],
+		Layer:     a.Labels["layer"],
+		Container: a.Labels["container"],
+		Summary:   a.Annotations["summary"],
 	}
 }
 

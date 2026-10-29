@@ -39,6 +39,17 @@ func TestNormalizeTCPConnect(t *testing.T) {
 	}
 }
 
+func TestNormalizeCarriesProcessStart(t *testing.T) {
+	line := `{"process_exec":{"process":{"pid":9,"uid":1000,"binary":"/bin/bash","start_time":"2026-10-28T12:00:00.123456789Z"}}}`
+	ev, ok, err := NormalizeLine(line)
+	if err != nil || !ok {
+		t.Fatalf("NormalizeLine = %v, %v", ok, err)
+	}
+	if ev.ProcessId != 9 || ev.StartTime != "2026-10-28T12:00:00.123456789Z" {
+		t.Fatalf("process identity = %d %q", ev.ProcessId, ev.StartTime)
+	}
+}
+
 func TestNormalizeSkipsOtherKprobes(t *testing.T) {
 	line := `{"process_kprobe":{"function_name":"security_file_open","process":{"binary":"/bin/cat"}}}`
 	_, ok, err := NormalizeLine(line)

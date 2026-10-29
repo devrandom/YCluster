@@ -111,3 +111,22 @@ func TestDetectionLogRotates(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectionRecordCarriesContainer(t *testing.T) {
+	a := alert{
+		Labels: map[string]string{
+			"host":      "node",
+			"source":    sourceTetragon,
+			"rule_id":   "tcp-connect",
+			"severity":  "low",
+			"layer":     "container",
+			"container": "demo",
+		},
+		Annotations: map[string]string{"summary": "process_kprobe: binary=/usr/bin/curl"},
+		StartsAt:    "2026-10-28T20:00:00Z",
+	}
+	rec := newDetectionRecord(a)
+	if rec.Layer != "container" || rec.Container != "demo" {
+		t.Fatalf("record lost container attribution: %+v", rec)
+	}
+}
