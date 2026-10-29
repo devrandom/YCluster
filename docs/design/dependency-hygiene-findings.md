@@ -124,10 +124,10 @@ Not part of the green gate. Held packages / microceph are patched via
 unattended-upgrades and the existing `packages.md` playbooks. Documented in
 the design; nothing accepted here.
 
-## S13 — dev tooling (`uv tool install`: serena, ty, mcp-fstools)
+## S13 — dev tooling (`uv tool install`: ty, python-gitlab; Go: tea, veans)
 
-Dev-only, excluded from the green gate per design. Re-pinned on `setup-tools`
-re-run; not tracked in this ledger.
+Dev-only, excluded from the green gate per design. Re-pinned on
+`setup-tools -f` re-run; not tracked in this ledger.
 
 ---
 

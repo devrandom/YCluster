@@ -298,5 +298,5 @@ for the summary.
 
 ```bash
 just setup-venv    # ./.venv + editable ycluster install
-just setup-tools   # serena-agent + ty + ../mcp-fstools (isolated uv tools)
+just setup-tools   # ty + python-gitlab + tea + veans (missing only; -f reinstalls)
 ```

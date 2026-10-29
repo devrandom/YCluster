@@ -199,7 +199,7 @@ for that surface's gate.
 | S10 | open-webui + plugins | ❌ | freshness + osv; plugins repo SHA pinned (matches repo rule). | pinned SHA/tag, clean at that rev |
 | S11 | vLLM | ❌ | sanity-check latest in pinned range vs PyPI advisory feed; keep the two files in sync (existing `vllm-upgrade.md` workflow). | pins in `install-vllm.yml` + `install-incus.yml` in sync, no known-reachable advisory |
 | S12 | OS packages + snaps | partial | Keep informational; rely on unattended-upgrades; report `HeldPackagesStale` as context. | no code-gate blocker; held-package upgrades via `packages.md` |
-| S13 | dev tooling (uv tools) | ❌ | Monitor but exclude from green gate (dev-only); re-pin on `setup-tools` re-run. | not a blocker; documented |
+| S13 | dev tooling (uv tools) | ❌ | Monitor but exclude from green gate (dev-only); re-pin on `setup-tools -f` re-run. | not a blocker; documented |
 
 Phase 1 — **unblock & wire** (parallel): S8 removal landed separately (not
 covered here); add the gate tooling via the `deps-tools` bootstrap target +
