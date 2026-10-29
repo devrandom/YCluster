@@ -22,12 +22,19 @@ type openAIErrorDetail struct {
 // Headers must not have been written yet — callers bail out before
 // WriteHeader on upstream failures.
 func writeOpenAIError(w http.ResponseWriter, status int, errType, message string) {
+	writeOpenAIErrorDetail(w, status, errType, "", message)
+}
+
+// writeOpenAIErrorDetail is writeOpenAIError with an optional stable
+// machine-readable code (e.g. "model_not_found"). Empty code is omitted.
+func writeOpenAIErrorDetail(w http.ResponseWriter, status int, errType, code, message string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openAIError{
 		Error: openAIErrorDetail{
 			Message: message,
 			Type:    errType,
+			Code:    code,
 		},
 	})
 }

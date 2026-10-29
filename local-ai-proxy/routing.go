@@ -54,6 +54,15 @@ func (h *Handler) handleRouteError(w http.ResponseWriter, r *http.Request, err e
 	}
 
 	h.Metrics.ObserveRouteError(classifyRouteError(err))
+	var superseded *SupersededError
+	if errors.As(err, &superseded) {
+		h.logger.Info("superseded model requested",
+			"model", superseded.Model,
+			"superseded_by", superseded.SupersededBy,
+			"method", r.Method, "path", r.URL.Path)
+		writeOpenAIErrorDetail(w, http.StatusNotFound, "invalid_request_error", "model_not_found", err.Error())
+		return true
+	}
 	if errors.Is(err, ErrNoHealthyBackend) {
 		h.logger.Warn("no healthy backend", "err", err.Error(), "method", r.Method, "path", r.URL.Path)
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", err.Error())

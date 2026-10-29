@@ -54,3 +54,7 @@ backend:
 # ["http://localhost:2379"] so only prefix is strictly required.
 # etcd:
 #   prefix: "/cluster/config/inference/models/"
+#
+# Model supersession: set superseded_by inline on an obsolete model's
+# etcd value to reject its requests with a 404 naming the replacement,
+# e.g. ds4 -> {"superseded_by": "ds4.1"} (backends optional).

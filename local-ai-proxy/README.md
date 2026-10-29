@@ -10,6 +10,11 @@ Written in Go, `net/http`, no framework.
 
 ## Features
 
+- **Model supersession.** Marking an etcd model entry with an inline
+  `superseded_by` field rejects requests for it with a 404
+  `model_not_found` error naming the replacement instead of reaching
+  a backend. Hot-reloads on etcd changes.
+
 - **Model-name routing.** Each request's `model` field selects the
   backend via an in-memory map rebuilt from YAML config or an etcd
   prefix (hot-reloaded on changes). The `X-Model` header overrides
@@ -82,6 +87,11 @@ backends:
 # without restart. endpoints defaults to ["http://localhost:2379"].
 etcd:
   prefix: "/inference/models/"
+
+# Model supersession (etcd mode): set superseded_by inline on an
+# obsolete model's value to reject its requests with a 404 naming the
+# replacement — {"superseded_by": "ds4.1"} (backends optional). It
+# hot-reloads; the replacement must be an ordinary registered model.
 
 # Optional. CIDRs from which X-User-Id is trusted. Default: loopback.
 trusted_proxies:

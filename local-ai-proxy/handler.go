@@ -183,6 +183,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // classifyRouteError maps a Route() error to a stable metric label.
 func classifyRouteError(err error) string {
+	var superseded *SupersededError
+	if errors.As(err, &superseded) {
+		return RouteErrSuperseded
+	}
 	if errors.Is(err, ErrNoHealthyBackend) {
 		return RouteErrNoHealthy
 	}

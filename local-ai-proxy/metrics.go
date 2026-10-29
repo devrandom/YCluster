@@ -217,6 +217,7 @@ func (m *Metrics) SetInflight(backend string, count int64) {
 // across callsites and keeps label cardinality bounded.
 const (
 	RouteErrUnknownModel   = "unknown_model"
+	RouteErrSuperseded     = "superseded_model"
 	RouteErrNoHealthy      = "no_healthy_backend"
 	RouteErrInvalidRequest = "invalid_request"
 	RouteErrBodyTooLarge   = "body_too_large"

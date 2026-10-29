@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	mvccpb "go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -57,8 +58,9 @@ type etcdBackendEntry struct {
 // backends are load-balanced by ModelRouter. ACL, when present, is
 // merged into the proxy's effective ACL alongside any YAML rules.
 type etcdModelValue struct {
-	Backends []etcdBackendEntry `json:"backends"`
-	ACL      *ACLModelRule      `json:"acl,omitempty"`
+	Backends     []etcdBackendEntry `json:"backends"`
+	ACL          *ACLModelRule      `json:"acl,omitempty"`
+	SupersededBy string             `json:"superseded_by,omitempty"`
 }
 
 // EtcdSource watches an etcd prefix. Each key under the prefix represents
@@ -77,6 +79,10 @@ type EtcdSource struct {
 	// model. Swapped together with snapshot so callers see a consistent
 	// (backends, ACL) view per model.
 	aclModels atomic.Pointer[map[string]ACLModelRule]
+
+	// superseded holds a parallel immutable map of obsolete model names
+	// to their replacements. Swapped together with the other maps.
+	superseded atomic.Pointer[map[string]string]
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -106,20 +112,10 @@ func (s *EtcdSource) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initial etcd get %s: %w", s.prefix, err)
 	}
-	m := make(map[string][]*url.URL, len(getResp.Kvs))
-	a := make(map[string]ACLModelRule)
-	for _, kv := range getResp.Kvs {
-		name := s.modelName(kv.Key)
-		urls, acl, ok := s.parseKV(kv.Key, kv.Value)
-		if ok {
-			m[name] = urls
-			if acl != nil {
-				a[name] = *acl
-			}
-		}
-	}
+	m, a, sup := s.initialState(getResp.Kvs)
 	s.snapshot.Store(&m)
 	s.aclModels.Store(&a)
+	s.superseded.Store(&sup)
 	s.logger.Info("etcd source initial load", "prefix", s.prefix, "models", len(m), "acl_rules", len(a))
 
 	watchCtx, cancel := context.WithCancel(context.Background())
@@ -145,8 +141,35 @@ func (s *EtcdSource) watch(ctx context.Context, startRev int64) {
 		s.applyWatchEvents(wresp.Events)
 		s.logger.Info("etcd source updated",
 			"models", len(*s.snapshot.Load()),
-			"acl_rules", len(*s.aclModels.Load()))
+			"acl_rules", len(*s.aclModels.Load()),
+			"superseded", len(*s.superseded.Load()))
 	}
+}
+
+// initialState builds the routing, ACL, and supersession maps from the
+// initial etcd listing. Superseded models are never routable, even when
+// their entry still carries backends (the common migration shape: mark
+// the model superseded first, remove its backend later).
+func (s *EtcdSource) initialState(kvs []*mvccpb.KeyValue) (map[string][]*url.URL, map[string]ACLModelRule, map[string]string) {
+	m := make(map[string][]*url.URL, len(kvs))
+	a := make(map[string]ACLModelRule)
+	sup := make(map[string]string)
+	for _, kv := range kvs {
+		name := s.modelName(kv.Key)
+		urls, acl, supersededBy, ok := s.parseKV(kv.Key, kv.Value)
+		if !ok {
+			continue
+		}
+		if supersededBy != "" {
+			sup[name] = supersededBy
+		} else if len(urls) > 0 {
+			m[name] = urls
+		}
+		if acl != nil {
+			a[name] = *acl
+		}
+	}
+	return m, a, sup
 }
 
 // applyWatchEvents atomically applies a batch of etcd watch events to the
@@ -163,37 +186,65 @@ func (s *EtcdSource) applyWatchEvents(events []*clientv3.Event) {
 	for k, v := range *curA {
 		nextA[k] = v
 	}
+	var nextS map[string]string
+	if curS := s.superseded.Load(); curS != nil {
+		nextS = make(map[string]string, len(*curS)+len(events))
+		for k, v := range *curS {
+			nextS[k] = v
+		}
+	} else {
+		nextS = make(map[string]string, len(events))
+	}
 	for _, ev := range events {
 		name := s.modelName(ev.Kv.Key)
 		switch ev.Type {
 		case clientv3.EventTypePut:
-			urls, acl, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value)
+			urls, acl, supersededBy, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value)
 			if ok {
-				nextM[name] = urls
-			}
-			if acl != nil {
-				nextA[name] = *acl
-			} else {
-				delete(nextA, name)
+				// Superseded models are never routable, even when the
+				// entry still lists backends.
+				if supersededBy != "" {
+					delete(nextM, name)
+					nextS[name] = supersededBy
+				} else {
+					if len(urls) > 0 {
+						nextM[name] = urls
+					} else {
+						delete(nextM, name)
+					}
+					delete(nextS, name)
+				}
+				if acl != nil {
+					nextA[name] = *acl
+				} else {
+					delete(nextA, name)
+				}
 			}
 		case clientv3.EventTypeDelete:
 			delete(nextM, name)
 			delete(nextA, name)
+			delete(nextS, name)
 		}
 	}
 	s.snapshot.Store(&nextM)
 	s.aclModels.Store(&nextA)
+	s.superseded.Store(&nextS)
 }
 
-func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, *ACLModelRule, bool) {
+func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, *ACLModelRule, string, bool) {
 	var v etcdModelValue
 	if err := json.Unmarshal(value, &v); err != nil {
 		s.logger.Warn("etcd value not JSON", "key", string(key), "err", err.Error())
-		return nil, nil, false
+		return nil, nil, "", false
 	}
-	if len(v.Backends) == 0 {
+	name := s.modelName(key)
+	if v.SupersededBy == name {
+		s.logger.Warn("etcd value supersedes itself; ignoring superseded_by", "key", string(key))
+		v.SupersededBy = ""
+	}
+	if len(v.Backends) == 0 && v.SupersededBy == "" {
 		s.logger.Warn("etcd value has empty backends list", "key", string(key))
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	urls := make([]*url.URL, 0, len(v.Backends))
 	for i, b := range v.Backends {
@@ -208,10 +259,10 @@ func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, *ACLModelRule, bool
 		}
 		urls = append(urls, u)
 	}
-	if len(urls) == 0 {
-		return nil, nil, false
+	if len(urls) == 0 && v.SupersededBy == "" {
+		return nil, nil, "", false
 	}
-	return urls, v.ACL, true
+	return urls, v.ACL, v.SupersededBy, true
 }
 
 func (s *EtcdSource) modelName(key []byte) string {

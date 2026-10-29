@@ -123,6 +123,13 @@ type ModelRouter struct {
 	Logger *slog.Logger
 }
 
+// SupersessionSource is an optional Source extension exposing a
+// hot-reloaded obsolete → replacement model map. EtcdSource implements
+// it; sources without supersession simply don't.
+type SupersessionSource interface {
+	SupersededSnapshot() map[string]string
+}
+
 func NewModelRouter(source Source) *ModelRouter {
 	return &ModelRouter{source: source}
 }
@@ -205,6 +212,10 @@ func (m *ModelRouter) routeJSON(r *http.Request, headerModel string) (*RouteResu
 		model = env.Model
 	}
 
+	if err := m.checkSuperseded(model); err != nil {
+		return nil, err
+	}
+
 	candidates, err := m.candidatesFor(model)
 	if err != nil {
 		return nil, err
@@ -239,6 +250,10 @@ func (m *ModelRouter) routeMultipart(r *http.Request, boundary string, headerMod
 
 	if model == "" {
 		return nil, errors.New("multipart body missing model field")
+	}
+
+	if err := m.checkSuperseded(model); err != nil {
+		return nil, err
 	}
 
 	candidates, err := m.candidatesFor(model)
@@ -277,6 +292,18 @@ func extractMultipartModel(body []byte, boundary string) (string, error) {
 		part.Close()
 	}
 	return "", nil
+}
+
+// checkSuperseded rejects obsolete model names before any routing or
+// ACL work, so superseded requests never reach a backend. Sources
+// without supersession (e.g. YAMLSource) never reject.
+func (m *ModelRouter) checkSuperseded(model string) error {
+	if ss, ok := m.source.(SupersessionSource); ok {
+		if replacement, ok := ss.SupersededSnapshot()[model]; ok {
+			return &SupersededError{Model: model, SupersededBy: replacement}
+		}
+	}
+	return nil
 }
 
 // candidatesFor looks up backends for a model and filters by health.
