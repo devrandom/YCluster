@@ -97,7 +97,13 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=300 update
+          # apt-get update exits 0 even when individual sources fail, so keep
+          # the last run's output where the metrics collector can count the
+          # failed fetches. RuntimeDirectory clears it on boot; the oneshot
+          # stops immediately, so preserve the directory after it exits.
+          RuntimeDirectory=ycluster
+          RuntimeDirectoryPreserve=yes
+          ExecStart=/bin/bash -c 'set -o pipefail; /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update 2>&1 | tee /run/ycluster/apt-update.log'
           # Only runs if ExecStart succeeded, so the stamp means "last
           # successful update". Refreshing the stamp also makes apt-daily's
           # own update pass skip, avoiding duplicate work.

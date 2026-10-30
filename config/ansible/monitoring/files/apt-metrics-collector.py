@@ -63,6 +63,10 @@ RESTART_IGNORED_PREFIXES = ("getty@", "serial-getty@", "user@")
 
 NEEDRESTART = shutil.which("needrestart") or "/usr/sbin/needrestart"
 
+# Last apt-get update output, written by the apt-cache-update unit.
+APT_UPDATE_LOG = Path("/run/ycluster/apt-update.log")
+APT_FAILURE_RE = re.compile(r"^(?:W: Failed to fetch|Err:?\d*)\s+(\S+)")
+
 
 def actionable_service(name: str) -> bool:
     """Return False for units whose stale libraries are not actionable."""
@@ -197,6 +201,39 @@ def conffile_prompt_metrics() -> list[str]:
     return lines
 
 
+def parse_apt_update_failures(output: str) -> list[str]:
+    """Return the source URIs apt failed to fetch in one update run.
+
+    apt-get update exits 0 when a single repository is unreachable, so the
+    success stamp cannot distinguish a broken mirror from a quiet day; the
+    failure lines are the only record of it.
+    """
+    sources: list[str] = []
+    for line in output.splitlines():
+        match = APT_FAILURE_RE.match(line.strip())
+        if match:
+            # Err: and "Failed to fetch" name the same repository at
+            # different depths; key on the base URI so they collapse.
+            sources.append(match.group(1).split("/dists/")[0])
+    return list(dict.fromkeys(sources))
+
+
+def fetch_failure_metrics() -> list[str]:
+    """Return per-source fetch-failure metrics from the last update run."""
+    try:
+        output = APT_UPDATE_LOG.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    lines = [
+        "# HELP ycluster_apt_fetch_failure apt-get update could not fetch this source in the last run",
+        "# TYPE ycluster_apt_fetch_failure gauge",
+    ]
+    for source in sorted(set(parse_apt_update_failures(output))):
+        lines.append(f'ycluster_apt_fetch_failure{{source="{source}"}} 1')
+    return lines
+
+
 def render(now: float) -> str:
     lines = [
         "# HELP ycluster_apt_update_age_seconds Seconds since the last successful apt cache update",
@@ -212,6 +249,7 @@ def render(now: float) -> str:
         lines.append(f'ycluster_apt_lock_held{{lock="{name}"}} {lock_held(path)}')
     lines.extend(conffile_prompt_metrics())
     lines.extend(restart_metrics())
+    lines.extend(fetch_failure_metrics())
     return "\n".join(lines) + "\n"
 
 

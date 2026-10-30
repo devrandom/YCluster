@@ -89,5 +89,27 @@ class TestParseConffilePrompts(unittest.TestCase):
         self.assertEqual(self.collector.parse_conffile_prompts(""), [])
 
 
+class TestParseAptUpdateFailures(unittest.TestCase):
+    def setUp(self):
+        self.collector = load_collector()
+
+    def test_unreachable_mirror_reported_once(self):
+        sources = self.collector.parse_apt_update_failures(
+            "Hit:1 http://security.ubuntu.com/ubuntu noble-security InRelease\n"
+            "Err:3 http://pt.archive.ubuntu.com/ubuntu noble InRelease\n"
+            "W: Failed to fetch http://pt.archive.ubuntu.com/ubuntu/dists/noble/InRelease"
+            "  Could not connect to pt.archive.ubuntu.com:80, connection timed out\n"
+            "W: Some index files failed to download.\n"
+        )
+        self.assertEqual(sources, ["http://pt.archive.ubuntu.com/ubuntu"])
+
+    def test_clean_run_has_no_failures(self):
+        sources = self.collector.parse_apt_update_failures(
+            "Hit:1 http://fr.archive.ubuntu.com/ubuntu noble InRelease\n"
+            "Get:2 http://fr.archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]\n"
+        )
+        self.assertEqual(sources, [])
+
+
 if __name__ == "__main__":
     unittest.main()

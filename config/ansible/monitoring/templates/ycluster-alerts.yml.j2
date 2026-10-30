@@ -102,6 +102,32 @@ groups:
           summary: "Apt metrics collector stale on {{ $labels.node }}"
           description: "apt_status.prom on {{ $labels.node }} has not been updated in over 30m"
 
+      # apt-get update exits 0 when a single repository is unreachable, so the
+      # success stamp alone cannot see a dead mirror or a blocked host. The
+      # refresh unit keeps its last run in /run/ycluster/apt-update.log and the
+      # collector turns the failed fetches into a gauge.
+      - alert: AptSourceFetchFailing
+        expr: count by (node) (ycluster_apt_fetch_failure) > 0
+        for: 1h
+        labels:
+          severity: warning
+          slow_repeat: "true"
+        annotations:
+          summary: "{{ $value }} apt source(s) failing on {{ $labels.node }}"
+          description: "apt-get update cannot fetch {{ $value }} source(s) on {{ $labels.node }}, so those package lists stay stale. The failing URIs are in `ycluster_apt_fetch_failure`."
+
+      # The upgrade stamp is written only by a completed pass, so this catches
+      # an image without unattended-upgrades as well as one whose passes fail.
+      - alert: AptUpgradeStale
+        expr: ycluster_apt_upgrade_age_seconds > 3 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+          slow_repeat: "true"
+        annotations:
+          summary: "No unattended upgrade pass on {{ $labels.node }} for over 3 days"
+          description: "unattended-upgrades is missing, disabled or failing on {{ $labels.node }}; security updates are not being applied."
+
       # unattended-upgrades has no tty, so a package whose local conffile
       # differs from the packaged copy is skipped on every run instead of
       # being upgraded. That is how squid silently stopped receiving updates
