@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -174,8 +176,11 @@ class StatePersistenceTests(unittest.TestCase):
         self.state_path.write_text("{not json", encoding="utf-8")
         exec_mod._BACKGROUNDED.clear()
         exec_mod._STATE_LOADED = False
-        exec_mod.init_state(self.state_path)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            exec_mod.init_state(self.state_path)
         self.assertEqual(exec_mod.list_backgrounded(), [])
+        self.assertIn("ignoring malformed state", stderr.getvalue())
 
     def test_unsafe_session_id_is_rejected(self):
         self.state_path.write_text(

@@ -32,6 +32,13 @@
 #   CE_HTTP_PATH           MCP endpoint path (default /mcp)
 #   CE_BASTION             SSH bastion host (required; the run tool fails
 #                          fast at startup if unset)
+#   CE_SSH_CONTROL_PERSIST_S
+#                          seconds to keep one multiplexed bastion
+#                          connection alive after the last call (default
+#                          300; 0 disables ControlMaster reuse)
+#   CE_SSH_CONTROL_PATH    ControlMaster socket path (default
+#                          ~/.ssh/cluster-exec-%C; %C hashes the
+#                          destination/user/port; empty disables)
 #   CE_BEARER_PATH         bearer token file (default
 #                          ~/.config/cluster-exec/bearer, mode 0600)
 #   CE_ENVRC               .envrc to auto-export CE_BEARER into (default

@@ -4,6 +4,8 @@ import math
 import os
 import secrets
 import signal
+import stat
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -165,6 +167,61 @@ SERVER = MCPServer(
 
 _LOG_PATH = Path(os.environ.get("CE_LOG_PATH", "tmp/cluster.log"))
 _BASTION = os.environ.get("CE_BASTION")
+
+
+def _control_path_from_env() -> str | None:
+    raw = os.environ.get("CE_SSH_CONTROL_PATH", "~/.ssh/cluster-exec-%C").strip()
+    if not raw:
+        return None
+    path = os.path.abspath(os.path.expandvars(os.path.expanduser(raw)))
+    # %C expands to a 40-character hash. Leave room for the terminating NUL
+    # and stay within the smaller (macOS) sockaddr_un limit.
+    estimated = path.replace("%C", "0" * 40)
+    if len(estimated.encode()) >= 104:
+        print(
+            f"cluster-exec: CE_SSH_CONTROL_PATH is too long for a Unix socket; "
+            f"disabling ssh multiplexing (set a shorter path)",
+            file=sys.stderr,
+        )
+        return None
+    parent = Path(estimated).parent
+    try:
+        st = parent.stat()
+    except OSError as exc:
+        print(
+            f"cluster-exec: cannot use CE_SSH_CONTROL_PATH parent {parent}: {exc}; "
+            f"disabling ssh multiplexing (set CE_SSH_CONTROL_PATH to a writable "
+            f"private directory)",
+            file=sys.stderr,
+        )
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        reason = "is not a directory"
+    elif st.st_uid != os.getuid():
+        reason = "is not owned by the current user"
+    elif st.st_mode & 0o022:
+        reason = "is group/world-writable"
+    elif not os.access(parent, os.W_OK | os.X_OK):
+        reason = "is not writable by the current user"
+    else:
+        return path
+    print(
+        f"cluster-exec: CE_SSH_CONTROL_PATH parent {parent} {reason}; "
+        f"disabling ssh multiplexing (set CE_SSH_CONTROL_PATH to a private "
+        f"writable directory)",
+        file=sys.stderr,
+    )
+    return None
+
+
+# Reuse one SSH connection to the bastion across tool calls. The first call
+# pays the full handshake; later calls multiplex over the same ControlMaster.
+# The socket lives in ~/.ssh by default (0700) and %C makes the path unique
+# per destination/user/port. Set CE_SSH_CONTROL_PERSIST_S=0 to disable.
+# Resolve the path in main() so importing the module (e.g. in unit tests)
+# does not probe or warn about the filesystem.
+_SSH_CONTROL_PATH: str | None = None
+_SSH_CONTROL_PERSIST_S = _env_float("CE_SSH_CONTROL_PERSIST_S", 300.0)
 _TIMEOUT_S = _env_float("CE_TIMEOUT_S", 1800.0)
 # Foreground cap on the `run` tool call — 10s by default, overridable via
 # `CE_AUTO_BG_TIMEOUT_S` for deployments where a known-long command
@@ -451,6 +508,8 @@ async def run(
             on_progress=report,
             cancel=cancel,
             principal=principal,
+            control_path=_SSH_CONTROL_PATH,
+            control_persist_s=_SSH_CONTROL_PERSIST_S,
         )
     finally:
         bridge_task.cancel()
@@ -536,6 +595,8 @@ async def put(
             cwd=cwd,
             user=user,
             cancel=cancel,
+            control_path=_SSH_CONTROL_PATH,
+            control_persist_s=_SSH_CONTROL_PERSIST_S,
         )
     finally:
         bridge_task.cancel()
@@ -623,6 +684,8 @@ async def get(
             cwd=cwd,
             user=user,
             cancel=cancel,
+            control_path=_SSH_CONTROL_PATH,
+            control_persist_s=_SSH_CONTROL_PERSIST_S,
         )
     finally:
         bridge_task.cancel()
@@ -801,6 +864,9 @@ async def status(
 
 
 def main() -> None:
+    global _SSH_CONTROL_PATH
+    if _SSH_CONTROL_PERSIST_S > 0:
+        _SSH_CONTROL_PATH = _control_path_from_env()
     # The MCP lifespan runs per client session, so load persistent status
     # exactly once here at daemon start. `_lifespan` also calls this as a
     # fallback, but the loader is idempotent and will not clobber live
@@ -871,6 +937,14 @@ async def _stop(request: Request) -> JSONResponse:
     # Terminate live SSH children but keep terminal records in the state
     # file: the next daemon process must still be able to answer `status`.
     killed = exec.kill_all_backgrounded(retain=True)
+    # The ControlMaster has no session marker of its own, so close it
+    # explicitly; otherwise a stopped daemon can leave a bastion connection
+    # alive until ControlPersist expires.
+    await exec.close_ssh_master(
+        bastion=_BASTION,
+        control_path=_SSH_CONTROL_PATH,
+        control_persist_s=_SSH_CONTROL_PERSIST_S,
+    )
     # Defer SIGTERM until after the response is flushed.
     loop = asyncio.get_running_loop()
     loop.call_later(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM))

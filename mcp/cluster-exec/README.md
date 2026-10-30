@@ -171,6 +171,37 @@ but retains their terminal records, so `--restart` keeps the history too.
 There is no automatic reaper yet; the state file is small and can be
 deleted when it gets noisy.
 
+## SSH connection reuse
+
+All `run`, `put`, and `get` calls share an SSH ControlMaster connection to
+`$CE_BASTION`. The first call after the socket expires pays the normal
+handshake; subsequent calls multiplex over the existing connection and avoid
+it. In practice this is a ~3s to ~0.3s difference per call on a typical
+bastion.
+
+The master persists for `CE_SSH_CONTROL_PERSIST_S` seconds (default 300)
+after its last client exits. The socket defaults to
+`~/.ssh/cluster-exec-%C`; OpenSSH expands `%C` to a hash of the destination,
+user, and port, so different bastions don't collide. Keep the path short
+(the Unix socket limit is typically 104 bytes) and in a directory owned by
+your user. `cedaemon --stop` explicitly closes the master with
+`ssh -O exit`, so stopping cluster-exec does not leave a bastion connection
+alive for the rest of the persist window. Set `CE_SSH_CONTROL_PERSIST_S=0`
+to disable multiplexing manually. If the parent directory is missing, not
+owned by your user, group/world-writable, or the path is too long for a Unix
+socket, cluster-exec logs a warning at startup and runs without multiplexing
+rather than breaking SSH commands.
+
+Only the outer hop is multiplexed. The inner `ssh <target>` still runs from
+the bastion for each `run` call, and file transfers keep their own binary
+stdin/stdout channel over the shared connection.
+
+Two operational trade-offs: the bastion's `MaxSessions` limit (10 by default
+on OpenSSH) bounds concurrent multiplexed calls, and a dropped master fails
+all in-flight sessions at once. For normal sequential agent use this is a
+large latency win; disable it with `CE_SSH_CONTROL_PERSIST_S=0` if either
+trade-off matters more than latency.
+
 ## Ansible
 
 Run playbooks via `hostname="localhost"` to skip the inner ssh and land directly on the bastion (which is also `$YC_SYNC_HOST` and typically the dev-sync host). `/etc/ansible` is mounted on every core node — the entry has it too:
@@ -187,6 +218,8 @@ run(command="cd /etc/ansible && ansible-playbook admin/install-ycluster-package.
 | Var | Default | Purpose |
 |---|---|---|
 | `CE_BASTION` | (required) | Entry host the outer ssh hops through. Should resolve in your local `~/.ssh/config`. |
+| `CE_SSH_CONTROL_PERSIST_S` | `300` | Reuse one SSH connection to the bastion via ControlMaster for this many seconds after the last client exits. `0` disables multiplexing. |
+| `CE_SSH_CONTROL_PATH` | `~/.ssh/cluster-exec-%C` | Control socket path. `%C` expands to a hash of destination/user/port; keep it short and in a user-owned directory. Empty disables multiplexing. |
 | `CE_HTTP_HOST` | `127.0.0.1` | Bind address for the streamable-HTTP transport. Loopback only by default — admin tool grants root SSH. |
 | `CE_HTTP_PORT` | `4003` | Bind port. |
 | `CE_HTTP_PATH` | `/mcp` | MCP endpoint path. |
@@ -209,7 +242,7 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_state tests.test_log tests.test_truncate tests.test_ratelimit tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema tests.test_stop_endpoint
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_state tests.test_log tests.test_truncate tests.test_ratelimit tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema tests.test_stop_endpoint tests.test_control_path
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):

@@ -569,7 +569,34 @@ def _mark_backgrounded_finished(
     _save_state()
 
 
-def _run_ssh_argv(bastion: str, session_id: str, remote_command: str) -> list[str]:
+def _ssh_mux_args(control_path: str | None, control_persist_s: float) -> list[str]:
+    """Return ssh options for a reusable ControlMaster connection.
+
+    Multiplexing is opt-in through a non-empty path and a positive persist
+    time. The socket path must be short enough for ``sockaddr_un`` (OpenSSH
+    expands ``%C`` to a 40-character hash); callers normally use
+    ``~/.ssh/cluster-exec-%C`` so different bastions get different sockets.
+    """
+    if not control_path or control_persist_s <= 0:
+        return []
+    return [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={control_path}",
+        "-o",
+        f"ControlPersist={max(1, int(control_persist_s))}",
+    ]
+
+
+def _run_ssh_argv(
+    bastion: str,
+    session_id: str,
+    remote_command: str,
+    *,
+    control_path: str | None = None,
+    control_persist_s: float = 0.0,
+) -> list[str]:
     # The marker is local argv only (ssh's SetEnv option), so pgrep/pkill can
     # find a surviving child after the daemon that spawned it has exited.
     # It does not alter the command sent to the target.
@@ -577,9 +604,49 @@ def _run_ssh_argv(bastion: str, session_id: str, remote_command: str) -> list[st
         "ssh",
         "-o",
         f"SetEnv={_LOCAL_SESSION_MARKER}={session_id}",
+        *_ssh_mux_args(control_path, control_persist_s),
         bastion,
         remote_command,
     ]
+
+
+async def close_ssh_master(
+    *,
+    bastion: str | None,
+    control_path: str | None,
+    control_persist_s: float,
+    timeout_s: float = 5.0,
+) -> bool:
+    """Ask the persistent ControlMaster for ``bastion`` to exit.
+
+    The master is deliberately not tied to any one tool call: it is what
+    makes the next call fast. Daemon shutdown should close it so a stopped
+    cluster-exec does not leave a bastion connection alive for the rest of
+    ``ControlPersist``. A missing socket is normal and returns False.
+    """
+    if not bastion or not control_path or control_persist_s <= 0:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh",
+            "-o",
+            f"ControlPath={control_path}",
+            "-O",
+            "exit",
+            bastion,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"cluster-exec: could not close ssh control socket: {exc}", file=sys.stderr)
+        return False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False
+    return proc.returncode == 0
 
 
 async def run(
@@ -599,6 +666,8 @@ async def run(
     on_progress: ProgressFn | None = None,
     cancel: asyncio.Event | None = None,
     principal: str | None = None,
+    control_path: str | None = None,
+    control_persist_s: float = 0.0,
 ) -> str:
     if cancel is None:
         cancel = asyncio.Event()
@@ -608,11 +677,23 @@ async def run(
         )
 
     if target_host == "localhost":
-        ssh_argv = _run_ssh_argv(bastion, session_id, command)
+        ssh_argv = _run_ssh_argv(
+            bastion,
+            session_id,
+            command,
+            control_path=control_path,
+            control_persist_s=control_persist_s,
+        )
     else:
         ssh_target = f"{user}@{target_host}" if user else target_host
         inner = f"ssh {shlex.quote(ssh_target)} {shlex.quote(command)}"
-        ssh_argv = _run_ssh_argv(bastion, session_id, inner)
+        ssh_argv = _run_ssh_argv(
+            bastion,
+            session_id,
+            inner,
+            control_path=control_path,
+            control_persist_s=control_persist_s,
+        )
     proc = await asyncio.create_subprocess_exec(
         *ssh_argv,
         stdout=asyncio.subprocess.PIPE,
@@ -928,6 +1009,8 @@ async def put_file(
     cwd: str,
     user: str | None = None,
     cancel: asyncio.Event | None = None,
+    control_path: str | None = None,
+    control_persist_s: float = 0.0,
 ) -> str:
     """Upload ``local_path`` to ``target_host:remote_path`` via SSH bastion.
 
@@ -958,12 +1041,13 @@ async def put_file(
     target_cmd_str = f"dd of={shlex.quote(remote_path)}"
     quoted_target_cmd = target_cmd_str
 
+    mux_args = _ssh_mux_args(control_path, control_persist_s)
     if target_host == "localhost":
-        ssh_argv: list[str] = ["ssh", bastion, quoted_target_cmd]
+        ssh_argv: list[str] = ["ssh", *mux_args, bastion, quoted_target_cmd]
     else:
         ssh_target = f"{user}@{target_host}" if user else target_host
         ssh_argv = [
-            "ssh", bastion,
+            "ssh", *mux_args, bastion,
             "ssh", shlex.quote(ssh_target), "--", quoted_target_cmd,
         ]
 
@@ -1140,6 +1224,8 @@ async def get_file(
     cwd: str,
     user: str | None = None,
     cancel: asyncio.Event | None = None,
+    control_path: str | None = None,
+    control_persist_s: float = 0.0,
 ) -> str:
     """Download ``remote_path`` from ``target_host`` to ``local_path`` via SSH bastion.
 
@@ -1159,15 +1245,19 @@ async def get_file(
         return f"ERROR: local path exists but is not a regular file: {local_path}"
 
     target_cmd_str = f"cat {shlex.quote(remote_path)}"
-    quoted_target_cmd = shlex.quote(target_cmd_str)
 
+    mux_args = _ssh_mux_args(control_path, control_persist_s)
     if target_host == "localhost":
-        ssh_argv: list[str] = ["ssh", bastion, quoted_target_cmd]
+        # Do not shlex-quote the whole command here: ssh joins its argv and
+        # the bastion shell re-parses the result. Quoting the entire
+        # ``cat <path>`` string would make the shell look for a program whose
+        # name contains a space. The path itself is already quoted above.
+        ssh_argv: list[str] = ["ssh", *mux_args, bastion, target_cmd_str]
     else:
         ssh_target = f"{user}@{target_host}" if user else target_host
         ssh_argv = [
-            "ssh", bastion,
-            "ssh", shlex.quote(ssh_target), "--", quoted_target_cmd,
+            "ssh", *mux_args, bastion,
+            "ssh", shlex.quote(ssh_target), "--", shlex.quote(target_cmd_str),
         ]
 
     ssh_proc = await asyncio.create_subprocess_exec(

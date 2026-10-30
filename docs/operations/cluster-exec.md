@@ -28,6 +28,25 @@ run(command="cd /etc/ansible && ./run-playbook.sh admin/install-ycluster-package
 Avoid the use of `ssh` inside the command — specify the hostname as a tool
 argument instead.
 
+## SSH connection reuse
+
+`run`, `put`, and `get` multiplex over one SSH connection to
+`$CE_BASTION`. The first call after the control socket expires pays the
+handshake; later calls reuse it. The socket defaults to
+`~/.ssh/cluster-exec-%C` (the `%C` token hashes the destination, user, and
+port) and the master persists for 300s after its last client. Tune with
+`CE_SSH_CONTROL_PERSIST_S`; set it to `0` to disable multiplexing. Override
+`CE_SSH_CONTROL_PATH` if the default path is too long for `sockaddr_un`
+(typically 104 bytes) or lands in an unwritable directory. An unusable
+control path is reported at startup and multiplexing is disabled; SSH
+commands still run.
+
+Only the outer hop is shared. Each remote command still runs `ssh <target>`
+from the bastion. Concurrent calls are bounded by the bastion's OpenSSH
+`MaxSessions` (10 by default), and loss of the master fails all in-flight
+sessions on that connection. `cedaemon --stop` closes the master with
+`ssh -O exit` after terminating background sessions.
+
 ## Backgrounding
 
 Foreground is capped at 10s by default (`CE_AUTO_BG_TIMEOUT_S`) — the `run`

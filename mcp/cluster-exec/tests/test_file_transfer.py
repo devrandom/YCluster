@@ -142,6 +142,8 @@ class PutTests(unittest.TestCase):
         cwd: str = kwargs.get("cwd", "/cwd")
         cancel: asyncio.Event | None = kwargs.get("cancel", None)
         user: str | None = kwargs.get("user", None)
+        control_path: str | None = kwargs.get("control_path", None)
+        control_persist_s: float = kwargs.get("control_persist_s", 0.0)
 
         with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
             text = asyncio.run(
@@ -155,6 +157,8 @@ class PutTests(unittest.TestCase):
                     cwd=cwd,
                     user=user,
                     cancel=cancel,
+                    control_path=control_path,
+                    control_persist_s=control_persist_s,
                 )
             )
         return text, argv_lists, kwarg_lists
@@ -195,6 +199,22 @@ class PutTests(unittest.TestCase):
         self.assertEqual(ssh_argv[2], "ssh")
         self.assertEqual(ssh_argv[3], shlex.quote("app1"))
         self.assertEqual(ssh_argv[4], "--")
+
+    def test_put_uses_control_master(self):
+        local = self._make_local(content=b"x")
+        cat = _FakeProc(stdout_data=b"x")
+        ssh = _FakeProc(exit_code=0)
+        _, argv_lists, _ = self._run_with(
+            procs=[cat, ssh],
+            local_path=str(local),
+            control_path="/home/test/.ssh/cluster-exec-%C",
+            control_persist_s=300,
+        )
+        ssh_argv = argv_lists[1]
+        self.assertIn("ControlMaster=auto", ssh_argv)
+        self.assertIn("ControlPath=/home/test/.ssh/cluster-exec-%C", ssh_argv)
+        self.assertIn("ControlPersist=300", ssh_argv)
+        self.assertIn("dummy-bastion", ssh_argv)
 
     def test_remote_target_with_user_prefixes_inner_ssh(self):
         """`user="admin"` produces `ssh admin@app1 ... -- dd of=...` on the
@@ -399,6 +419,8 @@ class GetTests(unittest.TestCase):
             cwd: str = kwargs.get("cwd", "/cwd")
             cancel: asyncio.Event | None = kwargs.get("cancel", None)
             user: str | None = kwargs.get("user", None)
+            control_path: str | None = kwargs.get("control_path", None)
+            control_persist_s: float = kwargs.get("control_persist_s", 0.0)
             with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
                 text = asyncio.run(
                     exec_mod.get_file(
@@ -411,6 +433,8 @@ class GetTests(unittest.TestCase):
                         cwd=cwd,
                         user=user,
                         cancel=cancel,
+                        control_path=control_path,
+                        control_persist_s=control_persist_s,
                     )
                 )
             content = local.read_bytes() if local.exists() else b""
@@ -425,6 +449,30 @@ class GetTests(unittest.TestCase):
         self.assertEqual(argv_lists[0][0], "ssh")
         self.assertEqual(argv_lists[0][1], "dummy-bastion")
         self.assertNotIn("ssh localhost", argv_lists[0][2])
+
+    def test_localhost_get_does_not_quote_the_whole_command(self):
+        """The bastion shell must see `cat <path>`, not a single quoted
+        program name containing a space (which exits 127)."""
+        ssh = _FakeProc(stdout_data=b"hello")
+        _, argv_lists, _ = self._run_with(
+            ssh,
+            target_host="localhost",
+            remote_path="/tmp/a b",
+        )
+        self.assertEqual(argv_lists[0][-1], "cat '/tmp/a b'")
+
+    def test_get_uses_control_master(self):
+        ssh = _FakeProc(stdout_data=b"hello")
+        _, argv_lists, _ = self._run_with(
+            ssh,
+            control_path="/home/test/.ssh/cluster-exec-%C",
+            control_persist_s=300,
+        )
+        ssh_argv = argv_lists[0]
+        self.assertIn("ControlMaster=auto", ssh_argv)
+        self.assertIn("ControlPath=/home/test/.ssh/cluster-exec-%C", ssh_argv)
+        self.assertIn("ControlPersist=300", ssh_argv)
+        self.assertIn("dummy-bastion", ssh_argv)
 
     def test_remote_target_wraps_inner_ssh(self):
         ssh = _FakeProc(stdout_data=b"hello")

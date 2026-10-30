@@ -249,6 +249,114 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(args[-1], "dummy-cmd")
         self.assertIn("SetEnv=CE_SESSION=abcd1234", args)
 
+    def test_run_uses_control_master(self):
+        proc = _FakeProcess(stdout_lines=[b"ok\n"], stderr_lines=[], exit_code=0)
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            asyncio.run(
+                exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="app1",
+                    command="echo hello",
+                    session_id="abcd1234",
+                    timeout_s=10,
+                    auto_bg_after_s=0.0,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                    control_path="/home/test/.ssh/cluster-exec-%C",
+                    control_persist_s=300,
+                )
+            )
+        args = captured[0]
+        self.assertIn("ControlMaster=auto", args)
+        self.assertIn("ControlPath=/home/test/.ssh/cluster-exec-%C", args)
+        self.assertIn("ControlPersist=300", args)
+        self.assertEqual(args[-2], "dummy-bastion")
+        self.assertIn("SetEnv=CE_SESSION=abcd1234", args)
+
+    def test_run_disables_control_master_when_persist_is_zero(self):
+        proc = _FakeProcess(stdout_lines=[b"ok\n"], stderr_lines=[], exit_code=0)
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            asyncio.run(
+                exec_mod.run(
+                    bastion="dummy-bastion",
+                    target_host="app1",
+                    command="echo hello",
+                    session_id="abcd1234",
+                    timeout_s=10,
+                    auto_bg_after_s=0.0,
+                    progress_interval_s=10.0,
+                    progress_tail_lines=50,
+                    head_lines=100,
+                    tail_lines=100,
+                    cwd="/cwd",
+                    control_path="/home/test/.ssh/cluster-exec-%C",
+                    control_persist_s=0,
+                )
+            )
+        self.assertNotIn("ControlMaster=auto", captured[0])
+
+    def test_close_ssh_master_uses_exit_request(self):
+        proc = _FakeProcess(stdout_lines=[], stderr_lines=[], exit_code=0)
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            closed = asyncio.run(
+                exec_mod.close_ssh_master(
+                    bastion="dummy-bastion",
+                    control_path="/home/test/.ssh/cluster-exec-%C",
+                    control_persist_s=300,
+                )
+            )
+        self.assertTrue(closed)
+        self.assertEqual(
+            captured[0],
+            (
+                "ssh",
+                "-o",
+                "ControlPath=/home/test/.ssh/cluster-exec-%C",
+                "-O",
+                "exit",
+                "dummy-bastion",
+            ),
+        )
+
+    def test_close_ssh_master_noop_when_disabled(self):
+        captured: list[tuple] = []
+
+        async def _create(*args, **kw):
+            captured.append(args)
+            return _FakeProcess([], [], 0)
+
+        with patch.object(exec_mod.asyncio, "create_subprocess_exec", side_effect=_create):
+            closed = asyncio.run(
+                exec_mod.close_ssh_master(
+                    bastion="dummy-bastion",
+                    control_path="/home/test/.ssh/cluster-exec-%C",
+                    control_persist_s=0,
+                )
+            )
+        self.assertFalse(closed)
+        self.assertEqual(captured, [])
+
     def test_stderr_tagged(self):
         proc = _FakeProcess(
             stdout_lines=[b"ok\n"],
