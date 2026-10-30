@@ -40,6 +40,13 @@ var expectedAdminServicePorts = map[uint16]struct{}{
 // same dial from another host stays visible.
 var containerNetwork = netip.MustParsePrefix("10.100.0.0/24")
 
+// containerBridges are host-local container networks: the Incus bridge and
+// docker0. Traffic to them from a container stays inside the host.
+var containerBridges = []netip.Prefix{
+	containerNetwork,
+	netip.MustParsePrefix("172.17.0.0/16"),
+}
+
 // cephPorts are the monitor, manager and OSD ports. Tetragon attributes
 // kernel-side connects to [kthreadd] when no user process owns the socket.
 var cephPorts = map[uint16]struct{}{
@@ -213,10 +220,20 @@ func containerEgressReason(body *tetragonLog, layer string) string {
 	if !ok {
 		return ""
 	}
-	if addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
-		return ""
+	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsLinkLocalUnicast() {
+		return "container_bridge"
 	}
-	return "tenant_egress"
+	if !addr.IsPrivate() {
+		return "tenant_egress"
+	}
+	// The container bridge is host-local networking between instances the
+	// network ACL already governs; it is not a path into the cluster.
+	for _, prefix := range containerBridges {
+		if prefix.Contains(addr) {
+			return "container_bridge"
+		}
+	}
+	return ""
 }
 
 func tcpDestination(raw json.RawMessage) (netip.Addr, uint16, bool) {

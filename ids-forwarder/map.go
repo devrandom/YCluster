@@ -191,6 +191,9 @@ func routineExecReason(process tetragonProcess) string {
 		if strings.Contains(args, "/etc/update-motd.d") {
 			return "motd"
 		}
+		if zulipCronReason(args) != "" {
+			return "app_cron"
+		}
 		// sysstat's daily-activity collector runs from cron every ten
 		// minutes on every node with a fixed command line.
 		if strings.Contains(args, "debian-sa1") {
@@ -318,6 +321,36 @@ func routinePrivilegeReason(body *tetragonLog) string {
 	if strings.HasPrefix(body.Process.Binary, "/snap/snapd/") &&
 		strings.HasSuffix(body.Process.Binary, "/usr/lib/snapd/snap-confine") {
 		return "expected_privilege"
+	}
+	return ""
+}
+
+// zulipCronCommands are the management commands Zulip's own scheduler runs
+// inside its container. Anything else from that path still alerts.
+var zulipCronCommands = map[string]struct{}{
+	"check_analytics_state":            {},
+	"promote_new_full_members":         {},
+	"send_zulip_update_announcements":  {},
+	"update_analytics_counts":          {},
+	"fetch_tor_exit_nodes":             {},
+	"enqueue_digest_emails":            {},
+	"clearsessions":                    {},
+	"soft_deactivate_users":            {},
+	"delete_old_unclaimed_attachments": {},
+}
+
+func zulipCronReason(args string) string {
+	if !strings.Contains(args, "/home/zulip/deployments/current/") {
+		return ""
+	}
+	fields := strings.Fields(args)
+	for i, f := range fields {
+		if f != "./manage.py" || i+1 >= len(fields) {
+			continue
+		}
+		if _, ok := zulipCronCommands[fields[i+1]]; ok {
+			return "app_cron"
+		}
 	}
 	return ""
 }

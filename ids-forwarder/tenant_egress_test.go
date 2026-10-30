@@ -84,9 +84,9 @@ func TestContainerClusterConnectStillAlerts(t *testing.T) {
 		addr string
 		port int
 	}{
-		{"10.0.0.12", 2381},  // etcd
-		{"10.100.0.7", 5432}, // another container on the Incus bridge
-		{"10.0.0.20", 22},    // another cluster host
+		{"10.0.0.12", 2381}, // etcd
+		{"10.0.0.20", 22},   // another cluster host
+		{"192.168.66.5", 22},
 	} {
 		a, _, ok, reason := tetragonAlertDecision(containerTCPLine(t, pid, started, dst.addr, dst.port), cfg)
 		if !ok {
@@ -94,6 +94,28 @@ func TestContainerClusterConnectStillAlerts(t *testing.T) {
 		}
 		if a.Labels["layer"] != "container" || a.Labels["container"] != "abdou2" {
 			t.Fatalf("container -> %s:%d lost attribution: %v", dst.addr, dst.port, a.Labels)
+		}
+	}
+}
+
+func TestContainerBridgeTrafficIsClassified(t *testing.T) {
+	root, pid, started := fakeContainerProc(t)
+	old := procRoot
+	procRoot = root
+	defer func() { procRoot = old }()
+
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+	for _, dst := range []struct {
+		addr string
+		port int
+	}{
+		{"10.100.0.7", 40001}, // peer instance on the Incus bridge
+		{"172.17.0.5", 5432},  // docker0 peer
+		{"127.0.0.1", 8000},   // the instance itself
+	} {
+		if _, _, ok, reason := tetragonAlertDecision(containerTCPLine(t, pid, started, dst.addr, dst.port), cfg); ok || reason != "container_bridge" {
+			t.Fatalf("container -> %s:%d: ok=%v reason=%q, want container_bridge", dst.addr, dst.port, ok, reason)
 		}
 	}
 }

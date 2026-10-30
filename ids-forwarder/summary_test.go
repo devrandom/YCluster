@@ -137,6 +137,13 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "nat_sync",
 		},
 		{
+			name:   "zulip analytics cron",
+			binary: "/bin/bash",
+			args:   `-c "   cd /home/zulip/deployments/current/ && ./manage.py update_analytics_counts >/dev/null"`,
+			parent: "/usr/sbin/cron",
+			reason: "app_cron",
+		},
+		{
 			name:   "apt refresh",
 			binary: "/usr/bin/apt-get",
 			args:   "-o DPkg::Lock::Timeout=300 update",
@@ -202,6 +209,9 @@ func TestRoutineExecKeepsUsefulCommands(t *testing.T) {
 		{"/usr/bin/apt-get", "install update-manager", "/usr/bin/sudo"},
 		{"/usr/bin/apt-get", "remove nginx", "/usr/bin/sudo"},
 		{"/usr/bin/dpkg", "-i /tmp/pkg.deb", "/usr/bin/apt-get"},
+		{"/bin/bash", `-c " cd /home/zulip/deployments/current/ && ./manage.py shell >/dev/null"`, "/usr/sbin/cron"},
+		{"/bin/bash", `-c " cd /home/zulip/deployments/current/ && ./manage.py createsuperuser"`, "/usr/sbin/cron"},
+		{"/bin/bash", `-c " cd /home/zulip/deployments/current/ && ./manage.py export --help"`, "/usr/sbin/cron"},
 		{"/bin/sh", `-c "git-upload-pack '/srv/git/project.git'"`, "/usr/bin/runc"},
 		{"/bin/sh", `-c "mountpoint -q /mnt/data"`, "/usr/bin/bash"},
 		{"/usr/bin/incus", "file push gw1/etc/hosts /tmp/hosts", "/usr/bin/python3"},
