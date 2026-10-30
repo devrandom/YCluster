@@ -12,7 +12,8 @@ Subcommands:
   --stop    Tell the daemon to stop (via control socket).
   --status  Print 'running' or 'not running'.
   --check   Dry-run checksum compare against the cluster: list files whose
-            content differs (exit 1 if any) and report daemon state.
+            content differs (timestamps ignored; exit 1 if any) and report
+            daemon state.
   --once    Do a single sync, no daemon.
   --daemon  Long-running watcher (debounces events, then rsyncs). Exits
             cleanly on SIGTERM/SIGINT. Not meant to be called directly —
@@ -53,7 +54,11 @@ DEST = os.environ.get('YC_SYNC_HOST', 's1.yc') + ':/opt/infrastructure/'
 # stay as symlinks. .watchignore is the source of truth for both rsync and the
 # daemon's debounce, so they cannot drift.
 RSYNC_OPTS = ['-az', '--no-owner', '--no-group', '--copy-unsafe-links', f'--exclude-from={REPO / ".watchignore"}']
-RSYNC_CHECK_OPTS = ['-naci', '--no-owner', '--no-group', '--copy-unsafe-links', f'--exclude-from={REPO / ".watchignore"}']
+# --no-times: -a includes -t, which makes rsync report (and would update)
+# files whose content matches but whose mtime differs. --check is a
+# content comparison, so ignore timestamps there.
+RSYNC_CHECK_OPTS = ['-naci', '--no-owner', '--no-group', '--copy-unsafe-links',
+                    '--no-times', f'--exclude-from={REPO / ".watchignore"}']
 
 # Match a path component exactly (.git, tmp, ...) at any depth: anchored at
 # either start-of-path or after a slash, and either end-of-path or before a
@@ -299,7 +304,8 @@ Commands:
             Log: {LOG}
   --stop    Tell the daemon to stop (via control socket).
   --check   Dry-run checksum compare against the cluster: list files whose
-            content differs (exit 1 if any), and report if the daemon is up.
+            content differs (timestamps ignored; exit 1 if any), and report
+            if the daemon is up.
   --once    Do a single sync and exit (no daemon).
   --status  Print 'running' or 'not running'.
 """
