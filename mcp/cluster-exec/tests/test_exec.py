@@ -141,9 +141,10 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         args = captured[0]
         self.assertEqual(args[0], "ssh")
-        self.assertEqual(args[1], "dummy-bastion")
-        self.assertEqual(args[2], "dummy-cmd")
-        self.assertNotIn("ssh localhost", args[2])
+        self.assertEqual(args[-2], "dummy-bastion")
+        self.assertEqual(args[-1], "dummy-cmd")
+        self.assertIn("SetEnv=CE_SESSION=abcd1234", args)
+        self.assertNotIn("ssh localhost", args[-1])
 
     def test_remote_target_wraps_inner_ssh(self):
         proc = _FakeProcess(stdout_lines=[b"ok\n"], stderr_lines=[], exit_code=0)
@@ -172,8 +173,9 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         args = captured[0]
         self.assertEqual(args[0], "ssh")
-        self.assertEqual(args[1], "dummy-bastion")
-        self.assertEqual(args[2], "ssh app1 'echo hello world'")
+        self.assertEqual(args[-2], "dummy-bastion")
+        self.assertEqual(args[-1], "ssh app1 'echo hello world'")
+        self.assertIn("SetEnv=CE_SESSION=abcd1234", args)
 
     def test_remote_target_with_user_prefixes_inner_ssh(self):
         """`user="admin"` produces `ssh admin@app1 ...` on the inner hop.
@@ -209,8 +211,9 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         args = captured[0]
         self.assertEqual(args[0], "ssh")
-        self.assertEqual(args[1], "dummy-bastion")
-        self.assertEqual(args[2], "ssh admin@app1 'echo hello world'")
+        self.assertEqual(args[-2], "dummy-bastion")
+        self.assertEqual(args[-1], "ssh admin@app1 'echo hello world'")
+        self.assertIn("SetEnv=CE_SESSION=abcd1234", args)
 
     def test_localhost_skips_inner_ssh_with_user(self):
         """`user` is a no-op for `hostname="localhost"` — the command runs
@@ -242,8 +245,9 @@ class ExecTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         args = captured[0]
         self.assertEqual(args[0], "ssh")
-        self.assertEqual(args[1], "dummy-bastion")
-        self.assertEqual(args[2], "dummy-cmd")
+        self.assertEqual(args[-2], "dummy-bastion")
+        self.assertEqual(args[-1], "dummy-cmd")
+        self.assertIn("SetEnv=CE_SESSION=abcd1234", args)
 
     def test_stderr_tagged(self):
         proc = _FakeProcess(

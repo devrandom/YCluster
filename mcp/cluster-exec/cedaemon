@@ -20,6 +20,10 @@
 #                          Liveness and stop both use the network port
 #                          instead.
 #   tmp/cluster-exec.log   stdout/stderr of the server
+#   tmp/cluster-exec.state.json
+#                          persisted background-session registry (mode
+#                          0600; override with CE_STATE_PATH). Kept across
+#                          restarts so `status` does not forget sessions.
 #
 # Env vars (read by the server itself, not by this script — set them before
 # invoking --start):
@@ -34,6 +38,9 @@
 #                          $REPO/.envrc)
 #   CE_LOG_PATH            JSONL log path for run output (default
 #                          tmp/cluster.log)
+#   CE_STATE_PATH          persisted background-session registry (default
+#                          tmp/cluster-exec.state.json, mode 0600). Reloaded
+#                          on start so status survives daemon restarts.
 #   CE_TIMEOUT_S           hard timeout per backgrounded run, seconds
 #                          (default 1800)
 #   CE_AUTO_BG_TIMEOUT_S   auto-bg threshold, seconds (default 10; bump

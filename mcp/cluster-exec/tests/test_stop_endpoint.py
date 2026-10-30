@@ -70,8 +70,13 @@ class StopEndpointAuthTests(unittest.TestCase):
                 )
             )
         self.assertEqual(resp.status_code, 200)
-        # Backgrounded session was killed before SIGTERM was scheduled.
-        self.assertEqual(exec_mod.list_backgrounded(), [])
+        # Backgrounded session was terminated before SIGTERM was scheduled,
+        # but its terminal status is retained for the next daemon process.
+        self.assertIn("stop00001", exec_mod.list_backgrounded())
+        bg = exec_mod.get_backgrounded("stop00001")
+        self.assertIsNotNone(bg)
+        self.assertIsNotNone(bg.finished_at)
+        self.assertEqual(bg.finished_reason, "stopped-with-daemon")
         self.assertTrue(fake_proc.terminate.called)
         # SIGTERM was scheduled (not yet fired) — call_later's callback
         # would call os.kill(pid, SIGTERM).

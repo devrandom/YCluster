@@ -159,6 +159,18 @@ kill   → terminate by session_id
 
 Backgrounded runs are still subject to `timeout_s` (the hard timeout). The `timeout_watcher` is registered when a run backgrounds; when it fires, the proc + readers are terminated and the session is marked exited in the registry.
 
+The registry is persisted to `$CE_STATE_PATH` (default
+`tmp/cluster-exec.state.json`, mode 0600) on every mutation and reloaded
+when the daemon starts. A daemon restart therefore does not erase `status`:
+finished runs keep their exit state, and runs that were still in flight are
+tagged `orphaned-by-restart`. `tail -s <id>` keeps working from the JSONL
+log, and `kill` finds a recovered local ssh child via its
+`CE_SESSION=<id>` argv marker, then sends SIGTERM and escalates to SIGKILL.
+`cedaemon --stop` terminates live children
+but retains their terminal records, so `--restart` keeps the history too.
+There is no automatic reaper yet; the state file is small and can be
+deleted when it gets noisy.
+
 ## Ansible
 
 Run playbooks via `hostname="localhost"` to skip the inner ssh and land directly on the bastion (which is also `$YC_SYNC_HOST` and typically the dev-sync host). `/etc/ansible` is mounted on every core node — the entry has it too:
@@ -181,6 +193,7 @@ run(command="cd /etc/ansible && ansible-playbook admin/install-ycluster-package.
 | `CE_BEARER_PATH` | `~/.config/cluster-exec/bearer` | Bearer token file (mode 0600). Created on first start; survives restarts. |
 | `CE_ENVRC` | `$REPO/.envrc` | `.envrc` file that `--start` auto-appends `export CE_BEARER=…` to. |
 | `CE_LOG_PATH` | `tmp/cluster.log` | JSONL log path (relative to MCP server CWD). |
+| `CE_STATE_PATH` | `$CE_LOG_PATH` directory + `cluster-exec.state.json` | Persisted background-session registry (mode 0600). Reloaded on daemon start so `status` survives restarts. |
 | `CE_TIMEOUT_S` | `1800` | Per-call hard timeout in seconds on backgrounded runs (SIGTERM, then SIGKILL after 2s). Set to 0 to disable. Must be greater than `CE_AUTO_BG_TIMEOUT_S` when enabled. |
 | `CE_AUTO_BG_TIMEOUT_S` | `10` | Auto-bg threshold in seconds — `run` tool calls return with `BACKGROUNDED session=<id>` after this many seconds of foreground time. Bump (e.g. `120`) for known-long commands; set to 0 to disable auto-backgrounding (foreground blocks until `timeout_s`). |
 | `CE_PROGRESS_INTERVAL_S` | `1.0` | Progress notification cadence in seconds. |
@@ -196,7 +209,7 @@ Run the tests:
 
 ```bash
 cd mcp/cluster-exec
-PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_log tests.test_truncate tests.test_ratelimit tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema tests.test_stop_endpoint
+PYTHONPATH=src python3 -m unittest tests.test_exec tests.test_bg_registry tests.test_state tests.test_log tests.test_truncate tests.test_ratelimit tests.test_cli tests.test_auth tests.test_file_transfer tests.test_schema tests.test_stop_endpoint
 ```
 
 Smoke-test the daemon (then trigger `run` from opencode):

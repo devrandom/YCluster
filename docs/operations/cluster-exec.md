@@ -55,6 +55,15 @@ disconnects mid-`run`, the SSH proc is still registered as a backgrounded
 session — find it with `status` (no args) or `tail -s <id>` and recover with
 `kill`, or it gets cleaned up by the `timeout_s` watcher or `cedaemon --stop`.
 
+The background-session registry is persisted to `$CE_STATE_PATH` (default
+`tmp/cluster-exec.state.json`, mode 0600) and reloaded on daemon start, so a
+restart does not erase `status`. Restored in-flight sessions are tagged
+`orphaned-by-restart`; `kill` finds the surviving local ssh child by its
+`CE_SESSION=<id>` argv marker, then SIGTERMs it and escalates to SIGKILL.
+`cedaemon --stop` terminates live children but keeps
+their terminal records for the next daemon process. There is no automatic
+reaper yet.
+
 ## Session visibility
 
 Sessions are keyed by their `session_id`, and by-ID access is not scoped to

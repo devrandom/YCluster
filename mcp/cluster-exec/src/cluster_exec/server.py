@@ -5,6 +5,7 @@ import os
 import secrets
 import signal
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,22 @@ _TAIL_STATUS_RECOMMENDED_SLEEP_S = _env_float(
     "CE_TAIL_STATUS_RECOMMENDED_SLEEP_S", 10.0
 )
 
+_STATE_PATH = Path(
+    os.environ.get(
+        "CE_STATE_PATH",
+        str(Path(os.environ.get("CE_LOG_PATH", "tmp/cluster.log")).parent / "cluster-exec.state.json"),
+    )
+)
+
+
+@asynccontextmanager
+async def _lifespan(_server: Any):
+    # Restore status across daemon restarts before accepting tool calls.
+    exec.init_state(_STATE_PATH)
+    await exec.start_recovered_watchers()
+    yield
+
+
 SERVER = MCPServer(
     "cluster-exec",
     instructions=(
@@ -117,7 +134,12 @@ SERVER = MCPServer(
         "disconnects mid-`run` (e.g. the turn is interrupted), the SSH "
         "proc is also registered as a backgrounded session \u2014 the "
         "response is gone, so find it with `status` (no args) and "
-        "recover with `tail`/`kill`. Full "
+        "recover with `tail`/`kill`. The status registry is persisted to "
+        "`$CE_STATE_PATH` (default `tmp/cluster-exec.state.json`, mode "
+        "0600) and reloaded on daemon start; sessions recovered that way "
+        "are tagged `orphaned-by-restart` and can still be inspected with "
+        "`status`/`tail` and terminated with `kill` (which finds the "
+        "surviving local ssh child by its argv marker). Full "
         "`run` output is logged to the same JSONL file; the returned "
         "text is the head/tail-truncated merged stream with `[stderr]` "
         "tags on stderr lines. `put` and `get` are foreground only (no "
@@ -137,6 +159,7 @@ SERVER = MCPServer(
         resource_server_url=AnyHttpUrl(_URL_BASE),
     ),
     token_verifier=auth.StaticTokenVerifier(_BEARER_TOKEN),
+    lifespan=_lifespan,
 )
 
 
@@ -691,17 +714,28 @@ async def kill(
 
 
 def _session_state(bg, log_path: Path) -> str:
-    elapsed = time.monotonic() - bg.started
-    rc = bg.proc.returncode
+    elapsed = exec.elapsed_seconds(bg)
+    rc = exec.returncode(bg)
     line_count = sum(
         1 for _ in log.tail(log_path, n=10_000_000, session=bg.session_id) if _.get("event") == "line"
     )
-    if rc is None:
+    if bg.finished_at is not None:
+        if rc is None:
+            state = f"exited exit=unknown elapsed={elapsed:.1f}s lines={line_count}"
+            if bg.finished_reason:
+                state += f" reason={bg.finished_reason}"
+        else:
+            state = f"exited exit={rc} elapsed={elapsed:.1f}s lines={line_count}"
+            if bg.finished_reason:
+                state += f" reason={bg.finished_reason}"
+    elif rc is not None:
+        state = f"exited exit={rc} elapsed={elapsed:.1f}s lines={line_count}"
+    else:
         remaining = max(0.0, bg.timeout_s - elapsed)
         state = f"running elapsed={elapsed:.1f}s lines={line_count} hard_timeout_in={remaining:.1f}s"
-    else:
-        state = f"exited exit={rc} elapsed={elapsed:.1f}s lines={line_count}"
-    if bg.orphaned:
+    if bg.recovered and bg.finished_at is None:
+        state = "orphaned-by-restart " + state
+    elif bg.orphaned and not bg.recovered:
         state = "orphaned-by-disconnect " + state
     return state
 
@@ -729,6 +763,7 @@ async def status(
     ctx: Context = None,  # type: ignore[assignment]
 ) -> list[TextContent]:
     log.init(_LOG_PATH)
+    await exec.start_recovered_watchers()
     if session_id is not None and not session_id:
         return [TextContent(type="text", text="ERROR: session_id must not be empty when provided")]
     refused = _poll_allowed("status", session_id)
@@ -766,6 +801,11 @@ async def status(
 
 
 def main() -> None:
+    # The MCP lifespan runs per client session, so load persistent status
+    # exactly once here at daemon start. `_lifespan` also calls this as a
+    # fallback, but the loader is idempotent and will not clobber live
+    # in-process session handles on reconnect.
+    exec.init_state(_STATE_PATH)
     host = os.environ.get("CE_HTTP_HOST", "127.0.0.1")
     port = _env_int("CE_HTTP_PORT", 4003)
     path = os.environ.get("CE_HTTP_PATH", "/mcp")
@@ -828,7 +868,9 @@ async def _stop(request: Request) -> JSONResponse:
     token = auth_header[len("Bearer "):] if auth_header.startswith("Bearer ") else ""
     if not token or not secrets.compare_digest(token, _BEARER_TOKEN):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    killed = exec.kill_all_backgrounded()
+    # Terminate live SSH children but keep terminal records in the state
+    # file: the next daemon process must still be able to answer `status`.
+    killed = exec.kill_all_backgrounded(retain=True)
     # Defer SIGTERM until after the response is flushed.
     loop = asyncio.get_running_loop()
     loop.call_later(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM))

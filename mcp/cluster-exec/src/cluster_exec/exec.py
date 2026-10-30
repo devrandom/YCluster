@@ -1,5 +1,12 @@
 import asyncio
+import json
+import os
+import re
 import shlex
+import signal
+import sys
+import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -18,11 +25,23 @@ class _Backgrounded:
     command: str
     started: float
     timeout_s: float
-    proc: asyncio.subprocess.Process
-    readers: tuple[asyncio.Task, asyncio.Task]
+    proc: asyncio.subprocess.Process | None = None
+    readers: tuple[asyncio.Task, asyncio.Task] | None = None
     timeout_watcher: asyncio.Task | None = None
     orphaned: bool = False
     finished_at: float | None = None
+    # Wall-clock timestamps make the registry snapshot meaningful across a
+    # daemon restart (monotonic clocks are process-independent on Linux, but
+    # they reset on reboot). `started`/`finished_at` remain monotonic for
+    # live timeout arithmetic.
+    started_wall: float | None = None
+    finished_wall: float | None = None
+    finished_reason: str | None = None
+    exit_code: int | None = None
+    ssh_pid: int | None = None
+    # Restored from `CE_STATE_PATH` after a daemon restart. No live process
+    # handle or reader tasks survive in the new process.
+    recovered: bool = False
     # `principal` ties the session to the client that started it (the MCP
     # session ID from `mcp-session-id`). `list_backgrounded` filters by it
     # so the no-arg `status` listing only shows the caller's own runs.
@@ -36,6 +55,194 @@ class _Backgrounded:
 
 
 _BACKGROUNDED: dict[str, _Backgrounded] = {}
+_STATE_VERSION = 1
+_STATE_PATH: Path | None = None
+_STATE_LOADED = False
+_STATE_LOCK = threading.RLock()
+_RECOVERED_POLL_S = 1.0
+_LOCAL_SESSION_MARKER = "CE_SESSION"
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def init_state(path: Path, *, force: bool = False) -> None:
+    """Load the persisted background-session registry from `path`.
+
+    Idempotent per process: the MCP lifespan runs once per client session,
+    not once per daemon process, so repeat calls must not clear live entries
+    and demote their `asyncio.Process` handles to recovered stubs. Call
+    `force=True` only from tests that explicitly simulate a process restart.
+    Missing state is normal (first start). A malformed snapshot is reported
+    and ignored rather than taking the daemon down; the next mutation
+    rewrites it.
+    """
+    global _STATE_PATH, _STATE_LOADED
+    path = Path(path)
+    if _STATE_LOADED and not force and path == _STATE_PATH:
+        return
+    _STATE_PATH = path
+    _STATE_LOADED = True
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(f"cluster-exec: could not read state {path}: {exc}", file=sys.stderr)
+        # A transient read failure should be retried by the next lifespan
+        # rather than blocking recovery for the rest of the process.
+        _STATE_LOADED = False
+        return
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(f"cluster-exec: ignoring malformed state {path}: {exc}", file=sys.stderr)
+        return
+    if not isinstance(data, dict) or data.get("v") != _STATE_VERSION:
+        print(
+            f"cluster-exec: ignoring state {path} with unsupported version",
+            file=sys.stderr,
+        )
+        return
+    records = data.get("sessions")
+    if not isinstance(records, list):
+        print(f"cluster-exec: ignoring state {path} without a sessions list", file=sys.stderr)
+        return
+
+    restored: dict[str, _Backgrounded] = {}
+    now_mono = time.monotonic()
+    now_wall = time.time()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        session_id = record.get("session_id")
+        target_host = record.get("target_host")
+        command = record.get("command")
+        if not (
+            isinstance(session_id, str)
+            and _SESSION_ID_RE.fullmatch(session_id)
+            and isinstance(target_host, str)
+            and target_host
+            and isinstance(command, str)
+            and command
+        ):
+            continue
+        try:
+            started_wall = float(record["started_wall"])
+            timeout_s = float(record["timeout_s"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        elapsed = max(0.0, now_wall - started_wall)
+        finished_wall_raw = record.get("finished_wall")
+        finished_wall = (
+            float(finished_wall_raw)
+            if isinstance(finished_wall_raw, (int, float))
+            else None
+        )
+        finished_at = None
+        if finished_wall is not None:
+            finished_at = now_mono - max(0.0, now_wall - finished_wall)
+        exit_code_raw = record.get("exit_code")
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else None
+        ssh_pid_raw = record.get("ssh_pid")
+        ssh_pid = ssh_pid_raw if isinstance(ssh_pid_raw, int) else None
+        principal_raw = record.get("principal")
+        principal = principal_raw if isinstance(principal_raw, str) else None
+        reason_raw = record.get("finished_reason")
+        finished_reason = reason_raw if isinstance(reason_raw, str) else None
+        restored[session_id] = _Backgrounded(
+            session_id=session_id,
+            target_host=target_host,
+            command=command,
+            started=now_mono - elapsed,
+            timeout_s=timeout_s,
+            proc=None,
+            readers=None,
+            timeout_watcher=None,
+            orphaned=bool(record.get("orphaned", False)),
+            finished_at=finished_at,
+            started_wall=started_wall,
+            finished_wall=finished_wall,
+            finished_reason=finished_reason,
+            exit_code=exit_code,
+            ssh_pid=ssh_pid,
+            recovered=True,
+            principal=principal,
+        )
+    with _STATE_LOCK:
+        _BACKGROUNDED.clear()
+        _BACKGROUNDED.update(restored)
+
+
+def _started_wall(bg: _Backgrounded) -> float:
+    if bg.started_wall is not None:
+        return bg.started_wall
+    return time.time() - max(0.0, time.monotonic() - bg.started)
+
+
+def elapsed_seconds(bg: _Backgrounded) -> float:
+    return max(0.0, time.time() - _started_wall(bg))
+
+
+def returncode(bg: _Backgrounded) -> int | None:
+    if bg.proc is not None and bg.proc.returncode is not None:
+        return bg.proc.returncode
+    return bg.exit_code
+
+
+def _snapshot_locked() -> list[dict]:
+    sessions: list[dict] = []
+    for bg in _BACKGROUNDED.values():
+        rc = returncode(bg)
+        ssh_pid = bg.ssh_pid
+        if bg.proc is not None:
+            proc_pid = getattr(bg.proc, "pid", None)
+            if isinstance(proc_pid, int):
+                ssh_pid = proc_pid
+        sessions.append(
+            {
+                "session_id": bg.session_id,
+                "target_host": bg.target_host,
+                "command": bg.command,
+                "started_wall": _started_wall(bg),
+                "timeout_s": bg.timeout_s,
+                "orphaned": bg.orphaned,
+                "finished_wall": bg.finished_wall,
+                "finished_reason": bg.finished_reason,
+                "exit_code": rc,
+                "ssh_pid": ssh_pid,
+                "principal": bg.principal,
+            }
+        )
+    return sessions
+
+
+def _save_state() -> None:
+    path = _STATE_PATH
+    if path is None:
+        return
+    with _STATE_LOCK:
+        payload = {"v": _STATE_VERSION, "sessions": _snapshot_locked()}
+        tmp_name: str | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=path.name + ".",
+                suffix=".tmp",
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, separators=(",", ":"))
+                f.write("\n")
+            os.replace(tmp_name, path)
+            tmp_name = None
+            os.chmod(path, 0o600)
+        except OSError as exc:
+            print(f"cluster-exec: could not write state {path}: {exc}", file=sys.stderr)
+        finally:
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
 
 
 def _visible(principal: str | None) -> Callable[["_Backgrounded"], bool]:
@@ -75,42 +282,231 @@ def kill_backgrounded(
     return _kill_unconditionally(session_id, grace_s)
 
 
-def _kill_unconditionally(session_id: str, grace_s: float = 2.0) -> bool:
-    """Terminate and remove the session without checking `principal`.
+def _kill_unconditionally(
+    session_id: str, grace_s: float = 2.0, retain: bool = False
+) -> bool:
+    """Terminate a session without checking `principal`.
 
     Used by `kill_all_backgrounded` (admin) and after we've already
-    verified the principal in `kill_backgrounded`.
+    verified the principal in `kill_backgrounded`. `retain=True` keeps a
+    terminal record (and therefore the persisted status) while still
+    terminating the process; daemon shutdown uses this so a restart does
+    not erase session history.
     """
-    bg = _BACKGROUNDED.pop(session_id, None)
+    bg = _BACKGROUNDED.get(session_id)
     if bg is None:
         return False
+    rc = returncode(bg)
+    was_finished = bg.finished_at is not None or rc is not None
     if bg.timeout_watcher is not None and not bg.timeout_watcher.done():
         bg.timeout_watcher.cancel()
         try:
             await_cancelled(bg.timeout_watcher)
         except Exception:
             pass
-    if bg.proc.returncode is None:
-        bg.proc.terminate()
-        try:
-            deadline = time.monotonic() + grace_s
-            while time.monotonic() < deadline and bg.proc.returncode is None:
-                time.sleep(0.05)
-            if bg.proc.returncode is None:
-                bg.proc.kill()
-        except Exception:
-            pass
+    if bg.proc is not None:
+        if bg.proc.returncode is None:
+            bg.proc.terminate()
+            try:
+                deadline = time.monotonic() + grace_s
+                while time.monotonic() < deadline and bg.proc.returncode is None:
+                    time.sleep(0.05)
+                if bg.proc.returncode is None:
+                    bg.proc.kill()
+            except Exception:
+                pass
+    elif not was_finished:
+        # Recovered after a daemon restart: the old asyncio Process handle
+        # is gone, but the local ssh child is still identifiable by the
+        # CE_SESSION marker in its argv. Do not discard the status record
+        # unless the child is confirmed gone or terminated.
+        pids = _local_session_pids(session_id)
+        if not pids:
+            _mark_backgrounded_finished(
+                session_id,
+                reason="process-gone-after-daemon-restart",
+            )
+            return False
+        if not _terminate_local_session(session_id, grace_s=grace_s):
+            return False
+    if retain:
+        _mark_backgrounded_finished(
+            session_id,
+            exit_code=returncode(bg),
+            reason=None if was_finished else "stopped-with-daemon",
+        )
+    else:
+        _BACKGROUNDED.pop(session_id, None)
+        _save_state()
     return True
 
 
-def kill_all_backgrounded(grace_s: float = 2.0) -> int:
-    # Snapshot keys: _kill_unconditionally mutates the dict as it pops.
+def kill_all_backgrounded(grace_s: float = 2.0, retain: bool = False) -> int:
+    # Snapshot keys: the default path mutates the dict as it pops.
     # Admin endpoint — bypasses principal filtering on purpose.
     count = 0
     for sid in list(_BACKGROUNDED.keys()):
-        if _kill_unconditionally(sid, grace_s=grace_s):
-            count += 1
+        bg = _BACKGROUNDED.get(sid)
+        was_live = (
+            bg is not None
+            and bg.finished_at is None
+            and returncode(bg) is None
+        )
+        if _kill_unconditionally(sid, grace_s=grace_s, retain=retain):
+            if not retain or was_live:
+                count += 1
     return count
+
+
+def _local_session_pids(session_id: str) -> list[int]:
+    """Return local PIDs whose argv carries this session's marker."""
+    needle = f"{_LOCAL_SESSION_MARKER}={session_id}".encode()
+    pids: list[int] = []
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        return pids
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = Path("/proc", entry.name, "cmdline").read_bytes()
+            except OSError:
+                continue
+            if needle in cmdline:
+                pids.append(int(entry.name))
+    return pids
+
+
+def _wait_for_local_session_exit(session_id: str, timeout_s: float) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        if not _local_session_pids(session_id):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _terminate_local_session(session_id: str, grace_s: float = 2.0) -> bool:
+    """SIGTERM, wait, then SIGKILL a recovered local ssh child.
+
+    Returns True only when no process carrying the session marker remains.
+    """
+    pids = _local_session_pids(session_id)
+    if not pids:
+        return False
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            print(
+                f"cluster-exec: could not SIGTERM recovered session {session_id} pid {pid}: {exc}",
+                file=sys.stderr,
+            )
+    if _wait_for_local_session_exit(session_id, grace_s):
+        return True
+    for pid in _local_session_pids(session_id):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            print(
+                f"cluster-exec: could not SIGKILL recovered session {session_id} pid {pid}: {exc}",
+                file=sys.stderr,
+            )
+    return _wait_for_local_session_exit(session_id, 1.0)
+
+
+async def _find_local_session_pid(session_id: str) -> int | None:
+    pattern = f"{_LOCAL_SESSION_MARKER}={session_id}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pgrep",
+            "-f",
+            pattern,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"cluster-exec: could not inspect recovered session {session_id}: {exc}", file=sys.stderr)
+        return None
+    stdout, _ = await proc.communicate()
+    for raw in stdout.decode("utf-8", errors="replace").splitlines():
+        try:
+            return int(raw.strip())
+        except ValueError:
+            continue
+    return None
+
+
+async def _recovered_watcher(session_id: str) -> None:
+    """Track a session restored from disk until it exits or hits its timeout."""
+    try:
+        while True:
+            bg = _BACKGROUNDED.get(session_id)
+            if bg is None or bg.finished_at is not None:
+                return
+            pid = await _find_local_session_pid(session_id)
+            bg = _BACKGROUNDED.get(session_id)
+            if bg is None or bg.finished_at is not None:
+                return
+            if pid is None:
+                _mark_backgrounded_finished(
+                    session_id,
+                    reason="process-gone-after-daemon-restart",
+                )
+                return
+            if bg.ssh_pid != pid:
+                bg.ssh_pid = pid
+                _save_state()
+            elapsed = elapsed_seconds(bg)
+            remaining = (
+                max(0.0, bg.timeout_s - elapsed) if bg.timeout_s > 0 else None
+            )
+            if remaining is not None and remaining <= 0:
+                if not _local_session_pids(session_id):
+                    _mark_backgrounded_finished(
+                        session_id,
+                        reason="process-gone-after-daemon-restart",
+                    )
+                    return
+                terminated = await asyncio.to_thread(
+                    _terminate_local_session,
+                    session_id,
+                )
+                if terminated:
+                    _mark_backgrounded_finished(
+                        session_id,
+                        reason="hard-timeout-after-daemon-restart",
+                    )
+                    return
+                # Termination was not confirmed. Keep the record and retry
+                # on the next poll rather than declaring a live process dead.
+            sleep_s = _RECOVERED_POLL_S
+            if remaining is not None:
+                sleep_s = min(sleep_s, remaining)
+            await asyncio.sleep(max(0.05, sleep_s))
+    except asyncio.CancelledError:
+        return
+
+
+async def start_recovered_watchers() -> None:
+    """Start poll loops for sessions restored from the state file.
+
+    Idempotent; called from the MCP lifespan and from `status` so a direct
+    tool invocation in tests or an embedded server still gets recovery.
+    """
+    for bg in list(_BACKGROUNDED.values()):
+        if not bg.recovered or bg.finished_at is not None:
+            continue
+        if bg.timeout_watcher is not None and not bg.timeout_watcher.done():
+            continue
+        bg.timeout_watcher = asyncio.create_task(_recovered_watcher(bg.session_id))
 
 
 def await_cancelled(task: asyncio.Task) -> None:
@@ -135,6 +531,8 @@ def register_backgrounded(
     orphaned: bool = False,
     principal: str | None = None,
 ) -> None:
+    proc_pid = getattr(proc, "pid", None)
+    ssh_pid = proc_pid if isinstance(proc_pid, int) else None
     _BACKGROUNDED[session_id] = _Backgrounded(
         session_id=session_id,
         target_host=target_host,
@@ -145,14 +543,43 @@ def register_backgrounded(
         readers=readers,
         timeout_watcher=timeout_watcher,
         orphaned=orphaned,
+        started_wall=time.time() - max(0.0, time.monotonic() - started),
+        ssh_pid=ssh_pid,
         principal=principal,
     )
+    _save_state()
 
 
-def _mark_backgrounded_finished(session_id: str) -> None:
+def _mark_backgrounded_finished(
+    session_id: str,
+    *,
+    exit_code: int | None = None,
+    reason: str | None = None,
+) -> None:
     bg = _BACKGROUNDED.get(session_id)
-    if bg is not None and bg.finished_at is None:
+    if bg is None:
+        return
+    if bg.finished_at is None:
         bg.finished_at = time.monotonic()
+        bg.finished_wall = time.time()
+    if exit_code is not None:
+        bg.exit_code = exit_code
+    if reason is not None and bg.finished_reason is None:
+        bg.finished_reason = reason
+    _save_state()
+
+
+def _run_ssh_argv(bastion: str, session_id: str, remote_command: str) -> list[str]:
+    # The marker is local argv only (ssh's SetEnv option), so pgrep/pkill can
+    # find a surviving child after the daemon that spawned it has exited.
+    # It does not alter the command sent to the target.
+    return [
+        "ssh",
+        "-o",
+        f"SetEnv={_LOCAL_SESSION_MARKER}={session_id}",
+        bastion,
+        remote_command,
+    ]
 
 
 async def run(
@@ -181,23 +608,16 @@ async def run(
         )
 
     if target_host == "localhost":
-        proc = await asyncio.create_subprocess_exec(
-            "ssh",
-            bastion,
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        ssh_argv = _run_ssh_argv(bastion, session_id, command)
     else:
         ssh_target = f"{user}@{target_host}" if user else target_host
         inner = f"ssh {shlex.quote(ssh_target)} {shlex.quote(command)}"
-        proc = await asyncio.create_subprocess_exec(
-            "ssh",
-            bastion,
-            inner,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        ssh_argv = _run_ssh_argv(bastion, session_id, inner)
+    proc = await asyncio.create_subprocess_exec(
+        *ssh_argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
     assert proc.stdout is not None and proc.stderr is not None
 
     stdout_buf: list[tuple[float, str]] = []
@@ -267,10 +687,17 @@ async def run(
         asyncio.create_task(asyncio.sleep(timeout_s)) if timeout_s > 0 else None
     )
 
-    async def finalize_backgrounded() -> None:
+    async def finalize_backgrounded(
+        *, exit_code: int | None = None, reason: str | None = None
+    ) -> None:
         # Keep the session in the registry so `status` can still show its
-        # terminal state; `kill` (or a server restart) removes it.
-        _mark_backgrounded_finished(session_id)
+        # terminal state; `kill` removes it explicitly, while daemon
+        # shutdown retains a terminal record for the next process.
+        _mark_backgrounded_finished(
+            session_id,
+            exit_code=exit_code,
+            reason=reason,
+        )
         cancel.set()
         watcher_task.cancel()
         try:
@@ -306,13 +733,16 @@ async def run(
                 pass
             if wait_task in done:
                 # Proc exited naturally before the hard timeout.
-                await finalize_backgrounded()
+                await finalize_backgrounded(exit_code=proc.returncode)
                 return
         # Hard timeout fired (or remaining <= 0). Proc is still alive
         # here (else wait_task would have been in done).
         if proc.returncode is None:
             await terminate_proc()
-        await finalize_backgrounded()
+        await finalize_backgrounded(
+            exit_code=proc.returncode,
+            reason="hard-timeout",
+        )
 
     race_set: list[asyncio.Task] = [wait_task]
     if bg_task is not None:
