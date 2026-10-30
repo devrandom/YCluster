@@ -38,11 +38,12 @@ CONTAINER="${CONTAINER:-{{ ds41_moet_container }}}"
 PORT="${PORT:-{{ ds41_moet_port }}}"
 SERVED_NAME="${SERVED_NAME:-{{ ds41_moet_served_name }}}"
 CACHE_DIR="${CACHE_DIR:-{{ ds41_moet_cache_dir }}}"
+DEEPGEMM_CACHE_DIR="${DEEPGEMM_CACHE_DIR:-{{ ds41_moet_deep_gemm_cache_dir }}}"
 SHM="${SHM:-{{ ds41_moet_shm }}}"
 MEM="${MEM:-{{ ds41_moet_memory }}}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
 SEQ="${SEQ:-8}"
-GPU_UTIL="${GPU_UTIL:-0.94}"
+GPU_UTIL="${GPU_UTIL:-0.92}"
 BATCH_TOKENS="${BATCH_TOKENS:-4096}"
 LONG_PREFILL_TOKENS="${LONG_PREFILL_TOKENS:-0}"
 PREFILL_INTERVAL="${PREFILL_INTERVAL:-1}"
@@ -67,13 +68,25 @@ podman image exists "$IMAGE" \
 # autotune on first start, so seed the host directory from the image once and
 # then keep it mounted: FlashInfer autotune, DeepGEMM and Triton caches all
 # live under /root/.cache and must survive container recreation.
-mkdir -p "$CACHE_DIR"
-if [ ! -e "$CACHE_DIR/.seeded-from-image" ]; then
-  echo "seeding $CACHE_DIR from the image's /root/.cache ..."
-  podman run --rm --entrypoint /bin/sh "$IMAGE" -c 'tar -C /root/.cache -cf - .' \
-    | tar -C "$CACHE_DIR" -xf -
-  touch "$CACHE_DIR/.seeded-from-image"
-fi
+seed_cache() {
+  host_dir="$1"
+  image_dir="$2"
+  mkdir -p "$host_dir"
+  [ -e "$host_dir/.seeded-from-image" ] && return 0
+  echo "seeding $host_dir from the image's $image_dir ..."
+  # Not every revision ships both caches; a missing image directory must
+  # leave the host cache empty rather than aborting the launch.
+  if podman run --rm --entrypoint /bin/sh "$IMAGE" -c "[ -d $image_dir ]"; then
+    podman run --rm --entrypoint /bin/sh "$IMAGE" -c "tar -C $image_dir -cf - ." \
+      | tar -C "$host_dir" -xf -
+  else
+    echo "  (image ships no $image_dir)"
+  fi
+  touch "$host_dir/.seeded-from-image"
+}
+
+seed_cache "$CACHE_DIR" /root/.cache
+seed_cache "$DEEPGEMM_CACHE_DIR" /root/.deep_gemm
 
 dev_args=()
 for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
@@ -97,7 +110,13 @@ podman run -d --name "$CONTAINER" \
   -e VLLM_MOET_SPARSE_MLA_LDG=1 \
   -e VLLM_MOET_TARGET_LM_HEAD_MXFP8=1 \
   -e VLLM_MOET_P2P_AR=1 \
-  -e VLLM_MOET_P2P_AR_FUSED_MAX_ROWS=16 \
+  -e VLLM_MOET_P2P_AR_FUSED_MAX_ROWS=8 \
+  -e VLLM_MOET_P2P_AG=0 \
+  -e VLLM_MOET_DFLASH_PREP_GROUPS=1 \
+  -e VLLM_MOET_CANDIDATE_DET_TOPK=1 \
+  -e VLLM_MOET_SWA_DECODE_BUILD=1 \
+  -e VLLM_MOET_MOE_TOPKSUM_ADD=1 \
+  -e VLLM_MOET_SWA_DRAFT_BUILD=1 \
   -e VLLM_MOET_ENGRAM_DISK=1 \
   -e VLLM_MOET_ENGRAM_DISK_THREADS=16 \
   -e NCCL_P2P_DISABLE=0 \
@@ -107,6 +126,7 @@ podman run -d --name "$CONTAINER" \
   -e TRANSFORMERS_OFFLINE=1 \
   -v "$MODEL_HOST":/models:ro \
   -v "$CACHE_DIR":/root/.cache \
+  -v "$DEEPGEMM_CACHE_DIR":/root/.deep_gemm \
   "$IMAGE" \
   /models \
   --served-model-name "$SERVED_NAME" \

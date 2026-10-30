@@ -205,7 +205,7 @@ Two different sets of figures are in circulation; ours matches the newer one.
 |---|---|---|---|
 | r13 submission (2026-10-21), same image/flags/300 W as ours | 8.9k / 9.9k / 10.7k / 11.1k at 8k/16k/32k/64k | 137.6 tok/s prose | **measured on a live box**: `LIVE: shared with agent traffic`, swap at 21 GB |
 | vLLM-Moet README, served image `-r21` (2026-10-26) | 163K in 8.6 s (~19k tok/s) | prose ~277, code ~796; C8 ~717 prose / ~2,055 code aggregate | measured at **400 W** per card |
-| this host, r13 image, 300 W Max-Q cards | 17.8k–18.2k flat to 55k, 17.3k at 127k | 406 tok/s median (code) | matches the r21 prefill figure, not the r13 one |
+| this host, **r21 image** (deployed), 300 W Max-Q cards | 17.7k–18.1k flat to 55k, 17.2k at 127k | 420 tok/s median at 512 tokens, 392 at 2,048 | prefill equal to r13; decode ~2× below the 400 W figures |
 
 So the mismatch is not a version gap. The 9–11k figures are r13, measured on
 the *same* image, flags and 300 W power limit we run — but with live agent
@@ -222,7 +222,7 @@ Image revisions (same repository, `ghcr.io/sybil-solutions/vllm-moet-dsv41`):
 | Tag | Digest | Stack |
 |---|---|---|
 | `r13-5d25cff` (deployed here) | `sha256:08f61e680ddab3f1f1b50f92020133c382630f9798ab0ff5729f8931a604f82d` | vLLM-Moet `5d25cff`, steps 1-28 |
-| `df3bd094-r21` (newest) | `sha256:ef1e28b719025690e24f0d6406b34cbe1a32c50ec7bbba2dc7358a0048c81a4a` | vLLM-Moet `b0dc737`, steps 1-36 |
+| `df3bd094-r21` (deployed) | `sha256:ef1e28b719025690e24f0d6406b34cbe1a32c50ec7bbba2dc7358a0048c81a4a` | vLLM-Moet `b0dc737`, steps 1-36 |
 
 r21 adds switches the r13 recipe does not set: `VLLM_MOET_P2P_AR_FUSED_MAX_ROWS=8`
 (8, not 16), `VLLM_MOET_P2P_AG=0`, `VLLM_MOET_DFLASH_PREP_GROUPS=1`,
@@ -242,12 +242,20 @@ tokens, cold prompts:
 
 | Prompt tokens | TTFT | Prefill tok/s | Decode tok/s |
 |---:|---:|---:|---:|
-| 6.9k | 0.39 s | 17,761 | 335 |
-| 13.8k | 0.77 s | 17,868 | 297 |
-| 27.5k | 1.51 s | 18,224 | 303 |
-| 55.0k | 3.03 s | 18,144 | 307 |
+| 6.9k | 0.39 s | 17,673 | 294 |
+| 13.8k | 0.78 s | 17,650 | 278 |
+| 27.5k | 1.52 s | 18,115 | 326 |
+| 55.0k | 3.04 s | 18,103 | 330 |
 
-A 127k prompt measured 17.3k tok/s end to end, so the rate holds with depth:
+(r21; the r13 run on the same harness gave 17.8k/17.9k/18.2k/18.1k prefill and
+335/297/303/307 decode, i.e. the two revisions are indistinguishable here.)
+
+The cards are **power-bound**: during decode all four sit at 288-300 W of a
+300 W limit, and the hardware ceiling is 325 W. The r21 figures of ~277 prose
+and ~680-796 code tok/s were taken at 400 W on full-power cards, so they are
+not reachable on a Max-Q part; treat them as a different SKU's numbers.
+
+A 127k prompt measured 17.2k tok/s end to end (r21; 17.3k on r13), so the rate holds with depth:
 a cold 500k prefill is roughly half a minute, not the several minutes the
 advertised curve implies.
 
@@ -283,7 +291,7 @@ deadline 10 s, baseline ~59 tok/s and p50 ITL 15.9 ms.
 
 | Step budget | Long-prefill cap | Prefill rate | p50 ITL under prefill | Decode under prefill |
 |---:|---:|---:|---:|---:|
-| 4096 (stock) | off | ~20.8k tok/s | 231 ms | 4.3 tok/s (0.07×) |
+| 4096 (stock), r13 / r21 | off | ~20.8k tok/s | 231 ms | 4.3 / 4.4 tok/s (0.07×) |
 | 8192 | 4096 | ~7k tok/s | 434 ms | 2.3 tok/s (0.04×) |
 | 8192 | 1024 | ~9k tok/s | 136 ms | 7.2 tok/s (0.12×) |
 

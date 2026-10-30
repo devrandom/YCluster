@@ -41,9 +41,12 @@
   hosts: nvidia
   become: yes
   vars:
-    # Digest-pinned from the launch manifest (local-ai-registry, r13).
-    ds41_moet_image: "ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:08f61e680ddab3f1f1b50f92020133c382630f9798ab0ff5729f8931a604f82d"
-    ds41_moet_image_tag: "ghcr.io/sybil-solutions/vllm-moet-dsv41:recipe-08f61e68"
+    # r21: vLLM-Moet b0dc737, Dockerfile steps 1-36. Newer than the r13
+    # digest the registry launch still pins (08f61e68…), which stays
+    # published; the registry has no r21 launch manifest yet, so the serve
+    # switches below come from the image README.
+    ds41_moet_image: "ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:ef1e28b719025690e24f0d6406b34cbe1a32c50ec7bbba2dc7358a0048c81a4a"
+    ds41_moet_image_tag: "ghcr.io/sybil-solutions/vllm-moet-dsv41:df3bd094-r21"
     ds41_moet_repo: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
     ds41_moet_revision: "1bae0e1088993b9b82de08f59de5be5a34e42170"
     ds41_moet_model_dir: "/home/dev/models/DeepSeek-V4.1-Flash-1017"
@@ -52,15 +55,17 @@
     ds41_moet_served_name: "deepseek-v4_1-flash-moet"
     ds41_moet_port: 9219
     ds41_moet_container: "ds41-moet"
-    # Persistent home for FlashInfer/DeepGEMM/Triton JIT caches. The launcher
-    # recreates the container on every start; without this mount each restart
-    # pays the recipe's ~22 min first-start autotune again.
+    # Persistent home for the FlashInfer/Triton JIT caches. The launcher
+    # recreates the container on every start; without these mounts each
+    # restart pays the recipe's ~22 min first-start autotune again.
     ds41_moet_cache_dir: "/home/dev/.cache/ds41-moet"
     # /dev/shm for the pinned KV-offload region (recipe default: 48g).
     ds41_moet_shm: "48g"
     # Container memory ceiling: ~47 GB working set plus the 48g shm tmpfs,
     # which is charged to the container cgroup.
     ds41_moet_memory: "112g"
+    # r21 keeps a second JIT cache for DeepGEMM outside /root/.cache.
+    ds41_moet_deep_gemm_cache_dir: "/home/dev/.cache/ds41-moet-deep-gemm"
     # Start (or attach to) the container at the end of the play. Set false
     # with -e ds41_moet_autostart=false to install the scripts before the
     # checkpoint is staged: the unit's ExecStart attaches to an existing
