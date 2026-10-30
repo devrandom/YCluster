@@ -215,7 +215,8 @@ median 403 tok/s live, 557–573 undisturbed, against our 406 idle. Prefill
 landed above that because our box is idle.
 
 r21 then publishes ~19k prefill on an idle box at 400 W, i.e. prefill is
-roughly unchanged between the two revisions and the r21 gains are decode-side.
+roughly unchanged between the two revisions, and on this host neither is
+decode different by more than a few percent (see the Fraser A/B below).
 
 Image revisions (same repository, `ghcr.io/sybil-solutions/vllm-moet-dsv41`):
 
@@ -278,6 +279,33 @@ Throughput is flat within noise and TTFT grows linearly: a second or fourth
 prefill queues behind the first rather than sharing compute. That also means
 a two-prefill fairness run reports a "combined span" that is just the sum of
 two serialized prefills -- do not read it as an aggregate rate.
+
+### Fraser bench: r13 vs r21 on this host (300 W)
+
+The authors' own bench (`tools/sm120_perf/fraser_bench.py` and their
+`fraser_prompt.txt`, 2,048 output tokens, temperature 0, 5 reps) against
+`127.0.0.1:9219`:
+
+| Build | median tok/s | range | accepted/step | steps/s |
+|---|---|---|---|---|
+| r13 (`5d25cff`) | 550.6 | 516-560 | 5.4 | 101.6 |
+| r21 (`b0dc737`), deployed | 566.6 | 540-589 | 5.4 | 104.7 |
+| r21 as published (400 W cards) | 680 (best 741) | - | 5.34 | 127.8 |
+
+r21 is ~3% ahead of r13 here, inside the run-to-run spread. The published
+r13→r21 jump (403 → 680) mixes a live box for r13, an idle one for r21, and
+300 W versus 400 W cards; it is not a same-host comparison, and on this
+hardware the two revisions are effectively equivalent.
+
+The remaining gap to 680 is step rate, not speculation quality: accepted
+tokens per step match (5.4 vs 5.34) while steps/s are 104.7 vs 127.8 (0.82) —
+that is what the 300 W cap costs, with all four cards sitting at 288-300 W of
+a 300 W limit (hardware ceiling 325 W).
+
+Decode rate on this model is dominated by draft acceptance, so prompts are not
+interchangeable: the same r21 build measures 392 tok/s on a generic "write an
+LRU cache" prompt, where acceptance is 3.58 tokens/step rather than 5.4.
+Compare decode numbers only on a fixed prompt.
 
 ### Fairness on the MoET recipe (measured, client on the serving node)
 
