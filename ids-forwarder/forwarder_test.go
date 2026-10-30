@@ -228,15 +228,13 @@ func TestExecBinaryAllowlist(t *testing.T) {
 func TestContainerLayerUsesPodMetadata(t *testing.T) {
 	host := tetragonLog{Process: tetragonProcess{
 		Binary: "/usr/bin/bash",
-		Parent: &tetragonProc{Binary: "/usr/bin/sshd"},
-	}}
+	}, Parent: &tetragonProc{Binary: "/usr/bin/sshd"}}
 	if got := tetragonLayer(&host); got != "host" {
 		t.Fatalf("process without pod metadata must stay host, got %q", got)
 	}
 	container := tetragonLog{Process: tetragonProcess{
 		Binary: "/usr/bin/bash",
-		Parent: &tetragonProc{Binary: "/usr/bin/containerd-shim", Pod: &tetragonPod{Name: "p"}},
-	}}
+	}, Parent: &tetragonProc{Binary: "/usr/bin/containerd-shim", Pod: &tetragonPod{Name: "p"}}}
 	if got := tetragonLayer(&container); got != "container" {
 		t.Fatalf("parent pod metadata must be container, got %q", got)
 	}

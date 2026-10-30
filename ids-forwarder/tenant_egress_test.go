@@ -59,6 +59,38 @@ func containerTCPLine(t *testing.T, pid uint32, started time.Time, daddr string,
 	return string(line)
 }
 
+func containerExecLine(t *testing.T, pid uint32, started time.Time, binary, args string) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"process_exec": map[string]any{
+			"process": map[string]any{
+				"binary":     binary,
+				"arguments":  args,
+				"pid":        pid,
+				"start_time": started.UTC().Format(time.RFC3339Nano),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
+func TestContainerInternalExecIsSuppressed(t *testing.T) {
+	root, pid, started := fakeContainerProc(t)
+	old := procRoot
+	procRoot = root
+	defer func() { procRoot = old }()
+
+	cfg := testConfig()
+	cfg.events = "process_exec"
+	line := containerExecLine(t, pid, started, "/usr/bin/bash", "/home/tenant/serve-model")
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); ok || reason != "container_internal" {
+		t.Fatalf("container exec: ok=%v reason=%q, want container_internal", ok, reason)
+	}
+}
+
 func TestContainerPublicEgressIsSuppressed(t *testing.T) {
 	root, pid, started := fakeContainerProc(t)
 	old := procRoot

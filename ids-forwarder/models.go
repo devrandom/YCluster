@@ -19,7 +19,10 @@ type tetragonLog struct {
 	FunctionName string          `json:"function_name"`
 	Message      string          `json:"message"`
 	Process      tetragonProcess `json:"process"`
-	Args         json.RawMessage `json:"args"`
+	// Parent is a sibling of process in every Tetragon event payload, not a
+	// field of process. Parsing it from inside process silently drops it.
+	Parent *tetragonProc   `json:"parent"`
+	Args   json.RawMessage `json:"args"`
 }
 
 type tetragonExit struct {
@@ -32,18 +35,18 @@ type tetragonConnect struct {
 }
 
 type tetragonProcess struct {
-	Binary    string        `json:"binary"`
-	Arguments string        `json:"arguments"`
-	UID       uint32        `json:"uid"`
-	PID       uint32        `json:"pid"`
-	StartTime string        `json:"start_time"`
-	Pod       *tetragonPod  `json:"pod"`
-	Parent    *tetragonProc `json:"parent"`
+	Binary    string       `json:"binary"`
+	Arguments string       `json:"arguments"`
+	UID       uint32       `json:"uid"`
+	PID       uint32       `json:"pid"`
+	StartTime string       `json:"start_time"`
+	Pod       *tetragonPod `json:"pod"`
 }
 
 type tetragonProc struct {
-	Binary string       `json:"binary"`
-	Pod    *tetragonPod `json:"pod"`
+	Binary    string       `json:"binary"`
+	Arguments string       `json:"arguments"`
+	Pod       *tetragonPod `json:"pod"`
 }
 
 type tetragonPod struct {

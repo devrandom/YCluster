@@ -88,6 +88,7 @@ func TestDaemonConfigWritesAreSuppressed(t *testing.T) {
 		{"/usr/bin/pmiectl", "/usr/bin/pmiectl -m check", "/etc/pcp/pmie/lock"},
 		{"/usr/bin/pmlogctl", "/usr/bin/pmlogctl -m check", "/etc/pcp/pmlogger/lock"},
 		{"/usr/sbin/iptables-save", "", "/etc/iptables/rules.v4"},
+		{"/usr/sbin/cupsd", "-l", "/etc/cups/cupsd.conf"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {

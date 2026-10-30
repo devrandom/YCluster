@@ -14,7 +14,7 @@ import (
 	"ycluster.local/ids-forwarder/sigma"
 )
 
-const testSigmaEvent = `{"time":"2026-10-28T12:00:00Z","process_exec":{"process":{"pid":42,"uid":0,"binary":"/bin/sh","arguments":"-c whoami","parent":{"pid":1,"uid":0,"binary":"/usr/sbin/sshd","arguments":"-D"}}}}`
+const testSigmaEvent = `{"time":"2026-10-28T12:00:00Z","process_exec":{"process":{"pid":42,"uid":0,"binary":"/bin/sh","arguments":"-c whoami"},"parent":{"pid":1,"uid":0,"binary":"/usr/sbin/sshd","arguments":"-D"}}}`
 
 func testDetection(rule, ts string) string {
 	event := map[string]any{

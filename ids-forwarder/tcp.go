@@ -35,6 +35,14 @@ var expectedAdminServicePorts = map[uint16]struct{}{
 	9216: {}, 9217: {}, 9218: {}, 12724: {}, 52415: {},
 }
 
+// internalServicePort covers the cluster's metrics and inference service
+// range. New backends should not require another expected-port map entry;
+// node-management ports (SSH, etcd, Ceph) stay outside this range and remain
+// visible for these binaries.
+func internalServicePort(port uint16) bool {
+	return (port >= 8000 && port <= 9999) || port == 11434 || port == 52415
+}
+
 // containerNetwork is the Incus bridge range. A node's own sshd dialing a
 // container's SSH port is the jump-host path used to reach instances; the
 // same dial from another host stays visible.
@@ -96,6 +104,10 @@ func expectedTCPReason(body *tetragonLog) string {
 	case base == "frpc" && port == 7000:
 		return "expected_tcp"
 	case strings.HasPrefix(base, "smokescreen"):
+		return "expected_tcp"
+	case strings.Contains(args, "/usr/local/lib/cluster/hosting-balance-collector"):
+		// The hosting-balance collector's provider API is a known external
+		// egress path; its output is the balance metric, not this connect.
 		return "expected_tcp"
 	case (base == "fwupd" || base == "snapd") && port == 443:
 		return "expected_tcp"
@@ -179,8 +191,12 @@ func expectedTCPReason(body *tetragonLog) string {
 		if port == 7443 {
 			return "expected_tcp"
 		}
+	case "dnsmasq":
+		if port == 53 || port == 853 {
+			return "expected_tcp"
+		}
 	case "prometheus":
-		if _, ok := expectedPrometheusPorts[port]; ok {
+		if _, ok := expectedPrometheusPorts[port]; ok || internalServicePort(port) {
 			return "expected_tcp"
 		}
 	case "prometheus-alertmanager":
@@ -192,7 +208,7 @@ func expectedTCPReason(body *tetragonLog) string {
 			return "expected_tcp"
 		}
 	case "local-ai-proxy":
-		if _, ok := expectedLocalAIProxyPorts[port]; ok {
+		if _, ok := expectedLocalAIProxyPorts[port]; ok || internalServicePort(port) {
 			return "expected_tcp"
 		}
 	case "python3", "python3.12":
@@ -200,7 +216,7 @@ func expectedTCPReason(body *tetragonLog) string {
 			return "expected_tcp"
 		}
 		if strings.Contains(args, "/opt/admin-services/app.py") {
-			if _, ok := expectedAdminServicePorts[port]; ok {
+			if _, ok := expectedAdminServicePorts[port]; ok || internalServicePort(port) {
 				return "expected_tcp"
 			}
 		}

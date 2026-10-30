@@ -80,20 +80,11 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 		if !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
 			return alert{}, meta, false, ""
 		}
-		if reason := routineExecReason(body.Process); reason != "" {
+		if reason := routineExecReason(body.Process, body.Parent); reason != "" {
 			return alert{}, meta, false, reason
 		}
 	}
 	if reason := packageMaintenanceReason(body); reason != "" {
-		return alert{}, meta, false, reason
-	}
-	if reason := expectedTCPReason(body); reason != "" {
-		return alert{}, meta, false, reason
-	}
-	if reason := routinePrivilegeReason(body); reason != "" {
-		return alert{}, meta, false, reason
-	}
-	if reason := routineFileWriteReason(body); reason != "" {
 		return alert{}, meta, false, reason
 	}
 	layer := tetragonLayer(body)
@@ -104,8 +95,27 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 			containerName = name
 		}
 	}
-	if reason := containerEgressReason(body, layer); reason != "" {
-		return alert{}, meta, false, reason
+	if layer == "container" {
+		// Tenant-container internals are tenant responsibility. Keep only
+		// the case that matters to the cluster: a connection leaving the
+		// container for a cluster-private address. Public egress and
+		// host-local bridge/loopback traffic are routine tenant traffic.
+		if reason := containerEgressReason(body, layer); reason != "" {
+			return alert{}, meta, false, reason
+		}
+		if body.FunctionName != "tcp_connect" {
+			return alert{}, meta, false, "container_internal"
+		}
+	} else {
+		if reason := expectedTCPReason(body); reason != "" {
+			return alert{}, meta, false, reason
+		}
+		if reason := routinePrivilegeReason(body); reason != "" {
+			return alert{}, meta, false, reason
+		}
+		if reason := routineFileWriteReason(body); reason != "" {
+			return alert{}, meta, false, reason
+		}
 	}
 	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), eventSummary(evType, body))
 	if containerName != "" {
@@ -149,11 +159,11 @@ func configuredExecBinary(binariesCSV, binary string) bool {
 // routineExecReason classifies known cluster probes and automation. The
 // binary allowlist is intentionally broad; without this filter, health
 // checks and package introspection dominate process_exec alerts.
-func routineExecReason(process tetragonProcess) string {
+func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string {
 	base := path.Base(process.Binary)
 	parent := ""
-	if process.Parent != nil {
-		parent = process.Parent.Binary
+	if parentProc != nil {
+		parent = parentProc.Binary
 	}
 	args := process.Arguments
 
@@ -163,6 +173,14 @@ func routineExecReason(process tetragonProcess) string {
 			return "loopback_http"
 		}
 	case "incus":
+		// The VM reconciler and state sampler are known periodic API
+		// consumers. Match the trusted caller once rather than every
+		// subcommand shape a future reconcile step might add.
+		if parentProc != nil && parentProc.Binary == "/usr/local/bin/ycluster" &&
+			(strings.Contains(parentProc.Arguments, "ycluster vm reconcile") ||
+				strings.Contains(parentProc.Arguments, "ycluster vm sample")) {
+			return "vm_reconcile"
+		}
 		// vm-gpu-collector: on vfio-pci hosts the GPUs are invisible to
 		// the host, so it lists VMs and execs nvidia-smi inside each one
 		// every 30s. Known unit, known command line.
@@ -212,21 +230,13 @@ func routineExecReason(process tetragonProcess) string {
 			(strings.Contains(args, "python3.") && strings.Contains(args, "&& sleep 0")) {
 			return "ansible_probe"
 		}
-		// The storage health probe runs the same mountpoint check from a
-		// shell wrapper on a short timer.
-		trimmed := strings.TrimSpace(args)
-		if strings.HasSuffix(trimmed, `-c "mountpoint -q /rbd/user"`) ||
-			strings.HasSuffix(trimmed, `-c 'mountpoint -q /rbd/user'`) {
-			return "storage_probe"
+		// needrestart probes the package tools from its dpkg/rpm hooks.
+		if strings.Contains(args, "type dpkg-query") ||
+			strings.Contains(args, "type rpm") {
+			return "package_query"
 		}
-		// The NAS mount retry uses a read-only mountpoint probe as its
-		// ExecCondition, and starts the mount unit when it is missing.
-		if strings.Contains(args, "mountpoint -q /mnt/nas-vm") ||
-			strings.Contains(args, "mountpoint -q /near2") {
-			return "mount_probe"
-		}
-		if strings.Contains(args, `systemctl start "`) && strings.Contains(args, `.mount"`) {
-			return "mount_retry"
+		if strings.Contains(args, "invoke-rc.d anacron start") {
+			return "cron"
 		}
 		// Containers use a literal false command as a liveness placeholder.
 		if strings.TrimSpace(args) == "-c -- /bin/false" {
@@ -261,6 +271,14 @@ func routineExecReason(process tetragonProcess) string {
 		}
 		if parent == "/usr/sbin/sshd" && strings.Contains(args, "&& sleep 0") {
 			return "ansible_probe"
+		}
+	case "logrotate":
+		if strings.Contains(args, "/etc/logrotate.conf") {
+			return "cron"
+		}
+	case "snap":
+		if strings.Contains(args, "microceph.log-rotate") {
+			return "cron"
 		}
 	case "sudo":
 		if strings.Contains(args, "BECOME-SUCCESS-") {
@@ -306,6 +324,8 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		if body.Process.UID == 0 && sudoTargetsNonRoot(body.Process.Arguments) {
 			return "privilege_drop"
 		}
+	case "/usr/sbin/logrotate", "/usr/bin/logrotate":
+		return "expected_privilege"
 	case "/usr/bin/runc",
 		"/usr/bin/containerd-shim-runc-v2",
 		"/usr/bin/docker-proxy",
@@ -495,7 +515,7 @@ func tetragonLayer(body *tetragonLog) string {
 	if body.Process.Pod != nil {
 		return "container"
 	}
-	if body.Process.Parent != nil && body.Process.Parent.Pod != nil {
+	if body.Parent != nil && body.Parent.Pod != nil {
 		return "container"
 	}
 	return "host"

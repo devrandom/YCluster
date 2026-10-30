@@ -69,7 +69,7 @@ func TestRedactTokenEdgeCases(t *testing.T) {
 func TestTetragonLayerAndSeverity(t *testing.T) {
 	cfg := testConfig()
 	// Pod metadata on the process marks a container event.
-	line := `{"process_kprobe":{"policy_name":"p","process":{"binary":"/bin/sh","pod":{"namespace":"ns","name":"vm1"}}}}`
+	line := `{"process_kprobe":{"function_name":"tcp_connect","policy_name":"p","process":{"binary":"/bin/sh","pod":{"namespace":"ns","name":"vm1"}},"args":[{"sock_arg":{"daddr":"10.0.0.12","dport":22}}]}}`
 	a, ok := tetragonAlert(line, cfg)
 	if !ok || a.Labels["layer"] != "container" {
 		t.Fatalf("expected container layer, got %+v", a.Labels)

@@ -36,19 +36,20 @@ type envelope struct {
 }
 
 type tetragon struct {
-	FunctionName string          `json:"function_name"`
-	Process      process         `json:"process"`
-	Args         json.RawMessage `json:"args"`
+	FunctionName string  `json:"function_name"`
+	Process      process `json:"process"`
+	// Parent is a sibling of process in the Tetragon payload.
+	Parent *process        `json:"parent"`
+	Args   json.RawMessage `json:"args"`
 }
 
 type process struct {
-	PID       uint32   `json:"pid"`
-	UID       uint32   `json:"uid"`
-	Binary    string   `json:"binary"`
-	Arguments string   `json:"arguments"`
-	StartTime string   `json:"start_time"`
-	Pod       *pod     `json:"pod"`
-	Parent    *process `json:"parent"`
+	PID       uint32 `json:"pid"`
+	UID       uint32 `json:"uid"`
+	Binary    string `json:"binary"`
+	Arguments string `json:"arguments"`
+	StartTime string `json:"start_time"`
+	Pod       *pod   `json:"pod"`
 }
 
 type pod struct {
@@ -85,9 +86,9 @@ func NormalizeLine(line string) (*Event, bool, error) {
 	}
 	switch {
 	case env.Exec != nil:
-		return normalizeProcess(env.Time, "process_exec", &env.Exec.Process), true, nil
+		return normalizeProcess(env.Time, "process_exec", &env.Exec.Process, env.Exec.Parent), true, nil
 	case env.Kprobe != nil && env.Kprobe.FunctionName == "tcp_connect":
-		ev := normalizeProcess(env.Time, "network_connection", &env.Kprobe.Process)
+		ev := normalizeProcess(env.Time, "network_connection", &env.Kprobe.Process, env.Kprobe.Parent)
 		if addr, port, ok := destination(env.Kprobe.Args); ok {
 			ev.DestinationIp = addr
 			ev.DestinationPort = port
@@ -98,7 +99,7 @@ func NormalizeLine(line string) (*Event, bool, error) {
 	}
 }
 
-func normalizeProcess(ts, eventType string, p *process) *Event {
+func normalizeProcess(ts, eventType string, p, parent *process) *Event {
 	ev := &Event{
 		Timestamp:   ts,
 		EventType:   eventType,
@@ -108,10 +109,10 @@ func normalizeProcess(ts, eventType string, p *process) *Event {
 		ProcessId:   p.PID,
 		StartTime:   p.StartTime,
 	}
-	if p.Parent != nil {
-		ev.ParentImage = p.Parent.Binary
-		ev.ParentCommandLine = commandLine(p.Parent.Binary, p.Parent.Arguments)
-		ev.ParentProcessId = p.Parent.PID
+	if parent != nil {
+		ev.ParentImage = parent.Binary
+		ev.ParentCommandLine = commandLine(parent.Binary, parent.Arguments)
+		ev.ParentProcessId = parent.PID
 	}
 	if p.Pod != nil {
 		ev.ContainerName = p.Pod.Name

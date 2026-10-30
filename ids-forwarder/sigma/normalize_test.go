@@ -3,7 +3,7 @@ package sigma
 import "testing"
 
 func TestNormalizeProcessExec(t *testing.T) {
-	line := `{"time":"2026-10-28T12:00:00Z","process_exec":{"process":{"pid":4242,"uid":0,"binary":"/bin/sh","arguments":"-c \"whoami\"","pod":{"namespace":"default","name":"web-0","container":{"name":"web","image":{"name":"nginx:1.29"}}},"parent":{"pid":1,"uid":0,"binary":"/usr/sbin/nginx","arguments":"-g daemon off;"}}}}`
+	line := `{"time":"2026-10-28T12:00:00Z","process_exec":{"process":{"pid":4242,"uid":0,"binary":"/bin/sh","arguments":"-c \"whoami\"","pod":{"namespace":"default","name":"web-0","container":{"name":"web","image":{"name":"nginx:1.29"}}}},"parent":{"pid":1,"uid":0,"binary":"/usr/sbin/nginx","arguments":"-g daemon off;"}}}`
 	ev, ok, err := NormalizeLine(line)
 	if err != nil || !ok {
 		t.Fatalf("NormalizeLine = %v, %v", ok, err)

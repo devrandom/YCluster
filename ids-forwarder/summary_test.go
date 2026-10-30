@@ -11,11 +11,12 @@ func TestRoutineExecSuppression(t *testing.T) {
 	cfg.events = "process_exec"
 
 	cases := []struct {
-		name   string
-		binary string
-		args   string
-		parent string
-		reason string
+		name       string
+		binary     string
+		args       string
+		parent     string
+		parentArgs string
+		reason     string
 	}{
 		{
 			name:   "loopback health request",
@@ -81,13 +82,6 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "ansible_probe",
 		},
 		{
-			name:   "storage mount probe",
-			binary: "/bin/sh",
-			args:   `-c "mountpoint -q /rbd/user"`,
-			parent: "/usr/bin/bash",
-			reason: "storage_probe",
-		},
-		{
 			name:   "login motd",
 			binary: "/bin/sh",
 			args:   `-c -- "/usr/bin/env -i PATH=/usr/bin run-parts --lsbsysinit /etc/update-motd.d"`,
@@ -107,6 +101,22 @@ func TestRoutineExecSuppression(t *testing.T) {
 			args:   `-c "echo ~ && sleep 0"`,
 			parent: "/usr/sbin/sshd",
 			reason: "ansible_probe",
+		},
+		{
+			name:       "vm reconcile list",
+			binary:     "/usr/bin/incus",
+			args:       "list --format json",
+			parent:     "/usr/local/bin/ycluster",
+			parentArgs: "/usr/local/bin/ycluster vm reconcile",
+			reason:     "vm_reconcile",
+		},
+		{
+			name:       "vm sample list",
+			binary:     "/usr/bin/incus",
+			args:       "list --format json",
+			parent:     "/usr/local/bin/ycluster",
+			parentArgs: "/usr/local/bin/ycluster vm sample",
+			reason:     "vm_reconcile",
 		},
 		{
 			name:   "vm gpu collector list",
@@ -158,18 +168,25 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "package_update",
 		},
 		{
-			name:   "nas mount retry probe",
+			name:   "needrestart dpkg probe",
 			binary: "/bin/sh",
-			args:   `-c '! mountpoint -q /mnt/nas-vm'`,
-			parent: "/usr/lib/systemd/systemd",
-			reason: "mount_probe",
+			args:   `-c "type dpkg-query 1> /dev/null 2> /dev/null"`,
+			parent: "/etc/needrestart/hook.d/10-dpkg",
+			reason: "package_query",
 		},
 		{
-			name:   "nas mount retry start",
-			binary: "/bin/sh",
-			args:   `-c 'systemctl start "mnt-nas\x2dvm.mount"'`,
+			name:   "snap microceph log rotate",
+			binary: "/usr/bin/snap",
+			args:   "run --timer=00:02,06:04,12:07,18:03 microceph.log-rotate",
 			parent: "/usr/lib/systemd/systemd",
-			reason: "mount_retry",
+			reason: "cron",
+		},
+		{
+			name:   "anacron boot condition",
+			binary: "/bin/sh",
+			args:   `-c "[ -x /etc/init.d/anacron ] && if [ ! -d /run/systemd/system ]; then /usr/sbin/invoke-rc.d anacron start >/dev/null; fi"`,
+			parent: "/usr/lib/systemd/systemd",
+			reason: "cron",
 		},
 		{
 			name:   "package query",
@@ -182,7 +199,7 @@ func TestRoutineExecSuppression(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			line := execLine(t, tc.binary, tc.args, tc.parent)
+			line := execLine(t, tc.binary, tc.args, tc.parent, tc.parentArgs)
 			_, _, ok, reason := tetragonAlertDecision(line, cfg)
 			if ok {
 				t.Fatal("routine exec must not forward")
@@ -382,15 +399,20 @@ func TestHandleLineCountsSuppressedExec(t *testing.T) {
 	}
 }
 
-func execLine(t *testing.T, binary, args, parent string) string {
+func execLine(t *testing.T, binary, args, parent string, parentArgs ...string) string {
 	t.Helper()
+	parentObj := map[string]any{"binary": parent}
+	if len(parentArgs) > 0 {
+		parentObj["arguments"] = parentArgs[0]
+	}
+	// Tetragon emits parent as a sibling of process inside the payload.
 	line, err := json.Marshal(map[string]any{
 		"process_exec": map[string]any{
 			"process": map[string]any{
 				"binary":    binary,
 				"arguments": args,
-				"parent":    map[string]any{"binary": parent},
 			},
+			"parent": parentObj,
 		},
 	})
 	if err != nil {
@@ -411,6 +433,7 @@ func TestRuntimePrivilegeTransitionsAreSuppressed(t *testing.T) {
 		"/usr/libexec/virtiofsd",
 		"/usr/libexec/podman/rootlessport",
 		"/usr/lib/pcp/pmdas/proc/pmdaproc",
+		"/usr/sbin/logrotate",
 	} {
 		for _, function := range []string{"__sys_setresuid", "security_capset"} {
 			t.Run(binary+" "+function, func(t *testing.T) {

@@ -87,6 +87,10 @@ func daemonConfigWrite(body *tetragonLog) string {
 	if !ok {
 		return ""
 	}
+	if path.Base(body.Process.Binary) == "cupsd" &&
+		strings.HasPrefix(filePath, "/etc/cups/") {
+		return "expected_file_write"
+	}
 	switch filePath {
 	case "/etc/pcp/pmie/lock":
 		if path.Base(body.Process.Binary) == "pmiectl" {
