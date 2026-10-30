@@ -28,6 +28,16 @@ Subcommands:
                     and fails if any generation was not fully contained.
                     Defaults finish in ~1-2 minutes.
   models            List model ids available on the gateway.
+
+Global (before or after the subcommand):
+  --endpoint URL    Talk to one backend directly instead of the gateway, e.g.
+                    `inference --endpoint http://127.0.0.1:9219 fairness m`.
+                    Use it ON the serving node: going through the gateway puts
+                    the storage leader and your own network path into every
+                    ITL/TTFT number. INFERENCE_ENDPOINT/INFERENCE_TOKEN do the
+                    same from the environment.
+  --token VALUE     Bearer token for --endpoint (defaults to a dummy value;
+                    direct backends usually run without an API key).
   image <model>     POST a generated test image (red circle + \"42\") through the
                     gateway and confirm the model actually reads it — the quick
                     sanity check for multimodal/vision support.
@@ -100,14 +110,45 @@ _FAIRNESS_MIN_PREFIX_CACHE_HIT = 0.9
 _FAIRNESS_PREFILL_PILOT_TOKENS = 32768
 
 
+# Direct-endpoint mode (--endpoint/--token, or INFERENCE_ENDPOINT/
+# INFERENCE_TOKEN). Runs the client against one backend URL instead of the
+# gateway, so latency and ITL reflect the engine rather than the client's
+# network path to the storage leader. Intended for measurements taken on the
+# serving node itself (`--endpoint http://127.0.0.1:9219`), not for users.
+_DIRECT_ENDPOINT = None
+_DIRECT_TOKEN = None
+
+
 def _load_config():
+    if _DIRECT_ENDPOINT:
+        endpoint = _DIRECT_ENDPOINT
+    else:
+        endpoint = os.environ.get("INFERENCE_ENDPOINT")
+    if endpoint:
+        token = _DIRECT_TOKEN or os.environ.get("INFERENCE_TOKEN") or None
+        return endpoint.rstrip("/"), token
     cfg = _cluster_config.load()
     return cfg.endpoint, cfg.token
 
 
+def _headers(key, content_type=None):
+    """Build request headers, omitting auth when there is no token.
+
+    Direct-endpoint runs (`--endpoint`, or INFERENCE_ENDPOINT) carry no token
+    by default: a backend you reach over loopback or the LAN runs without an
+    API key, and sending a fake bearer only invites confusion.
+    """
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
 def _get(base, key, path, timeout=30):
     req = urllib.request.Request(
-        base + path, headers={"Authorization": f"Bearer {key}"}
+        base + path, headers=_headers(key)
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
@@ -117,10 +158,7 @@ def _post(base, key, path, body, timeout=30):
     req = urllib.request.Request(
         base + path,
         data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
+        headers=_headers(key, "application/json"),
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -601,11 +639,8 @@ def cmd_chat(args):
     req = urllib.request.Request(
         base + "/v1/chat/completions",
         data=payload,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        },
+        headers={**_headers(key, "application/json"),
+                 "Accept": "text/event-stream"},
         method="POST",
     )
 
@@ -712,7 +747,7 @@ def cmd_chat(args):
                           "content": "What is the weather in Paris right now? Use the tool."}],
         }).encode(),
         headers={
-            "Authorization": f"Bearer {key}",
+            **_headers(key),
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         },
@@ -818,7 +853,7 @@ def _bench_stream(base, key, messages, model, gen, timeout,
     req = urllib.request.Request(
         base + "/v1/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        headers=_headers(key, "application/json"),
         method="POST",
     )
 
@@ -1976,7 +2011,7 @@ def cmd_transcribe(args):
         base + "/v1/audio/transcriptions",
         data=body,
         headers={
-            "Authorization": f"Bearer {key}",
+            **_headers(key),
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
         method="POST",
@@ -2122,7 +2157,7 @@ def cmd_ocr(args):
         base + "/v1/file_parse",
         data=body,
         headers={
-            "Authorization": f"Bearer {key}",
+            **_headers(key),
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
         method="POST",
@@ -2181,19 +2216,55 @@ def cmd_ocr(args):
     return 0
 
 
+def _strip_direct_flags(argv):
+    """Remove --endpoint/--token from anywhere and record them.
+
+    They are accepted around the subcommand (`inference --endpoint URL
+    fairness m`) so every subcommand gets direct-endpoint mode without
+    duplicating the option in each parser.
+    """
+    global _DIRECT_ENDPOINT, _DIRECT_TOKEN
+    kept = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--endpoint" or arg == "--token":
+            if i + 1 >= len(argv):
+                print(f"{arg} needs a value", file=sys.stderr)
+                raise SystemExit(2)
+            if arg == "--endpoint":
+                _DIRECT_ENDPOINT = argv[i + 1].rstrip("/")
+            else:
+                _DIRECT_TOKEN = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--endpoint=") or arg.startswith("--token="):
+            name, value = arg.split("=", 1)
+            if name == "--endpoint":
+                _DIRECT_ENDPOINT = value.rstrip("/")
+            else:
+                _DIRECT_TOKEN = value
+            i += 1
+            continue
+        kept.append(arg)
+        i += 1
+    return kept
+
+
 def main():
-    if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+    argv = _strip_direct_flags(sys.argv[1:])
+    if len(argv) >= 1 and argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0
     if (
-        len(sys.argv) < 2
-        or sys.argv[1] not in ("chat", "bench", "batch", "fairness", "models",
-                              "image", "smoke", "transcribe", "ocr")
+        len(argv) < 1
+        or argv[0] not in ("chat", "bench", "batch", "fairness", "models",
+                           "image", "smoke", "transcribe", "ocr")
     ):
         print(__doc__, file=sys.stderr)
         return 2
-    sub = sys.argv[1]
-    rest = sys.argv[2:]
+    sub = argv[0]
+    rest = argv[1:]
 
     if sub == "models":
         return cmd_models(rest)
