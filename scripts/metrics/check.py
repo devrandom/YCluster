@@ -302,8 +302,10 @@ def collect_go(skip_coverage: bool) -> list[tuple[str, str, float]]:
     if not skip_coverage:
         for go_dir in GO_DIRS:
             profile = go_dir / "metrics.cover.out"
-            by_func, total = go_coverage(go_dir, profile)
-            profile.unlink(missing_ok=True)
+            try:
+                by_func, total = go_coverage(go_dir, profile)
+            finally:
+                profile.unlink(missing_ok=True)
             cov_by_func.update(by_func)
             if total is not None:
                 cov_totals.append((go_dir.name, total))
