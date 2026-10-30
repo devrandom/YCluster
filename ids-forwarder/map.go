@@ -84,6 +84,9 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 			return alert{}, meta, false, reason
 		}
 	}
+	if reason := packageMaintenanceReason(body); reason != "" {
+		return alert{}, meta, false, reason
+	}
 	if reason := expectedTCPReason(body); reason != "" {
 		return alert{}, meta, false, reason
 	}
@@ -315,6 +318,45 @@ func routinePrivilegeReason(body *tetragonLog) string {
 	if strings.HasPrefix(body.Process.Binary, "/snap/snapd/") &&
 		strings.HasSuffix(body.Process.Binary, "/usr/lib/snapd/snap-confine") {
 		return "expected_privilege"
+	}
+	return ""
+}
+
+// packageMaintenanceReason classifies apt's own maintenance shapes, and
+// only those: installs, removals and dpkg file installs stay visible.
+func packageMaintenanceReason(body *tetragonLog) string {
+	if body == nil {
+		return ""
+	}
+	base := path.Base(body.Process.Binary)
+	args := body.Process.Arguments
+	switch base {
+	case "apt-get", "apt":
+		// Match whole subcommand tokens so installing a package whose name
+		// contains "update" is not mistaken for a refresh.
+		fields := strings.Fields(args)
+		for i, f := range fields {
+			switch f {
+			case "update", "check":
+				return "package_update"
+			case "list":
+				if i+1 < len(fields) && strings.Contains(fields[i+1], "upgradable") {
+					return "package_update"
+				}
+			}
+		}
+	case "dpkg":
+		if strings.HasPrefix(strings.TrimSpace(args), "-l ") {
+			return "package_update"
+		}
+	case "sh", "bash", "dash":
+		if strings.Contains(args, "apt-news.service esm-cache.service") ||
+			strings.Contains(args, "apt/periodic/update-success-stamp") {
+			return "package_update"
+		}
+	}
+	if strings.Contains(args, "/usr/lib/ubuntu-advantage/esm_cache.py") {
+		return "package_update"
 	}
 	return ""
 }

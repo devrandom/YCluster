@@ -137,6 +137,20 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "nat_sync",
 		},
 		{
+			name:   "apt refresh",
+			binary: "/usr/bin/apt-get",
+			args:   "-o DPkg::Lock::Timeout=300 update",
+			parent: "/usr/bin/apt",
+			reason: "package_update",
+		},
+		{
+			name:   "apt post-invoke hook",
+			binary: "/bin/sh",
+			args:   `-c -- "systemctl start --no-block apt-news.service esm-cache.service"`,
+			parent: "/usr/bin/apt-get",
+			reason: "package_update",
+		},
+		{
 			name:   "nas mount retry probe",
 			binary: "/bin/sh",
 			args:   `-c '! mountpoint -q /mnt/nas-vm'`,
@@ -185,6 +199,9 @@ func TestRoutineExecKeepsUsefulCommands(t *testing.T) {
 		{"/usr/bin/curl", "https://example.com/health", "/usr/bin/bash"},
 		{"/usr/bin/bash", `-c "id"`, "/usr/sbin/sshd"},
 		{"/usr/bin/apt-get", "install nginx", "/usr/bin/sudo"},
+		{"/usr/bin/apt-get", "install update-manager", "/usr/bin/sudo"},
+		{"/usr/bin/apt-get", "remove nginx", "/usr/bin/sudo"},
+		{"/usr/bin/dpkg", "-i /tmp/pkg.deb", "/usr/bin/apt-get"},
 		{"/bin/sh", `-c "git-upload-pack '/srv/git/project.git'"`, "/usr/bin/runc"},
 		{"/bin/sh", `-c "mountpoint -q /mnt/data"`, "/usr/bin/bash"},
 		{"/usr/bin/incus", "file push gw1/etc/hosts /tmp/hosts", "/usr/bin/python3"},
@@ -403,6 +420,35 @@ func TestRuntimePrivilegeTransitionsAreSuppressed(t *testing.T) {
 	line := privilegeLine(t, "privilege-raises", "__sys_setresuid", "/bin/sh")
 	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
 		t.Fatalf("shell privilege raise was suppressed as %q", reason)
+	}
+}
+
+func TestPackageMaintenanceRaisesAreClassified(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	shapes := []struct {
+		binary string
+		args   string
+	}{
+		{"/usr/bin/apt-get", "-o DPkg::Lock::Timeout=300 update"},
+		{"/usr/bin/python3", "/usr/lib/ubuntu-advantage/esm_cache.py"},
+	}
+	for _, tc := range shapes {
+		line := privilegeLineUID(t, "privilege-raises", "__sys_setresuid", tc.binary, tc.args, 0)
+		_, _, ok, reason := tetragonAlertDecision(line, cfg)
+		if ok {
+			t.Fatalf("%s %q was forwarded", tc.binary, tc.args)
+		}
+		if reason != "package_update" {
+			t.Fatalf("%s %q reason = %q, want package_update", tc.binary, tc.args, reason)
+		}
+	}
+
+	// A package installation is a host change and must still alert.
+	line := privilegeLineUID(t, "privilege-raises", "__sys_setresuid", "/usr/bin/apt-get", "install nginx", 0)
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+		t.Fatalf("apt-get install was suppressed as %q", reason)
 	}
 }
 
