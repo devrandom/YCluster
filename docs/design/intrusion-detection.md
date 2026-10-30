@@ -524,6 +524,12 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - Small Go service in the repo, stdlib only.
 - Tails the Tetragon JSON events file; optional localhost HTTP receiver for
   CrowdSec notification-http POSTs.
+- Every suppression entry must correspond to a producer the cluster does not
+  own. Cluster-owned units use native systemd directives instead of shell
+  wrappers (`ConditionPathIsMountPoint` rather than a `mountpoint` probe,
+  direct `ExecStart` rather than a pipeline), so a recurring shell exec is
+  either fixed at the source or visible as an alert. Producer-side shell
+  removal is the preferred fix; filters are for packaged software.
 - Forwards `process_kprobe` events plus `process_exec` events for an
   allowlist of binaries (interactive shells, privilege tools, package
   managers, downloaders). Other execs are dropped in-process: the base

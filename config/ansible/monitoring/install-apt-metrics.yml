@@ -103,7 +103,10 @@
           # stops immediately, so preserve the directory after it exits.
           RuntimeDirectory=ycluster
           RuntimeDirectoryPreserve=yes
-          ExecStart=/bin/bash -c 'set -o pipefail; /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update 2>&1 | tee /run/ycluster/apt-update.log'
+          ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=300 update
+          # stderr inherits stdout, so one truncating target captures both
+          # streams and keeps the file at one run's output.
+          StandardOutput=truncate:/run/ycluster/apt-update.log
           # Only runs if ExecStart succeeded, so the stamp means "last
           # successful update". Refreshing the stamp also makes apt-daily's
           # own update pass skip, avoiding duplicate work.

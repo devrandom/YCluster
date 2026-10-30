@@ -117,7 +117,7 @@
 
 
     - name: Check if /rbd/user is mounted (indicates storage leader)
-      shell: mountpoint -q /rbd/user
+      command: mountpoint -q /rbd/user
       register: rbd_user_mounted
       failed_when: false
       changed_when: false

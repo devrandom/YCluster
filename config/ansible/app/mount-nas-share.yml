@@ -478,14 +478,15 @@
           Description=Retry NAS NFS mount {{ item.mount_point }}
           After=network-online.target
           Wants=network-online.target
+          # Negated native condition: run the retry only when the path is
+          # not a mount point. This avoids a shell exec and the IDS probe
+          # on every timer tick.
+          ConditionPathIsMountPoint=!{{ item.mount_point }}
 
           [Service]
           Type=oneshot
           TimeoutStartSec=5min
-          # systemd 255 has no mount-point condition, so the probe decides
-          # whether the retry runs. Healthy hosts skip the start entirely.
-          ExecCondition=/bin/sh -c '! mountpoint -q {{ item.mount_point }}'
-          ExecStart=-/bin/sh -c 'systemctl start "{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"'
+          ExecStart=-/usr/bin/systemctl start "{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"
         mode: '0644'
       loop: "{{ nas_nfs_mounts_effective }}"
       loop_control:

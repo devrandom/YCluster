@@ -44,7 +44,7 @@
       loop: "{{ held_packages }}"
 
     - name: Check if this host is the storage leader
-      shell: mountpoint -q /rbd/user
+      command: mountpoint -q /rbd/user
       register: rbd_mounted
       failed_when: false
       changed_when: false

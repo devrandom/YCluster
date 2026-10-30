@@ -172,7 +172,8 @@
 
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI --ecosystem Alpine
+          Environment=PYTHONPATH={{ osv_feed_install_dir }}
+          ExecStart=/usr/bin/python3 -m osv_feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI --ecosystem Alpine
           # Publish the read-only snapshot to the shared dir only once the
           # local writable store is fully written and closed.
           ExecStartPost=/usr/bin/python3 {{ osv_feed_publish_path }}

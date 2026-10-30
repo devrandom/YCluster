@@ -8,7 +8,7 @@
 
   tasks:
     - name: Check if storage leader
-      shell: mountpoint -q /rbd/user
+      command: mountpoint -q /rbd/user
       register: rbd_mounted
       failed_when: false
       changed_when: false
@@ -150,13 +150,13 @@
           [Unit]
           Description=Alert VM owners about GPU instances idle for over a day
           After=network.target
+          # The report queries the central Prometheus; only the leader
+          # should evaluate and alert, or every storage node would notify.
+          ConditionPathIsMountPoint=/rbd/user
 
           [Service]
           Type=oneshot
           EnvironmentFile=/etc/ycluster/etcd-client.env
-          # The report queries the central Prometheus; only the leader
-          # should evaluate and alert, or every storage node would notify.
-          ExecCondition=/bin/sh -c 'mountpoint -q /rbd/user'
           ExecStart=/usr/local/bin/ycluster vm idle --notify
           StandardOutput=journal
           StandardError=journal

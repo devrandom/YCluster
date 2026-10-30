@@ -157,7 +157,7 @@
     ds4_served_name: "{{ hostvars[ds4_nvidia_host]['ds4_served_name'] | default('deepseek-v4-flash') }}"
   tasks:
     - name: Check if this host is the storage leader
-      shell: mountpoint -q /rbd/user
+      command: mountpoint -q /rbd/user
       register: rbd_user_mounted
       failed_when: false
       changed_when: false

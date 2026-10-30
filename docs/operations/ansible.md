@@ -37,7 +37,7 @@ should detect it dynamically rather than
 
 ```yaml
 - name: Check if this host is the storage leader
-  shell: mountpoint -q /rbd/user   # or /rbd/misc depending on the volume
+  command: mountpoint -q /rbd/user   # or /rbd/misc depending on the volume
   register: rbd_mounted
   failed_when: false
   changed_when: false

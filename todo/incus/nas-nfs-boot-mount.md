@@ -29,10 +29,9 @@ on the same host can fail the same way.
      `host_vars/<host>.yml`, and `mount-nas-share.yml`; deployed on the
      affected host. Both NFS mounts are active.
    - Revised: the retry is one service and timer per mount, gated by
-     `ExecCondition=/bin/sh -c '! mountpoint -q <path>'`, so a healthy host
-     never starts a mount unit and the IDS sees only the read-only probe.
-     systemd 255 has no mount-point condition (`ConditionPathIsMountPoint`
-     is rejected as an unknown key).
+     `ConditionPathIsMountPoint=!<path>`, so a healthy host never starts a
+     mount unit and no shell probe is executed. systemd 255 supports the
+     condition and the `!` negation.
 2. **Order VM startup after the mount.** Add
    `RequiresMountsFor=<vm-data mount>` to `incus.service` and
    `vm-reconciler.service`, or a dedicated dependency unit, so auto-start

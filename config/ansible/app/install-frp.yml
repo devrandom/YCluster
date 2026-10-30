@@ -124,7 +124,7 @@
     # frpc-ssh stays enabled on every core node since each one owns a unique
     # ssh tunnel name, so it gets a separate unconditional handler.
     - name: Detect storage leader (frpc is leader-gated, see storage-leader-election)
-      shell: mountpoint -q /rbd/user
+      command: mountpoint -q /rbd/user
       register: rbd_user_mounted
       failed_when: false
       changed_when: false
