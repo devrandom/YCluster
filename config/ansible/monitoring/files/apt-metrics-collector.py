@@ -9,6 +9,7 @@ can run from a systemd oneshot unit on every Linux node.
 
 import fcntl
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +22,19 @@ TEXTFILE_DIR = Path(
     )
 )
 OUT = Path(os.environ.get("APT_METRICS_OUT", TEXTFILE_DIR / "apt_status.prom"))
+
+UU_LOG = Path(
+    os.environ.get(
+        "APT_UU_LOG", "/var/log/unattended-upgrades/unattended-upgrades.log"
+    )
+)
+
+# unattended-upgrades runs without a tty, so a package whose local conffile
+# differs from the shipped one is skipped on every run ("has conffile
+# prompt and needs to be upgraded manually"). That is silent by design
+# upstream, so the last run's log is the semantic source for this metric.
+UU_RUN_START = "Starting unattended upgrades script"
+UU_CONFFILE_PROMPT = re.compile(r"WARNING Package (\S+) has conffile prompt")
 
 STAMPS = {
     "update": Path("/var/lib/apt/periodic/update-success-stamp"),
@@ -148,6 +162,41 @@ def restart_metrics() -> list[str]:
     return lines
 
 
+def parse_conffile_prompts(log_text: str) -> list[str]:
+    """Return packages the most recent unattended-upgrades run skipped.
+
+    Only the last run is considered: a package that was upgraded or
+    reconciled since then must stop alerting instead of lingering in an
+    older log line.
+    """
+    skipped: list[str] = []
+    for line in log_text.splitlines():
+        if UU_RUN_START in line:
+            skipped = []
+            continue
+        match = UU_CONFFILE_PROMPT.search(line)
+        if match:
+            skipped.append(match.group(1))
+    return sorted(set(skipped))
+
+
+def conffile_prompt_metrics() -> list[str]:
+    """Return per-package metrics for conffile prompts in the last run."""
+    try:
+        log_text = UU_LOG.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # No log means no evidence of a prompt (fresh install or rotation);
+        # emit the empty family rather than inventing a series.
+        return []
+    lines = [
+        "# HELP ycluster_apt_conffile_prompt Package skipped by the last unattended-upgrades run over a conffile prompt",
+        "# TYPE ycluster_apt_conffile_prompt gauge",
+    ]
+    for package in parse_conffile_prompts(log_text):
+        lines.append(f'ycluster_apt_conffile_prompt{{package="{package}"}} 1')
+    return lines
+
+
 def render(now: float) -> str:
     lines = [
         "# HELP ycluster_apt_update_age_seconds Seconds since the last successful apt cache update",
@@ -161,6 +210,7 @@ def render(now: float) -> str:
     ]
     for name, path in LOCKS.items():
         lines.append(f'ycluster_apt_lock_held{{lock="{name}"}} {lock_held(path)}')
+    lines.extend(conffile_prompt_metrics())
     lines.extend(restart_metrics())
     return "\n".join(lines) + "\n"
 

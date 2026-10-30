@@ -48,5 +48,46 @@ class TestParseNeedrestart(unittest.TestCase):
         self.assertEqual(kernel, 0)
 
 
+class TestParseConffilePrompts(unittest.TestCase):
+    def setUp(self):
+        self.collector = load_collector()
+
+    def test_last_run_wins(self):
+        text = (
+            "2026-10-01 06:00:00,000 INFO Starting unattended upgrades script\n"
+            "2026-10-01 06:00:01,000 WARNING Package squid has conffile prompt "
+            "and needs to be upgraded manually\n"
+            "2026-10-02 06:00:00,000 INFO Starting unattended upgrades script\n"
+            "2026-10-02 06:00:02,000 INFO No packages found that can be "
+            "upgraded unattended and no pending auto-removals\n"
+        )
+        self.assertEqual(self.collector.parse_conffile_prompts(text), [])
+
+    def test_packages_deduplicated_and_sorted(self):
+        text = (
+            "2026-10-02 06:00:00,000 INFO Starting unattended upgrades script\n"
+            "2026-10-02 06:00:01,000 WARNING Package squid has conffile prompt "
+            "and needs to be upgraded manually\n"
+            "2026-10-02 06:00:02,000 WARNING Package nginx-common has conffile "
+            "prompt and needs to be upgraded manually\n"
+            "2026-10-02 06:00:03,000 WARNING Package squid has conffile prompt "
+            "and needs to be upgraded manually\n"
+        )
+        self.assertEqual(
+            self.collector.parse_conffile_prompts(text),
+            ["nginx-common", "squid"],
+        )
+
+    def test_blacklist_lines_are_not_prompts(self):
+        text = (
+            "2026-10-02 06:00:00,000 INFO Starting unattended upgrades script\n"
+            "2026-10-02 06:00:02,000 INFO Package squid is blacklisted.\n"
+        )
+        self.assertEqual(self.collector.parse_conffile_prompts(text), [])
+
+    def test_empty_log(self):
+        self.assertEqual(self.collector.parse_conffile_prompts(""), [])
+
+
 if __name__ == "__main__":
     unittest.main()

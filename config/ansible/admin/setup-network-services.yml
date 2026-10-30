@@ -4,61 +4,40 @@
   become: yes
     
   tasks:
+    # Cluster proxy policy lives in conf.d, not in squid.conf. The stock
+    # squid.conf includes /etc/squid/conf.d/*.conf just before its final
+    # "http_access deny all"; keeping the conffile unmodified is what lets
+    # unattended-upgrades install squid updates instead of skipping them
+    # with "Package squid has conffile prompt".
     - name: Configure Squid proxy
       copy:
-        dest: /etc/squid/squid.conf
+        dest: /etc/squid/conf.d/50-ycluster.conf
         content: |
-          # Basic Squid configuration for cluster proxy
-          http_port 3128
-          
+          # Cluster proxy policy. Managed by Ansible:
+          # admin/setup-network-services.yml.
+
+          # Clients on the cluster networks. The stock localnet ACL is not
+          # reused: it also covers 0.0.0.0/8, CGNAT and link-local ranges.
+          acl ycluster_net src 10.0.0.0/8
+          acl ycluster_net src 172.16.0.0/12
+          acl ycluster_net src 192.168.0.0/16
+          acl ycluster_net src 127.0.0.0/8
+          http_access allow ycluster_net
+
           # Shutdown timeout (faster restarts)
           shutdown_lifetime 5 seconds
-          
-          # Timeouts for large downloads
-          connect_timeout 2 minutes                                                                                                     
-          read_timeout 15 minutes                                                                                                       
-          request_timeout 10 minutes                                                                                                     
 
-          # Allow access from cluster networks and common private ranges
-          acl localnet src 10.0.0.0/8
-          acl localnet src 172.16.0.0/12
-          acl localnet src 192.168.0.0/16
-          acl localnet src 127.0.0.0/8
-          
-          # Standard ports
-          acl SSL_ports port 443
-          acl Safe_ports port 80
-          acl Safe_ports port 21
-          acl Safe_ports port 443
-          acl Safe_ports port 70
-          acl Safe_ports port 210
-          acl Safe_ports port 1025-65535
-          acl Safe_ports port 280
-          acl Safe_ports port 488
-          acl Safe_ports port 591
-          acl Safe_ports port 777
-          acl CONNECT method CONNECT
-          
-          # Access rules
-          http_access deny !Safe_ports
-          http_access deny CONNECT !SSL_ports
-          http_access allow localhost manager
-          http_access deny manager
-          http_access allow localnet
-          http_access allow localhost
-          http_access deny all
-          
+          # Timeouts for large downloads
+          connect_timeout 2 minutes
+          read_timeout 15 minutes
+          request_timeout 10 minutes
+
           # Cache configuration
           cache_dir ufs /var/spool/squid 1000 16 256
-          coredump_dir /var/spool/squid
-          
-          # Memory cache
           cache_mem 256 MB
           maximum_object_size_in_memory 512 KB
-          
-          # Disk cache
           maximum_object_size 100 MB
-          
+
           # Refresh patterns for package repositories
           refresh_pattern ^ftp:           1440    20%     10080
           refresh_pattern ^gopher:        1440    0%      1440
@@ -68,10 +47,35 @@
           refresh_pattern \/InRelease$ 0 0% 0 refresh-ims
           refresh_pattern \/(Translation-.*)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
           refresh_pattern .               0       20%     4320
-          
+
           # Logging
           access_log /var/log/squid/access.log squid
-        backup: yes
+        mode: '0644'
+      notify: restart squid
+
+    # Older runs wrote the policy straight into squid.conf, leaving the
+    # package conffile modified. Put the packaged copy back so future
+    # upgrades need no conffile decision; --reinstall also pulls the
+    # candidate version, finishing the upgrade unattended-upgrades skipped.
+    - name: Check for local changes to package-managed squid files
+      command: dpkg -V squid
+      register: squid_dpkg_verify
+      changed_when: false
+      failed_when: false
+      check_mode: no
+
+    # A same-version reinstall leaves a locally modified conffile alone
+    # (dpkg only rewrites it when the shipped copy changed), so move it out
+    # of the way first and let --force-confmiss unpack the packaged copy.
+    - name: Move the locally modified squid.conf aside
+      command: mv -f /etc/squid/squid.conf /etc/squid/squid.conf.pre-conf.d
+      when: "'/etc/squid/squid.conf' in squid_dpkg_verify.stdout"
+
+    - name: Restore the packaged squid.conf and upgrade squid
+      command: apt-get install -y --reinstall -o Dpkg::Options::=--force-confmiss squid
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      when: "'/etc/squid/squid.conf' in squid_dpkg_verify.stdout"
       notify: restart squid
 
     - name: Flush handlers to restart squid immediately
