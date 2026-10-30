@@ -28,8 +28,17 @@
       meta: end_host
       when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
 
+    # Emit both name strategies. `index` keeps every existing reference
+    # (nvidia.com/gpu=0, ...) working, but the index is the driver minor
+    # number: it renumbers when cards are added, removed or rebound across
+    # reboots. `uuid` adds nvidia.com/gpu=GPU-<uuid> aliases so multi-GPU
+    # deployments can pin an exact card set that cannot drift.
     - name: Generate nvidia CDI spec
-      command: nvidia-ctk cdi generate --device-name-strategy=index --output=/etc/cdi/nvidia.yaml
+      command: >-
+        nvidia-ctk cdi generate
+        --device-name-strategy=index
+        --device-name-strategy=uuid
+        --output=/etc/cdi/nvidia.yaml
       changed_when: true
 
     - name: Remove stale runtime CDI spec
