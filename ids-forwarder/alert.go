@@ -180,6 +180,7 @@ type metrics struct {
 	dropped         atomic.Int64
 	deduped         atomic.Int64
 	coalesced       atomic.Int64
+	rateLimited     atomic.Int64
 	expired         atomic.Int64
 	gaps            atomic.Int64
 	oversized       atomic.Int64

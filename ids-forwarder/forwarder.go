@@ -29,6 +29,8 @@ type config struct {
 	hostname        string
 	queueMax        int
 	dedupWindow     time.Duration
+	rateLimit       int
+	rateWindow      time.Duration
 	alertTTL        time.Duration
 	maxEventAge     time.Duration
 	startupGrace    time.Duration
@@ -56,6 +58,8 @@ func defaultConfig() config {
 		metricsListen:   "127.0.0.1:2113",
 		queueMax:        1000,
 		dedupWindow:     5 * time.Minute,
+		rateLimit:       0,
+		rateWindow:      time.Hour,
 		alertTTL:        10 * time.Minute,
 		maxEventAge:     24 * time.Hour,
 		startupGrace:    time.Minute,
@@ -73,6 +77,7 @@ type forwarder struct {
 	cfg       config
 	queue     alertQueue
 	dedup     dedup
+	rate      *rateLimiter
 	client    *http.Client
 	stats     metrics
 	stop      chan struct{}
@@ -107,6 +112,12 @@ func newForwarder(cfg config) (*forwarder, error) {
 	if cfg.dedupWindow < 0 {
 		return nil, errors.New("dedup-window must be >= 0")
 	}
+	if cfg.rateLimit < 0 {
+		return nil, errors.New("rate-limit must be >= 0")
+	}
+	if cfg.rateLimit > 0 && cfg.rateWindow <= 0 {
+		return nil, errors.New("rate-window must be > 0 when rate-limit is set")
+	}
 	if cfg.spoolMaxBytes < 0 {
 		return nil, errors.New("spool-max-bytes must be >= 0")
 	}
@@ -120,6 +131,7 @@ func newForwarder(cfg config) (*forwarder, error) {
 		cfg:    cfg,
 		queue:  alertQueue{max: cfg.queueMax},
 		dedup:  newDedup(cfg.dedupWindow),
+		rate:   newRateLimiter(cfg.rateLimit, cfg.rateWindow),
 		client: &http.Client{Timeout: cfg.postTimeout},
 		stop:   make(chan struct{}),
 	}
@@ -474,6 +486,20 @@ func (f *forwarder) enqueue(a alert) error {
 	// recording the rest, so a scheduled exec does not page on every run.
 	if window, ok := ruleRepeatWindows[a.Labels["rule_id"]]; ok && f.dedup.seenWithin(key, window) {
 		f.stats.coalesced.Add(1)
+		if !auditOnly {
+			f.recordDetection(a)
+		}
+		return nil
+	}
+	// Optional per-host circuit breaker: deliver at most rate-limit alerts
+	// per severity per window, but keep recording everything so the history
+	// stays complete. The cluster-wide notification budget lives in
+	// ntfy-webhook, which is the only shared enforcement point; this local
+	// cap is disabled in the Ansible deployment. The audit rule already
+	// coalesces to one alert per hour and must not crowd out detections that
+	// need a human.
+	if !auditOnly && !f.rate.allow(a.Labels["severity"]) {
+		f.stats.rateLimited.Add(1)
 		if !auditOnly {
 			f.recordDetection(a)
 		}

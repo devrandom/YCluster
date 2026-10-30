@@ -71,6 +71,63 @@ class Admit(unittest.TestCase):
         )
 
 
+class FakeLease:
+    def revoke(self):
+        pass
+
+
+class FakeEtcd:
+    def __init__(self):
+        self.keys = set()
+
+    def lease(self, ttl):
+        return FakeLease()
+
+    def get(self, key):
+        return (b"1", None) if key in self.keys else (None, None)
+
+    def put_if_not_exists(self, key, value, lease=None):
+        if key in self.keys:
+            return False
+        self.keys.add(key)
+        return True
+
+    def delete(self, key):
+        self.keys.discard(key)
+
+
+class IdsBudget(unittest.TestCase):
+    def setUp(self):
+        reset_state()
+        wh.IDS_RATE_LIMIT = 2
+        wh.IDS_RATE_WINDOW_SECONDS = 3600
+        wh._shared_client = FakeEtcd()
+        os.environ["NTFY_SHARED_DEDUP"] = "1"
+
+    def test_budget_is_per_severity(self):
+        self.assertTrue(wh._ids_budget_claim("warning", now=100.0))
+        self.assertTrue(wh._ids_budget_claim("warning", now=100.0))
+        self.assertFalse(wh._ids_budget_claim("warning", now=100.0))
+        self.assertTrue(wh._ids_budget_claim("critical", now=100.0))
+
+    def test_budget_expires_in_next_window(self):
+        self.assertTrue(wh._ids_budget_claim("warning", now=100.0))
+        self.assertTrue(wh._ids_budget_claim("warning", now=100.0))
+        self.assertFalse(wh._ids_budget_claim("warning", now=100.0))
+        self.assertTrue(wh._ids_budget_claim("warning", now=100.0 + 3600))
+
+    def test_cap_notice_is_once_per_severity_and_window(self):
+        self.assertIsNotNone(wh._ids_cap_alert_claim("warning", now=100.0))
+        self.assertIsNone(wh._ids_cap_alert_claim("warning", now=100.0))
+        self.assertIsNotNone(wh._ids_cap_alert_claim("critical", now=100.0))
+        self.assertIsNotNone(wh._ids_cap_alert_claim("warning", now=100.0 + 3600))
+
+    def test_budget_fails_open_without_etcd(self):
+        wh._shared_client = None
+        with mock.patch.object(wh, "_new_shared_client", return_value=None):
+            self.assertTrue(wh._ids_budget_claim("warning", now=100.0))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -166,6 +223,142 @@ class WebhookHttp(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.get_json()["sent"], 1)
         m.assert_called_once()
+
+    def test_ids_budget_denials_do_not_consume_local_throttle(self):
+        wh.IDS_RATE_LIMIT = 1
+        wh.IDS_RATE_WINDOW_SECONDS = 3600
+        wh.THROTTLE_MAX_SENDS = 2
+        wh._shared_client = FakeEtcd()
+        os.environ["NTFY_SHARED_DEDUP"] = "1"
+        alerts = [
+            {
+                "status": "firing",
+                "fingerprint": f"warn-{i}",
+                "labels": {"alertname": "IDSAlert", "severity": "warning"},
+                "annotations": {"summary": f"warn-{i}", "description": "warn"},
+            }
+            for i in range(3)
+        ]
+        alerts.append({
+            "status": "firing",
+            "fingerprint": "crit",
+            "labels": {"alertname": "IDSAlert", "severity": "critical"},
+            "annotations": {"summary": "crit", "description": "crit"},
+        })
+        with unittest.mock.patch.object(wh, "send_to_ntfy", return_value=True) as m:
+            resp = post({"alerts": alerts})
+        self.assertEqual(resp.get_json()["sent"], 3)
+        self.assertEqual(resp.get_json()["throttled"], 2)
+        self.assertEqual(resp.get_json()["cap_reached"], 1)
+        self.assertEqual(m.call_count, 3)
+
+    def test_ids_budget_skips_audit_rule(self):
+        wh.IDS_RATE_LIMIT = 1
+        wh.IDS_RATE_WINDOW_SECONDS = 3600
+        wh._shared_client = FakeEtcd()
+        os.environ["NTFY_SHARED_DEDUP"] = "1"
+        payload = {
+            "alerts": [
+                {
+                    "status": "firing",
+                    "fingerprint": "audit",
+                    "labels": {"alertname": "IDSAlert", "severity": "warning", "rule_id": "container-api"},
+                    "annotations": {"summary": "incus", "description": "incus"},
+                },
+                {
+                    "status": "firing",
+                    "fingerprint": "real",
+                    "labels": {"alertname": "IDSAlert", "severity": "warning", "rule_id": "tcp-connect"},
+                    "annotations": {"summary": "connect", "description": "connect"},
+                },
+            ]
+        }
+        with unittest.mock.patch.object(wh, "send_to_ntfy", return_value=True) as m:
+            resp = post(payload)
+        self.assertEqual(resp.get_json()["sent"], 2)
+        self.assertEqual(resp.get_json()["throttled"], 0)
+
+    def test_ids_budget_throttles_across_alerts(self):
+        wh.IDS_RATE_LIMIT = 1
+        wh.IDS_RATE_WINDOW_SECONDS = 3600
+        wh._shared_client = FakeEtcd()
+        os.environ["NTFY_SHARED_DEDUP"] = "1"
+        payload = {
+            "alerts": [
+                {
+                    "status": "firing",
+                    "fingerprint": f"fp-{i}",
+                    "labels": {"alertname": "IDSAlert", "severity": "warning"},
+                    "annotations": {"summary": f"ids-{i}", "description": "ids"},
+                }
+                for i in range(2)
+            ]
+        }
+        with unittest.mock.patch.object(wh, "send_to_ntfy", return_value=True) as m:
+            resp = post(payload)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["sent"], 2)
+        self.assertEqual(resp.get_json()["throttled"], 1)
+        self.assertEqual(resp.get_json()["cap_reached"], 1)
+        self.assertEqual(m.call_count, 2)
+        cap_title, cap_message, cap_priority, cap_tags = m.call_args_list[1].args
+        self.assertEqual(cap_title, "[WARNING] IDS alert budget reached")
+        self.assertEqual(cap_priority, "default")
+        self.assertIn("warning IDS alert budget", cap_message)
+        self.assertIn("ids-1", cap_message)
+
+    def test_ids_cap_notice_is_sent_once_per_window(self):
+        wh.IDS_RATE_LIMIT = 1
+        wh.IDS_RATE_WINDOW_SECONDS = 3600
+        wh._shared_client = FakeEtcd()
+        os.environ["NTFY_SHARED_DEDUP"] = "1"
+        payload = {
+            "alerts": [
+                {
+                    "status": "firing",
+                    "fingerprint": f"fp-{i}",
+                    "labels": {"alertname": "IDSAlert", "severity": "warning"},
+                    "annotations": {"summary": f"ids-{i}", "description": "ids"},
+                }
+                for i in range(2)
+            ]
+        }
+        with unittest.mock.patch.object(wh, "send_to_ntfy", return_value=True):
+            post(payload)
+        with unittest.mock.patch.object(wh, "send_to_ntfy", return_value=True) as m:
+            resp = post({"alerts": [{
+                "status": "firing",
+                "fingerprint": "fp-2",
+                "labels": {"alertname": "IDSAlert", "severity": "warning"},
+                "annotations": {"summary": "ids-2", "description": "ids"},
+            }]})
+        self.assertEqual(resp.get_json()["sent"], 0)
+        self.assertEqual(resp.get_json()["throttled"], 1)
+        self.assertEqual(resp.get_json()["cap_reached"], 0)
+        m.assert_not_called()
+
+    def test_ids_cap_notice_uses_critical_priority(self):
+        wh.IDS_RATE_LIMIT = 1
+        wh.IDS_RATE_WINDOW_SECONDS = 3600
+        wh._shared_client = FakeEtcd()
+        os.environ["NTFY_SHARED_DEDUP"] = "1"
+        payload = {
+            "alerts": [
+                {
+                    "status": "firing",
+                    "fingerprint": f"crit-{i}",
+                    "labels": {"alertname": "IDSAlert", "severity": "critical"},
+                    "annotations": {"summary": f"crit-{i}", "description": "crit"},
+                }
+                for i in range(2)
+            ]
+        }
+        with unittest.mock.patch.object(wh, "send_to_ntfy", return_value=True) as m:
+            resp = post(payload)
+        self.assertEqual(resp.get_json()["cap_reached"], 1)
+        cap_title, _, cap_priority, _ = m.call_args_list[1].args
+        self.assertEqual(cap_title, "[CRITICAL] IDS alert budget reached")
+        self.assertEqual(cap_priority, "urgent")
 
     def test_rate_limited_returns_200_not_503(self):
         with unittest.mock.patch.object(wh, "send_to_ntfy", return_value="rate_limited") as m:

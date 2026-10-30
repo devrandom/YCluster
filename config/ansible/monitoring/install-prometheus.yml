@@ -5,6 +5,10 @@
   vars:
     prometheus_retention_time: "48h"
     prometheus_retention_size: "10GB"
+    # Cluster-wide IDS notification budget, enforced in ntfy-webhook so it
+    # does not multiply by the number of forwarder hosts.
+    ntfy_ids_rate_limit: 5
+    ntfy_ids_rate_window_seconds: 3600
     
   tasks:
     - name: Create Grafana data directory
@@ -226,6 +230,8 @@
           User=ntfy-webhook
           Group=ntfy-webhook
           EnvironmentFile=-/etc/ycluster/etcd-client.env
+          Environment=NTFY_IDS_RATE_LIMIT={{ ntfy_ids_rate_limit }}
+          Environment=NTFY_IDS_RATE_WINDOW_SECONDS={{ ntfy_ids_rate_window_seconds }}
           ExecStart=/usr/bin/python3 /usr/local/bin/ntfy-webhook.py
           Restart=always
           RestartSec=5

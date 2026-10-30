@@ -18,6 +18,22 @@ decide and record. Deploy and operator activity that a person deliberately
 started does not belong in the average — if it can be mistaken for a
 detection, it is a missing classification, not an alert.
 
+The notification path also enforces a storm brake: at most **five alerts per
+severity per hour for the whole cluster**. Each severity has an independent
+budget, so a warning storm cannot consume the capacity reserved for criticals.
+The budget is enforced by `ntfy-webhook`, the shared notification edge, with
+atomic slot claims in etcd; the forwarder is per-host, so a local cap there
+would multiply the budget by the fleet size. The forwarder keeps every
+classified detection in `detections.jsonl` regardless of the budget. The
+`-rate-limit` flag remains an optional per-host circuit breaker, disabled in
+the Ansible deployment. The Incus audit rule (`container-api`) is excluded
+from the budget — it is already coalesced to one alert per hour and must not
+consume a detection's slot. The first over-budget alert for a severity sends
+one additional notice explaining that the cap was reached; later over-budget
+alerts are recorded but not delivered until the next window. During the
+tuning window `IDSAlert` still routes to `ids-silent`, so this budget governs
+the path that will carry pages once that route is removed.
+
 ## Threat model
 
 Two classes of adversary, both in scope:

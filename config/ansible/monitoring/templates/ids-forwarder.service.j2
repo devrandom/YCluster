@@ -21,6 +21,8 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -sigma-detections {{ ids_forwarder_sigma_detections }} \
     -sigma-cursor {{ ids_forwarder_sigma_cursor }} \
     -max-event-age {{ ids_forwarder_max_event_age }} \
+    -rate-limit {{ ids_forwarder_rate_limit }} \
+    -rate-window {{ ids_forwarder_rate_window }} \
     -startup-grace {{ ids_forwarder_startup_grace }} \
     -http-listen {{ ids_forwarder_http_listen }}
 Restart=on-failure

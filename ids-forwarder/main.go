@@ -29,6 +29,10 @@ func main() {
 		cfg.queueMax, "maximum in-memory queued alerts when no spool is configured")
 	flag.DurationVar(&cfg.dedupWindow, "dedup-window",
 		cfg.dedupWindow, "suppress repeat alerts with the same key within this window")
+	flag.IntVar(&cfg.rateLimit, "rate-limit",
+		cfg.rateLimit, "optional local per-host circuit breaker: maximum alerts per severity per rate-window (0 disables; the cluster budget is in ntfy-webhook)")
+	flag.DurationVar(&cfg.rateWindow, "rate-window",
+		cfg.rateWindow, "window for -rate-limit")
 	flag.DurationVar(&cfg.alertTTL, "alert-ttl",
 		cfg.alertTTL, "how long a delivered alert stays active in Alertmanager")
 	flag.DurationVar(&cfg.maxEventAge, "max-event-age",

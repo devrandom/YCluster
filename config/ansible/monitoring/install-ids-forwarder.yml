@@ -44,6 +44,12 @@
     ids_forwarder_sigma_socket: /run/rsigma/events.sock
     ids_forwarder_sigma_detections: /var/log/rsigma/detections.ndjson
     ids_forwarder_sigma_cursor: "{{ ids_forwarder_state_dir }}/sigma.cursor.json"
+    # Optional per-host circuit breaker. The cluster-wide budget (five
+    # notifications per severity per hour) is enforced by ntfy-webhook using
+    # shared etcd state; a per-host cap here would multiply that budget by
+    # the fleet size, so it stays disabled.
+    ids_forwarder_rate_limit: 0
+    ids_forwarder_rate_window: 1h
     ids_forwarder_max_event_age: 24h
     ids_forwarder_startup_grace: 1m
     ids_metrics_textfile_dir: /var/lib/prometheus/node-exporter
