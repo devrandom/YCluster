@@ -57,6 +57,24 @@ Under the hood `ycluster inference …` shells out to the proxy's own
 CLI (`local-ai-proxy models …`), which owns the etcd schema. You can
 call it directly on a core node if you prefer.
 
+### Retiring a model name
+
+A model entry with **no backends** is not always cruft: it is how a retired
+name keeps answering with a redirect. The etcd value carries
+`"superseded_by": "<new-model>"`, and the proxy answers requests for the old
+name with a structured 404 instead of a generic "model not found":
+
+```bash
+curl -s localhost:4001/v1/chat/completions -d '{"model":"deepseek-v4-flash",...}'
+# 404 {"error":{"message":"model \"deepseek-v4-flash\" has been superseded by
+#      \"deepseek-v4_1-flash\"","code":"model_not_found"}}
+```
+
+`ycluster inference ls` renders these as `(0 backends)`, so check whether an
+entry is a redirect before removing it: `ycluster inference remove
+<old-model>` deletes the redirect with the entry. When retiring a name,
+remove its backends first and leave the entry carrying `superseded_by`.
+
 ## Health and Status
 
 ```bash
