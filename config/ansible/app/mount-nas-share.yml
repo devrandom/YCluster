@@ -13,6 +13,7 @@
 - name: Mount NAS share on Linux nodes
   hosts: core:compute
   become: yes
+  tags: [cifs]
   # Pulled by explicit file reference, not a group_vars/all auto-load, so it
   # stays out of `ansible-inventory --host` dumps (vault/general.yml).
   vars_files:
@@ -163,10 +164,44 @@
 - name: Mount NAS share on macOS nodes
   hosts: macos
   become: yes
+  tags: [cifs]
   pre_tasks:
-    - name: Skip macOS hosts when the CIFS NAS mount is disabled
+    - name: Skip macOS hosts when the CIFS NAS mount is enabled
       meta: end_host
-      when: not (nas_cifs_enabled | bool)
+      when: nas_cifs_enabled | bool
+
+    - name: Check macOS NAS mount state
+      command: mount
+      register: macos_mount_check
+      changed_when: false
+
+    - name: Unmount the legacy CIFS share
+      command: diskutil unmount force /Volumes/near1
+      when: "'/Volumes/near1' in macos_mount_check.stdout"
+
+    - name: Check for the legacy CIFS launchdaemon
+      stat:
+        path: /Library/LaunchDaemons/com.ycluster.mount-near1.plist
+      register: macos_near1_plist
+
+    - name: Unload the legacy CIFS launchdaemon
+      command: launchctl unload /Library/LaunchDaemons/com.ycluster.mount-near1.plist
+      when: macos_near1_plist.stat.exists
+      register: macos_near1_unload
+      failed_when: false
+      changed_when: macos_near1_unload.rc == 0
+
+    - name: Remove legacy CIFS mount artifacts
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /Library/LaunchDaemons/com.ycluster.mount-near1.plist
+        - /usr/local/bin/mount-near1.sh
+        - /etc/nas-credentials
+
+    - name: Finish macOS CIFS retirement
+      meta: end_host
   # Pulled by explicit file reference, not a group_vars/all auto-load, so it
   # stays out of `ansible-inventory --host` dumps (vault/general.yml).
   vars_files:
@@ -315,6 +350,7 @@
 - name: Mount NFS subtrees on Linux nodes
   hosts: core:compute
   become: yes
+  tags: [nfs]
   tasks:
     - name: Skip hosts with no enabled NAS NFS mounts
       meta: end_host
