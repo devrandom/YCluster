@@ -157,6 +157,8 @@ Run it on a cluster node or the bastion so the client uses the local
 ```bash
 inference fairness <model>
 inference fairness <model> --prefills 1 --json
+# on the serving node, bypass the gateway's network hop:
+inference --local fairness <model>
 ```
 
 The phases are named `baseline`, `with-prefill`, and `baseline-after`.

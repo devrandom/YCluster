@@ -137,5 +137,16 @@ python3 contrib/inference chat <model-id>
 # list available models:
 python3 contrib/inference models
 ```
+
+On the node that actually serves a model, `--local` skips the gateway: it
+reads the gateway's etcd model registry, asserts the model has a backend on
+this host, and talks to that backend over loopback with no bearer token. Use
+it for latency or throughput numbers; going through the gateway adds the
+leader's network hop.
+
+```bash
+inference --local chat <model-id>
+inference --local fairness <model-id>
+```
 </content>
 </invoke>

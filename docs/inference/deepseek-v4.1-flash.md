@@ -238,8 +238,9 @@ README.
 
 ### Prefill and decode by depth (measured, client on the serving node)
 
-`inference --endpoint http://127.0.0.1:9219 bench` — 2 repeats, 128 decode
-tokens, cold prompts:
+`inference --local bench <model>` (on the serving node; `--local` reads the
+gateway registry and asserts this host serves the model) — 2 repeats, 128
+decode tokens, cold prompts:
 
 | Prompt tokens | TTFT | Prefill tok/s | Decode tok/s |
 |---:|---:|---:|---:|
@@ -321,8 +322,9 @@ Compare decode numbers only on a fixed prompt.
 
 Run against `127.0.0.1:<port>` on the GPU node, not through the gateway: a
 remote client adds the storage-leader hop and the WAN path to every TTFT and
-ITL figure. `inference --endpoint http://127.0.0.1:9219 fairness <model>`
-does this.
+ITL figure. `inference --local fairness <model>` does this: the flag reads the
+gateway's etcd registry, asserts the model has a backend on this host, and
+talks to it over loopback without a gateway token.
 
 Stimulus: 2 generations (16k context) plus 2 concurrent cold prefills, decode
 deadline 10 s, baseline ~59 tok/s and p50 ITL 15.9 ms.
