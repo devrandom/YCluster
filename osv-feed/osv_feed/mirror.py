@@ -167,6 +167,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_packages_package
           ON packages(ecosystem, package);
+        -- Per-record updates and withdrawals delete by (ecosystem, record_id).
+        -- Without this index that lookup walks every package row of the
+        -- ecosystem (millions for Ubuntu), making each changed record O(total)
+        -- and a normal incremental sync take tens of minutes.
+        CREATE INDEX IF NOT EXISTS idx_packages_record
+          ON packages(ecosystem, record_id);
         """
     )
 

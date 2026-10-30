@@ -445,6 +445,21 @@ class FeedStatusTest(unittest.TestCase):
             }
         self.assertEqual({"openssh", "openssl"}, packages)
 
+    def test_per_record_package_delete_uses_index(self):
+        # Withdrawals and record updates delete package rows by record id. A
+        # plan that only narrows on ``ecosystem`` scans every package row in
+        # the feed (millions for Ubuntu), turning an incremental sync into a
+        # quadratic, multi-minute job.
+        with mirror.connect(self.db) as conn:
+            plan = " ".join(
+                row["detail"]
+                for row in conn.execute(
+                    "EXPLAIN QUERY PLAN DELETE FROM packages "
+                    "WHERE ecosystem='Ubuntu' AND record_id='UBUNTU-CVE-R'"
+                )
+            )
+        self.assertIn("idx_packages_record", plan)
+
     def test_boundary_age_is_fresh(self):
         self._write_record()
         mirror.save_cursor(self.db, "Ubuntu", self.now - timedelta(days=1))
