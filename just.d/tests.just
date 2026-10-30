@@ -31,6 +31,7 @@ test:
     @go test -C ids-forwarder ./...
     @echo "== test: IDS policies =="
     @.venv/bin/python -m unittest discover -s config/ansible/monitoring/tests -p 'test_ids_policies.py'
+    @.venv/bin/python -m unittest discover -s config/ansible/monitoring/tests -p 'test_apt_metrics_collector.py'
 
 test-system-quick:
     @mkdir -p ./tmp

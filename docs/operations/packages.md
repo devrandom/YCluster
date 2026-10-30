@@ -18,6 +18,21 @@ Check current metrics on a node with:
 cat /var/lib/prometheus/node-exporter/apt_status.prom
 ```
 
+The collector also asks `needrestart -b` which services are still running
+against replaced libraries and whether an installed kernel supersedes the
+running one, publishing `ycluster_restart_service_pending{service=...}` and
+`ycluster_restart_kernel_pending`. Storage keeps needrestart in list-only mode
+(unattended ceph/etcd/keepalived/postgresql restarts cost availability), so
+these two alerts are how a pending restart surfaces there:
+
+- `StorageServiceRestartPending` — a storage service needs a restart; run
+  `needrestart -r l` on the node and restart it in a maintenance window.
+- `StorageKernelRebootPending` — a storage node still runs a superseded
+  kernel; schedule a reboot.
+
+Both aggregate over the storage nodes, so a fleet-wide condition pages once
+instead of once per node.
+
 ## Held Packages
 
 Some packages are held from automatic upgrades via `dpkg --set-selections` because

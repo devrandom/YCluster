@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Emit apt freshness and lock metrics for node_exporter.
+"""Emit apt freshness, lock and pending-restart metrics for node_exporter.
 
-Reads the stamps maintained by apt-daily and probes the apt/dpkg lock files
-without modifying them.  The script is intentionally dependency-free so it can
-run from a systemd oneshot unit on every Linux node.
+Reads the stamps maintained by apt-daily, probes the apt/dpkg lock files
+without modifying them, and asks needrestart which services are still running
+against replaced libraries.  The script is intentionally dependency-free so it
+can run from a systemd oneshot unit on every Linux node.
 """
 
 import fcntl
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -29,6 +32,29 @@ LOCKS = {
     "dpkg": Path("/var/lib/dpkg/lock"),
     "dpkg_frontend": Path("/var/lib/dpkg/lock-frontend"),
 }
+
+# needrestart greylists these itself (restarting them is user-visible or
+# meaningless), so a stale library there is not actionable on its own.
+RESTART_IGNORED = frozenset(
+    {
+        "dbus.service",
+        "systemd-logind.service",
+        "networkd-dispatcher.service",
+        "unattended-upgrades.service",
+    }
+)
+
+# Per-session units that needrestart never restarts itself.
+RESTART_IGNORED_PREFIXES = ("getty@", "serial-getty@", "user@")
+
+NEEDRESTART = shutil.which("needrestart") or "/usr/sbin/needrestart"
+
+
+def actionable_service(name: str) -> bool:
+    """Return False for units whose stale libraries are not actionable."""
+    if name in RESTART_IGNORED:
+        return False
+    return not name.startswith(RESTART_IGNORED_PREFIXES)
 
 
 def stamp_age_seconds(path: Path, now: float) -> float:
@@ -65,6 +91,63 @@ def lock_held(path: Path) -> int:
         os.close(fd)
 
 
+def parse_needrestart(output: str) -> tuple[list[str], int]:
+    """Parse `needrestart -b` output into (services, kernel upgrade pending).
+
+    Batch output lists every service whose binaries or libraries were
+    replaced, including the ones needrestart would refuse to restart, so the
+    greylisted units are filtered out here.  The kernel status is one of
+    NRK_UNKNOWN/NRK_NOUPGRADE (0/1, nothing to do) or NRK_ABIUPGRADE/
+    NRK_VERUPGRADE (2/3, reboot pending).
+    """
+    services: list[str] = []
+    kernel_pending = 0
+    for line in output.splitlines():
+        key, _, value = line.partition(":")
+        value = value.strip()
+        if key == "NEEDRESTART-SVC":
+            if value and actionable_service(value):
+                services.append(value)
+        elif key == "NEEDRESTART-KSTA":
+            try:
+                kernel_pending = 1 if int(value) >= 2 else 0
+            except ValueError:
+                kernel_pending = 0
+    return services, kernel_pending
+
+
+def restart_metrics() -> list[str]:
+    """Return pending-restart metrics, or nothing when needrestart is absent."""
+    if not os.access(NEEDRESTART, os.X_OK):
+        return []
+    try:
+        result = subprocess.run(
+            [NEEDRESTART, "-b"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    services, kernel_pending = parse_needrestart(result.stdout)
+    lines = [
+        "# HELP ycluster_restart_service_pending Services running replaced libraries that need a restart",
+        "# TYPE ycluster_restart_service_pending gauge",
+    ]
+    for name in sorted(services):
+        lines.append(f'ycluster_restart_service_pending{{service="{name}"}} 1')
+    lines.extend(
+        [
+            "# HELP ycluster_restart_kernel_pending Whether an installed kernel supersedes the running one",
+            "# TYPE ycluster_restart_kernel_pending gauge",
+            f"ycluster_restart_kernel_pending {kernel_pending}",
+        ]
+    )
+    return lines
+
+
 def render(now: float) -> str:
     lines = [
         "# HELP ycluster_apt_update_age_seconds Seconds since the last successful apt cache update",
@@ -78,6 +161,7 @@ def render(now: float) -> str:
     ]
     for name, path in LOCKS.items():
         lines.append(f'ycluster_apt_lock_held{{lock="{name}"}} {lock_held(path)}')
+    lines.extend(restart_metrics())
     return "\n".join(lines) + "\n"
 
 

@@ -14,6 +14,9 @@
     - name: Install required packages
       apt:
         name:
+          # Not every image ships it, and without the package the
+          # apt-daily-upgrade timer exits without applying security updates.
+          - unattended-upgrades
           - python3
           - python3-pip
           - python3-flask
@@ -34,6 +37,28 @@
           - clang
           - libcurl4-openssl-dev
         state: present
+
+    # A patched library only protects a daemon once the daemon reloads it, so
+    # let needrestart restart services after package upgrades. Storage keeps
+    # needrestart's non-restarting default: an unattended restart of ceph,
+    # etcd, keepalived or postgresql costs availability. Container runtimes
+    # are deferred everywhere (see the conf.d drop-in below).
+    - name: Restart services after package upgrades
+      lineinfile:
+        path: /etc/needrestart/needrestart.conf
+        regexp: '^\s*#?\$nrconf\{restart\}\s*=.*$'
+        line: "$nrconf{restart} = 'a';"
+      when: "'storage' not in group_names"
+
+    - name: Defer container and database restarts to a maintenance window
+      copy:
+        dest: /etc/needrestart/conf.d/50-ycluster.conf
+        content: |
+          # Restarting these is a maintenance-window action; everything else
+          # is restarted so patched libraries take effect.
+          $nrconf{override_rc}{qr(^incus)} = 0;
+          $nrconf{override_rc}{qr(^postgresql)} = 0;
+        mode: '0640'
 
     - name: Create admin services directory
       file:

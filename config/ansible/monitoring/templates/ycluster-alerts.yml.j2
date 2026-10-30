@@ -102,6 +102,32 @@ groups:
           summary: "Apt metrics collector stale on {{ $labels.node }}"
           description: "apt_status.prom on {{ $labels.node }} has not been updated in over 30m"
 
+      # Storage deliberately keeps needrestart in list-only mode, because an
+      # unattended restart of ceph, etcd, keepalived or postgresql costs
+      # availability. That leaves patched libraries unused until someone acts,
+      # so surface it. Both expressions sum() over the storage nodes, which
+      # collapses them into a single firing series: one page for a rollout
+      # that touches all of them, not one page per node.
+      - alert: StorageServiceRestartPending
+        expr: sum(ycluster_restart_service_pending{node=~"s[0-9]+"}) > 0
+        for: 2h
+        labels:
+          severity: warning
+          slow_repeat: "true"
+        annotations:
+          summary: "{{ $value }} service(s) on storage nodes need a restart"
+          description: "Patched libraries are installed but still unused. Run `needrestart -r l` on the storage nodes and restart the listed services in a maintenance window."
+
+      - alert: StorageKernelRebootPending
+        expr: sum(ycluster_restart_kernel_pending{node=~"s[0-9]+"}) > 0
+        for: 12h
+        labels:
+          severity: warning
+          slow_repeat: "true"
+        annotations:
+          summary: "{{ $value }} storage node(s) still run a superseded kernel"
+          description: "An installed kernel is newer than the running one; schedule a reboot of the affected storage nodes."
+
       # YCluster health API
       - alert: YClusterHealthAPIDown
         expr: up{job="ycluster-health"} == 0
