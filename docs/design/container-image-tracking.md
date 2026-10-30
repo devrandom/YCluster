@@ -23,7 +23,7 @@ observes it.
   mirrors `PyPI` and `Alpine` alongside Ubuntu/Debian/Go, publishes their
   cursors, adds
   `[tracking.container]` to the collector config, points the collector at
-  `OSV_FEED_CONTAINER_DIR` (`/near1/osv-feed/container`), and syncs
+  `OSV_FEED_CONTAINER_DIR` (under the shared NFS snapshot), and syncs
   `config/ansible/monitoring/container-manifests/*.manifest` into that shared dir. The pending-CVE
   alerts (`PerimeterCVE*LongPending`) join on `image` so container images
   stay distinct perimeter surfaces. Manifest sync and collector runs are
@@ -149,7 +149,7 @@ All of these map to OSV ecosystems (`Ubuntu`/`Debian`, `PyPI`, `npm`,
   Tooling must be built from pinned source (`go install` at a pinned SHA)
   or be stdlib-only and live inside `osv-feed/`.
 - **Leak-free.** Image manifests and digests are internal cluster state;
-  keep them on the collector/`/near1`, never uploaded.
+  keep them on the collector node or its shared NFS snapshot, never uploaded.
 - **Reuse the existing model.** Findings should flow through the SAME
   pipeline as apt/source packages: local mirror → `match` →
   `osv_feed_cve_info` (`category="container"`) → `first_seen.json` →
@@ -171,7 +171,7 @@ scanner introduces.
    the SHA we built. For authentik, generate by resolving its published
    image (layers/base + `python -m pip list` dump) at the pinned tag.
    Store as `container/<image>-<digest>.manifest` next to the OSV snapshot
-   on `/near1`.
+   in the shared NFS snapshot directory.
 2. **Mirror the ecosystems the images need** on top of the existing
    Ubuntu/Debian/Go mirror: `PyPI` (~32 MB) for the Python runtime surface
    of every image here. The web frontends are baked into static assets and
@@ -207,8 +207,9 @@ scanner introduces.
 - **P2 (manifests at build):** generate `container/*.manifest` from the
   pinned trees via `osv-feed/osv_feed/manifestgen.py` with `--uv-select`
   runtime filtering, vendored at `config/ansible/monitoring/container-manifests/` (open-webui `base`,
-  zulip `prod`, authentik `base`) and synced to `/near1/osv-feed/container`
-  by `install-osv-feed.yml`. **Done in repo** (regenerate and re-sync after
+  zulip `prod`, authentik `base`) and synced to the shared snapshot
+  container directory by `install-osv-feed.yml`. **Done in repo**
+  (regenerate and re-sync after
   each image/`uv.lock` bump).
 - **P3 (authentik):** digest-pin `ghcr.io/goauthentik/server`
   (`authentik_image` var + compose override + manager). **Done in repo.**

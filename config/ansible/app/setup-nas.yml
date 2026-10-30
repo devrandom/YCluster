@@ -169,7 +169,7 @@
         owner: "{{ vm_data_nfs_anon_uid }}"
         group: "{{ vm_data_nfs_anon_gid }}"
         mode: '0775'
-      loop: "{{ nas_nfs_exports }}"
+      loop: "{{ nas_nfs_exports_effective }}"
 
     - name: Own the NFS export subtrees as uid/gid 1000 (NFS single-UID parity)
       file:
@@ -178,7 +178,7 @@
         owner: "{{ vm_data_nfs_anon_uid }}"
         group: "{{ vm_data_nfs_anon_gid }}"
         recurse: yes
-      loop: "{{ nas_nfs_exports }}"
+      loop: "{{ nas_nfs_exports_effective }}"
 
     - name: Configure NFS /etc/exports
       copy:
@@ -186,7 +186,7 @@
         content: |
           # NAS exports — configured by setup-nas.yml. Single-UID squash
           # mirrors the CIFS uid/gid=1000.
-          {% for export in nas_nfs_exports %}
+          {% for export in nas_nfs_exports_effective %}
           {% for net in export.networks %}
           {{ export.path }} {{ net }}(rw,sync,no_subtree_check,all_squash,anonuid={{ vm_data_nfs_anon_uid }},anongid={{ vm_data_nfs_anon_gid }})
           {% endfor %}

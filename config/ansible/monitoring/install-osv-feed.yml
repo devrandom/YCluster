@@ -2,9 +2,9 @@
 # Install and wire the local OSV CVE feed (osv-feed) on a single collector
 # node. The mirror writes Debian/Ubuntu/Go/PyPI/Alpine + EPSS into a local
 # SQLite store on the node's disk (SQLite over a network share is fragile),
-# then a publish job snapshots that store to the shared /near1 dir; the collector
-# matches the snapshot read-only and writes CVE state to the node_exporter textfile
-# directory.
+# then a publish job snapshots that store to the shared NFS snapshot dir; the
+# collector matches the snapshot read-only and writes CVE state to the
+# node_exporter textfile directory.
 #
 # Single writer: the daily mirror (which owns <db_dir>'s cursors,
 # first-seen state and the writable SQLite store) lives on one designated
@@ -13,7 +13,8 @@
 #
 # Usage:
 #   ./run-playbook.sh monitoring/install-osv-feed.yml
-#   # override the collector node (must mount /near1 and have outbound access):
+#   # override the collector node (must mount the NFS snapshot dir and have
+#   # outbound access):
 #   ./run-playbook.sh monitoring/install-osv-feed.yml -e osv_feed_collector=storage-1
 #
 # See docs/design/osv-feed.md for the deployment plan and
@@ -35,8 +36,6 @@
     # node's local disk; only a read-only snapshot is published to the
     # shared dir (see docs/design/osv-feed.md).
     osv_feed_db_dir: /var/lib/osv-feed/db
-    osv_feed_snapshot_dir: /near1/osv-feed
-    osv_feed_ack_db: /near1/osv-feed/acks.json
     osv_feed_ecosystem: Ubuntu
     osv_feed_match_interval_sec: 900
     # Derived from perimeter_software.yml entries whose `osv_category` matches
@@ -115,6 +114,10 @@
         dest: "{{ osv_feed_container_dir }}/"
         delete: yes
         recursive: yes
+        # The NFS export is all-squash; do not try to preserve root ownership.
+        rsync_opts:
+          - "--no-owner"
+          - "--no-group"
       # The collector matches them from the read-only snapshot
       # (see docs/design/container-image-tracking.md).
 

@@ -112,9 +112,10 @@ avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
 3. **Publish a read-only snapshot.** SQLite directly over a network
    filesystem (Samba/NFS) is fragile — locking and journal files on the
    share. Instead, a separate `Type=oneshot` systemd job in the bigger
-   repo copies `<db_dir>/osv-feed.sqlite` to `/near1` with an atomic
-   replace after each mirror run. Because the DB uses rollback-journal
-   (DELETE) mode, the copied single file is always a complete snapshot.
+   repo copies `<db_dir>/osv-feed.sqlite` to the shared NFS snapshot
+   directory with an atomic replace after each mirror run. Because the DB
+   uses rollback-journal (DELETE) mode, the copied single file is always a
+   complete snapshot.
    The publish step also copies the EPSS snapshot and the per-ecosystem
    cursors, which a reader's freshness/`match` run consults; `first-seen.json`
    is deliberately *not* published — it is per-consumer writable state.
@@ -129,14 +130,14 @@ avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
      (`dpkg-query -W -f '${Package} ${Source}'`);
    - CVE state via `osv-feed --db-immutable match --format prometheus`
      (a bare run reports the whole tracked surface) pointed at the
-     `/near1` snapshot, emitting `osv_feed_cve_info` and
+     mounted NFS snapshot, emitting `osv_feed_cve_info` and
      `osv_feed_cve_first_seen_seconds`. `--db-immutable` opens the file
      with `mode=ro&immutable=1` so readers take no locks and never write
      `-journal`/`-wal`/`-shm` files to the share. The first-seen gauge
      needs writable state, so under `--db-immutable` `first-seen.json`
      falls back to the local default DB dir
      (`~/.cache/osv-feed`; pin it with `--state-dir` if needed) and is
-     never written into the read-only `/near1` snapshot.
+     never written into the read-only snapshot.
 
 5. **Alert rules.** `PerimeterCVECriticalLongPending` /
    `PerimeterCVEHighLongPending` fire from the coalesced
@@ -156,8 +157,9 @@ avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
 
 - `osv-feed/test.sh` stays green.
 - Run the mirror once and confirm `<db>/osv-feed.sqlite` plus the
-  per-ecosystem cursor; the publish job copies the sqlite file to `/near1`
-  and `osv-feed --db-immutable match --format prometheus` pointed at the
+  per-ecosystem cursor; the publish job copies the sqlite file to the
+  shared NFS snapshot directory and
+  `osv-feed --db-immutable match --format prometheus` pointed at the
   snapshot emits `osv_feed_cve_first_seen_seconds`, scraped by the
   textfile collector.
 - `promtool check rules` passes on the new alert group, and a synthetic

@@ -1,0 +1,6 @@
+---
+# Published osv-feed snapshot location. The writable SQLite store stays on
+# the collector node's local disk; only this read-only snapshot is shared.
+# Hosts using the NFS export override these to the client mount path.
+osv_feed_snapshot_dir: /near1/osv-feed
+osv_feed_ack_db: "{{ osv_feed_snapshot_dir }}/acks.json"

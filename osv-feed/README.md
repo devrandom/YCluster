@@ -358,8 +358,9 @@ the requested packages instead of scanning the whole archive.
 The writable DB lives on a node with local storage for reasons of
 robustness: SQLite over a network filesystem (e.g. on a Samba/NFS share)
 invites locking and journaling problems. A separate deployment job copies
-`<db_dir>/osv-feed.sqlite` to a share like `/near1` after each `mirror`
-run, using an atomic replace so consumers always see a complete file.
+`<db_dir>/osv-feed.sqlite` to a shared NFS directory (for example
+`/mnt/near1-osv-feed`) after each `mirror` run, using an atomic replace so
+consumers always see a complete file.
 `osv-feed` itself only maintains the writable store; the publish step is
 owned by the surrounding repo's systemd job.
 
@@ -370,8 +371,8 @@ copies the EPSS snapshot and the per-ecosystem cursors alongside the DB
 (a reader's `match` run consults them), but `first-seen.json` is never
 written into the read-only snapshot dir: under `--db-immutable` the
 writable `first-seen.json` falls back to the local default DB dir
-(`~/.cache/osv-feed`), so consumers pointed at the `/near1` copy never
-touch the share.
+(`~/.cache/osv-feed`), so consumers pointed at that snapshot never
+touch the writable store.
 
 `immutable_db=true` can also be set via `OSV_FEED_IMMUTABLE_DB` or
 `[feed] immutable_db`; the CLI flag wins over both. The first-seen state

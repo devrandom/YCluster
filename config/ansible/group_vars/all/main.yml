@@ -148,3 +148,7 @@ nas_nfs_export: "{{ vm_data_nfs_export }}"
 nas_nfs_exports:
   - path: "{{ nas_nfs_export }}"
     networks: "{{ vm_data_nfs_export_net }}"
+# Additional non-VM-data exports (for trees migrated off CIFS) can be added
+# per NAS host without replacing the shared VM-data export above.
+nas_nfs_exports_extra: []
+nas_nfs_exports_effective: "{{ nas_nfs_exports + nas_nfs_exports_extra }}"
