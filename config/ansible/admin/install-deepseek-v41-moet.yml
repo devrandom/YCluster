@@ -1,0 +1,190 @@
+---
+# Deploy the sybil/MoET DeepSeek-V4.1-Flash recipe to Nvidia GPU nodes.
+#
+# This is the 0xSero / sybil-solutions "moet-r13" launch
+# (vllm-moet-deepseek-v4.1-flash-1017-512k-tp4), NOT the Karmic Kraken
+# profile deployed by admin/install-deepseek-v41-flash.yml. It installs as a
+# separate alongside backend so both can be measured against identical
+# traffic before either one replaces the other.
+#
+#   image: ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:08f61e68… (r13)
+#   weights: deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10…
+#
+# Requirements, from the recipe manifest (registry/launches/
+# vllm-moet-deepseek-v4.1-flash-1017-512k-tp4.json upstream):
+#   - 4x RTX PRO 6000 Blackwell 96 GB in ONE host, with GPU peer-to-peer
+#     (cudaDeviceCanAccessPeer true for every pair; the P2P all-reduce and
+#     NCCL_P2P_LEVEL=SYS depend on it).
+#   - 47 GB host RAM at peak, 32 GiB of it a pinned KV-offload region that
+#     lives in /dev/shm -- hence --shm-size 48g.
+#   - 510 GB of weights plus the ~9.6 GB image on LOCAL NVMe: the Engram
+#     tables are read from the checkpoint on every decode step, so the model
+#     directory must not sit on NAS or network storage.
+#
+# Gating:
+#   Per-host `ds41_moet_enabled: true` in private host_vars/<node>.yml.
+#   Per-host `ds41_moet_gpus: "<4 CDI names>"` selects the cards. Prefer the
+#   GPU-UUID names from `nvidia-ctk cdi list` (nvidia.com/gpu=GPU-…): the
+#   index names are driver minor numbers and renumber across reboots and
+#   card hot-plugs, UUIDs do not.
+#
+# Bring up:
+#   ~/bin/ds41-moet-setup.sh --download   # image + checkpoint (~520 GB)
+#   ~/bin/ds41-moet-setup.sh              # re-pull image + verify checkpoint
+#   ~/bin/ds41-moet-start.sh              # manual launch (idempotent)
+#
+# The runtime service is a system-level unit that attaches to the existing
+# rootless container, so the backend comes back after a host reboot and is
+# restarted after an engine failure.
+
+- name: Deploy the DS4.1 MoET recipe to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # Digest-pinned from the launch manifest (local-ai-registry, r13).
+    ds41_moet_image: "ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:08f61e680ddab3f1f1b50f92020133c382630f9798ab0ff5729f8931a604f82d"
+    ds41_moet_image_tag: "ghcr.io/sybil-solutions/vllm-moet-dsv41:recipe-08f61e68"
+    ds41_moet_repo: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    ds41_moet_revision: "1bae0e1088993b9b82de08f59de5be5a34e42170"
+    ds41_moet_model_dir: "/home/dev/models/DeepSeek-V4.1-Flash-1017"
+    # Keep this distinct from the Karmic Kraken name (deepseek-v4_1-flash) so
+    # callers can A/B the two recipes without the gateway splitting traffic.
+    ds41_moet_served_name: "deepseek-v4_1-flash-moet"
+    ds41_moet_port: 9219
+    ds41_moet_container: "ds41-moet"
+    # Persistent home for FlashInfer/DeepGEMM/Triton JIT caches. The launcher
+    # recreates the container on every start; without this mount each restart
+    # pays the recipe's ~22 min first-start autotune again.
+    ds41_moet_cache_dir: "/home/dev/.cache/ds41-moet"
+    # /dev/shm for the pinned KV-offload region (recipe default: 48g).
+    ds41_moet_shm: "48g"
+    # Container memory ceiling: ~47 GB working set plus the 48g shm tmpfs,
+    # which is charged to the container cgroup.
+    ds41_moet_memory: "112g"
+    # Start (or attach to) the container at the end of the play. Set false
+    # with -e ds41_moet_autostart=false to install the scripts before the
+    # checkpoint is staged: the unit's ExecStart attaches to an existing
+    # container, so with no container yet it would fail and Restart=always
+    # would spin it every 10s.
+    ds41_moet_autostart: true
+
+  tasks:
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: End play for nodes that have not opted into the MoET recipe
+      meta: end_host
+      when: not (ds41_moet_enabled | default(false))
+
+    - name: Refuse a GPU set that is not exactly four cards
+      fail:
+        msg: >-
+          ds41_moet_gpus must name exactly 4 CDI devices (TP4), got
+          '{{ ds41_moet_gpus | default('') }}'
+      when: (ds41_moet_gpus | default('') | string | split() | length) != 4
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install DS4.1 MoET staging scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - ds41-moet-setup.sh
+        - ds41-moet-start.sh
+
+    - name: Install DS4.1 MoET systemd unit
+      template:
+        src: templates/ds41-moet.service.j2
+        dest: /etc/systemd/system/ds41-moet.service
+        owner: root
+        group: root
+        mode: '0644'
+
+    # state: started attaches to a running container (no-op) or starts the
+    # existing one; it never recreates it, so deploying does not bounce
+    # inference. Use ~/bin/ds41-moet-start.sh + `systemctl restart ds41-moet`
+    # when the launch flags change.
+    - name: Enable and start the DS4.1 MoET service
+      systemd:
+        name: ds41-moet.service
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      when: ds41_moet_autostart | default(true) | bool
+
+    - name: Report deferred start
+      debug:
+        msg: >-
+          ds41-moet.service installed but not started (ds41_moet_autostart=false).
+          Stage the checkpoint with ~/bin/ds41-moet-setup.sh --download, then
+          re-run this play without the override.
+      when: not (ds41_moet_autostart | default(true) | bool)
+
+- name: Register the DS4.1 MoET backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    ds41_moet_nvidia_host: >-
+      {{ (groups['nvidia']
+          | select('in', hostvars.keys())
+          | list)
+         | map('extract', hostvars, 'ds41_moet_enabled')
+         | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+         | selectattr(0, 'defined')
+         | selectattr(0, 'equalto', true)
+         | map(attribute=1)
+         | first
+         | default('') }}
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: End play when no MoET host is opted in
+      meta: end_host
+      when: ds41_moet_nvidia_host | length == 0
+
+    - name: Set DS4.1 MoET backend facts
+      set_fact:
+        ds41_moet_backend_url: >-
+          http://{{ ds41_moet_nvidia_host }}.xc:{{
+            hostvars[ds41_moet_nvidia_host]['ds41_moet_port'] | default(9219) }}
+        ds41_moet_served_name_fact: >-
+          {{ hostvars[ds41_moet_nvidia_host]['ds41_moet_served_name']
+             | default('deepseek-v4_1-flash-moet') }}
+
+    - name: Register the DS4.1 MoET backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ ds41_moet_backend_url }}
+        {{ ds41_moet_served_name_fact }}
+      register: ds41_moet_proxy_register
+      changed_when: "'added' in ds41_moet_proxy_register.stdout or 'registered' in ds41_moet_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+
+    - name: Report DS4.1 MoET registration
+      debug:
+        msg: >-
+          DS4.1 MoET backend registered at {{ ds41_moet_backend_url }}
+          (served: {{ ds41_moet_served_name_fact }})
+      when:
+        - is_storage_leader
+        - not ansible_check_mode

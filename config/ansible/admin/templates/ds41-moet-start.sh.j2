@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Launch DeepSeek-V4.1-Flash on the sybil/MoET recipe runtime (TP4, 512K).
+# Run as the dev user:
+#
+#   ~/bin/ds41-moet-start.sh
+#
+# This is an alongside container (ds41-moet): it does not touch the Karmic
+# Kraken deployment (ds41-flash), ds4-dspark, or their GPUs. It needs 4 cards
+# named in ds41_moet_gpus (private host_vars); prefer CDI GPU-UUID names.
+#
+# The launch arguments and environment below are copied from the upstream
+# manifest, registry/launches/vllm-moet-deepseek-v4.1-flash-1017-512k-tp4.json
+# (sybil-solutions/local-ai-registry). Do not "tidy" them: the fused decode
+# kernel, the MXFP4 indexer, the b12x MoE backend and the disk Engram layer
+# are all part of the recipe being measured.
+#
+# Scheduler fairness knobs. Defaults here are the RECIPE STOCK shape: 4096
+# step budget, no long-prefill cap, no prefill cadence. Do not "fix" them by
+# lowering LONG_PREFILL_TOKENS without reading the measured table in
+# docs/inference/deepseek-v4.1-flash.md: on this image decode during a heavy
+# prefill is ~1 token per prefill step, so every halving of the cap buys
+# decode smoothness by halving prefill throughput. Raising the budget to
+# 8192 with a 4096 cap makes it worse, not better, without a time-shared
+# scheduler. The Karmic Kraken fork's --prefill-compute-share is what makes
+# that trade-off unnecessary; this image does not have it.
+#
+# Env overrides: GPUS PORT SERVED_NAME MAX_MODEL_LEN SEQ GPU_UTIL SHM MEM
+#                BATCH_TOKENS LONG_PREFILL_TOKENS PREFILL_INTERVAL
+#
+# The image's ENTRYPOINT is ["vllm","serve"], so the arguments below start at
+# the model path. Do not add another `serve`: it would be passed through as
+# the model directory.
+set -euo pipefail
+
+IMAGE="${IMAGE:-{{ ds41_moet_image }}}"
+MODEL_HOST="${MODEL_HOST:-{{ ds41_moet_model_dir }}}"
+CONTAINER="${CONTAINER:-{{ ds41_moet_container }}}"
+PORT="${PORT:-{{ ds41_moet_port }}}"
+SERVED_NAME="${SERVED_NAME:-{{ ds41_moet_served_name }}}"
+CACHE_DIR="${CACHE_DIR:-{{ ds41_moet_cache_dir }}}"
+SHM="${SHM:-{{ ds41_moet_shm }}}"
+MEM="${MEM:-{{ ds41_moet_memory }}}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
+SEQ="${SEQ:-8}"
+GPU_UTIL="${GPU_UTIL:-0.94}"
+BATCH_TOKENS="${BATCH_TOKENS:-4096}"
+LONG_PREFILL_TOKENS="${LONG_PREFILL_TOKENS:-0}"
+PREFILL_INTERVAL="${PREFILL_INTERVAL:-1}"
+
+# CDI device names (index or GPU-UUID). The container only sees the devices
+# injected below, so CUDA ordinals 0..N-1 always address exactly these cards
+# in this order; do not replace CUDA_VISIBLE_DEVICES with host smi indices.
+GPUS="${GPUS:-{{ ds41_moet_gpus | default('') }}}"
+[ -n "$GPUS" ] || { echo "no GPUs configured for $CONTAINER - set ds41_moet_gpus in host_vars/<node>.yml (or override GPUS)" >&2; exit 1; }
+ngpu=0
+for _g in $GPUS; do ngpu=$((ngpu + 1)); done
+[ "$ngpu" -eq 4 ] || { echo "$CONTAINER requires exactly 4 GPUs, got: $GPUS" >&2; exit 1; }
+
+# pre-flight
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - run: ~/bin/ds41-moet-setup.sh" >&2; exit 1; }
+[ -f "$MODEL_HOST/config.json" ] && [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+  || { echo "checkpoint missing at $MODEL_HOST - run: ~/bin/ds41-moet-setup.sh --download" >&2; exit 1; }
+
+# The image ships a warm /root/.cache/flashinfer from its build. Mounting an
+# empty host directory over /root/.cache would hide it and force a full
+# autotune on first start, so seed the host directory from the image once and
+# then keep it mounted: FlashInfer autotune, DeepGEMM and Triton caches all
+# live under /root/.cache and must survive container recreation.
+mkdir -p "$CACHE_DIR"
+if [ ! -e "$CACHE_DIR/.seeded-from-image" ]; then
+  echo "seeding $CACHE_DIR from the image's /root/.cache ..."
+  podman run --rm --entrypoint /bin/sh "$IMAGE" -c 'tar -C /root/.cache -cf - .' \
+    | tar -C "$CACHE_DIR" -xf -
+  touch "$CACHE_DIR/.seeded-from-image"
+fi
+
+dev_args=()
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
+
+CVD="$(seq -s, 0 $((ngpu - 1)))"
+
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+podman run -d --name "$CONTAINER" \
+  "${dev_args[@]}" \
+  --network=host \
+  --init \
+  --security-opt seccomp=unconfined \
+  --shm-size "$SHM" \
+  --ulimit memlock=-1:-1 \
+  --ulimit nofile=1048576:1048576 \
+  --ulimit stack=67108864:67108864 \
+  --memory "$MEM" --memory-swap "$MEM" \
+  -e CUDA_VISIBLE_DEVICES="$CVD" \
+  -e VLLM_MOET_B12X_MOE_FUSED=1 \
+  -e VLLM_MOET_SPARSE_MLA_LDG=1 \
+  -e VLLM_MOET_TARGET_LM_HEAD_MXFP8=1 \
+  -e VLLM_MOET_P2P_AR=1 \
+  -e VLLM_MOET_P2P_AR_FUSED_MAX_ROWS=16 \
+  -e VLLM_MOET_ENGRAM_DISK=1 \
+  -e VLLM_MOET_ENGRAM_DISK_THREADS=16 \
+  -e NCCL_P2P_DISABLE=0 \
+  -e NCCL_P2P_LEVEL=SYS \
+  -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+  -e HF_HUB_OFFLINE=1 \
+  -e TRANSFORMERS_OFFLINE=1 \
+  -v "$MODEL_HOST":/models:ro \
+  -v "$CACHE_DIR":/root/.cache \
+  "$IMAGE" \
+  /models \
+  --served-model-name "$SERVED_NAME" \
+  --host 0.0.0.0 \
+  --port "$PORT" \
+  --tensor-parallel-size 4 \
+  --max-model-len "$MAX_MODEL_LEN" \
+  --gpu-memory-utilization "$GPU_UTIL" \
+  --max-num-seqs "$SEQ" \
+  --kv-cache-dtype nvfp4_ds_mla \
+  --tool-call-parser deepseek_v41 \
+  --enable-auto-tool-choice \
+  --reasoning-parser deepseek_v41 \
+  --tokenizer-mode deepseek_v41 \
+  --max-num-batched-tokens "$BATCH_TOKENS" \
+  --long-prefill-token-threshold "$LONG_PREFILL_TOKENS" \
+  --prefill-schedule-interval "$PREFILL_INTERVAL" \
+  --max-cudagraph-capture-size 64 \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false,"moe_backend":"b12x"}' \
+  --attention-config '{"indexer_kv_dtype":"mxfp4","indexer_tp_shard_min_rows":2048}' \
+  --moe-backend b12x \
+  --kv-offloading-size 32 \
+  --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/srv/kvcache/v41-interleaved","n_read_threads":16,"n_write_threads":16,"locality":"LOCAL"}],"offload_prompt_only":false}}'
+
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPUs [$GPUS], TP=4 max_model_len=$MAX_MODEL_LEN slots=$SEQ batch=$BATCH_TOKENS long_prefill=$LONG_PREFILL_TOKENS prefill_interval=$PREFILL_INTERVAL"
+echo "  first start runs FlashInfer autotune + DeepGEMM JIT (~22 min upstream)"
+echo "  watch:  podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/health"

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Stage the DeepSeek-V4.1-Flash checkpoint and the sybil/MoET recipe image.
+# Run as the dev user:
+#
+#   ~/bin/ds41-moet-setup.sh --download     # image pull + checkpoint (~520 GB)
+#   ~/bin/ds41-moet-setup.sh                # image pull + checkpoint verify
+#   ~/bin/ds41-moet-setup.sh --verify-only  # just verify the staged checkpoint
+#
+# The checkpoint must live on local NVMe: the recipe's Engram layer reads the
+# tables from the checkpoint on every decode step, so a network/NAS mount
+# would sit on the decode critical path.
+set -eu
+
+IMAGE="{{ ds41_moet_image }}"
+IMAGE_TAG="{{ ds41_moet_image_tag }}"
+REPO="{{ ds41_moet_repo }}"
+REVISION="{{ ds41_moet_revision }}"
+MODEL_HOST="${MODEL_HOST:-{{ ds41_moet_model_dir }}}"
+
+action="setup"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --download)     action="download"; shift ;;
+    --verify-only)  action="verify-only"; shift ;;
+    -h|--help)
+      sed -n '2,14p' "$0"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v podman >/dev/null \
+  || { echo "podman missing - run admin/setup-gpu-podman.yml first" >&2; exit 1; }
+
+if [ "$action" != "verify-only" ]; then
+  echo "== pull $IMAGE_TAG (digest $IMAGE) =="
+  podman pull "$IMAGE"
+  echo "  image ready: $IMAGE"
+  echo
+fi
+
+if [ "$action" = "download" ]; then
+  avail_gb="$(df -Pk "$(dirname "$MODEL_HOST")" | awk 'NR==2 {printf "%d", $4/1048576}')"
+  if [ "$avail_gb" -lt 520 ]; then
+    echo "not enough space in $(dirname "$MODEL_HOST"): ${avail_gb} GB free, need 520 GB" >&2
+    exit 1
+  fi
+  echo "== download $REPO @ $REVISION -> $MODEL_HOST =="
+  # Xet must stay enabled: the two 101.5 GB Engram shards are served through
+  # Xet only, and the plain download path refuses them ("file is too large to
+  # be downloaded using the regular download method"). hf_xet is pulled in as
+  # a companion package rather than installed globally.
+  uv tool run --with hf_xet hf download "$REPO" \
+    --revision "$REVISION" \
+    --local-dir "$MODEL_HOST"
+  echo
+fi
+
+if [ "$action" = "download" ] || [ "$action" = "verify-only" ]; then
+  echo "== verify checkpoint revision =="
+  trees_dir="$MODEL_HOST/.cache/huggingface/trees"
+  if [ ! -d "$trees_dir" ]; then
+    echo "no trees metadata at $trees_dir - run --download first" >&2
+    exit 1
+  fi
+  got="$(ls "$trees_dir"/*.json 2>/dev/null \
+        | xargs -n1 basename \
+        | sed 's/\.json$//' \
+        | sort -u \
+        | head -1)"
+  if [ -z "$got" ]; then
+    echo "no trees metadata files at $trees_dir" >&2
+    exit 1
+  fi
+  if [ "$got" != "$REVISION" ]; then
+    echo "revision mismatch: expected $REVISION, got '$got'" >&2
+    echo "  $MODEL_HOST contains a different HF revision" >&2
+    exit 1
+  fi
+  echo "  revision OK: $got"
+  echo
+fi
+
+if [ "$action" = "setup" ]; then
+  if [ ! -f "$MODEL_HOST/config.json" ]; then
+    echo "Checkpoint not found at $MODEL_HOST (~510 GB) - download it:"
+    echo "  ~/bin/ds41-moet-setup.sh --download"
+    exit 0
+  fi
+  [ -f "$MODEL_HOST/model.safetensors.index.json" ] \
+    || { echo "index missing at $MODEL_HOST/model.safetensors.index.json" >&2; exit 1; }
+
+  model_type="$(python3 -c "import json; print(json.load(open('$MODEL_HOST/config.json'))['model_type'])" 2>/dev/null || echo 'unknown')"
+  if [ "$model_type" != "deepseek_v41" ]; then
+    echo "expected model_type 'deepseek_v41', got '$model_type' in $MODEL_HOST/config.json" >&2
+    exit 1
+  fi
+
+  echo
+  echo "Start the server:  ~/bin/ds41-moet-start.sh"
+fi

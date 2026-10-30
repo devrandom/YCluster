@@ -133,6 +133,194 @@ Migration notes if we move:
   RAM-Engram on different clocks. Any upgrade re-runs the smoke/needle
   suite plus a matched short benchmark against R36 before serving traffic.
 
+## MoET recipe (r13, alongside deployment)
+
+A second recipe for the same checkpoint, from `sybil-solutions/local-ai-registry`
+(0xSero / kacper-daftcode `vLLM-Moet`), deployed by
+`admin/install-deepseek-v41-moet.yml` as `ds41-moet`:
+
+| Item | Value |
+|---|---|
+| launch id | `vllm-moet-deepseek-v4.1-flash-1017-512k-tp4` |
+| image | `ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:08f61e68…` (r13) |
+| runtime | vLLM nightly df3bd094 + sm_120 steps 1-28, DSpark k=7 |
+| needs | 4× 96 GB sm_120 in one host with GPU P2P; 47 GB host RAM; 520 GB local NVMe |
+
+It differs from the Karmic Kraken profile in what it turns on, not in what it
+serves: fused decode MoE kernel, FP4 KV record + MXFP4 indexer keys, MXFP8
+target `lm_head`, sparse-MLA gather loads, PCIe P2P all-reduce, and an
+`engram_disk` layer that reads the Engram tables from the checkpoint on NVMe
+instead of pinning ~330 GB of host shared memory. That last point is why it
+fits a 125 GiB host at all — and why the model directory must be local NVMe.
+
+Quality is lossy by design (top-1 agreement 0.974 vs a stock-kernel reference,
+mean KL 0.0195, needle PASS at 245K and 510K upstream). Every `VLLM_MOET_*`
+switch falls back to the stock path when set to 0.
+
+Throughput expectations, from the reference host (125 GiB RAM, PCIe 5.0,
+300 W per card, disk Engram — the same shape as our candidate hosts):
+
+- recipe-kit prose sweep: prefill 8k 8,944 / 32k 10,695 / 64k 11,119 tok/s;
+  decode C1 137.6, C2 191.7, C3 202.5, C4 263.2, C8 271.7 tok/s aggregate;
+  C1 at 32k 73.1 tok/s.
+- `fraser_bench` (2,048-token code bench): median 403, undisturbed reps
+  557-573 tok/s at 5.4-5.6 accepted tokens per step.
+
+The widely quoted 600+ tok/s figures are a different configuration: an
+upstream `fraser_bench` run at 325 W with +5000 MHz memory clock and the
+Engram tables in host RAM (189 GiB). Do not quote them for a disk-Engram
+host. Decode is power-bound, so record the GPU power limit with any number.
+
+Operationally, the launcher recreates the container on every start, so the
+FlashInfer/DeepGEMM/Triton JIT caches must be bind-mounted out (the playbook
+mounts `/root/.cache` from the host) — otherwise each restart pays the ~22 min
+first-start autotune again. The unit attaches to the existing container the
+same way the Karmic Kraken unit does, so a deploy does not bounce inference.
+
+### Measured on our host (first bring-up)
+
+4× RTX PRO 6000 96 GB (Max-Q, 300 W), single socket, IOMMU on, all four cards
+Gen5 x16 with peer access `OK` on every pair; 125 GiB host RAM, disk Engram.
+
+| Measurement | Result |
+|---|---|
+| engine ready after container start | ~7 min (upstream quotes ~22 min for a cold autotune) |
+| C1 codegen, 512 tokens, 3 runs | 377 / 406 / 426 tok/s, median **406** |
+| conc 4, 512 tokens each | 653 tok/s aggregate, 163-185 per request |
+| prefill at 127K prompt | 17,311 tok/s |
+| needle at 127K (50% depth) | PASS |
+| steady-state VRAM | 91.6 GB per card |
+| host RAM in use while serving | 72 GiB used, 52 GiB available |
+
+That is roughly 1.6-1.9× the Karmic Kraken profile's 208-250 tok/s C1 on the
+same card model, with the same checkpoint and the same IOMMU-on host. The gap
+to the published 557-573 tok/s bench numbers is the untuned upstream
+configuration (325 W, +5000 MHz memory, RAM Engram); do not expect it here.
+
+### Published numbers and image revisions
+
+Two different sets of figures are in circulation; ours matches the newer one.
+
+| Source | Prefill | C1 decode | Notes |
+|---|---|---|---|
+| r13 submission (2026-10-21), same image/flags/300 W as ours | 8.9k / 9.9k / 10.7k / 11.1k at 8k/16k/32k/64k | 137.6 tok/s prose | **measured on a live box**: `LIVE: shared with agent traffic`, swap at 21 GB |
+| vLLM-Moet README, served image `-r21` (2026-10-26) | 163K in 8.6 s (~19k tok/s) | prose ~277, code ~796; C8 ~717 prose / ~2,055 code aggregate | measured at **400 W** per card |
+| this host, r13 image, 300 W Max-Q cards | 17.8k–18.2k flat to 55k, 17.3k at 127k | 406 tok/s median (code) | matches the r21 prefill figure, not the r13 one |
+
+So the mismatch is not a version gap. The 9–11k figures are r13, measured on
+the *same* image, flags and 300 W power limit we run — but with live agent
+traffic sharing the box and the host swapping (21 GB), which the submission
+states outright. Its decode shows the same live-vs-idle spread: `fraser_bench`
+median 403 tok/s live, 557–573 undisturbed, against our 406 idle. Prefill
+landed above that because our box is idle.
+
+r21 then publishes ~19k prefill on an idle box at 400 W, i.e. prefill is
+roughly unchanged between the two revisions and the r21 gains are decode-side.
+
+Image revisions (same repository, `ghcr.io/sybil-solutions/vllm-moet-dsv41`):
+
+| Tag | Digest | Stack |
+|---|---|---|
+| `r13-5d25cff` (deployed here) | `sha256:08f61e680ddab3f1f1b50f92020133c382630f9798ab0ff5729f8931a604f82d` | vLLM-Moet `5d25cff`, steps 1-28 |
+| `df3bd094-r21` (newest) | `sha256:ef1e28b719025690e24f0d6406b34cbe1a32c50ec7bbba2dc7358a0048c81a4a` | vLLM-Moet `b0dc737`, steps 1-36 |
+
+r21 adds switches the r13 recipe does not set: `VLLM_MOET_P2P_AR_FUSED_MAX_ROWS=8`
+(8, not 16), `VLLM_MOET_P2P_AG=0`, `VLLM_MOET_DFLASH_PREP_GROUPS=1`,
+`VLLM_MOET_CANDIDATE_DET_TOPK=1`, `VLLM_MOET_SWA_DECODE_BUILD=1`,
+`VLLM_MOET_MOE_TOPKSUM_ADD=1`, `VLLM_MOET_SWA_DRAFT_BUILD=1`, plus
+`--gpu-memory-utilization 0.92` and a JIT-cache mount at `/root/.deep_gemm`
+alongside `/root/.cache`. It also carries deterministic MoE output above 8
+rows (`B12X_DYNAMIC_DETERMINISTIC_OUTPUT=1`), which matters for repeatable
+agent runs. The registry has not published an r21 launch manifest yet (main is
+still the 2026-10-23 r13 recipe), so r21's serve config comes from the image
+README.
+
+### Prefill and decode by depth (measured, client on the serving node)
+
+`inference --endpoint http://127.0.0.1:9219 bench` — 2 repeats, 128 decode
+tokens, cold prompts:
+
+| Prompt tokens | TTFT | Prefill tok/s | Decode tok/s |
+|---:|---:|---:|---:|
+| 6.9k | 0.39 s | 17,761 | 335 |
+| 13.8k | 0.77 s | 17,868 | 297 |
+| 27.5k | 1.51 s | 18,224 | 303 |
+| 55.0k | 3.03 s | 18,144 | 307 |
+
+A 127k prompt measured 17.3k tok/s end to end, so the rate holds with depth:
+a cold 500k prefill is roughly half a minute, not the several minutes the
+advertised curve implies.
+
+That is ~1.6× the recipe manifest's own prefill sweep (8,944 / 9,937 /
+10,695 / 11,119 tok/s at 8k / 16k / 32k / 64k). The manifest notes its
+reference box was serving other agent traffic during the sweep, and its
+client was not on the node. Treat 9-11k as the number to quote for the
+recipe, and this host as measuring above it.
+
+Prefill saturates the GPUs, so concurrency buys nothing. Cold 32k prefills,
+no shared prefix, two rounds per point:
+
+| Concurrency | requests/s | TTFT | end-to-end |
+|---:|---:|---:|---:|
+| 1 | 0.64 | 1.51 s | 1.55 s |
+| 2 | 0.66 | 2.25 s | 2.93 s |
+| 4 | 0.66 | 3.83 s | 4.82 s |
+
+Throughput is flat within noise and TTFT grows linearly: a second or fourth
+prefill queues behind the first rather than sharing compute. That also means
+a two-prefill fairness run reports a "combined span" that is just the sum of
+two serialized prefills -- do not read it as an aggregate rate.
+
+### Fairness on the MoET recipe (measured, client on the serving node)
+
+Run against `127.0.0.1:<port>` on the GPU node, not through the gateway: a
+remote client adds the storage-leader hop and the WAN path to every TTFT and
+ITL figure. `inference --endpoint http://127.0.0.1:9219 fairness <model>`
+does this.
+
+Stimulus: 2 generations (16k context) plus 2 concurrent cold prefills, decode
+deadline 10 s, baseline ~59 tok/s and p50 ITL 15.9 ms.
+
+| Step budget | Long-prefill cap | Prefill rate | p50 ITL under prefill | Decode under prefill |
+|---:|---:|---:|---:|---:|
+| 4096 (stock) | off | ~20.8k tok/s | 231 ms | 4.3 tok/s (0.07×) |
+| 8192 | 4096 | ~7k tok/s | 434 ms | 2.3 tok/s (0.04×) |
+| 8192 | 1024 | ~9k tok/s | 136 ms | 7.2 tok/s (0.12×) |
+
+This image schedules a long prefill as its own step, so a running decode
+advances about one token per prefill step: decode rate tracks the step's
+prefill token count, and every halving of the cap buys decode smoothness by
+halving prefill throughput. Raising the budget while capping chunks makes it
+worse, not better — the cap and the budget are not independent here.
+
+The Karmic Kraken profile gets 0.71× decode at near-baseline prefill because
+its fork has `--prefill-compute-share`, a time-based service-class scheduler.
+This image has only `--prefill-schedule-interval` (defer prefill to every Nth
+step), which reproduces the same token-per-step dilution rather than
+reserving a decode lane. Reproducing the Kraken numbers here needs the fork
+patch, not a lower cap.
+
+Practical default: ship the recipe stock shape (4096 budget, cap off). Cap
+`LONG_PREFILL_TOKENS` only if smoothest decode matters more than prefill
+throughput, and pick it from the table above.
+
+### MoET deploy checklist
+
+1. In private host_vars: `ds41_moet_enabled: true` and `ds41_moet_gpus` set to
+   four CDI **GPU-UUID** names (`nvidia-ctk cdi list`). Index names track the
+   driver minor number and renumber when cards move between vfio and the host.
+2. `admin/setup-gpu-podman.yml` must have run since the last GPU change: it
+   emits both index and UUID CDI device names.
+3. `admin/install-deepseek-v41-moet.yml --limit <node> -e ds41_moet_autostart=false`
+   installs the scripts and the unit without starting anything.
+4. As dev on the host: `~/bin/ds41-moet-setup.sh --download` (image ~25 GB on
+   disk, checkpoint ~510 GB).
+5. Re-run the play without the override (or `~/bin/ds41-moet-start.sh` then
+   `systemctl restart ds41-moet`). First start does the FlashInfer autotune.
+6. Qualify: `/health`, `/v1/models`, smoke chat, needletest at 100K/245K, then
+   the C1 and conc-8/32 sweep against the Karmic Kraken baseline before
+   promoting the gateway key.
+
 ## Files added
 
 - `config/ansible/admin/install-deepseek-v41-flash.yml` — playbook

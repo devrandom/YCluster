@@ -46,7 +46,8 @@ deployment-agnostic — no node names, IPs, or account specifics.
   — new architecture (`deepseek_v41`) alongside the DS4 backend; B12X R36
   image, TP4/DCP1, SSD Engram, ~510 GB checkpoint. Serving on the four-GPU
   spare node. Single-stream 256-token sweep: 186-231 tok/s decode, 1.5k-9.4k
-  tok/s cold prefill.
+  tok/s cold prefill. Also covers the 0xSero/sybil MoET r13 recipe deployed
+  alongside it (`ds41-moet`) for a like-for-like comparison.
 - [GPU PCIe P2P: host IOMMU fix vs. 0xSero recipe](gpu-p2p-iommu.md)
   — how to check P2P capability and measure bandwidth, plus sanitized host
   profiles. The DS4.1 host is in the public 237→444 tok/s report's "before"

@@ -1,0 +1,25 @@
+[Unit]
+Description=DeepSeek-V4.1-Flash inference API (MoET recipe)
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/dev
+# The container definition lives in dev's rootless Podman storage. If it is
+# already running, wait for it instead of failing with "cannot start an already
+# running container"; if it is stopped, start it attached. Either way systemd
+# supervises the exit and restarts the container after an engine failure.
+ExecStart=/usr/bin/systemd-run --scope --unit=ds41-moet-run /bin/sh -c '/usr/sbin/runuser -u dev -- /usr/bin/podman start --attach {{ ds41_moet_container }} || /usr/sbin/runuser -u dev -- /usr/bin/podman wait {{ ds41_moet_container }}'
+ExecStop=/usr/sbin/runuser -u dev -- /usr/bin/podman stop --time 60 {{ ds41_moet_container }}
+Restart=always
+RestartSec=10
+# First start runs FlashInfer autotune + DeepGEMM JIT (~22 min upstream); the
+# unit only attaches, so this is headroom for the container to come up.
+TimeoutStartSec=15min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
