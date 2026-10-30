@@ -230,6 +230,25 @@ func TestSystemdPrivilegeFallback(t *testing.T) {
 	}
 }
 
+func privilegeLineUID(t *testing.T, policy, function, binary, args string, uid uint32) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"process_kprobe": map[string]any{
+			"policy_name":   policy,
+			"function_name": function,
+			"process": map[string]any{
+				"binary":    binary,
+				"arguments": args,
+				"uid":       uid,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
 func privilegeLine(t *testing.T, policy, function, binary string) string {
 	t.Helper()
 	line, err := json.Marshal(map[string]any{
@@ -384,6 +403,47 @@ func TestRuntimePrivilegeTransitionsAreSuppressed(t *testing.T) {
 	line := privilegeLine(t, "privilege-raises", "__sys_setresuid", "/bin/sh")
 	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
 		t.Fatalf("shell privilege raise was suppressed as %q", reason)
+	}
+}
+
+func TestSudoDropFromRootIsNotARaise(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	drops := []string{
+		"-u qdrant -- /bin/true",
+		"--user=qdrant -- /bin/true",
+		"-iu qdrant -- /bin/true",
+		"-uqdrant -- /bin/true",
+	}
+	for _, args := range drops {
+		t.Run(args, func(t *testing.T) {
+			line := privilegeLineUID(t, "privilege-raises", "__sys_setresuid", "/usr/bin/sudo", args, 0)
+			_, _, ok, reason := tetragonAlertDecision(line, cfg)
+			if ok {
+				t.Fatal("privilege drop from root was forwarded as a raise")
+			}
+			if reason != "privilege_drop" {
+				t.Fatalf("reason = %q, want privilege_drop", reason)
+			}
+		})
+	}
+
+	raises := []struct {
+		args string
+		uid  uint32
+	}{
+		{"-u root -- /bin/id", 0},        // target is root
+		{"-i", 0},                        // root shell, no user switch
+		{"-u qdrant -- /bin/true", 1000}, // caller was not root
+	}
+	for _, tc := range raises {
+		t.Run("raise "+tc.args, func(t *testing.T) {
+			line := privilegeLineUID(t, "privilege-raises", "__sys_setresuid", "/usr/bin/sudo", tc.args, tc.uid)
+			if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+				t.Fatalf("sudo %q was suppressed as %q", tc.args, reason)
+			}
+		})
 	}
 }
 

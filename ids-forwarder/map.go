@@ -293,6 +293,13 @@ func routinePrivilegeReason(body *tetragonLog) string {
 			strings.Contains(body.Process.Arguments, "/usr/bin/python3") {
 			return "ansible_probe"
 		}
+		// sudo is setuid root and calls setresuid(-1, 0, -1) on itself
+		// before dropping to its target. The policy matches that no-op as
+		// a transition to uid 0, so a drop from root to a named non-root
+		// user is classified here. The exec of sudo is still forwarded.
+		if body.Process.UID == 0 && sudoTargetsNonRoot(body.Process.Arguments) {
+			return "privilege_drop"
+		}
 	case "/usr/bin/runc",
 		"/usr/bin/containerd-shim-runc-v2",
 		"/usr/bin/docker-proxy",
@@ -310,6 +317,39 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		return "expected_privilege"
 	}
 	return ""
+}
+
+// sudoTargetsNonRoot reports whether a sudo command line switches to a
+// named user other than root. It understands -u user, --user user,
+// --user=user, -uuser and clustered short flags such as -iu user.
+func sudoTargetsNonRoot(args string) bool {
+	fields := strings.Fields(args)
+	isRoot := func(v string) bool {
+		v = strings.Trim(v, "\"'")
+		return v == "0" || v == "root"
+	}
+	for i, f := range fields {
+		next := ""
+		if i+1 < len(fields) {
+			next = fields[i+1]
+		}
+		switch {
+		case f == "-u" || f == "--user":
+			return next != "" && !isRoot(next)
+		case strings.HasPrefix(f, "--user="):
+			return !isRoot(strings.TrimPrefix(f, "--user="))
+		case strings.HasPrefix(f, "-") && !strings.HasPrefix(f, "--"):
+			at := strings.IndexByte(f, 'u')
+			if at < 0 {
+				continue
+			}
+			if inline := f[at+1:]; inline != "" {
+				return !isRoot(inline)
+			}
+			return next != "" && !isRoot(next)
+		}
+	}
+	return false
 }
 
 func healthCheckArgs(args string) bool {
