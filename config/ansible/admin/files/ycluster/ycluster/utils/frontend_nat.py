@@ -523,8 +523,13 @@ def _converge_vm(vm, records, live, transit_subnet):
         device_changed = True
     # Guests commonly netplan-match only their first NIC, so the hot-added
     # transit NIC stays down. Ensure the wildcard drop-in exists (idempotent
-    # probe; cheap) and apply/restart when anything changed.
-    netplan_changed = _ensure_guest_transit_netplan(vm)
+    # probe; cheap) and apply/restart when anything changed. A stopped guest
+    # cannot be exec'd into; retrying every reconcile tick just produces a
+    # failed API call, so defer the guest-side work until it is running.
+    netplan_changed = False
+    status = str(details.get('status', '')).lower()
+    if not status or status == 'running':
+        netplan_changed = _ensure_guest_transit_netplan(vm)
     if device_changed or netplan_changed:
         if netplan_changed:
             _apply_guest_netplan(vm)

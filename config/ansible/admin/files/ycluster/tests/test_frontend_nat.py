@@ -378,6 +378,10 @@ class TransitSyncTests(unittest.TestCase):
         probe = mock.Mock(returncode=0,
                           stdout=frontend_nat.NETPLAN_TRANSIT_CONFIG)
         with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_instance_details',
+                                  return_value={'status': 'Running',
+                                                'expanded_devices': {'eth0': {
+                                                    'network': 'eth0-shadow'}}}), \
                 mock.patch.object(frontend_nat, '_reserve_transit_ip') as r, \
                 mock.patch.object(frontend_nat, 'set_exposure') as set_, \
                 mock.patch.object(frontend_nat, '_incus',
@@ -879,6 +883,9 @@ class TransitSyncTests(unittest.TestCase):
         patches = self._sync_patches(exposures)
         calls = []
         with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_instance_details',
+                                  return_value={'status': 'Running',
+                                                'expanded_devices': {}}), \
                 mock.patch.object(frontend_nat, '_reserve_transit_ip',
                                   return_value='100.100.2.11'), \
                 mock.patch.object(frontend_nat, 'set_exposure'), \
@@ -889,6 +896,22 @@ class TransitSyncTests(unittest.TestCase):
             frontend_nat.sync_transit_nics({'vm-a'}, '100.100.2.0/24')
         self.assertTrue(any('netplan apply' in ' '.join(map(str, c))
                             for c in calls))
+
+    def test_stopped_vm_skips_guest_netplan_exec(self):
+        exposures = [{'proto': 'tcp', 'vm': 'vm-a', 'ports': '80',
+                      'transit_ip': '100.100.2.11'}]
+        patches = self._sync_patches(exposures,
+                                     live={'vm-a': '100.100.2.11'})
+        calls = []
+        with patches[0], patches[1], \
+                mock.patch.object(frontend_nat, '_instance_details',
+                                  return_value={'status': 'Stopped',
+                                                'expanded_devices': {}}), \
+                mock.patch.object(frontend_nat, '_incus',
+                                  side_effect=lambda *a, **k:
+                                  calls.append(a) or mock.Mock(returncode=1)):
+            frontend_nat.sync_transit_nics({'vm-a'}, '100.100.2.0/24')
+        self.assertFalse(any('exec' in c or 'cat' in c for c in calls))
 
     def test_reattaches_missing_transit_nic(self):
         # A recorded IP with no live transit0 NIC (partial teardown or
