@@ -1,0 +1,18 @@
+---
+# CVE-2026-98432: disable MPTCP until nodes run a patched kernel.
+# The published remote code execution chain targets MPTCP listeners; Go
+# programs built with go >= 1.24 create them by default (frps, local-ai-proxy).
+# Disabling MPTCP makes those listeners plain TCP. Remove this playbook and
+# drop /etc/sysctl.d/99-disable-mptcp.conf once the kernel fix is deployed.
+- name: Disable MPTCP
+  hosts: managed:frontend
+  become: yes
+  tasks:
+    - name: Disable MPTCP
+      sysctl:
+        name: net.mptcp.enabled
+        value: '0'
+        sysctl_file: /etc/sysctl.d/99-disable-mptcp.conf
+        sysctl_set: yes
+        state: present
+        reload: yes

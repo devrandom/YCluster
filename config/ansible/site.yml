@@ -16,6 +16,8 @@
 - import_playbook: admin/configure-uplink-service.yml
 - import_playbook: configure-ntp.yml
 - import_playbook: configure-proxy.yml
+# CVE-2026-98432 stopgap: no MPTCP listeners while the kernel fix is pending.
+- import_playbook: configure-mptcp.yml
 
 # TODO we have this here because we don't have a proxy before this on first run.  But it's not ideal
 # to do it so late, if the proxy has been already installed.
