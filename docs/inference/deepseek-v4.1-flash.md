@@ -292,10 +292,20 @@ The authors' own bench (`tools/sm120_perf/fraser_bench.py` and their
 | r21 (`b0dc737`), deployed | 566.6 | 540-589 | 5.4 | 104.7 |
 | r21 as published (400 W cards) | 680 (best 741) | - | 5.34 | 127.8 |
 
-r21 is ~3% ahead of r13 here, inside the run-to-run spread. The published
-r13→r21 jump (403 → 680) mixes a live box for r13, an idle one for r21, and
-300 W versus 400 W cards; it is not a same-host comparison, and on this
-hardware the two revisions are effectively equivalent.
+That is what the upstream release history predicts. r18 → r21 is +1.6%
+steps/s (125.95 → 127.95 over 20 production reps, outputs bit-identical): the
+mHC boundary kernel as a five-CTA cluster, the sparse-MLA XV loads on one
+transposed `ldmatrix`, step 36's drafter metadata, and
+`P2P_AR_FUSED_MAX_ROWS` 16 → 8. r13 → r18 bundled the launch-reduction steps
+30-33 (drafter input prep, DSA candidate blocks on the deterministic top-k,
+each SWA builder's decode build, the shared-expert add folded into the MoE
+top-k), each worth tens of microseconds on a ~8-10 ms decode step. None of
+those is a throughput multiplier, and the upstream README described r13 at
+325 W while its 680 tok/s row is 400 W on an idle box.
+
+So "r13 and r21 are within a few percent here" is expected, and the quoted
+403 → 680 jump spans measurement conditions (live box, 300 W for the r13
+submission) plus one power-limit change, not the kernels alone.
 
 The remaining gap to 680 is step rate, not speculation quality: accepted
 tokens per step match (5.4 vs 5.34) while steps/s are 104.7 vs 127.8 (0.82) —
