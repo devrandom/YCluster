@@ -107,6 +107,13 @@ def _release_image_mount(loop_dev, mountpoint):
                        capture_output=True, text=True)
 
 
+def _unmount(mountpoint: str | None) -> None:
+    """Best-effort unmount without narrowing the caller's cleanup path."""
+    if mountpoint:
+        subprocess.run(["umount", mountpoint], check=False,
+                       capture_output=True, text=True)
+
+
 def _legacy_share_has_data(host_dir):
     """True when a legacy directory share exists with anything in it.
 
@@ -241,9 +248,7 @@ def migrate_vm_data_to_image(name, image, *, is_running):
                 "VM started during migration; keeping the legacy share")
         os.replace(tmp, image)
     finally:
-        if mountpoint:
-            subprocess.run(["umount", mountpoint], check=False,
-                           capture_output=True, text=True)
+        _unmount(mountpoint)
         _release_image_mount(loop_dev, mountpoint)
         if os.path.exists(tmp):
             os.unlink(tmp)
