@@ -22,13 +22,20 @@
     - name: Pin kernel to known-good amdgpu DKMS version
       tags: ['kernel-pin', 'never']
       block:
-        - name: Remove HWE kernel meta-package (prevents incompatible kernel upgrades)
+        # amdgpu-dkms only builds for the pinned series. A failed build makes
+        # /etc/kernel/postinst.d/dkms exit 11, which leaves linux-image and
+        # linux-headers half-configured and blocks every later apt run until
+        # the kernel is removed, so drop the metapackages that pull in others.
+        - name: Remove kernel meta-packages (prevents other series upgrading)
           apt:
             name:
+              - linux-generic
+              - linux-image-generic
+              - linux-headers-generic
               - linux-image-generic-hwe-24.04
               - linux-headers-generic-hwe-24.04
             state: absent
-          register: hwe_removed
+            purge: yes
 
         - name: Install pinned kernel
           apt:
@@ -41,23 +48,27 @@
             state: present
             update_cache: yes
 
-        - name: Find incompatible kernels to remove
+        # GA 6.8.0-147+ and HWE 6.17 both ship kernel APIs newer than
+        # amdgpu-dkms 6.12.12 supports (pci_resize_resource(), drm), and a
+        # half-configured kernel retries its DKMS build on every apt run.
+        # Keep only the pinned kernel, including any half-configured ones.
+        - name: Find kernels to remove
           shell: >
-            dpkg -l linux-image-*-generic linux-headers-*-generic 2>/dev/null |
-            awk '/^ii/{print $2}' |
+            dpkg -l 'linux-image-[0-9]*-generic' 'linux-headers-[0-9]*-generic'
+            'linux-modules-[0-9]*-generic' 'linux-modules-extra-[0-9]*-generic'
+            'linux-tools-[0-9]*-generic' 2>/dev/null |
+            awk '/^i[a-z] /{print $2}' |
             grep -v '{{ rocm_kernel_version }}' |
-            grep -v '6.8.0' |
-            grep -v linux-image-generic |
             tr '\n' ' '
-          register: incompatible_kernels
+          register: stale_kernels
           changed_when: false
 
-        - name: Remove incompatible kernels (keep pinned and GA)
+        - name: Remove non-pinned kernels
           apt:
-            name: "{{ incompatible_kernels.stdout.split() }}"
+            name: "{{ stale_kernels.stdout.split() }}"
             state: absent
             purge: yes
-          when: incompatible_kernels.stdout.strip() != ""
+          when: stale_kernels.stdout.strip() != ""
           register: kernels_removed
 
         - name: Update GRUB
