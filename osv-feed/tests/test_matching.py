@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import tempfile
+import tracemalloc
 import unittest
 
 from osv_feed import matching
@@ -31,6 +32,10 @@ def _basic_record(record_id, package, introduced="0", fixed=None, last_affected=
     }
 
 
+def _match_specs(*args, **kwargs):
+    return list(matching.match_specs(*args, **kwargs))
+
+
 class MatchSpecsTest(unittest.TestCase):
     def setUp(self):
         self.db = tempfile.mkdtemp(prefix="osv-feed-test-")
@@ -42,7 +47,7 @@ class MatchSpecsTest(unittest.TestCase):
             "Ubuntu",
             _basic_record("UBUNTU-CVE-FIX", "openssh", fixed="1:9.6p1-3ubuntu13.5"),
         )
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual(1, len(findings))
@@ -55,7 +60,7 @@ class MatchSpecsTest(unittest.TestCase):
             _basic_record("UBUNTU-CVE-FIX", "openssh", fixed="1:9.6p1-3ubuntu13.5"),
         )
         for version in ("1:9.6p1-3ubuntu13.5", "1:9.7p1-1"):
-            findings = matching.match_specs(
+            findings = _match_specs(
                 self.db,
                 [{"ecosystem": "Ubuntu", "package": "openssh", "version": version}],
             )
@@ -65,7 +70,7 @@ class MatchSpecsTest(unittest.TestCase):
         _write_record(
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-NOFIX", "openssh")
         )
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual("no_fix_yet", findings[0]["state"])
@@ -74,7 +79,7 @@ class MatchSpecsTest(unittest.TestCase):
         record = _basic_record("UBUNTU-CVE-WITHDRAWN", "openssh")
         record["withdrawn"] = "2026-10-27T14:50:09Z"
         _write_record(self.db, "Ubuntu", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db,
             [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}],
         )
@@ -87,10 +92,10 @@ class MatchSpecsTest(unittest.TestCase):
             "Ubuntu",
             _basic_record("UBUNTU-CVE-LAST", "openssh", introduced="1.0", last_affected="2.0"),
         )
-        hit = matching.match_specs(
+        hit = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1.5"}]
         )
-        miss = matching.match_specs(
+        miss = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "2.1"}]
         )
         self.assertEqual("no_fix_yet", hit[0]["state"])
@@ -107,10 +112,10 @@ class MatchSpecsTest(unittest.TestCase):
             ],
         }
         _write_record(self.db, "PyPI", record)
-        hit = matching.match_specs(
+        hit = _match_specs(
             self.db, [{"ecosystem": "PyPI", "package": "demo", "version": "1.0.0"}]
         )
-        miss = matching.match_specs(
+        miss = _match_specs(
             self.db, [{"ecosystem": "PyPI", "package": "demo", "version": "1.0.1"}]
         )
         self.assertEqual("no_fix_yet", hit[0]["state"])
@@ -122,7 +127,7 @@ class MatchSpecsTest(unittest.TestCase):
             "Ubuntu",
             _basic_record("UBUNTU-CVE-SRC", "openssh"),
         )
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db,
             [{"ecosystem": "Ubuntu", "package": "openssh-server", "version": "1:9.6p1-3ubuntu13.3"}],
         )
@@ -140,7 +145,7 @@ class MatchSpecsTest(unittest.TestCase):
             ],
         }
         _write_record(self.db, "Debian", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Debian", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual("high", findings[0]["severity"])
@@ -155,7 +160,7 @@ class MatchSpecsTest(unittest.TestCase):
             "affected": [{"package": {"name": "openssh"}}],
         }
         _write_record(self.db, "Ubuntu", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual("high", findings[0]["severity"])
@@ -171,14 +176,14 @@ class MatchSpecsTest(unittest.TestCase):
             ],
         }
         _write_record(self.db, "Ubuntu", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual("critical", findings[0]["severity"])
 
     def test_severity_empty_when_unavailable(self):
         _write_record(self.db, "Ubuntu", _basic_record("UBUNTU-CVE-NOSEV", "openssh"))
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual("", findings[0]["severity"])
@@ -196,7 +201,7 @@ class MatchSpecsTest(unittest.TestCase):
             "affected": [{"package": {"name": "github.com/fatedier/frp"}}],
         }
         _write_record(self.db, "Go", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db,
             [{"ecosystem": "Go", "package": "github.com/fatedier/frp", "version": "0.70.0"}],
         )
@@ -217,7 +222,7 @@ class MatchSpecsTest(unittest.TestCase):
             "affected": [{"package": {"name": "brotli"}}],
         }
         _write_record(self.db, "Alpine", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db,
             [{"ecosystem": "Alpine", "package": "brotli", "version": "1.2.0-r1"}],
         )
@@ -235,7 +240,7 @@ class MatchSpecsTest(unittest.TestCase):
             "affected": [{"package": {"name": "pypdf"}}],
         }
         _write_record(self.db, "PyPI", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db,
             [{"ecosystem": "PyPI", "package": "pypdf", "version": "6.7.5"}],
         )
@@ -253,7 +258,7 @@ class MatchSpecsTest(unittest.TestCase):
             "affected": [{"package": {"name": "expat"}}],
         }
         _write_record(self.db, "Alpine", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db,
             [{"ecosystem": "Alpine", "package": "expat", "version": "2.8.5-r0"}],
         )
@@ -288,7 +293,7 @@ class MatchSpecsTest(unittest.TestCase):
             "0.40.0": ("patched", "high"),          # before introduced
         }
         for version, (state, severity) in cases.items():
-            findings = matching.match_specs(
+            findings = _match_specs(
                 self.db,
                 [{"ecosystem": "Go", "package": "github.com/fatedier/frp", "version": version}],
             )
@@ -302,15 +307,107 @@ class MatchSpecsTest(unittest.TestCase):
         _write_record(
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-B", "nginx")
         )
-        records = matching._candidate_records(self.db, "Ubuntu", ["openssh"])
+        records = list(matching.iter_candidate_records(self.db, "Ubuntu", ["openssh"]))
         self.assertEqual(["UBUNTU-CVE-A"], [record["id"] for record in records])
+
+    def test_candidate_records_are_parsed_lazily(self):
+        _write_record(
+            self.db, "Ubuntu", _basic_record("UBUNTU-CVE-A", "openssh")
+        )
+        with mirror.connect(self.db) as conn:
+            conn.execute(
+                "INSERT INTO records(ecosystem, id, data) VALUES (?, ?, ?)",
+                ("Ubuntu", "UBUNTU-CVE-BAD", "{not-json"),
+            )
+            conn.execute(
+                "INSERT INTO packages(ecosystem, package, record_id) "
+                "VALUES (?, ?, ?)",
+                ("Ubuntu", "openssh", "UBUNTU-CVE-BAD"),
+            )
+
+        records = matching.iter_candidate_records(
+            self.db, "Ubuntu", ["openssh"]
+        )
+        self.assertEqual("UBUNTU-CVE-A", next(records)["id"])
+        with self.assertRaises(ValueError):
+            next(records)
+
+    def test_match_specs_is_lazy(self):
+        _write_record(
+            self.db, "Ubuntu", _basic_record("UBUNTU-CVE-A", "openssh")
+        )
+        with mirror.connect(self.db) as conn:
+            conn.execute(
+                "INSERT INTO records(ecosystem, id, data) VALUES (?, ?, ?)",
+                ("Ubuntu", "UBUNTU-CVE-BAD", "{not-json"),
+            )
+            conn.execute(
+                "INSERT INTO packages(ecosystem, package, record_id) "
+                "VALUES (?, ?, ?)",
+                ("Ubuntu", "openssh", "UBUNTU-CVE-BAD"),
+            )
+
+        findings = matching.match_specs(
+            self.db,
+            [{
+                "ecosystem": "Ubuntu",
+                "package": "openssh",
+                "version": "1:9.6p1-3ubuntu13.3",
+            }],
+        )
+        self.assertEqual("UBUNTU-CVE-A", next(findings)["cve"])
+        with self.assertRaises(ValueError):
+            next(findings)
+
+    def test_match_specs_keeps_only_one_record(self):
+        versions = [f"9.{i}.0" for i in range(20000)]
+        versions[0] = "1"
+        for i in range(20):
+            _write_record(
+                self.db,
+                "Ubuntu",
+                {
+                    "id": f"UBUNTU-CVE-LARGE-{i}",
+                    "summary": "large record",
+                    "affected": [
+                        {
+                            "package": {
+                                "ecosystem": "Ubuntu",
+                                "name": "openssh",
+                            },
+                            "versions": versions,
+                        }
+                    ],
+                },
+            )
+
+        tracemalloc.start()
+        try:
+            count = sum(
+                1
+                for _ in matching.match_specs(
+                    self.db,
+                    [{
+                        "ecosystem": "Ubuntu",
+                        "package": "openssh",
+                        "version": "1",
+                    }],
+                )
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(20, count)
+        self.assertLess(peak, 4 * 1024 * 1024)
 
     def test_candidate_records_immutable_read(self):
         _write_record(
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-A", "openssh")
         )
-        records = matching._candidate_records(
-            self.db, "Ubuntu", ["openssh"], immutable=True
+        records = list(
+            matching.iter_candidate_records(
+                self.db, "Ubuntu", ["openssh"], immutable=True
+            )
         )
         self.assertEqual(["UBUNTU-CVE-A"], [record["id"] for record in records])
         db = os.path.join(self.db, "osv-feed.sqlite")
@@ -325,8 +422,8 @@ class MatchSpecsTest(unittest.TestCase):
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-NOFIX", "openssh")
         )
         specs = [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
-        findings_a = matching.match_specs(self.db, specs)
-        findings_b = matching.match_specs(self.db, specs)
+        findings_a = _match_specs(self.db, specs)
+        findings_b = _match_specs(self.db, specs)
         first_seen_a = matching.first_seen_for(self.db, findings_a)
         first_seen_b = matching.first_seen_for(self.db, findings_b)
         self.assertEqual(first_seen_a, first_seen_b)
@@ -342,7 +439,7 @@ class MatchSpecsTest(unittest.TestCase):
         _write_record(
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-FIX", "openssh", fixed="2.0")
         )
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "3.0"}]
         )
         self.assertEqual("patched", findings[0]["state"])
@@ -379,7 +476,7 @@ class MatchSpecsTest(unittest.TestCase):
             "4.5": "patched",
         }
         for version, expected in cases.items():
-            findings = matching.match_specs(
+            findings = _match_specs(
                 self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": version}]
             )
             self.assertEqual(expected, findings[0]["state"], version)
@@ -405,11 +502,11 @@ class MatchSpecsTest(unittest.TestCase):
             ],
         }
         _write_record(self.db, "Ubuntu", record)
-        no_fix = matching.match_specs(
+        no_fix = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1.2"}]
         )
         self.assertEqual("no_fix_yet", no_fix[0]["state"])
-        fix = matching.match_specs(
+        fix = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "2.5"}]
         )
         self.assertEqual("fix_available", fix[0]["state"])
@@ -423,7 +520,7 @@ class MatchSpecsTest(unittest.TestCase):
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-NOFIX", "openssh")
         )
         self._write_epss({"UBUNTU-CVE-NOFIX": {"score": 0.25, "percentile": 0.9}})
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual(1, len(findings))
@@ -435,7 +532,7 @@ class MatchSpecsTest(unittest.TestCase):
         record["aliases"] = ["CVE-2024-9999"]
         _write_record(self.db, "Debian", record)
         self._write_epss({"CVE-2024-9999": {"score": 0.7, "percentile": 0.99}})
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Debian", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual(0.7, findings[0]["epss_score"])
@@ -446,14 +543,14 @@ class MatchSpecsTest(unittest.TestCase):
             self.db, "Ubuntu", _basic_record("UBUNTU-CVE-NOFIX", "openssh")
         )
         self._write_epss({})
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": "1:9.6p1-3ubuntu13.3"}]
         )
         self.assertEqual(0.0, findings[0]["epss_score"])
         self.assertEqual(0.0, findings[0]["epss_percentile"])
 
     def test_epss_zero_for_uninstalled(self):
-        findings = matching.match_specs(
+        findings = _match_specs(
             self.db, [{"ecosystem": "Ubuntu", "package": "openssh", "version": None}]
         )
         self.assertEqual(1, len(findings))
@@ -506,7 +603,7 @@ class EcosystemVersionCompareTest(unittest.TestCase):
             "Go",
             _basic_record("GO-CVE-VPREFIX", "example.com/mod", fixed="0.52.0"),
         )
-        findings = matching.match_specs(
+        findings = _match_specs(
             db,
             [{"ecosystem": "Go", "package": "example.com/mod", "version": "v0.1.0"}],
         )
@@ -519,12 +616,12 @@ class EcosystemVersionCompareTest(unittest.TestCase):
         record = _basic_record("ALPINE-CVE-REV", "openssl", fixed="1.2.3-r2")
         record["affected"][0]["package"]["ecosystem"] = "Alpine:v3.24"
         _write_record(db, "Alpine", record)
-        finding = matching.match_specs(
+        finding = _match_specs(
             db,
             [{"ecosystem": "Alpine:v3.24", "package": "openssl", "version": "1.2.3_alpha1"}],
         )
         self.assertEqual("fix_available", finding[0]["state"])
-        patched = matching.match_specs(
+        patched = _match_specs(
             db,
             [{"ecosystem": "Alpine:v3.24", "package": "openssl", "version": "1.2.3-r2"}],
         )
@@ -545,7 +642,7 @@ class EcosystemVersionCompareTest(unittest.TestCase):
         )
         record["affected"][0]["package"]["ecosystem"] = "Alpine:v3.24"
         _write_record(db, "Alpine", record)
-        findings = matching.match_specs(
+        findings = _match_specs(
             db,
             [{"ecosystem": "Alpine:v3.24", "package": "gnutls", "version": "3.8.13-r0"}],
         )

@@ -117,7 +117,7 @@ class MatchContainerTest(unittest.TestCase):
             "webapp.manifest",
             ["PyPI:requests=2.32.3", "PyPI:flask=3.0.0"],
         )
-        findings = matching.match_container(self.db, self.manifest_dir)
+        findings = list(matching.match_container(self.db, self.manifest_dir))
         self.assertEqual(1, len(findings))
         self.assertEqual("webapp", findings[0]["image"])
         self.assertEqual("requests", findings[0]["package"])
@@ -154,7 +154,7 @@ class MatchContainerTest(unittest.TestCase):
             "forgejo.manifest",
             ["Alpine:v3.24:brotli=1.2.0-r1"],
         )
-        findings = matching.match_container(self.db, self.manifest_dir)
+        findings = list(matching.match_container(self.db, self.manifest_dir))
         self.assertEqual(1, len(findings))
         finding = findings[0]
         self.assertEqual("forgejo", finding["image"])
@@ -171,14 +171,14 @@ class MatchContainerTest(unittest.TestCase):
         )
         self._manifest("webapp.manifest", ["PyPI:requests=2.32.3"])
         self._manifest("worker.manifest", ["PyPI:requests=2.32.3"])
-        findings = matching.match_container(self.db, self.manifest_dir)
+        findings = list(matching.match_container(self.db, self.manifest_dir))
         first_seen = matching.first_seen_for(self.db, findings)
         keys = {tuple(k.split("|")[0:2]) for k in first_seen}
         self.assertEqual({("image", "webapp"), ("image", "worker")}, keys)
         self.assertEqual(2, len(first_seen))
 
     def test_empty_manifest_dir(self):
-        self.assertEqual([], matching.match_container(self.db, self.manifest_dir))
+        self.assertEqual([], list(matching.match_container(self.db, self.manifest_dir)))
 
 
 class ContainerCliTest(unittest.TestCase):

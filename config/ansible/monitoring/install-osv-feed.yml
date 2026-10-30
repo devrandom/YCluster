@@ -192,6 +192,11 @@
           # archive. The incremental sync is resumable, so a generous window
           # covers those cases without masking a genuinely stuck run.
           TimeoutStartSec=43200
+          # A runaway mirror can otherwise grow without bound and take the
+          # host down. Cap it inside the service cgroup; broad matches are
+          # streamed by the CLI.
+          MemoryHigh=4G
+          MemoryMax=6G
         mode: '0644'
       notify: reload systemd
 
@@ -276,27 +281,10 @@
         state: started
         daemon_reload: yes
 
-    # First data instead of waiting up to a day for the timer; tolerated if
-    # the initial download needs a retry (the daily timer keeps retrying).
-    # Mirror then publish, so the shared snapshot exists before collecting.
-    # Only seed the store on first install: on a redeploy the writable DB
-    # already holds the mirrored feeds, so re-running the mirror would just
-    # re-download everything for no reason (the daily timer keeps it fresh).
-    - name: Check whether the writable feed store already exists
-      stat:
-        path: "{{ osv_feed_db_dir }}/osv-feed.sqlite"
-      register: osv_feed_store
-
-    - name: Run the initial mirror and publish so the feed exists before matching
-      shell: |
-        /usr/local/bin/osv-feed mirror --ecosystem Debian --ecosystem Ubuntu --ecosystem Go --ecosystem PyPI --ecosystem Alpine \
-          && /usr/bin/python3 {{ osv_feed_publish_path }}
-      environment:
-        OSV_FEED_DB_DIR: "{{ osv_feed_db_dir }}"
-        OSV_FEED_SNAPSHOT_DIR: "{{ osv_feed_snapshot_dir }}"
-      when: not osv_feed_store.stat.exists
-      changed_when: false
-      failed_when: false
+    # The timer is persistent, so enabling it on a host that has never
+    # mirrored runs the service straight away. Seeding the store from an
+    # Ansible shell task instead ran the mirror inside an SSH session with no
+    # cgroup limit and no service supervision.
 
     - name: Run an initial collection so metrics appear immediately
       command: /usr/bin/python3 {{ osv_feed_collector_path }}

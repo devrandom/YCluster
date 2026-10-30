@@ -7,7 +7,9 @@ import datetime
 import json
 import re
 import sys
+import tempfile
 import time
+from typing import Iterable
 
 from . import __version__
 from .acks import add_ack
@@ -37,9 +39,9 @@ from .installed import installed_package
 from .matching import UNINSTALLED
 from .matching import PENDING_STATES
 from .matching import _finding_key
-from .matching import first_seen_for
-from .matching import match_container
+from .matching import FirstSeenTracker
 from .matching import match_specs
+from .matching import match_container
 from .epss import mirror_epss
 from .mirror import feed_status
 from .mirror import mirror_ecosystem
@@ -77,7 +79,7 @@ def _image_label(finding: dict) -> str:
     return f',image="{_escape_prometheus(image)}"'
 
 
-def _cve_summary(findings: list[dict], first_seen: dict[str, int]) -> dict[str, dict]:
+def _cve_summary(findings: Iterable[dict], first_seen: dict[str, int]) -> dict[str, dict]:
     """Coalesce pending CVEs into one entry per alert severity.
 
     Collects non-acked ``no_fix_yet``/``fix_available`` findings whose
@@ -114,85 +116,157 @@ def _cve_summary(findings: list[dict], first_seen: dict[str, int]) -> dict[str, 
     return result
 
 
-def _render_prometheus(findings: list[dict], first_seen: dict[str, int]) -> str:
-    summary = _cve_summary(findings, first_seen)
-    lines = [
-        "# HELP osv_feed_cve_info CVE state for an installed package version.",
-        "# TYPE osv_feed_cve_info gauge",
-    ]
-    for finding in findings:
-        if finding.get("state") == UNINSTALLED:
-            continue
-        labels = (
-            f'ecosystem="{_escape_prometheus(finding["ecosystem"])}",'
-            f'package="{_escape_prometheus(finding["requested_package"])}",'
-            f'version="{_escape_prometheus(finding["version"])}",'
-            f'cve="{_escape_prometheus(finding["cve"])}",'
-            f'severity="{_escape_prometheus(finding["severity"])}",'
-            f'state="{_escape_prometheus(finding["state"])}",'
-            f'category="{_escape_prometheus(finding.get("category", ""))}",'
-            f'acked="{_acked_label(finding)}"'
-            f'{_image_label(finding)}'
-        )
-        lines.append(f"osv_feed_cve_info{{{labels}}} 1")
-    lines.append("# HELP osv_feed_cve_epss_score EPSS exploit-probability score for a CVE (0 if unknown).")
-    lines.append("# TYPE osv_feed_cve_epss_score gauge")
-    for finding in findings:
-        if finding.get("state") == UNINSTALLED:
-            continue
-        labels = (
-            f'ecosystem="{_escape_prometheus(finding["ecosystem"])}",'
-            f'package="{_escape_prometheus(finding["requested_package"])}",'
-            f'version="{_escape_prometheus(finding["version"])}",'
-            f'cve="{_escape_prometheus(finding["cve"])}"'
-            f'{_image_label(finding)}'
-        )
-        lines.append(f"osv_feed_cve_epss_score{{{labels}}} {finding.get('epss_score', 0.0)}")
-    lines.append("# HELP osv_feed_cve_epss_percentile EPSS percentile (0..1) for a CVE (0 if unknown).")
-    lines.append("# TYPE osv_feed_cve_epss_percentile gauge")
-    for finding in findings:
-        if finding.get("state") == UNINSTALLED:
-            continue
-        labels = (
-            f'ecosystem="{_escape_prometheus(finding["ecosystem"])}",'
-            f'package="{_escape_prometheus(finding["requested_package"])}",'
-            f'version="{_escape_prometheus(finding["version"])}",'
-            f'cve="{_escape_prometheus(finding["cve"])}"'
-            f'{_image_label(finding)}'
-        )
-        lines.append(
-            f"osv_feed_cve_epss_percentile{{{labels}}} {finding.get('epss_percentile', 0.0)}"
-        )
-    lines.append("# HELP osv_feed_cve_first_seen_seconds Seconds since epoch when a CVE was first seen for a package version.")
-    lines.append("# TYPE osv_feed_cve_first_seen_seconds gauge")
-    for key, value in first_seen.items():
-        parts = key.split("|")
-        if parts[0] == "image":
-            _, image, ecosystem, package, version, cve = parts
-            image_label = f',image="{_escape_prometheus(image)}"'
-        else:
-            ecosystem, package, version, cve = parts
-            image_label = ""
-        labels = (
-            f'ecosystem="{_escape_prometheus(ecosystem)}",'
-            f'package="{_escape_prometheus(package)}",'
-            f'version="{_escape_prometheus(version)}",'
-            f'cve="{_escape_prometheus(cve)}"'
-            f'{image_label}'
-        )
-        lines.append(f"osv_feed_cve_first_seen_seconds{{{labels}}} {value}")
-    lines.append("# HELP osv_feed_cve_summary Count of non-acked pending CVEs past the per-severity SLA, with up to 5 example CVEs.")
-    lines.append("# TYPE osv_feed_cve_summary gauge")
+def _prometheus_info_line(finding: dict) -> str | None:
+    if finding.get("state") == UNINSTALLED:
+        return None
+    labels = (
+        f'ecosystem="{_escape_prometheus(finding["ecosystem"])}",'
+        f'package="{_escape_prometheus(finding["requested_package"])}",'
+        f'version="{_escape_prometheus(finding["version"])}",'
+        f'cve="{_escape_prometheus(finding["cve"])}",'
+        f'severity="{_escape_prometheus(finding["severity"])}",'
+        f'state="{_escape_prometheus(finding["state"])}",'
+        f'category="{_escape_prometheus(finding.get("category", ""))}",'
+        f'acked="{_acked_label(finding)}"'
+        f'{_image_label(finding)}'
+    )
+    return f"osv_feed_cve_info{{{labels}}} 1"
+
+
+def _prometheus_epss_lines(finding: dict) -> tuple[str, str] | None:
+    if finding.get("state") == UNINSTALLED:
+        return None
+    labels = (
+        f'ecosystem="{_escape_prometheus(finding["ecosystem"])}",'
+        f'package="{_escape_prometheus(finding["requested_package"])}",'
+        f'version="{_escape_prometheus(finding["version"])}",'
+        f'cve="{_escape_prometheus(finding["cve"])}"'
+        f'{_image_label(finding)}'
+    )
+    score = f"osv_feed_cve_epss_score{{{labels}}} {finding.get('epss_score', 0.0)}"
+    percentile = (
+        f"osv_feed_cve_epss_percentile{{{labels}}} "
+        f"{finding.get('epss_percentile', 0.0)}"
+    )
+    return score, percentile
+
+
+def _prometheus_first_seen_line(key: str, value: int) -> str:
+    parts = key.split("|")
+    if parts[0] == "image":
+        _, image, ecosystem, package, version, cve = parts
+        image_label = f',image="{_escape_prometheus(image)}"'
+    else:
+        ecosystem, package, version, cve = parts
+        image_label = ""
+    labels = (
+        f'ecosystem="{_escape_prometheus(ecosystem)}",'
+        f'package="{_escape_prometheus(package)}",'
+        f'version="{_escape_prometheus(version)}",'
+        f'cve="{_escape_prometheus(cve)}"'
+        f'{image_label}'
+    )
+    return f"osv_feed_cve_first_seen_seconds{{{labels}}} {value}"
+
+
+def _prometheus_summary_lines(summary: dict[str, dict]) -> Iterable[str]:
     for severity in ("critical", "high"):
         entry = summary.get(severity)
         if not entry:
             continue
         cves = ",".join(entry["cves"])
-        lines.append(
-            f'osv_feed_cve_summary{{severity="{severity}",acked="false",cves="{_escape_prometheus(cves)}"}} {entry["count"]}'
+        yield (
+            f'osv_feed_cve_summary{{severity="{severity}",acked="false",'
+            f'cves="{_escape_prometheus(cves)}"}} {entry["count"]}'
         )
-    lines.append("")
-    return "\n".join(lines)
+
+
+def _write_prometheus_stream(findings: Iterable[dict], state_dir: str) -> None:
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as spool:
+        tracker = FirstSeenTracker(state_dir)
+        for finding in findings:
+            tracker.add(finding)
+            spool.write(
+                json.dumps(_lean_finding(finding), separators=(",", ":"))
+                + "\n"
+            )
+        tracker.save()
+
+        spool.seek(0)
+        summary = _cve_summary(
+            (json.loads(line) for line in spool), tracker.result
+        )
+
+        out = sys.stdout
+        out.write(
+            "# HELP osv_feed_cve_info CVE state for an installed package version.\n"
+            "# TYPE osv_feed_cve_info gauge\n"
+        )
+        spool.seek(0)
+        for line in spool:
+            rendered = _prometheus_info_line(json.loads(line))
+            if rendered is not None:
+                out.write(rendered + "\n")
+
+        out.write(
+            "# HELP osv_feed_cve_epss_score EPSS exploit-probability score "
+            "for a CVE (0 if unknown).\n"
+            "# TYPE osv_feed_cve_epss_score gauge\n"
+        )
+        spool.seek(0)
+        for line in spool:
+            rendered = _prometheus_epss_lines(json.loads(line))
+            if rendered is not None:
+                out.write(rendered[0] + "\n")
+
+        out.write(
+            "# HELP osv_feed_cve_epss_percentile EPSS percentile (0..1) "
+            "for a CVE (0 if unknown).\n"
+            "# TYPE osv_feed_cve_epss_percentile gauge\n"
+        )
+        spool.seek(0)
+        for line in spool:
+            rendered = _prometheus_epss_lines(json.loads(line))
+            if rendered is not None:
+                out.write(rendered[1] + "\n")
+
+        out.write(
+            "# HELP osv_feed_cve_first_seen_seconds Seconds since epoch when "
+            "a CVE was first seen for a package version.\n"
+            "# TYPE osv_feed_cve_first_seen_seconds gauge\n"
+        )
+        for key, value in tracker.result.items():
+            out.write(_prometheus_first_seen_line(key, value) + "\n")
+
+        out.write(
+            "# HELP osv_feed_cve_summary Count of non-acked pending CVEs past "
+            "the per-severity SLA, with up to 5 example CVEs.\n"
+            "# TYPE osv_feed_cve_summary gauge\n"
+        )
+        for line in _prometheus_summary_lines(summary):
+            out.write(line + "\n")
+
+
+def _write_json_stream(findings: Iterable[dict], state_dir: str) -> None:
+    tracker = FirstSeenTracker(state_dir)
+    out = sys.stdout
+    out.write('{"findings": [')
+    first = True
+    for finding in findings:
+        if first:
+            out.write('\n')
+            first = False
+        else:
+            out.write(',\n')
+        rendered = json.dumps(finding, indent=2)
+        out.write('\n'.join('    ' + line for line in rendered.splitlines()))
+        tracker.add(finding)
+    if not first:
+        out.write('\n')
+    tracker.save()
+    out.write('], "first_seen": ')
+    json.dump(tracker.result, out, indent=2, sort_keys=True)
+    out.write('}\n')
 
 
 def _cve_title(finding: dict) -> str:
@@ -243,29 +317,61 @@ def _format_acked_at(value: str) -> str:
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _render_table(findings: list[dict], verbose: bool = False) -> str:
-    header = ("ECOSYSTEM", "CATEGORY", "PACKAGE", "VERSION", "SEVERITY", "CVE", "STATE", "ACK")
-    rows = [
-        (
-            f["ecosystem"],
-            f.get("category", ""),
-            f["requested_package"],
-            f["version"],
-            f["severity"],
-            f["cve"],
-            f["state"],
-            _format_acked_at(f.get("acked_at", "")),
+def _write_table_stream(
+    findings: Iterable[dict], state_dir: str, verbose: bool = False
+) -> None:
+    header = (
+        "ECOSYSTEM",
+        "CATEGORY",
+        "PACKAGE",
+        "VERSION",
+        "SEVERITY",
+        "CVE",
+        "STATE",
+        "ACK",
+    )
+    widths = [len(cell) for cell in header]
+    tracker = FirstSeenTracker(state_dir)
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as spool:
+        for finding in findings:
+            row = (
+                finding["ecosystem"],
+                finding.get("category", ""),
+                finding["requested_package"],
+                finding["version"],
+                finding["severity"],
+                finding["cve"],
+                finding["state"],
+                _format_acked_at(finding.get("acked_at", "")),
+            )
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(str(cell)))
+            details = _verbose_detail_lines(finding) if verbose else []
+            spool.write(
+                json.dumps(
+                    {"row": [str(cell) for cell in row], "details": details}
+                )
+                + "\n"
+            )
+            tracker.add(finding)
+        tracker.save()
+
+        out = sys.stdout
+        out.write(
+            "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(header))
+            + "\n"
         )
-        for f in findings
-    ]
-    widths = [max(len(str(row[i])) for row in [header] + rows) for i in range(len(header))]
-    lines = ["  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(header))]
-    lines.append("  ".join("-" * width for width in widths))
-    for row, finding in zip(rows, findings):
-        lines.append("  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)))
-        if verbose:
-            lines.extend(_verbose_detail_lines(finding))
-    return "\n".join(lines)
+        out.write("  ".join("-" * width for width in widths) + "\n")
+        spool.seek(0)
+        for line in spool:
+            item = json.loads(line)
+            row = item["row"]
+            out.write(
+                "  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row))
+                + "\n"
+            )
+            for detail in item["details"]:
+                out.write(detail + "\n")
 
 
 def _render_ack_table(entries: list[dict]) -> str:
@@ -386,7 +492,7 @@ def _all_category_specs(
 
     Packages are deduplicated by (ecosystem, package, version); if a package
     is listed in several categories, it is still matched once and re-tagged
-    per category later by ``_filtered_findings``.
+    per category later by ``_iter_filtered_findings``.
     """
     specs: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
@@ -506,27 +612,82 @@ def _auto_categories(package: str, config: dict) -> list[tuple[str, dict | None]
     return [(DEFAULT_FALLBACK_NAME, DEFAULT_FALLBACK_CATEGORY)]
 
 
-def _filtered_findings(findings: list[dict], args: argparse.Namespace, config: dict, acks: dict) -> list[dict]:
-    filtered: list[dict] = []
+def _lean_finding(finding: dict) -> dict:
+    """Keep fields used by the Prometheus renderer, not advisory prose."""
+    keys = (
+        "ecosystem",
+        "package",
+        "requested_package",
+        "version",
+        "cve",
+        "severity",
+        "state",
+        "category",
+        "interests",
+        "acked",
+        "acked_at",
+        "ack_note",
+        "surface",
+        "image",
+        "epss_score",
+        "epss_percentile",
+    )
+    return {key: finding[key] for key in keys if key in finding}
+
+
+def _iter_filtered_findings(
+    findings: Iterable[dict],
+    args: argparse.Namespace,
+    config: dict,
+    acks: dict,
+):
     category = args.category or ""
     if category:
         category_cfg = category_config(category, config)
         for finding in findings:
             tagged = _tag_finding(finding, category, category_cfg, acks)
             if tagged is not None:
-                filtered.append(tagged)
-        return filtered
+                yield tagged
+        return
     for finding in findings:
         for cat_name, cat_cfg in _auto_categories(finding["package"], config):
             tagged = _tag_finding(finding, cat_name, cat_cfg, acks)
             if tagged is not None:
-                filtered.append(tagged)
-    return filtered
+                yield tagged
 
 
-def _filter_container_findings(
-    findings: list[dict], config: dict, acks: dict
-) -> list[dict]:
+def _iter_cli_findings(
+    args: argparse.Namespace,
+    specs: list[dict],
+    config: dict,
+    acks: dict,
+):
+    category = args.category or ""
+    if category != "container":
+        yield from _iter_filtered_findings(
+            match_specs(
+                args.db_dir, specs, immutable=args.immutable
+            ),
+            args,
+            config,
+            acks,
+        )
+    if not category or category == "container":
+        for container_dir in resolve_container_dirs(args.container_dir):
+            yield from _iter_filter_container_findings(
+                match_container(
+                    args.db_dir,
+                    container_dir,
+                    immutable=args.immutable,
+                ),
+                config,
+                acks,
+            )
+
+
+def _iter_filter_container_findings(
+    findings: Iterable[dict], config: dict, acks: dict
+):
     """Tag container findings ``category=container`` and apply its policy.
 
     Container findings are driven by manifest files rather than a category
@@ -535,12 +696,10 @@ def _filter_container_findings(
     states only).
     """
     category_cfg = category_config("container", config)
-    filtered: list[dict] = []
     for finding in findings:
         tagged = _tag_finding(finding, "container", category_cfg, acks)
         if tagged is not None:
-            filtered.append(tagged)
-    return filtered
+            yield tagged
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -759,28 +918,13 @@ def main(argv: list[str] | None = None) -> int:
     if _warn_stale_feeds(args.db_dir, specs):
         return 1
     acks = load_acks(args.ack_db)
-    findings = match_specs(args.db_dir, specs, immutable=args.immutable)
-    category = args.category or ""
-    if category == "container":
-        # ``container`` is a manifest-driven surface, not a package category;
-        # a ``--category container`` run is scoped to container findings only.
-        findings = []
-    else:
-        findings = _filtered_findings(findings, args, config, acks)
-    if not category or category == "container":
-        for container_dir in resolve_container_dirs(args.container_dir):
-            container_findings = match_container(
-                args.db_dir, container_dir, immutable=args.immutable
-            )
-            findings.extend(_filter_container_findings(container_findings, config, acks))
-    first_seen = first_seen_for(args.state_dir, findings)
+    findings_iter = _iter_cli_findings(args, specs, config, acks)
     if args.format == "json":
-        json.dump({"findings": findings, "first_seen": first_seen}, sys.stdout, indent=2)
-        sys.stdout.write("\n")
+        _write_json_stream(findings_iter, args.state_dir)
     elif args.format == "prometheus":
-        sys.stdout.write(_render_prometheus(findings, first_seen))
+        _write_prometheus_stream(findings_iter, args.state_dir)
     else:
-        sys.stdout.write(_render_table(findings, args.verbose) + "\n")
+        _write_table_stream(findings_iter, args.state_dir, args.verbose)
     return 0
 
 

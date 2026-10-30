@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import time
+import tracemalloc
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -82,7 +83,7 @@ class CliMatchTest(unittest.TestCase):
         local_state = tempfile.mkdtemp(prefix="osv-local-")
         self.addCleanup(shutil.rmtree, local_state, ignore_errors=True)
         with mock.patch("osv_feed.cli.feed_status", return_value="ok"), mock.patch(
-            "osv_feed.cli.match_specs", return_value=[]
+            "osv_feed.cli.match_specs", return_value=iter([])
         ) as match_specs, mock.patch(
             "osv_feed.cli.default_db_dir", return_value=local_state
         ):
@@ -138,6 +139,99 @@ class CliMatchTest(unittest.TestCase):
         self.assertEqual("no_fix_yet", data["findings"][0]["state"])
         self.assertEqual("perimeter", data["findings"][0]["category"])
         self.assertIn("severity", data["findings"][0])
+
+    def test_json_stream_does_not_retain_findings(self):
+        state_dir = tempfile.mkdtemp(prefix="osv-state-")
+        self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
+
+        class Sink(io.TextIOBase):
+            def write(self, value):
+                return len(value)
+
+        def findings():
+            for i in range(100):
+                yield {
+                    "ecosystem": "Ubuntu",
+                    "package": "openssh",
+                    "requested_package": "openssh",
+                    "version": "1",
+                    "cve": f"UBUNTU-CVE-{i}",
+                    "severity": "high",
+                    "state": "no_fix_yet",
+                    "acked": False,
+                    "details": "x" * 100000,
+                }
+
+        tracemalloc.start()
+        try:
+            with contextlib.redirect_stdout(Sink()):
+                cli._write_json_stream(findings(), state_dir)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 2 * 1024 * 1024)
+
+    def test_table_stream_does_not_retain_findings(self):
+        state_dir = tempfile.mkdtemp(prefix="osv-state-")
+        self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
+
+        class Sink(io.TextIOBase):
+            def write(self, value):
+                return len(value)
+
+        def findings():
+            for i in range(100):
+                yield {
+                    "ecosystem": "Ubuntu",
+                    "requested_package": "openssh",
+                    "version": "1",
+                    "cve": f"UBUNTU-CVE-{i}",
+                    "severity": "high",
+                    "state": "no_fix_yet",
+                    "acked": False,
+                    "details": "x" * 100000,
+                }
+
+        tracemalloc.start()
+        try:
+            with contextlib.redirect_stdout(Sink()):
+                cli._write_table_stream(findings(), state_dir)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 2 * 1024 * 1024)
+
+    def test_prometheus_stream_does_not_retain_findings(self):
+        state_dir = tempfile.mkdtemp(prefix="osv-state-")
+        self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
+
+        class Sink(io.TextIOBase):
+            def write(self, value):
+                return len(value)
+
+        def findings():
+            for i in range(100):
+                yield {
+                    "ecosystem": "Ubuntu",
+                    "requested_package": "openssh",
+                    "version": "1",
+                    "cve": f"UBUNTU-CVE-{i}",
+                    "severity": "high",
+                    "state": "no_fix_yet",
+                    "acked": False,
+                    "epss_score": 0.1,
+                    "epss_percentile": 0.2,
+                    "details": "x" * 100000,
+                }
+
+        tracemalloc.start()
+        try:
+            with contextlib.redirect_stdout(Sink()):
+                cli._write_prometheus_stream(findings(), state_dir)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 2 * 1024 * 1024)
 
     def test_table_includes_severity_column(self):
         code, output = self._run(
@@ -224,12 +318,21 @@ class CliMatchTest(unittest.TestCase):
             "Ubuntu|nginx|1.0|CVE-C1": now - 20 * 3600,
             'Ubuntu|nginx|1.0|CVE-H"1': now - 3 * 24 * 3600,
         }
-        output = cli._render_prometheus(findings, first_seen)
-        self.assertIn('osv_feed_cve_summary{severity="critical",acked="false",cves="CVE-C1"} 1', output)
+        state_dir = tempfile.mkdtemp(prefix="osv-state-")
+        self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
+        with open(
+            os.path.join(state_dir, "first-seen.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(first_seen, fh)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cli._write_prometheus_stream(iter(findings), state_dir)
+        rendered = output.getvalue()
+        self.assertIn('osv_feed_cve_summary{severity="critical",acked="false",cves="CVE-C1"} 1', rendered)
         self.assertIn(
-            'osv_feed_cve_summary{severity="high",acked="false",cves="CVE-H\\"1"} 1', output
+            'osv_feed_cve_summary{severity="high",acked="false",cves="CVE-H\\"1"} 1', rendered
         )
-        self.assertNotIn('severity="medium"', output)
+        self.assertNotIn('severity="medium"', rendered)
 
     def test_empty_findings_still_exit_zero(self):
         code, output = self._run(

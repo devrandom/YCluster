@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import time
 from itertools import zip_longest
-from typing import Callable
+from typing import Callable, Iterable, Iterator
 
 import sqlite3
 
@@ -34,7 +34,6 @@ FIX_AVAILABLE = "fix_available"
 NO_FIX_YET = "no_fix_yet"
 UNINSTALLED = "uninstalled"
 
-STATE_ORDER = {NO_FIX_YET: 0, FIX_AVAILABLE: 1, PATCHED: 2}
 
 
 def _have_dpkg() -> bool:
@@ -243,34 +242,44 @@ def iter_records(db_dir: str, ecosystem: str):
         conn.close()
 
 
-def _candidate_records(
+def iter_candidate_records(
     db_dir: str, ecosystem: str, packages: list[str], *, immutable: bool = False
-) -> list[dict]:
-    """Load only records that mention any requested package.
+) -> Iterator[dict]:
+    """Yield records that mention any requested package, one at a time.
 
-    Uses the in-database package index so only candidate records are read,
-    regardless of how many ecosystems share the store.
+    The package lookup is pushed into SQLite and each record's JSON is parsed
+    only when it is yielded.  This matters for broad queries such as the
+    Ubuntu ``linux`` source package: the matching feed can contain tens of
+    thousands of records with large affected-version arrays, and retaining
+    all of them simultaneously exhausts small collector hosts.
     """
     wanted = [package.lower() for package in packages]
     if not wanted:
-        return []
+        return
     placeholders = ",".join("?" for _ in wanted)
     sql = (
-        "SELECT DISTINCT r.data FROM records r "
-        "JOIN packages p ON p.ecosystem = r.ecosystem AND p.record_id = r.id "
-        f"WHERE r.ecosystem=? AND p.package IN ({placeholders})"
+        "SELECT r.data FROM records r "
+        "WHERE r.ecosystem=? AND EXISTS ("
+        "SELECT 1 FROM packages p "
+        "WHERE p.ecosystem=r.ecosystem AND p.record_id=r.id "
+        f"AND p.package IN ({placeholders})"
+        ")"
+        " ORDER BY r.id"
     )
     try:
         conn = connect(db_dir, read_only=True, immutable=immutable)
     except sqlite3.OperationalError:
-        return []
+        return
     try:
-        records = []
-        for row in conn.execute(sql, [ecosystem, *wanted]).fetchall():
-            record = json.loads(row[0])
+        for row in conn.execute(sql, [ecosystem, *wanted]):
+            try:
+                record = json.loads(row[0])
+            except ValueError as exc:
+                raise ValueError(
+                    f"cannot read OSV record in {db_path(db_dir)}: {exc}"
+                ) from exc
             if not record.get("withdrawn"):
-                records.append(record)
-        return records
+                yield record
     finally:
         conn.close()
 
@@ -508,36 +517,66 @@ def classify_record(
     return state
 
 
-def _first_seen(db_dir: str, findings: list[dict]) -> dict[str, int]:
-    os.makedirs(db_dir, exist_ok=True)
-    state_path = os.path.join(db_dir, "first-seen.json")
-    try:
-        with open(state_path, "r", encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (FileNotFoundError, ValueError):
-        state = {}
-    now = int(time.time())
-    result: dict[str, int] = {}
-    current_keys = set()
-    for finding in findings:
-        key = _finding_key(finding)
-        current_keys.add(key)
-        if key not in state:
-            state[key] = now
-        result[key] = state[key]
-    state = {key: value for key, value in state.items() if key in current_keys}
-    fd, tmp = tempfile.mkstemp(dir=db_dir, prefix=".first-seen-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, ensure_ascii=False, sort_keys=True)
-    except Exception:
+class FirstSeenTracker:
+    """Incrementally assign and persist first-seen epochs for findings.
+
+    ``add`` is intentionally idempotent per finding key and ignores
+    non-pending findings.  This lets callers stream a large result set,
+    retain only the much smaller key-to-epoch mapping, and call ``save`` once
+    at the end.
+    """
+
+    def __init__(self, db_dir: str):
+        os.makedirs(db_dir, exist_ok=True)
+        self.db_dir = db_dir
+        self.state_path = os.path.join(db_dir, "first-seen.json")
         try:
-            os.remove(tmp)
-        except FileNotFoundError:
-            pass
-        raise
-    os.replace(tmp, state_path)
-    return result
+            with open(self.state_path, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (FileNotFoundError, ValueError):
+            state = {}
+        self.state = state if isinstance(state, dict) else {}
+        self.now = int(time.time())
+        self.result: dict[str, int] = {}
+        self.current_keys: set[str] = set()
+
+    def add(self, finding: dict) -> int | None:
+        if finding.get("state") not in PENDING_STATES:
+            return None
+        key = _finding_key(finding)
+        self.current_keys.add(key)
+        if key not in self.state:
+            self.state[key] = self.now
+        self.result[key] = self.state[key]
+        return self.result[key]
+
+    def save(self) -> None:
+        state = {
+            key: value
+            for key, value in self.state.items()
+            if key in self.current_keys
+        }
+        fd, tmp = tempfile.mkstemp(
+            dir=self.db_dir, prefix=".first-seen-", suffix=".json"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+        os.replace(tmp, self.state_path)
+
+
+def _first_seen(db_dir: str, findings: Iterable[dict]) -> dict[str, int]:
+    tracker = FirstSeenTracker(db_dir)
+    for finding in findings:
+        tracker.add(finding)
+    tracker.save()
+    return tracker.result
 
 
 def _finding_key(finding: dict) -> str:
@@ -560,7 +599,7 @@ def _finding_key(finding: dict) -> str:
 PENDING_STATES = (NO_FIX_YET, FIX_AVAILABLE)
 
 
-def first_seen_for(db_dir: str, findings: list[dict]) -> dict[str, int]:
+def first_seen_for(db_dir: str, findings: Iterable[dict]) -> dict[str, int]:
     """Return persisted first-seen epochs for pending (unresolved) findings.
 
     Only findings in a pending state (``no_fix_yet`` / ``fix_available``) are
@@ -586,106 +625,108 @@ def _epss_for(
     return None
 
 
+def _uninstalled_finding(ecosystem: str, spec: dict) -> dict:
+    finding = {
+        "ecosystem": ecosystem,
+        "package": spec["package"],
+        "requested_package": spec["package"],
+        "version": "",
+        "cve": "",
+        "summary": "",
+        "details": "",
+        "aliases": [],
+        "references": [],
+        "published": "",
+        "modified": "",
+        "severity": "",
+        "state": UNINSTALLED,
+        "epss_score": 0.0,
+        "epss_percentile": 0.0,
+    }
+    if spec.get("image"):
+        finding["image"] = spec["image"]
+    return finding
+
+
+def _finding_for_record(
+    ecosystem: str,
+    spec: dict,
+    record: dict,
+    cmp: VersionCompare,
+    epss: dict[str, dict[str, float]],
+) -> dict:
+    epss_hit = _epss_for(epss, record)
+    finding = {
+        "ecosystem": ecosystem,
+        "package": spec["package"],
+        "requested_package": spec["package"],
+        "version": spec["version"],
+        "cve": record.get("id", ""),
+        "summary": record.get("summary", ""),
+        "details": record.get("details", ""),
+        "aliases": [str(a) for a in (record.get("aliases") or [])],
+        "references": [
+            r.get("url")
+            for r in (record.get("references") or [])
+            if isinstance(r, dict) and r.get("url")
+        ],
+        "published": record.get("published", ""),
+        "modified": record.get("modified", ""),
+        "severity": _severity_label(record, spec["package"]),
+        "state": classify_record(
+            record,
+            spec["package"],
+            spec["version"],
+            cmp,
+            ecosystem,
+        ),
+        "epss_score": epss_hit["score"] if epss_hit else 0.0,
+        "epss_percentile": epss_hit["percentile"] if epss_hit else 0.0,
+    }
+    if spec.get("image"):
+        finding["image"] = spec["image"]
+    return finding
+
+
 def match_specs(
     db_dir: str,
     specs: list[dict],
     cmp: VersionCompare = version_compare,
     *,
     immutable: bool = False,
-) -> list[dict]:
-    """Match package specs against the local mirror.
+) -> Iterator[dict]:
+    """Yield findings for ``specs`` without retaining full OSV records.
 
-    specs items: {"ecosystem": str, "package": str, "version": str}
-    Returns the findings list; first-seen state is managed separately by
-    ``first_seen_for`` after any filtering has been applied.
-
-    ``immutable`` opens the store without locking and without writing
-    journal files — intended for read-only consumers pointed at an atomic
-    snapshot (e.g. on a network share).
+    Findings are emitted in candidate-record order.  The iterator parses one
+    record, emits its finding, and releases the record before reading the
+    next one, keeping memory bounded for broad package queries.
     """
     epss = load_epss(db_dir)
     by_ecosystem: dict[str, list[dict]] = {}
     for spec in specs:
         by_ecosystem.setdefault(spec["ecosystem"], []).append(spec)
 
-    findings: list[dict] = []
     for ecosystem, ecosystem_specs in by_ecosystem.items():
         ecosystem_cmp = compare_for_ecosystem(ecosystem, cmp)
         base_ecosystem = ecosystem.split(":", 1)[0] if ecosystem.startswith("Alpine:") else ecosystem
-        records = _candidate_records(
-            db_dir,
-            base_ecosystem,
-            [spec["package"] for spec in ecosystem_specs],
-            immutable=immutable,
-        )
+        versioned = [spec for spec in ecosystem_specs if spec.get("version") is not None]
         for spec in ecosystem_specs:
             if spec.get("version") is None:
-                finding = {
-                    "ecosystem": ecosystem,
-                    "package": spec["package"],
-                    "requested_package": spec["package"],
-                    "version": "",
-                    "cve": "",
-                    "summary": "",
-                    "details": "",
-                    "aliases": [],
-                    "references": [],
-                    "published": "",
-                    "modified": "",
-                    "severity": "",
-                    "state": UNINSTALLED,
-                    "epss_score": 0.0,
-                    "epss_percentile": 0.0,
-                }
-                if spec.get("image"):
-                    finding["image"] = spec["image"]
-                findings.append(finding)
-                continue
-            for record in records:
+                yield _uninstalled_finding(ecosystem, spec)
+        if not versioned:
+            continue
+        for record in iter_candidate_records(
+            db_dir,
+            base_ecosystem,
+            [spec["package"] for spec in versioned],
+            immutable=immutable,
+        ):
+            for spec in versioned:
                 if not _affected_entries(record, spec["package"], ecosystem):
                     continue
-                epss_hit = _epss_for(epss, record)
-                finding = {
-                    "ecosystem": ecosystem,
-                    "package": spec["package"],
-                    "requested_package": spec["package"],
-                    "version": spec["version"],
-                    "cve": record.get("id", ""),
-                    "summary": record.get("summary", ""),
-                    "details": record.get("details", ""),
-                    "aliases": [str(a) for a in (record.get("aliases") or [])],
-                    "references": [
-                        r.get("url")
-                        for r in (record.get("references") or [])
-                        if isinstance(r, dict) and r.get("url")
-                    ],
-                    "published": record.get("published", ""),
-                    "modified": record.get("modified", ""),
-                    "severity": _severity_label(record, spec["package"]),
-                    "state": classify_record(
-                        record,
-                        spec["package"],
-                        spec["version"],
-                        ecosystem_cmp,
-                        ecosystem,
-                    ),
-                    "epss_score": epss_hit["score"] if epss_hit else 0.0,
-                    "epss_percentile": (
-                        epss_hit["percentile"] if epss_hit else 0.0
-                    ),
-                }
-                if spec.get("image"):
-                    finding["image"] = spec["image"]
-                findings.append(finding)
-    findings.sort(
-        key=lambda f: (
-            f["ecosystem"],
-            f["requested_package"],
-            STATE_ORDER.get(f["state"], 9),
-            f["cve"],
-        )
-    )
-    return findings
+                yield _finding_for_record(
+                    ecosystem, spec, record, ecosystem_cmp, epss
+                )
 
 
 def match_container(
@@ -694,15 +735,17 @@ def match_container(
     cmp: VersionCompare = version_compare,
     *,
     immutable: bool = False,
-) -> list[dict]:
-    """Match every ``ecosystem:name=version`` spec in ``container_dir``.
+) -> Iterator[dict]:
+    """Yield findings for every ``ecosystem:name=version`` manifest spec.
 
     Loads each ``*.manifest`` file and matches it through the same pipeline
     as host packages; each finding carries an ``image`` label from its
-    manifest file name so first-seen and alerting are per-image. Returns an
-    empty list when the directory contains no manifests.
+    manifest file name so first-seen and alerting are per-image.  Yields
+    nothing when the directory contains no manifests.
     """
     manifests = load_manifests(container_dir)
     if not manifests:
-        return []
-    return match_specs(db_dir, manifests, cmp=cmp, immutable=immutable)
+        return
+    yield from match_specs(
+        db_dir, manifests, cmp=cmp, immutable=immutable
+    )
