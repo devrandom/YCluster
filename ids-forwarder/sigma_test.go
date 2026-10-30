@@ -159,7 +159,10 @@ func TestSigmaCursorRoundTrip(t *testing.T) {
 func TestSigmaDetectionsTailWithCursor(t *testing.T) {
 	dir := t.TempDir()
 	detPath := filepath.Join(dir, "detections.jsonl")
-	first := testDetection("First", "2026-10-28T12:00:00Z")
+	// Timestamps must stay inside the 24h event-age cutoff, or the tail
+	// handler drops them and the test fails with the passage of time.
+	now := time.Now().UTC()
+	first := testDetection("First", now.Add(-2*time.Minute).Format(time.RFC3339))
 	if err := os.WriteFile(detPath, []byte(first+"\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +185,7 @@ func TestSigmaDetectionsTailWithCursor(t *testing.T) {
 		t.Fatalf("pre-existing detection was paged: depth=%d", depth)
 	}
 
-	second := testDetection("Second", "2026-10-28T12:00:01Z")
+	second := testDetection("Second", now.Add(-time.Minute).Format(time.RFC3339))
 	appendLine(t, detPath, second)
 	waitFor(t, 3*time.Second, func() bool { return f.queue.depth() == 1 })
 	a, _ := f.queue.pop()
@@ -214,7 +217,7 @@ func TestSigmaDetectionsTailWithCursor(t *testing.T) {
 	if depth := f2.queue.depth(); depth != 0 {
 		t.Fatalf("cursor replay duplicated detections: depth=%d", depth)
 	}
-	appendLine(t, detPath, testDetection("Third", "2026-10-28T12:00:02Z"))
+	appendLine(t, detPath, testDetection("Third", now.Format(time.RFC3339)))
 	waitFor(t, 3*time.Second, func() bool { return f2.queue.depth() == 1 })
 	a, _ = f2.queue.pop()
 	if a.Labels["rule_id"] != "rule-Third" {

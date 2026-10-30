@@ -159,6 +159,28 @@ func routineExecReason(process tetragonProcess) string {
 		if argumentsHaveLoopbackURL(args) {
 			return "loopback_http"
 		}
+	case "incus":
+		// vm-gpu-collector: on vfio-pci hosts the GPUs are invisible to
+		// the host, so it lists VMs and execs nvidia-smi inside each one
+		// every 30s. Known unit, known command line.
+		if strings.Contains(args, "type=virtual-machine") &&
+			strings.Contains(args, "list") {
+			return "gpu_collector"
+		}
+		if strings.Contains(args, "-- nvidia-smi --query-gpu=") &&
+			strings.Contains(args, "--format=csv") {
+			return "gpu_collector"
+		}
+		// sync_transit_nics reads instance metadata and the bastion's
+		// /etc/hosts on every reconciler tick to rewrite the transit
+		// block. Reads only: a push to the same path still alerts.
+		if strings.HasPrefix(args, "file pull ") &&
+			strings.HasSuffix(strings.TrimSpace(args), "/etc/hosts -") {
+			return "nat_sync"
+		}
+		if strings.HasPrefix(args, "info ") {
+			return "nat_sync"
+		}
 	case "sh", "bash", "dash", "zsh", "fish":
 		if strings.Contains(args, "/usr/share/prometheus-node-exporter-collectors/") {
 			return "node_exporter"
@@ -190,6 +212,15 @@ func routineExecReason(process tetragonProcess) string {
 		if strings.HasSuffix(trimmed, `-c "mountpoint -q /rbd/user"`) ||
 			strings.HasSuffix(trimmed, `-c 'mountpoint -q /rbd/user'`) {
 			return "storage_probe"
+		}
+		// The NAS mount retry uses a read-only mountpoint probe as its
+		// ExecCondition, and starts the mount unit when it is missing.
+		if strings.Contains(args, "mountpoint -q /mnt/nas-vm") ||
+			strings.Contains(args, "mountpoint -q /near2") {
+			return "mount_probe"
+		}
+		if strings.Contains(args, `systemctl start "`) && strings.Contains(args, `.mount"`) {
+			return "mount_retry"
 		}
 		// Containers use a literal false command as a liveness placeholder.
 		if strings.TrimSpace(args) == "-c -- /bin/false" {
@@ -305,10 +336,38 @@ func argumentsHaveLoopbackURL(args string) bool {
 }
 
 func tetragonRule(evType string, body *tetragonLog) string {
+	// The incus CLI is how an operator or a script reaches a tenant
+	// instance through the API (exec, file push/pull, start). Record it
+	// under its own rule so the caller's subcommand and target are visible.
+	if isIncusClient(body) {
+		return "container-api"
+	}
+	// incusd's forkfile helper creates a process inside a container on
+	// behalf of the API (incus exec, file push/pull, instance start). The
+	// privilege policy matches it, but it is a runtime mechanism, not an
+	// escalation, so it gets its own rule id for triage.
+	if isIncusForkfile(body) {
+		return "container-exec"
+	}
 	if body.PolicyName != "" {
 		return body.PolicyName
 	}
 	return evType
+}
+
+func isIncusClient(body *tetragonLog) bool {
+	if body == nil || body.PolicyName == "privilege-raises" {
+		return false
+	}
+	return path.Base(body.Process.Binary) == "incus"
+}
+
+func isIncusForkfile(body *tetragonLog) bool {
+	if body == nil || body.Process.Binary == "" {
+		return false
+	}
+	return strings.HasSuffix(body.Process.Binary, "/incusd") &&
+		strings.HasPrefix(body.Process.Arguments, "forkfile")
 }
 
 // tetragonLayer reports "container" when pod metadata is attached to the

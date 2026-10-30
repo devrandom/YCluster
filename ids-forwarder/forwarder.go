@@ -51,7 +51,7 @@ func defaultConfig() config {
 		alertmanagerURL: "http://127.0.0.1:9093",
 		tetragonLog:     "/var/log/tetragon/tetragon.log",
 		events:          "process_kprobe",
-		execBinaries:    "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget",
+		execBinaries:    "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget,incus",
 		httpListen:      "",
 		metricsListen:   "127.0.0.1:2113",
 		queueMax:        1000,
@@ -447,13 +447,36 @@ func (f *forwarder) handleLine(line string) error {
 	return nil
 }
 
+// ruleRepeatWindows coalesces repeated detections of the same shape. Rules
+// absent from the map use the shared dedup window only.
+var ruleRepeatWindows = map[string]time.Duration{
+	"container-exec": time.Hour,
+	"container-api":  time.Hour,
+}
+
 // enqueue makes one alert durable. It returns an error only when the
 // alert could not be stored; callers must then keep their source cursor
 // where it is so the event is retried.
 func (f *forwarder) enqueue(a alert) error {
+	// API usage is an audit trail before it is an alert: record every call,
+	// even when delivery is deduplicated.
+	auditOnly := a.Labels["rule_id"] == "container-api"
+	if auditOnly {
+		f.recordDetection(a)
+	}
 	key := a.dedupKey()
 	if f.dedup.seen(key) {
 		f.stats.deduped.Add(1)
+		return nil
+	}
+	// A recurring action describes the same thing happening again, not a new
+	// condition. Alert on the first occurrence in the window and keep
+	// recording the rest, so a scheduled exec does not page on every run.
+	if window, ok := ruleRepeatWindows[a.Labels["rule_id"]]; ok && f.dedup.seenWithin(key, window) {
+		f.stats.coalesced.Add(1)
+		if !auditOnly {
+			f.recordDetection(a)
+		}
 		return nil
 	}
 	if f.spool != nil {
@@ -471,7 +494,9 @@ func (f *forwarder) enqueue(a alert) error {
 		// Mark only after the append is durable: a failed append must stay
 		// retryable instead of being suppressed as a duplicate.
 		f.dedup.mark(key)
-		f.recordDetection(a)
+		if !auditOnly {
+			f.recordDetection(a)
+		}
 		return nil
 	}
 	if !f.queue.push(a) {
@@ -480,7 +505,9 @@ func (f *forwarder) enqueue(a alert) error {
 		return nil
 	}
 	f.dedup.mark(key)
-	f.recordDetection(a)
+	if !auditOnly {
+		f.recordDetection(a)
+	}
 	return nil
 }
 

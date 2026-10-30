@@ -9,6 +9,15 @@ separate SIEM control plane.
 
 Design: [`docs/design/intrusion-detection.md`](../../docs/design/intrusion-detection.md).
 
+## Alerting target
+
+The cluster averages **one forwarded IDS alert per day**. Sustained volume
+above that is a tuning defect, not vigilance: each alert either points at a
+routine shape to classify at the source, or at a real policy question to
+decide and record. Deploy and operator activity that a person deliberately
+started does not belong in the average — if it can be mistaken for a
+detection, it is a missing classification, not an alert.
+
 ## Threat model
 
 Two classes of adversary, both in scope:
@@ -154,6 +163,19 @@ must not become a second, longer-lived access log.
     connection should be impossible, so the alert fires when network policy is
     broken or bypassed. Container identity comes from `/proc/<pid>/cgroup`
     with a PID/start-time check, recorded as a `container` label.
+  - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
+    allowlist and maps to its own rule, `container-api`, so every `incus
+    exec`, `incus file push/pull` and lifecycle call lands in
+    `detections.jsonl` with the subcommand and target instance. Delivery is
+    one alert per host per hour regardless of subcommand; the record keeps
+    every call that is not classified. Known periodic consumers are
+    classified instead of recorded: `gpu_collector` for
+    `vm-gpu-collector`'s list and guest `nvidia-smi` queries, and
+    `nat_sync` for the frontend-NAT reads of instance metadata and the
+    bastion's `/etc/hosts`. This is the audit trail for entering a container or VM
+    namespace. The daemon's own debug log is deliberately not used for this:
+    it dumps whole API response bodies (~12-40 MiB/hour on one host) and
+    still reports the unix-socket peer as `@`.
   - Remaining: VM lateral-movement visibility. Host-side Tetragon cannot see
     guest sockets — the hypervisor only exposes the QEMU process — so a VM
     reaching a cluster address produces no kprobe event and cannot be

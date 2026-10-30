@@ -109,6 +109,48 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "ansible_probe",
 		},
 		{
+			name:   "vm gpu collector list",
+			binary: "/usr/bin/incus",
+			args:   "list --format=json type=virtual-machine",
+			parent: "/usr/bin/python3",
+			reason: "gpu_collector",
+		},
+		{
+			name:   "vm gpu collector query",
+			binary: "/usr/bin/incus",
+			args:   "exec vm1 -- nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader,nounits",
+			parent: "/usr/bin/python3",
+			reason: "gpu_collector",
+		},
+		{
+			name:   "frontend nat hosts read",
+			binary: "/usr/bin/incus",
+			args:   "file pull gw1/etc/hosts -",
+			parent: "/usr/bin/python3",
+			reason: "nat_sync",
+		},
+		{
+			name:   "frontend nat instance info",
+			binary: "/usr/bin/incus",
+			args:   "info gw1",
+			parent: "/usr/bin/python3",
+			reason: "nat_sync",
+		},
+		{
+			name:   "nas mount retry probe",
+			binary: "/bin/sh",
+			args:   `-c '! mountpoint -q /mnt/nas-vm'`,
+			parent: "/usr/lib/systemd/systemd",
+			reason: "mount_probe",
+		},
+		{
+			name:   "nas mount retry start",
+			binary: "/bin/sh",
+			args:   `-c 'systemctl start "mnt-nas\x2dvm.mount"'`,
+			parent: "/usr/lib/systemd/systemd",
+			reason: "mount_retry",
+		},
+		{
 			name:   "package query",
 			binary: "/usr/bin/dpkg",
 			args:   "--print-foreign-architectures",
@@ -145,6 +187,8 @@ func TestRoutineExecKeepsUsefulCommands(t *testing.T) {
 		{"/usr/bin/apt-get", "install nginx", "/usr/bin/sudo"},
 		{"/bin/sh", `-c "git-upload-pack '/srv/git/project.git'"`, "/usr/bin/runc"},
 		{"/bin/sh", `-c "mountpoint -q /mnt/data"`, "/usr/bin/bash"},
+		{"/usr/bin/incus", "file push gw1/etc/hosts /tmp/hosts", "/usr/bin/python3"},
+		{"/usr/bin/incus", "exec gw1 -- id", "/usr/bin/python3"},
 	}
 
 	for _, tc := range cases {

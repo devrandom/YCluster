@@ -18,7 +18,9 @@
     # connects); process_exec is high-volume and is filtered by binary
     # in the forwarder.
     ids_forwarder_events: "process_kprobe,process_exec"
-    ids_forwarder_exec_binaries: "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget"
+    # incus is the API client: recording it names the subcommand and target
+    # of every container/VM file or exec operation (rule id container-api).
+    ids_forwarder_exec_binaries: "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget,incus"
     # Loopback receiver for CrowdSec notification-http POSTs.
     ids_forwarder_http_listen: "127.0.0.1:9201"
     ids_forwarder_metrics_listen: "127.0.0.1:2113"

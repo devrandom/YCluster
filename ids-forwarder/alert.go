@@ -61,6 +61,13 @@ func (a alert) dedupKey() string {
 	}
 	sort.Strings(keys)
 	summary := normalizeDedupSummary(a.Annotations["summary"])
+	if a.Labels["rule_id"] == "container-api" {
+		// Per-command detail belongs in the record: one API-usage alert per
+		// host per window is enough to notice that someone is driving the
+		// Incus API, and it keeps an interactive session from paging once
+		// per subcommand.
+		summary = ""
+	}
 	sum := sha256.Sum256([]byte(strings.Join(keys, "|") + "|" + summary))
 	return hex.EncodeToString(sum[:8])
 }
@@ -86,6 +93,19 @@ func (d *dedup) seen(key string) bool {
 	defer d.mu.Unlock()
 	last, ok := d.keys[key]
 	return ok && time.Since(last) < d.window
+}
+
+// seenWithin reports whether key was seen within an arbitrary window. Rules
+// that describe a recurring action rather than a new condition use a window
+// longer than the shared dedup window.
+func (d *dedup) seenWithin(key string, window time.Duration) bool {
+	if window <= 0 {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	last, ok := d.keys[key]
+	return ok && time.Since(last) < window
 }
 
 // mark records that key is now durable.
@@ -159,6 +179,7 @@ type metrics struct {
 	forwarded       atomic.Int64
 	dropped         atomic.Int64
 	deduped         atomic.Int64
+	coalesced       atomic.Int64
 	expired         atomic.Int64
 	gaps            atomic.Int64
 	oversized       atomic.Int64
