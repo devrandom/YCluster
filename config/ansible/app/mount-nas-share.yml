@@ -434,50 +434,110 @@
         index_var: nas_nfs_mounts_idx
       when: item.enabled | bool
 
-    - name: Install the NAS NFS mount retry service
+    - name: Install per-mount NAS NFS retry services
       copy:
-        dest: /etc/systemd/system/nas-nfs-mount-retry.service
+        dest: "/etc/systemd/system/nas-nfs-mount-retry-{{ nas_nfs_mounts_idx }}.service"
         content: |
           [Unit]
-          Description=Retry failed NAS NFS mounts
+          Description=Retry NAS NFS mount {{ item.mount_point }}
           After=network-online.target
           Wants=network-online.target
 
           [Service]
           Type=oneshot
           TimeoutStartSec=5min
-          {% for mount in nas_nfs_mounts_effective %}
-          {% if mount.enabled | bool %}
-          ExecStart=-/bin/sh -c 'systemctl start "$(systemd-escape \
-          --path --suffix=mount {{ mount.mount_point }})"'
-          {% endif %}
-          {% endfor %}
+          # systemd 255 has no mount-point condition, so the probe decides
+          # whether the retry runs. Healthy hosts skip the start entirely.
+          ExecCondition=/bin/sh -c '! mountpoint -q {{ item.mount_point }}'
+          ExecStart=-/bin/sh -c 'systemctl start "{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"'
         mode: '0644'
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: item.enabled | bool
+      notify: reload systemd
 
-    - name: Install the NAS NFS mount retry timer
+    - name: Install per-mount NAS NFS retry timers
       copy:
-        dest: /etc/systemd/system/nas-nfs-mount-retry.timer
+        dest: "/etc/systemd/system/nas-nfs-mount-retry-{{ nas_nfs_mounts_idx }}.timer"
         content: |
           [Unit]
-          Description=Retry failed NAS NFS mounts
+          Description=Retry NAS NFS mount {{ item.mount_point }}
 
           [Timer]
           OnBootSec=30s
-          OnUnitActiveSec=30s
+          OnUnitInactiveSec=30s
           AccuracySec=1s
           Persistent=true
 
           [Install]
           WantedBy=timers.target
         mode: '0644'
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: item.enabled | bool
+      notify: reload systemd
 
-    - name: Enable and start the NAS NFS mount retry timer
+    - name: Retire the single-service NAS NFS retry units
       systemd:
-        name: nas-nfs-mount-retry.timer
+        name: "nas-nfs-mount-retry.{{ item }}"
+        enabled: false
+        state: stopped
+      loop: [timer, service]
+      failed_when: false
+
+    - name: Remove the retired NAS NFS retry unit files
+      file:
+        path: "/etc/systemd/system/nas-nfs-mount-retry.{{ item }}"
+        state: absent
+      loop: [service, timer]
+
+    - name: Create the systemd drop-in directories for mount ordering
+      file:
+        path: "/etc/systemd/system/{{ item }}.service.d"
+        state: directory
+        mode: '0755'
+      loop: [incus, vm-reconciler]
+
+    - name: Order Incus after each enabled NAS NFS mount
+      copy:
+        dest: "/etc/systemd/system/incus.service.d/10-nas-mount-{{ nas_nfs_mounts_idx }}.conf"
+        content: |
+          [Unit]
+          Wants={{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}
+          After={{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}
+        mode: '0644'
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: item.enabled | bool
+      notify: reload systemd
+
+    - name: Order the VM reconciler after each enabled NAS NFS mount
+      copy:
+        dest: "/etc/systemd/system/vm-reconciler.service.d/10-nas-mount-{{ nas_nfs_mounts_idx }}.conf"
+        content: |
+          [Unit]
+          Wants={{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}
+          After={{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}
+        mode: '0644'
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: item.enabled | bool
+      notify: reload systemd
+
+    - name: Enable and start the per-mount NAS NFS retry timers
+      systemd:
+        name: "nas-nfs-mount-retry-{{ nas_nfs_mounts_idx }}.timer"
         enabled: true
         state: started
         daemon_reload: true
-
+      loop: "{{ nas_nfs_mounts_effective }}"
+      loop_control:
+        index_var: nas_nfs_mounts_idx
+      when: item.enabled | bool
     - name: Check the NAS NFS mounts are present
       command: "mountpoint -q {{ item.mount_point }}"
       failed_when: false

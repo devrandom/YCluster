@@ -23,16 +23,28 @@ on the same host can fail the same way.
 ## Recommended fixes
 
 1. **Remove `bg` and add a retry path.** `hard` keeps the mount retrying;
-   a `nas-nfs-mount-retry.timer` starts failed enabled mount units every
-   30s. This also recovers after a NAS outage longer than the mount timeout.
+   a per-mount retry starts a failed mount unit every 30s. This also
+   recovers after a NAS outage longer than the mount timeout.
    - Status: implemented in `group_vars/all/main.yml`,
      `host_vars/<host>.yml`, and `mount-nas-share.yml`; deployed on the
-     affected host. Both NFS mounts are active and the retry timer is active.
+     affected host. Both NFS mounts are active.
+   - Revised: the retry is one service and timer per mount, gated by
+     `ExecCondition=/bin/sh -c '! mountpoint -q <path>'`, so a healthy host
+     never starts a mount unit and the IDS sees only the read-only probe.
+     systemd 255 has no mount-point condition (`ConditionPathIsMountPoint`
+     is rejected as an unknown key).
 2. **Order VM startup after the mount.** Add
    `RequiresMountsFor=<vm-data mount>` to `incus.service` and
    `vm-reconciler.service`, or a dedicated dependency unit, so auto-start
    does not race the mount.
-   - Status: open.
+   - Status: implemented as ordering, not a hard requirement:
+     per-mount drop-ins add `Wants=` and `After=` on the mount unit to
+     `incus.service` and `vm-reconciler.service`. `RequiresMountsFor=` would
+     make incusd fail its start job whenever the NAS is down; with
+     `Restart=on-failure` that hits systemd's start limit and can leave
+     incusd failed after the NAS returns. Ordering removes the race and
+     keeps the control plane up; the reconciler retries instance starts
+     once the mount recovers. Deployed on the affected host.
 3. **Make `network-online.target` real.** Fix the netplan wait-online
    condition so `systemd-networkd-wait-online` runs, and wait for the LAN
    interface rather than `--any -o routable`.
