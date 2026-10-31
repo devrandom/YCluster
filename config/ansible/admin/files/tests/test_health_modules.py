@@ -365,24 +365,77 @@ class HealthChecksExtraTests(unittest.TestCase):
             self.assertEqual(self.hs.check_ceph_status()['status'],
                              'unavailable')
 
-    def test_dns_status_branches(self):
+    def test_dns_status_modes(self):
+        cases = [
+            ('127.0.0.1', 'dnsmasq', 'dnsmasq', 'systemd-resolved'),
+            ('127.0.0.53', 'resolved', 'systemd-resolved', 'dnsmasq'),
+        ]
+        for nameserver, mode, service, conflict_service in cases:
+            resolver = mock.Mock()
+            resolver.resolve.return_value = [mock.Mock(
+                __str__=lambda self: 'ip-a')]
+            with mock.patch.object(hc, '_read_resolv_nameserver',
+                                   return_value=nameserver), \
+                    mock.patch.object(
+                        hc, 'check_service_status',
+                        side_effect=lambda name, service=service: name == service), \
+                    mock.patch.object(hc.dns.resolver, 'Resolver',
+                                      return_value=resolver):
+                result = hc.check_dns_status()
+            self.assertEqual(result['status'], 'healthy')
+            self.assertEqual(result['details']['mode'], mode)
+            self.assertEqual(result['details']['nameserver'], nameserver)
+            self.assertEqual(result['details']['service_active'], True)
+            self.assertFalse(result['details']['conflicting_service_active'])
+            self.assertEqual(resolver.nameservers, [nameserver])
+            self.assertEqual(resolver.timeout, 1)
+            self.assertEqual(resolver.lifetime, 2)
+            self.assertNotEqual(conflict_service, service)
+
+    def test_dns_status_timeout_and_conflicting_resolver(self):
         resolver = mock.Mock()
-        resolver.resolve.return_value = ['1.1.1.1']
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=True), \
-                mock.patch.object(self.hs.dns.resolver, 'Resolver',
+        resolver.resolve.side_effect = hc.dns.resolver.Timeout
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.53'), \
+                mock.patch.object(hc, 'check_service_status',
+                                  return_value=True), \
+                mock.patch.object(hc.dns.resolver, 'Resolver',
                                   return_value=resolver):
-            result = self.hs.check_dns_status()
-        self.assertEqual(result['status'], 'healthy')
-        resolver.resolve.side_effect = self.hs.dns.resolver.NXDOMAIN
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=True), \
-                mock.patch.object(self.hs.dns.resolver, 'Resolver',
+            result = hc.check_dns_status()
+        self.assertEqual(result['status'], 'degraded')
+        self.assertIn('Local DNS query timeout', result['details']['message'])
+        self.assertTrue(result['details']['conflicting_service_active'])
+
+    def test_dns_status_inactive_does_not_query(self):
+        resolver = mock.Mock()
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.53'), \
+                mock.patch.object(hc, 'check_service_status',
+                                  return_value=False), \
+                mock.patch.object(hc.dns.resolver, 'Resolver',
                                   return_value=resolver):
-            self.assertEqual(self.hs.check_dns_status()['status'], 'degraded')
-        with mock.patch.object(self.hs, 'check_service_status',
-                               side_effect=RuntimeError('bad')):
-            self.assertEqual(self.hs.check_dns_status()['status'], 'error')
+            result = hc.check_dns_status()
+        self.assertEqual(result['status'], 'unhealthy')
+        self.assertEqual(result['details']['message'],
+                         'systemd-resolved is inactive; DNS not queried')
+        resolver.resolve.assert_not_called()
+
+    def test_dns_status_unknown_nameserver(self):
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='192.0.2.53'), \
+                mock.patch.object(hc, 'check_service_status') as service:
+            result = hc.check_dns_status()
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(result['details']['mode'], 'unknown')
+        self.assertEqual(result['details']['nameserver'], '192.0.2.53')
+        service.assert_not_called()
+
+    def test_read_resolv_nameserver(self):
+        with mock.patch('builtins.open', mock.mock_open(
+                read_data='# comment\nnameserver 127.0.0.53\n')):
+            self.assertEqual(hc._read_resolv_nameserver(), '127.0.0.53')
+        with mock.patch('builtins.open', side_effect=OSError('missing')):
+            self.assertIsNone(hc._read_resolv_nameserver())
 
     def test_certificate_expiry(self):
         from cryptography import x509
@@ -519,31 +572,38 @@ class HealthChecksExtraTests(unittest.TestCase):
             result = self.hs.check_docker_daemon()
         self.assertEqual(result['status'], 'error')
 
-    def test_dns_status_more_branches(self):
+    def test_dns_status_failure_branches(self):
         resolver = mock.Mock()
-        resolver.resolve.side_effect = self.hs.dns.resolver.NoAnswer
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=True), \
-                mock.patch.object(self.hs.dns.resolver, 'Resolver',
+        resolver.resolve.side_effect = hc.dns.resolver.NoAnswer
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.1'), \
+                mock.patch.object(hc, 'check_service_status',
+                                  side_effect=lambda name: name == 'dnsmasq'), \
+                mock.patch.object(hc.dns.resolver, 'Resolver',
                                   return_value=resolver):
-            self.assertEqual(self.hs.check_dns_status()['status'], 'degraded')
+            self.assertEqual(hc.check_dns_status()['status'], 'degraded')
+        resolver.resolve.side_effect = None
         resolver.resolve.return_value = []
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=True), \
-                mock.patch.object(self.hs.dns.resolver, 'Resolver',
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.1'), \
+                mock.patch.object(hc, 'check_service_status',
+                                  side_effect=lambda name: name == 'dnsmasq'), \
+                mock.patch.object(hc.dns.resolver, 'Resolver',
                                   return_value=resolver):
-            self.assertEqual(self.hs.check_dns_status()['status'], 'degraded')
+            self.assertEqual(hc.check_dns_status()['status'], 'degraded')
         resolver.resolve.side_effect = RuntimeError('bad')
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=True), \
-                mock.patch.object(self.hs.dns.resolver, 'Resolver',
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.1'), \
+                mock.patch.object(hc, 'check_service_status',
+                                  side_effect=lambda name: name == 'dnsmasq'), \
+                mock.patch.object(hc.dns.resolver, 'Resolver',
                                   return_value=resolver):
-            self.assertEqual(self.hs.check_dns_status()['status'], 'degraded')
-        with mock.patch.object(self.hs, 'check_service_status',
-                               return_value=False), \
-                mock.patch.object(self.hs.dns.resolver, 'Resolver',
-                                  return_value=resolver):
-            self.assertEqual(self.hs.check_dns_status()['status'], 'unhealthy')
+            self.assertEqual(hc.check_dns_status()['status'], 'degraded')
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.1'), \
+                mock.patch.object(hc, 'check_service_status',
+                                  side_effect=RuntimeError('bad')):
+            self.assertEqual(hc.check_dns_status()['status'], 'error')
 
     def test_clock_skew_thresholds_and_errors(self):
         response = mock.Mock(offset=2, stratum=2, precision=1, delay=0.1)

@@ -158,6 +158,11 @@ per host via `managed_dns_mode` in `host_vars/<node>.yml` (private repo):
   uplink keeps DNS learned from DHCP. Site-local names (`.lan`) resolve
   normally.
 
+Use `resolved` only on hosts that need site-local DNS, such as hosts mounting a
+site-local NAS by name. It is not the fleet-wide default: nodes that consume
+only cluster (`.xc`) resources stay on `dnsmasq`. Treat the split as a scoped
+per-host policy rather than an incomplete rollout.
+
 To switch a host to `resolved` mode, set the variable and rerun
 `admin/setup-base-compute.yml --limit <hostname>`. To roll back, remove the
 variable (or set it to `dnsmasq`) and rerun — the playbook cleans up the

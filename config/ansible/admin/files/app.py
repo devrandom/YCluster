@@ -54,7 +54,6 @@ import socket
 import platform
 import requests
 from datetime import datetime, timedelta, UTC
-import dns.resolver
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from jinja2 import Template
@@ -77,8 +76,8 @@ from app_helpers import (_add_health_service, _assemble_intervals,
                          _parse_windows, _required_service_health,
                          _standby_service_health, _storage_vip_health,
                          _usage_row)
-from health_common import (check_port_open, check_service_status,
-                           check_tang_service)
+from health_common import (check_dns_status, check_port_open,
+                           check_service_status, check_tang_service)
 from ycluster.common.etcd_utils import get_etcd_client
 
 AUTOINSTALL_USER_DATA_TEMPLATE = os.path.join(os.path.dirname(__file__), 'templates', 'user-data.j2')
@@ -456,59 +455,6 @@ def check_ceph_status():
             return {'status': 'error', 'details': result.stderr.strip()}
     except:
         return {'status': 'unavailable', 'details': 'ceph command failed'}
-
-def _dns_query_details():
-    """Query the local resolver for this host and return (working, message)."""
-    try:
-        resolver = dns.resolver.Resolver()
-        resolver.nameservers = ['127.0.0.1']
-        resolver.timeout = 3
-        resolver.lifetime = 5
-
-        local_hostname = platform.node()
-        answer = resolver.resolve(local_hostname, 'A')
-        if answer:
-            resolved_ips = [str(rdata) for rdata in answer]
-            return True, (f"Local DNS server responding "
-                          f"({local_hostname} -> {', '.join(resolved_ips)})")
-        return False, f"Local DNS query for {local_hostname} returned no results"
-    except dns.resolver.Timeout:
-        return False, "Local DNS query timeout"
-    except dns.resolver.NXDOMAIN:
-        return False, "Local DNS query: domain not found"
-    except dns.resolver.NoAnswer:
-        return False, "Local DNS query: no answer"
-    except Exception as e:
-        return False, f"Local DNS query error: {str(e)}"
-
-
-def check_dns_status():
-    """Check DNS (dnsmasq) service and functionality"""
-    try:
-        service_running = check_service_status('dnsmasq')
-        dns_working, dns_details = _dns_query_details()
-
-        if service_running and dns_working:
-            status = 'healthy'
-            details = f"Service active, {dns_details}"
-        elif service_running:
-            status = 'degraded'
-            details = f"Service active but {dns_details}"
-        else:
-            status = 'unhealthy'
-            details = f"Service inactive, {dns_details}"
-
-        return {
-            'status': status,
-            'details': {
-                'service_active': service_running,
-                'dns_working': dns_working,
-                'message': details
-            }
-        }
-    except Exception as e:
-        return {'status': 'error', 'details': f"DNS check failed: {str(e)}"}
-
 
 def check_certificate_expiry():
     """Check TLS certificate expiry from etcd"""

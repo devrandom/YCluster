@@ -276,17 +276,23 @@ class HealthApiDnsTests(unittest.TestCase):
         resolver = mock.Mock()
         answer = [mock.Mock(__str__=lambda self: 'ip-a')]
         resolver.resolve.return_value = answer
-        with mock.patch.object(hs, 'check_service_status', return_value=True), \
-             mock.patch.object(hs.dns.resolver, 'Resolver', return_value=resolver):
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.1'), \
+             mock.patch.object(hc, 'check_service_status',
+                               side_effect=lambda name: name == 'dnsmasq'), \
+             mock.patch.object(hc.dns.resolver, 'Resolver', return_value=resolver):
             result = hs.check_dns_status()
         self.assertEqual(result['status'], 'healthy')
         self.assertTrue(result['details']['dns_working'])
 
     def test_dns_timeout(self):
         resolver = mock.Mock()
-        resolver.resolve.side_effect = hs.dns.resolver.Timeout
-        with mock.patch.object(hs, 'check_service_status', return_value=True), \
-             mock.patch.object(hs.dns.resolver, 'Resolver', return_value=resolver):
+        resolver.resolve.side_effect = hc.dns.resolver.Timeout
+        with mock.patch.object(hc, '_read_resolv_nameserver',
+                               return_value='127.0.0.1'), \
+             mock.patch.object(hc, 'check_service_status',
+                               side_effect=lambda name: name == 'dnsmasq'), \
+             mock.patch.object(hc.dns.resolver, 'Resolver', return_value=resolver):
             result = hs.check_dns_status()
         self.assertEqual(result['status'], 'degraded')
         self.assertEqual(result['details']['message'], 'Local DNS query timeout')

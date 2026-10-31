@@ -5,7 +5,6 @@ import os
 import socket
 import subprocess
 
-import dns.resolver
 import requests
 
 from health_common import (
@@ -18,6 +17,7 @@ from health_common import (
     _tang_advertisement_status,
     _tang_health_from_probe,
     check_port_open,
+    check_dns_status,
     check_service_status,
     check_tang_service,
     is_core_node,
@@ -46,57 +46,6 @@ def check_ceph_status():
             return {'status': 'error', 'details': result.stderr.strip()}
     except:
         return {'status': 'unavailable', 'details': 'ceph command failed'}
-
-
-def check_dns_status():
-    """Check DNS (dnsmasq) service and functionality"""
-    try:
-        service_running = check_service_status("dnsmasq")
-        dns_working = False
-        dns_details = "DNS query failed"
-        try:
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = ["127.0.0.1"]
-            resolver.timeout = 3
-            resolver.lifetime = 5
-            local_hostname = _HOSTNAME
-            answer = resolver.resolve(local_hostname, "A")
-            if answer:
-                resolved_ips = [str(rdata) for rdata in answer]
-                dns_working = True
-                dns_details = (
-                    f"Local DNS server responding "
-                    f"({local_hostname} -> {', '.join(resolved_ips)})"
-                )
-            else:
-                dns_details = (
-                    f"Local DNS query for {local_hostname} returned no results"
-                )
-        except dns.resolver.Timeout:
-            dns_details = "Local DNS query timeout"
-        except dns.resolver.NXDOMAIN:
-            dns_details = "Local DNS query: domain not found"
-        except dns.resolver.NoAnswer:
-            dns_details = "Local DNS query: no answer"
-        except Exception as e:
-            dns_details = f"Local DNS query error: {str(e)}"
-
-        if service_running and dns_working:
-            status = "healthy"
-        elif service_running:
-            status = "degraded"
-        else:
-            status = "unhealthy"
-        return {
-            "status": status,
-            "details": {
-                "service_active": service_running,
-                "dns_working": dns_working,
-                "message": dns_details,
-            },
-        }
-    except Exception as e:
-        return {"status": "error", "details": f"DNS check failed: {str(e)}"}
 
 
 def check_clock_skew():

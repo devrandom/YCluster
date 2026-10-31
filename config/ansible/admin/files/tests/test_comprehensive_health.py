@@ -372,25 +372,6 @@ class FrontendHostsEntriesTests(unittest.TestCase):
         self.assertEqual(appmod._frontend_hosts_entries(client), [])
 
 
-class DnsQueryDetailsTests(unittest.TestCase):
-    def test_resolves_local_host(self):
-        resolver = mock.Mock()
-        answer = [mock.Mock(__str__=lambda self: 'ip-a')]
-        resolver.resolve.return_value = answer
-        with mock.patch.object(appmod.dns.resolver, 'Resolver', return_value=resolver):
-            working, message = appmod._dns_query_details()
-        self.assertTrue(working)
-        self.assertIn('ip-a', message)
-
-    def test_timeout(self):
-        resolver = mock.Mock()
-        resolver.resolve.side_effect = appmod.dns.resolver.Timeout
-        with mock.patch.object(appmod.dns.resolver, 'Resolver', return_value=resolver):
-            working, message = appmod._dns_query_details()
-        self.assertFalse(working)
-        self.assertEqual(message, 'Local DNS query timeout')
-
-
 class DisabledHealthTests(unittest.TestCase):
     def test_disabled_host_seeding(self):
         hosts = [

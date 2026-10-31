@@ -54,6 +54,8 @@
         - app_usage.py
         - app_users.py
         - app_wg.py
+        - project_routes.py
+        - settings_routes.py
       notify: restart admin-api
 
     - name: Copy lite health API

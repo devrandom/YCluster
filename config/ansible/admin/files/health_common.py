@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import dns.resolver
 import requests
 
 from flask import g
@@ -63,6 +64,113 @@ def check_port_open(host, port, timeout=3):
         return result == 0
     except Exception:
         return False
+
+
+DNS_MODE_BY_NAMESERVER = {
+    '127.0.0.1': ('dnsmasq', 'dnsmasq'),
+    '127.0.0.53': ('resolved', 'systemd-resolved'),
+}
+
+
+def _read_resolv_nameserver(path='/etc/resolv.conf'):
+    """Return the first nameserver configured in resolv.conf, or None."""
+    try:
+        with open(path, encoding='utf-8') as resolv_conf:
+            for line in resolv_conf:
+                fields = line.split()
+                if len(fields) >= 2 and fields[0] == 'nameserver':
+                    return fields[1]
+    except OSError:
+        return None
+    return None
+
+
+def check_dns_status():
+    """Check the local resolver selected by /etc/resolv.conf.
+
+    Managed compute hosts support either a local dnsmasq forwarder or
+    systemd-resolved.  Keep the DNS probe bounded well below the admin API's
+    5-second health timeout, and never query a resolver whose service is down.
+    """
+    nameserver = _read_resolv_nameserver()
+    mode, service = DNS_MODE_BY_NAMESERVER.get(nameserver, (None, None))
+    if mode is None:
+        label = nameserver or 'missing'
+        return {
+            'status': 'error',
+            'details': {
+                'service_active': False,
+                'dns_working': False,
+                'mode': 'unknown',
+                'nameserver': nameserver,
+                'conflicting_service_active': False,
+                'message': f'Unsupported local resolver nameserver: {label}',
+            },
+        }
+
+    conflict_service = ('dnsmasq' if mode == 'resolved'
+                        else 'systemd-resolved')
+    try:
+        service_active = check_service_status(service)
+        conflict_active = check_service_status(conflict_service)
+    except Exception as e:
+        return {
+            'status': 'error',
+            'details': {
+                'service_active': False,
+                'dns_working': False,
+                'mode': mode,
+                'nameserver': nameserver,
+                'conflicting_service_active': False,
+                'message': f'DNS service check failed: {str(e)}',
+            },
+        }
+
+    details = {
+        'service_active': service_active,
+        'dns_working': False,
+        'mode': mode,
+        'nameserver': nameserver,
+        'conflicting_service_active': conflict_active,
+    }
+    if not service_active:
+        details['message'] = f'{service} is inactive; DNS not queried'
+        return {'status': 'unhealthy', 'details': details}
+
+    message = 'DNS query failed'
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = [nameserver]
+        resolver.timeout = 1
+        resolver.lifetime = 2
+        answer = resolver.resolve(_HOSTNAME, 'A')
+        if answer:
+            resolved_ips = [str(rdata) for rdata in answer]
+            details['dns_working'] = True
+            message = (f'{mode} DNS server responding '
+                       f'({_HOSTNAME} -> {", ".join(resolved_ips)})')
+        else:
+            message = f'Local DNS query for {_HOSTNAME} returned no results'
+    except dns.resolver.Timeout:
+        message = 'Local DNS query timeout'
+    except dns.resolver.NXDOMAIN:
+        message = 'Local DNS query: domain not found'
+    except dns.resolver.NoAnswer:
+        message = 'Local DNS query: no answer'
+    except Exception as e:
+        message = f'Local DNS query error: {str(e)}'
+
+    if conflict_active:
+        details['message'] = (
+            f'{service} DNS is active, but conflicting {conflict_service} '
+            f'is also active; {message}')
+        return {'status': 'degraded', 'details': details}
+
+    details['message'] = message
+    return {
+        'status': 'healthy' if details['dns_working'] else 'degraded',
+        'details': details,
+    }
 
 
 @dataclass(frozen=True)
@@ -370,5 +478,4 @@ def check_tang_service(probe=None):
         }
     except Exception as e:
         return {'status': 'error', 'details': {'message': f'Tang check failed: {str(e)}'}}
-
 
