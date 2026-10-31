@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+schemas=(
+  com.canonical.unity.settings-daemon.plugins.power
+  org.gnome.settings-daemon.plugins.power
+)
+
+changed=0
+available_schemas=$(gsettings list-schemas)
+
+for schema in "${schemas[@]}"; do
+  if ! grep -qxF "$schema" <<<"$available_schemas"; then
+    continue
+  fi
+
+  for key in sleep-inactive-ac-type sleep-inactive-battery-type; do
+    current=$(gsettings get "$schema" "$key")
+    if [[ "$current" != "'nothing'" ]]; then
+      gsettings set "$schema" "$key" nothing
+      printf 'updated %s %s %s -> nothing\n' "$schema" "$key" "$current"
+      changed=1
+    fi
+  done
+
+  for key in sleep-inactive-ac-timeout sleep-inactive-battery-timeout; do
+    current=$(gsettings get "$schema" "$key")
+    if [[ "$current" != "0" ]]; then
+      gsettings set "$schema" "$key" 0
+      printf 'updated %s %s %s -> 0\n' "$schema" "$key" "$current"
+      changed=1
+    fi
+  done
+done
+
+if [[ "$changed" -eq 0 ]]; then
+  echo "ok: desktop idle-suspend is already disabled"
+fi

@@ -1,0 +1,116 @@
+---
+# Desktop-class compute nodes run a greeter and user sessions. Disabling
+# systemd sleep alone would leave the greeter repeatedly trying to suspend, so
+# apply both layers. Opt in per host with desktop_no_sleep: true.
+- name: Keep desktop-class compute nodes awake
+  hosts: compute
+  become: true
+  gather_facts: false
+
+  handlers:
+    - name: Reload systemd-logind
+      ansible.builtin.systemd:
+        name: systemd-logind
+        state: reloaded
+
+  tasks:
+    - name: Skip nodes that are not desktop-class
+      ansible.builtin.meta: end_host
+      when: not (desktop_no_sleep | default(false) | bool)
+
+    - name: Require the desktop session users
+      ansible.builtin.assert:
+        that:
+          - desktop_no_sleep_users | default([]) | length > 0
+        fail_msg: "desktop_no_sleep is enabled but desktop_no_sleep_users is empty"
+
+    - name: Read the local account database
+      ansible.builtin.getent:
+        database: passwd
+
+    - name: Verify the configured desktop users exist
+      ansible.builtin.assert:
+        that:
+          - item in getent_passwd
+        fail_msg: "desktop_no_sleep_users entry '{{ item }}' does not exist"
+      loop: "{{ desktop_no_sleep_users }}"
+
+    - name: Ensure the systemd configuration directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /etc/systemd/logind.conf.d
+        - /etc/systemd/sleep.conf.d
+
+    - name: Disable logind idle and key-triggered sleep
+      ansible.builtin.copy:
+        dest: /etc/systemd/logind.conf.d/99-no-sleep.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Login]
+          IdleAction=ignore
+          HandleSuspendKey=ignore
+          HandleHibernateKey=ignore
+          HandleLidSwitch=ignore
+          HandleLidSwitchExternalPower=ignore
+          HandleLidSwitchDocked=ignore
+      notify: Reload systemd-logind
+
+    - name: Disable the systemd sleep verbs
+      ansible.builtin.copy:
+        dest: /etc/systemd/sleep.conf.d/99-no-sleep.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Sleep]
+          AllowSuspend=no
+          AllowHibernation=no
+          AllowHybridSleep=no
+          AllowSuspendThenHibernate=no
+
+    - name: Mask the sleep targets and services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        masked: true
+      loop: "{{ desktop_no_sleep_units }}"
+
+    - name: Ensure the cluster helper directory exists
+      ansible.builtin.file:
+        path: /usr/local/lib/cluster
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the desktop idle-suspend helper
+      ansible.builtin.copy:
+        src: files/scripts/disable-desktop-suspend
+        dest: /usr/local/lib/cluster/disable-desktop-suspend
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Disable idle suspend in the desktop sessions
+      ansible.builtin.include_tasks: tasks/disable-desktop-suspend-user.yml
+      loop: "{{ desktop_no_sleep_users }}"
+      loop_control:
+        loop_var: desktop_user
+
+  vars:
+    desktop_no_sleep_units:
+      - sleep.target
+      - suspend.target
+      - hibernate.target
+      - hybrid-sleep.target
+      - suspend-then-hibernate.target
+      - systemd-suspend.service
+      - systemd-hibernate.service
+      - systemd-hybrid-sleep.service
+      - systemd-suspend-then-hibernate.service

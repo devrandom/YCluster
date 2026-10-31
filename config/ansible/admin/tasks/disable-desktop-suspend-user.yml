@@ -1,0 +1,15 @@
+---
+# gsettings writes need a session bus. dbus-run-session supplies one for both
+# the LightDM greeter and a logged-in desktop user without an X display.
+- name: Set desktop idle-suspend policy for {{ desktop_user }}
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dbus-run-session
+      - --
+      - /usr/local/lib/cluster/disable-desktop-suspend
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    HOME: "{{ getent_passwd[desktop_user][4] }}"
+  register: desktop_no_sleep_dconf
+  changed_when: "'updated ' in desktop_no_sleep_dconf.stdout"
