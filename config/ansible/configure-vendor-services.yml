@@ -83,3 +83,35 @@
         - apt-news.service
         - esm-cache.service
       when: item in unit_files.stdout
+
+    # Desktop packages install apt post-invoke hooks that re-run on every
+    # update: PackageKit and AppStream refresh their caches, command-not-found
+    # rebuilds its database, and update-notifier rewrites the updates-available
+    # MOTD. AppStream also adds DEP-11 index downloads to every apt update.
+    # Servers do not use any of that, so replace the conffiles with inert
+    # replacements. A site.yml run restores this content if an upgrade ships a
+    # new version of a hook file.
+    - name: Disable desktop apt post-invoke hooks
+      copy:
+        dest: "{{ item.path }}"
+        content: "{{ item.content }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - path: /etc/apt/apt.conf.d/20packagekit
+          content: |
+            # Managed by Ansible: PackageKit cache-refresh hooks are not used
+            # on cluster servers.
+        - path: /etc/apt/apt.conf.d/50appstream
+          content: |
+            # Managed by Ansible: no AppStream DEP-11 metadata or cache
+            # refresh on cluster servers.
+        - path: /etc/apt/apt.conf.d/50command-not-found
+          content: |
+            # Managed by Ansible: command-not-found database refresh is not
+            # used on cluster servers.
+        - path: /etc/apt/apt.conf.d/99update-notifier
+          content: |
+            # Managed by Ansible: the updates-available MOTD is not used on
+            # cluster servers.

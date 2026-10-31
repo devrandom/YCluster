@@ -107,10 +107,12 @@
           # stderr inherits stdout, so one truncating target captures both
           # streams and keeps the file at one run's output.
           StandardOutput=truncate:/run/ycluster/apt-update.log
-          # Only runs if ExecStart succeeded, so the stamp means "last
-          # successful update". Refreshing the stamp also makes apt-daily's
-          # own update pass skip, avoiding duplicate work.
-          ExecStartPost=/bin/touch /var/lib/apt/periodic/update-success-stamp
+          # Only runs if ExecStart succeeded, so both stamps mean "last
+          # successful update". update-success-stamp feeds the node-exporter
+          # apt collector; update-stamp is what apt.systemd.daily checks, so
+          # touching it makes apt-daily's own update pass skip and leaves it
+          # as a fallback if this timer stops.
+          ExecStartPost=/bin/touch /var/lib/apt/periodic/update-success-stamp /var/lib/apt/periodic/update-stamp
         mode: '0644'
       notify: reload systemd
 

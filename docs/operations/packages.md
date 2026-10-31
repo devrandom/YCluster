@@ -4,8 +4,22 @@
 
 `monitoring/install-apt-metrics.yml` installs a 15-minute textfile collector that
 publishes apt cache/upgrade age and apt/dpkg lock state, plus a 12h
-`apt-cache-update.timer` that runs `apt-get update` (stamp refreshed only on
-success). It also installs a global `DPkg::Lock::Timeout` of 300s so a hung apt
+`apt-cache-update.timer` that runs `apt-get update`. Both
+`update-success-stamp` and `update-stamp` are refreshed only after a successful
+run: the former feeds the freshness metric, and the latter makes the stock
+`apt-daily` pass skip its own update so the timer is the primary refresher and
+apt-daily is the fallback if it stops. `unattended-upgrade` runs from
+`apt-daily-upgrade.timer` against the same lists and does not refresh them
+itself.
+
+Desktop packages install apt post-invoke hooks that refresh PackageKit,
+AppStream (including DEP-11 index downloads), the command-not-found database
+and the updates-available MOTD on every update. `configure-vendor-services.yml`
+replaces those conffiles with inert comments. The packages stay installed
+because `ubuntu-server` depends on `software-properties-common` and
+`update-notifier-common`, and PackageKit pulls in AppStream.
+
+The playbook also installs a global `DPkg::Lock::Timeout` of 300s so a hung apt
 run fails after 5 minutes instead of blocking unattended-upgrades for days.
 
 Alerts: cache not successfully updated in over 24h, an apt job active for over
