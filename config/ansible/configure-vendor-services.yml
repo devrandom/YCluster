@@ -1,0 +1,85 @@
+---
+# Vendor background services the cluster does not want. Each is switched off at
+# its own durable control as well as its units, so a package upgrade that
+# re-enables a unit still hits the switch:
+#
+#   motd-news   fetches https://motd.ubuntu.com every few hours for the login
+#               banner (/etc/default/motd-news).
+#   apt-news    the Ubuntu Pro client fetches https://motd.ubuntu.com/aptnews.json
+#               on every apt update, even when the machine is not attached
+#               (`pro config set apt_news=false`).
+#   apport      collects crash dumps and can forward them to Canonical
+#               (/etc/default/apport).
+- name: Disable vendor background services
+  hosts: managed
+  become: yes
+  tasks:
+    - name: Turn off motd-news in its default file
+      copy:
+        dest: /etc/default/motd-news
+        content: |
+          # Managed by Ansible: the cluster does not fetch distro news.
+          ENABLED=0
+          URLS=""
+          WAIT=5
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Turn off apport in its default file
+      copy:
+        dest: /etc/default/apport
+        content: |
+          # Managed by Ansible: the cluster does not collect or forward crash reports.
+          enabled=0
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Check for the Ubuntu Pro client
+      stat:
+        path: /usr/bin/pro
+      register: ua_client
+
+    - name: Read the apt-news setting
+      command: pro config show apt_news
+      register: ua_apt_news
+      changed_when: false
+      when: ua_client.stat.exists
+
+    - name: Stop the Pro client fetching apt news
+      command: pro config set apt_news=false
+      when:
+        - ua_client.stat.exists
+        - "'apt_news True' in ua_apt_news.stdout"
+
+    - name: List installed unit files
+      command: systemctl list-unit-files --no-legend
+      register: unit_files
+      changed_when: false
+
+    - name: Stop and disable vendor background units
+      systemd:
+        name: "{{ item }}"
+        enabled: no
+        state: stopped
+      loop:
+        - motd-news.timer
+        - ubuntu-advantage.service
+        - ua-timer.timer
+        - ua-reboot-cmds.service
+        - apport.service
+        - apport-autoreport.path
+        - apport-autoreport.timer
+      when: item in unit_files.stdout
+
+    # apt runs these from a post-invoke hook on every update; masking stops
+    # them at the source rather than relying on each one's internal checks.
+    - name: Mask the apt-triggered vendor units
+      systemd:
+        name: "{{ item }}"
+        masked: yes
+      loop:
+        - apt-news.service
+        - esm-cache.service
+      when: item in unit_files.stdout
