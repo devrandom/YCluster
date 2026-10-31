@@ -175,62 +175,6 @@ func (s *EtcdSource) initialState(kvs []*mvccpb.KeyValue) (map[string][]*url.URL
 // applyWatchEvents atomically applies a batch of etcd watch events to the
 // in-memory snapshot and ACL model map. It copies the current maps, applies
 // each event, then stores the new maps so readers see a consistent view.
-func (s *EtcdSource) applyWatchEvents(events []*clientv3.Event) {
-	curM := s.snapshot.Load()
-	curA := s.aclModels.Load()
-	nextM := make(map[string][]*url.URL, len(*curM)+len(events))
-	for k, v := range *curM {
-		nextM[k] = v
-	}
-	nextA := make(map[string]ACLModelRule, len(*curA)+len(events))
-	for k, v := range *curA {
-		nextA[k] = v
-	}
-	var nextS map[string]string
-	if curS := s.superseded.Load(); curS != nil {
-		nextS = make(map[string]string, len(*curS)+len(events))
-		for k, v := range *curS {
-			nextS[k] = v
-		}
-	} else {
-		nextS = make(map[string]string, len(events))
-	}
-	for _, ev := range events {
-		name := s.modelName(ev.Kv.Key)
-		switch ev.Type {
-		case clientv3.EventTypePut:
-			urls, acl, supersededBy, ok := s.parseKV(ev.Kv.Key, ev.Kv.Value)
-			if ok {
-				// Superseded models are never routable, even when the
-				// entry still lists backends.
-				if supersededBy != "" {
-					delete(nextM, name)
-					nextS[name] = supersededBy
-				} else {
-					if len(urls) > 0 {
-						nextM[name] = urls
-					} else {
-						delete(nextM, name)
-					}
-					delete(nextS, name)
-				}
-				if acl != nil {
-					nextA[name] = *acl
-				} else {
-					delete(nextA, name)
-				}
-			}
-		case clientv3.EventTypeDelete:
-			delete(nextM, name)
-			delete(nextA, name)
-			delete(nextS, name)
-		}
-	}
-	s.snapshot.Store(&nextM)
-	s.aclModels.Store(&nextA)
-	s.superseded.Store(&nextS)
-}
-
 func (s *EtcdSource) parseKV(key, value []byte) ([]*url.URL, *ACLModelRule, string, bool) {
 	var v etcdModelValue
 	if err := json.Unmarshal(value, &v); err != nil {
