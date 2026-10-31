@@ -140,8 +140,7 @@ def update_project(cur, identity, project_id, name=None, description=None,
         idp_project = clean_text(idp_project, "IdP project", max_length=200)
         if allowed_idp_projects is not None \
                 and idp_project not in allowed_idp_projects:
-            raise ValidationError(
-                "cannot move project outside your managed projects")
+            raise ValidationError("cannot move project outside your managed projects")
     if name is None and description is None and active is None \
             and idp_project is None:
         return current

@@ -2,9 +2,15 @@
 
 import importlib.util
 import json
+import sys
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
+
+_stub = types.ModuleType('psycopg2')
+_stub.connect = None
+sys.modules.setdefault('psycopg2', _stub)
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
@@ -156,6 +162,38 @@ class CliModeTests(unittest.TestCase):
                 migration.main()
         sqls = [call.args[0] for call in cur.execute.call_args_list]
         self.assertTrue(any('INSERT INTO projects' in s for s in sqls))
+
+
+class MainEntryTests(unittest.TestCase):
+    def test_db_connect_uses_peer_auth(self):
+        with mock.patch.object(migration.psycopg2, 'connect',
+                               return_value='conn') as connect:
+            self.assertEqual(migration.db_connect(), 'conn')
+        connect.assert_called_once_with(dbname='ycluster', user='postgres')
+
+    def test_from_authentik_prints_users(self):
+        users = [{'uid': '1', 'username': 'alice@x.org'}]
+        with mock.patch.object(migration.sys, 'argv',
+                               ['x', '--from-authentik']), \
+                mock.patch('ycluster.utils.authentik_manager.users_data',
+                           return_value=users), \
+                mock.patch('builtins.print') as printed:
+            migration.main()
+        printed.assert_called_once_with(json.dumps(users))
+
+    def test_requires_an_action(self):
+        with mock.patch.object(migration.sys, 'argv', ['x']), \
+                mock.patch.object(migration.sys, 'stderr'):
+            with self.assertRaises(SystemExit):
+                migration.main()
+
+    def test_module_entrypoint_parses_arguments(self):
+        import runpy
+        with mock.patch.object(migration.sys, 'argv', ['x']), \
+                mock.patch.object(migration.sys, 'stderr'):
+            with self.assertRaises(SystemExit):
+                runpy.run_path(str(_ROOT / 'migrate-project-defaults.py'),
+                               run_name='__main__')
 
 
 if __name__ == '__main__':

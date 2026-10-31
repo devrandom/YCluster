@@ -129,5 +129,148 @@ class HostingBalanceCollectorTests(unittest.TestCase):
                 col.OUT = original_out
 
 
+    def test_load_plugin_rejects_missing_spec(self):
+        with mock.patch.object(col.importlib.util, "spec_from_file_location",
+                               return_value=None):
+            with self.assertRaises(ImportError):
+                col.load_plugin(Path("plugin.py"))
+
+    def test_load_plugin_requires_fetch_balances(self):
+        with tempfile.TemporaryDirectory() as plugin_dir:
+            path = Path(plugin_dir) / "no_fetch.py"
+            path.write_text('PROVIDER = "none"\n')
+            with self.assertRaises(AttributeError):
+                col.load_plugin(path)
+
+    def test_load_plugin_requires_provider(self):
+        with tempfile.TemporaryDirectory() as plugin_dir:
+            path = Path(plugin_dir) / "no_provider.py"
+            path.write_text('def fetch_balances():\n    return []\n')
+            with self.assertRaises(AttributeError):
+                col.load_plugin(path)
+
+    def test_render_rejects_duplicate_account(self):
+        results = [
+            ("one", "provider", [{"account": "a", "balance_dollars": 1.0}]),
+            ("two", "provider", [{"account": "a", "balance_dollars": 2.0}]),
+        ]
+        with self.assertRaises(ValueError):
+            col.render(results, set())
+
+    def test_write_output_removes_partial_file_on_failure(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            original_out = col.OUT
+            col.OUT = Path(out_dir) / "hosting_balance.prom"
+            try:
+                with mock.patch.object(col.os, "replace",
+                                       side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        col.write_output("body\n")
+                self.assertFalse(list(Path(out_dir).glob(".hosting_balance.*")))
+            finally:
+                col.OUT = original_out
+
+    def test_write_output_tolerates_already_removed_tempfile(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            original_out = col.OUT
+            col.OUT = Path(out_dir) / "hosting_balance.prom"
+            try:
+                with mock.patch.object(col.os, "replace",
+                                       side_effect=OSError("disk full")), \
+                        mock.patch.object(col.os, "unlink",
+                                          side_effect=FileNotFoundError):
+                    with self.assertRaises(OSError):
+                        col.write_output("body\n")
+            finally:
+                col.OUT = original_out
+
+    def test_collect_skips_unloadable_plugin(self):
+        with tempfile.TemporaryDirectory() as plugin_dir:
+            (Path(plugin_dir) / "broken.py").write_text("def fetch_balances(:\n")
+            original = col.PLUGIN_DIR
+            col.PLUGIN_DIR = Path(plugin_dir)
+            try:
+                with mock.patch.object(col.sys, "stderr"):
+                    body = col.collect()
+            finally:
+                col.PLUGIN_DIR = original
+
+        self.assertIn(
+            'ycluster_hosting_balance_up{provider="broken",account="default"} 0',
+            body,
+        )
+
+    def test_collect_reports_invalid_balance(self):
+        with tempfile.TemporaryDirectory() as plugin_dir:
+            (Path(plugin_dir) / "negative.py").write_text(
+                plugin_source("negative", '[{"balance_dollars": -1}]')
+            )
+            original = col.PLUGIN_DIR
+            col.PLUGIN_DIR = Path(plugin_dir)
+            try:
+                with mock.patch.object(col.sys, "stderr"):
+                    body = col.collect()
+            finally:
+                col.PLUGIN_DIR = original
+
+        self.assertIn(
+            'ycluster_hosting_balance_up{provider="negative",account="default"} 0',
+            body,
+        )
+
+    def test_collect_reports_empty_plugin(self):
+        with tempfile.TemporaryDirectory() as plugin_dir:
+            (Path(plugin_dir) / "empty.py").write_text(
+                plugin_source("empty", '[]')
+            )
+            original = col.PLUGIN_DIR
+            col.PLUGIN_DIR = Path(plugin_dir)
+            try:
+                with mock.patch.object(col.sys, "stderr"):
+                    body = col.collect()
+            finally:
+                col.PLUGIN_DIR = original
+
+        self.assertIn(
+            'ycluster_hosting_balance_up{provider="empty",account="default"} 0',
+            body,
+        )
+
+    def test_main_reports_collection_failure(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            original_out = col.OUT
+            col.OUT = Path(out_dir) / "hosting_balance.prom"
+            try:
+                with mock.patch.object(col, "collect",
+                                       side_effect=RuntimeError("boom")), \
+                        mock.patch.object(col.sys, "stderr"):
+                    self.assertEqual(col.main(), 1)
+                self.assertIn(
+                    'provider="unconfigured"', col.OUT.read_text())
+            finally:
+                col.OUT = original_out
+
+    def test_module_entrypoint_runs_main(self):
+        import os
+        import runpy
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = Path(tmp) / "plugins"
+            plugin_dir.mkdir()
+            (plugin_dir / "one.py").write_text(
+                plugin_source("one", '[{"balance_dollars": 5}]')
+            )
+            out = Path(tmp) / "out.prom"
+            env = {
+                "HOSTING_BALANCE_PLUGIN_DIR": str(plugin_dir),
+                "HOSTING_BALANCE_METRICS_OUT": str(out),
+            }
+            with mock.patch.dict(os.environ, env):
+                with self.assertRaises(SystemExit) as exit_info:
+                    runpy.run_path(str(_HERE / "hosting-balance-collector.py"),
+                                   run_name="__main__")
+            self.assertEqual(exit_info.exception.code, 0)
+            self.assertIn('provider="one"', out.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

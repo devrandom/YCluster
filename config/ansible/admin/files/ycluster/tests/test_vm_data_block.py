@@ -3,6 +3,7 @@
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from ycluster.utils import vm_data_block as vdb
@@ -550,6 +551,155 @@ class VMDataBlockTests(unittest.TestCase):
                 None, "vm1",
                 wait_agent=lambda name, timeout: None,
                 agent_timeout=10)
+
+
+class LegacyShareProbeTests(unittest.TestCase):
+    def test_start_failure_is_treated_as_no_data(self):
+        with mock.patch.object(vdb.subprocess, "Popen",
+                               side_effect=OSError("gone")):
+            self.assertFalse(vdb._legacy_share_has_data("/mnt/vm"))
+
+    def test_timeout_is_treated_as_no_data(self):
+        proc = mock.MagicMock()
+        proc.communicate.side_effect = subprocess.TimeoutExpired("ls", 10)
+        with mock.patch.object(vdb.subprocess, "Popen", return_value=proc):
+            self.assertFalse(vdb._legacy_share_has_data("/mnt/vm"))
+
+    def test_nonempty_directory_has_data(self):
+        proc = mock.MagicMock(returncode=0)
+        proc.communicate.return_value = ("file\n", "")
+        with mock.patch.object(vdb.subprocess, "Popen", return_value=proc):
+            self.assertTrue(vdb._legacy_share_has_data("/mnt/vm"))
+
+    def test_empty_or_failed_listing_has_no_data(self):
+        proc = mock.MagicMock(returncode=0)
+        proc.communicate.return_value = ("\n", "")
+        with mock.patch.object(vdb.subprocess, "Popen", return_value=proc):
+            self.assertFalse(vdb._legacy_share_has_data("/mnt/vm"))
+        proc = mock.MagicMock(returncode=2)
+        proc.communicate.return_value = ("", "")
+        with mock.patch.object(vdb.subprocess, "Popen", return_value=proc):
+            self.assertFalse(vdb._legacy_share_has_data("/mnt/vm"))
+
+
+class CreateDataImageTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.image = str(Path(self.tmp.name) / "data.img")
+
+    def _statvfs(self, free_bytes):
+        stats = mock.Mock()
+        stats.f_bavail = free_bytes // 4096
+        stats.f_frsize = 4096
+        return stats
+
+    def test_refuses_when_nas_is_full(self):
+        with mock.patch.object(vdb.os, "statvfs",
+                               return_value=self._statvfs(1024)):
+            with self.assertRaises(RuntimeError):
+                vdb.create_data_image("vm1", self.image)
+
+    def test_creates_then_renames_image(self):
+        with mock.patch.object(vdb.os, "statvfs",
+                               return_value=self._statvfs(10**12)), \
+                mock.patch.object(vdb.subprocess, "run") as run, \
+                mock.patch.object(vdb.os, "replace") as replace, \
+                mock.patch("builtins.print"):
+            vdb.create_data_image("vm1", self.image)
+        self.assertEqual(replace.call_args.args[1], self.image)
+        self.assertEqual([c.args[0][0] for c in run.call_args_list],
+                         ["qemu-img", "mkfs.ext4"])
+
+    def test_removes_stale_tmp_and_tmp_after_failure(self):
+        tmp = self.image + ".tmp"
+        Path(tmp).write_text("stale")
+        with mock.patch.object(vdb.os, "statvfs",
+                               return_value=self._statvfs(10**12)), \
+                mock.patch.object(vdb.subprocess, "run",
+                                  side_effect=subprocess.CalledProcessError(
+                                      1, "mkfs.ext4")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                vdb.create_data_image("vm1", self.image)
+        self.assertFalse(Path(tmp).exists())
+
+    def test_cleanup_failure_is_ignored(self):
+        tmp = self.image + ".tmp"
+        Path(tmp).write_text("stale")
+        with mock.patch.object(vdb.os, "statvfs",
+                               return_value=self._statvfs(10**12)), \
+                mock.patch.object(vdb.subprocess, "run",
+                                  side_effect=OSError("boom")), \
+                mock.patch.object(vdb.os, "unlink",
+                                  side_effect=OSError("nope")):
+            with self.assertRaises(OSError):
+                vdb.create_data_image("vm1", self.image)
+
+
+class NasReachableTests(unittest.TestCase):
+    def test_probe_start_failure(self):
+        with mock.patch.object(vdb.subprocess, "Popen",
+                               side_effect=OSError("gone")), \
+                mock.patch("builtins.print"):
+            self.assertFalse(vdb._nas_reachable())
+
+    def test_probe_timeout(self):
+        proc = mock.MagicMock()
+        proc.wait.side_effect = subprocess.TimeoutExpired("ls", 10)
+        with mock.patch.object(vdb.subprocess, "Popen", return_value=proc), \
+                mock.patch("builtins.print"):
+            self.assertFalse(vdb._nas_reachable())
+
+    def test_probe_failure_status(self):
+        proc = mock.MagicMock()
+        proc.wait.return_value = 2
+        with mock.patch.object(vdb.subprocess, "Popen", return_value=proc), \
+                mock.patch("builtins.print"):
+            self.assertFalse(vdb._nas_reachable())
+
+    def test_probe_success(self):
+        proc = mock.MagicMock()
+        proc.wait.return_value = 0
+        with mock.patch.object(vdb.subprocess, "Popen", return_value=proc):
+            self.assertTrue(vdb._nas_reachable())
+
+
+class ResizeAndAttachTests(unittest.TestCase):
+    def test_resize_requires_existing_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                vdb.assert_resizable(mock.Mock(), "vm1",
+                                     str(Path(tmp) / "absent.img"))
+
+    def test_container_without_nas_reports_failure(self):
+        incus = mock.Mock()
+        with mock.patch.object(vdb.subprocess, "run",
+                               side_effect=subprocess.CalledProcessError(
+                                   1, "mkdir")), \
+                mock.patch("builtins.print"):
+            self.assertFalse(vdb.ensure_nas_share(
+                "c1", incus, share_enabled=True,
+                instance_info=lambda name: {"type": "container"},
+                instance_running=lambda name: False))
+
+    def test_fresh_vm_creates_image_before_attach(self):
+        incus = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            image = str(Path(tmp) / "vm1.img")
+            with mock.patch.object(vdb, "_nas_reachable", return_value=True), \
+                    mock.patch.object(vdb, "data_image_path",
+                                      return_value=image), \
+                    mock.patch.object(vdb, "data_migration_lock"), \
+                    mock.patch.object(vdb, "_legacy_share_has_data",
+                                      return_value=False), \
+                    mock.patch.object(vdb, "create_data_image") as create, \
+                    mock.patch.object(vdb, "replace_data_device"), \
+                    mock.patch("builtins.print"):
+                self.assertFalse(vdb.ensure_nas_share(
+                    "vm1", incus, share_enabled=True,
+                    instance_info=lambda name: {"type": "virtual-machine"},
+                    instance_running=lambda name: False))
+            create.assert_called_once_with("vm1", image)
 
 
 if __name__ == "__main__":

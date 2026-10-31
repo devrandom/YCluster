@@ -386,15 +386,22 @@ def py_coverage(
     env = dict(os.environ)
     env["COVERAGE_FILE"] = str(data_file)
     files_root = ROOT / "config" / "ansible" / "admin" / "files"
-    # Suites matching run-tests.sh plus the monitoring collector tests.
+    # Suites matching run-tests.sh plus the monitoring collector tests. The
+    # source root is the directory holding the code under test, which is not
+    # always the working directory (the apt collector test lives beside the
+    # other monitoring tests, one level down from the collector).
+    collectors = ROOT / "config" / "ansible" / "monitoring" / "files"
     suites = (
-        (files_root, {}, ["discover"]),
-        (files_root / "ycluster", {"PYTHONPATH": "."}, ["discover"]),
+        (files_root, {}, ".", ["discover"]),
+        (files_root / "ycluster", {"PYTHONPATH": "."}, ".", ["discover"]),
         (
-            ROOT / "config" / "ansible" / "monitoring" / "files",
+            collectors,
             {},
+            ".",
             [
                 "test_crps_collector",
+                "test_hosting_balance_collector",
+                "test_ids_metrics_collector",
                 "test_monitoring_helpers",
                 "test_node_temps_collector",
                 "test_ntfy_webhook",
@@ -402,16 +409,22 @@ def py_coverage(
                 "test_target_and_provision",
             ],
         ),
+        (
+            ROOT / "config" / "ansible" / "monitoring" / "tests",
+            {},
+            str(collectors),
+            ["test_apt_metrics_collector"],
+        ),
     )
-    for i, (cwd, extra_env, targets) in enumerate(suites):
+    for i, (cwd, extra_env, source, targets) in enumerate(suites):
         e = dict(env)
         e.update(extra_env)
+        cmd = ["coverage", "run"] + (["--append"] if i else []) + [
+            "--source", source, "-m", "unittest"]
         if targets == ["discover"]:
-            cmd = ["coverage", "run"] + (["--append"] if i else []) + [
-                "--source", ".", "-m", "unittest", "discover", "-s", "tests"]
+            cmd += ["discover", "-s", "tests"]
         else:
-            cmd = ["coverage", "run", "--append", "--source", ".",
-                   "-m", "unittest", *targets]
+            cmd += targets
         run(cmd, cwd=cwd, env=e)
     run(["coverage", "json", "-o", str(json_path)], env=env)
     data = load_json_bytes(json_path)

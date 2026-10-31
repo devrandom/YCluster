@@ -281,5 +281,104 @@ class PasswordTests(unittest.TestCase):
                 provision.get_password()
 
 
+class ConnectTests(unittest.TestCase):
+    def test_connect_uses_peer_auth(self):
+        import sys
+        import types
+        fake = types.ModuleType('psycopg2')
+        fake.connect = mock.Mock(return_value='conn')
+        with mock.patch.dict(sys.modules, {'psycopg2': fake}):
+            self.assertEqual(provision.connect('ycluster'), 'conn')
+        fake.connect.assert_called_once_with(dbname='ycluster',
+                                             user='postgres')
+
+
+class MigrationDiscoveryTests(unittest.TestCase):
+    def test_missing_directory_is_an_error(self):
+        with self.assertRaisesRegex(RuntimeError, 'not found'):
+            provision.discover_migrations('/nonexistent/migrations')
+
+    def test_ignores_non_sql_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'README.md').write_text('notes')
+            Path(directory, '0001_first.sql').write_text('SELECT 1;')
+            migrations = provision.discover_migrations(directory)
+        self.assertEqual([m['name'] for m in migrations], ['0001_first.sql'])
+
+
+class ReleaseLockTests(unittest.TestCase):
+    def test_unlock_failure_is_logged_not_raised(self):
+        conn = mock.MagicMock()
+
+        def execute(sql, params=None):
+            if "pg_advisory_unlock" in sql:
+                raise RuntimeError("gone")
+
+        cursor = conn.cursor.return_value.__enter__.return_value
+        cursor.execute.side_effect = execute
+        conn.__enter__.return_value = conn
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, '0001_first.sql').write_text('SELECT 1;')
+            with mock.patch.object(provision.LOG, 'exception') as log:
+                provision.apply_migrations(conn, directory)
+        log.assert_called_once()
+
+
+class _Cursor:
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Conn:
+    autocommit = False
+
+    def __init__(self):
+        self.closed = False
+
+    def cursor(self):
+        return _Cursor()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        self.closed = True
+
+
+class EntrypointTests(unittest.TestCase):
+    def test_module_entrypoint_provisions(self):
+        import runpy
+        import sys
+        import types
+        fake = types.ModuleType('psycopg2')
+        fake.connect = mock.Mock(side_effect=lambda *a, **k: _Conn())
+        with tempfile.TemporaryDirectory() as migrations, \
+                mock.patch.dict(sys.modules, {'psycopg2': fake}), \
+                mock.patch.dict('os.environ', {
+                    'ADMIN_DB_PASSWORD': 'secret',
+                    'ADMIN_MIGRATIONS_DIR': migrations,
+                }), \
+                mock.patch('builtins.print'):
+            Path(migrations, '0001_first.sql').write_text('SELECT 1;')
+            runpy.run_path(str(_ROOT / 'provision-admin.py'),
+                           run_name='__main__')
+        self.assertEqual(fake.connect.call_count, 2)
+
+
 if __name__ == '__main__':
     unittest.main()

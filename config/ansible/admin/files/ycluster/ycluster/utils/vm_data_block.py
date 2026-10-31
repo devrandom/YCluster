@@ -36,7 +36,6 @@ VM_DATA_DEVICE = "data"
 VM_DATA_GUEST_PATH = "/data"
 # The image's ext4 label is the stable handle for guest-side operations:
 # device indexes (/dev/vdb) shift when other disks are attached.
-VM_DATA_RESIZE_DEVICE = "/dev/disk/by-label/vmdata"
 VM_DATA_FSTAB_LINE = "LABEL=vmdata  /data  ext4  defaults  0  2"
 
 LOCK_DIR = "/run/lock"

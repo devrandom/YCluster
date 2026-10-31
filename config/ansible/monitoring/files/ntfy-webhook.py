@@ -434,116 +434,136 @@ def webhook():
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No JSON data received'}), 400
-        
+
         logger.info(f"Received webhook with data: {json.dumps(data, indent=2)}")
 
         alerts = data.get('alerts', [])
-        sent = 0
-        deduped = 0
-        throttled = 0
-        rate_limited = 0
-        cap_reached = 0
-        errors = 0
-
+        counts = _new_counts()
         for alert in alerts:
-            key = alert_key(alert)
-            decision = _check_admission(key)
-            if decision == 'dedup':
-                deduped += 1
-                logger.info(f"Deduplicated already-notified alert: {key}")
-                continue
-            if decision == 'throttle':
-                throttled += 1
-                logger.warning(f"Throttled notification for alert: {key}")
-                continue
-            if decision == 'send' and not _shared_claim(key):
-                deduped += 1
-                logger.info(f"Deduplicated cross-host notification: {key}")
-                continue
+            _handle_alert(alert, counts)
+        return _webhook_response(len(alerts), counts)
 
-            labels = alert.get("labels", {})
-            severity = labels.get("severity", "info")
-            if (alert.get("status", "firing") == "firing"
-                    and labels.get("alertname") == "IDSAlert"
-                    and labels.get("rule_id") != "container-api"
-                    and not _ids_budget_claim(severity)):
-                throttled += 1
-                cap_key = _ids_cap_alert_claim(severity)
-                if cap_key:
-                    try:
-                        result = send_ids_cap_alert(severity, alert)
-                    except Exception as e:
-                        logger.error(f"Error sending IDS cap notice: {e}")
-                        result = False
-                    if result is True:
-                        sent += 1
-                        cap_reached += 1
-                    elif result == 'rate_limited':
-                        rate_limited += 1
-                        cap_reached += 1
-                    else:
-                        errors += 1
-                        _ids_cap_alert_release(cap_key)
-                    if result is True:
-                        logger.warning(f"IDS {severity} budget exhausted; sent cap notice: {key}")
-                    else:
-                        logger.warning(f"IDS {severity} budget exhausted; cap notice not delivered: {key}")
-                else:
-                    logger.warning(f"IDS {severity} budget exhausted; throttled: {key}")
-                continue
-
-            if not _record_admission(key):
-                throttled += 1
-                logger.warning(f"Throttled notification for alert: {key}")
-                continue
-
-            try:
-                formatted = format_alert_message(alert)
-                result = send_to_ntfy(
-                    formatted['title'],
-                    formatted['message'],
-                    formatted['priority'],
-                    formatted['tags']
-                )
-                if result is True:
-                    sent += 1
-                elif result == 'rate_limited':
-                    rate_limited += 1
-                else:
-                    errors += 1
-            except Exception as e:
-                logger.error(f"Error processing alert: {e}")
-                errors += 1
-
-        # Acknowledge deduped/throttled/rate-limited alerts so Alertmanager does
-        # not retry them and re-stoke the ntfy.sh rate limit. Only a genuine
-        # send failure with nothing delivered keeps the 503 -> retry behaviour.
-        if errors and sent == 0:
-            return jsonify({
-                'error': 'Failed to send notifications',
-                'processed': len(alerts),
-                'sent': 0,
-                'deduped': deduped,
-                'throttled': throttled,
-                'rate_limited': rate_limited,
-                'cap_reached': cap_reached,
-                'errors': errors
-            }), 503  # Service Unavailable - triggers Alertmanager retry
-
-        return jsonify({
-            'status': 'success',
-            'processed': len(alerts),
-            'sent': sent,
-            'deduped': deduped,
-            'throttled': throttled,
-            'rate_limited': rate_limited,
-            'cap_reached': cap_reached,
-            'errors': errors
-        })
-        
     except Exception as e:
         logger.error(f"Error handling webhook: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+COUNT_KEYS = ('sent', 'deduped', 'throttled', 'rate_limited', 'cap_reached', 'errors')
+
+
+def _new_counts():
+    return dict.fromkeys(COUNT_KEYS, 0)
+
+
+def _handle_alert(alert, counts):
+    """Admit, throttle or send one alert, updating the summary counters."""
+    key = alert_key(alert)
+    decision = _check_admission(key)
+    if decision == 'dedup':
+        counts['deduped'] += 1
+        logger.info(f"Deduplicated already-notified alert: {key}")
+        return
+    if decision == 'throttle':
+        counts['throttled'] += 1
+        logger.warning(f"Throttled notification for alert: {key}")
+        return
+    if decision == 'send' and not _shared_claim(key):
+        counts['deduped'] += 1
+        logger.info(f"Deduplicated cross-host notification: {key}")
+        return
+    if _ids_budget_exhausted(alert):
+        _handle_ids_cap(alert, key, counts)
+        return
+    if not _record_admission(key):
+        counts['throttled'] += 1
+        logger.warning(f"Throttled notification for alert: {key}")
+        return
+    _send_alert(alert, counts)
+
+
+def _ids_budget_exhausted(alert):
+    """Report whether an IDS alert is over the cluster-wide budget."""
+    labels = alert.get("labels", {})
+    if alert.get("status", "firing") != "firing":
+        return False
+    if labels.get("alertname") != "IDSAlert":
+        return False
+    if labels.get("rule_id") == "container-api":
+        return False
+    return not _ids_budget_claim(labels.get("severity", "info"))
+
+
+def _handle_ids_cap(alert, key, counts):
+    """Throttle one over-budget IDS alert, sending the cap notice at most once."""
+    severity = alert.get("labels", {}).get("severity", "info")
+    counts['throttled'] += 1
+    cap_key = _ids_cap_alert_claim(severity)
+    if not cap_key:
+        logger.warning(f"IDS {severity} budget exhausted; throttled: {key}")
+        return
+    try:
+        result = send_ids_cap_alert(severity, alert)
+    except Exception as e:
+        logger.error(f"Error sending IDS cap notice: {e}")
+        result = False
+    if result is True:
+        counts['sent'] += 1
+        counts['cap_reached'] += 1
+        logger.warning(f"IDS {severity} budget exhausted; sent cap notice: {key}")
+        return
+    if result == 'rate_limited':
+        counts['rate_limited'] += 1
+        counts['cap_reached'] += 1
+    else:
+        counts['errors'] += 1
+        _ids_cap_alert_release(cap_key)
+    logger.warning(f"IDS {severity} budget exhausted; cap notice not delivered: {key}")
+
+
+def _send_alert(alert, counts):
+    try:
+        formatted = format_alert_message(alert)
+        result = send_to_ntfy(
+            formatted['title'],
+            formatted['message'],
+            formatted['priority'],
+            formatted['tags']
+        )
+        if result is True:
+            counts['sent'] += 1
+        elif result == 'rate_limited':
+            counts['rate_limited'] += 1
+        else:
+            counts['errors'] += 1
+    except Exception as e:
+        logger.error(f"Error processing alert: {e}")
+        counts['errors'] += 1
+
+
+def _webhook_response(processed, counts):
+    """Acknowledge everything except a total delivery failure.
+
+    Deduped/throttled/rate-limited alerts are acknowledged so Alertmanager
+    does not retry them and re-stoke the ntfy.sh rate limit. Only a genuine
+    send failure with nothing delivered keeps the 503 -> retry behaviour.
+    """
+    if counts['errors'] and counts['sent'] == 0:
+        return jsonify({
+            'error': 'Failed to send notifications',
+            'processed': processed,
+            'sent': 0,
+            'deduped': counts['deduped'],
+            'throttled': counts['throttled'],
+            'rate_limited': counts['rate_limited'],
+            'cap_reached': counts['cap_reached'],
+            'errors': counts['errors']
+        }), 503  # Service Unavailable - triggers Alertmanager retry
+
+    return jsonify({
+        'status': 'success',
+        'processed': processed,
+        **counts
+    })
 
 @app.route('/health', methods=['GET'])
 def health():

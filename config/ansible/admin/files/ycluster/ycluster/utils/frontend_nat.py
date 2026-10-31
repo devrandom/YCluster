@@ -466,24 +466,33 @@ def _reconcile_device(vm, ip, live, attached):
     return False
 
 
+def _recorded_transit_ip(vm, records, live):
+    """Return the IP recorded for `vm`, or `(None, False)` when unreadable.
+
+    Records disagree after a partial migration or write. The live NIC is
+    ground truth for what the guest actually holds, so converge every record
+    onto it rather than guessing and stranding the VM.
+    """
+    existing = {r.get('transit_ip') for r in records} - {''}
+    if len(existing) <= 1:
+        return (existing.pop() if existing else None), True
+    if not live:
+        print(f'Warning: {vm} has conflicting transit IPs and no live '
+              'device; skipping', file=sys.stderr)
+        return None, False
+    print(f'Warning: {vm} has conflicting transit IPs; resolving to '
+          f'the live device {live}', file=sys.stderr)
+    return live, True
+
+
 def _converge_vm(vm, records, live, transit_subnet):
     """Converge one VM; returns `(ip, device_changed)` or `(None, False)`."""
     details = _instance_details(vm)
     device_changed = False
     attached = False
-    existing = {r.get('transit_ip') for r in records} - {''}
-    if len(existing) > 1:
-        if not live:
-            print(f'Warning: {vm} has conflicting transit IPs and no live '
-                  'device; skipping', file=sys.stderr)
-            return None, False
-        # Records disagree (a partial migration or write). The live NIC is
-        # ground truth for what the guest actually holds, so converge every
-        # record onto it rather than guessing and stranding the VM.
-        print(f'Warning: {vm} has conflicting transit IPs; resolving to '
-              f'the live device {live}', file=sys.stderr)
-        existing = {live}
-    ip = existing.pop() if existing else None
+    ip, ok = _recorded_transit_ip(vm, records, live)
+    if not ok:
+        return None, False
     if ip and _subnet_for(ip) != transit_subnet:
         migrated = _migrate_legacy_ip(vm, records, ip, live, transit_subnet)
         if not migrated:

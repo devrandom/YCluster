@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PKG = os.path.join(_HERE, "..", "ycluster")
@@ -255,6 +256,64 @@ class MigrateTests(ApiKeysTestBase):
             return ak.migrate_owui_keys(hasher=self.hasher)
         finally:
             ak._import_psycopg2 = orig
+
+
+class EdgeCaseTests(ApiKeysTestBase):
+    def test_valid_user_rejects_bad_email(self):
+        with self.assertRaises(ValueError):
+            ak._valid_user("bad email!")
+
+    def test_list_skips_empty_and_nested_key_ids(self):
+        ak.create_key("alice@x", hasher=self.hasher)
+        base = ak.USERS_PREFIX + "alice@x" + ak.KEYS_SUFFIX
+        self.etcd.seed_json(base + "nested/x", {"hash": "h"})
+        keys = ak.list_keys("alice@x")["alice@x"]
+        self.assertEqual(len(keys), 1)
+
+    def test_backfill_skips_missing_and_digested_records(self):
+        base = ak.USERS_PREFIX + "x@y" + ak.KEYS_SUFFIX
+        ak._backfill_digest(base + "missing", "sk-1")
+        path = base + "k"
+        ak._put(path, {"hash": "h", "digest": "d"})
+        ak._backfill_digest(path, "sk-1")
+        self.assertEqual(self.etcd.get_json(path)["digest"], "d")
+
+    def test_backfill_swallows_etcd_errors(self):
+        path = ak.USERS_PREFIX + "x@y" + ak.KEYS_SUFFIX + "k"
+        ak._put(path, {"hash": "h"})
+        with mock.patch.object(type(self.etcd), "put",
+                               side_effect=RuntimeError("read-only")):
+            ak._backfill_digest(path, "sk-1")
+        self.assertNotIn("digest", self.etcd.get_json(path))
+
+    def test_validate_skips_corrupt_hashes_on_both_paths(self):
+        token = "sk-corrupt"
+        base = ak.USERS_PREFIX + "alice@x" + ak.KEYS_SUFFIX
+        self.etcd.seed_json(base + "digest", {
+            "hash": "not-argon2", "digest": ak.token_digest(token)})
+        self.etcd.seed_json(base + "legacy", {"hash": "also-not-argon2"})
+        self.assertIsNone(ak.validate_key(token, hasher=self.hasher))
+
+    def test_has_owner_token_covers_legacy_and_mismatch(self):
+        token = "sk-owner"
+        base = ak.USERS_PREFIX + "alice@x" + ak.KEYS_SUFFIX
+        self.etcd.seed_json(base + "legacy", {"hash": self.hasher.hash(token)})
+        self.assertTrue(ak._has_owner_token("alice@x", token, self.hasher))
+        self.assertFalse(ak._has_owner_token("alice@x", "sk-other",
+                                             self.hasher))
+
+    def test_import_psycopg2_reports_missing_driver(self):
+        real_import = __import__("importlib").import_module
+        with mock.patch("importlib.import_module",
+                        side_effect=ModuleNotFoundError("psycopg2")):
+            with self.assertRaises(RuntimeError):
+                ak._import_psycopg2()
+        self.assertTrue(callable(real_import))
+
+    def test_import_psycopg2_returns_module(self):
+        sentinel = object()
+        with mock.patch("importlib.import_module", return_value=sentinel):
+            self.assertIs(ak._import_psycopg2(), sentinel)
 
 
 if __name__ == "__main__":

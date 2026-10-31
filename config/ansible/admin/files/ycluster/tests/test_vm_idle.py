@@ -470,5 +470,113 @@ class SuppressionTest(unittest.TestCase):
         send.assert_not_called()
 
 
+class BookkeepingEdgeTests(unittest.TestCase):
+    def test_non_numeric_point_is_skipped(self):
+        payload = {"status": "success", "data": {"result": [
+            {"metric": {"vm": "vm1"},
+             "values": [[100, "not-a-number"], [160, "1"]]},
+        ]}}
+        response = mock.Mock()
+        response.json.return_value = payload
+        with mock.patch.object(vm_idle.requests, "get",
+                               return_value=response):
+            series = vm_idle.fetch_gpu_series(now=NOW, url="http://prom")
+        self.assertEqual(len(series["vm1"]), 1)
+
+    def test_unparseable_alert_timestamp_is_due(self):
+        with mock.patch.object(vm_idle.vm, "_get_json",
+                               return_value={"alerted_at": "garbage"}):
+            self.assertTrue(vm_idle._alert_due("vm1", NOW))
+
+    def test_suppression_list_must_be_a_list(self):
+        client = mock.Mock()
+        client.get.return_value = (json.dumps({"owner": True}).encode(), None)
+        with mock.patch.object(vm_idle, "get_etcd_client",
+                               return_value=client):
+            self.assertEqual(vm_idle.suppressed_owners(), set())
+
+    def test_suppression_requires_owner(self):
+        with mock.patch.object(vm_idle, "suppressed_owners",
+                               return_value=set()):
+            with self.assertRaises(ValueError):
+                vm_idle.set_suppressed("  ", True)
+
+    def test_zulip_settings_requires_all_keys(self):
+        client = mock.Mock()
+        client.get.side_effect = lambda key: (
+            b"bot@example.test" if key == vm_idle.ZULIP_BOT_EMAIL_KEY
+            else (b"key" if key == vm_idle.ZULIP_BOT_API_KEY else None), None)
+        with mock.patch.object(vm_idle, "get_etcd_client",
+                               return_value=client):
+            self.assertIsNone(vm_idle._zulip_settings())
+
+    def test_zulip_settings_returns_credentials(self):
+        client = mock.Mock()
+        client.get.return_value = (b"value", None)
+        with mock.patch.object(vm_idle, "get_etcd_client",
+                               return_value=client):
+            self.assertEqual(vm_idle._zulip_settings(),
+                             ("value", "value", "value"))
+
+    def test_resolve_recipient_without_owner(self):
+        self.assertIsNone(vm_idle.resolve_recipient(None))
+
+    def test_resolve_recipient_without_password(self):
+        client = mock.Mock()
+        client.get.return_value = (None, None)
+        with mock.patch.object(vm_idle, "get_etcd_client",
+                               return_value=client):
+            self.assertEqual(vm_idle.resolve_recipient("a@example.test"),
+                             "a@example.test")
+
+    def test_resolve_recipient_maps_realm_address(self):
+        import sys
+        import types
+        client = mock.Mock()
+        client.get.return_value = (b"pw", None)
+        cursor = mock.MagicMock()
+        cursor.__enter__.return_value.fetchone.return_value = ("user7@realm",)
+        conn = mock.MagicMock()
+        conn.cursor.return_value = cursor
+        fake = types.ModuleType("psycopg2")
+        fake.connect = mock.Mock(return_value=conn)
+        with mock.patch.object(vm_idle, "get_etcd_client",
+                               return_value=client), \
+                mock.patch.dict(sys.modules, {"psycopg2": fake}):
+            self.assertEqual(vm_idle.resolve_recipient("a@example.test"),
+                             "user7@realm")
+        conn.close.assert_called_once()
+
+    def test_resolve_recipient_falls_back_on_error(self):
+        import sys
+        import types
+        client = mock.Mock()
+        client.get.return_value = (b"pw", None)
+        fake = types.ModuleType("psycopg2")
+        fake.connect = mock.Mock(side_effect=RuntimeError("down"))
+        with mock.patch.object(vm_idle, "get_etcd_client",
+                               return_value=client), \
+                mock.patch.dict(sys.modules, {"psycopg2": fake}), \
+                mock.patch("builtins.print"):
+            self.assertEqual(vm_idle.resolve_recipient("a@example.test"),
+                             "a@example.test")
+
+    def test_stream_retry_network_error_is_failed(self):
+        response = mock.Mock()
+        response.ok = False
+        with mock.patch.object(vm_idle, "resolve_recipient",
+                               return_value="user7@realm.test"), \
+                mock.patch.object(vm_idle.requests, "post",
+                                  side_effect=[response,
+                                               vm_idle.requests.RequestException("down")]):
+            outcome = vm_idle.send_zulip(
+                ("bot@realm.test", "key", "realm.test"),
+                {"name": "vm1", "owner": "a@example.test",
+                 "status": "idle", "samples": 1440,
+                 "high_samples": 0, "low_samples": 0},
+                stream="ops")
+        self.assertEqual(outcome, "failed")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -49,6 +49,19 @@ vm_schedule_stop_now
 gpu_block_upsert
 gpu_block_remove
 users_page
+projects_page
+projects_data
+project_create
+project_update
+project_audit
+project_member_add
+project_member_remove
+project_member_default
+project_quota_upsert
+project_quota_delete
+project_quotas_import
+prometheus_targets_sglang
+prometheus_targets_vllm
 users_action
 settings_page
 settings_data
@@ -116,6 +129,7 @@ healthz
 # Used only from the test suite (tests are excluded from the scan).
 validate_key
 reset_store
+_admit
 
 # Copied over the open-webui tree at build time; loaded by its retrieval
 # plugin registry (build-open-webui.yml).
