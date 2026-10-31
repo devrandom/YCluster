@@ -19,6 +19,8 @@ func main() {
 		cfg.events, "comma-separated Tetragon event types to forward")
 	flag.StringVar(&cfg.execBinaries, "exec-binaries",
 		cfg.execBinaries, "comma-separated binary basenames forwarded for process_exec events")
+	flag.BoolVar(&cfg.execRootUserPath, "exec-root-user-path",
+		cfg.execRootUserPath, "alert when root executes a binary from /home or /var/tmp on the host layer")
 	flag.StringVar(&cfg.httpListen, "http-listen",
 		cfg.httpListen, "optional localhost HTTP receiver for CrowdSec notifications")
 	flag.StringVar(&cfg.metricsListen, "metrics-listen",

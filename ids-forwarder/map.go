@@ -71,6 +71,22 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	if !configuredEvent(cfg.events, evType) {
 		return alert{}, meta, false, ""
 	}
+	// Root executing a payload staged in a user-writable tree crosses the
+	// privilege boundary without needing a package-manager shell. Containers
+	// are excluded: a root process inside a tenant container sees its own
+	// filesystem, not the host's.
+	if evType == "process_exec" && cfg.execRootUserPath && body.Process.UID == 0 {
+		if layer, _ := tetragonEventLayer(body); layer == "host" && rootExecUserPath(body.Process.Binary) {
+			a := newAlert(cfg, sourceTetragon, "warning", layer, "exec-root-user-path",
+				"process_exec: binary="+body.Process.Binary+" root-exec")
+			a.Labels["binary"] = processBinaryName(body.Process.Binary)
+			a.dedupIdentity = identityHash("exec-root-user-path|" + body.Process.Binary)
+			a.StartsAt = meta.time.Format(time.RFC3339Nano)
+			a.eventTime = meta.time
+			a.eventHash = meta.hash
+			return a, meta, true, ""
+		}
+	}
 	// process_exec fires for every exec on the node; forward only the
 	// binaries that matter for detection (shells, privilege tools,
 	// package managers, downloaders).

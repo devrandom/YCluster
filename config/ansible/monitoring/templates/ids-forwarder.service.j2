@@ -10,6 +10,7 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -tetragon-log {{ ids_forwarder_tetragon_log }} \
     -events {{ ids_forwarder_events }} \
     -exec-binaries {{ ids_forwarder_exec_binaries }} \
+    -exec-root-user-path {{ ids_forwarder_exec_root_user_path }} \
     -metrics-listen {{ ids_forwarder_metrics_listen }} \
     -cursor-file {{ ids_forwarder_cursor_file }} \
     -spool-file {{ ids_forwarder_spool_file }} \

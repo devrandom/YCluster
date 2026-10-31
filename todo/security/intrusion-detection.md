@@ -169,6 +169,15 @@ must not become a second, longer-lived access log.
     forwarder's normal Alertmanager spool. The hand-written Go rules still see
     only the allowlist; decide whether to widen it before retiring the
     duplicate coverage.
+  - Done: the Sigma rule set now includes SigmaHQ's execution-from-`/tmp`
+    and execution-from-`/dev/shm` rules. A replay over four nodes' Tetragon
+    logs (~1.1M execs) showed no routine hits, so the rules add no volume.
+    A file-ownership rule was rejected: the forwarder cannot read home
+    directories and legitimate operator virtualenvs make it noisy. Added the
+    local `exec-root-user-path` rule instead (root executing from `/home` or
+    `/var/tmp`, host layer only), also zero hits in the replay. A non-root
+    operator running their own binary stays indistinguishable from an
+    attacker by exec metadata alone.
   - Remaining: two-week Sigma/RSigma pilot on the installed service, using the
     curated rules under `config/ansible/monitoring/files/rsigma/rules/` and
     the replay results in "The behavioural-rule gap"; keep the hand-written

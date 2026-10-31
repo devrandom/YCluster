@@ -314,6 +314,26 @@ Two pipeline gaps are independent of this decision and worth fixing first:
   root cron job looks like a root login), and persists on daemons started from
   a shell. It is useful as a label on stored detections, not as a filter.
 
+First increment against the exec blind spot: the Sigma path now carries
+SigmaHQ's `proc_creation_lnx_susp_execution_tmp_folder` and
+`proc_creation_lnx_susp_exec_from_dev_shm`. That path bypasses `execBinaries`,
+so binary name and language no longer matter once a payload runs from tmpfs.
+A replay of four nodes' Tetragon logs (about 1.1M execs) found no hits for
+either path, so the rules add no routine volume.
+
+A broader "unusual path" rule did not survive the same replay. The `/home`
+events were a mix of deleted virtualenv interpreters from an operator
+workload and build toolchains, and the unprivileged forwarder cannot inspect
+home directories (mode 0750/0700) to judge file ownership, so a provenance
+rule would have fired on legitimate work. The one clean predicate was root
+executing a payload from `/home` or `/var/tmp` on the host layer: zero
+routine hits across the replay, and container processes are excluded by
+layer. It is implemented as `exec-root-user-path`, an explicit local
+exception to the upstream-naming rule because SigmaHQ has no counterpart.
+A non-root operator running their own binary remains indistinguishable from
+an attacker by exec metadata alone; ad-hoc workloads belong in a container
+or VM, where the layer-aware egress and lateral rules apply.
+
 ### Off-the-shelf rule-layer options (2026-10-28)
 
 No project is a drop-in Falco rule layer for Tetragon events. The credible

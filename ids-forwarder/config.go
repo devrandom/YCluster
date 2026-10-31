@@ -12,33 +12,34 @@ const (
 )
 
 type config struct {
-	alertmanagerURL string
-	tetragonLog     string
-	events          string
-	execBinaries    string
-	httpListen      string
-	metricsListen   string
-	hostname        string
-	queueMax        int
-	dedupWindow     time.Duration
-	rateLimit       int
-	rateWindow      time.Duration
-	alertTTL        time.Duration
-	maxEventAge     time.Duration
-	startupGrace    time.Duration
-	cursorFile      string
-	spoolFile       string
-	spoolMaxBytes   int64
-	detectionsFile  string
-	detectionsBytes int64
-	detectionsKeep  int
-	destKeyFile     string
-	sigmaSocket     string
-	sigmaDetections string
-	sigmaCursorFile string
-	postTimeout     time.Duration
-	pollInterval    time.Duration
-	logf            func(format string, args ...any)
+	alertmanagerURL  string
+	tetragonLog      string
+	events           string
+	execBinaries     string
+	execRootUserPath bool
+	httpListen       string
+	metricsListen    string
+	hostname         string
+	queueMax         int
+	dedupWindow      time.Duration
+	rateLimit        int
+	rateWindow       time.Duration
+	alertTTL         time.Duration
+	maxEventAge      time.Duration
+	startupGrace     time.Duration
+	cursorFile       string
+	spoolFile        string
+	spoolMaxBytes    int64
+	detectionsFile   string
+	detectionsBytes  int64
+	detectionsKeep   int
+	destKeyFile      string
+	sigmaSocket      string
+	sigmaDetections  string
+	sigmaCursorFile  string
+	postTimeout      time.Duration
+	pollInterval     time.Duration
+	logf             func(format string, args ...any)
 }
 
 func defaultConfig() config {

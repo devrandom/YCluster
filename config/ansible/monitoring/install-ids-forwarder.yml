@@ -21,6 +21,10 @@
     # incus is the API client: recording it names the subcommand and target
     # of every container/VM file or exec operation (rule id container-api).
     ids_forwarder_exec_binaries: "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget,incus"
+    # Local rule with no SigmaHQ counterpart: root executing a payload from
+    # /home or /var/tmp on the host layer. A replay over four nodes' event
+    # logs produced no routine hits. Containers are excluded by layer.
+    ids_forwarder_exec_root_user_path: true
     # Loopback receiver for CrowdSec notification-http POSTs.
     ids_forwarder_http_listen: "127.0.0.1:9201"
     ids_forwarder_metrics_listen: "127.0.0.1:2113"
