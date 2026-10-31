@@ -654,6 +654,41 @@
           "indexByName": {"target": 0, "status": 1, "Value": 2}
         }}
       ]
+    },
+    {
+      "title": "Interactive P50 — synthetic small probe",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus-local"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 49},
+      "id": 25,
+      "description": "P50 of 10 sequential synthetic requests with a small prompt (~64 target tokens; actual varies by tokenizer) and 32 generated tokens; one warmup is excluded. Each request uses a unique prefix, temperature 0, thinking off, and ignore_eos. This isolates interactive latency from long user requests, though concurrent engine load still affects queueing.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never"}
+        },
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": " E2E$"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [5, 5]}}]}
+        ]
+      },
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "min", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "expr": "max by (model, backend) (ycluster_inference_interactive_ttft_seconds)",
+          "legendFormat": "{{model}} @ {{backend}} TTFT",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        },
+        {
+          "expr": "max by (model, backend) (ycluster_inference_interactive_e2e_seconds)",
+          "legendFormat": "{{model}} @ {{backend}} E2E",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "prometheus-local"}
+        }
+      ]
     }
   ],
   "refresh": "15s",

@@ -214,3 +214,26 @@ backend state healthy *and* does it serve this model?", treating a nil
 4. Confirm `InferenceBackendDown` fires for a deliberately unplaced
    backend in a dev/test environment, and does **not** fire across a
    normal re-placement.
+
+## Interactive latency probe
+
+The inference dashboard has a synthetic interactive-latency panel fed by
+`monitoring/install-prometheus.yml`. It is separate from routing health: it
+answers "how long does a small request take right now?", not "can this backend
+serve the model?".
+
+- The collector runs on the storage leader only. Non-leaders remove their
+  textfile so failover leaves one live sample stream.
+- Targets are discovered from Prometheus: every active vLLM/SGLang
+  `(backend, model)` pair with an e2e request-latency histogram.
+- Each target gets one excluded warmup and ten sequential measured requests
+  with a unique prompt targeting ~64 tokens, 32 generated tokens, temperature 0,
+  thinking disabled, and `ignore_eos`.
+- The probe talks directly to the backend rather than through the gateway, so
+  the metric is not diluted by long user-request durations. It still shares
+  the engine with live traffic; queueing and contention remain visible.
+- Output is `inference_interactive.prom` in the node_exporter textfile
+  directory, with P50 TTFT/e2e plus sample, failure, token-count, and
+  success timestamp gauges.
+- The Grafana panel is "Interactive P50 — synthetic small probe" on the
+  Inference dashboard.

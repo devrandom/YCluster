@@ -277,6 +277,60 @@
         mode: '0644'
       notify: reload systemd
 
+    - name: Install inference interactive probe collector
+      copy:
+        src: inference-interactive-probe.py
+        dest: /usr/local/lib/cluster/inference-interactive-probe
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create inference interactive probe systemd service
+      copy:
+        dest: /etc/systemd/system/inference-interactive-probe.service
+        content: |
+          [Unit]
+          Description=Probe interactive inference latency
+          After=network-online.target local-ai-proxy.service prometheus.service
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          User=root
+          EnvironmentFile=-/etc/ycluster/etcd-client.env
+          Environment=PATH=/usr/local/bin:/usr/bin:/bin
+          Environment=INFERENCE_PROBE_PROM_URL=http://127.0.0.1:9090
+          Environment=INFERENCE_PROBE_REQUESTS=10
+          Environment=INFERENCE_PROBE_PROMPT_TOKENS=64
+          Environment=INFERENCE_PROBE_COMPLETION_TOKENS=32
+          ExecStart=/usr/bin/python3 /usr/local/lib/cluster/inference-interactive-probe
+          TimeoutStartSec=600
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths=/var/lib/prometheus/node-exporter
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create inference interactive probe systemd timer
+      copy:
+        dest: /etc/systemd/system/inference-interactive-probe.timer
+        content: |
+          [Unit]
+          Description=Probe interactive inference latency every 5 minutes
+          Requires=inference-interactive-probe.service
+
+          [Timer]
+          OnBootSec=2min
+          OnUnitActiveSec=5min
+          AccuracySec=30s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
     - name: Enable and start Prometheus services
       systemd:
         name: "{{ item }}"
@@ -290,6 +344,12 @@
         - prometheus-alertmanager
         - ntfy-webhook
         - update-blackbox-targets.timer
+        - inference-interactive-probe.timer
+
+    - name: Run an initial inference interactive probe
+      command: /usr/bin/python3 /usr/local/lib/cluster/inference-interactive-probe
+      environment: "{{ etcd_client_env }}"
+      changed_when: false
 
     - name: Create Grafana provisioning directories
       file:
