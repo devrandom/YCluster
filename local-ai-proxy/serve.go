@@ -69,6 +69,13 @@ func wireServeHandler(cfg Config, logger *slog.Logger, router Router, source Sou
 
 	h := NewHandler(router)
 	configureHandler(h, cfg, router, source, health, metrics, loadCounter)
+	if limit := h.Concurrency.Limit(); limit > 0 {
+		logger.Info("per-user concurrency limit enabled",
+			"max_concurrent_per_user_model", limit,
+			"max_queued_per_user_model", h.Concurrency.MaxQueued())
+	} else {
+		logger.Info("per-user concurrency limit disabled")
+	}
 
 	chained := LoggingMiddleware(logger, h)
 	return TrustedHeadersMiddleware(cfg.TrustedProxies, chained)

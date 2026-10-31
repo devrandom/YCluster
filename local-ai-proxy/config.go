@@ -66,6 +66,20 @@ type Config struct {
 	// See acl.go for semantics.
 	ACL *ACLConfig `yaml:"acl,omitempty"`
 
+	// MaxQueuedPerUserModel bounds how many requests may wait for a
+	// (X-User-Id, model) slot. Unset uses
+	// DefaultMaxQueuedPerUserModel (4); an explicit 0 disables queueing
+	// so over-cap requests are rejected immediately.
+	MaxQueuedPerUserModel *int `yaml:"max_queued_per_user_model,omitempty"`
+
+	// MaxConcurrentPerUserModel caps in-flight requests per
+	// (X-User-Id, model) pair. Unset uses
+	// DefaultMaxConcurrentPerUserModel (4); an explicit 0 disables the
+	// cap. Requests without a trusted X-User-Id are never limited.
+	// Excess requests wait in MaxQueuedPerUserModel slots; a full queue
+	// returns HTTP 429 (rate_limit_error).
+	MaxConcurrentPerUserModel *int `yaml:"max_concurrent_per_user_model,omitempty"`
+
 	// MaxRoutingBodyBytes caps the size of a JSON request body the
 	// router will buffer to find the `model` field. Defaults to
 	// DefaultMaxRoutingBodyBytes (32 MiB). Sized for multimodal
@@ -97,6 +111,31 @@ type EtcdConfig struct {
 	// URL of a backend the operator has marked as known-down. Defaults
 	// to DefaultDisabledPrefix. Set empty to disable the feature.
 	DisabledPrefix string `yaml:"disabled_prefix,omitempty"`
+}
+
+// UserModelConcurrencyLimit resolves the effective per-(user, model)
+// in-flight cap: DefaultMaxConcurrentPerUserModel when unset, 0 when
+// explicitly disabled.
+func (c Config) UserModelConcurrencyLimit() int {
+	if c.MaxConcurrentPerUserModel == nil {
+		return DefaultMaxConcurrentPerUserModel
+	}
+	if *c.MaxConcurrentPerUserModel < 0 {
+		return 0
+	}
+	return *c.MaxConcurrentPerUserModel
+}
+
+// UserModelQueueDepth resolves the per-(user, model) wait-queue depth:
+// DefaultMaxQueuedPerUserModel when unset, 0 when explicitly disabled.
+func (c Config) UserModelQueueDepth() int {
+	if c.MaxQueuedPerUserModel == nil {
+		return DefaultMaxQueuedPerUserModel
+	}
+	if *c.MaxQueuedPerUserModel < 0 {
+		return 0
+	}
+	return *c.MaxQueuedPerUserModel
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -170,6 +209,12 @@ func (c Config) Validate() error {
 	}
 	if err := c.ACL.Validate(); err != nil {
 		return err
+	}
+	if c.MaxConcurrentPerUserModel != nil && *c.MaxConcurrentPerUserModel < 0 {
+		return fmt.Errorf("max_concurrent_per_user_model must be >= 0 (0 disables the cap)")
+	}
+	if c.MaxQueuedPerUserModel != nil && *c.MaxQueuedPerUserModel < 0 {
+		return fmt.Errorf("max_queued_per_user_model must be >= 0 (0 disables queueing)")
 	}
 	return nil
 }

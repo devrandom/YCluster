@@ -12,3 +12,9 @@ backend:
   url: "{{ backend_url }}"
 {% endif %}
 
+# Per-user, per-model in-flight cap and wait-queue depth. 0 disables
+# either. A full queue gets 429 rate_limit_error (code
+# concurrency_limit_exceeded).
+max_concurrent_per_user_model: {{ proxy_max_concurrent_per_user_model | default(4) | int }}
+max_queued_per_user_model: {{ proxy_max_queued_per_user_model | default(4) | int }}
+

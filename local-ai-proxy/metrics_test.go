@@ -42,3 +42,25 @@ func TestObserveAttemptTransportError(t *testing.T) {
 	// status 0 == transport error; must not panic and must count requests.
 	m.ObserveAttempt("m1", "http://b1", 0, false, 0.1)
 }
+
+func TestUserConcurrencyMetricsExposed(t *testing.T) {
+	m := NewMetrics()
+	m.QueueInc("m1")
+	m.QueueInc("m1")
+	m.QueueDec("m1")
+	m.ObserveUserQueueWait("m1", 2.5)
+	m.ObserveUserConcurrencyReject("m1")
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`local_ai_proxy_user_concurrency_queued{model="m1"} 1`,
+		`local_ai_proxy_user_concurrency_rejected_total{model="m1"} 1`,
+		`local_ai_proxy_user_concurrency_wait_seconds_count{model="m1"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics body missing %q", want)
+		}
+	}
+}

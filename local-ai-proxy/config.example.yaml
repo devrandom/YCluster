@@ -38,6 +38,19 @@ backend:
 # or `etcd`.
 # health_check_interval: 30s
 
+# Max in-flight requests per (X-User-Id, model) pair. Defaults to 4
+# when unset; 0 disables the cap. Excess requests wait in that caller's
+# own FIFO queue, so a single client can't occupy every batch slot on a
+# shared backend. Requests without a trusted X-User-Id are not limited.
+# max_concurrent_per_user_model: 4
+
+# Queue depth per (X-User-Id, model) pair. Defaults to 4 when unset;
+# 0 disables queueing. A full queue gets HTTP 429 (rate_limit_error,
+# code concurrency_limit_exceeded). This caps waiting connections and
+# queue state; it does not cap request-body memory, which the router
+# allocates before admission.
+# max_queued_per_user_model: 4
+
 # Max JSON request-body size the router will buffer to find the
 # `model` field (bytes). Defaults to 33554432 (32 MiB) when unset.
 # Sized for multimodal chat-completion requests with base64-encoded

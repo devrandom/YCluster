@@ -306,3 +306,104 @@ backend:
 		t.Errorf("MetricsListen = %q; want :4010", cfg.MetricsListen)
 	}
 }
+
+// TestUserModelConcurrencyLimitDefault confirms the per-user, per-model
+// cap defaults to 4 when unset and that an explicit 0 disables it.
+func TestUserModelConcurrencyLimitDefault(t *testing.T) {
+	var cfg Config
+	if got := cfg.UserModelConcurrencyLimit(); got != 4 {
+		t.Errorf("unset limit = %d; want %d", got, DefaultMaxConcurrentPerUserModel)
+	}
+
+	zero := 0
+	cfg.MaxConcurrentPerUserModel = &zero
+	if got := cfg.UserModelConcurrencyLimit(); got != 0 {
+		t.Errorf("explicit zero = %d; want 0 (disabled)", got)
+	}
+
+	seven := 7
+	cfg.MaxConcurrentPerUserModel = &seven
+	if got := cfg.UserModelConcurrencyLimit(); got != 7 {
+		t.Errorf("explicit limit = %d; want 7", got)
+	}
+}
+
+func TestValidateRejectsNegativeUserConcurrencyLimit(t *testing.T) {
+	neg := -1
+	cfg := Config{
+		Listen:                    ":4000",
+		Backend:                   Backend{URL: "http://x"},
+		MaxConcurrentPerUserModel: &neg,
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "max_concurrent_per_user_model") {
+		t.Errorf("want max_concurrent_per_user_model error, got %v", err)
+	}
+}
+
+func TestLoadConfigOrDefaultHonorsUserConcurrencyLimit(t *testing.T) {
+	path := writeTempFile(t, "c.yaml", `
+listen: ":4000"
+backend:
+  url: "http://localhost:8080"
+max_concurrent_per_user_model: 6
+`)
+	cfg, err := LoadConfigOrDefault(path, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.UserModelConcurrencyLimit() != 6 {
+		t.Errorf("limit = %d; want 6", cfg.UserModelConcurrencyLimit())
+	}
+}
+
+// TestUserModelQueueDepthDefault confirms the per-user, per-model wait
+// queue defaults to 4 when unset and that an explicit 0 disables
+// queueing (over-cap requests are rejected immediately).
+func TestUserModelQueueDepthDefault(t *testing.T) {
+	var cfg Config
+	if got := cfg.UserModelQueueDepth(); got != 4 {
+		t.Errorf("unset queue depth = %d; want %d", got, DefaultMaxQueuedPerUserModel)
+	}
+
+	zero := 0
+	cfg.MaxQueuedPerUserModel = &zero
+	if got := cfg.UserModelQueueDepth(); got != 0 {
+		t.Errorf("explicit zero = %d; want 0 (no queueing)", got)
+	}
+
+	six := 6
+	cfg.MaxQueuedPerUserModel = &six
+	if got := cfg.UserModelQueueDepth(); got != 6 {
+		t.Errorf("explicit queue depth = %d; want 6", got)
+	}
+}
+
+func TestValidateRejectsNegativeUserQueueDepth(t *testing.T) {
+	neg := -1
+	cfg := Config{
+		Listen:                ":4000",
+		Backend:               Backend{URL: "http://x"},
+		MaxQueuedPerUserModel: &neg,
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "max_queued_per_user_model") {
+		t.Errorf("want max_queued_per_user_model error, got %v", err)
+	}
+}
+
+func TestLoadConfigOrDefaultHonorsUserQueueDepth(t *testing.T) {
+	path := writeTempFile(t, "c.yaml", `
+listen: ":4000"
+backend:
+  url: "http://localhost:8080"
+max_queued_per_user_model: 2
+`)
+	cfg, err := LoadConfigOrDefault(path, "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.UserModelQueueDepth() != 2 {
+		t.Errorf("queue depth = %d; want 2", cfg.UserModelQueueDepth())
+	}
+}
