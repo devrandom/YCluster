@@ -45,6 +45,7 @@ func TestExpectedTCPIsSuppressed(t *testing.T) {
 		{"squid egress", "/usr/sbin/squid", "--kid squid-1", "203.0.113.50", 443},
 		{"networkmanager connectivity check", "/usr/sbin/NetworkManager", "--no-daemon", "203.0.113.60", 80},
 		{"vikunja healthcheck", "/app/vikunja/vikunja", "healthcheck", "203.0.113.70", 443},
+		{"vm idle zulip notify", "/usr/local/bin/ycluster", "/usr/local/bin/ycluster vm idle --notify", "203.0.113.71", 443},
 		{"cluster collector to etcd", "/usr/bin/python3", "/usr/local/bin/collect-model-stats", "10.0.0.11", 2381},
 		{"cluster heartbeat ping", "/usr/bin/python3", "/usr/local/lib/cluster/cluster-heartbeat", "203.0.113.80", 443},
 		{"podman port forwarder", "/usr/libexec/podman/rootlessport", "", "10.88.0.4", 9000},

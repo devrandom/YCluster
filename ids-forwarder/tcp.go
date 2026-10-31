@@ -61,167 +61,229 @@ var cephPorts = map[uint16]struct{}{
 	3300: {}, 6789: {}, 6800: {}, 6801: {}, 6802: {}, 6803: {}, 6810: {},
 }
 
+// containerProbeReason covers the few in-container probes that reach a
+// cluster address on purpose. The list stays explicit: a container reaching
+// another node is the lateral-movement signal the IDS exists to show, so a
+// broad "container traffic is fine" rule here would defeat it.
+func containerProbeReason(body *tetragonLog) string {
+	if body == nil || body.FunctionName != "tcp_connect" {
+		return ""
+	}
+	base := strings.TrimSuffix(path.Base(body.Process.Binary), " (deleted)")
+	// Vikunja's image ships a healthcheck subcommand (the container is
+	// distroless) and it checks service.publicurl, which resolves to the
+	// storage VIP. Every probe is therefore a container -> VIP connect.
+	if base == "vikunja" && strings.Contains(body.Process.Arguments, "healthcheck") {
+		return "expected_tcp"
+	}
+	return ""
+}
+
+// tcpConn is the part of a tcp_connect event the suppression rules need.
+type tcpConn struct {
+	binary string
+	base   string
+	args   string
+	addr   netip.Addr
+	port   uint16
+}
+
+// newTCPConn extracts the destination and process identity, or reports that
+// the event is not a connect we can classify.
+func newTCPConn(body *tetragonLog) (tcpConn, bool) {
+	if body == nil || body.FunctionName != "tcp_connect" {
+		return tcpConn{}, false
+	}
+	addr, port, ok := tcpDestination(body.Args)
+	if !ok || port == 0 {
+		return tcpConn{}, false
+	}
+	binary := body.Process.Binary
+	return tcpConn{
+		binary: binary,
+		// Tetragon keeps the " (deleted)" suffix after an in-place binary
+		// update; it is not part of the process identity.
+		base: strings.TrimSuffix(path.Base(binary), " (deleted)"),
+		args: body.Process.Arguments,
+		addr: addr,
+		port: port,
+	}, true
+}
+
 // expectedTCPReason suppresses a known service connecting to its normal
 // service port on the private cluster network. The same binary talking to an
 // unexpected port, or to an external address, still produces an alert.
 func expectedTCPReason(body *tetragonLog) string {
-	if body == nil || body.FunctionName != "tcp_connect" {
+	conn, ok := newTCPConn(body)
+	if !ok {
 		return ""
 	}
-	addr, port, ok := tcpDestination(body.Args)
-	if !ok || port == 0 {
-		return ""
-	}
-
-	// Tetragon keeps the " (deleted)" suffix after an in-place binary
-	// update; it is not part of the process identity.
-	base := strings.TrimSuffix(path.Base(body.Process.Binary), " (deleted)")
-	args := body.Process.Arguments
-
-	// A container's sshd dials the next hop's SSH port when a client uses
-	// the jump host. This is the documented access path into the Incus
-	// bridge, and it only covers dials inside that bridge.
-	if base == "sshd" && port == 22 && containerNetwork.Contains(addr) {
+	// Fixed automation talks to fixed destinations, so these rules apply
+	// regardless of address family.
+	if automationDial(conn) || containerProbeReason(body) != "" {
 		return "expected_tcp"
 	}
-	// Tetragon reports kernel-side connects without an owning process as
-	// [kthreadd]; those are the Ceph OSD and messenger sockets.
-	if base == "[kthreadd]" {
-		if _, ok := cephPorts[port]; ok {
-			return "expected_tcp"
-		}
+	// Everything below is cluster-internal; a public destination from one
+	// of these binaries stays visible.
+	if !conn.addr.IsPrivate() {
+		return ""
 	}
-	// The blackbox exporter exists to probe external endpoints; apt's
-	// methods reach the mirror through the cluster proxy; ntfy-webhook and
-	// squid are the notification and egress paths.
+	if clusterDial(conn) {
+		return "expected_tcp"
+	}
+	return ""
+}
+
+// automationDial covers daemons and scripts whose dials are fixed: the
+// blackbox exporter exists to probe external endpoints, apt's methods reach
+// the mirror through the cluster proxy, and ntfy-webhook and squid are the
+// notification and egress paths.
+func automationDial(c tcpConn) bool {
 	switch {
-	case base == "prometheus-blackbox-exporter":
-		return "expected_tcp"
-	case base == "ntfy-webhook.py" || strings.Contains(args, "ntfy-webhook.py"):
-		return "expected_tcp"
-	case base == "squid":
-		return "expected_tcp"
-	case base == "frpc" && port == 7000:
-		return "expected_tcp"
-	case strings.HasPrefix(base, "smokescreen"):
-		return "expected_tcp"
-	case strings.Contains(args, "/usr/local/lib/cluster/hosting-balance-collector"):
+	case c.base == "sshd":
+		// A container's sshd dials the next hop's SSH port when a client
+		// uses the jump host. This is the documented access path into the
+		// Incus bridge, and it only covers dials inside that bridge.
+		return c.port == 22 && containerNetwork.Contains(c.addr)
+	case c.base == "[kthreadd]":
+		// Tetragon reports kernel-side connects without an owning process
+		// as [kthreadd]; those are the Ceph OSD and messenger sockets.
+		_, ok := cephPorts[c.port]
+		return ok
+	case c.base == "prometheus-blackbox-exporter", c.base == "squid":
+		return true
+	case strings.HasPrefix(c.base, "smokescreen"):
+		return true
+	case c.base == "ntfy-webhook.py" || strings.Contains(c.args, "ntfy-webhook.py"):
+		return true
+	case c.base == "frpc":
+		return c.port == 7000
+	case c.base == "fwupd" || c.base == "snapd":
+		return c.port == 443
+	case c.base == "NetworkManager":
+		return c.port == 80
+	case strings.Contains(c.binary, "/apt/methods/"):
+		return c.port == 443 || c.port == 3128
+	}
+	if c.args == "" {
+		return false
+	}
+	return automationArgs(c)
+}
+
+// automationArgs covers cluster scripts whose binary name is generic
+// (python3, ycluster) and whose purpose is only visible in the command line.
+func automationArgs(c tcpConn) bool {
+	switch {
+	case strings.Contains(c.args, "ycluster vm idle") && c.port == 443:
+		// The hourly leader job posts idle-VM notices to the Zulip API.
+		return true
+	case strings.Contains(c.args, "/usr/local/lib/cluster/hosting-balance-collector"):
 		// The hosting-balance collector's provider API is a known external
 		// egress path; its output is the balance metric, not this connect.
-		return "expected_tcp"
-	case (base == "fwupd" || base == "snapd") && port == 443:
-		return "expected_tcp"
-	case strings.Contains(body.Process.Binary, "/apt/methods/") && (port == 443 || port == 3128):
-		return "expected_tcp"
-	case base == "NetworkManager" && port == 80:
-		return "expected_tcp"
-	case base == "vikunja" && strings.Contains(args, "healthcheck"):
-		return "expected_tcp"
+		return true
+	case strings.Contains(c.args, "/usr/local/lib/cluster/cluster-heartbeat"):
+		// The leader's dead-man's-switch ping is a fixed external call;
+		// match the script path rather than the destination.
+		return true
+	case c.port == 2381 && c.addr.IsPrivate() && strings.Contains(c.args, "/usr/local/"):
+		// Cluster collectors talk to etcd on the client port.
+		return true
+	case isPython(c.base) && strings.Contains(c.args, "ycluster.utils.gateway_health"):
+		return c.port == 2381 || c.port == 7000
 	}
-	// Cluster collectors talk to etcd on the client port.
-	if port == 2381 && addr.IsPrivate() && strings.Contains(args, "/usr/local/") {
-		return "expected_tcp"
-	}
-	// The leader's dead-man's-switch ping is a fixed external call; its
-	// failure is an unanswered check on the far side, not a missing event
-	// here. Match the script path rather than the destination so another
-	// process reaching that host still alerts. A repointed URL is not
-	// visible here by design; the write to the environment file stays
-	// alertable and is the signal for that change.
-	if strings.Contains(args, "/usr/local/lib/cluster/cluster-heartbeat") {
-		return "expected_tcp"
-	}
-	if (base == "python3" || base == "python3.12") &&
-		strings.Contains(args, "ycluster.utils.gateway_health") &&
-		(port == 2381 || port == 7000) {
-		return "expected_tcp"
-	}
-	if !addr.IsPrivate() {
-		return ""
-	}
+	return false
+}
+
+func isPython(base string) bool {
+	return base == "python3" || base == "python3.12"
+}
+
+// clusterDial covers dials to cluster-internal services. Callers guarantee
+// the destination is private.
+func clusterDial(c tcpConn) bool {
 	// Squid is the cluster's egress proxy: every client, including apt's
-	// HTTP method, reaches its one private address on this port. The proxy
-	// logs the real destination, so the connect itself carries no detection
-	// value.
-	if port == 3128 {
-		return "expected_tcp"
+	// HTTP method, reaches its one private address on this port.
+	if c.port == 3128 {
+		return true
 	}
 	// Port forwarders for published container ports only ever dial the
 	// container side of their own bridge.
-	if base == "rootlessport" || base == "docker-proxy" {
-		return "expected_tcp"
+	if c.base == "rootlessport" || c.base == "docker-proxy" {
+		return true
 	}
 	// nginx dials its configured upstreams on the cluster network.
-	if base == "nginx" && port == 8188 {
-		return "expected_tcp"
+	if c.base == "nginx" && c.port == 8188 {
+		return true
 	}
-	switch base {
-	case "etcdctl", "ycluster":
-		if port == 2381 || (base == "ycluster" && (port == 9091 || port == 5432)) {
-			return "expected_tcp"
-		}
-	case "etcd":
-		if port == 2382 {
-			return "expected_tcp"
-		}
+	return cephDial(c) || serviceDial(c)
+}
+
+func cephDial(c tcpConn) bool {
+	switch c.base {
 	case "ceph":
-		switch port {
-		case 3300, 6789, 6800, 6801, 6802, 6810:
-			return "expected_tcp"
-		}
+		// The CLI reaches the monitor, manager and OSD ports.
+		return c.port == 3300 || c.port == 6789 ||
+			c.port == 6800 || c.port == 6801 || c.port == 6802 || c.port == 6810
 	case "ceph-mgr":
-		if (port >= 6800 && port <= 6802) || port == 6810 {
-			return "expected_tcp"
-		}
+		return (c.port >= 6800 && c.port <= 6802) || c.port == 6810
 	case "ceph-mon":
-		switch port {
-		case 3300, 6789, 6810:
-			return "expected_tcp"
-		}
+		return c.port == 3300 || c.port == 6789 || c.port == 6810
 	case "ceph-osd":
-		switch port {
-		case 6789, 6810:
-			return "expected_tcp"
-		}
+		return c.port == 6789 || c.port == 6810
 	case "ceph-mds":
-		if port == 6810 {
-			return "expected_tcp"
-		}
-	case "microcephd":
-		if port == 7443 {
-			return "expected_tcp"
-		}
-	case "dnsmasq":
-		if port == 53 || port == 853 {
-			return "expected_tcp"
-		}
-	case "prometheus":
-		if _, ok := expectedPrometheusPorts[port]; ok || internalServicePort(port) {
-			return "expected_tcp"
-		}
-	case "prometheus-alertmanager":
-		if port == 9094 {
-			return "expected_tcp"
-		}
-	case "ids-forwarder":
-		if port == 9093 {
-			return "expected_tcp"
-		}
-	case "local-ai-proxy":
-		if _, ok := expectedLocalAIProxyPorts[port]; ok || internalServicePort(port) {
-			return "expected_tcp"
-		}
-	case "python3", "python3.12":
-		if port == 2381 && strings.Contains(args, "update-blackbox-targets") {
-			return "expected_tcp"
-		}
-		if strings.Contains(args, "/opt/admin-services/app.py") {
-			if _, ok := expectedAdminServicePorts[port]; ok || internalServicePort(port) {
-				return "expected_tcp"
-			}
-		}
+		return c.port == 6810
 	}
-	return ""
+	return false
+}
+
+func serviceDial(c tcpConn) bool {
+	switch c.base {
+	case "etcdctl":
+		return c.port == 2381
+	case "ycluster":
+		return c.port == 2381 || c.port == 9091 || c.port == 5432
+	case "etcd":
+		return c.port == 2382
+	case "microcephd":
+		return c.port == 7443
+	case "dnsmasq":
+		return c.port == 53 || c.port == 853
+	case "prometheus":
+		return registeredPort(expectedPrometheusPorts, c.port)
+	case "prometheus-alertmanager":
+		return c.port == 9094
+	case "ids-forwarder":
+		return c.port == 9093
+	case "local-ai-proxy":
+		return registeredPort(expectedLocalAIProxyPorts, c.port)
+	}
+	if !isPython(c.base) {
+		return false
+	}
+	return adminPythonDial(c)
+}
+
+// registeredPort reports whether port is a known service port or part of
+// the cluster's metrics and inference range.
+func registeredPort(known map[uint16]struct{}, port uint16) bool {
+	if _, ok := known[port]; ok {
+		return true
+	}
+	return internalServicePort(port)
+}
+
+// adminPythonDial covers the admin service and its target updater, which
+// share the python3 binary.
+func adminPythonDial(c tcpConn) bool {
+	if c.port == 2381 && strings.Contains(c.args, "update-blackbox-targets") {
+		return true
+	}
+	if !strings.Contains(c.args, "/opt/admin-services/app.py") {
+		return false
+	}
+	_, ok := expectedAdminServicePorts[c.port]
+	return ok || internalServicePort(c.port)
 }
 
 // containerEgressReason suppresses ordinary internet egress from a user

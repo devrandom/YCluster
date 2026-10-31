@@ -35,6 +35,40 @@ func containerForProcess(pid uint32, startTime string) (string, bool) {
 	return name, true
 }
 
+// containerForEvent attributes an event to a container. Short-lived children
+// (motd scripts, shell probes) are often gone by the time the line is read, so
+// when the process itself no longer resolves, fall back to its parent, which
+// is normally the long-lived process the container started.
+func containerForEvent(body *tetragonLog) (string, bool) {
+	if body == nil {
+		return "", false
+	}
+	if name, ok := containerForProcess(body.Process.PID, body.Process.StartTime); ok {
+		return name, true
+	}
+	if p := body.Parent; p != nil {
+		if name, ok := containerForProcess(p.PID, p.StartTime); ok {
+			return name, true
+		}
+	}
+	// Both processes can be gone by the time the line is read. Incus maps
+	// container accounts into a host uid range that no host account uses
+	// here: host accounts top out at 65534, containers start at 1,000,000.
+	// The uid is in the event, so attribution does not depend on /proc.
+	if body.Process.UID >= incusIDMapBase {
+		return "", true
+	}
+	if p := body.Parent; p != nil && p.UID >= incusIDMapBase {
+		return "", true
+	}
+	return "", false
+}
+
+// incusIDMapBase is the lowest host uid the Incus idmap can produce. It is
+// below the cluster's 1,000,000 base so a different idmap range still
+// matches, and above every host account (nobody is 65534).
+const incusIDMapBase = 100000
+
 // containerNameFromCgroup recognises the cgroup paths used by Incus/LXC,
 // Docker/Podman and Kubernetes. Only LXC-style paths carry a name.
 func containerNameFromCgroup(cgroup string) (string, bool) {

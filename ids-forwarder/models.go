@@ -46,6 +46,9 @@ type tetragonProcess struct {
 type tetragonProc struct {
 	Binary    string       `json:"binary"`
 	Arguments string       `json:"arguments"`
+	UID       uint32       `json:"uid"`
+	PID       uint32       `json:"pid"`
+	StartTime string       `json:"start_time"`
 	Pod       *tetragonPod `json:"pod"`
 }
 

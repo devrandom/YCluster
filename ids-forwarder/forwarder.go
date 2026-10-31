@@ -13,66 +13,6 @@ import (
 	"time"
 )
 
-const (
-	sourceTetragon = "tetragon"
-	sourceCrowdSec = "crowdsec"
-	alertName      = "IDSAlert"
-)
-
-type config struct {
-	alertmanagerURL string
-	tetragonLog     string
-	events          string
-	execBinaries    string
-	httpListen      string
-	metricsListen   string
-	hostname        string
-	queueMax        int
-	dedupWindow     time.Duration
-	rateLimit       int
-	rateWindow      time.Duration
-	alertTTL        time.Duration
-	maxEventAge     time.Duration
-	startupGrace    time.Duration
-	cursorFile      string
-	spoolFile       string
-	spoolMaxBytes   int64
-	detectionsFile  string
-	detectionsBytes int64
-	detectionsKeep  int
-	sigmaSocket     string
-	sigmaDetections string
-	sigmaCursorFile string
-	postTimeout     time.Duration
-	pollInterval    time.Duration
-	logf            func(format string, args ...any)
-}
-
-func defaultConfig() config {
-	return config{
-		alertmanagerURL: "http://127.0.0.1:9093",
-		tetragonLog:     "/var/log/tetragon/tetragon.log",
-		events:          "process_kprobe",
-		execBinaries:    "bash,sh,dash,zsh,fish,sudo,su,apt,apt-get,dpkg,snap,curl,wget,incus",
-		httpListen:      "",
-		metricsListen:   "127.0.0.1:2113",
-		queueMax:        1000,
-		dedupWindow:     5 * time.Minute,
-		rateLimit:       0,
-		rateWindow:      time.Hour,
-		alertTTL:        10 * time.Minute,
-		maxEventAge:     24 * time.Hour,
-		startupGrace:    time.Minute,
-		spoolMaxBytes:   100 << 20,
-		detectionsFile:  "/var/lib/ids-forwarder/detections.jsonl",
-		detectionsBytes: 50 << 20,
-		detectionsKeep:  10,
-		postTimeout:     5 * time.Second,
-		pollInterval:    500 * time.Millisecond,
-		logf:            log.Printf,
-	}
-}
-
 type forwarder struct {
 	cfg       config
 	queue     alertQueue
@@ -263,40 +203,42 @@ func (f *forwarder) start() error {
 		f.wg.Add(1)
 		go f.cursorLoop()
 	}
-	if f.stopping() {
-		return nil
-	}
-	if f.cfg.tetragonLog != "" {
-		if err := f.startTailer(); err != nil {
+	for _, step := range f.startSteps() {
+		if f.stopping() {
+			return nil
+		}
+		if err := step(); err != nil {
 			return err
 		}
 	}
-	if f.stopping() {
-		return nil
+	return nil
+}
+
+// startSteps lists the optional services in start order. Each one is only
+// present when its configuration is set.
+func (f *forwarder) startSteps() []func() error {
+	var steps []func() error
+	if f.cfg.tetragonLog != "" {
+		steps = append(steps, f.startTailer)
 	}
 	if f.cfg.httpListen != "" {
-		if err := f.startReceiver(); err != nil {
-			return err
-		}
-	}
-	if f.stopping() {
-		return nil
+		steps = append(steps, f.startReceiver)
 	}
 	if f.cfg.sigmaDetections != "" {
-		// The Sigma path is additive: a bad detection sink must not take
-		// down the hand-written rules or the Alertmanager spool.
-		if err := f.startSigmaDetections(); err != nil {
-			f.stats.sigmaTailErrors.Add(1)
-			f.cfg.logf("sigma detections disabled: %v", err)
-		}
-	}
-	if f.stopping() {
-		return nil
+		steps = append(steps, f.startSigmaDetectionsBestEffort)
 	}
 	if f.cfg.metricsListen != "" {
-		if err := f.startMetrics(); err != nil {
-			return err
-		}
+		steps = append(steps, f.startMetrics)
+	}
+	return steps
+}
+
+// startSigmaDetectionsBestEffort keeps the Sigma path additive: a bad
+// detection sink must not take down the hand-written rules or the spool.
+func (f *forwarder) startSigmaDetectionsBestEffort() error {
+	if err := f.startSigmaDetections(); err != nil {
+		f.stats.sigmaTailErrors.Add(1)
+		f.cfg.logf("sigma detections disabled: %v", err)
 	}
 	return nil
 }
@@ -457,99 +399,4 @@ func (f *forwarder) handleLine(line string) error {
 	}
 	f.cursor.advance(meta.time, meta.hash)
 	return nil
-}
-
-// ruleRepeatWindows coalesces repeated detections of the same shape. Rules
-// absent from the map use the shared dedup window only.
-var ruleRepeatWindows = map[string]time.Duration{
-	"container-exec": time.Hour,
-	"container-api":  time.Hour,
-}
-
-// enqueue makes one alert durable. It returns an error only when the
-// alert could not be stored; callers must then keep their source cursor
-// where it is so the event is retried.
-func (f *forwarder) enqueue(a alert) error {
-	// API usage is an audit trail before it is an alert: record every call,
-	// even when delivery is deduplicated.
-	auditOnly := a.Labels["rule_id"] == "container-api"
-	if auditOnly {
-		f.recordDetection(a)
-	}
-	key := a.dedupKey()
-	if f.dedup.seen(key) {
-		f.stats.deduped.Add(1)
-		return nil
-	}
-	// A recurring action describes the same thing happening again, not a new
-	// condition. Alert on the first occurrence in the window and keep
-	// recording the rest, so a scheduled exec does not page on every run.
-	if window, ok := ruleRepeatWindows[a.Labels["rule_id"]]; ok && f.dedup.seenWithin(key, window) {
-		f.stats.coalesced.Add(1)
-		if !auditOnly {
-			f.recordDetection(a)
-		}
-		return nil
-	}
-	// Optional per-host circuit breaker: deliver at most rate-limit alerts
-	// per severity per window, but keep recording everything so the history
-	// stays complete. The cluster-wide notification budget lives in
-	// ntfy-webhook, which is the only shared enforcement point; this local
-	// cap is disabled in the Ansible deployment. The audit rule already
-	// coalesces to one alert per hour and must not crowd out detections that
-	// need a human.
-	if !auditOnly && !f.rate.allow(a.Labels["severity"]) {
-		f.stats.rateLimited.Add(1)
-		if !auditOnly {
-			f.recordDetection(a)
-		}
-		return nil
-	}
-	if f.spool != nil {
-		if err := f.spool.append(a); err != nil {
-			if errors.Is(err, errSpoolEntryTooLarge) {
-				// A single pathological event must not wedge replay.
-				f.stats.oversized.Add(1)
-				f.stats.dropped.Add(1)
-				f.cfg.logf("drop oversized alert %s: %v", a.Labels["rule_id"], err)
-				return nil
-			}
-			f.stats.dropped.Add(1)
-			return err
-		}
-		// Mark only after the append is durable: a failed append must stay
-		// retryable instead of being suppressed as a duplicate.
-		f.dedup.mark(key)
-		if !auditOnly {
-			f.recordDetection(a)
-		}
-		return nil
-	}
-	if !f.queue.push(a) {
-		f.stats.dropped.Add(1)
-		f.cfg.logf("queue full, dropping alert")
-		return nil
-	}
-	f.dedup.mark(key)
-	if !auditOnly {
-		f.recordDetection(a)
-	}
-	return nil
-}
-
-// recordDetection appends the detection to the local record file. This is
-// the durable history of what the sensor classified as a detection, kept
-// separately from Alertmanager, which is only the paging path. A write
-// failure is counted and logged rather than returned: a full disk must not
-// stall the cursor or stop coverage alerts from being delivered.
-func (f *forwarder) recordDetection(a alert) {
-	if f.record == nil {
-		return
-	}
-	if err := f.record.append(newDetectionRecord(a)); err != nil {
-		f.stats.recordErrors.Add(1)
-		f.cfg.logf("record detection %s: %v", a.Labels["rule_id"], err)
-		return
-	}
-	f.stats.recorded.Add(1)
 }

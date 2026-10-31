@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -76,46 +74,12 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	// process_exec fires for every exec on the node; forward only the
 	// binaries that matter for detection (shells, privilege tools,
 	// package managers, downloaders).
-	if evType == "process_exec" {
-		if !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
-			return alert{}, meta, false, ""
-		}
-		if reason := routineExecReason(body.Process, body.Parent); reason != "" {
-			return alert{}, meta, false, reason
-		}
+	if evType == "process_exec" && !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
+		return alert{}, meta, false, ""
 	}
-	if reason := packageMaintenanceReason(body); reason != "" {
+	layer, containerName := tetragonEventLayer(body)
+	if reason := tetragonSuppression(evType, body, layer); reason != "" {
 		return alert{}, meta, false, reason
-	}
-	layer := tetragonLayer(body)
-	containerName := ""
-	if layer == "host" {
-		if name, ok := containerForProcess(body.Process.PID, body.Process.StartTime); ok {
-			layer = "container"
-			containerName = name
-		}
-	}
-	if layer == "container" {
-		// Tenant-container internals are tenant responsibility. Keep only
-		// the case that matters to the cluster: a connection leaving the
-		// container for a cluster-private address. Public egress and
-		// host-local bridge/loopback traffic are routine tenant traffic.
-		if reason := containerEgressReason(body, layer); reason != "" {
-			return alert{}, meta, false, reason
-		}
-		if body.FunctionName != "tcp_connect" {
-			return alert{}, meta, false, "container_internal"
-		}
-	} else {
-		if reason := expectedTCPReason(body); reason != "" {
-			return alert{}, meta, false, reason
-		}
-		if reason := routinePrivilegeReason(body); reason != "" {
-			return alert{}, meta, false, reason
-		}
-		if reason := routineFileWriteReason(body); reason != "" {
-			return alert{}, meta, false, reason
-		}
 	}
 	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), eventSummary(evType, body))
 	if containerName != "" {
@@ -125,6 +89,68 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	a.eventTime = meta.time
 	a.eventHash = meta.hash
 	return a, meta, true, ""
+}
+
+// tetragonEventLayer resolves the host/container layer of an event and, for
+// host-attributed events, the container that owns the process.
+func tetragonEventLayer(body *tetragonLog) (layer, containerName string) {
+	layer = tetragonLayer(body)
+	if layer != "host" {
+		return layer, ""
+	}
+	// The host-side exec rules come after the layer check so a container's
+	// shells are attributed to the container rather than matched against
+	// host daemon shapes.
+	if name, ok := containerForEvent(body); ok {
+		return "container", name
+	}
+	return layer, ""
+}
+
+// tetragonSuppression returns the reason an event is not forwarded, or ""
+// when it should produce an alert.
+func tetragonSuppression(evType string, body *tetragonLog, layer string) string {
+	if evType == "process_exec" {
+		if layer == "container" {
+			return "container_internal"
+		}
+		if reason := routineExecReason(body.Process, body.Parent); reason != "" {
+			return reason
+		}
+	}
+	if reason := packageMaintenanceReason(body); reason != "" {
+		return reason
+	}
+	if layer == "container" {
+		return containerSuppressionReason(body)
+	}
+	return hostSuppressionReason(body)
+}
+
+// containerSuppressionReason keeps only the container case that matters to
+// the cluster: a connection leaving for a cluster-private address. Public
+// egress and host-local bridge/loopback traffic are routine tenant traffic.
+func containerSuppressionReason(body *tetragonLog) string {
+	if reason := containerEgressReason(body, "container"); reason != "" {
+		return reason
+	}
+	if reason := containerProbeReason(body); reason != "" {
+		return reason
+	}
+	if body.FunctionName != "tcp_connect" {
+		return "container_internal"
+	}
+	return ""
+}
+
+func hostSuppressionReason(body *tetragonLog) string {
+	if reason := expectedTCPReason(body); reason != "" {
+		return reason
+	}
+	if reason := routinePrivilegeReason(body); reason != "" {
+		return reason
+	}
+	return routineFileWriteReason(body)
 }
 
 // tetragonAlert is the mapping-only view used by tests and callers that do
@@ -154,144 +180,6 @@ func configuredExecBinary(binariesCSV, binary string) bool {
 		}
 	}
 	return false
-}
-
-// routineExecReason classifies known cluster probes and automation. The
-// binary allowlist is intentionally broad; without this filter, health
-// checks and package introspection dominate process_exec alerts.
-func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string {
-	base := path.Base(process.Binary)
-	parent := ""
-	if parentProc != nil {
-		parent = parentProc.Binary
-	}
-	args := process.Arguments
-
-	switch base {
-	case "curl", "wget":
-		if argumentsHaveLoopbackURL(args) {
-			return "loopback_http"
-		}
-	case "incus":
-		// The VM reconciler and state sampler are known periodic API
-		// consumers. Match the trusted caller once rather than every
-		// subcommand shape a future reconcile step might add.
-		if parentProc != nil && parentProc.Binary == "/usr/local/bin/ycluster" &&
-			(strings.Contains(parentProc.Arguments, "ycluster vm reconcile") ||
-				strings.Contains(parentProc.Arguments, "ycluster vm sample")) {
-			return "vm_reconcile"
-		}
-		// vm-gpu-collector: on vfio-pci hosts the GPUs are invisible to
-		// the host, so it lists VMs and execs nvidia-smi inside each one
-		// every 30s. Known unit, known command line.
-		if strings.Contains(args, "type=virtual-machine") &&
-			strings.Contains(args, "list") {
-			return "gpu_collector"
-		}
-		if strings.Contains(args, "-- nvidia-smi --query-gpu=") &&
-			strings.Contains(args, "--format=csv") {
-			return "gpu_collector"
-		}
-		// sync_transit_nics reads instance metadata and the bastion's
-		// /etc/hosts on every reconciler tick to rewrite the transit
-		// block. Reads only: a push to the same path still alerts.
-		if strings.HasPrefix(args, "file pull ") &&
-			strings.HasSuffix(strings.TrimSpace(args), "/etc/hosts -") {
-			return "nat_sync"
-		}
-		if strings.HasPrefix(args, "info ") {
-			return "nat_sync"
-		}
-	case "sh", "bash", "dash", "zsh", "fish":
-		if strings.Contains(args, "/usr/share/prometheus-node-exporter-collectors/") {
-			return "node_exporter"
-		}
-		if strings.Contains(args, "/etc/update-motd.d") {
-			return "motd"
-		}
-		if zulipCronReason(args) != "" {
-			return "app_cron"
-		}
-		// sysstat's daily-activity collector runs from cron every ten
-		// minutes on every node with a fixed command line.
-		if strings.Contains(args, "debian-sa1") {
-			return "sysstat"
-		}
-		// Debian's cron.d wrappers run through this exact shell command.
-		if strings.Contains(args, "/etc/cron.") {
-			return "cron"
-		}
-		// Ansible's become handshake and its connectivity/interpreter
-		// probes run on every task; they are fixed shell shapes, not
-		// workload execs.
-		if strings.Contains(args, "BECOME-SUCCESS-") ||
-			strings.Contains(args, "echo ~ && sleep 0") ||
-			(strings.Contains(args, "echo PLATFORM") && strings.Contains(args, "command -v")) ||
-			(strings.Contains(args, "python3.") && strings.Contains(args, "&& sleep 0")) {
-			return "ansible_probe"
-		}
-		// needrestart probes the package tools from its dpkg/rpm hooks.
-		if strings.Contains(args, "type dpkg-query") ||
-			strings.Contains(args, "type rpm") {
-			return "package_query"
-		}
-		if strings.Contains(args, "invoke-rc.d anacron start") {
-			return "cron"
-		}
-		// Containers use a literal false command as a liveness placeholder.
-		if strings.TrimSpace(args) == "-c -- /bin/false" {
-			return "health_check"
-		}
-		// Ansible runs its file transfer through a shell wrapper around
-		// sftp-server.
-		if strings.Contains(args, "/usr/lib/openssh/sftp-server") {
-			return "ansible_probe"
-		}
-		// Ansible's per-task temp directory is created, chmodded and
-		// removed with the same fixed command shapes.
-		if strings.Contains(args, "/root/.ansible/tmp/") {
-			return "ansible_probe"
-		}
-		// Container health checks run without a stable parent: the shim,
-		// tini or the workload itself forks them, so match the probe shape
-		// instead of the parent binary.
-		if healthCheckArgs(args) &&
-			(strings.Contains(args, "localhost") ||
-				strings.Contains(args, "127.0.0.1") ||
-				strings.Contains(args, "/lifecycle/")) {
-			return "health_check"
-		}
-		if healthCheckArgs(args) &&
-			(parent == "/lifecycle/ak" ||
-				parent == "/usr/bin/containerd-shim-runc-v2" ||
-				parent == "/usr/bin/runc" ||
-				parent == "/bin/sh" ||
-				parent == "/bin/bash") {
-			return "health_check"
-		}
-		if parent == "/usr/sbin/sshd" && strings.Contains(args, "&& sleep 0") {
-			return "ansible_probe"
-		}
-	case "logrotate":
-		if strings.Contains(args, "/etc/logrotate.conf") {
-			return "cron"
-		}
-	case "snap":
-		if strings.Contains(args, "microceph.log-rotate") {
-			return "cron"
-		}
-	case "sudo":
-		if strings.Contains(args, "BECOME-SUCCESS-") {
-			return "ansible_probe"
-		}
-	case "dpkg":
-		if strings.Contains(args, "--print-foreign-architectures") ||
-			strings.Contains(args, "--compare-versions") ||
-			args == "--version" {
-			return "package_query"
-		}
-	}
-	return ""
 }
 
 // routinePrivilegeReason covers process binaries whose privilege transitions
@@ -341,36 +229,6 @@ func routinePrivilegeReason(body *tetragonLog) string {
 	if strings.HasPrefix(body.Process.Binary, "/snap/snapd/") &&
 		strings.HasSuffix(body.Process.Binary, "/usr/lib/snapd/snap-confine") {
 		return "expected_privilege"
-	}
-	return ""
-}
-
-// zulipCronCommands are the management commands Zulip's own scheduler runs
-// inside its container. Anything else from that path still alerts.
-var zulipCronCommands = map[string]struct{}{
-	"check_analytics_state":            {},
-	"promote_new_full_members":         {},
-	"send_zulip_update_announcements":  {},
-	"update_analytics_counts":          {},
-	"fetch_tor_exit_nodes":             {},
-	"enqueue_digest_emails":            {},
-	"clearsessions":                    {},
-	"soft_deactivate_users":            {},
-	"delete_old_unclaimed_attachments": {},
-}
-
-func zulipCronReason(args string) string {
-	if !strings.Contains(args, "/home/zulip/deployments/current/") {
-		return ""
-	}
-	fields := strings.Fields(args)
-	for i, f := range fields {
-		if f != "./manage.py" || i+1 >= len(fields) {
-			continue
-		}
-		if _, ok := zulipCronCommands[fields[i+1]]; ok {
-			return "app_cron"
-		}
 	}
 	return ""
 }
@@ -442,29 +300,6 @@ func sudoTargetsNonRoot(args string) bool {
 				return !isRoot(inline)
 			}
 			return next != "" && !isRoot(next)
-		}
-	}
-	return false
-}
-
-func healthCheckArgs(args string) bool {
-	lower := strings.ToLower(args)
-	return strings.Contains(lower, "/health") || strings.Contains(lower, "healthcheck")
-}
-
-func argumentsHaveLoopbackURL(args string) bool {
-	for _, field := range strings.Fields(args) {
-		field = strings.Trim(field, "\"'")
-		u, err := url.Parse(field)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			continue
-		}
-		host := u.Hostname()
-		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
-			return true
-		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			return true
 		}
 	}
 	return false

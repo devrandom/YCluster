@@ -106,24 +106,12 @@ func (s *sigmaSink) loop() {
 			}
 		}
 		if conn == nil {
-			c, err := net.DialTimeout("unix", s.path, 2*time.Second)
-			if err != nil {
-				s.errors.Add(1)
-				if s.dialLogged.CompareAndSwap(false, true) {
-					s.logf("sigma: connect %s: %v", s.path, err)
-				}
-				if !sleepOrStop(s.stop, backoff) {
-					return
-				}
-				if backoff < 30*time.Second {
-					backoff *= 2
-				}
-				continue
+			var ok bool
+			conn, backoff, ok = s.connect(backoff)
+			if !ok {
+				return
 			}
-			conn = c
-			backoff = time.Second
-			s.dialLogged.Store(false)
-			s.logf("sigma: connected to %s", s.path)
+			continue
 		}
 		if _, err := conn.Write(append(pending, '\n')); err != nil {
 			s.errors.Add(1)
@@ -132,6 +120,29 @@ func (s *sigmaSink) loop() {
 		}
 		pending = nil
 		s.sent.Add(1)
+	}
+}
+
+// connect dials the rule engine, retrying with backoff until it succeeds or
+// the sink is closed. ok=false means the sink stopped while backing off.
+func (s *sigmaSink) connect(backoff time.Duration) (net.Conn, time.Duration, bool) {
+	for {
+		conn, err := net.DialTimeout("unix", s.path, 2*time.Second)
+		if err == nil {
+			s.dialLogged.Store(false)
+			s.logf("sigma: connected to %s", s.path)
+			return conn, time.Second, true
+		}
+		s.errors.Add(1)
+		if s.dialLogged.CompareAndSwap(false, true) {
+			s.logf("sigma: connect %s: %v", s.path, err)
+		}
+		if !sleepOrStop(s.stop, backoff) {
+			return nil, backoff, false
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
 	}
 }
 

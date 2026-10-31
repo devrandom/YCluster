@@ -160,3 +160,67 @@ func TestHostEgressIsNotSuppressed(t *testing.T) {
 		t.Fatalf("host egress was suppressed as %q", reason)
 	}
 }
+
+func TestContainerExecIgnoresHostExecRules(t *testing.T) {
+	old := procRoot
+	procRoot = t.TempDir() // no /proc entries: attribution has to use the uid
+	defer func() { procRoot = old }()
+
+	cfg := testConfig()
+	cfg.events = "process_exec"
+	line, err := json.Marshal(map[string]any{
+		"process_exec": map[string]any{
+			"process": map[string]any{
+				"binary":    "/bin/sh",
+				"arguments": `-c -- "/usr/bin/env -i PATH=/usr/bin run-parts --lsbsysinit /etc/update-motd.d"`,
+				"uid":       1000000,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, ok, reason := tetragonAlertDecision(string(line), cfg)
+	if ok {
+		t.Fatal("container exec must not forward")
+	}
+	if reason != "container_internal" {
+		t.Fatalf("reason = %q, want container_internal", reason)
+	}
+}
+
+func TestContainerSelfProbeIsSuppressedButLateralIsNot(t *testing.T) {
+	old := procRoot
+	procRoot = t.TempDir()
+	defer func() { procRoot = old }()
+
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+	line := func(binary, args string) string {
+		t.Helper()
+		out, err := json.Marshal(map[string]any{
+			"process_kprobe": map[string]any{
+				"function_name": "tcp_connect",
+				"process": map[string]any{
+					"binary":    binary,
+					"arguments": args,
+					"uid":       1000000,
+				},
+				"args": []any{map[string]any{
+					"sock_arg": map[string]any{"daddr": "10.0.0.100", "dport": 443},
+				}},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+
+	if _, _, ok, reason := tetragonAlertDecision(line("/app/vikunja/vikunja", "healthcheck"), cfg); ok || reason != "expected_tcp" {
+		t.Fatalf("vikunja healthcheck: ok=%v reason=%q, want suppressed as expected_tcp", ok, reason)
+	}
+	if _, _, ok, _ := tetragonAlertDecision(line("/usr/bin/curl", "https://10.0.0.100/"), cfg); !ok {
+		t.Fatal("a container reaching the same address with another binary must still alert")
+	}
+}
