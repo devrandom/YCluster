@@ -567,3 +567,140 @@ health_check_interval: 250ms
 		t.Errorf("dead backend %s: state=%q; want down", dead, states[dead])
 	}
 }
+
+// TestSystemPerUserConcurrencyLimit — the configured cap and queue depth
+// apply to real traffic through the proxy binary: with a limit of 2 and a
+// queue of 1, a third request waits instead of failing, a fourth is
+// rejected because the queue is full, another user is unaffected, and the
+// queued request completes when a slot frees.
+func TestSystemPerUserConcurrencyLimit(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+
+	started := make(chan struct{}, 16)
+	b := newFakeBackend(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			okModels(`{}`)(w, r)
+			return
+		}
+		started <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+	defer b.close()
+
+	cfg := fmt.Sprintf(`max_concurrent_per_user_model: 2
+max_queued_per_user_model: 1
+health_check_interval: -1s
+backends:
+  - model: m
+    api_base: %q
+`, b.server.URL)
+	base := startProxy(t, cfg)
+	// Registered after the backend/proxy so it runs first on failure:
+	// backend handlers block on release and Close would wait forever.
+	defer unblock()
+
+	post := func(user string) (*http.Response, error) {
+		req, err := http.NewRequest(http.MethodPost, base+"/v1/chat/completions",
+			strings.NewReader(`{"model":"m","messages":[]}`))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-Id", user)
+		return http.DefaultClient.Do(req)
+	}
+
+	type result struct {
+		status int
+		err    error
+	}
+	run := func(user string) <-chan result {
+		ch := make(chan result, 1)
+		go func() {
+			resp, err := post(user)
+			if err != nil {
+				ch <- result{err: err}
+				return
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			ch <- result{status: resp.StatusCode}
+		}()
+		return ch
+	}
+
+	waitStarted := func(what string) {
+		t.Helper()
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+
+	alice1 := run("alice")
+	alice2 := run("alice")
+	waitStarted("the two alice requests")
+	waitStarted("the two alice requests")
+	if got := b.hits.Load(); got != 2 {
+		t.Fatalf("backend hits = %d; want 2", got)
+	}
+
+	// The third alice request waits in the queue rather than failing.
+	alice3 := run("alice")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := http.Get(base + "/metrics")
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if strings.Contains(string(body), `local_ai_proxy_user_concurrency_queued{model="m"} 1`) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("third alice request never queued")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := b.hits.Load(); got != 2 {
+		t.Fatalf("queued request reached the backend: hits = %d; want 2", got)
+	}
+
+	// The queue is full, so the fourth alice request is rejected.
+	resp, err := post("alice")
+	if err != nil {
+		t.Fatalf("fourth alice request: %v", err)
+	}
+	var apiErr openAIError
+	_ = json.NewDecoder(resp.Body).Decode(&apiErr)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("fourth alice status = %d; want 429", resp.StatusCode)
+	}
+	if apiErr.Error.Code != "concurrency_limit_exceeded" {
+		t.Fatalf("error code = %q; want concurrency_limit_exceeded", apiErr.Error.Code)
+	}
+	if got := b.hits.Load(); got != 2 {
+		t.Fatalf("rejected request reached the backend: hits = %d; want 2", got)
+	}
+
+	bob := run("bob")
+	waitStarted("bob's request")
+
+	unblock()
+	for _, ch := range []<-chan result{alice1, alice2, alice3, bob} {
+		res := <-ch
+		if res.err != nil {
+			t.Errorf("request failed: %v", res.err)
+			continue
+		}
+		if res.status != http.StatusOK {
+			t.Errorf("request status = %d; want 200", res.status)
+		}
+	}
+}

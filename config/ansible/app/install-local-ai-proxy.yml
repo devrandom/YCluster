@@ -37,6 +37,11 @@
     # {{ inference_proxy_metrics_port }} while the API listener stays
     # loopback-only (see group_vars/all/main.yml).
     proxy_metrics_listen: ":{{ inference_proxy_metrics_port }}"
+    # Max in-flight requests per (X-User-Id, model) on the gateway.
+    # Default 4; 0 disables. See docs/local-ai-proxy.md.
+    proxy_max_concurrent_per_user_model: 4
+    # Queue depth per (X-User-Id, model). Default 4; 0 disables queueing.
+    proxy_max_queued_per_user_model: 4
     # Binary stays in the build output dir on the buildhost (see
     # build-local-ai-proxy.yml).
     proxy_binary_src: /opt/src/local-ai-proxy/bin/local-ai-proxy

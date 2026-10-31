@@ -52,6 +52,16 @@ using `net/http` for native `context.Context` propagation.
   max 16 for vLLM). Queue or reject when at capacity rather than
   overloading.
 
+- **Per-user, per-model concurrency limiting** — cap in-flight requests
+  for each `(X-User-Id, model)` pair (default 4, configurable, `0`
+  disables). `X-User-Id` arrives from the trusted gateway. Excess
+  requests wait in that caller's bounded queue (default depth 4); only
+  a full queue returns `429 rate_limit_error` with code
+  `concurrency_limit_exceeded`, before any upstream dispatch. This is
+  about fairness on a shared backend: with continuous batching, one
+  client's N parallel streams make each of them slower and leave less
+  throughput for everyone else.
+
 - **Backend health tracking** — periodic liveness checks. Track
   backend state: healthy / degraded (slow responses) / down (unreachable
   or error). Auto-remove from rotation when down, auto-restore when
@@ -180,6 +190,38 @@ backends:
       - "mlx-community/MediumModel-4bit"
 ```
 
+### Per-user concurrency limits
+
+```yaml
+# Max in-flight requests per (X-User-Id, model). Default 4; 0 disables.
+max_concurrent_per_user_model: 4
+# Max requests that may wait for a slot. Default 4; 0 disables queueing
+# (over-cap requests are rejected immediately). A full queue returns
+# HTTP 429, type rate_limit_error, code concurrency_limit_exceeded.
+max_queued_per_user_model: 4
+```
+
+The counter is per user *and* per model, so a client may run four
+requests against each of several models, and only that caller's own
+requests ever wait in its queue. Queued requests are admitted FIFO and
+hold their connection but no backend slot. If a client disconnects while
+queued, the request is dropped without consuming a slot. Slots are held
+for the whole response, including streaming, and are released when the
+handler returns (client disconnect included).
+
+The queue depth is capped; wait time is not, so a request waits until a
+slot frees or its client disconnects. The router buffers request bodies
+to find the model before admission, so the cap limits waiting
+connections and queue state but does not bound request-body memory. In
+passthrough (single-backend) mode there is no model name, so the
+limiter degenerates to a per-user cap. Observability:
+`local_ai_proxy_user_concurrency_queued{model}` (current depth),
+`local_ai_proxy_user_concurrency_wait_seconds{model}` (admission wait),
+and `local_ai_proxy_user_concurrency_rejected_total{model}` (full-queue
+rejections, also logged at INFO with the user and limits). Requests
+without a trusted `X-User-Id` (health probes, local unauthenticated
+calls) are never limited.
+
 ### Request flow
 
 1. Client sends `POST /v1/chat/completions` with `model: "chat"`.
@@ -187,18 +229,23 @@ backends:
    mode) or looks up the Bearer token in the static map. Identity is
    attached to the request context.
 3. Router resolves "chat" → backends `[mac-llama, mac2-llama]`.
-4. Router picks the backend with lowest in-flight count that is healthy
+4. If the caller's trusted `X-User-Id` already has
+   `max_concurrent_per_user_model` requests in flight for that model,
+   the request waits in that caller's queue for a slot. If the queue is
+   full (`max_queued_per_user_model`), the proxy returns 429
+   `rate_limit_error` without contacting a backend.
+5. Router picks the backend with lowest in-flight count that is healthy
    and under its concurrency limit.
-5. If model alias exists (chat → Model-Q3_K_S), rewrite model field
+6. If model alias exists (chat → Model-Q3_K_S), rewrite model field
    in request body.
-6. Proxy creates upstream request with `http.NewRequestWithContext(ctx)`.
-7. For streaming: read SSE chunks from upstream, write to client. On
+7. Proxy creates upstream request with `http.NewRequestWithContext(ctx)`.
+8. For streaming: read SSE chunks from upstream, write to client. On
    write error → context cancelled → upstream connection closed →
    backend aborts the request.
-8. For non-streaming: `http.Do(req)` blocks. If client disconnects,
+9. For non-streaming: `http.Do(req)` blocks. If client disconnects,
    context cancelled → `http.Do` returns with error → upstream
    connection closed.
-9. Log usage, update in-flight count, return response.
+10. Log usage, update in-flight count, return response.
 
 ## Implementation plan
 

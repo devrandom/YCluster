@@ -2,8 +2,10 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // serveHealthz renders the operator health endpoint. With no HealthChecker
@@ -91,6 +93,49 @@ func (h *Handler) requestACL(w http.ResponseWriter, r *http.Request, model strin
 		return false
 	}
 	return true
+}
+
+// admitRequest runs the ACL check and then the per-(user, model)
+// concurrency check. It returns a release function and true when the
+// request may be dispatched, or false when an error has been written.
+func (h *Handler) admitRequest(w http.ResponseWriter, r *http.Request, model string) (func(), bool) {
+	if !h.requestACL(w, r, model) {
+		return nil, false
+	}
+	return h.acquireUserConcurrency(w, r, model)
+}
+
+// acquireUserConcurrency enforces the per-(user, model) in-flight cap,
+// waiting in the caller's queue when one is configured. It returns a
+// release function and true when the request may be dispatched. When
+// the queue is full it writes a 429 rate_limit_error and returns false;
+// when the client disconnects while waiting it returns false without
+// writing (there is nobody to answer). A handler without a limiter, or
+// a request without a trusted X-User-Id, always proceeds.
+func (h *Handler) acquireUserConcurrency(w http.ResponseWriter, r *http.Request, model string) (func(), bool) {
+	user := r.Header.Get("X-User-Id")
+	start := time.Now()
+	release, queued, ok := h.Concurrency.Acquire(r.Context(), user, model)
+	if ok {
+		if queued {
+			h.Metrics.ObserveUserQueueWait(model, time.Since(start).Seconds())
+		}
+		return release, true
+	}
+	if r.Context().Err() != nil {
+		// The client disconnected while queued; do not occupy a slot
+		// and do not write a response.
+		return nil, false
+	}
+	h.Metrics.ObserveUserConcurrencyReject(model)
+	h.logger.Info("user concurrency queue full",
+		"model", model, "user", user, "limit", h.Concurrency.Limit(),
+		"queue", h.Concurrency.MaxQueued(),
+		"method", r.Method, "path", r.URL.Path)
+	writeOpenAIErrorDetail(w, http.StatusTooManyRequests, "rate_limit_error", "concurrency_limit_exceeded",
+		fmt.Sprintf("too many concurrent requests for model %q (limit %d, queue %d); retry when an in-flight request completes",
+			model, h.Concurrency.Limit(), h.Concurrency.MaxQueued()))
+	return nil, false
 }
 
 // filterModelsByACL returns only the model names the caller may access.

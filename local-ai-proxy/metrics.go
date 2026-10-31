@@ -22,6 +22,9 @@ type Metrics struct {
 	backendUp    *prometheus.GaugeVec
 	backendState *prometheus.GaugeVec
 	routeErrors  *prometheus.CounterVec
+	userRejected *prometheus.CounterVec
+	queueDepth   *prometheus.GaugeVec
+	queueWait    *prometheus.HistogramVec
 
 	modelHealthy *prometheus.GaugeVec
 	modelEnabled *prometheus.GaugeVec
@@ -79,6 +82,19 @@ func NewMetrics() *Metrics {
 			Name: "local_ai_proxy_route_errors_total",
 			Help: "Requests rejected by the router before any upstream dispatch.",
 		}, []string{"reason"}),
+		userRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "local_ai_proxy_user_concurrency_rejected_total",
+			Help: "Requests rejected with 429 because the caller's wait queue for that model was full.",
+		}, []string{"model"}),
+		queueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "local_ai_proxy_user_concurrency_queued",
+			Help: "Requests currently waiting for a per-user, per-model concurrency slot.",
+		}, []string{"model"}),
+		queueWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "local_ai_proxy_user_concurrency_wait_seconds",
+			Help:    "Time a request spent queued for a per-user, per-model concurrency slot before being admitted.",
+			Buckets: []float64{.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+		}, []string{"model"}),
 		modelHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "local_ai_proxy_model_healthy_backends",
 			Help: "Number of currently-healthy backends serving each model.",
@@ -92,7 +108,7 @@ func NewMetrics() *Metrics {
 			Help: "Number of backends configured for each model (healthy + down + disabled + unknown).",
 		}, []string{"model"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors, m.modelHealthy, m.modelEnabled, m.modelTotal)
+	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors, m.userRejected, m.queueDepth, m.queueWait, m.modelHealthy, m.modelEnabled, m.modelTotal)
 	return m
 }
 
@@ -149,6 +165,42 @@ func (m *Metrics) ObserveRouteError(reason string) {
 		return
 	}
 	m.routeErrors.WithLabelValues(reason).Inc()
+}
+
+// ObserveUserConcurrencyReject increments the counter for requests
+// turned away by the per-(user, model) in-flight cap. model is the
+// model the request was routed to; the user identity stays in the
+// access log rather than a metric label.
+func (m *Metrics) ObserveUserConcurrencyReject(model string) {
+	if m == nil {
+		return
+	}
+	m.userRejected.WithLabelValues(model).Inc()
+}
+
+// QueueInc and QueueDec maintain the per-model wait-queue depth gauge.
+// They implement QueueObserver for UserModelLimiter.
+func (m *Metrics) QueueInc(model string) {
+	if m == nil {
+		return
+	}
+	m.queueDepth.WithLabelValues(model).Inc()
+}
+
+func (m *Metrics) QueueDec(model string) {
+	if m == nil {
+		return
+	}
+	m.queueDepth.WithLabelValues(model).Dec()
+}
+
+// ObserveUserQueueWait records how long a request waited for a
+// per-(user, model) slot before being admitted.
+func (m *Metrics) ObserveUserQueueWait(model string, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.queueWait.WithLabelValues(model).Observe(seconds)
 }
 
 // SetBackendState updates both the 0/1 healthy gauge (for simple

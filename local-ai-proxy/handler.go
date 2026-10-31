@@ -110,6 +110,10 @@ type Handler struct {
 	// request. When ACLProvider is non-nil, the static ACL field is
 	// ignored.
 	ACLProvider func() *ACLConfig
+
+	// Concurrency caps in-flight requests per (X-User-Id, model) and
+	// queues the excess. Nil disables both.
+	Concurrency *UserModelLimiter
 }
 
 func (h *Handler) currentACL() *ACLConfig {
@@ -176,7 +180,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.requestACL(w, r, route.Model) {
+	if release, ok := h.admitRequest(w, r, route.Model); ok {
+		defer release()
 		h.dispatch(w, r, route)
 	}
 }

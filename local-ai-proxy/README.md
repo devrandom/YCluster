@@ -38,6 +38,12 @@ Written in Go, `net/http`, no framework.
 - **Operator-disabled backends.** Mark a URL as known-down so it
   stops polling, stops alerting, and its models become implicitly
   disabled — useful during planned downtime.
+- **Per-user, per-model concurrency limiting.** Caps in-flight
+  requests per `(X-User-Id, model)` pair (default 4; `0` disables) and
+  queues excess requests in that caller's own bounded FIFO (default
+  depth 4). Only a full queue gets a `429 rate_limit_error`, so one
+  client's parallel agent sessions can't occupy every batch slot while
+  a burst still completes without client-side retries.
 - **Client-disconnect cancellation.** When a client closes a streaming
   request, the upstream backend request is cancelled, freeing the
   slot. Covers both non-streaming and SSE paths. (Every GPU cycle
@@ -100,6 +106,14 @@ trusted_proxies:
 
 # Optional. Health check cadence (default 30s; 0 disables).
 health_check_interval: 30s
+
+# Optional. Max in-flight requests per (X-User-Id, model) pair.
+# Default 4; 0 disables. Excess requests wait in a per-caller queue.
+max_concurrent_per_user_model: 4
+
+# Optional. Queue depth per (X-User-Id, model) pair. Default 4;
+# 0 disables queueing. A full queue returns 429 rate_limit_error.
+max_queued_per_user_model: 4
 ```
 
 ## Endpoints
