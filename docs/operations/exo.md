@@ -307,6 +307,23 @@ curl -s http://m1.yc:52415/state | jq '.runners'
 # RunnerShuttingDown / RunnerConnected → mid-transition
 ```
 
+### Gateway health
+
+`local-ai-proxy` does not trust exo's `/v1/models` for health: exo
+returns the whole model catalog whether or not an instance is placed.
+For exo backends (`owned_by: "exo"` in the catalog) the proxy probes
+`/state/instances` and `/state/runners` instead, and reports the
+backend healthy only when at least one instance has every runner in
+`RunnerReady` or `RunnerRunning` (both states accept work). `ycluster
+inference status` therefore reflects placement, not just process
+liveness. The same two endpoints are the quickest way to check
+readiness by hand:
+
+```bash
+curl -s http://m1.yc:52415/state/instances | jq 'keys'
+curl -s http://m1.yc:52415/state/runners | jq '.[]|keys[0]'
+```
+
 ### Tear down an instance
 
 ```bash

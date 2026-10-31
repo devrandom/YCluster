@@ -127,6 +127,30 @@ etcdctl del /cluster/config/inference/disabled/http://gpu2:8000
 
 ## Operational endpoints
 
+### Backend probes
+
+By default the proxy probes `GET <backend>/v1/models`. Any status below
+500 means the backend is reachable, and `data[].id` becomes the set of
+models the backend serves. A healthy backend only counts for a model
+when that set contains the model; a backend whose list could not be
+determined is treated as serving the model rather than being dropped.
+
+exo is special: its `/v1/models` is a catalog of every known model card
+and stays 200 with nothing placed. The proxy recognises exo from
+`owned_by: "exo"` in that catalog and probes placement instead:
+
+- `GET /state/instances` — placed instances and their model/runner IDs
+- `GET /state/runners` — runner states
+
+The backend is healthy only when at least one instance has every
+runner in `RunnerReady` or `RunnerRunning` (exo dispatches work in both
+states). Its served-model set becomes the ready instances' model IDs,
+so an unplaced model is filtered from routing and shows as
+`unavailable` rather than healthy. If nothing is placed the
+probe records `down` with `no instance placed`; if placement is still
+loading it records `down` with `runners not ready`. Both feed the same
+5-minute `InferenceBackendDown` / `InferenceModelDown` alerts.
+
 ### `/healthz`
 
 ```json

@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -281,5 +285,251 @@ func TestHealthCheckerServesModelUnknownListAllowsAll(t *testing.T) {
 	}
 	if !hc.ServesModel(up.URL, "anything") {
 		t.Error("ServesModel(anything) = false; want true (model list unknown)")
+	}
+}
+
+// exoInstance renders one placed exo instance with the given runner IDs.
+func exoInstance(id, model string, runners ...string) string {
+	parts := make([]string, len(runners))
+	for i, r := range runners {
+		parts[i] = fmt.Sprintf(`%q:{}`, r)
+	}
+	return fmt.Sprintf(
+		`%q:{"MlxJacclInstance":{"shardAssignments":{"modelId":%q,"runnerToShard":{%s}}}}`,
+		id, model, strings.Join(parts, ","))
+}
+
+func exoInstances(entries ...string) string {
+	return "{" + strings.Join(entries, ",") + "}"
+}
+
+// TestHealthCheckerExoProbeUsesPlacementState covers the exo failure
+// mode the /v1/models catalog probe cannot see: the backend answers
+// 200 with every model card while no instance is placed, or while its
+// runners are still loading.
+func TestHealthCheckerExoProbeUsesPlacementState(t *testing.T) {
+	const model = "mlx-community/Kimi-K2.6-mlx-DQ3_K_M-q8"
+	cases := map[string]struct {
+		instances       string
+		runners         string
+		instancesStatus int
+		runnersStatus   int
+		wantState       BackendState
+		wantErr         string
+		wantModel       []string
+	}{
+		"no instance": {
+			instances: "{}",
+			runners:   "{}",
+			wantState: StateDown,
+			wantErr:   "no instance placed",
+			wantModel: []string{},
+		},
+		"loading": {
+			instances: exoInstances(exoInstance("i1", model, "r1", "r2")),
+			runners:   `{"r1":{"RunnerReady":{}},"r2":{"RunnerLoading":{"layersLoaded":10}}}`,
+			wantState: StateDown,
+			wantErr:   "runners not ready",
+			wantModel: []string{},
+		},
+		"ready": {
+			instances: exoInstances(exoInstance("i1", model, "r1", "r2")),
+			runners:   `{"r1":{"RunnerReady":{}},"r2":{"RunnerReady":{}}}`,
+			wantState: StateHealthy,
+			wantModel: []string{model},
+		},
+		"running": {
+			instances: exoInstances(exoInstance("i1", model, "r1", "r2")),
+			runners:   `{"r1":{"RunnerRunning":{}},"r2":{"RunnerRunning":{}}}`,
+			wantState: StateHealthy,
+			wantModel: []string{model},
+		},
+		"mixed ready and running": {
+			instances: exoInstances(exoInstance("i1", model, "r1", "r2")),
+			runners:   `{"r1":{"RunnerReady":{}},"r2":{"RunnerRunning":{}}}`,
+			wantState: StateHealthy,
+			wantModel: []string{model},
+		},
+		"missing runner": {
+			instances: exoInstances(exoInstance("i1", model, "r1", "r2")),
+			runners:   `{"r1":{"RunnerReady":{}}}`,
+			wantState: StateDown,
+			wantErr:   "runners not ready",
+			wantModel: []string{},
+		},
+		"duplicate ready instances": {
+			instances: exoInstances(
+				exoInstance("i1", model, "r1"),
+				exoInstance("i2", model, "r2"),
+			),
+			runners:   `{"r1":{"RunnerReady":{}},"r2":{"RunnerReady":{}}}`,
+			wantState: StateHealthy,
+			wantModel: []string{model},
+		},
+		"instances 404": {
+			instancesStatus: http.StatusNotFound,
+			wantState:       StateDown,
+			wantErr:         "exo instances: HTTP 404",
+			wantModel:       []string{},
+		},
+		"runners 500": {
+			instances:     exoInstances(exoInstance("i1", model, "r1")),
+			runnersStatus: http.StatusInternalServerError,
+			wantState:     StateDown,
+			wantErr:       "exo runners: HTTP 500",
+			wantModel:     []string{},
+		},
+		"malformed runners": {
+			instances: exoInstances(exoInstance("i1", model, "r1")),
+			runners:   "not-json",
+			wantState: StateDown,
+			wantErr:   "exo runners: parse",
+			wantModel: []string{},
+		},
+		"only ready instances count": {
+			instances: exoInstances(
+				exoInstance("i1", model, "r1"),
+				exoInstance("i2", "other-model", "r2"),
+			),
+			runners:   `{"r1":{"RunnerReady":{}},"r2":{"RunnerLoading":{}}}`,
+			wantState: StateHealthy,
+			wantModel: []string{model},
+		},
+		"unrecognized instances": {
+			instances: `{"i1":{"UnknownInstance":{}}}`,
+			runners:   `{}`,
+			wantState: StateDown,
+			wantErr:   "exo instances: unrecognized state",
+			wantModel: []string{},
+		},
+		"malformed instances": {
+			instances: "not-json",
+			runners:   "{}",
+			wantState: StateDown,
+			wantErr:   "exo instances: parse",
+			wantModel: []string{},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/models":
+					_, _ = fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"owned_by":"exo"}]}`, model)
+				case "/state/instances":
+					if tc.instancesStatus != 0 {
+						w.WriteHeader(tc.instancesStatus)
+					}
+					_, _ = io.WriteString(w, tc.instances)
+				case "/state/runners":
+					if tc.runnersStatus != 0 {
+						w.WriteHeader(tc.runnersStatus)
+					}
+					_, _ = io.WriteString(w, tc.runners)
+				default:
+					t.Errorf("unexpected upstream path %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer up.Close()
+
+			u := mustURL(t, up.URL)
+			hc := newTestHealthChecker(t, map[string][]*url.URL{model: {u}})
+			hc.checkAll(context.Background())
+
+			bh := hc.Snapshot()[u.String()]
+			if bh.State != tc.wantState {
+				t.Fatalf("state = %v (err %q); want %v", bh.State, bh.Err, tc.wantState)
+			}
+			if !strings.HasPrefix(bh.Err, tc.wantErr) {
+				t.Errorf("err = %q; want prefix %q", bh.Err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(bh.Models, tc.wantModel) {
+				t.Errorf("Models = %#v; want %#v", bh.Models, tc.wantModel)
+			}
+			if tc.wantState == StateDown && hc.ServesModel(u.String(), model) {
+				t.Error("ServesModel(down backend) = true; want false")
+			}
+		})
+	}
+}
+
+// TestHealthCheckerNonExoBackendKeepsCatalogProbe verifies that a
+// backend which does not identify as exo is still checked with the
+// plain /v1/models probe and never hits the exo state endpoints.
+func TestHealthCheckerNonExoBackendKeepsCatalogProbe(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("unexpected upstream path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"alpha"}]}`)
+	}))
+	defer up.Close()
+
+	u := mustURL(t, up.URL)
+	hc := newTestHealthChecker(t, map[string][]*url.URL{"alpha": {u}})
+	hc.checkAll(context.Background())
+
+	bh := hc.Snapshot()[u.String()]
+	if bh.State != StateHealthy {
+		t.Fatalf("state = %v; want healthy", bh.State)
+	}
+	if !reflect.DeepEqual(bh.Models, []string{"alpha"}) {
+		t.Errorf("Models = %#v; want [alpha]", bh.Models)
+	}
+	if hc.ServesModel(u.String(), "beta") {
+		t.Error("ServesModel(beta) = true; want false")
+	}
+}
+
+// TestHealthCheckerModelMetricsIgnoreNonServingBackend verifies that a
+// healthy backend which reports not serving a model does not keep that
+// model's healthy-backend gauge at 1 (the partial-placement case).
+func TestHealthCheckerModelMetricsIgnoreNonServingBackend(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"alpha"}]}`)
+	}))
+	defer up.Close()
+
+	u := mustURL(t, up.URL)
+	hc := newTestHealthChecker(t, map[string][]*url.URL{
+		"alpha": {u},
+		"beta":  {u},
+	})
+	hc.Metrics = NewMetrics()
+	hc.checkAll(context.Background())
+
+	rec := httptest.NewRecorder()
+	hc.Metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `local_ai_proxy_model_healthy_backends{model="alpha"} 1`) {
+		t.Errorf("alpha healthy gauge not 1 in:\n%s", body)
+	}
+	if !strings.Contains(body, `local_ai_proxy_model_healthy_backends{model="beta"} 0`) {
+		t.Errorf("beta healthy gauge not 0 in:\n%s", body)
+	}
+	if !strings.Contains(body, `local_ai_proxy_model_enabled_backends{model="beta"} 1`) {
+		t.Errorf("beta enabled gauge not 1 in:\n%s", body)
+	}
+}
+
+// TestHealthCheckerFetchStateRejectsOversizedBody verifies that a state
+// response over the cap fails closed with an explicit over-limit error
+// rather than being reported as malformed JSON.
+func TestHealthCheckerFetchStateRejectsOversizedBody(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"padded":"`+strings.Repeat("x", 64)+`"}`)
+	}))
+	defer up.Close()
+
+	u := mustURL(t, up.URL)
+	hc := newTestHealthChecker(t, map[string][]*url.URL{"m": {u}})
+	var v map[string]json.RawMessage
+	err := hc.fetchState(context.Background(), u, "/state/instances", &v, 16)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 16 bytes") {
+		t.Fatalf("err = %v; want over-limit error", err)
 	}
 }

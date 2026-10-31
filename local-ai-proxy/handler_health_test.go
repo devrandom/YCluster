@@ -118,3 +118,41 @@ func TestWriteHealthzAuthDown(t *testing.T) {
 		t.Fatalf("unexpected response: %#v", response)
 	}
 }
+
+// TestHealthzModelRollupHonorsServedModels verifies that a healthy
+// backend only counts for the models its /v1/models list contains, so
+// a partial placement is visible in /healthz. A nil list still counts
+// as serving every model (the backend couldn't be interrogated).
+func TestHealthzModelRollupHonorsServedModels(t *testing.T) {
+	backend := mustURL(t, "http://backend.example:8000")
+	snap := map[string]BackendHealth{
+		backend.String(): {
+			State:     StateHealthy,
+			LastCheck: time.Now(),
+			Models:    []string{"alpha"},
+		},
+	}
+	models := map[string][]*url.URL{
+		"alpha": {backend},
+		"beta":  {backend},
+	}
+
+	entries, healthy, _, unavailable := healthzModelEntries(models, snap)
+	if healthy != 1 || unavailable != 1 {
+		t.Fatalf("healthy=%d unavailable=%d; want 1/1", healthy, unavailable)
+	}
+	states := map[string]string{}
+	for _, e := range entries {
+		states[e.Name] = e.State
+	}
+	if states["alpha"] != "healthy" || states["beta"] != "unavailable" {
+		t.Fatalf("model states = %#v; want alpha healthy, beta unavailable", states)
+	}
+
+	unknown := map[string]BackendHealth{
+		backend.String(): {State: StateHealthy, LastCheck: time.Now()},
+	}
+	if got := modelStateFromBackends("beta", models["beta"], unknown); got != "healthy" {
+		t.Errorf("nil Models state = %q; want healthy", got)
+	}
+}

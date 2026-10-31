@@ -10,9 +10,11 @@ import (
 )
 
 // modelStateFromBackends classifies a model's rollup state from its
-// backends' health. Matches the categories used by /healthz:
-// healthy, unavailable, disabled, unknown.
-func modelStateFromBackends(urls []*url.URL, snap map[string]BackendHealth) string {
+// backends' health. A healthy backend only counts when it also reports
+// serving this model, so a backend that is up but has no ready instance
+// of the model does not mask the outage. Matches the categories used by
+// /healthz: healthy, unavailable, disabled, unknown.
+func modelStateFromBackends(model string, urls []*url.URL, snap map[string]BackendHealth) string {
 	if len(urls) == 0 {
 		return "unknown"
 	}
@@ -27,7 +29,7 @@ func modelStateFromBackends(urls []*url.URL, snap map[string]BackendHealth) stri
 		if bh.State != StateDisabled {
 			allDisabled = false
 		}
-		if bh.State == StateHealthy {
+		if bh.State == StateHealthy && backendServesModel(bh, model) {
 			anyHealthy = true
 		}
 	}

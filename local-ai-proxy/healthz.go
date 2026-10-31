@@ -109,7 +109,7 @@ func healthzModelEntries(models map[string][]*url.URL, snap map[string]BackendHe
 		for _, u := range urls {
 			urlStrs = append(urlStrs, u.String())
 		}
-		state := modelStateFromBackends(urls, snap)
+		state := modelStateFromBackends(name, urls, snap)
 		switch state {
 		case "healthy":
 			healthy++

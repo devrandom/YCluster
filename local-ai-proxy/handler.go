@@ -485,12 +485,12 @@ func (h *Handler) servableModels() []string {
 	snap := h.Health.Snapshot()
 	out := make([]string, 0, len(all))
 	for _, name := range all {
-		if modelStateFromBackends(models[name], snap) == "healthy" {
+		if modelStateFromBackends(name, models[name], snap) == "healthy" {
 			out = append(out, name)
 			continue
 		}
 		// Also include unknown — we lack signal, let the client try.
-		if modelStateFromBackends(models[name], snap) == "unknown" {
+		if modelStateFromBackends(name, models[name], snap) == "unknown" {
 			out = append(out, name)
 		}
 	}

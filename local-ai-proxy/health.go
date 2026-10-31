@@ -142,17 +142,12 @@ func (hc *HealthChecker) IsHealthy(urlStr string) bool {
 	return ok && bh.State == StateHealthy
 }
 
-// ServesModel reports whether the given backend URL is known to serve
-// the given model ID. Returns true when the model list couldn't be
-// determined (Models is nil) so the router doesn't filter out a
-// reachable backend we couldn't interrogate. Returns false when the
-// backend reported a model list that doesn't contain the model — the
-// stale-entry case this method exists to catch.
-func (hc *HealthChecker) ServesModel(urlStr, model string) bool {
-	hc.mu.RLock()
-	defer hc.mu.RUnlock()
-	bh, ok := hc.states[urlStr]
-	if !ok || bh.Models == nil {
+// backendServesModel reports whether a backend health snapshot lists
+// the given model. A nil Models means the list couldn't be determined,
+// in which case the backend is treated as serving the model so a
+// reachable backend we couldn't interrogate is not filtered out.
+func backendServesModel(bh BackendHealth, model string) bool {
+	if bh.Models == nil {
 		return true
 	}
 	for _, m := range bh.Models {
@@ -161,6 +156,22 @@ func (hc *HealthChecker) ServesModel(urlStr, model string) bool {
 		}
 	}
 	return false
+}
+
+// ServesModel reports whether the given backend URL is known to serve
+// the given model ID. Returns true when the backend hasn't been checked
+// yet or its model list couldn't be determined (Models is nil) so the
+// router doesn't filter out a backend we couldn't interrogate. Returns
+// false when the backend reported a model list that doesn't contain the
+// model — the stale-entry case this method exists to catch.
+func (hc *HealthChecker) ServesModel(urlStr, model string) bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	bh, ok := hc.states[urlStr]
+	if !ok {
+		return true
+	}
+	return backendServesModel(bh, model)
 }
 
 // Snapshot returns a copy of the current per-backend states.
@@ -192,7 +203,7 @@ func (hc *HealthChecker) updateModelMetrics() {
 			if !ok || bh.State != StateDisabled {
 				c.enabled++
 			}
-			if ok && bh.State == StateHealthy {
+			if ok && bh.State == StateHealthy && backendServesModel(bh, model) {
 				c.healthy++
 			}
 		}
