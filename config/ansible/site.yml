@@ -8,6 +8,10 @@
 - import_playbook: configure-locale.yml
 - import_playbook: configure-vendor-services.yml
 
+# Frontend NAT mTLS PKI - seeded before admin services because
+# setup-web-services fails closed when the CA is absent from etcd.
+- import_playbook: app/setup-frontend-nat-ca.yml
+
 # Admin Services - Cluster management and coordination
 - import_playbook: admin/admin.yml
 
@@ -26,6 +30,13 @@
 
 # Applications
 - import_playbook: app/app.yml
+
+# VM frontend NAT - the WireGuard overlay must be rendered before the agent
+# install because the frontend env file selects the wg-vm-nat transit
+# interface. Both plays no-op on hosts without the opt-in host_vars flags and
+# skip cleanly when a --limit excludes one side of the overlay.
+- import_playbook: app/install-vm-nat-wg.yml
+- import_playbook: app/install-frontend-nat.yml
 
 # Storage Infrastructure - Complete storage and database deployment
 - import_playbook: storage/storage.yml

@@ -4,8 +4,10 @@
 # announce exactly one /24 transit data subnet; no cluster 10.* route is
 # ever exchanged over this overlay.
 #
-# Run with both groups selected so spoke keys are available when the hub
-# configuration is rendered.
+# Both groups must be selected in the same run so spoke keys are available
+# when the hub configuration is rendered. Under --limit that excludes either
+# side, the hub and spoke plays skip (leaving existing configuration
+# untouched) instead of failing or rendering a partial peer list.
 - name: Prepare VM NAT transit spokes
   hosts: compute
   become: yes
@@ -79,6 +81,7 @@
       register: compute_nft_ruleset
       changed_when: false
       failed_when: false
+      check_mode: false
 
     - name: Require explicit integration for an existing forward firewall
       assert:
@@ -132,22 +135,48 @@
         state: "{{ 'restarted' if (spoke_firewall.changed or spoke_firewall_unit.changed) else 'started' }}"
         daemon_reload: "{{ spoke_firewall_unit.changed }}"
 
+    - name: Check for the spoke WireGuard key
+      stat:
+        path: /etc/wireguard/wg-vm-nat.key
+      register: spoke_key_file
+      changed_when: false
+
+    - name: Note that a dry run cannot render the spoke without a key
+      debug:
+        msg: >-
+          /etc/wireguard/wg-vm-nat.key does not exist yet, so this dry run
+          cannot render the spoke configuration. Run the play for real to
+          generate the key.
+      when: ansible_check_mode and not spoke_key_file.stat.exists
+
+    - name: Stop the spoke play when a dry run has no key
+      meta: end_host
+      when: ansible_check_mode and not spoke_key_file.stat.exists
+
     - name: Generate the spoke WireGuard private key
       shell: |
         umask 077
-        test -s /etc/wireguard/wg-vm-nat.key || wg genkey > /etc/wireguard/wg-vm-nat.key
-        wg pubkey < /etc/wireguard/wg-vm-nat.key
+        wg genkey > /etc/wireguard/wg-vm-nat.key
+      args:
+        executable: /bin/bash
+      when: not spoke_key_file.stat.exists
+
+    - name: Read the spoke WireGuard public key
+      shell: wg pubkey < /etc/wireguard/wg-vm-nat.key
       args:
         executable: /bin/bash
       register: spoke_public_key
       changed_when: false
+      check_mode: false
       no_log: true
+      when: spoke_key_file.stat.exists or not ansible_check_mode
 
     - name: Read the spoke WireGuard private key
       slurp:
         src: /etc/wireguard/wg-vm-nat.key
       register: spoke_private_key_raw
       no_log: true
+      when: spoke_key_file.stat.exists or not ansible_check_mode
 
     - name: Record spoke facts for the hub play
       set_fact:
@@ -157,6 +186,7 @@
         vm_nat_wg_private_key: >-
           {{ spoke_private_key_raw.content | b64decode | trim }}
       no_log: true
+      when: spoke_key_file.stat.exists or not ansible_check_mode
 
 - name: Install the VM NAT WireGuard hub
   hosts: frontend
@@ -205,6 +235,43 @@
           {{ spokes }}
       run_once: true
 
+    - name: Identify opted-in spokes from inventory
+      set_fact:
+        vm_nat_opted_in_spokes: >-
+          {%- set opted_in = [] -%}
+          {%- for host in groups['compute'] | default([]) -%}
+          {%- if hostvars[host].vm_nat_transit_enabled | default(false) -%}
+          {%- set _ = opted_in.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ opted_in }}
+      run_once: true
+
+    - name: Explain why the hub is left untouched
+      debug:
+        msg: >-
+          No VM NAT spoke was prepared in this run, so the existing hub
+          configuration is left untouched. Re-run with the compute and
+          frontend groups selected together to render the overlay.
+      run_once: true
+      when: vm_nat_participating_spokes | length == 0
+
+    - name: Stop the hub play when no spoke was prepared
+      meta: end_play
+      when: vm_nat_participating_spokes | length == 0
+
+    - name: Fail on a partial spoke set
+      assert:
+        that: vm_nat_participating_spokes | length == vm_nat_opted_in_spokes | length
+        fail_msg: >-
+          Prepared {{ vm_nat_participating_spokes | length }} of
+          {{ vm_nat_opted_in_spokes | length }} opted-in VM NAT spokes
+          (missing:
+          {{ vm_nat_opted_in_spokes | difference(vm_nat_participating_spokes | map(attribute='host') | list) | join(', ') }}).
+          Rendering the hub now would drop their peers; re-run with the
+          compute and frontend groups selected together.
+      run_once: true
+
     - name: Derive the hub spoke third octets
       set_fact:
         vm_nat_spoke_third_octets: >-
@@ -247,22 +314,48 @@
         state: present
         reload: yes
 
-    - name: Generate the hub WireGuard key
+    - name: Check for the hub WireGuard key
+      stat:
+        path: /etc/wireguard/wg-vm-nat.key
+      register: hub_key_file
+      changed_when: false
+
+    - name: Note that a dry run cannot render the hub without a key
+      debug:
+        msg: >-
+          /etc/wireguard/wg-vm-nat.key does not exist yet, so this dry run
+          cannot render the hub configuration. Run the play for real to
+          generate the key.
+      when: ansible_check_mode and not hub_key_file.stat.exists
+
+    - name: Stop the hub play when a dry run has no key
+      meta: end_play
+      when: ansible_check_mode and not hub_key_file.stat.exists
+
+    - name: Generate the hub WireGuard private key
       shell: |
         umask 077
-        test -s /etc/wireguard/wg-vm-nat.key || wg genkey > /etc/wireguard/wg-vm-nat.key
-        wg pubkey < /etc/wireguard/wg-vm-nat.key
+        wg genkey > /etc/wireguard/wg-vm-nat.key
+      args:
+        executable: /bin/bash
+      when: not hub_key_file.stat.exists
+
+    - name: Read the hub WireGuard public key
+      shell: wg pubkey < /etc/wireguard/wg-vm-nat.key
       args:
         executable: /bin/bash
       register: hub_public_key
       changed_when: false
+      check_mode: false
       no_log: true
+      when: hub_key_file.stat.exists or not ansible_check_mode
 
     - name: Read the hub WireGuard private key
       slurp:
         src: /etc/wireguard/wg-vm-nat.key
       register: hub_private_key_raw
       no_log: true
+      when: hub_key_file.stat.exists or not ansible_check_mode
 
     - name: Install the hub WireGuard configuration
       template:
@@ -325,6 +418,46 @@
     - name: Skip non-participating compute hosts
       meta: end_host
       when: not vm_nat_transit_enabled | default(false)
+
+    - name: Identify opted-in frontends from inventory
+      set_fact:
+        vm_nat_opted_in_frontends: >-
+          {%- set opted_in = [] -%}
+          {%- for host in groups['frontend'] | default([]) -%}
+          {%- if hostvars[host].vm_frontend_nat_enabled | default(false) -%}
+          {%- set _ = opted_in.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ opted_in }}
+        vm_nat_rendered_hubs: >-
+          {%- set rendered = [] -%}
+          {%- for host in groups['frontend'] | default([]) -%}
+          {%- if hostvars[host].vm_frontend_nat_enabled | default(false)
+                and hostvars[host].hub_public_key is defined -%}
+          {%- set _ = rendered.append(host) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ rendered }}
+
+    - name: Explain why the spoke configuration is left untouched
+      debug:
+        msg: >-
+          No VM NAT hub was rendered in this run, so the existing spoke
+          configuration is left untouched. Re-run with the compute and
+          frontend groups selected together to render the overlay.
+      when:
+        - vm_nat_opted_in_frontends | length > 0
+        - vm_nat_rendered_hubs | length == 0
+
+    - name: Stop the spoke play when no hub was rendered
+      meta: end_host
+      when:
+        - vm_nat_opted_in_frontends | length > 0
+        - vm_nat_rendered_hubs | length == 0
+
+    - name: Stop the spoke play when no frontend is opted in
+      meta: end_host
+      when: vm_nat_opted_in_frontends | length == 0
 
     - name: Resolve candidate participating frontends
       set_fact:

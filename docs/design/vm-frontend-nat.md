@@ -4,7 +4,11 @@
 
 **Implemented.** The NAT gateway state machine and renderer are deployed
 on the designated frontend; the WireGuard transport overlay is
-provisioned by `app/install-vm-nat-wg.yml`.
+provisioned by `app/install-vm-nat-wg.yml`. All three associated playbooks
+(`app/setup-frontend-nat-ca.yml`, `app/install-vm-nat-wg.yml`,
+`app/install-frontend-nat.yml`) are imported by `site.yml`; the CA seed
+runs before admin services because `setup-web-services` fails closed when
+the CA is absent from etcd.
 
 Selected VMs need a public network identity that is decoupled from the
 compute host they run on, for both directions:
@@ -132,10 +136,13 @@ routing, and NAT chains.
   overlay playbook fails and requires explicit transit0/WG rules there
   rather than bypassing it.
 
-Run the playbook with both `frontend` and `compute` selected so spoke
-keys are available when the hub configuration is rendered. Re-run
-`app/install-frontend-nat.yml` afterward when upgrading an already
-deployed frontend, because its environment file must select the
+Both groups must be selected in the same run so spoke keys are available
+when the hub configuration is rendered; `site.yml` does this by default.
+A `--limit` that excludes either side makes the hub and spoke plays skip
+with a notice, leaving the existing overlay configuration untouched, and
+a run that excludes some (but not all) opted-in spokes fails rather than
+rendering a partial peer list. `app/install-frontend-nat.yml` runs after
+the overlay play, because its environment file must select the
 `wg-vm-nat` transit interface.
 
 ### Frontend NAT (nftables)

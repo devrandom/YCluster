@@ -1,3 +1,4 @@
 ---
 - import_playbook: install-etcd.yml
+- import_playbook: app/setup-frontend-nat-ca.yml
 - import_playbook: admin/admin.yml

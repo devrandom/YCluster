@@ -72,7 +72,17 @@
       loop: [ca.crt, client.crt, client.key]
       register: nat_mtls_material
       changed_when: false
+      check_mode: false
       no_log: true
+
+    - name: Fail if mTLS material is missing
+      when: vm_frontend_nat_enabled | default(false) and
+            (nat_mtls_material.results | map(attribute='stdout') | map('trim') | select('equalto', '') | list | length > 0)
+      fail:
+        msg: >-
+          NAT mTLS material missing from etcd ({{ nat_ca_etcd_prefix }})
+          — run setup-frontend-nat-ca.yml to seed it. The agent refuses to
+          pull without mTLS (fail-closed).
 
     - name: Install mTLS CA certificate (from etcd)
       when: vm_frontend_nat_enabled | default(false)
@@ -95,15 +105,6 @@
         dest: /etc/ycluster/nat-client.key
         mode: '0600'
       no_log: true
-
-    - name: Fail if mTLS material is missing
-      when: vm_frontend_nat_enabled | default(false) and
-            (nat_mtls_material.results | map(attribute='stdout') | map('trim') | select('equalto', '') | list | length > 0)
-      fail:
-        msg: >-
-          NAT mTLS material missing from etcd ({{ nat_ca_etcd_prefix }})
-          — run setup-frontend-nat-ca.yml to seed it. The agent refuses to
-          pull without mTLS (fail-closed).
 
     - name: Create nftables.d include directory
       when: vm_frontend_nat_enabled | default(false)
