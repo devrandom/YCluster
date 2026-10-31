@@ -7,6 +7,13 @@
 - import_playbook: install-node-temps.yml
 - import_playbook: install-crps.yml
 - import_playbook: install-osv-feed.yml
+# IDS: Tetragon sensor, RSigma rule layer, CrowdSec log engine, and the
+# forwarder that normalizes detections for Alertmanager. Build them with
+# app/build-*.yml before a full site.yml run on a fresh cluster.
+- import_playbook: install-tetragon.yml
+- import_playbook: install-rsigma.yml
+- import_playbook: install-crowdsec.yml
+- import_playbook: install-ids-forwarder.yml
 - import_playbook: ceph.yml
 # Silence benign boot-time systemd failures (networkd wait-online, snap
 # leftovers, VM-host nvidia units) so SystemdUnitFailed only fires on real
