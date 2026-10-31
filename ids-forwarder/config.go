@@ -32,6 +32,7 @@ type config struct {
 	detectionsFile  string
 	detectionsBytes int64
 	detectionsKeep  int
+	destKeyFile     string
 	sigmaSocket     string
 	sigmaDetections string
 	sigmaCursorFile string
@@ -59,6 +60,7 @@ func defaultConfig() config {
 		detectionsFile:  "/var/lib/ids-forwarder/detections.jsonl",
 		detectionsBytes: 50 << 20,
 		detectionsKeep:  10,
+		destKeyFile:     "/var/lib/ids-forwarder/dest.key",
 		postTimeout:     5 * time.Second,
 		pollInterval:    500 * time.Millisecond,
 		logf:            log.Printf,

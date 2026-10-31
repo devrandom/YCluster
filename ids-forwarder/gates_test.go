@@ -102,11 +102,14 @@ func TestEventTypeVariants(t *testing.T) {
 
 func TestSeenAndMarkExpiryBoundsMemory(t *testing.T) {
 	d := newDedup(time.Minute)
-	// Deterministically backdate 4200 keys past their window so the
-	// cleanup pass evicts them, regardless of test-runner timing.
+	// Retention normally covers the longest per-rule window; shorten it here
+	// so the bound can be exercised without waiting an hour.
+	d.retain = 3 * time.Minute
+	// Deterministically backdate 4200 keys past retention so the cleanup
+	// pass evicts them, regardless of test-runner timing.
 	d.mu.Lock()
 	for i := 0; i < 4200; i++ {
-		d.keys[fmt.Sprintf("k%d", i)] = time.Now().Add(-2 * time.Minute)
+		d.keys[fmt.Sprintf("k%d", i)] = time.Now().Add(-5 * time.Minute)
 	}
 	d.mu.Unlock()
 	// The next insert triggers the cleanup pass at >4096.
@@ -220,3 +223,12 @@ func TestCrowdsecJSONRoundTrip(t *testing.T) {
 
 // sync2Mutex is an alias to keep the import list tidy in this file.
 type sync2Mutex = sync.Mutex
+
+func TestDedupRetentionCoversRepeatWindows(t *testing.T) {
+	d := newDedup(time.Minute)
+	for rule, window := range ruleRepeatWindows {
+		if d.retain < window {
+			t.Fatalf("retention %s does not cover %s window %s", d.retain, rule, window)
+		}
+	}
+}

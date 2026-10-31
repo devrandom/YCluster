@@ -36,6 +36,9 @@
     # of state and has no query, so the history lives here. Query with jq;
     # the same shape can be shipped to a central store later.
     ids_forwarder_detections_file: "{{ ids_forwarder_state_dir }}/detections.jsonl"
+    # Key for the hashed destination label: Alertmanager fingerprints on
+    # labels, so the address has to be distinguishable without being shown.
+    ids_forwarder_dest_key_file: "{{ ids_forwarder_state_dir }}/dest.key"
     ids_forwarder_detections_max_bytes: 52428800
     ids_forwarder_detections_keep: 10
     # Sigma rule layer: a bounded, best-effort copy of normalized events

@@ -8,20 +8,35 @@ import (
 // ruleRepeatWindows coalesces repeated detections of the same shape. Rules
 // absent from the map use the shared dedup window only.
 var ruleRepeatWindows = map[string]time.Duration{
+	"process_exec":   time.Hour,
+	"tcp-connect":    time.Hour,
 	"container-exec": time.Hour,
 	"container-api":  time.Hour,
+}
+
+// recordsEveryOccurrence marks alerts whose individual occurrences are
+// evidence even when delivery is coalesced: API usage and host shells. The
+// first one per window still pages; the rest are written to
+// detections.jsonl so the history is complete.
+// bypassesLocalRateLimit reports rules that must never be crowded out by the
+// optional per-host cap.
+func bypassesLocalRateLimit(a alert) bool {
+	switch a.Labels["rule_id"] {
+	case "container-api", "container-exec":
+		return true
+	}
+	return a.Labels["rule_id"] == "process_exec" && isShellBinary(a.Labels["binary"])
 }
 
 // enqueue makes one alert durable. It returns an error only when the
 // alert could not be stored; callers must then keep their source cursor
 // where it is so the event is retried.
 func (f *forwarder) enqueue(a alert) error {
-	// API usage is an audit trail before it is an alert: record every call,
-	// even when delivery is deduplicated.
-	auditOnly := a.Labels["rule_id"] == "container-api"
-	if auditOnly {
-		f.recordDetection(a)
-	}
+	// The detection history is an audit trail before it is an alert:
+	// record every classified detection, including the ones whose delivery
+	// is deduplicated or coalesced.
+	f.recordDetection(a)
+	auditOnly := bypassesLocalRateLimit(a)
 	key := a.dedupKey()
 	if f.dedup.seen(key) {
 		f.stats.deduped.Add(1)
@@ -32,9 +47,6 @@ func (f *forwarder) enqueue(a alert) error {
 	// recording the rest, so a scheduled exec does not page on every run.
 	if window, ok := ruleRepeatWindows[a.Labels["rule_id"]]; ok && f.dedup.seenWithin(key, window) {
 		f.stats.coalesced.Add(1)
-		if !auditOnly {
-			f.recordDetection(a)
-		}
 		return nil
 	}
 	// Optional per-host circuit breaker: deliver at most rate-limit alerts
@@ -46,9 +58,6 @@ func (f *forwarder) enqueue(a alert) error {
 	// need a human.
 	if !auditOnly && !f.rate.allow(a.Labels["severity"]) {
 		f.stats.rateLimited.Add(1)
-		if !auditOnly {
-			f.recordDetection(a)
-		}
 		return nil
 	}
 	if f.spool != nil {
@@ -66,9 +75,6 @@ func (f *forwarder) enqueue(a alert) error {
 		// Mark only after the append is durable: a failed append must stay
 		// retryable instead of being suppressed as a duplicate.
 		f.dedup.mark(key)
-		if !auditOnly {
-			f.recordDetection(a)
-		}
 		return nil
 	}
 	if !f.queue.push(a) {
@@ -77,9 +83,6 @@ func (f *forwarder) enqueue(a alert) error {
 		return nil
 	}
 	f.dedup.mark(key)
-	if !auditOnly {
-		f.recordDetection(a)
-	}
 	return nil
 }
 

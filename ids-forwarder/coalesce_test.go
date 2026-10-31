@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -202,5 +203,288 @@ func TestContainerAPIUsageIsAlwaysRecorded(t *testing.T) {
 	}
 	if n := len(splitLines(string(body))); n != 2 {
 		t.Fatalf("recorded %d detections, want both API calls", n)
+	}
+}
+
+func shellExecLine(t *testing.T, cmd string) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"process_exec": map[string]any{
+			"process": map[string]any{"binary": "/bin/sh", "arguments": cmd},
+			"parent":  map[string]any{"binary": "/usr/sbin/sshd", "arguments": "-D"},
+		},
+		"time": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
+func TestShellExecCoalescesButKeepsEveryRecord(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.events = "process_exec"
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
+
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.closeState()
+
+	if err := f.handleLine(shellExecLine(t, `-c "echo one"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.queue.depth(); got != 1 {
+		t.Fatalf("queue depth after first shell = %d, want 1", got)
+	}
+	// A different command from the same host must not page again, but it
+	// still has to appear in the detection history.
+	if err := f.handleLine(shellExecLine(t, `-c "echo two"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.queue.depth(); got != 1 {
+		t.Fatalf("queue depth after second shell = %d, want 1 (same key)", got)
+	}
+	if got := f.stats.deduped.Load(); got != 1 {
+		t.Fatalf("deduped = %d, want 1", got)
+	}
+	body, err := os.ReadFile(cfg.detectionsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(splitLines(string(body))); n != 2 {
+		t.Fatalf("recorded %d detections, want 2 (every shell command is evidence)", n)
+	}
+}
+
+func TestTCPConnectKeyUsesDestinationOnly(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	alertFor := func(daddr string, port int) alert {
+		t.Helper()
+		a, ok := tetragonAlert(tcpLine(t, "/usr/bin/curl", "https://service/", daddr, port), cfg)
+		if !ok {
+			t.Fatalf("connect to %s:%d must alert", daddr, port)
+		}
+		return a
+	}
+	if alertFor("203.0.113.10", 443).dedupKey() != alertFor("203.0.113.10", 443).dedupKey() {
+		t.Fatal("repeats to the same destination must share a key")
+	}
+	if alertFor("203.0.113.10", 443).dedupKey() == alertFor("203.0.113.11", 443).dedupKey() {
+		t.Fatal("a different destination must produce a different key")
+	}
+}
+
+func TestContainerExecCoalescesAcrossInvocations(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	alertFor := func(args string) alert {
+		t.Helper()
+		line, err := json.Marshal(map[string]any{
+			"process_kprobe": map[string]any{
+				"policy_name":   "privilege-raises",
+				"function_name": "security_task_fix_setuid",
+				"process": map[string]any{
+					"binary":    "/usr/libexec/incus/incusd",
+					"arguments": args,
+				},
+				"args": []any{map[string]any{"int_arg": 0}},
+			},
+			"time": time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, ok := tetragonAlert(string(line), cfg)
+		if !ok {
+			t.Fatalf("forkfile %q must alert", args)
+		}
+		return a
+	}
+	if alertFor("forkfile -- 3 4 5 2750").dedupKey() != alertFor("forkfile -- 7 8 9 9999").dedupKey() {
+		t.Fatal("forkfile invocations differ only by pid and must share one key")
+	}
+}
+
+func ageDedupKeys(f *forwarder, age time.Duration) {
+	f.dedup.mu.Lock()
+	defer f.dedup.mu.Unlock()
+	for k := range f.dedup.keys {
+		f.dedup.keys[k] = time.Now().Add(-age)
+	}
+}
+
+func TestShellExecRepeatWindowHoldsAnHour(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.events = "process_exec"
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
+
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.closeState()
+
+	if err := f.handleLine(shellExecLine(t, `-c "echo one"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.queue.depth(); got != 1 {
+		t.Fatalf("queue depth after first shell = %d, want 1", got)
+	}
+
+	// Six minutes later: past the shared window, inside the hourly one.
+	ageDedupKeys(f, 6*time.Minute)
+	if err := f.handleLine(shellExecLine(t, `-c "echo two"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.queue.depth(); got != 1 {
+		t.Fatalf("queue depth after six minutes = %d, want 1 (coalesced)", got)
+	}
+	if got := f.stats.coalesced.Load(); got != 1 {
+		t.Fatalf("coalesced = %d, want 1", got)
+	}
+
+	// Past the hour the next shell is a new event again.
+	ageDedupKeys(f, 61*time.Minute)
+	if err := f.handleLine(shellExecLine(t, `-c "echo three"`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.queue.depth(); got != 2 {
+		t.Fatalf("queue depth after an hour = %d, want 2", got)
+	}
+}
+
+func TestShellExecCoalescesAcrossShellBinaries(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_exec"
+
+	alertFor := func(binary, cmd string) alert {
+		t.Helper()
+		a, ok := tetragonAlert(execLine(t, binary, cmd, "/usr/sbin/sshd"), cfg)
+		if !ok {
+			t.Fatalf("%s %q must alert", binary, cmd)
+		}
+		return a
+	}
+	if alertFor("/bin/sh", `-c "echo one"`).dedupKey() != alertFor("/bin/bash", `-c "echo two"`).dedupKey() {
+		t.Fatal("sh and bash on one host must share the shell key")
+	}
+}
+
+func TestTCPConnectRepeatsCoalesceAndKeepRecords(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
+
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.closeState()
+
+	line := tcpLine(t, "/usr/bin/curl", "https://service/", "203.0.113.10", 443)
+	if err := f.handleLine(line); err != nil {
+		t.Fatal(err)
+	}
+	ageDedupKeys(f, 6*time.Minute)
+	if err := f.handleLine(line); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.queue.depth(); got != 1 {
+		t.Fatalf("queue depth = %d, want 1 (repeat coalesced)", got)
+	}
+	if got := f.stats.coalesced.Load(); got != 1 {
+		t.Fatalf("coalesced = %d, want 1", got)
+	}
+
+	other := tcpLine(t, "/usr/bin/curl", "https://service/", "203.0.113.11", 443)
+	if err := f.handleLine(other); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.queue.depth(); got != 2 {
+		t.Fatalf("queue depth = %d, want 2 (a new destination must page)", got)
+	}
+
+	body, err := os.ReadFile(cfg.detectionsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(splitLines(string(body))); n != 3 {
+		t.Fatalf("recorded %d detections, want 3", n)
+	}
+}
+
+func TestTCPDestinationLabelSeparatesAddresses(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+	alertFor := func(daddr string) alert {
+		t.Helper()
+		a, ok := tetragonAlert(tcpLine(t, "/usr/bin/curl", "https://service/", daddr, 443), cfg)
+		if !ok {
+			t.Fatalf("connect to %s must alert", daddr)
+		}
+		return a
+	}
+	one, two := alertFor("203.0.113.10"), alertFor("203.0.113.11")
+	if one.Labels["dest"] == "" || one.Labels["dest"] == two.Labels["dest"] {
+		t.Fatalf("dest labels must be present and distinct: %q vs %q", one.Labels["dest"], two.Labels["dest"])
+	}
+	if strings.Contains(one.Labels["dest"], "203.0.113.10") {
+		t.Fatal("dest label must not carry the address")
+	}
+	if alertFor("203.0.113.10").Labels["dest"] != one.Labels["dest"] {
+		t.Fatal("the same destination must keep one label")
+	}
+}
+
+func TestDeletedBinaryIsStillClassified(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_exec"
+	a, ok := tetragonAlert(execLine(t, "/bin/sh (deleted)", `-c "echo hi"`, "/usr/sbin/sshd"), cfg)
+	if !ok {
+		t.Fatal("a shell replaced in place must still be classified")
+	}
+	if a.Labels["binary"] != "sh" {
+		t.Fatalf("binary label = %q, want sh", a.Labels["binary"])
+	}
+}
+
+func TestRepeatedDetectionWithinDedupWindowIsRecorded(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
+
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.closeState()
+
+	line := tcpLine(t, "/usr/bin/curl", "https://service/", "203.0.113.20", 8443)
+	for i := 0; i < 2; i++ {
+		if err := f.handleLine(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.queue.depth(); got != 1 {
+		t.Fatalf("queue depth = %d, want 1 (delivery deduplicated)", got)
+	}
+	if got := f.stats.deduped.Load(); got != 1 {
+		t.Fatalf("deduped = %d, want 1", got)
+	}
+	body, err := os.ReadFile(cfg.detectionsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(splitLines(string(body))); n != 2 {
+		t.Fatalf("recorded %d detections, want 2 (dedup is delivery-only)", n)
 	}
 }

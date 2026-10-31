@@ -21,6 +21,10 @@ type alert struct {
 
 	eventTime time.Time
 	eventHash string
+	// dedupIdentity carries the part of an event that the visible summary
+	// redacts, so two destinations that both print as [ip] still get
+	// different dedup keys. Never serialised.
+	dedupIdentity string
 }
 
 // eventTimestamp returns the event's original time. Spooled alerts lose
@@ -52,34 +56,62 @@ func (a alert) tooOld(now time.Time, maxAge time.Duration) bool {
 }
 
 func (a alert) dedupKey() string {
+	shell := a.Labels["rule_id"] == "process_exec" && isShellBinary(a.Labels["binary"])
 	keys := make([]string, 0, len(a.Labels))
 	for k := range a.Labels {
 		if k == "severity" {
 			continue // severity changes should not defeat dedup
 		}
+		if k == "binary" && shell {
+			continue // sh, bash and dash are the same signal on one host
+		}
 		keys = append(keys, k+"="+a.Labels[k])
 	}
 	sort.Strings(keys)
 	summary := normalizeDedupSummary(a.Annotations["summary"])
-	if a.Labels["rule_id"] == "container-api" {
+	if shell {
+		// A shell on the host is one signal: someone (or something) with
+		// root has a shell. Colour that by the first command line per
+		// window instead of once per command; every command is still
+		// recorded in detections.jsonl.
+		summary = ""
+	}
+	switch a.Labels["rule_id"] {
+	case "container-api", "container-exec":
 		// Per-command detail belongs in the record: one API-usage alert per
 		// host per window is enough to notice that someone is driving the
 		// Incus API, and it keeps an interactive session from paging once
-		// per subcommand.
+		// per subcommand. Forkfile carries the invocation's pids, so its
+		// summary would otherwise defeat the window as well.
 		summary = ""
 	}
-	sum := sha256.Sum256([]byte(strings.Join(keys, "|") + "|" + summary))
+	sum := sha256.Sum256([]byte(strings.Join(keys, "|") + "|" + summary + "|" + a.dedupIdentity))
 	return hex.EncodeToString(sum[:8])
 }
 
 type dedup struct {
 	window time.Duration
+	// retain is how long a key stays in the map. It must cover the longest
+	// per-rule repeat window, not just the shared one, or a busy host
+	// evicts the entries the hourly coalescing depends on.
+	retain time.Duration
 	mu     sync.Mutex
 	keys   map[string]time.Time
 }
 
 func newDedup(window time.Duration) dedup {
-	return dedup{window: window, keys: map[string]time.Time{}}
+	return dedup{window: window, retain: dedupRetention(window), keys: map[string]time.Time{}}
+}
+
+// dedupRetention is the shared window widened to the longest repeat window.
+func dedupRetention(window time.Duration) time.Duration {
+	retain := window
+	for _, w := range ruleRepeatWindows {
+		if w > retain {
+			retain = w
+		}
+	}
+	return retain
 }
 
 // seen reports whether key was forwarded within the dedup window. The
@@ -116,10 +148,12 @@ func (d *dedup) mark(key string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := time.Now()
-	// Bound memory: if the map is huge, drop expired entries first.
+	// Bound memory: if the map is huge, drop entries past the retention
+	// window first. Pruning by d.window here would silently shorten the
+	// per-rule coalescing windows.
 	if len(d.keys) > 4096 {
 		for k, t := range d.keys {
-			if now.Sub(t) >= d.window {
+			if now.Sub(t) >= d.retain {
 				delete(d.keys, k)
 			}
 		}
@@ -239,6 +273,16 @@ func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
 	redactMap(a.Labels)
 	a.Annotations["summary"] = boundSummary(redactSecrets(a.Annotations["summary"]))
 	return a
+}
+
+// identityHash is a stable, non-reversible marker for the part of an event
+// that the visible summary may redact. It never leaves the process.
+func identityHash(s string) string {
+	if s == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
 }
 
 func lineHash(line string) string {

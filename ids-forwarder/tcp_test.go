@@ -144,6 +144,7 @@ func tcpLine(t *testing.T, binary, args, daddr string, port int) string {
 	t.Helper()
 	line, err := json.Marshal(map[string]any{
 		"process_kprobe": map[string]any{
+			"policy_name":   "tcp-connect",
 			"function_name": "tcp_connect",
 			"process":       map[string]any{"binary": binary, "arguments": args},
 			"args": []any{

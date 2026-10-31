@@ -17,6 +17,8 @@ func testConfig() config {
 	cfg.logf = func(string, ...any) {}
 	// Only tests that exercise the record file point this at a temp dir.
 	cfg.detectionsFile = ""
+	// Keep the destination-key helper from touching /var/lib during tests.
+	cfg.destKeyFile = ""
 	return cfg
 }
 

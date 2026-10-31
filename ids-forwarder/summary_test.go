@@ -721,3 +721,37 @@ func TestAnsibleSudoPrivilegeRaiseIsSuppressed(t *testing.T) {
 		t.Fatalf("unrelated sudo transition was suppressed as %q", reason)
 	}
 }
+
+func TestShellExecCoalescesPerHostPerWindow(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_exec"
+
+	shellAlert := func(cmd string) alert {
+		t.Helper()
+		a, ok := tetragonAlert(execLine(t, "/bin/sh", cmd, "/usr/sbin/sshd"), cfg)
+		if !ok {
+			t.Fatalf("shell exec %q must alert", cmd)
+		}
+		return a
+	}
+	first := shellAlert(`-c "echo one"`)
+	second := shellAlert(`-c "echo two"`)
+	if first.dedupKey() != second.dedupKey() {
+		t.Fatal("different shell commands must share one key per host and window")
+	}
+	if first.Labels["binary"] != "sh" {
+		t.Fatalf("binary label = %q, want sh", first.Labels["binary"])
+	}
+
+	aptAlert := func(pkg string) alert {
+		t.Helper()
+		a, ok := tetragonAlert(execLine(t, "/usr/bin/apt-get", "install "+pkg, "/usr/bin/sudo"), cfg)
+		if !ok {
+			t.Fatalf("apt exec %q must alert", pkg)
+		}
+		return a
+	}
+	if aptAlert("nginx").dedupKey() == aptAlert("certbot").dedupKey() {
+		t.Fatal("non-shell execs must keep the command line in the key")
+	}
+}

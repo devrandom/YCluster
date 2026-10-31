@@ -110,6 +110,7 @@ func TestSigmaSinkDoesNotBlockWhenEngineIsDown(t *testing.T) {
 
 func TestSigmaDetectionToAlert(t *testing.T) {
 	cfg := defaultConfig()
+	cfg.destKeyFile = ""
 	cfg.hostname = "node.test"
 	line := testDetection("Linux Webshell Indicators", "2026-10-28T12:00:00Z")
 	a, ok := sigmaDetectionToAlert(line, cfg)
@@ -167,6 +168,7 @@ func TestSigmaDetectionsTailWithCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := defaultConfig()
+	cfg.destKeyFile = ""
 	cfg.hostname = "node.test"
 	cfg.detectionsFile = ""
 	cfg.sigmaDetections = detPath

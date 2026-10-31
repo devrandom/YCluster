@@ -81,9 +81,29 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	if reason := tetragonSuppression(evType, body, layer); reason != "" {
 		return alert{}, meta, false, reason
 	}
-	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), eventSummary(evType, body))
+	summary := eventSummary(evType, body)
+	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), summary)
+	if body.FunctionName == "tcp_connect" {
+		if addr, port, ok := tcpDestination(body.Args); ok {
+			a.Labels["dest"] = destinationLabel(addr, port)
+		}
+	}
+	if evType == "process_exec" {
+		// Kept as a label so the dedup key can tell a shell from a
+		// package-manager or downloader exec, and so triage sees which
+		// binary produced the alert.
+		a.Labels["binary"] = processBinaryName(body.Process.Binary)
+	}
 	if containerName != "" {
 		a.Labels["container"] = containerName
+	}
+	// The visible summary redacts addresses, so two connects to different
+	// hosts would otherwise share one dedup key. Hash the normalised but
+	// unredacted summary for the key; shells and API calls coalesce by
+	// design and keep an empty identity.
+	if a.Labels["rule_id"] != "container-api" && a.Labels["rule_id"] != "container-exec" &&
+		!(evType == "process_exec" && isShellBinary(a.Labels["binary"])) {
+		a.dedupIdentity = identityHash(normalizeDedupSummary(eventSummaryRaw(evType, body)))
 	}
 	a.StartsAt = meta.time.Format(time.RFC3339Nano)
 	a.eventTime = meta.time
@@ -170,7 +190,7 @@ func configuredEvent(eventsCSV, evType string) bool {
 }
 
 func configuredExecBinary(binariesCSV, binary string) bool {
-	base := path.Base(strings.TrimSpace(binary))
+	base := processBinaryName(strings.TrimSpace(binary))
 	if base == "." || base == "/" || base == "" {
 		return false
 	}
@@ -325,6 +345,22 @@ func tetragonRule(evType string, body *tetragonLog) string {
 	return evType
 }
 
+// processBinaryName is the binary name Tetragon reports, without the
+// " (deleted)" suffix left behind by an in-place update.
+func processBinaryName(binary string) string {
+	return path.Base(strings.TrimSuffix(binary, " (deleted)"))
+}
+
+// isShellBinary reports whether the exec is an interactive shell, the class
+// that coalesces to one alert per host per window.
+func isShellBinary(name string) bool {
+	switch name {
+	case "sh", "bash", "dash", "zsh", "fish":
+		return true
+	}
+	return false
+}
+
 func isIncusClient(body *tetragonLog) bool {
 	if body == nil || body.PolicyName == "privilege-raises" {
 		return false
@@ -364,6 +400,13 @@ func tetragonSeverity(body *tetragonLog) string {
 }
 
 func eventSummary(evType string, body *tetragonLog) string {
+	return redactIPs(eventSummaryRaw(evType, body))
+}
+
+// eventSummaryRaw builds the summary without address redaction. It exists so
+// the dedup identity can distinguish events the visible summary collapses to
+// [ip]; the result is hashed and never stored or delivered.
+func eventSummaryRaw(evType string, body *tetragonLog) string {
 	parts := make([]string, 0, 3)
 	if body.Process.Binary != "" {
 		parts = append(parts, "binary="+body.Process.Binary)
@@ -380,7 +423,7 @@ func eventSummary(evType string, body *tetragonLog) string {
 	if len(parts) == 0 {
 		return fmt.Sprintf("tetragon %s event", evType)
 	}
-	return redactIPs(fmt.Sprintf("%s: %s", evType, strings.Join(parts, " ")))
+	return fmt.Sprintf("%s: %s", evType, strings.Join(parts, " "))
 }
 
 // crowdsecToAlert maps one CrowdSec notification-http payload item to an

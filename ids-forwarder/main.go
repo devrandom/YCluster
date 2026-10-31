@@ -51,6 +51,8 @@ func main() {
 		cfg.detectionsBytes, "rotate the detections file at this size")
 	flag.IntVar(&cfg.detectionsKeep, "detections-keep",
 		cfg.detectionsKeep, "number of rotated detections files to retain")
+	flag.StringVar(&cfg.destKeyFile, "dest-key-file",
+		cfg.destKeyFile, "key file for the hashed TCP destination label (empty generates an ephemeral key)")
 	flag.StringVar(&cfg.sigmaSocket, "sigma-socket",
 		cfg.sigmaSocket, "unix socket of the RSigma rule engine (empty disables the Sigma event copy)")
 	flag.StringVar(&cfg.sigmaDetections, "sigma-detections",

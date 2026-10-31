@@ -17,6 +17,7 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -detections-file {{ ids_forwarder_detections_file }} \
     -detections-max-bytes {{ ids_forwarder_detections_max_bytes }} \
     -detections-keep {{ ids_forwarder_detections_keep }} \
+    -dest-key-file {{ ids_forwarder_dest_key_file }} \
     -sigma-socket {{ ids_forwarder_sigma_socket }} \
     -sigma-detections {{ ids_forwarder_sigma_detections }} \
     -sigma-cursor {{ ids_forwarder_sigma_cursor }} \

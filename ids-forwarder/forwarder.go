@@ -67,6 +67,7 @@ func newForwarder(cfg config) (*forwarder, error) {
 	if cfg.logf == nil {
 		cfg.logf = log.Printf
 	}
+	destinationKey = loadDestinationKey(cfg.destKeyFile, cfg.logf)
 	f := &forwarder{
 		cfg:    cfg,
 		queue:  alertQueue{max: cfg.queueMax},
