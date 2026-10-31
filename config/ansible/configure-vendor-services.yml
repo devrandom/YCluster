@@ -115,3 +115,32 @@
           content: |
             # Managed by Ansible: the updates-available MOTD is not used on
             # cluster servers.
+
+    # ubuntu-release-upgrader checks for a new release from the login MOTD
+    # (91-release-upgrade -> check-new-release) and connects to ubuntu.com.
+    # Disable the automatic hook, but keep Prompt=lts so a manual
+    # do-release-upgrade still checks on demand; Prompt=never would refuse
+    # the upgrade entirely.
+    - name: Keep manual release upgrades available
+      copy:
+        dest: /etc/update-manager/release-upgrades
+        content: |
+          # Managed by Ansible: no automatic new-release check. A manual
+          # do-release-upgrade still checks on demand.
+          [DEFAULT]
+          Prompt=lts
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Stop the release-upgrade MOTD check from running
+      copy:
+        dest: /etc/update-motd.d/91-release-upgrade
+        content: |
+          #!/bin/sh
+          # Managed by Ansible: no new-release check on cluster servers.
+          exit 0
+        owner: root
+        group: root
+        mode: '0644'
+
