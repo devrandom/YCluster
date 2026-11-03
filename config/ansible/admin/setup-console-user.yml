@@ -1,0 +1,79 @@
+---
+# Temporary console administrator without TOTP. Opt in per host with
+# `console_user_enabled: true` in host_vars/<node>.yml. When the variable is
+# false or absent, the account and its private group are removed (including
+# the home directory).
+#
+# The playbook intentionally leaves the password unset: set it manually with
+# `passwd ops` on the host. SSH password/keyboard-interactive auth is disabled
+# for this account so the temporary credential only works at the local console
+# (getty or GDM).
+- name: Setup optional console administrator
+  hosts: managed
+  become: yes
+  vars:
+    console_user: ops
+    console_user_uid: 2001
+    console_user_group: ops
+    console_user_gid: 2001
+    console_user_home: /home/ops
+  tasks:
+    - name: Create console administrator group
+      group:
+        name: "{{ console_user_group }}"
+        gid: "{{ console_user_gid }}"
+        state: present
+      when: console_user_enabled | default(false) | bool
+
+    - name: Create console administrator
+      user:
+        name: "{{ console_user }}"
+        uid: "{{ console_user_uid }}"
+        group: "{{ console_user_group }}"
+        groups: sudo
+        append: yes
+        shell: /bin/bash
+        home: "{{ console_user_home }}"
+        create_home: yes
+        state: present
+      when: console_user_enabled | default(false) | bool
+
+    - name: Restrict console administrator home
+      file:
+        path: "{{ console_user_home }}"
+        state: directory
+        owner: "{{ console_user }}"
+        group: "{{ console_user_group }}"
+        mode: '0700'
+      when: console_user_enabled | default(false) | bool
+
+    - name: Remove console administrator
+      user:
+        name: "{{ console_user }}"
+        state: absent
+        remove: yes
+      when: not (console_user_enabled | default(false) | bool)
+
+    - name: Remove console administrator group
+      group:
+        name: "{{ console_user_group }}"
+        state: absent
+      when: not (console_user_enabled | default(false) | bool)
+
+    - name: Disable SSH password auth for console administrator
+      blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} ANSIBLE MANAGED - console user"
+        block: |
+          # Console-only account: never authenticate over SSH with its password
+          Match User {{ console_user }}
+              PasswordAuthentication no
+              KbdInteractiveAuthentication no
+        validate: '/usr/sbin/sshd -t -f %s'
+        state: "{{ 'present' if (console_user_enabled | default(false) | bool) else 'absent' }}"
+      notify: restart ssh
+  handlers:
+    - name: restart ssh
+      systemd:
+        name: ssh
+        state: restarted

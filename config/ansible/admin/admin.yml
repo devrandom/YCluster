@@ -13,6 +13,7 @@
 - import_playbook: install-burst-write-reliability.yml
 - import_playbook: setup-linux-boot.yml
 - import_playbook: setup-admin-user.yml
+- import_playbook: setup-console-user.yml
 - import_playbook: install-dhcp-leader-election.yml
 - import_playbook: setup-network-services.yml
 - import_playbook: setup-pxe-boot.yml
