@@ -1,0 +1,46 @@
+---
+# Per-interface systemd .link overrides for NIC link advertisement.
+#
+# Opt in per host in private host_vars, e.g.:
+#
+#   nic_link_advertise:
+#     eno1np0:
+#       match: "Path=pci-0000:00:1f.6"
+#       advertise: "10000baset-full"
+#
+# The .link file is applied by udev when the device is initialized, while the
+# interface is still administratively down. That matters for the X710/i40e
+# multi-speed autonegotiation fallback: `ethtool -s` fails with "Operation not
+# supported" until the interface is up, so a boot-time service would race
+# networking or renegotiate after DHCP.
+#
+# `advertise` takes systemd.link Advertise= tokens. Multiple speeds can be a
+# space-separated string (for example "1000baset-full 10000baset-full").
+# Changes apply at the next device initialization; no trigger is run here
+# because it would renegotiate a live uplink.
+
+- name: Configure per-interface link advertisement
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Skip hosts without link advertisement overrides
+      meta: end_host
+      when: nic_link_advertise | default({}) | length == 0
+
+    - name: Install systemd .link advertisement overrides
+      template:
+        src: templates/nic-link.link.j2
+        dest: "/etc/systemd/network/50-ycluster-{{ item.key }}.link"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ nic_link_advertise | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      notify: reload udev link rules
+
+  handlers:
+    - name: reload udev link rules
+      command: udevadm control --reload

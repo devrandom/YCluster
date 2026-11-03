@@ -3,6 +3,8 @@
 - import_playbook: setup-base-compute.yml
 - import_playbook: disable-desktop-sleep.yml
 - import_playbook: configure-netplan.yml
+# Per-NIC autonegotiation overrides (systemd .link); no-op without host_vars
+- import_playbook: configure-nic-link.yml
 - import_playbook: install-vault-pass-setup.yml
 - import_playbook: install-ycluster-package.yml
 - import_playbook: setup-base-infrastructure.yml

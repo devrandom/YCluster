@@ -1,0 +1,7 @@
+# Managed by Ansible - admin/configure-nic-link.yml
+# Applied by udev at link setup, before networkd brings the interface up.
+[Match]
+{{ item.value.match }}
+
+[Link]
+Advertise={{ item.value.advertise }}
