@@ -37,6 +37,9 @@ func TestNormalizeTCPConnect(t *testing.T) {
 	if ev.User != "1000" {
 		t.Fatalf("User = %q", ev.User)
 	}
+	if ev.Initiated != "true" {
+		t.Fatalf("Initiated = %q, want true", ev.Initiated)
+	}
 }
 
 func TestNormalizeCarriesProcessStart(t *testing.T) {

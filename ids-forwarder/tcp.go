@@ -18,16 +18,22 @@ type tetragonSocket struct {
 	DPort uint16 `json:"dport"`
 }
 
+// expectedPrometheusPorts lists the scrape targets outside the
+// 8000-9999 service range; in-range targets are covered by
+// internalServicePort. Prometheus scrapes the admin API on 12723 for
+// http_sd and the inference proxy's dedicated metrics listener on 4010.
 var expectedPrometheusPorts = map[uint16]struct{}{
-	8067: {}, 9090: {}, 9093: {}, 9094: {}, 9095: {},
+	4010: {}, 8067: {}, 9090: {}, 9093: {}, 9094: {}, 9095: {},
 	9100: {}, 9101: {}, 9115: {}, 9187: {},
 	9216: {}, 9217: {}, 9218: {}, 9222: {},
-	9283: {}, 9400: {}, 9443: {},
+	9283: {}, 9400: {}, 9443: {}, 12723: {},
 }
 
+// expectedLocalAIProxyPorts is both the proxy's upstream set and the set of
+// inference backend ports the latency probe polls.
 var expectedLocalAIProxyPorts = map[uint16]struct{}{
 	8000: {}, 8001: {}, 8080: {}, 8081: {}, 9000: {},
-	9216: {}, 9217: {}, 9218: {}, 11434: {}, 52415: {},
+	9216: {}, 9217: {}, 9218: {}, 9219: {}, 11434: {}, 52415: {},
 }
 
 var expectedAdminServicePorts = map[uint16]struct{}{
@@ -69,11 +75,18 @@ func containerProbeReason(body *tetragonLog) string {
 	if body == nil || body.FunctionName != "tcp_connect" {
 		return ""
 	}
-	base := strings.TrimSuffix(path.Base(body.Process.Binary), " (deleted)")
+	binary := strings.TrimSuffix(body.Process.Binary, " (deleted)")
+	_, port, ok := tcpDestination(body.Args)
+	if !ok {
+		return ""
+	}
 	// Vikunja's image ships a healthcheck subcommand (the container is
 	// distroless) and it checks service.publicurl, which resolves to the
-	// storage VIP. Every probe is therefore a container -> VIP connect.
-	if base == "vikunja" && strings.Contains(body.Process.Arguments, "healthcheck") {
+	// storage VIP. Every probe is therefore a container -> VIP connect on
+	// the publicurl port; the exact image path and port keep a lookalike
+	// binary from inheriting this without the Vikunja image.
+	if binary == "/app/vikunja/vikunja" &&
+		strings.Contains(body.Process.Arguments, "healthcheck") && port == 443 {
 		return "expected_tcp"
 	}
 	return ""
@@ -124,8 +137,9 @@ func expectedTCPReason(body *tetragonLog) string {
 		return "expected_tcp"
 	}
 	// Everything below is cluster-internal; a public destination from one
-	// of these binaries stays visible.
-	if !conn.addr.IsPrivate() {
+	// of these binaries stays visible. Loopback counts as local: a service
+	// reaching its own host is neither egress nor lateral movement.
+	if !conn.addr.IsPrivate() && !conn.addr.IsLoopback() {
 		return ""
 	}
 	if clusterDial(conn) {
@@ -147,22 +161,36 @@ func automationDial(c tcpConn) bool {
 		return c.port == 22 && containerNetwork.Contains(c.addr)
 	case c.base == "[kthreadd]":
 		// Tetragon reports kernel-side connects without an owning process
-		// as [kthreadd]; those are the Ceph OSD and messenger sockets.
-		_, ok := cephPorts[c.port]
-		return ok
-	case c.base == "prometheus-blackbox-exporter", c.base == "squid":
+		// as [kthreadd]; those are the Ceph OSD and messenger sockets, plus
+		// the kernel NFS client mounting VM storage from the cluster.
+		if _, ok := cephPorts[c.port]; ok {
+			return true
+		}
+		return c.port == 2049 && c.addr.IsPrivate()
+	case c.base == "prometheus-blackbox-exporter":
+		// The whole purpose of this daemon is probing arbitrary endpoints.
 		return true
-	case strings.HasPrefix(c.base, "smokescreen"):
-		return true
-	case c.base == "ntfy-webhook.py" || strings.Contains(c.args, "ntfy-webhook.py"):
-		return true
+	case c.base == "squid" && c.binary == "/usr/sbin/squid":
+		// The proxy dials origins and peers. A payload named "squid" does not
+		// inherit that exemption.
+		return c.port == 80 || c.port == 443 || c.port == 3128
+	case strings.HasPrefix(c.binary, "/usr/local/bin/smokescreen-"):
+		// Versioned build path; an attacker staging a binary elsewhere does
+		// not inherit the exemption.
+		return c.port == 443
+	case strings.HasPrefix(c.binary, "/usr/local/bin/ntfy-webhook.py") ||
+		strings.HasPrefix(c.args, "/usr/local/bin/ntfy-webhook.py"):
+		// Pinned install path and the notify-only HTTPS API, plus the cluster
+		// etcd it uses to claim the shared budget; an argument mentioning the
+		// name does not make an arbitrary payload trusted.
+		return c.port == 443 || (c.port == 2381 && c.addr.IsPrivate())
 	case c.base == "frpc":
 		return c.port == 7000
 	case c.base == "fwupd" || c.base == "snapd":
 		return c.port == 443
 	case c.base == "NetworkManager":
 		return c.port == 80
-	case strings.Contains(c.binary, "/apt/methods/"):
+	case strings.HasPrefix(c.binary, "/usr/lib/apt/methods/"):
 		return c.port == 443 || c.port == 3128
 	}
 	if c.args == "" {
@@ -173,26 +201,86 @@ func automationDial(c tcpConn) bool {
 
 // automationArgs covers cluster scripts whose binary name is generic
 // (python3, ycluster) and whose purpose is only visible in the command line.
+// Every match is anchored to the program or its interpreter operand: argv is
+// attacker-controlled, so a payload must not inherit an exemption by naming
+// a cluster script in a later argument.
 func automationArgs(c tcpConn) bool {
 	switch {
-	case strings.Contains(c.args, "ycluster vm idle") && c.port == 443:
+	case c.port == 443 && yclusterIdleNotify(c.args):
 		// The hourly leader job posts idle-VM notices to the Zulip API.
 		return true
-	case strings.Contains(c.args, "/usr/local/lib/cluster/hosting-balance-collector"):
+	case invokesScript(c.args, "/usr/local/lib/cluster/hosting-balance-collector"):
 		// The hosting-balance collector's provider API is a known external
 		// egress path; its output is the balance metric, not this connect.
-		return true
-	case strings.Contains(c.args, "/usr/local/lib/cluster/cluster-heartbeat"):
-		// The leader's dead-man's-switch ping is a fixed external call;
-		// match the script path rather than the destination.
-		return true
-	case c.port == 2381 && c.addr.IsPrivate() && strings.Contains(c.args, "/usr/local/"):
+		return c.port == 443
+	case invokesScript(c.args, "/usr/local/lib/cluster/cluster-heartbeat"):
+		// The leader's dead-man's-switch ping is a fixed external call, and
+		// the same job records leadership in etcd.
+		return c.port == 443 || (c.port == 2381 && c.addr.IsPrivate())
+	case invokesScript(c.args, "/usr/local/lib/cluster/inference-interactive-probe"):
+		// The latency probe polls the registered inference backends and its
+		// own Prometheus. Backends come from the cluster-owned registry, but
+		// keep the exemption to private inference ports so a redirected
+		// target still shows up.
+		_, known := expectedLocalAIProxyPorts[c.port]
+		return (known && c.addr.IsPrivate()) || (c.port == 9090 && c.addr.IsLoopback())
+	case c.port == 2381 && c.addr.IsPrivate() && clusterScript(c.args):
 		// Cluster collectors talk to etcd on the client port.
 		return true
-	case isPython(c.base) && strings.Contains(c.args, "ycluster.utils.gateway_health"):
+	case isPython(c.base) && strings.HasPrefix(c.args, "-m ycluster.utils.gateway_health"):
+		// Module invocation only: the text in another argument is not the
+		// gateway-health probe.
 		return c.port == 2381 || c.port == 7000
 	}
 	return false
+}
+
+// invokesScript reports whether the command line launches script. Tetragon
+// records the process arguments without the interpreter, so a script normally
+// appears at argv[0] and only an interpreter flag can precede it.
+func invokesScript(args, script string) bool {
+	fields := strings.Fields(args)
+	if i := scriptOperand(fields); i >= 0 && i < len(fields) {
+		return fields[i] == script
+	}
+	return false
+}
+
+// clusterScript reports whether the command line runs a cluster-installed
+// program, which is the part of argv a payload cannot forge without write
+// access to /usr/local.
+func clusterScript(args string) bool {
+	fields := strings.Fields(args)
+	i := scriptOperand(fields)
+	if i < 0 || i >= len(fields) {
+		return false
+	}
+	return strings.HasPrefix(fields[i], "/usr/local/lib/cluster/") ||
+		strings.HasPrefix(fields[i], "/usr/local/bin/")
+}
+
+// scriptOperand returns the index of the program or interpreter script
+// operand, or -1 for an empty command line. Accepting a single leading flag
+// covers `python3 -u /usr/local/...` without letting a script's first
+// argument claim the identity of the program.
+func scriptOperand(fields []string) int {
+	switch {
+	case len(fields) == 0:
+		return -1
+	case len(fields) > 1 && strings.HasPrefix(fields[0], "-"):
+		return 1
+	}
+	return 0
+}
+
+// yclusterIdleNotify matches the idle-VM notice subcommand.
+func yclusterIdleNotify(args string) bool {
+	fields := strings.Fields(args)
+	i := scriptOperand(fields)
+	if i < 0 || i+2 >= len(fields) || fields[i] != "/usr/local/bin/ycluster" {
+		return false
+	}
+	return fields[i+1] == "vm" && fields[i+2] == "idle"
 }
 
 func isPython(base string) bool {
@@ -242,7 +330,8 @@ func serviceDial(c tcpConn) bool {
 	case "etcdctl":
 		return c.port == 2381
 	case "ycluster":
-		return c.port == 2381 || c.port == 9091 || c.port == 5432
+		// 8067 is the DHCP health endpoint that `cluster status` probes.
+		return c.port == 2381 || c.port == 9091 || c.port == 5432 || c.port == 8067
 	case "etcd":
 		return c.port == 2382
 	case "microcephd":
@@ -256,7 +345,9 @@ func serviceDial(c tcpConn) bool {
 	case "ids-forwarder":
 		return c.port == 9093
 	case "local-ai-proxy":
-		return registeredPort(expectedLocalAIProxyPorts, c.port)
+		// The proxy also reads its model registry from the etcd client port.
+		return registeredPort(expectedLocalAIProxyPorts, c.port) ||
+			(c.port == 2381 && c.addr.IsPrivate())
 	}
 	if !isPython(c.base) {
 		return false
@@ -276,6 +367,12 @@ func registeredPort(known map[uint16]struct{}, port uint16) bool {
 // adminPythonDial covers the admin service and its target updater, which
 // share the python3 binary.
 func adminPythonDial(c tcpConn) bool {
+	if c.port == 2381 && c.addr.IsPrivate() &&
+		strings.HasPrefix(c.args, "/opt/admin-services/") {
+		// The admin services (app.py, health-api.py) read their
+		// configuration from etcd.
+		return true
+	}
 	if c.port == 2381 && strings.Contains(c.args, "update-blackbox-targets") {
 		return true
 	}

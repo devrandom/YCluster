@@ -27,6 +27,9 @@ type Event struct {
 	StartTime         string `json:"StartTime,omitempty"`
 	DestinationIp     string `json:"DestinationIp,omitempty"`
 	DestinationPort   uint16 `json:"DestinationPort,omitempty"`
+	// Initiated is set for tcp_connect events: the sensor saw the SYN.
+	// SigmaHQ network rules use it to distinguish client from server traffic.
+	Initiated string `json:"Initiated,omitempty"`
 }
 
 type envelope struct {
@@ -92,6 +95,7 @@ func NormalizeLine(line string) (*Event, bool, error) {
 		if addr, port, ok := destination(env.Kprobe.Args); ok {
 			ev.DestinationIp = addr
 			ev.DestinationPort = port
+			ev.Initiated = "true"
 		}
 		return ev, true, nil
 	default:

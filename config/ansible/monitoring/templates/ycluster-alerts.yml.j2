@@ -1171,6 +1171,15 @@ groups:
           summary: "IDS Sigma detections disabled on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} could not open the RSigma detection sink in the last 15m; Sigma detections are not reaching Alertmanager from that node."
 
+      - alert: IdsSigmaStalled
+        expr: increase(ids_forwarder_recorded_total[15m]) > 0 and increase(ids_forwarder_sigma_sent_total[15m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS Sigma path stalled on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} recorded detections in the last 15m but sent nothing to RSigma; check the socket and the service flags."
+
       - alert: IdsForwarderDropping
         expr: increase(ids_forwarder_dropped_total[15m]) > 0
         for: 5m
