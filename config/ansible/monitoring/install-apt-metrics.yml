@@ -99,14 +99,12 @@
           Type=oneshot
           # apt-get update exits 0 even when individual sources fail, so keep
           # the last run's output where the metrics collector can count the
-          # failed fetches. RuntimeDirectory clears it on boot; the oneshot
-          # stops immediately, so preserve the directory after it exits.
+          # failed fetches. systemd can open StandardOutput= before it has
+          # created RuntimeDirectory (EXIT_STDOUT), so create the directory
+          # and redirect inside ExecStart instead.
           RuntimeDirectory=ycluster
           RuntimeDirectoryPreserve=yes
-          ExecStart=/usr/bin/apt-get -o DPkg::Lock::Timeout=300 update
-          # stderr inherits stdout, so one truncating target captures both
-          # streams and keeps the file at one run's output.
-          StandardOutput=truncate:/run/ycluster/apt-update.log
+          ExecStart=/bin/bash -c 'mkdir -p /run/ycluster && exec /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update > /run/ycluster/apt-update.log 2>&1'
           # Only runs if ExecStart succeeded, so both stamps mean "last
           # successful update". update-success-stamp feeds the node-exporter
           # apt collector; update-stamp is what apt.systemd.daily checks, so
