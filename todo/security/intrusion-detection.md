@@ -219,6 +219,16 @@ must not become a second, longer-lived access log.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.
+- Evasion-analysis follow-up: Sigma delivery fixed (the unit's
+  space-separated bool flag stopped Go flag parsing, leaving the socket,
+  cursor, spool and receiver unparsed) and `IdsSigmaStalled` added; inert
+  hostname rules disabled; attacker-shaped egress suppressions partly
+  tightened; nginx/sshd parser defects fixed. Deferred to the discussion
+  phase: paging, VM/UDP/unix-socket visibility, rename/mmap/read hooks,
+  kernel rate limits, the admin-service port range, alert-path
+  authentication, CrowdSec scenarios/thresholds, non-root interpreter
+  coverage, raw retention and boot-order process attribution (services that
+  start before Tetragon are reported as systemd with argv `text`).
 - Ship findings through the existing Alertmanager → ntfy path, with a
   severity mapping. Avoid a second paging channel that bypasses the
   established alert routing.

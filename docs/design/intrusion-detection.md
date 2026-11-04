@@ -669,21 +669,27 @@ network coverage.
   event-generating. The Ceph and `ycluster` CLIs are Python scripts, so
   `matchBinaries` does not identify them reliably; their expected pairs
   remain visible and are suppressed by the forwarder.
-- **Tetragon process execs.** The forwarder forwards `process_exec` only for
-  shells, privilege tools (`sudo`, `su`), package managers and downloaders.
-  The binary allowlist is a playbook variable
+- **Tetragon process execs.** The hand-written path forwards `process_exec`
+  only for shells, privilege tools (`sudo`, `su`), package managers and
+  downloaders. The binary allowlist is a playbook variable
   (`ids_forwarder_exec_binaries`). Recognized health probes and collector
-  scripts are suppressed before alert creation.
-- **Tetragon FIM.** Real-time file access and modification on `/etc`, systemd unit
-  paths, SSH config, cron paths and Ansible-managed config directories. This is
-  access/modification detection, not a periodic hash baseline.
-- **CrowdSec scenarios.** sshd authentication failures and successes, sudo
-  failures, nginx 4xx/5xx bursts, scanner paths, and Authentik authentication
-  failures.
+  scripts are suppressed before alert creation. The Sigma copy is offered every
+  `process_exec` and `tcp_connect` before that allowlist is applied, so it is the
+  broader exec surface when it is delivering.
+- **Tetragon FIM.** Write events on `/etc/` and `/usr/lib/systemd/system/` only.
+  This is write detection, not read/access detection, and it is bypassable by a
+  staged rename or an mmap update; see the evasion analysis. There is no periodic
+  hash baseline.
+- **CrowdSec scenarios.** sshd brute force, nginx 40x bursts and non-static
+  crawling. The Authentik log is collected but has no parser or scenario yet, and
+  the sudo/5xx/scanner-path scenarios named in earlier drafts are not implemented.
 - **Baseline hashes.** If a periodic hash manifest is required, add a small Go
   hasher that writes a signed manifest and compares it on a timer. Do not add AIDE.
-- **Sigma.** Use as an offline source for new Tetragon/CrowdSec rules; no runtime
-  Sigma engine.
+- **Sigma.** RSigma runs the curated rule set over the normalized
+  `process_exec`/`tcp_connect` stream. At the 2026-10-31 check it was receiving
+  no events in production; do not credit it with coverage until the delivery
+  counter moves and a positive control fires. SigmaHQ is also the source for new
+  rules; there is no automatic upstream update.
 - **Tuning.** Run the full policy/scenario set in the dev cluster for two weeks,
   suppress expected package updates, Ansible runs, container builds and health probes,
   then enable alerts on core, storage and frontend first. The first production
@@ -843,6 +849,289 @@ hard way. They apply to the pinned versions; re-verify on upgrades.
 - Ansible must escape Go-template fragments destined for CrowdSec's own
   templating: write `format: "{{ '{{.|toJson}}' }}"` for the
   notification-http body.
+
+## Evasion analysis (2026-10-31)
+
+Assumption: the rules, suppression table and collection configuration are public.
+The relevant question is therefore not whether an attacker can read the rules, but
+whether a given attacker can shape activity that the shipped configuration never
+records, never classifies, or classifies as routine. The answer is yes: the
+current posture detects several specific behaviours, but it is bypassable by
+design in the VM/tenant boundary, by transport choice, by process identity, and by
+tampering with the paging path.
+
+This section is the detection-engineering counterpart to the threat model. It
+records what was verified against the code, a probe of the classifier, and the
+live deployment. It does not assume the attacker needs to defeat eBPF: in several
+cases they only need to use a protocol or namespace the sensor does not observe.
+
+### Verification method
+
+- Read the Tetragon policies, forwarder classification/suppression code, the
+  curated Sigma set and its normalizer, and the CrowdSec parsers/scenarios.
+- Ran an attacker-shaped probe through the real `tetragonAlertDecision` path
+  (scratch copy under `./tmp/`, not committed).
+- Compared the running fleet with the repository: sensor liveness, Alertmanager
+  route, forwarder counters, event-log rotation, and the Sigma delivery counters.
+- Ran the deployed forwarder binary locally against a synthetic log and a fake
+  Sigma socket, to distinguish a binary defect from a deployment-state defect.
+
+### Findings, highest impact first
+
+1. **Detections are currently not paged.** `IDSAlert` still routes to the
+   `ids-silent` receiver (verified in the live Alertmanager configuration). Every
+   hand-written and Sigma detection is visible only in the Alertmanager API and
+   `detections.jsonl`. Coverage alerts still page. This is the intended tuning
+   state, but it is the dominant practical bypass until the route is removed.
+
+2. **The Sigma rule layer is not receiving events.** Fleet-wide,
+   `ids_forwarder_sigma_sent_total` is zero while `ids_forwarder_recorded_total` is
+   non-zero and rising; `rsigma` reports up and its metrics endpoint responds; no
+   established unix connection to `events.sock` exists; and the deployed forwarder
+   binary sends normalized events when the same log/socket harness is run locally.
+   All curated Sigma rules are therefore inert in production even though the
+   component-health alert says the engine is up. There is no alert for "Sigma
+   received nothing": only drops, send errors and tail errors are covered. This
+   needs a controlled forwarder restart and a positive-control event before the
+   Sigma path can be credited with any coverage.
+
+3. **Four of the curated Sigma network rules can never fire.** The normalizer
+   never emits `DestinationHostname` or `Initiated`, but these rules require one
+   or both: crypto-mining pools, ngrok, localtonet, and the malware-callback-port
+   rule. There is also no DNS or hostname enrichment anywhere in the pipeline, so
+   hostname-based C2 detection is impossible by construction. Set `Initiated` for
+   `tcp_connect` and either add destination-hostname enrichment or drop the
+   hostname rules rather than counting them as coverage.
+
+4. **Suppression keys are attacker-controlled.** The forwarder suppresses on
+   basename, path substring and `argv` substring. The probe confirmed that each of
+   the following produces no alert:
+   - a payload copied to `/tmp/squid` or named `smokescreen*`/`vikunja`
+     connects to an arbitrary external address and port; a binary whose path
+     contains `/apt/methods/` is exempt on 443 and 3128;
+   - any program whose arguments contain `/usr/local/lib/cluster/cluster-heartbeat`
+     or `hosting-balance-collector` egresses to an arbitrary destination;
+   - any `python3` whose arguments contain `/opt/admin-services/app.py` reaches any
+     private service port in the 8000-9999 range;
+   - a shell whose command line contains `/health`, `BECOME-SUCCESS-`,
+     `echo ~ && sleep 0`, `python3.` plus `&& sleep 0`, `/root/.ansible/tmp/`, or a
+     `/etc/cron.` path is classified as routine.
+
+   The suppression table is public, so this is deterministic. Fixing it requires
+   matching on immutable identity (exact executable path plus uid/parent) and the
+   expected destination, not on a basename or a substring an attacker can place in
+   `argv`. Where a benign producer is cluster-owned, remove the shell wrapper at
+   the source instead of adding another filter. At minimum, egress suppressions
+   should never apply for an arbitrary destination: a `squid`-named binary may
+   talk to the proxy port, not to any address on any port.
+
+5. **The observation boundary omits the most relevant attacker channels.**
+   - **VM guests are invisible.** Incus VMs have their own kernel; the host sees
+     QEMU and bridge traffic, not guest `exec` or `connect`. There is no flow
+     record or tap on the tenant bridge, so a VM owner attacking a neighbour, a
+     guest C2 channel, or a guest-to-cluster attempt is not detected. The TODO
+     records this as "proposed, not implemented". The threat model explicitly
+     includes VM-to-neighbour attacks, so this is currently a stated goal with no
+     enforcement behind it.
+   - **UDP is not collected.** Only `tcp_connect` is traced. DNS, QUIC/HTTP3 on
+     UDP/443, ICMP tunnels, WireGuard/OpenVPN clients, and UDP exfiltration are
+     invisible. A reverse shell over TCP is visible; a C2 channel over QUIC is not.
+   - **Unix sockets are not collected.** Incus/Docker/Podman sockets, D-Bus and
+     systemd private sockets are not traced. A process that reaches the Incus
+     socket via `curl --unix-socket ... http://localhost` is also shaped like a
+     suppressed loopback probe. Container escape or host control through a mounted
+     runtime socket is invisible.
+   - **File reads are not collected.** The file policy only matches MAY_WRITE on
+     `/etc/` and `/usr/lib/systemd/system/`. Reading SSH host keys, WireGuard keys,
+     etcd client certificates, gateway token files or `/etc/shadow` produces no
+     event.
+   - **Container activity is almost entirely suppressed.** `process_exec` inside a
+     container is dropped (`container_internal`, or by the exec allowlist before
+     that), public egress is dropped as `tenant_egress`, and bridge-local traffic
+     is dropped as `container_bridge`. Only the curated Sigma rules can see
+     container execs, and only through the currently broken Sigma path. The
+     local Sigma filter that suppresses root interactive shells also matches a
+     root shell inside an Incus container, because Incus carries no pod metadata
+     to set a container name. A compromised tenant container is close to a blind
+     spot; a VM is one entirely.
+
+6. **File-integrity matching is bypassable without touching a watched path.**
+   The hook is `security_file_permission` on writes. Staging a file under `/tmp`
+   and `rename()`-ing it over a target under `/etc` produces no write event on the
+   target because rename is a path operation, not a write; an `mmap(MAP_SHARED)`
+   update likewise does not call the per-write permission hook. The code comment
+   that a rename "lands on the target path and stays alertable" is not true with
+   the current policy. Writes are also limited to `/etc/` and
+   `/usr/lib/systemd/system/`; `/run/systemd/system`, `/usr/local/lib/systemd/system`,
+   `/var/spool/cron`, `/home/*/.ssh/authorized_keys` and `/opt` configuration are
+   outside the watched prefixes. Add `security_path_rename`/`security_inode_link`
+   and `security_mmap_file` hooks, and cover the other persistence paths.
+
+7. **Kernel rate limits drop events before the forwarder sees them.** Every
+   `tcp_connect` and privilege-raise hook has `rateLimit: "1m"` scoped to the
+   process. A long-lived compromised process can therefore open many connections
+   per minute with only the first logged. Because the rate budget is consumed by
+   *every* connect that matches the policy, an attacker can also burn it with one
+   expected-shaped connect, then scan or beacon for the rest of the minute with no
+   events at all. Rate limiting belongs after classification (with a counted drop),
+   not in the kernel before the event exists.
+
+8. **The most exposed service has the least southbound visibility.** The kernel
+   policy excludes `etcd`/`etcdctl`, `prometheus` and `local-ai-proxy` connects to
+   their expected private ports. The forwarder then treats the entire 8000-9999
+   range (plus 11434 and 52415) as expected for `prometheus`, `local-ai-proxy` and
+   the admin Python service. An attacker who obtains code execution in the
+   inference proxy — the service most directly exposed to untrusted user prompts
+   and API keys — can reach any internal service in that range without a
+   `tcp_connect` event. Lateral movement is the exact case the policy is
+   supposed to retain for those binaries.
+
+9. **The paging path is unauthenticated and floodable.** The forwarder's CrowdSec
+   receiver is a localhost HTTP POST with no authentication; any local user can
+   inject alerts or spend the warning budget. Alertmanager listens on all
+   interfaces on 9093 with no auth, and its cluster port on the node address is
+   unauthenticated; `ntfy-webhook` listens on 0.0.0.0:9095. An attacker with any
+   node foothold can post fake alerts, create silences, or consume the
+   cluster-wide five-per-severity-per-hour budget, after which real detections are
+   recorded but not delivered. The budget is a useful storm brake, but it must not
+   be claimable by untrusted input.
+
+10. **CrowdSec content is thinner than the design claims and has two logic
+    defects.** There are three scenarios, not the documented sshd/sudo/nginx/
+    Authentik set. The Authentik log is collected but has no parser or scenario.
+    `http-crawl-non_statics` reads `static_ressource == 'false'`, while the nginx
+    parser sets `static_ressource` to `false` for static extensions and `true`
+    otherwise, so the rule fires on static-asset bursts and never on dynamic
+    crawling. The sshd parser labels every `... from <ip> port <n> ssh2` line as
+    `ssh_failed-auth`, including successful logins, so valid sessions feed the
+    brute-force bucket and the signal cannot distinguish success from failure.
+    Both rate-based scenarios are easy to stay under: sshd is 5 events with a
+    10s leak and the 40x bucket is 20 events with a 1s leak. Slow or distributed
+    guessing below those rates is never detected, and source-IP grouping makes
+    distribution trivial.
+
+11. **The curated Sigma set is shallow and can be evaded with ordinary tradecraft.**
+    The netcat rule needs `-e`/`-c` plus a named shell (not `socat`, `ncat --exec`,
+    or an interpreter); the base64 rule needs a literal pipe to `bash`/`sh` (not
+    `xxd -r`, `openssl enc -d`, or `/usr/bin/env sh`); the tmp/dev-shm rules match
+    path prefixes, so `/memfd:...`, `/run`, non-root `/home` and non-root
+    `/var/tmp` are uncovered; the log-clearing rule only covers `/var/log`; and the
+    webshell rule only matches a few server parents. A non-root operator or
+    service account can run an arbitrary interpreter payload from `/home` with no
+    hand-written alert and no Sigma match. `exec-root-user-path` covers root only.
+    That is an explicit accepted limitation for operator workloads, but it is also
+    a usable path for a compromised service account.
+
+12. **Raw retention is far shorter than the access-log window.** Tetragon
+    rotates at 24h or 50 MB; at the observed volume the size cap dominates and
+    rotations land roughly every 35-40 minutes, so seven compressed backups hold
+    a few hours, not a week. Classified detections survive in `detections.jsonl`
+    (50 MB x 10), but unclassified events are gone quickly. An attacker only has
+    to outlast a few hours for the raw trail to disappear, and a noisy node can
+    shrink that window further.
+
+### What still works
+
+The design is not uniformly weak. Host shells, non-allowlisted execs seen by
+Sigma (when it is fed), non-loopback host TCP, kernel-module loads, targeted
+privilege raises, writes that actually pass through a watched path, Incus CLI use,
+and container-to-private-network connects are all collected. Coverage alarms for a
+stopped Tetragon/CrowdSec/forwarder/RSigma and for replay gaps are real. The
+binding constraints are the ones above: an attacker who can choose the namespace
+(VM), the transport (UDP/unix socket), the process name/argv, or the paging path
+does not need to defeat the classifier.
+
+### Recommended order
+
+1. Fix the Sigma delivery gap and add a positive-control canary per rule group;
+   alert when `sigma_sent` stays flat while `recorded` grows.
+2. Remove attacker-controlled substring suppressions and replace them with
+   exact-path + uid + destination matching. Move remaining egress allowlisting to
+   the network layer (default-deny tenant egress) rather than the detector.
+3. Page detections: remove the `ids-silent` route, or keep it only for a named
+   allowlist of known-noisy rules, not for the whole `IDSAlert` class.
+4. Close the transport/namespace gaps in priority order: VM bridge flow logging
+   first (the stated threat model), then UDP/DNS, then unix-socket connects, then
+   guest agents if VM-internal detection is actually required.
+5. Add rename/mmap/read hooks and the missing persistence paths; stop relying on
+   the write-only hook for integrity.
+6. Fix the CrowdSec parser inversion and sshd success/failure labelling; add the
+   missing scenarios or delete the claims from the design.
+7. Authenticate or unix-socket the forwarder receiver and restrict Alertmanager,
+   its cluster port, and the ntfy webhook to the monitoring control plane.
+8. Keep a time-based floor on raw event retention (or ship to a central store) so
+   the 50 MB cap cannot reduce the forensic window to minutes.
+
+### Mitigation status
+
+Fixed in the same pass:
+
+- **Sigma delivery (finding 2).** The unit passed `-exec-root-user-path True`.
+  Go's flag parser stops at the first non-flag argument, so every flag after it
+  — Sigma socket and detection sink, cursor, spool, CrowdSec receiver — was
+  ignored. The template now emits `-flag={{ value }}`. Sigma send counters move
+  fleet-wide and the receiver is listening on `127.0.0.1:9201` again. A new
+  `IdsSigmaStalled` alert fires when detections are recorded but nothing reaches
+  RSigma. It is a stall check, not a coverage check: if the Sigma sink is
+  deliberately disabled the series is absent and the rule stays inactive.
+- **Inert network rules (finding 3).** `Initiated` is set for `tcp_connect`, so
+  the malware-callback-port rule can match. The three hostname-only rules moved
+  to `files/rsigma/rules-disabled/`; the normalizer has no DNS enrichment, so
+  they are no longer installed or counted as coverage.
+- **Attacker-shaped suppressions (finding 4, partial).** Squid, smokescreen and
+  the apt method helpers now require their package path and expected port; the
+  heartbeat and balance collectors only suppress their real destinations
+  (external 443, plus the leader's private etcd client port); the notifier only
+  suppresses its pinned install path on 443 and the private etcd it uses for
+  the shared budget; and the Vikunja healthcheck only the image path on 443.
+  Script exemptions are anchored to the program or the interpreter's script
+  operand rather than a substring anywhere in argv, so a cluster-script path in
+  a later argument no longer suppresses the connect. A payload named `squid`,
+  `smokescreen`, `vikunja` or `ntfy-webhook.py`, a copied `/tmp/apt/methods/`
+  path, or a heartbeat argument pointing at another port is no longer exempt.
+- **Leftover expected traffic.** Prometheus's
+  own service-discovery and inference-metrics scrapes (`12723`, `4010`),
+  loopback destinations, the inference latency probe's backend polls, the
+  `cluster status` DHCP health probe (`8067`), the kernel NFS client's
+  private storage mounts (`2049`), and the etcd client port for the
+  cluster-owned services that read their configuration or registry from it
+  (the inference proxy, the admin services, the notifier's budget claim, and
+  `/usr/local` cluster scripts) are recognized as expected; they were
+  generating most of the post-fix inflow without being useful signals.
+- **CrowdSec logic defects (finding 10, partial).** The nginx parser no
+  longer inverts `static_ressource`; its `%{NUMBER:...:int}` captures also never
+  matched in this grok build, so the HTTP scenarios were inert even before that
+  bug. The captures are plain strings now, which the 40x scenario already
+  expects. `cscli explain` shows `static_ressource` true for a static asset and
+  false for a dynamic path with `http_access-log` set. sshd successful logins
+  are labelled `ssh_success` and failures `ssh_failed-auth`, both verified the
+  same way; non-auth lines are `ssh_other`.
+
+Two noise sources remain visible and are recorded rather than suppressed:
+
+- The OSV mirror fetches advisories over HTTPS in a six-hourly run, producing
+  thousands of connects per run that coalesce per destination. It is a
+  cluster-owned collector and could be added to the egress table, but it is
+  also the process that handles untrusted advisory content, so the exemption
+  deserves a deliberate decision.
+- A service that started before Tetragon at boot has no exec record; Tetragon
+  then reports its connects as `/usr/lib/systemd/systemd` with argv `text`.
+  That is a sensor artifact, not the process identity: the admin API and
+  health API's periodic local probes show up this way after a reboot, and any
+  other pre-boot process would be attributed the same. Suppressing that
+  identity would hide those too, so the fix is either coverage of pre-existing
+  processes or a self-connect rule, not a name match.
+
+Deferred to the discussion phase, because each needs a policy or volume
+decision: paging while the silent window runs (1); VM, UDP and unix-socket
+visibility (5); rename/mmap/read hooks and the missing persistence paths (6);
+kernel rate limits (7); the 8000-9999 range for the admin service (8); alert-path
+authentication (9); the missing CrowdSec scenarios and thresholds (10);
+non-root interpreter coverage (11); raw retention (12); and boot-order process
+attribution. nginx collection is
+also deferred: the access logs on the core nodes are empty and the frontend
+hosts are not managed, so the HTTP scenarios still have no input even with the
+parser fixed.
 
 ## Validation
 

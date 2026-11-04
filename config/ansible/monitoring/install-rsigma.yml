@@ -14,6 +14,12 @@
     rsigma_conf_dir: /etc/rsigma
     rsigma_rules_dir: "{{ rsigma_conf_dir }}/rules"
     rsigma_state_dir: /var/lib/rsigma
+    # Kept in files/rsigma/rules-disabled: they match DestinationHostname,
+    # which the normalizer never emits.
+    rsigma_disabled_rules:
+      - net_connection_lnx_crypto_mining_indicators.yml
+      - net_connection_lnx_ngrok_tunnel.yml
+      - net_connection_lnx_domain_localtonet_tunnel.yml
     rsigma_log_dir: /var/log/rsigma
     rsigma_socket_dir: /run/rsigma
     rsigma_api_addr: 127.0.0.1:9290
@@ -47,6 +53,12 @@
         owner: root
         group: root
         mode: '0644'
+
+    - name: Remove rules that cannot match the normalized fields
+      file:
+        path: "{{ rsigma_rules_dir }}/{{ item }}"
+        state: absent
+      loop: "{{ rsigma_disabled_rules }}"
 
     - name: Install RSigma pipeline
       copy:
