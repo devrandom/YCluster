@@ -88,6 +88,37 @@ type Config struct {
 	// prompts. Increase further if you serve heavier payloads.
 	// Multipart audio uploads have a separate cap (see router.go).
 	MaxRoutingBodyBytes int64 `yaml:"max_routing_body_bytes,omitempty"`
+
+	// Affinity pins conversation-keyed requests to one backend so the
+	// engine's prefix cache stays warm across turns. Unset enables it;
+	// `affinity: false` routes purely by load. Only meaningful in
+	// model-routed modes with more than one backend per model.
+	Affinity *bool `yaml:"affinity,omitempty"`
+
+	// AffinityMaxSkew is how many more in-flight requests the pinned
+	// backend may carry than the least-loaded candidate before a
+	// request is rebalanced away. Unset uses
+	// DefaultAffinityMaxSkew (1); 0 pins only while the pinned backend
+	// is not busier than any peer. Raise it for stronger stickiness.
+	AffinityMaxSkew *int `yaml:"affinity_max_skew,omitempty"`
+}
+
+// AffinityEnabled reports whether conversation affinity is on. It is on
+// unless explicitly disabled.
+func (c Config) AffinityEnabled() bool {
+	return c.Affinity == nil || *c.Affinity
+}
+
+// AffinitySkew resolves the effective affinity skew, clamping negative
+// values to 0.
+func (c Config) AffinitySkew() int {
+	if c.AffinityMaxSkew == nil {
+		return DefaultAffinityMaxSkew
+	}
+	if *c.AffinityMaxSkew < 0 {
+		return 0
+	}
+	return *c.AffinityMaxSkew
 }
 
 // DefaultTrustedProxies applies when trusted_proxies is unset in YAML.

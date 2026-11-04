@@ -94,6 +94,11 @@ type Handler struct {
 	// router can pick the least-loaded backend.
 	Load LoadTracker
 
+	// Affinity pins conversation-keyed requests to one backend so its
+	// prefix cache stays warm across turns. The zero value disables it;
+	// configureHandler installs the configured policy.
+	Affinity AffinityPolicy
+
 	// Metrics, if set, receives Prometheus observations from the
 	// request path. Nil-safe.
 	Metrics *Metrics
@@ -224,8 +229,15 @@ func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, route *RouteR
 		if r.Context().Err() != nil {
 			return
 		}
-		backend := PickBackend(remaining, h.loadRead())
+		backend, affinity := PickBackendAffinity(remaining, h.loadRead(), route.AffinityKey, h.Affinity)
+		if backend == nil {
+			writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", "no backend available")
+			return
+		}
 		remaining = removeURL(remaining, backend)
+		if affinity != "" && h.Metrics != nil {
+			h.Metrics.ObserveAffinity(affinity)
+		}
 		lastTry := len(remaining) == 0 || route.Body == nil
 
 		if done := h.tryOnce(w, r, route.Model, route.Stream, backend, route.Body, lastTry); done {

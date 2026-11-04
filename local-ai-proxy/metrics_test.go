@@ -37,6 +37,25 @@ func TestMetricsHandlerServesRegistry(t *testing.T) {
 	}
 }
 
+func TestObserveAffinityExportsOutcomeCounter(t *testing.T) {
+	m := NewMetrics()
+	m.ObserveAffinity(AffinityPinned)
+	m.ObserveAffinity(AffinityPinned)
+	m.ObserveAffinity(AffinityRebalanced)
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`local_ai_proxy_affinity_total{result="pinned"} 2`,
+		`local_ai_proxy_affinity_total{result="rebalanced"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output missing %q", want)
+		}
+	}
+}
+
 func TestObserveAttemptTransportError(t *testing.T) {
 	m := NewMetrics()
 	// status 0 == transport error; must not panic and must count requests.

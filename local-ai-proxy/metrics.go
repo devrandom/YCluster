@@ -22,6 +22,7 @@ type Metrics struct {
 	backendUp    *prometheus.GaugeVec
 	backendState *prometheus.GaugeVec
 	routeErrors  *prometheus.CounterVec
+	affinity     *prometheus.CounterVec
 	userRejected *prometheus.CounterVec
 	queueDepth   *prometheus.GaugeVec
 	queueWait    *prometheus.HistogramVec
@@ -82,6 +83,10 @@ func NewMetrics() *Metrics {
 			Name: "local_ai_proxy_route_errors_total",
 			Help: "Requests rejected by the router before any upstream dispatch.",
 		}, []string{"reason"}),
+		affinity: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "local_ai_proxy_affinity_total",
+			Help: "Conversation-keyed requests by outcome: pinned to the backend owning the conversation, or rebalanced to the least-loaded one because the pinned backend was busy.",
+		}, []string{"result"}),
 		userRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "local_ai_proxy_user_concurrency_rejected_total",
 			Help: "Requests rejected with 429 because the caller's wait queue for that model was full.",
@@ -108,7 +113,7 @@ func NewMetrics() *Metrics {
 			Help: "Number of backends configured for each model (healthy + down + disabled + unknown).",
 		}, []string{"model"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors, m.userRejected, m.queueDepth, m.queueWait, m.modelHealthy, m.modelEnabled, m.modelTotal)
+	reg.MustRegister(m.requests, m.duration, m.ttft, m.retries, m.inflight, m.backendUp, m.backendState, m.routeErrors, m.affinity, m.userRejected, m.queueDepth, m.queueWait, m.modelHealthy, m.modelEnabled, m.modelTotal)
 	return m
 }
 
@@ -165,6 +170,15 @@ func (m *Metrics) ObserveRouteError(reason string) {
 		return
 	}
 	m.routeErrors.WithLabelValues(reason).Inc()
+}
+
+// ObserveAffinity records how conversation stickiness resolved a
+// request: AffinityPinned or AffinityRebalanced.
+func (m *Metrics) ObserveAffinity(result string) {
+	if m == nil {
+		return
+	}
+	m.affinity.WithLabelValues(result).Inc()
 }
 
 // ObserveUserConcurrencyReject increments the counter for requests

@@ -37,6 +37,55 @@ backend:
 	}
 }
 
+func TestAffinityConfigDefaultsAndOverrides(t *testing.T) {
+	cases := []struct {
+		name        string
+		yaml        string
+		wantEnabled bool
+		wantSkew    int
+	}{
+		{
+			name:        "unset enables with default skew",
+			yaml:        "backend:\n  url: \"http://localhost:8080\"\n",
+			wantEnabled: true,
+			wantSkew:    DefaultAffinityMaxSkew,
+		},
+		{
+			name:        "explicit disable",
+			yaml:        "backend:\n  url: \"http://localhost:8080\"\naffinity: false\n",
+			wantEnabled: false,
+			wantSkew:    DefaultAffinityMaxSkew,
+		},
+		{
+			name:        "skew override",
+			yaml:        "backend:\n  url: \"http://localhost:8080\"\naffinity_max_skew: 4\n",
+			wantEnabled: true,
+			wantSkew:    4,
+		},
+		{
+			name:        "negative skew clamps to zero",
+			yaml:        "backend:\n  url: \"http://localhost:8080\"\naffinity_max_skew: -2\n",
+			wantEnabled: true,
+			wantSkew:    0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfig(writeTempFile(t, "c.yaml", tc.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.AffinityEnabled(); got != tc.wantEnabled {
+				t.Errorf("AffinityEnabled() = %v; want %v", got, tc.wantEnabled)
+			}
+			if got := cfg.AffinitySkew(); got != tc.wantSkew {
+				t.Errorf("AffinitySkew() = %d; want %d", got, tc.wantSkew)
+			}
+		})
+	}
+}
+
 func TestLoadConfigMissingFile(t *testing.T) {
 	_, err := LoadConfig(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err == nil {

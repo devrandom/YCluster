@@ -71,6 +71,11 @@ type RouteResult struct {
 	Candidates []*url.URL
 	Body       []byte
 	Stream     bool
+
+	// AffinityKey is the conversation identity sticky routing uses, or
+	// "" when the request carries none. See affinityKey for the
+	// precedence.
+	AffinityKey string
 }
 
 // Router decides which backends are eligible to serve a request.
@@ -197,8 +202,9 @@ func (m *ModelRouter) routeJSON(r *http.Request, headerModel string) (*RouteResu
 	}
 
 	var env struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
+		Model          string `json:"model"`
+		Stream         bool   `json:"stream"`
+		PromptCacheKey string `json:"prompt_cache_key"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, fmt.Errorf("request body is not valid JSON: %w", err)
@@ -220,7 +226,13 @@ func (m *ModelRouter) routeJSON(r *http.Request, headerModel string) (*RouteResu
 	if err != nil {
 		return nil, err
 	}
-	return &RouteResult{Model: model, Candidates: candidates, Body: body, Stream: env.Stream}, nil
+	return &RouteResult{
+		Model:       model,
+		Candidates:  candidates,
+		Body:        body,
+		Stream:      env.Stream,
+		AffinityKey: affinityKey(r, env.PromptCacheKey),
+	}, nil
 }
 
 // routeMultipart reads the request body once, locates the `model` form
@@ -262,7 +274,45 @@ func (m *ModelRouter) routeMultipart(r *http.Request, boundary string, headerMod
 	}
 	// Multipart audio endpoints don't stream the way chat completions do;
 	// leave Stream=false (it's only used as a metric label).
-	return &RouteResult{Model: model, Candidates: candidates, Body: body, Stream: false}, nil
+	return &RouteResult{
+		Model:       model,
+		Candidates:  candidates,
+		Body:        body,
+		Stream:      false,
+		AffinityKey: affinityKey(r, ""),
+	}, nil
+}
+
+// affinityKey derives the sticky-routing key for a request. Open WebUI's
+// chat id comes first because it is scoped to one conversation; Codex's
+// prompt_cache_key (sent in the Responses body, stable per thread) is
+// next; thread-id and session-id are the header fallbacks. X-User-Id is
+// last: it keeps a caller's traffic together when nothing finer-grained
+// is available.
+//
+// x-client-request-id is deliberately not used: SDKs commonly set it
+// per request, so keying on it would make every request its own
+// conversation and mask the X-User-Id fallback.
+//
+// Each source is namespaced so two clients can't collide by reusing the
+// same id under different headers.
+func affinityKey(r *http.Request, promptCacheKey string) string {
+	if v := strings.TrimSpace(r.Header.Get("X-OpenWebUI-Chat-Id")); v != "" {
+		return "owui-chat:" + v
+	}
+	if v := strings.TrimSpace(promptCacheKey); v != "" {
+		return "cache-key:" + v
+	}
+	if v := strings.TrimSpace(r.Header.Get("Thread-Id")); v != "" {
+		return "thread:" + v
+	}
+	if v := strings.TrimSpace(r.Header.Get("Session-Id")); v != "" {
+		return "session:" + v
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-User-Id")); v != "" {
+		return "user:" + v
+	}
+	return ""
 }
 
 // extractMultipartModel scans the multipart body for the `model` form field
@@ -334,12 +384,21 @@ func (m *ModelRouter) candidatesFor(model string) ([]*url.URL, error) {
 // Counts are sampled once up front so concurrent Inc/Dec can't leave
 // the tie-set empty between passes.
 func PickBackend(candidates []*url.URL, load Load) *url.URL {
+	if len(candidates) == 0 {
+		return nil
+	}
 	if len(candidates) == 1 {
 		return candidates[0]
 	}
 	if load == nil {
 		return candidates[rand.IntN(len(candidates))]
 	}
+	return leastLoaded(candidates, load)
+}
+
+// leastLoaded picks the candidate running the fewest requests, breaking
+// ties at random. candidates must be non-empty and load non-nil.
+func leastLoaded(candidates []*url.URL, load Load) *url.URL {
 	counts := make([]int64, len(candidates))
 	minCount := int64(-1)
 	for i, u := range candidates {

@@ -43,6 +43,43 @@ ycluster inference remove http://m2.xc:8080 qwen3-30b
 Backend URLs are host-only (no `/v1` suffix) — the proxy appends the
 client path as-is.
 
+### Session affinity
+
+A model with several backends is normally load-balanced by in-flight
+count, which throws away the engine's prefix cache whenever a
+conversation bounces between nodes. The proxy therefore pins
+conversation-keyed requests to one backend:
+
+| Precedence | Source | Sent by |
+|---|---|---|
+| 1 | `X-OpenWebUI-Chat-Id` header | Open WebUI (`ENABLE_FORWARD_USER_INFO_HEADERS=True`) |
+| 2 | `prompt_cache_key` in the JSON body | Codex, one per thread |
+| 3 | `thread-id` header | Codex |
+| 4 | `session-id` header | Codex |
+| 5 | `X-User-Id` header | the gateway (all authenticated callers) |
+
+`x-client-request-id` is intentionally not used: SDKs often set it per
+request, which would make every request its own conversation and hide
+the `X-User-Id` fallback.
+
+The backend is chosen by rendezvous hashing over the candidate URLs, so
+the same conversation keeps its node while that node stays healthy, and
+changes to the backend set only move the keys that have to move. A pin
+is dropped when the pinned backend already runs `affinity_max_skew`
+more requests than the least-loaded peer (default 1), so one busy
+conversation cannot hold a whole node. Requests without any of the keys
+above are routed purely by load.
+
+```yaml
+affinity: true          # default; false restores pure load balancing
+affinity_max_skew: 1    # raise for stronger stickiness, 0 for strict fairness
+```
+
+`local_ai_proxy_affinity_total{result="pinned"|"rebalanced"}` on the
+metrics port counts the outcome, which is how you can tell whether
+traffic is actually sticking (a high `rebalanced` share means the
+pinned node is usually the busiest).
+
 `remove` mirrors `add`'s argument shape: `add`/`remove <url> [model]`
 operate on a backend (all its models, or one), while `remove <model>`
 still works model-first. A positional containing `://` is the backend.

@@ -58,6 +58,21 @@ backend:
 # multi-image prompts. Increase further if you serve heavier
 # payloads. Multipart audio uploads have a separate 200 MiB cap
 # (see README).
+
+# Conversation affinity. A request carrying a conversation key
+# (X-OpenWebUI-Chat-Id, the body's prompt_cache_key, thread-id,
+# session-id, x-client-request-id, or X-User-Id) is pinned to the
+# backend rendezvous hashing assigns to that key, keeping its prefix
+# cache warm across turns. Enabled by default; set false to route
+# purely by load.
+# affinity: true
+
+# How many more in-flight requests the pinned backend may carry than
+# the least-loaded peer before the pin is dropped. Default 1 keeps a
+# conversation on its node during one long generation; 0 pins only
+# while the backend is not busier than any peer; raise it for stronger
+# stickiness.
+# affinity_max_skew: 1
 # max_routing_body_bytes: 33554432
 
 # --- Option 3: etcd-backed mappings (hot-reloading) ---

@@ -31,6 +31,15 @@ Written in Go, `net/http`, no framework.
   transparently retried against a peer; only the last attempt's
   response is returned. Each retry also fires an out-of-band health
   probe so transient glitches don't strand traffic for a full tick.
+- **Conversation affinity.** A request that carries a conversation key
+  (`X-OpenWebUI-Chat-Id`, the body's `prompt_cache_key`, or the Codex
+  `thread-id`/`session-id` headers) is pinned to the backend rendezvous
+  hashing assigns to that key, so the engine's prefix cache survives
+  across turns. The pin is dropped when the pinned backend runs
+  `affinity_max_skew` more requests than the least-loaded peer, so a
+  busy conversation cannot starve the fleet. `affinity: false` restores
+  pure load balancing; `local_ai_proxy_affinity_total{result}` counts
+  pins and rebalances.
 - **Per-backend health checks.** Periodic `GET /v1/models` probe with
   state (healthy/down/disabled); transitions log at INFO/WARN. The
   synthesized `/v1/models` hides disabled and unavailable models so

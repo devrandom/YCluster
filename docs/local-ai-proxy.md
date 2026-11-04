@@ -45,7 +45,22 @@ using `net/http` for native `context.Context` propagation.
   top_logprobs, reasoning_content, etc.).
 
 - **Multi-backend routing** — multiple backends can serve the same model.
-  Route by model name. Weighted routing (prefer faster backends).
+  Route by model name, least-loaded, with conversation affinity on top
+  (see below). Weighted routing (prefer faster backends) is not
+  implemented.
+
+- **Conversation affinity** — a request carrying a conversation key is
+  pinned to the backend that rendezvous-hashes for that key, so the
+  backend's prefix cache stays warm across turns. Keys come from
+  `X-OpenWebUI-Chat-Id`, then the JSON body's `prompt_cache_key`
+  (Codex sends one per thread), then `thread-id`, `session-id`, and
+  finally `X-User-Id`. (`x-client-request-id` is ignored because SDKs
+  set it per request.) The pin yields to
+  load: it is dropped when the pinned backend runs `affinity_max_skew`
+  (default 1) more requests than the least-loaded candidate, and a
+  backend that is down or disabled is never a candidate. Because the
+  mapping is rendezvous hashing, adding a backend only moves the keys
+  it takes over, and losing one only moves that backend's keys.
 
 - **Concurrency-aware routing** — track in-flight requests per backend.
   Respect per-backend concurrency limits (e.g. max 1 for llama-server,

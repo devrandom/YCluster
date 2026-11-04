@@ -130,6 +130,7 @@ func configureHandler(h *Handler, cfg Config, router Router, source Source, heal
 	h.Health = health
 	h.AuthHealthURL = cfg.AuthHealthURL
 	h.Metrics = metrics
+	h.Affinity = AffinityPolicy{Enabled: cfg.AffinityEnabled(), MaxSkew: cfg.AffinitySkew()}
 	h.Concurrency = NewUserModelLimiter(cfg.UserModelConcurrencyLimit(), cfg.UserModelQueueDepth(), metrics)
 
 	if es, ok := source.(*EtcdSource); ok {
