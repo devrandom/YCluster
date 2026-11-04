@@ -273,16 +273,23 @@
     - name: Apply any pending service restarts before smoke check
       meta: flush_handlers
 
+    # Restarting the service closes the listener; probing immediately can
+    # race the new process and report a spurious -1.
+    - name: Wait for the proxy to accept connections
+      wait_for:
+        host: 127.0.0.1
+        port: 4001
+        timeout: 30
+
     - name: Smoke check /v1/models through local-ai-proxy
       uri:
         url: "http://127.0.0.1:4001/v1/models"
         return_content: no
         status_code: [200, 401, 404]
       register: smoke
-      failed_when: false
-      retries: 5
+      retries: 10
       delay: 1
-      until: smoke.status is defined
+      until: smoke.status | default(-1) in [200, 401, 404]
 
     - name: Report smoke check
       debug:
