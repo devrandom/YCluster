@@ -8,7 +8,7 @@ filter: "evt.Line.Labels.type == 'nginx'"
 onsuccess: continue
 nodes:
   - grok:
-      pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status:int} %{NUMBER:bytes:int} "%{DATA:referer}" "%{DATA:user_agent}"'
+      pattern: '%{IPORHOST:source_ip} - %{NOTSPACE:target_user} \[%{HTTPDATE:time}\] "%{WORD:verb} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:status} %{NUMBER:bytes} "%{DATA:referer}" "%{DATA:user_agent}"'
       apply_on: Line.Raw
     statics:
       - meta: log_type
@@ -24,4 +24,4 @@ nodes:
       - parsed: file_name
         expression: "split(evt.Parsed.request, '?')[0]"
       - parsed: static_ressource
-        expression: 'evt.Parsed.request matches ".*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$" ? "false" : "true"'
+        expression: 'evt.Parsed.request matches ".*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$" ? "true" : "false"'
