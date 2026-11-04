@@ -38,9 +38,9 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-{{ ds41_moet_image }}}"
-MODEL_HOST="${MODEL_HOST:-{{ ds41_moet_model_dir }}}"
+MODEL_HOST="${MODEL_HOST:-{{ ds41_moet_model_dir | default('/home/dev/models/DeepSeek-V4.1-Flash-1017') }}}"
 CONTAINER="${CONTAINER:-{{ ds41_moet_container }}}"
-PORT="${PORT:-{{ ds41_moet_port }}}"
+PORT="${PORT:-{{ ds41_moet_port | default(9219) }}}"
 SERVED_NAME="${SERVED_NAME:-{{ ds41_moet_served_name }}}"
 CACHE_DIR="${CACHE_DIR:-{{ ds41_moet_cache_dir }}}"
 DEEPGEMM_CACHE_DIR="${DEEPGEMM_CACHE_DIR:-{{ ds41_moet_deep_gemm_cache_dir }}}"

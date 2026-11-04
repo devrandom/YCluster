@@ -1,14 +1,15 @@
 # DeepSeek-V4.1-Flash on RTX PRO 6000 / SM120
 
 Status: **SERVING** under the gateway key `deepseek-v4_1-flash`, backed by
-two engines on separate four-GPU nodes: the Karmic Kraken container
-(`ds41-flash`, port 9218) and the sybil/MoET recipe (`ds41-moet`, port 9219).
-`local-ai-proxy` fans out across both, least-loaded, so a request may be
-answered by either engine. Context cap 512K (`MAX_MODEL_LEN=524288`,
-engine KV pool 4.7M tokens). Needles verified through 200K via the smoke
-suite (7/7) and a direct 430K-token prompt at 80% depth. The R36 image
-token normalizer is patched (bind-mounted) to accept Responses API
-`input_text`/`output_text` part types for Codex compatibility.
+the sybil/MoET recipe (`ds41-moet`, port 9219) on every four-GPU node;
+`local-ai-proxy` fans out across the fleet, least-loaded. Context cap 512K
+(`MAX_MODEL_LEN=524288`).
+
+The Karmic Kraken profile is retained in
+`admin/install-deepseek-v41-flash.yml` but is no longer deployed. Its
+sections below stay as the reference for that recipe: the R36 image, the
+R36-only tokenizer patch for Responses API `input_text`/`output_text` parts,
+the 4.7M-token KV pool, and the needle results measured on it.
 
 ## Model
 
@@ -136,31 +137,32 @@ Migration notes if we move:
   RAM-Engram on different clocks. Any upgrade re-runs the smoke/needle
   suite plus a matched short benchmark against R36 before serving traffic.
 
-## MoET recipe (r13, pooled backend)
+## MoET recipe (r21, the deployed backend)
 
-A second recipe for the same checkpoint, from `sybil-solutions/local-ai-registry`
-(0xSero / kacper-daftcode `vLLM-Moet`), deployed by
-`admin/install-deepseek-v41-moet.yml` as `ds41-moet`. It serves the same
-gateway key as the Karmic Kraken profile, so both engines are one
-`deepseek-v4_1-flash` fleet rather than two model ids:
+The recipe serving this model, for the same checkpoint, from
+`sybil-solutions/local-ai-registry` (0xSero / kacper-daftcode `vLLM-Moet`),
+installed by `admin/install-deepseek-v41-moet.yml` as `ds41-moet`. Every
+opt-in host is registered under the same `deepseek-v4_1-flash` gateway key,
+so the fleet is N MoET engines behind one model id:
 
-- The split is unweighted (least-loaded, ties broken randomly), so roughly
-  half the traffic lands on this ~400 tok/s C1 engine and half on the
-  ~210 tok/s Karmic Kraken one.
+- The split is unweighted (least-loaded, ties broken randomly) and roughly
+  even across the hosts; every member is the same recipe, so the blend is
+  homogeneous.
 - MoET's kernels are lossy by design (top-1 agreement 0.974, mean KL 0.0195)
-  and its scheduler is the recipe stock shape, so a slow prefill here is
-  visible to whoever got routed to it.
+  and its scheduler is the recipe stock shape: long prefills get no
+  prefill-compute-share fairness, so concurrent generations stall behind
+  them. That is the recipe's trade-off, not a per-host one.
 - Benchmark per host, not through the gateway:
-  `inference --local bench deepseek-v4_1-flash` on the serving node resolves
-  the local backend of that model key. Gateway numbers are a blend of both.
-- Retiring either engine means `ycluster inference remove <url>` for its
+  `inference --local bench deepseek-v4_1-flash` on a serving node resolves the
+  local backend of that model key. Gateway numbers are a blend of the fleet.
+- Retiring one engine means `ycluster inference remove <url>` for its
   backend, not removing the model entry.
 
 | Item | Value |
 |---|---|
 | launch id | `vllm-moet-deepseek-v4.1-flash-1017-512k-tp4` |
-| image | `ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:08f61e68…` (r13) |
-| runtime | vLLM nightly df3bd094 + sm_120 steps 1-28, DSpark k=7 |
+| image | `ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:ef1e28b7…` (r21) |
+| runtime | vLLM nightly df3bd094 + sm_120 steps 1-36, DSpark k=7 |
 | needs | 4× 96 GB sm_120 in one host with GPU P2P; 47 GB host RAM; 520 GB local NVMe |
 
 It differs from the Karmic Kraken profile in what it turns on, not in what it

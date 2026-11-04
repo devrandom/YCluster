@@ -31,6 +31,11 @@
 #   GPU-UUID names from `nvidia-ctk cdi list` (nvidia.com/gpu=GPU-…): the
 #   index names are driver minor numbers and renumber across reboots and
 #   card hot-plugs, UUIDs do not.
+#   Per-host `ds41_moet_model_dir` / `ds41_moet_port` override the staged
+#   checkpoint directory (default /home/dev/models/DeepSeek-V4.1-Flash-1017)
+#   and the listening port (default 9219). A host that already holds the
+#   same 1017 checkpoint under another directory name reuses it in place
+#   instead of staging a second 510 GB copy.
 #
 # Bring up:
 #   ~/bin/ds41-moet-setup.sh --download   # image + checkpoint (~520 GB)
@@ -53,7 +58,6 @@
     ds41_moet_image_tag: "ghcr.io/sybil-solutions/vllm-moet-dsv41:df3bd094-r21"
     ds41_moet_repo: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
     ds41_moet_revision: "1bae0e1088993b9b82de08f59de5be5a34e42170"
-    ds41_moet_model_dir: "/home/dev/models/DeepSeek-V4.1-Flash-1017"
     # Must match the Karmic Kraken profile's name
     # (admin/install-deepseek-v41-flash.yml) so this engine joins the same
     # `deepseek-v4_1-flash` fleet: local-ai-proxy fans out across every
@@ -61,8 +65,12 @@
     # the gateway key too -- the proxy drops a backend for a model its
     # /v1/models does not advertise.
     ds41_moet_served_name: "deepseek-v4_1-flash"
-    ds41_moet_port: 9219
     ds41_moet_container: "ds41-moet"
+    # The checkpoint directory and the listening port are per-host
+    # (host_vars/<node>.yml): a host may already hold the same 1017 weights
+    # under a different directory name, and two MoET hosts can coexist.
+    # The served name is deliberately NOT per-host -- pooling only works
+    # when every engine answers to the same id.
     # Persistent home for the FlashInfer/Triton JIT caches. The launcher
     # recreates the container on every start; without these mounts each
     # restart pays the recipe's ~22 min first-start autotune again.
@@ -144,11 +152,12 @@
           re-run this play without the override.
       when: not (ds41_moet_autostart | default(true) | bool)
 
-- name: Register the DS4.1 MoET backend with local-ai-proxy
+- name: Register the DS4.1 MoET backends with local-ai-proxy
   hosts: storage
   become: yes
   vars:
-    ds41_moet_nvidia_host: >-
+    # Every opt-in host is a fleet member, not just the first one.
+    ds41_moet_hosts: >-
       {{ (groups['nvidia']
           | select('in', hostvars.keys())
           | list)
@@ -157,8 +166,8 @@
          | selectattr(0, 'defined')
          | selectattr(0, 'equalto', true)
          | map(attribute=1)
-         | first
-         | default('') }}
+         | list }}
+    ds41_moet_served_name: "deepseek-v4_1-flash"
   tasks:
     - name: Check if this host is the storage leader
       command: mountpoint -q /rbd/user
@@ -189,33 +198,28 @@
 
     - name: End play when no MoET host is opted in
       meta: end_host
-      when: ds41_moet_nvidia_host | length == 0
+      when: ds41_moet_hosts | length == 0
 
-    - name: Set DS4.1 MoET backend facts
-      set_fact:
-        ds41_moet_backend_url: >-
-          http://{{ ds41_moet_nvidia_host }}.xc:{{
-            hostvars[ds41_moet_nvidia_host]['ds41_moet_port'] | default(9219) }}
-        ds41_moet_served_name_fact: >-
-          {{ hostvars[ds41_moet_nvidia_host]['ds41_moet_served_name']
-             | default('deepseek-v4_1-flash') }}
-
-    - name: Register the DS4.1 MoET backend with local-ai-proxy
+    - name: Register every DS4.1 MoET backend with local-ai-proxy
       command: >-
-        ycluster inference add {{ ds41_moet_backend_url }}
-        {{ ds41_moet_served_name_fact }}
+        ycluster inference add
+        http://{{ item }}.xc:{{ hostvars[item]['ds41_moet_port'] | default(9219) }}
+        {{ ds41_moet_served_name }}
+      loop: "{{ ds41_moet_hosts }}"
+      loop_control:
+        label: "{{ item }}"
       register: ds41_moet_proxy_register
       changed_when: "'Added:' in ds41_moet_proxy_register.stdout"
       when:
         - is_storage_leader
         - not ansible_check_mode
 
-    - name: Report DS4.1 MoET registration
+    - name: Report DS4.1 MoET registrations
       debug:
-        msg: >-
-          DS4.1 MoET backend registered at {{ ds41_moet_backend_url }}
-          (serving: {{ ds41_moet_served_name_fact }}, pooled with the other
-          backends under that name)
+        msg: "{{ item.stdout }}"
+      loop: "{{ ds41_moet_proxy_register.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
       when:
         - is_storage_leader
         - not ansible_check_mode

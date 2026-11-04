@@ -43,11 +43,12 @@ deployment-agnostic — no node names, IPs, or account specifics.
   prefill vs flat TP=8 on this no-NVLink box). Includes the node-crash incident
   and the retired-REAP history.
 - [DeepSeek-V4.1-Flash](deepseek-v4.1-flash.md)
-  — new architecture (`deepseek_v41`) alongside the DS4 backend; B12X R36
-  image, TP4/DCP1, SSD Engram, ~510 GB checkpoint. Serving on the four-GPU
-  spare node. Single-stream 256-token sweep: 186-231 tok/s decode, 1.5k-9.4k
-  tok/s cold prefill. Also covers the 0xSero/sybil MoET r13 recipe
-  (`ds41-moet`), pooled into the same `deepseek-v4_1-flash` gateway key.
+  — new architecture (`deepseek_v41`) alongside the DS4 backend; TP4/DCP1,
+  SSD Engram, ~510 GB checkpoint. The deployed backend is the 0xSero/sybil
+  MoET recipe (`ds41-moet`), pooled across hosts under one
+  `deepseek-v4_1-flash` gateway key: ~400-420 tok/s C1 decode and 17-18k
+  tok/s cold prefill measured there, against 186-231 tok/s decode and
+  1.5k-9.4k tok/s prefill on the retired Karmic Kraken profile.
 - [GPU PCIe P2P: host IOMMU fix vs. 0xSero recipe](gpu-p2p-iommu.md)
   — how to check P2P capability and measure bandwidth, plus sanitized host
   profiles. The DS4.1 host is in the public 237→444 tok/s report's "before"

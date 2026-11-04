@@ -15,7 +15,7 @@ IMAGE="{{ ds41_moet_image }}"
 IMAGE_TAG="{{ ds41_moet_image_tag }}"
 REPO="{{ ds41_moet_repo }}"
 REVISION="{{ ds41_moet_revision }}"
-MODEL_HOST="${MODEL_HOST:-{{ ds41_moet_model_dir }}}"
+MODEL_HOST="${MODEL_HOST:-{{ ds41_moet_model_dir | default('/home/dev/models/DeepSeek-V4.1-Flash-1017') }}}"
 
 action="setup"
 while [ $# -gt 0 ]; do
