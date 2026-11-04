@@ -23,6 +23,9 @@
 - import_playbook: configure-proxy.yml
 # CVE-2026-98432 stopgap: no MPTCP listeners while the kernel fix is pending.
 - import_playbook: configure-mptcp.yml
+# CVE-2026-98432 stopgap: drop IPv4 TCP packets carrying IP options on the
+# frontends (the MPTCP flag alone does not remove the trigger).
+- import_playbook: configure-ipv4-options-filter.yml
 
 # TODO we have this here because we don't have a proxy before this on first run.  But it's not ideal
 # to do it so late, if the proxy has been already installed.

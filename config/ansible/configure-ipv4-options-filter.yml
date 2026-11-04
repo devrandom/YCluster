@@ -1,0 +1,100 @@
+---
+# CVE-2026-98432 stopgap: drop IPv4 TCP packets that carry IP header options.
+#
+# The use-after-free is reachable from any IPv4 TCP listener as soon as the
+# SYN carries IP options: tcp_v4_save_options() allocates ireq->ireq_opt from
+# the incoming SYN regardless of MPTCP. Disabling MPTCP (configure-mptcp.yml)
+# only removes the listener configuration the published exploit used, so this
+# filter is the actual stopgap until nodes run a kernel with e3f33b0a1d89
+# ("ipv4: free inet_opt and ireq_opt after an RCU grace period").
+#
+# The rule hooks prerouting so traffic forwarded to containers/VMs behind the
+# frontend is covered too, and it drops before conntrack. Normal TCP traffic
+# never sets IHL > 5; TCP's own options live in the TCP header and are not
+# affected. Known gaps, per the vendor advisories: traffic between containers
+# on the same host bypasses prerouting, and CIPSO security labels travel in IP
+# options (not used here).
+#
+# Rolled out with an explicit --limit (frontend, then storage, then compute) and
+# watch each host's drop counter for legitimate IP-option traffic before
+# widening. Remove this playbook, /etc/nftables.d/cve-2026-98432.nft and the
+# unit once every node runs a fixed kernel.
+- name: Drop IPv4 TCP packets with IP header options
+  hosts: managed:frontend
+  become: yes
+
+  tasks:
+    - name: Ensure the nftables ruleset directory exists
+      file:
+        path: /etc/nftables.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install CVE-2026-98432 filter ruleset
+      copy:
+        dest: /etc/nftables.d/cve-2026-98432.nft
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # CVE-2026-98432: drop IPv4 TCP packets carrying IP header options.
+          table ip cve_2026_98432 {
+              chain prerouting {
+                  type filter hook prerouting priority -300; policy accept;
+                  meta l4proto tcp ip hdrlength > 5 counter drop
+              }
+          }
+      register: cve_filter_ruleset
+
+    # ufw owns the `filter` table via iptables-nft and nftables.service is
+    # disabled, so the rule needs its own unit to survive a reboot.
+    - name: Install CVE-2026-98432 filter unit
+      copy:
+        dest: /etc/systemd/system/cve-2026-98432-filter.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Drop IPv4 TCP packets with IP options (CVE-2026-98432 stopgap)
+          After=network-pre.target
+          Wants=network-pre.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStartPre=-/usr/sbin/nft delete table ip cve_2026_98432
+          ExecStart=/usr/sbin/nft -f /etc/nftables.d/cve-2026-98432.nft
+
+          [Install]
+          WantedBy=multi-user.target
+      register: cve_filter_unit
+
+    - name: Validate the filter ruleset
+      command: nft -c -f /etc/nftables.d/cve-2026-98432.nft
+      changed_when: false
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+      when: cve_filter_unit.changed
+
+    # `restarted` also starts an inactive unit, and makes a ruleset change take
+    # effect immediately. `started` leaves an already-loaded table (and its
+    # counters) alone on repeat runs.
+    - name: Enable the CVE-2026-98432 filter
+      systemd:
+        name: cve-2026-98432-filter.service
+        enabled: yes
+        state: "{{ 'restarted' if (cve_filter_ruleset.changed or cve_filter_unit.changed) else 'started' }}"
+
+    - name: Read the live filter table
+      command: nft list table ip cve_2026_98432
+      register: cve_filter_table
+      changed_when: false
+
+    - name: Show the live filter table and its drop counters
+      debug:
+        var: cve_filter_table.stdout_lines
