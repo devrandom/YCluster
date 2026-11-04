@@ -8,6 +8,11 @@
 # Kraken deployment (ds41-flash), ds4-dspark, or their GPUs. It needs 4 cards
 # named in ds41_moet_gpus (private host_vars); prefer CDI GPU-UUID names.
 #
+# The engine advertises the shared gateway name (ds41_moet_served_name,
+# `deepseek-v4_1-flash`), so local-ai-proxy pools it with the Karmic Kraken
+# backend under one model key. `ds41-moet` is only the container's internal
+# identity here, not the model id callers ask for.
+#
 # The launch arguments and environment below are copied from the upstream
 # manifest, registry/launches/vllm-moet-deepseek-v4.1-flash-1017-512k-tp4.json
 # (sybil-solutions/local-ai-registry). Do not "tidy" them: the fused decode

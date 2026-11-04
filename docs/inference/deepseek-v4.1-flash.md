@@ -1,7 +1,10 @@
 # DeepSeek-V4.1-Flash on RTX PRO 6000 / SM120
 
-Status: **SERVING** on the four-GPU spare node (`ds41-flash`, port 9218,
-gateway key `deepseek-v4_1-flash`). Context cap 512K (`MAX_MODEL_LEN=524288`,
+Status: **SERVING** under the gateway key `deepseek-v4_1-flash`, backed by
+two engines on separate four-GPU nodes: the Karmic Kraken container
+(`ds41-flash`, port 9218) and the sybil/MoET recipe (`ds41-moet`, port 9219).
+`local-ai-proxy` fans out across both, least-loaded, so a request may be
+answered by either engine. Context cap 512K (`MAX_MODEL_LEN=524288`,
 engine KV pool 4.7M tokens). Needles verified through 200K via the smoke
 suite (7/7) and a direct 430K-token prompt at 80% depth. The R36 image
 token normalizer is patched (bind-mounted) to accept Responses API
@@ -133,11 +136,25 @@ Migration notes if we move:
   RAM-Engram on different clocks. Any upgrade re-runs the smoke/needle
   suite plus a matched short benchmark against R36 before serving traffic.
 
-## MoET recipe (r13, alongside deployment)
+## MoET recipe (r13, pooled backend)
 
 A second recipe for the same checkpoint, from `sybil-solutions/local-ai-registry`
 (0xSero / kacper-daftcode `vLLM-Moet`), deployed by
-`admin/install-deepseek-v41-moet.yml` as `ds41-moet`:
+`admin/install-deepseek-v41-moet.yml` as `ds41-moet`. It serves the same
+gateway key as the Karmic Kraken profile, so both engines are one
+`deepseek-v4_1-flash` fleet rather than two model ids:
+
+- The split is unweighted (least-loaded, ties broken randomly), so roughly
+  half the traffic lands on this ~400 tok/s C1 engine and half on the
+  ~210 tok/s Karmic Kraken one.
+- MoET's kernels are lossy by design (top-1 agreement 0.974, mean KL 0.0195)
+  and its scheduler is the recipe stock shape, so a slow prefill here is
+  visible to whoever got routed to it.
+- Benchmark per host, not through the gateway:
+  `inference --local bench deepseek-v4_1-flash` on the serving node resolves
+  the local backend of that model key. Gateway numbers are a blend of both.
+- Retiring either engine means `ycluster inference remove <url>` for its
+  backend, not removing the model entry.
 
 | Item | Value |
 |---|---|

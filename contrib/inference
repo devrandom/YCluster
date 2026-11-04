@@ -68,7 +68,7 @@ Usage:
   ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 1,2,4,8 --json
   ./inference batch MiniMaxAI/MiniMax-M2.7 --concurrency 8 --cache 50
   ./inference fairness deepseek-v4_1-flash
-  ./inference --local bench deepseek-v4_1-flash-moet
+  ./inference --local bench deepseek-v4_1-flash
   ./inference fairness glm-5.3-flash --prefills 1 --json
   ./inference image nemotron-3-nano-omni
   ./inference smoke MiniMaxAI/MiniMax-M2.7 A C

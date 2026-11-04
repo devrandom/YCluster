@@ -3,9 +3,13 @@
 #
 # This is the 0xSero / sybil-solutions "moet-r13" launch
 # (vllm-moet-deepseek-v4.1-flash-1017-512k-tp4), NOT the Karmic Kraken
-# profile deployed by admin/install-deepseek-v41-flash.yml. It installs as a
-# separate alongside backend so both can be measured against identical
-# traffic before either one replaces the other.
+# profile deployed by admin/install-deepseek-v41-flash.yml. It serves the
+# same gateway name as that profile, so both engines form one
+# `deepseek-v4_1-flash` fleet and local-ai-proxy splits traffic across them
+# least-loaded. A request may land on either engine: the two recipes run on
+# separate hosts with different kernels, throughput and (for MoET)
+# lossy-by-design quality. Measure per host with `inference --local` rather
+# than reading a gateway number as one engine's.
 #
 #   image: ghcr.io/sybil-solutions/vllm-moet-dsv41@sha256:08f61e68… (r13)
 #   weights: deepseek-ai/DeepSeek-V4.1-Flash-1017 @ 1bae0e10…
@@ -50,9 +54,13 @@
     ds41_moet_repo: "deepseek-ai/DeepSeek-V4.1-Flash-1017"
     ds41_moet_revision: "1bae0e1088993b9b82de08f59de5be5a34e42170"
     ds41_moet_model_dir: "/home/dev/models/DeepSeek-V4.1-Flash-1017"
-    # Keep this distinct from the Karmic Kraken name (deepseek-v4_1-flash) so
-    # callers can A/B the two recipes without the gateway splitting traffic.
-    ds41_moet_served_name: "deepseek-v4_1-flash-moet"
+    # Must match the Karmic Kraken profile's name
+    # (admin/install-deepseek-v41-flash.yml) so this engine joins the same
+    # `deepseek-v4_1-flash` fleet: local-ai-proxy fans out across every
+    # backend registered under a name. The engine's served id has to equal
+    # the gateway key too -- the proxy drops a backend for a model its
+    # /v1/models does not advertise.
+    ds41_moet_served_name: "deepseek-v4_1-flash"
     ds41_moet_port: 9219
     ds41_moet_container: "ds41-moet"
     # Persistent home for the FlashInfer/Triton JIT caches. The launcher
@@ -162,6 +170,23 @@
       set_fact:
         is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
 
+    # The MoET engine used to answer as `deepseek-v4_1-flash-moet`. Retire
+    # that name here so it does not come back on a fresh deploy; it runs
+    # before the no-host guard so de-opting the recipe also cleans it up.
+    - name: Read the current gateway model registry
+      command: ycluster inference ls
+      register: ds41_moet_models_ls
+      changed_when: false
+      check_mode: false
+      when: is_storage_leader
+
+    - name: Retire the legacy `deepseek-v4_1-flash-moet` gateway name
+      command: ycluster inference remove deepseek-v4_1-flash-moet
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+        - "'deepseek-v4_1-flash-moet' in (ds41_moet_models_ls.stdout | default(''))"
+
     - name: End play when no MoET host is opted in
       meta: end_host
       when: ds41_moet_nvidia_host | length == 0
@@ -173,14 +198,14 @@
             hostvars[ds41_moet_nvidia_host]['ds41_moet_port'] | default(9219) }}
         ds41_moet_served_name_fact: >-
           {{ hostvars[ds41_moet_nvidia_host]['ds41_moet_served_name']
-             | default('deepseek-v4_1-flash-moet') }}
+             | default('deepseek-v4_1-flash') }}
 
     - name: Register the DS4.1 MoET backend with local-ai-proxy
       command: >-
         ycluster inference add {{ ds41_moet_backend_url }}
         {{ ds41_moet_served_name_fact }}
       register: ds41_moet_proxy_register
-      changed_when: "'added' in ds41_moet_proxy_register.stdout or 'registered' in ds41_moet_proxy_register.stdout"
+      changed_when: "'Added:' in ds41_moet_proxy_register.stdout"
       when:
         - is_storage_leader
         - not ansible_check_mode
@@ -189,7 +214,8 @@
       debug:
         msg: >-
           DS4.1 MoET backend registered at {{ ds41_moet_backend_url }}
-          (served: {{ ds41_moet_served_name_fact }})
+          (serving: {{ ds41_moet_served_name_fact }}, pooled with the other
+          backends under that name)
       when:
         - is_storage_leader
         - not ansible_check_mode
