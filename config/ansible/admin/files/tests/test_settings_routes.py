@@ -269,7 +269,7 @@ class UsageRouteTests(unittest.TestCase):
                 mock.patch.object(appmod, "_usage_stats_cursor",
                                   return_value=(FakeConn(), None, None)), \
                 mock.patch.object(app_usage, "fetch_usage_state",
-                                  return_value=([], [], {})), \
+                                  return_value=([], {}, {}, {})), \
                 mock.patch.object(app_usage, "registry_snapshots",
                                   return_value=({}, [])), \
                 mock.patch.object(app_usage, "owner_visibility",
@@ -294,7 +294,7 @@ class UsageRouteTests(unittest.TestCase):
                 mock.patch.object(appmod, "_usage_stats_cursor",
                                   return_value=(FakeConn(), None, None)), \
                 mock.patch.object(app_usage, "fetch_usage_state",
-                                  return_value=([], [], {})), \
+                                  return_value=([], {}, {}, {})), \
                 mock.patch.object(app_usage, "registry_snapshots",
                                   return_value=({}, {})), \
                 mock.patch.object(app_usage, "owner_visibility",

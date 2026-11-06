@@ -41,6 +41,10 @@ VM_STATE_PREFIX = "/cluster/vm-state/"
 # Stamped into each snapshot; must match the vm-state-sampler.timer cadence
 # (files/vm-state-sampler.timer) — observed GPU-hours = sum(gpus * interval_s).
 VM_STATE_INTERVAL_S = 60
+# Sampler heartbeat for node_exporter's textfile collector. Usage accounting
+# reads "no snapshot" as "host off", so a dead sampler would silently stop
+# billing and stop the dashboard's drift signal; this is what alerts on it.
+VM_SAMPLER_METRICS = "/var/lib/prometheus/node-exporter/vm_sampler.prom"
 # Desired power state per VM, written by admin-api and converged by the
 # vm-reconciler timer; hosts pull intent over etcd (no inbound channel).
 # {"mode": "on"|"off"|"schedule", "windows":
@@ -845,8 +849,9 @@ def _record_event(event, name, owner=None, gpus=None, initiator="cli",
 
     Best-effort: accounting must never break a lifecycle operation. CLI
     operations default to non-billable (admin debugging must not count
-    against the owner's quota) — `--bill` opts in; the future
-    scheduler/web path emits its own initiator with billable=True.
+    against the owner's quota) — `--bill` opts in per operation, and
+    `ycluster vm alter --bill-default` opts in permanently for a VM;
+    the scheduler/web path emits its own initiator with billable=True.
     """
     try:
         payload = {
@@ -864,10 +869,54 @@ def _record_event(event, name, owner=None, gpus=None, initiator="cli",
         print(f"Warning: failed to record {event} event for {name}: {e}",
               file=sys.stderr)
 
-def _record_event_from_record(event, name, initiator="cli", billable=False):
+def _resolve_billable(record, billable=None):
+    """Resolve a lifecycle event's billing flag.
+
+    An explicit flag (web/scheduler, or CLI `--bill`) wins. None means
+    "follow the VM's registered policy", set with
+    `ycluster vm alter --bill-default`, so an owner-billed VM stays
+    billable across CLI stop/start cycles without a flag every time.
+    """
+    if billable is not None:
+        return billable
+    return bool((record or {}).get("billable"))
+
+
+def _record_event_from_record(event, name, initiator="cli", billable=None):
     rec = vm_get(name) or {}
     _record_event(event, name, owner=rec.get("owner"), gpus=rec.get("gpus"),
-                  initiator=initiator, billable=billable)
+                  initiator=initiator,
+                  billable=_resolve_billable(rec, billable))
+
+def _write_sampler_metrics(count, ts):
+    """Publish sampler liveness for node_exporter (best-effort).
+
+    Written only after the snapshot reached etcd, so the timestamp means
+    "last successful sample", not "last attempt". A host that is merely
+    powered off stops scraping node_exporter too, so a stale heartbeat
+    means the sampler itself is broken — which usage accounting cannot
+    tell apart from a host that is off.
+    """
+    body = (
+        "# HELP vm_sampler_last_success_timestamp_seconds "
+        "Unix time of the last snapshot written to etcd.\n"
+        "# TYPE vm_sampler_last_success_timestamp_seconds gauge\n"
+        f"vm_sampler_last_success_timestamp_seconds {int(ts)}\n"
+        "# HELP vm_sampler_instances Instances in the last snapshot.\n"
+        "# TYPE vm_sampler_instances gauge\n"
+        f"vm_sampler_instances {count}\n"
+    )
+    tmp = VM_SAMPLER_METRICS + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(VM_SAMPLER_METRICS), exist_ok=True)
+        with open(tmp, "w") as f:
+            f.write(body)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, VM_SAMPLER_METRICS)
+    except Exception as e:
+        print(f"Warning: failed to write {VM_SAMPLER_METRICS}: {e}",
+              file=sys.stderr)
+
 
 def sample_state():
     """Snapshot local incus state into etcd for usage accounting.
@@ -876,6 +925,7 @@ def sample_state():
     per host; the collector on the storage leader turns fresh snapshots
     into usage_stats.vm_samples rows (stale snapshots — host down, timer
     dead — are skipped there, so absence is never mistaken for runtime).
+    Also stamps the sampler heartbeat the VMSamplerStale alert watches.
     """
     instances = []
     for inst in _incus_json("list", "--format", "json"):
@@ -897,6 +947,7 @@ def sample_state():
         "instances": instances,
     }
     _put_json(VM_STATE_PREFIX + socket.gethostname(), payload)
+    _write_sampler_metrics(len(instances), time.time())
     print(f"sampled {len(instances)} instance(s)")
 
 def vm_sync_limits():
@@ -1114,7 +1165,7 @@ def _warn_desired_conflict(name, action):
     if reason:
         print(f"  NOTE: '{name}' is {reason}.", file=sys.stderr)
 
-def vm_stop(name, billable=False, initiator="cli", release=False):
+def vm_stop(name, billable=None, initiator="cli", release=False):
     _incus_stop(name)
     _record_event_from_record("stop", name, initiator=initiator,
                               billable=billable)
@@ -1129,7 +1180,7 @@ def vm_stop(name, billable=False, initiator="cli", release=False):
     if initiator == "cli":
         _warn_desired_conflict(name, "stop")
 
-def vm_start(name, billable=False, initiator="cli", gpus=None, migrate=False):
+def vm_start(name, billable=None, initiator="cli", gpus=None, migrate=False):
     """Start a VM, converging its passthrough GPUs to `gpus` (default:
     the VM's registered count). `gpus` is capped at the registered count
     so a caller can never over-allocate past the VM's allocation; 0
@@ -1170,7 +1221,7 @@ def vm_start(name, billable=False, initiator="cli", gpus=None, migrate=False):
     if initiator == "cli":
         _warn_desired_conflict(name, "start")
 
-def vm_restart(name, billable=False, initiator="cli"):
+def vm_restart(name, billable=None, initiator="cli"):
     record = vm_get(name) or {}
     mem = record.get("mem") or _incus_config_value(name, "limits.memory")
     if not mem:

@@ -3,37 +3,112 @@
 import csv
 import io
 import re
+from datetime import datetime, timedelta, timezone
+
+# A sample credits the time elapsed since the previous sample for the same
+# (vm, host), so observed GPU-hours track the collector's real cadence
+# rather than the interval_s the sampler stamped. Gaps are capped: a dead
+# collector or host must never fabricate running time.
+SAMPLE_GAP_CAP_S = 600
+# A VM counts as "known stopped" only when its newest sample is at most
+# this old. Older means the sampler is dead, which is unknown, not off.
+SAMPLE_FRESH_S = 600
+# A host with no snapshot for this long is off: nothing on it can be
+# running. VMSamplerStale alerts when a live host stops sampling, so this
+# assumption can't silently stop billing.
+HOST_DOWN_GAP_S = 600
 
 def fetch_usage_state(cur, since_dt, until_dt=None):
     """Read lifecycle events, sample aggregates, and latest VM state.
 
     until_dt bounds the sample aggregation (year windows need a hard end);
-    None leaves it open-ended for day windows ending at "now"."""
+    None leaves it open-ended for day windows ending at "now".
+
+    Each sampled VM also carries `stopped_at` when samples show it is no
+    longer running: the last moment it was seen Running. Callers use that
+    to stop an unclosed lifecycle interval from accruing forever."""
     # The latest pre-window event decides whether an interval was open (and
     # with what gpus/billable) at the window start, bounding the scan.
-    cur.execute('''SELECT DISTINCT ON (vm) ts, vm, event, owner, gpus, billable
+    cur.execute('''SELECT DISTINCT ON (vm) ts, vm, event, owner, gpus, billable,
+                          host
                    FROM vm_events WHERE ts < %s
                    ORDER BY vm, ts DESC''', [since_dt])
     pre_events = cur.fetchall()
-    cur.execute('''SELECT ts, vm, event, owner, gpus, billable
+    cur.execute('''SELECT ts, vm, event, owner, gpus, billable, host
                    FROM vm_events WHERE ts >= %s
                    ORDER BY vm, ts''', [since_dt])
     events = pre_events + cur.fetchall()
 
-    sample_where = 'WHERE ts >= %s' if until_dt is None else 'WHERE ts >= %s AND ts < %s'
-    sample_params = [since_dt] if until_dt is None else [since_dt, until_dt]
+    until_clause = '' if until_dt is None else 'AND ts < %s'
+    sample_params = [since_dt - timedelta(seconds=SAMPLE_GAP_CAP_S),
+                     SAMPLE_GAP_CAP_S, since_dt]
+    if until_dt is not None:
+        sample_params.append(until_dt)
     cur.execute(f'''
+        WITH s AS (
+            SELECT vm, host, ts, owner, state, gpus,
+                   lag(ts) OVER (PARTITION BY vm, host ORDER BY ts) AS prev
+            FROM vm_samples WHERE ts >= %s
+        )
         SELECT vm, MAX(COALESCE(owner, '')),
-               SUM(CASE WHEN state = 'Running' THEN gpus * interval_s ELSE 0 END)::float / 3600,
+               (SUM(CASE WHEN state = 'Running'
+                         THEN gpus * LEAST(EXTRACT(EPOCH FROM ts - prev), %s)
+                         ELSE 0 END) / 3600)::float,
                COUNT(*) FILTER (WHERE state = 'Running')
-        FROM vm_samples {sample_where}
+        FROM s
+        WHERE ts >= %s AND prev IS NOT NULL {until_clause}
         GROUP BY vm
     ''', sample_params)
     sampled = {r[0]: {'owner': r[1], 'observed': r[2] or 0.0,
                       'samples': r[3]} for r in cur.fetchall()}
-    cur.execute('''SELECT DISTINCT ON (vm) vm, state
+
+    cur.execute('''SELECT DISTINCT ON (vm) vm, state, ts, host
                    FROM vm_samples ORDER BY vm, ts DESC''')
-    return events, sampled, dict(cur.fetchall())
+    latest = {vm: (state, ts, host) for vm, state, ts, host in cur.fetchall()}
+    cur.execute('''SELECT vm, MAX(ts) FROM vm_samples
+                   WHERE state = 'Running' GROUP BY vm''')
+    last_running = dict(cur.fetchall())
+    now = datetime.now(timezone.utc)
+    for vm, (state, ts, _) in latest.items():
+        if state != 'Running' and ts is not None \
+                and (now - ts).total_seconds() <= SAMPLE_FRESH_S \
+                and vm in sampled:
+            sampled[vm]['stopped_at'] = last_running.get(vm) or ts
+
+    # Host uptime, inferred from snapshot cadence: a sampling host emits a
+    # snapshot every ~2 minutes, so any longer silence means the machine is
+    # off (or its sampler is broken — VMSamplerStale reports that). Nothing
+    # on an off host runs, so intervals must not accrue across these holes.
+    cur.execute(f'''
+        WITH s AS (
+            SELECT DISTINCT host, ts FROM vm_samples WHERE ts >= %s
+        ), g AS (
+            SELECT host, lag(ts) OVER (PARTITION BY host ORDER BY ts) AS prev,
+                   ts
+            FROM s
+        )
+        SELECT host, prev, ts FROM g
+        WHERE extract(epoch FROM ts - prev) > %s
+    ''', [since_dt - timedelta(seconds=HOST_DOWN_GAP_S), HOST_DOWN_GAP_S])
+    host_down = {}
+    for host, start, end in cur.fetchall():
+        start = max(start, since_dt)
+        if end > start:
+            host_down.setdefault(host, []).append((start, end))
+    # A host that stopped reporting and hasn't come back is off from its
+    # last snapshot on.
+    cur.execute('''SELECT host, MAX(ts) FROM vm_samples GROUP BY host''')
+    hosts_off = set()
+    for host, last in cur.fetchall():
+        if last is not None and (now - last).total_seconds() > HOST_DOWN_GAP_S:
+            host_down.setdefault(host, []).append((last, now))
+            hosts_off.add(host)
+    # A VM on an off host is not running, whatever the last sample said.
+    for vm, (_, _, host) in latest.items():
+        if host in hosts_off and vm in sampled:
+            sampled[vm]['host_off'] = True
+    return (events, sampled,
+            {vm: state for vm, (state, _, _) in latest.items()}, host_down)
 
 
 def registry_snapshots(vmm):
@@ -156,6 +231,16 @@ CSV_FIELDS = ['Owner', 'VM', 'GPUs', 'GPU type', 'Now', 'Schedule',
               'Observed GPU-h', 'Delta GPU-h', 'Samples']
 
 
+def now_label(row):
+    """Human label for the Now column, shared with the CSV export."""
+    current = row.get('current')
+    if current == 'unclosed':
+        return 'stopped (unclosed)'
+    if current == 'host-off':
+        return 'host off (no samples)'
+    return f'running ({current})' if current else ''
+
+
 def usage_csv(rows):
     """Render usage rows as a CSV StringIO, matching the page's columns."""
     buf = io.StringIO()
@@ -167,8 +252,7 @@ def usage_csv(rows):
             'VM': row['vm'],
             'GPUs': row.get('gpus') if row.get('gpus') is not None else '',
             'GPU type': row.get('gpu_type') or '',
-            'Now': (f"running ({row['current']})"
-                    if row.get('current') else ''),
+            'Now': now_label(row),
             'Schedule': row.get('schedule_mode') or '',
             'Windows': '; '.join(f"{w.get('start', '')} -> {w.get('end', '')}"
                                  for w in row.get('windows') or []),

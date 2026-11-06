@@ -197,10 +197,17 @@ def register(mod):
 
         with conn:
             with conn.cursor() as cur:
-                events, sampled, last_state = fetch_usage_state(cur, since_dt, until_dt)
+                events, sampled, last_state, host_down = fetch_usage_state(
+                    cur, since_dt, until_dt)
 
         registry, desired_all = registry_snapshots(mod.vmm)
-        per_vm = mod._assemble_intervals(events, since_dt, until_dt)
+        # Samples that show a VM stopped bound its still-open interval:
+        # a missed stop event must not bill or track forever.
+        observed_end = {vm: s['stopped_at'] for vm, s in sampled.items()
+                        if s.get('stopped_at')}
+        per_vm = mod._assemble_intervals(events, since_dt, until_dt,
+                                         observed_end=observed_end,
+                                         host_down=host_down)
         from ycluster.utils import authentik_manager
         visible = owner_visibility(mod._authentik_identity(), authentik_manager)
         rows = usage_rows(per_vm, sampled, registry, desired_all, last_state,

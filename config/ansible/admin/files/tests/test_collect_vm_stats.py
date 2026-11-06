@@ -108,5 +108,49 @@ class IngestSnapshotsTests(unittest.TestCase):
         self.assertEqual(conn.transactions, 0)
 
 
+class ScriptedCursor(FakeCursor):
+    """Cursor that replays a fixed result set for the reconcile query."""
+
+    def __init__(self, parent, rows=()):
+        super().__init__(parent)
+        self.result = list(rows)
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def fetchall(self):
+        return self.result
+
+
+class ScriptedConn(FakeConn):
+    def __init__(self, rows=()):
+        super().__init__()
+        self.cursor_obj = ScriptedCursor(self, rows)
+
+    def cursor(self):
+        return self.cursor_obj
+
+
+class ReconcileUnclosedStopsTests(unittest.TestCase):
+    def test_appends_stop_at_last_running_sample(self):
+        stopped = datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc)
+        conn = ScriptedConn([('vm1', 'nv1', 'a@x', 2, stopped)])
+        self.assertEqual(collect_vm_stats.reconcile_unclosed_stops(conn), 1)
+        self.assertEqual(conn.rows, [(
+            stopped, 'vm1', 'nv1', 'a@x', 2,
+            'sample-stop:vm1:2026-11-06T10:00:00+00:00')])
+
+    def test_nothing_to_close_inserts_nothing(self):
+        conn = ScriptedConn([])
+        self.assertEqual(collect_vm_stats.reconcile_unclosed_stops(conn), 0)
+        self.assertEqual(conn.rows, [])
+        sql = conn.cursor_obj.executed[0][0]
+        # Only fresh samples count, and a zero-length close must sort
+        # after the start that opened it.
+        self.assertIn("interval '10 minutes'", sql)
+        self.assertIn("1 microsecond", sql)
+
+
 if __name__ == '__main__':
     unittest.main()

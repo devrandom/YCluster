@@ -40,6 +40,22 @@ groups:
           summary: "Node {{ $labels.node }} is down"
           description: "Node {{ $labels.node }} has been down for more than 1 minute"
 
+      # The vm-state-sampler is the only evidence of what is actually
+      # running: usage accounting (billable vs observed GPU-hours) reads
+      # "no snapshot" as "host off", so a dead sampler silently stops
+      # billing and hides the drift signal. The timestamp is written only
+      # after a successful etcd put, and a powered-off host stops scraping
+      # node-exporter too, so this fires on live hosts with a broken
+      # sampler rather than duplicating NodeDown.
+      - alert: VMSamplerStale
+        expr: time() - vm_sampler_last_success_timestamp_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "VM state sampler stale on {{ $labels.node }}"
+          description: "No successful VM snapshot from {{ $labels.node }} in {{ $value | humanizeDuration }}; usage accounting treats the host as off until it recovers."
+
       # Any systemd unit in failed state — silent unit failures otherwise
       # surface only on manual journalctl inspection. Known-benign
       # offenders are cleared/masked by clear-benign-failed-units.yml.

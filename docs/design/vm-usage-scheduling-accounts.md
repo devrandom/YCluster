@@ -275,6 +275,11 @@ vm_events(ts, vm, host, event, owner, gpus, initiator, billable)
   bringing a VM up for debugging must not count against the owner's quota.
   A `--bill` flag opts in when the admin is acting on the owner's behalf.
   Web/scheduler-initiated operations are billable.
+- Per-VM policy: `ycluster vm alter <vm> --bill-default` stores
+  `billable: true` in the VM registry, so later CLI start/stop/restart
+  events bill the owner without a flag on each op; `--no-bill-default`
+  reverts to the admin/debug default. An explicit flag on a single
+  operation still wins.
 - Billable GPU-hours = Σ over billable start→stop intervals of
   `gpus × duration`.
 
@@ -314,6 +319,23 @@ the CLI, a host reboot with autostart, a missed event, or clock skew. The
 dashboard surfaces them; resolution is human at first (decide whether the
 time was billable). Samples are the safety net — they make untracked
 runtime *visible* without automatically billing it.
+
+An interval the samples show is over must also be closed: otherwise a later
+start is a no-op (the interval is still open) and the whole gap accrues into
+the new run. The collector appends a `stop` (`initiator=samples`) at the last
+moment samples saw the VM running, for VMs whose newest sample is fresh — a
+dead sampler means unknown, not stopped. The dashboard clips an open interval
+at the same point while that stop is still pending.
+
+Host liveness is inferred the same way: a host emits a snapshot every ~2
+minutes, so a longer silence means the machine is off, and nothing on it can
+be running. Interval time overlapping such a window never accrues — the event
+log has no notion of host uptime and would otherwise bill a whole outage. A
+host that stops reporting for good is treated as off from its last snapshot.
+That assumption cannot tell "host off" from "sampler broken", so the sampler
+stamps `vm_sampler_last_success_timestamp_seconds` into its node-exporter
+textfile after a successful etcd put and `VMSamplerStale` alerts when a live
+host stops sampling.
 
 ### Dashboard
 

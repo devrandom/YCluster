@@ -62,7 +62,8 @@ def _parse_windows(windows):
                     'end': end.isoformat(timespec='seconds')})
     return sorted(out, key=lambda w: w['start'])
 
-def _assemble_intervals(events, since_dt, now):
+def _assemble_intervals(events, since_dt, now, observed_end=None,
+                        host_down=None):
     """Assemble running intervals per VM from the event stream (each VM's
     pre-window event sorts before its window events, and the state machine
     is per-VM, so the combined list needs no global re-sort). launch/start
@@ -70,34 +71,56 @@ def _assemble_intervals(events, since_dt, now):
     close it; an interval still open accrues until now. Time is clipped to
     the window; billable is a property of the opening event.
 
+    `observed_end` maps a VM to the last moment samples saw it running
+    (only for VMs whose newest sample says stopped). An interval still
+    open in the event stream — a stop that was never recorded — stops
+    accruing there instead of running to `now` forever. VMs with stale
+    samples are absent: a dead sampler means unknown, not stopped.
+
+    `host_down` maps a host to its off windows (no snapshots). Nothing on
+    an off host runs, so interval time overlapping one never accrues; the
+    event log otherwise bills a VM for the whole outage it was never told
+    about. An interval's host is the host of the event that opened it.
+
     Returns {vm: {'owner': str, 'open': (ts, gpus, billable) | None,
                   'billable': float, 'tracked': float}}.
     """
-    def accrue(st, end):
+    observed_end = observed_end or {}
+    host_down = host_down or {}
+
+    def accrue(vm, st, end):
         start, ev_gpus, ev_billable = st['open']
         lo, hi = max(start, since_dt), min(end, now)
+        if vm in observed_end:
+            hi = min(hi, observed_end[vm])
         if hi > lo:
-            hours = (hi - lo).total_seconds() / 3600 * (ev_gpus or 0)
+            secs = (hi - lo).total_seconds()
+            for down_lo, down_hi in host_down.get(st.get('host'), ()):
+                secs -= max(0.0, (min(down_hi, hi) - max(down_lo, lo))
+                            .total_seconds())
+            hours = max(secs, 0.0) / 3600 * (ev_gpus or 0)
             st['tracked'] += hours
             if ev_billable:
                 st['billable'] += hours
 
     per_vm = {}
-    for ts, vm, event, owner, gpus, billable in events:
+    for ts, vm, event, owner, gpus, billable, host in events:
         st = per_vm.setdefault(vm, {'owner': owner, 'open': None,
-                                    'billable': 0.0, 'tracked': 0.0})
+                                    'billable': 0.0, 'tracked': 0.0,
+                                    'host': host})
         if owner:
             st['owner'] = owner
         if event in ('launch', 'start', 'restart'):
             if st['open'] is None:
                 st['open'] = (ts, gpus, billable)
+                st['host'] = host
         elif event in ('stop', 'destroy'):
             if st['open'] is not None:
-                accrue(st, ts)
+                accrue(vm, st, ts)
                 st['open'] = None
-    for st in per_vm.values():
+    for vm, st in per_vm.items():
         if st['open'] is not None:
-            accrue(st, now)
+            accrue(vm, st, now)
     return per_vm
 
 def _usage_row(vm, ev, sm, registry, desired_all, last_state):
@@ -107,9 +130,16 @@ def _usage_row(vm, ev, sm, registry, desired_all, last_state):
     observed = round(sm.get('observed', 0.0), 4)
     # Is the VM on the clock right now, and on whose dime: an open
     # event interval says billable/unbilled; running per the latest
-    # sample with no open interval is untracked runtime.
-    if ev.get('open') is not None:
-        current = 'billable' if ev['open'][2] else 'unbilled'
+    # sample with no open interval is untracked runtime; an open
+    # interval whose VM samples say stopped is unclosed (accrual was
+    # clipped at the last running sample, so it is not on the clock).
+    if sm.get('host_off'):
+        current = 'host-off'
+    elif ev.get('open') is not None:
+        if sm.get('stopped_at'):
+            current = 'unclosed'
+        else:
+            current = 'billable' if ev['open'][2] else 'unbilled'
     elif last_state.get(vm) == 'Running':
         current = 'untracked'
     else:

@@ -69,9 +69,17 @@ def register_vm_commands(subparsers):
     ap.add_argument('--bill', action='store_true',
                     help='Bill this admin op to the owner (CLI ops '
                          'default to non-billable admin/debug time)')
+    ap.add_argument('--bill-default', dest='bill_default',
+                    action='store_true', default=None,
+                    help='Persistently bill this VM\'s CLI-initiated '
+                         'runtimes to the owner (registry-only change)')
+    ap.add_argument('--no-bill-default', dest='bill_default',
+                    action='store_false',
+                    help='Revert this VM to non-billable CLI runtimes')
     ap.set_defaults(func=lambda a: vm.vm_alter(
         a.name, owner=a.owner, gpus=a.gpus, cpu=a.cpu, mem=a.mem,
         image=a.image, instance_type=a.instance_type, billable=a.bill,
+        billable_default=a.bill_default,
         add_users=a.add_user, remove_users=a.remove_user))
 
     lsp = sub.add_parser('list', help='List registered VMs')
@@ -87,8 +95,8 @@ def register_vm_commands(subparsers):
                     help="Also detach the VM's passthrough GPUs back to the "
                          "host pool (next start re-acquires them). Default: "
                          "keep them attached for a fast restart.")
-    sp.set_defaults(func=lambda a: vm.vm_stop(a.name, billable=a.bill,
-                                              release=a.release))
+    sp.set_defaults(func=lambda a: vm.vm_stop(
+        a.name, billable=True if a.bill else None, release=a.release))
 
     stp = sub.add_parser('start', help='Start a stopped VM')
     stp.add_argument('name')
@@ -102,15 +110,16 @@ def register_vm_commands(subparsers):
                     help='Migrate the legacy virtiofs share to a block '
                          'image before starting (otherwise migrates never '
                          'run automatically)')
-    stp.set_defaults(func=lambda a: vm.vm_start(a.name, billable=a.bill,
-                                                gpus=a.gpus,
-                                                migrate=a.migrate))
+    stp.set_defaults(func=lambda a: vm.vm_start(
+        a.name, billable=True if a.bill else None,
+        gpus=a.gpus, migrate=a.migrate))
 
     rsp = sub.add_parser('restart', help='Stop (if running) and start a VM')
     rsp.add_argument('name')
     rsp.add_argument('--bill', action='store_true',
                     help='Bill the continued runtime to the owner')
-    rsp.set_defaults(func=lambda a: vm.vm_restart(a.name, billable=a.bill))
+    rsp.set_defaults(func=lambda a: vm.vm_restart(
+        a.name, billable=True if a.bill else None))
 
     dp = sub.add_parser('destroy', help='Delete a VM and its registration')
     dp.add_argument('name')

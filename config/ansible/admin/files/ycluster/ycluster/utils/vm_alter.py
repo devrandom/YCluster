@@ -116,8 +116,27 @@ def _alter_resources(name, rec, cpu, mem):
     return cpu_changed, mem_changed
 
 
+def _alter_billable_default(rec, billable_default):
+    """Persist the per-VM billing policy for CLI-initiated runtimes.
+
+    Registry-only (no incus call). Unset keeps the historical default of
+    non-billable admin/debug time; True makes every later lifecycle event
+    for this VM billable to its owner unless a caller passes an explicit
+    flag. Returns whether the record changed.
+    """
+    if billable_default is None \
+            or bool(rec.get("billable")) == bool(billable_default):
+        return False
+    if billable_default:
+        rec["billable"] = True
+    else:
+        rec.pop("billable", None)
+    return True
+
+
 def _vm_alter_changes(owner, owner_changed, rec, access_changed,
-                      gpus, gpu_changed, cpu, cpu_changed, mem, mem_changed):
+                      gpus, gpu_changed, cpu, cpu_changed, mem, mem_changed,
+                      billable_default, billable_default_changed):
     """Build the human-readable change summary for vm_alter."""
     changes = []
     if owner_changed:
@@ -131,11 +150,15 @@ def _vm_alter_changes(owner, owner_changed, rec, access_changed,
         changes.append(f"cpu -> {cpu}")
     if mem_changed:
         changes.append(f"mem -> {mem}")
+    if billable_default_changed:
+        state = "on" if billable_default else "off"
+        changes.append(f"billable default -> {state}")
     return changes
 
 
 def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
              image=None, instance_type=None, billable=False,
+             billable_default=None,
              add_users=None, remove_users=None):
     """Alter parameters of an existing VM. Pass only what should change.
 
@@ -155,6 +178,10 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
     have keys registered to be added; the owner is never an additional
     user itself.
 
+    `billable` flags this one alter event; `billable_default` sets the
+    VM's persistent billing policy (registry-only, no incus call) so
+    later CLI lifecycle events are billed to the owner.
+
     No-op if every supplied value already matches the registry.
     """
     vm._valid_vm_name(name)
@@ -173,9 +200,11 @@ def vm_alter(name, owner=None, gpus=None, cpu=None, mem=None,
 
     gpu_changed = _alter_vm_gpus(name, rec, cur_type, gpus)
     cpu_changed, mem_changed = _alter_resources(name, rec, cpu, mem)
+    billable_default_changed = _alter_billable_default(rec, billable_default)
     changes = _vm_alter_changes(
         owner, owner_changed, rec, access_changed, gpus, gpu_changed,
         cpu, cpu_changed, mem, mem_changed,
+        billable_default, billable_default_changed,
     )
     if not changes:
         print(f"No changes for '{name}' (every supplied value matches "

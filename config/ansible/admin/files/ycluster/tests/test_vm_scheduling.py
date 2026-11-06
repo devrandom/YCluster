@@ -12,7 +12,9 @@ or a single module:
 
 import io
 import json
+import os
 import subprocess
+import tempfile
 import contextlib
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -734,10 +736,12 @@ class VMAlterHelperTests(unittest.TestCase):
     def test_change_summary(self):
         rec = {"additional_users": ["b@x"]}
         changes = vm_alter._vm_alter_changes(
-            "new@x", True, rec, True, 2, True, 8, True, "16GiB", True)
+            "new@x", True, rec, True, 2, True, 8, True, "16GiB", True,
+            True, True)
         self.assertEqual(changes, [
             "owner -> new@x", "additional users -> [b@x]",
             "gpus -> 2", "cpu -> 8", "mem -> 16GiB",
+            "billable default -> on",
         ])
 
     @mock.patch.object(vm, "_verify_guest_gpus")
@@ -868,6 +872,49 @@ class VMAlterOrchestratorTests(unittest.TestCase):
                                               exists):
         with self.assertRaisesRegex(ValueError, "not present on this host"):
             vm_alter.vm_alter("vm1")
+
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "_valid_vm_name")
+    @mock.patch.object(vm, "vm_get")
+    def test_vm_alter_sets_billable_default(self, vm_get, valid_name, exists):
+        rec = {"name": "vm1", "owner": "a@x", "type": "vm", "gpus": 1}
+        vm_get.return_value = rec
+        with mock.patch.object(vm, "_put_json") as put, \
+                mock.patch.object(vm, "_record_event") as event, \
+                mock.patch("builtins.print") as print_:
+            vm_alter.vm_alter("vm1", billable_default=True)
+        self.assertTrue(rec["billable"])
+        put.assert_called_once_with(vm.VMS_PREFIX + "vm1", rec)
+        event.assert_called_once()
+        print_.assert_called_once_with(
+            "Altered 'vm1': billable default -> on.")
+
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "_valid_vm_name")
+    @mock.patch.object(vm, "vm_get")
+    def test_vm_alter_clears_billable_default(self, vm_get, valid_name, exists):
+        rec = {"name": "vm1", "owner": "a@x", "type": "vm", "gpus": 1,
+               "billable": True}
+        vm_get.return_value = rec
+        with mock.patch.object(vm, "_put_json") as put, \
+                mock.patch.object(vm, "_record_event"), \
+                mock.patch("builtins.print"):
+            vm_alter.vm_alter("vm1", billable_default=False)
+        self.assertNotIn("billable", rec)
+        put.assert_called_once()
+
+    @mock.patch.object(vm, "_instance_exists", return_value=True)
+    @mock.patch.object(vm, "_valid_vm_name")
+    @mock.patch.object(vm, "vm_get")
+    def test_vm_alter_billable_default_no_changes(self, vm_get, valid_name,
+                                                  exists):
+        vm_get.return_value = {"name": "vm1", "owner": "a@x", "type": "vm",
+                               "gpus": 1, "billable": True}
+        with mock.patch.object(vm, "_put_json") as put, \
+                mock.patch.object(vm, "_record_event") as event:
+            vm_alter.vm_alter("vm1", billable_default=True)
+        self.assertEqual(put.call_count, 0)
+        self.assertEqual(event.call_count, 0)
 
     @mock.patch.object(vm, "_instance_exists", return_value=True)
     @mock.patch.object(vm, "vm_get", return_value={"type": "vm"})
@@ -1689,6 +1736,24 @@ class VMListHelperTests(unittest.TestCase):
         record.assert_called_once_with('start', 'vm1', owner='alice@x',
                                        gpus=2, initiator='web', billable=True)
 
+    def test_record_event_from_record_honours_billable_default(self):
+        rec = {'owner': 'alice@x', 'gpus': 2, 'billable': True}
+        for passed, want in ((None, True), (False, False), (True, True)):
+            with mock.patch.object(vm, 'vm_get', return_value=rec), \
+                    mock.patch.object(vm, '_record_event') as record:
+                vm._record_event_from_record('start', 'vm1', billable=passed)
+            record.assert_called_once_with('start', 'vm1', owner='alice@x',
+                                           gpus=2, initiator='cli',
+                                           billable=want)
+
+    def test_record_event_from_record_default_off(self):
+        with mock.patch.object(vm, 'vm_get',
+                               return_value={'owner': 'alice@x', 'gpus': 2}), \
+                mock.patch.object(vm, '_record_event') as record:
+            vm._record_event_from_record('stop', 'vm1')
+        record.assert_called_once_with('stop', 'vm1', owner='alice@x',
+                                       gpus=2, initiator='cli', billable=False)
+
     def test_vm_gpus_reports_assigned_free_and_wedged(self):
         with mock.patch.object(vm, 'gpu_pool', return_value=[]), \
                 mock.patch('builtins.print') as print_:
@@ -1707,6 +1772,30 @@ class VMListHelperTests(unittest.TestCase):
         self.assertEqual(print_.mock_calls[1], mock.call('p2  free'))
         self.assertEqual(print_.mock_calls[2],
                          mock.call('p3  WEDGED (PCIe fault? — won\'t be allocated)'))
+
+
+class SamplerMetricsTests(unittest.TestCase):
+    def test_writes_heartbeat_and_instance_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'vm_sampler.prom')
+            with mock.patch.object(vm, 'VM_SAMPLER_METRICS', path):
+                vm._write_sampler_metrics(3, 1762300000.7)
+            with open(path) as f:
+                body = f.read()
+            self.assertEqual(os.listdir(tmp), ['vm_sampler.prom'])
+        self.assertIn('vm_sampler_last_success_timestamp_seconds 1762300000', body)
+        self.assertIn('vm_sampler_instances 3', body)
+
+    def test_write_failure_does_not_break_sampling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = os.path.join(tmp, 'file')
+            open(blocker, 'w').close()
+            with mock.patch.object(vm, 'VM_SAMPLER_METRICS',
+                                   os.path.join(blocker, 'vm_sampler.prom')), \
+                    mock.patch('builtins.print') as print_:
+                vm._write_sampler_metrics(1, 1762300000)
+        print_.assert_called_once()
+        self.assertIn('vm_sampler.prom', print_.call_args.args[0])
 
 
 class UserRegistryTests(unittest.TestCase):

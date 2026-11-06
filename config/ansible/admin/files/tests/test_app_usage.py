@@ -1,21 +1,95 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import app_usage
 from ycluster.utils import authentik_manager
+
+SINCE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 class FetchUsageStateTests(unittest.TestCase):
     def test_fetches_events_samples_and_states(self):
         cur = mock.Mock()
         cur.fetchall.side_effect = [
-            [('pre',)], [('in',)], [('vm', 'owner', 2.0, 3)], [('vm', 'Running')]
+            [('pre',)], [('in',)], [('vm', 'owner', 2.0, 3)],
+            [('vm', 'Running', None, 'nv1')], [('vm', None)], [], [],
         ]
-        events, sampled, states = app_usage.fetch_usage_state(cur, 'since')
+        events, sampled, states, host_down = app_usage.fetch_usage_state(
+            cur, SINCE)
         self.assertEqual(events, [('pre',), ('in',)])
         self.assertEqual(sampled, {'vm': {'owner': 'owner', 'observed': 2.0, 'samples': 3}})
         self.assertEqual(states, {'vm': 'Running'})
-        self.assertEqual(cur.execute.call_count, 4)
+        self.assertEqual(host_down, {})
+        self.assertEqual(cur.execute.call_count, 7)
+        # Observed accrues from the real inter-sample gap, not the
+        # interval_s stamped by the sampler (which drifts from the
+        # collector cadence and halved every observed number).
+        sample_sql = cur.execute.call_args_list[2].args[0]
+        self.assertIn('lag(ts)', sample_sql)
+        self.assertNotIn('interval_s', sample_sql)
+
+    def test_stopped_sample_marks_interval_end(self):
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=30)
+        last_run = fresh - timedelta(hours=5)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [], [], [('vm', 'owner', 2.0, 3)],
+            [('vm', 'Stopped', fresh, 'nv1')], [('vm', last_run)], [], [],
+        ]
+        _, sampled, states, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertEqual(sampled['vm']['stopped_at'], last_run)
+        self.assertEqual(states, {'vm': 'Stopped'})
+
+    def test_stale_sample_is_unknown_not_stopped(self):
+        old = datetime.now(timezone.utc) - timedelta(hours=33)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [], [], [('vm', 'owner', 2.0, 3)],
+            [('vm', 'Stopped', old, 'nv1')], [], [], [],
+        ]
+        _, sampled, _, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertNotIn('stopped_at', sampled['vm'])
+
+    def test_host_down_windows_come_from_snapshot_gaps(self):
+        start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 2, 9, tzinfo=timezone.utc)
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=60)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [], [], [], [('vm', 'Running', fresh, 'nv1')], [],
+            [('nv1', start, end)], [('nv1', fresh)],
+        ]
+        _, _, _, host_down = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertEqual(host_down, {'nv1': [(start, end)]})
+
+    def test_host_that_stopped_reporting_is_off_from_last_sample(self):
+        last = datetime.now(timezone.utc) - timedelta(hours=30)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [[], [], [], [], [], [], [('c3', last)]]
+        _, _, _, host_down = app_usage.fetch_usage_state(cur, SINCE)
+        down = host_down['c3']
+        self.assertEqual(down[0][0], last)
+        self.assertGreater(down[0][1], last + timedelta(hours=29))
+
+    def test_vm_on_an_off_host_is_flagged(self):
+        last = datetime.now(timezone.utc) - timedelta(hours=30)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [], [], [('vm', 'owner', 1.0, 1)],
+            [('vm', 'Running', last, 'c3')], [], [], [('c3', last)],
+        ]
+        _, sampled, _, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertTrue(sampled['vm']['host_off'])
+
+    def test_now_label_distinguishes_off_and_unclosed(self):
+        self.assertEqual(app_usage.now_label({'current': 'host-off'}),
+                         'host off (no samples)')
+        self.assertEqual(app_usage.now_label({'current': 'unclosed'}),
+                         'stopped (unclosed)')
+        self.assertEqual(app_usage.now_label({'current': 'billable'}),
+                         'running (billable)')
+        self.assertEqual(app_usage.now_label({}), '')
 
 
 class RegistrySnapshotsTests(unittest.TestCase):

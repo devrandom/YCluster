@@ -39,7 +39,10 @@
     A red Δ (observed − tracked) means runtime nobody's events accounted
     for — manual incus ops, host reboot autostart, or missed events.
     <b>Now</b>: whether the current run is billable (untracked = running
-    per samples with no lifecycle event).
+    per samples with no lifecycle event; unclosed = interval still open in
+    the event log but samples show it stopped, so accrual ends at the last
+    running sample; host off = the host sent no snapshot, so nothing on it
+    is billed).
   </p>
 
   <form class="filters" @submit.prevent="fetchRows()">
@@ -89,8 +92,8 @@
               <td x-text="row.vm"></td>
               <td class="num" x-text="row.gpus ?? '—'"></td>
               <td x-text="row.gpu_type || '—'"></td>
-              <td :class="row.current === 'billable' ? 'now-billable' : (row.current === 'untracked' ? 'now-untracked' : '')"
-                  x-text="row.current ? `running (${row.current})` : '—'"></td>
+              <td :class="row.current === 'billable' ? 'now-billable' : (row.current === 'untracked' || row.current === 'unclosed' || row.current === 'host-off' ? 'now-untracked' : '')"
+                  x-text="row.current === 'unclosed' ? 'stopped (unclosed)' : (row.current === 'host-off' ? 'host off (no samples)' : (row.current ? `running (${row.current})` : '—'))"></td>
               <td>
                 <template x-if="row.windows && row.windows.length">
                   <details>
