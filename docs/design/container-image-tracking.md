@@ -51,9 +51,11 @@ observes it.
   --go-buildinfo <buildinfo>`; apk specs use the installed DB's `o:`
   source-package origin (`brotli-libs` → `brotli`, `libexpat` → `expat`), not
   the binary `P:` name. `app/build-forgejo.yml` upgrades the upstream image's
-  `brotli-libs 1.2.0-r1`, `expat 2.8.5-r0`, and `zlib 1.3.2-r0` to
-  `1.2.1-r0`, `2.9.0-r0`, and `1.3.2-r1`; the manifest is generated from
-  that runtime image. apk specs carry the release (`Alpine:v3.24:...`), so OSV's
+  `libexpat 2.9.0-r0` to `2.10.0-r0` and OpenSSH `10.3_p1-r1` to `10.3_p1-r2`
+  (ALPINE-CVE-2026-123158); curl, brotli-libs, and zlib arrive already fixed
+  from the upstream base, and the manifest is generated from that runtime
+  image. apk specs carry the release
+  (`Alpine:v3.24:...`), so OSV's
   per-release entries do not leak historical-branch findings into the current
   image.
 - **Vikunja manifest — generated, not yet deployed.** `vikunja.manifest`
@@ -85,7 +87,7 @@ observes it.
 | authentik server+worker | `registry.xc:5000/authentik:2026.8.5-6b924afb9705` | `ghcr.io/goauthentik/server@sha256:6b924afb…` (var `authentik_image`) + `authentik_version: "2026.8.5"` in `app/install-authentik.yml` | P0-A (IdP + authenticated web) | storage nodes |
 | open-webui | `registry.xc:5000/open-webui-with-plugins:latest` | upstream v0.12.3 `91ea4e34…` + mobile-upload/pillow/certifi/Brotli patches and plugins SHA `746f4b2f…` in `app/build-open-webui.yml` | P0-U (login/static/pre-auth) | storage leader |
 | zulip | `registry.xc:5000/zulip:12.1-0` | docker-zulip `9a0bd360…` + zulip src `7d85fc15…` in `app/build-zulip.yml` | P0-U (login/registration/pre-auth) | storage leader |
-| forgejo | `registry.xc:5000/forgejo:17.0.0-c6931ca29261-brotli1.2.1-expat2.9.0-zlib1.3.2r1` | upstream `codeberg.org/forgejo/forgejo@sha256:c6931ca…` (17.0.0) + brotli/expat/zlib security bumps in `app/build-forgejo.yml` | P0-U (pre-auth git/API) | storage leader |
+| forgejo | `registry.xc:5000/forgejo:17.0.1-fcd19ff4ebc8-expat2.10.0-openssh10.3_p1-r2` | upstream `codeberg.org/forgejo/forgejo@sha256:fcd19ff4…` (17.0.1) + libexpat/OpenSSH security bumps in `app/build-forgejo.yml` | P0-U (pre-auth git/API) | storage leader |
 | vikunja | `registry.xc:5000/vikunja:2.7.1-3a848c83404d` (repo-landed, not deployed) | upstream `docker.io/vikunja/vikunja@sha256:3a848c83404d…` (2.7.1) in `app/install-vikunja.yml` | P0-U (pre-auth login/API) | storage leader |
 
 open-webui and zulip are built in-cluster from pinned source

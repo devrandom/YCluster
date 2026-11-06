@@ -195,10 +195,10 @@ perimeter_software:
     osv_category: container
     osv_packages: []
     # package: container image (Alpine source packages + Forgejo Go modules)
-    # pin_source: app/build-forgejo.yml (upstream @sha256:c6931ca... 17.0.0
-    #             + brotli/expat/zlib security bumps)
+    # pin_source: app/build-forgejo.yml (upstream @sha256:fcd19ff4... 17.0.1
+    #             + libexpat/OpenSSH security bumps)
     # manifest: config/ansible/monitoring/container-manifests/forgejo.manifest
-    # (Alpine apk source origins + linked Go module buildinfo, 280 specs)
+    # (Alpine apk source origins + linked Go module buildinfo, 279 specs)
   - name: vikunja
     # tasks.<domain>. No edge forward-auth: the web UI logs in through OIDC
     # and API/CalDAV clients use Vikunja tokens, not an Authentik session.

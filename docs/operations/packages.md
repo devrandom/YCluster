@@ -254,7 +254,7 @@ image's actual `pip list`, because the Dockerfile installs `requirements.txt`.
 | open-webui | built image from `app/build-open-webui.yml` `webui_repo_sha` | `pip list --format=json` from the built image; authlib/certifi/pillow/Brotli are patched direct pins |
 | zulip | `app/build-zulip.yml` (docker-zulip + src SHAs) | `--uv-select prod` |
 | authentik | `app/install-authentik.yml` `authentik_image` (digest) + `authentik_version` | `--uv-select base` |
-| forgejo | patched in-cluster image from `app/build-forgejo.yml` (upstream digest + brotli/expat/zlib security bumps) | `manifestgen forgejo --apk-installed <installed> --apk-release v3.24 --go-buildinfo <buildinfo>`; apk specs use the installed DB's `o:` source origin, Go specs use the linked binary's buildinfo |
+| forgejo | patched in-cluster image from `app/build-forgejo.yml` (upstream digest + libexpat/OpenSSH security bumps) | `manifestgen forgejo --apk-installed <installed> --apk-release v3.24 --go-buildinfo <buildinfo>`; apk specs use the installed DB's `o:` source origin, Go specs use the linked binary's buildinfo |
 | vikunja | `app/install-vikunja.yml` `vikunja_upstream_image` (amd64 digest) + `vikunja_version` | `manifestgen vikunja --go-buildinfo <buildinfo>` from the distroless binary; no apk layer |
 
 Alpine advisories are keyed on the **source** package, while
