@@ -1,5 +1,9 @@
 """Helpers for the per-VM GPU usage endpoint."""
 
+import csv
+import io
+import re
+
 def fetch_usage_state(cur, since_dt, until_dt=None):
     """Read lifecycle events, sample aggregates, and latest VM state.
 
@@ -40,6 +44,70 @@ def registry_snapshots(vmm):
         return {}, {}
 
 
+_GPU_ALIASES = (
+    # lspci's database on some hosts predates Blackwell, so the card shows
+    # up as a bare "Device 2bb5" — normalize both forms.
+    (re.compile(r'rtx pro 6000|device 2bb5'), 'RTX PRO 6000'),
+    (re.compile(r'rtx a6000'), 'RTX A6000'),
+)
+_STRIX_HALO = re.compile(r'strix halo|device 1586')
+_AI_MAX_CPU = re.compile(r'ai max\+?\s*(\d+)', re.IGNORECASE)
+_BMC_GPU = re.compile(r'aspeed|matrox', re.IGNORECASE)
+
+
+def gpu_type_label(gpu, cpu=''):
+    """Short operator-facing label for one inventory GPU entry.
+
+    Inventory models are lspci marketing strings (or bare ``Device <id>``
+    when the host's PCI database is older than the card) and nvidia-smi
+    names. Normalize the ones the cluster uses to the names people say
+    out loud; anything unrecognised is shown verbatim.
+    """
+    vendor = str(gpu.get('vendor') or '').strip()
+    model = str(gpu.get('model') or '').strip()
+    text = f'{vendor} {model}'.strip().lower()
+    if not text or _BMC_GPU.search(text):
+        return ''  # BMC display chips are not compute GPUs
+    for pattern, label in _GPU_ALIASES:
+        if pattern.search(text):
+            return label
+    if _STRIX_HALO.search(text):
+        # Use the CPU family so a future Strix Halo part is not mislabelled
+        # as the current Ryzen AI Max+ generation.
+        match = _AI_MAX_CPU.search(cpu or '')
+        return f'AMD {match.group(1)}+' if match else 'AMD Strix Halo'
+    return model or vendor
+
+
+def _hardware_gpu_type(hardware):
+    """Distinct GPU type labels for a host's hardware snapshot."""
+    labels = []
+    for gpu in hardware.get('gpus') or []:
+        label = gpu_type_label(gpu, hardware.get('cpu') or '')
+        if label and label not in labels:
+            labels.append(label)
+    return ' + '.join(labels)
+
+
+def gpu_types_by_host(registry, hardware_get=None):
+    """Map each VM host in the registry to its GPU type label.
+
+    Best-effort: inventory gaps or an etcd failure leave the label empty
+    rather than failing the usage page.
+    """
+    if hardware_get is None:
+        from ycluster.utils.inventory import get_hardware as hardware_get
+    hosts = {(rec or {}).get('host') for rec in registry.values()}
+    out = {}
+    for host in sorted(h for h in hosts if h):
+        try:
+            hardware = hardware_get(host) or {}
+            out[host] = _hardware_gpu_type(hardware)
+        except Exception:
+            out[host] = ''
+    return out
+
+
 def owner_visibility(identity, authentik_manager):
     """Return an owner filter for the caller's role.
 
@@ -65,7 +133,8 @@ def owner_visibility(identity, authentik_manager):
     return visible
 
 
-def usage_rows(per_vm, sampled, registry, desired_all, last_state, visible, row_fn):
+def usage_rows(per_vm, sampled, registry, desired_all, last_state, visible,
+               row_fn, gpu_types=None):
     """Build visible usage rows, sorted by VM name."""
     rows = []
     for vm in sorted(set(per_vm) | set(sampled)):
@@ -74,5 +143,41 @@ def usage_rows(per_vm, sampled, registry, desired_all, last_state, visible, row_
         owner = ev.get('owner') or sm.get('owner') or ''
         if not visible(owner):
             continue
-        rows.append(row_fn(vm, ev, sm, registry, desired_all, last_state))
+        row = row_fn(vm, ev, sm, registry, desired_all, last_state)
+        if gpu_types is not None:
+            host = (registry.get(vm) or {}).get('host', '')
+            row['gpu_type'] = gpu_types.get(host, '') if row.get('gpus') else ''
+        rows.append(row)
     return rows
+
+
+CSV_FIELDS = ['Owner', 'VM', 'GPUs', 'GPU type', 'Now', 'Schedule',
+              'Windows', 'Billable GPU-h', 'Tracked GPU-h',
+              'Observed GPU-h', 'Delta GPU-h', 'Samples']
+
+
+def usage_csv(rows):
+    """Render usage rows as a CSV StringIO, matching the page's columns."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=CSV_FIELDS)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({
+            'Owner': row.get('owner') or '(unregistered)',
+            'VM': row['vm'],
+            'GPUs': row.get('gpus') if row.get('gpus') is not None else '',
+            'GPU type': row.get('gpu_type') or '',
+            'Now': (f"running ({row['current']})"
+                    if row.get('current') else ''),
+            'Schedule': row.get('schedule_mode') or '',
+            'Windows': '; '.join(f"{w.get('start', '')} -> {w.get('end', '')}"
+                                 for w in row.get('windows') or []),
+            'Billable GPU-h': f"{row.get('billable_gpu_hours', 0.0):.2f}",
+            'Tracked GPU-h': f"{row.get('tracked_gpu_hours', 0.0):.2f}",
+            'Observed GPU-h': f"{row.get('observed_gpu_hours', 0.0):.2f}",
+            'Delta GPU-h': (
+                f"{row.get('observed_gpu_hours', 0.0) - row.get('tracked_gpu_hours', 0.0):.2f}"),
+            'Samples': row.get('samples', 0),
+        })
+    buf.seek(0)
+    return buf

@@ -74,6 +74,7 @@ settings_api_keys_create
 settings_api_keys_revoke
 vm_usage_page
 vm_usage_data
+vm_usage_export
 model_usage_options
 
 # Flask before_request hook (health-api.py).

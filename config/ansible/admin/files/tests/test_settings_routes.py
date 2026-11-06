@@ -282,6 +282,37 @@ class UsageRouteTests(unittest.TestCase):
             response = self.http.get("/admin/vm-usage/data", headers=ADMIN)
         self.assertEqual(response.get_json(), [{"vm": "vm1"}])
 
+    def test_vm_usage_export_csv(self):
+        import app_usage
+        row = {'vm': 'vm1', 'owner': 'a@x', 'gpus': 2,
+               'gpu_type': 'RTX PRO 6000', 'current': None,
+               'schedule_mode': 'unmanaged', 'windows': [],
+               'billable_gpu_hours': 0.0, 'tracked_gpu_hours': 1.25,
+               'observed_gpu_hours': 1.25, 'samples': 75}
+        with mock.patch("settings_routes._vm_usage_window",
+                            return_value=("a", "b")), \
+                mock.patch.object(appmod, "_usage_stats_cursor",
+                                  return_value=(FakeConn(), None, None)), \
+                mock.patch.object(app_usage, "fetch_usage_state",
+                                  return_value=([], [], {})), \
+                mock.patch.object(app_usage, "registry_snapshots",
+                                  return_value=({}, {})), \
+                mock.patch.object(app_usage, "owner_visibility",
+                                  return_value=None), \
+                mock.patch.object(app_usage, "usage_rows",
+                                  return_value=[row]), \
+                mock.patch.object(appmod, "_assemble_intervals",
+                                  return_value={}), \
+                mock.patch.object(appmod, "_usage_row"):
+            response = self.http.get("/admin/vm-usage/export.csv?since=30",
+                                     headers=ADMIN)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/csv")
+        self.assertIn('filename=vm-usage-30.csv',
+                      response.headers["Content-Disposition"])
+        self.assertIn('vm1,2,RTX PRO 6000', response.text)
+        self.assertIn('1.25', response.text)
+
     def test_model_usage_options_are_admin_only(self):
         self.assertEqual(
             self.http.get("/admin/model-usage/options",

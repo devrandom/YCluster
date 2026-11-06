@@ -29,6 +29,71 @@ class RegistrySnapshotsTests(unittest.TestCase):
         self.assertEqual(app_usage.registry_snapshots(vmm), ({}, {'vm': {}}))
 
 
+class GpuTypeTests(unittest.TestCase):
+    def test_nvidia_marketing_name_normalized(self):
+        self.assertEqual(
+            app_usage.gpu_type_label({
+                'vendor': 'NVIDIA',
+                'model': 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition',
+            }), 'RTX PRO 6000')
+
+    def test_nvidia_generic_pci_id_from_old_lspci_db(self):
+        self.assertEqual(
+            app_usage.gpu_type_label({'vendor': 'NVIDIA Corporation',
+                                      'model': 'Device 2bb5'}),
+            'RTX PRO 6000')
+
+    def test_strix_halo_uses_cpu_family(self):
+        self.assertEqual(
+            app_usage.gpu_type_label({
+                'vendor': 'Advanced Micro Devices, Inc. [AMD/ATI]',
+                'model': 'Device 1586',
+            }, cpu='AMD RYZEN AI MAX+ 395 w/ Radeon 8060S, 16c/32t'),
+            'AMD 395+')
+
+    def test_strix_halo_without_cpu_is_generic(self):
+        self.assertEqual(
+            app_usage.gpu_type_label({'vendor': 'AMD', 'model': 'Strix Halo'}),
+            'AMD Strix Halo')
+
+    def test_bmc_display_chip_is_not_a_gpu(self):
+        self.assertEqual(
+            app_usage.gpu_type_label({'vendor': 'ASPEED Technology, Inc.',
+                                      'model': 'ASPEED Graphics Family'}), '')
+
+    def test_other_names_pass_through(self):
+        self.assertEqual(
+            app_usage.gpu_type_label({'vendor': 'NVIDIA',
+                                      'model': 'NVIDIA RTX A6000'}),
+            'RTX A6000')
+        self.assertEqual(
+            app_usage.gpu_type_label({'vendor': 'Apple',
+                                      'model': 'Apple M3 Ultra'}),
+            'Apple M3 Ultra')
+
+
+class GpuTypesByHostTests(unittest.TestCase):
+    def test_dedupes_repeated_cards_and_survives_lookup_failure(self):
+        registry = {
+            'vm-a': {'host': 'gpu-a'},
+            'vm-b': {'host': 'gpu-a'},
+            'vm-c': {'host': 'gone'},
+            'vm-d': {},
+        }
+        hw = {'gpu-a': {'cpu': 'Xeon', 'gpus': [
+            {'vendor': 'NVIDIA Corporation', 'model': 'Device 2bb5'},
+            {'vendor': 'NVIDIA Corporation', 'model': 'Device 2bb5'},
+        ]}}
+
+        def get_hardware(host):
+            if host == 'gone':
+                raise RuntimeError('etcd down')
+            return hw[host]
+
+        self.assertEqual(app_usage.gpu_types_by_host(registry, get_hardware),
+                         {'gpu-a': 'RTX PRO 6000', 'gone': ''})
+
+
 class OwnerVisibilityTests(unittest.TestCase):
     def test_non_manager_visible(self):
         identity = mock.Mock(is_manager=False, is_admin=False)
@@ -82,6 +147,44 @@ class UsageRowsTests(unittest.TestCase):
             {}, {}, {}, visible, row_fn)
         self.assertEqual(got, ['b'])
         row_fn.assert_called_once()
+
+    def test_attaches_gpu_type_from_host(self):
+        gpus = {'vm1': 2, 'vm2': 1, 'vm3': 0}
+
+        def row_fn(vm, *_):
+            return {'vm': vm, 'gpus': gpus[vm]}
+
+        got = app_usage.usage_rows(
+            {'vm1': {}, 'vm2': {}, 'vm3': {}}, {},
+            {'vm1': {'host': 'gpu-a'}, 'vm2': {'host': 'gpu-b'},
+             'vm3': {'host': 'gpu-a'}},
+            {}, {}, lambda owner: True, row_fn,
+            gpu_types={'gpu-a': 'RTX PRO 6000', 'gpu-b': 'AMD 395+'})
+        self.assertEqual(got, [
+            {'vm': 'vm1', 'gpus': 2, 'gpu_type': 'RTX PRO 6000'},
+            {'vm': 'vm2', 'gpus': 1, 'gpu_type': 'AMD 395+'},
+            {'vm': 'vm3', 'gpus': 0, 'gpu_type': ''},
+        ])
+
+
+class UsageCsvTests(unittest.TestCase):
+    def test_header_and_row(self):
+        import csv
+        buf = app_usage.usage_csv([{
+            'vm': 'vm1', 'owner': 'a@x', 'gpus': 2,
+            'gpu_type': 'RTX PRO 6000', 'current': 'untracked',
+            'schedule_mode': 'schedule',
+            'windows': [{'start': '2026-01-01T00:00:00+00:00',
+                         'end': '2026-01-02T00:00:00+00:00'}],
+            'billable_gpu_hours': 4.0, 'tracked_gpu_hours': 3.0,
+            'observed_gpu_hours': 5.5, 'samples': 42,
+        }])
+        rows = list(csv.DictReader(buf))
+        self.assertEqual(rows[0]['VM'], 'vm1')
+        self.assertEqual(rows[0]['GPU type'], 'RTX PRO 6000')
+        self.assertEqual(rows[0]['Now'], 'running (untracked)')
+        self.assertEqual(rows[0]['Delta GPU-h'], '2.50')
+        self.assertIn('2026-01-01T00:00:00+00:00 -> ', rows[0]['Windows'])
 
 
 if __name__ == '__main__':

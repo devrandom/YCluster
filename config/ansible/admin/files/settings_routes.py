@@ -6,7 +6,7 @@ helper, vm_manager and usage helpers without a circular import.
 
 from datetime import datetime, timezone
 
-from flask import jsonify, render_template, request
+from flask import Response, jsonify, render_template, request
 
 VM_USAGE_SINCE_VALUES = {'1', '7', '14', '30', '60', '90',
                          'this-year', 'previous-year'}
@@ -180,15 +180,19 @@ def register(mod):
         return render_template('admin-vm-usage.html', since=_vm_usage_since())
 
 
-    @flask_app.route('/admin/vm-usage/data')
-    def vm_usage_data():
-        """Per-VM GPU-hours in the window: billable + tracked from lifecycle
-        events (interval assembly), observed from incus-state samples."""
-        from app_usage import fetch_usage_state, owner_visibility, registry_snapshots, usage_rows
+    def _vm_usage_rows():
+        """Per-VM GPU-hour rows for the selected window, or (None, error).
+
+        Shared by the JSON endpoint and the CSV export so both always
+        describe the same rows.
+        """
+        from app_usage import (fetch_usage_state, gpu_types_by_host,
+                               owner_visibility, registry_snapshots,
+                               usage_rows)
         since_dt, until_dt = _vm_usage_window(mod._since_days_dt)
         conn, _, err = mod._usage_stats_cursor(since_dt)
         if err:
-            return jsonify({'error': err}), 500
+            return None, err
         assert conn is not None
 
         with conn:
@@ -199,8 +203,33 @@ def register(mod):
         per_vm = mod._assemble_intervals(events, since_dt, until_dt)
         from ycluster.utils import authentik_manager
         visible = owner_visibility(mod._authentik_identity(), authentik_manager)
-        rows = usage_rows(per_vm, sampled, registry, desired_all, last_state, visible, mod._usage_row)
+        rows = usage_rows(per_vm, sampled, registry, desired_all, last_state,
+                          visible, mod._usage_row,
+                          gpu_types=gpu_types_by_host(registry))
+        return rows, None
+
+
+    @flask_app.route('/admin/vm-usage/data')
+    def vm_usage_data():
+        """Per-VM GPU-hours in the window: billable + tracked from lifecycle
+        events (interval assembly), observed from incus-state samples."""
+        rows, err = _vm_usage_rows()
+        if err:
+            return jsonify({'error': err}), 500
         return jsonify(rows)
+
+
+    @flask_app.route('/admin/vm-usage/export.csv')
+    def vm_usage_export():
+        """Download the current VM-usage view as CSV."""
+        from app_usage import usage_csv
+        rows, err = _vm_usage_rows()
+        if err:
+            return jsonify({'error': err}), 500
+        filename = f'vm-usage-{_vm_usage_since()}.csv'
+        return Response(usage_csv(rows).getvalue(), mimetype='text/csv',
+                        headers={'Content-Disposition':
+                                 f'attachment; filename={filename}'})
 
 
     @flask_app.route('/admin/model-usage/options')
