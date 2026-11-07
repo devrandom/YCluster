@@ -1109,6 +1109,24 @@ Fixed in the same pass:
   (the inference proxy, the admin services, the notifier's budget claim, and
   `/usr/local` cluster scripts) are recognized as expected; they were
   generating most of the post-fix inflow without being useful signals.
+- **Kernel rate limit (finding 7, partial).** Every post action allowed one
+  event per minute per process, so a long-lived process disappeared from the
+  log after its first connect and an attacker could spend the budget with one
+  routine connect. Tetragon expresses `rateLimit` as a minimum interval, not a
+  per-minute budget, and accepts whole seconds, minutes or hours only, so the
+  finest setting is `1s` (60/min) and "30/min" can only be written as `2s`,
+  which truncates a multi-host operation into one event every two seconds. The
+  limit is now `1s` per process, the most burst-tolerant value the parser
+  accepts; a sub-second interval is not expressible, which is why storm control
+  lives on the alert path (the forwarder's per-host cap) rather than in the
+  kernel. Removing the limit entirely on a core node moved the forwarded rate
+  from 5.1/s to 4.1/s (the control node went 5.7/s to 2.6/s over the same
+  window) with the log at about 1 KB/s and no gaps or RSigma drops, because the
+  noisy daemons are excluded from the policy and short-lived connectors each
+  get their own budget.
+  `install-tetragon.yml` takes `tetragon_rate_limit_disable` for a single-node
+  measurement, and the forwarder's per-host cap with `IdsForwarderRateLimited`
+  is the storm brake.
 - **CrowdSec logic defects (finding 10, partial).** The nginx parser no
   longer inverts `static_ressource`; its `%{NUMBER:...:int}` captures also never
   matched in this grok build, so the HTTP scenarios were inert even before that
@@ -1118,28 +1136,31 @@ Fixed in the same pass:
   are labelled `ssh_success` and failures `ssh_failed-auth`, both verified the
   same way; non-auth lines are `ssh_other`.
 
-Two noise sources remain visible and are recorded rather than suppressed:
+Two items surfaced while verifying the fix. Neither is suppressed by name:
 
 - The OSV mirror fetches advisories over HTTPS in a six-hourly run, producing
   thousands of connects per run that coalesce per destination. It is a
-  cluster-owned collector and could be added to the egress table, but it is
-  also the process that handles untrusted advisory content, so the exemption
-  deserves a deliberate decision.
-- A service that started before Tetragon at boot has no exec record; Tetragon
-  then reports its connects as `/usr/lib/systemd/systemd` with argv `text`.
-  That is a sensor artifact, not the process identity: the admin API and
-  health API's periodic local probes show up this way after a reboot, and any
-  other pre-boot process would be attributed the same. Suppressing that
-  identity would hide those too, so the fix is either coverage of pre-existing
-  processes or a self-connect rule, not a name match.
+  cluster-owned collector, so its `-m osv_feed` invocation is exempt on 443
+  only; the rule matches the module form rather than the name appearing in an
+  argument, and any other port still alerts.
+- A service that started before Tetragon has no exec record; Tetragon then
+  reports its connects as `/usr/lib/systemd/systemd` with argv `text`. That is
+  a sensor artifact, not the process identity: the admin API and health API's
+  probes showed up this way after a reboot, and any other pre-Tetragon process
+  would be attributed the same. The forwarder now resolves the placeholder
+  identity from `/proc` before classification, so suppression, labels and the
+  rule-layer copy name the binary that is actually running. The event's pid and
+  exec time are checked against `/proc/<pid>/stat` first, so a reused pid cannot
+  lend its identity to an old event; if the process is gone (replay after it
+  exited) the placeholder stays.
 
 Deferred to the discussion phase, because each needs a policy or volume
 decision: paging while the silent window runs (1); VM, UDP and unix-socket
 visibility (5); rename/mmap/read hooks and the missing persistence paths (6);
-kernel rate limits (7); the 8000-9999 range for the admin service (8); alert-path
+the 8000-9999 range for the admin service (8); alert-path
 authentication (9); the missing CrowdSec scenarios and thresholds (10);
 non-root interpreter coverage (11); raw retention (12); and boot-order process
-attribution. nginx collection is
+attribution for events whose process has since exited. nginx collection is
 also deferred: the access logs on the core nodes are empty and the frontend
 hosts are not managed, so the HTTP scenarios still have no input even with the
 parser fixed.
@@ -1149,27 +1170,15 @@ parser fixed.
 The concrete actions behind the open items, in the order they should be taken.
 Each one names the decision it needs, where there is one.
 
-1. **Page a named subset.** With measured inflow near zero, page
+1. **The coverage work** in the order of *Recommended order*: VM bridge
+   flow logging first, then UDP/DNS, then unix sockets, then the integrity
+   hooks.
+2. **Page a named subset, last.** With the measured inflow near zero, page
    `exec-root-user-path`, `kernel-modules`, `privilege-raises`, `container-api`
    and Sigma findings at medium or above, and leave the rest of `IDSAlert` on
    `ids-silent`. The success criterion is one clean week without an
    expected-traffic page, after which the exception list is removed. Needs:
    sign-off on the subset.
-2. **Fix the boot-order attribution.** Make Tetragon cover the cluster services
-   by starting it before the admin API, health API and inference proxy, and add
-   a self-connect rule (`saddr == daddr` on an internal service port) so local
-   probes produce no event regardless of attribution. Host-local traffic is not
-   lateral movement, so the self-connect rule needs no policy decision.
-3. **Whitelist the OSV mirror's egress.** `python3 -m osv_feed mirror` on 443
-   only, anchored to the module invocation rather than an argv substring.
-   Needs: confirmation that the collector that parses untrusted advisories
-   should have an egress exemption at all.
-4. **Measure the kernel rate limit before removing it.** Drop
-   `rateLimit: "1m"` on one node for a day, record the event volume and the
-   suppressed-event delta, then decide fleet-wide. Needs: a volume budget.
-5. **Then the coverage work** in the order of *Recommended order*: VM bridge
-   flow logging first, then UDP/DNS, then unix sockets, then the integrity
-   hooks.
 
 ## Validation
 

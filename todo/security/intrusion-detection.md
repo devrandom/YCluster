@@ -225,10 +225,13 @@ must not become a second, longer-lived access log.
   hostname rules disabled; attacker-shaped egress suppressions partly
   tightened; nginx/sshd parser defects fixed. Deferred to the discussion
   phase: paging, VM/UDP/unix-socket visibility, rename/mmap/read hooks,
-  kernel rate limits, the admin-service port range, alert-path
+  the admin-service port range, alert-path
   authentication, CrowdSec scenarios/thresholds, non-root interpreter
-  coverage, raw retention and boot-order process attribution (services that
-  start before Tetragon are reported as systemd with argv `text`).
+  coverage and raw retention. Boot-order attribution is fixed in the
+  forwarder: an event that Tetragon reports as `/usr/lib/systemd/systemd` with
+  argv `text` now has its identity resolved from `/proc`, with the pid's file
+  start time checked against the event before the lookup. Events replayed
+  after the process has exited keep the placeholder.
   The concrete actions and decision points for those items are in the design
   doc's *Next steps* section.
 - Ship findings through the existing Alertmanager → ntfy path, with a
