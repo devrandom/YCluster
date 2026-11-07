@@ -307,8 +307,11 @@ wanting `vlm-engine` must send `backend=vlm-engine` explicitly
    `/home/dev/.cache/paddleocr`) so the bind-mount target exists.
 5. **Warmup run** — one-shot `podman run --rm` to trigger paddle OCR
    model download (cached in the bind-mounted dir for next runs).
-6. **Install systemd unit** (`mineru-podman.service`) which runs
-   `podman run` with the args above.
+6. **Install the quadlet** (`/etc/containers/systemd/mineru-podman.container`,
+   which the generator turns into `mineru-podman.service`). Quadlet's
+   generated ExecStart is `podman run --replace --rm` with the args above, so
+   every start rebuilds the container from the spec instead of reusing
+   whatever state the previous one left behind.
 7. **Stop old `mineru.service`** (the venv-based unit). Leave the
    unit file in place for rollback.
 8. **Start `mineru-podman.service`**.
@@ -519,7 +522,7 @@ venv-based service also exposes) and routes to the healthy backend.
 |---|---|---|
 | new | `config/ansible/admin/files/mineru/Containerfile` | Ubuntu 24.04 + uv-installed `mineru[all] torchvision vllm` |
 | new | `config/ansible/admin/files/mineru/run-mineru-uds.py` | uvicorn monkey-patch launcher; binds the API on `/run/mineru/mineru.sock` instead of TCP; pre-flight checks the UDS path for stale files vs. live listeners (uvicorn 0.51.0 silently hangs on UDS collision, so the wrapper fails fast with a diagnostic) |
-| new | `config/ansible/admin/files/mineru/mineru-podman.service` | systemd unit wrapping `podman run --network=none ...` |
+| new | `config/ansible/admin/files/mineru/mineru-podman.container.j2` | quadlet spec for the container; generates `mineru-podman.service` |
 | new | `config/ansible/admin/files/mineru/mineru-podman-proxy.service` | systemd unit running `socat TCP-LISTEN:8000,fork UNIX-CONNECT:/run/mineru/mineru.sock` |
 | edit | `config/ansible/admin/install-mineru.yml` | apt `socat`, pre-create `/run/mineru/`, install + start proxy unit, stage UDS wrapper |
 | keep | `config/ansible/admin/files/mineru/run-mineru.sh` | unused after refactor; leave for reference |

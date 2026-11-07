@@ -45,7 +45,7 @@
 #   Per-host `nemotron_gpus: "<space-separated CDI indices>"` (default "0")
 #   picks the GPUs this container uses (TP=1 on a single card). On a MinerU
 #   host use a different CDI index from MinerU's pinned CDI 0
-#   (app/files/mineru/mineru-podman.service). Set `nemotron_gpu_util` to 0.80
+#   (app/files/mineru/mineru-podman.container.j2). Set `nemotron_gpu_util` to 0.80
 #   on a dedicated card, or ~0.45 when sharing the card with MinerU. This
 #   play's GPU index is purely a CDI index into the host's host-visible cards.
 #

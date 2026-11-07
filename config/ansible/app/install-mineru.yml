@@ -53,8 +53,15 @@
     mineru_containerfile_dest: /home/dev/.mineru-build/Containerfile
     mineru_uds_wrapper_src: files/mineru/run-mineru-uds.py
     mineru_uds_wrapper_dest: /home/dev/.mineru-build/run-mineru-uds.py
-    mineru_service_unit_src: files/mineru/mineru-podman.service.j2
-    mineru_service_unit_dest: /etc/systemd/system/mineru-podman.service
+    # The runtime spec is a Quadlet: the generator derives
+    # mineru-podman.service from this file, and the generated ExecStart is
+    # `podman run --replace --rm`, so a start always rebuilds the container
+    # from the spec. The hand-written system unit of the same name is removed
+    # below -- it wrapped `podman run` in `systemd-run --scope`.
+    mineru_container: mineru
+    mineru_quadlet_src: files/mineru/mineru-podman.container.j2
+    mineru_quadlet_dest: /etc/containers/systemd/mineru-podman.container
+    mineru_legacy_unit: /etc/systemd/system/mineru-podman.service
     mineru_proxy_unit_src: files/mineru/mineru-podman-proxy.service
     mineru_proxy_unit_dest: /etc/systemd/system/mineru-podman-proxy.service
     # mineru-api inside the container (--network=none) binds a Unix
@@ -313,12 +320,10 @@
       # the registry has no auth but the upload is non-trivial).
       # Skipped on subsequent runs.
 
-    # The mineru-podman.service does `podman pull` as part of its
-    # ExecStartPre (under User=dev — the only context where
-    # CLONE_NEWUSER is allowed on this kernel/buildah combo).
-    # Pulling from the playbook via become_user: dev fails with
-    # "cannot re-exec process" because sudo strips CLONE_NEWUSER,
-    # so the pull is delegated to systemd. ~5 s on a warm cache.
+    # The quadlet pulls with `Pull=missing` when the unit starts rather than
+    # from here: pulling via become_user: dev fails with "cannot re-exec
+    # process" because sudo strips CLONE_NEWUSER, and pulling at start keeps a
+    # cached image usable when the registry is unreachable.
 
     # Warmup: trigger paddle/VLM weight download into the bind-
     # mounted cache. mineru-models-download prompts interactively
@@ -362,16 +367,59 @@
       # Long-running on cold cache; skipped when VLM is already
       # cached. ~22 GB total downloaded into the bind-mounted cache.
 
-    - name: Install mineru-podman systemd unit
+    # The distro podman package ships this directory; this fleet purges it in
+    # favour of the source build, so nothing else creates it.
+    - name: Ensure the quadlet directory exists
+      file:
+        path: "{{ mineru_quadlet_dest | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the mineru quadlet
       template:
-        src: "{{ mineru_service_unit_src }}"
-        dest: "{{ mineru_service_unit_dest }}"
+        src: "{{ mineru_quadlet_src }}"
+        dest: "{{ mineru_quadlet_dest }}"
         owner: root
         group: root
         mode: '0644'
       notify:
         - reload systemd
         - restart mineru-podman service
+
+    # The legacy unit ran the container through
+    # `systemd-run --scope --unit=mineru-run`. A fixed transient unit name is
+    # the failure mode that kept the MoET backend down after an unclean
+    # shutdown: the scope outlives podman's pause process and every later
+    # start dies on the duplicate unit. The quadlet replaces it, and the two
+    # would also fight over the container name.
+    - name: Check for the legacy mineru system unit
+      stat:
+        path: "{{ mineru_legacy_unit }}"
+      register: mineru_legacy_stat
+
+    - name: Stop and disable the legacy mineru system unit
+      systemd:
+        name: mineru-podman.service
+        state: stopped
+        enabled: no
+      when: mineru_legacy_stat.stat.exists
+
+    - name: Remove the legacy mineru system unit
+      file:
+        path: "{{ mineru_legacy_unit }}"
+        state: absent
+      when: mineru_legacy_stat.stat.exists
+      notify:
+        - reload systemd
+
+    # Flush before the start task: the manager has to reload so the generator
+    # emits mineru-podman.service, and a changed spec only takes effect on a
+    # restart. Doing it here keeps a fresh deploy from starting the unit and
+    # then bouncing it again a few tasks later.
+    - name: Apply the mineru unit changes
+      meta: flush_handlers
 
     # The proxy unit bridges host TCP:{{ mineru_port }} to the
     # container's Unix socket at {{ mineru_uds_path }} — see the
@@ -403,10 +451,11 @@
       # Old service may already be inactive on a fresh host — don't
       # fail the playbook if it is.
 
-    - name: Enable and start mineru-podman service
+    # No `enabled:`: quadlet units are enabled by the generator from
+    # [Install] WantedBy, and `systemctl enable` cannot manage them.
+    - name: Start mineru-podman service
       systemd:
         name: mineru-podman.service
-        enabled: yes
         state: started
         daemon_reload: yes
 

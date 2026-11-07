@@ -1,0 +1,65 @@
+[Unit]
+Description=MinerU document parsing API (opendatalab/MinerU 3.4.x, podman)
+# Same prerequisites as before: the CUDA driver must be initialised before
+# mineru-api imports torch, and nvidia-persistenced keeps it resident.
+After=network.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Container]
+Image={{ mineru_image_registry }}
+ContainerName={{ mineru_container | default('mineru') }}
+# Rootful podman: the engine has to re-exec into a fresh user namespace, which
+# sudo/systemd strip under User=dev -- that is why this unit ran as root even
+# before the quadlet. --userns=keep-id plus --user keeps host UIDs 1:1, so the
+# bind-mounted /home/dev trees stay writable by the container process.
+UserNS=keep-id
+User={{ mineru_run_uid | default(1002) }}:{{ mineru_run_gid | default(1002) }}
+# No netns interfaces: no socket(AF_INET, ...) can succeed, so a crafted PDF
+# that triggers an outbound fetch fails at the syscall layer rather than
+# relying on mineru's application-level SSRF mitigation. mineru-api binds a
+# Unix socket at {{ mineru_uds_path }} instead, and
+# mineru-podman-proxy.service bridges host TCP:{{ mineru_port }} to it.
+Network=none
+AddDevice=nvidia.com/gpu=0
+# Registry tags are immutable per build (install-mineru.yml rebuilds only when
+# the tag is absent), so `missing` beats the old unconditional pull in
+# ExecStartPre: no registry round trip on every start, and a registry outage
+# no longer blocks a restart with a cached image.
+Pull=missing
+# /home/dev/.cache carries the HF weights (~2.2 GB VLM + ~2.5 GB pipeline)
+# and the compiled CUDA kernels, so a redeploy does not re-download them.
+Volume=/home/dev/.cache:/home/dev/.cache
+Volume=/home/dev/.config:/home/dev/.config
+Volume=/home/dev/.local:/home/dev/.local
+Volume=/home/dev/.triton:/home/dev/.triton
+Volume=/home/dev/.nv:/home/dev/.nv
+Volume={{ mineru_mineru_json }}:{{ mineru_mineru_json }}
+Volume={{ mineru_uds_dir }}:{{ mineru_uds_dir }}
+Environment=MINERU_UDS_PATH={{ mineru_uds_path }}
+Environment=MINERU_API_OUTPUT_ROOT=/home/dev/.cache/mineru-output
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=USER=dev
+Environment=LOGNAME=dev
+# --gpu-memory-utilization: MinerU's VLM backend otherwise defaults to 0.5 and
+# pins ~48 GB of the 96 GB card; 0.2 is what this deployment is sized for.
+# --max-model-len must stay <= 8192 (the VLM's max_position_embeddings).
+Exec=--host 0.0.0.0 --port {{ mineru_port }} --enable-vlm-preload true \
+    --gpu-memory-utilization {{ mineru_gpu_memory_utilization | default('0.2') }} \
+    --max-model-len {{ mineru_max_model_len | default('8192') }}
+StopTimeout=30
+
+[Service]
+Restart=always
+RestartSec=5
+# Cold start settles the VLM weights into VRAM and compiles the vLLM CUDA
+# graphs. Quadlet's Type=notify reports readiness when conmon starts the
+# container, so this only bounds a start that never gets that far.
+TimeoutStartSec=600
+TimeoutStopSec=45
+# /run is tmpfs, so the UDS directory is recreated on every boot. It is owned
+# by dev because the container's mineru process runs as the host dev UID
+# through --userns=keep-id and creates the socket there.
+ExecStartPre=/usr/bin/install -d -o dev -g dev -m 0755 {{ mineru_uds_dir }}
+
+[Install]
+WantedBy=multi-user.target

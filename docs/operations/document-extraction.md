@@ -114,7 +114,8 @@ Host (Nvidia)
   /home/dev/mineru.json          ─┤    ~2.5 GB pipeline; bind-mounted
                                    │    into the container so weights
   mineru-podman.service            │    survive every redeploy)
-    └─ podman run ...              │
+    └─ podman run ...              │  (generated from the quadlet
+                                   │   /etc/containers/systemd/mineru-podman.container)
          ├─ image: registry.xc:5000/mineru:3.4.3-all-vllm
          ├─ -p 8000:8000            │
          ├─ --device nvidia.com/gpu=all  (CDI)
@@ -149,7 +150,7 @@ ssh "$YC_SYNC_HOST" "cd /etc/ansible && \
 - Push is skipped in the same case.
 - `mineru-models-download` warmup is skipped if the VLM model is
   already cached at `/home/dev/.cache/huggingface/hub/models--opendatalab--MinerU2.5-Pro-2605-1.2B`.
-- The systemd unit is rewritten if it differs; the service is
+- The quadlet is rewritten if it differs; the service is
   restarted via the `restart mineru-podman service` handler.
 
 First install takes:
@@ -238,9 +239,8 @@ client-side.
   LaunchDaemon (mirrors the TEI log convention).
 - **Linux/Nvidia node**: `journalctl -u mineru-podman`. podman's
   default log driver is journald, so all stdout/stderr from the
-  container (and the systemd-run wrapper) lands in the systemd
-  journal. To grep without journalctl: `journalctl -u mineru-podman
-  > file`.
+  container lands in the systemd journal. To grep without journalctl:
+  `journalctl -u mineru-podman > file`.
 - **storage leader**: nginx `/var/log/nginx/access.log` for the
   incoming `/v1/file_parse` POSTs; `journalctl -u local-ai-proxy`
   for proxy-side routing decisions.

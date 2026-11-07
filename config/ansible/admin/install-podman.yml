@@ -193,6 +193,17 @@
         - dir: "{{ podman_user_generators }}"
           name: podman-user-generator
 
+    # Quadlet reads system-scoped .container/.volume/.network files from here.
+    # The distro package creates it and this fleet purges that package, so a
+    # system quadlet would otherwise fail to install (missing parent directory).
+    - name: Ensure the system quadlet directory exists
+      file:
+        path: /etc/containers/systemd
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
     - name: Re-run the systemd generators with quadlet in place
       systemd:
         daemon_reload: yes
