@@ -1205,6 +1205,15 @@ groups:
           summary: "IDS forwarder dropped alerts on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} alerts in the last 15m; the durable spool could not be written, a spooled record was unreadable or over the size cap, or Alertmanager rejected it permanently."
 
+      - alert: IdsForwarderRateLimited
+        expr: increase(ids_forwarder_rate_limited_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IDS forwarder hit its local alert cap on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} withheld {{ $value | printf \"%.0f\" }} alerts in the last 15m because the per-host, per-severity delivery cap was reached. The detections are still recorded in detections.jsonl."
+
       - alert: IdsForwarderCursorFailing
         expr: increase(ids_forwarder_cursor_errors_total[15m]) > 0
         for: 5m

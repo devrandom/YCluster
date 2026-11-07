@@ -13,6 +13,11 @@ POLICY_DIR = ROOT / "config/ansible/app/files/tetragon-policies"
 TETRAGON_CONFIG = ROOT / "config/ansible/monitoring/templates/tetragon.yaml.j2"
 TETRAGON_INSTALL = ROOT / "config/ansible/monitoring/install-tetragon.yml"
 
+# One event per second per process: the finest interval Tetragon accepts. It
+# still truncates bursts, so the forwarder records the rest and paging is capped
+# there.
+RATE_LIMIT = "1s"
+
 
 @unittest.skipIf(yaml is None, "PyYAML is not available")
 class TestIDSPolicies(unittest.TestCase):
@@ -59,7 +64,7 @@ class TestIDSPolicies(unittest.TestCase):
         )
         selector = setuid["selectors"][0]
         self.assertEqual(selector["matchArgs"][0]["values"], ["0"])
-        self.assertEqual(selector["matchActions"][0]["rateLimit"], "1m")
+        self.assertEqual(selector["matchActions"][0]["rateLimit"], RATE_LIMIT)
         self.assertEqual(selector["matchActions"][0]["rateLimitScope"], "process")
 
     def test_privilege_manager_transitions_filtered_at_policy(self):
@@ -136,7 +141,7 @@ class TestIDSPolicies(unittest.TestCase):
 
         for selector in selectors:
             action = selector["matchActions"][0]
-            self.assertEqual(action["rateLimit"], "1m")
+            self.assertEqual(action["rateLimit"], RATE_LIMIT)
             self.assertEqual(action["rateLimitScope"], "process")
 
     def test_process_exit_is_not_exported(self):

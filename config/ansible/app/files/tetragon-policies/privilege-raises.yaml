@@ -30,14 +30,14 @@ spec:
               operator: "CapabilitiesGained"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
         - matchArgs:
             - args: [2, 3]
               operator: "CapabilitiesGained"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setuid"
       syscall: false
@@ -58,7 +58,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setgid"
       syscall: false
@@ -79,7 +79,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setreuid"
       syscall: false
@@ -102,7 +102,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
         - matchBinaries:
             - operator: "NotIn"
@@ -117,7 +117,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setregid"
       syscall: false
@@ -140,7 +140,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
         - matchBinaries:
             - operator: "NotIn"
@@ -155,7 +155,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setresuid"
       syscall: false
@@ -180,7 +180,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
         - matchBinaries:
             - operator: "NotIn"
@@ -195,7 +195,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setresgid"
       syscall: false
@@ -220,7 +220,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
         - matchBinaries:
             - operator: "NotIn"
@@ -235,7 +235,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setfsuid"
       syscall: false
@@ -256,7 +256,7 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "__sys_setfsgid"
       syscall: false
@@ -277,5 +277,5 @@ spec:
                 - "0"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"

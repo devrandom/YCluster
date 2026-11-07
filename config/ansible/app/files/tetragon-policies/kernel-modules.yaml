@@ -22,12 +22,12 @@ spec:
                 - ".ko.zst"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
     - call: "do_init_module"
       syscall: false
       selectors:
         - matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"

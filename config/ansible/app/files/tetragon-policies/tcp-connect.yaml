@@ -46,7 +46,7 @@ spec:
                 - "172.16.0.0/12"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
 
         - matchBinaries:
@@ -72,7 +72,7 @@ spec:
                 - "fc00::/7"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
 
         - matchBinaries:
@@ -95,7 +95,7 @@ spec:
                 - "2382"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
 
         - matchBinaries:
@@ -125,7 +125,7 @@ spec:
                 - "52415"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"
 
         - matchBinaries:
@@ -161,5 +161,5 @@ spec:
                 - "9443"
           matchActions:
             - action: Post
-              rateLimit: "1m"
+              rateLimit: "1s"
               rateLimitScope: "process"

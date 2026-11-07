@@ -148,6 +148,22 @@
         mode: '0644'
       notify: restart tetragon
 
+    # Measurement switch: the kernel rate limit hides every event from a
+    # process after the first one per minute, which also bounds how fast a
+    # single process can flush the event log. Set this on one node to measure
+    # the unrated volume before changing the default.
+    - name: Drop the kernel event rate limit for a measurement
+      lineinfile:
+        path: "{{ tetragon_policy_dir }}/{{ item }}"
+        regexp: '^\s+rateLimit: "1m"$'
+        state: absent
+      loop:
+        - tcp-connect.yaml
+        - privilege-raises.yaml
+        - kernel-modules.yaml
+      when: tetragon_rate_limit_disable | default(false)
+      notify: restart tetragon
+
     # copy does not delete destination files absent from the source tree.
     # Run this after the copy in case a stale synced source file is still
     # present on the controller.
