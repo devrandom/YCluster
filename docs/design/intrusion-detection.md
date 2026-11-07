@@ -1043,24 +1043,35 @@ does not need to defeat the classifier.
 
 ### Recommended order
 
+Status markers below reflect the mitigation pass recorded further down; the
+concrete actions for the open items are in [Next steps](#next-steps).
+
 1. Fix the Sigma delivery gap and add a positive-control canary per rule group;
-   alert when `sigma_sent` stays flat while `recorded` grows.
+   alert when `sigma_sent` stays flat while `recorded` grows. **Done** — the
+   unit flag bug is fixed and `IdsSigmaStalled` covers the stall case.
 2. Remove attacker-controlled substring suppressions and replace them with
    exact-path + uid + destination matching. Move remaining egress allowlisting to
    the network layer (default-deny tenant egress) rather than the detector.
+   **Partly done** — matching is anchored to the program or interpreter operand
+   and the package-path entries require their real paths and ports; egress
+   allowlisting at the network layer and uid matching remain open.
 3. Page detections: remove the `ids-silent` route, or keep it only for a named
-   allowlist of known-noisy rules, not for the whole `IDSAlert` class.
+   allowlist of known-noisy rules, not for the whole `IDSAlert` class. **Open**,
+   needs the paging decision.
 4. Close the transport/namespace gaps in priority order: VM bridge flow logging
    first (the stated threat model), then UDP/DNS, then unix-socket connects, then
-   guest agents if VM-internal detection is actually required.
+   guest agents if VM-internal detection is actually required. **Open.**
 5. Add rename/mmap/read hooks and the missing persistence paths; stop relying on
-   the write-only hook for integrity.
+   the write-only hook for integrity. **Open.**
 6. Fix the CrowdSec parser inversion and sshd success/failure labelling; add the
-   missing scenarios or delete the claims from the design.
+   missing scenarios or delete the claims from the design. **Partly done** — the
+   parser defects are fixed and the design claims were corrected; the scenario
+   set and thresholds are unchanged.
 7. Authenticate or unix-socket the forwarder receiver and restrict Alertmanager,
    its cluster port, and the ntfy webhook to the monitoring control plane.
+   **Open.**
 8. Keep a time-based floor on raw event retention (or ship to a central store) so
-   the 50 MB cap cannot reduce the forensic window to minutes.
+   the 50 MB cap cannot reduce the forensic window to minutes. **Open.**
 
 ### Mitigation status
 
@@ -1132,6 +1143,33 @@ attribution. nginx collection is
 also deferred: the access logs on the core nodes are empty and the frontend
 hosts are not managed, so the HTTP scenarios still have no input even with the
 parser fixed.
+
+### Next steps
+
+The concrete actions behind the open items, in the order they should be taken.
+Each one names the decision it needs, where there is one.
+
+1. **Page a named subset.** With measured inflow near zero, page
+   `exec-root-user-path`, `kernel-modules`, `privilege-raises`, `container-api`
+   and Sigma findings at medium or above, and leave the rest of `IDSAlert` on
+   `ids-silent`. The success criterion is one clean week without an
+   expected-traffic page, after which the exception list is removed. Needs:
+   sign-off on the subset.
+2. **Fix the boot-order attribution.** Make Tetragon cover the cluster services
+   by starting it before the admin API, health API and inference proxy, and add
+   a self-connect rule (`saddr == daddr` on an internal service port) so local
+   probes produce no event regardless of attribution. Host-local traffic is not
+   lateral movement, so the self-connect rule needs no policy decision.
+3. **Whitelist the OSV mirror's egress.** `python3 -m osv_feed mirror` on 443
+   only, anchored to the module invocation rather than an argv substring.
+   Needs: confirmation that the collector that parses untrusted advisories
+   should have an egress exemption at all.
+4. **Measure the kernel rate limit before removing it.** Drop
+   `rateLimit: "1m"` on one node for a day, record the event volume and the
+   suppressed-event delta, then decide fleet-wide. Needs: a volume budget.
+5. **Then the coverage work** in the order of *Recommended order*: VM bridge
+   flow logging first, then UDP/DNS, then unix sockets, then the integrity
+   hooks.
 
 ## Validation
 

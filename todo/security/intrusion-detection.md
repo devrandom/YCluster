@@ -229,6 +229,8 @@ must not become a second, longer-lived access log.
   authentication, CrowdSec scenarios/thresholds, non-root interpreter
   coverage, raw retention and boot-order process attribution (services that
   start before Tetragon are reported as systemd with argv `text`).
+  The concrete actions and decision points for those items are in the design
+  doc's *Next steps* section.
 - Ship findings through the existing Alertmanager → ntfy path, with a
   severity mapping. Avoid a second paging channel that bypasses the
   established alert routing.
