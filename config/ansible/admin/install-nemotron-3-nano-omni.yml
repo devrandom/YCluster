@@ -1,18 +1,19 @@
 ---
-# Deploy NVIDIA Nemotron-3 Nano Omni 30B-A3B inference scripts to Nvidia GPU
-# nodes. Two dev scripts (the dev user has no sudo, and needs none for these):
+# Deploy NVIDIA Nemotron-3 Nano Omni 30B-A3B to Nvidia GPU nodes. One dev
+# script (the dev user has no sudo, and needs none for it):
 #   ~dev/bin/nemotron-setup.sh  - pull the image, smoke-test GPU passthrough
 #                                 (CDI), stage/verify the NVFP4 checkpoint.
 #                                 Flags:
 #                                   --download     pull the checkpoint (~22 GB)
 #                                   --verify-only  just check the staged revision
-#   ~dev/bin/nemotron-start.sh  - create/replace the vLLM container (foreground
-#                                 start is left to systemd; see below)
 #
-# Lifecycle: nemotron.service supervises the rootless container (start at
-# boot, restart on engine exit), the same way ds41-flash.service does. The
-# start script defines the container; after changing its settings re-run it,
-# then `systemctl restart nemotron` so systemd re-attaches.
+# Lifecycle: the runtime spec is a Quadlet (templates/nemotron.container.j2)
+# in the dev user's ~/.config/containers/systemd. Quadlet turns it into a user
+# unit whose ExecStart is `podman run --rm --replace`, so every start builds a
+# fresh container from the spec and there is no stale container record to
+# reconcile. Linger starts it at boot, and Restart=always restarts the engine
+# after a crash. After changing the launch flags, as dev: `systemctl --user
+# restart nemotron-3-omni`.
 #
 # Model: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 at the pinned
 # revision (nemotron_revision). NVIDIA's first-party ModelOpt NVFP4 quant of
@@ -57,7 +58,7 @@
 #   ssh <host>.yc
 #   ~/bin/nemotron-setup.sh --download   # pull image + CDI smoke + checkpoint
 #   ~/bin/nemotron-setup.sh              # later runs: image pull + smoke only
-#   ~/bin/nemotron-start.sh              # launch (idempotent)
+#   systemctl --user start nemotron-3-omni   # runtime, owned by the quadlet
 
 - name: Deploy Nemotron-3 Nano Omni inference scripts to Nvidia GPU nodes
   hosts: nvidia
@@ -87,8 +88,18 @@
     # 9215=spare, 9216=DS4, 9217=Nemotron-3 Omni.
     nemotron_port: 9217
     # Container name in dev's rootless podman storage; must match
-    # ~/bin/nemotron-start.sh (CONTAINER).
+    # the quadlet below (ContainerName).
     nemotron_container: "nemotron-3-omni"
+    # Container name of the model inside /models; the quadlet mounts the
+    # checkpoint there and the launch arguments address it.
+    nemotron_model_name: "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4"
+    # Container memory ceiling. The launcher used to pick this from host RAM
+    # (32g on small hosts, 64g otherwise); every opted-in host has plenty.
+    nemotron_memory: "64g"
+    # The runtime spec is a Quadlet user unit owned by the dev user manager.
+    nemotron_user: "dev"
+    nemotron_quadlet_dir: "/home/dev/.config/containers/systemd"
+    nemotron_quadlet_path: "{{ nemotron_quadlet_dir }}/{{ nemotron_container }}.container"
   tasks:
     # Same guard as install-deepseek-v4-flash.yml / install-minimax-m3.yml:
     # skip nodes with no host-visible NVIDIA GPU (no NVIDIA hardware, or all
@@ -131,20 +142,6 @@
         mode: '0755'
       loop:
         - nemotron-setup.sh
-        - nemotron-start.sh
-
-    # The container itself lives in dev's rootless podman storage (created by
-    # ~/bin/nemotron-start.sh); this unit supervises it so the server comes
-    # back after a reboot and after an engine crash. Same pattern as
-    # ds41-flash.service, which also wraps a rootless container.
-    - name: Install nemotron systemd unit
-      template:
-        src: nemotron.service.j2
-        dest: /etc/systemd/system/nemotron.service
-        owner: root
-        group: root
-        mode: '0644'
-      register: nemotron_unit
 
     - name: Read host dev UID
       command: id -u dev
@@ -152,37 +149,99 @@
       changed_when: false
       check_mode: no
 
-    - name: Check whether the Nemotron container has been created
-      become_user: dev
-      command: podman container exists {{ nemotron_container }}
+    - name: Check whether the Nemotron service user lingers
+      command: loginctl show-user {{ nemotron_user }} --property=Linger --value
+      register: nemotron_linger
+      changed_when: false
+      check_mode: false
+
+    # Linger keeps the user manager (and therefore the quadlet) alive outside a
+    # login session, including at boot.
+    - name: Enable lingering for the Nemotron service user
+      command: loginctl enable-linger {{ nemotron_user }}
+      when: nemotron_linger.stdout | trim != 'yes'
+      changed_when: true
+
+    - name: Ensure the dev quadlet directory exists
+      file:
+        path: "{{ nemotron_quadlet_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install the Nemotron quadlet
+      template:
+        src: nemotron.container.j2
+        dest: "{{ nemotron_quadlet_path }}"
+        owner: dev
+        group: dev
+        mode: '0644'
+
+    # Earlier revisions supervised the container with a root system unit; the
+    # quadlet is owned by the dev user manager and both would fight over the
+    # container name.
+    - name: Check for the legacy Nemotron system unit
+      stat:
+        path: /etc/systemd/system/nemotron.service
+      register: nemotron_legacy_unit
+
+    - name: Stop and disable the legacy Nemotron system unit
+      systemd:
+        name: nemotron.service
+        state: stopped
+        enabled: no
+      when: nemotron_legacy_unit.stat.exists
+
+    - name: Remove the legacy Nemotron system unit
+      file:
+        path: /etc/systemd/system/nemotron.service
+        state: absent
+      when: nemotron_legacy_unit.stat.exists
+
+    - name: Remove the legacy Nemotron launcher
+      file:
+        path: /home/dev/bin/nemotron-start.sh
+        state: absent
+
+    - name: Reload the dev user manager so the quadlet generator runs
+      become_user: "{{ nemotron_user }}"
+      command: systemctl --user daemon-reload
       environment:
         XDG_RUNTIME_DIR: "/run/user/{{ nemotron_dev_uid.stdout }}"
         DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ nemotron_dev_uid.stdout }}/bus"
-      register: nemotron_container_present
       changed_when: false
-      failed_when: false
-      check_mode: no
 
-    # `started` (not `restarted`): when the container is already running the
-    # unit's ExecStart falls through to `podman wait`, so systemd adopts it
-    # without a ~7 minute model reload. Restart explicitly after changing the
-    # container definition.
-    - name: Enable and start the nemotron service
+    # The quadlet creates the container with `podman run`, so the only
+    # precondition is a staged checkpoint. Without it, start would fail-loop
+    # and hit the unit's start limit.
+    - name: Check whether the Nemotron checkpoint is staged
+      stat:
+        path: "{{ nemotron_model_dir }}/config.json"
+      register: nemotron_checkpoint
+
+    # `started`, not `restarted`: an already-active unit is left alone, so a
+    # deploy never bounces inference. Quadlet recreates the container from the
+    # .container spec on the next start; use `systemctl --user restart
+    # {{ nemotron_container }}` after changing the launch flags.
+    - name: Start the Nemotron quadlet
+      become_user: "{{ nemotron_user }}"
       systemd:
-        name: nemotron.service
-        enabled: yes
+        name: "{{ nemotron_container }}.service"
+        scope: user
         state: started
-        daemon_reload: "{{ nemotron_unit.changed | default(false) }}"
-      when: nemotron_container_present.rc == 0
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ nemotron_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ nemotron_dev_uid.stdout }}/bus"
+      when: nemotron_checkpoint.stat.exists
 
-    - name: Note that nemotron stays unmanaged until its container is created
+    - name: Note that Nemotron stays unmanaged until its checkpoint is staged
       debug:
         msg: >-
-          nemotron.service is installed but not enabled: no
-          {{ nemotron_container }} container exists yet. Run
-          ~/bin/nemotron-start.sh as dev (after ~/bin/nemotron-setup.sh
-          --download), then re-run this play to hand it over to systemd.
-      when: nemotron_container_present.rc != 0
+          The {{ nemotron_container }} quadlet is installed but not started:
+          no checkpoint at {{ nemotron_model_dir }}/config.json. Run
+          ~/bin/nemotron-setup.sh --download as dev, then re-run this play.
+      when: not nemotron_checkpoint.stat.exists
 
 - name: Register the Nemotron backend with local-ai-proxy
   hosts: storage

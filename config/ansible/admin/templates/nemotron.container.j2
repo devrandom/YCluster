@@ -1,0 +1,56 @@
+[Unit]
+Description=Nemotron-3 Nano Omni ({{ nemotron_served_name }}) inference API
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+# Bound a crash loop instead of restarting every 10s forever.
+StartLimitIntervalSec=3600
+StartLimitBurst=6
+
+[Container]
+Image={{ nemotron_image }}
+ContainerName={{ nemotron_container }}
+Network=host
+ShmSize=16g
+Memory={{ nemotron_memory | default('64g') }}
+StopTimeout=60
+# No Quadlet keyword for these, so pass them through. --entrypoint replaces the
+# image's entrypoint with plain `vllm`; the launch arguments live in Exec.
+PodmanArgs=--memory-swap={{ nemotron_memory | default('64g') }} --security-opt seccomp=unconfined --group-add keep-groups --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576 --ulimit stack=67108864:67108864 --entrypoint vllm
+Environment=HF_HUB_OFFLINE=1
+Environment=CUDA_VISIBLE_DEVICES=0
+
+# NVFP4 is a single HF repo (no separate vision/audio repos), so one read-only
+# mount is all it needs. The container path is the model name on purpose: the
+# Exec arguments address it there.
+Volume={{ nemotron_model_dir }}:/models/{{ nemotron_model_name }}:ro
+# One card (TP=1). The NVFP4 MoE supports no other TP size, and MinerU is
+# pinned to CDI 0, so never default this to the first card.
+{% for gpu in nemotron_gpus.split() %}AddDevice=nvidia.com/gpu={{ gpu }}
+{% endfor %}
+Exec=serve /models/{{ nemotron_model_name }} \
+    --served-model-name {{ nemotron_served_name }} \
+    --trust-remote-code \
+    --tensor-parallel-size 1 \
+    --max-model-len 131072 \
+    --kv-cache-dtype fp8 \
+    --gpu-memory-utilization {{ nemotron_gpu_util | default(0.45) }} \
+    --max-num-seqs 32 \
+    --max-num-batched-tokens 8192 \
+    --moe-backend flashinfer_cutlass \
+    --reasoning-parser nemotron_v3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --limit-mm-per-prompt '{"image":8,"video":1,"audio":1}' \
+    --host 0.0.0.0 \
+    --port {{ nemotron_port | default(9217) }}
+
+[Service]
+Restart=always
+RestartSec=10
+# Cold start loads ~21 GB of NVFP4 weights and profiles the omni encoder
+# cache; measured ~7 minutes on a dedicated card.
+TimeoutStartSec=20min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
