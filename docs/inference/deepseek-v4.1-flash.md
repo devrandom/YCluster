@@ -196,6 +196,55 @@ mounts `/root/.cache` from the host) — otherwise each restart pays the ~22 min
 first-start autotune again. The unit attaches to the existing container the
 same way the Karmic Kraken unit does, so a deploy does not bounce inference.
 
+### KV offload tiers and the disk budget
+
+VRAM spillover has two tiers, and both are deployment choices, not engine
+defaults:
+
+| Tier | Backing | Size | Set by |
+|---|---|---|---|
+| primary | pinned host RAM | 8 GiB total across TP4 (the flag is not per rank), LRU | `ds41_moet_kv_offload_gb` |
+| secondary | local NVMe | `ds41_moet_kvcache_max_gb` (default 64 GiB) | `ds41-moet-kvcache-prune.timer` |
+
+`--kv-transfer-config` selects `OffloadingConnector` with a
+`TieringOffloadingSpec`. Blocks evicted from the GPU prefix cache land in the
+CPU tier; every block written there is also written through to the filesystem
+tier (16 read / 16 write threads, O_DIRECT, hash-named `.bin` files). A disk
+hit is promoted into the CPU tier and then copied to the GPU.
+`offload_prompt_only: false`, so decode-phase blocks spill too. On the two
+serving hosts that showed up as 6.4 GB and 16.5 GB offloaded, the same byte
+count on disk, and 144 MB promoted back on the busier one.
+
+The tier is sized from measured capacity, not from the recipe default. This
+model is pure MLA with TP-only parallelism, so the connector keeps one host
+copy per block and the offload cost is ~1 KB per token: a full 512K context
+occupies ~0.5 GiB. The GPU pool is 8,243,108 tokens (15.7 max-length requests)
+built from 10.62 GiB of KV per rank, so 8 GiB of host RAM holds about one
+GPU pool's worth of evicted blocks — every block the GPU could still have
+cached has a RAM slot — and anything older is a filesystem read at a fraction
+of a second, against ~30 s to recompute a 512K prefill. The recipe's 32 GiB is
+that same tier four times over, which only buys RAM-resident history beyond
+the GPU's own reach.
+
+Two properties of that filesystem tier drive the deployment:
+
+- **It has no quota and no eviction.** Files are dropped only when a short
+  read proves corruption and lookups are plain `exists()` probes, so left
+  alone the tree grows until the host filesystem fills — on these nodes the
+  same LV as the podman store and the checkpoint.
+- **It is not part of the container's identity.** In the writable layer it is
+  destroyed by the `podman rm -f` the launcher runs on every restart. The
+  launcher therefore bind-mounts `ds41_moet_kvcache_dir`
+  (`/home/dev/.cache/ds41-moet-kvcache`) at `/srv/kvcache`, and
+  `ds41-moet-kvcache-prune.timer` runs `ds41-moet-kvcache-prune` every 10
+  minutes to delete the oldest blocks back under the byte budget.
+
+Pruning is a cache trade, not a correctness one: blocks younger than 5 minutes
+are never pruned, and deleting a block the engine is about to read is just a
+cache miss (the request recomputes). Keep the budget well clear of free space;
+offload traffic on these hosts runs at a few GB per hour, so the budget is what
+decides whether the cache stays resident or churns.
+
 ### Measured on our host (first bring-up)
 
 4× RTX PRO 6000 96 GB (Max-Q, 300 W), single socket, IOMMU on, all four cards
@@ -379,14 +428,44 @@ throughput, and pick it from the table above.
 2. `admin/setup-gpu-podman.yml` must have run since the last GPU change: it
    emits both index and UUID CDI device names.
 3. `admin/install-deepseek-v41-moet.yml --limit <node> -e ds41_moet_autostart=false`
-   installs the scripts and the unit without starting anything.
+   installs the staging script and the quadlet without starting anything.
 4. As dev on the host: `~/bin/ds41-moet-setup.sh --download` (image ~25 GB on
-   disk, checkpoint ~510 GB).
-5. Re-run the play without the override (or `~/bin/ds41-moet-start.sh` then
-   `systemctl restart ds41-moet`). First start does the FlashInfer autotune.
+   disk, checkpoint ~510 GB). It also seeds the host JIT caches from the image.
+5. Re-run the play without the override, or as dev run `systemctl --user start
+   ds41-moet`. First start does the FlashInfer autotune.
 6. Qualify: `/health`, `/v1/models`, smoke chat, needletest at 100K/245K, then
    the C1 and conc-8/32 sweep against the Karmic Kraken baseline before
    promoting the gateway key.
+
+## Boot and recovery
+
+The runtime spec is a Quadlet, `templates/ds41-moet.container.j2`, installed
+to the dev user's `~/.config/containers/systemd/ds41-moet.container`. Quadlet
+turns it into a user unit whose ExecStart is
+`podman run --rm --replace`, so every start builds the container fresh from
+the spec:
+
+- no stale container record to reconcile — the failure mode after an unclean
+  shutdown (`podman start` fails with "no such exit code") cannot occur;
+- `--rm` means a crashed engine's container is removed, and the exit status
+  is what `[Service] Restart=always` acts on;
+- `StartLimitBurst=6` per hour bounds a crash loop instead of retrying
+  forever.
+
+Run it as the owning user: `systemctl --user start|restart|status ds41-moet`.
+The distro runs the container without a login session, so linger must stay
+enabled for dev (`loginctl enable-linger dev`, which the play ensures); that
+user manager is also what gives rootless Podman a delegated cgroup subtree. A
+root system unit cannot supervise a rootless container this way — that is why
+the earlier `systemd-run --scope` wrapper is gone (the scope survived behind
+Podman's pause process and every later start failed with a duplicate
+transient unit).
+
+Quadlet is a separate binary from podman: `admin/build-podman.yml` builds
+`podman`, `quadlet` and `rootlessport` with `BINDIR=/usr/bin` (quadlet embeds
+that path into generated units), and `admin/install-podman.yml` installs
+`/usr/libexec/podman/quadlet` plus the podman-{system,user}-generator
+symlinks. Without them a `.container` file is silently ignored.
 
 ## Files added
 
@@ -394,6 +473,10 @@ throughput, and pick it from the table above.
 - `config/ansible/admin/templates/ds41-setup.sh.j2` — image pull + checkpoint stage/verify
 - `config/ansible/admin/templates/ds41-start.sh.j2` — manual container launch/update
 - `config/ansible/admin/templates/ds41-flash.service.j2` — systemd boot-start unit
+- `config/ansible/admin/install-deepseek-v41-moet.yml` — MoET recipe playbook (also installs the KV cache pruner and its timer)
+- `config/ansible/admin/templates/ds41-moet-setup.sh.j2` — MoET image/checkpoint staging and JIT cache seeding
+- `config/ansible/admin/templates/ds41-moet.container.j2` — MoET Quadlet (the runtime spec)
+- `config/ansible/admin/files/ds41-moet-kvcache-prune.py` — filesystem KV tier pruner
 
 ## Scheduler fairness
 

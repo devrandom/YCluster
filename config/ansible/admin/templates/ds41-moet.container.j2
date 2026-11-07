@@ -1,0 +1,94 @@
+[Unit]
+Description=DeepSeek-V4.1-Flash inference API (MoET recipe)
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+# A container that cannot start must not spin forever. Quadlet's generated
+# unit is restarted by [Service] Restart= below, so this bounds a crash loop
+# instead of retrying every 10s forever.
+StartLimitIntervalSec=3600
+StartLimitBurst=6
+
+[Container]
+Image={{ ds41_moet_image }}
+ContainerName={{ ds41_moet_container }}
+# The engine binds the host port directly; no port publishing, so rootless
+# `-p` (and rootlessport) is not involved.
+Network=host
+ShmSize={{ ds41_moet_shm }}
+Memory={{ ds41_moet_memory }}
+StopTimeout=60
+# No Quadlet keyword for these, so pass them through. --memory-swap equal to
+# --memory disables swap for the container; --init reaps the vLLM workers.
+PodmanArgs=--memory-swap={{ ds41_moet_memory }} --init --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576 --ulimit stack=67108864:67108864
+
+# Recipe environment (copied from the upstream launch manifest; do not
+# "tidy" these - the fused decode kernel, MXFP4 indexer, b12x MoE backend and
+# disk Engram layer are all part of the measured recipe).
+Environment=CUDA_VISIBLE_DEVICES=0,1,2,3
+Environment=VLLM_MOET_B12X_MOE_FUSED=1
+Environment=VLLM_MOET_SPARSE_MLA_LDG=1
+Environment=VLLM_MOET_TARGET_LM_HEAD_MXFP8=1
+Environment=VLLM_MOET_P2P_AR=1
+Environment=VLLM_MOET_P2P_AR_FUSED_MAX_ROWS=8
+Environment=VLLM_MOET_P2P_AG=0
+Environment=VLLM_MOET_DFLASH_PREP_GROUPS=1
+Environment=VLLM_MOET_CANDIDATE_DET_TOPK=1
+Environment=VLLM_MOET_SWA_DECODE_BUILD=1
+Environment=VLLM_MOET_MOE_TOPKSUM_ADD=1
+Environment=VLLM_MOET_SWA_DRAFT_BUILD=1
+Environment=VLLM_MOET_ENGRAM_DISK=1
+Environment=VLLM_MOET_ENGRAM_DISK_THREADS=16
+Environment=NCCL_P2P_DISABLE=0
+Environment=NCCL_P2P_LEVEL=SYS
+Environment=VLLM_ENGINE_READY_TIMEOUT_S=3600
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+
+# Checkpoint is read-only; the FlashInfer/Triton and DeepGEMM JIT caches are
+# host directories because the container is recreated on every start (Quadlet
+# runs `podman run --rm --replace`), and a cache inside the writable layer
+# would be thrown away - each restart would pay the recipe's ~22 min autotune.
+Volume={{ ds41_moet_model_dir | default('/home/dev/models/DeepSeek-V4.1-Flash-1017') }}:/models:ro
+Volume={{ ds41_moet_cache_dir }}:/root/.cache:rw
+Volume={{ ds41_moet_deep_gemm_cache_dir }}:/root/.deep_gemm:rw
+# Filesystem tier of the KV offload connector. It must be a mount: the
+# container is recreated on every start, and a tier left in the writable
+# layer is discarded with it.
+Volume={{ ds41_moet_kvcache_dir }}:/srv/kvcache:rw
+# Exactly the four cards in ds41_moet_gpus (TP4), in this order: the container
+# sees CUDA ordinals 0..3 for them, which is what CUDA_VISIBLE_DEVICES names.
+{% for gpu in ds41_moet_gpus.split() %}AddDevice=nvidia.com/gpu={{ gpu }}
+{% endfor %}
+Exec=/models \
+    --served-model-name {{ ds41_moet_served_name }} \
+    --host 0.0.0.0 \
+    --port {{ ds41_moet_port | default(9219) }} \
+    --tensor-parallel-size 4 \
+    --max-model-len 524288 \
+    --gpu-memory-utilization 0.92 \
+    --max-num-seqs 8 \
+    --kv-cache-dtype nvfp4_ds_mla \
+    --tool-call-parser deepseek_v41 \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v41 \
+    --tokenizer-mode deepseek_v41 \
+    --max-num-batched-tokens 4096 \
+    --long-prefill-token-threshold 0 \
+    --prefill-schedule-interval 1 \
+    --max-cudagraph-capture-size 64 \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false,"moe_backend":"b12x"}' \
+    --attention-config '{"indexer_kv_dtype":"mxfp4","indexer_tp_shard_min_rows":2048}' \
+    --moe-backend b12x \
+    --kv-offloading-size {{ ds41_moet_kv_offload_gb | default(32) }} \
+    --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/srv/kvcache/{{ ds41_moet_kvcache_subdir }}","n_read_threads":16,"n_write_threads":16,"locality":"LOCAL"}],"offload_prompt_only":false}}'
+
+[Service]
+Restart=always
+RestartSec=10
+# First start runs FlashInfer autotune + DeepGEMM JIT (~22 min upstream) and
+# loads a 475 GiB checkpoint; the generated unit is Type=notify on conmon.
+TimeoutStartSec=15min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target

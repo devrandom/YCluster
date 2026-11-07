@@ -1,6 +1,7 @@
 ---
-# Build podman from source on the buildhost (default s1). The binary stays
-# in the build output dir; install-podman.yml fetches it from there via the
+# Build podman from source on the buildhost (default s1) together with the
+# quadlet generator and the rootlessport helper. The binaries stay in the
+# build output dir; install-podman.yml fetches them from there via the
 # controller. Run after admin/install-ycluster-package.yml.
 #
 # Why build from source: Ubuntu 24.04 ships podman 4.9.3, which can't parse
@@ -8,6 +9,20 @@
 # default. CDI 0.7.0 support landed in podman 5.1.0. Building a current
 # 5.x release removes the CDI-version pin/strip hacks in setup-gpu-podman.yml
 # and install-nvidia.yml. See docs/operations/packages.md.
+#
+# Three separate binaries come out of the tree; all three are built here:
+#   bin/podman        `make podman`        - the engine
+#   bin/quadlet       `make quadlet`       - the Quadlet generator
+#   bin/rootlessport  `make rootlessport`  - rootless `-p` port publishing
+# `make podman` does NOT build the other two. Without quadlet a `.container`
+# unit is inert: upstream installs /usr/libexec/podman/quadlet plus the
+# podman-{system,user}-generator symlinks from `make install.bin`, which this
+# fleet never runs (install-podman.yml installs the binaries individually).
+#
+# BINDIR=/usr/bin is load-bearing, not cosmetic: quadlet bakes the podman path
+# it writes into every generated unit (`_binDir`) at link time, and the
+# Makefile default is /usr/local/bin, where this fleet has no podman. The
+# verification task at the end fails the build if the embedded path is wrong.
 #
 # No prebuilt binaries: see AGENTS.md "No prebuilt third-party binaries".
 # Source is vendored under /opt/src/podman/ and pinned to a git SHA in the
@@ -24,19 +39,38 @@
   vars:
     podman_build_dir: "/opt/src/podman"
     podman_binary: "{{ podman_build_dir }}/bin/podman"
+    podman_quadlet: "{{ podman_build_dir }}/bin/quadlet"
+    podman_rootlessport: "{{ podman_build_dir }}/bin/rootlessport"
     # podman v5.8.0 = 07efc23e05c3d9aa15a0f30d57194737bfc4b6b1.
     podman_repo_url: "https://github.com/containers/podman.git"
     podman_repo_sha: "07efc23e05c3d9aa15a0f30d57194737bfc4b6b1"
+    podman_build_targets: "podman quadlet rootlessport"
+    podman_build_bindir: "/usr/bin"
+    # Rebuild when the pin or the build flags change. Checking only for
+    # bin/podman kept a pre-quadlet binary in place and made the missing
+    # generator look like a packaging decision instead of a stale build.
+    podman_build_stamp: "{{ podman_build_dir }}/.build-stamp"
+    podman_build_stamp_body: >-
+      {{ podman_repo_sha }} BINDIR={{ podman_build_bindir }}
+      TARGETS={{ podman_build_targets }}
     # Go toolchain. Installed via apt (golang-1.24) on the buildhost when
     # a rebuild is needed; local_ai_proxy_go_bin overrides the path for
     # hosts that already have go elsewhere.
     go_bin: "{{ local_ai_proxy_go_bin | default('/usr/lib/go-1.24/bin/go') }}"
   tasks:
-    - name: Check if podman binary already exists
-      stat:
-        path: "{{ podman_binary }}"
-      register: podman_binary_stat
+    - name: Read the build stamp
+      command: cat {{ podman_build_stamp }}
+      register: podman_build_stamp_read
+      changed_when: false
+      failed_when: false
+      check_mode: false
       delegate_to: "{{ buildhost }}"
+
+    - name: Decide whether podman needs a (re)build
+      set_fact:
+        podman_needs_build: >-
+          {{ podman_build_stamp_read.rc != 0
+             or (podman_build_stamp_read.stdout | trim) != (podman_build_stamp_body | trim) }}
 
     - name: Install build dependencies on buildhost
       apt:
@@ -55,14 +89,14 @@
           - libdevmapper-dev
         state: present
       become: yes
-      when: not podman_binary_stat.stat.exists
+      when: podman_needs_build
       delegate_to: "{{ buildhost }}"
 
     - name: Remove existing build directory (clean rebuild)
       file:
         path: "{{ podman_build_dir }}"
         state: absent
-      when: not podman_binary_stat.stat.exists
+      when: podman_needs_build
       delegate_to: "{{ buildhost }}"
 
     - name: Clone podman repository at pinned SHA
@@ -71,31 +105,86 @@
         dest: "{{ podman_build_dir }}"
         version: "{{ podman_repo_sha }}"
         depth: 1
-      when: not podman_binary_stat.stat.exists
+      when: podman_needs_build
       delegate_to: "{{ buildhost }}"
 
-    - name: Build podman binary
-      make:
+    - name: Build podman, quadlet and rootlessport
+      command:
+        cmd: >-
+          make -j{{ ansible_processor_vcpus | default(4) }}
+          {{ podman_build_targets }} BINDIR={{ podman_build_bindir }}
         chdir: "{{ podman_build_dir }}"
-        target: podman
       environment:
         PATH: "{{ go_bin | dirname }}:{{ ansible_env.PATH | default('/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin') }}"
-      when: not podman_binary_stat.stat.exists
+      when: podman_needs_build
       delegate_to: "{{ buildhost }}"
 
-    - name: Verify podman binary was produced
+    - name: Verify the podman, quadlet and rootlessport binaries were produced
       stat:
-        path: "{{ podman_binary }}"
-      register: podman_binary_verify
-      failed_when: not podman_binary_verify.stat.exists
+        path: "{{ item }}"
+      register: podman_build_binaries
+      failed_when: not podman_build_binaries.stat.exists
+      loop:
+        - "{{ podman_binary }}"
+        - "{{ podman_quadlet }}"
+        - "{{ podman_rootlessport }}"
       delegate_to: "{{ buildhost }}"
 
-    - name: Show built podman version
-      command: "{{ podman_binary }} --version"
-      register: podman_version
+    - name: Show built binary versions
+      command: "{{ item }}"
+      register: podman_build_versions
       changed_when: false
+      loop:
+        - "{{ podman_binary }} --version"
+        - "{{ podman_quadlet }} -version"
       delegate_to: "{{ buildhost }}"
 
-    - name: Print podman version
+    - name: Print built binary versions
       debug:
-        var: podman_version.stdout
+        msg: "{{ podman_build_versions.results | map(attribute='stdout') | list }}"
+
+    # Proves BINDIR took effect. Quadlet embeds the path of the podman binary
+    # it puts in generated units, so a /usr/local/bin path would silently
+    # produce units pointing at a binary this fleet does not have.
+    - name: Create the quadlet path-check directory
+      file:
+        path: "{{ podman_build_dir }}/.quadlet-check"
+        state: directory
+        mode: '0755'
+      delegate_to: "{{ buildhost }}"
+
+    - name: Stage a probe unit for the quadlet path check
+      copy:
+        dest: "{{ podman_build_dir }}/.quadlet-check/podman-path-check.container"
+        content: |
+          [Unit]
+          Description=quadlet binary path check
+          [Container]
+          Image=example.invalid/probe:latest
+          Exec=/bin/true
+      delegate_to: "{{ buildhost }}"
+
+    - name: Verify quadlet targets the installed podman path
+      command:
+        cmd: >-
+          env QUADLET_UNIT_DIRS={{ podman_build_dir }}/.quadlet-check
+          {{ podman_quadlet }} -user -dryrun
+      register: podman_quadlet_check
+      changed_when: false
+      failed_when: >-
+        ('ExecStart=' ~ podman_build_bindir ~ '/podman run') not in podman_quadlet_check.stdout
+      delegate_to: "{{ buildhost }}"
+
+    - name: Remove the quadlet path-check probe
+      file:
+        path: "{{ podman_build_dir }}/.quadlet-check"
+        state: absent
+      delegate_to: "{{ buildhost }}"
+
+    - name: Record the build stamp
+      copy:
+        content: "{{ podman_build_stamp_body }}\n"
+        dest: "{{ podman_build_stamp }}"
+        mode: '0644'
+      when: podman_needs_build
+      delegate_to: "{{ buildhost }}"

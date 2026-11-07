@@ -16,6 +16,9 @@ IMAGE_TAG="{{ ds41_moet_image_tag }}"
 REPO="{{ ds41_moet_repo }}"
 REVISION="{{ ds41_moet_revision }}"
 MODEL_HOST="${MODEL_HOST:-{{ ds41_moet_model_dir | default('/home/dev/models/DeepSeek-V4.1-Flash-1017') }}}"
+CACHE_DIR="${CACHE_DIR:-{{ ds41_moet_cache_dir }}}"
+DEEPGEMM_CACHE_DIR="${DEEPGEMM_CACHE_DIR:-{{ ds41_moet_deep_gemm_cache_dir }}}"
+KVCACHE_DIR="${KVCACHE_DIR:-{{ ds41_moet_kvcache_dir }}}"
 
 action="setup"
 while [ $# -gt 0 ]; do
@@ -37,6 +40,35 @@ if [ "$action" != "verify-only" ]; then
   echo "== pull $IMAGE_TAG (digest $IMAGE) =="
   podman pull "$IMAGE"
   echo "  image ready: $IMAGE"
+  echo
+
+  # The runtime quadlet bind-mounts host cache directories over /root/.cache
+  # and /root/.deep_gemm (the container is recreated on every start, so those
+  # caches cannot live in the writable layer). The image ships a warm
+  # /root/.cache/flashinfer from its build; seed the host dirs once from the
+  # image, otherwise an empty mount would hide it and pay a full autotune.
+  seed_cache() {
+    host_dir="$1"
+    image_dir="$2"
+    mkdir -p "$host_dir"
+    [ -e "$host_dir/.seeded-from-image" ] && return 0
+    echo "seeding $host_dir from the image's $image_dir ..."
+    # Not every revision ships both caches; a missing image directory must
+    # leave the host cache empty rather than aborting the setup.
+    if podman run --rm --entrypoint /bin/sh "$IMAGE" -c "[ -d $image_dir ]"; then
+      podman run --rm --entrypoint /bin/sh "$IMAGE" -c "tar -C $image_dir -cf - ." \
+        | tar -C "$host_dir" -xf -
+    else
+      echo "  (image ships no $image_dir)"
+    fi
+    touch "$host_dir/.seeded-from-image"
+  }
+
+  seed_cache "$CACHE_DIR" /root/.cache
+  seed_cache "$DEEPGEMM_CACHE_DIR" /root/.deep_gemm
+  # The KV tier directory is owned by dev but written by the container's root
+  # (rootless mapping): plain mkdir, no image seeding.
+  mkdir -p "$KVCACHE_DIR"
   echo
 fi
 
@@ -98,5 +130,5 @@ if [ "$action" = "setup" ]; then
   fi
 
   echo
-  echo "Start the server:  ~/bin/ds41-moet-start.sh"
+  echo "Start the server:  systemctl --user start {{ ds41_moet_container }}"
 fi

@@ -20,7 +20,9 @@
 #     (cudaDeviceCanAccessPeer true for every pair; the P2P all-reduce and
 #     NCCL_P2P_LEVEL=SYS depend on it).
 #   - 47 GB host RAM at peak, 32 GiB of it a pinned KV-offload region that
-#     lives in /dev/shm -- hence --shm-size 48g.
+#     lives in /dev/shm -- hence --shm-size 48g. We size that region down
+#     (ds41_moet_kv_offload_gb, default 8 GiB) and leave shm at the recipe
+#     value; the flag is a total across TP ranks, so 32 GiB is ~8 GiB/rank.
 #   - 510 GB of weights plus the ~9.6 GB image on LOCAL NVMe: the Engram
 #     tables are read from the checkpoint on every decode step, so the model
 #     directory must not sit on NAS or network storage.
@@ -40,11 +42,15 @@
 # Bring up:
 #   ~/bin/ds41-moet-setup.sh --download   # image + checkpoint (~520 GB)
 #   ~/bin/ds41-moet-setup.sh              # re-pull image + verify checkpoint
-#   ~/bin/ds41-moet-start.sh              # manual launch (idempotent)
+#   systemctl --user start ds41-moet      # runtime, owned by the quadlet
 #
-# The runtime service is a system-level unit that attaches to the existing
-# rootless container, so the backend comes back after a host reboot and is
-# restarted after an engine failure.
+# The runtime spec is a Quadlet (`templates/ds41-moet.container.j2`) in the
+# dev user's `~/.config/containers/systemd`. Quadlet turns it into a user
+# unit whose ExecStart is `podman run --rm --replace`, so every start builds a
+# fresh container from the spec: there is no stale container record to
+# reconcile, which is the failure mode that kept the backend down after an
+# unclean shutdown. With lingering enabled the user manager starts it at
+# boot, and `[Service] Restart=always` restarts the engine after a crash.
 
 - name: Deploy the DS4.1 MoET recipe to Nvidia GPU nodes
   hosts: nvidia
@@ -66,6 +72,15 @@
     # /v1/models does not advertise.
     ds41_moet_served_name: "deepseek-v4_1-flash"
     ds41_moet_container: "ds41-moet"
+    # The container lives in this user's rootless Podman storage; the service
+    # runs the supervisor as that user. Its uid drives the unit's
+    # XDG_RUNTIME_DIR and the user@<uid>.service dependency.
+    ds41_moet_user: "dev"
+    # The runtime spec is a Quadlet user unit: the dev user manager starts it
+    # (linger keeps that manager up at boot), and Quadlet re-creates the
+    # container with `podman run --rm --replace` on every start.
+    ds41_moet_quadlet_dir: "/home/dev/.config/containers/systemd"
+    ds41_moet_quadlet_path: "{{ ds41_moet_quadlet_dir }}/{{ ds41_moet_container }}.container"
     # The checkpoint directory and the listening port are per-host
     # (host_vars/<node>.yml): a host may already hold the same 1017 weights
     # under a different directory name, and two MoET hosts can coexist.
@@ -77,19 +92,46 @@
     ds41_moet_cache_dir: "/home/dev/.cache/ds41-moet"
     # /dev/shm for the pinned KV-offload region (recipe default: 48g).
     ds41_moet_shm: "48g"
+    # Pinned CPU-RAM primary tier of the KV offload connector, GiB for the
+    # whole engine (the flag is a total across TP ranks, not per rank). At
+    # ~1 KB/token a full 512K context is ~0.5 GiB, so 8 GiB holds roughly one
+    # GPU KV pool's worth of evicted blocks; older blocks live on the
+    # filesystem tier and cost a fraction of a second to read back. The
+    # recipe's 32 GiB is the same tier four times over.
+    ds41_moet_kv_offload_gb: 8
     # Container memory ceiling: ~47 GB working set plus the 48g shm tmpfs,
     # which is charged to the container cgroup.
     ds41_moet_memory: "112g"
     # r21 keeps a second JIT cache for DeepGEMM outside /root/.cache.
     ds41_moet_deep_gemm_cache_dir: "/home/dev/.cache/ds41-moet-deep-gemm"
+    # Host directory for the KV offload connector's filesystem tier,
+    # bind-mounted at /srv/kvcache. It has to be local NVMe (blocks are read
+    # back into the CPU tier on a prefix-cache hit) and it must be a mount:
+    # the launcher recreates the container on every start, so a tier left in
+    # the writable layer is discarded with it.
+    ds41_moet_kvcache_dir: "/home/dev/.cache/ds41-moet-kvcache"
+    # Subdirectory under the host dir and the container mount; also the
+    # root_dir in the launcher's --kv-transfer-config.
+    ds41_moet_kvcache_subdir: "v41-interleaved"
+    # Byte budget for the tier. vLLM's filesystem tier has no quota and no
+    # eviction -- it drops a block only when a short read proves corruption --
+    # so ds41-moet-kvcache-prune.timer trims the oldest blocks back under this
+    # budget. Keep it well clear of the node's free space: the tree shares its
+    # filesystem with the podman store and the checkpoint.
+    ds41_moet_kvcache_max_gb: 64
+    ds41_moet_kvcache_prune_on_calendar: "*:0/10"
+    ds41_moet_kvcache_prune_path: /usr/local/lib/cluster/ds41-moet-kvcache-prune
     # Start (or attach to) the container at the end of the play. Set false
-    # with -e ds41_moet_autostart=false to install the scripts before the
-    # checkpoint is staged: the unit's ExecStart attaches to an existing
-    # container, so with no container yet it would fail and Restart=always
-    # would spin it every 10s.
+    # with -e ds41_moet_autostart=false to install everything before the
+    # checkpoint is staged: the supervisor would try to create the container,
+    # the launcher's pre-flight would fail on the missing checkpoint, and the
+    # unit would stop at its start limit.
     ds41_moet_autostart: true
 
   tasks:
+    # `--tags service-unit` installs only the supervisor, the user-manager
+    # plumbing and the unit, so a boot-recovery fix can reach a host without
+    # also shipping unrelated launcher/KV-cache work in progress.
     - name: End play for nodes with no host-visible NVIDIA GPU
       meta: end_host
       when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
@@ -112,6 +154,7 @@
         owner: dev
         group: dev
         mode: '0755'
+      tags: [service-unit]
 
     - name: Install DS4.1 MoET staging scripts into ~dev/bin
       template:
@@ -122,34 +165,196 @@
         mode: '0755'
       loop:
         - ds41-moet-setup.sh
-        - ds41-moet-start.sh
 
-    - name: Install DS4.1 MoET systemd unit
-      template:
-        src: templates/ds41-moet.service.j2
-        dest: /etc/systemd/system/ds41-moet.service
+    - name: Read the DS4.1 MoET service user's uid
+      command: id -u {{ ds41_moet_user }}
+      register: ds41_moet_uid_lookup
+      changed_when: false
+      check_mode: false
+      tags: [service-unit]
+
+    - name: Set the DS4.1 MoET service user's uid
+      set_fact:
+        ds41_moet_uid: "{{ ds41_moet_uid_lookup.stdout }}"
+      tags: [service-unit]
+
+    # The unit depends on user@<uid>.service for the user-manager bus; linger
+    # keeps that manager up outside a login session, including at boot.
+    - name: Check whether the DS4.1 MoET service user lingers
+      command: loginctl show-user {{ ds41_moet_user }} --property=Linger --value
+      register: ds41_moet_linger
+      changed_when: false
+      check_mode: false
+      tags: [service-unit]
+
+    - name: Enable lingering for the DS4.1 MoET service user
+      command: loginctl enable-linger {{ ds41_moet_user }}
+      when: ds41_moet_linger.stdout | trim != 'yes'
+      changed_when: true
+      tags: [service-unit]
+
+    - name: Ensure the DS4.1 MoET KV cache directory exists
+      file:
+        path: "{{ ds41_moet_kvcache_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Ensure cluster lib directory exists for the KV cache pruner
+      file:
+        path: "{{ ds41_moet_kvcache_prune_path | dirname }}"
+        state: directory
         owner: root
         group: root
+        mode: '0755'
+
+    - name: Install the DS4.1 MoET KV cache pruner
+      copy:
+        src: files/ds41-moet-kvcache-prune.py
+        dest: "{{ ds41_moet_kvcache_prune_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    # The filesystem tier grows without bound on its own (see the
+    # ds41_moet_kvcache_max_gb comment); this timer is the only thing that
+    # keeps it inside the budget.
+    - name: Install the DS4.1 MoET KV cache pruner service
+      copy:
+        dest: /etc/systemd/system/ds41-moet-kvcache-prune.service
+        content: |
+          [Unit]
+          Description=Trim the DS4.1 MoET filesystem KV cache to its byte budget
+          After=ds41-moet.service
+
+          [Service]
+          Type=oneshot
+          User=dev
+          Group=dev
+          ExecStart=/usr/bin/python3 {{ ds41_moet_kvcache_prune_path }} --root {{ ds41_moet_kvcache_dir }}/{{ ds41_moet_kvcache_subdir }} --max-bytes {{ (ds41_moet_kvcache_max_gb | int) * 1073741824 }}
+          Nice=10
+          NoNewPrivileges=true
+          PrivateTmp=true
         mode: '0644'
 
-    # state: started attaches to a running container (no-op) or starts the
-    # existing one; it never recreates it, so deploying does not bounce
-    # inference. Use ~/bin/ds41-moet-start.sh + `systemctl restart ds41-moet`
-    # when the launch flags change.
-    - name: Enable and start the DS4.1 MoET service
+    - name: Install the DS4.1 MoET KV cache pruner timer
+      copy:
+        dest: /etc/systemd/system/ds41-moet-kvcache-prune.timer
+        content: |
+          [Unit]
+          Description=Periodically trim the DS4.1 MoET filesystem KV cache
+
+          [Timer]
+          OnCalendar={{ ds41_moet_kvcache_prune_on_calendar }}
+          RandomizedDelaySec=30
+          Unit=ds41-moet-kvcache-prune.service
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+
+    - name: Enable and start the DS4.1 MoET KV cache pruner timer
       systemd:
-        name: ds41-moet.service
+        name: ds41-moet-kvcache-prune.timer
         state: started
         enabled: yes
         daemon_reload: yes
+
+    # Catch a broken unit or directory permission at deploy time instead of
+    # on the timer's first tick.
+    - name: Run the DS4.1 MoET KV cache pruner once
+      systemd:
+        name: ds41-moet-kvcache-prune.service
+        state: started
+      when: not ansible_check_mode
+
+    - name: Ensure the dev quadlet directory exists
+      file:
+        path: "{{ ds41_moet_quadlet_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+      tags: [service-unit]
+
+    - name: Install the DS4.1 MoET quadlet
+      template:
+        src: templates/ds41-moet.container.j2
+        dest: "{{ ds41_moet_quadlet_path }}"
+        owner: dev
+        group: dev
+        mode: '0644'
+      tags: [service-unit]
+
+    # Earlier revisions supervised the container with a root system unit; the
+    # quadlet is owned by the dev user manager. Both would fight over the
+    # container name, so retire the old unit and its helpers.
+    - name: Check for the legacy DS4.1 MoET system unit
+      stat:
+        path: /etc/systemd/system/ds41-moet.service
+      register: ds41_moet_legacy_unit
+      tags: [service-unit]
+
+    - name: Stop and disable the legacy DS4.1 MoET system unit
+      systemd:
+        name: ds41-moet.service
+        state: stopped
+        enabled: no
+      when: ds41_moet_legacy_unit.stat.exists
+      tags: [service-unit]
+
+    - name: Remove the legacy DS4.1 MoET system unit
+      file:
+        path: /etc/systemd/system/ds41-moet.service
+        state: absent
+      when: ds41_moet_legacy_unit.stat.exists
+      tags: [service-unit]
+
+    - name: Remove the legacy supervisor wrapper and manual launcher
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /home/dev/bin/ds41-moet-supervise.sh
+        - /home/dev/bin/ds41-moet-start.sh
+      tags: [service-unit]
+
+    - name: Reload the dev user manager so the quadlet generator runs
+      become_user: "{{ ds41_moet_user }}"
+      command: systemctl --user daemon-reload
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ ds41_moet_uid }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ds41_moet_uid }}/bus"
+      changed_when: false
+      tags: [service-unit]
+
+    # `started`, not `restarted`: an already-active unit is left alone, so a
+    # deploy never bounces inference. Quadlet recreates the container from the
+    # .container spec on the next start; use `systemctl --user restart
+    # ds41-moet` after changing the launch flags. Enabling is handled by the
+    # quadlet's [Install] section, which makes the generator emit the
+    # default.target.wants link.
+    - name: Start the DS4.1 MoET quadlet
+      become_user: "{{ ds41_moet_user }}"
+      systemd:
+        name: "{{ ds41_moet_container }}.service"
+        scope: user
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ ds41_moet_uid }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ds41_moet_uid }}/bus"
       when: ds41_moet_autostart | default(true) | bool
+      tags: [service-unit]
 
     - name: Report deferred start
       debug:
         msg: >-
-          ds41-moet.service installed but not started (ds41_moet_autostart=false).
-          Stage the checkpoint with ~/bin/ds41-moet-setup.sh --download, then
-          re-run this play without the override.
+          {{ ds41_moet_container }}.container installed but not started
+          (ds41_moet_autostart=false). Stage the checkpoint with
+          ~/bin/ds41-moet-setup.sh --download, then re-run this play without
+          the override, or start it as dev: systemctl --user start
+          {{ ds41_moet_container }}.
       when: not (ds41_moet_autostart | default(true) | bool)
 
 - name: Register the DS4.1 MoET backends with local-ai-proxy
