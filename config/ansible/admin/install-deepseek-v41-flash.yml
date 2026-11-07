@@ -27,11 +27,14 @@
 #   ssh <host>.yc
 #   ~/bin/ds41-setup.sh --download   # pull image + checkpoint (~510 GB)
 #   ~/bin/ds41-setup.sh              # subsequent: image pull + verify
-#   ~/bin/ds41-start.sh              # manual launch (idempotent)
+#   systemctl --user start ds41-flash    # runtime, owned by the quadlet
 #
-# Runtime service is a system-level systemd unit that starts the existing
-# rootless container, so the backend starts after a host reboot and restarts
-# after an engine failure.
+# The runtime spec is a Quadlet (templates/ds41-flash.container.j2) in the dev
+# user's ~/.config/containers/systemd. Quadlet's ExecStart is
+# `podman run --rm --replace`, so every start builds a fresh container from
+# the spec; linger starts it at boot and Restart=always restarts the engine
+# after a crash. This play is a no-op on hosts without ds41_enabled, and none
+# currently opt in, so the quadlet is unexercised on this fleet.
 
 - name: Deploy DeepSeek-V4.1-Flash staging scripts to Nvidia GPU nodes
   hosts: nvidia
@@ -53,6 +56,13 @@
     # Engram placement: disk for hosts without 189 GiB spare RAM. Override
     # per-host with ds41_engram_memory: "ram" on larger hosts.
     ds41_engram_memory: "disk"
+    ds41_flash_container: "ds41-flash"
+    # Container memory ceiling (the profile runner is memory-hungry).
+    ds41_memory: "120g"
+    # The runtime spec is a Quadlet user unit owned by the dev user manager.
+    ds41_user: "dev"
+    ds41_quadlet_dir: "/home/dev/.config/containers/systemd"
+    ds41_quadlet_path: "{{ ds41_quadlet_dir }}/{{ ds41_flash_container }}.container"
 
   tasks:
     - name: End play for nodes with no host-visible NVIDIA GPU
@@ -80,29 +90,100 @@
         mode: '0755'
       loop:
         - ds41-setup.sh
-        - ds41-start.sh
 
-    - name: Remove obsolete DS4.1 Quadlet probe
+    - name: Read host dev UID
+      command: id -u {{ ds41_user }}
+      register: ds41_dev_uid
+      changed_when: false
+      check_mode: false
+
+    - name: Check whether the DS4.1 service user lingers
+      command: loginctl show-user {{ ds41_user }} --property=Linger --value
+      register: ds41_linger
+      changed_when: false
+      check_mode: false
+
+    - name: Enable lingering for the DS4.1 service user
+      command: loginctl enable-linger {{ ds41_user }}
+      when: ds41_linger.stdout | trim != 'yes'
+      changed_when: true
+
+    - name: Ensure the dev quadlet directory exists
       file:
-        path: /home/dev/.config/containers/systemd/ds41-flash.container
-        state: absent
+        path: "{{ ds41_quadlet_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
 
-    - name: Install DS4.1 systemd unit
+    - name: Install the DS4.1 quadlet
       template:
-        src: templates/ds41-flash.service.j2
-        dest: /etc/systemd/system/ds41-flash.service
-        owner: root
-        group: root
+        src: templates/ds41-flash.container.j2
+        dest: "{{ ds41_quadlet_path }}"
+        owner: dev
+        group: dev
         mode: '0644'
 
-    # Do not restart the service here: attaching to an already-healthy
-    # container is non-disruptive, but restarting would bounce inference.
-    - name: Enable and start DS4.1 service
+    # Earlier revisions supervised the container with a root system unit; the
+    # quadlet is owned by the dev user manager and both would fight over the
+    # container name.
+    - name: Check for the legacy DS4.1 system unit
+      stat:
+        path: /etc/systemd/system/ds41-flash.service
+      register: ds41_legacy_unit
+
+    - name: Stop and disable the legacy DS4.1 system unit
       systemd:
         name: ds41-flash.service
+        state: stopped
+        enabled: no
+      when: ds41_legacy_unit.stat.exists
+
+    - name: Remove the legacy DS4.1 system unit
+      file:
+        path: /etc/systemd/system/ds41-flash.service
+        state: absent
+      when: ds41_legacy_unit.stat.exists
+
+    - name: Remove the legacy DS4.1 launcher
+      file:
+        path: /home/dev/bin/ds41-start.sh
+        state: absent
+
+    - name: Reload the dev user manager so the quadlet generator runs
+      become_user: "{{ ds41_user }}"
+      command: systemctl --user daemon-reload
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ ds41_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ds41_dev_uid.stdout }}/bus"
+      changed_when: false
+
+    - name: Check whether the DS4.1 checkpoint is staged
+      stat:
+        path: "{{ ds41_model_dir }}/config.json"
+      register: ds41_checkpoint
+
+    # `started`, not `restarted`: an already-active unit is left alone, so a
+    # deploy never bounces inference. Quadlet recreates the container from the
+    # .container spec on the next start.
+    - name: Start the DS4.1 quadlet
+      become_user: "{{ ds41_user }}"
+      systemd:
+        name: "{{ ds41_flash_container }}.service"
+        scope: user
         state: started
-        enabled: yes
-        daemon_reload: yes
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ ds41_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ds41_dev_uid.stdout }}/bus"
+      when: ds41_checkpoint.stat.exists
+
+    - name: Note that DS4.1 stays unmanaged until its checkpoint is staged
+      debug:
+        msg: >-
+          The {{ ds41_flash_container }} quadlet is installed but not started:
+          no checkpoint at {{ ds41_model_dir }}/config.json. Run
+          ~/bin/ds41-setup.sh --download as dev, then re-run this play.
+      when: not ds41_checkpoint.stat.exists
 
 - name: Register the DS4.1 backend with local-ai-proxy
   hosts: storage

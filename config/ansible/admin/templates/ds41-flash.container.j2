@@ -1,0 +1,53 @@
+[Unit]
+Description=DeepSeek-V4.1-Flash inference API (Karmic Kraken profile)
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+# Bound a crash loop instead of restarting every 10s forever.
+StartLimitIntervalSec=3600
+StartLimitBurst=6
+
+[Container]
+Image={{ ds41_image }}
+ContainerName={{ ds41_flash_container | default('ds41-flash') }}
+Network=host
+Memory={{ ds41_memory | default('120g') }}
+StopTimeout=60
+# No Quadlet keyword for these. --ipc=host keeps the profile runner's shared
+# memory behaviour; the ulimits match the recipe.
+PodmanArgs=--memory-swap={{ ds41_memory | default('120g') }} --ipc=host --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --ulimit stack=67108864:67108864
+
+# The KK image runs its profile runner from these environment variables; the
+# command line below only carries the deployment choices that differ from the
+# profile defaults (served name, fairness knobs).
+Environment=CUDA_VISIBLE_DEVICES=0,1,2,3
+Environment=PROFILE=ds41-flash
+Environment=HARDWARE_PROFILE=rtx-pro-6000-pcie
+Environment=MODEL=/model
+Environment=HOST=0.0.0.0
+Environment=PORT={{ ds41_port }}
+Environment=TP=4
+Environment=DCP=1
+Environment=MAX_MODEL_LEN=524288
+Environment=MAX_NUM_SEQS=9
+Environment=MAX_NUM_BATCHED_TOKENS=8192
+Environment=GPU_MEMORY_UTILIZATION=0.95
+Environment=ENGRAM_TABLE_MEMORY={{ ds41_engram_memory | default('disk') }}
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+
+Volume={{ ds41_model_dir }}:/model:ro
+Volume={{ ds41_cache_dir | default('/home/dev/.cache/ds41-kk') }}:/cache:rw
+{% for gpu in ds41_gpus.split() %}AddDevice=nvidia.com/gpu={{ gpu }}
+{% endfor %}
+Exec=--served-model-name {{ ds41_served_name }} \
+    --prefill-compute-share 0.2 \
+    --long-prefill-token-threshold 4096
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=15min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
