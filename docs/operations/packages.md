@@ -113,6 +113,46 @@ snap list | grep held          # what is pinned, and at which revision
 snap refresh --list            # what a refresh would install
 ```
 
+## Podman (self-built, with quadlet)
+
+Compute nodes run podman built from source instead of the distro package:
+Ubuntu 24.04 ships 4.9.3, which cannot parse the CDI v0.7.0 specs that current
+nvidia-container-toolkit emits. The version comes from the SHA pinned in
+`admin/build-podman.yml`, which builds on the buildhost (`s1`) and produces
+three binaries — `podman`, `quadlet` and `rootlessport`. `admin/install-podman.yml`
+installs them on the compute nodes and `admin/setup-gpu-podman.yml` emits the
+CDI device names.
+
+Two build details are load-bearing:
+
+- `make` needs `BINDIR=/usr/bin`. Quadlet embeds the podman path into every
+  unit it generates, and the Makefile default is `/usr/local/bin`, where this
+  fleet has no podman. The build fails if the generated `ExecStart` does not
+  name the installed binary.
+- `make podman` alone does **not** build `quadlet` or `rootlessport`. Install
+  puts them in `/usr/libexec/podman/` and symlinks
+  `/usr/lib/systemd/{system,user}-generators/podman-{system,user}-generator`
+  to the quadlet binary, **after** the distro package purge (those paths are
+  dpkg-owned). Without the generator links a `.container` file is silently
+  ignored and the service simply never appears.
+
+The pin and the build flags are recorded in `.build-stamp` next to the build
+tree, so changing either triggers a rebuild instead of reusing a stale binary
+(a pre-quadlet build once looked like a deliberate packaging choice).
+
+Check a node with:
+
+```bash
+podman --version
+podman quadlet list
+ls -l /usr/lib/systemd/user-generators/podman-user-generator
+```
+
+Writing an inference service as a quadlet, and why the unit is a *user* unit
+under `dev` (linger + delegated cgroup) rather than a root system unit, is
+described in [Boot and recovery](../inference/deepseek-v4.1-flash.md#boot-and-recovery).
+Unit state is exported to node_exporter by `monitoring/install-quadlet-metrics.yml`.
+
 ## CVE tracking, self-built pins, and container images
 
 Installed apt packages, self-built source pins (`frp`), and the public
