@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Publish the state of user-manager (Quadlet) units to node_exporter's
+# textfile collector.
+#
+# node_exporter's systemd collector reads *system* units only, so a Quadlet --
+# a unit generated in a user manager -- has no node_systemd_unit_state series
+# and the SystemdUnitFailed alert cannot see it. That matters for the
+# inference containers: when one hits its start limit it stays down with no
+# service-level signal.
+#
+# Walk every user that owns a .container file, ask that user's manager for the
+# unit state, and publish one gauge per unit. Units that are simply inactive
+# (never started, or stopped on purpose) report 0/0 so only real failures
+# alert.
+set -uo pipefail
+
+out_dir="${OUT_DIR:-/var/lib/prometheus/node-exporter}"
+out="$out_dir/quadlets.prom"
+
+tmp="$(mktemp "$out_dir/.quadlets.XXXXXX")" || exit 1
+trap 'rm -f "$tmp"' EXIT
+
+{
+  echo '# HELP inference_quadlet_unit_active Quadlet user unit is active (1) or not (0).'
+  echo '# TYPE inference_quadlet_unit_active gauge'
+  echo '# HELP inference_quadlet_unit_failed Quadlet user unit is in the failed state (1) or not (0).'
+  echo '# TYPE inference_quadlet_unit_failed gauge'
+} >"$tmp"
+
+for unit_file in /home/*/.config/containers/systemd/*.container; do
+  [ -e "$unit_file" ] || continue
+  name="$(basename "$unit_file" .container)"
+  uid="$(stat -c %u "$unit_file")"
+  user="$(stat -c %U "$unit_file")"
+  # runuser wants a user *name* (unlike su, it rejects the #uid form).
+  state="$(runuser -u "$user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+    systemctl --user show "$name.service" --property=ActiveState --value 2>/dev/null)"
+  active=0
+  failed=0
+  case "$state" in
+    active) active=1 ;;
+    failed) failed=1 ;;
+  esac
+  printf 'inference_quadlet_unit_active{name="%s",user="%s"} %d\n' "$name" "$user" "$active" >>"$tmp"
+  printf 'inference_quadlet_unit_failed{name="%s",user="%s"} %d\n' "$name" "$user" "$failed" >>"$tmp"
+done
+
+chmod 0644 "$tmp"
+mv "$tmp" "$out"

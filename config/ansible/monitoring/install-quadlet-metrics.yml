@@ -1,0 +1,83 @@
+---
+# Publish Quadlet (user-manager) unit state for the inference containers.
+#
+# node_exporter's systemd collector only reads system units, so a Quadlet --
+# and the inference containers run as Quadlets under the dev user manager --
+# has no node_systemd_unit_state series. Without this, a unit that hits its
+# start limit leaves the backend down with no service-level alert.
+#
+# Writes inference_quadlet_unit_{active,failed} to the node_exporter textfile
+# collector (configured by install-prometheus.yml); the alert lives in
+# templates/ycluster-alerts-inference.yml.j2.
+- name: Install Quadlet unit-state metrics
+  hosts: compute
+  become: yes
+  vars:
+    collector_path: /usr/local/lib/cluster/quadlet-metrics-collector
+    interval_sec: 30
+  tasks:
+    - name: Install the Quadlet metrics collector
+      copy:
+        src: files/quadlet-metrics-collector
+        dest: "{{ collector_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create the Quadlet metrics service
+      copy:
+        dest: /etc/systemd/system/quadlet-metrics.service
+        content: |
+          [Unit]
+          Description=Publish Quadlet user-unit state for node_exporter
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ collector_path }}
+          User=root
+          # runuser + systemctl --user need to reach each user's manager, so
+          # keep the sandbox light: no ProtectHome/ProtectSystem here.
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths=/var/lib/prometheus/node-exporter
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Create the Quadlet metrics timer
+      copy:
+        dest: /etc/systemd/system/quadlet-metrics.timer
+        content: |
+          [Unit]
+          Description=Publish Quadlet user-unit state every {{ interval_sec }}s
+
+          [Timer]
+          OnBootSec=60s
+          OnUnitActiveSec={{ interval_sec }}s
+          AccuracySec=5s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd
+
+    - name: Enable and start the Quadlet metrics timer
+      systemd:
+        name: quadlet-metrics.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Run the collector once so the first scrape sees data
+      command: "{{ collector_path }}"
+      changed_when: false
+
+    - name: Verify the collector wrote its textfile
+      stat:
+        path: /var/lib/prometheus/node-exporter/quadlets.prom
+      register: quadlet_prom
+      failed_when: not quadlet_prom.stat.exists
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes

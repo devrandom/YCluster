@@ -32,6 +32,20 @@ groups:
           summary: "Inference backend {{ $labels.backend }} down"
           description: "local-ai-proxy health checks have been failing against {{ $labels.backend }} for 5m. Disabled backends don't trigger this; if you intentionally took it offline, mark it disabled via /cluster/config/inference/disabled/<url>."
 
+      # Quadlets are user units, so node_exporter's systemd collector cannot
+      # see them (install-quadlet-metrics.yml publishes them as a textfile
+      # metric instead). failed=1 means the container hit its start limit and
+      # systemd stopped retrying: the backend stays down until an operator
+      # intervenes, which is exactly what the gateway-side rule cannot say.
+      - alert: InferenceQuadletUnitFailed
+        expr: inference_quadlet_unit_failed == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference quadlet {{ $labels.name }} failed on {{ $labels.node }}"
+          description: "{{ $labels.name }} is in the failed state in {{ $labels.user }}'s user manager (start limit hit), so the backend stays down. Check `systemctl --user status {{ $labels.name }}` as that user, fix the cause, then `systemctl --user reset-failed {{ $labels.name }}` and start it again."
+
       # A model has zero healthy backends but at least one non-disabled
       # backend configured — i.e. the model is unservable for reasons
       # other than the operator turning it off. (A model whose only
