@@ -15,6 +15,7 @@
 - import_playbook: install-rsigma.yml
 - import_playbook: install-crowdsec.yml
 - import_playbook: install-ids-forwarder.yml
+- import_playbook: install-ids-bridge-consumer.yml
 - import_playbook: ceph.yml
 # Silence benign boot-time systemd failures (networkd wait-online, snap
 # leftovers, VM-host nvidia units) so SystemdUnitFailed only fires on real

@@ -32,6 +32,7 @@ test:
     @echo "== test: IDS policies =="
     @.venv/bin/python -m unittest discover -s config/ansible/monitoring/tests -p 'test_ids_policies.py'
     @.venv/bin/python -m unittest discover -s config/ansible/monitoring/tests -p 'test_apt_metrics_collector.py'
+    @.venv/bin/python -m unittest discover -s config/ansible/monitoring/files -p 'test_ids_bridge_consumer.py'
 
 test-system-quick:
     @mkdir -p ./tmp

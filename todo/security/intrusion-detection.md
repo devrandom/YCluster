@@ -201,21 +201,22 @@ must not become a second, longer-lived access log.
     namespace. The daemon's own debug log is deliberately not used for this:
     it dumps whole API response bodies (~12-40 MiB/hour on one host) and
     still reports the unix-socket peer as `@`.
-  - Remaining: VM lateral-movement visibility. Host-side Tetragon cannot see
-    guest sockets — the hypervisor only exposes the QEMU process — so a VM
-    reaching a cluster address produces no kprobe event and cannot be
-    attributed to an instance. Isolation is already enforced for containers
-    and VMs by the Incus network ACL on the tenant bridge (deny the
-    cluster-private ranges, allow the bridge and the internet), but those
-    drops are silent, so a VM attempt is invisible today while the equivalent
-    container attempt alerts. Proposed, not implemented: a log-only nftables
-    rule matching tenant-bridge traffic to the cluster-private ranges, placed
-    ahead of the ACL verdict so it still fires when the ACL is removed or
-    edited, plus a small consumer that maps the source to an instance name at
-    the host and posts a CrowdSec-shaped alert to the forwarder's localhost
-    receiver — the tenant address never leaves the host. Note that
-    established flows are accepted ahead of the ACL drops, so a policy change
-    does not contain connections that are already up.
+  - VM lateral movement. Host-side Tetragon cannot see guest sockets — the
+    hypervisor only exposes the QEMU process — so a VM reaching a cluster
+    address produces no kprobe event. Done on one compute node: the bridge
+    guard — a traffic filter, not an IDS component,
+    `admin/install-vm-bridge-guard.yml` — drops guest-to-neighbour traffic in
+    the nftables bridge family and counts/logs guest-to-cluster attempts ahead
+    of the silent Incus ACL verdict. The IDS side is separate
+    (`monitoring/install-ids-bridge-consumer.yml`) and posts one CrowdSec-shaped
+    alert per class per hour to the forwarder's loopback receiver — no guest
+    address leaves the host. Two survey findings changed
+    the design: the Incus ACL is emitted with drops before allows, and it is
+    never consulted for guest-to-guest traffic at all, because same-bridge
+    frames are switched at layer 2 and skip the IP hooks. Remaining: roll the
+    play out to the other bridge hosts, and flow records (a scan and a single
+    connection still look the same). Details in the design doc's *VM bridge
+    visibility* section.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and
   container workloads.

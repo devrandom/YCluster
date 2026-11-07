@@ -10,3 +10,30 @@
 # default for the fleet. Override per-host (e.g. host_vars/c3.yml) where a
 # newer kernel is required.
 rocm_kernel_version: "6.14.0-37-generic"
+
+# Incus VM bridge
+# ===============
+# Per-node bridge for tenant VMs and containers. Every node uses the same
+# subnet and guests are NATed out, so guest traffic never crosses hosts
+# unmasqueraded. Shared by admin/install-incus.yml (bridge + ACL),
+# admin/install-vm-bastion.yml (fixed jump-host address) and
+# monitoring/install-vm-bridge-guard.yml (neighbour isolation).
+incus_bridge: incusbr0
+incus_bridge_cidr: "10.100.0.1/24"
+# Network form of incus_bridge_cidr, for rule matching.
+incus_bridge_subnet: "10.100.0.0/24"
+# The bastion is the only guest that may open connections to other guests.
+vm_bastion_ip: "10.100.0.53"
+# Guests keep internet access but are denied cluster-local / private ranges.
+# Incus ACL semantics: within one ACL, drop wins over allow, so only specific
+# subnets are listed here and the default action stays accept. The bridge
+# subnet is contained in 10.0.0.0/16; DHCP and DNS still work because Incus
+# accepts those ports ahead of the ACL jump.
+incus_isolation_allowed_cidrs:
+  - "10.100.0.0/24"        # the VM bridge itself (DHCP/DNS/gateway)
+incus_isolation_blocked_cidrs:
+  - "10.0.0.0/16"          # cluster LAN + WireGuard overlay
+  - "10.10.10.0/24"        # AMT
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "169.254.0.0/16"       # link-local

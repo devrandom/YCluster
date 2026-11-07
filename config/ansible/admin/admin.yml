@@ -40,4 +40,7 @@
 - import_playbook: install-vllm.yml
 - import_playbook: setup-gpu-podman.yml
 - import_playbook: install-incus.yml
+# Guest isolation on the VM bridge: drops guest-to-neighbour traffic that the
+# Incus ACL never sees, and makes guest-to-cluster drops observable.
+- import_playbook: install-vm-bridge-guard.yml
 - import_playbook: install-vm-bastion.yml

@@ -1,0 +1,74 @@
+---
+# IDS side of the VM bridge guard.
+#
+# admin/install-vm-bridge-guard.yml is the filter: it drops guest-to-neighbour
+# traffic and counts guest-to-cluster attempts. This play only observes it. It
+# turns each rate-limited kernel log line into a CrowdSec-shaped alert on the
+# forwarder's loopback receiver, keeping the guest address on the host, and
+# coalesces to one alert per class per hour so a scan costs one notification.
+#
+# Docs: docs/design/intrusion-detection.md, "VM bridge visibility".
+- name: Observe VM bridge guard blocks
+  hosts: "{{ ids_bridge_consumer_target | default('compute') }}"
+  become: yes
+  vars:
+    ids_bridge_consumer_receiver: "http://{{ ids_forwarder_http_listen | default('127.0.0.1:9201') }}/crowdsec"
+  tasks:
+    - name: Check whether this node runs the VM bridge
+      stat:
+        path: "/sys/class/net/{{ incus_bridge }}"
+      register: ids_bridge_consumer_link
+
+    - name: End play unless this node runs the VM bridge
+      meta: end_host
+      when: not ids_bridge_consumer_link.stat.exists
+
+    - name: Install the bridge guard consumer
+      copy:
+        src: files/ids-bridge-consumer.py
+        dest: /usr/local/lib/cluster/ids-bridge-consumer
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the consumer unit
+      copy:
+        dest: /etc/systemd/system/ids-bridge-consumer.service
+        content: |
+          [Unit]
+          Description=Forward VM bridge guard blocks to the ids-forwarder
+          After=ids-forwarder.service
+          Wants=ids-forwarder.service
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 /usr/local/lib/cluster/ids-bridge-consumer \
+              --receiver {{ ids_bridge_consumer_receiver }} \
+              --burst 1 --window 3600
+          Restart=always
+          RestartSec=5
+          # Reads the kernel ring buffer through journalctl only.
+          User=root
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: restart ids bridge consumer
+
+    - name: Enable and start the consumer
+      systemd:
+        name: ids-bridge-consumer.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart ids bridge consumer
+      systemd:
+        name: ids-bridge-consumer.service
+        state: restarted
+        daemon_reload: yes

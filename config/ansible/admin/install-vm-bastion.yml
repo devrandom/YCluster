@@ -23,6 +23,8 @@
     vm_bastion_container: bastion
     vm_bastion_jump_user: jump
     vm_bastion_image: "images:ubuntu/24.04"
+    # vm_bastion_ip (group_vars/compute.yml) is the fixed bridge address the
+    # bridge guard exempts from guest-to-guest isolation.
     frp_client_binary_src: /opt/src/frp/bin/frpc
   tasks:
     - name: End play unless this node hosts Incus instances
@@ -102,6 +104,27 @@
       delay: 3
       until: bastion_ready.rc == 0
       changed_when: false
+
+    - name: Read the bastion bridge address
+      command: "incus config device get {{ vm_bastion_container }} eth0 ipv4.address"
+      register: bastion_ip_cur
+      changed_when: false
+      failed_when: false
+
+    # The address must be bare: a /24 prefix fails Incus's subnet check for a
+    # NIC bound to a managed network. Changing it needs the container stopped,
+    # so the jump host is down for the few seconds between the two calls.
+    - name: Pin the bastion bridge address
+      when: bastion_ip_cur.stdout | default('') != vm_bastion_ip
+      block:
+        - name: Stop the bastion to change its address
+          command: "incus stop {{ vm_bastion_container }}"
+
+        - name: Override the bastion bridge address
+          command: "incus config device override {{ vm_bastion_container }} eth0 ipv4.address={{ vm_bastion_ip }}"
+
+        - name: Start the bastion with the pinned address
+          command: "incus start {{ vm_bastion_container }}"
 
     # Auto-start with the Incus daemon so a host reboot doesn't leave the
     # jump host down (the daemon only restores prior state when autostart is

@@ -44,25 +44,9 @@
     # the same name: a play var outranks host_vars and would shadow the
     # override (same reason incus_passthrough_gpu_pci isn't defaulted here).
     incus_render_gid_default: 993
-    incus_bridge: incusbr0
-    incus_bridge_cidr: "10.100.0.1/24"
     incus_storage_pool: local
-    # GPU VMs keep internet access but are denied cluster-local / private
-    # ranges. Incus ACL semantics: within one ACL, drop wins over allow.
-    # That means an over-broad drop (e.g. 10.0.0.0/8) shadows the
-    # 10.100.0.0/24 allow and breaks DHCP/DNS/gateway to the bridge.
-    # So we list only the *specific* cluster subnets to deny — none of
-    # which overlap with 10.100.0.0/24 — and rely on the default-accept
-    # for everything else (the bridge subnet + the public internet).
-    incus_isolation_allowed_cidrs:
-      - "10.100.0.0/24"      # the VM bridge itself — DHCP/DNS/gateway
-    incus_isolation_blocked_cidrs:
-      - "10.0.0.0/16"        # cluster LAN + WireGuard overlay
-                             # (room for future cluster /24s)
-      - "10.10.10.0/24"      # AMT
-      - "172.16.0.0/12"
-      - "192.168.0.0/16"
-      - "169.254.0.0/16"     # link-local
+    # Bridge identity and the isolation ACL live in group_vars/compute.yml:
+    # the VM-bastion and bridge-guard plays read the same values.
     # Upstream DNS for the VM bridge resolver. nv2's /etc/resolv.conf lists a
     # dead 127.0.0.1 first (no local resolver on non-core nodes), which stalls
     # lookups, so the bridge dnsmasq is given explicit servers instead.

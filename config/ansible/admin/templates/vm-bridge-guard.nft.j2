@@ -1,0 +1,47 @@
+# Rendered by admin/install-vm-bridge-guard.yml. Do not edit on the host.
+#
+# Guest-to-guest traffic on one bridge is switched at layer 2, so it never
+# reaches the Incus ACL chain: that chain is hooked on the IP-family
+# input/output/forward hooks, and a drop rule for 10.0.0.0/16 in it does not
+# affect a frame that the bridge forwards between two veths. The bridge-family
+# chain below does see those frames, so neighbour isolation lives there.
+#
+# The IP-family chain changes no verdict. It only counts and logs the
+# guest-to-cluster attempts that gpu-vm-isolation already drops silently.
+#
+# These log lines are the interface the IDS consumes
+# (monitoring/install-ids-bridge-consumer.yml). Nothing here depends on it:
+# the tables are the enforcement, the log is for operators.
+#
+# `destroy` before the declarations keeps the load idempotent without a
+# flush window: the batch below replaces both tables atomically.
+
+destroy table bridge vm_bridge_guard
+destroy table inet vm_bridge_guard
+
+table bridge vm_bridge_guard {
+	chain forward {
+		type filter hook forward priority -10; policy accept;
+
+		# The bastion may open connections to guests (its jump path)...
+		ether type ip ip saddr { {{ vm_bridge_guard_exempt_sources | join(', ') }} } counter accept
+
+		# ...and this is the return direction for those connections. Scoped
+		# to the exempt sources on purpose: a blanket established,related
+		# accept would also keep a guest-to-guest flow alive across the
+		# moment the guard is loaded. Needs nf_conntrack_bridge, which the
+		# ct expression loads on demand.
+		ether type ip ip daddr { {{ vm_bridge_guard_exempt_sources | join(', ') }} } ct state established,related counter accept
+
+		# Tenant to neighbour. Everything else on the subnet is a peer.
+		ether type ip ip saddr {{ vm_bridge_guard_subnet }} ip daddr {{ vm_bridge_guard_subnet }} counter log prefix "vm-bridge-guard neighbour " level warn limit rate {{ vm_bridge_guard_log_rate }} burst {{ vm_bridge_guard_log_burst }} packets drop comment "vm-bridge-neighbour"
+	}
+}
+
+table inet vm_bridge_guard {
+	chain forward {
+		type filter hook forward priority -10; policy accept;
+
+		iifname "{{ incus_bridge }}" ip saddr {{ vm_bridge_guard_subnet }} ip daddr { {{ vm_bridge_guard_cluster_cidrs | join(', ') }} } counter log prefix "vm-bridge-guard cluster " level warn limit rate {{ vm_bridge_guard_log_rate }} burst {{ vm_bridge_guard_log_burst }} packets comment "vm-bridge-cluster"
+	}
+}

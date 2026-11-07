@@ -926,13 +926,13 @@ cases they only need to use a protocol or namespace the sensor does not observe.
    talk to the proxy port, not to any address on any port.
 
 5. **The observation boundary omits the most relevant attacker channels.**
-   - **VM guests are invisible.** Incus VMs have their own kernel; the host sees
-     QEMU and bridge traffic, not guest `exec` or `connect`. There is no flow
-     record or tap on the tenant bridge, so a VM owner attacking a neighbour, a
-     guest C2 channel, or a guest-to-cluster attempt is not detected. The TODO
-     records this as "proposed, not implemented". The threat model explicitly
-     includes VM-to-neighbour attacks, so this is currently a stated goal with no
-     enforcement behind it.
+   - **VM guests are invisible from inside.** Incus VMs have their own kernel;
+     the host sees QEMU and bridge traffic, not guest `exec` or `connect`. There
+     is still no flow record or tap, so a guest C2 channel and the shape of an
+     attack (scan versus single connection) are not visible. What is covered:
+     guest-to-neighbour and guest-to-cluster traffic are dropped and alerted by
+     the bridge guard (see *VM bridge visibility*), currently on one
+     compute node.
    - **UDP is not collected.** Only `tcp_connect` is traced. DNS, QUIC/HTTP3 on
      UDP/443, ICMP tunnels, WireGuard/OpenVPN clients, and UDP exfiltration are
      invisible. A reverse shell over TCP is visible; a C2 channel over QUIC is not.
@@ -1058,9 +1058,11 @@ concrete actions for the open items are in [Next steps](#next-steps).
 3. Page detections: remove the `ids-silent` route, or keep it only for a named
    allowlist of known-noisy rules, not for the whole `IDSAlert` class. **Open**,
    needs the paging decision.
-4. Close the transport/namespace gaps in priority order: VM bridge flow logging
-   first (the stated threat model), then UDP/DNS, then unix-socket connects, then
-   guest agents if VM-internal detection is actually required. **Open.**
+4. Close the transport/namespace gaps in priority order: roll the VM bridge
+   guard out to every bridge host (blocking and alerting are implemented, see
+   *VM bridge visibility*), then flow records on the same bridge, then UDP/DNS,
+   then unix-socket connects, then guest agents if VM-internal detection is
+   actually required. **Partly done.**
 5. Add rename/mmap/read hooks and the missing persistence paths; stop relying on
    the write-only hook for integrity. **Open.**
 6. Fix the CrowdSec parser inversion and sshd success/failure labelling; add the
@@ -1170,15 +1172,88 @@ parser fixed.
 The concrete actions behind the open items, in the order they should be taken.
 Each one names the decision it needs, where there is one.
 
-1. **The coverage work** in the order of *Recommended order*: VM bridge
-   flow logging first, then UDP/DNS, then unix sockets, then the integrity
-   hooks.
+1. **The coverage work** in the order of *Recommended order*: finish the VM
+   bridge guard rollout, then flow records, then UDP/DNS, then unix sockets,
+   then the integrity hooks.
 2. **Page a named subset, last.** With the measured inflow near zero, page
    `exec-root-user-path`, `kernel-modules`, `privilege-raises`, `container-api`
    and Sigma findings at medium or above, and leave the rest of `IDSAlert` on
    `ids-silent`. The success criterion is one clean week without an
    expected-traffic page, after which the exception list is removed. Needs:
    sign-off on the subset.
+
+## VM bridge visibility
+
+The Incus bridge is `incusbr0` (`10.100.0.1/24`, NAT on) with the ACL
+`gpu-vm-isolation`. That ACL compiles to one chain (`acl.incusbr0`) holding
+`ct state established,related accept`, then drops to `10.0.0.0/16`,
+`10.10.10.0/24`, `172.16.0.0/12`, `192.168.0.0/16` and `169.254.0.0/16`,
+then accepts `10.100.0.0/24`, then a catch-all accept. Three properties
+matter, and two of them are not what the YAML suggests:
+
+1. **Drops are emitted before allows.** Incus sorts an ACL's rules by action,
+   not by the order they are written. The `10.100.0.0/24` allow therefore
+   does not shadow the `10.0.0.0/16` drop that contains it. Guest DHCP and
+   DNS still work only because Incus accepts those ports in the bridge's
+   input chain *before* jumping into the ACL.
+2. **The ACL never sees guest-to-guest traffic.** The chain is reached from
+   `aclin.*` (input), `aclout.*` (output) and `aclfwd.*` (forward), all in the
+   IP family. Two veths on the same bridge exchange frames through the
+   bridge, which does not traverse those hooks: a guest could still open SSH
+   to a neighbour with the `10.0.0.0/16` drop in place. So the ACL contains
+   guest-to-cluster and guest-to-internet routing only; "neighbour traffic is
+   allowed" was never true, it was simply unfiltered. Established flows also
+   keep passing a newly added drop, so the ACL contains new connections only.
+3. **Every drop is silent.** No counter, no log, no metric. A guest probing
+   the cluster produces nothing an operator can see.
+
+### The bridge guard
+
+The enforcement is a traffic filter, not a detection component: it lives with
+the bridge configuration in `admin/install-vm-bridge-guard.yml` behind
+`vm-bridge-guard.service`, and would be installed even with the IDS switched
+off. It installs two nftables tables:
+
+- **`bridge vm_bridge_guard`** sees the switched frames. It accepts traffic
+  from the bastion's pinned bridge address (`vm_bastion_ip`,
+  `group_vars/compute.yml`) and established return traffic to it, then drops
+  guest-to-guest traffic with a counter and a rate-limited kernel log. Both
+  accepts are scoped to that address on purpose: a blanket
+  `ct state established,related accept` would keep a guest-to-guest flow alive
+  across the moment the guard is loaded, which is the weakness this hook is
+  supposed to avoid. Requiring `nf_conntrack_bridge` is the price of keeping
+  the jump path working without also exempting the bastion's peers.
+- **`inet vm_bridge_guard`** matches `iifname incusbr0` and the cluster
+  ranges and *changes no verdict*: `gpu-vm-isolation` still drops the packet,
+  the guard only counts and logs it. Keeping the drop in one place means the
+  two policies cannot drift into a state where traffic is allowed by one and
+  expected to be blocked by the other.
+
+The IDS side is separate and optional: `monitoring/install-ids-bridge-consumer.yml`
+installs `ids-bridge-consumer.service`, which tails the guard's kernel log,
+reduces each line to its class (`vm-bridge-neighbour-egress`, `vm-bridge-cluster-egress`) and posts a
+CrowdSec-shaped alert to the forwarder's loopback receiver. The alert carries
+no address, port or interface name. Nothing in the filter depends on it; if the
+consumer is not deployed the traffic is still blocked, only the notification is
+missing. Both kernel logging (six lines a minute)
+and alerting (one per class per hour) are bounded, so a port scan costs the
+cluster a single notification; the exact packet count stays on the host in the
+nftables counter.
+
+Verified on a compute node with the bastion and one VM: guest-to-neighbour is
+dropped and logged, the bastion still opens SSH to the guest, guest DNS and
+internet egress work, and a guest-to-cluster attempt is counted and produces
+one `vm-bridge-cluster-egress` detection.
+
+### Not covered
+
+- **Flow records.** A scan and a single connection look the same to the guard:
+  it blocks the attempt, not the pattern. Per-flow volume would need conntrack
+  events (`nf_conntrack_bridge` now makes guest-to-guest flows visible to
+  conntrack, but nothing exports them) or per-veth accounting, plus a privacy
+  budget. Not started.
+- **Other bridge hosts.** The play targets `compute` and skips nodes without
+  `incusbr0`; only one compute node has run it so far.
 
 ## Validation
 

@@ -1,0 +1,94 @@
+---
+# Guest isolation on the Incus VM bridge.
+#
+# This is a traffic filter, not a detection component. It enforces two rules
+# the Incus ACL cannot:
+#
+#   * guest -> neighbour is dropped. Same-bridge frames are switched at layer
+#     2, so they never traverse the IP-family hooks the Incus ACL is chained
+#     from, and the ACL never sees them.
+#   * guest -> cluster stops being silent. The drop itself stays in the ACL
+#     (gpu-vm-isolation); this adds a counter and a rate-limited kernel log in
+#     front of it, without a verdict, so the two policies cannot drift apart.
+#
+# The IDS consumes the log lines (monitoring/install-ids-bridge-consumer.yml),
+# but nothing here depends on that: the tables are the enforcement.
+# Design notes: docs/design/intrusion-detection.md, "VM bridge visibility".
+- name: Install the VM bridge guard
+  hosts: "{{ vm_bridge_guard_target | default('compute') }}"
+  become: yes
+  vars:
+    vm_bridge_guard_rules_path: /etc/nftables.d/vm-bridge-guard.nft
+    # Same subnet and cluster ranges the Incus isolation ACL uses
+    # (group_vars/compute.yml), so there is one policy for both.
+    vm_bridge_guard_subnet: "{{ incus_bridge_subnet }}"
+    vm_bridge_guard_cluster_cidrs: "{{ incus_isolation_blocked_cidrs }}"
+    # The bastion is the only guest allowed to open connections to other
+    # guests: it is the jump host for VM SSH access.
+    vm_bridge_guard_exempt_sources:
+      - "{{ vm_bastion_ip }}"
+    vm_bridge_guard_log_rate: "6/minute"
+    vm_bridge_guard_log_burst: 5
+  tasks:
+    - name: Check whether this node runs the VM bridge
+      stat:
+        path: "/sys/class/net/{{ incus_bridge }}"
+      register: vm_bridge_guard_link
+
+    - name: End play unless this node runs the VM bridge
+      meta: end_host
+      when: not vm_bridge_guard_link.stat.exists
+
+    - name: Ensure the nftables include directory exists
+      file:
+        path: /etc/nftables.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the guard ruleset
+      template:
+        src: vm-bridge-guard.nft.j2
+        dest: "{{ vm_bridge_guard_rules_path }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart vm bridge guard
+
+    - name: Install the guard unit
+      copy:
+        dest: /etc/systemd/system/vm-bridge-guard.service
+        content: |
+          [Unit]
+          Description=Guest isolation on the Incus VM bridge (nftables)
+          After=network-pre.target
+          Wants=network-pre.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          # The ruleset file starts with `destroy table`, so each load is a
+          # full atomic replacement rather than an append.
+          ExecStart=/usr/sbin/nft -f {{ vm_bridge_guard_rules_path }}
+          ExecStop=-/usr/sbin/nft delete table bridge vm_bridge_guard
+          ExecStop=-/usr/sbin/nft delete table inet vm_bridge_guard
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: restart vm bridge guard
+
+    - name: Enable and start the guard
+      systemd:
+        name: vm-bridge-guard.service
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart vm bridge guard
+      systemd:
+        name: vm-bridge-guard.service
+        state: restarted
+        daemon_reload: yes
