@@ -20,7 +20,7 @@ together:
 
 1. Raise `--max-running-requests` **and** `--cuda-graph-max-bs-decode` to the
    same value (16/32) in both the vendored `Dockerfile` CMD and
-   `glm53-sglang-start.sh.j2`.
+   `glm53-flash-sglang.container.j2`.
 2. Expect larger graph-capture memory/time. With 6 draft tokens the decode
    shape is ~batch×7, so this is not free on the 96 GB cards and needs
    re-qualification of `--mem-fraction-static`.

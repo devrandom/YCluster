@@ -1,14 +1,19 @@
 ---
-# Deploy GLM-5.3-Flash NVFP4 (SM120 SGLang) inference scripts to Nvidia GPU
-# nodes. Companion to docs/inference/glm-5.3-flash-deploy-2026-08.md. Two dev
-# scripts (the dev user has no sudo, and needs none for these):
+# Deploy GLM-5.3-Flash NVFP4 (SM120 SGLang) inference to Nvidia GPU nodes.
+# Companion to docs/inference/glm-5.3-flash-deploy-2026-08.md. The dev user
+# owns both the staging script and the unit (no sudo, and none needed):
 #   ~dev/bin/glm53-sglang-setup.sh - pull the base image, build the patched
 #                                    image, CDI-smoke the GPU, verify the
 #                                    staged checkpoint (120 shards + pinned
 #                                    metadata hashes). Flags:
 #                                      --verify-checkpoint  just verify a
 #                                         staged checkpoint
-#   ~dev/bin/glm53-sglang-start.sh - (re)launch the server, e.g. after reboot
+#   ~dev/.config/containers/systemd/glm53-flash-sglang.container - Quadlet
+#     the generator turns into a user unit owned by the dev user manager:
+#       systemctl --user start|restart|status glm53-flash-sglang
+#     Linger makes that unit start at boot; quadlet's `podman run --replace
+#     --rm` rebuilds the container from the spec on every start, so there is
+#     no container state to reconcile after an unclean shutdown.
 #
 # Model: LibertAIDAI/GLM-5.3-Flash-NVFP4 @ 9e0d74e3...(the pinned 0xSero SM120
 # NVFP4 checkpoint). 320B-total / 18B-active hybrid KDA+sparse-MLA MoE,
@@ -48,7 +53,7 @@
 # Run after setup-gpu-podman.yml (podman + CDI). To bring the server up:
 #   ssh <host>.yc
 #   ~/bin/glm53-sglang-setup.sh          # build patched image + verify ckpt
-#   ~/bin/glm53-sglang-start.sh          # launch (idempotent)
+#   systemctl --user start glm53-flash-sglang   # or re-run this play
 
 - name: Deploy GLM-5.3-Flash inference scripts to Nvidia GPU nodes
   hosts: nvidia
@@ -78,6 +83,17 @@
     # Where tools stage the build context on the host (copied below from the
     # vendored files/glm53-sglang/). glm53-sglang-setup.sh builds from here.
     glm53_build_dir: "/home/dev/glm53-flash-sglang-build"
+    # Container name in dev's rootless podman storage (the quadlet's
+    # ContainerName).
+    glm53_container: "glm53-flash-sglang"
+    # Cgroup cap for the container; startup streams ~182 GiB to the GPUs and is
+    # the risk window on this ~125 GiB-RAM node, so the cap is what keeps a
+    # runaway warmup from OOM-killing the host.
+    glm53_memory: "80g"
+    # The runtime spec is a Quadlet user unit owned by the dev user manager.
+    glm53_user: "dev"
+    glm53_quadlet_dir: "/home/dev/.config/containers/systemd"
+    glm53_quadlet_path: "{{ glm53_quadlet_dir }}/{{ glm53_container }}.container"
   tasks:
     - name: End play for nodes with no host-visible NVIDIA GPU
       meta: end_host
@@ -117,25 +133,100 @@
         mode: '0755'
       loop:
         - glm53-sglang-setup.sh
-        - glm53-sglang-start.sh
 
-    - name: Install GLM-5.3 systemd unit
+    - name: Read host dev UID
+      command: id -u {{ glm53_user }}
+      register: glm53_dev_uid
+      changed_when: false
+      check_mode: false
+
+    - name: Check whether the GLM-5.3 service user lingers
+      command: loginctl show-user {{ glm53_user }} --property=Linger --value
+      register: glm53_linger
+      changed_when: false
+      check_mode: false
+
+    - name: Enable lingering for the GLM-5.3 service user
+      command: loginctl enable-linger {{ glm53_user }}
+      when: glm53_linger.stdout | trim != 'yes'
+      changed_when: true
+
+    - name: Ensure the dev quadlet directory exists
+      file:
+        path: "{{ glm53_quadlet_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install the GLM-5.3 quadlet
       template:
-        src: templates/glm53-flash-sglang.service.j2
-        dest: /etc/systemd/system/glm53-flash-sglang.service
-        owner: root
-        group: root
+        src: templates/glm53-flash-sglang.container.j2
+        dest: "{{ glm53_quadlet_path }}"
+        owner: dev
+        group: dev
         mode: '0644'
-      register: glm53_service
 
-    # Do not restart the service here: attaching to an already-healthy
-    # container is non-disruptive, but restarting would bounce inference.
-    - name: Enable GLM-5.3 boot-start service
+    # Earlier revisions supervised the container with a root system unit; the
+    # quadlet is owned by the dev user manager and both would fight over the
+    # container name.
+    - name: Check for the legacy GLM-5.3 system unit
+      stat:
+        path: /etc/systemd/system/glm53-flash-sglang.service
+      register: glm53_legacy_unit
+
+    - name: Stop and disable the legacy GLM-5.3 system unit
       systemd:
         name: glm53-flash-sglang.service
+        state: stopped
+        enabled: no
+      when: glm53_legacy_unit.stat.exists
+
+    - name: Remove the legacy GLM-5.3 system unit
+      file:
+        path: /etc/systemd/system/glm53-flash-sglang.service
+        state: absent
+      when: glm53_legacy_unit.stat.exists
+
+    - name: Remove the legacy GLM-5.3 launcher
+      file:
+        path: /home/dev/bin/glm53-sglang-start.sh
+        state: absent
+
+    - name: Reload the dev user manager so the quadlet generator runs
+      become_user: "{{ glm53_user }}"
+      command: systemctl --user daemon-reload
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ glm53_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ glm53_dev_uid.stdout }}/bus"
+      changed_when: false
+
+    - name: Check whether the GLM-5.3 checkpoint is staged
+      stat:
+        path: "{{ glm53_model_dir }}/config.json"
+      register: glm53_checkpoint
+
+    # `started`, not `restarted`: an already-active unit is left alone, so a
+    # deploy never bounces inference. Quadlet recreates the container from the
+    # .container spec on the next start.
+    - name: Start the GLM-5.3 quadlet
+      become_user: "{{ glm53_user }}"
+      systemd:
+        name: "{{ glm53_container }}.service"
+        scope: user
         state: started
-        enabled: yes
-        daemon_reload: yes
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ glm53_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ glm53_dev_uid.stdout }}/bus"
+      when: glm53_checkpoint.stat.exists
+
+    - name: Note that GLM-5.3 stays unmanaged until its checkpoint is staged
+      debug:
+        msg: >-
+          The {{ glm53_container }} quadlet is installed but not started: no
+          checkpoint at {{ glm53_model_dir }}/config.json. Run
+          ~/bin/glm53-sglang-setup.sh as dev, then re-run this play.
+      when: not glm53_checkpoint.stat.exists
 
 - name: Register the GLM-5.3 backend with local-ai-proxy
   hosts: storage

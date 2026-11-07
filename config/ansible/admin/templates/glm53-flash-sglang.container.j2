@@ -1,0 +1,74 @@
+[Unit]
+Description=GLM-5.3-Flash inference API (NVFP4 SGLang)
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+# Bound a crash loop instead of restarting every 10s forever.
+StartLimitIntervalSec=3600
+StartLimitBurst=6
+
+[Container]
+Image={{ glm53_image }}
+ContainerName={{ glm53_container | default('glm53-flash-sglang') }}
+Network=host
+ShmSize=32g
+Memory={{ glm53_memory | default('80g') }}
+StopTimeout=60
+# No Quadlet keyword for these, so pass them through. The memory cap is the
+# startup risk window (stream-to-GPU + JIT + graph capture on a ~125 GiB-RAM
+# node); --group-add keep-groups keeps the NVIDIA device groups visible.
+PodmanArgs=--memory-swap={{ glm53_memory | default('80g') }} --init --security-opt seccomp=unconfined --group-add keep-groups --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576 --ulimit stack=67108864:67108864
+# Everything else in the container's environment (CUDA_DEVICE_ORDER,
+# TORCH_CUDA_ARCH_LIST, FLASHINFER_CUDA_ARCH_LIST, SGLANG_OPT_*) is baked into
+# the image by the SM120-patched Dockerfile.
+Environment=CUDA_VISIBLE_DEVICES=0,1,2,3
+
+# Checkpoint read-only; the JIT/autotune/CUDA-graph cache is a host directory
+# because the container is recreated on every start. Reusing it avoids the
+# ~minutes of recompile on each launch.
+Volume={{ glm53_model_dir }}:/model:ro
+Volume={{ glm53_cache_dir | default('/home/dev/.cache/glm53-sglang') }}:/root/.cache:rw
+{% for gpu in glm53_flash_gpus.split() %}AddDevice=nvidia.com/gpu={{ gpu }}
+{% endfor %}
+# The image entrypoint is python3, so the command line starts at -m.
+Exec=-m sglang.launch_server \
+    --model-path /model \
+    --served-model-name {{ glm53_served_name }} \
+    --tp-size 4 \
+    --ep-size 4 \
+    --context-length 1048576 \
+    --quantization modelopt_fp4 \
+    --attention-backend dsa \
+    --dsa-prefill-backend flashinfer_sparse_mla \
+    --dsa-decode-backend flashinfer_sparse_mla \
+    --linear-attn-backend triton \
+    --kv-cache-dtype fp8_e4m3 \
+    --moe-runner-backend flashinfer_cutlass \
+    --disable-shared-experts-fusion \
+    --chunked-prefill-size {{ glm53_chunked_prefill_size | default(8192) }} \
+    --max-prefill-tokens {{ glm53_chunked_prefill_size | default(8192) }} \
+    --max-running-requests 8 \
+    --mem-fraction-static {{ glm53_mem_fraction_static }} \
+    --cuda-graph-max-bs-decode 8 \
+    --speculative-algorithm NEXTN \
+    --speculative-num-steps 5 \
+    --speculative-eagle-topk 1 \
+    --speculative-num-draft-tokens 6 \
+    --speculative-adaptive \
+    --media-url-max-file-size-mb 1024 \
+    --enable-multimodal \
+    --enable-metrics \
+    --chat-template /chat-template.jinja \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --host 0.0.0.0 \
+    --port {{ glm53_port }}
+
+[Service]
+Restart=always
+RestartSec=10
+# Cold start streams ~182 GiB to the GPUs, then JIT and captures graphs.
+TimeoutStartSec=20min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
