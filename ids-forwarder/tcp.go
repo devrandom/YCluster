@@ -227,6 +227,10 @@ func automationArgs(c tcpConn) bool {
 	case c.port == 2381 && c.addr.IsPrivate() && clusterScript(c.args):
 		// Cluster collectors talk to etcd on the client port.
 		return true
+	case c.port == 443 && isPython(c.base) && moduleRun(c.args, "osv_feed"):
+		// The OSV mirror fetches advisories over HTTPS. Anchor the exemption
+		// to the module invocation, not to the text appearing in an argument.
+		return true
 	case isPython(c.base) && strings.HasPrefix(c.args, "-m ycluster.utils.gateway_health"):
 		// Module invocation only: the text in another argument is not the
 		// gateway-health probe.
@@ -285,6 +289,13 @@ func yclusterIdleNotify(args string) bool {
 
 func isPython(base string) bool {
 	return base == "python3" || base == "python3.12"
+}
+
+// moduleRun reports whether the interpreter runs module via `-m`. Tetragon
+// records the arguments without the interpreter binary.
+func moduleRun(args, module string) bool {
+	fields := strings.Fields(args)
+	return len(fields) >= 2 && fields[0] == "-m" && fields[1] == module
 }
 
 // clusterDial covers dials to cluster-internal services. Callers guarantee

@@ -68,6 +68,10 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	if evType == "" || body == nil {
 		return alert{}, eventMeta{}, false, ""
 	}
+	// A process that started before the sensor attached has no exec record;
+	// fill in the identity from /proc so routing, suppression and labels name
+	// the binary that is actually running.
+	resolveEventIdentity(&body.Process)
 	if !configuredEvent(cfg.events, evType) {
 		return alert{}, meta, false, ""
 	}

@@ -64,6 +64,7 @@ func (s *sigmaSink) offer(line string) {
 	if !ok {
 		return
 	}
+	resolveSigmaIdentity(ev)
 	b, err := json.Marshal(ev)
 	if err != nil {
 		s.errors.Add(1)
