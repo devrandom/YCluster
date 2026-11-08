@@ -178,10 +178,14 @@ must not become a second, longer-lived access log.
     `/var/tmp`, host layer only), also zero hits in the replay. A non-root
     operator running their own binary stays indistinguishable from an
     attacker by exec metadata alone.
-  - Remaining: two-week Sigma/RSigma pilot on the installed service, using the
-    curated rules under `config/ansible/monitoring/files/rsigma/rules/` and
-    the replay results in "The behavioural-rule gap"; keep the hand-written
-    rules until it passes.
+  - Running: Sigma/RSigma pilot on the installed service, using the curated
+    rules under `config/ansible/monitoring/files/rsigma/rules/`. Started
+    2026-11-04 (first detections), checkpoint 2026-11-18. Day-0 tuning added
+    local suppressions for the MicroCeph daemons (887 detections in three
+    days, all of the pilot's noise) and for sysstat/dmesg rotation, whose
+    upstream filter assumes a bare `rm -f ...` command line. Pass criteria and
+    the readout are in "The behavioural-rule gap" in the design doc. Keep the
+    hand-written rules until it passes.
   - Done: tenant-container egress is classified by layer. Internet egress from
     an Incus container is suppressed as routine tenant traffic, while a
     container connecting to a cluster-private address still alerts: such a
@@ -203,8 +207,8 @@ must not become a second, longer-lived access log.
     still reports the unix-socket peer as `@`.
   - VM lateral movement. Host-side Tetragon cannot see guest sockets — the
     hypervisor only exposes the QEMU process — so a VM reaching a cluster
-    address produces no kprobe event. Done on one compute node: the bridge
-    guard — a traffic filter, not an IDS component,
+    address produces no kprobe event. Deployed on every bridge host: the
+    bridge guard — a traffic filter, not an IDS component,
     `admin/install-vm-bridge-guard.yml` — drops guest-to-neighbour traffic in
     the nftables bridge family and counts/logs guest-to-cluster attempts ahead
     of the silent Incus ACL verdict. The IDS side is separate
@@ -213,9 +217,10 @@ must not become a second, longer-lived access log.
     address leaves the host. Two survey findings changed
     the design: the Incus ACL is emitted with drops before allows, and it is
     never consulted for guest-to-guest traffic at all, because same-bridge
-    frames are switched at layer 2 and skip the IP hooks. Remaining: roll the
-    play out to the other bridge hosts, and flow records (a scan and a single
-    connection still look the same). Details in the design doc's *VM bridge
+    frames are switched at layer 2 and skip the IP hooks. Remaining: flow
+    records (a scan and a single connection still look the same) and watching
+    the neighbour-drop counter, which is the only signal that a real
+    tenant-to-tenant dependency got cut. Details in the design doc's *VM bridge
     visibility* section.
 - Define the detection rule set and tune it to this cluster's baseline before
   enabling alerts; default signatures will be noisy against the inference and

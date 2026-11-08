@@ -435,6 +435,52 @@ enforce `logsource.category`, so every category needs its own guard. The
 curated set is quiet on these two windows; the next gate is a two-week
 BTF-capable host run, not more offline replay.
 
+**Pilot log.** Live on every managed node since 2026-11-04; checkpoint
+2026-11-18. The engine is healthy on the installed service: 566k events
+forwarded on a storage node with `sigma_errors_total` 0, `sigma_dropped_total`
+0, queue depth 0, RSS 13-30 MB and CPU at or below 1%. Pass criteria for the
+checkpoint: no forwarder error or drop counters, no `IdsSigmaStalled`, at most
+one detection per day fleet-wide over the trailing week, RSS below 50 MB and
+CPU below 2% per host, and at least the detections the hand-written rules
+produce on the synthetic controls.
+
+Day-0 tuning (2026-11-07). Local suppression rules — a Sigma `filter` with
+`rules:` naming the target id — do work in 0.25.0. Two upstream rules needed
+one on the first day; a third only showed up when the nightly jobs ran; a
+fourth had been suppressed before the pilot:
+
+- **MicroCeph daemons.** `Linux Reverse Shell Indicator` matches any bash that
+  opens a connection, and each MicroCeph daemon is a bash wrapper
+  (`/snap/microceph/*/commands/{mon,osd,mds,mgr}.start`) that dials the monitor
+  endpoints on startup and reconnect. 887 detections in three days on one
+  node: the largest single source of noise, though not the only one. The
+  suppression is anchored to the daemon invocation, because a `contains` match
+  on the path would let any bash with a trailing `/snap/microceph/x` argument
+  suppress the rule.
+- **sysstat and dmesg rotation.** The upstream `Linux Logs Clearing Attempts`
+  filter is `CommandLine|startswith: 'rm -f ...'`, but the normalized
+  `CommandLine` starts with the image path (`/usr/bin/rm -f ...`), so the
+  upstream filter never matches and every host fired about ten times. That is
+  a normalization mismatch, not an upstream bug — the pipeline reports the
+  same shape Windows rules expect — so the local suppression re-states the
+  filter against our field shape. It matches the whole command line, not a
+  substring: a substring rule would exempt `rm -f /var/log/sysstat/* /var/log/auth.log*`.
+- **nginx logrotate.** The `postrotate` hook runs `/etc/init.d/nginx rotate`,
+  which reads `/proc/cmdline` and the server config with `cat`; the upstream
+  `Linux Webshell Indicators` rule looks for a `cat` under a process named
+  `nginx`, so every nginx host fired twice a night. It only appeared in the
+  first night's data, which is why the rule set needs a full day before it can
+  be called quiet. Suppressed for the rotate hook only.
+- **PCP janitors**, already suppressed before the pilot.
+
+What is left firing is the rule working: `/dev/tcp` connection probes and
+`bash -i` sessions from operator shells.
+
+Readout, per host: `python3 -c` over `/var/log/rsigma/detections.ndjson`
+counting `rule_title`, alongside `ids_forwarder_sigma_{sent,errors,dropped}_total`
+from the forwarder's loopback metrics. The detections file is the durable
+record; the counters prove nothing was lost before it.
+
 Fallbacks if the pilot fails:
 
 - Falco's `collector` and `json` plugins can run Falco as an unprivileged
@@ -1252,8 +1298,14 @@ one `vm-bridge-cluster-egress` detection.
   events (`nf_conntrack_bridge` now makes guest-to-guest flows visible to
   conntrack, but nothing exports them) or per-veth accounting, plus a privacy
   budget. Not started.
-- **Other bridge hosts.** The play targets `compute` and skips nodes without
-  `incusbr0`; only one compute node has run it so far.
+## Open item: tenant-to-tenant dependencies
+
+The guard is live on every bridge host and nothing legitimate has been blocked
+so far: after the rollout the neighbour-drop counter read zero on all eight,
+except for the two packets of the deliberate test. That was read once, on the
+deployment day, not over time. A dependency nobody told us about would appear
+there first, so read `nft list table bridge vm_bridge_guard` on the bridge
+hosts before concluding the isolation is free.
 
 ## Validation
 

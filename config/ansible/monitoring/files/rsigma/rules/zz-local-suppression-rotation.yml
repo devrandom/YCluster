@@ -1,0 +1,22 @@
+title: Suppress routine sysstat and dmesg log rotation
+id: c979779f-d58b-4d06-91fb-2189bba91c70
+description: |
+  Local tuning for the IDS pilot. sysstat's cron job and the dmesg logrotate
+  rule remove their own rotated files every night, on every host. The
+  upstream Linux Logs Clearing Attempts filter expects a bare `rm -f ...`
+  command line; the normalized CommandLine starts with the image path, so the
+  upstream filter never matches and the rule fires on routine rotation. Keep
+  the upstream rule and exclude only the exact rotation command lines here.
+author: YCluster IDS pilot
+logsource:
+    product: linux
+    category: process_creation
+filter:
+    rules:
+        - 80915f59-9b56-4616-9de0-fd0dea6c12fe
+    rotation:
+        # Whole-line match: a substring rule would exempt any command that
+        # merely mentions the rotation path, e.g.
+        # `rm -f /var/log/sysstat/* /var/log/auth.log*`.
+        CommandLine|re: '^(/usr/bin/rm -f /var/log/sysstat/(sa|sar)[0-9]+( /var/log/sysstat/(sa|sar)[0-9]+)*|/usr/bin/rm -f -- /var/log//dmesg\.[0-9]+(\.gz)?( /var/log//dmesg\.[0-9]+(\.gz)?)*)$'
+    condition: not rotation

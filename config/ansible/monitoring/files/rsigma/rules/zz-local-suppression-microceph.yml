@@ -1,0 +1,22 @@
+title: Suppress MicroCeph daemon connections
+id: 015bf0bc-e561-44f4-ac18-b18a9d424548
+description: |
+  Local tuning for the IDS pilot. Every MicroCeph daemon runs as a bash
+  wrapper (/snap/microceph/*/commands/{mon,osd,mds,mgr}.start) that dials
+  the monitor endpoints at startup and on every reconnect. The upstream
+  Linux Reverse Shell Indicator matches any bash that opens a connection, so
+  the daemons trip it continuously; a real reverse shell on these hosts does
+  not run from the MicroCeph snap.
+author: YCluster IDS pilot
+logsource:
+    product: linux
+    category: network_connection
+filter:
+    rules:
+        - 83dcd9f6-9ca8-4af7-a16e-a1c7a6b51871
+    microceph:
+        # Anchored on purpose: a `contains` match would let any bash that
+        # mentions the path, e.g. a `-c` payload with a trailing
+        # `/snap/microceph/x` argument, suppress the rule.
+        CommandLine|re: '^/(usr/)?bin/bash /snap/microceph/[0-9]+/commands/[a-z]+\.start$'
+    condition: not microceph
