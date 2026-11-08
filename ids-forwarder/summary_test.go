@@ -274,6 +274,62 @@ func TestSystemdPrivilegeFallback(t *testing.T) {
 	}
 }
 
+func TestRoutinePrivilegeShapesAreSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	// runuser has no routine producer any more: the quadlet metrics
+	// collector asks the user manager through the machine bus. Any
+	// credential change it performs is therefore worth seeing, including
+	// one dressed up as a login session.
+	line := privilegeLineUID(t, "privilege-raises", "__sys_setresuid", "/usr/sbin/runuser",
+		"-u dev -- env XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus", 0)
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+		t.Fatalf("runuser session shape was suppressed as %q", reason)
+	}
+
+	line = privilegeLineUID(t, "privilege-raises", "__sys_setresuid", "/usr/bin/unattended-upgrade",
+		"/usr/bin/unattended-upgrade --download-only", 0)
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); ok || reason != "package_maintenance" {
+		t.Fatalf("unattended-upgrade: ok=%v reason=%q, want suppressed as package_maintenance", ok, reason)
+	}
+
+	line = privilegeLineUID(t, "privilege-raises", "__sys_setresuid", "/usr/sbin/squid", "-k rotate", 0)
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); ok || reason != "expected_privilege" {
+		t.Fatalf("squid rotate: ok=%v reason=%q, want suppressed as expected_privilege", ok, reason)
+	}
+
+	// squid doing anything else stays visible.
+	line = privilegeLineUID(t, "privilege-raises", "__sys_setresuid", "/usr/sbin/squid", "-k reconfigure", 0)
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+		t.Fatalf("squid reconfigure was suppressed as %q", reason)
+	}
+}
+
+func TestBridgeGuardModuleLoadIsSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	for _, module := range []string{"nf_conntrack_bridge", "nft-expr-log"} {
+		line := privilegeLineUID(t, "kernel-modules", "security_kernel_module_request",
+			"/sbin/modprobe", "-q -- "+module, 0)
+		_, _, ok, reason := tetragonAlertDecision(line, cfg)
+		if ok {
+			t.Fatalf("expected %s load to be suppressed", module)
+		}
+		if reason != "bridge_guard_module" {
+			t.Fatalf("reason = %q, want bridge_guard_module", reason)
+		}
+	}
+
+	// Any other module load stays visible.
+	line := privilegeLineUID(t, "kernel-modules", "security_kernel_module_request",
+		"/sbin/modprobe", "-q -- usb_storage", 0)
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+		t.Fatalf("unrelated module load was suppressed as %q", reason)
+	}
+}
+
 func privilegeLineUID(t *testing.T, policy, function, binary, args string, uid uint32) string {
 	t.Helper()
 	line, err := json.Marshal(map[string]any{

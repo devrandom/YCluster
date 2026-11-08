@@ -187,10 +187,30 @@ func hostSuppressionReason(body *tetragonLog) string {
 	if reason := expectedTCPReason(body); reason != "" {
 		return reason
 	}
+	if reason := routineModuleReason(body); reason != "" {
+		return reason
+	}
 	if reason := routinePrivilegeReason(body); reason != "" {
 		return reason
 	}
 	return routineFileWriteReason(body)
+}
+
+// routineModuleReason covers the modules the VM bridge guard's own nftables
+// ruleset pulls in when it is loaded: the conntrack expression and the log
+// statement. Every guard (re)load otherwise reports two module loads per
+// host, which is our noise rather than a signal.
+func routineModuleReason(body *tetragonLog) string {
+	if body == nil || body.PolicyName != "kernel-modules" {
+		return ""
+	}
+	for _, field := range strings.Fields(body.Process.Arguments) {
+		switch field {
+		case "nf_conntrack_bridge", "nft-expr-log":
+			return "bridge_guard_module"
+		}
+	}
+	return ""
 }
 
 // tetragonAlert is the mapping-only view used by tests and callers that do
@@ -254,6 +274,16 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		}
 	case "/usr/sbin/logrotate", "/usr/bin/logrotate":
 		return "expected_privilege"
+	case "/usr/bin/unattended-upgrade":
+		// apt's unattended run drops to _apt for downloads and back again
+		// on every timer tick.
+		return "package_maintenance"
+	case "/usr/sbin/squid", "/usr/bin/squid":
+		// `squid -k rotate` re-execs itself as the cache user to rotate
+		// its logs; logrotate drives it.
+		if strings.Contains(body.Process.Arguments, "-k rotate") {
+			return "expected_privilege"
+		}
 	case "/usr/bin/runc",
 		"/usr/bin/containerd-shim-runc-v2",
 		"/usr/bin/docker-proxy",

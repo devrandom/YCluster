@@ -8,12 +8,47 @@ route:
   repeat_interval: 1h
   receiver: 'default'
   routes:
-    # IDS detection alerts are observe-only during the tuning window:
-    # record them in Alertmanager but do not deliver them anywhere. Remove
-    # this route (and the ids-silent receiver) once the policies and
-    # scenarios have been tuned against real traffic. Coverage alerts such
-    # as TetragonDown still route normally: a stopped sensor is a blind
-    # spot, not tuning noise.
+    # IDS paging subset. These rules have a near-zero routine baseline, so a
+    # hit is worth interrupting someone for. The rest of the class stays on
+    # ids-silent below: those rules are still being tuned, and container-api
+    # is an audit stream (every incus exec / file push), not a signal.
+    - match:
+        alertname: 'IDSAlert'
+        severity: 'critical'
+      match_re:
+        rule_id: '^(exec-root-user-path|kernel-modules|privilege-raises)$'
+      receiver: 'critical-alerts'
+      group_wait: 5s
+      repeat_interval: 30m
+    - match:
+        alertname: 'IDSAlert'
+        severity: 'warning'
+      match_re:
+        rule_id: '^(exec-root-user-path|kernel-modules|privilege-raises)$'
+      receiver: 'warning-alerts'
+      repeat_interval: 2h
+    # Sigma findings at medium or above. The engine's own level travels on
+    # sigma_level because low and medium both map to the cluster's warning.
+    - match:
+        alertname: 'IDSAlert'
+        severity: 'critical'
+      match_re:
+        sigma_level: '^(medium|high|critical)$'
+      receiver: 'critical-alerts'
+      group_wait: 5s
+      repeat_interval: 30m
+    - match:
+        alertname: 'IDSAlert'
+        severity: 'warning'
+      match_re:
+        sigma_level: '^(medium|high|critical)$'
+      receiver: 'warning-alerts'
+      repeat_interval: 2h
+    # Everything else in the IDS class stays observe-only: recorded in
+    # Alertmanager and in detections.jsonl, delivered nowhere. Bridge-guard
+    # blocks (vm-bridge-*) stay here by design: they are counted per guest
+    # and reviewed, not paged. Coverage alerts such as TetragonDown still
+    # route normally — a stopped sensor is a blind spot, not tuning noise.
     - match:
         alertname: 'IDSAlert'
       receiver: 'ids-silent'

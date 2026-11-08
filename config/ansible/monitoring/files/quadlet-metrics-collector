@@ -12,6 +12,11 @@
 # unit state, and publish one gauge per unit. Units that are simply inactive
 # (never started, or stopped on purpose) report 0/0 so only real failures
 # alert.
+#
+# The query goes through `systemctl --user --machine=<user>@.host`, which
+# reaches the user manager over the machine bus. Doing it with `runuser -u`
+# instead made every tick perform a root-to-user credential change, which is
+# a real setresuid and showed up as a privilege transition in the IDS.
 set -uo pipefail
 
 out_dir="${OUT_DIR:-/var/lib/prometheus/node-exporter}"
@@ -30,12 +35,9 @@ trap 'rm -f "$tmp"' EXIT
 for unit_file in /home/*/.config/containers/systemd/*.container; do
   [ -e "$unit_file" ] || continue
   name="$(basename "$unit_file" .container)"
-  uid="$(stat -c %u "$unit_file")"
   user="$(stat -c %U "$unit_file")"
-  # runuser wants a user *name* (unlike su, it rejects the #uid form).
-  state="$(runuser -u "$user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
-    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
-    systemctl --user show "$name.service" --property=ActiveState --value 2>/dev/null)"
+  state="$(systemctl --user --machine="$user@.host" show "$name.service" \
+    --property=ActiveState --value 2>/dev/null)"
   active=0
   failed=0
   case "$state" in

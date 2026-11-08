@@ -159,6 +159,10 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	if containerName != "" {
 		a.Labels["container"] = containerName
 	}
+	// Keep the engine's own level alongside the two-level cluster severity:
+	// paging decides on "medium or above", which the mapped severity cannot
+	// express (low and medium both map to warning).
+	a.Labels["sigma_level"] = strings.ToLower(strings.TrimSpace(det.Level))
 	if t, err := time.Parse(time.RFC3339Nano, ev.Timestamp); err == nil {
 		a.StartsAt = t.UTC().Format(time.RFC3339Nano)
 		a.eventTime = t.UTC()

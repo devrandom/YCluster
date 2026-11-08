@@ -1221,12 +1221,24 @@ Each one names the decision it needs, where there is one.
 1. **The coverage work** in the order of *Recommended order*: finish the VM
    bridge guard rollout, then flow records, then UDP/DNS, then unix sockets,
    then the integrity hooks.
-2. **Page a named subset, last.** With the measured inflow near zero, page
-   `exec-root-user-path`, `kernel-modules`, `privilege-raises`, `container-api`
-   and Sigma findings at medium or above, and leave the rest of `IDSAlert` on
-   `ids-silent`. The success criterion is one clean week without an
-   expected-traffic page, after which the exception list is removed. Needs:
-   sign-off on the subset.
+2. **Page a named subset.** Done on 2026-11-08. Paging covers
+   `exec-root-user-path`, `kernel-modules`, `privilege-raises` and Sigma
+   findings at medium or above (`sigma_level` carries the engine's own level,
+   because low and medium both map to the cluster's warning). Everything else
+   in `IDSAlert` stays on `ids-silent`.
+
+   Two deviations from the earlier proposal, both driven by the overnight
+   data: `container-api` is excluded because it is an audit stream — every
+   `incus exec` and `incus file push`, including routine administration,
+   produces one — and `privilege-raises` was only included after the routine
+   session, package and rotation shapes were classified in the forwarder, so
+   that it is not a proxy for `runuser` timers. Bridge-guard blocks
+   (`vm-bridge-*`) stay silent by design: they are counted per guest and
+   reviewed, not paged.
+
+   The success criterion is one clean week without an expected-traffic page.
+   Alert volume is capped cluster-wide at five notifications per severity per
+   hour by the ntfy webhook, independent of this route.
 
 ## VM bridge visibility
 

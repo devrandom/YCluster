@@ -229,8 +229,13 @@ must not become a second, longer-lived access log.
   space-separated bool flag stopped Go flag parsing, leaving the socket,
   cursor, spool and receiver unparsed) and `IdsSigmaStalled` added; inert
   hostname rules disabled; attacker-shaped egress suppressions partly
-  tightened; nginx/sshd parser defects fixed. Deferred to the discussion
-  phase: paging, VM/UDP/unix-socket visibility, rename/mmap/read hooks,
+  tightened; nginx/sshd parser defects fixed. Paging decided on 2026-11-08:
+  `exec-root-user-path`, `kernel-modules`, `privilege-raises` and Sigma at
+  medium or above page; `container-api` and the bridge-guard blocks stay
+  observe-only. The routine shapes behind `privilege-raises` (session spawns,
+  unattended-upgrades, squid rotation) are classified first, so it is not a
+  proxy for timers. Still deferred to the discussion phase:
+  VM/UDP/unix-socket visibility, rename/mmap/read hooks,
   the admin-service port range, alert-path
   authentication, CrowdSec scenarios/thresholds, non-root interpreter
   coverage and raw retention. Boot-order attribution is fixed in the

@@ -22,6 +22,9 @@ func routineFileWriteReason(body *tetragonLog) string {
 	}
 	if body.Process.Binary != "/usr/local/bin/ycluster" ||
 		!strings.Contains(body.Process.Arguments, "wg reconcile --up") {
+		if reason := backupVerifyReason(body); reason != "" {
+			return reason
+		}
 		if reason := blackboxTargetsRewrite(body); reason != "" {
 			return reason
 		}
@@ -33,6 +36,22 @@ func routineFileWriteReason(body *tetragonLog) string {
 	path, ok := fileArgPath(body.Args)
 	if ok && path == "/etc/wireguard/wg0.conf" {
 		return "expected_file_write"
+	}
+	return ""
+}
+
+// backupVerifyReason covers setup-backup-verify.yml. It builds a throwaway
+// Postgres cluster under <data>/<version>/verifyrestore, restores the nightly
+// dump into it, checks it and drops it again on every storage node. The
+// scratch directory is named exactly once, so match it rather than the
+// binaries that happen to write there.
+func backupVerifyReason(body *tetragonLog) string {
+	if path, ok := fileArgPath(body.Args); ok && strings.Contains(path, "/verifyrestore/") {
+		return "backup_verify"
+	}
+	if strings.Contains(body.Process.Binary, "pg_createcluster") &&
+		strings.Contains(body.Process.Arguments, " verifyrestore ") {
+		return "backup_verify"
 	}
 	return ""
 }

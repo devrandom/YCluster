@@ -126,6 +126,11 @@ func TestSigmaDetectionToAlert(t *testing.T) {
 	if a.Labels["severity"] != "critical" {
 		t.Fatalf("severity = %q", a.Labels["severity"])
 	}
+	// Paging decides on "medium or above", which the two-level severity
+	// cannot express, so the engine's own level travels as its own label.
+	if a.Labels["sigma_level"] != "high" {
+		t.Fatalf("sigma_level = %q", a.Labels["sigma_level"])
+	}
 	if !strings.Contains(a.Annotations["summary"], "args=/bin/sh -c whoami") {
 		t.Fatalf("summary = %q", a.Annotations["summary"])
 	}

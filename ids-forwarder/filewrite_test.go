@@ -64,6 +64,45 @@ func TestOtherFileWritesAreForwarded(t *testing.T) {
 	}
 }
 
+func TestBackupVerifyWritesAreSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	cases := []struct {
+		name   string
+		binary string
+		args   string
+		path   string
+	}{
+		{"cluster config", "/usr/bin/pg_createcluster",
+			"-w /usr/bin/pg_createcluster 16 verifyrestore -p 5433",
+			"/etc/postgresql/16/verifyrestore/start.conf"},
+		{"restored file", "/bin/install",
+			"-o 111 -g 112 -m 640 /var/lib/postgresql/16/verifyrestore/pg_hba.conf",
+			"/var/lib/postgresql/16/verifyrestore/pg_hba.conf"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := fileWriteLine(t, tc.binary, tc.args, tc.path)
+			_, _, ok, reason := tetragonAlertDecision(line, cfg)
+			if ok {
+				t.Fatal("expected backup verification write to be suppressed")
+			}
+			if reason != "backup_verify" {
+				t.Fatalf("reason = %q, want backup_verify", reason)
+			}
+		})
+	}
+
+	// The real cluster on the same host stays visible.
+	line := fileWriteLine(t, "/usr/bin/pg_createcluster",
+		"-w /usr/bin/pg_createcluster 16 main -p 5432",
+		"/etc/postgresql/16/main/start.conf")
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+		t.Fatalf("real cluster write was suppressed as %q", reason)
+	}
+}
+
 func fileWriteLine(t *testing.T, binary, args, path string) string {
 	t.Helper()
 	line, err := json.Marshal(map[string]any{

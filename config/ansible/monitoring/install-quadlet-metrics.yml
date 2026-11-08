@@ -35,8 +35,8 @@
           Type=oneshot
           ExecStart={{ collector_path }}
           User=root
-          # runuser + systemctl --user need to reach each user's manager, so
-          # keep the sandbox light: no ProtectHome/ProtectSystem here.
+          # systemctl --user --machine reaches each user's manager over the
+          # machine bus, so keep the sandbox light: no ProtectHome here.
           PrivateTmp=true
           NoNewPrivileges=true
           ReadWritePaths=/var/lib/prometheus/node-exporter
