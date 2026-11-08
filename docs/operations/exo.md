@@ -347,6 +347,43 @@ After both come back the placement supervisor re-places K2.6 on the
 next ~30 s tick. exo does not persist placements across a restart, so
 expect a full reload cycle (see timings below).
 
+### Node identity and event-log catch-up
+
+Two properties of the pinned exo make a restart cost more than the
+load cycle above, and the cost grows with cluster uptime:
+
+- **Node IDs are not persisted.** `get_node_id_keypair()` in
+  `exo/routing/router.py` unconditionally returns
+  `Keypair.generate()` (upstream `TODO`: bring back node-id
+  persistence). Every exo start gets a fresh libp2p identity, so the
+  restarted node's previous runners and instances become ghosts owned
+  by a peer id that no longer exists.
+- **A restarted node replays the master's whole event log.** The master
+  answers `RequestEventLog` with 1000 events per RPC
+  (`exo/master/main.py`), so catch-up runs at roughly 1k events/s no
+  matter how healthy the network is. `lastEventAppliedIdx` on
+  `/state` shows progress.
+
+In practice: 8 days of uptime accumulated ~4.7M events, and a
+restarted mac replayed them at ~800/s (measured on `lastEventAppliedIdx`),
+i.e. roughly 100 min before it could take its shard again. The placement
+supervisor had already created the instance, but its runner sat in
+`RunnerIdle` until the restarted node caught up. The ~2 min figure above
+only holds for a small event log.
+
+Consequences for operations:
+
+- **Only the master keeps the live log.** `~/.exo/event_log/master/events.bin`
+  exists and grows on the master; a follower has no equivalent file there,
+  which is why a restarted follower has to pull the whole log over RPC at
+  the rate above. Check which mac holds that file before choosing one to
+  restart, and watch `lastEventAppliedIdx` to tell replay from a hang.
+- For a fast recovery when history does not matter, stop both daemons,
+  archive `/Users/dev/.exo/event_log` on both macs, and start them —
+  the cluster re-forms empty and re-places in minutes. The log only
+  holds instances/runners/tasks/downloads; model weights and the
+  catalog live elsewhere.
+
 ### Watch loading progress
 
 ```bash
