@@ -65,6 +65,17 @@
         - host_firewall_wg_port.stdout | length > 0
       notify: reload ufw
 
+    # SSH stays reachable from anywhere. The firewall is a blast-radius
+    # control, not a replacement for the overlay management path, and a
+    # colo host whose overlay is down must not need a console to get back.
+    - name: Allow SSH from anywhere
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+      when: host_firewall_ssh | default(true) | bool
+      notify: reload ufw
+
     - name: Set the default policies
       community.general.ufw:
         default: "{{ item.policy }}"
