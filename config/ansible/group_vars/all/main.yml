@@ -81,6 +81,22 @@ gateway_vip: "10.0.0.254"
 # and the cluster route is the fallback when no uplink is up.
 vip_metric: 500
 
+# Upstream resolvers for the local dnsmasq forwarder on managed nodes, in
+# the order they should be tried. The cluster zone is separate: /xc is
+# forwarded to gateway_vip from /etc/dnsmasq.d/dns.conf, never from here.
+# Override per host or group (e.g. a colo's own resolvers ahead of a public
+# fallback) in host_vars.
+dnsmasq_upstreams:
+  - 208.67.222.222
+  - 8.8.8.8
+  - 1.1.1.1
+
+# dnsmasq normally queries every upstream and sticks with whichever answers
+# fastest, so a list is not a priority order. Set this when the list IS a
+# deliberate chain (colo resolver first, public fallback second) and the
+# later entries should only be used when the earlier ones fail.
+dnsmasq_upstream_strict_order: false
+
 # WireGuard peer subnet and route metric. The route is declared in the
 # netplan template so networkd installs it at boot with no rc.local race.
 # On the wg server itself the connected wg0 route wins (lower metric).

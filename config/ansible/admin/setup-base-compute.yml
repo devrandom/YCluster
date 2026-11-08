@@ -22,17 +22,9 @@
             state: present
 
         - name: Clear default dnsmasq.conf to avoid conflicts
-          copy:
+          template:
+            src: templates/dnsmasq-main.conf.j2
             dest: /etc/dnsmasq.conf
-            content: |
-              # Main dnsmasq configuration
-              # All configuration is in /etc/dnsmasq.d/
-              conf-dir=/etc/dnsmasq.d/,*.conf
-              # Use additional hosts file for static DNS entries
-              addn-hosts=/etc/static-hosts
-              server=208.67.222.222
-              server=8.8.8.8
-              server=1.1.1.1
             backup: yes
           notify: restart dnsmasq
 
@@ -74,7 +66,7 @@
               # The Incus-managed transit bridge runs its own dnsmasq for
               # DHCP/DNS; avoid trying to bind its gateway address.
               except-interface=transit0
-              {% endif %}
+              {%- endif %}
               # DNS only, no DHCP
               port=53
               # Only answer queries from clients on a directly-attached subnet.

@@ -1,0 +1,13 @@
+# Main dnsmasq configuration
+# All configuration is in /etc/dnsmasq.d/
+conf-dir=/etc/dnsmasq.d/,*.conf
+# Use additional hosts file for static DNS entries
+addn-hosts=/etc/static-hosts
+# Upstream resolvers, in priority order (dnsmasq_upstreams).
+{% for upstream in dnsmasq_upstreams %}
+server={{ upstream }}
+{% endfor %}
+{% if dnsmasq_upstream_strict_order | bool %}
+# Try the upstreams in the order listed instead of fastest-server wins.
+strict-order
+{% endif %}
