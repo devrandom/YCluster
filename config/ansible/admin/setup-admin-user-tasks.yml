@@ -121,7 +121,7 @@
     state: absent
   notify: restart ssh
 
-- name: Configure SSH to allow publickey OR keyboard-interactive for admin, disable password for root
+- name: Configure SSH to require publickey, and publickey plus TOTP for admin
   blockinfile:
     path: /etc/ssh/sshd_config
     marker: "# {mark} ANSIBLE MANAGED - TOTP Configuration"
@@ -129,26 +129,28 @@
       # Disable password authentication for root
       Match User root
           PasswordAuthentication no
-      # Allow either publickey alone OR keyboard-interactive (password+TOTP) for admin user
+      # admin: publickey first, then password+TOTP. Password-only logins stay
+      # impossible; every other account is publickey-only.
       Match User admin
           AuthenticationMethods publickey keyboard-interactive
+          KbdInteractiveAuthentication yes
       Match all
     validate: '/usr/sbin/sshd -t -f %s'
   notify: restart ssh
 
-- name: Enable challenge-response authentication
+- name: Disable challenge-response authentication outside the admin match block
   lineinfile:
     path: /etc/ssh/sshd_config
     regexp: '^#?KbdInteractiveAuthentication'
-    line: 'KbdInteractiveAuthentication yes'
+    line: 'KbdInteractiveAuthentication no'
     validate: '/usr/sbin/sshd -t -f %s'
   notify: restart ssh
 
-- name: Enable password authentication globally
+- name: Disable password authentication globally
   lineinfile:
     path: /etc/ssh/sshd_config
     regexp: '^#?PasswordAuthentication'
-    line: 'PasswordAuthentication yes'
+    line: 'PasswordAuthentication no'
     validate: '/usr/sbin/sshd -t -f %s'
   notify: restart ssh
 

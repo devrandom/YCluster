@@ -69,6 +69,9 @@
           Match User {{ console_user }}
               PasswordAuthentication no
               KbdInteractiveAuthentication no
+          # Reset, so a later managed block appended to sshd_config does not
+          # silently inherit the ops match.
+          Match all
         validate: '/usr/sbin/sshd -t -f %s'
         state: "{{ 'present' if (console_user_enabled | default(false) | bool) else 'absent' }}"
       notify: restart ssh
