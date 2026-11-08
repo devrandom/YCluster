@@ -1,0 +1,80 @@
+---
+# Opt-in host firewall for managed nodes.
+#
+# Deny new inbound connections, allow outbound, and let everything inside
+# the cluster networks through untouched: the cluster LAN, the WireGuard
+# overlay and the Incus guest bridge. Loopback is allowed by ufw itself.
+#
+# Two deliberate departures from a bare "deny inbound":
+#
+#   * routed forwarding stays permissive. ufw defaults the routed policy to
+#     deny, which sits in the iptables layer next to the Incus nft NAT table
+#     and drops guest egress even though the nft chain accepts it.
+#   * the WireGuard listen port is opened for UDP. The tunnel's outer
+#     packets arrive on the uplink with a public source address, so a rule
+#     keyed on the overlay subnet cannot match them, and without the port
+#     the server could not handshake towards the node.
+#
+# Nothing is enabled unless the host opts in with `host_firewall: true` in
+# host_vars; every other host ends the play untouched and keeps whatever
+# the distribution left behind.
+- name: Configure the optional host firewall
+  hosts: "{{ host_firewall_target | default('managed') }}"
+  become: yes
+
+  handlers:
+    - name: reload ufw
+      command: ufw --force reload
+
+  vars:
+    host_firewall_networks:
+      - "10.0.0.0/16"                           # cluster LAN
+      - "{{ wg_peer_subnet }}"                  # WireGuard overlay peers
+      - "{{ incus_bridge_subnet | default('10.100.0.0/24') }}"
+
+  tasks:
+    - name: End play unless this host opted in
+      ansible.builtin.meta: end_host
+      when: not (host_firewall | default(false) | bool)
+
+    - name: Install ufw
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: Allow the cluster networks through
+      community.general.ufw:
+        rule: allow
+        from: "{{ item }}"
+      loop: "{{ host_firewall_networks }}"
+      notify: reload ufw
+
+    - name: Read the WireGuard listen port
+      ansible.builtin.command: wg show wg0 listen-port
+      register: host_firewall_wg_port
+      changed_when: false
+      failed_when: false
+
+    - name: Allow the WireGuard listen port
+      community.general.ufw:
+        rule: allow
+        port: "{{ host_firewall_wg_port.stdout }}"
+        proto: udp
+      when:
+        - host_firewall_wg_port.rc == 0
+        - host_firewall_wg_port.stdout | length > 0
+      notify: reload ufw
+
+    - name: Set the default policies
+      community.general.ufw:
+        default: "{{ item.policy }}"
+        direction: "{{ item.direction }}"
+      loop:
+        - { policy: deny, direction: incoming }
+        - { policy: allow, direction: outgoing }
+        - { policy: allow, direction: routed }
+      notify: reload ufw
+
+    - name: Enable the firewall
+      community.general.ufw:
+        state: enabled

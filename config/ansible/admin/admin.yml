@@ -5,6 +5,9 @@
 - import_playbook: configure-netplan.yml
 # Per-NIC autonegotiation overrides (systemd .link); no-op without host_vars
 - import_playbook: configure-nic-link.yml
+# Opt-in host firewall: deny inbound except the cluster networks. No-op
+# unless a host sets host_firewall: true.
+- import_playbook: configure-firewall.yml
 - import_playbook: install-vault-pass-setup.yml
 - import_playbook: install-ycluster-package.yml
 - import_playbook: setup-base-infrastructure.yml
