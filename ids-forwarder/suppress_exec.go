@@ -67,6 +67,12 @@ func incusReason(args string, parentProc *tetragonProc) string {
 	if strings.Contains(args, "-- nvidia-smi --query-gpu=") && strings.Contains(args, "--format=csv") {
 		return "gpu_collector"
 	}
+	if args == "list --format csv -c n,4" {
+		// ids-bridge-consumer resolves a logged source address to a guest
+		// name before it reports a bridge alert; the listing is read-only
+		// inventory, cached for a minute.
+		return "bridge_consumer"
+	}
 	// sync_transit_nics reads instance metadata and the bastion's
 	// /etc/hosts on every reconciler tick to rewrite the transit block.
 	if strings.HasPrefix(args, "file pull ") &&
@@ -101,6 +107,11 @@ func shellSystemReason(args string) string {
 		return "node_exporter"
 	case strings.Contains(args, "/etc/update-motd.d"):
 		return "motd"
+	case strings.TrimSpace(args) == "/usr/local/lib/cluster/quadlet-metrics-collector":
+		// quadlet-metrics.timer execs the collector every 30 s. The unit
+		// runs the shebang script directly, so the kernel records the
+		// interpreter with the script as its only argument.
+		return "quadlet_metrics"
 	case zulipCronReason(args) != "":
 		return "app_cron"
 	case strings.Contains(args, "debian-sa1"):

@@ -61,6 +61,20 @@ func TestRoutineExecSuppression(t *testing.T) {
 			reason: "sysstat",
 		},
 		{
+			name:   "bridge consumer guest lookup",
+			binary: "/usr/bin/incus",
+			args:   "list --format csv -c n,4",
+			parent: "/usr/bin/python3.12",
+			reason: "bridge_consumer",
+		},
+		{
+			name:   "quadlet metrics collector",
+			binary: "/usr/bin/bash",
+			args:   "/usr/local/lib/cluster/quadlet-metrics-collector",
+			parent: "/usr/lib/systemd/systemd",
+			reason: "quadlet_metrics",
+		},
+		{
 			name:   "ansible platform probe",
 			binary: "/bin/sh",
 			args:   `-c "echo PLATFORM; uname; echo FOUND; command -v 'python3.12'; command -v 'python3.11'"`,
@@ -226,6 +240,11 @@ func TestRoutineExecKeepsUsefulCommands(t *testing.T) {
 		{"/usr/bin/apt-get", "install update-manager", "/usr/bin/sudo"},
 		{"/usr/bin/apt-get", "remove nginx", "/usr/bin/sudo"},
 		{"/usr/bin/dpkg", "-i /tmp/pkg.deb", "/usr/bin/apt-get"},
+		// Only the timer's exact invocation is routine: an extra argument
+		// could turn the collector into a different command.
+		{"/usr/bin/bash", "/usr/local/lib/cluster/quadlet-metrics-collector --verbose", "/usr/lib/systemd/systemd"},
+		{"/usr/bin/bash", "/usr/local/lib/cluster/quadlet-metrics-other", "/usr/lib/systemd/systemd"},
+		{"/usr/bin/incus", "list --format json", "/usr/bin/bash"},
 		{"/bin/bash", `-c " cd /home/zulip/deployments/current/ && ./manage.py shell >/dev/null"`, "/usr/sbin/cron"},
 		{"/bin/bash", `-c " cd /home/zulip/deployments/current/ && ./manage.py createsuperuser"`, "/usr/sbin/cron"},
 		{"/bin/bash", `-c " cd /home/zulip/deployments/current/ && ./manage.py export --help"`, "/usr/sbin/cron"},

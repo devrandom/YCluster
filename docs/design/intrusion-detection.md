@@ -605,7 +605,10 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   Ansible connection probes, package-architecture queries, expected
   private-network TCP service/port pairs, the exact gateway-health probe to
   its public endpoint, systemd's transient `/proc/self/fd/9` privilege
-  transitions, sysstat's `debian-sa1` cron wrapper, the temp file of the
+  transitions, sysstat's `debian-sa1` cron wrapper, the quadlet-metrics
+  timer's single-argument exec of
+  `/usr/local/lib/cluster/quadlet-metrics-collector`, the bridge consumer's
+  read-only `incus list --format csv -c n,4` guest lookup, the temp file of the
   managed blackbox-target rewrite, the leader's healthchecks.io heartbeat,
   and the exact `ycluster wg reconcile`
   write to its managed WireGuard config, counted by reason in
