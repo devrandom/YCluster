@@ -27,6 +27,11 @@
     # guests: it is the jump host for VM SSH access.
     vm_bridge_guard_exempt_sources:
       - "{{ vm_bastion_ip }}"
+    # Blocked by the ACL like the rest of the cluster ranges, but too routine
+    # to alert on: guests that think they are on a cloud instance poll the
+    # metadata endpoint every hour, and it never answers.
+    vm_bridge_guard_silent_destinations:
+      - "169.254.169.254/32"
     vm_bridge_guard_log_rate: "6/minute"
     vm_bridge_guard_log_burst: 5
   tasks:

@@ -13,6 +13,7 @@
   become: yes
   vars:
     ids_bridge_consumer_receiver: "http://{{ ids_forwarder_http_listen | default('127.0.0.1:9201') }}/crowdsec"
+    ids_bridge_consumer_conf_dir: /etc/ids-bridge-consumer
   tasks:
     - name: Check whether this node runs the VM bridge
       stat:
@@ -23,6 +24,29 @@
       meta: end_host
       when: not ids_bridge_consumer_link.stat.exists
 
+    - name: Ensure the consumer config directory exists
+      file:
+        path: "{{ ids_bridge_consumer_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the quiet instance list
+      copy:
+        dest: "{{ ids_bridge_consumer_conf_dir }}/quiet-instances"
+        # Deliberately `default([])` at the use site: a play-level default
+        # would outrank host_vars and shadow the per-host list.
+        content: |
+          # Managed by monitoring/install-ids-bridge-consumer.yml.
+          # Instances listed here still have their blocks counted and logged,
+          # but the consumer does not alert on them.
+          {{ ids_bridge_quiet_instances | default([]) | join('\n') }}
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart ids bridge consumer
+
     - name: Install the bridge guard consumer
       copy:
         src: files/ids-bridge-consumer.py
@@ -30,6 +54,7 @@
         owner: root
         group: root
         mode: '0755'
+      notify: restart ids bridge consumer
 
     - name: Install the consumer unit
       copy:
@@ -44,15 +69,22 @@
           Type=simple
           ExecStart=/usr/bin/python3 /usr/local/lib/cluster/ids-bridge-consumer \
               --receiver {{ ids_bridge_consumer_receiver }} \
+              --quiet-file {{ ids_bridge_consumer_conf_dir }}/quiet-instances \
               --burst 1 --window 3600
           Restart=always
           RestartSec=5
-          # Reads the kernel ring buffer through journalctl only.
+          # The consumer reads the kernel ring buffer through journalctl and
+          # asks the Incus socket who owns an address. The CLI writes its
+          # config under $HOME even for a read-only call, so it needs a
+          # writable home inside this sandbox.
           User=root
           NoNewPrivileges=true
           ProtectSystem=strict
           ProtectHome=true
           PrivateTmp=true
+          StateDirectory=ids-bridge-consumer
+          StateDirectoryMode=0750
+          Environment=HOME=/var/lib/ids-bridge-consumer
 
           [Install]
           WantedBy=multi-user.target

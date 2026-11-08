@@ -9,12 +9,19 @@
 # The IP-family chain changes no verdict. It only counts and logs the
 # guest-to-cluster attempts that gpu-vm-isolation already drops silently.
 #
+# Destinations in vm_bridge_guard_silent_destinations are dropped by the ACL
+# like the rest of the cluster ranges but are not counted or logged: a guest
+# probing the cloud metadata endpoint is routine enough that alerting on it is
+# noise.
+#
 # These log lines are the interface the IDS consumes
 # (monitoring/install-ids-bridge-consumer.yml). Nothing here depends on it:
 # the tables are the enforcement, the log is for operators.
 #
 # `destroy` before the declarations keeps the load idempotent without a
 # flush window: the batch below replaces both tables atomically.
+
+{% set silent = '' if not vm_bridge_guard_silent_destinations else ' ip daddr != { ' ~ (vm_bridge_guard_silent_destinations | join(', ')) ~ ' }' %}
 
 destroy table bridge vm_bridge_guard
 destroy table inet vm_bridge_guard
@@ -42,6 +49,6 @@ table inet vm_bridge_guard {
 	chain forward {
 		type filter hook forward priority -10; policy accept;
 
-		iifname "{{ incus_bridge }}" ip saddr {{ vm_bridge_guard_subnet }} ip daddr { {{ vm_bridge_guard_cluster_cidrs | join(', ') }} } counter log prefix "vm-bridge-guard cluster " level warn limit rate {{ vm_bridge_guard_log_rate }} burst {{ vm_bridge_guard_log_burst }} packets comment "vm-bridge-cluster"
+		iifname "{{ incus_bridge }}" ip saddr {{ vm_bridge_guard_subnet }} ip daddr { {{ vm_bridge_guard_cluster_cidrs | join(', ') }} }{{ silent }} counter log prefix "vm-bridge-guard cluster " level warn limit rate {{ vm_bridge_guard_log_rate }} burst {{ vm_bridge_guard_log_burst }} packets comment "vm-bridge-cluster"
 	}
 }

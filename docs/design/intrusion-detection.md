@@ -1273,7 +1273,11 @@ off. It installs two nftables tables:
   ranges and *changes no verdict*: `gpu-vm-isolation` still drops the packet,
   the guard only counts and logs it. Keeping the drop in one place means the
   two policies cannot drift into a state where traffic is allowed by one and
-  expected to be blocked by the other.
+  expected to be blocked by the other. Cloud metadata addresses are excluded
+  from the count and the log (`vm_bridge_guard_silent_destinations`): a guest
+  that believes it is on a cloud instance polls `169.254.169.254` every hour
+  forever, the ACL drops it either way, and an hourly alert about a probe that
+  can never succeed is noise.
 
 The IDS side is separate and optional: `monitoring/install-ids-bridge-consumer.yml`
 installs `ids-bridge-consumer.service`, which tails the guard's kernel log,
