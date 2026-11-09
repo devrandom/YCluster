@@ -20,6 +20,13 @@
 #     datasources through host.docker.internal — and that traffic arrives on
 #     the input path, not the forwarding one. Rootless podman needs nothing
 #     here: pasta hands it the host's loopback, which ufw already accepts.
+#   * guest DHCP is allowed in on the guest bridges. ufw's stock after-input
+#     chain ends in a drop for udp/67, so a guest that reboots cannot get a
+#     lease: its DHCPDISCOVER comes from 0.0.0.0, matches no source rule, and
+#     is dropped. Renewals are unicast from the bridge subnet and pass, which
+#     makes the failure look like "one VM lost its network" rather than a
+#     rule-set bug. The rule is scoped to the bridge interface because the
+#     source address is 0.0.0.0.
 #
 # Keepalived needs no rule of its own. VRRP advertisements are protocol 112
 # to the multicast group 224.0.0.18, sourced from the sending node's
@@ -53,6 +60,7 @@
       - "{{ incus_bridge_subnet | default('10.100.0.0/24') }}"
       - "172.16.0.0/12"                         # docker bridges
     host_firewall_allowed_networks: "{{ host_firewall_networks + (host_firewall_networks_extra | default([])) }}"
+    host_firewall_dhcp_interfaces: "{{ ['incusbr0', 'transit0'] + (host_firewall_dhcp_interfaces_extra | default([])) }}"
 
   tasks:
     - name: End play if this host opted out
@@ -86,6 +94,23 @@
       when:
         - host_firewall_wg_port.rc | default(1) == 0
         - host_firewall_wg_port.stdout | default('') | length > 0
+      notify: reload ufw
+
+    - name: Check which guest bridges this host has
+      ansible.builtin.stat:
+        path: "/sys/class/net/{{ item }}"
+      loop: "{{ host_firewall_dhcp_interfaces }}"
+      register: host_firewall_bridges
+
+    - name: Allow guest DHCP to reach the bridge's DHCP server
+      community.general.ufw:
+        rule: allow
+        direction: in
+        interface: "{{ item.item }}"
+        port: "67"
+        proto: udp
+      loop: "{{ host_firewall_bridges.results }}"
+      when: item.stat.exists
       notify: reload ufw
 
     - name: Allow extra UDP ports from anywhere
