@@ -604,7 +604,10 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   container health checks, node-exporter collectors, login MOTD generation,
   Ansible connection probes, package-architecture queries, expected
   private-network TCP service/port pairs, the exact gateway-health probe to
-  its public endpoint, systemd's transient `/proc/self/fd/9` privilege
+  its public endpoint, Ceph OSD ports dialled by kernel threads (whose
+  identity is the comm in brackets, so the workqueue thread that services a
+  reconnect counts as much as `[kthreadd]`), systemd's transient
+  `/proc/self/fd/9` privilege
   transitions, sysstat's `debian-sa1` cron wrapper, the quadlet-metrics
   timer's single-argument exec of
   `/usr/local/lib/cluster/quadlet-metrics-collector`, the bridge consumer's
@@ -739,10 +742,10 @@ network coverage.
   autoload requests, not escalation. High-volume compiled control-plane
   clients (`etcdctl`, `etcd`, Prometheus, and `local-ai-proxy`) have their
   expected private-network port pairs filtered in the kernel; unexpected
-  ports and external destinations still generate events. Container bridges
-  (`172.16.0.0/12`) are excluded alongside loopback: they are host-local,
-  and a container reaching another node appears with the cluster or public
-  destination address. Root uid/gid
+  ports and external destinations still generate events. Loopback is
+  excluded; container bridges (`172.16.0.0/12`) are not, because that range
+  holds both peers and, at `.1`, the host, and only the forwarder can tell
+  them apart. Root uid/gid
   transitions made by `sshd` and cron are also filtered in the policy.
   systemd's transient re-exec presents as `/proc/self/fd/9`, which
   `matchBinaries` cannot resolve, so that single path remains visible and is
@@ -1035,10 +1038,10 @@ cases they only need to use a protocol or namespace the sensor does not observe.
      routine there. Any other port on that address — node-exporter,
      Alertmanager, the inference proxy, sshd — is a connection into the host
      and alerts. A container reaching a real cluster address is never bridge
-     traffic at all and always alerts. The tcp-connect policy still excludes
-     `172.16.0.0/12` at the kernel, so this classification reaches the Incus
-     bridge only until that exclusion is removed; without that change, docker
-     bridge traffic is invisible. Only the curated Sigma rules can see
+     traffic at all and always alerts. The tcp-connect policy keeps bridge
+     destinations visible for exactly this reason: the policy can only see
+     addresses, and the same range holds peers and the host, so the split
+     belongs in the forwarder. Only the curated Sigma rules can see
      container execs, and only through the currently broken Sigma path. The
      local Sigma filter that suppresses root interactive shells also matches a
      root shell inside an Incus container, because Incus carries no pod metadata

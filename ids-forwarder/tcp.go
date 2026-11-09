@@ -163,10 +163,12 @@ func automationDial(c tcpConn) bool {
 		// uses the jump host. This is the documented access path into the
 		// Incus bridge, and it only covers dials inside that bridge.
 		return c.port == 22 && containerNetwork.Contains(c.addr)
-	case c.base == "[kthreadd]":
-		// Tetragon reports kernel-side connects without an owning process
-		// as [kthreadd]; those are the Ceph OSD and messenger sockets, plus
-		// the kernel NFS client mounting VM storage from the cluster.
+	case strings.HasPrefix(c.binary, "["):
+		// A kernel thread has no binary path or argv: Tetragon prints the
+		// comm in brackets, and the connect is serviced by whichever
+		// workqueue thread the kernel picked ([kworker/N:M-.../pid] as
+		// well as [kthreadd]). These are the Ceph OSD and messenger
+		// sockets, plus the kernel NFS client mounting VM storage.
 		if _, ok := cephPorts[c.port]; ok {
 			return true
 		}

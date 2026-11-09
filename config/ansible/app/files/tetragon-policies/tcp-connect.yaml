@@ -2,9 +2,12 @@
 # socket fields needed for destination operators; security_socket_connect's
 # sockaddr argument does not support them.
 #
-# Loopback and container-bridge destinations are omitted: both are local to
-# the host, and a container reaching another node shows up with the cluster
-# or public destination address.
+# Loopback is omitted: it never leaves the host. Container-bridge
+# destinations (docker's 172.16-172.31 pool and the project subnets) stay
+# visible, because that range holds two different things: another container
+# (.2 and up, host-local and uninteresting) and the bridge gateway (.1,
+# which is the host itself). Hiding the whole range hid every container ->
+# host connection from the forwarder, which is the case worth seeing.
 #
 # High-volume trusted control-plane services still generate events when they
 # connect to an external address or to an unexpected port on the private
@@ -39,11 +42,6 @@ spec:
               values:
                 - "127.0.0.0/8"
                 - "::1/128"
-                # Container bridges (docker's 172.17-172.31 default pool
-                # and the per-service subnets) are host-local, like loopback.
-                # Traffic that leaves the host carries the cluster or public
-                # address and stays visible.
-                - "172.16.0.0/12"
           matchActions:
             - action: Post
               rateLimit: "1s"

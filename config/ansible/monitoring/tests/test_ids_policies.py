@@ -113,10 +113,10 @@ class TestIDSPolicies(unittest.TestCase):
         self.assertEqual(untrusted["matchArgs"][0]["operator"], "NotDAddr")
         self.assertIn("127.0.0.0/8", untrusted["matchArgs"][0]["values"])
         self.assertIn("::1/128", untrusted["matchArgs"][0]["values"])
-        # Container bridges are host-local and excluded for the same reason
-        # as loopback: a container reaching another node is seen with the
-        # cluster or public destination address.
-        self.assertIn("172.16.0.0/12", untrusted["matchArgs"][0]["values"])
+        # Bridge destinations stay visible: the range holds both peers and
+        # the gateway, and the gateway is the host. Only the forwarder can
+        # tell them apart, so the policy must not drop the range.
+        self.assertNotIn("172.16.0.0/12", untrusted["matchArgs"][0]["values"])
 
         trusted_external = next(
             selector for selector in selectors
