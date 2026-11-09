@@ -79,7 +79,7 @@ Exec=/models \
     --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false,"moe_backend":"b12x"}' \
     --attention-config '{"indexer_kv_dtype":"mxfp4","indexer_tp_shard_min_rows":2048}' \
     --moe-backend b12x \
-    --kv-offloading-size {{ ds41_moet_kv_offload_gb | default(32) }} \
+    --kv-offloading-size {{ ds41_moet_kv_offload_gb | default(8) }} \
     --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","secondary_tiers":[{"type":"fs","root_dir":"/srv/kvcache/{{ ds41_moet_kvcache_subdir }}","n_read_threads":16,"n_write_threads":16,"locality":"LOCAL"}],"offload_prompt_only":false}}'
 
 [Service]

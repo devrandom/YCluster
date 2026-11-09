@@ -245,6 +245,57 @@ cache miss (the request recomputes). Keep the budget well clear of free space;
 offload traffic on these hosts runs at a few GB per hour, so the budget is what
 decides whether the cache stays resident or churns.
 
+### Why the tiers stay, whatever the quiet-hour hit rate says
+
+A day of steady traffic showed the tiers doing almost nothing: ~38 GB written
+across both hosts and 8.6K prefix tokens served back out of ~36M queried
+(0.02%), with every real hit coming from the GPU pool. That is the quiet
+baseline, not the design target. The tiers exist for request storms — the same
+long prefix arriving from many clients at once, or a retry wave behind a slow
+prefill — where a hit replaces seconds of prefill and a miss means queueing
+behind it. Do not size them, or retire them, from a day of low reuse.
+
+Size against the slot count instead:
+
+| Scenario | KV in flight | Where it lands |
+|---|---|---|
+| 8 slots × 512K (current `MAX_NUM_SEQS`) | ~4 GB per wave; the 8.24M-token GPU pool holds ~2 waves | GPU, then the 8 GiB RAM tier (~16 max-length contexts) |
+| slots raised to 32 × 512K | ~16 GB per wave | GPU holds half a wave; the RAM tier overflows into disk on every eviction |
+
+So the RAM tier should scale with `MAX_NUM_SEQS × max context × 2`: 8 GiB at
+the current 8 slots, more if the slots go up. Raising slots without raising
+the tier moves the cache onto NVMe and turns a storm's warm hits into disk
+reads.
+
+Note what a storm surplus actually does. A request computes only the tokens it
+carries; the KV it can reuse is the prefix from earlier turns, and that prefix
+can be in the tiers after the previous turn's blocks were evicted. The
+scheduler asks the connector about such a request while it is still queued —
+`get_num_new_matched_tokens` runs for any waiting request with
+`num_computed_tokens == 0`, and the load is asynchronous — so a promotion
+starts before the request is admitted and the disk read overlaps its queue
+time. What is never parked in the tiers is KV for tokens that have not been
+computed: a first-turn request with no prior history has nothing to load and
+only waits.
+
+Preemption is recompute rather than swap: the victim's blocks are freed (and
+captured by the connector) and the request returns to the waiting queue with
+`num_computed_tokens = 0`, so a surviving copy in the tiers is what saves the
+re-prefill.
+
+Raising `MAX_NUM_SEQS` therefore buys storm capacity only for decode-heavy
+traffic with short prompts. For long-context storms it buys nothing: prefill is
+compute-bound and flat under concurrency on this engine, and the extra slots
+just move the same queue from the gateway into the scheduler.
+
+Under storm pressure the engine degrades safely rather than stalling: the
+tiering backpressure policy drops *stores* when the filesystem tier is slow or
+the primary tier is pinned, which costs a future cache miss and never blocks a
+prefill, and reads are unaffected. Watch
+`vllm:kv_offload_cpu_cache_usage_perc` (sustained high means transfers are
+being dropped), `kv_offload_tiering_active_promotion_jobs`, and the
+`vllm:kv_offload_tiering_promotion_latency_seconds` histogram during a burst.
+
 ### Measured on our host (first bring-up)
 
 4× RTX PRO 6000 96 GB (Max-Q, 300 W), single socket, IOMMU on, all four cards
