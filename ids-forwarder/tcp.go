@@ -14,6 +14,7 @@ type tetragonSockArg struct {
 }
 
 type tetragonSocket struct {
+	SAddr string `json:"saddr"`
 	DAddr string `json:"daddr"`
 	DPort uint16 `json:"dport"`
 }
@@ -55,10 +56,13 @@ func internalServicePort(port uint16) bool {
 var containerNetwork = netip.MustParsePrefix("10.100.0.0/24")
 
 // containerBridges are host-local container networks: the Incus bridge and
-// docker0. Traffic to them from a container stays inside the host.
+// the RFC 1918 range Docker allocates user-defined bridges from. A compose
+// project gets its own network (172.26.x here), not docker0, and reaching the
+// host over that bridge is still host-local: it is the same path the gateway
+// nginx accepts with `allow 172.16.0.0/12`, not a route into the cluster.
 var containerBridges = []netip.Prefix{
 	containerNetwork,
-	netip.MustParsePrefix("172.17.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
 }
 
 // cephPorts are the monitor, manager and OSD ports. Tetragon attributes
@@ -402,9 +406,19 @@ func containerEgressReason(body *tetragonLog, layer string) string {
 	if layer != "container" || body == nil || body.FunctionName != "tcp_connect" {
 		return ""
 	}
-	addr, _, ok := tcpDestination(body.Args)
+	sock, ok := tcpSocket(body.Args)
 	if !ok {
 		return ""
+	}
+	addr, err := netip.ParseAddr(sock.DAddr)
+	if err != nil {
+		return ""
+	}
+	addr = addr.Unmap()
+	dport := sock.DPort
+	src, err := netip.ParseAddr(sock.SAddr)
+	if err != nil {
+		src = netip.Addr{}
 	}
 	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsLinkLocalUnicast() {
 		return "container_bridge"
@@ -414,31 +428,79 @@ func containerEgressReason(body *tetragonLog, layer string) string {
 	}
 	// The container bridge is host-local networking between instances the
 	// network ACL already governs; it is not a path into the cluster.
+	// The bridge gateway is the host, so what it exposes there is worth
+	// seeing: only the inference gateway and the shared database are
+	// routine, and any other port on that address stays visible.
 	for _, prefix := range containerBridges {
 		if prefix.Contains(addr) {
+			if isBridgeGateway(src, addr) && !gatewayServicePort(dport) {
+				return ""
+			}
 			return "container_bridge"
 		}
 	}
 	return ""
 }
 
+// bridgeGatewayPorts are the host services a container reaches over its own
+// docker bridge gateway: the inference/catch-all nginx on 80 and the shared
+// PostgreSQL on 5432. Anything else on the gateway (node-exporter,
+// Alertmanager, the proxy, sshd) is a connection into the host and alerts.
+var bridgeGatewayPorts = map[uint16]struct{}{
+	80:   {},
+	5432: {},
+}
+
+func gatewayServicePort(port uint16) bool {
+	_, ok := bridgeGatewayPorts[port]
+	return ok
+}
+
+// isBridgeGateway reports whether dst is the default gateway of src's /24:
+// Docker gives the first address of the network to the host, so for a
+// container at 172.26.0.3 that is 172.26.0.1. Peers on the same bridge are
+// .2 and up and stay classified as container_bridge.
+func isBridgeGateway(src, dst netip.Addr) bool {
+	if !src.IsValid() || !dst.IsValid() || src.Is4() != dst.Is4() {
+		return false
+	}
+	prefix, err := src.Prefix(24)
+	if err != nil {
+		return false
+	}
+	base := prefix.Addr().As4()
+	base[3] = 1
+	return dst == netip.AddrFrom4(base)
+}
+
 func tcpDestination(raw json.RawMessage) (netip.Addr, uint16, bool) {
-	if len(raw) == 0 || string(raw) == "null" {
+	sock, ok := tcpSocket(raw)
+	if !ok {
 		return netip.Addr{}, 0, false
+	}
+	addr, err := netip.ParseAddr(sock.DAddr)
+	if err != nil {
+		return netip.Addr{}, 0, false
+	}
+	return addr.Unmap(), sock.DPort, true
+}
+
+// tcpSocket returns the socket tuple Tetragon recorded for the connect. The
+// source address matters for telling a container's bridge peer from the
+// bridge gateway, which is the host.
+func tcpSocket(raw json.RawMessage) (*tetragonSocket, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, false
 	}
 	var args []tetragonSockArg
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return netip.Addr{}, 0, false
+		return nil, false
 	}
 	for _, arg := range args {
 		if arg.SockArg == nil {
 			continue
 		}
-		addr, err := netip.ParseAddr(arg.SockArg.DAddr)
-		if err != nil {
-			continue
-		}
-		return addr.Unmap(), arg.SockArg.DPort, true
+		return arg.SockArg, true
 	}
-	return netip.Addr{}, 0, false
+	return nil, false
 }

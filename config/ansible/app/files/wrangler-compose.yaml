@@ -52,10 +52,12 @@ services:
       - 127.0.0.1:${WRANGLER_PORT:-9082}:80
     extra_hosts:
       - host.docker.internal:host-gateway
-      # Cluster inference gateway (nginx vhost on the storage VIP). Docker's
-      # resolver doesn't know *.xc, so pin the name here; the gateway still
-      # authenticates the request and injects X-User-Id for local-ai-proxy.
-      - inference.xc:10.0.0.100
+      # Cluster inference gateway. Docker's resolver doesn't know *.xc, so
+      # pin the name; pointing it at the host bridge rather than the storage
+      # VIP keeps the call host-local while the Host header still selects the
+      # inference.xc vhost, which accepts 172.16.0.0/12 and authenticates the
+      # request the same way.
+      - inference.xc:host-gateway
     depends_on:
       redis:
         condition: service_healthy

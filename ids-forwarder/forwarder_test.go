@@ -240,6 +240,21 @@ func TestContainerLayerUsesPodMetadata(t *testing.T) {
 	if got := tetragonLayer(&container); got != "container" {
 		t.Fatalf("parent pod metadata must be container, got %q", got)
 	}
+	// A Docker health check exits before the line is read, so neither pid
+	// resolves through /proc; the runtime id on the event is what places it.
+	dockerChild := tetragonLog{Process: tetragonProcess{
+		Binary: "/bin/sh",
+	}, Parent: &tetragonProc{Binary: "/bin/sh", Docker: "eef24d4469c4"}}
+	if got := tetragonLayer(&dockerChild); got != "container" {
+		t.Fatalf("docker runtime id must be container, got %q", got)
+	}
+	dockerProcess := tetragonLog{Process: tetragonProcess{
+		Binary: "/bin/sh",
+		Docker: "eef24d4469c4",
+	}}
+	if got := tetragonLayer(&dockerProcess); got != "container" {
+		t.Fatalf("docker runtime id on the process must be container, got %q", got)
+	}
 }
 
 func TestPostFansOutToEveryAlertmanager(t *testing.T) {

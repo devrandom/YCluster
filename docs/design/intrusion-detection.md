@@ -699,6 +699,11 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   session-based rather than `auid`-based: a root cron job carries `auid=0`
   exactly like a root login but runs in `cron.service`, not in a session
   scope.
+- Layer attribution reads the event before it reads `/proc`: a process or
+  parent carrying `process.docker` (the Docker runtime's container id) is a
+  container even when both pids have exited, which is the normal case for a
+  30-second health check whose uid is a host uid. The `/proc` cgroup lookup
+  still covers Incus, whose events carry no such field.
 - Does not copy raw Tetragon events into the spool and does not put IPs in
   labels, annotations, or the spool.
 - Coverage is republished through the node_exporter textfile collector
@@ -1024,7 +1029,13 @@ cases they only need to use a protocol or namespace the sensor does not observe.
    - **Container activity is almost entirely suppressed.** `process_exec` inside a
      container is dropped (`container_internal`, or by the exec allowlist before
      that), public egress is dropped as `tenant_egress`, and bridge-local traffic
-     is dropped as `container_bridge`. Only the curated Sigma rules can see
+     is dropped as `container_bridge`. The exception is the bridge's own
+     gateway: Docker gives the host the first address of the container's /24,
+     and only the inference gateway (80) and the shared PostgreSQL (5432) are
+     routine there. Any other port on that address — node-exporter,
+     Alertmanager, the inference proxy, sshd — is a connection into the host
+     and alerts. A container reaching a real cluster address is never bridge
+     traffic at all and always alerts. Only the curated Sigma rules can see
      container execs, and only through the currently broken Sigma path. The
      local Sigma filter that suppresses root interactive shells also matches a
      root shell inside an Incus container, because Incus carries no pod metadata

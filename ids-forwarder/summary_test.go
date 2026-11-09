@@ -638,6 +638,21 @@ func TestContainerWorkloadNoise_isSuppressed(t *testing.T) {
 	}
 }
 
+func TestDockerContainerExec_isSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_exec"
+	// A <1s health check: both pids are gone by read time and the uid is a
+	// host uid, so only the docker id on the event can place it.
+	line := `{"process_exec":{"process":{"binary":"/bin/sh","arguments":"-c \"redis-cli -a x ping\"","docker":"eef24d4469c4"},"parent":{"binary":"/bin/sh","docker":"eef24d4469c4"}}}`
+	_, _, ok, reason := tetragonAlertDecision(line, cfg)
+	if ok {
+		t.Fatal("container health check must not forward as a host event")
+	}
+	if reason != "container_internal" {
+		t.Fatalf("reason = %q, want container_internal", reason)
+	}
+}
+
 func TestVolatileIdentifiersCollapseUnderDedup(t *testing.T) {
 	cfg := testConfig()
 

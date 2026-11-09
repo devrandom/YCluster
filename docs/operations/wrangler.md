@@ -109,8 +109,11 @@ This deployment runs:
 | Gateway key | etcd `/cluster/config/wrangler/inference-key`, owner `receipt-wrangler@ycluster.invalid` |
 
 The container reaches the gateway because `wrangler-compose.yaml` pins
-`inference.xc` to the storage VIP in `extra_hosts`; Docker's resolver does
-not know `*.xc`. The gateway authenticates the Bearer key against its etcd
+`inference.xc` in `extra_hosts`; Docker's resolver does not know `*.xc`. The
+pin is `host-gateway`, not the storage VIP: both services are on the leader,
+so the call stays on the host bridge instead of crossing the cluster network,
+and the gateway nginx already accepts `172.16.0.0/12`. The gateway
+authenticates the Bearer key against its etcd
 key store and injects `X-User-Id` for `local-ai-proxy`, so routing, health,
 cancellation and the per-user concurrency caps all apply. The key is minted
 with `ycluster inference key create` and can be revoked with

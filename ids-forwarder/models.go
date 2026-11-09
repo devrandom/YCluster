@@ -41,6 +41,10 @@ type tetragonProcess struct {
 	PID       uint32       `json:"pid"`
 	StartTime string       `json:"start_time"`
 	Pod       *tetragonPod `json:"pod"`
+	// Docker is the container id Tetragon records for a process started by
+	// the Docker runtime. It is present on the event itself, so attribution
+	// survives a process that exited before the line was read.
+	Docker string `json:"docker"`
 }
 
 type tetragonProc struct {
@@ -50,6 +54,7 @@ type tetragonProc struct {
 	PID       uint32       `json:"pid"`
 	StartTime string       `json:"start_time"`
 	Pod       *tetragonPod `json:"pod"`
+	Docker    string       `json:"docker"`
 }
 
 type tetragonPod struct {

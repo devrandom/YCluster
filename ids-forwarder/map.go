@@ -461,6 +461,16 @@ func tetragonLayer(body *tetragonLog) string {
 	if body.Parent != nil && body.Parent.Pod != nil {
 		return "container"
 	}
+	// Docker containers carry the runtime's container id on the event, which
+	// is the only attribution that survives a short-lived child: a health
+	// check is gone from /proc before the line is read, and its uid is a
+	// host uid, so the cgroup fallback cannot place it.
+	if body.Process.Docker != "" {
+		return "container"
+	}
+	if body.Parent != nil && body.Parent.Docker != "" {
+		return "container"
+	}
 	return "host"
 }
 
