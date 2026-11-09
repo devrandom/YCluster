@@ -2533,6 +2533,10 @@ def app_landing():
                          'url': f'https://admin.{domain}/',
                          'logo': '/static/ycluster-favicon.svg',
                          'desc': 'Inventory, utilization, users, monitoring'})
+            apps.append({'name': 'Karma Alerts',
+                         'url': f'https://admin.{domain}/karma/',
+                         'logo': '/static/ycluster-favicon.svg',
+                         'desc': 'Firing alerts across the Alertmanager peers, silences'})
     return render_template('app-landing.html', domain=domain or '', apps=apps)
 
 

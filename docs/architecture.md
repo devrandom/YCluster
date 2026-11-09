@@ -41,7 +41,7 @@
   - `admin/` - Admin services (DHCP, PXE, web services, ycluster package)
   - `storage/` - Storage infrastructure (Ceph, PostgreSQL, Qdrant)
   - `app/` - Application deployments (Open-WebUI, frp)
-  - `monitoring/` - Prometheus, Grafana, alerting
+  - `monitoring/` - Prometheus, Alertmanager, Karma, Grafana
   - `inventory_plugins/etcd_nodes.py` - Dynamic inventory from etcd
 - `config/ansible/admin/files/ycluster/` - Python CLI tool source
 - `docs/` - documentation

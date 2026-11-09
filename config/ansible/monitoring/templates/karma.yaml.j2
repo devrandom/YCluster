@@ -1,0 +1,48 @@
+# Karma configuration for the YCluster alert dashboard.
+#
+# Rendered by monitoring/install-karma.yml. nginx proxies /karma/ to the
+# loopback port and supplies the identity header Karma requires; see
+# docs/design/alert-ui.md.
+listen:
+  address: 0.0.0.0
+  port: {{ karma_listen_port }}
+  prefix: /karma/
+
+# Aggregate the HA Alertmanager peers. proxy: true routes silence writes
+# through Karma, so browsers never need to reach :9093 themselves.
+alertmanager:
+  interval: 1m
+  servers:
+{% for host in groups['core'] | sort %}
+    - name: {{ host }}
+      cluster: ycluster
+      uri: http://{{ hostvars[host]['ansible_host'] }}:9093
+      timeout: 20s
+      proxy: true
+{% endfor %}
+
+authentication:
+  header:
+    name: X-Authentik-UID
+    value_re: ^(.+)$
+    # Authentik sends the groups pipe-separated. custom.js uses them to show
+    # the YCluster home link to admins only.
+    group_name: X-Authentik-Groups
+    group_value_re: ^(.+)$
+    group_value_separator: "|"
+
+filters:
+  default:
+    - "@state=active"
+
+# History queries the Prometheus that sent each alert; the local Prometheus
+# has no external URL, so the feature would only produce broken links.
+history:
+  enabled: false
+
+custom:
+  js: /etc/karma/custom.js
+
+log:
+  level: info
+  format: text

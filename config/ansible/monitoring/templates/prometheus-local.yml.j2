@@ -27,6 +27,15 @@ scrape_configs:
         labels:
           node: '{{ ansible_hostname }}'
 
+  # Karma alert dashboard: request/latency metrics and the per-Alertmanager
+  # upstream health gauges it derives from the API polls.
+  - job_name: 'karma'
+    metrics_path: '/karma/metrics'
+    static_configs:
+      - targets: ['localhost:{{ karma_port | default(8080) }}']
+        labels:
+          node: '{{ ansible_hostname }}'
+
   # Dynamic scrape targets via the local admin API.
   #
   # /api/prometheus/targets/<job> returns Prometheus http_sd format and

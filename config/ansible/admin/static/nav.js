@@ -45,6 +45,7 @@
         ['VM Usage', '/admin/vm-usage'],
         ['Users', '/admin/users'],
         ['Monitoring', '/grafana/dashboards'],
+        ['Alerts', '/karma/'],
         ['Account', authHref],
     ];
     const brand = 'YCluster';

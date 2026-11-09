@@ -1,0 +1,90 @@
+---
+# Build Karma (the Alertmanager dashboard, docs/design/alert-ui.md) from
+# source on the buildhost and push the image to the in-cluster registry.
+# monitoring/install-karma.yml pulls that tag on the core nodes.
+#
+# Upstream's Dockerfile ends in gcr.io/distroless/static, which the build
+# host cannot reach; app/files/karma.Dockerfile mirrors it with a scratch
+# final stage (Karma is static and only talks plain HTTP to Alertmanager).
+#
+# The build host can reach GitHub directly (git ls-remote verified
+# 2026-11-09), so the first run clones into /opt/src/karma. Later runs never
+# pull; bump karma_repo_sha and clone/check out manually, as
+# build-open-webui.yml does for its fork.
+- name: Build Karma from source
+  hosts: "{{ buildhost | default('s1') }}"
+  vars:
+    karma_version: "v0.134"
+    # https://github.com/prymitive/karma/releases/tag/v0.134
+    karma_repo_sha: "72300baf94b6bd8d986f08bdc80b8a92d2553ecd"
+    karma_build_dir: /opt/src/karma
+    karma_image_repo: registry.xc:5000/karma
+    karma_image: "{{ karma_image_repo }}:{{ karma_version }}"
+    # Egress proxy on the cluster gateway for the npm and Go module fetches
+    # inside the build stages, matching build-open-webui.yml.
+    karma_build_proxy: "http://{{ gateway_vip }}:3128"
+  tasks:
+    - name: Verify registry is ready for push operations
+      uri:
+        url: http://registry.xc:5000/v2/_catalog
+        method: GET
+        timeout: 10
+      register: karma_registry_catalog
+      failed_when: karma_registry_catalog.status != 200
+
+    - name: Create build directory
+      file:
+        path: "{{ karma_build_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check out Karma source
+      git:
+        repo: https://github.com/prymitive/karma.git
+        dest: "{{ karma_build_dir }}"
+        version: "{{ karma_repo_sha }}"
+        force: yes
+        update: false
+
+    - name: Verify Karma checkout is at the requested revision
+      command: git rev-parse HEAD
+      args:
+        chdir: "{{ karma_build_dir }}"
+      register: karma_head
+      changed_when: false
+      failed_when: karma_head.stdout != karma_repo_sha
+
+    - name: Copy Karma build Dockerfile
+      copy:
+        src: files/karma.Dockerfile
+        dest: "{{ karma_build_dir }}/karma.Dockerfile"
+        mode: '0644'
+
+    - name: Exclude VCS metadata from the build context
+      copy:
+        dest: "{{ karma_build_dir }}/.dockerignore"
+        content: ".git\n"
+        mode: '0644'
+
+    - name: Build and push the Karma image
+      shell: |
+        set -o pipefail
+        docker buildx build \
+          --build-arg http_proxy={{ karma_build_proxy }} \
+          --build-arg https_proxy={{ karma_build_proxy }} \
+          --build-arg VERSION={{ karma_version }} \
+          --cache-from type=registry,ref={{ karma_image_repo }}:cache \
+          --cache-to type=registry,ref={{ karma_image_repo }}:cache,mode=max \
+          --progress plain \
+          --tag {{ karma_image }} \
+          --push \
+          --file karma.Dockerfile \
+          . | tee /tmp/build-karma.log 2>&1
+      args:
+        chdir: "{{ karma_build_dir }}"
+        executable: /bin/bash
+      no_log: false
+
+    - name: Display build completion
+      debug:
+        msg: "{{ karma_image }} built and pushed to the cluster registry"

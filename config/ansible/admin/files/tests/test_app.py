@@ -1779,6 +1779,7 @@ class AppLandingTests(SchedTestBase):
         self.assertNotIn(b"Settings", r.data)
         # A plain user is neither admin nor manager -> no Admin link.
         self.assertNotIn(b"YCluster Admin", r.data)
+        self.assertNotIn(b"Karma Alerts", r.data)
 
     def test_landing_links_use_seeded_domain(self):
         self.seed_domain("example.com")
@@ -1813,12 +1814,15 @@ class AppLandingTests(SchedTestBase):
         self.assertEqual(r.status_code, 200)
         self.assertIn(b"YCluster Admin", r.data)
         self.assertIn(b"https://admin.example.com/", r.data)
+        self.assertIn(b"Karma Alerts", r.data)
+        self.assertIn(b"https://admin.example.com/karma/", r.data)
 
     def test_manager_sees_admin_link(self):
         self.seed_domain()
         r = self.get("/", admin=False, email="alice@x", manager=True)
         self.assertEqual(r.status_code, 200)
         self.assertIn(b"YCluster Admin", r.data)
+        self.assertIn(b"Karma Alerts", r.data)
 
     def test_landing_without_domain_renders_empty(self):
         # No /cluster/https/domain and no app. host: no cross-subdomain apps
@@ -1827,6 +1831,7 @@ class AppLandingTests(SchedTestBase):
         r = self.get("/", admin=True)
         self.assertEqual(r.status_code, 200)
         self.assertNotIn(b"YCluster Admin", r.data)
+        self.assertNotIn(b"Karma Alerts", r.data)
 
 
 class FrontendNatRulesApiTest(SchedTestBase):

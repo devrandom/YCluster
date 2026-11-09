@@ -72,6 +72,11 @@ build_cache_dir: ./tmp/build-cache
 # scrape config.
 inference_proxy_metrics_port: 4010
 
+# Karma alert dashboard (docs/design/alert-ui.md). Loopback port on each
+# core node; nginx proxies /karma/ to it and the local Prometheus scrapes
+# its /metrics. Shared by monitoring/install-karma.yml and the scrape config.
+karma_port: 8080
+
 # Cluster gateway VIP — keepalived-managed across core nodes; routes
 # external traffic and runs dnsmasq + squid for joining nodes.
 gateway_vip: "10.0.0.254"

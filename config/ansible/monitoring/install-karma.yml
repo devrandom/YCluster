@@ -1,0 +1,73 @@
+---
+# Karma alert dashboard on every core node (docs/design/alert-ui.md).
+#
+# Karma reads the HA Alertmanager instances over the cluster network and
+# serves a merged, filterable view behind nginx at /karma/. The container
+# listens only on the node's loopback; the admin-api nginx vhosts front it
+# and supply the Authentik identity header Karma requires.
+#
+# Build the image first with app/build-karma.yml.
+- name: Install Karma alert dashboard
+  hosts: core
+  become: yes
+  vars:
+    karma_version: "v0.134"
+    karma_image: "registry.xc:5000/karma:{{ karma_version }}"
+    karma_config_dir: /etc/karma
+    karma_listen_port: "{{ karma_port | default(8080) }}"
+  tasks:
+    - name: Create Karma configuration directory
+      file:
+        path: "{{ karma_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Configure Karma
+      template:
+        src: karma.yaml.j2
+        dest: "{{ karma_config_dir }}/karma.yaml"
+        mode: '0644'
+      notify: restart karma
+
+    - name: Install Karma custom assets
+      copy:
+        src: files/karma-custom.js
+        dest: "{{ karma_config_dir }}/custom.js"
+        mode: '0644'
+      notify: restart karma
+
+    - name: Run Karma container
+      docker_container:
+        name: karma
+        image: "{{ karma_image }}"
+        state: started
+        restart_policy: unless-stopped
+        command: ["--config.file={{ karma_config_dir }}/karma.yaml"]
+        ports:
+          - "127.0.0.1:{{ karma_listen_port }}:8080"
+        volumes:
+          - "{{ karma_config_dir }}:/etc/karma:ro"
+        cap_drop:
+          - ALL
+        security_opts:
+          - no-new-privileges:true
+
+    - name: Apply the configuration restart before probing
+      meta: flush_handlers
+
+    - name: Wait for the Karma health endpoint
+      uri:
+        url: "http://127.0.0.1:{{ karma_listen_port }}/karma/health"
+        status_code: 200
+      register: karma_health
+      until: karma_health.status == 200
+      retries: 30
+      delay: 2
+      changed_when: false
+
+  handlers:
+    - name: restart karma
+      docker_container:
+        name: karma
+        state: started
+        restart: yes

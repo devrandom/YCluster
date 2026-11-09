@@ -297,6 +297,13 @@
       notify: restart nginx
       when: "'storage' in group_names"
 
+    - name: Install shared karma proxy snippet
+      copy:
+        src: admin-api-karma-proxy.conf
+        dest: /etc/nginx/admin-api-karma-proxy.conf
+      notify: restart nginx
+      when: "'storage' in group_names"
+
     # open-webui-locations.conf is included by open-webui.conf.j2 (single
     # source: certbot-manager-rendered for both the plain :443 and the frp
     # tunnel landing). The `(( port ))` marker is substituted here with the
