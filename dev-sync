@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pyinotify
@@ -64,6 +65,96 @@ RSYNC_CHECK_OPTS = ['-naci', '--no-owner', '--no-group', '--copy-unsafe-links',
 # either start-of-path or after a slash, and either end-of-path or before a
 # slash -- so ".git" matches ".git", ".git/HEAD", "subdir/.git", "x/.git/y".
 SKIP_RE = re.compile(r'(^|/)(\.git|tmp|__pycache__|\.venv|venv|trees|work)(/|$)')
+
+# fs.inotify max_user_watches is 65536 here, and the repo has ~115k
+# directories: ext/ ~19k, tmp/ ~38k, work/ ~53k, .venv/ ~4k. Adding a watch
+# for every one of them exhausted the budget part-way through the walk, and
+# pyinotify's add_watch is quiet=True by default, so every later watch --
+# including the out-of-tree config/ansible/host_vars symlink target --
+# failed with ENOSPC and was silently dropped. Private-repo edits then never
+# fired an event even though --check saw them as out of sync.
+#
+# The fix is to watch only what is actually synced: .watchignore is already
+# the source of truth for the rsync side, so prune the same paths here and
+# the walk drops to a few hundred directories.
+WATCHIGNORE = REPO / '.watchignore'
+
+
+def _excluded_patterns():
+    """Parse .watchignore into (kind, pattern) directory-prune rules."""
+    pats = []
+    try:
+        lines = WATCHIGNORE.read_text().splitlines()
+    except OSError:
+        return pats
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('+ '):  # rsync include; never a prune rule
+            continue
+        line = line.rstrip('/')
+        if line.startswith('/'):
+            pats.append(('root', line[1:]))
+        elif line.startswith('**/'):
+            pats.append(('name', line[3:]))
+        elif '/' in line:
+            pats.append(('root', line))
+        else:
+            pats.append(('name', line))
+    return pats
+
+
+EXCLUDED = _excluded_patterns()
+
+
+def is_excluded(rel):
+    """True when a repo-relative path is kept off the cluster."""
+    if rel in ('', '.'):
+        return False
+    rel = rel[2:] if rel.startswith('./') else rel
+    base = rel.rsplit('/', 1)[-1]
+    for kind, pat in EXCLUDED:
+        if kind == 'root':
+            if rel == pat or rel.startswith(pat + '/'):
+                return True
+        elif fnmatch(base, pat):
+            return True
+    return bool(SKIP_RE.search(rel))
+
+
+def add_watches(wm, root, mask, label, prune):
+    """Watch root recursively, skipping paths the sync excludes.
+
+    pyinotify's rec=True would add a watch per directory in the tree,
+    including ext/, tmp/, work/ and .venv/ -- more directories than
+    fs.inotify allows user watches for. Walk ourselves instead so the watch
+    set matches the synced set, and report (rather than swallow) failures.
+    Returns the list of directories that could not be watched.
+    """
+    failed = []
+    watched = 0
+    for dirpath, dirnames, _ in os.walk(root, followlinks=False):
+        if prune:
+            rel_dir = os.path.relpath(dirpath, root)
+            dirnames[:] = [
+                d for d in dirnames
+                if not is_excluded(d if rel_dir == '.' else f'{rel_dir}/{d}')
+            ]
+        if wm.add_watch(dirpath, mask, quiet=True).get(dirpath, -1) < 0:
+            failed.append(dirpath)
+        else:
+            watched += 1
+    log(f'{label}: {watched} dir(s) watched'
+        + (f', {len(failed)} FAILED' if failed else ''))
+    for p in failed[:5]:
+        try:
+            limit = Path('/proc/sys/fs/inotify/max_user_watches').read_text().strip()
+        except OSError:
+            limit = '?'
+        log(f'{label}: cannot watch {p} (max_user_watches={limit}) — '
+            'edits there will not trigger a sync')
+    return failed
 
 
 def log(line):
@@ -266,10 +357,20 @@ def main_daemon():
     wm = pyinotify.WatchManager()
     mask = (pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CREATE
             | pyinotify.IN_DELETE | pyinotify.IN_MOVED_TO
-            | pyinotify.IN_MOVED_FROM)
-    wm.add_watch(str(REPO), mask, rec=True)
+            | pyinotify.IN_MOVED_FROM | pyinotify.IN_ATTRIB)
+
+    # A failed repo watch means nothing fires at all; that is fatal, not a
+    # warning, so the operator sees it in --status instead of trusting a
+    # daemon that silently watches nothing.
+    if add_watches(wm, REPO, mask, 'repo', prune=True):
+        log('daemon exiting: repo watch incomplete')
+        try:
+            SOCK.unlink()
+        except FileNotFoundError:
+            pass
+        sys.exit('dev-sync: could not watch the repo; see tmp/dev-sync.log')
     for r in extra_roots:
-        wm.add_watch(str(r), mask, rec=True)
+        add_watches(wm, r, mask, f'external {r}', prune=False)
     notifier = pyinotify.Notifier(wm, on_event)
 
     def shutdown(signum, frame):
