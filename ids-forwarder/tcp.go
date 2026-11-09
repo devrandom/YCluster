@@ -416,10 +416,6 @@ func containerEgressReason(body *tetragonLog, layer string) string {
 	}
 	addr = addr.Unmap()
 	dport := sock.DPort
-	src, err := netip.ParseAddr(sock.SAddr)
-	if err != nil {
-		src = netip.Addr{}
-	}
 	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsLinkLocalUnicast() {
 		return "container_bridge"
 	}
@@ -433,7 +429,7 @@ func containerEgressReason(body *tetragonLog, layer string) string {
 	// routine, and any other port on that address stays visible.
 	for _, prefix := range containerBridges {
 		if prefix.Contains(addr) {
-			if isBridgeGateway(src, addr) && !gatewayServicePort(dport) {
+			if isBridgeGateway(addr) && !gatewayServicePort(dport) {
 				return ""
 			}
 			return "container_bridge"
@@ -456,21 +452,17 @@ func gatewayServicePort(port uint16) bool {
 	return ok
 }
 
-// isBridgeGateway reports whether dst is the default gateway of src's /24:
-// Docker gives the first address of the network to the host, so for a
-// container at 172.26.0.3 that is 172.26.0.1. Peers on the same bridge are
-// .2 and up and stay classified as container_bridge.
-func isBridgeGateway(src, dst netip.Addr) bool {
-	if !src.IsValid() || !dst.IsValid() || src.Is4() != dst.Is4() {
+// isBridgeGateway reports whether dst is the host end of a docker network.
+// Docker gives each network's first address to the host, so every gateway is
+// an address ending in .1 inside the range it allocates from, and instances
+// start at .2. The container may be on a project network while the host is
+// reached through docker0 (host-gateway is 172.17.0.1), so the comparison is
+// on the address shape rather than on the sender's own subnet.
+func isBridgeGateway(dst netip.Addr) bool {
+	if !dst.IsValid() || !dst.Is4() {
 		return false
 	}
-	prefix, err := src.Prefix(24)
-	if err != nil {
-		return false
-	}
-	base := prefix.Addr().As4()
-	base[3] = 1
-	return dst == netip.AddrFrom4(base)
+	return dst.As4()[3] == 1
 }
 
 func tcpDestination(raw json.RawMessage) (netip.Addr, uint16, bool) {

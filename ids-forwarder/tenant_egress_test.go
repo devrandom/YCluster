@@ -153,7 +153,9 @@ func TestContainerBridgeTrafficIsClassified(t *testing.T) {
 		{"172.26.0.3", "172.26.0.2", 6379},   // compose network peer
 		{"172.26.0.3", "172.26.0.1", 80},     // host gateway: inference nginx
 		{"172.26.0.3", "172.26.0.1", 5432},   // host gateway: shared PostgreSQL
-		{"10.100.0.20", "127.0.0.1", 8000},   // the instance itself
+		{"172.26.0.3", "172.17.0.1", 80},     // host-gateway resolves to docker0
+		{"172.26.0.3", "172.17.0.1", 5432},
+		{"10.100.0.20", "127.0.0.1", 8000}, // the instance itself
 	} {
 		if _, _, ok, reason := tetragonAlertDecision(containerTCPLineFrom(t, pid, started, dst.src, dst.addr, dst.port), cfg); ok || reason != "container_bridge" {
 			t.Fatalf("container -> %s:%d: ok=%v reason=%q, want container_bridge", dst.addr, dst.port, ok, reason)
@@ -171,13 +173,15 @@ func TestContainerBridgeGatewayOtherPortsAlert(t *testing.T) {
 	cfg.events = "process_kprobe"
 	// The gateway is the host: what it exposes there beyond the inference
 	// gateway and the shared database is a connection into the host.
-	for _, port := range []int{22, 9100, 9093, 4001, 2375} {
-		a, _, ok, reason := tetragonAlertDecision(containerTCPLineFrom(t, pid, started, "172.26.0.3", "172.26.0.1", port), cfg)
-		if !ok {
-			t.Fatalf("container -> gateway:%d was suppressed as %q", port, reason)
-		}
-		if a.Labels["layer"] != "container" {
-			t.Fatalf("gateway:%d lost container attribution: %v", port, a.Labels)
+	for _, dst := range []string{"172.26.0.1", "172.17.0.1"} {
+		for _, port := range []int{22, 9100, 9093, 4001, 2375} {
+			a, _, ok, reason := tetragonAlertDecision(containerTCPLineFrom(t, pid, started, "172.26.0.3", dst, port), cfg)
+			if !ok {
+				t.Fatalf("container -> %s:%d was suppressed as %q", dst, port, reason)
+			}
+			if a.Labels["layer"] != "container" {
+				t.Fatalf("%s:%d lost container attribution: %v", dst, port, a.Labels)
+			}
 		}
 	}
 }

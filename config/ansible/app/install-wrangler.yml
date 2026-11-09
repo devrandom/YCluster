@@ -34,7 +34,10 @@
     wrangler_redis_registry_image: "registry.xc:5000/redis:{{ wrangler_redis_version }}-ec1c2d3603c3"
     wrangler_port: "{{ wrangler_local_port | default('9082') }}"
     # SSO requires the public auth.<domain> discovery URL, so external access
-    # is what turns OIDC on. Internal-only mode keeps password login.
+    # is what turns OIDC on. Internal-only mode keeps password login. The
+    # default stays internal-only because enabling the vhost adds the name to
+    # the shared certificate SAN list; deployments that serve it set
+    # wrangler_external in their inventory so a converge does not drop it.
     wrangler_external_enabled: "{{ wrangler_external | default(false) }}"
     wrangler_data_dir: /rbd/user/wrangler
     wrangler_redis_dir: /rbd/user/wrangler/redis
