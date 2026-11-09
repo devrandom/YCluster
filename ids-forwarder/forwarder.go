@@ -395,6 +395,7 @@ func (f *forwarder) handleLine(line string) error {
 		f.cursor.advance(meta.time, meta.hash)
 		return nil
 	}
+	f.stats.countOrigin(a.Labels["origin"])
 	if err := f.enqueue(a); err != nil {
 		return &spoolError{err: fmt.Errorf("queue alert %s: %w", a.Labels["rule_id"], err)}
 	}

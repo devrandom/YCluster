@@ -121,6 +121,17 @@ func (f *forwarder) startMetrics() error {
 		for _, reason := range reasons {
 			fmt.Fprintf(w, "ids_forwarder_suppressed_total{reason=%q} %d\n", reason, suppressed[reason])
 		}
+		fmt.Fprintf(w, "# HELP ids_forwarder_detections_total Classified detections by process origin, before dedup, coalescing and rate limiting.\n")
+		fmt.Fprintf(w, "# TYPE ids_forwarder_detections_total counter\n")
+		origins := f.stats.originCounts()
+		names := make([]string, 0, len(origins))
+		for origin := range origins {
+			names = append(names, origin)
+		}
+		sort.Strings(names)
+		for _, origin := range names {
+			fmt.Fprintf(w, "ids_forwarder_detections_total{origin=%q} %d\n", origin, origins[origin])
+		}
 	})
 	srv := &http.Server{Addr: f.cfg.metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ln, err := net.Listen("tcp", f.cfg.metricsListen)

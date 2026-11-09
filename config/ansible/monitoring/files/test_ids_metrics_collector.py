@@ -53,6 +53,7 @@ class IdsMetricsCollectorTests(unittest.TestCase):
         forwarder = (
             "# HELP ids_forwarder_dropped_total dropped\n"
             "ids_forwarder_dropped_total 3\n"
+            'ids_forwarder_detections_total{origin="interactive"} 4\n'
             "ids_forwarder_queue_depth{queue=\"spool\"} 7\n"
             "unrelated_metric 9\n"
         )
@@ -80,6 +81,7 @@ class IdsMetricsCollectorTests(unittest.TestCase):
         self.assertIn('ids_component_up{component="tetragon"} 1', body)
         self.assertIn('ids_component_up{component="crowdsec"} 0', body)
         self.assertIn("ids_forwarder_dropped_total 3", body)
+        self.assertIn('ids_forwarder_detections_total{origin="interactive"} 4', body)
         self.assertIn('ids_forwarder_queue_depth{queue="spool"} 7', body)
         self.assertNotIn("unrelated_metric", body)
         self.assertFalse(list(col.OUT.parent.glob(".ids.*")))

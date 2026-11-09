@@ -17,22 +17,29 @@ var procRoot = "/proc"
 // start time must match /proc or the pid has been reused since the event was
 // written, which is common during replay.
 func containerForProcess(pid uint32, startTime string) (string, bool) {
+	cgroup, ok := cgroupPath(pid, startTime)
+	if !ok {
+		return "", false
+	}
+	return containerNameFromCgroup(cgroup)
+}
+
+// cgroupPath returns the process's cgroup file, guarding against pid reuse
+// the same way container attribution does: /proc must belong to the process
+// the event named, not to whatever has the pid now.
+func cgroupPath(pid uint32, startTime string) (string, bool) {
 	if pid == 0 || startTime == "" {
 		return "", false
 	}
 	base := fmt.Sprintf("%s/%d", procRoot, pid)
-	cgroup, err := os.ReadFile(base + "/cgroup")
+	data, err := os.ReadFile(base + "/cgroup")
 	if err != nil {
-		return "", false
-	}
-	name, ok := containerNameFromCgroup(string(cgroup))
-	if !ok {
 		return "", false
 	}
 	if !processStartMatches(base, startTime) {
 		return "", false
 	}
-	return name, true
+	return string(data), true
 }
 
 // containerForEvent attributes an event to a container. Short-lived children

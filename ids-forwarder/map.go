@@ -84,6 +84,7 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 			a := newAlert(cfg, sourceTetragon, "warning", layer, "exec-root-user-path",
 				"process_exec: binary="+body.Process.Binary+" root-exec")
 			a.Labels["binary"] = processBinaryName(body.Process.Binary)
+			applyOrigin(&a, body, layer)
 			a.dedupIdentity = identityHash("exec-root-user-path|" + body.Process.Binary)
 			a.StartsAt = meta.time.Format(time.RFC3339Nano)
 			a.eventTime = meta.time
@@ -103,6 +104,7 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	}
 	summary := eventSummary(evType, body)
 	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), summary)
+	applyOrigin(&a, body, layer)
 	if body.FunctionName == "tcp_connect" {
 		if addr, port, ok := tcpDestination(body.Args); ok {
 			a.Labels["dest"] = destinationLabel(addr, port)
@@ -145,6 +147,26 @@ func tetragonEventLayer(body *tetragonLog) (layer, containerName string) {
 		return "container", name
 	}
 	return layer, ""
+}
+
+// applyOrigin records which login session or systemd unit started the
+// process. Provenance only: nothing suppresses, coalesces or routes on it
+// yet, it exists so the stream can be measured per actor first. Every alert
+// carries an origin, including "unknown", so a resolution regression shows
+// up as a series rather than disappearing.
+func applyOrigin(a *alert, body *tetragonLog, layer string) {
+	if layer == "container" {
+		a.Labels["origin"] = "container"
+		return
+	}
+	o := eventOrigin(body.Process, body.Parent)
+	a.Labels["origin"] = o.Origin
+	if o.Actor == "" {
+		return
+	}
+	// These labels are set after newAlert's redaction pass, so they get it
+	// here instead of trusting the value to be address-free.
+	a.Labels["actor"] = redactIPs(o.Actor)
 }
 
 // tetragonSuppression returns the reason an event is not forwarded, or ""

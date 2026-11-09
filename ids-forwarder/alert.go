@@ -62,6 +62,12 @@ func (a alert) dedupKey() string {
 		if k == "severity" {
 			continue // severity changes should not defeat dedup
 		}
+		if k == "origin" || k == "actor" {
+			// Provenance describes the alert, it does not make it a
+			// different signal: one shell on one host stays one alert
+			// whichever session or unit ran it.
+			continue
+		}
 		if k == "binary" && shell {
 			continue // sh, bash and dash are the same signal on one host
 		}
@@ -228,6 +234,35 @@ type metrics struct {
 
 	suppressedMu sync.Mutex
 	suppressed   map[string]int64
+
+	originMu sync.Mutex
+	origins  map[string]int64
+}
+
+// countOrigin tallies classified detections by provenance, before dedup,
+// coalescing and rate limiting, so the origin split can be measured before
+// any routing depends on it. An empty origin is counted as "unset" rather
+// than skipped, so a labelling regression is visible instead of silent.
+func (m *metrics) countOrigin(origin string) {
+	if origin == "" {
+		origin = "unset"
+	}
+	m.originMu.Lock()
+	defer m.originMu.Unlock()
+	if m.origins == nil {
+		m.origins = map[string]int64{}
+	}
+	m.origins[origin]++
+}
+
+func (m *metrics) originCounts() map[string]int64 {
+	m.originMu.Lock()
+	defer m.originMu.Unlock()
+	out := make(map[string]int64, len(m.origins))
+	for origin, count := range m.origins {
+		out[origin] = count
+	}
+	return out
 }
 
 func (m *metrics) suppress(reason string) {

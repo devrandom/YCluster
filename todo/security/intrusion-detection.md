@@ -306,6 +306,18 @@ different costs and privacy exposure.
 
 ## Open questions
 
+- Provenance is now recorded per detection (`origin=interactive|unit|
+  container`, `actor=<user|unit>`, counted in
+  `ids_forwarder_detections_total`). Whether to route on it is open: the
+  candidate design is a per-actor budget with a session digest instead of
+  per-event pages, keeping a never-routine set (root exec from `/home` or
+  `/var/tmp`, module loads not from the kernel alias path, privilege
+  transitions to uid 0, writes to `/etc/shadow` or `authorized_keys`) that
+  pages regardless of actor. A blanket "root shell and Ansible never alert"
+  is rejected: it makes a stolen bastion session the quiet path. Separating
+  the automation identity from the human one (playbooks as a dedicated user)
+  is what makes Ansible distinguishable at all, since every task is a fresh
+  login session.
 - Which malicious-user paths matter most in practice: guest-to-guest traffic,
   abuse of operator credentials, or misuse of the Ansible/agent access path?
 - What non-IP evidence is sufficient for incidents that surface after the

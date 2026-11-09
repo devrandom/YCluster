@@ -672,6 +672,27 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   `ids_forwarder_cursor_errors_total`, `ids_forwarder_forwarded_total`,
   `ids_forwarder_deduped_total` and
   `ids_forwarder_suppressed_total{reason=...}`.
+- Labels every detection with `origin=interactive|unit|container|unknown` and,
+  for the first two, `actor=<login user|unit name>`. The origin comes from the
+  process cgroup, read from the same `/proc/<pid>/cgroup` lookup that already
+  attributes containers, with the same start-time guard against pid reuse:
+  `user.slice/user-<uid>.slice/session-<n>.scope` is a login session (the user
+  is resolved from `/run/systemd/sessions/<n>`, never from a remote address),
+  `system.slice/<unit>` is a systemd unit. Container cgroups are rejected
+  before the session parser runs, because a payload has session scopes of its
+  own whose numbers mean nothing on the host. Slices are skipped when naming a
+  unit, so `system-getty.slice/getty@tty1.service` reports `getty@tty1`, and a
+  `run-r<hex>.scope` from `systemd-run` keeps `origin=unit` without an actor
+  so a label value is not created per invocation. The parser assumes unified
+  cgroup v2, which every managed node uses. It is provenance, not policy: no
+  suppression or routing decision reads it, `dedupKey` ignores it, every alert
+  carries an origin (the root-exec rule included), and the counts are
+  published as `ids_forwarder_detections_total{origin=...}` — classified
+  detections, before dedup, coalescing and rate limiting, with an `unset`
+  bucket so a labelling regression is visible. Cron is the reason this is
+  session-based rather than `auid`-based: a root cron job carries `auid=0`
+  exactly like a root login but runs in `cron.service`, not in a session
+  scope.
 - Does not copy raw Tetragon events into the spool and does not put IPs in
   labels, annotations, or the spool.
 - Coverage is republished through the node_exporter textfile collector

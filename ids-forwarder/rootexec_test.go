@@ -77,6 +77,12 @@ func TestRootExecUserPathAlert(t *testing.T) {
 			if a.Labels["binary"] != "tool" {
 				t.Errorf("binary = %q", a.Labels["binary"])
 			}
+			// This branch returns before the shared labelling path, so it
+			// has to carry provenance itself or the paging rule that
+			// matters most drops out of the origin measurement.
+			if a.Labels["origin"] == "" {
+				t.Error("root-exec alert carries no origin label")
+			}
 		})
 	}
 }
