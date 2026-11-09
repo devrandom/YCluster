@@ -410,6 +410,7 @@ def get_hosts():
         f"{STORAGE_VIP} auth.xc",
         f"{STORAGE_VIP} forgejo.xc",
         f"{STORAGE_VIP} vikunja.xc",
+        f"{STORAGE_VIP} wrangler.xc",
     ])
 
     # Forgejo advertises git.<domain> for SSH clone URLs when external SSH
@@ -423,6 +424,7 @@ def get_hosts():
             f"{STORAGE_VIP} git.{domain}",
             f"{STORAGE_VIP} auth.{domain}",
             f"{STORAGE_VIP} tasks.{domain}",
+            f"{STORAGE_VIP} receipts.{domain}",
         ])
 
     if hosts_entries:

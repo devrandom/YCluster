@@ -77,6 +77,11 @@ the web UI uses OIDC and API/CalDAV clients use Vikunja tokens, so Vikunja is
 its own credential boundary. Do not add the outpost include to
 `vikunja_tasks.conf.j2`; it is tiered P0-U in `perimeter_software.yml`.
 
+`receipts.<domain>` (Receipt Wrangler, when external access is enabled) is
+the same exception again: the web UI and mobile app log in through OIDC, and
+API clients use Wrangler JWTs. Do not add the outpost include to
+`wrangler_receipts.conf.j2`; it is tiered P0-U in `perimeter_software.yml`.
+
 Forgejo SSH is not an nginx vhost at all. It is a raw TCP proxy registered
 by the leader-gated `frpc` (`name = "forgejo-ssh"`, frontend port 2222,
 backend `127.0.0.1:2222`). The frontend UFW opens 2222 by default; set

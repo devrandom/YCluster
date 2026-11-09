@@ -1,0 +1,69 @@
+services:
+  redis:
+    # WRANGLER_REDIS_IMAGE is set by the systemd unit. Redis backs the
+    # background job queue (OCR, email polling, scheduled tasks); the app
+    # refuses to start without it.
+    image: ${WRANGLER_REDIS_IMAGE:-registry.xc:5000/redis:7.4.12-ec1c2d3603c3}
+    container_name: wrangler-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    command:
+      - sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes
+    volumes:
+      - ${WRANGLER_REDIS_DIR:-/rbd/user/wrangler/redis}:/data
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  wrangler:
+    # WRANGLER_IMAGE is set by the systemd unit. The fallback is the
+    # digest-derived in-cluster tag so a manual compose run cannot silently
+    # fall back to a mutable upstream tag.
+    image: ${WRANGLER_IMAGE:-registry.xc:5000/wrangler:7.3.0-fbc9034d666b}
+    container_name: wrangler
+    environment:
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY must be set}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set}
+      DB_ENGINE: postgresql
+      DB_HOST: host.docker.internal
+      DB_PORT: "5432"
+      DB_NAME: wrangler
+      DB_USER: wrangler
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    volumes:
+      # Uploaded receipt images, generated PDFs and the SQLite fallback
+      # directory live under data/. logs/ holds the API's rotating logs.
+      - ${WRANGLER_DATA_DIR:-/rbd/user/wrangler}/data:/app/receipt-wrangler-api/data
+      - ${WRANGLER_DATA_DIR:-/rbd/user/wrangler}/logs:/app/receipt-wrangler-api/logs
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      # Host nginx is the only web ingress. The bundled nginx listens on 80
+      # and proxies /api to the Go API on localhost:8081 inside the container.
+      - 127.0.0.1:${WRANGLER_PORT:-9082}:80
+    extra_hosts:
+      - host.docker.internal:host-gateway
+      # Cluster inference gateway (nginx vhost on the storage VIP). Docker's
+      # resolver doesn't know *.xc, so pin the name here; the gateway still
+      # authenticates the request and injects X-User-Id for local-ai-proxy.
+      - inference.xc:10.0.0.100
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # The image is Debian with bash; avoid depending on curl being present.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/80'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped

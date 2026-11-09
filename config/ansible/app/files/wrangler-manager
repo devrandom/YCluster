@@ -1,0 +1,168 @@
+#!/bin/bash
+set -euo pipefail
+
+# etcd client config (endpoints + TLS certs) from the single source; set -a
+# exports the ETCDCTL_* vars so the bare etcdctl calls below pick them up.
+set -a; . /etc/ycluster/etcd-client.env 2>/dev/null || true; set +a
+
+WRANGLER_DATA_DIR="${WRANGLER_DATA_DIR:-/rbd/user/wrangler}"
+WRANGLER_REDIS_DIR="${WRANGLER_REDIS_DIR:-$WRANGLER_DATA_DIR/redis}"
+WRANGLER_CONFIG_DIR="${WRANGLER_CONFIG_DIR:-/etc/wrangler}"
+WRANGLER_PORT="${WRANGLER_PORT:-9082}"
+COMPOSE_PROJECT="wrangler"
+ETCD_KEY_PREFIX="/cluster/config/wrangler"
+
+get_secret() {
+    etcdctl get "${ETCD_KEY_PREFIX}/$1" --print-value-only 2>/dev/null || true
+}
+
+wait_for_registry() {
+    local max_attempts=12
+    local delay=5
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://registry.xc:5000/v2/" > /dev/null 2>&1; then
+            return 0
+        fi
+        echo "Waiting for registry (attempt $attempt/$max_attempts)..."
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Registry not available after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+wait_for_wrangler() {
+    local max_attempts=90
+    local delay=2
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -sf --max-time 3 "http://127.0.0.1:${WRANGLER_PORT}/" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep $delay
+        attempt=$((attempt + 1))
+    done
+
+    echo "Wrangler did not become healthy after $((max_attempts * delay)) seconds"
+    return 1
+}
+
+bootstrap_oidc() {
+    local external_domain="$1"
+    local admin_password="$2"
+    local oidc_secret attempt
+
+    for attempt in $(seq 1 30); do
+        oidc_secret=$(etcdctl get /cluster/config/authentik/wrangler-client-secret --print-value-only 2>/dev/null || true)
+        [ -n "$oidc_secret" ] && break
+        sleep 2
+    done
+    if [ -z "$oidc_secret" ]; then
+        echo "Authentik Wrangler client secret not published yet; skipping OIDC setup"
+        return 0
+    fi
+
+    WRANGLER_API_URL="http://127.0.0.1:${WRANGLER_PORT}" \
+    WRANGLER_ADMIN_PASSWORD="$admin_password" \
+    WRANGLER_SERVER_PUBLIC_URL="https://receipts.$external_domain" \
+    WRANGLER_OIDC_ISSUER="https://auth.$external_domain/application/o/wrangler/" \
+    WRANGLER_OIDC_CLIENT_SECRET="$oidc_secret" \
+        /usr/local/lib/cluster/wrangler-bootstrap || \
+        echo "Wrangler bootstrap failed; finish OIDC setup from the admin UI"
+}
+
+start_wrangler() {
+    mkdir -p "$WRANGLER_DATA_DIR"/{data,logs} "$WRANGLER_REDIS_DIR"
+    # The redis image runs as the redis user (uid 999) after dropping root.
+    chown -R 999:999 "$WRANGLER_REDIS_DIR"
+
+    local db_password encryption_key secret_key redis_password admin_password
+    db_password=$(get_secret db-password)
+    encryption_key=$(get_secret encryption-key)
+    secret_key=$(get_secret secret-key)
+    redis_password=$(get_secret redis-password)
+    admin_password=$(get_secret admin-password)
+
+    if [ -z "$db_password" ] || [ -z "$encryption_key" ] || [ -z "$secret_key" ] \
+        || [ -z "$redis_password" ] || [ -z "$admin_password" ]; then
+        echo "Wrangler secrets missing from etcd; run install-wrangler.yml first"
+        return 1
+    fi
+
+    local env_file
+    env_file=$(mktemp --tmpdir=/dev/shm)
+    trap "rm -f '$env_file'" EXIT
+
+    # Secrets go through a 0600 file in /dev/shm, never through argv: the
+    # cluster's IDS logs command arguments.
+    umask 077
+    cat > "$env_file" <<EOF
+WRANGLER_IMAGE=${WRANGLER_IMAGE:?WRANGLER_IMAGE must be set by the unit}
+WRANGLER_REDIS_IMAGE=${WRANGLER_REDIS_IMAGE:?WRANGLER_REDIS_IMAGE must be set by the unit}
+WRANGLER_PORT=$WRANGLER_PORT
+WRANGLER_DATA_DIR=$WRANGLER_DATA_DIR
+WRANGLER_REDIS_DIR=$WRANGLER_REDIS_DIR
+ENCRYPTION_KEY=$encryption_key
+SECRET_KEY=$secret_key
+DB_PASSWORD=$db_password
+REDIS_PASSWORD=$redis_password
+EOF
+
+    if ! wait_for_registry; then
+        echo "Failed to connect to registry, aborting startup"
+        return 1
+    fi
+
+    cd "$WRANGLER_CONFIG_DIR"
+    docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up -d --pull=always
+
+    if ! wait_for_wrangler; then
+        return 1
+    fi
+
+    # Rotate the bootstrap admin/admin account on first start. The app creates
+    # that account whenever the users table is empty, so this also runs after a
+    # restore from an empty database.
+    if ! WRANGLER_API_URL="http://127.0.0.1:${WRANGLER_PORT}" \
+        WRANGLER_ADMIN_PASSWORD="$admin_password" \
+            /usr/local/lib/cluster/wrangler-bootstrap --rotate-only; then
+        echo "Wrangler admin password rotation failed"
+        return 1
+    fi
+
+    if [ "${WRANGLER_EXTERNAL_ENABLED:-false}" = "true" ]; then
+        local external_domain
+        external_domain=$(etcdctl get /cluster/https/domain --print-value-only 2>/dev/null || true)
+        if [ -n "$external_domain" ]; then
+            bootstrap_oidc "$external_domain" "$admin_password"
+        fi
+    fi
+
+    # Re-attach in the foreground so systemd sees the service alive.
+    # On SIGTERM, stop_wrangler runs `docker compose down`.
+    exec docker compose -p "$COMPOSE_PROJECT" --env-file "$env_file" up
+}
+
+stop_wrangler() {
+    echo "Stopping Wrangler"
+    cd "$WRANGLER_CONFIG_DIR"
+    docker compose -p "$COMPOSE_PROJECT" down
+    echo "Wrangler stopped"
+}
+
+case "${1:-}" in
+    start)
+        start_wrangler
+        ;;
+    stop)
+        stop_wrangler
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac

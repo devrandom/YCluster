@@ -93,9 +93,11 @@ class LightweightRouteTests(unittest.TestCase):
         self.assertIn('ip-frontend frontend frontend.xc', response.text)
         self.assertIn(f'{appmod.STORAGE_VIP} forgejo.xc', response.text)
         self.assertIn(f'{appmod.STORAGE_VIP} vikunja.xc', response.text)
+        self.assertIn(f'{appmod.STORAGE_VIP} wrangler.xc', response.text)
         self.assertIn(f'{appmod.STORAGE_VIP} git.example.com', response.text)
         self.assertIn(f'{appmod.STORAGE_VIP} auth.example.com', response.text)
         self.assertIn(f'{appmod.STORAGE_VIP} tasks.example.com', response.text)
+        self.assertIn(f'{appmod.STORAGE_VIP} receipts.example.com', response.text)
 
 
 if __name__ == '__main__':

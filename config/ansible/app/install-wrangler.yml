@@ -1,0 +1,442 @@
+---
+# Receipt Wrangler (receipt capture / expense tracking) on the storage leader.
+#
+# Mirrors the Vikunja/Forgejo app pattern: the service follows the storage
+# leader through ycluster-apps.target, metadata lives in the cluster's shared
+# PostgreSQL, and uploaded receipts plus Redis' AOF live under /rbd/user.
+#
+# Two runtime pieces are app-specific:
+#   - Redis is mandatory: it backs the OCR/email/scheduled-task job queue and
+#     the app refuses to start without it. It runs as a sidecar container with
+#     requirepass, so it is not a shared instance.
+#   - The upstream image seeds a bootstrap admin/admin account on an empty
+#     users table. wrangler-manager rotates it to an etcd-generated password on
+#     every start, which also covers a restore from an empty database.
+#
+# External access defaults to off. Enabling it adds receipts.<domain> and
+# requires a DNS record plus `ycluster certbot obtain` on the leader; see
+# docs/operations/wrangler.md.
+- name: Install Receipt Wrangler on storage nodes
+  hosts: storage
+  become: yes
+  vars:
+    wrangler_version: "7.3.0"
+    # amd64 manifest digest for the upstream v7.3.0 image
+    # (docker.io/noah231515/receipt-wrangler:latest on 2026-11-06 was newer
+    # than the release; pin the release tag, not :latest).
+    wrangler_upstream_image: "docker.io/noah231515/receipt-wrangler@sha256:fbc9034d666b0f40b4a5e5f6bfa541265d4137c14b07ed8594ea77568171a868"
+    wrangler_image_digest: "{{ wrangler_upstream_image.split('@')[1] }}"
+    wrangler_registry_tag: "{{ wrangler_version }}-{{ wrangler_image_digest[7:19] }}"
+    wrangler_registry_image: "registry.xc:5000/wrangler:{{ wrangler_registry_tag }}"
+    # Redis 7.4.12-alpine, amd64 manifest digest from the upstream image tag.
+    wrangler_redis_version: "7.4.12"
+    wrangler_redis_upstream_image: "docker.io/library/redis@sha256:ec1c2d3603c3d7d65b153bedda0248b641aa3bd7684503406b27b9e870ac0796"
+    wrangler_redis_registry_image: "registry.xc:5000/redis:{{ wrangler_redis_version }}-ec1c2d3603c3"
+    wrangler_port: "{{ wrangler_local_port | default('9082') }}"
+    # SSO requires the public auth.<domain> discovery URL, so external access
+    # is what turns OIDC on. Internal-only mode keeps password login.
+    wrangler_external_enabled: "{{ wrangler_external | default(false) }}"
+    wrangler_data_dir: /rbd/user/wrangler
+    wrangler_redis_dir: /rbd/user/wrangler/redis
+  tasks:
+    - name: Check if this host is the storage leader
+      command: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Ensure the cluster registry is active on the leader
+      systemd:
+        name: docker-registry.service
+        state: started
+      when: is_storage_leader
+
+    - name: Check whether the cluster registry has the Wrangler image
+      uri:
+        url: "http://registry.xc:5000/v2/wrangler/manifests/{{ wrangler_registry_tag }}"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
+        status_code: 200
+        timeout: 10
+      register: wrangler_registry_check
+      failed_when: false
+      until: wrangler_registry_check.status | default(-1) in [200, 404]
+      retries: 30
+      delay: 2
+      when: is_storage_leader
+
+    - name: Seed the cluster registry with the pinned Wrangler image
+      shell: |
+        set -e
+        docker pull -q {{ wrangler_upstream_image }}
+        docker tag {{ wrangler_upstream_image }} {{ wrangler_registry_image }}
+        docker push -q {{ wrangler_registry_image }}
+        echo seeded
+      when: is_storage_leader and wrangler_registry_check.status | default(-1) != 200
+      register: wrangler_registry_seed
+      changed_when: "'seeded' in wrangler_registry_seed.stdout"
+
+    - name: Check whether the cluster registry has the Redis image
+      uri:
+        url: "http://registry.xc:5000/v2/redis/manifests/{{ wrangler_redis_version }}-ec1c2d3603c3"
+        method: HEAD
+        headers:
+          Accept: "application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json"
+        status_code: 200
+        timeout: 10
+      register: wrangler_redis_registry_check
+      failed_when: false
+      until: wrangler_redis_registry_check.status | default(-1) in [200, 404]
+      retries: 30
+      delay: 2
+      when: is_storage_leader
+
+    - name: Seed the cluster registry with the pinned Redis image
+      shell: |
+        set -e
+        docker pull -q {{ wrangler_redis_upstream_image }}
+        docker tag {{ wrangler_redis_upstream_image }} {{ wrangler_redis_registry_image }}
+        docker push -q {{ wrangler_redis_registry_image }}
+        echo seeded
+      when: is_storage_leader and wrangler_redis_registry_check.status | default(-1) != 200
+      register: wrangler_redis_registry_seed
+      changed_when: "'seeded' in wrangler_redis_registry_seed.stdout"
+
+    - name: Pull the pinned Wrangler images from the cluster registry
+      docker_image:
+        name: "{{ item }}"
+        source: pull
+      loop:
+        - "{{ wrangler_registry_image }}"
+        - "{{ wrangler_redis_registry_image }}"
+      when: is_storage_leader
+
+    - name: Read Wrangler secrets from etcd
+      command: etcdctl get /cluster/config/wrangler/{{ item }} --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: wrangler_secret_read
+      changed_when: false
+      failed_when: false
+      no_log: true
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+      loop:
+        - db-password
+        - encryption-key
+        - secret-key
+        - redis-password
+        - admin-password
+
+    - name: Generate missing Wrangler secrets
+      command: openssl rand -hex 16
+      register: wrangler_secret_generated
+      changed_when: false
+      no_log: true
+      run_once: true
+      when: item.stdout | trim == ''
+      loop: "{{ wrangler_secret_read.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Store generated Wrangler secrets in etcd
+      command: etcdctl put /cluster/config/wrangler/{{ item.0.item }}
+      args:
+        stdin: "{{ item.1.stdout }}"
+        stdin_add_newline: false
+      environment: "{{ etcd_client_env }}"
+      no_log: true
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+      when: item.1.stdout is defined
+      loop: "{{ wrangler_secret_read.results | zip(wrangler_secret_generated.results) | list }}"
+
+    - name: Read back Wrangler secrets
+      command: etcdctl get /cluster/config/wrangler/{{ item }} --print-value-only
+      environment: "{{ etcd_client_env }}"
+      register: wrangler_secret_final
+      changed_when: false
+      no_log: true
+      run_once: true
+      delegate_to: "{{ groups['storage'] | first }}"
+      loop:
+        - db-password
+        - encryption-key
+        - secret-key
+        - redis-password
+        - admin-password
+
+    - name: Set Wrangler secret facts
+      set_fact:
+        wrangler_db_password: "{{ wrangler_secret_final.results | selectattr('item', 'equalto', 'db-password') | map(attribute='stdout') | first | trim }}"
+        wrangler_encryption_key: "{{ wrangler_secret_final.results | selectattr('item', 'equalto', 'encryption-key') | map(attribute='stdout') | first | trim }}"
+        wrangler_secret_key: "{{ wrangler_secret_final.results | selectattr('item', 'equalto', 'secret-key') | map(attribute='stdout') | first | trim }}"
+        wrangler_redis_password: "{{ wrangler_secret_final.results | selectattr('item', 'equalto', 'redis-password') | map(attribute='stdout') | first | trim }}"
+        wrangler_admin_password: "{{ wrangler_secret_final.results | selectattr('item', 'equalto', 'admin-password') | map(attribute='stdout') | first | trim }}"
+      no_log: true
+
+    - name: Create Wrangler configuration directory
+      file:
+        path: /etc/wrangler
+        state: directory
+        mode: '0755'
+
+    - name: Copy Wrangler compose file
+      copy:
+        src: files/wrangler-compose.yaml
+        dest: /etc/wrangler/docker-compose.yml
+        mode: '0644'
+      notify: restart wrangler
+
+    - name: Create cluster scripts directory
+      file:
+        path: /usr/local/lib/cluster
+        state: directory
+        mode: '0755'
+
+    - name: Create Wrangler manager script
+      copy:
+        src: files/wrangler-manager
+        dest: /usr/local/lib/cluster/wrangler-manager
+        mode: '0755'
+      notify: restart wrangler
+
+    - name: Create Wrangler bootstrap helper
+      copy:
+        src: files/wrangler-bootstrap.py
+        dest: /usr/local/lib/cluster/wrangler-bootstrap
+        mode: '0755'
+      notify: restart wrangler
+
+    - name: Create Wrangler systemd service
+      copy:
+        dest: /etc/systemd/system/wrangler.service
+        content: |
+          [Unit]
+          Description=Receipt Wrangler (receipt capture / expense tracking)
+          After=network.target docker.service user-rbd.service
+          Requires=docker.service user-rbd.service
+          PartOf=ycluster-apps.target
+
+          [Service]
+          Type=exec
+          ExecStart=/usr/local/lib/cluster/wrangler-manager start
+          ExecStop=/usr/local/lib/cluster/wrangler-manager stop
+          TimeoutStartSec=900
+          TimeoutStopSec=90
+          User=root
+          Restart=on-failure
+          RestartSec=10
+          Environment=WRANGLER_IMAGE={{ wrangler_registry_image }}
+          Environment=WRANGLER_REDIS_IMAGE={{ wrangler_redis_registry_image }}
+          Environment=WRANGLER_PORT={{ wrangler_port }}
+          Environment=WRANGLER_DATA_DIR={{ wrangler_data_dir }}
+          Environment=WRANGLER_REDIS_DIR={{ wrangler_redis_dir }}
+          Environment=WRANGLER_EXTERNAL_ENABLED={{ 'true' if wrangler_external_enabled | bool else 'false' }}
+
+          [Install]
+          WantedBy=ycluster-apps.target
+      register: wrangler_service_file
+      notify: restart wrangler
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Re-enable Wrangler service to update symlinks
+      command: systemctl reenable wrangler.service
+      when: wrangler_service_file.changed
+
+    - name: Enable Wrangler service
+      systemd:
+        name: wrangler.service
+        enabled: yes
+
+    - name: Configure PostgreSQL for Wrangler
+      when: is_storage_leader
+      block:
+        - name: Create PostgreSQL database for Wrangler
+          postgresql_db:
+            name: wrangler
+            state: present
+          become_user: postgres
+
+        - name: Create PostgreSQL user for Wrangler
+          postgresql_user:
+            name: wrangler
+            password: "{{ wrangler_db_password }}"
+            db: wrangler
+            priv: ALL
+            state: present
+          become_user: postgres
+          no_log: true
+
+        - name: Grant schema permissions to Wrangler user
+          postgresql_privs:
+            database: wrangler
+            state: present
+            privs: ALL
+            type: schema
+            objs: public
+            roles: wrangler
+          become_user: postgres
+
+        - name: Make Wrangler owner of the database
+          postgresql_owner:
+            db: wrangler
+            obj_name: wrangler
+            new_owner: wrangler
+            obj_type: database
+          become_user: postgres
+
+    - name: Create Wrangler data directories
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: '0750'
+      loop:
+        - { path: "{{ wrangler_data_dir }}", owner: root, group: root }
+        - { path: "{{ wrangler_data_dir }}/data", owner: root, group: root }
+        - { path: "{{ wrangler_data_dir }}/logs", owner: root, group: root }
+        - { path: "{{ wrangler_redis_dir }}", owner: '999', group: '999' }
+      when: is_storage_leader
+
+    - name: Install Wrangler internal nginx site (wrangler.xc)
+      template:
+        src: templates/wrangler-internal.conf.j2
+        dest: /etc/nginx/sites-available/wrangler-internal
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable Wrangler internal nginx site
+      file:
+        src: /etc/nginx/sites-available/wrangler-internal
+        dest: /etc/nginx/sites-enabled/wrangler-internal
+        state: link
+      notify: reload nginx
+
+    - name: Install Wrangler external nginx template
+      template:
+        src: files/wrangler_receipts.conf.j2
+        dest: /etc/nginx/templates/wrangler_receipts.conf.j2
+        mode: '0644'
+        variable_start_string: '(('
+        variable_end_string: '))'
+        block_start_string: '((#'
+        block_end_string: '#))'
+      vars:
+        proxy_port: "{{ wrangler_port }}"
+      notify: reload nginx
+      when: wrangler_external_enabled | bool
+
+    - name: Generate Wrangler nginx configuration from template
+      command: "/usr/local/bin/certbot-manager update-nginx{% if web_services_force_local | default(false) %} --local{% endif %}"
+      environment: "{{ etcd_client_env }}"
+      register: wrangler_nginx_update
+      changed_when: "'configuration updated' in wrangler_nginx_update.stdout"
+      failed_when: wrangler_nginx_update.rc != 0
+      notify: reload nginx
+      when: wrangler_external_enabled | bool
+
+    - name: Enable receipts.<domain> Wrangler nginx site
+      file:
+        src: /etc/nginx/sites-available/wrangler_receipts
+        dest: /etc/nginx/sites-enabled/wrangler_receipts
+        state: link
+      notify: reload nginx
+      when: wrangler_external_enabled | bool
+
+    - name: Remove Wrangler external nginx site when disabled
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/sites-enabled/wrangler_receipts
+        - /etc/nginx/sites-available/wrangler_receipts
+        - /etc/nginx/templates/wrangler_receipts.conf.j2
+      notify: reload nginx
+      when: not (wrangler_external_enabled | bool)
+
+    - name: Apply pending Wrangler service changes
+      meta: flush_handlers
+
+    - name: Start Wrangler service on the storage leader
+      systemd:
+        name: wrangler.service
+        state: started
+      when: is_storage_leader
+
+    - name: Wait for Wrangler to become reachable
+      uri:
+        url: "http://127.0.0.1:{{ wrangler_port }}/"
+        status_code: 200
+        timeout: 5
+      register: wrangler_health
+      until: wrangler_health.status | default(0) == 200
+      retries: 90
+      delay: 3
+      failed_when: false
+      when: is_storage_leader
+
+    - name: Require Wrangler to be reachable
+      fail:
+        msg: >-
+          Wrangler did not become reachable; check journalctl -u wrangler and
+          docker compose -p wrangler logs on the leader
+      when: is_storage_leader and wrangler_health.status | default(0) != 200
+
+    - name: Check that Wrangler rotated the bootstrap admin password
+      command: >-
+        curl -s -o /dev/null -w '%{http_code}'
+        -X POST http://127.0.0.1:{{ wrangler_port }}/api/login/?tokensInBody=true
+        -H 'Content-Type: application/json'
+        -d '{"username":"admin","password":"admin"}'
+      register: wrangler_default_login
+      changed_when: false
+      failed_when: false
+      # The app seeds roles and the bootstrap admin after the HTTP listener is
+      # already up, and wrangler-manager only rotates once the API answers.
+      # Wait for the rejection instead of sampling a single early response.
+      until: wrangler_default_login.stdout | default('') != '200'
+      retries: 40
+      delay: 3
+      when: is_storage_leader
+
+    - name: Fail if the default admin/admin login still works
+      fail:
+        msg: >-
+          The bootstrap admin account still accepts the default password;
+          run /usr/local/lib/cluster/wrangler-manager start on the leader and
+          check the wrangler-bootstrap output
+      when: is_storage_leader and wrangler_default_login.stdout | default('') == '200'
+
+    # Non-leaders must not run Wrangler: it owns the leader's PostgreSQL and
+    # /rbd/user mount, so a stale instance from a previous leader tenure must
+    # not survive a re-provision.
+    - name: Stop Wrangler on non-leaders
+      systemd:
+        name: wrangler.service
+        state: stopped
+        enabled: no
+      when: not is_storage_leader
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    # Leader-only: the unit Requires=user-rbd.service and /rbd/user mounts
+    # only on the leader, so a restart on a non-leader would fail.
+    - name: restart wrangler
+      systemd:
+        name: wrangler.service
+        state: restarted
+        daemon_reload: yes
+      when: is_storage_leader

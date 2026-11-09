@@ -213,3 +213,17 @@ perimeter_software:
     #             @sha256:f7dc8428d10a...)
     # manifest: config/ansible/monitoring/container-manifests/vikunja.manifest
     # (Go module buildinfo, 159 specs)
+  - name: wrangler
+    # receipts.<domain> when external access is enabled; internal-only
+    # (wrangler.xc) otherwise. No edge forward-auth: the web UI and mobile app
+    # log in through OIDC and API clients use Wrangler JWTs, so Wrangler is
+    # the auth boundary. Tier P0-U by the pre-auth login/API surface.
+    tier: P0-U
+    osv_category: container
+    osv_packages: []
+    # package: container image (Debian runtime: Go API buildinfo + Python venv)
+    # pin_source: app/install-wrangler.yml wrangler_upstream_image
+    #             (upstream 7.3.0 amd64 @sha256:fbc9034d666b...)
+    # manifest: config/ansible/monitoring/container-manifests/wrangler.manifest
+    # (Go module buildinfo + PyPI venv packages; the Debian apt layer is not
+    # covered by manifestgen yet)

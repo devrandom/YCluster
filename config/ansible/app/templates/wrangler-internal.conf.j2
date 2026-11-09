@@ -1,0 +1,30 @@
+# HTTP - wrangler.xc (cluster-internal)
+#
+# Receipt Wrangler, internal access. External access is the separate
+# certbot-managed vhost (wrangler_receipts.conf.j2 -> receipts.<domain>).
+# Restricted to the cluster subnet and the host's Docker bridges.
+server {
+    listen 80;
+    server_name wrangler.xc;
+
+    # Receipt photos and multi-page PDFs; the app caps uploads internally too.
+    client_max_body_size 110M;
+
+    location / {
+        allow 10.0.0.0/24;
+        allow 127.0.0.0/8;
+        allow 172.16.0.0/12;
+        deny all;
+
+        proxy_pass http://127.0.0.1:{{ wrangler_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Receipt PDF rendering and OCR job downloads can take a while.
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+}
