@@ -242,33 +242,74 @@ func TestContainerLayerUsesPodMetadata(t *testing.T) {
 	}
 }
 
-func TestPostFailsOverBetweenAlertmanagers(t *testing.T) {
+func TestPostFansOutToEveryAlertmanager(t *testing.T) {
 	var mu sync.Mutex
-	var got int
-	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		got++
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer good.Close()
+	counts := map[string]int{}
+	srv := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			counts[name]++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+	}
+	first, second := srv("first"), srv("second")
+	defer first.Close()
+	defer second.Close()
 
 	cfg := testConfig()
-	cfg.alertmanagerURL = "http://127.0.0.1:1," + good.URL
+	cfg.alertmanagerURL = first.URL + ", " + second.URL
 	f, err := newForwarder(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := f.post([]alert{newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")}); err != nil {
-		t.Fatalf("post should succeed via the second URL: %v", err)
+		t.Fatalf("post should succeed: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if got != 1 {
-		t.Fatalf("healthy instance got %d posts, want 1", got)
+	// HA peers do not share alert state, so every instance must receive it.
+	if counts["first"] != 1 || counts["second"] != 1 {
+		t.Fatalf("posts = %v, want one to each instance", counts)
+	}
+	if f.stats.partialDelivery.Load() != 0 || f.stats.failures.Load() != 0 {
+		t.Fatalf("full delivery counted as partial=%d failures=%d",
+			f.stats.partialDelivery.Load(), f.stats.failures.Load())
+	}
+}
+
+func TestPostCountsPartialDelivery(t *testing.T) {
+	good := httptestAlertmanager(t, func([]byte) {})
+
+	cfg := testConfig()
+	cfg.alertmanagerURL = "http://127.0.0.1:1," + good
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.post([]alert{newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")}); err != nil {
+		t.Fatalf("one reachable instance is enough: %v", err)
+	}
+	if f.stats.partialDelivery.Load() != 1 {
+		t.Fatalf("partial deliveries = %d, want 1", f.stats.partialDelivery.Load())
 	}
 	if f.stats.failures.Load() != 0 {
-		t.Fatalf("failover success must not count a failure, got %d", f.stats.failures.Load())
+		t.Fatalf("partial delivery must not count a failure, got %d", f.stats.failures.Load())
+	}
+}
+
+func TestPostFailsWhenNoInstanceAccepts(t *testing.T) {
+	cfg := testConfig()
+	cfg.alertmanagerURL = "http://127.0.0.1:1,http://127.0.0.1:2"
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.post([]alert{newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")}); err == nil {
+		t.Fatal("post must fail when no instance accepts")
+	}
+	if f.stats.failures.Load() != 1 {
+		t.Fatalf("failures = %d, want 1", f.stats.failures.Load())
 	}
 }
 

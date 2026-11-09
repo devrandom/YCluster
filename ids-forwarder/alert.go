@@ -227,6 +227,7 @@ type metrics struct {
 	rejected        atomic.Int64
 	cursorErrors    atomic.Int64
 	failures        atomic.Int64
+	partialDelivery atomic.Int64
 	recorded        atomic.Int64
 	recordErrors    atomic.Int64
 	sigmaBad        atomic.Int64

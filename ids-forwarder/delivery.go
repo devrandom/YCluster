@@ -141,30 +141,56 @@ func (f *forwarder) post(alerts []alert) error {
 		return err
 	}
 	// alertmanager-url may be a comma-separated list (the cluster runs
-	// Alertmanager on every core node). Try each in order; a single
-	// reachable instance is enough for the alert to be accepted.
-	var lastErr error
+	// Alertmanager on every core node), and every instance gets the alert.
+	// HA peers gossip the notification log and silences, not the alert set,
+	// so a peer that is skipped never shows this alert and can never notify
+	// for it. One accepting instance is enough for the spool to move on: a
+	// peer that is down at this moment is counted as a partial delivery
+	// rather than replayed to the peers that already have it.
+	var (
+		transientErr error
+		permanentErr error
+		delivered    int
+		attempted    int
+	)
 	for _, base := range strings.Split(f.cfg.alertmanagerURL, ",") {
 		base = strings.TrimSpace(base)
 		if base == "" {
 			continue
 		}
+		attempted++
 		if err := f.postOne(base, body); err != nil {
 			var perm *permanentPostError
 			if errors.As(err, &perm) {
-				f.stats.failures.Add(1)
-				return err
+				permanentErr = err
+				continue
 			}
-			lastErr = err
+			if transientErr == nil {
+				transientErr = err
+			}
 			continue
+		}
+		delivered++
+	}
+	if delivered > 0 {
+		if delivered < attempted {
+			f.stats.partialDelivery.Add(1)
+			err := transientErr
+			if err == nil {
+				err = permanentErr
+			}
+			f.cfg.logf("alertmanager: delivered to %d of %d instances: %v", delivered, attempted, err)
 		}
 		return nil
 	}
 	f.stats.failures.Add(1)
-	if lastErr == nil {
-		lastErr = errors.New("no alertmanager URL configured")
+	if permanentErr != nil {
+		return permanentErr
 	}
-	return lastErr
+	if transientErr != nil {
+		return transientErr
+	}
+	return errors.New("no alertmanager URL configured")
 }
 
 func (f *forwarder) postOne(base string, body []byte) error {

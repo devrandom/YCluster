@@ -629,9 +629,15 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   suppressed events are counted in `ids_forwarder_suppressed_total` instead
   of being written. The same shape can later be shipped to a central store
   without changing the forwarder.
-- Posts to every core Alertmanager instance over the cluster network, in
-  order, and stops at the first that accepts the alert. Non-core nodes have
-  no local Alertmanager.
+- Posts to every core Alertmanager instance over the cluster network.
+  Alertmanager's HA gossip replicates the notification log and silences, not
+  the alert set, so an instance that is skipped never shows the alert and can
+  never notify for it; the peers only look consistent as long as each one
+  receives every alert. Delivery succeeds when at least one instance accepts,
+  and a partial delivery is logged and counted in
+  `ids_forwarder_alertmanager_partial_total` rather than replayed to the
+  instances that already have it. A payload every instance rejects is still
+  a permanent error. Non-core nodes have no local Alertmanager.
 - Persists the exact last Tetragon line processed (event time plus a content
   hash), not a timestamp watermark. Tetragon can write events with older
   timestamps, and a watermark would discard them. On restart the forwarder
