@@ -1716,6 +1716,11 @@ class ApiKeysAppTests(SchedTestBase):
         d = self.get("/admin/settings/api-keys/data", email="alice@x").get_json()
         self.assertNotIn("secret", str(d))
 
+    def test_data_shows_public_endpoint(self):
+        self.etcd.put("/cluster/https/domain", "example.com")
+        d = self.get("/admin/settings/api-keys/data", email="alice@x").get_json()
+        self.assertEqual(d["endpoint"], "https://example.com/v1")
+
     def test_create_bad_label_is_400(self):
         r = self.post_json("/admin/settings/api-keys/create",
                            {"label": 123}, email="alice@x")
@@ -1742,6 +1747,25 @@ class ApiKeysAppTests(SchedTestBase):
         r = self.post_json("/admin/settings/api-keys/revoke",
                            {"key_id": "does-not-exist"}, email="alice@x")
         self.assertEqual(r.status_code, 404)
+
+    def test_rename_own_key(self):
+        secret = apikeys.create_key("alice@x", label="old", hasher=_fast_hasher())
+        key_id = apikeys.list_keys("alice@x")["alice@x"][0]["key_id"]
+        r = self.post_json("/admin/settings/api-keys/rename",
+                           {"key_id": key_id, "label": "new"}, email="alice@x")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(apikeys.list_keys("alice@x")["alice@x"][0]["label"], "new")
+        # The key itself is unchanged and still authenticates.
+        self.assertEqual(apikeys.validate_key(secret, hasher=_fast_hasher()),
+                         ("alice@x", []))
+
+    def test_cannot_rename_another_users_key(self):
+        apikeys.create_key("bob@x", label="bob", hasher=_fast_hasher())
+        bob_key = apikeys.list_keys("bob@x")["bob@x"][0]["key_id"]
+        r = self.post_json("/admin/settings/api-keys/rename",
+                           {"key_id": bob_key, "label": "x"}, email="alice@x")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(apikeys.list_keys("bob@x")["bob@x"][0]["label"], "bob")
 
     def test_page_renders(self):
         r = self.get("/admin/settings/api-keys", email="alice@x")

@@ -161,6 +161,53 @@ class CreateListRevokeTests(ApiKeysTestBase):
             ak.revoke_key("../../bad")
 
 
+class RenameTests(ApiKeysTestBase):
+    def _key_path(self, email, key_id):
+        return ak.USERS_PREFIX + email + ak.KEYS_SUFFIX + key_id
+
+    def _only_key_id(self, email):
+        return ak.list_keys(email)[email][0]["key_id"]
+
+    def test_rename_updates_only_label(self):
+        secret = ak.create_key("alice@x", groups=["g1"], label="old",
+                               hasher=self.hasher)
+        key_id = self._only_key_id("alice@x")
+        before = self.etcd.get_json(self._key_path("alice@x", key_id))
+        self.assertTrue(ak.rename_key("alice@x", key_id, "new"))
+        after = self.etcd.get_json(self._key_path("alice@x", key_id))
+        self.assertEqual(after["label"], "new")
+        for field in ("hash", "digest", "created_at"):
+            self.assertEqual(after[field], before[field])
+        # Key metadata and authentication are otherwise unchanged.
+        self.assertEqual(ak.list_keys("alice@x")["alice@x"][0]["label"], "new")
+        self.assertEqual(ak.validate_key(secret, hasher=self.hasher),
+                         ("alice@x", ["g1"]))
+
+    def test_rename_can_clear_label(self):
+        ak.create_key("alice@x", label="laptop", hasher=self.hasher)
+        key_id = self._only_key_id("alice@x")
+        self.assertTrue(ak.rename_key("alice@x", key_id, ""))
+        self.assertEqual(ak.list_keys("alice@x")["alice@x"][0]["label"], "")
+
+    def test_rename_missing_key_returns_false(self):
+        self.assertFalse(ak.rename_key("alice@x", "does-not-exist", "x"))
+        self.assertEqual(ak.list_keys("alice@x")["alice@x"], [])
+
+    def test_rename_is_owner_scoped(self):
+        ak.create_key("alice@x", label="old", hasher=self.hasher)
+        key_id = self._only_key_id("alice@x")
+        self.assertFalse(ak.rename_key("bob@x", key_id, "stolen"))
+        self.assertEqual(ak.list_keys("alice@x")["alice@x"][0]["label"], "old")
+
+    def test_rename_rejects_bad_id(self):
+        with self.assertRaises(ValueError):
+            ak.rename_key("alice@x", "../../bad", "x")
+
+    def test_rename_rejects_bad_owner(self):
+        with self.assertRaises(ValueError):
+            ak.rename_key("bad owner!", "k", "x")
+
+
 class DigestIndexTests(ApiKeysTestBase):
     def _key_path(self, email, key_id="k1"):
         return ak.USERS_PREFIX + email + ak.KEYS_SUFFIX + key_id

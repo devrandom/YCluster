@@ -136,8 +136,10 @@ health checker's rotation.
 
 Gateway API keys are etcd-backed and self-service. Users mint keys at
 `https://<admin-domain>/admin/settings/api-keys` (the key is shown once
-at mint and never re-displayed) and manage their own keys there. Ops
-manage keys cluster-wide with the CLI:
+at mint and never re-displayed) and manage their own keys there. The
+page shows the public base URL (`https://<domain>/v1`) and lets users
+relabel a key without revoking it. Ops manage keys cluster-wide with
+the CLI:
 
 ```bash
 ycluster inference key create --owner alice@example.com --group g1 --label laptop

@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 import app as appmod
+import settings_routes
 
 
 USER = {
@@ -161,10 +162,21 @@ class ApiKeyTests(unittest.TestCase):
 
     def test_data_returns_keys(self):
         with mock.patch.object(appmod.apikeys, "list_keys",
-                               return_value={"user@example.test": [{"key_id": "k"}]}):
+                               return_value={"user@example.test": [{"key_id": "k"}]}), \
+                mock.patch.object(settings_routes, "_external_inference_endpoint",
+                                  return_value="https://example.test/v1"):
             response = self.http.get("/admin/settings/api-keys/data",
                                      headers=USER)
         self.assertEqual(response.get_json()["keys"], [{"key_id": "k"}])
+
+    def test_data_includes_inference_endpoint(self):
+        with mock.patch.object(appmod.apikeys, "list_keys", return_value={}), \
+                mock.patch.object(settings_routes, "_external_inference_endpoint",
+                                  return_value="https://example.test/v1"):
+            response = self.http.get("/admin/settings/api-keys/data",
+                                     headers=USER)
+        body = response.get_json()
+        self.assertEqual(body["endpoint"], "https://example.test/v1")
 
     def test_create_requires_email(self):
         self.assertEqual(
@@ -241,6 +253,82 @@ class ApiKeyTests(unittest.TestCase):
                                       headers=USER, json={"key_id": "k"})
         self.assertEqual(response.get_json(), {"ok": True})
         revoke.assert_called_once_with("k")
+
+    def test_rename_requires_email(self):
+        self.assertEqual(
+            self.http.post("/admin/settings/api-keys/rename", headers=ANON,
+                           json={"key_id": "k", "label": "l"}).status_code, 403)
+
+    def test_rename_requires_key_id(self):
+        self.assertEqual(
+            self.http.post("/admin/settings/api-keys/rename", headers=USER,
+                           json={"label": "l"}).status_code, 400)
+
+    def test_rename_rejects_bad_label(self):
+        response = self.http.post("/admin/settings/api-keys/rename",
+                                  headers=USER,
+                                  json={"key_id": "k", "label": 5})
+        self.assertEqual(response.status_code, 400)
+
+    def test_rename_missing_key_is_404(self):
+        with mock.patch.object(appmod.apikeys, "rename_key",
+                               return_value=False):
+            response = self.http.post("/admin/settings/api-keys/rename",
+                                      headers=USER,
+                                      json={"key_id": "k", "label": "l"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_rename_rejects_invalid_key(self):
+        with mock.patch.object(appmod.apikeys, "rename_key",
+                               side_effect=ValueError("bad")):
+            response = self.http.post("/admin/settings/api-keys/rename",
+                                      headers=USER,
+                                      json={"key_id": "k", "label": "l"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_rename_reports_write_failure(self):
+        with mock.patch.object(appmod.apikeys, "rename_key",
+                               side_effect=RuntimeError("down")):
+            response = self.http.post("/admin/settings/api-keys/rename",
+                                      headers=USER,
+                                      json={"key_id": "k", "label": "l"})
+        self.assertEqual(response.status_code, 503)
+
+    def test_rename_succeeds(self):
+        with mock.patch.object(appmod.apikeys, "rename_key",
+                               return_value=True) as rename:
+            response = self.http.post("/admin/settings/api-keys/rename",
+                                      headers=USER,
+                                      json={"key_id": "k", "label": "  laptop  "})
+        self.assertEqual(response.get_json(),
+                         {"ok": True, "key_id": "k", "label": "laptop"})
+        rename.assert_called_once_with("user@example.test", "k", "laptop")
+
+
+class ApiKeyEndpointTests(unittest.TestCase):
+    """Public inference URL shown on the API keys page."""
+
+    def endpoint(self, canonical, base_url="http://localhost"):
+        with mock.patch.object(appmod, "get_etcd_client", return_value=object()), \
+                mock.patch.object(appmod, "_configured_external_domain",
+                                  return_value=canonical):
+            with appmod.app.test_request_context(
+                    "/admin/settings/api-keys/data", base_url=base_url):
+                return settings_routes._external_inference_endpoint(appmod)
+
+    def test_uses_configured_domain(self):
+        self.assertEqual(self.endpoint("example.test"),
+                         "https://example.test/v1")
+
+    def test_falls_back_to_request_host_without_admin_prefix(self):
+        self.assertEqual(
+            self.endpoint("", "https://admin.example.test"),
+            "https://example.test/v1")
+
+    def test_has_no_public_endpoint_for_internal_hosts(self):
+        for base_url in ("http://localhost", "https://admin.xc",
+                         "http://10.0.0.5:12723"):
+            self.assertEqual(self.endpoint("", base_url), "", base_url)
 
 
 class UsageRouteTests(unittest.TestCase):

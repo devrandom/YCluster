@@ -32,19 +32,42 @@
     code { background: #f3f4f6; border-radius: 3px; padding: 0.05rem 0.3rem; font-size: 0.85em; }
     .secretbox { display: flex; gap: 0.6rem; align-items: center; margin-top: 0.75rem; padding: 0.75rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
     .secretval { flex: 1; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8rem; word-break: break-all; }
+    .endpointrow { display: flex; gap: 0.6rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
+    .endpointval { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9rem; word-break: break-all; }
+    .renamebox { display: flex; gap: 0.5rem; align-items: center; }
+    .editinput { flex: 1; min-width: 0; padding: 0.35rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; box-sizing: border-box; }
+    .secondary { background: #e5e7eb; color: #111827; }
+    .secondary:hover { background: #d1d5db; }
+    .iconbtn.edit { color: #374151; }
+    .iconbtn.edit:hover { background: #e5e7eb; }
   </style>
 </head>
 <body x-data="apiKeysApp()" x-init="load()">
   <h1>API Keys</h1>
   <p class="explainer">
-    These keys let <b>you</b> talk to the cluster's inference gateway
-    (<code>Authorization: Bearer &lt;sk-…&gt;</code>), e.g. from a local client
-    or from Open-WebUI's Connections page. Keys are shown <b>once</b> at
-    creation — if you lose it, revoke and create a new one.
+    These keys let <b>you</b> talk to the cluster's inference gateway at the
+    endpoint below (<code>Authorization: Bearer &lt;sk-…&gt;</code>), e.g. from
+    a local client or from Open-WebUI's Connections page. Keys are shown
+    <b>once</b> at creation — if you lose it, revoke and create a new one.
   </p>
 
   <template x-if="fatal">
     <div class="card"><span class="error" x-text="fatal"></span></div>
+  </template>
+
+  <template x-if="!fatal && !loading">
+    <div class="card">
+      <h2>API endpoint</h2>
+      <div class="meta">Point OpenAI-compatible clients at this base URL:</div>
+      <div class="endpointrow" x-show="endpoint">
+        <code class="endpointval" x-text="endpoint"></code>
+        <button @click="copyEndpoint()" :disabled="copiedEndpoint">Copy</button>
+        <span class="saved" x-text="copiedEndpoint ? 'copied' : ''"></span>
+      </div>
+      <div class="meta" x-show="!endpoint">
+        Public URL unavailable — the cluster domain is not configured.
+      </div>
+    </div>
   </template>
 
   <template x-if="!fatal">
@@ -70,9 +93,32 @@
         <template x-for="k in keys" :key="k.key_id">
           <div class="key">
             <div class="grow">
-              <span class="klabel" x-text="k.label || '(no label)'"></span>
-              <span class="kmeta" x-text="shortId(k.key_id) + ' · created ' + created(k.created_at)"></span>
+              <template x-if="editing !== k.key_id">
+                <div>
+                  <span class="klabel" x-text="k.label || '(no label)'"></span>
+                  <span class="kmeta" x-text="shortId(k.key_id) + ' · created ' + created(k.created_at)"></span>
+                </div>
+              </template>
+              <template x-if="editing === k.key_id">
+                <div class="renamebox">
+                  <input class="editinput" type="text" x-ref="renameInput"
+                         x-model="editLabel" placeholder="Label (e.g. laptop)"
+                         @keydown.enter.prevent="saveRename(k)"
+                         @keydown.escape.prevent="cancelRename()"/>
+                  <button @click="saveRename(k)" :disabled="renaming">Save</button>
+                  <button class="secondary" @click="cancelRename()" :disabled="renaming">Cancel</button>
+                </div>
+              </template>
             </div>
+            <button class="iconbtn edit" x-show="editing !== k.key_id"
+                    @click="startRename(k)" aria-label="Rename key"
+                    title="Rename this key">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                   stroke-linejoin="round">
+                <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+              </svg>
+            </button>
             <button class="iconbtn" @click="revokeKey(k.key_id)" aria-label="Revoke key"
                     title="Revoke this key">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
@@ -86,6 +132,8 @@
         </template>
       </div>
 
+      <span class="error" x-show="error" x-text="error"></span>
+
       <div x-show="!loading">
         <div class="row">
           <input type="text" x-model="label" placeholder="Label (e.g. laptop)"
@@ -93,7 +141,6 @@
           <button @click="createKey()" :disabled="creating">Create key</button>
         </div>
         <span class="error" x-show="createError" x-text="createError"></span>
-        <span class="error" x-show="error" x-text="error"></span>
       </div>
     </div>
   </template>
@@ -101,8 +148,9 @@
   <script>
     function apiKeysApp() {
       return {
-        email: '', keys: [], label: '',
-        loading: false, creating: false, copied: false,
+        email: '', keys: [], label: '', endpoint: '',
+        loading: false, creating: false, copied: false, copiedEndpoint: false,
+        editing: '', editLabel: '', renaming: false,
         fatal: '', createError: '', error: '',
         newSecret: '',
 
@@ -114,6 +162,7 @@
               if (d.error) { this.fatal = d.error; this.loading = false; return }
               this.email = d.email
               this.keys = d.keys || []
+              this.endpoint = d.endpoint || ''
               this.loading = false
             })
             .catch(() => { this.fatal = 'failed to load API keys'; this.loading = false })
@@ -154,6 +203,45 @@
           }).catch(() => { this.createError = 'copy failed — select the text manually' })
         },
 
+        copyEndpoint() {
+          navigator.clipboard.writeText(this.endpoint).then(() => {
+            this.copiedEndpoint = true
+            setTimeout(() => { this.copiedEndpoint = false }, 2000)
+          }).catch(() => { this.error = 'copy failed — select the URL manually' })
+        },
+
+        startRename(k) {
+          this.editing = k.key_id
+          this.editLabel = k.label || ''
+          this.error = ''
+          this.$nextTick(() => {
+            if (this.$refs.renameInput) this.$refs.renameInput.focus()
+          })
+        },
+
+        cancelRename() {
+          this.editing = ''
+          this.editLabel = ''
+        },
+
+        saveRename(k) {
+          if (this.renaming) return
+          this.error = ''
+          this.renaming = true
+          fetch('/admin/settings/api-keys/rename', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key_id: k.key_id, label: this.editLabel.trim()}),
+          })
+            .then(r => r.json().then(d => ({ok: r.ok, d})))
+            .then(({ok, d}) => {
+              this.renaming = false
+              if (!ok) { this.error = d.error || 'failed to rename key'; return }
+              this.cancelRename()
+              this.loadedKeys()
+            })
+            .catch(() => { this.renaming = false; this.error = 'request failed' })
+        },
+
         revokeKey(keyId) {
           this.error = ''
           fetch('/admin/settings/api-keys/revoke', {
@@ -162,8 +250,10 @@
           })
             .then(r => r.json().then(d => ({ok: r.ok, d})))
             .then(({ok, d}) => {
-              if (ok) this.loadedKeys()
-              else this.error = d.error || 'failed to revoke key'
+              if (ok) {
+                if (this.editing === keyId) this.cancelRename()
+                this.loadedKeys()
+              } else this.error = d.error || 'failed to revoke key'
             })
             .catch(() => { this.error = 'request failed' })
         },

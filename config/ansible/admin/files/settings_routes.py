@@ -4,12 +4,40 @@ Registered from app.py with the app module, so handlers reuse its identity
 helper, vm_manager and usage helpers without a circular import.
 """
 
+import re
 from datetime import datetime, timezone
 
 from flask import Response, jsonify, render_template, request
 
 VM_USAGE_SINCE_VALUES = {'1', '7', '14', '30', '60', '90',
                          'this-year', 'previous-year'}
+
+INFERENCE_API_PATH = '/v1'
+_NON_API_HOST_PREFIXES = ('admin', 'app')
+_IPV4_RE = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
+
+
+def _external_inference_endpoint(mod):
+    """Public inference base URL (`https://<domain>/v1`) for the keys page.
+
+    The inference API is served at the root `<domain>` vhost, not on the
+    admin/app vhost this page runs on. Prefer the canonical domain from
+    etcd; when it is unset (dev/force-local install) derive `<domain>` from
+    the request host, dropping an admin/app subdomain. Returns '' when no
+    usable domain can be determined."""
+    try:
+        domain = mod._configured_external_domain(mod.get_etcd_client())
+    except Exception:
+        domain = ''
+    if not domain:
+        host = (request.host or '').split(':', 1)[0]
+        head, sep, rest = host.partition('.')
+        if sep and head in _NON_API_HOST_PREFIXES:
+            host = rest
+        if ('.' in host and not host.endswith('.xc')
+                and not _IPV4_RE.match(host)):
+            domain = host
+    return f'https://{domain}{INFERENCE_API_PATH}' if domain else ''
 
 
 def _vm_usage_since():
@@ -129,6 +157,7 @@ def register(mod):
         except Exception as e:
             return jsonify({'error': f'etcd connection failed: {e}'}), 503
         return jsonify({'email': id.email,
+                        'endpoint': _external_inference_endpoint(mod),
                         'keys': data.get(id.email, [])})
 
 
@@ -172,6 +201,30 @@ def register(mod):
         except Exception as e:
             return jsonify({'error': f'etcd write failed: {e}'}), 503
         return jsonify({'ok': True})
+
+
+    @flask_app.route('/admin/settings/api-keys/rename', methods=['POST'])
+    def settings_api_keys_rename():
+        id = mod._authentik_identity()
+        if not id.email:
+            return jsonify({'error': 'no authenticated user'}), 403
+        body = request.get_json(silent=True) or {}
+        key_id = body.get('key_id', '') or ''
+        label = body.get('label', '') or ''
+        if not isinstance(key_id, str) or not key_id.strip():
+            return jsonify({'error': 'no key id provided'}), 400
+        if not isinstance(label, str):
+            return jsonify({'error': 'invalid label'}), 400
+        label = label.strip()
+        try:
+            # Owner-scoped in the DAL: another user's key-id is not found.
+            if not mod.apikeys.rename_key(id.email, key_id, label):
+                return jsonify({'error': 'key not found'}), 404
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        except Exception as e:
+            return jsonify({'error': f'etcd write failed: {e}'}), 503
+        return jsonify({'ok': True, 'key_id': key_id, 'label': label})
 
 
     @flask_app.route('/admin/vm-usage')

@@ -32,6 +32,10 @@ a gateway API key at `https://<admin-domain>/admin/settings/api-keys`
 key also works. Keys minted before the gateway moved off Open-WebUI
 keep their original `sk-…` value — there is no rotation.
 
+The same page shows the public base URL (`https://<domain>/v1`) and
+lets you rename a key's label. Renaming is display-only: the key value
+and its access are unchanged.
+
 ## What's available
 
 Models map to backends in etcd and change over time. List what's

@@ -143,6 +143,24 @@ def revoke_key(key_id):
     return False
 
 
+def rename_key(owner, key_id, label):
+    """Set the label on one of `owner`'s keys. Returns False if absent.
+
+    Owner-scoped: another user's key-id is simply not found. Only the label
+    changes; hash, digest and created_at are preserved."""
+    _valid_user(owner)
+    if not _KEY_ID_RE.match(key_id):
+        raise ValueError(f"Invalid key id '{key_id}'")
+    path = USERS_PREFIX + owner + KEYS_SUFFIX + key_id
+    val, _ = get_etcd_client().get(path)
+    if val is None:
+        return False
+    data = json.loads(val.decode())
+    data["label"] = label or ""
+    _put(path, data)
+    return True
+
+
 def validate_key(presented, hasher=None):
     """Return (email, groups) authenticating the presented token, or None.
 
