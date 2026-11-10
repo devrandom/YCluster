@@ -486,7 +486,12 @@
           [Service]
           Type=oneshot
           TimeoutStartSec=5min
-          ExecStart=-/usr/bin/systemctl start "{{ nas_nfs_mount_units.results[nas_nfs_mounts_idx].stdout }}"
+          # Start the unit by mount point, not by its escaped name: systemd
+          # C-unescapes ExecStart arguments, so the unit name
+          # "mnt-nas\x2dvm.mount" reaches systemctl as
+          # "mnt-nas-vm.mount" and fails with "Unit ... not found".
+          # systemctl converts an absolute path to the matching .mount unit.
+          ExecStart=-/usr/bin/systemctl start "{{ item.mount_point }}"
         mode: '0644'
       loop: "{{ nas_nfs_mounts_effective }}"
       loop_control:
