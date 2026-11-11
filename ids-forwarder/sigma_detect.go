@@ -147,15 +147,20 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 		parts = append(parts, fmt.Sprintf("dst=%s:%d", ev.DestinationIp, ev.DestinationPort))
 	}
 	layer := sigmaLayer(ev)
-	containerName := ""
+	containerName := ev.ContainerName
 	if layer == "host" {
-		if name, ok := containerForProcess(ev.ProcessId, ev.StartTime); ok {
-			layer = "container"
-			containerName = name
+		if r := resolveProcessLayer(ev.ProcessId, ev.StartTime); r.Resolved && r.Layer != "" {
+			layer = r.Layer
+			if r.Name != "" {
+				containerName = r.Name
+			}
 		}
 	}
 	a := newAlert(cfg, sourceSigma, sigmaSeverity(det.Level), layer, rule,
 		redactIPs(strings.Join(parts, " ")))
+	// The visible summary redacts addresses; keep the unredacted event as the
+	// dedup identity so callbacks to different hosts do not collapse.
+	a.dedupIdentity = identityHash(det.RuleID + "|" + strings.Join(parts, " "))
 	if containerName != "" {
 		a.Labels["container"] = containerName
 	}
@@ -183,6 +188,9 @@ func sigmaSeverity(level string) string {
 }
 
 func sigmaLayer(ev sigma.Event) string {
+	if ev.Layer != "" {
+		return ev.Layer
+	}
 	if ev.ContainerName != "" {
 		return "container"
 	}

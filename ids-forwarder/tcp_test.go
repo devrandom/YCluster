@@ -146,6 +146,23 @@ func TestUnexpectedTCPIsForwarded(t *testing.T) {
 		{"vikunja healthcheck on another port", "/app/vikunja/vikunja", "healthcheck", "10.0.0.100", 8443},
 		{"ntfy name in arguments", "/usr/bin/python3", "-c import ntfy-webhook.py", "203.0.113.40", 443},
 		{"ntfy on another port", "/usr/bin/python3.12", "/usr/local/bin/ntfy-webhook.py", "203.0.113.40", 8443},
+		{"blackbox basename from tmp", "/tmp/prometheus-blackbox-exporter", "", "203.0.113.30", 443},
+		{"frpc basename from tmp", "/tmp/frpc", "", "203.0.113.93", 7000},
+		{"fwupd basename from tmp", "/tmp/fwupd", "", "203.0.113.91", 443},
+		{"snapd basename from tmp", "/tmp/snapd", "", "203.0.113.92", 443},
+		{"networkmanager basename from tmp", "/tmp/NetworkManager", "", "203.0.113.60", 80},
+		{"sshd basename from tmp", "/tmp/sshd", "", "10.100.0.13", 22},
+		{"ycluster basename from tmp", "/tmp/ycluster", "vm idle --notify", "10.0.0.12", 9091},
+		{"etcd basename from tmp", "/tmp/etcd", "", "10.0.0.12", 2382},
+		{"prometheus basename from tmp", "/tmp/prometheus", "", "10.0.0.12", 9283},
+		{"local ai proxy basename from tmp", "/tmp/local-ai-proxy", "serve", "10.0.0.12", 9218},
+		{"rootlessport basename from tmp", "/tmp/rootlessport", "", "10.88.0.4", 9000},
+		{"ceph basename from tmp", "/tmp/ceph", "", "10.0.0.11", 3300},
+		{"dnsmasq basename from tmp", "/tmp/dnsmasq", "", "10.0.0.11", 53},
+		{"admin python script in a later argument", "/usr/bin/python3", "/tmp/payload.py /opt/admin-services/app.py", "10.0.0.12", 8000},
+		{"admin python traversal", "/usr/bin/python3", "/opt/admin-services/../../tmp/payload.py", "10.0.0.11", 2381},
+		{"blackbox updater in a later argument", "/usr/bin/python3", "/tmp/p.py update-blackbox-targets", "10.0.0.11", 2381},
+		{"snapd lookalike", "/snap/snapd/28254/usr/lib/snapd/snapd.evil", "", "203.0.113.92", 443},
 	}
 
 	for _, tc := range cases {

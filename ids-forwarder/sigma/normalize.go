@@ -20,13 +20,17 @@ type Event struct {
 	ParentImage       string `json:"ParentImage,omitempty"`
 	ParentCommandLine string `json:"ParentCommandLine,omitempty"`
 	User              string `json:"User,omitempty"`
-	ProcessId         uint32 `json:"ProcessId,omitempty"`
-	ParentProcessId   uint32 `json:"ParentProcessId,omitempty"`
-	ContainerName     string `json:"ContainerName,omitempty"`
-	ContainerImage    string `json:"ContainerImage,omitempty"`
-	StartTime         string `json:"StartTime,omitempty"`
-	DestinationIp     string `json:"DestinationIp,omitempty"`
-	DestinationPort   uint16 `json:"DestinationPort,omitempty"`
+	// Layer is host or container. Local suppressions use it so a tenant
+	// cannot match a host-only exclusion.
+	Layer           string `json:"Layer,omitempty"`
+	ProcessId       uint32 `json:"ProcessId,omitempty"`
+	ParentProcessId uint32 `json:"ParentProcessId,omitempty"`
+	ParentStartTime string `json:"ParentStartTime,omitempty"`
+	ContainerName   string `json:"ContainerName,omitempty"`
+	ContainerImage  string `json:"ContainerImage,omitempty"`
+	StartTime       string `json:"StartTime,omitempty"`
+	DestinationIp   string `json:"DestinationIp,omitempty"`
+	DestinationPort uint16 `json:"DestinationPort,omitempty"`
 	// Initiated is set for tcp_connect events: the sensor saw the SYN.
 	// SigmaHQ network rules use it to distinguish client from server traffic.
 	Initiated string `json:"Initiated,omitempty"`
@@ -53,6 +57,8 @@ type process struct {
 	Arguments string `json:"arguments"`
 	StartTime string `json:"start_time"`
 	Pod       *pod   `json:"pod"`
+	// Docker is the container id Tetragon records for Docker workloads.
+	Docker string `json:"docker"`
 }
 
 type pod struct {
@@ -110,6 +116,7 @@ func normalizeProcess(ts, eventType string, p, parent *process) *Event {
 		Image:       p.Binary,
 		CommandLine: commandLine(p.Binary, p.Arguments),
 		User:        user(p.UID),
+		Layer:       "host",
 		ProcessId:   p.PID,
 		StartTime:   p.StartTime,
 	}
@@ -117,6 +124,13 @@ func normalizeProcess(ts, eventType string, p, parent *process) *Event {
 		ev.ParentImage = parent.Binary
 		ev.ParentCommandLine = commandLine(parent.Binary, parent.Arguments)
 		ev.ParentProcessId = parent.PID
+		ev.ParentStartTime = parent.StartTime
+		if parent.Pod != nil || parent.Docker != "" {
+			ev.Layer = "container"
+		}
+	}
+	if p.Pod != nil || p.Docker != "" {
+		ev.Layer = "container"
 	}
 	if p.Pod != nil {
 		ev.ContainerName = p.Pod.Name

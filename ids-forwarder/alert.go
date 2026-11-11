@@ -59,9 +59,6 @@ func (a alert) dedupKey() string {
 	shell := a.Labels["rule_id"] == "process_exec" && isShellBinary(a.Labels["binary"])
 	keys := make([]string, 0, len(a.Labels))
 	for k := range a.Labels {
-		if k == "severity" {
-			continue // severity changes should not defeat dedup
-		}
 		if k == "origin" || k == "actor" {
 			// Provenance describes the alert, it does not make it a
 			// different signal: one shell on one host stays one alert

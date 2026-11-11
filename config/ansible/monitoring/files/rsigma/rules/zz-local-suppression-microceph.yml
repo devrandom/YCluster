@@ -19,4 +19,5 @@ filter:
         # mentions the path, e.g. a `-c` payload with a trailing
         # `/snap/microceph/x` argument, suppress the rule.
         CommandLine|re: '^/(usr/)?bin/bash /snap/microceph/[0-9]+/commands/[a-z]+\.start$'
+        Layer: host
     condition: not microceph

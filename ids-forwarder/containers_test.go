@@ -17,11 +17,18 @@ func TestContainerNameFromCgroup(t *testing.T) {
 	}{
 		{"incus", "0::/lxc.payload.abdou2/user.slice/user-1000.slice/session-1.scope", "abdou2", true},
 		{"lxc", "0::/lxc/web1/init.scope", "web1", true},
-		{"docker", "0::/system.slice/docker-abc123.scope", "", true},
-		{"podman", "0::/machine.slice/libpod-abc123.scope", "", true},
+		{"docker", "0::/system.slice/docker-" + dockerID + ".scope", "", true},
+		{"podman", "0::/machine.slice/libpod-" + dockerID + ".scope", "", true},
 		{"kube", "0::/kubepods.slice/kubepods-burstable.slice/cri-containerd-abc.scope", "", true},
+		{"docker v1", "0::/docker/" + dockerID, "", true},
+		{"podman v1", "0::/libpod/" + dockerID, "", true},
+		{"rootless docker shape", "0::/user.slice/user-1000.slice/user@1000.service/app.slice/docker-" + dockerID + ".scope", "", true},
+		{"forged named docker scope", "0::/user.slice/user-1000.slice/user@1000.service/app.slice/docker-evil.scope", "", false},
+		{"rootless kubepods shape", "0::/user.slice/user-1000.slice/user@1000.service/app.slice/kubepods-evil.slice", "", true},
+		{"user scope with kubepods name", "0::/user.slice/user-1000.slice/user@1000.service/app.slice/kubepods-evil.scope", "", false},
 		{"host", "0::/user.slice/user-0.slice/session-1.scope", "", false},
 		{"init", "0::/init.scope", "", false},
+		{"nested lxc name", "0::/system.slice/lxc.payload.evil.scope", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,5 +144,56 @@ func TestContainerForEventUsesIncusIDMap(t *testing.T) {
 	}
 	if _, ok := containerForEvent(parent); !ok {
 		t.Fatal("idmapped parent uid must be attributed to a container")
+	}
+	subuid := &tetragonLog{Process: tetragonProcess{PID: 7005, UID: 100000,
+		StartTime: "2026-10-30T19:21:08.494766950Z"}}
+	if _, ok := containerForEvent(subuid); ok {
+		t.Fatal("an ordinary host subuid must not be attributed to a container")
+	}
+	if _, layer := containerForEventLayer(subuid); layer != "unverified" {
+		t.Fatalf("ordinary non-root uid layer = %q, want unverified", layer)
+	}
+	// A dead system-account process is a host service, not a rootless
+	// container: `_apt` and PCP's `pcp` account exit before the line is read.
+	systemAccount := &tetragonLog{Process: tetragonProcess{PID: 7006, UID: 42,
+		StartTime: "2026-10-30T19:21:08.494766950Z"}}
+	if _, layer := containerForEventLayer(systemAccount); layer != "" {
+		t.Fatalf("dead system-account uid layer = %q, want host", layer)
+	}
+}
+
+const dockerID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestRootlessUserScopeStaysHost(t *testing.T) {
+	root := t.TempDir()
+	const btime = int64(1700000000)
+	const ticks = 4242
+	pid := uint32(8888)
+	dir := filepath.Join(root, fmt.Sprint(pid))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup"),
+		[]byte("0::/user.slice/user-1000.slice/user@1000.service/app.slice/libpod-"+dockerID+".scope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stat := fmt.Sprintf("%d (bash) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 %d 0\n", pid, ticks)
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "stat"),
+		[]byte(fmt.Sprintf("cpu 0 0\nbtime %d\n", btime)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := procRoot
+	procRoot = root
+	defer func() { procRoot = old }()
+
+	want := time.Unix(btime, 0).Add(time.Duration(ticks) * time.Second / 100)
+	if _, layer := containerForProcessLayer(pid, want.Format(time.RFC3339Nano)); layer != "unverified" {
+		t.Fatalf("layer = %q, want unverified", layer)
+	}
+	if _, ok := containerForProcess(pid, want.Format(time.RFC3339Nano)); ok {
+		t.Fatal("an unverified user-scope runtime name must not be a verified container")
 	}
 }

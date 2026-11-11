@@ -23,6 +23,31 @@ func TestNormalizeProcessExec(t *testing.T) {
 	if ev.ContainerName != "web" || ev.ContainerImage != "nginx:1.29" {
 		t.Fatalf("container fields = %+v", ev)
 	}
+	if ev.Layer != "container" {
+		t.Fatalf("Layer = %q, want container", ev.Layer)
+	}
+}
+
+func TestNormalizeCarriesDockerLayer(t *testing.T) {
+	line := `{"process_exec":{"process":{"pid":10,"uid":0,"binary":"/bin/sh","docker":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}`
+	ev, ok, err := NormalizeLine(line)
+	if err != nil || !ok {
+		t.Fatalf("NormalizeLine = %v, %v", ok, err)
+	}
+	if ev.Layer != "container" {
+		t.Fatalf("Layer = %q, want container", ev.Layer)
+	}
+}
+
+func TestNormalizeHostLayer(t *testing.T) {
+	line := `{"process_exec":{"process":{"pid":11,"uid":0,"binary":"/usr/bin/incus"}}}`
+	ev, ok, err := NormalizeLine(line)
+	if err != nil || !ok {
+		t.Fatalf("NormalizeLine = %v, %v", ok, err)
+	}
+	if ev.Layer != "host" {
+		t.Fatalf("Layer = %q, want host", ev.Layer)
+	}
 }
 
 func TestNormalizeTCPConnect(t *testing.T) {

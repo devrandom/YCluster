@@ -139,6 +139,25 @@ func TestSigmaDetectionToAlert(t *testing.T) {
 	}
 }
 
+func TestSigmaDeadIncusProcessUsesIDMap(t *testing.T) {
+	container := &sigma.Event{User: "1000000"}
+	resolveSigmaIdentity(container)
+	if container.Layer != "container" {
+		t.Fatalf("Layer = %q, want container for an idmapped uid", container.Layer)
+	}
+	host := &sigma.Event{User: "1000"}
+	resolveSigmaIdentity(host)
+	if host.Layer != "unverified" {
+		t.Fatalf("Layer = %q, want unverified for a dead non-root uid", host.Layer)
+	}
+	// System accounts are host services even when the process has exited.
+	system := &sigma.Event{User: "42"}
+	resolveSigmaIdentity(system)
+	if system.Layer != "host" {
+		t.Fatalf("Layer = %q, want host for a dead system-account uid", system.Layer)
+	}
+}
+
 func TestSigmaRuleSlug(t *testing.T) {
 	if got := sigmaRuleSlug("Linux  Webshell / Indicators!"); got != "linux-webshell-indicators" {
 		t.Fatalf("slug = %q", got)

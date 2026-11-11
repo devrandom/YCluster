@@ -19,4 +19,5 @@ filter:
         # merely mentions the rotation path, e.g.
         # `rm -f /var/log/sysstat/* /var/log/auth.log*`.
         CommandLine|re: '^(/usr/bin/rm -f /var/log/sysstat/(sa|sar)[0-9]+( /var/log/sysstat/(sa|sar)[0-9]+)*|/usr/bin/rm -f -- /var/log//dmesg\.[0-9]+(\.gz)?( /var/log//dmesg\.[0-9]+(\.gz)?)*)$'
+        Layer: host
     condition: not rotation

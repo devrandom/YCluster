@@ -24,4 +24,8 @@ nodes:
       - parsed: file_name
         expression: "split(evt.Parsed.request, '?')[0]"
       - parsed: static_ressource
-        expression: 'evt.Parsed.request matches ".*\\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg)$" ? "true" : "false"'
+        # Use the path without the query string and a set of known static
+        # roots. An arbitrary dynamic route must not become static just
+        # because the client appended an asset suffix. A response content
+        # type would be stronger; the combined log format does not carry one.
+        expression: '((not (evt.Parsed.file_name contains "..")) and (not (evt.Parsed.file_name contains "%2e")) and (not (evt.Parsed.file_name contains "%2E")) and (evt.Parsed.file_name startsWith "/static/" or evt.Parsed.file_name startsWith "/staticfiles/" or evt.Parsed.file_name startsWith "/assets/" or evt.Parsed.file_name startsWith "/media/" or evt.Parsed.file_name startsWith "/_next/static/" or evt.Parsed.file_name == "/favicon.ico")) ? "true" : "false"'

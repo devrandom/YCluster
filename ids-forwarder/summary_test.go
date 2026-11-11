@@ -42,14 +42,14 @@ func TestRoutineExecSuppression(t *testing.T) {
 		{
 			name:   "node exporter collector",
 			binary: "/bin/sh",
-			args:   `-c "/usr/share/prometheus-node-exporter-collectors/smartmon.sh | sponge out"`,
+			args:   `-c "/usr/share/prometheus-node-exporter-collectors/smartmon.sh | sponge /var/lib/prometheus/node-exporter/smartmon.prom"`,
 			parent: "/proc/self/fd/9",
 			reason: "node_exporter",
 		},
 		{
 			name:   "node exporter without parent attribution",
 			binary: "/bin/sh",
-			args:   `-c "/usr/share/prometheus-node-exporter-collectors/nvme_metrics.py | sponge out"`,
+			args:   `-c "/usr/share/prometheus-node-exporter-collectors/nvme_metrics.py | sponge /var/lib/prometheus/node-exporter/nvme.prom"`,
 			parent: "",
 			reason: "node_exporter",
 		},
@@ -179,6 +179,13 @@ func TestRoutineExecSuppression(t *testing.T) {
 			binary: "/bin/sh",
 			args:   `-c -- "systemctl start --no-block apt-news.service esm-cache.service"`,
 			parent: "/usr/bin/apt-get",
+			reason: "package_update",
+		},
+		{
+			name:   "apt daily update stamp",
+			binary: "/bin/sh",
+			args:   `-c -- "touch /var/lib/apt/periodic/update-success-stamp 2>/dev/null || true"`,
+			parent: "/usr/lib/systemd/systemd",
 			reason: "package_update",
 		},
 		{
@@ -465,7 +472,8 @@ func TestHandleLineCountsSuppressedExec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	line := execLine(t, "/usr/bin/curl", "-f -s http://localhost:5000/v2/", "/usr/bin/bash")
+	line := execLine(t, "/usr/bin/curl", "-f -s http://localhost:5000/v2/",
+		"/usr/local/lib/cluster/check-storage-vip-health")
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +620,7 @@ func TestContainerWorkloadNoise_isSuppressed(t *testing.T) {
 		parent string
 		reason string
 	}{
-		{"container health probe", "process_exec", "/bin/sh", `-c "curl --silent --fail http://localhost:8080/health | jq -n"`, "/usr/bin/tini", "health_check"},
+		{"container health probe", "process_exec", "/bin/sh", `-c "curl --silent --fail http://localhost:8080/health"`, "/usr/bin/tini", "health_check"},
 		{"lifecycle healthcheck", "process_exec", "/usr/bin/bash", "/lifecycle/ak healthcheck", "/usr/bin/tini", "health_check"},
 		{"false liveness probe", "process_exec", "/bin/sh", "-c -- /bin/false", "", "health_check"},
 		{"cron.d wrapper", "process_exec", "/bin/sh", `-c "cd / && run-parts --report /etc/cron.hourly"`, "/usr/sbin/cron", "cron"},

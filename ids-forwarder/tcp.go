@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/netip"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -79,7 +80,7 @@ func containerProbeReason(body *tetragonLog) string {
 	if body == nil || body.FunctionName != "tcp_connect" {
 		return ""
 	}
-	binary := strings.TrimSuffix(body.Process.Binary, " (deleted)")
+	binary := path.Clean(strings.TrimSuffix(body.Process.Binary, " (deleted)"))
 	_, port, ok := tcpDestination(body.Args)
 	if !ok {
 		return ""
@@ -115,12 +116,12 @@ func newTCPConn(body *tetragonLog) (tcpConn, bool) {
 	if !ok || port == 0 {
 		return tcpConn{}, false
 	}
-	binary := body.Process.Binary
+	binary := strings.TrimSuffix(body.Process.Binary, " (deleted)")
 	return tcpConn{
 		binary: binary,
 		// Tetragon keeps the " (deleted)" suffix after an in-place binary
 		// update; it is not part of the process identity.
-		base: strings.TrimSuffix(path.Base(binary), " (deleted)"),
+		base: path.Base(binary),
 		args: body.Process.Arguments,
 		addr: addr,
 		port: port,
@@ -158,7 +159,7 @@ func expectedTCPReason(body *tetragonLog) string {
 // notification and egress paths.
 func automationDial(c tcpConn) bool {
 	switch {
-	case c.base == "sshd":
+	case c.binary == "/usr/sbin/sshd":
 		// A container's sshd dials the next hop's SSH port when a client
 		// uses the jump host. This is the documented access path into the
 		// Incus bridge, and it only covers dials inside that bridge.
@@ -173,7 +174,7 @@ func automationDial(c tcpConn) bool {
 			return true
 		}
 		return c.port == 2049 && c.addr.IsPrivate()
-	case c.base == "prometheus-blackbox-exporter":
+	case c.binary == "/usr/bin/prometheus-blackbox-exporter":
 		// The whole purpose of this daemon is probing arbitrary endpoints.
 		return true
 	case c.base == "squid" && c.binary == "/usr/sbin/squid":
@@ -184,17 +185,17 @@ func automationDial(c tcpConn) bool {
 		// Versioned build path; an attacker staging a binary elsewhere does
 		// not inherit the exemption.
 		return c.port == 443
-	case strings.HasPrefix(c.binary, "/usr/local/bin/ntfy-webhook.py") ||
-		strings.HasPrefix(c.args, "/usr/local/bin/ntfy-webhook.py"):
+	case c.binary == "/usr/local/bin/ntfy-webhook.py" ||
+		invokesScript(c.args, "/usr/local/bin/ntfy-webhook.py"):
 		// Pinned install path and the notify-only HTTPS API, plus the cluster
 		// etcd it uses to claim the shared budget; an argument mentioning the
 		// name does not make an arbitrary payload trusted.
 		return c.port == 443 || (c.port == 2381 && c.addr.IsPrivate())
-	case c.base == "frpc":
+	case c.binary == "/usr/local/bin/frpc":
 		return c.port == 7000
-	case c.base == "fwupd" || c.base == "snapd":
+	case c.binary == "/usr/libexec/fwupd/fwupd" || snapdBinary(c.binary):
 		return c.port == 443
-	case c.base == "NetworkManager":
+	case c.binary == "/usr/sbin/NetworkManager":
 		return c.port == 80
 	case strings.HasPrefix(c.binary, "/usr/lib/apt/methods/"):
 		return c.port == 443 || c.port == 3128
@@ -249,24 +250,32 @@ func automationArgs(c tcpConn) bool {
 // records the process arguments without the interpreter, so a script normally
 // appears at argv[0] and only an interpreter flag can precede it.
 func invokesScript(args, script string) bool {
-	fields := strings.Fields(args)
-	if i := scriptOperand(fields); i >= 0 && i < len(fields) {
-		return fields[i] == script
-	}
-	return false
+	return scriptPath(args) == script
 }
 
 // clusterScript reports whether the command line runs a cluster-installed
 // program, which is the part of argv a payload cannot forge without write
 // access to /usr/local.
 func clusterScript(args string) bool {
+	script := scriptPath(args)
+	return strings.HasPrefix(script, "/usr/local/lib/cluster/") ||
+		strings.HasPrefix(script, "/usr/local/bin/")
+}
+
+// scriptPath returns the cleaned script operand, or "" when argv does not
+// name one. Cleaning before the comparison rejects `/opt/../tmp/payload`
+// without rejecting a legitimate absolute path.
+func scriptPath(args string) string {
 	fields := strings.Fields(args)
 	i := scriptOperand(fields)
 	if i < 0 || i >= len(fields) {
-		return false
+		return ""
 	}
-	return strings.HasPrefix(fields[i], "/usr/local/lib/cluster/") ||
-		strings.HasPrefix(fields[i], "/usr/local/bin/")
+	raw := strings.Trim(fields[i], "\"'")
+	if strings.Contains(raw, "..") {
+		return ""
+	}
+	return path.Clean(raw)
 }
 
 // scriptOperand returns the index of the program or interpreter script
@@ -297,6 +306,37 @@ func isPython(base string) bool {
 	return base == "python3" || base == "python3.12"
 }
 
+// snapBinary matches /snap/<snap>/<revision>/bin/<name>. The revision is
+// numeric and the executable name is exact, so a copied binary outside the
+// snap does not inherit the exemption.
+func snapBinary(binary, snap, name string) bool {
+	prefix := "/snap/" + snap + "/"
+	if !strings.HasPrefix(binary, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(binary, prefix), "/")
+	if len(parts) != 3 || parts[1] != "bin" || parts[2] != name {
+		return false
+	}
+	_, err := strconv.Atoi(parts[0])
+	return err == nil
+}
+
+// snapdBinary matches the snapd snap's own daemon, whose revision changes on
+// every refresh.
+func snapdBinary(binary string) bool {
+	prefix := "/snap/snapd/"
+	if !strings.HasPrefix(binary, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(binary, prefix), "/")
+	if len(parts) != 5 || parts[1] != "usr" || parts[2] != "lib" || parts[3] != "snapd" || parts[4] != "snapd" {
+		return false
+	}
+	_, err := strconv.Atoi(parts[0])
+	return err == nil
+}
+
 // moduleRun reports whether the interpreter runs module via `-m`. Tetragon
 // records the arguments without the interpreter binary.
 func moduleRun(args, module string) bool {
@@ -314,11 +354,11 @@ func clusterDial(c tcpConn) bool {
 	}
 	// Port forwarders for published container ports only ever dial the
 	// container side of their own bridge.
-	if c.base == "rootlessport" || c.base == "docker-proxy" {
+	if c.binary == "/usr/libexec/podman/rootlessport" || c.binary == "/usr/bin/docker-proxy" {
 		return true
 	}
 	// nginx dials its configured upstreams on the cluster network.
-	if c.base == "nginx" && c.port == 8188 {
+	if c.binary == "/usr/sbin/nginx" && c.port == 8188 {
 		return true
 	}
 	return cephDial(c) || serviceDial(c)
@@ -327,16 +367,31 @@ func clusterDial(c tcpConn) bool {
 func cephDial(c tcpConn) bool {
 	switch c.base {
 	case "ceph":
+		if !snapBinary(c.binary, "microceph", "ceph") && c.binary != "/usr/bin/ceph" {
+			return false
+		}
 		// The CLI reaches the monitor, manager and OSD ports.
 		return c.port == 3300 || c.port == 6789 ||
 			c.port == 6800 || c.port == 6801 || c.port == 6802 || c.port == 6810
 	case "ceph-mgr":
+		if !snapBinary(c.binary, "microceph", "ceph-mgr") && c.binary != "/usr/bin/ceph-mgr" {
+			return false
+		}
 		return (c.port >= 6800 && c.port <= 6802) || c.port == 6810
 	case "ceph-mon":
+		if !snapBinary(c.binary, "microceph", "ceph-mon") && c.binary != "/usr/bin/ceph-mon" {
+			return false
+		}
 		return c.port == 3300 || c.port == 6789 || c.port == 6810
 	case "ceph-osd":
+		if !snapBinary(c.binary, "microceph", "ceph-osd") && c.binary != "/usr/bin/ceph-osd" {
+			return false
+		}
 		return c.port == 6789 || c.port == 6810
 	case "ceph-mds":
+		if !snapBinary(c.binary, "microceph", "ceph-mds") && c.binary != "/usr/bin/ceph-mds" {
+			return false
+		}
 		return c.port == 6810
 	}
 	return false
@@ -345,26 +400,28 @@ func cephDial(c tcpConn) bool {
 func serviceDial(c tcpConn) bool {
 	switch c.base {
 	case "etcdctl":
-		return c.port == 2381
+		return c.binary == "/usr/bin/etcdctl" && c.port == 2381
 	case "ycluster":
 		// 8067 is the DHCP health endpoint that `cluster status` probes.
-		return c.port == 2381 || c.port == 9091 || c.port == 5432 || c.port == 8067
+		return c.binary == "/usr/local/bin/ycluster" &&
+			(c.port == 2381 || c.port == 9091 || c.port == 5432 || c.port == 8067)
 	case "etcd":
-		return c.port == 2382
+		return c.binary == "/usr/bin/etcd" && c.port == 2382
 	case "microcephd":
-		return c.port == 7443
+		return snapBinary(c.binary, "microceph", "microcephd") && c.port == 7443
 	case "dnsmasq":
-		return c.port == 53 || c.port == 853
+		return c.binary == "/usr/sbin/dnsmasq" && (c.port == 53 || c.port == 853)
 	case "prometheus":
-		return registeredPort(expectedPrometheusPorts, c.port)
+		return c.binary == "/usr/bin/prometheus" && registeredPort(expectedPrometheusPorts, c.port)
 	case "prometheus-alertmanager":
-		return c.port == 9094
+		return c.binary == "/usr/bin/prometheus-alertmanager" && c.port == 9094
 	case "ids-forwarder":
-		return c.port == 9093
+		return c.binary == "/usr/local/bin/ids-forwarder" && c.port == 9093
 	case "local-ai-proxy":
 		// The proxy also reads its model registry from the etcd client port.
-		return registeredPort(expectedLocalAIProxyPorts, c.port) ||
-			(c.port == 2381 && c.addr.IsPrivate())
+		return c.binary == "/usr/local/bin/local-ai-proxy" &&
+			(registeredPort(expectedLocalAIProxyPorts, c.port) ||
+				(c.port == 2381 && c.addr.IsPrivate()))
 	}
 	if !isPython(c.base) {
 		return false
@@ -384,16 +441,18 @@ func registeredPort(known map[uint16]struct{}, port uint16) bool {
 // adminPythonDial covers the admin service and its target updater, which
 // share the python3 binary.
 func adminPythonDial(c tcpConn) bool {
+	script := scriptPath(c.args)
 	if c.port == 2381 && c.addr.IsPrivate() &&
-		strings.HasPrefix(c.args, "/opt/admin-services/") {
+		strings.HasPrefix(script, "/opt/admin-services/") {
 		// The admin services (app.py, health-api.py) read their
 		// configuration from etcd.
 		return true
 	}
-	if c.port == 2381 && strings.Contains(c.args, "update-blackbox-targets") {
+	if c.port == 2381 && c.addr.IsPrivate() &&
+		invokesScript(c.args, "/usr/local/lib/cluster/update-blackbox-targets") {
 		return true
 	}
-	if !strings.Contains(c.args, "/opt/admin-services/app.py") {
+	if script != "/opt/admin-services/app.py" {
 		return false
 	}
 	_, ok := expectedAdminServicePorts[c.port]
@@ -405,7 +464,7 @@ func adminPythonDial(c tcpConn) bool {
 // private address is not ordinary egress: it means the network policy was
 // bypassed or misconfigured, and it stays alertable.
 func containerEgressReason(body *tetragonLog, layer string) string {
-	if layer != "container" || body == nil || body.FunctionName != "tcp_connect" {
+	if (layer != "container" && layer != "unverified") || body == nil || body.FunctionName != "tcp_connect" {
 		return ""
 	}
 	sock, ok := tcpSocket(body.Args)
@@ -418,6 +477,18 @@ func containerEgressReason(body *tetragonLog, layer string) string {
 	}
 	addr = addr.Unmap()
 	dport := sock.DPort
+	if layer == "unverified" {
+		// We cannot prove this is a container network namespace. Only ordinary
+		// public egress is routine; loopback, the host bridge and every private
+		// cluster address stay visible.
+		if addr.IsLoopback() || addr.IsUnspecified() || addr.IsLinkLocalUnicast() {
+			return ""
+		}
+		if !addr.IsPrivate() {
+			return "tenant_egress"
+		}
+		return ""
+	}
 	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsLinkLocalUnicast() {
 		return "container_bridge"
 	}

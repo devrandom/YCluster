@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"ycluster.local/ids-forwarder/sigma"
@@ -72,7 +73,36 @@ func resolveProcessIdentity(pid uint32, startTime string) (string, string, bool)
 // resolveSigmaIdentity applies the same fallback to the rule-layer copy, which
 // is normalized separately from the alert path.
 func resolveSigmaIdentity(ev *sigma.Event) {
-	if ev == nil || ev.Image != unknownExecBinary ||
+	if ev == nil {
+		return
+	}
+	if ev.Layer == "" {
+		ev.Layer = "host"
+	}
+	if ev.Layer == "host" {
+		// A process that /proc still knows is classified by its cgroup. Only
+		// when both it and its parent are gone does the uid heuristic apply;
+		// otherwise every non-root host service would lose its host
+		// exclusions.
+		r := resolveProcessLayer(ev.ProcessId, ev.StartTime)
+		if !r.Resolved && ev.ParentProcessId != 0 {
+			r = resolveProcessLayer(ev.ParentProcessId, ev.ParentStartTime)
+		}
+		switch {
+		case r.Resolved:
+			if r.Layer != "" {
+				ev.Layer = r.Layer
+				if r.Name != "" && ev.ContainerName == "" {
+					ev.ContainerName = r.Name
+				}
+			}
+		case incusMappedUser(ev.User):
+			ev.Layer = "container"
+		case loginUIDUser(ev.User):
+			ev.Layer = "unverified"
+		}
+	}
+	if ev.Image != unknownExecBinary ||
 		!strings.HasSuffix(strings.TrimSpace(ev.CommandLine), " "+unknownExecArg) {
 		return
 	}
@@ -82,4 +112,17 @@ func resolveSigmaIdentity(ev *sigma.Event) {
 	}
 	ev.Image = binary
 	ev.CommandLine = strings.TrimSpace(binary + " " + args)
+}
+
+func incusMappedUser(user string) bool {
+	uid, err := strconv.ParseUint(user, 10, 32)
+	return err == nil && uid >= incusIDMapBase
+}
+
+// loginUIDUser reports whether the numeric uid belongs to a login account.
+// System accounts below loginUIDBase are host services even when the process
+// has already exited.
+func loginUIDUser(user string) bool {
+	uid, err := strconv.ParseUint(user, 10, 32)
+	return err == nil && uid >= loginUIDBase
 }

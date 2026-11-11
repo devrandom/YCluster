@@ -257,6 +257,207 @@ must not become a second, longer-lived access log.
   including remote hosts, and define how a host that is down, off-cluster, or
   outside the Ansible inventory is represented in coverage.
 
+## Suppression blind-spot review
+
+Review assumption: the attacker knows the policies, forwarder source, Sigma
+rules and CrowdSec content. A suppression is unsafe when it matches a value
+the attacker can set (argv, basename, cgroup text, mutable container path) or
+when a later stage removes the event that would have shown the bypass.
+
+Actionable in this pass:
+
+- [x] Container attribution must not accept a forged cgroup name or a host
+      subuid: parse only real LXC/Docker/Podman/Kubernetes roots, assign user
+      scopes an `unverified` layer, and raise the no-`/proc` idmap fallback to
+      the Incus base.
+- [x] Egress/lateral exemptions must use exact executable paths (or anchored
+      snap paths), not `path.Base` values that any user can copy to `/tmp`.
+- [x] Interpreter exemptions must use the actual script operand, resolve
+      `..` traversal, and match exact destinations; `adminPythonDial` and
+      the blackbox updater are the first cases. Symlinks are not followed:
+      the remaining paths are root-owned install locations.
+- [x] Shell and Ansible suppressions must match anchored command shapes, not
+      substrings that can appear in a comment or a later argument; a probe
+      command must not be able to carry a payload.
+- [x] The Ansible temp-directory and node-exporter sponge shapes must reject
+      shell metacharacters in their variable tokens.
+- [x] Health probes must use known system binaries, reject proxy/resolve/
+      unix-socket redirects, and require every HTTP URL to be loopback.
+- [x] Health probes must reject shell composition and config indirection
+      (`-K`, `-e`, `-o`, `-O`), and address/socket tests must parse the host
+      rather than use substrings.
+- [x] Package queries and maintenance must match the complete command shape and
+      the apt subcommand position, not a prefix or any later token.
+- [x] Reject apt `Pre-Invoke`/`Post-Invoke` and arbitrary `-c` config files;
+      require the exact verifyrestore writer and `<version>/verifyrestore`
+      components.
+- [x] The bridge-guard module exemption must require the package `modprobe`
+      and the exact module name, not any command line containing the token.
+- [x] File-write suppressions must use exact writer paths and the narrow target
+      set each writer manages.
+- [x] Dedup keys must include severity and the unredacted Sigma destination,
+      so a critical event cannot disappear behind an earlier warning and two
+      callback destinations cannot collapse into one.
+- [x] Sigma local suppressions must require `Layer: host`; the normalizer must
+      carry layer and container identity so a tenant cannot match a host
+      filter.
+- [x] `container-api` and `container-exec` must match the real Incus binaries,
+      not any executable whose basename is `incus` or `incusd`.
+- [x] The Tetragon measurement switch must remove the current `1s` limit and
+      its `rateLimitScope`, not the retired `1m` value.
+- [x] Alertmanager must group and inhibit on `host` and `rule_id`, not on an
+      absent `node` label; missing equal labels currently match across hosts.
+- [x] CrowdSec must classify SSH success/failure from the message prefix and
+      nginx static resources from the cleaned path, not a substring or the
+      query string.
+- [x] Nginx static resources must use known static roots, not an arbitrary
+      file extension, and a `..` segment must not inherit a static root.
+- [x] Sigma must apply the same Incus idmap fallback when the process is gone,
+      so a dead container root shell cannot match `Layer: host`.
+
+Second delta, after re-running the deployed review:
+
+- [x] Health probes reject `$()` and attached/equals forms of config, proxy,
+      output, execute and socket flags; `-o /dev/null` remains allowed.
+- [x] Apt attached `-c`/`--config-file` forms are rejected, not only the
+      separated form.
+- [x] Verifyrestore requires `/bin/install` or the exact
+      `pg_createcluster <version> verifyrestore` shape and a
+      `postgresql/<version>/verifyrestore/` path.
+- [x] The `unverified` layer does not suppress loopback, bridge or private
+      destinations; only ordinary public egress is routine.
+- [x] A dead non-root process without a cgroup is `unverified` rather than
+      host, and Sigma checks the parent start time before falling back.
+- [x] Nginx static classification rejects encoded `..` (`%2e`/`%2E`).
+
+Third delta, after deploying the second delta and re-running the review with
+the working tree included:
+
+- [x] A process that `/proc` still resolves keeps the host layer even when it
+      runs as a non-root service account. The old code applied the uid
+      fallback to resolved host processes, so every non-root daemon
+      (`admin-api`, `local-ai-proxy`, `prometheus`, the `ceph` CLI) became
+      `unverified`, lost `expected_tcp`, and alerted on every cluster-internal
+      connect: about 1,000 `tcp-connect` alerts per hour on one node with the
+      kernel `1s` limit still in place. The uid fallback now runs only when
+      neither the process nor its parent resolves, in both the Tetragon and
+      Sigma paths.
+- [x] Ansible's nested become probe shapes are suppressed again. A non-root
+      connection wraps the command twice, so the deployed argv is
+      `bash -c "/bin/sh -c 'sudo -H -S -n -u root /bin/sh -c ...'"`; the
+      forwarder now unwraps one shell layer at a time and matches the same
+      anchored payloads. The expanded temp-directory form with backquote
+      `echo`, the `rm -f -r .../ansible-tmp-*/` cleanup, the `env -i
+      run-parts` motd shape and the `python3.x && sleep 0` interpreter probe
+      are covered, as is the `chmod u+x .../ansible-tmp-*/ {dir}/source`
+      step; a payload appended to any layer keeps the event visible.
+      Without this, one deploy produced about 1,500 `process_exec` detections.
+- [x] Clustered short options no longer bypass the health-probe checks:
+      `curl -so /tmp/x`, `curl -sK /tmp/rc` and `wget -qO /tmp/x` are not
+      routine, while `-o /dev/null` and `-m 5` still are.
+- [x] A newline in a shell payload is rejected before whitespace
+      normalisation, so `bash -c $'curl http://localhost/\\n/opt/evil'` cannot
+      read as a single probe command.
+- [x] The verifyrestore drill accepts `/usr/bin/install`, which is the binary
+      Debian's `install` resolves to on these hosts, as well as
+      `/bin/install`.
+- [x] The PCP cleanup filter requires a file component that does not start
+      with a dot, so `.../pmlogger/../../../../var/log/auth.log` cannot borrow
+      the rotation exemption.
+- [x] The node-exporter sponge exemption is limited to
+      `/var/lib/prometheus/node-exporter/*.prom`, and the microceph snap
+      rotation exemption matches the exact `run --timer=... <app>` shape
+      instead of any argument that contains the app name.
+- [x] The root-session Sigma filter description now states what the filter
+      actually matches: any root interactive bash on a host, which stays
+      visible through the `process_exec` rule.
+- [x] The curl/wget loopback exemption is anchored to its only host-side
+      originator: keepalived's storage-VIP script
+      (`/usr/local/lib/cluster/check-storage-vip-health`) running
+      `curl -f -s http://localhost:<port>/v2/`. A direct curl or wget with a
+      loopback URL is no longer routine, whichever arguments it carries, and
+      the shell health-check class now also requires a health-check parent
+      (shim, runc, tini or the lifecycle wrapper).
+- [x] apt-daily's `touch /var/lib/apt/periodic/<stamp> 2>/dev/null || true`
+      is classified as package maintenance again; the earlier narrowing to
+      the `systemctl start --no-block apt-news.service` shape had dropped it.
+- [x] A dead process whose uid is below 1000 stays host. The unverified
+      fallback was also catching system accounts that exit before the line is
+      read: `_apt` (42) running `dpkg --print-foreign-architectures` from the
+      hourly apt refresh, and PCP's `pcp` (996) running its log cleanup. Each
+      produced 25-100 `process_exec` or Sigma detections per node per day, and
+      the `Layer: host` PCP filter could not match them. Rootless runtimes run
+      as the invoking login user, so the fallback now applies only at uid
+      1000 and above.
+- [x] The PCP cleanup filter allows the per-host subdirectory PCP creates
+      (`/var/log/pcp/pmlogger/<host>/<file>`) while still rejecting a `..`
+      component; verified with `rsigma rule backtest` against the three real
+      shapes plus a log-clearing true positive.
+
+Deferred to the discussion phase, because each needs a policy or volume
+decision:
+
+- The 8000-9999 internal-service range stays broad by design; narrowing it to
+  the service registry conflicts with the earlier decision not to edit the
+  filter on every new backend.
+- Kernel `rateLimit` still drops events before userspace; replacing it with a
+  counted forwarder cap needs a measured volume budget.
+- Rename/link/mmap hooks and a periodic integrity baseline need a coverage and
+  volume decision. Until then the managed Prometheus temp-write suppression
+  must stay, and the documentation must not claim the rename is visible.
+- The Vikunja healthcheck exemption still matches a path inside the tenant
+  container. Fixing it needs an image or container-name identity, or moving
+  the probe to the host.
+- Root execution outside `/home` and `/var/tmp` (for example `/opt`,
+  `/usr/local`, `/var/lib`) needs an allowlist of system-owned trees; broad
+  coverage would alert on routine cluster services.
+- Shell coalescing remains one alert per host per window. Per-actor coalescing
+  and paging unknown-origin shells are policy choices about alert volume.
+- Paging the remaining `process_exec`, `tcp-connect`, CrowdSec and Sigma-low
+  classes, authenticating the paging path, and changing CrowdSec thresholds
+  are separate decisions.
+- Bridge-guard attribution by guest-selected source address/MAC needs an
+  interface-to-instance mapping from Incus; the current consumer can be
+  spoofed into another guest's budget or quiet list.
+- Rootless Podman/Docker workloads whose cgroup is under `user.slice` get the
+  `unverified` layer: execs stay visible, host automation and `Layer: host`
+  Sigma filters do not apply, and network traffic uses the container egress
+  rules. Verify the runtime through an API or an authenticated cgroup marker
+  before restoring container-internal suppression for these workloads.
+- The exact Ansible `BECOME-SUCCESS`/sudo probe shapes still launch a Python
+  interpreter whose stdin can carry code. Removing that exemption needs a
+  dedicated automation identity (or a non-shell probe), otherwise every
+  Ansible task alerts.
+- Raw event retention and the 50 MB rotation cap remain a forensic-window
+  decision.
+- `process_exec` only reaches the forwarder for the configured binary list
+  (shells, privilege tools, package managers, downloaders). A payload at
+  `/opt/evil`, `python3` by itself, `nsenter`, `rm` or a copied binary
+  produces no event. Widening the list needs a volume budget; until then the
+  Sigma rules are the only coverage for those paths.
+- Environment-driven configuration defeats the shell exemptions: `.curlrc`
+  via `CURL_HOME`, `APT_CONFIG` with an apt `Pre-Invoke` hook, `WGETRC` and
+  `LD_PRELOAD` all run code or add destinations while the argv still matches a
+  routine shape. Closing this needs a trusted parent/unit or a dedicated
+  automation identity, not another argv check.
+- Destination exemptions still trust the executable name for daemons that read
+  attacker-supplied configuration (`prometheus`, `frpc`, `squid`,
+  `smokescreen`, `docker-proxy`, `rootlessport`), and any host process may
+  reach port 3128 and be treated as the squid proxy. Match the unit identity
+  and the configured destination instead.
+- A container process that enters the host mount namespace (`nsenter -t 1 -m`)
+  keeps its container cgroup, so its file writes are still
+  `container_internal`. Compare `/proc/<pid>/ns/mnt` with the host before
+  granting the container layer, and define the behaviour when the pid is gone.
+- The verifyrestore write path is still a generic `install` into a
+  `postgresql/<version>/verifyrestore/` tree. It needs the backup unit's
+  identity (or a per-run component) rather than a path that any root process
+  can reproduce.
+- The root-session Sigma filter suppresses the Bash Interactive Shell rule for
+  every root interactive shell on a host. The description now says so; whether
+  the pilot keeps that shape (the `process_exec` rule still records it) or
+  narrows it to a parent/command-line condition is a policy choice.
+
 ## Packet capture
 
 Decide this separately for **detection** and for **incident response**; they have

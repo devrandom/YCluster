@@ -1184,7 +1184,7 @@ Fixed in the same pass:
   the malware-callback-port rule can match. The three hostname-only rules moved
   to `files/rsigma/rules-disabled/`; the normalizer has no DNS enrichment, so
   they are no longer installed or counted as coverage.
-- **Attacker-shaped suppressions (finding 4, partial).** Squid, smokescreen and
+- **Attacker-shaped suppressions (finding 4, first pass).** Squid, smokescreen and
   the apt method helpers now require their package path and expected port; the
   heartbeat and balance collectors only suppress their real destinations
   (external 443, plus the leader's private etcd client port); the notifier only
@@ -1226,10 +1226,75 @@ Fixed in the same pass:
   longer inverts `static_ressource`; its `%{NUMBER:...:int}` captures also never
   matched in this grok build, so the HTTP scenarios were inert even before that
   bug. The captures are plain strings now, which the 40x scenario already
-  expects. `cscli explain` shows `static_ressource` true for a static asset and
-  false for a dynamic path with `http_access-log` set. sshd successful logins
-  are labelled `ssh_success` and failures `ssh_failed-auth`, both verified the
-  same way; non-auth lines are `ssh_other`.
+  expects. The static test now uses the path with the query removed and refuses
+  API/admin/auth prefixes, so a dynamic route ending in `.css` is not treated
+  as an asset. sshd success/failure is classified from the start of the
+  `sshd_event` message, not from a substring that can appear in an
+  attacker-chosen username; successful logins are `ssh_success`, failures
+  `ssh_failed-auth`, and non-auth lines `ssh_other`.
+
+- **Suppression blind-spot review (finding 4, second pass).** The forwarder now
+  uses exact real paths for daemon, snap, Incus, Prometheus, etcd and admin
+  exemptions instead of a basename that can be copied to `/tmp`; script
+  operands are cleaned and rejected when they contain `..`; shell, Ansible and
+  package probes match anchored command shapes rather than a substring or
+  comment; the bridge-guard module exemption requires the package `modprobe`
+  and one exact module name; file-write exemptions use exact writers; dedup
+  keys include severity and the unredacted Sigma destination; Sigma events
+  carry `Layer` and local filters require `Layer: host`; Alertmanager groups
+  and inhibits on `host` and `rule_id`; and container attribution parses only
+  real LXC/Docker/Podman/Kubernetes cgroup components, treats an unverified
+  rootless user-scope claim as its own `unverified` layer (execs stay
+  visible; host automation and `Layer: host` Sigma filters do not apply;
+  network traffic uses the container egress rules), and uses the Incus idmap
+  base rather than a generic subuid. The Tetragon measurement switch now removes
+  `rateLimit` and `rateLimitScope`. A follow-up review removed the generic
+  Python/`$(...)` probe exemptions, made health probes use known system
+  binaries and reject proxy/resolve/unix-socket redirects, required the apt
+  subcommand position and rejected apt invoke/config hooks, narrowed
+  file-write writers and verifyrestore paths, used known nginx static roots
+  with a `..` guard, and applied the Incus idmap fallback to Sigma events
+  whose process has already exited. The next review round also rejects shell
+  composition and config indirection in health probes and shell metacharacters
+  in the Ansible temp-directory and node-exporter sponge shapes.
+
+  A third round, run against the deployed second delta, found two regressions
+  and four narrower holes. Layer resolution treated every non-root process
+  that `/proc` could not resolve *and* every resolved non-root host process as
+  `unverified`, so routine daemons lost their suppression and one node
+  produced about a thousand `tcp-connect` alerts per hour; the uid fallback now
+  applies only when neither the process nor its parent resolves. The anchored
+  Ansible probe patterns missed the nested become wrapper, the backquote
+  temp-directory form and the `rm -f -r .../ansible-tmp-*` cleanup that a
+  non-root connection produces, so a deploy added about 1,500 `process_exec`
+  detections; the matcher now unwraps one shell layer at a time. Health probes
+  also accept clustered short options, reject a newline in the payload, limit
+  the sponge destination to the node-exporter textfile directory, match the
+  snap rotation command exactly, and accept `/usr/bin/install` for the
+  verifyrestore drill. The PCP cleanup regex no longer accepts a `..`
+  component, and the root-session description matches the filter.
+
+  The curl/wget loopback exemption is now anchored to the only host-side
+  producer, keepalived's storage-VIP script and its registry probe; a direct
+  curl or wget with a loopback URL is not routine by argv alone, and the shell
+  health-check class requires a health-check parent. apt-daily's
+  `touch /var/lib/apt/periodic/<stamp>` line is routine package maintenance
+  again.
+
+  The `unverified` fallback for processes that have already exited is limited
+  to login uids (1000 and above). System accounts below that are host
+  services: `_apt` running the hourly package refresh and PCP's `pcp` account
+  running its log cleanup both exit before the line is read, and classifying
+  them as user workloads reintroduced roughly a hundred detections per node
+  per day. The PCP cleanup filter also allows the per-host subdirectory PCP
+  creates under `pmlogger/` while still rejecting a `..` component.
+
+  Still deferred because they need a policy or volume decision: the
+  tenant-controlled Vikunja healthcheck path, the broad 8000-9999 service
+  range, shell coalescing and the paging subset, kernel rate limiting, the
+  bridge-guard guest attribution, rename/link/mmap hooks, and raw retention.
+  The review prompt and checklist live in
+  [`todo/security/intrusion-detection.md`](../../todo/security/intrusion-detection.md).
 
 Two items surfaced while verifying the fix. Neither is suppressed by name:
 
@@ -1259,6 +1324,63 @@ attribution for events whose process has since exited. nginx collection is
 also deferred: the access logs on the core nodes are empty and the frontend
 hosts are not managed, so the HTTP scenarios still have no input even with the
 parser fixed.
+
+### Suppression blind-spot review prompt
+
+Run this review whenever a suppression table, allowlist, kernel-policy filter,
+parser whitelist, rate limit, or alert route changes, and at least once before
+each release. Paste the block into a fresh agent with repository read access.
+
+```text
+Review the YCluster IDS for suppression blind spots: places where a filter,
+allowlist, deduplication key, rate limit, or routing rule decides an event is
+routine based on a value an attacker can control. Assume the attacker has the
+full configuration (this document, the Tetragon policies, the forwarder source,
+the Sigma rewrite and rule set, and the CrowdSec parsers and scenarios). The
+question is not whether the rules are secret, but whether an attacker who knows
+them can make malicious activity match a routine path.
+
+Scope (read all of these):
+- config/ansible/app/files/tetragon-policies/*.yaml: selectors, namespaces,
+  matchBinaries, rateLimit, and any event dropped before userspace.
+- ids-forwarder/*.go: expectedTCPReason/automationDial, containerEgressReason,
+  routineExecReason and the shell/incus/health helpers, root-exec and
+  privilege-raise classification, container and layer attribution, coalescing
+  and dedup keys, per-host caps, the severity budget, and routing/delivery.
+- config/ansible/monitoring/files/rsigma/rules/: local suppression rules and
+  the fields they match; ids-forwarder/sigma/normalize.go for what values
+  those fields actually contain.
+- config/ansible/app/files/crowdsec-* and
+  config/ansible/monitoring/templates/crowdsec-*.j2: parsers, scenarios,
+  whitelists, and notification paths.
+- The alerting route, silences, and caps in the monitoring templates.
+
+For every suppression or classification rule, answer:
+1. Which input fields does it read, and can the attacker set them? Consider
+   argv, binary path, cwd, executable basename, uid/gid, parent process,
+   container name and image, destination address/port/hostname, source port,
+   timing and ordering, log content, process comm, and namespace.
+2. What could the attacker do that still lands in the suppressed class? Name
+   the concrete action, for example copying a payload to a path that matches a
+   prefix, setting an argv token, or running under an allowlisted parent.
+3. What remains visible elsewhere: the kernel policy, another rule, the layer
+   label, the network guard, or a coverage alert? If nothing remains, it is a
+   blind spot.
+4. Is the match anchored to an immutable identity plus an expected destination,
+   or to a substring or name that can be forged? Prefer exact executable path,
+   uid, parent, and destination. Note when only a policy decision can fix it.
+
+Treat this document's claims as hypotheses and verify them against the code,
+tests, and deployed configuration. Check the tests for the intended scope so a
+deliberate exclusion (for example tenant egress is suppressed by design) is
+not reported as a bug.
+
+Deliver a table sorted by impact: finding, file:line, attacker-controlled
+input, bypass action, residual visibility, and recommended fix. Then list the
+smallest set of changes that removes attacker-controlled keys without
+reintroducing alert storms, and separately list items that need a policy or
+volume decision. Do not modify tracked files or deploy anything.
+```
 
 ### Next steps
 

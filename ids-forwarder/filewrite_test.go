@@ -80,6 +80,11 @@ func TestBackupVerifyWritesAreSuppressed(t *testing.T) {
 		{"restored file", "/bin/install",
 			"-o 111 -g 112 -m 640 /var/lib/postgresql/16/verifyrestore/pg_hba.conf",
 			"/var/lib/postgresql/16/verifyrestore/pg_hba.conf"},
+		// Debian's PATH resolves install to /usr/bin/install, which is the
+		// binary the drill actually records.
+		{"usrmerge install", "/usr/bin/install",
+			"-o 111 -g 112 -m 640 /var/lib/postgresql/16/verifyrestore/pg_hba.conf",
+			"/var/lib/postgresql/16/verifyrestore/pg_hba.conf"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

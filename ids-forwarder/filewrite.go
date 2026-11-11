@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"path"
+	"regexp"
+	"strconv"
 	"strings"
 )
+
+var verifyrestorePathRe = regexp.MustCompile(`^/(?:var/lib|etc)/postgresql/([0-9]+)/verifyrestore/`)
 
 type tetragonFileArg struct {
 	FileArg *tetragonFile `json:"file_arg"`
@@ -46,12 +49,32 @@ func routineFileWriteReason(body *tetragonLog) string {
 // scratch directory is named exactly once, so match it rather than the
 // binaries that happen to write there.
 func backupVerifyReason(body *tetragonLog) string {
-	if path, ok := fileArgPath(body.Args); ok && strings.Contains(path, "/verifyrestore/") {
+	filePath, ok := fileArgPath(body.Args)
+	if !ok {
+		return ""
+	}
+	match := verifyrestorePathRe.FindStringSubmatch(filePath)
+	if match == nil {
+		return ""
+	}
+	switch body.Process.Binary {
+	case "/bin/install", "/usr/bin/install":
+		// pg_createcluster's verifyrestore drill installs the copied cluster
+		// files with the system install binary; Debian's PATH resolves it to
+		// /usr/bin/install, and usrmerge systems also expose /bin/install.
 		return "backup_verify"
 	}
-	if strings.Contains(body.Process.Binary, "pg_createcluster") &&
-		strings.Contains(body.Process.Arguments, " verifyrestore ") {
-		return "backup_verify"
+	if body.Process.Binary != "/usr/bin/pg_createcluster" {
+		return ""
+	}
+	fields := strings.Fields(body.Process.Arguments)
+	for i, field := range fields {
+		if field != "verifyrestore" || i == 0 {
+			continue
+		}
+		if _, err := strconv.Atoi(fields[i-1]); err == nil && fields[i-1] == match[1] {
+			return "backup_verify"
+		}
 	}
 	return ""
 }
@@ -62,7 +85,7 @@ func backupVerifyReason(body *tetragonLog) string {
 // and stays alertable, so the write to the temp name adds no signal.
 func blackboxTargetsRewrite(body *tetragonLog) string {
 	if body.Process.Binary != "/usr/bin/python3" ||
-		!strings.Contains(body.Process.Arguments, "/usr/local/lib/cluster/update-blackbox-targets") {
+		!invokesScript(body.Process.Arguments, "/usr/local/lib/cluster/update-blackbox-targets") {
 		return ""
 	}
 	path, ok := fileArgPath(body.Args)
@@ -80,15 +103,15 @@ func zulipPushHostsWrite(body *tetragonLog) string {
 	if !ok {
 		return ""
 	}
-	switch path.Base(body.Process.Binary) {
-	case "setup-zulip-egress":
+	switch body.Process.Binary {
+	case "/usr/local/lib/cluster/setup-zulip-egress":
 		// The helper writes /etc/zulip/push-hosts.<random> and renames it
 		// over the target.
 		if filePath == "/etc/zulip/push-hosts" ||
 			strings.HasPrefix(filePath, "/etc/zulip/push-hosts.") {
 			return "expected_file_write"
 		}
-	case "cat":
+	case "/usr/bin/cat", "/bin/cat":
 		if filePath == "/etc/zulip/push-hosts" &&
 			strings.HasPrefix(strings.TrimSpace(body.Process.Arguments), "/etc/zulip/push-hosts.") {
 			return "expected_file_write"
@@ -106,21 +129,21 @@ func daemonConfigWrite(body *tetragonLog) string {
 	if !ok {
 		return ""
 	}
-	if path.Base(body.Process.Binary) == "cupsd" &&
+	if body.Process.Binary == "/usr/sbin/cupsd" &&
 		strings.HasPrefix(filePath, "/etc/cups/") {
 		return "expected_file_write"
 	}
 	switch filePath {
 	case "/etc/pcp/pmie/lock":
-		if path.Base(body.Process.Binary) == "pmiectl" {
+		if body.Process.Binary == "/usr/bin/pmiectl" {
 			return "expected_file_write"
 		}
 	case "/etc/pcp/pmlogger/lock":
-		if path.Base(body.Process.Binary) == "pmlogctl" {
+		if body.Process.Binary == "/usr/bin/pmlogctl" {
 			return "expected_file_write"
 		}
 	case "/etc/iptables/rules.v4":
-		if path.Base(body.Process.Binary) == "iptables-save" {
+		if body.Process.Binary == "/usr/sbin/iptables-save" {
 			return "expected_file_write"
 		}
 	}

@@ -15,7 +15,8 @@ filter:
     rules:
         - 818f7b24-0fba-4c49-a073-8b755573b9c7
     nginx_rotate:
-        ParentImage|endswith: '/init.d/nginx'
+        ParentImage: '/etc/init.d/nginx'
         ParentCommandLine|endswith: 'rotate'
         Image|endswith: '/cat'
+        Layer: host
     condition: not nginx_rotate

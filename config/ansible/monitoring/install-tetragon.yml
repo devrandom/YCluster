@@ -155,7 +155,7 @@
     - name: Drop the kernel event rate limit for a measurement
       lineinfile:
         path: "{{ tetragon_policy_dir }}/{{ item }}"
-        regexp: '^\s+rateLimit: "1m"$'
+        regexp: '^\s+rateLimit(Scope)?: .*$'
         state: absent
       loop:
         - tcp-connect.yaml

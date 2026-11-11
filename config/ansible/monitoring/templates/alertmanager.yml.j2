@@ -2,7 +2,9 @@ global:
   # No SMTP configuration - using webhooks only
 
 route:
-  group_by: ['alertname', 'instance', 'domain', 'provider', 'account']
+  # IDS alerts carry host/rule_id; other alerts leave them empty. Grouping on
+  # both keeps one host's rule separate from the same rule on another host.
+  group_by: ['alertname', 'host', 'rule_id', 'instance', 'domain', 'provider', 'account']
   group_wait: 10s
   group_interval: 10s
   repeat_interval: 1h
@@ -126,7 +128,11 @@ inhibit_rules:
       severity: 'critical'
     target_match:
       severity: 'warning'
-    equal: ['alertname', 'node']
+    # node is present on the infrastructure alerts; host/rule_id are present
+    # on IDS alerts. Missing labels compare equal, so include all four: a
+    # critical IDS alert then inhibits only the same rule on the same host,
+    # not every warning IDS alert in the cluster.
+    equal: ['alertname', 'node', 'host', 'rule_id']
 
   - source_match:
       alertname: 'NodeDown'

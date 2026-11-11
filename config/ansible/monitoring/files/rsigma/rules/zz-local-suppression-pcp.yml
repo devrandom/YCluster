@@ -13,5 +13,9 @@ filter:
         - 80915f59-9b56-4616-9de0-fd0dea6c12fe
     pcp_cleanup:
         Image|endswith: '/rm'
-        CommandLine|contains: '/var/log/pcp/'
+        # PCP keeps one directory per host under pmlogger/, so allow one
+        # optional subdirectory. Every component must start with a
+        # non-dot character, so a `..` traversal cannot borrow the path.
+        CommandLine|re: '^/(usr/)?bin/rm -f( --)? /var/log/pcp/(pmlogger|pmie)/[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*( /var/log/pcp/(pmlogger|pmie)/[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*)*$'
+        Layer: host
     condition: not pcp_cleanup

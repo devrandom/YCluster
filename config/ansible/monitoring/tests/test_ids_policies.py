@@ -1,6 +1,7 @@
 """Static checks for the pinned Tetragon IDS policy set."""
 
 import unittest
+import re
 from pathlib import Path
 
 try:
@@ -12,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[4]
 POLICY_DIR = ROOT / "config/ansible/app/files/tetragon-policies"
 TETRAGON_CONFIG = ROOT / "config/ansible/monitoring/templates/tetragon.yaml.j2"
 TETRAGON_INSTALL = ROOT / "config/ansible/monitoring/install-tetragon.yml"
+ALERTMANAGER = ROOT / "config/ansible/monitoring/templates/alertmanager.yml.j2"
+RSIGMA_RULES = ROOT / "config/ansible/monitoring/files/rsigma/rules"
 
 # One event per second per process: the finest interval Tetragon accepts. It
 # still truncates bursts, so the forwarder records the rest and paging is capped
@@ -154,6 +157,27 @@ class TestIDSPolicies(unittest.TestCase):
         text = TETRAGON_INSTALL.read_text()
         self.assertIn("Remove retired tracing policies", text)
         self.assertIn("privilege-and-capability-changes.yaml", text)
+
+    def test_alertmanager_keeps_ids_inhibition_per_host_and_rule(self):
+        text = ALERTMANAGER.read_text()
+        self.assertIn("group_by: ['alertname', 'host', 'rule_id'", text)
+        self.assertIn("equal: ['alertname', 'node', 'host', 'rule_id']", text)
+
+    def test_pcp_cleanup_filter_rejects_traversal(self):
+        # The rotation cleanup runs `rm` on fixed log names. A file component
+        # that starts with a dot would let `..` borrow the exemption, so the
+        # filter must not match it.
+        with (RSIGMA_RULES / "zz-local-suppression-pcp.yml").open() as fh:
+            rule = yaml.safe_load(fh)
+        pattern = rule["filter"]["pcp_cleanup"]["CommandLine|re"]
+        compiled = re.compile(pattern)
+        self.assertIsNotNone(
+            compiled.match("/usr/bin/rm -f /var/log/pcp/pmlogger/pmlogger.log"))
+        for forged in (
+            "/usr/bin/rm -f /var/log/pcp/pmlogger/../../../../var/log/auth.log",
+            "/usr/bin/rm -f /var/log/pcp/pmie/..",
+        ):
+            self.assertIsNone(compiled.match(forged), forged)
 
 
 if __name__ == "__main__":

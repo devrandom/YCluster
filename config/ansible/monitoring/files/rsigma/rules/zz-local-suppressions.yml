@@ -1,10 +1,11 @@
 title: Suppress routine root interactive shells
 id: 5f6f0b1e-6a9c-4f0e-9d6a-1f1d0c9b7a21
 description: |
-  Local tuning for the IDS pilot. Root-owned interactive bash with no parent
-  binary is the normal cluster-exec/operator session shape seen in the storage
-  and GPU replay windows. Keep the upstream Bash Interactive Shell rule for
-  non-root users.
+  Local tuning for the IDS pilot. Any root-owned interactive bash on a host is
+  the normal cluster-exec/operator session shape seen in the storage and GPU
+  replay windows; it is still recorded by the process_exec rule. Keep the
+  upstream Bash Interactive Shell rule for non-root users and for container
+  workloads.
 author: YCluster IDS pilot
 logsource:
     product: linux
@@ -14,4 +15,5 @@ filter:
         - 6104e693-a7d6-4891-86cb-49a258523559
     root_session:
         User: root
+        Layer: host
     condition: not root_session

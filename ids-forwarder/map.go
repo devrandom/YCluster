@@ -143,8 +143,8 @@ func tetragonEventLayer(body *tetragonLog) (layer, containerName string) {
 	// The host-side exec rules come after the layer check so a container's
 	// shells are attributed to the container rather than matched against
 	// host daemon shapes.
-	if name, ok := containerForEvent(body); ok {
-		return "container", name
+	if name, containerLayer := containerForEventLayer(body); containerLayer != "" {
+		return containerLayer, name
 	}
 	return layer, ""
 }
@@ -157,6 +157,10 @@ func tetragonEventLayer(body *tetragonLog) (layer, containerName string) {
 func applyOrigin(a *alert, body *tetragonLog, layer string) {
 	if layer == "container" {
 		a.Labels["origin"] = "container"
+		return
+	}
+	if layer == "unverified" {
+		a.Labels["origin"] = "unverified"
 		return
 	}
 	o := eventOrigin(body.Process, body.Parent)
@@ -172,19 +176,22 @@ func applyOrigin(a *alert, body *tetragonLog, layer string) {
 // tetragonSuppression returns the reason an event is not forwarded, or ""
 // when it should produce an alert.
 func tetragonSuppression(evType string, body *tetragonLog, layer string) string {
+	if evType == "process_exec" && layer == "container" {
+		return "container_internal"
+	}
+	if layer == "container" {
+		return containerSuppressionReason(body)
+	}
+	if layer == "unverified" {
+		return containerEgressReason(body, "unverified")
+	}
 	if evType == "process_exec" {
-		if layer == "container" {
-			return "container_internal"
-		}
 		if reason := routineExecReason(body.Process, body.Parent); reason != "" {
 			return reason
 		}
 	}
 	if reason := packageMaintenanceReason(body); reason != "" {
 		return reason
-	}
-	if layer == "container" {
-		return containerSuppressionReason(body)
 	}
 	return hostSuppressionReason(body)
 }
@@ -226,11 +233,22 @@ func routineModuleReason(body *tetragonLog) string {
 	if body == nil || body.PolicyName != "kernel-modules" {
 		return ""
 	}
+	binary := strings.TrimSuffix(body.Process.Binary, " (deleted)")
+	if binary != "/usr/sbin/modprobe" && binary != "/sbin/modprobe" {
+		return ""
+	}
+	var modules []string
 	for _, field := range strings.Fields(body.Process.Arguments) {
-		switch field {
-		case "nf_conntrack_bridge", "nft-expr-log":
-			return "bridge_guard_module"
+		if !strings.HasPrefix(field, "-") {
+			modules = append(modules, field)
 		}
+	}
+	if len(modules) != 1 {
+		return ""
+	}
+	switch modules[0] {
+	case "nf_conntrack_bridge", "nft-expr-log":
+		return "bridge_guard_module"
 	}
 	return ""
 }
@@ -283,8 +301,7 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		return "expected_privilege"
 	case "/usr/bin/sudo":
 		// Ansible's become wrapper raises privileges for every task.
-		if strings.Contains(body.Process.Arguments, "BECOME-SUCCESS-") &&
-			strings.Contains(body.Process.Arguments, "/usr/bin/python3") {
+		if ansibleSudoRe.MatchString(body.Process.Arguments) {
 			return "ansible_probe"
 		}
 		// sudo is setuid root and calls setresuid(-1, 0, -1) on itself
@@ -331,37 +348,64 @@ func packageMaintenanceReason(body *tetragonLog) string {
 	if body == nil {
 		return ""
 	}
-	base := path.Base(body.Process.Binary)
+	binary := strings.TrimSuffix(body.Process.Binary, " (deleted)")
 	args := body.Process.Arguments
-	switch base {
-	case "apt-get", "apt":
-		// Match whole subcommand tokens so installing a package whose name
-		// contains "update" is not mistaken for a refresh.
+	switch binary {
+	case "/usr/bin/apt-get", "/usr/bin/apt":
+		// Only the subcommand position is routine: a package named "update"
+		// in `apt-get install evil update` is still an install.
 		fields := strings.Fields(args)
-		for i, f := range fields {
-			switch f {
-			case "update", "check":
-				return "package_update"
-			case "list":
-				if i+1 < len(fields) && strings.Contains(fields[i+1], "upgradable") {
-					return "package_update"
-				}
+		for _, field := range fields {
+			if strings.Contains(field, "Pre-Invoke") || strings.Contains(field, "Post-Invoke") ||
+				field == "-c" || field == "--config-file" ||
+				strings.HasPrefix(field, "--config-file=") ||
+				(strings.HasPrefix(field, "-c") && field != "-c") {
+				return ""
 			}
 		}
-	case "dpkg":
+		sub, rest := aptSubcommand(fields)
+		switch sub {
+		case "update", "check":
+			return "package_update"
+		case "list":
+			if len(rest) > 0 && strings.Contains(rest[0], "upgradable") {
+				return "package_update"
+			}
+		}
+	case "/usr/bin/dpkg":
 		if strings.HasPrefix(strings.TrimSpace(args), "-l ") {
 			return "package_update"
 		}
-	case "sh", "bash", "dash":
-		if strings.Contains(args, "apt-news.service esm-cache.service") ||
-			strings.Contains(args, "apt/periodic/update-success-stamp") {
+	case "/bin/sh", "/bin/bash", "/usr/bin/bash", "/usr/bin/dash":
+		cmd := shellPayload(args)
+		if cmd == "systemctl start --no-block apt-news.service esm-cache.service" ||
+			aptStampRe.MatchString(cmd) {
 			return "package_update"
 		}
 	}
-	if strings.Contains(args, "/usr/lib/ubuntu-advantage/esm_cache.py") {
+	script := "/usr/lib/ubuntu-advantage/esm_cache.py"
+	if binary == script || invokesScript(args, script) || invokesScript(shellPayload(args), script) {
 		return "package_update"
 	}
 	return ""
+}
+
+// aptSubcommand returns the first non-option operand and the fields after it,
+// skipping the values of apt options that take a separate argument. This keeps
+// a package name that happens to be "update" from looking like the subcommand.
+func aptSubcommand(fields []string) (string, []string) {
+	for i := 0; i < len(fields); i++ {
+		field := fields[i]
+		if strings.HasPrefix(field, "-") {
+			switch field {
+			case "-o", "--option", "-c", "--config-file", "-t", "--target-release":
+				i++
+			}
+			continue
+		}
+		return field, fields[i+1:]
+	}
+	return "", nil
 }
 
 // sudoTargetsNonRoot reports whether a sudo command line switches to a
@@ -437,14 +481,16 @@ func isIncusClient(body *tetragonLog) bool {
 	if body == nil || body.PolicyName == "privilege-raises" {
 		return false
 	}
-	return path.Base(body.Process.Binary) == "incus"
+	return body.Process.Binary == "/usr/bin/incus" || body.Process.Binary == "/usr/local/bin/incus"
 }
 
 func isIncusForkfile(body *tetragonLog) bool {
 	if body == nil || body.Process.Binary == "" {
 		return false
 	}
-	return strings.HasSuffix(body.Process.Binary, "/incusd") &&
+	return (body.Process.Binary == "/usr/bin/incusd" ||
+		body.Process.Binary == "/usr/libexec/incus/incusd" ||
+		body.Process.Binary == "/usr/local/bin/incusd") &&
 		strings.HasPrefix(body.Process.Arguments, "forkfile")
 }
 

@@ -20,7 +20,10 @@ nodes:
       apply_on: Line.Raw
     statics:
       - meta: log_type
-        expression: 'evt.Line.Raw contains "Accepted " ? "ssh_success" : (evt.Line.Raw contains "Failed password" or evt.Line.Raw contains "Invalid user" ? "ssh_failed-auth" : "ssh_other")'
+        # Classify from the start of the message, not a substring: the
+        # username is attacker-controlled, so a failed login for a user
+        # named "Accepted" must not become a success.
+        expression: 'evt.Parsed.sshd_event startsWith "Accepted " ? "ssh_success" : (evt.Parsed.sshd_event startsWith "Failed password" or evt.Parsed.sshd_event startsWith "Invalid user" ? "ssh_failed-auth" : "ssh_other")'
       - meta: source_ip
         expression: evt.Parsed.source_ip
       - parsed: sshd_event

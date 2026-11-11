@@ -46,6 +46,9 @@ func processOriginFor(pid uint32, startTime string) processOrigin {
 	// A container has its own session scopes inside the payload cgroup; the
 	// numbers mean nothing on the host, so never resolve them here.
 	if _, inContainer := containerNameFromCgroup(path); inContainer {
+		if userScopeRuntime(path) {
+			return processOrigin{Origin: "unverified"}
+		}
 		return processOrigin{Origin: "container"}
 	}
 	if n, ok := loginSessionID(path); ok {
