@@ -522,16 +522,6 @@ groups:
           summary: "ZFS pool {{ $labels.pool }} has not been scrubbed in over 60 days"
           description: "Last scrub on {{ $labels.pool }} ({{ $labels.node }}) was over 60 days ago — run `zpool scrub {{ $labels.pool }}`"
 
-      # Samba services on NAS nodes
-      - alert: SambaDown
-        expr: node_systemd_unit_state{name=~"smbd.service|nmbd.service",state="active"} == 0
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Samba {{ $labels.name }} not running on {{ $labels.node }}"
-          description: "{{ $labels.name }} is not in active state on {{ $labels.node }} — clients cannot reach the share"
-
       # SMART health failure — drive is reporting overall self-assessment failed
       - alert: SmartDriveUnhealthy
         expr: smartmon_device_smart_healthy == 0

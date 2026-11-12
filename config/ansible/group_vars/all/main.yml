@@ -144,6 +144,11 @@ vm_data_nfs_anon_gid: 1000
 # with remaining CIFS consumers.
 nas_cifs_enabled: false
 
+# Samba/CIFS server on NAS hosts. Retired: every CIFS consumer moved to the
+# NFS VM-data export, so setup-nas.yml stops and masks smbd/nmbd and removes
+# /etc/samba/smb.conf unless a NAS host sets this back to true.
+nas_samba_enabled: false
+
 # NFS mounts provisioned by mount-nas-share.yml. The first entry preserves the
 # existing VM-data mount and its rollout switch; hosts can extend the list via
 # `nas_nfs_mounts_extra` without replacing the shared VM-data entry.

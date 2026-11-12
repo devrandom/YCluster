@@ -379,8 +379,10 @@ so the durable fix is moving this protocol to NFS, which has no
 - **Server (unconditional):** `setup-nas.yml` installs `nfs-kernel-server` on
   the NAS host and always exports the whole `/near1/vm` subtree as one NFSv4
   export, single-UID squashed to uid/gid 1000 (`all_squash,anonuid=1000,
-  anongid=1000`) to mirror the CIFS `uid=1000,gid=1000` arrangement. The shared
-  `/near1` CIFS export stays for its existing non-VM consumers.
+  anongid=1000`) to mirror the CIFS `uid=1000,gid=1000` arrangement. The
+  shared `/near1` CIFS export is retired: clients run with
+  `nas_cifs_enabled: false`, and `nas_samba_enabled: false` stops and masks
+  Samba on the NAS, so NFS is the only NAS protocol in use.
 - **Client (rollout switch):** the client mount is gated by a per-host Ansible
   flag, `vm_data_nfs` (default `true`; set `false` in `host_vars/<host>.yml`
   to opt out). When enabled, `mount-nas-share.yml` installs `nfs-common`, writes a static

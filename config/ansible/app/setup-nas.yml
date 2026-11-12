@@ -1,14 +1,15 @@
 ---
-# Setup Samba file sharing on NAS nodes
+# Set up the NAS: NFS VM-data export, ZFS pool metrics, and (optionally) the
+# legacy CIFS/Samba share, which is retired by default.
 #
 # Usage:
 #   ansible-playbook app/setup-nas.yml
 #
 # Prerequisites:
 #   - NAS node bootstrapped and registered in etcd
-#   - vault_samba_secret defined in vault
+#   - vault_samba_secret defined in vault (only when nas_samba_enabled)
 
-- name: Setup Samba on NAS nodes
+- name: Set up NAS exports and services
   hosts: nas
   become: yes
   # Pulled by explicit file reference, not a group_vars/all auto-load, so it
@@ -23,77 +24,115 @@
     samba_share_path: /near1
 
   tasks:
-    - name: Install Samba packages
-      apt:
-        name:
-          - samba
-          - samba-common-bin
-        state: present
-        update_cache: yes
+    # Legacy CIFS. Retired fleet-wide: every consumer moved to the NFS
+    # VM-data export. The block stays for the rollback path; the default
+    # (nas_samba_enabled: false) tears the server down below instead.
+    - name: Configure the legacy CIFS/Samba share
+      when: nas_samba_enabled | bool
+      tags: [samba]
+      block:
+        - name: Install Samba packages
+          apt:
+            name:
+              - samba
+              - samba-common-bin
+            state: present
+            update_cache: yes
 
-    - name: Ensure share directory exists
-      file:
-        path: "{{ samba_share_path }}"
-        state: directory
-        mode: '0775'
+        - name: Ensure share directory exists
+          file:
+            path: "{{ samba_share_path }}"
+            state: directory
+            mode: '0775'
 
-    - name: Configure Samba
-      copy:
-        dest: /etc/samba/smb.conf
-        content: |
-          [global]
-          workgroup = YCLUSTER
-          server string = YCluster NAS
-          security = user
-          map to guest = never
-          log file = /var/log/samba/log.%m
-          max log size = 1000
-          logging = file
-          panic action = /usr/share/samba/panic-action %d
-          server role = standalone server
-          obey pam restrictions = yes
-          unix password sync = yes
-          passwd program = /usr/bin/passwd %u
-          passwd chat = *Enter\snew\s*\spassword:* %n\n *Retype\snew\s*\spassword:* %n\n *password\supdated\ssuccessfully* .
-          pam password change = yes
+        - name: Configure Samba
+          copy:
+            dest: /etc/samba/smb.conf
+            content: |
+              [global]
+              workgroup = YCLUSTER
+              server string = YCluster NAS
+              security = user
+              map to guest = never
+              log file = /var/log/samba/log.%m
+              max log size = 1000
+              logging = file
+              panic action = /usr/share/samba/panic-action %d
+              server role = standalone server
+              obey pam restrictions = yes
+              unix password sync = yes
+              passwd program = /usr/bin/passwd %u
+              passwd chat = *Enter\snew\s*\spassword:* %n\n *Retype\snew\s*\spassword:* %n\n *password\supdated\ssuccessfully* .
+              pam password change = yes
 
-          [{{ samba_share_name }}]
-          path = {{ samba_share_path }}
-          browseable = yes
-          read only = no
-          valid users = {{ samba_user }}
-          create mask = 0664
-          directory mask = 0775
-          force user = root
-          force group = root
-        mode: '0644'
-      notify: restart smbd
+              [{{ samba_share_name }}]
+              path = {{ samba_share_path }}
+              browseable = yes
+              read only = no
+              valid users = {{ samba_user }}
+              create mask = 0664
+              directory mask = 0775
+              force user = root
+              force group = root
+            mode: '0644'
+          notify: restart smbd
 
-    - name: Create system user for Samba
-      user:
-        name: "{{ samba_user }}"
-        system: yes
-        create_home: no
-        shell: /usr/sbin/nologin
+        - name: Create system user for Samba
+          user:
+            name: "{{ samba_user }}"
+            system: yes
+            create_home: no
+            shell: /usr/sbin/nologin
 
-    - name: Set Samba password
-      shell: |
-        printf '%s\n%s\n' '{{ vault_samba_secret }}' '{{ vault_samba_secret }}' | smbpasswd -a -s {{ samba_user }}
-      changed_when: true
-      no_log: true
+        - name: Set Samba password
+          shell: |
+            printf '%s\n%s\n' '{{ vault_samba_secret }}' '{{ vault_samba_secret }}' | smbpasswd -a -s {{ samba_user }}
+          changed_when: true
+          no_log: true
 
-    - name: Enable Samba user
-      command: smbpasswd -e {{ samba_user }}
-      changed_when: true
+        - name: Enable Samba user
+          command: smbpasswd -e {{ samba_user }}
+          changed_when: true
 
-    - name: Enable and start Samba services
-      systemd:
-        name: "{{ item }}"
-        enabled: yes
-        state: started
+        - name: Enable and start Samba services
+          systemd:
+            name: "{{ item }}"
+            enabled: yes
+            state: started
+          loop:
+            - smbd
+            - nmbd
+
+    - name: Check for the Samba unit files
+      tags: [samba]
+      stat:
+        path: "/lib/systemd/system/{{ item }}.service"
+      register: samba_unit_files
       loop:
         - smbd
         - nmbd
+      when: not (nas_samba_enabled | bool)
+
+    - name: Stop, disable and mask the Samba services
+      tags: [samba]
+      systemd:
+        name: "{{ item.item }}"
+        state: stopped
+        enabled: no
+        masked: yes
+      loop: "{{ samba_unit_files.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when:
+        - not (nas_samba_enabled | bool)
+        - item.stat.exists
+
+    - name: Remove the Samba share configuration
+      tags: [samba]
+      file:
+        path: /etc/samba/smb.conf
+        state: absent
+      when: not (nas_samba_enabled | bool)
 
     - name: Install ZFS pool textfile exporter script
       copy:
