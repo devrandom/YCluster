@@ -4,4 +4,8 @@
 {{ item.value.match }}
 
 [Link]
+# A matching .link file replaces the naming policy from 99-default.link. With
+# no NamePolicy here, udev leaves the kernel name (eth0) in place instead of
+# renaming to ID_NET_NAME_ONBOARD, so keep the onboard policy explicitly.
+NamePolicy=onboard
 Advertise={{ item.value.advertise }}
