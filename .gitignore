@@ -55,3 +55,5 @@ config/ansible/inventory_cluster.yml
 # rsync --copy-unsafe-links)
 /config/ansible/host_vars
 /config/ansible/group_vars/storage
+# ntfy topics are bearer secrets; see ycluster-private/group_vars/all/ntfy.yml
+/config/ansible/group_vars/all/ntfy.yml

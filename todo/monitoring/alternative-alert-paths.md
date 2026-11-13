@@ -38,6 +38,5 @@ an operator-visible delivery blind spot on the alerting path itself.
   rate-limiting/backoff so a dead upstream doesn't produce thousands of
   503-failure log lines per node per hour.
 
-Related: `todo/monitoring/ntfy-topic-out-of-repo.md` (move the hardcoded
-`NTFY_TOPIC` out of the repo) — do that alongside if the webhook is being
-touched.
+The ntfy topics themselves now come from the private group vars
+(`docs/operations/notifications.md`) and no longer live in this repo.

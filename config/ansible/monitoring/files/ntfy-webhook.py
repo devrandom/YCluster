@@ -26,8 +26,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-NTFY_TOPIC = "cf0d6065-2357-493e-a7a8-06666dd660eb"
-NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+# ntfy.sh topics are per-deployment secrets, so they come from the
+# environment (/etc/ycluster/ntfy.env, written from the private repo) and
+# never from this file. Routing is by alert class and by host:
+#   NTFY_TOPIC_MAIN     - everything not routed elsewhere
+#   NTFY_TOPIC_IDS      - the IDSAlert class, incl. IDS budget cap notices
+#   NTFY_HOST_TOPICS    - JSON {host: topic} overrides
+#   NTFY_LOCATIONS      - JSON {location: {topic, hosts[]}}
+NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 # Enrichment queries go to the central Prometheus (not localhost:9090):
 # probe_* / https-domain data now lives only on central, which runs on the
 # storage leader. admin.xc (10.0.0.100) is the keepalived storage VIP, so it
@@ -45,6 +51,100 @@ THROTTLE_WINDOW_SECONDS = int(os.environ.get("NTFY_THROTTLE_WINDOW_SECONDS", "60
 # be enforced. The budget is claim-based in etcd and fails open.
 IDS_RATE_LIMIT = int(os.environ.get("NTFY_IDS_RATE_LIMIT", "5"))
 IDS_RATE_WINDOW_SECONDS = int(os.environ.get("NTFY_IDS_RATE_WINDOW_SECONDS", "3600"))
+
+
+def ntfy_topic(channel):
+    """Return the configured topic for a channel, or "" when unset."""
+    return os.environ.get(f"NTFY_TOPIC_{channel.upper()}", "").strip()
+
+
+def _json_map(name):
+    """Parse a JSON object from the environment, warning and ignoring junk."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError as e:
+        logger.warning(f"Ignoring malformed {name}: {e}")
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning(f"Ignoring {name}: expected a JSON object")
+        return {}
+    return parsed
+
+
+def host_topics():
+    """Direct host -> topic overrides, from NTFY_HOST_TOPICS."""
+    return {
+        str(host).strip().lower(): str(topic).strip()
+        for host, topic in _json_map("NTFY_HOST_TOPICS").items()
+        if str(topic).strip()
+    }
+
+
+def locations():
+    """Location -> {topic, hosts}, from NTFY_LOCATIONS."""
+    result = {}
+    for name, spec in _json_map("NTFY_LOCATIONS").items():
+        if not isinstance(spec, dict):
+            logger.warning(f"Ignoring ntfy location '{name}': expected an object")
+            continue
+        topic = str(spec.get("topic") or "").strip()
+        hosts = [str(host).strip().lower() for host in spec.get("hosts") or []]
+        if not topic or not hosts:
+            logger.warning(f"Ignoring ntfy location '{name}': needs topic and hosts")
+            continue
+        result[name] = {"topic": topic, "hosts": hosts}
+    return result
+
+
+def host_topic_index():
+    """Host -> topic, with direct overrides winning over locations."""
+    index = {}
+    for spec in locations().values():
+        for host in spec["hosts"]:
+            index.setdefault(host, spec["topic"])
+    index.update(host_topics())
+    return index
+
+
+def _label_hosts(value):
+    """Host names one alert label value could name.
+
+    Alert labels carry hosts as bare names (node="lab1"), host:port
+    (instance="lab1:9100") or URLs (backend="https://lab1.example:9218"). Return
+    both the qualified name and its first label so all three forms compare
+    against the same host -> topic index.
+    """
+    value = value.strip().lower()
+    if "://" in value:
+        value = value.split("://", 1)[1]
+    value = value.split("/", 1)[0]
+    if ":" in value:
+        value = value.rsplit(":", 1)[0]
+    if not value:
+        return set()
+    return {value, value.split(".", 1)[0]}
+
+
+def alert_topic(alert):
+    """Pick the topic for one Alertmanager alert, "" for the main topic.
+
+    IDS findings are security events and stay on their own topic even when
+    the alert also names a host that is routed somewhere else.
+    """
+    labels = alert.get("labels") or {}
+    if labels.get("alertname") == "IDSAlert":
+        return ntfy_topic("ids")
+    index = host_topic_index()
+    if index:
+        for value in labels.values():
+            for host in _label_hosts(str(value)):
+                if host in index:
+                    return index[host]
+    return ""
+
 
 _lock = threading.Lock()
 _last_sent_at = {}
@@ -248,7 +348,7 @@ def send_ids_cap_alert(severity, alert):
     )
     if rule:
         message += f" (rule_id={rule})"
-    return send_to_ntfy(title, message, priority, tags)
+    return send_to_ntfy(title, message, priority, tags, topic=ntfy_topic("ids"))
 
 
 def alert_key(alert):
@@ -403,24 +503,30 @@ def format_alert_message(alert):
         'tags': tags
     }
 
-def send_to_ntfy(title, message, priority="default", tags=""):
+def send_to_ntfy(title, message, priority="default", tags="", topic=""):
     """Send a notification to ntfy. Returns True on success, 'rate_limited'
     when ntfy.sh returned HTTP 429, or False on any other failure."""
+    topic = topic or ntfy_topic("main")
+    if not topic:
+        logger.error(f"No ntfy topic configured; dropping notification: {title}")
+        return False
     headers = {
         'Title': title.encode('utf-8').decode('utf-8'),
         'Priority': priority,
         'Tags': tags,
         'Content-Type': 'text/plain; charset=utf-8'
     }
-    
+    url = f"{NTFY_SERVER}/{topic}"
+
     try:
         # Ensure message is properly encoded as UTF-8
         message_bytes = message.encode('utf-8')
-        response = requests.post(NTFY_URL, data=message_bytes, headers=headers, timeout=10)
+        response = requests.post(url, data=message_bytes, headers=headers, timeout=10)
         if response.status_code == 429:
             logger.warning(f"ntfy.sh rate-limited notification: {title}")
             return 'rate_limited'
         response.raise_for_status()
+        # Do not log the topic: it is a bearer secret.
         logger.info(f"Sent notification to ntfy: {title}")
         return True
     except requests.exceptions.RequestException as e:
@@ -527,7 +633,8 @@ def _send_alert(alert, counts):
             formatted['title'],
             formatted['message'],
             formatted['priority'],
-            formatted['tags']
+            formatted['tags'],
+            topic=alert_topic(alert)
         )
         if result is True:
             counts['sent'] += 1

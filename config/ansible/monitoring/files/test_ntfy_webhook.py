@@ -128,6 +128,124 @@ class IdsBudget(unittest.TestCase):
             self.assertTrue(wh._ids_budget_claim("warning", now=100.0))
 
 
+class Routing(unittest.TestCase):
+    """Which topic an alert goes to, and how send_to_ntfy resolves it."""
+
+    def setUp(self):
+        reset_state()
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "NTFY_TOPIC_MAIN": "main-topic",
+                "NTFY_TOPIC_IDS": "ids-topic",
+                "NTFY_LOCATIONS": '{"lab": {"topic": "lab-topic", "hosts": ["lab1", "lab2"]}}',
+                "NTFY_HOST_TOPICS": "",
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_ids_alert_uses_the_ids_topic(self):
+        alert = {"labels": {"alertname": "IDSAlert", "severity": "critical"}}
+        self.assertEqual(wh.alert_topic(alert), "ids-topic")
+
+    def test_ids_wins_over_a_host_route(self):
+        alert = {"labels": {"alertname": "IDSAlert", "node": "lab1"}}
+        self.assertEqual(wh.alert_topic(alert), "ids-topic")
+
+    def test_host_routes_through_its_location(self):
+        alert = {"labels": {"alertname": "NodeDown", "node": "lab2"}}
+        self.assertEqual(wh.alert_topic(alert), "lab-topic")
+
+    def test_host_route_matches_every_label_form(self):
+        for value in (
+            "lab1:9100",
+            "lab1.xc:9218",
+            "https://lab1.xc:9218",
+            "lab1.example.net",
+        ):
+            alert = {"labels": {"alertname": "X", "instance": value}}
+            self.assertEqual(wh.alert_topic(alert), "lab-topic", value)
+
+    def test_direct_host_topic_wins_over_the_location(self):
+        os.environ["NTFY_HOST_TOPICS"] = '{"lab1": "solo-topic"}'
+        alert = {"labels": {"alertname": "NodeDown", "node": "lab1"}}
+        self.assertEqual(wh.alert_topic(alert), "solo-topic")
+        other = {"labels": {"alertname": "NodeDown", "node": "lab2"}}
+        self.assertEqual(wh.alert_topic(other), "lab-topic")
+
+    def test_routed_host_needs_no_location(self):
+        os.environ["NTFY_LOCATIONS"] = ""
+        os.environ["NTFY_HOST_TOPICS"] = '{"lab1": "solo-topic"}'
+        alert = {"labels": {"alertname": "NodeDown", "node": "lab1"}}
+        self.assertEqual(wh.alert_topic(alert), "solo-topic")
+
+    def test_similar_hostname_is_not_a_match(self):
+        alert = {"labels": {"alertname": "NodeDown", "node": "lab10"}}
+        self.assertEqual(wh.alert_topic(alert), "")
+
+    def test_unrouted_host_uses_the_main_topic(self):
+        alert = {"labels": {"alertname": "NodeDown", "node": "s1"}}
+        self.assertEqual(wh.alert_topic(alert), "")
+
+    def test_malformed_routes_are_ignored(self):
+        os.environ["NTFY_LOCATIONS"] = "not json"
+        alert = {"labels": {"alertname": "NodeDown", "node": "lab1"}}
+        self.assertEqual(wh.alert_topic(alert), "")
+        self.assertEqual(wh.host_topic_index(), {})
+
+    def test_location_without_topic_or_hosts_is_ignored(self):
+        os.environ["NTFY_LOCATIONS"] = '{"lab": {"hosts": ["lab1"]}}'
+        self.assertEqual(wh.host_topic_index(), {})
+
+    def test_send_posts_to_the_given_topic(self):
+        with mock.patch.object(wh.requests, "post") as post:
+            post.return_value.status_code = 200
+            self.assertTrue(wh.send_to_ntfy("t", "m", topic="ids-topic"))
+        self.assertTrue(post.call_args.args[0].endswith("/ids-topic"))
+
+    def test_send_falls_back_to_the_main_topic(self):
+        with mock.patch.object(wh.requests, "post") as post:
+            post.return_value.status_code = 200
+            self.assertTrue(wh.send_to_ntfy("t", "m"))
+        self.assertTrue(post.call_args.args[0].endswith("/main-topic"))
+
+    def test_missing_topic_drops_the_notification(self):
+        for key in ("NTFY_TOPIC_MAIN", "NTFY_TOPIC_IDS"):
+            os.environ.pop(key)
+        with mock.patch.object(wh.requests, "post") as post:
+            self.assertFalse(wh.send_to_ntfy("t", "m"))
+        post.assert_not_called()
+
+    def test_webhook_routes_each_alert_by_its_labels(self):
+        payload = {
+            "alerts": [
+                {
+                    "status": "firing",
+                    "fingerprint": "host-1",
+                    "labels": {"alertname": "NodeDown", "severity": "critical", "node": "lab1"},
+                    "annotations": {"summary": "lab1 down", "description": "down"},
+                },
+                {
+                    "status": "firing",
+                    "fingerprint": "ids-1",
+                    "labels": {"alertname": "IDSAlert", "severity": "warning", "node": "s1"},
+                    "annotations": {"summary": "ids", "description": "ids"},
+                },
+                {
+                    "status": "firing",
+                    "fingerprint": "main-1",
+                    "labels": {"alertname": "NodeDown", "severity": "critical", "node": "s1"},
+                    "annotations": {"summary": "s1 down", "description": "down"},
+                },
+            ]
+        }
+        with mock.patch.object(wh, "send_to_ntfy", return_value=True) as m:
+            post(payload)
+        topics = [call.kwargs["topic"] for call in m.call_args_list]
+        self.assertEqual(topics, ["lab-topic", "ids-topic", ""])
+
+
 if __name__ == "__main__":
     unittest.main()
 

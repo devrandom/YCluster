@@ -167,6 +167,45 @@
           - python3-etcd3
         state: present
 
+    # Topics are bearer secrets, so they are not in this repo. They come from
+    # config/ansible/group_vars/all/ntfy.yml (private repo, symlinked in).
+    - name: Require ntfy topic configuration
+      assert:
+        that:
+          - ntfy_topic_main | default('') | length > 0
+          - ntfy_topic_ids | default('') | length > 0
+        fail_msg: >-
+          ntfy topics are not configured for this deployment. Set
+          ntfy_topic_main and ntfy_topic_ids in the private group vars file
+          config/ansible/group_vars/all/ntfy.yml.
+
+    # Assert on the shape, not the values: a task that echoes the location
+    # specs would print the topics on every run.
+    - name: Validate ntfy location definitions
+      assert:
+        that:
+          - ntfy_locations | default({}) | dict2items | rejectattr('value.topic', 'defined') | map(attribute='key') | list | length == 0
+          - ntfy_locations | default({}) | dict2items | rejectattr('value.hosts', 'defined') | map(attribute='key') | list | length == 0
+          - ntfy_locations | default({}) | dict2items | selectattr('value.hosts', 'defined') | rejectattr('value.hosts', 'truthy') | map(attribute='key') | list | length == 0
+        fail_msg: >-
+          Every ntfy_locations entry needs a topic and a non-empty hosts
+          list (see the private group vars file
+          config/ansible/group_vars/all/ntfy.yml).
+
+    - name: Write ntfy topic configuration
+      copy:
+        dest: /etc/ycluster/ntfy.env
+        content: |
+          NTFY_SERVER={{ ntfy_server | default('https://ntfy.sh') }}
+          NTFY_TOPIC_MAIN={{ ntfy_topic_main }}
+          NTFY_TOPIC_IDS={{ ntfy_topic_ids | default('') }}
+          NTFY_LOCATIONS={{ ntfy_locations | default({}) | to_json }}
+          NTFY_HOST_TOPICS={{ ntfy_host_topics | default({}) | to_json }}
+        owner: root
+        group: root
+        mode: '0640'
+      notify: restart ntfy webhook
+
     - name: Copy ntfy webhook handler
       copy:
         src: ntfy-webhook.py
@@ -229,6 +268,7 @@
           Type=simple
           User=ntfy-webhook
           Group=ntfy-webhook
+          EnvironmentFile=/etc/ycluster/ntfy.env
           EnvironmentFile=-/etc/ycluster/etcd-client.env
           Environment=NTFY_IDS_RATE_LIMIT={{ ntfy_ids_rate_limit }}
           Environment=NTFY_IDS_RATE_WINDOW_SECONDS={{ ntfy_ids_rate_window_seconds }}

@@ -65,6 +65,8 @@ election.
   IdP-superuser groups; how to add members).
 - **Inference gateway** — `docs/operations/inference.md` and
   `docs/local-ai-proxy.md`.
+- **Notifications** — `docs/operations/notifications.md` (ntfy channels; the
+  topics are secrets and live in the private repo's group vars).
 - **Dev PXE & dev cluster** — `docs/DEVELOPMENT.md`,
   `docs/design/virtual-test-environment.md` (Incus dev cluster).
 - **Contributing** — `docs/CONTRIBUTING.md` (coding conventions, local
