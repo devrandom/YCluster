@@ -2,10 +2,10 @@
 
 No IDS today: we collect logs and metrics, but nothing detects or alerts on
 hostile behaviour. Authentik gates public HTTP paths and SSH is key-only, yet a
-compromised node, a stolen key, or a reachable service that should not be would
-only surface if a human read the logs. This item scopes an IDS that fits the
-existing stack (journald, Prometheus/Alertmanager, ntfy) instead of adding a
-separate SIEM control plane.
+non-root compromise, a stolen non-root key, or a reachable service that should
+not be would only surface if a human read the logs. This item scopes an IDS
+that fits the existing stack (journald, Prometheus/Alertmanager, ntfy) instead
+of adding a separate SIEM control plane.
 
 Design: [`docs/design/intrusion-detection.md`](../../docs/design/intrusion-detection.md).
 
@@ -36,16 +36,22 @@ the path that will carry pages once that route is removed.
 
 ## Threat model
 
-Two classes of adversary, both in scope:
+Two classes of adversary are in scope:
 
 - **External attackers.** Someone outside the cluster probing or exploiting the
   public ingress, WireGuard endpoint, or any service that is unexpectedly
-  reachable. Assume perimeter controls can be misconfigured, not that they hold.
-- **Malicious users.** Anyone with legitimate access who abuses it: VM owners
-  escaping or attacking neighbours, a compromised operator/agent credential, a
-  stolen SSH or WireGuard key, or an insider running commands they should not.
-  Detection has to cover actions that look authenticated and authorised at the
-  edge, so perimeter logs alone are insufficient.
+  reachable, before they obtain host root. Assume perimeter controls can be
+  misconfigured, not that they hold.
+- **Malicious users.** VM owners escaping or attacking neighbours, non-root
+  users abusing legitimate access, a stolen non-root SSH or WireGuard key, or a
+  non-root insider running commands they should not. Detection has to cover
+  actions that look authenticated and authorised at the edge, so perimeter logs
+  alone are insufficient. Privilege escalation from a non-root identity is in
+  scope up to the point root is obtained.
+- **Host root is out of scope for host-based detection.** An attacker who
+  already has root on a monitored host disables or tampers with the sensor
+  before acting. Root interactive sessions, root SSH commands, a stolen root
+  key, and post-root activity are evidence-only; they are not coverage claims.
 
 ## Scope
 
@@ -72,8 +78,8 @@ Every node and Incus host runs its own sensor. This is not just a core-node
 deployment: remote cluster nodes matter because they sit outside the LAN, may be
 powered off or disconnected for long periods, and cannot be covered by the
 in-cluster network sensor. A remote node can still be the entry point for a
-stolen credential or a compromised operator session. Admin laptops are out of
-scope for now and should not gate the rollout.
+stolen non-root credential or a compromised non-root operator session. Admin
+laptops are out of scope for now and should not gate the rollout.
 
 - **Deploy with the host baseline.** Use one Ansible role for Linux hosts so the
   sensor is installed, configured, and re-applied like any other baseline
@@ -87,9 +93,12 @@ scope for now and should not gate the rollout.
   the host with a bounded disk budget, replay in order, and mark the gap
   explicitly. Remote hosts will be offline; the plan must not lose events or
   grow the buffer without limit.
-- **Treat coverage loss as an alert.** A host that stops reporting, whose
-  sensor is disabled, or whose buffer overflows is itself an alert. Otherwise
-  an attacker can disable the sensor and disappear from the console.
+- **Treat coverage loss as an alert, not as a defence.** A host that stops
+  reporting, whose sensor is disabled, or whose buffer overflows is itself an
+  alert. This catches accidents and careless attackers. It does not stop a root
+  attacker: they disable the sensor first, take the coverage alert, and are
+  still out of scope by the threat model. Say so rather than implying the alert
+  closes the case.
 - **Protect the local state.** Assume the host can be compromised: keep the
   sensor's buffer and credentials out of the root fs, use a fixed budget, and
   document what a compromised host can read or tamper with. Prefer
@@ -210,6 +219,18 @@ must not become a second, longer-lived access log.
     sequence, add a positive control proving a hostile unit still alerts, and
     decide whether one "boot activity" summary should be delivered. Build the
     boot unit/shape inventory from a clean reboot.
+  - Open: align delivery with the host-root-out-of-scope model. Root interactive
+    `process_exec`, root `privilege-raises`, and root-origin private
+    `tcp-connect` are still delivered. Move them to `detections.jsonl`-only,
+    or record why they remain as evidence. Guest root is unaffected by this:
+    uid 0 inside a tenant container or VM is a host-unprivileged identity and
+    must keep alerting, so any filter has to key on `Layer: host` plus a host
+    login session or host unit, never on uid alone. Non-root sudo and
+    escalation alerts stay regardless. File writes below `/etc` are root by
+    construction, so they follow the same rule and were never in the paging
+    subset. The classification, the `page` label and the measurement gate are
+    specified in
+    [`docs/design/ids-coverage-and-evidence.md`](../../docs/design/ids-coverage-and-evidence.md).
   - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
     allowlist and maps to its own rule, `container-api`, so every `incus
     exec`, `incus file push/pull` and lifecycle call lands in
@@ -527,18 +548,21 @@ different costs and privacy exposure.
 
 - Provenance is now recorded per detection (`origin=interactive|unit|
   container`, `actor=<user|unit>`, counted in
-  `ids_forwarder_detections_total`). Whether to route on it is open: the
-  candidate design is a per-actor budget with a session digest instead of
-  per-event pages, keeping a never-routine set (root exec from `/home` or
-  `/var/tmp`, module loads not from the kernel alias path, privilege
-  transitions to uid 0, writes to `/etc/shadow` or `authorized_keys`) that
-  pages regardless of actor. A blanket "root shell and Ansible never alert"
-  is rejected: it makes a stolen bastion session the quiet path. Separating
-  the automation identity from the human one (playbooks as a dedicated user)
-  is what makes Ansible distinguishable at all, since every task is a fresh
-  login session.
+  `ids_forwarder_detections_total`). The host-root-out-of-scope model changes
+  the routing decision: a root interactive shell or Ansible task is evidence,
+  not coverage, because an attacker with host root disables the sensor first.
+  Dropping the page must not drop the `detections.jsonl` record, or a later
+  incident loses the only trail of what the root session did. The remaining
+  policy question is therefore the non-root boundary, not root: escalation from
+  a non-root identity up to root, non-root SSH and WireGuard, tenant/container
+  lateral movement, and non-root exec from attacker-writable paths stay as
+  alerts. The candidate design is a per-actor budget with a session digest
+  instead of per-event pages; separating the automation identity from the human
+  one (playbooks as a dedicated user) is still what makes Ansible
+  distinguishable, since every task is a fresh login session.
 - Which malicious-user paths matter most in practice: guest-to-guest traffic,
-  abuse of operator credentials, or misuse of the Ansible/agent access path?
+  abuse of non-root operator credentials, or misuse of the Ansible/agent access
+  path by a non-root identity?
 - What non-IP evidence is sufficient for incidents that surface after the
   access-log retention window has closed, and who owns that data?
 - Which remote cluster nodes can run a sensor at all, and what is the minimum

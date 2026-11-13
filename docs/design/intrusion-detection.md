@@ -42,8 +42,9 @@ small Go forwarder; Alertmanager remains the only routing and deduplication laye
 
 ## Goals
 
-- Detect external attackers and malicious users, including a compromised
-  operator/agent credential and a VM owner attacking a neighbour.
+- Detect external attackers before host root and non-root malicious users,
+  including a non-root operator/agent credential and a VM owner attacking a
+  neighbour. Host-root post-exploitation is out of scope.
 - Run a sensor on every cluster node, including remote nodes that are often offline,
   not only on core nodes.
 - Run an in-cluster network sensor on the ingress path; do not assume a managed
@@ -52,7 +53,8 @@ small Go forwarder; Alertmanager remains the only routing and deduplication laye
   severity mapping.
 - Keep user IP addresses only as long as the existing nginx/SSH access logs.
 - Make coverage loss visible: a host that stops reporting is an alert, not a silent
-  blind spot.
+  blind spot. Visibility only: this catches accidents and weaker attackers, not a
+  root attacker who removes the sensor on purpose.
 - Treat the IDS itself as part of the attack surface.
 
 ## Non-goals
@@ -64,6 +66,10 @@ small Go forwarder; Alertmanager remains the only routing and deduplication laye
 - No public-internet egress alerting. Exfiltration is not part of the threat
   model; host and tenant access to the public internet is normal and is not a
   detection signal. Private cluster lateral movement remains in scope.
+- No host-root post-exploitation coverage. A root attacker disables the local
+  sensor first, so root sessions on a monitored host are recorded as evidence
+  and are not a detection claim. Root inside a tenant container or VM is a
+  different identity and stays in scope.
 - No guest-internal monitoring of user VMs or containers unless an agent is
   deliberately installed inside the guest.
 - No replacement for nginx, sshd, journald or the existing access logs.
@@ -96,16 +102,33 @@ small Go forwarder; Alertmanager remains the only routing and deduplication laye
 
 ## Threat model
 
-- **External attackers.** Someone probing or exploiting the public ingress, the
-  WireGuard endpoint, or an unexpectedly reachable service. Assume a perimeter
-  control can be misconfigured.
-- **Malicious users.** A VM owner attacking a neighbour or escaping a workload, a
-  stolen SSH/WireGuard key, a compromised operator or agent credential, or an insider
-  running commands they should not. Detection must cover authenticated actions, so edge
-  logs alone are insufficient.
+- **Competent adversary baseline.** Assume the attacker knows the rules and the
+  suppression table, chooses the path that avoids detection, and treats the IDS
+  as part of the target. In particular, a host-root attacker disables or tampers
+  with the local sensor before doing anything else. Activity after host root is
+  therefore out of scope: a sensor running under a compromised root cannot be
+  trusted to report it. Coverage-loss alerts remain a backstop for mistakes and
+  less capable attackers, not a control against this adversary.
+- **In scope.** External attackers before they obtain host root; malicious
+  tenants and containers, including escape attempts and neighbour traffic;
+  non-root users and stolen non-root SSH/WireGuard keys; privilege escalation
+  from a non-root identity up to the point root is obtained; and authenticated
+  actions that an edge log cannot distinguish from legitimate use.
+- **Root inside a guest is not host root.** A tenant container or VM running as
+  uid 0 on its own layer has no privilege on the monitored host, so its activity,
+  its execs and its lateral attempts stay in scope. The exclusion is host-layer
+  root: the identity that can stop the sensor, rewrite the Tetragon policy, or
+  edit the forwarder binary.
+- **Out of scope.** Post-root host activity, root interactive sessions and root
+  SSH commands, a stolen root key used on a monitored host, root operator/agent
+  credentials, public C2 or exfiltration, and any action taken after the attacker
+  has disabled the local sensor. The IDS is not a control for these cases.
 - **The IDS itself.** An attacker who can reach a sensor, feed it malicious input, or
   steal its credentials can turn detection into a pivot. The IDS is in scope as a
   target, not just as an observer.
+
+What each rule is worth under this model, and how delivery is decided, is
+specified in [`ids-coverage-and-evidence.md`](ids-coverage-and-evidence.md).
 
 ## IDS components are attack surface
 
@@ -333,6 +356,9 @@ executing a payload from `/home` or `/var/tmp` on the host layer: zero
 routine hits across the replay, and container processes are excluded by
 layer. It is implemented as `exec-root-user-path`, an explicit local
 exception to the upstream-naming rule because SigmaHQ has no counterpart.
+A root process can remove the sensor that this rule runs in, so the rule is a
+backstop against a root shell that appears before anyone disables detection —
+not a control against an attacker who already has host root.
 A non-root operator running their own binary remains indistinguishable from
 an attacker by exec metadata alone; ad-hoc workloads belong in a container
 or VM, where the layer-aware egress and lateral rules apply.
@@ -772,6 +798,10 @@ network coverage.
   event-generating. The Ceph and `ycluster` CLIs are Python scripts, so
   `matchBinaries` does not identify them reliably; their expected pairs
   remain visible and are suppressed by the forwarder.
+  Escalation into root is in scope precisely because it happens before the
+  attacker has root: the transition, its parent and the unprivileged identity
+  are what the rules cover. Whatever the newly-root process does next is
+  post-root activity and is not a coverage claim.
 - **Tetragon process execs.** The hand-written path forwards `process_exec`
   only for shells, privilege tools (`sudo`, `su`), package managers and
   downloaders. The binary allowlist is a playbook variable
@@ -853,6 +883,9 @@ network coverage.
   outage while they remain in the sensor log; only events older than
   `-max-event-age` are dropped, and an exhausted replay window produces a
   separate gap alert.
+  Coverage alerts also do not restore coverage after host root. They tell an
+  operator that a sensor died, which is the incident trigger; the response is
+  manual (isolate, revoke, rotate), not a claim that detection continued.
 - **Response.** None in phase 1. No bouncers, no active response, no firewall
   change, no account disable, no VM stop. Triage is manual: inspect, isolate the host
   or revoke the WireGuard peer only with explicit approval, then rotate keys.
@@ -962,6 +995,12 @@ records, never classifies, or classifies as routine. The answer is yes: the
 current posture detects several specific behaviours, but it is bypassable by
 design in the VM/tenant boundary, by transport choice, by process identity, and by
 tampering with the paging path.
+
+Host root is the endpoint of that last one: the sensor runs under the same root
+as the attacker. That is why the threat model excludes post-root host activity
+instead of counting it as an evasion to be fixed. The findings below are the
+ones that remain fixable without that assumption, and each is scoped to an
+attacker who does not yet have host root.
 
 This section is the detection-engineering counterpart to the threat model. It
 records what was verified against the code, a probe of the classifier, and the
@@ -1183,7 +1222,10 @@ concrete actions for the open items are in [Next steps](#next-steps).
    then unix-socket connects, then guest agents if VM-internal detection is
    actually required. **Partly done.**
 5. Add rename/mmap/read hooks and the missing persistence paths; stop relying on
-   the write-only hook for integrity. **Open.**
+   the write-only hook for integrity. **Open, and re-ranked.** Every host write
+   below `/etc` is root, so under the host-root boundary this protects the
+   evidence record rather than the detection claim; it comes after the tenant
+   and ingress work listed in item 4.
 6. Fix the CrowdSec parser inversion and sshd success/failure labelling; add the
    missing scenarios or delete the claims from the design. **Partly done** — the
    parser defects are fixed and the design claims were corrected; the scenario
@@ -1366,6 +1408,13 @@ the Sigma rewrite and rule set, and the CrowdSec parsers and scenarios). The
 question is not whether the rules are secret, but whether an attacker who knows
 them can make malicious activity match a routine path.
 
+Assume host root is out of scope: an attacker with root on a monitored host
+disables or rewrites the sensor, so post-root host activity is evidence, not
+coverage. Report only paths that reach the attacker's goal before host root.
+Root inside a tenant container or VM is a different identity and is in scope.
+Do not report a post-root host path as a blind spot; do report a rule or
+document that still claims coverage for one.
+
 Scope (read all of these):
 - config/ansible/app/files/tetragon-policies/*.yaml: selectors, namespaces,
   matchBinaries, rateLimit, and any event dropped before userspace.
@@ -1415,12 +1464,14 @@ Each one names the decision it needs, where there is one.
 
 1. **The coverage work** in the order of *Recommended order*: finish the VM
    bridge guard rollout, then flow records, then UDP/DNS, then unix sockets,
-   then the integrity hooks.
-2. **Page a named subset.** Done on 2026-11-08. Paging covers
-   `exec-root-user-path`, `kernel-modules`, `privilege-raises` and Sigma
-   findings at medium or above (`sigma_level` carries the engine's own level,
-   because low and medium both map to the cluster's warning). Everything else
-   in `IDSAlert` stays on `ids-silent`.
+   then the integrity hooks. The hooks are last because they now protect the
+   evidence record instead of the detection claim.
+2. **Page a named subset.** Done on 2026-11-08, superseded by the delivery
+   classes in [`ids-coverage-and-evidence.md`](ids-coverage-and-evidence.md).
+   The original set was `exec-root-user-path`, `kernel-modules`,
+   `privilege-raises` and Sigma findings at medium or above (`sigma_level`
+   carries the engine's own level, because low and medium both map to the
+   cluster's warning). Everything else in `IDSAlert` stayed on `ids-silent`.
 
    Two deviations from the earlier proposal, both driven by the overnight
    data: `container-api` is excluded because it is an audit stream — every
@@ -1430,6 +1481,15 @@ Each one names the decision it needs, where there is one.
    that it is not a proxy for `runuser` timers. Bridge-guard blocks
    (`vm-bridge-*`) stay silent by design: they are counted per guest and
    reviewed, not paged.
+
+   Under the threat model above, the root-origin part of that set is a
+   backstop rather than coverage: `exec-root-user-path` and root-initiated
+   `privilege-raises` fire only while the sensor is still running, which a
+   host-root attacker controls. They are now recorded as evidence and not
+   delivered. What pages is the transition out of a non-root identity, plus
+   tenant and container lateral movement and Sigma hits on non-root execs,
+   each enabled from measurement as the coverage-and-evidence design
+   describes.
 
    The success criterion is one clean week without an expected-traffic page.
    Alert volume is capped cluster-wide at five notifications per severity per
