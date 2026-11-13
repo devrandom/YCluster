@@ -317,6 +317,12 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		// apt's unattended run drops to _apt for downloads and back again
 		// on every timer tick.
 		return "package_maintenance"
+	case "/usr/bin/certbot":
+		// certbot renew drops privileges after loading its account key on
+		// every timer tick. Other certbot subcommands stay visible.
+		if certbotRenewRe.MatchString(body.Process.Arguments) {
+			return "expected_privilege"
+		}
 	case "/usr/sbin/squid", "/usr/bin/squid":
 		// `squid -k rotate` re-execs itself as the cache user to rotate
 		// its logs; logrotate drives it.

@@ -30,6 +30,9 @@ var (
 	debianSA1Re      = regexp.MustCompile(`^(?:command -v debian-sa1 > ?/dev/null(?: 2>&1)? && )?debian-sa1 1 1$`)
 	nodeExporterRe   = regexp.MustCompile(`^/usr/share/prometheus-node-exporter-collectors/[A-Za-z0-9_.-]+(?: \| sponge /var/lib/prometheus/node-exporter/[A-Za-z0-9_.-]+\.prom)?$`)
 	snapRotateRe     = regexp.MustCompile(`^run --timer="?[0-9:,]+"? microceph\.log-rotate$`)
+	snapDesktopRe    = regexp.MustCompile(`^run snapd-desktop-integration$`)
+	certbotRenewRe   = regexp.MustCompile(`^(?:/usr/bin/certbot )?-q renew --no-random-sleep-on-renew$`)
+	cupsLogrotateRe  = regexp.MustCompile(`(?s)^-c\s+"\s*invoke-rc\.d(?: --quiet)? cups restart > ?/dev/null\s*"(?:\s+logrotate_script\s+"/var/log/cups/[^"\r\n]+")?\s*$`)
 	cronDirRe        = regexp.MustCompile(`^/etc/cron\.(hourly|daily|weekly|monthly|d)$`)
 	packageQueryRe   = regexp.MustCompile(`^type (dpkg-query|rpm)(?: 1> /dev/null 2> /dev/null)?$`)
 	aptStampRe       = regexp.MustCompile(`^touch /var/lib/apt/periodic/[A-Za-z0-9._-]+ 2>/dev/null \|\| true$`)
@@ -45,10 +48,22 @@ func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string
 	if parentProc != nil {
 		parent = parentProc.Binary
 	}
+	if process.Binary == "/etc/cron.daily/dpkg" {
+		// Debian's daily package-database backup runs the script directly
+		// from cron. The exact root-owned path is the identity; another
+		// executable in a cron directory stays visible.
+		return "cron"
+	}
 	switch base {
 	case "curl", "wget":
 		if process.Binary != "/usr/bin/curl" && process.Binary != "/usr/bin/wget" {
 			break
+		}
+		if fetchVersionQuery(args) {
+			return "package_query"
+		}
+		if publicFetchArgs(args) {
+			return "public_egress"
 		}
 		if vipHealthProbe(process, parentProc) {
 			return "loopback_http"
@@ -61,6 +76,9 @@ func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string
 		if !isSystemShell(process.Binary) {
 			break
 		}
+		if publicFetchShell(args) {
+			return "public_egress"
+		}
 		return shellReason(args, parent)
 	case "logrotate":
 		if process.Binary != "/usr/sbin/logrotate" && process.Binary != "/usr/bin/logrotate" {
@@ -70,11 +88,14 @@ func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string
 			return "cron"
 		}
 	case "snap":
-		if process.Binary != "/usr/bin/snap" {
+		if process.Binary != "/usr/bin/snap" && !snapdSnapPath(process.Binary, "usr/bin/snap") {
 			break
 		}
 		if snapRotateRe.MatchString(args) {
 			return "cron"
+		}
+		if snapDesktopRe.MatchString(args) {
+			return "desktop"
 		}
 	case "sudo":
 		if process.Binary != "/usr/bin/sudo" {
@@ -89,11 +110,89 @@ func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string
 		}
 		if strings.Contains(args, "--print-foreign-architectures") ||
 			strings.Contains(args, "--compare-versions") ||
-			args == "--version" {
+			args == "--version" || dpkgStatusArgs(args) {
 			return "package_query"
 		}
 	}
 	return ""
+}
+
+// dpkgStatusArgs matches the read-only package status query. Requiring
+// exactly one operand keeps a payload appended after the package name from
+// inheriting the exemption.
+func dpkgStatusArgs(args string) bool {
+	fields := strings.Fields(args)
+	return len(fields) == 2 && fields[0] == "--status" && !strings.HasPrefix(fields[1], "-")
+}
+
+func fetchVersionQuery(args string) bool {
+	fields := strings.Fields(args)
+	return len(fields) == 1 && (fields[0] == "--version" || fields[0] == "-V")
+}
+
+// publicFetchArgs reports whether a curl/wget command line performs a plain
+// HTTP(S) fetch and every URL it names is outside the cluster's private and
+// loopback ranges. Config files, proxies, unix sockets and connect overrides
+// stay visible because they can redirect the request somewhere the argv does
+// not show. A private destination also stays visible: the public-egress
+// exemption is only for public internet traffic.
+func publicFetchArgs(args string) bool {
+	fields := strings.Fields(args)
+	for _, field := range fields {
+		switch field {
+		case "--unix-socket", "--abstract-unix-socket", "-K", "--config",
+			"-x", "--proxy", "--preproxy", "--socks4", "--socks4a",
+			"--socks5", "--socks5-hostname", "--resolve", "--connect-to",
+			"-e", "--execute":
+			return false
+		}
+		if strings.HasPrefix(field, "--config=") || strings.HasPrefix(field, "--proxy=") {
+			return false
+		}
+	}
+	seen := false
+	for _, field := range fields {
+		field = strings.Trim(field, "\"'")
+		field = strings.TrimPrefix(field, "--url=")
+		if !strings.HasPrefix(field, "http://") && !strings.HasPrefix(field, "https://") {
+			continue
+		}
+		u, err := url.Parse(field)
+		if err != nil || u.Hostname() == "" {
+			return false
+		}
+		host := u.Hostname()
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return false
+		}
+		if ip := net.ParseIP(host); ip != nil &&
+			(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+			return false
+		}
+		seen = true
+	}
+	return seen
+}
+
+// publicFetchShell recognizes a shell whose entire payload is one plain
+// public curl/wget fetch. Composition, pipes, substitutions and
+// output redirection stay visible because they can turn the fetch into code
+// execution or a private-network probe.
+func publicFetchShell(args string) bool {
+	cmd := shellPayload(args)
+	if cmd == "" || strings.ContainsAny(cmd, ";|&<>`$\n\r") {
+		return false
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "curl", "wget", "/usr/bin/curl", "/usr/bin/wget":
+	default:
+		return false
+	}
+	return publicFetchArgs(strings.Join(fields[1:], " "))
 }
 
 func isSystemShell(binary string) bool {
@@ -166,6 +265,12 @@ func incusReason(args string, parentProc *tetragonProc) string {
 // tools and container health checks. The order matches the alert reasons:
 // once a command line is recognised, later shapes are not considered.
 func shellReason(args, parent string) string {
+	if cupsLogrotateRe.MatchString(args) {
+		// Debian's cups logrotate postrotate script restarts the daemon
+		// after rotating its logs. logrotate passes the script as a
+		// multi-line -c payload and appends its own $0/$1 arguments.
+		return "cron"
+	}
 	if reason := shellSystemReason(args); reason != "" {
 		return reason
 	}

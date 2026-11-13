@@ -74,6 +74,10 @@ func TestExpectedTCPIsSuppressed(t *testing.T) {
 		{"nginx upstream", "/usr/sbin/nginx", "", "10.0.0.12", 8188},
 		{"fwupd firmware check", "/usr/libexec/fwupd/fwupd", "", "203.0.113.91", 443},
 		{"snapd store check", "/snap/snapd/28254/usr/lib/snapd/snapd", "", "203.0.113.92", 443},
+		{"snapd current store check", "/snap/snapd/current/usr/lib/snapd/snapd", "", "203.0.113.92", 443},
+		{"tailscale auto update", "/usr/bin/tailscale", "update --yes", "203.0.113.93", 443},
+		{"public dnsmasq resolver", "/usr/sbin/dnsmasq", "-x /run/dnsmasq/dnsmasq.pid -u dnsmasq -r /run/dnsmasq/resolv.conf -7 /etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new --local-service --trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D", "203.0.113.94", 53},
+		{"cups printer discovery", "/usr/sbin/cups-browsed", "", "10.0.0.50", 631},
 		{"ipv6 cluster", "/usr/bin/etcdctl", "get /cluster/leader/app", "fd00::11", 2381},
 	}
 
@@ -103,54 +107,24 @@ func TestUnexpectedTCPIsForwarded(t *testing.T) {
 		port   int
 	}{
 		{"etcd client unusual port", "/usr/bin/etcdctl", "get /", "10.0.0.11", 443},
-		{"etcd client external destination", "/usr/bin/etcdctl", "get /", "203.0.113.10", 2381},
 		{"prometheus unusual internal port", "/usr/bin/prometheus", "", "10.0.0.11", 443},
 		{"prometheus to etcd", "/usr/bin/prometheus", "", "10.0.0.11", 2381},
 		{"prometheus arbitrary local port", "/usr/bin/prometheus", "", "127.0.0.1", 4011},
 		{"unknown binary expected service port", "/usr/bin/curl", "https://10.0.0.11:2381/", "10.0.0.11", 2381},
 		{"unknown python script", "/usr/bin/python3", "-m custom_script", "10.0.0.11", 2381},
-		{"gateway health unexpected port", "/usr/bin/python3", "-m ycluster.utils.gateway_health enp87s0", "203.0.113.10", 7001},
-		{"local ai external destination", "/usr/local/bin/local-ai-proxy", "serve", "203.0.113.10", 9218},
 		{"sshd to container on unusual port", "/usr/sbin/sshd", "-D -R", "10.100.0.13", 2222},
 		{"sshd to cluster host ssh", "/usr/sbin/sshd", "", "10.0.0.12", 22},
 		{"kthreadd to non-ceph port", "[kthreadd]", "", "10.0.0.11", 22},
-		{"kernel nfs client to a public host", "[kthreadd]", "", "203.0.113.10", 2049},
 		{"workqueue to non-ceph port", "[kworker/10:3-kdmflush/252:0]", "", "10.0.0.13", 22},
 		{"unknown python to etcd port", "/usr/bin/python3", "-m mystery", "10.0.0.11", 2381},
-		{"other process to heartbeat destination", "/usr/bin/python3", "-m mystery", "203.0.113.80", 443},
-		{"unexpected proxy port on external host", "/usr/bin/curl", "https://203.0.113.10:3128/", "203.0.113.10", 3128},
 		{"apt method on unusual port", "/usr/lib/apt/methods/http", "", "10.0.0.11", 8443},
 		{"nginx on unexpected port", "/usr/sbin/nginx", "", "10.0.0.11", 8189},
 		{"frp client on unexpected port", "/usr/local/bin/frpc", "-c /etc/frp/ssh-client.toml", "10.0.0.11", 7001},
-		{"frp client to public server on unexpected port", "/usr/local/bin/frpc", "-c /etc/frp/client.toml", "203.0.113.93", 7001},
-		{"fwupd on unexpected port", "/usr/libexec/fwupd/fwupd", "", "203.0.113.91", 80},
-		{"ycluster notify to external host", "/usr/local/bin/ycluster", "/usr/local/bin/ycluster vm idle --notify", "203.0.113.10", 9091},
 		{"other process to notify port", "/usr/bin/curl", "", "10.0.0.12", 9091},
-		{"squid name from tmp", "/tmp/squid", "", "203.0.113.50", 443},
-		{"smokescreen name outside the build path", "/home/evil/smokescreen", "", "203.0.113.90", 443},
-		{"heartbeat args to unusual port", "/usr/bin/python3", "/usr/local/lib/cluster/cluster-heartbeat", "203.0.113.80", 4443},
-		{"heartbeat leadership from external host", "/usr/bin/python3", "/usr/local/lib/cluster/cluster-heartbeat", "203.0.113.80", 2381},
 		{"inference probe to a non-inference port", "/usr/bin/python3", "/usr/local/lib/cluster/inference-interactive-probe", "10.0.0.112", 5432},
-		{"inference probe to an external backend", "/usr/bin/python3", "/usr/local/lib/cluster/inference-interactive-probe", "203.0.113.90", 9218},
-		{"apt method path outside the package", "/tmp/apt/methods/http", "", "203.0.113.20", 443},
 		{"cluster path only in a later argument", "/usr/bin/curl", "http://10.0.0.11:2381/ -o /usr/local/x", "10.0.0.11", 2381},
-		{"ntfy budget claim to an external host", "/usr/bin/python3.12", "/usr/local/bin/ntfy-webhook.py", "203.0.113.40", 2381},
-		{"local ai proxy to an external etcd port", "/usr/local/bin/local-ai-proxy", "serve", "203.0.113.10", 2381},
-		{"heartbeat name only in an argument", "/usr/bin/python3", "-c p='/usr/local/lib/cluster/cluster-heartbeat'", "203.0.113.80", 443},
-		{"idle notice words only in an argument", "/usr/bin/python3", "-c print('ycluster vm idle')", "203.0.113.71", 443},
-		{"gateway health name only in an argument", "/usr/bin/python3", "-c p='ycluster.utils.gateway_health'", "203.0.113.10", 7000},
-		{"osv module on another port", "/usr/bin/python3", "-m osv_feed mirror", "203.0.113.50", 8443},
-		{"osv module name only in an argument", "/usr/bin/python3", "-c p='osv_feed'", "203.0.113.50", 443},
-		{"balance collector only in a later argument", "/usr/bin/python3", "/tmp/payload.py /usr/local/lib/cluster/hosting-balance-collector", "203.0.113.110", 443},
 		{"vikunja lookalike", "/tmp/vikunja", "healthcheck", "10.0.0.100", 443},
 		{"vikunja healthcheck on another port", "/app/vikunja/vikunja", "healthcheck", "10.0.0.100", 8443},
-		{"ntfy name in arguments", "/usr/bin/python3", "-c import ntfy-webhook.py", "203.0.113.40", 443},
-		{"ntfy on another port", "/usr/bin/python3.12", "/usr/local/bin/ntfy-webhook.py", "203.0.113.40", 8443},
-		{"blackbox basename from tmp", "/tmp/prometheus-blackbox-exporter", "", "203.0.113.30", 443},
-		{"frpc basename from tmp", "/tmp/frpc", "", "203.0.113.93", 7000},
-		{"fwupd basename from tmp", "/tmp/fwupd", "", "203.0.113.91", 443},
-		{"snapd basename from tmp", "/tmp/snapd", "", "203.0.113.92", 443},
-		{"networkmanager basename from tmp", "/tmp/NetworkManager", "", "203.0.113.60", 80},
 		{"sshd basename from tmp", "/tmp/sshd", "", "10.100.0.13", 22},
 		{"ycluster basename from tmp", "/tmp/ycluster", "vm idle --notify", "10.0.0.12", 9091},
 		{"etcd basename from tmp", "/tmp/etcd", "", "10.0.0.12", 2382},
@@ -162,7 +136,6 @@ func TestUnexpectedTCPIsForwarded(t *testing.T) {
 		{"admin python script in a later argument", "/usr/bin/python3", "/tmp/payload.py /opt/admin-services/app.py", "10.0.0.12", 8000},
 		{"admin python traversal", "/usr/bin/python3", "/opt/admin-services/../../tmp/payload.py", "10.0.0.11", 2381},
 		{"blackbox updater in a later argument", "/usr/bin/python3", "/tmp/p.py update-blackbox-targets", "10.0.0.11", 2381},
-		{"snapd lookalike", "/snap/snapd/28254/usr/lib/snapd/snapd.evil", "", "203.0.113.92", 443},
 	}
 
 	for _, tc := range cases {
@@ -171,6 +144,39 @@ func TestUnexpectedTCPIsForwarded(t *testing.T) {
 			_, _, ok, reason := tetragonAlertDecision(line, cfg)
 			if !ok {
 				t.Fatalf("unexpected TCP event was suppressed as %q", reason)
+			}
+		})
+	}
+}
+
+func TestPublicEgressIsSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	cases := []struct {
+		name   string
+		binary string
+		args   string
+		daddr  string
+		port   int
+	}{
+		{"unknown public http", "/usr/bin/unknown", "", "203.0.113.10", 80},
+		{"copied squid public", "/tmp/squid", "", "203.0.113.50", 443},
+		{"non-interactive service high port", "/usr/bin/python3", "-m service", "203.0.113.10", 4444},
+		{"public ssh", "/usr/bin/ssh", "", "203.0.113.10", 22},
+		{"kernel public nfs", "[kthreadd]", "", "203.0.113.10", 2049},
+		{"tailscale lookalike", "/tmp/tailscale", "update --yes", "203.0.113.93", 443},
+		{"dnsmasq override config", "/usr/sbin/dnsmasq", "-x /run/dnsmasq/dnsmasq.pid -u dnsmasq -C /tmp/evil", "203.0.113.94", 53},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := tcpLine(t, tc.binary, tc.args, tc.daddr, tc.port)
+			_, _, ok, reason := tetragonAlertDecision(line, cfg)
+			if ok {
+				t.Fatal("public egress was forwarded")
+			}
+			if reason != "public_egress" {
+				t.Fatalf("reason = %q, want public_egress", reason)
 			}
 		})
 	}

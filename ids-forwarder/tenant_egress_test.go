@@ -186,12 +186,16 @@ func TestContainerBridgeGatewayOtherPortsAlert(t *testing.T) {
 	}
 }
 
-func TestHostEgressIsNotSuppressed(t *testing.T) {
+func TestHostPublicEgressIsSuppressed(t *testing.T) {
 	cfg := testConfig()
 	cfg.events = "process_kprobe"
 	line := tcpLine(t, "/usr/bin/curl", "https://203.0.113.10/", "203.0.113.10", 8443)
-	if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
-		t.Fatalf("host egress was suppressed as %q", reason)
+	if _, _, ok, reason := tetragonAlertDecision(line, cfg); ok || reason != "public_egress" {
+		t.Fatalf("host public egress: ok=%v reason=%q, want public_egress", ok, reason)
+	}
+	private := tcpLine(t, "/usr/bin/curl", "https://10.0.0.50/", "10.0.0.50", 8443)
+	if _, _, ok, reason := tetragonAlertDecision(private, cfg); !ok {
+		t.Fatalf("host private egress was suppressed as %q", reason)
 	}
 }
 

@@ -271,10 +271,10 @@ func TestTCPConnectKeyUsesDestinationOnly(t *testing.T) {
 		}
 		return a
 	}
-	if alertFor("203.0.113.10", 443).dedupKey() != alertFor("203.0.113.10", 443).dedupKey() {
+	if alertFor("10.0.0.50", 443).dedupKey() != alertFor("10.0.0.50", 443).dedupKey() {
 		t.Fatal("repeats to the same destination must share a key")
 	}
-	if alertFor("203.0.113.10", 443).dedupKey() == alertFor("203.0.113.11", 443).dedupKey() {
+	if alertFor("10.0.0.50", 443).dedupKey() == alertFor("10.0.0.51", 443).dedupKey() {
 		t.Fatal("a different destination must produce a different key")
 	}
 }
@@ -389,7 +389,7 @@ func TestTCPConnectRepeatsCoalesceAndKeepRecords(t *testing.T) {
 	}
 	defer f.closeState()
 
-	line := tcpLine(t, "/usr/bin/curl", "https://service/", "203.0.113.10", 443)
+	line := tcpLine(t, "/usr/bin/curl", "https://service/", "10.0.0.50", 443)
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestTCPConnectRepeatsCoalesceAndKeepRecords(t *testing.T) {
 		t.Fatalf("coalesced = %d, want 1", got)
 	}
 
-	other := tcpLine(t, "/usr/bin/curl", "https://service/", "203.0.113.11", 443)
+	other := tcpLine(t, "/usr/bin/curl", "https://service/", "10.0.0.51", 443)
 	if err := f.handleLine(other); err != nil {
 		t.Fatal(err)
 	}
@@ -432,14 +432,14 @@ func TestTCPDestinationLabelSeparatesAddresses(t *testing.T) {
 		}
 		return a
 	}
-	one, two := alertFor("203.0.113.10"), alertFor("203.0.113.11")
+	one, two := alertFor("10.0.0.50"), alertFor("10.0.0.51")
 	if one.Labels["dest"] == "" || one.Labels["dest"] == two.Labels["dest"] {
 		t.Fatalf("dest labels must be present and distinct: %q vs %q", one.Labels["dest"], two.Labels["dest"])
 	}
-	if strings.Contains(one.Labels["dest"], "203.0.113.10") {
+	if strings.Contains(one.Labels["dest"], "10.0.0.50") {
 		t.Fatal("dest label must not carry the address")
 	}
-	if alertFor("203.0.113.10").Labels["dest"] != one.Labels["dest"] {
+	if alertFor("10.0.0.50").Labels["dest"] != one.Labels["dest"] {
 		t.Fatal("the same destination must keep one label")
 	}
 }
@@ -468,7 +468,7 @@ func TestRepeatedDetectionWithinDedupWindowIsRecorded(t *testing.T) {
 	}
 	defer f.closeState()
 
-	line := tcpLine(t, "/usr/bin/curl", "https://service/", "203.0.113.20", 8443)
+	line := tcpLine(t, "/usr/bin/curl", "https://service/", "10.0.0.20", 8443)
 	for i := 0; i < 2; i++ {
 		if err := f.handleLine(line); err != nil {
 			t.Fatal(err)

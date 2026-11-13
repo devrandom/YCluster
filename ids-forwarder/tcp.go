@@ -141,11 +141,11 @@ func expectedTCPReason(body *tetragonLog) string {
 	if automationDial(conn) || containerProbeReason(body) != "" {
 		return "expected_tcp"
 	}
-	// Everything below is cluster-internal; a public destination from one
-	// of these binaries stays visible. Loopback counts as local: a service
-	// reaching its own host is neither egress nor lateral movement.
+	// Public-internet egress is routine for every host process, interactive
+	// or not. A private cluster destination is lateral movement and stays
+	// visible below; loopback is local and also routine.
 	if !conn.addr.IsPrivate() && !conn.addr.IsLoopback() {
-		return ""
+		return "public_egress"
 	}
 	if clusterDial(conn) {
 		return "expected_tcp"
@@ -195,6 +195,17 @@ func automationDial(c tcpConn) bool {
 		return c.port == 7000
 	case c.binary == "/usr/libexec/fwupd/fwupd" || snapdBinary(c.binary):
 		return c.port == 443
+	case c.binary == "/usr/bin/tailscale" && c.port == 443 && c.args == "update --yes":
+		// The Tailscale updater checks the signed release feed. The exact
+		// binary and updater subcommand are the identity; a copied binary
+		// or a different subcommand stays visible.
+		return true
+	case c.binary == "/usr/sbin/dnsmasq" && c.port == 53 && dnsmasqSystemArgs(c.args):
+		// The host resolver forwards queries to its configured upstream
+		// resolvers, which may be public. The fixed systemd-unit
+		// configuration is the identity; a copied binary, another port or
+		// an override config stays visible.
+		return true
 	case c.binary == "/usr/sbin/NetworkManager":
 		return c.port == 80
 	case strings.HasPrefix(c.binary, "/usr/lib/apt/methods/"):
@@ -244,6 +255,24 @@ func automationArgs(c tcpConn) bool {
 		return c.port == 2381 || c.port == 7000
 	}
 	return false
+}
+
+// dnsmasqSystemArgs matches the fixed configuration the host resolver unit
+// starts dnsmasq with. Trust anchors are key material and change on a package
+// update, so they are the only permitted suffix; a conf-file or server
+// override would let the same binary talk to a different resolver and stays
+// visible.
+func dnsmasqSystemArgs(args string) bool {
+	const prefix = "-x /run/dnsmasq/dnsmasq.pid -u dnsmasq -r /run/dnsmasq/resolv.conf -7 /etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new --local-service"
+	if !strings.HasPrefix(args, prefix) {
+		return false
+	}
+	for _, field := range strings.Fields(strings.TrimPrefix(args, prefix)) {
+		if !strings.HasPrefix(field, "--trust-anchor=.") {
+			return false
+		}
+	}
+	return true
 }
 
 // invokesScript reports whether the command line launches script. Tetragon
@@ -322,19 +351,31 @@ func snapBinary(binary, snap, name string) bool {
 	return err == nil
 }
 
-// snapdBinary matches the snapd snap's own daemon, whose revision changes on
-// every refresh.
+// snapdBinary matches the snapd snap's own daemon at either its revision
+// directory or the stable current symlink.
 func snapdBinary(binary string) bool {
+	return snapdSnapPath(binary, "usr/lib/snapd/snapd")
+}
+
+// snapdSnapPath matches a command inside the snapd snap at either its
+// revision directory or the stable "current" symlink. The trailing path is
+// exact, so a lookalike binary in the same snap tree does not inherit the
+// exemption.
+func snapdSnapPath(binary, tail string) bool {
 	prefix := "/snap/snapd/"
 	if !strings.HasPrefix(binary, prefix) {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(binary, prefix), "/")
-	if len(parts) != 5 || parts[1] != "usr" || parts[2] != "lib" || parts[3] != "snapd" || parts[4] != "snapd" {
+	if len(parts) != len(strings.Split(tail, "/"))+1 {
 		return false
 	}
-	_, err := strconv.Atoi(parts[0])
-	return err == nil
+	if parts[0] != "current" {
+		if _, err := strconv.Atoi(parts[0]); err != nil {
+			return false
+		}
+	}
+	return strings.Join(parts[1:], "/") == tail
 }
 
 // moduleRun reports whether the interpreter runs module via `-m`. Tetragon
@@ -411,6 +452,10 @@ func serviceDial(c tcpConn) bool {
 		return snapBinary(c.binary, "microceph", "microcephd") && c.port == 7443
 	case "dnsmasq":
 		return c.binary == "/usr/sbin/dnsmasq" && (c.port == 53 || c.port == 853)
+	case "cups-browsed":
+		// Printer discovery is host-local IPP traffic. A public
+		// destination or another port stays visible.
+		return c.binary == "/usr/sbin/cups-browsed" && c.port == 631
 	case "prometheus":
 		return c.binary == "/usr/bin/prometheus" && registeredPort(expectedPrometheusPorts, c.port)
 	case "prometheus-alertmanager":

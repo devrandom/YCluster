@@ -192,6 +192,12 @@ must not become a second, longer-lived access log.
     connection should be impossible, so the alert fires when network policy is
     broken or bypassed. Container identity comes from `/proc/<pid>/cgroup`
     with a PID/start-time check, recorded as a `container` label.
+  - Done: host egress is classified by destination, not origin. A TCP connect
+    to a public destination, and a plain `curl`/`wget` public fetch, are
+    routine for every process and are not alerted, including a shell whose
+    entire payload is one such fetch. A private cluster destination still
+    alerts as lateral movement; config-file, proxy, unix-socket, composed and
+    piped commands stay visible.
   - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
     allowlist and maps to its own rule, `container-api`, so every `incus
     exec`, `incus file push/pull` and lifecycle call lands in

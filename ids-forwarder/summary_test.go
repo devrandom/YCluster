@@ -241,7 +241,7 @@ func TestRoutineExecKeepsUsefulCommands(t *testing.T) {
 		args   string
 		parent string
 	}{
-		{"/usr/bin/curl", "https://example.com/health", "/usr/bin/bash"},
+		{"/usr/bin/curl", "https://10.0.0.11:2381/metrics", "/usr/bin/bash"},
 		{"/usr/bin/bash", `-c "id"`, "/usr/sbin/sshd"},
 		{"/usr/bin/apt-get", "install nginx", "/usr/bin/sudo"},
 		{"/usr/bin/apt-get", "install update-manager", "/usr/bin/sudo"},

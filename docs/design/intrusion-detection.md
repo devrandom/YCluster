@@ -61,6 +61,9 @@ small Go forwarder; Alertmanager remains the only routing and deduplication laye
   this rollout.
 - No full packet capture archive. Packet capture is on-demand and time-boxed.
 - No automatic blocking or active response in phase 1.
+- No public-internet egress alerting. Exfiltration is not part of the threat
+  model; host and tenant access to the public internet is normal and is not a
+  detection signal. Private cluster lateral movement remains in scope.
 - No guest-internal monitoring of user VMs or containers unless an agent is
   deliberately installed inside the guest.
 - No replacement for nginx, sshd, journald or the existing access logs.
@@ -693,12 +696,15 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   unit, so `system-getty.slice/getty@tty1.service` reports `getty@tty1`, and a
   `run-r<hex>.scope` from `systemd-run` keeps `origin=unit` without an actor
   so a label value is not created per invocation. The parser assumes unified
-  cgroup v2, which every managed node uses. It is provenance, not policy: no
-  suppression or routing decision reads it, `dedupKey` ignores it, every alert
-  carries an origin (the root-exec rule included), and the counts are
-  published as `ids_forwarder_detections_total{origin=...}` — classified
-  detections, before dedup, coalescing and rate limiting, with an `unset`
-  bucket so a labelling regression is visible. Cron is the reason this is
+  cgroup v2, which every managed node uses. Public-internet TCP egress and a
+  plain `curl`/`wget` public fetch (including a shell whose whole payload is
+  that fetch) are routine for every host process, whatever its origin. A
+  private cluster destination is lateral movement and still alerts.
+  No suppression or routing decision reads origin, `dedupKey` ignores
+  it, every alert carries an origin (the root-exec rule included), and the
+  counts are published as `ids_forwarder_detections_total{origin=...}` —
+  classified detections, before dedup, coalescing and rate limiting, with an
+  `unset` bucket so a labelling regression is visible. Cron is the reason this is
   session-based rather than `auid`-based: a root cron job carries `auid=0`
   exactly like a root login but runs in `cron.service`, not in a session
   scope.
@@ -741,8 +747,10 @@ network coverage.
   deliberately excluded: they match normal credential commits and netdev
   autoload requests, not escalation. High-volume compiled control-plane
   clients (`etcdctl`, `etcd`, Prometheus, and `local-ai-proxy`) have their
-  expected private-network port pairs filtered in the kernel; unexpected
-  ports and external destinations still generate events. Loopback is
+  expected private-network port pairs filtered in the kernel. Unexpected
+  private-network ports still generate events. Public destinations also
+  generate raw events, but the forwarder classifies them as routine egress;
+  only private lateral movement is alerted. Loopback is
   excluded; container bridges (`172.16.0.0/12`) are not, because that range
   holds both peers and, at `.1`, the host, and only the forwarder can tell
   them apart. Root uid/gid
@@ -990,6 +998,9 @@ cases they only need to use a protocol or namespace the sensor does not observe.
 4. **Suppression keys are attacker-controlled.** The forwarder suppresses on
    basename, path substring and `argv` substring. The probe confirmed that each of
    the following produces no alert:
+   *This review predates the public-egress policy: the external-destination
+   examples are now routine by design. The remaining risk is any suppression
+   that covers a private cluster destination.*
    - a payload copied to `/tmp/squid` or named `smokescreen*`/`vikunja`
      connects to an arbitrary external address and port; a binary whose path
      contains `/apt/methods/` is exempt on 443 and 3128;
@@ -1005,9 +1016,11 @@ cases they only need to use a protocol or namespace the sensor does not observe.
    matching on immutable identity (exact executable path plus uid/parent) and the
    expected destination, not on a basename or a substring an attacker can place in
    `argv`. Where a benign producer is cluster-owned, remove the shell wrapper at
-   the source instead of adding another filter. At minimum, egress suppressions
-   should never apply for an arbitrary destination: a `squid`-named binary may
-   talk to the proxy port, not to any address on any port.
+   the source instead of adding another filter. Egress suppressions must never
+   apply to an arbitrary **private** destination: a `squid`-named binary may
+   talk to the proxy port, not to any cluster address on any port. Public
+   destinations are the documented exception and are routine for every
+   process.
 
 5. **The observation boundary omits the most relevant attacker channels.**
    - **VM guests are invisible from inside.** Incus VMs have their own kernel;
@@ -1019,7 +1032,9 @@ cases they only need to use a protocol or namespace the sensor does not observe.
      compute node.
    - **UDP is not collected.** Only `tcp_connect` is traced. DNS, QUIC/HTTP3 on
      UDP/443, ICMP tunnels, WireGuard/OpenVPN clients, and UDP exfiltration are
-     invisible. A reverse shell over TCP is visible; a C2 channel over QUIC is not.
+     invisible. A reverse shell that execs a shell is still visible through the
+     process rules, but its public TCP flow is routine; a C2 channel over QUIC
+     is not visible at all.
    - **Unix sockets are not collected.** Incus/Docker/Podman sockets, D-Bus and
      systemd private sockets are not traced. A process that reaches the Incus
      socket via `curl --unix-socket ... http://localhost` is also shaped like a

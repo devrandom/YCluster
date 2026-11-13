@@ -18,7 +18,7 @@ func TestDetectionRecordIsWritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	line := tcpLine(t, "/usr/bin/curl", "https://203.0.113.10/", "203.0.113.10", 8443)
+	line := tcpLine(t, "/usr/bin/curl", "https://10.0.0.50/", "10.0.0.50", 8443)
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
