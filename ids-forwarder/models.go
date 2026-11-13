@@ -38,9 +38,14 @@ type tetragonProcess struct {
 	Binary    string       `json:"binary"`
 	Arguments string       `json:"arguments"`
 	UID       uint32       `json:"uid"`
+	Auid      uint32       `json:"auid"`
 	PID       uint32       `json:"pid"`
 	StartTime string       `json:"start_time"`
 	Pod       *tetragonPod `json:"pod"`
+	// NS is the namespace snapshot Tetragon renders from its exec-time
+	// process cache. It survives the process exiting, so it is the
+	// trustworthy layer source.
+	NS *eventNamespaces `json:"ns"`
 	// Docker is the container id Tetragon records for a process started by
 	// the Docker runtime. It is present on the event itself, so attribution
 	// survives a process that exited before the line was read.
@@ -48,14 +53,34 @@ type tetragonProcess struct {
 }
 
 type tetragonProc struct {
-	Binary    string       `json:"binary"`
-	Arguments string       `json:"arguments"`
-	UID       uint32       `json:"uid"`
-	PID       uint32       `json:"pid"`
-	StartTime string       `json:"start_time"`
-	Pod       *tetragonPod `json:"pod"`
-	Docker    string       `json:"docker"`
+	Binary    string           `json:"binary"`
+	Arguments string           `json:"arguments"`
+	UID       uint32           `json:"uid"`
+	Auid      uint32           `json:"auid"`
+	PID       uint32           `json:"pid"`
+	StartTime string           `json:"start_time"`
+	Pod       *tetragonPod     `json:"pod"`
+	NS        *eventNamespaces `json:"ns"`
+	Docker    string           `json:"docker"`
 }
+
+// eventNamespaces is what --enable-process-ns adds to every event: the pid and
+// mount namespace inums with the kernel's own verdict on whether each is the
+// host's. A zero inum means the field is absent, which is what a replayed
+// pre-flag line looks like.
+type eventNamespaces struct {
+	Pid tetragonNamespace `json:"pid"`
+	Mnt tetragonNamespace `json:"mnt"`
+}
+
+type tetragonNamespace struct {
+	Inum   uint32 `json:"inum"`
+	IsHost bool   `json:"is_host"`
+}
+
+// auidUnset is the kernel's "no login uid" value, reported for anything
+// systemd starts.
+const auidUnset = ^uint32(0)
 
 type tetragonPod struct {
 	Namespace string `json:"namespace"`

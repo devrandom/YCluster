@@ -55,6 +55,7 @@ class IdsMetricsCollectorTests(unittest.TestCase):
             "ids_forwarder_dropped_total 3\n"
             "ids_forwarder_boot_suppressed_total 5\n"
             'ids_forwarder_detections_total{origin="interactive"} 4\n'
+            'ids_forwarder_provenance_total{check="layer",source="namespace"} 11\n'
             "ids_forwarder_queue_depth{queue=\"spool\"} 7\n"
             "unrelated_metric 9\n"
         )
@@ -84,9 +85,22 @@ class IdsMetricsCollectorTests(unittest.TestCase):
         self.assertIn("ids_forwarder_dropped_total 3", body)
         self.assertIn("ids_forwarder_boot_suppressed_total 5", body)
         self.assertIn('ids_forwarder_detections_total{origin="interactive"} 4', body)
+        self.assertIn(
+            'ids_forwarder_provenance_total{check="layer",source="namespace"} 11', body)
         self.assertIn('ids_forwarder_queue_depth{queue="spool"} 7', body)
         self.assertNotIn("unrelated_metric", body)
         self.assertFalse(list(col.OUT.parent.glob(".ids.*")))
+
+    def test_every_forwarder_metric_the_rollout_reads_is_forwarded(self):
+        # The forwarder's endpoint is loopback-only, so anything missing from
+        # this allowlist does not exist in Prometheus at all.
+        for name in (
+            "ids_forwarder_provenance_total",
+            "ids_forwarder_evidence_only_total",
+            "ids_forwarder_page_candidates_total",
+            "ids_forwarder_build_info",
+        ):
+            self.assertIn(name, col.FORWARDER_GAUGES)
 
     def test_main_skips_gauges_when_forwarder_is_down(self):
         with tempfile.TemporaryDirectory() as tmp:

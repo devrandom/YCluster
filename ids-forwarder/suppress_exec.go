@@ -48,6 +48,10 @@ func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string
 	if parentProc != nil {
 		parent = parentProc.Binary
 	}
+	// Ansible's become handshake is routine only when a root-driven playbook
+	// ran it. Any user who can sudo can type the same argv, and the escalation
+	// class is the one place that must not be suppressible by a command line.
+	invokerRoot := rootInvoker(parentProc)
 	if process.Binary == "/etc/cron.daily/dpkg" {
 		// Debian's daily package-database backup runs the script directly
 		// from cron. The exact root-owned path is the identity; another
@@ -79,7 +83,7 @@ func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string
 		if publicFetchShell(args) {
 			return "public_egress"
 		}
-		return shellReason(args, parent)
+		return shellReason(args, parent, invokerRoot)
 	case "logrotate":
 		if process.Binary != "/usr/sbin/logrotate" && process.Binary != "/usr/bin/logrotate" {
 			break
@@ -101,7 +105,7 @@ func routineExecReason(process tetragonProcess, parentProc *tetragonProc) string
 		if process.Binary != "/usr/bin/sudo" {
 			break
 		}
-		if ansibleSudoRe.MatchString(args) {
+		if invokerRoot && ansibleSudoRe.MatchString(args) {
 			return "ansible_probe"
 		}
 	case "dpkg":
@@ -264,7 +268,7 @@ func incusReason(args string, parentProc *tetragonProc) string {
 // shellReason classifies the shell wrappers used by cron, Ansible, package
 // tools and container health checks. The order matches the alert reasons:
 // once a command line is recognised, later shapes are not considered.
-func shellReason(args, parent string) string {
+func shellReason(args, parent string, invokerRoot bool) string {
 	if cupsLogrotateRe.MatchString(args) {
 		// Debian's cups logrotate postrotate script restarts the daemon
 		// after rotating its logs. logrotate passes the script as a
@@ -274,7 +278,7 @@ func shellReason(args, parent string) string {
 	if reason := shellSystemReason(args); reason != "" {
 		return reason
 	}
-	if shellAnsibleProbeReason(args) {
+	if invokerRoot && shellAnsibleProbeReason(args) {
 		return "ansible_probe"
 	}
 	if reason := shellPackageQueryReason(args); reason != "" {

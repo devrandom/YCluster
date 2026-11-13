@@ -34,6 +34,27 @@ type Event struct {
 	// Initiated is set for tcp_connect events: the sensor saw the SYN.
 	// SigmaHQ network rules use it to distinguish client from server traffic.
 	Initiated string `json:"Initiated,omitempty"`
+	// Ns, ParentNs, Auid and ParentUID carry the event-carried provenance the
+	// forwarder classifies on. Auid travels with the event so the escalation
+	// fallback survives the round trip through the rule engine; the namespace
+	// fields do not, because the layer is resolved before the event is sent.
+	Ns        *Namespaces `json:"-"`
+	ParentNs  *Namespaces `json:"-"`
+	Auid      uint32      `json:"Auid,omitempty"`
+	ParentUID uint32      `json:"-"`
+}
+
+// Namespaces is the --enable-process-ns snapshot Tetragon renders from its
+// exec-time process cache: namespace inums with the kernel's verdict on
+// whether each is the host's.
+type Namespaces struct {
+	Pid Namespace `json:"pid"`
+	Mnt Namespace `json:"mnt"`
+}
+
+type Namespace struct {
+	Inum   uint32 `json:"inum"`
+	IsHost bool   `json:"is_host"`
 }
 
 type envelope struct {
@@ -51,12 +72,14 @@ type tetragon struct {
 }
 
 type process struct {
-	PID       uint32 `json:"pid"`
-	UID       uint32 `json:"uid"`
-	Binary    string `json:"binary"`
-	Arguments string `json:"arguments"`
-	StartTime string `json:"start_time"`
-	Pod       *pod   `json:"pod"`
+	PID       uint32      `json:"pid"`
+	UID       uint32      `json:"uid"`
+	Auid      uint32      `json:"auid"`
+	Binary    string      `json:"binary"`
+	Arguments string      `json:"arguments"`
+	StartTime string      `json:"start_time"`
+	Pod       *pod        `json:"pod"`
+	NS        *Namespaces `json:"ns"`
 	// Docker is the container id Tetragon records for Docker workloads.
 	Docker string `json:"docker"`
 }
@@ -119,12 +142,16 @@ func normalizeProcess(ts, eventType string, p, parent *process) *Event {
 		Layer:       "host",
 		ProcessId:   p.PID,
 		StartTime:   p.StartTime,
+		Ns:          p.NS,
+		Auid:        p.Auid,
 	}
 	if parent != nil {
 		ev.ParentImage = parent.Binary
 		ev.ParentCommandLine = commandLine(parent.Binary, parent.Arguments)
 		ev.ParentProcessId = parent.PID
 		ev.ParentStartTime = parent.StartTime
+		ev.ParentNs = parent.NS
+		ev.ParentUID = parent.UID
 		if parent.Pod != nil || parent.Docker != "" {
 			ev.Layer = "container"
 		}

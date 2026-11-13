@@ -593,9 +593,11 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
 - JSON events written to a bounded local file with rotation. The forwarder
   tails that file; the gRPC unix socket stays reserved for operator tooling.
 - Retention matches the access-log window but is volume-dependent: Tetragon
-  rotates at 24h **or** 50 MB, whichever comes first, and keeps seven
-  compressed backups. Under heavy event volume the size cap dominates, so
-  the retained window can be well under a day. Do not assume a daily file.
+  rotates at 24h **or** 100 MB, whichever comes first, and keeps seven
+  compressed backups. The cap doubled with `enable-process-ns`, because the
+  namespace snapshot is about 1.7x the event size and the raw window has to
+  stay the same. Under heavy event volume the size cap dominates, so the
+  retained window can be well under a day. Do not assume a daily file.
 - Policies pinned in Ansible: file writes to `/etc` and systemd paths,
   targeted root uid/gid transitions and capability gains, actual kernel
   module loads, and non-loopback TCP connects. Shell and package-manager
@@ -745,11 +747,33 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   session-based rather than `auid`-based: a root cron job carries `auid=0`
   exactly like a root login but runs in `cron.service`, not in a session
   scope.
-- Layer attribution reads the event before it reads `/proc`: a process or
-  parent carrying `process.docker` (the Docker runtime's container id) is a
-  container even when both pids have exited, which is the normal case for a
-  30-second health check whose uid is a host uid. The `/proc` cgroup lookup
-  still covers Incus, whose events carry no such field.
+- Layer attribution reads the event before it reads `/proc`. With
+  `enable-process-ns`, every event carries the pid and mount namespace inums
+  with the kernel's own `is_host` verdict, rendered by Tetragon from its
+  exec-time process cache, so a verdict survives the process exiting. The
+  order is: pod or Docker metadata on the event, then the namespace snapshot,
+  then the live cgroup for a container name and to reject a user-created
+  sandbox, then the parent, then the uid heuristic. A foreign pid namespace
+  with the *host* mount namespace (`nsenter -t 1 -m`) is treated as host: the
+  process can write host paths, so its file writes alert. `/proc` is read only
+  to refine a verdict, never to make the host/container call, and the source
+  of every verdict is counted in `ids_forwarder_provenance_total{check,source}`
+  so a regression to the fallbacks is visible.
+  Two refinements keep a container from being read as host: a container that
+  runs in the host pid namespace (`--pid=host`, Incus `keep=pid`) is caught by
+  its cgroup, and the verdict is reported as `namespace+cgroup`. That is also
+  the one case where an `IsHost` namespace does not win, so a host-namespace
+  container keeps `container_internal` and its name. The demotion has a
+  deliberate side effect: a tenant process holding the host mount namespace is
+  now subject to the host-only suppression table, so its connects can be
+  classified `expected_tcp`. The canary watch covers
+  `ids_forwarder_suppressed_total{reason="expected_tcp"}` for that reason.
+  Tetragon annotates the snapshot at exec time, so a `setns` without a
+  following exec keeps the old namespaces on record.
+- The escalation verdict reads the event too: the parent's uid, then the
+  audit uid, then the login session. Only the last needs `/proc`, and it is
+  the last because an unresolvable invoker leaves the event as evidence
+  rather than paging on a guess.
 - Does not copy raw Tetragon events into the spool and does not put IPs in
   labels, annotations, or the spool.
 - Coverage is republished through the node_exporter textfile collector
@@ -834,7 +858,7 @@ network coverage.
 
 ## Data and retention
 
-- **Tetragon events.** Bounded local files; rotate at 24h or 50 MB and keep
+- **Tetragon events.** Bounded local files; rotate at 24h or 100 MB and keep
   seven compressed backups. The effective window is the smaller of the time
   and volume caps and can be much shorter than a day under load. Network
   events contain IPs, so they are subject to the same cutoff.
@@ -1181,7 +1205,8 @@ cases they only need to use a protocol or namespace the sensor does not observe.
     a usable path for a compromised service account.
 
 12. **Raw retention is far shorter than the access-log window.** Tetragon
-    rotates at 24h or 50 MB; at the observed volume the size cap dominates and
+    rotates at 24h or 100 MB (50 MB before `enable-process-ns`); at the
+    observed volume the size cap dominates and
     rotations land roughly every 35-40 minutes, so seven compressed backups hold
     a few hours, not a week. Classified detections survive in `detections.jsonl`
     (50 MB x 10), but unclassified events are gone quickly. An attacker only has
@@ -1234,7 +1259,9 @@ concrete actions for the open items are in [Next steps](#next-steps).
    its cluster port, and the ntfy webhook to the monitoring control plane.
    **Open.**
 8. Keep a time-based floor on raw event retention (or ship to a central store) so
-   the 50 MB cap cannot reduce the forensic window to minutes. **Open.**
+   the per-file size cap cannot reduce the forensic window to minutes.
+   **Open**; the cap moved to 100 MB with the namespace snapshot, which buys
+   the same window at the higher event size but is still a volume cap.
 
 ### Mitigation status
 
@@ -1341,6 +1368,13 @@ Fixed in the same pass:
   snap rotation command exactly, and accept `/usr/bin/install` for the
   verifyrestore drill. The PCP cleanup regex no longer accepts a `..`
   component, and the root-session description matches the filter.
+
+  The probe exemption is also gated on the invoker: it applies only when the
+  parent process is root. The anchored patterns are still a command line a
+  user can type, and the escalation class is the one place a command line must
+  not decide delivery, so a non-root invoker's `sudo -H -S -n -u root /bin/sh
+  -c "echo BECOME-SUCCESS-..."` stays visible. Root-driven playbooks are
+  unaffected, which is where the volume is.
 
   The curl/wget loopback exemption is now anchored to the only host-side
   producer, keepalived's storage-VIP script and its registry probe; a direct

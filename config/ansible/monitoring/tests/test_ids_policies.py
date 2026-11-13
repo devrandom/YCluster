@@ -153,6 +153,13 @@ class TestIDSPolicies(unittest.TestCase):
         self.assertIn('"PROCESS_KPROBE"', text)
         self.assertNotIn('"PROCESS_EXIT"', text)
 
+    def test_namespace_snapshot_is_exported(self):
+        # ids-forwarder resolves the layer from the event's namespace snapshot,
+        # so the sensor has to render it; the retention cap moves with it.
+        text = TETRAGON_CONFIG.read_text()
+        self.assertIn("enable-process-ns: true", text)
+        self.assertIn("export-file-max-size-mb: 100", text)
+
     def test_install_removes_retired_policy(self):
         text = TETRAGON_INSTALL.read_text()
         self.assertIn("Remove retired tracing policies", text)

@@ -82,11 +82,11 @@ event stays coverage, because a duplicate page is cheaper than a dropped
 escalation.
 
 Sigma alerts carry no origin or actor today (`sigma_detect.go` never calls
-`applyOrigin`), and no alert carries `uid`; adding both is part of this change.
-Until a host runs a forwarder that supplies them, a Sigma hit on a root host
-process is still evidence by identity alone, and the only thing lost is the
-transition exception at the Sigma layer, where no curated rule currently
-matches a privilege tool. The record fields are the reason to add them.
+`applyOrigin`), and no alert carries `uid`; this change adds both, and carries
+the audit uid in the normalized event so the escalation fallback survives the
+round trip through the rule engine. The namespace snapshot does not travel:
+the layer is resolved before the event is sent, and RSigma echoes back what it
+received.
 
 ## Classification
 
@@ -104,16 +104,24 @@ not depend on `/proc` timing.
 
 `escalationTransition` is narrow on purpose. It is true only for the events
 that *perform* the transition: a `process_exec` of `sudo`, `su`, `doas` or
-`pkexec`, and a `privilege-raises` transition made by one of them. The invoker
-is the *parent* process, because the tool itself is already root when the event
-is written; when the parent has left `/proc` the login session of the event
-process is the fallback, and an unresolvable invoker leaves the event as
-evidence rather than paging on a guess.
+`pkexec`. The invoker is the *parent* process, because the tool itself is
+already root when the event is written; when the parent has left `/proc` the
+audit uid carried on the event is the next source, and the login session of the
+event process is the last. Only that last one needs a live `/proc`, and an
+unresolvable invoker leaves the event as evidence rather than paging on a
+guess. The source of each verdict is counted in
+`ids_forwarder_provenance_total{check="escalation",source=...}`.
 
 The parent is the right identity, not the session: `su - someadmin -c sudo ...`
 run inside a root session elevates an unprivileged account, and an operator who
 logs in as root and steps down and back up is not crossing a boundary. Reading
-the session alone missed the first case and paged on neither.
+the session alone missed the first case and paged on neither. The credential
+commit that follows the exec is recorded as evidence, so one sudo pages once.
+A *container* layer suppresses the label, and so does an `unverified` layer
+when a cgroup actually explained it: a user-scope runtime or a pid-namespace
+sandbox outside any runtime root is a tenant, not a host process. An
+`unverified` layer that only the uid fallback produced is undecided, and stays
+coverage — a duplicate page there is the cheaper mistake.
 
 This scoping is what keeps the model honest. A root shell spawned from an
 operator's session is evidence, exactly like any other post-root activity,
@@ -126,7 +134,7 @@ processes.
 | Rule | Layer and identity | Class |
 |---|---|---|
 | `process_exec` of `sudo`, `su`, `doas`, `pkexec` from a non-root login session | host, uid 0 | coverage (`escalation_nonroot`) |
-| `privilege-raises` made by one of those tools from a non-root login session | host, uid 0 | coverage (`escalation_nonroot`) |
+| the `privilege-raises` commit that follows that exec | host, uid 0 | evidence (`root_privilege`), not a second page |
 | `process_exec`, `exec-root-user-path`, any other root exec | host, uid 0 | evidence (`root_exec`) |
 | `process_exec` | host, uid != 0 | coverage (`exec_nonroot`) |
 | `tcp-connect`, private destination | host, uid 0 | evidence (`root_connect`) |
@@ -134,7 +142,7 @@ processes.
 | `tcp-connect`, cluster destination | container, unverified | coverage (`lateral_container`) |
 | exec, write, module and privilege rules | container, host-visible uid below the idmap base | evidence (privileged container) |
 | `privilege-raises`, any other case | host, uid 0 | evidence (`root_privilege`) |
-| `privilege-raises` | container, unverified | coverage (`escalation_nonroot`) |
+| `privilege-raises` | container | coverage (`container_other`) |
 | `kernel-modules` | host | evidence (`root_module`) |
 | `kernel-modules` | container | coverage |
 | File writes below `/etc` and unit paths | host, uid 0 | evidence (`root_file_write`) |

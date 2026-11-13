@@ -177,17 +177,30 @@ var privilegeTools = map[string]bool{
 	"/usr/local/bin/pkexec": true,
 }
 
-// nonRootInvoker reports whether the identity that ran a privilege tool was
-// unprivileged, which is what makes its exec a transition rather than root
-// doing root things. The parent's uid is the invoker: the tool itself is
-// already root when the event is written. When the parent is gone, the login
-// session of the event process is the fallback, and an unresolvable invoker
-// stays evidence rather than paging on a guess.
-func nonRootInvoker(process tetragonProcess, parent *tetragonProc) bool {
-	if parent != nil && parent.PID != 0 {
-		return parent.UID != 0
+// escalationSource reports where the proof that a privilege tool was run by
+// an unprivileged identity came from, or "" when there is no proof. The
+// sources are ordered by how well they survive the process exiting: the
+// parent uid is in the event, the audit uid is in the event, and the login
+// session needs a live /proc.
+func escalationSource(body *tetragonLog) string {
+	if p := body.Parent; p != nil && p.PID != 0 {
+		// The invoker has to be an unprivileged host identity. An idmapped
+		// uid is a container account, which is a tenant boundary, not a host
+		// one, and must not turn into a page.
+		if p.UID != 0 && p.UID < incusIDMapBase {
+			return "uid"
+		}
+		// A root parent is a positive answer: root running a privilege tool
+		// is not a transition, whatever the audit trail says.
+		return ""
 	}
-	return nonRootSession(process.PID, process.StartTime)
+	if body.Process.Auid != auidUnset && body.Process.Auid >= loginUIDBase && body.Process.Auid < incusIDMapBase {
+		return "auid"
+	}
+	if nonRootSession(body.Process.PID, body.Process.StartTime) {
+		return "session"
+	}
+	return ""
 }
 
 // nonRootSession reports a login session owned by an account other than root.
@@ -196,4 +209,18 @@ func nonRootInvoker(process tetragonProcess, parent *tetragonProc) bool {
 func nonRootSession(pid uint32, startTime string) bool {
 	o := processOriginFor(pid, startTime)
 	return o.Origin == "interactive" && o.Actor != "" && o.Actor != "root"
+}
+
+// rootInvoker reports a positively identified root parent. An absent or
+// non-root invoker is not root, so an exemption that depends on it must not
+// apply: the argv is attacker-controlled.
+func rootInvoker(parent *tetragonProc) bool {
+	return parent != nil && parent.PID != 0 && parent.UID == 0
+}
+
+// tenantUnverified reports an unverified layer that a cgroup actually
+// explained: a user-scope runtime or a pid-namespace sandbox outside any
+// runtime root. That is a tenant, not an undecided host process.
+func tenantUnverified(source string) bool {
+	return source == "cgroup" || source == "namespace+cgroup"
 }

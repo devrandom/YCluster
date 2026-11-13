@@ -69,6 +69,7 @@ func newForwarder(cfg config) (*forwarder, error) {
 		cfg.logf = log.Printf
 	}
 	destinationKey = loadDestinationKey(cfg.destKeyFile, cfg.logf)
+	captureProcessSnapshot(cfg.logf)
 	f := &forwarder{
 		cfg:    cfg,
 		queue:  alertQueue{max: cfg.queueMax},
@@ -396,6 +397,9 @@ func (f *forwarder) handleLine(line string) error {
 	if meta.time.IsZero() {
 		return nil
 	}
+	// Counted before the delivery decision: the provenance question is about
+	// every layer decision, including the events that are suppressed.
+	f.stats.countProvenance(a.prov)
 	if !ok {
 		f.stats.suppress(suppressed)
 		f.cursor.advance(meta.time, meta.hash)

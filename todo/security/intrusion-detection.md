@@ -235,12 +235,13 @@ must not become a second, longer-lived access log.
     `class=root_exec delivery=evidence` and never reach Alertmanager, a live
     non-root exec lands in `exec_nonroot` with `page=no` and increments
     `ids_forwarder_page_candidates_total`, and the shadow counters are in the
-    node textfile collector. Two gaps are left in the measurement itself:
-    a short-lived non-root host process whose pid has left `/proc` falls back
-    to `layer=unverified` and is counted as `container_other` rather than
-    `exec_nonroot`, so the class undercounts on replay and for very short
-    commands; and `escalation_nonroot` pages from day one without a shadow
-    measurement, by decision.
+    node textfile collector. A short-lived non-root host process whose pid has
+    left `/proc` still falls back to `layer=unverified` and is counted as
+    `container_other` rather than `exec_nonroot`, so that class undercounts on
+    replay until every host emits the namespace snapshot; the per-verdict
+    source is counted in `ids_forwarder_provenance_total` so the transition is
+    visible rather than assumed. `escalation_nonroot` pages from day one
+    without a shadow measurement, by decision.
   - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
     allowlist and maps to its own rule, `container-api`, so every `incus
     exec`, `incus file push/pull` and lifecycle call lands in
@@ -494,10 +495,13 @@ decision:
   `smokescreen`, `docker-proxy`, `rootlessport`), and any host process may
   reach port 3128 and be treated as the squid proxy. Match the unit identity
   and the configured destination instead.
-- A container process that enters the host mount namespace (`nsenter -t 1 -m`)
-  keeps its container cgroup, so its file writes are still
-  `container_internal`. Compare `/proc/<pid>/ns/mnt` with the host before
-  granting the container layer, and define the behaviour when the pid is gone.
+- Done: a container process that enters the host mount namespace
+  (`nsenter -t 1 -m`) is demoted to the host layer. With
+  `enable-process-ns` the event carries the pid and mount namespace inums, so
+  a foreign pid namespace with the host mount namespace is host whatever the
+  cgroup says, and the verdict survives the process exiting. The raw
+  retention cap moved 50 -> 100 MB with the snapshot (~1.7x event size); the
+  two changes travel together.
 - The verifyrestore write path is still a generic `install` into a
   `postgresql/<version>/verifyrestore/` tree. It needs the backup unit's
   identity (or a per-run component) rather than a path that any root process
@@ -556,6 +560,23 @@ different costs and privacy exposure.
 
 ## Open questions
 
+- `ids_forwarder_provenance_total` is measured but not alerted on: after the
+  namespace rollout `source="fallback"` should be replay-only, and a change is
+  worth investigating. No alert rule yet because the replay window would trip
+  it on purpose.
+- Decisions taken after the provenance review: an `unverified` layer keeps the
+  escalation label only when the uid fallback produced it; a cgroup that named
+  a user-scope runtime or a sandbox means a tenant, not a host boundary. The
+  anchor-based Ansible probe exemption now also requires a root invoker, so a
+  command line a user can type cannot hide an escalation.
+  Watch on the first deploy: if any playbook is ever run as a *non-root*
+  connection user, every task's become exec now pages instead of being
+  suppressed. That is the intended trade, but it would show up as an
+  `escalation_nonroot` burst, so it is the first thing to check if alerts jump.
+- The audit uid is the escalation fallback when the parent has left `/proc`,
+  and a daemon started from a login shell keeps its `auid`, so its `sudo`
+  would page. Accepted for now; the parent uid answers first in the common
+  case.
 - Provenance is now recorded per detection (`origin=interactive|unit|
   container`, `actor=<user|unit>`, counted in
   `ids_forwarder_detections_total`). The host-root-out-of-scope model changes

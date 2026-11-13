@@ -394,6 +394,50 @@ func TestObservedAnsibleProbeShapesAreSuppressed(t *testing.T) {
 	}
 }
 
+func TestAnsibleProbeNeedsARootInvoker(t *testing.T) {
+	cfg := testConfig()
+	cfg.events = "process_exec"
+	become := `-H -S -n -u root /bin/sh -c "echo BECOME-SUCCESS-abc123 ; /usr/bin/python3"`
+
+	// The exact argv matches, but a login account typed it: the escalation
+	// must survive, or the only paging class has a documented bypass.
+	line, err := json.Marshal(map[string]any{
+		"process_exec": map[string]any{
+			"process": map[string]any{
+				"pid": 900, "uid": 0, "binary": "/usr/bin/sudo", "arguments": become,
+			},
+			"parent": map[string]any{"pid": 42, "uid": 2000, "binary": "/bin/bash"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _, ok, reason := tetragonAlertDecision(string(line), cfg)
+	if !ok {
+		t.Fatalf("a non-root invoker's become shape was suppressed as %q", reason)
+	}
+	if a.Labels["escalation"] != "nonroot" {
+		t.Fatalf("escalation label = %q, want nonroot", a.Labels["escalation"])
+	}
+
+	// The same shell probe from a non-root parent is not routine either.
+	probe, err := json.Marshal(map[string]any{
+		"process_exec": map[string]any{
+			"process": map[string]any{
+				"pid": 901, "uid": 2000, "binary": "/bin/sh",
+				"arguments": `-c "( umask 77 && mkdir -p /root/.ansible/tmp ) && sleep 0"`,
+			},
+			"parent": map[string]any{"pid": 42, "uid": 2000, "binary": "/bin/bash"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, reason := tetragonAlertDecision(string(probe), cfg); !ok {
+		t.Fatalf("a non-root invoker's shell probe was suppressed as %q", reason)
+	}
+}
+
 func TestRoutineDesktopAndMaintenanceShapesAreSuppressed(t *testing.T) {
 	cfg := testConfig()
 	cfg.events = "process_exec"

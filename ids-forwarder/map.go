@@ -81,12 +81,13 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	// are excluded: a root process inside a tenant container sees its own
 	// filesystem, not the host's.
 	if evType == "process_exec" && cfg.execRootUserPath && body.Process.UID == 0 {
-		if layer, _ := tetragonEventLayer(body); layer == "host" && rootExecUserPath(body.Process.Binary) {
+		if layer, _, source := tetragonEventLayerInfo(body); layer == "host" && rootExecUserPath(body.Process.Binary) {
 			a := newAlert(cfg, sourceTetragon, "warning", layer, "exec-root-user-path",
 				"process_exec: binary="+body.Process.Binary+" root-exec")
 			a.Labels["binary"] = processBinaryName(body.Process.Binary)
 			applyOrigin(&a, body, layer)
-			applyIdentity(&a, evType, body)
+			applyIdentity(&a, evType, body, layer)
+			a.prov.layer = source
 			a.dedupIdentity = identityHash("exec-root-user-path|" + body.Process.Binary)
 			a.StartsAt = meta.time.Format(time.RFC3339Nano)
 			a.eventTime = meta.time
@@ -100,14 +101,20 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	if evType == "process_exec" && !configuredExecBinary(cfg.execBinaries, body.Process.Binary) {
 		return alert{}, meta, false, ""
 	}
-	layer, containerName := tetragonEventLayer(body)
+	layer, containerName, layerSource := tetragonEventLayerInfo(body)
+	prov := eventProvenance{layer: layerSource}
 	if reason := tetragonSuppression(evType, body, layer); reason != "" {
-		return alert{}, meta, false, reason
+		// Suppressed events still made a layer decision. Hand it back so the
+		// caller can count it: the rollout question is whether the old /proc
+		// path still decides anything, and most decisions are on events that
+		// never become alerts.
+		return alert{prov: prov}, meta, false, reason
 	}
 	summary := eventSummary(evType, body)
 	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), summary)
+	a.prov = prov
 	applyOrigin(&a, body, layer)
-	applyIdentity(&a, evType, body)
+	applyIdentity(&a, evType, body, layer)
 	if body.FunctionName == "tcp_connect" {
 		if addr, port, ok := tcpDestination(body.Args); ok {
 			a.Labels["dest"] = destinationLabel(addr, port)
@@ -139,17 +146,25 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 // tetragonEventLayer resolves the host/container layer of an event and, for
 // host-attributed events, the container that owns the process.
 func tetragonEventLayer(body *tetragonLog) (layer, containerName string) {
+	layer, containerName, _ = tetragonEventLayerInfo(body)
+	return layer, containerName
+}
+
+// tetragonEventLayerInfo is tetragonEventLayer plus the provenance source the
+// metric counts: metadata, namespace, cgroup, uid or fallback.
+func tetragonEventLayerInfo(body *tetragonLog) (layer, containerName, source string) {
 	layer = tetragonLayer(body)
 	if layer != "host" {
-		return layer, ""
+		return layer, "", "metadata"
 	}
 	// The host-side exec rules come after the layer check so a container's
 	// shells are attributed to the container rather than matched against
 	// host daemon shapes.
-	if name, containerLayer := containerForEventLayer(body); containerLayer != "" {
-		return containerLayer, name
+	r := resolveEventLayer(body)
+	if r.Layer != "" {
+		return r.Layer, r.Name, r.Source
 	}
-	return layer, ""
+	return "host", "", r.Source
 }
 
 // applyOrigin records which login session or systemd unit started the
@@ -179,7 +194,7 @@ func applyOrigin(a *alert, body *tetragonLog, layer string) {
 // applyIdentity records what the delivery classifier reads: the host-visible
 // uid, the event kind, and whether the event is the transition out of a
 // non-root login session.
-func applyIdentity(a *alert, evType string, body *tetragonLog) {
+func applyIdentity(a *alert, evType string, body *tetragonLog, layer string) {
 	// A zero-value process is a missing process, not uid 0: the decoder
 	// leaves every field at its zero value. Only a real event carries a pid,
 	// so the absence of one must not read as proof of host root.
@@ -190,9 +205,26 @@ func applyIdentity(a *alert, evType string, body *tetragonLog) {
 	// Only the exec is the transition marker. The credential commit that
 	// follows from the same process is the same action, and paging twice for
 	// one sudo would double the only class that pages at landing.
-	if a.Labels["kind"] == "exec" && privilegeTools[body.Process.Binary] &&
-		nonRootInvoker(body.Process, body.Parent) {
+	// Only a container is excluded: a tenant root is not host root. An
+	// unverified layer means the process and its parent had left /proc, not
+	// that the process is a tenant, so the escalation still counts there.
+	if a.Labels["kind"] != "exec" || layer == "container" {
+		return
+	}
+	// An unverified layer is two different things. If the cgroup positively
+	// named a user-scope runtime or a user-created sandbox, the process is a
+	// tenant and never crossed a host boundary. If the layer is unverified
+	// only because the uid fallback ran, nothing was decided and the event
+	// stays coverage.
+	if layer == "unverified" && tenantUnverified(a.prov.layer) {
+		return
+	}
+	if !privilegeTools[body.Process.Binary] {
+		return
+	}
+	if source := escalationSource(body); source != "" {
 		a.Labels["escalation"] = "nonroot"
+		a.prov.escalation = source
 	}
 }
 
@@ -346,7 +378,7 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		return "expected_privilege"
 	case "/usr/bin/sudo":
 		// Ansible's become wrapper raises privileges for every task.
-		if ansibleSudoRe.MatchString(body.Process.Arguments) {
+		if rootInvoker(body.Parent) && ansibleSudoRe.MatchString(body.Process.Arguments) {
 			return "ansible_probe"
 		}
 		// sudo is setuid root and calls setresuid(-1, 0, -1) on itself

@@ -25,6 +25,17 @@ type alert struct {
 	// redacts, so two destinations that both print as [ip] still get
 	// different dedup keys. Never serialised.
 	dedupIdentity string
+	// prov records how the layer and escalation verdicts were reached. It is
+	// counted at decision time and never serialised.
+	prov eventProvenance
+}
+
+// eventProvenance names the source of each classification verdict, so the
+// metric can show that the event-carried sources dominate and the /proc
+// fallbacks are rare outside replay.
+type eventProvenance struct {
+	layer      string
+	escalation string
 }
 
 // eventTimestamp returns the event's original time. Spooled alerts lose
@@ -240,6 +251,34 @@ type metrics struct {
 	classMu  sync.Mutex
 	evidence map[string]int64
 	paged    map[string]int64
+
+	provMu sync.Mutex
+	prov   map[string]int64
+}
+
+// countProvenance tallies how a classification verdict was reached.
+func (m *metrics) countProvenance(p eventProvenance) {
+	m.provMu.Lock()
+	defer m.provMu.Unlock()
+	if m.prov == nil {
+		m.prov = map[string]int64{}
+	}
+	if p.layer != "" {
+		m.prov["layer\x00"+p.layer]++
+	}
+	if p.escalation != "" {
+		m.prov["escalation\x00"+p.escalation]++
+	}
+}
+
+func (m *metrics) provenanceCounts() map[string]int64 {
+	m.provMu.Lock()
+	defer m.provMu.Unlock()
+	out := make(map[string]int64, len(m.prov))
+	for key, count := range m.prov {
+		out[key] = count
+	}
+	return out
 }
 
 // countEvidence tallies detections dropped as post-root evidence, by class.

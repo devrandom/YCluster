@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,6 +108,7 @@ func (f *forwarder) sigmaLineHandler() func([]byte) {
 			f.stats.expired.Add(1)
 			return
 		}
+		f.stats.countProvenance(a.prov)
 		if err := f.enqueue(a); err != nil {
 			f.cfg.logf("fatal: sigma detection enqueue: %v", err)
 			go f.fail(err)
@@ -149,7 +151,7 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	layer := sigmaLayer(ev)
 	containerName := ev.ContainerName
 	if layer == "host" {
-		if r := resolveProcessLayer(ev.ProcessId, ev.StartTime); r.Resolved && r.Layer != "" {
+		if r := resolveProcessLayer(ev.ProcessId, ev.StartTime, sigmaUID(ev.User), sigmaNamespaces(ev.Ns)); r.Resolved && r.Layer != "" {
 			layer = r.Layer
 			if r.Name != "" {
 				containerName = r.Name
@@ -177,6 +179,34 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	return a, true
 }
 
+// sigmaNamespaces converts the rule layer's copy of the namespace snapshot.
+// A detection echoed back by RSigma carries none: the normalized event it
+// stores has no ns field, which is why this path stays best-effort.
+func sigmaNamespaces(ns *sigma.Namespaces) *eventNamespaces {
+	if ns == nil {
+		return nil
+	}
+	return &eventNamespaces{
+		Pid: tetragonNamespace{Inum: ns.Pid.Inum, IsHost: ns.Pid.IsHost},
+		Mnt: tetragonNamespace{Inum: ns.Mnt.Inum, IsHost: ns.Mnt.IsHost},
+	}
+}
+
+// sigmaUID parses the normalized User field, which is "root" or a numeric uid.
+func sigmaUID(user string) uint32 {
+	switch {
+	case user == "root":
+		return 0
+	case user == "":
+		return 0
+	}
+	value, err := strconv.ParseUint(user, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(value)
+}
+
 // applySigmaIdentity gives a Sigma detection the same provenance the Tetragon
 // path carries, so the delivery classifier can tell a root host action from a
 // tenant one. The evaluator already supplies the uid as a user name and the
@@ -202,11 +232,26 @@ func applySigmaIdentity(a *alert, ev sigma.Event, layer string) {
 			a.Labels["actor"] = redactIPs(o.Actor)
 		}
 	}
-	// The normalized Sigma event carries no parent uid, so the session is the
-	// only invoker evidence available on this path.
-	if privilegeTools[ev.Image] && nonRootSession(ev.ProcessId, ev.StartTime) {
-		a.Labels["escalation"] = "nonroot"
+	// The normalized Sigma event carries no parent uid, so the audit uid is
+	// the first invoker evidence here and the session the last.
+	if privilegeTools[ev.Image] && layer != "container" {
+		if source := sigmaEscalationSource(ev); source != "" {
+			a.Labels["escalation"] = "nonroot"
+			a.prov.escalation = source
+		}
 	}
+}
+
+// sigmaEscalationSource mirrors escalationSource without a parent uid: the
+// audit uid is carried on the event, the session is read from /proc.
+func sigmaEscalationSource(ev sigma.Event) string {
+	if ev.Auid != auidUnset && ev.Auid >= loginUIDBase && ev.Auid < incusIDMapBase {
+		return "auid"
+	}
+	if nonRootSession(ev.ProcessId, ev.StartTime) {
+		return "session"
+	}
+	return ""
 }
 
 // sigmaSeverity keeps the two-level cluster alert vocabulary. High and

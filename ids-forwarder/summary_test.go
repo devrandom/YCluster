@@ -484,7 +484,10 @@ func TestHandleLineCountsSuppressedExec(t *testing.T) {
 
 func execLine(t *testing.T, binary, args, parent string, parentArgs ...string) string {
 	t.Helper()
-	parentObj := map[string]any{"binary": parent}
+	// A real event always carries the parent's pid and uid; several
+	// exemptions now depend on the invoker being root, so the fixture has to
+	// look like the kernel's output rather than a bare binary name.
+	parentObj := map[string]any{"binary": parent, "pid": 1, "uid": 0}
 	if len(parentArgs) > 0 {
 		parentObj["arguments"] = parentArgs[0]
 	}
@@ -791,6 +794,7 @@ func TestAnsibleSudoPrivilegeRaiseIsSuppressed(t *testing.T) {
 				"binary":    "/usr/bin/sudo",
 				"arguments": `-H -S -n -u root /bin/sh -c "echo BECOME-SUCCESS-abc123 ; /usr/bin/python3"`,
 			},
+			"parent": map[string]any{"pid": 1, "uid": 0, "binary": "/bin/sh"},
 		},
 	})
 	if err != nil {

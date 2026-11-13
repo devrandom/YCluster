@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"ycluster.local/ids-forwarder/sigma"
 )
@@ -41,15 +42,135 @@ func resolveEventIdentity(process *tetragonProcess) bool {
 	return true
 }
 
-// resolveProcessIdentity reads the live command line from /proc.
+// procSnapshotEntry is one process captured at startup.
+type procSnapshotEntry struct {
+	start  string
+	binary string
+	args   string
+}
+
+var (
+	snapshotMu sync.Mutex
+	snapshot   map[uint32]procSnapshotEntry
+	memoMu     sync.Mutex
+	memo       map[uint32]procSnapshotEntry
+)
+
+// captureProcessSnapshot remembers every process alive at startup. Tetragon
+// reports a process it never saw exec as the init binary, and the services
+// that shape covers are exactly the long-lived ones; reading them at startup
+// is the only moment they are guaranteed to still be in /proc for the whole
+// burst of events that follows a restart.
+// captureProcessSnapshot returns the number of processes it captured. A
+// failure is logged by the caller: the forwarder still works through the
+// live /proc path, but on a node where /proc reads are restricted the
+// snapshot would otherwise be silently inert.
+func captureProcessSnapshot(logf func(string, ...any)) int {
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		if logf != nil {
+			logf("process snapshot: read %s: %v; pre-attach identities will resolve from live /proc only", procRoot, err)
+		}
+		return 0
+	}
+	snap := make(map[uint32]procSnapshotEntry, len(entries))
+	for _, entry := range entries {
+		value, err := strconv.ParseUint(entry.Name(), 10, 32)
+		if err != nil {
+			continue
+		}
+		pid := uint32(value)
+		base := fmt.Sprintf("%s/%d", procRoot, pid)
+		start, ok := readProcessStart(base)
+		if !ok {
+			continue
+		}
+		binary, args, ok := readCmdline(base)
+		if !ok {
+			continue
+		}
+		snap[pid] = procSnapshotEntry{start: start, binary: binary, args: args}
+	}
+	snapshotMu.Lock()
+	snapshot = snap
+	snapshotMu.Unlock()
+	if len(snap) == 0 && logf != nil {
+		logf("process snapshot captured no processes; pre-attach identities will resolve from live /proc")
+	}
+	return len(snap)
+}
+
+// resetProcessSnapshot clears both caches. Tests use it after pointing
+// procRoot at a fake tree.
+func resetProcessSnapshot() {
+	snapshotMu.Lock()
+	snapshot = nil
+	snapshotMu.Unlock()
+	memoMu.Lock()
+	memo = nil
+	memoMu.Unlock()
+}
+
+func snapshotLookup(pid uint32, startTime string) (procSnapshotEntry, bool) {
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
+	entry, ok := snapshot[pid]
+	if !ok || !startTimeWithin(entry.start, startTime) {
+		return procSnapshotEntry{}, false
+	}
+	return entry, true
+}
+
+// memoCap bounds the replay memo so a long backfill cannot grow it without
+// limit.
+const memoCap = 1024
+
+func memoLookup(pid uint32, startTime string) (procSnapshotEntry, bool) {
+	memoMu.Lock()
+	defer memoMu.Unlock()
+	entry, ok := memo[pid]
+	if !ok || !startTimeWithin(entry.start, startTime) {
+		return procSnapshotEntry{}, false
+	}
+	return entry, true
+}
+
+func memoStore(pid uint32, start, binary, args string) {
+	memoMu.Lock()
+	defer memoMu.Unlock()
+	if memo == nil || len(memo) >= memoCap {
+		memo = map[uint32]procSnapshotEntry{}
+	}
+	memo[pid] = procSnapshotEntry{start: start, binary: binary, args: args}
+}
+
+// resolveProcessIdentity reads the command line from the startup snapshot,
+// then from a bounded replay memo, and only then from live /proc.
 func resolveProcessIdentity(pid uint32, startTime string) (string, string, bool) {
 	if pid == 0 || startTime == "" {
 		return "", "", false
+	}
+	if entry, ok := snapshotLookup(pid, startTime); ok {
+		return entry.binary, entry.args, true
+	}
+	if entry, ok := memoLookup(pid, startTime); ok {
+		return entry.binary, entry.args, true
 	}
 	base := fmt.Sprintf("%s/%d", procRoot, pid)
 	if !processStartMatches(base, startTime) {
 		return "", "", false
 	}
+	binary, args, ok := readCmdline(base)
+	if !ok {
+		return "", "", false
+	}
+	memoStore(pid, startTime, binary, args)
+	return binary, args, true
+}
+
+// readCmdline reproduces Tetragon's binary/arguments split from a live
+// process, including the interpreter-name quirk the suppression table expects.
+func readCmdline(base string) (string, string, bool) {
 	raw, err := os.ReadFile(base + "/cmdline")
 	if err != nil {
 		return "", "", false
@@ -84,9 +205,9 @@ func resolveSigmaIdentity(ev *sigma.Event) {
 		// when both it and its parent are gone does the uid heuristic apply;
 		// otherwise every non-root host service would lose its host
 		// exclusions.
-		r := resolveProcessLayer(ev.ProcessId, ev.StartTime)
+		r := resolveProcessLayer(ev.ProcessId, ev.StartTime, sigmaUID(ev.User), sigmaNamespaces(ev.Ns))
 		if !r.Resolved && ev.ParentProcessId != 0 {
-			r = resolveProcessLayer(ev.ParentProcessId, ev.ParentStartTime)
+			r = resolveProcessLayer(ev.ParentProcessId, ev.ParentStartTime, ev.ParentUID, sigmaNamespaces(ev.ParentNs))
 		}
 		switch {
 		case r.Resolved:

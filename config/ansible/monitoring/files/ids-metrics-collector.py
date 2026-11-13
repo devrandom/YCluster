@@ -44,6 +44,7 @@ FORWARDER_GAUGES = (
     "ids_forwarder_gap_total",
     "ids_forwarder_oversized_total",
     "ids_forwarder_page_candidates_total",
+    "ids_forwarder_provenance_total",
     "ids_forwarder_queue_depth",
     "ids_forwarder_record_errors_total",
     "ids_forwarder_recorded_total",

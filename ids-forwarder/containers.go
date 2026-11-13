@@ -30,6 +30,9 @@ type processLayer struct {
 	Name     string
 	Layer    string
 	Resolved bool
+	// Source names how the verdict was reached: namespace, cgroup, uid or
+	// fallback (the parent decided it). Only the metric reads it.
+	Source string
 }
 
 // resolveProcessLayer returns the container layer ("container" or
@@ -37,26 +40,78 @@ type processLayer struct {
 // runtime is "unverified": it may be a real rootless container, but a user can
 // create the same cgroup name, so it must not inherit host or container
 // suppression.
-func resolveProcessLayer(pid uint32, startTime string) processLayer {
+//
+// The event-carried namespace snapshot wins over /proc: it was captured at
+// exec time, so it answers for a process that has already exited. /proc only
+// refines the verdict with a container name and separates a runtime container
+// from a bare user namespace.
+func resolveProcessLayer(pid uint32, startTime string, uid uint32, ns *eventNamespaces) processLayer {
+	if ns != nil && ns.Pid.Inum != 0 {
+		switch {
+		case ns.Pid.IsHost:
+			// A container can run in the host pid namespace (--pid=host, or
+			// Incus keep=pid). The cgroup is the only thing that tells them
+			// apart, and the cost is one /proc read on a live process.
+			if r := cgroupLayer(pid, startTime); r.Resolved && r.Layer != "" {
+				r.Source = "namespace+cgroup"
+				return r
+			}
+			return processLayer{Resolved: true, Source: "namespace"}
+		case ns.Mnt.Inum != 0 && ns.Mnt.IsHost:
+			// A foreign pid namespace with the host mount namespace: the
+			// process can write host paths, so it has host blast radius.
+			return processLayer{Resolved: true, Source: "namespace"}
+		}
+		r := containerizedLayer(pid, startTime, uid)
+		// Keep the refinement that actually answered: namespace says
+		// "container", the cgroup or the uid says which kind.
+		r.Source = "namespace+" + r.Source
+		return r
+	}
+	return cgroupLayer(pid, startTime)
+}
+
+// cgroupLayer is the pre-namespace path and the refinement for a container
+// verdict: the live cgroup, guarded against pid reuse.
+func cgroupLayer(pid uint32, startTime string) processLayer {
 	cgroup, ok := cgroupPath(pid, startTime)
 	if !ok {
 		return processLayer{}
 	}
 	name, inContainer := containerNameFromCgroup(cgroup)
 	if !inContainer {
-		return processLayer{Resolved: true}
+		return processLayer{Resolved: true, Source: "cgroup"}
 	}
 	if userScopeRuntime(cgroup) {
-		return processLayer{Layer: "unverified", Resolved: true}
+		return processLayer{Layer: "unverified", Resolved: true, Source: "cgroup"}
 	}
-	return processLayer{Name: name, Layer: "container", Resolved: true}
+	return processLayer{Name: name, Layer: "container", Resolved: true, Source: "cgroup"}
+}
+
+// containerizedLayer decides what kind of container a namespace says the
+// process is in, using the cgroup for the name and to reject a user-created
+// sandbox, and the host-visible uid when the cgroup is gone.
+func containerizedLayer(pid uint32, startTime string, uid uint32) processLayer {
+	if r := cgroupLayer(pid, startTime); r.Resolved {
+		if r.Layer == "container" {
+			return r
+		}
+		// A pid namespace with no runtime cgroup is something a user can
+		// create with unshare. Do not let it inherit host or container
+		// suppression.
+		return processLayer{Layer: "unverified", Resolved: true, Source: "cgroup"}
+	}
+	if uid >= incusIDMapBase {
+		return processLayer{Layer: "container", Resolved: true, Source: "uid"}
+	}
+	return processLayer{Layer: "unverified", Resolved: true, Source: "uid"}
 }
 
 // containerForProcessLayer keeps the two-value shape for callers that only
 // need the container verdict; resolveProcessLayer carries the host/unknown
 // distinction.
 func containerForProcessLayer(pid uint32, startTime string) (string, string) {
-	r := resolveProcessLayer(pid, startTime)
+	r := resolveProcessLayer(pid, startTime, 0, nil)
 	return r.Name, r.Layer
 }
 
@@ -99,11 +154,12 @@ func resolveEventLayer(body *tetragonLog) processLayer {
 	if body == nil {
 		return processLayer{}
 	}
-	if r := resolveProcessLayer(body.Process.PID, body.Process.StartTime); r.Resolved {
+	if r := resolveProcessLayer(body.Process.PID, body.Process.StartTime, body.Process.UID, body.Process.NS); r.Resolved {
 		return r
 	}
 	if p := body.Parent; p != nil {
-		if r := resolveProcessLayer(p.PID, p.StartTime); r.Resolved {
+		if r := resolveProcessLayer(p.PID, p.StartTime, p.UID, p.NS); r.Resolved {
+			r.Source = "fallback"
 			return r
 		}
 	}
@@ -115,10 +171,10 @@ func resolveEventLayer(body *tetragonLog) processLayer {
 	// base (100000): otherwise a user namespace with an ordinary subuid range
 	// could claim the container layer without any container runtime.
 	if body.Process.UID >= incusIDMapBase {
-		return processLayer{Layer: "container"}
+		return processLayer{Layer: "container", Source: "uid"}
 	}
 	if p := body.Parent; p != nil && p.UID >= incusIDMapBase {
-		return processLayer{Layer: "container"}
+		return processLayer{Layer: "container", Source: "uid"}
 	}
 	// Both processes are gone and neither is idmapped. A dead login-uid
 	// process can be a rootless container whose cgroup is no longer in /proc,
@@ -127,10 +183,10 @@ func resolveEventLayer(body *tetragonLog) processLayer {
 	// they exit before the line is read, and no rootless runtime starts from a
 	// system uid.
 	if body.Process.UID >= loginUIDBase {
-		return processLayer{Layer: "unverified"}
+		return processLayer{Layer: "unverified", Source: "uid"}
 	}
 	if p := body.Parent; p != nil && p.UID >= loginUIDBase {
-		return processLayer{Layer: "unverified"}
+		return processLayer{Layer: "unverified", Source: "uid"}
 	}
 	return processLayer{}
 }
@@ -247,34 +303,55 @@ func userScopeRuntime(cgroup string) bool {
 }
 
 func processStartMatches(base, startTime string) bool {
-	want, err := time.Parse(time.RFC3339Nano, startTime)
-	if err != nil {
+	got, ok := readProcessStart(base)
+	if !ok {
 		return false
 	}
+	return startTimeWithin(got, startTime)
+}
+
+// readProcessStart renders /proc/<pid>/stat field 22 as a wall-clock time,
+// which is what Tetragon reports as start_time.
+func readProcessStart(base string) (string, bool) {
 	stat, err := os.ReadFile(base + "/stat")
 	if err != nil {
-		return false
+		return "", false
 	}
 	// The comm field can contain spaces, so parse after the last ')'.
 	end := strings.LastIndexByte(string(stat), ')')
 	if end < 0 {
-		return false
+		return "", false
 	}
 	fields := strings.Fields(string(stat)[end+1:])
 	// fields[0] is state (field 3); starttime is field 22.
 	if len(fields) < 20 {
-		return false
+		return "", false
 	}
 	ticks, err := strconv.ParseUint(fields[19], 10, 64)
 	if err != nil {
-		return false
+		return "", false
 	}
 	btime, err := bootTime()
 	if err != nil {
-		return false
+		return "", false
 	}
 	got := time.Unix(btime, 0).Add(time.Duration(ticks) * time.Second / 100)
-	diff := got.Sub(want)
+	return got.UTC().Format(time.RFC3339Nano), true
+}
+
+// startTimeWithin is the tolerance Tetragon's own timestamps need: the event
+// and /proc agree to well under a second, so two seconds is slack, not a
+// loophole for a reused pid.
+func startTimeWithin(got, want string) bool {
+	g, err := time.Parse(time.RFC3339Nano, got)
+	if err != nil {
+		return false
+	}
+	w, err := time.Parse(time.RFC3339Nano, want)
+	if err != nil {
+		return false
+	}
+	diff := g.Sub(w)
 	return diff > -2*time.Second && diff < 2*time.Second
 }
 

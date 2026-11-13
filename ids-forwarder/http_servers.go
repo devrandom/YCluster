@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -155,6 +156,21 @@ func (f *forwarder) startMetrics() error {
 		sort.Strings(classNames)
 		for _, class := range classNames {
 			fmt.Fprintf(w, "ids_forwarder_page_candidates_total{class=%q} %d\n", class, candidates[class])
+		}
+		fmt.Fprintf(w, "# HELP ids_forwarder_provenance_total Classification verdicts by source, counted for every event that reached the layer decision. namespace and namespace+cgroup should dominate; uid and fallback should be replay-only.\n")
+		fmt.Fprintf(w, "# TYPE ids_forwarder_provenance_total counter\n")
+		prov := f.stats.provenanceCounts()
+		provKeys := make([]string, 0, len(prov))
+		for key := range prov {
+			provKeys = append(provKeys, key)
+		}
+		sort.Strings(provKeys)
+		for _, key := range provKeys {
+			check, source, ok := strings.Cut(key, "\x00")
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(w, "ids_forwarder_provenance_total{check=%q,source=%q} %d\n", check, source, prov[key])
 		}
 		fmt.Fprintf(w, "# HELP ids_forwarder_build_info Build metadata; page_schema is the delivery-class schema the binary emits.\n")
 		fmt.Fprintf(w, "# TYPE ids_forwarder_build_info gauge\n")

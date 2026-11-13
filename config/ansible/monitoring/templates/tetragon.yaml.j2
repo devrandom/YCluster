@@ -24,10 +24,12 @@ export-filename: /var/log/tetragon/tetragon.log
 # Group-readable so ids-forwarder (member of the tetragon group) can tail.
 export-file-perm: 640
 # Bounded retention: rotate daily, keep one week (the access-log window
-# used for the IP-retention constraint), cap each file, compress.
+# used for the IP-retention constraint), cap each file, compress. The per-file
+# cap moved from 50 to 100 MB together with process-ns: the namespace snapshot
+# is about 1.7x the event size, and the cap has to keep the same raw window.
 export-file-rotation-interval: 24h
 export-file-max-backups: 7
-export-file-max-size-mb: 50
+export-file-max-size-mb: 100
 export-file-compress: true
 # PROCESS_EXIT is intentionally omitted: the forwarder does not consume it,
 # and exporting it doubles the event-log volume on several node types.
@@ -36,6 +38,10 @@ export-denylist: ''
 
 # Do not include raw file contents or network payloads in events.
 process-metadata: ''
+# Render the pid and mount namespaces into every event from Tetragon's
+# exec-time process cache. This is ids-forwarder's race-free layer source: the
+# snapshot survives the process exiting, which /proc does not.
+enable-process-ns: true
 enable-credentials-access: false
 enable-path-resolution: true
 

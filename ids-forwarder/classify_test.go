@@ -160,23 +160,77 @@ func TestPageEligible(t *testing.T) {
 	}
 }
 
-func TestNonRootInvoker(t *testing.T) {
-	process := tetragonProcess{PID: 999999}
+func TestEscalationSource(t *testing.T) {
 	cases := []struct {
-		name   string
-		parent *tetragonProc
-		want   bool
+		name string
+		body *tetragonLog
+		want string
 	}{
-		{"parent elevating from a login account", &tetragonProc{PID: 4242, UID: 2000}, true},
-		{"parent already root", &tetragonProc{PID: 4242, UID: 0}, false},
-		{"parent gone and no session", nil, false},
+		{
+			name: "parent elevating from a login account",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999}, Parent: &tetragonProc{PID: 4242, UID: 2000}},
+			want: "uid",
+		},
+		{
+			name: "parent already root",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999}, Parent: &tetragonProc{PID: 4242, UID: 0}},
+			want: "",
+		},
+		{
+			name: "audit uid survives a parentless event",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999, Auid: 2000}},
+			want: "auid",
+		},
+		{
+			name: "unset audit uid and no session",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999, Auid: auidUnset}},
+			want: "",
+		},
+		{
+			name: "audit uid below the login base is a system account",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999, Auid: 42}},
+			want: "",
+		},
+		{
+			name: "a root parent overrides a non-root audit uid",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999, Auid: 2000}, Parent: &tetragonProc{PID: 4242, UID: 0}},
+			want: "",
+		},
+		{
+			name: "an idmapped parent is a tenant, not a host escalation",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999}, Parent: &tetragonProc{PID: 4242, UID: 1000123}},
+			want: "",
+		},
+		{
+			name: "audit uid in the idmap range is a tenant",
+			body: &tetragonLog{Process: tetragonProcess{PID: 999999, Auid: 1000123}},
+			want: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := nonRootInvoker(process, tc.parent); got != tc.want {
-				t.Fatalf("nonRootInvoker = %v, want %v", got, tc.want)
+			if got := escalationSource(tc.body); got != tc.want {
+				t.Fatalf("escalationSource = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEscalationSourceFallsBackToTheSession(t *testing.T) {
+	root := t.TempDir()
+	sessions := t.TempDir()
+	restoreProc, restoreSessions := procRoot, sessionDir
+	procRoot, sessionDir = root, sessions
+	t.Cleanup(func() { procRoot, sessionDir = restoreProc, restoreSessions })
+
+	start := writeFakeProcess(t, root, 9100, "0::/user.slice/user-1000.slice/session-88.scope\n")
+	if err := os.WriteFile(filepath.Join(sessions, "88"),
+		[]byte("USER=ops\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := &tetragonLog{Process: tetragonProcess{PID: 9100, StartTime: start, Auid: auidUnset}}
+	if got := escalationSource(body); got != "session" {
+		t.Fatalf("escalationSource = %q, want session", got)
 	}
 }
 
