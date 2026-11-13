@@ -287,25 +287,25 @@ groups:
           summary: "High load average on {{ $labels.node }}"
           description: "Load average on {{ $labels.node }} is {{ $value }} (normalized by CPU count) for more than 10 minutes"
 
-      # High external network ingress bandwidth (50GB/hr = ~111.1 Mbps)
+      # High external network ingress bandwidth (200GB/hr = ~444.4 Mbps)
       - alert: HighNetworkIngress
-        expr: rate(node_network_receive_bytes_total{device="enp87s0"}[5m]) * 8 > 111111111
+        expr: rate(node_network_receive_bytes_total{device="enp87s0"}[5m]) * 8 > 444444444
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: "High external network ingress on {{ $labels.node }}"
-          description: "External network ingress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps (>50GB/hr) for more than 2 minutes"
+          description: "External network ingress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps (>200GB/hr) for more than 1 minute"
 
-      # High external network egress bandwidth (5GB/hr = ~11.1 Mbps)
+      # High external network egress bandwidth (20GB/hr = ~44.4 Mbps)
       - alert: HighNetworkEgress
-        expr: rate(node_network_transmit_bytes_total{device="enp87s0"}[5m]) * 8 > 11111111
+        expr: rate(node_network_transmit_bytes_total{device="enp87s0"}[5m]) * 8 > 44444444
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: "High external network egress on {{ $labels.node }}"
-          description: "External network egress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps (>5GB/hr) for more than 2 minutes"
+          description: "External network egress on {{ $labels.node }} interface {{ $labels.device }} is {{ $value | humanize }}bps (>20GB/hr) for more than 1 minute"
 
   - name: ycluster-services
     rules:
