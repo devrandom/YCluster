@@ -47,6 +47,8 @@ election.
 - `testing` — unit tests (Python + Go) and dev-cluster system tests; pick the
   right surface for your change.
 - `deploy-to-cluster` — dev-sync workflow, which playbook to run, `--limit managed`.
+- `rolling-storage-reboot` — manual rolling reboot of storage nodes, leader
+  last, with the etcd/mon/Tang quorum and failover gates.
 - `git-history-cleanup` — local history rewrites.
 
 ## Key docs
