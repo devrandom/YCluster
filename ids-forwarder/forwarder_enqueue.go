@@ -36,6 +36,10 @@ func (f *forwarder) enqueue(a alert) error {
 	// record every classified detection, including the ones whose delivery
 	// is deduplicated or coalesced.
 	f.recordDetection(a)
+	if f.bootSuppress(a) {
+		f.stats.bootSuppressed.Add(1)
+		return nil
+	}
 	auditOnly := bypassesLocalRateLimit(a)
 	key := a.dedupKey()
 	if f.dedup.seen(key) {
@@ -84,6 +88,32 @@ func (f *forwarder) enqueue(a alert) error {
 	}
 	f.dedup.mark(key)
 	return nil
+}
+
+// bootSuppress keeps the routine activity a host emits while it is coming up
+// out of Alertmanager. The event is already in detections.jsonl. The set is
+// deliberately narrow: private lateral connects, file writes, Sigma rules,
+// forwarder gaps and interactive sessions are never hidden by boot time.
+func (f *forwarder) bootSuppress(a alert) bool {
+	if f.cfg.bootGrace <= 0 || f.bootTime.IsZero() || a.eventTime.IsZero() {
+		return false
+	}
+	if a.eventTime.Before(f.bootTime) || a.eventTime.After(f.bootTime.Add(f.cfg.bootGrace)) {
+		return false
+	}
+	if a.Labels["origin"] == "interactive" {
+		return false
+	}
+	switch a.Labels["rule_id"] {
+	case "container-api", "container-exec", "kernel-modules", "privilege-raises":
+		return true
+	case "process_exec":
+		switch a.Labels["origin"] {
+		case "unit", "unknown":
+			return true
+		}
+	}
+	return false
 }
 
 // recordDetection appends the detection to the local record file. This is

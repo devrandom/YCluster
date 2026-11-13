@@ -26,6 +26,7 @@ ExecStart=/usr/local/bin/ids-forwarder \
     -rate-limit {{ ids_forwarder_rate_limit }} \
     -rate-window {{ ids_forwarder_rate_window }} \
     -startup-grace {{ ids_forwarder_startup_grace }} \
+    -boot-grace {{ ids_forwarder_boot_grace }} \
     -http-listen {{ ids_forwarder_http_listen }}
 Restart=on-failure
 RestartSec=5

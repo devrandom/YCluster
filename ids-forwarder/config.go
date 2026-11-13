@@ -27,6 +27,7 @@ type config struct {
 	alertTTL         time.Duration
 	maxEventAge      time.Duration
 	startupGrace     time.Duration
+	bootGrace        time.Duration
 	cursorFile       string
 	spoolFile        string
 	spoolMaxBytes    int64
@@ -57,6 +58,7 @@ func defaultConfig() config {
 		alertTTL:        10 * time.Minute,
 		maxEventAge:     24 * time.Hour,
 		startupGrace:    time.Minute,
+		bootGrace:       5 * time.Minute,
 		spoolMaxBytes:   100 << 20,
 		detectionsFile:  "/var/lib/ids-forwarder/detections.jsonl",
 		detectionsBytes: 50 << 20,

@@ -683,7 +683,18 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   `ids_forwarder_oversized_total`, `ids_forwarder_rejected_total`,
   `ids_forwarder_cursor_errors_total`, `ids_forwarder_forwarded_total`,
   `ids_forwarder_deduped_total` and
-  `ids_forwarder_suppressed_total{reason=...}`.
+  `ids_forwarder_suppressed_total{reason=...}` and
+  `ids_forwarder_boot_suppressed_total`.
+- Applies a five-minute boot grace. Routine host activity from systemd
+  units and unknown provenance during that window — Incus API readiness,
+  container hooks, VM launches, dnsmasq, mounts, nftables module loads and
+  shell wrappers — is recorded in `detections.jsonl` but not delivered, and
+  counted in `ids_forwarder_boot_suppressed_total`. Interactive sessions,
+  private lateral connects, file writes, Sigma rules and `forwarder-gap`
+  are never hidden by boot time. The window is configurable with
+  `-boot-grace`. This is a known blind spot: a compromised unit active during
+  the grace is recorded but not delivered. The TODO tracks replacing the
+  grace with unit- and parent-anchored boot classification.
 - Labels every detection with `origin=interactive|unit|container|unknown` and,
   for the first two, `actor=<login user|unit name>`. The origin comes from the
   process cgroup, read from the same `/proc/<pid>/cgroup` lookup that already

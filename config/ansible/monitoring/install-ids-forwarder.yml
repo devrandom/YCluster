@@ -59,6 +59,11 @@
     ids_forwarder_rate_window: 1h
     ids_forwarder_max_event_age: 24h
     ids_forwarder_startup_grace: 1m
+    # Routine unit activity during the first five minutes after boot is
+    # recorded in detections.jsonl but not delivered. Private lateral
+    # connects, file writes, Sigma rules and interactive sessions remain
+    # visible.
+    ids_forwarder_boot_grace: 5m
     ids_metrics_textfile_dir: /var/lib/prometheus/node-exporter
   tasks:
     - name: Check whether the tetragon group exists

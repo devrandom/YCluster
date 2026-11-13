@@ -41,6 +41,8 @@ func main() {
 		cfg.maxEventAge, "drop events older than this instead of delivering them")
 	flag.DurationVar(&cfg.startupGrace, "startup-grace",
 		cfg.startupGrace, "first-run replay window used to cover a process restart")
+	flag.DurationVar(&cfg.bootGrace, "boot-grace",
+		cfg.bootGrace, "suppress routine boot activity this long after the host boot time (0 disables)")
 	flag.StringVar(&cfg.cursorFile, "cursor-file",
 		cfg.cursorFile, "durable Tetragon replay cursor (empty disables replay)")
 	flag.StringVar(&cfg.spoolFile, "spool-file",

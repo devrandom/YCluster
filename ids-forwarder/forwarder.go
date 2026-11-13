@@ -28,6 +28,7 @@ type forwarder struct {
 	sigmaTail *tailer
 	sigma     *sigmaSink
 	record    *detectionLog
+	bootTime  time.Time
 
 	// wg tracks background goroutines (tailer, post loop) so tests can
 	// coordinate shutdown.
@@ -75,6 +76,11 @@ func newForwarder(cfg config) (*forwarder, error) {
 		rate:   newRateLimiter(cfg.rateLimit, cfg.rateWindow),
 		client: &http.Client{Timeout: cfg.postTimeout},
 		stop:   make(chan struct{}),
+	}
+	if cfg.bootGrace > 0 {
+		if btime, err := bootTime(); err == nil {
+			f.bootTime = time.Unix(btime, 0).UTC()
+		}
 	}
 	if cfg.spoolFile != "" {
 		spool, err := openAlertSpool(cfg.spoolFile, cfg.spoolMaxBytes, cfg.logf)

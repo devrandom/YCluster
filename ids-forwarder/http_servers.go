@@ -88,6 +88,7 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "ids_forwarder_dropped_total %d\n", f.stats.dropped.Load())
 		fmt.Fprintf(w, "ids_forwarder_deduped_total %d\n", f.stats.deduped.Load())
 		fmt.Fprintf(w, "ids_forwarder_coalesced_total %d\n", f.stats.coalesced.Load())
+		fmt.Fprintf(w, "ids_forwarder_boot_suppressed_total %d\n", f.stats.bootSuppressed.Load())
 		fmt.Fprintf(w, "ids_forwarder_rate_limited_total %d\n", f.stats.rateLimited.Load())
 		fmt.Fprintf(w, "ids_forwarder_post_failures_total %d\n", f.stats.failures.Load())
 		fmt.Fprintf(w, "ids_forwarder_alertmanager_partial_total %d\n", f.stats.partialDelivery.Load())

@@ -198,6 +198,18 @@ must not become a second, longer-lived access log.
     entire payload is one such fetch. A private cluster destination still
     alerts as lateral movement; config-file, proxy, unix-socket, composed and
     piped commands stay visible.
+  - Done: reboots do not page. For five minutes after boot, routine unit and
+    unknown-origin activity (Incus API readiness, container hooks, VM
+    launches, dnsmasq, mounts, nftables module loads and shell wrappers) is
+    recorded but not delivered. Interactive sessions, private lateral
+    connects, file writes, Sigma rules and `forwarder-gap` remain visible.
+  - Open: re-examine the boot sequence. The five-minute grace leaves a blind
+    spot for a compromised service or malicious systemd unit active during
+    boot: its activity is recorded but does not alert. Replace the broad
+    grace with unit- and parent-anchored classification of the actual boot
+    sequence, add a positive control proving a hostile unit still alerts, and
+    decide whether one "boot activity" summary should be delivered. Build the
+    boot unit/shape inventory from a clean reboot.
   - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
     allowlist and maps to its own rule, `container-api`, so every `incus
     exec`, `incus file push/pull` and lifecycle call lands in
