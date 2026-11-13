@@ -104,11 +104,16 @@ not depend on `/proc` timing.
 
 `escalationTransition` is narrow on purpose. It is true only for the events
 that *perform* the transition: a `process_exec` of `sudo`, `su`, `doas` or
-`pkexec`, and a `privilege-raises` transition made by one of them. It reads the
-session from the event's own cgroup, never the parent fallback, so the answer
-does not depend on whether `/proc` still held the parent when the line was
-read. If the session cannot be resolved, the event stays coverage: a duplicate
-page is cheaper than a dropped escalation.
+`pkexec`, and a `privilege-raises` transition made by one of them. The invoker
+is the *parent* process, because the tool itself is already root when the event
+is written; when the parent has left `/proc` the login session of the event
+process is the fallback, and an unresolvable invoker leaves the event as
+evidence rather than paging on a guess.
+
+The parent is the right identity, not the session: `su - someadmin -c sudo ...`
+run inside a root session elevates an unprivileged account, and an operator who
+logs in as root and steps down and back up is not crossing a boundary. Reading
+the session alone missed the first case and paged on neither.
 
 This scoping is what keeps the model honest. A root shell spawned from an
 operator's session is evidence, exactly like any other post-root activity,
@@ -127,7 +132,7 @@ processes.
 | `tcp-connect`, private destination | host, uid 0 | evidence (`root_connect`) |
 | `tcp-connect`, private destination | host, uid != 0 | coverage (`lateral_nonroot`) |
 | `tcp-connect`, cluster destination | container, unverified | coverage (`lateral_container`) |
-| any rule | container, host-visible uid below the idmap base | evidence (privileged container) |
+| exec, write, module and privilege rules | container, host-visible uid below the idmap base | evidence (privileged container) |
 | `privilege-raises`, any other case | host, uid 0 | evidence (`root_privilege`) |
 | `privilege-raises` | container, unverified | coverage (`escalation_nonroot`) |
 | `kernel-modules` | host | evidence (`root_module`) |
@@ -142,8 +147,11 @@ processes.
 | `vm-bridge-*` blocks | network | audit (exempt) |
 | CrowdSec scenarios | host, log-derived | coverage, silent until measured |
 
-The privileged-container row overrides every other container row: it appears
-once rather than repeated against each rule.
+The privileged-container row overrides the container rows for exec, write,
+module and privilege, and appears once rather than repeated against each rule.
+Connects stay `lateral_container` and Sigma stays `sigma_nonroot` whatever the
+guest uid: the network path is a tenant-boundary signal either way, and the
+curated Sigma set is the only thing that sees inside a container.
 
 The exemption for `container-api` and `container-exec` is deliberate: they are
 root-admin activity by definition, but they are the only record of who entered
@@ -232,12 +240,12 @@ is the one event this design exists to page, so the first measurement happens
 in production with the notification budget as the brake.
 
 Two pipeline details travel with the class. `process_exec` is filtered by
-`ids_forwarder_exec_binaries`, which lists `sudo` and `su` only, so `doas` and
-`pkexec` join it in the same change; without that the class row for those tools
-is hollow. And both the shadow counter and the build-info series join the
+`ids_forwarder_exec_binaries`, which listed `sudo` and `su` only until this
+change added `doas` and `pkexec`; without that the class row for those tools is
+hollow. And both the shadow counter and the build-info series are in the
 textfile allowlist in `ids-metrics-collector.py`, which is the only path to
-Prometheus from a loopback endpoint; without that the gate and the
-stale-schema check have no series to read.
+Prometheus from a loopback endpoint; without that the gate and the stale-schema
+check have no series to read.
 
 ## Alerting
 

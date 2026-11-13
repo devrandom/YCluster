@@ -21,10 +21,15 @@ type detectionRecord struct {
 	Severity  string `json:"severity"`
 	Layer     string `json:"layer"`
 	Container string `json:"container,omitempty"`
+	Origin    string `json:"origin,omitempty"`
+	Actor     string `json:"actor,omitempty"`
+	UID       string `json:"uid,omitempty"`
+	Class     string `json:"class"`
+	Delivery  string `json:"delivery"`
 	Summary   string `json:"summary"`
 }
 
-func newDetectionRecord(a alert) detectionRecord {
+func newDetectionRecord(a alert, class, delivery string) detectionRecord {
 	return detectionRecord{
 		Time:      a.eventTimestamp().UTC().Format(time.RFC3339Nano),
 		Host:      a.Labels["host"],
@@ -33,6 +38,11 @@ func newDetectionRecord(a alert) detectionRecord {
 		Severity:  a.Labels["severity"],
 		Layer:     a.Labels["layer"],
 		Container: a.Labels["container"],
+		Origin:    a.Labels["origin"],
+		Actor:     a.Labels["actor"],
+		UID:       a.Labels["uid"],
+		Class:     class,
+		Delivery:  delivery,
 		Summary:   a.Annotations["summary"],
 	}
 }

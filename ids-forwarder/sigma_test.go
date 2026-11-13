@@ -21,7 +21,7 @@ func testDetection(rule, ts string) string {
 		"EventType":   "process_exec",
 		"Image":       "/bin/sh",
 		"CommandLine": "/bin/sh -c whoami",
-		"User":        "root",
+		"User":        "1000",
 		"@timestamp":  ts,
 	}
 	det := map[string]any{

@@ -236,6 +236,54 @@ type metrics struct {
 
 	originMu sync.Mutex
 	origins  map[string]int64
+
+	classMu  sync.Mutex
+	evidence map[string]int64
+	paged    map[string]int64
+}
+
+// countEvidence tallies detections dropped as post-root evidence, by class.
+// The count is what shows how much of the stream the model now keeps out of
+// the paging path.
+func (m *metrics) countEvidence(class string) {
+	m.classMu.Lock()
+	defer m.classMu.Unlock()
+	if m.evidence == nil {
+		m.evidence = map[string]int64{}
+	}
+	m.evidence[class]++
+}
+
+func (m *metrics) evidenceCounts() map[string]int64 {
+	m.classMu.Lock()
+	defer m.classMu.Unlock()
+	out := make(map[string]int64, len(m.evidence))
+	for class, count := range m.evidence {
+		out[class] = count
+	}
+	return out
+}
+
+// countPageCandidate tallies a delivered-but-silent coverage detection, after
+// dedup and coalescing, at the point where enabling its class would have
+// paged. The measurement gate reads this instead of running a class live.
+func (m *metrics) countPageCandidate(class string) {
+	m.classMu.Lock()
+	defer m.classMu.Unlock()
+	if m.paged == nil {
+		m.paged = map[string]int64{}
+	}
+	m.paged[class]++
+}
+
+func (m *metrics) pageCandidateCounts() map[string]int64 {
+	m.classMu.Lock()
+	defer m.classMu.Unlock()
+	out := make(map[string]int64, len(m.paged))
+	for class, count := range m.paged {
+		out[class] = count
+	}
+	return out
 }
 
 // countOrigin tallies classified detections by provenance, before dedup,

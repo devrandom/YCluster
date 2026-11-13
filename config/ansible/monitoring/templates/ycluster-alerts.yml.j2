@@ -1107,16 +1107,31 @@ groups:
         expr: ids_component_up{component="ids-forwarder"} == 0
         for: 5m
         labels:
-          severity: warning
+          severity: critical
+          ids_coverage: "true"
         annotations:
           summary: "IDS forwarder down on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} has been unreachable for 5m; Tetragon and CrowdSec events are not being forwarded from that node."
+
+      # The forwarder labels every detection with the delivery class schema
+      # (`page`). A host still running an older binary sends alerts that route
+      # to ids-silent, so its escalations would vanish without this check.
+      - alert: IdsForwarderSchemaStale
+        expr: (ids_component_up{component="ids-forwarder"} == 1) unless on (node) ids_forwarder_build_info{page_schema="1"}
+        for: 15m
+        labels:
+          severity: warning
+          ids_coverage: "true"
+        annotations:
+          summary: "IDS forwarder on {{ $labels.node }} predates the delivery classes"
+          description: "ids-forwarder on {{ $labels.node }} is running but reports no page-schema build info, so its IDSAlert findings route to the silent receiver. Redeploy the forwarder on that node."
 
       - alert: TetragonDown
         expr: ids_component_up{component="tetragon"} == 0
         for: 5m
         labels:
-          severity: warning
+          severity: critical
+          ids_coverage: "true"
         annotations:
           summary: "Tetragon down on {{ $labels.node }}"
           description: "Tetragon on {{ $labels.node }} has been unreachable for 5m; host-level eBPF detection is not running there."
@@ -1125,7 +1140,8 @@ groups:
         expr: ids_component_up{component="crowdsec"} == 0
         for: 5m
         labels:
-          severity: warning
+          severity: critical
+          ids_coverage: "true"
         annotations:
           summary: "CrowdSec down on {{ $labels.node }}"
           description: "CrowdSec on {{ $labels.node }} has been unreachable for 5m; log-based detection (sshd/nginx) is not running there."
@@ -1134,7 +1150,8 @@ groups:
         expr: ids_component_up{component="rsigma"} == 0
         for: 5m
         labels:
-          severity: warning
+          severity: critical
+          ids_coverage: "true"
         annotations:
           summary: "Sigma rule engine down on {{ $labels.node }}"
           description: "rsigma on {{ $labels.node }} has been unreachable for 5m; Sigma rules are not evaluating Tetragon events there."
@@ -1144,6 +1161,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS Sigma events dropped on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} normalized events before the Sigma engine in the last 15m; the rule layer has a coverage gap on that node."
@@ -1153,6 +1171,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS Sigma detections disabled on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} could not open the RSigma detection sink in the last 15m; Sigma detections are not reaching Alertmanager from that node."
@@ -1162,6 +1181,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS Sigma path stalled on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} recorded detections in the last 15m but sent nothing to RSigma; check the socket and the service flags."
@@ -1171,6 +1191,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS forwarder dropped alerts on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} alerts in the last 15m; the durable spool could not be written, a spooled record was unreadable or over the size cap, or Alertmanager rejected it permanently."
@@ -1180,6 +1201,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS forwarder hit its local alert cap on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} withheld {{ $value | printf \"%.0f\" }} alerts in the last 15m because the per-host, per-severity delivery cap was reached. The detections are still recorded in detections.jsonl."
@@ -1189,6 +1211,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS forwarder cannot save its replay cursor on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} failed to persist its Tetragon replay cursor; a restart resumes from an older boundary, so already-delivered alerts may be replayed."
@@ -1198,6 +1221,7 @@ groups:
         for: 15m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS forwarder backlog on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} has a backlog (over 1000 queued alerts or more than 80 MiB spooled); Alertmanager delivery is behind and new sensor events may be back-pressured."
@@ -1207,6 +1231,7 @@ groups:
         for: 5m
         labels:
           severity: warning
+          ids_coverage: "true"
         annotations:
           summary: "IDS forwarder expired events on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} dropped {{ $value | printf \"%.0f\" }} events older than the replay cutoff in the last 15m; inspect the sensor backlog and retention window."

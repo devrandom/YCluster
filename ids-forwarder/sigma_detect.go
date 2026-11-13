@@ -164,6 +164,7 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	if containerName != "" {
 		a.Labels["container"] = containerName
 	}
+	applySigmaIdentity(&a, ev, layer)
 	// Keep the engine's own level alongside the two-level cluster severity:
 	// paging decides on "medium or above", which the mapped severity cannot
 	// express (low and medium both map to warning).
@@ -174,6 +175,38 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	}
 	a.eventHash = lineHash(line)
 	return a, true
+}
+
+// applySigmaIdentity gives a Sigma detection the same provenance the Tetragon
+// path carries, so the delivery classifier can tell a root host action from a
+// tenant one. The evaluator already supplies the uid as a user name and the
+// pid with its start time, which is what the cgroup lookup needs.
+func applySigmaIdentity(a *alert, ev sigma.Event, layer string) {
+	switch ev.User {
+	case "":
+	case "root":
+		a.Labels["uid"] = "0"
+	default:
+		a.Labels["uid"] = ev.User
+	}
+	a.Labels["kind"] = "sigma"
+	switch layer {
+	case "container":
+		a.Labels["origin"] = "container"
+	case "unverified":
+		a.Labels["origin"] = "unverified"
+	default:
+		o := processOriginFor(ev.ProcessId, ev.StartTime)
+		a.Labels["origin"] = o.Origin
+		if o.Actor != "" {
+			a.Labels["actor"] = redactIPs(o.Actor)
+		}
+	}
+	// The normalized Sigma event carries no parent uid, so the session is the
+	// only invoker evidence available on this path.
+	if privilegeTools[ev.Image] && nonRootSession(ev.ProcessId, ev.StartTime) {
+		a.Labels["escalation"] = "nonroot"
+	}
 }
 
 // sigmaSeverity keeps the two-level cluster alert vocabulary. High and

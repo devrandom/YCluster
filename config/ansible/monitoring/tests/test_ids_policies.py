@@ -163,6 +163,26 @@ class TestIDSPolicies(unittest.TestCase):
         self.assertIn("group_by: ['alertname', 'host', 'rule_id'", text)
         self.assertIn("equal: ['alertname', 'node', 'host', 'rule_id']", text)
 
+    def test_alertmanager_pages_on_the_delivery_class(self):
+        # The forwarder decides coverage vs evidence; the route table must not
+        # grow a rule-id list again, and an alert without the label must land
+        # on the silent receiver.
+        text = ALERTMANAGER.read_text()
+        self.assertIn("page: 'yes'", text)
+        self.assertNotIn("exec-root-user-path|kernel-modules|privilege-raises", text)
+        self.assertNotIn("sigma_level: '^(medium|high|critical)$'", text)
+        silent = text.split("alertname: 'IDSAlert'")[-1]
+        self.assertIn("receiver: 'ids-silent'", silent)
+
+    def test_sensor_loss_is_critical_and_on_the_ids_topic(self):
+        text = (ROOT / "config/ansible/monitoring/templates/ycluster-alerts.yml.j2").read_text()
+        for name in ("IdsForwarderDown", "TetragonDown", "CrowdsecDown", "RsigmaDown"):
+            block = text.split(f"- alert: {name}")[1].split("- alert:")[0]
+            self.assertIn("severity: critical", block, name)
+            self.assertIn('ids_coverage: "true"', block, name)
+        stale = text.split("- alert: IdsForwarderSchemaStale")[1].split("- alert:")[0]
+        self.assertIn('ids_forwarder_build_info{page_schema="1"}', stale)
+
     def test_pcp_cleanup_filter_rejects_traversal(self):
         # The rotation cleanup runs `rm` on fixed log names. A file component
         # that starts with a dot would let `..` borrow the exemption, so the

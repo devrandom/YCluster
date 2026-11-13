@@ -35,7 +35,21 @@ func (f *forwarder) enqueue(a alert) error {
 	// The detection history is an audit trail before it is an alert:
 	// record every classified detection, including the ones whose delivery
 	// is deduplicated or coalesced.
-	f.recordDetection(a)
+	class, evidence := classifyAlert(a)
+	delivery := deliveryFor(a, class, evidence)
+	a.Labels["class"] = class
+	a.Labels["page"] = "no"
+	if delivery == deliveryPage {
+		a.Labels["page"] = "yes"
+	}
+	f.recordDetection(a, class, delivery)
+	if delivery == deliveryEvidence {
+		// Post-root host activity: recorded, never delivered. Dropping it
+		// before the dedup and rate paths keeps it from spending a key or a
+		// slot that a later coverage event needs.
+		f.stats.countEvidence(class)
+		return nil
+	}
 	if f.bootSuppress(a) {
 		f.stats.bootSuppressed.Add(1)
 		return nil
@@ -52,6 +66,12 @@ func (f *forwarder) enqueue(a alert) error {
 	if window, ok := ruleRepeatWindows[a.Labels["rule_id"]]; ok && f.dedup.seenWithin(key, window) {
 		f.stats.coalesced.Add(1)
 		return nil
+	}
+	if delivery == deliverySilent {
+		// Delivered to Alertmanager but not paged. Counting here measures
+		// what enabling the class would actually page, dedup and coalescing
+		// included.
+		f.stats.countPageCandidate(class)
 	}
 	// Optional per-host circuit breaker: deliver at most rate-limit alerts
 	// per severity per window, but keep recording everything so the history
@@ -121,11 +141,11 @@ func (f *forwarder) bootSuppress(a alert) bool {
 // separately from Alertmanager, which is only the paging path. A write
 // failure is counted and logged rather than returned: a full disk must not
 // stall the cursor or stop coverage alerts from being delivered.
-func (f *forwarder) recordDetection(a alert) {
+func (f *forwarder) recordDetection(a alert, class, delivery string) {
 	if f.record == nil {
 		return
 	}
-	if err := f.record.append(newDetectionRecord(a)); err != nil {
+	if err := f.record.append(newDetectionRecord(a, class, delivery)); err != nil {
 		f.stats.recordErrors.Add(1)
 		f.cfg.logf("record detection %s: %v", a.Labels["rule_id"], err)
 		return

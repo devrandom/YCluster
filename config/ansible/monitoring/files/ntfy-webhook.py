@@ -137,6 +137,11 @@ def alert_topic(alert):
     labels = alert.get("labels") or {}
     if labels.get("alertname") == "IDSAlert":
         return ntfy_topic("ids")
+    # Sensor-down and sensor-degradation alerts are the first signal of a host
+    # compromise under the host-root boundary, so they belong on the IDS topic
+    # rather than a host's own stream.
+    if labels.get("ids_coverage") == "true":
+        return ntfy_topic("ids")
     index = host_topic_index()
     if index:
         for value in labels.values():

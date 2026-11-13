@@ -231,6 +231,16 @@ must not become a second, longer-lived access log.
     subset. The classification, the `page` label and the measurement gate are
     specified in
     [`docs/design/ids-coverage-and-evidence.md`](../../docs/design/ids-coverage-and-evidence.md).
+    Deployed and verified: root execs are recorded with
+    `class=root_exec delivery=evidence` and never reach Alertmanager, a live
+    non-root exec lands in `exec_nonroot` with `page=no` and increments
+    `ids_forwarder_page_candidates_total`, and the shadow counters are in the
+    node textfile collector. Two gaps are left in the measurement itself:
+    a short-lived non-root host process whose pid has left `/proc` falls back
+    to `layer=unverified` and is counted as `container_other` rather than
+    `exec_nonroot`, so the class undercounts on replay and for very short
+    commands; and `escalation_nonroot` pages from day one without a shadow
+    measurement, by decision.
   - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
     allowlist and maps to its own rule, `container-api`, so every `incus
     exec`, `incus file push/pull` and lifecycle call lands in

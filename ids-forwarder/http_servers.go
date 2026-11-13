@@ -134,6 +134,31 @@ func (f *forwarder) startMetrics() error {
 		for _, origin := range names {
 			fmt.Fprintf(w, "ids_forwarder_detections_total{origin=%q} %d\n", origin, origins[origin])
 		}
+		fmt.Fprintf(w, "# HELP ids_forwarder_evidence_only_total Detections recorded as post-root evidence and not delivered, by class.\n")
+		fmt.Fprintf(w, "# TYPE ids_forwarder_evidence_only_total counter\n")
+		evidence := f.stats.evidenceCounts()
+		classes := make([]string, 0, len(evidence))
+		for class := range evidence {
+			classes = append(classes, class)
+		}
+		sort.Strings(classes)
+		for _, class := range classes {
+			fmt.Fprintf(w, "ids_forwarder_evidence_only_total{class=%q} %d\n", class, evidence[class])
+		}
+		fmt.Fprintf(w, "# HELP ids_forwarder_page_candidates_total Silent coverage detections after dedup and coalescing, by class; what enabling that class would have paged.\n")
+		fmt.Fprintf(w, "# TYPE ids_forwarder_page_candidates_total counter\n")
+		candidates := f.stats.pageCandidateCounts()
+		classNames := make([]string, 0, len(candidates))
+		for class := range candidates {
+			classNames = append(classNames, class)
+		}
+		sort.Strings(classNames)
+		for _, class := range classNames {
+			fmt.Fprintf(w, "ids_forwarder_page_candidates_total{class=%q} %d\n", class, candidates[class])
+		}
+		fmt.Fprintf(w, "# HELP ids_forwarder_build_info Build metadata; page_schema is the delivery-class schema the binary emits.\n")
+		fmt.Fprintf(w, "# TYPE ids_forwarder_build_info gauge\n")
+		fmt.Fprintf(w, "ids_forwarder_build_info{page_schema=%q} 1\n", "1")
 	})
 	srv := &http.Server{Addr: f.cfg.metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ln, err := net.Listen("tcp", f.cfg.metricsListen)

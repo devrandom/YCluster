@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -85,6 +86,7 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 				"process_exec: binary="+body.Process.Binary+" root-exec")
 			a.Labels["binary"] = processBinaryName(body.Process.Binary)
 			applyOrigin(&a, body, layer)
+			applyIdentity(&a, evType, body)
 			a.dedupIdentity = identityHash("exec-root-user-path|" + body.Process.Binary)
 			a.StartsAt = meta.time.Format(time.RFC3339Nano)
 			a.eventTime = meta.time
@@ -105,6 +107,7 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	summary := eventSummary(evType, body)
 	a := newAlert(cfg, sourceTetragon, tetragonSeverity(body), layer, tetragonRule(evType, body), summary)
 	applyOrigin(&a, body, layer)
+	applyIdentity(&a, evType, body)
 	if body.FunctionName == "tcp_connect" {
 		if addr, port, ok := tcpDestination(body.Args); ok {
 			a.Labels["dest"] = destinationLabel(addr, port)
@@ -171,6 +174,48 @@ func applyOrigin(a *alert, body *tetragonLog, layer string) {
 	// These labels are set after newAlert's redaction pass, so they get it
 	// here instead of trusting the value to be address-free.
 	a.Labels["actor"] = redactIPs(o.Actor)
+}
+
+// applyIdentity records what the delivery classifier reads: the host-visible
+// uid, the event kind, and whether the event is the transition out of a
+// non-root login session.
+func applyIdentity(a *alert, evType string, body *tetragonLog) {
+	// A zero-value process is a missing process, not uid 0: the decoder
+	// leaves every field at its zero value. Only a real event carries a pid,
+	// so the absence of one must not read as proof of host root.
+	if body.Process.PID != 0 {
+		a.Labels["uid"] = strconv.FormatUint(uint64(body.Process.UID), 10)
+	}
+	a.Labels["kind"] = eventKind(evType, body)
+	// Only the exec is the transition marker. The credential commit that
+	// follows from the same process is the same action, and paging twice for
+	// one sudo would double the only class that pages at landing.
+	if a.Labels["kind"] == "exec" && privilegeTools[body.Process.Binary] &&
+		nonRootInvoker(body.Process, body.Parent) {
+		a.Labels["escalation"] = "nonroot"
+	}
+}
+
+// eventKind names the event independently of the policy that produced it, so
+// the classifier does not depend on policy file names. The exec policy also
+// reports file writes, which is why the event type alone is not enough.
+func eventKind(evType string, body *tetragonLog) string {
+	switch evType {
+	case "process_exec":
+		return "exec"
+	}
+	if body.FunctionName == "tcp_connect" {
+		return "connect"
+	}
+	switch body.PolicyName {
+	case "kernel-modules":
+		return "module"
+	case "privilege-raises":
+		return "privilege"
+	case "exec-and-sensitive-file-writes":
+		return "write"
+	}
+	return "other"
 }
 
 // tetragonSuppression returns the reason an event is not forwarded, or ""

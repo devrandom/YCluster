@@ -153,6 +153,14 @@ class Routing(unittest.TestCase):
         alert = {"labels": {"alertname": "IDSAlert", "node": "lab1"}}
         self.assertEqual(wh.alert_topic(alert), "ids-topic")
 
+    def test_ids_coverage_alert_uses_the_ids_topic(self):
+        alert = {"labels": {"alertname": "TetragonDown", "node": "lab1", "ids_coverage": "true"}}
+        self.assertEqual(wh.alert_topic(alert), "ids-topic")
+
+    def test_coverage_alert_keeps_the_host_topic_without_the_label(self):
+        alert = {"labels": {"alertname": "TetragonDown", "node": "lab1"}}
+        self.assertEqual(wh.alert_topic(alert), "lab-topic")
+
     def test_host_routes_through_its_location(self):
         alert = {"labels": {"alertname": "NodeDown", "node": "lab2"}}
         self.assertEqual(wh.alert_topic(alert), "lab-topic")

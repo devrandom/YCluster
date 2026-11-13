@@ -125,8 +125,11 @@ func TestDetectionRecordCarriesContainer(t *testing.T) {
 		Annotations: map[string]string{"summary": "process_kprobe: binary=/usr/bin/curl"},
 		StartsAt:    "2026-10-28T20:00:00Z",
 	}
-	rec := newDetectionRecord(a)
+	rec := newDetectionRecord(a, "lateral_container", deliverySilent)
 	if rec.Layer != "container" || rec.Container != "demo" {
 		t.Fatalf("record lost container attribution: %+v", rec)
+	}
+	if rec.Class != "lateral_container" || rec.Delivery != deliverySilent {
+		t.Fatalf("record lost its delivery class: %+v", rec)
 	}
 }
