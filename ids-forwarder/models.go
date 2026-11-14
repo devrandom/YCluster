@@ -35,13 +35,23 @@ type tetragonConnect struct {
 }
 
 type tetragonProcess struct {
-	Binary    string       `json:"binary"`
-	Arguments string       `json:"arguments"`
-	UID       uint32       `json:"uid"`
-	Auid      uint32       `json:"auid"`
-	PID       uint32       `json:"pid"`
-	StartTime string       `json:"start_time"`
-	Pod       *tetragonPod `json:"pod"`
+	Binary    string `json:"binary"`
+	Arguments string `json:"arguments"`
+	// Cwd is the working directory at exec time. It is rendered from the
+	// exec-time cache, so it answers for a process that has already exited;
+	// a staging directory here changes what the exec means.
+	Cwd       string `json:"cwd"`
+	UID       uint32 `json:"uid"`
+	Auid      uint32 `json:"auid"`
+	PID       uint32 `json:"pid"`
+	StartTime string `json:"start_time"`
+	// ExecID names this exec in Tetragon's process cache and ParentExecID
+	// names the exec that created it. Together they make ancestry
+	// addressable from the event stream, without a /proc read and without
+	// depending on the parent still running.
+	ExecID       string       `json:"exec_id"`
+	ParentExecID string       `json:"parent_exec_id"`
+	Pod          *tetragonPod `json:"pod"`
 	// NS is the namespace snapshot Tetragon renders from its exec-time
 	// process cache. It survives the process exiting, so it is the
 	// trustworthy layer source.
@@ -53,29 +63,48 @@ type tetragonProcess struct {
 }
 
 type tetragonProc struct {
-	Binary    string           `json:"binary"`
-	Arguments string           `json:"arguments"`
-	UID       uint32           `json:"uid"`
-	Auid      uint32           `json:"auid"`
-	PID       uint32           `json:"pid"`
-	StartTime string           `json:"start_time"`
-	Pod       *tetragonPod     `json:"pod"`
-	NS        *eventNamespaces `json:"ns"`
-	Docker    string           `json:"docker"`
+	Binary       string           `json:"binary"`
+	Arguments    string           `json:"arguments"`
+	Cwd          string           `json:"cwd"`
+	UID          uint32           `json:"uid"`
+	Auid         uint32           `json:"auid"`
+	PID          uint32           `json:"pid"`
+	StartTime    string           `json:"start_time"`
+	ExecID       string           `json:"exec_id"`
+	ParentExecID string           `json:"parent_exec_id"`
+	Pod          *tetragonPod     `json:"pod"`
+	NS           *eventNamespaces `json:"ns"`
+	Docker       string           `json:"docker"`
 }
 
-// eventNamespaces is what --enable-process-ns adds to every event: the pid and
-// mount namespace inums with the kernel's own verdict on whether each is the
-// host's. A zero inum means the field is absent, which is what a replayed
-// pre-flag line looks like.
+// eventNamespaces is what --enable-process-ns adds to every event: namespace
+// inums with the kernel's own verdict on whether each is the host's. Only the
+// ones a decision reads are decoded: pid and mnt answer the layer question and
+// net separates a tenant that shares the host network from one behind its own.
+// A zero inum means the field is absent, which is what a replayed pre-flag line
+// looks like.
+//
+// The user namespace is deliberately not decoded. It cannot stand in for the
+// layer question: a privileged container shares the host user namespace, and a
+// host daemon under systemd's PrivateUsers= has one of its own, so neither
+// verdict separates tenants from host processes.
 type eventNamespaces struct {
 	Pid tetragonNamespace `json:"pid"`
 	Mnt tetragonNamespace `json:"mnt"`
+	Net tetragonNamespace `json:"net"`
 }
 
 type tetragonNamespace struct {
 	Inum   uint32 `json:"inum"`
 	IsHost bool   `json:"is_host"`
+}
+
+// hostNetwork reports a process that shares the host network namespace. The
+// snapshot has to be present: a missing field is not a verdict, and "false" is
+// the safe default because it keeps a container's traffic on the container
+// path.
+func hostNetwork(ns *eventNamespaces) bool {
+	return ns != nil && ns.Net.Inum != 0 && ns.Net.IsHost
 }
 
 // auidUnset is the kernel's "no login uid" value, reported for anything

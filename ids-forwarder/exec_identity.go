@@ -206,6 +206,14 @@ func resolveSigmaIdentity(ev *sigma.Event) {
 		// otherwise every non-root host service would lose its host
 		// exclusions.
 		r := resolveProcessLayer(ev.ProcessId, ev.StartTime, sigmaUID(ev.User), sigmaNamespaces(ev.Ns))
+		// The round trip through the rule engine drops the namespace
+		// snapshot, but the exec id still names what the forwarder saw when
+		// it forwarded the event.
+		if !r.Resolved {
+			if e, ok := execLookup(ev.ExecId); ok && e.ns != nil {
+				r = resolveProcessLayer(ev.ProcessId, ev.StartTime, e.uid, e.ns)
+			}
+		}
 		if !r.Resolved && ev.ParentProcessId != 0 {
 			r = resolveProcessLayer(ev.ParentProcessId, ev.ParentStartTime, ev.ParentUID, sigmaNamespaces(ev.ParentNs))
 		}

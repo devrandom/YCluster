@@ -19,3 +19,16 @@ func rootExecUserPath(path string) bool {
 	}
 	return false
 }
+
+// worldWritableCwd reports a working directory inside a tree any local
+// account can write to. It is the only working directory worth putting on an
+// alert: a service runs from / or from its unit's WorkingDirectory, so a
+// payload started from a staging directory is the shape triage wants to see.
+func worldWritableCwd(dir string) bool {
+	for _, prefix := range []string{"/tmp", "/var/tmp", "/dev/shm", "/run/user"} {
+		if dir == prefix || strings.HasPrefix(dir, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}

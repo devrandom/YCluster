@@ -13,10 +13,15 @@ import (
 // network_connection rules reference. Field names deliberately match the
 // Sigma rules so the RSigma pipeline only has to add the event-type guard.
 type Event struct {
-	Timestamp         string `json:"@timestamp,omitempty"`
-	EventType         string `json:"EventType"`
-	Image             string `json:"Image,omitempty"`
-	CommandLine       string `json:"CommandLine,omitempty"`
+	Timestamp   string `json:"@timestamp,omitempty"`
+	EventType   string `json:"EventType"`
+	Image       string `json:"Image,omitempty"`
+	CommandLine string `json:"CommandLine,omitempty"`
+	// CurrentDirectory is the working directory at exec time. Tetragon
+	// renders it from its exec-time cache, so it survives the process
+	// exiting and can match a payload run from a staging directory whose
+	// image path is not itself suspicious.
+	CurrentDirectory  string `json:"CurrentDirectory,omitempty"`
 	ParentImage       string `json:"ParentImage,omitempty"`
 	ParentCommandLine string `json:"ParentCommandLine,omitempty"`
 	User              string `json:"User,omitempty"`
@@ -26,6 +31,10 @@ type Event struct {
 	ProcessId       uint32 `json:"ProcessId,omitempty"`
 	ParentProcessId uint32 `json:"ParentProcessId,omitempty"`
 	ParentStartTime string `json:"ParentStartTime,omitempty"`
+	// ExecId names the exec in Tetragon's cache. The forwarder keeps what it
+	// learned about that exec, so a detection quoted back from the rule
+	// engine can still resolve its layer and invoker without /proc.
+	ExecId          string `json:"ExecId,omitempty"`
 	ContainerName   string `json:"ContainerName,omitempty"`
 	ContainerImage  string `json:"ContainerImage,omitempty"`
 	StartTime       string `json:"StartTime,omitempty"`
@@ -77,7 +86,9 @@ type process struct {
 	Auid      uint32      `json:"auid"`
 	Binary    string      `json:"binary"`
 	Arguments string      `json:"arguments"`
+	Cwd       string      `json:"cwd"`
 	StartTime string      `json:"start_time"`
+	ExecID    string      `json:"exec_id"`
 	Pod       *pod        `json:"pod"`
 	NS        *Namespaces `json:"ns"`
 	// Docker is the container id Tetragon records for Docker workloads.
@@ -134,16 +145,18 @@ func NormalizeLine(line string) (*Event, bool, error) {
 
 func normalizeProcess(ts, eventType string, p, parent *process) *Event {
 	ev := &Event{
-		Timestamp:   ts,
-		EventType:   eventType,
-		Image:       p.Binary,
-		CommandLine: commandLine(p.Binary, p.Arguments),
-		User:        user(p.UID),
-		Layer:       "host",
-		ProcessId:   p.PID,
-		StartTime:   p.StartTime,
-		Ns:          p.NS,
-		Auid:        p.Auid,
+		Timestamp:        ts,
+		EventType:        eventType,
+		Image:            p.Binary,
+		CommandLine:      commandLine(p.Binary, p.Arguments),
+		CurrentDirectory: p.Cwd,
+		User:             user(p.UID),
+		Layer:            "host",
+		ProcessId:        p.PID,
+		StartTime:        p.StartTime,
+		ExecId:           p.ExecID,
+		Ns:               p.NS,
+		Auid:             p.Auid,
 	}
 	if parent != nil {
 		ev.ParentImage = parent.Binary

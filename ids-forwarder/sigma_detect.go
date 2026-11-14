@@ -136,6 +136,9 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	if ev.CommandLine != "" {
 		parts = append(parts, "args="+ev.CommandLine)
 	}
+	if worldWritableCwd(ev.CurrentDirectory) {
+		parts = append(parts, "cwd="+ev.CurrentDirectory)
+	}
 	if ev.ParentImage != "" {
 		parts = append(parts, "parent="+ev.ParentImage)
 	}
@@ -150,9 +153,11 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	}
 	layer := sigmaLayer(ev)
 	containerName := ev.ContainerName
+	layerSource := ""
 	if layer == "host" {
-		if r := resolveProcessLayer(ev.ProcessId, ev.StartTime, sigmaUID(ev.User), sigmaNamespaces(ev.Ns)); r.Resolved && r.Layer != "" {
+		if r := sigmaEventLayer(ev); r.Resolved && r.Layer != "" {
 			layer = r.Layer
+			layerSource = r.Source
 			if r.Name != "" {
 				containerName = r.Name
 			}
@@ -160,6 +165,7 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	}
 	a := newAlert(cfg, sourceSigma, sigmaSeverity(det.Level), layer, rule,
 		redactIPs(strings.Join(parts, " ")))
+	a.prov.layer = layerSource
 	// The visible summary redacts addresses; keep the unredacted event as the
 	// dedup identity so callbacks to different hosts do not collapse.
 	a.dedupIdentity = identityHash(det.RuleID + "|" + strings.Join(parts, " "))
@@ -179,9 +185,24 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	return a, true
 }
 
+// sigmaEventLayer resolves the layer of a detection's process from what the
+// rule engine echoed back, then from the exec the forwarder recorded when it
+// forwarded that event. The exec id is the identity that survives the round
+// trip, so /proc never decides here.
+func sigmaEventLayer(ev sigma.Event) processLayer {
+	if r := resolveProcessLayer(ev.ProcessId, ev.StartTime, sigmaUID(ev.User), sigmaNamespaces(ev.Ns)); r.Resolved {
+		return r
+	}
+	if e, ok := execLookup(ev.ExecId); ok && e.ns != nil {
+		return resolveProcessLayer(ev.ProcessId, ev.StartTime, e.uid, e.ns)
+	}
+	return processLayer{}
+}
+
 // sigmaNamespaces converts the rule layer's copy of the namespace snapshot.
-// A detection echoed back by RSigma carries none: the normalized event it
-// stores has no ns field, which is why this path stays best-effort.
+// A detection echoed back by RSigma carries none: the normalized event
+// deliberately omits the snapshot, because the layer is resolved before the
+// event is sent. The exec cache covers the process that has since exited.
 func sigmaNamespaces(ns *sigma.Namespaces) *eventNamespaces {
 	if ns == nil {
 		return nil
@@ -242,9 +263,18 @@ func applySigmaIdentity(a *alert, ev sigma.Event, layer string) {
 	}
 }
 
-// sigmaEscalationSource mirrors escalationSource without a parent uid: the
-// audit uid is carried on the event, the session is read from /proc.
+// sigmaEscalationSource mirrors escalationSource: the parent uid comes from
+// the exec the forwarder recorded, the audit uid from the event, and the
+// session from /proc.
 func sigmaEscalationSource(ev sigma.Event) string {
+	if e, ok := execLookup(ev.ExecId); ok && e.hasParent {
+		if nonRootHostUID(e.parentUID) {
+			return "execid"
+		}
+		// A root parent is a positive answer, exactly as on the Tetragon
+		// path: do not fall through to an audit uid that says otherwise.
+		return ""
+	}
 	if ev.Auid != auidUnset && ev.Auid >= loginUIDBase && ev.Auid < incusIDMapBase {
 		return "auid"
 	}

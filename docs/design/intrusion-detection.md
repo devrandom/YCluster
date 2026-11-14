@@ -363,6 +363,13 @@ A non-root operator running their own binary remains indistinguishable from
 an attacker by exec metadata alone; ad-hoc workloads belong in a container
 or VM, where the layer-aware egress and lateral rules apply.
 
+The remaining temporary-directory gap was `/var/tmp`: the upstream rules
+cover `/tmp` and `/dev/shm`, and `exec-root-user-path` is root only. A local
+rule, `Execution From Persistent Temporary Directory`, matches a host-layer
+exec of a binary under `/var/tmp` and filters `User: root` so root stays with
+the hand-written rule. The retained Tetragon window showed no
+`/var/tmp` execution at all before it shipped, so it adds no routine volume.
+
 ### Off-the-shelf rule-layer options (2026-10-28)
 
 No project is a drop-in Falco rule layer for Tetragon events. The credible
@@ -770,10 +777,29 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   `ids_forwarder_suppressed_total{reason="expected_tcp"}` for that reason.
   Tetragon annotates the snapshot at exec time, so a `setns` without a
   following exec keeps the old namespaces on record.
+  Two more fields the same snapshot and the same event carry are read. The
+  network namespace separates a tenant that shares the host network
+  (`--network=host`) from one behind its own: such a container has no bridge,
+  so a loopback connect is a tenant reaching a host service and stays
+  alertable instead of being suppressed as `container_bridge`, and the alert
+  carries `net=host`. The working directory at exec time (`process.cwd`) is
+  appended to the summary when it is inside a world-writable tree (`/tmp`,
+  `/var/tmp`, `/dev/shm`, `/run/user/*`), the one directory class that changes
+  what an exec means. The user namespace is deliberately not used for the
+  layer call: a privileged container shares the host user namespace and a host
+  daemon under systemd `PrivateUsers=` has one of its own, so neither verdict
+  separates a tenant from a host process.
+- A bounded exec-id cache keeps what the event stream said about each exec
+  (`exec_id`, `parent_exec_id`, two generations of 4096 entries). The parent's
+  uid and the process's namespace snapshot are therefore still available after
+  `/proc` has forgotten them, which is what the Sigma path needs: its
+  normalized event omits the snapshot on purpose, and a detection quoted back
+  by the rule engine resolves its layer and invoker from the cache by exec id.
 - The escalation verdict reads the event too: the parent's uid, then the
-  audit uid, then the login session. Only the last needs `/proc`, and it is
-  the last because an unresolvable invoker leaves the event as evidence
-  rather than paging on a guess.
+  parent exec from the exec-id cache, then the audit uid, then the login
+  session. Only the last needs `/proc`, and it is the last because an
+  unresolvable invoker leaves the event as evidence rather than paging on a
+  guess.
 - Does not copy raw Tetragon events into the spool and does not put IPs in
   labels, annotations, or the spool.
 - Coverage is republished through the node_exporter textfile collector
@@ -1196,8 +1222,9 @@ cases they only need to use a protocol or namespace the sensor does not observe.
     The netcat rule needs `-e`/`-c` plus a named shell (not `socat`, `ncat --exec`,
     or an interpreter); the base64 rule needs a literal pipe to `bash`/`sh` (not
     `xxd -r`, `openssl enc -d`, or `/usr/bin/env sh`); the tmp/dev-shm rules match
-    path prefixes, so `/memfd:...`, `/run`, non-root `/home` and non-root
-    `/var/tmp` are uncovered; the log-clearing rule only covers `/var/log`; and the
+    path prefixes, so `/memfd:...`, `/run` and non-root `/home` are uncovered
+    (non-root `/var/tmp` is now covered by the local rule below); the
+    log-clearing rule only covers `/var/log`; and the
     webshell rule only matches a few server parents. A non-root operator or
     service account can run an arbitrary interpreter payload from `/home` with no
     hand-written alert and no Sigma match. `exec-root-user-path` covers root only.

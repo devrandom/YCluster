@@ -91,3 +91,17 @@ func TestNormalizeRejectsMalformedJSON(t *testing.T) {
 		t.Fatal("expected a parse error")
 	}
 }
+
+func TestNormalizeCarriesWorkingDirectoryAndExecID(t *testing.T) {
+	line := `{"time":"2026-11-13T12:00:00Z","process_exec":{"process":{"pid":77,"uid":1000,"binary":"/usr/bin/python3","arguments":"payload.py","cwd":"/var/tmp/stage","exec_id":"bnY0OjE6Nzc="}}}`
+	ev, ok, err := NormalizeLine(line)
+	if err != nil || !ok {
+		t.Fatalf("NormalizeLine = %v, %v", ok, err)
+	}
+	if ev.CurrentDirectory != "/var/tmp/stage" {
+		t.Fatalf("CurrentDirectory = %q", ev.CurrentDirectory)
+	}
+	if ev.ExecId != "bnY0OjE6Nzc=" {
+		t.Fatalf("ExecId = %q", ev.ExecId)
+	}
+}

@@ -535,10 +535,20 @@ func containerEgressReason(body *tetragonLog, layer string) string {
 		return ""
 	}
 	if addr.IsLoopback() || addr.IsUnspecified() || addr.IsLinkLocalUnicast() {
+		if hostNetwork(body.Process.NS) {
+			// The container shares the host network namespace, so loopback is
+			// the host's loopback: this is a tenant reaching a host service.
+			return ""
+		}
 		return "container_bridge"
 	}
 	if !addr.IsPrivate() {
 		return "tenant_egress"
+	}
+	if hostNetwork(body.Process.NS) {
+		// Without a network namespace of its own the container has no bridge
+		// to be routine on: a private address is a host or cluster path.
+		return ""
 	}
 	// The container bridge is host-local networking between instances the
 	// network ACL already governs; it is not a path into the cluster.

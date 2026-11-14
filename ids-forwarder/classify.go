@@ -180,18 +180,28 @@ var privilegeTools = map[string]bool{
 // escalationSource reports where the proof that a privilege tool was run by
 // an unprivileged identity came from, or "" when there is no proof. The
 // sources are ordered by how well they survive the process exiting: the
-// parent uid is in the event, the audit uid is in the event, and the login
-// session needs a live /proc.
+// parent uid is in the event, the parent exec is in the event stream the
+// forwarder already read, the audit uid is in the event, and the login
+// session is the only one that needs a live /proc.
 func escalationSource(body *tetragonLog) string {
 	if p := body.Parent; p != nil && p.PID != 0 {
 		// The invoker has to be an unprivileged host identity. An idmapped
 		// uid is a container account, which is a tenant boundary, not a host
 		// one, and must not turn into a page.
-		if p.UID != 0 && p.UID < incusIDMapBase {
+		if nonRootHostUID(p.UID) {
 			return "uid"
 		}
 		// A root parent is a positive answer: root running a privilege tool
 		// is not a transition, whatever the audit trail says.
+		return ""
+	}
+	// The parent block can be absent (a replayed line, a trimmed export)
+	// while the event still names the parent exec. The cache was filled when
+	// that exec was read, so its uid answers without /proc.
+	if e, ok := execLookup(body.Process.ParentExecID); ok {
+		if nonRootHostUID(e.uid) {
+			return "execid"
+		}
 		return ""
 	}
 	if body.Process.Auid != auidUnset && body.Process.Auid >= loginUIDBase && body.Process.Auid < incusIDMapBase {
@@ -201,6 +211,12 @@ func escalationSource(body *tetragonLog) string {
 		return "session"
 	}
 	return ""
+}
+
+// nonRootHostUID reports an unprivileged host identity. An idmapped uid is a
+// container account, which is a tenant boundary, not a host one.
+func nonRootHostUID(uid uint32) bool {
+	return uid != 0 && uid < incusIDMapBase
 }
 
 // nonRootSession reports a login session owned by an account other than root.

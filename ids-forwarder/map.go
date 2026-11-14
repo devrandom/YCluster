@@ -73,6 +73,10 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	// fill in the identity from /proc so routing, suppression and labels name
 	// the binary that is actually running.
 	resolveEventIdentity(&body.Process)
+	// Remember the exec while the event still carries it. Later events, and
+	// the Sigma detections quoted back from the rule engine, resolve a dead
+	// invoker from this cache instead of from /proc.
+	rememberExec(body)
 	if !configuredEvent(cfg.events, evType) {
 		return alert{}, meta, false, ""
 	}
@@ -128,6 +132,12 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	}
 	if containerName != "" {
 		a.Labels["container"] = containerName
+	}
+	if layer == "container" && hostNetwork(body.Process.NS) {
+		// The container shares the host network namespace, so its connects
+		// are host connects: loopback reaches host services rather than a
+		// bridge. Flagged so triage does not read the alert as tenant egress.
+		a.Labels["net"] = "host"
 	}
 	// The visible summary redacts addresses, so two connects to different
 	// hosts would otherwise share one dedup key. Hash the normalised but
@@ -624,6 +634,12 @@ func eventSummaryRaw(evType string, body *tetragonLog) string {
 	}
 	if body.Process.Arguments != "" {
 		parts = append(parts, "args="+body.Process.Arguments)
+	}
+	if evType == "process_exec" && worldWritableCwd(body.Process.Cwd) {
+		// World-writable staging directory: the one working-directory class
+		// that changes what the exec means. Carried from the event, so it
+		// survives a process that already exited.
+		parts = append(parts, "cwd="+body.Process.Cwd)
 	}
 	if len(body.Args) > 0 && string(body.Args) != "null" {
 		parts = append(parts, "kprobe_args="+normalizeSocketArgs(string(body.Args)))

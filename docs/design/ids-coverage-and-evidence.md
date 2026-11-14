@@ -289,9 +289,14 @@ folded into it.
 - **Sigma low-level rules.** `Bash Interactive Shell` and `Crontab Enumeration`
   are `level: low`; whether a curated low-level rule should page at all is
   open.
-- **Non-root exec from `/var/tmp`.** `exec-root-user-path` is root only, and
-  the forwarder cannot stat home directories. A non-root payload staged in the
-  world-writable temporary directory is in scope and uncovered.
+- **Non-root exec from a writable directory.** `/tmp` and `/dev/shm` are
+  covered upstream, `/var/tmp` by the local `Execution From Persistent
+  Temporary Directory` rule, and root by `exec-root-user-path`. What is left
+  is a payload whose binary lives outside those trees but is started from one:
+  the event carries the working directory and it is appended to the summary
+  for triage, but no rule alerts on it. Whether a host-layer exec from a
+  world-writable working directory is signal is a tuning decision, not a
+  coverage claim.
 - **Boot grace and non-root unit activity.** The grace still hides unit and
   unknown-origin `process_exec` for five minutes after boot, which includes
   non-root unit shapes that are now coverage.

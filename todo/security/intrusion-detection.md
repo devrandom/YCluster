@@ -184,9 +184,11 @@ must not become a second, longer-lived access log.
     A file-ownership rule was rejected: the forwarder cannot read home
     directories and legitimate operator virtualenvs make it noisy. Added the
     local `exec-root-user-path` rule instead (root executing from `/home` or
-    `/var/tmp`, host layer only), also zero hits in the replay. A non-root
-    operator running their own binary stays indistinguishable from an
-    attacker by exec metadata alone.
+    `/var/tmp`, host layer only), also zero hits in the replay. `/var/tmp` for
+    non-root is now covered by the local `Execution From Persistent Temporary
+    Directory` rule, which filters root so it does not duplicate the
+    hand-written one. A non-root operator running their own binary stays
+    indistinguishable from an attacker by exec metadata alone.
   - Running: Sigma/RSigma pilot on the installed service, using the curated
     rules under `config/ansible/monitoring/files/rsigma/rules/`. Started
     2026-11-04 (first detections), checkpoint 2026-11-18. Day-0 tuning added
@@ -306,6 +308,47 @@ must not become a second, longer-lived access log.
 - Add the per-host sensor to the host baseline and inventory-driven rollout,
   including remote hosts, and define how a host that is down, off-cluster, or
   outside the Ansible inventory is represented in coverage.
+
+## Event-carried enrichment
+
+Prefer what the event already carries over a `/proc` read. Tetragon renders
+these fields from its exec-time cache, so they survive the process exiting and
+a pid being reused. Ranked by value for cost, with what was measured before
+each was taken or dropped.
+
+- Done: `process.cwd`. It was on every exec and read by neither path. A
+  world-writable working directory (`/tmp`, `/var/tmp`, `/dev/shm`,
+  `/run/user/*`) is appended to the alert summary. The retained window on two
+  nodes showed zero non-root execs with a world-writable cwd, so the field adds
+  no volume.
+- Done: `ns.net`. A container that shares the host network namespace has no
+  bridge, so its loopback connects reach host services and now alert instead of
+  being suppressed as `container_bridge`; the alert carries `net=host`. Public
+  egress from the same container stays suppressed as tenant egress. Measured:
+  16 host-network container events in one node's retained window, none to
+  loopback, so the change is inert until such a workload reaches the host.
+- Done: exec-id cache. `exec_id`/`parent_exec_id` were on every event and
+  unused. The forwarder keeps two generations of 4096 entries and resolves a
+  dead parent's uid, plus the Sigma path's layer and invoker, from the cache
+  rather than from `/proc` or the audit uid.
+  `ids_forwarder_provenance_total{source="execid"}` counts the new source.
+- Rejected: `ns.user` as a layer signal. Measured counterexample: host daemons
+  on a storage node (prometheus, upowerd) carry a user namespace because the
+  unit sets `PrivateUsers=`, while a privileged container shares the host user
+  namespace. Neither verdict separates a tenant from a host process, so the
+  field is deliberately not decoded.
+- Rejected for now: `--enable-ancestors=base,kprobe`. It is the closest
+  analogue of `enable-process-ns` and renders the whole chain into every
+  event, but each ancestor is a full process object (~1 KB with the namespace
+  snapshot) on events that are already ~2.3 KB, so the 100 MB cap needs a
+  measured spike first. The exec-id cache answers the one-level question.
+- Not taken: `--enable-process-cred` (a `process_cred` event would make the
+  unreachable "privilege-raises" row a positive signal) and `--enable-cgidmap`
+  (workload resolution from cgroup id; CRI-oriented, probably inert for Incus).
+  Both are extra event sources, not enrichment.
+- Not trusted: `process.in_init_tree`. It reads `false` on a systemd-spawned
+  bash on a managed node, so it must not replace the boot grace until its
+  semantics are understood.
 
 ## Suppression blind-spot review
 

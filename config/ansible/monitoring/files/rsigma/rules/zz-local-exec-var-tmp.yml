@@ -1,0 +1,22 @@
+title: Execution From Persistent Temporary Directory
+id: 5789ca27-9b62-4b69-9508-4eac798485ba
+status: test
+description: |
+  Local rule. A host-layer process executes a binary staged in /var/tmp.
+  The upstream tmp and dev-shm rules do not cover this directory, and the
+  hand-written exec-root-user-path rule covers root only, so a non-root
+  payload staged there was the documented remaining gap.
+author: YCluster IDS
+logsource:
+    product: linux
+    category: process_creation
+detection:
+    selection:
+        Layer: host
+        Image|startswith: '/var/tmp/'
+    filter_root:
+        User: root
+    condition: selection and not filter_root
+falsepositives:
+    - An operator running a self-built tool from /var/tmp
+level: medium
