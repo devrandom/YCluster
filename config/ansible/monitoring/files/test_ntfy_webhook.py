@@ -529,3 +529,69 @@ class WebhookHttp(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.get_json()["throttled"], 1)
         m.assert_not_called()
+
+
+class KarmaLink(unittest.TestCase):
+    """The dashboard deep link attached to an alert notification."""
+
+    KARMA = "https://admin.example.net/karma"
+
+    def setUp(self):
+        reset_state()
+        self._saved = wh.KARMA_URL
+        wh.KARMA_URL = self.KARMA
+
+    def tearDown(self):
+        wh.KARMA_URL = self._saved
+
+    def test_disabled_without_a_dashboard(self):
+        wh.KARMA_URL = ""
+        self.assertEqual(wh.karma_alert_url({"alertname": "X"}), "")
+        formatted = wh.format_alert_message(
+            {"status": "firing", "labels": {"alertname": "X"}, "annotations": {}}
+        )
+        self.assertNotIn("Karma:", formatted["message"])
+        self.assertEqual(formatted["click"], "")
+
+    def test_group_labels_build_the_filter(self):
+        url = wh.karma_alert_url(
+            {"alertname": "IDSAlert", "host": "lab1", "rule_id": "privilege-raises"},
+            {"alertname": "IDSAlert", "host": "lab1", "rule_id": "privilege-raises"},
+        )
+        self.assertEqual(
+            url,
+            self.KARMA + "/?q=alertname%3DIDSAlert&q=host%3Dlab1&q=rule_id%3Dprivilege-raises",
+        )
+
+    def test_labels_fill_in_when_the_group_has_none(self):
+        url = wh.karma_alert_url({"alertname": "NodeDown", "node": "lab1"})
+        self.assertTrue(url.startswith(self.KARMA + "/?"))
+        self.assertIn("q=alertname%3DNodeDown", url)
+        self.assertIn("q=node%3Dlab1", url)
+
+    def test_values_karma_would_misread_are_quoted(self):
+        url = wh.karma_alert_url({"alertname": "Drive Warnings"})
+        self.assertIn('q=alertname%3D%22Drive+Warnings%22', url)
+
+    def test_message_and_click_action_carry_the_link(self):
+        alert = {
+            "status": "firing",
+            "labels": {"alertname": "IDSAlert", "host": "lab1", "severity": "warning"},
+            "annotations": {"summary": "s", "description": "d"},
+        }
+        formatted = wh.format_alert_message(alert, {"alertname": "IDSAlert", "host": "lab1"})
+        self.assertIn("Karma: " + self.KARMA, formatted["message"])
+        self.assertTrue(formatted["click"].startswith(self.KARMA + "/?"))
+        self.assertIn("alertname%3DIDSAlert", formatted["click"])
+
+    def test_send_sets_the_click_header(self):
+        with mock.patch.object(wh.requests, "post") as post:
+            post.return_value.status_code = 200
+            wh.send_to_ntfy("t", "m", topic="main-topic", click=self.KARMA + "?q=x")
+        self.assertEqual(post.call_args.kwargs["headers"]["Click"], self.KARMA + "?q=x")
+
+    def test_no_click_header_without_a_link(self):
+        with mock.patch.object(wh.requests, "post") as post:
+            post.return_value.status_code = 200
+            wh.send_to_ntfy("t", "m", topic="main-topic")
+        self.assertNotIn("Click", post.call_args.kwargs["headers"])

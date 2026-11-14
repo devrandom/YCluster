@@ -60,6 +60,30 @@ Hosts that are not in the cluster inventory (a firewall host, a NAS watched
 from the admin repo) are notified by the admin repo directly; point those
 senders at the same topic that the matching location uses.
 
+## Dashboard links
+
+Each notification can carry a link back to the alert's group in Karma, the
+alert dashboard described in
+[`../design/alert-ui.md`](../design/alert-ui.md). It is set from `karma_url`
+in the same private file (`https://<admin-host>/karma/`) and rendered into
+`/etc/ycluster/ntfy.env` as `NTFY_KARMA_URL`; empty disables it, so a
+deployment without the dashboard simply gets no links.
+
+The link is a Karma filter over the labels the alert is grouped by —
+`?q=alertname=IDSAlert&q=host=<host>&q=rule_id=privilege-raises` — using the
+webhook payload's `groupLabels` and falling back to the alert's own labels.
+Karma takes one matcher per `q`, so the labels are ordered most-identifying
+first. It appears as a `Karma:` line in the message body and also as the
+notification's tap action (`Click` header).
+
+Karma is behind Authentik. A browser with an active session lands on the
+filtered view directly. On a cold session the dashboard vhost redirects to
+the outpost with `rd=` the original URL, but the outpost keeps only the part
+of `rd` before the first `&`, so the browser comes back filtered by the
+first matcher only (`alertname`). Making the full filter survive a login
+would mean encoding `rd` in the nginx redirect — a change to the shared
+forward-auth flow, not to this link.
+
 ## Rotating a topic
 
 1. Update the topic value in `ycluster-private/group_vars/all/ntfy.yml`.

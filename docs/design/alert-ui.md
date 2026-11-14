@@ -246,6 +246,10 @@ asymmetry visible; it does not fix the delivery gap.
   login; `/karma/health` and `/karma/metrics` stay reachable from localhost.
 - Alert delivery still arrives in ntfy exactly once per semantic event (the UI
   must not add a receiver).
+- A notification's deep link opens the alert's group: Karma reads repeated
+  `?q=` matchers, and `ntfy-webhook` builds them from the Alertmanager
+  `groupLabels` (`alertname`, `rule_id`, `host`, …), falling back to the
+  alert's own labels. The same URL is the notification's tap action.
 
 Verified at rollout: the public vhost returns `302` to the Authentik outpost
 for browser navigations and `401` for fetch-style requests; the internal vhost

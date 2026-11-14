@@ -201,6 +201,8 @@
           NTFY_TOPIC_IDS={{ ntfy_topic_ids | default('') }}
           NTFY_LOCATIONS={{ ntfy_locations | default({}) | to_json }}
           NTFY_HOST_TOPICS={{ ntfy_host_topics | default({}) | to_json }}
+          # Empty disables the per-alert dashboard links.
+          NTFY_KARMA_URL={{ karma_url | default('') }}
         owner: root
         group: root
         mode: '0640'

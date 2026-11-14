@@ -8,9 +8,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
+from urllib.parse import urlencode
 
 import requests
 from flask import Flask, request, jsonify
@@ -51,6 +53,19 @@ THROTTLE_WINDOW_SECONDS = int(os.environ.get("NTFY_THROTTLE_WINDOW_SECONDS", "60
 # be enforced. The budget is claim-based in etcd and fails open.
 IDS_RATE_LIMIT = int(os.environ.get("NTFY_IDS_RATE_LIMIT", "5"))
 IDS_RATE_WINDOW_SECONDS = int(os.environ.get("NTFY_IDS_RATE_WINDOW_SECONDS", "3600"))
+
+# Alert dashboard (Karma) base URL, e.g. https://admin.example.net/karma/.
+# Empty disables the links. Deployment-specific, so it comes from the env
+# file the private repo writes, like the topics above.
+KARMA_URL = os.environ.get("NTFY_KARMA_URL", "").strip().rstrip("/")
+
+# Labels a Karma filter uses, in order. The Alertmanager group labels win
+# when present: they are exactly the key the alert is grouped under, so the
+# link lands on the group the notification is about.
+# Order matters: Karma takes one matcher per ?q= and the sign-in redirect
+# keeps only the first, so the most identifying label comes first.
+KARMA_FILTER_LABELS = ("alertname", "host", "node", "rule_id", "job", "instance")
+KARMA_BARE_VALUE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 
 def ntfy_topic(channel):
@@ -430,7 +445,43 @@ def query_blackbox_nodes(domain, instance):
         logger.error(f"Failed to query Prometheus for blackbox nodes: {e}")
         return []
 
-def format_alert_message(alert):
+def karma_filter(key, value):
+    """Render one Karma matcher, quoting values its parser would misread."""
+    if KARMA_BARE_VALUE.match(value):
+        return f"{key}={value}"
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{key}="{escaped}"'
+
+
+def karma_alert_url(labels, group_labels=None):
+    """Deep link to the alert's group in Karma, or "" when no dashboard is set.
+
+    Karma's UI reads repeated ?q= matchers from the query string, so the link
+    is a filter built from the labels the alert is grouped by rather than a
+    per-alert id. The group labels come from the Alertmanager payload, so the
+    link lands on the same group the notification is about.
+    """
+    if not KARMA_URL:
+        return ""
+    labels = labels or {}
+    group_labels = group_labels or {}
+    matchers = []
+    for key in KARMA_FILTER_LABELS:
+        value = group_labels.get(key) or labels.get(key)
+        if value:
+            matchers.append(karma_filter(key, str(value)))
+    if not matchers:
+        return ""
+    # Keep the trailing slash: the dashboard vhost answers a bare /karma with
+    # a 301 to /karma/, and that redirect drops the query string.
+    if "?" in KARMA_URL:
+        base, separator = KARMA_URL, "&"
+    else:
+        base, separator = KARMA_URL.rstrip("/") + "/", "?"
+    return f"{base}{separator}{urlencode([('q', m) for m in matchers])}"
+
+
+def format_alert_message(alert, group_labels=None):
     """Format a single alert for ntfy."""
     status = alert.get('status', 'unknown')
     labels = alert.get('labels', {})
@@ -469,10 +520,13 @@ def format_alert_message(alert):
             blackbox_info = f"\nBlackbox nodes: {', '.join(blackbox_nodes)}"
         else:
             blackbox_info = "\nBlackbox nodes: (query failed or no data)"
+
+    karma_link = karma_alert_url(labels, group_labels)
+    karma_info = f"\nKarma: {karma_link}" if karma_link else ""
     
     if status == 'resolved':
         title = f"[RESOLVED] {summary}"
-        message = f"Alert resolved at {timestamp}\n\n{description}{blackbox_info}"
+        message = f"Alert resolved at {timestamp}\n\n{description}{blackbox_info}{karma_info}"
         priority = "default"
         tags = "white_check_mark"
     else:
@@ -498,6 +552,8 @@ def format_alert_message(alert):
         message_parts.append(description)
         if blackbox_info:
             message_parts.append(blackbox_info)
+        if karma_info:
+            message_parts.append(karma_info)
         
         message = "\n".join(message_parts)
     
@@ -505,10 +561,12 @@ def format_alert_message(alert):
         'title': title,
         'message': message,
         'priority': priority,
-        'tags': tags
+        'tags': tags,
+        # Tapping the notification opens the same group in the dashboard.
+        'click': karma_link
     }
 
-def send_to_ntfy(title, message, priority="default", tags="", topic=""):
+def send_to_ntfy(title, message, priority="default", tags="", topic="", click=""):
     """Send a notification to ntfy. Returns True on success, 'rate_limited'
     when ntfy.sh returned HTTP 429, or False on any other failure."""
     topic = topic or ntfy_topic("main")
@@ -521,6 +579,8 @@ def send_to_ntfy(title, message, priority="default", tags="", topic=""):
         'Tags': tags,
         'Content-Type': 'text/plain; charset=utf-8'
     }
+    if click:
+        headers['Click'] = click
     url = f"{NTFY_SERVER}/{topic}"
 
     try:
@@ -549,9 +609,10 @@ def webhook():
         logger.info(f"Received webhook with data: {json.dumps(data, indent=2)}")
 
         alerts = data.get('alerts', [])
+        group_labels = data.get('groupLabels') or {}
         counts = _new_counts()
         for alert in alerts:
-            _handle_alert(alert, counts)
+            _handle_alert(alert, counts, group_labels)
         return _webhook_response(len(alerts), counts)
 
     except Exception as e:
@@ -566,7 +627,7 @@ def _new_counts():
     return dict.fromkeys(COUNT_KEYS, 0)
 
 
-def _handle_alert(alert, counts):
+def _handle_alert(alert, counts, group_labels=None):
     """Admit, throttle or send one alert, updating the summary counters."""
     key = alert_key(alert)
     decision = _check_admission(key)
@@ -589,7 +650,7 @@ def _handle_alert(alert, counts):
         counts['throttled'] += 1
         logger.warning(f"Throttled notification for alert: {key}")
         return
-    _send_alert(alert, counts)
+    _send_alert(alert, counts, group_labels)
 
 
 def _ids_budget_exhausted(alert):
@@ -631,15 +692,16 @@ def _handle_ids_cap(alert, key, counts):
     logger.warning(f"IDS {severity} budget exhausted; cap notice not delivered: {key}")
 
 
-def _send_alert(alert, counts):
+def _send_alert(alert, counts, group_labels=None):
     try:
-        formatted = format_alert_message(alert)
+        formatted = format_alert_message(alert, group_labels)
         result = send_to_ntfy(
             formatted['title'],
             formatted['message'],
             formatted['priority'],
             formatted['tags'],
-            topic=alert_topic(alert)
+            topic=alert_topic(alert),
+            click=formatted['click'],
         )
         if result is True:
             counts['sent'] += 1
