@@ -42,6 +42,13 @@ func (f *forwarder) enqueue(a alert) error {
 	if delivery == deliveryPage {
 		a.Labels["page"] = "yes"
 	}
+	// The summary is the notification title and has to stay short; the
+	// description carries the context a reader needs to triage without
+	// opening detections.jsonl on the host.
+	if a.Annotations == nil {
+		a.Annotations = map[string]string{}
+	}
+	a.Annotations["description"] = alertDescription(a, class, delivery)
 	f.recordDetection(a, class, delivery)
 	if delivery == deliveryEvidence {
 		// Post-root host activity: recorded, never delivered. Dropping it

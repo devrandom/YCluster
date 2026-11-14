@@ -435,7 +435,7 @@ func TestTCPSummaryDropsPerConnectionFields(t *testing.T) {
 	if first.dedupKey() != second.dedupKey() {
 		t.Fatalf("per-connection fields defeat dedup: %s != %s", first.dedupKey(), second.dedupKey())
 	}
-	if !strings.Contains(first.Annotations["summary"], "dport") {
+	if !strings.Contains(first.Annotations["summary"], "-> [ip]:8080") {
 		t.Fatalf("summary should keep the destination: %s", first.Annotations["summary"])
 	}
 }

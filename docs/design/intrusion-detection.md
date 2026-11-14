@@ -800,6 +800,18 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   session. Only the last needs `/proc`, and it is the last because an
   unresolvable invoker leaves the event as evidence rather than paging on a
   guess.
+- The alert text is split into two annotations with different jobs. The
+  summary is the notification title, so it stays short: the policy name
+  (`privilege-raises`, `tcp-connect`) rather than `process_kprobe`, the
+  command line without `binary=`/`args=` furniture, and the destination as
+  `-> addr:port` for a connect instead of the raw socket argument. A
+  `privilege-raises` event renders the transition it observed — `setuid(0)`,
+  `caps effective 0x0->0x400` — rather than the capability bitmap dump, which
+  is unreadable in a notification and gives every event a distinct dedup
+  signature. The description carries what a reader would otherwise have to
+  open `detections.jsonl` on the host to learn: host, layer, container,
+  origin and actor, uid, then rule, class and delivery. It is attached in the
+  enqueue path because the class is only known there.
 - Does not copy raw Tetragon events into the spool and does not put IPs in
   labels, annotations, or the spool.
 - Coverage is republished through the node_exporter textfile collector

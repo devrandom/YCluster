@@ -396,6 +396,24 @@ func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
 	return a
 }
 
+// alertDescription is the body of the notification. The summary is the title,
+// so it stays short; this says where the detection happened, which identity
+// produced it, and how the delivery model treated it, without sending a
+// reader to the host to find out.
+func alertDescription(a alert, class, delivery string) string {
+	where := []string{"host=" + a.Labels["host"], "layer=" + a.Labels["layer"]}
+	for _, key := range []string{"container", "origin", "actor", "uid"} {
+		if value := a.Labels[key]; value != "" {
+			where = append(where, key+"="+value)
+		}
+	}
+	what := "rule=" + a.Labels["rule_id"] + " class=" + class + " delivery=" + delivery
+	if t := a.eventTimestamp(); !t.IsZero() {
+		what += " at " + t.UTC().Format(time.RFC3339)
+	}
+	return strings.Join(where, " ") + "\n" + what
+}
+
 // identityHash is a stable, non-reversible marker for the part of an event
 // that the visible summary may redact. It never leaves the process.
 func identityHash(s string) string {

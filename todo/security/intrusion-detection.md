@@ -350,6 +350,26 @@ each was taken or dropped.
   bash on a managed node, so it must not replace the boot grace until its
   semantics are understood.
 
+## Alert text
+
+- Done: the summary was carrying the raw `privilege-raises` argument list, so
+  a proxy's capability change arrived as a title full of
+  `cap_effective_arg` bitmaps, and the description was empty (ntfy printed
+  "No description available"). The summary now names the transition
+  (`setuid(0)`, `caps effective 0x0->0x400`), leads with the policy name for
+  kprobe events, prints a connect's destination as `-> addr:port`, and drops
+  the `binary=`/`args=` furniture. The description is filled in at enqueue
+  time with host, layer, container, origin/actor, uid, rule, class and
+  delivery, which is the context a reader previously had to fetch from the
+  host.
+- Done: the squid proxy's own privilege transitions are classified as
+  `expected_privilege`. The `privilege-raises` policy matches the daemon's
+  `setuid(0)` and its capability use on every log rotation and reconfigure,
+  and the non-root uid on those events made the classifier page: two alerts
+  at midnight, for the daemon managing itself. The shapes are `-k rotate`,
+  `--kid`, `-z`, `--foreground` and `-sYC`/`-YC`; the packaged proxy is not
+  setuid root, so an invocation without them keeps its classification.
+
 ## Suppression blind-spot review
 
 Review assumption: the attacker knows the policies, forwarder source, Sigma

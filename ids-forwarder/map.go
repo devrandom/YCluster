@@ -411,9 +411,14 @@ func routinePrivilegeReason(body *tetragonLog) string {
 			return "expected_privilege"
 		}
 	case "/usr/sbin/squid", "/usr/bin/squid":
-		// `squid -k rotate` re-execs itself as the cache user to rotate
-		// its logs; logrotate drives it.
-		if strings.Contains(body.Process.Arguments, "-k rotate") {
+		// The proxy daemon manages its own credentials: logrotate's
+		// `-k rotate`, the master's worker children (`--kid`), a reconfigure
+		// (`-z`) and the unit's `--foreground` all set uid 0 back and adjust
+		// the capability set the root master started with. None of that is a
+		// non-root identity crossing the boundary, and squid is not setuid
+		// root, so a process started from anywhere else gains nothing by
+		// these flags.
+		if squidDaemonArgs(body.Process.Arguments) {
 			return "expected_privilege"
 		}
 	case "/usr/bin/runc",
@@ -433,6 +438,21 @@ func routinePrivilegeReason(body *tetragonLog) string {
 		return "expected_privilege"
 	}
 	return ""
+}
+
+// squidDaemonArgs reports the invocation shapes the proxy daemon produces for
+// itself: logrotate's `-k rotate`, the master's worker children (`--kid`), a
+// reconfigure (`-z`) and the systemd unit's `--foreground`/`-sYC`. The
+// packaged proxy is not setuid root, so an invocation with any other shape is
+// not something these flags can turn into an escalation.
+func squidDaemonArgs(args string) bool {
+	for _, field := range strings.Fields(args) {
+		switch field {
+		case "-z", "-sYC", "-YC", "--kid", "--foreground":
+			return true
+		}
+	}
+	return strings.Contains(args, "-k rotate")
 }
 
 // packageMaintenanceReason classifies apt's own maintenance shapes, and
@@ -629,11 +649,15 @@ func eventSummary(evType string, body *tetragonLog) string {
 // [ip]; the result is hashed and never stored or delivered.
 func eventSummaryRaw(evType string, body *tetragonLog) string {
 	parts := make([]string, 0, 3)
-	if body.Process.Binary != "" {
-		parts = append(parts, "binary="+body.Process.Binary)
-	}
-	if body.Process.Arguments != "" {
-		parts = append(parts, "args="+body.Process.Arguments)
+	// The command line reads as one thing: an alert title that says
+	// "binary=... args=..." spends the first half of a notification on
+	// field names.
+	if body.Process.Binary != "" && body.Process.Arguments != "" {
+		parts = append(parts, body.Process.Binary+" "+body.Process.Arguments)
+	} else if body.Process.Binary != "" {
+		parts = append(parts, body.Process.Binary)
+	} else if body.Process.Arguments != "" {
+		parts = append(parts, body.Process.Arguments)
 	}
 	if evType == "process_exec" && worldWritableCwd(body.Process.Cwd) {
 		// World-writable staging directory: the one working-directory class
@@ -641,7 +665,27 @@ func eventSummaryRaw(evType string, body *tetragonLog) string {
 		// survives a process that already exited.
 		parts = append(parts, "cwd="+body.Process.Cwd)
 	}
-	if len(body.Args) > 0 && string(body.Args) != "null" {
+	prefix := evType
+	if evType == "process_kprobe" && body.PolicyName != "" {
+		// "process_kprobe" is the hook mechanism, not the signal: the policy
+		// name is what a reader recognises.
+		prefix = body.PolicyName
+	}
+	if body.FunctionName == "tcp_connect" {
+		// The socket argument carries the family, source port, cookie and
+		// state as well; the destination is the part that identifies the
+		// event.
+		if addr, port, ok := tcpDestination(body.Args); ok {
+			parts = append(parts, fmt.Sprintf("-> %s:%d", addr, port))
+		}
+	} else if body.PolicyName == "privilege-raises" {
+		// The raw hook arguments are a capability bitmap dump: unreadable in a
+		// notification and useless for dedup, where they make every event a
+		// new signature. Render the transition instead.
+		if transition := privilegeTransition(body.FunctionName, body.Args); transition != "" {
+			parts = append(parts, transition)
+		}
+	} else if len(body.Args) > 0 && string(body.Args) != "null" {
 		parts = append(parts, "kprobe_args="+normalizeSocketArgs(string(body.Args)))
 	}
 	if body.Message != "" {
@@ -650,7 +694,7 @@ func eventSummaryRaw(evType string, body *tetragonLog) string {
 	if len(parts) == 0 {
 		return fmt.Sprintf("tetragon %s event", evType)
 	}
-	return fmt.Sprintf("%s: %s", evType, strings.Join(parts, " "))
+	return fmt.Sprintf("%s: %s", prefix, strings.Join(parts, " "))
 }
 
 // crowdsecToAlert maps one CrowdSec notification-http payload item to an
