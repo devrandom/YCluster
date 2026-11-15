@@ -552,6 +552,7 @@ class KarmaLink(unittest.TestCase):
         )
         self.assertNotIn("Karma:", formatted["message"])
         self.assertEqual(formatted["click"], "")
+        self.assertEqual(formatted["actions"], "")
 
     def test_group_labels_build_the_filter(self):
         url = wh.karma_alert_url(
@@ -573,16 +574,18 @@ class KarmaLink(unittest.TestCase):
         url = wh.karma_alert_url({"alertname": "Drive Warnings"})
         self.assertIn('q=alertname%3D%22Drive+Warnings%22', url)
 
-    def test_message_and_click_action_carry_the_link(self):
+    def test_link_is_a_button_not_a_line_of_body_text(self):
         alert = {
             "status": "firing",
             "labels": {"alertname": "IDSAlert", "host": "lab1", "severity": "warning"},
             "annotations": {"summary": "s", "description": "d"},
         }
         formatted = wh.format_alert_message(alert, {"alertname": "IDSAlert", "host": "lab1"})
-        self.assertIn("Karma: " + self.KARMA, formatted["message"])
+        self.assertNotIn("Karma:", formatted["message"])
+        self.assertNotIn(self.KARMA, formatted["message"])
         self.assertTrue(formatted["click"].startswith(self.KARMA + "/?"))
         self.assertIn("alertname%3DIDSAlert", formatted["click"])
+        self.assertEqual(formatted["actions"], "view, Karma, " + formatted["click"])
 
     def test_send_sets_the_click_header(self):
         with mock.patch.object(wh.requests, "post") as post:
@@ -590,8 +593,21 @@ class KarmaLink(unittest.TestCase):
             wh.send_to_ntfy("t", "m", topic="main-topic", click=self.KARMA + "?q=x")
         self.assertEqual(post.call_args.kwargs["headers"]["Click"], self.KARMA + "?q=x")
 
+    def test_send_sets_the_action_header(self):
+        with mock.patch.object(wh.requests, "post") as post:
+            post.return_value.status_code = 200
+            wh.send_to_ntfy(
+                "t", "m", topic="main-topic",
+                actions="view, Karma, " + self.KARMA + "?q=x",
+            )
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["Actions"],
+            "view, Karma, " + self.KARMA + "?q=x",
+        )
+
     def test_no_click_header_without_a_link(self):
         with mock.patch.object(wh.requests, "post") as post:
             post.return_value.status_code = 200
             wh.send_to_ntfy("t", "m", topic="main-topic")
         self.assertNotIn("Click", post.call_args.kwargs["headers"])
+        self.assertNotIn("Actions", post.call_args.kwargs["headers"])

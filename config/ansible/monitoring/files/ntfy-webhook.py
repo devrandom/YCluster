@@ -481,6 +481,18 @@ def karma_alert_url(labels, group_labels=None):
     return f"{base}{separator}{urlencode([('q', m) for m in matchers])}"
 
 
+def karma_action(url):
+    """Render the dashboard link as an ntfy action button, or "" when unset.
+
+    The button keeps the URL out of the message body, which otherwise spends
+    a whole line on a query string. ntfy renders ``view`` actions on every
+    client (Android, iOS, web), unlike Markdown, which iOS does not render.
+    """
+    if not url:
+        return ""
+    return f"view, Karma, {url}"
+
+
 def format_alert_message(alert, group_labels=None):
     """Format a single alert for ntfy."""
     status = alert.get('status', 'unknown')
@@ -522,11 +534,10 @@ def format_alert_message(alert, group_labels=None):
             blackbox_info = "\nBlackbox nodes: (query failed or no data)"
 
     karma_link = karma_alert_url(labels, group_labels)
-    karma_info = f"\nKarma: {karma_link}" if karma_link else ""
-    
+
     if status == 'resolved':
         title = f"[RESOLVED] {summary}"
-        message = f"Alert resolved at {timestamp}\n\n{description}{blackbox_info}{karma_info}"
+        message = f"Alert resolved at {timestamp}\n\n{description}{blackbox_info}"
         priority = "default"
         tags = "white_check_mark"
     else:
@@ -552,9 +563,7 @@ def format_alert_message(alert, group_labels=None):
         message_parts.append(description)
         if blackbox_info:
             message_parts.append(blackbox_info)
-        if karma_info:
-            message_parts.append(karma_info)
-        
+
         message = "\n".join(message_parts)
     
     return {
@@ -563,10 +572,14 @@ def format_alert_message(alert, group_labels=None):
         'priority': priority,
         'tags': tags,
         # Tapping the notification opens the same group in the dashboard.
-        'click': karma_link
+        'click': karma_link,
+        # Same link as a button, so it is still reachable when the tap
+        # action is not obvious (and without printing the URL in the body).
+        'actions': karma_action(karma_link),
     }
 
-def send_to_ntfy(title, message, priority="default", tags="", topic="", click=""):
+def send_to_ntfy(title, message, priority="default", tags="", topic="", click="",
+                 actions=""):
     """Send a notification to ntfy. Returns True on success, 'rate_limited'
     when ntfy.sh returned HTTP 429, or False on any other failure."""
     topic = topic or ntfy_topic("main")
@@ -581,6 +594,8 @@ def send_to_ntfy(title, message, priority="default", tags="", topic="", click=""
     }
     if click:
         headers['Click'] = click
+    if actions:
+        headers['Actions'] = actions
     url = f"{NTFY_SERVER}/{topic}"
 
     try:
@@ -702,6 +717,7 @@ def _send_alert(alert, counts, group_labels=None):
             formatted['tags'],
             topic=alert_topic(alert),
             click=formatted['click'],
+            actions=formatted['actions'],
         )
         if result is True:
             counts['sent'] += 1

@@ -259,7 +259,8 @@ asymmetry visible; it does not fix the delivery gap.
 - A notification's deep link opens the alert's group: Karma reads repeated
   `?q=` matchers, and `ntfy-webhook` builds them from the Alertmanager
   `groupLabels` (`alertname`, `rule_id`, `host`, …), falling back to the
-  alert's own labels. The same URL is the notification's tap action.
+  alert's own labels. The same URL is the notification's tap action and a
+  `Karma` action button, so it is never printed in the message body.
 
 Verified at rollout: the public vhost returns `302` to the Authentik outpost
 for browser navigations and `401` for fetch-style requests; the internal vhost

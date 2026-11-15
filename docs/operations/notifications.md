@@ -73,8 +73,11 @@ The link is a Karma filter over the labels the alert is grouped by —
 `?q=alertname=IDSAlert&q=host=<host>&q=rule_id=privilege-raises` — using the
 webhook payload's `groupLabels` and falling back to the alert's own labels.
 Karma takes one matcher per `q`, so the labels are ordered most-identifying
-first. It appears as a `Karma:` line in the message body and also as the
-notification's tap action (`Click` header).
+first. The URL is not printed in the body: the whole notification is the tap
+action (`Click` header), and the same URL is a `Karma` button (`Actions`
+header, a `view` action). Action buttons render on Android, iOS and the web
+app; Markdown would not work as a substitute because the iOS client does not
+render it.
 
 Karma is behind Authentik. A browser with an active session lands on the
 filtered view directly. On a cold session the dashboard vhost redirects to
