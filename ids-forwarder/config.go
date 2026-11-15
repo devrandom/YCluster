@@ -38,6 +38,7 @@ type config struct {
 	sigmaSocket      string
 	sigmaDetections  string
 	sigmaCursorFile  string
+	namespaceMap     string
 	postTimeout      time.Duration
 	pollInterval     time.Duration
 	logf             func(format string, args ...any)

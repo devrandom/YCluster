@@ -63,6 +63,8 @@ func main() {
 		cfg.sigmaDetections, "RSigma detection sink to tail (empty disables)")
 	flag.StringVar(&cfg.sigmaCursorFile, "sigma-cursor",
 		cfg.sigmaCursorFile, "durable byte cursor for the RSigma detection sink (default: <detections>.cursor)")
+	flag.StringVar(&cfg.namespaceMap, "namespace-map",
+		cfg.namespaceMap, "pid-namespace inum to cgroup map published by the root-side enumerator (empty disables)")
 	flag.DurationVar(&cfg.postTimeout, "post-timeout",
 		cfg.postTimeout, "per-POST timeout to Alertmanager")
 	flag.DurationVar(&cfg.pollInterval, "poll-interval",

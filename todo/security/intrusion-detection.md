@@ -349,6 +349,20 @@ each was taken or dropped.
 - Not trusted: `process.in_init_tree`. It reads `false` on a systemd-spawned
   bash on a managed node, so it must not replace the boot grace until its
   semantics are understood.
+- Done: pid-namespace to container map. A container's short-lived children
+  (`sh -c "ps …"` in a session inside a tenant instance) were arriving as
+  `unverified` because the cgroup that names the container is gone with the
+  process, and the namespace snapshot names an inum, not a workload. The
+  kernel offers no inum-to-owner interface: the only source is live
+  processes, and `/proc/<pid>/ns/pid` needs ptrace-level access the forwarder
+  does not have. `ids-namespace-enumerator` therefore runs as root every 30
+  seconds, pairs each non-host pid namespace with the cgroup of a process
+  living in it, and publishes the table where the forwarder polls it; the
+  forwarder keeps the parsing rules and reports `namespace+nsmap`. A cache
+  learned only from the event stream was rejected as brittle, and the
+  parent-cgroup fallback as insufficient: the recorded events' immediate
+  parent is the session process, but a two-level one-shot chain would still
+  miss.
 
 ## Alert text
 

@@ -69,6 +69,7 @@ func newForwarder(cfg config) (*forwarder, error) {
 		cfg.logf = log.Printf
 	}
 	destinationKey = loadDestinationKey(cfg.destKeyFile, cfg.logf)
+	namespaceMapPath = cfg.namespaceMap
 	captureProcessSnapshot(cfg.logf)
 	f := &forwarder{
 		cfg:    cfg,

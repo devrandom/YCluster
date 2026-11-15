@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Publish pid-namespace inum -> cgroup for the IDS forwarder.
+
+The forwarder runs as an unprivileged user and can read /proc/<pid>/cgroup
+but not /proc/<pid>/ns/pid, whose symlink needs ptrace-level access to
+follow. That leaves it unable to say which container a short-lived process
+belonged to once the process has exited, so every such event degrades to the
+"unverified" layer.
+
+This job runs as root, pairs the two files for every live process, and writes
+{inum: cgroup text} where the forwarder polls it. It is deliberately dumb:
+naming the container from the cgroup text stays in the forwarder, so the two
+sides cannot disagree about what a runtime looks like.
+"""
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+
+
+def read_pid_namespace_inum(path):
+    """Return the inum of a /proc/<pid>/ns/pid symlink, or 0."""
+    try:
+        target = os.readlink(path)
+    except OSError:
+        return 0
+    # "pid:[4026533204]"
+    if not target.startswith("pid:[") or not target.endswith("]"):
+        return 0
+    try:
+        return int(target[5:-1])
+    except ValueError:
+        return 0
+
+
+def collect(proc_root, host_inum):
+    """Map each non-host pid namespace to the cgroup text of a process in it.
+
+    One process per namespace is enough: the cgroup file names the runtime
+    that owns the namespace, and every process in it carries the same path.
+    """
+    mapping = {}
+    try:
+        entries = os.listdir(proc_root)
+    except OSError as err:
+        print(f"ids-namespace-enumerator: read {proc_root}: {err}", file=sys.stderr)
+        return mapping
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        base = os.path.join(proc_root, entry)
+        inum = read_pid_namespace_inum(os.path.join(base, "ns", "pid"))
+        if inum == 0 or inum == host_inum or inum in mapping:
+            continue
+        try:
+            with open(os.path.join(base, "cgroup"), encoding="utf-8") as fh:
+                text = fh.read().strip()
+        except OSError:
+            continue
+        if text:
+            mapping[inum] = text
+    return mapping
+
+
+def write_map(path, mapping):
+    """Replace the published map atomically so a reader never sees half of it."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory or ".", prefix=".namespaces-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({str(k): v for k, v in mapping.items()}, fh, sort_keys=True)
+            fh.write("\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--proc-root", default="/proc")
+    parser.add_argument("--output", default="/var/lib/ids-forwarder/namespaces.json")
+    args = parser.parse_args()
+
+    host_inum = read_pid_namespace_inum(os.path.join(args.proc_root, "self", "ns", "pid"))
+    mapping = collect(args.proc_root, host_inum)
+    write_map(args.output, mapping)
+    print(f"ids-namespace-enumerator: published {len(mapping)} namespaces", flush=True)
+
+
+if __name__ == "__main__":
+    main()

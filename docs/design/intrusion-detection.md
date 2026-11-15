@@ -795,6 +795,18 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   `/proc` has forgotten them, which is what the Sigma path needs: its
   normalized event omits the snapshot on purpose, and a detection quoted back
   by the rule engine resolves its layer and invoker from the cache by exec id.
+- A root-side enumerator (`ids-namespace-enumerator`, a 30-second timer)
+  publishes pid-namespace inum to cgroup text, because the kernel exposes a
+  namespace's owner only through the processes living in it: the forwarder can
+  read `/proc/<pid>/cgroup` as an unprivileged user but not
+  `/proc/<pid>/ns/pid`, whose symlink needs ptrace-level access. The forwarder
+  parses the published table with the same rules as a live cgroup, so a
+  container whose short-lived child has already exited still resolves to the
+  container name instead of degrading to `unverified`. A namespace that never
+  had a runtime cgroup — a user's `unshare` sandbox — is never published and
+  keeps the unverified verdict. The verdict is reported as `namespace+nsmap`,
+  a map older than five minutes reads as empty, and an absent file simply
+  disables the lookup.
 - The escalation verdict reads the event too: the parent's uid, then the
   parent exec from the exec-id cache, then the audit uid, then the login
   session. Only the last needs `/proc`, and it is the last because an

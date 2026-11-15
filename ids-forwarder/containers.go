@@ -62,7 +62,7 @@ func resolveProcessLayer(pid uint32, startTime string, uid uint32, ns *eventName
 			// process can write host paths, so it has host blast radius.
 			return processLayer{Resolved: true, Source: "namespace"}
 		}
-		r := containerizedLayer(pid, startTime, uid)
+		r := containerizedLayer(pid, startTime, uid, ns)
 		// Keep the refinement that actually answered: namespace says
 		// "container", the cgroup or the uid says which kind.
 		r.Source = "namespace+" + r.Source
@@ -91,7 +91,7 @@ func cgroupLayer(pid uint32, startTime string) processLayer {
 // containerizedLayer decides what kind of container a namespace says the
 // process is in, using the cgroup for the name and to reject a user-created
 // sandbox, and the host-visible uid when the cgroup is gone.
-func containerizedLayer(pid uint32, startTime string, uid uint32) processLayer {
+func containerizedLayer(pid uint32, startTime string, uid uint32, ns *eventNamespaces) processLayer {
 	if r := cgroupLayer(pid, startTime); r.Resolved {
 		if r.Layer == "container" {
 			return r
@@ -100,6 +100,18 @@ func containerizedLayer(pid uint32, startTime string, uid uint32) processLayer {
 		// create with unshare. Do not let it inherit host or container
 		// suppression.
 		return processLayer{Layer: "unverified", Resolved: true, Source: "cgroup"}
+	}
+	// The cgroup read failed because the process was already gone. The pid
+	// namespace outlives it for the container's lifetime, so a namespace the
+	// publisher saw inside a runtime still names the container it belongs to.
+	// Only a namespace with a runtime cgroup is published, so a bare
+	// unshare sandbox keeps the unverified verdict below.
+	if ns != nil && ns.Pid.Inum != 0 {
+		if cgroup, ok := namespaceMapLookup(ns.Pid.Inum); ok {
+			if name, inContainer := containerNameFromCgroup(cgroup); inContainer && !userScopeRuntime(cgroup) {
+				return processLayer{Name: name, Layer: "container", Resolved: true, Source: "nsmap"}
+			}
+		}
 	}
 	if uid >= incusIDMapBase {
 		return processLayer{Layer: "container", Resolved: true, Source: "uid"}

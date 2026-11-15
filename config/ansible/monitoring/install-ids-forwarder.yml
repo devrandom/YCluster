@@ -51,6 +51,12 @@
     ids_forwarder_sigma_socket: /run/rsigma/events.sock
     ids_forwarder_sigma_detections: /var/log/rsigma/detections.ndjson
     ids_forwarder_sigma_cursor: "{{ ids_forwarder_state_dir }}/sigma.cursor.json"
+    # The forwarder cannot read /proc/<pid>/ns/pid (ptrace-level access), so a
+    # root-side timer pairs each pid namespace with the cgroup that names its
+    # container and publishes the table here. Short-lived processes that have
+    # already exited are then attributed to their container instead of
+    # degrading to the unverified layer.
+    ids_forwarder_namespace_map: "{{ ids_forwarder_state_dir }}/namespaces.json"
     # Optional per-host circuit breaker. The cluster-wide budget (five
     # notifications per severity per hour) is enforced by ntfy-webhook using
     # shared etcd state; a per-host cap here would multiply that budget by
@@ -145,6 +151,63 @@
         enabled: yes
         state: started
         daemon_reload: yes
+
+    - name: Install pid-namespace enumerator
+      copy:
+        src: files/ids-namespace-enumerator
+        dest: /usr/local/lib/cluster/ids-namespace-enumerator
+        owner: root
+        group: root
+        mode: '0755'
+      notify: reload systemd ids
+
+    - name: Install pid-namespace enumerator service
+      copy:
+        dest: /etc/systemd/system/ids-namespace-enumerator.service
+        content: |
+          [Unit]
+          Description=Publish the pid-namespace to container map for the IDS forwarder
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/python3 /usr/local/lib/cluster/ids-namespace-enumerator --output {{ ids_forwarder_namespace_map }}
+          User=root
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          NoNewPrivileges=true
+          ReadWritePaths={{ ids_forwarder_state_dir }}
+        mode: '0644'
+      notify: reload systemd ids
+
+    - name: Install pid-namespace enumerator timer
+      copy:
+        dest: /etc/systemd/system/ids-namespace-enumerator.timer
+        content: |
+          [Unit]
+          Description=Refresh the IDS pid-namespace map
+
+          [Timer]
+          OnBootSec=30s
+          OnUnitActiveSec=30s
+          AccuracySec=5s
+
+          [Install]
+          WantedBy=timers.target
+        mode: '0644'
+      notify: reload systemd ids
+
+    - name: Enable and start pid-namespace enumerator timer
+      systemd:
+        name: ids-namespace-enumerator.timer
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Publish the pid-namespace map immediately
+      systemd:
+        name: ids-namespace-enumerator.service
+        state: started
 
     # Textfile collector: the IDS metrics endpoints are loopback-only, and
     # core Prometheus already scrapes node_exporter on every managed node.
