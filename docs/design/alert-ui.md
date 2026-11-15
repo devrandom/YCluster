@@ -132,7 +132,7 @@ frontend, one static binary, Apache-2.0.
   reachable from Karma; otherwise disable `history`.
 - Authentication by reverse-proxy header: the configured header must be
   present or the request is 403, and the captured value becomes the silence
-  author. This maps directly onto nginx's `X-Authentik-UID`.
+  author. This maps directly onto nginx's `X-Authentik-Username`.
 - `/health` and `/metrics` are exempt from header auth, so health checks and
   Prometheus scraping work without a login.
 - `listen.prefix` supports `/karma/`, so it can sit behind the existing
@@ -194,7 +194,7 @@ zero-new-component stopgap.
   never pull and rely on the pinned SHA.
 - `config/ansible/monitoring/templates/karma.yaml.j2`: one upstream per
   Alertmanager in the `core` group, shared `cluster` name, `proxy: true`, header auth on
-  `X-Authentik-UID`, `listen.prefix: /karma/`, history off.
+  `X-Authentik-Username`, `listen.prefix: /karma/`, history off.
 - `config/ansible/monitoring/install-karma.yml`: `docker_container` on
   `core`, config mounted read-only, published as `127.0.0.1:{{ karma_port }}`,
   `cap_drop: ALL`, no-new-privileges, health probe.
@@ -203,7 +203,7 @@ zero-new-component stopgap.
   "YCluster" link back to `/` only when `ycluster-admins` is present.
 - `config/ansible/admin/files/admin-api-karma-proxy.conf` plus `location
   /karma/` blocks in `admin-api-locations.conf` (internal, identity `internal`)
-  and `admin-api-authed-locations.conf` (public, Authentik UID as the silence
+  and `admin-api-authed-locations.conf` (public, Authentik username as the silence
   author). The snippet is installed by `admin/setup-web-services.yml`.
 - `admin/static/nav.js` and `admin/files/index.html` link `/karma/` as
   "Alerts"; `group_vars/all/main.yml` owns `karma_port`; `prometheus-local`
@@ -221,8 +221,18 @@ cd /etc/ansible
 
 Karma has no OIDC flow of its own: SSO is the Authentik forward-auth outpost,
 which nginx already fronts for `/grafana/` and `/admin/`, with the resolved
-UID passed as Karma's header identity and `X-Authentik-Groups` used for the
-admin-only home link.
+username passed as Karma's header identity and `X-Authentik-Groups` used for
+the admin-only home link.
+
+The username rather than the UID is the identity string because Karma has a
+single field: it displays the header value and stamps it as the silence author.
+The UID is an opaque sha256 of the numeric user id and install id, so the UI
+showed a 64-hex string; `X-Authentik-Email` would show the email but is
+optional metadata (OAuth-sourced accounts can lack it) and Karma answers 403
+when its configured header is missing. The username is always present and the
+invite flow creates accounts with `username == email`, so it renders the same
+email for cluster-created accounts. Silences created before the switch keep
+the UID in `createdBy`; new ones carry the username.
 
 ### What the first merged view showed
 

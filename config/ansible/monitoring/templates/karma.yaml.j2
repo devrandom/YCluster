@@ -23,7 +23,12 @@ alertmanager:
 
 authentication:
   header:
-    name: X-Authentik-UID
+    # Karma has one identity string: it is both the displayed user and the
+    # silence author. Use the Authentik username (always present, and equal
+    # to the email for invitation-created accounts) instead of the UID,
+    # whose sha256 value is unreadable in the UI, or the email, which
+    # OAuth-sourced accounts can lack.
+    name: X-Authentik-Username
     value_re: ^(.+)$
     # Authentik sends the groups pipe-separated. custom.js uses them to show
     # the YCluster home link to admins only.

@@ -1,7 +1,7 @@
 // Adds a "YCluster" link back to the admin home for cluster admins.
 //
 // Karma has no OIDC flow of its own: nginx's Authentik forward-auth adds
-// X-Authentik-UID (identity) and X-Authentik-Groups (authorisation) to every
+// X-Authentik-Username (identity) and X-Authentik-Groups (authorisation) to every
 // request, and Karma exposes the parsed groups in /alerts.json. Fetch that
 // once and only render the link when ycluster-admins is present.
 (function () {
