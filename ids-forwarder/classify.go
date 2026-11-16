@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -14,6 +15,39 @@ const (
 	deliverySilent   = "silent"
 	deliveryPage     = "page"
 )
+
+// publicDestination reports whether a destination address is an ordinary
+// internet address: not loopback, not link-local, not a private range. It is
+// the address half of the tenant-egress rule, for the paths where only an
+// address string survives, as in a Sigma detection.
+func publicDestination(raw string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return !addr.IsLoopback() && !addr.IsUnspecified() && !addr.IsLinkLocalUnicast() && !addr.IsPrivate()
+}
+
+// containerEgress reports whether a detection describes a container's own
+// connection to an ordinary internet address, which is the traffic a live
+// connect already drops as tenant_egress.
+func containerEgress(destination, layer string) bool {
+	if layer != "container" && layer != "unverified" {
+		return false
+	}
+	return publicDestination(destination)
+}
+
+// sigmaContainerClass separates a rule hit on the container's own internet
+// connection, which is the tenant's traffic and never pages, from one that
+// reaches into the cluster, which keeps the container page.
+func sigmaContainerClass(a alert) string {
+	if a.Labels["egress"] == "public" {
+		return "tenant_egress"
+	}
+	return "sigma_nonroot"
+}
 
 // pagingClasses are the coverage classes allowed to page today. Everything
 // else is delivered silent and counted as a page candidate until a shadow
@@ -40,10 +74,7 @@ func classifyAlert(a alert) (class string, evidence bool) {
 	if a.Labels["source"] == sourceSigma {
 		switch a.Labels["layer"] {
 		case "container", "unverified":
-			// The curated rules are the only path that sees inside a
-			// container, and the tenant boundary is in scope whatever the
-			// guest uid.
-			return "sigma_nonroot", false
+			return sigmaContainerClass(a), false
 		}
 		if isRootIdentity(a) {
 			return "root_sigma", true

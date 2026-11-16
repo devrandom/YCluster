@@ -104,6 +104,18 @@ func TestClassifyAlert(t *testing.T) {
 			class:  "sigma_nonroot",
 		},
 		{
+			// A rule that fires on the container's own internet connection is
+			// the same event the connect path suppresses as tenant egress.
+			name:   "container sigma hit on public egress is not paged",
+			labels: map[string]string{"source": sourceSigma, "rule_id": "rule", "layer": "container", "kind": "sigma", "uid": "1000", "egress": "public"},
+			class:  "tenant_egress",
+		},
+		{
+			name:   "container sigma hit on a cluster destination still pages",
+			labels: map[string]string{"source": sourceSigma, "rule_id": "rule", "layer": "container", "kind": "sigma", "uid": "1000"},
+			class:  "sigma_nonroot",
+		},
+		{
 			name:   "missing uid is not proof of root",
 			labels: map[string]string{"rule_id": "process_exec", "layer": "host", "kind": "exec"},
 			class:  "exec_nonroot",

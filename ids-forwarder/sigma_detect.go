@@ -166,6 +166,12 @@ func sigmaDetectionToAlert(line string, cfg config) (alert, bool) {
 	a := newAlert(cfg, sourceSigma, sigmaSeverity(det.Level), layer, rule,
 		redactIPs(strings.Join(parts, " ")))
 	a.prov.layer = layerSource
+	if containerEgress(ev.DestinationIp, layer) {
+		// The same call the live-connect path makes: a container reaching an
+		// ordinary internet address is the tenant's own traffic, whatever the
+		// rule that noticed it.
+		a.Labels["egress"] = "public"
+	}
 	// The visible summary redacts addresses; keep the unredacted event as the
 	// dedup identity so callbacks to different hosts do not collapse.
 	a.dedupIdentity = identityHash(det.RuleID + "|" + strings.Join(parts, " "))

@@ -150,6 +150,7 @@ processes.
 | Sigma, level medium or above | host, `User=root` | evidence (`root_sigma`) |
 | Sigma, level medium or above | host, non-root `User` | coverage (`sigma_nonroot`) |
 | Sigma, any level | container | coverage (`sigma_nonroot`) |
+| Sigma, any level, public destination | container, unverified | coverage (`tenant_egress`), never pages |
 | Sigma, level low or informational | host, non-root `User` | coverage, never pages |
 | `container-api`, `container-exec` | host, root | audit (exempt) |
 | `vm-bridge-*` blocks | network | audit (exempt) |
@@ -160,6 +161,11 @@ module and privilege, and appears once rather than repeated against each rule.
 Connects stay `lateral_container` and Sigma stays `sigma_nonroot` whatever the
 guest uid: the network path is a tenant-boundary signal either way, and the
 curated Sigma set is the only thing that sees inside a container.
+The one exception is a rule that fires on a container's own connection to an
+ordinary internet address: the live connect for the same traffic is already
+suppressed as `tenant_egress`, because reaching the internet is what tenant
+workloads do, so the rule hit is recorded under that class and does not page.
+A private or loopback destination is a cluster path and keeps `sigma_nonroot`.
 
 The exemption for `container-api` and `container-exec` is deliberate: they are
 root-admin activity by definition, but they are the only record of who entered
@@ -232,6 +238,7 @@ are `level: low` and stay silent.
 | `exec_nonroot` | host shells and allowlisted execs by non-root identities | silent, measure |
 | `lateral_nonroot` | private cluster connects from a non-root host process | silent, measure |
 | `lateral_container` | container or unverified process connecting to a cluster address | silent, measure |
+| `tenant_egress` | a container Sigma hit whose event is the container's own connection to an internet address | silent, measure |
 | `crowdsec` | sshd and nginx scenarios | silent, measure |
 
 A class is enabled when the shadow counter shows at most one page per day

