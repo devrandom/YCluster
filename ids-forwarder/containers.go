@@ -78,14 +78,23 @@ func cgroupLayer(pid uint32, startTime string) processLayer {
 	if !ok {
 		return processLayer{}
 	}
+	r := cgroupVerdict(cgroup)
+	r.Source = "cgroup"
+	return r
+}
+
+// cgroupVerdict decides what kind of container a cgroup text belongs to. The
+// caller fills in Source, because the same text arrives either from a live
+// /proc or from the published namespace map.
+func cgroupVerdict(cgroup string) processLayer {
 	name, inContainer := containerNameFromCgroup(cgroup)
 	if !inContainer {
-		return processLayer{Resolved: true, Source: "cgroup"}
+		return processLayer{Resolved: true}
 	}
 	if userScopeRuntime(cgroup) {
-		return processLayer{Layer: "unverified", Resolved: true, Source: "cgroup"}
+		return processLayer{Layer: "unverified", Resolved: true}
 	}
-	return processLayer{Name: name, Layer: "container", Resolved: true, Source: "cgroup"}
+	return processLayer{Name: name, Layer: "container", Resolved: true}
 }
 
 // containerizedLayer decides what kind of container a namespace says the
@@ -104,13 +113,12 @@ func containerizedLayer(pid uint32, startTime string, uid uint32, ns *eventNames
 	// The cgroup read failed because the process was already gone. The pid
 	// namespace outlives it for the container's lifetime, so a namespace the
 	// publisher saw inside a runtime still names the container it belongs to.
-	// Only a namespace with a runtime cgroup is published, so a bare
-	// unshare sandbox keeps the unverified verdict below.
+	// The publisher filters nothing: the same containerNameFromCgroup and
+	// userScopeRuntime rules run here, so a bare unshare sandbox keeps the
+	// unverified verdict instead of inheriting container suppression.
 	if ns != nil && ns.Pid.Inum != 0 {
-		if cgroup, ok := namespaceMapLookup(ns.Pid.Inum); ok {
-			if name, inContainer := containerNameFromCgroup(cgroup); inContainer && !userScopeRuntime(cgroup) {
-				return processLayer{Name: name, Layer: "container", Resolved: true, Source: "nsmap"}
-			}
+		if r, ok := namespaceMapVerdict(ns.Pid.Inum); ok {
+			return r
 		}
 	}
 	if uid >= incusIDMapBase {

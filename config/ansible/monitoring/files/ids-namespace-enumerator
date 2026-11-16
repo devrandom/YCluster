@@ -8,22 +8,44 @@ belonged to once the process has exited, so every such event degrades to the
 "unverified" layer.
 
 This job runs as root, pairs the two files for every live process, and writes
-{inum: cgroup text} where the forwarder polls it. It is deliberately dumb:
-naming the container from the cgroup text stays in the forwarder, so the two
-sides cannot disagree about what a runtime looks like.
+{inum: [cgroup text, ...]} where the forwarder polls it. It is deliberately
+dumb: naming the container from the cgroup texts stays in the forwarder, so
+the two sides cannot disagree about what a runtime looks like.
 """
 
 import argparse
 import json
 import os
-import sys
 import tempfile
+
+# One namespace legitimately carries one cgroup per service the container
+# runs, so publishing a single text would be an arbitrary pick and publishing
+# all of them would let a tenant inflate this file at will. The forwarder only
+# needs enough to see whether a second runtime owns the namespace, so the
+# texts are sorted, truncated, and budgeted: a tenant chooses both the number
+# of pid namespaces it creates and how long its cgroup paths are. The budget
+# is in encoded bytes, because that is what the reader limits, and encoding is
+# not the text's length: json escapes a non-ASCII character to six bytes.
+MAX_TEXTS_PER_NAMESPACE = 64
+MAX_TEXT_BYTES = 512
+MAX_MAP_BYTES = 1 << 20
 
 
 def read_pid_namespace_inum(path):
-    """Return the inum of a /proc/<pid>/ns/pid symlink, or 0."""
+    """Return the inum of a /proc/<pid>/ns/pid symlink, or 0 if there is none.
+
+    A process that exited between the directory read and this one is expected
+    and answers 0. A permission failure is not: it means the job has lost the
+    ptrace access it exists for, and answering 0 for every process would
+    publish the empty map that is indistinguishable from a host without
+    containers.
+    """
     try:
         target = os.readlink(path)
+    except PermissionError:
+        # The unit asks for CAP_SYS_PTRACE for exactly this read; failing it
+        # must not be mistaken for "this process had no namespace".
+        raise
     except OSError:
         return 0
     # "pid:[4026533204]"
@@ -36,40 +58,91 @@ def read_pid_namespace_inum(path):
 
 
 def collect(proc_root, host_inum):
-    """Map each non-host pid namespace to the cgroup text of a process in it.
+    """Map each non-host pid namespace to the cgroup texts seen inside it.
 
-    One process per namespace is enough: the cgroup file names the runtime
-    that owns the namespace, and every process in it carries the same path.
+    One container spans many cgroups, and one namespace can in principle be
+    shared by two containers, so the caller gets every distinct text rather
+    than whichever process happened to be read first. Which of them names a
+    runtime, and whether they agree, is decided by the forwarder.
+
+    A procfs that cannot be read raises: the caller must not publish an empty
+    map for a host that simply could not be enumerated, because that looks
+    exactly like a host with no containers and would leave the forwarder
+    degrading to the uid heuristic without anything reporting it.
     """
     mapping = {}
-    try:
-        entries = os.listdir(proc_root)
-    except OSError as err:
-        print(f"ids-namespace-enumerator: read {proc_root}: {err}", file=sys.stderr)
-        return mapping
-    for entry in entries:
+    seen = denied = unreadable = 0
+    for entry in os.listdir(proc_root):
         if not entry.isdigit():
             continue
+        seen += 1
         base = os.path.join(proc_root, entry)
-        inum = read_pid_namespace_inum(os.path.join(base, "ns", "pid"))
-        if inum == 0 or inum == host_inum or inum in mapping:
+        try:
+            inum = read_pid_namespace_inum(os.path.join(base, "ns", "pid"))
+        except PermissionError:
+            denied += 1
+            continue
+        if inum == 0 or inum == host_inum:
             continue
         try:
-            with open(os.path.join(base, "cgroup"), encoding="utf-8") as fh:
-                text = fh.read().strip()
+            with open(os.path.join(base, "cgroup"), "rb") as fh:
+                text = fh.read(MAX_TEXT_BYTES).decode("utf-8", "replace").strip()
         except OSError:
+            unreadable += 1
             continue
         if text:
-            mapping[inum] = text
-    return mapping
+            mapping.setdefault(inum, set()).add(text)
+
+    # A refusal is tolerable while something still gets published; an
+    # enumeration that reads nothing is not, because it is indistinguishable
+    # from a host without containers.
+    if seen and denied == seen:
+        raise RuntimeError(
+            f"ids-namespace-enumerator: all {seen} processes under {proc_root} refused their namespace")
+    if unreadable and not mapping:
+        raise RuntimeError(
+            f"ids-namespace-enumerator: {unreadable} cgroups unreadable under {proc_root}")
+    if denied or unreadable:
+        print(f"ids-namespace-enumerator: skipped {denied} refused namespaces, "
+              f"{unreadable} unreadable cgroups", flush=True)
+    return sampled(mapping)
+
+
+def sampled(mapping):
+    """Bound the encoded map to what the forwarder will read.
+
+    Sorted before it is truncated, so the sample does not depend on the order
+    the kernel happened to list processes in. A namespace with more than
+    MAX_TEXTS_PER_NAMESPACE texts of its own can still push a second owner's
+    text out of the sample; that is the cost of the bound.
+    """
+    published = {}
+    # Each entry is charged the length of its own one-entry object. Summed
+    # over the map that is exactly the encoded body: json puts one ", "
+    # between entries and two braces around them.
+    budget = MAX_MAP_BYTES - len("\n")
+    for inum in sorted(mapping):
+        texts = []
+        for text in sorted(mapping[inum])[:MAX_TEXTS_PER_NAMESPACE]:
+            if len(json.dumps({str(inum): texts + [text]})) > budget:
+                break
+            texts.append(text)
+        if not texts:
+            break
+        budget -= len(json.dumps({str(inum): texts}))
+        published[inum] = texts
+    return published
 
 
 def write_map(path, mapping):
-    """Replace the published map atomically so a reader never sees half of it."""
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory or ".", prefix=".namespaces-")
+    """Replace the published map atomically so a reader never sees half of it.
+
+    The directory is provisioned by the install playbook as a root-owned
+    ReadWritePaths entry. Creating it here would quietly defeat that, so a
+    missing directory is an error.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".namespaces-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({str(k): v for k, v in mapping.items()}, fh, sort_keys=True)
@@ -87,10 +160,14 @@ def write_map(path, mapping):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proc-root", default="/proc")
-    parser.add_argument("--output", default="/var/lib/ids-forwarder/namespaces.json")
+    parser.add_argument("--output", default="/var/lib/ids-namespace-map/namespaces.json")
     args = parser.parse_args()
 
     host_inum = read_pid_namespace_inum(os.path.join(args.proc_root, "self", "ns", "pid"))
+    if host_inum == 0:
+        raise SystemExit(
+            f"ids-namespace-enumerator: no pid namespace for {args.proc_root}/self/ns/pid, "
+            "so host processes cannot be told apart from container processes")
     mapping = collect(args.proc_root, host_inum)
     write_map(args.output, mapping)
     print(f"ids-namespace-enumerator: published {len(mapping)} namespaces", flush=True)

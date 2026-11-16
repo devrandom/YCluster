@@ -82,6 +82,27 @@ func TestLayerFromNamespaceSnapshot(t *testing.T) {
 	}
 }
 
+// The published map answers for a pid the kernel has forgotten. A live pid
+// is answered by its own cgroup, which is the only source that describes the
+// process the event named, so a published entry naming another container must
+// not override it.
+func TestLiveCgroupBeatsTheNamespaceMap(t *testing.T) {
+	root := t.TempDir()
+	withProcRoot(t, root)
+	const btime = int64(1700000000)
+	start := fakeProcEntry(t, root, 700, btime, 4242, []string{"/bin/sh"}, "")
+	withProcRoot(t, root)
+	writeCgroup(t, root, 700, "0::/lxc.payload.tenant/init.scope")
+	publishNamespaceMap(t, map[string][]string{
+		"4026532001": {"0::/lxc.payload.other/init.scope\n"},
+	})
+
+	got := resolveProcessLayer(700, start.Format(time.RFC3339Nano), 1000000, containerNS())
+	if !got.Resolved || got.Layer != "container" || got.Name != "tenant" || got.Source != "namespace+cgroup" {
+		t.Fatalf("resolveProcessLayer = %+v, want the container from the live cgroup", got)
+	}
+}
+
 func TestLayerWithoutNamespaceKeepsTheProcPath(t *testing.T) {
 	root := t.TempDir()
 	withProcRoot(t, root)

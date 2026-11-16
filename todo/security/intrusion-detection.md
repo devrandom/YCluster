@@ -356,13 +356,30 @@ each was taken or dropped.
   kernel offers no inum-to-owner interface: the only source is live
   processes, and `/proc/<pid>/ns/pid` needs ptrace-level access the forwarder
   does not have. `ids-namespace-enumerator` therefore runs as root every 30
-  seconds, pairs each non-host pid namespace with the cgroup of a process
+  seconds, pairs each non-host pid namespace with the cgroups of the processes
   living in it, and publishes the table where the forwarder polls it; the
-  forwarder keeps the parsing rules and reports `namespace+nsmap`. A cache
+  forwarder keeps the parsing rules, names a container only when every
+  published text agrees, and reports `namespace+nsmap`. A cache
   learned only from the event stream was rejected as brittle, and the
   parent-cgroup fallback as insufficient: the recorded events' immediate
   parent is the session process, but a two-level one-shot chain would still
   miss.
+  - Deferred: no `namespace_map_age_seconds` gauge, so a timer that silently
+    stops looks like a host without containers until the five-minute staleness
+    cutoff. The enumerator now fails its unit on an unreadable procfs or a lost
+    ptrace capability, which covers the loud cases, not a stopped timer.
+  - Deferred: a container running in the host pid namespace (`--pid=host`,
+    Incus `keep=pid`) is caught by its live cgroup but has no entry in this
+    table, so its dead processes still degrade to the uid heuristic. Publishing
+    the mount-namespace inum as well would close it.
+  - Deferred: the multi-owner policy stops at "refuse to name". The publisher
+    samples up to 64 sorted texts per namespace inside a 1 MiB encoded map, so
+    a namespace shared by more than two containers, or one container with more
+    texts than the sample, is a policy question rather than a bound to raise.
+  - Residual: a pid namespace whose inum is reused inside one refresh cycle
+    (container destroyed and another created within 30 seconds) can be named
+    after the previous owner. The forwarder's live-cgroup read guards pid
+    reuse; the published table has no equivalent guard.
 
 ## Alert text
 

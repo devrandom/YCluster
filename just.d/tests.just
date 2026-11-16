@@ -34,6 +34,7 @@ test:
     @.venv/bin/python -m unittest discover -s config/ansible/monitoring/tests -p 'test_apt_metrics_collector.py'
     @.venv/bin/python -m unittest discover -s config/ansible/monitoring/tests -p 'test_rsigma_suppressions.py'
     @.venv/bin/python -m unittest discover -s config/ansible/monitoring/files -p 'test_ids_bridge_consumer.py'
+    @.venv/bin/python -m unittest discover -s config/ansible/monitoring/files -p 'test_ids_namespace_enumerator.py'
 
 test-system-quick:
     @mkdir -p ./tmp

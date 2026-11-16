@@ -402,6 +402,7 @@ def py_coverage(
                 "test_crps_collector",
                 "test_hosting_balance_collector",
                 "test_ids_metrics_collector",
+                "test_ids_namespace_enumerator",
                 "test_monitoring_helpers",
                 "test_node_temps_collector",
                 "test_ntfy_webhook",

@@ -760,7 +760,8 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   exec-time process cache, so a verdict survives the process exiting. The
   order is: pod or Docker metadata on the event, then the namespace snapshot,
   then the live cgroup for a container name and to reject a user-created
-  sandbox, then the parent, then the uid heuristic. A foreign pid namespace
+  sandbox, then the published pid-namespace map for a name the exited process
+  took with it, then the parent, then the uid heuristic. A foreign pid namespace
   with the *host* mount namespace (`nsenter -t 1 -m`) is treated as host: the
   process can write host paths, so its file writes alert. `/proc` is read only
   to refine a verdict, never to make the host/container call, and the source
@@ -796,17 +797,52 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   normalized event omits the snapshot on purpose, and a detection quoted back
   by the rule engine resolves its layer and invoker from the cache by exec id.
 - A root-side enumerator (`ids-namespace-enumerator`, a 30-second timer)
-  publishes pid-namespace inum to cgroup text, because the kernel exposes a
-  namespace's owner only through the processes living in it: the forwarder can
-  read `/proc/<pid>/cgroup` as an unprivileged user but not
+  publishes pid-namespace inum to the cgroup texts its processes had, because
+  the kernel exposes a namespace's owner only through the processes living in
+  it: the forwarder can read `/proc/<pid>/cgroup` as an unprivileged user but not
   `/proc/<pid>/ns/pid`, whose symlink needs ptrace-level access. The forwarder
   parses the published table with the same rules as a live cgroup, so a
   container whose short-lived child has already exited still resolves to the
   container name instead of degrading to `unverified`. A namespace that never
-  had a runtime cgroup — a user's `unshare` sandbox — is never published and
-  keeps the unverified verdict. The verdict is reported as `namespace+nsmap`,
-  a map older than five minutes reads as empty, and an absent file simply
-  disables the lookup.
+  had a runtime cgroup — a user's `unshare` sandbox — is not a container: the
+  publisher filters nothing, and `containerNameFromCgroup` plus
+  `userScopeRuntime` run on every published text. A container runs a service
+  per cgroup, so one namespace carries many texts: the table holds a sorted,
+  truncated list of the ones its processes had, and the forwarder names the
+  container only when they all name the same one. A namespace shared by two
+  containers is never named, whichever process happened to be read first —
+  unless truncation dropped the second owner's texts, which is the residual
+  risk the bounds below accept. A live `/proc` cgroup still answers first; the
+  map only answers for a pid the
+  kernel has forgotten, and it answers with a name or not at all — a refusal
+  falls back to the uid heuristic, so an idmapped process is still a container
+  (unnamed) and a login uid is still unverified. The verdict is reported as
+  `namespace+nsmap`, and a refusal shows up as `namespace+uid`, which the
+  provenance counters are already read for.
+  Both sides bound the file, because a tenant chooses how many pid namespaces
+  it creates and how long its cgroup paths are: the publisher keeps 512 bytes
+  per text, 64 texts per namespace, and a 1 MiB encoded map, and the forwarder
+  applies the same 1 MiB ceiling before it parses anything. Encoding is what is
+  counted, not text length: json escapes a non-ASCII character to six bytes, so
+  a budget in characters would let a compliant publisher write a file the
+  reader refuses. Sorting happens before truncation, so the sample is
+  deterministic; a namespace with more than 64 texts of its own could still
+  push a second owner out of the sample, and that residual risk is accepted
+  over an unbounded file. A map older than five minutes reads as empty, an
+  absent file disables the lookup, and a map in the other format (an old
+  forwarder or an old publisher) fails to parse and reads as empty — the uid
+  fallback, logged once per distinct problem rather than every ten seconds. An
+  enumeration that fails leaves the previous map in place and fails the unit,
+  so the outage shows up as a failed
+  unit instead of as a map that quietly says "this host has no containers",
+  and the unit needs the ptrace capability it claims, so losing it for every
+  process fails the same way while a single refused process is skipped and
+  reported. `CAP_SYS_PTRACE` is number 19 and translates correctly on these
+  nodes (verified with `systemctl show -p CapabilityBoundingSet`), unlike the
+  `CAP_BPF`/`CAP_PERFMON` mis-translation recorded under Tetragon.
+  The unit runs as root with `CapabilityBoundingSet=CAP_SYS_PTRACE` — the one
+  capability the ptrace access check needs — and publishes into a root-owned
+  directory the forwarder only reads, so the two sides share no writable path.
 - The escalation verdict reads the event too: the parent's uid, then the
   parent exec from the exec-id cache, then the audit uid, then the login
   session. Only the last needs `/proc`, and it is the last because an

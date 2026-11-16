@@ -56,7 +56,14 @@
     # container and publishes the table here. Short-lived processes that have
     # already exited are then attributed to their container instead of
     # degrading to the unverified layer.
-    ids_forwarder_namespace_map: "{{ ids_forwarder_state_dir }}/namespaces.json"
+    # The map lives in its own root-owned directory, outside the forwarder's
+    # state directory: the unit replaces it atomically (a temp file next to
+    # it, then rename), so it needs a writable directory rather than one
+    # writable file, and it must not share a directory with the cursor and
+    # spool. The forwarder only reads the file, which the directory's 0755
+    # mode allows without granting it anything else.
+    ids_forwarder_namespace_map_dir: /var/lib/ids-namespace-map
+    ids_forwarder_namespace_map: "{{ ids_forwarder_namespace_map_dir }}/namespaces.json"
     # Optional per-host circuit breaker. The cluster-wide budget (five
     # notifications per severity per hour) is enforced by ntfy-webhook using
     # shared etcd state; a per-host cap here would multiply that budget by
@@ -108,6 +115,14 @@
         owner: ids-forwarder
         group: ids-forwarder
         mode: '0750'
+
+    - name: Ensure the pid-namespace map directory exists
+      file:
+        path: "{{ ids_forwarder_namespace_map_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
 
     - name: Check for binary on buildhost
       stat:
@@ -176,7 +191,15 @@
           ProtectHome=true
           PrivateTmp=true
           NoNewPrivileges=true
-          ReadWritePaths={{ ids_forwarder_state_dir }}
+          ProtectKernelTunables=yes
+          ProtectKernelModules=yes
+          ProtectControlGroups=yes
+          MemoryDenyWriteExecute=yes
+          # Following /proc/<pid>/ns/pid needs ptrace-level access to the
+          # processes inside a container; the job reads nothing else and
+          # writes only its own directory.
+          CapabilityBoundingSet=CAP_SYS_PTRACE
+          ReadWritePaths={{ ids_forwarder_namespace_map_dir }}
         mode: '0644'
       notify: reload systemd ids
 
@@ -208,6 +231,30 @@
       systemd:
         name: ids-namespace-enumerator.service
         state: started
+
+    # A unit that exits cleanly without publishing leaves the forwarder on the
+    # uid heuristic and nothing else notices, so the play checks the artefact.
+    - name: Check the pid-namespace map was published
+      stat:
+        path: "{{ ids_forwarder_namespace_map }}"
+      register: ids_namespace_map_file
+
+    - name: Fail when no pid-namespace map was published
+      assert:
+        that:
+          - ids_namespace_map_file.stat.exists
+          - ids_namespace_map_file.stat.size > 0
+        fail_msg: "{{ ids_forwarder_namespace_map }} was not published; check journalctl -u ids-namespace-enumerator"
+
+    # The old binary reads the old path, so the restart has to happen before
+    # the old map goes away. Handlers run at the end of the play otherwise.
+    - name: Apply the forwarder restart before retiring the old map
+      meta: flush_handlers
+
+    - name: Remove the map from its old location in the forwarder state directory
+      file:
+        path: "{{ ids_forwarder_state_dir }}/namespaces.json"
+        state: absent
 
     # Textfile collector: the IDS metrics endpoints are loopback-only, and
     # core Prometheus already scrapes node_exporter on every managed node.
