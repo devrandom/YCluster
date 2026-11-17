@@ -21,7 +21,8 @@
       loop:
         - "http_proxy=http://proxy.xc:3128"
         - "https_proxy=http://proxy.xc:3128"
-        - "no_proxy=localhost,127.0.0.1,10.0.0.0/16,10.10.10.0/24,.xc"
+        - "no_proxy={{ cluster_no_proxy }}"
+        - "NO_PROXY={{ cluster_no_proxy }}"
 
     - name: Configure apt proxy
       copy:
@@ -55,3 +56,30 @@
         - ansible_facts['os_family'] == "Debian"
         - snap_http_proxy.stdout != "http://proxy.xc:3128"
       become: yes
+
+# Hosts outside the storage group may still point at the proxy, left over from
+# an earlier run (one compute node does). They keep whatever proxy settings
+# they have; only the bypass list is normalized, so no managed host can send a
+# cluster name to the proxy.
+- name: Normalize the cluster proxy bypass on the remaining managed hosts
+  hosts: managed:!storage
+  become: yes
+  tasks:
+    - name: Read the host environment file
+      slurp:
+        src: /etc/environment
+      register: host_environment
+      failed_when: false
+
+    - name: Set the cluster bypass where a proxy is configured
+      lineinfile:
+        path: /etc/environment
+        line: "{{ item }}"
+        regexp: "^{{ item.split('=')[0] }}="
+        backup: yes
+      loop:
+        - "no_proxy={{ cluster_no_proxy }}"
+        - "NO_PROXY={{ cluster_no_proxy }}"
+      when:
+        - host_environment.content is defined
+        - "'http_proxy=' in (host_environment.content | b64decode)"

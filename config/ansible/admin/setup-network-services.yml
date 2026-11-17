@@ -22,6 +22,17 @@
           acl ycluster_net src 172.16.0.0/12
           acl ycluster_net src 192.168.0.0/16
           acl ycluster_net src 127.0.0.0/8
+
+          # The proxy is for the internet. A request for a cluster address is
+          # a lateral connection that the IDS cannot see end to end, so it is
+          # refused rather than relayed: clients carry the cluster ranges and
+          # `.xc` in NO_PROXY and go direct. A client with a stale bypass list
+          # fails loudly here instead of quietly laundering the connection.
+          acl cluster_dst dst 10.0.0.0/8
+          acl cluster_dst dst 172.16.0.0/12
+          acl cluster_dst dst 192.168.0.0/16
+          http_access deny cluster_dst
+
           http_access allow ycluster_net
 
           # Shutdown timeout (faster restarts)

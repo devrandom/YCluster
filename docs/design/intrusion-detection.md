@@ -1382,6 +1382,11 @@ Fixed in the same pass:
   now requires the gateway VIP and the healthcheck the storage VIP
   (`-service-addresses`, from inventory), so a dial to the same port on any
   other host stays visible: a port is a destination any node can offer.
+  The proxy itself no longer relays to the cluster at all: squid denies every
+  private destination, and hosts and guests carry the cluster ranges and `.xc`
+  in `NO_PROXY` so they go direct. A proxied request for a cluster name was a
+  lateral connection the sensor could only see as "client to the proxy", with
+  the forwarded hop invisible.
   Script exemptions are anchored to the program or the interpreter's script
   operand rather than a substring anywhere in argv, so a cluster-script path in
   a later argument no longer suppresses the connect. A payload named `squid`,
