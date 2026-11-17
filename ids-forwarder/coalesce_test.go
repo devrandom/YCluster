@@ -77,8 +77,8 @@ func TestRecurringContainerExecIsCoalesced(t *testing.T) {
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth after first event = %d, want 1", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates after first event = %d, want 1", got)
 	}
 
 	// Six minutes later: past the shared 5m dedup window, still inside the
@@ -96,8 +96,8 @@ func TestRecurringContainerExecIsCoalesced(t *testing.T) {
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth after repeat = %d, want 1 (coalesced)", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates after repeat = %d, want 1 (coalesced)", got)
 	}
 	if got := f.stats.coalesced.Load(); got != 1 {
 		t.Fatalf("coalesced = %d, want 1", got)
@@ -191,8 +191,8 @@ func TestContainerAPIUsageIsAlwaysRecorded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth = %d, want 1 alert for the pair", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates = %d, want 1 for the pair", got)
 	}
 	if got := f.stats.deduped.Load(); got != 1 {
 		t.Fatalf("deduped = %d, want 1", got)
@@ -236,16 +236,16 @@ func TestShellExecCoalescesButKeepsEveryRecord(t *testing.T) {
 	if err := f.handleLine(shellExecLine(t, `-c "echo one"`)); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth after first shell = %d, want 1", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates after first shell = %d, want 1", got)
 	}
 	// A different command from the same host must not page again, but it
 	// still has to appear in the detection history.
 	if err := f.handleLine(shellExecLine(t, `-c "echo two"`)); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth after second shell = %d, want 1 (same key)", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates after second shell = %d, want 1 (same key)", got)
 	}
 	if got := f.stats.deduped.Load(); got != 1 {
 		t.Fatalf("deduped = %d, want 1", got)
@@ -334,8 +334,8 @@ func TestShellExecRepeatWindowHoldsAnHour(t *testing.T) {
 	if err := f.handleLine(shellExecLine(t, `-c "echo one"`)); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth after first shell = %d, want 1", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates after first shell = %d, want 1", got)
 	}
 
 	// Six minutes later: past the shared window, inside the hourly one.
@@ -343,8 +343,8 @@ func TestShellExecRepeatWindowHoldsAnHour(t *testing.T) {
 	if err := f.handleLine(shellExecLine(t, `-c "echo two"`)); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth after six minutes = %d, want 1 (coalesced)", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates after six minutes = %d, want 1 (coalesced)", got)
 	}
 	if got := f.stats.coalesced.Load(); got != 1 {
 		t.Fatalf("coalesced = %d, want 1", got)
@@ -355,8 +355,8 @@ func TestShellExecRepeatWindowHoldsAnHour(t *testing.T) {
 	if err := f.handleLine(shellExecLine(t, `-c "echo three"`)); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 2 {
-		t.Fatalf("queue depth after an hour = %d, want 2", got)
+	if got := pageCandidates(f); got != 2 {
+		t.Fatalf("page candidates after an hour = %d, want 2", got)
 	}
 }
 
@@ -397,8 +397,8 @@ func TestTCPConnectRepeatsCoalesceAndKeepRecords(t *testing.T) {
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth = %d, want 1 (repeat coalesced)", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates = %d, want 1 (repeat coalesced)", got)
 	}
 	if got := f.stats.coalesced.Load(); got != 1 {
 		t.Fatalf("coalesced = %d, want 1", got)
@@ -408,8 +408,8 @@ func TestTCPConnectRepeatsCoalesceAndKeepRecords(t *testing.T) {
 	if err := f.handleLine(other); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.queue.depth(); got != 2 {
-		t.Fatalf("queue depth = %d, want 2 (a new destination must page)", got)
+	if got := pageCandidates(f); got != 2 {
+		t.Fatalf("page candidates = %d, want 2 (a new destination must count)", got)
 	}
 
 	body, err := os.ReadFile(cfg.detectionsFile)
@@ -474,8 +474,8 @@ func TestRepeatedDetectionWithinDedupWindowIsRecorded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := f.queue.depth(); got != 1 {
-		t.Fatalf("queue depth = %d, want 1 (delivery deduplicated)", got)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("page candidates = %d, want 1 (delivery deduplicated)", got)
 	}
 	if got := f.stats.deduped.Load(); got != 1 {
 		t.Fatalf("deduped = %d, want 1", got)

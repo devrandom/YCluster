@@ -10,35 +10,11 @@ route:
   repeat_interval: 1h
   receiver: 'default'
   routes:
-    # IDS paging. The forwarder decides the delivery class and sets `page`
-    # from the threat model; this file only maps severity to a receiver. See
-    # docs/design/ids-coverage-and-evidence.md. A forwarder that predates the
-    # label emits no `page`, so it falls through to ids-silent below: a stale
-    # binary goes quiet rather than noisy, and IdsForwarderSchemaStale makes
-    # that state visible.
-    - match:
-        alertname: 'IDSAlert'
-        page: 'yes'
-        severity: 'critical'
-      receiver: 'critical-alerts'
-      group_wait: 5s
-      repeat_interval: 30m
-    - match:
-        alertname: 'IDSAlert'
-        page: 'yes'
-        severity: 'warning'
-      receiver: 'warning-alerts'
-      repeat_interval: 2h
-    # Everything else in the IDS class stays observe-only: recorded in
-    # Alertmanager and in detections.jsonl, delivered nowhere. That is every
-    # coverage class still waiting for its shadow measurement, the Incus audit
-    # stream, and the bridge-guard blocks (vm-bridge-*), which are counted per
-    # guest and reviewed rather than paged. Coverage alerts such as
-    # TetragonDown are not IDSAlert at all and route by their own severity.
-    - match:
-        alertname: 'IDSAlert'
-      receiver: 'ids-silent'
-      repeat_interval: 24h
+    # IDS findings carry no routing of their own. The forwarder decides which
+    # of them may page and posts only those, so an IDSAlert that arrives is a
+    # finding someone is meant to act on, and severity selects the receiver
+    # like every other alert. See docs/design/ids-coverage-and-evidence.md.
+
     # Perimeter CVE alerts (osv-feed) repeat daily so an unresolved
     # no_fix_yet/fix_available CVE stays visible instead of being
     # swallowed by the shorter global repeat_interval. Severity still picks
@@ -86,10 +62,6 @@ receivers:
     webhook_configs:
       - url: 'http://localhost:9095/webhook'
         send_resolved: true
-
-  - name: 'ids-silent'
-    # No integrations: IDS alerts stay visible in the Alertmanager UI/API
-    # during the tuning window but are not delivered to anyone.
 
   - name: 'critical-alerts'
     # Critical alerts - immediate notification via ntfy webhook handler

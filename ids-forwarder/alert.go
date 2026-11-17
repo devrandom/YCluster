@@ -303,9 +303,9 @@ func (m *metrics) evidenceCounts() map[string]int64 {
 	return out
 }
 
-// countPageCandidate tallies a delivered-but-silent coverage detection, after
-// dedup and coalescing, at the point where enabling its class would have
-// paged. The measurement gate reads this instead of running a class live.
+// countPageCandidate tallies a recorded-only coverage detection, after dedup
+// and coalescing, at the point where enabling its class would have paged. The
+// measurement gate reads this instead of running a class live.
 func (m *metrics) countPageCandidate(class string) {
 	m.classMu.Lock()
 	defer m.classMu.Unlock()

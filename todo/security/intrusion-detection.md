@@ -30,9 +30,9 @@ the Ansible deployment. The Incus audit rule (`container-api`) is excluded
 from the budget — it is already coalesced to one alert per hour and must not
 consume a detection's slot. The first over-budget alert for a severity sends
 one additional notice explaining that the cap was reached; later over-budget
-alerts are recorded but not delivered until the next window. During the
-tuning window `IDSAlert` still routes to `ids-silent`, so this budget governs
-the path that will carry pages once that route is removed.
+alerts are recorded but not delivered until the next window. The budget sees
+only the findings the forwarder actually posts, since a class that does not
+page never reaches Alertmanager.
 
 ## Threat model
 
@@ -174,10 +174,11 @@ must not become a second, longer-lived access log.
     upstream counterpart.
   - Done: `ids-forwarder` copies every `process_exec` and `tcp_connect` event
     to RSigma over a bounded unix-socket queue, bypassing the `execBinaries`
-    allowlist for the Sigma path only. RSigma detections return through the
-    forwarder's normal Alertmanager spool. The hand-written Go rules still see
-    only the allowlist; decide whether to widen it before retiring the
-    duplicate coverage.
+    allowlist for the Sigma path only. RSigma detections enter the forwarder's
+    normal classification path, so only a class that may page reaches the
+    Alertmanager spool and everything else is recorded. The hand-written Go
+    rules still see only the allowlist; decide whether to widen it before
+    retiring the duplicate coverage.
   - Done: the Sigma rule set now includes SigmaHQ's execution-from-`/tmp`
     and execution-from-`/dev/shm` rules. A replay over four nodes' Tetragon
     logs (~1.1M execs) showed no routine hits, so the rules add no volume.
@@ -235,9 +236,9 @@ must not become a second, longer-lived access log.
     [`docs/design/ids-coverage-and-evidence.md`](../../docs/design/ids-coverage-and-evidence.md).
     Deployed and verified: root execs are recorded with
     `class=root_exec delivery=evidence` and never reach Alertmanager, a live
-    non-root exec lands in `exec_nonroot` with `page=no` and increments
-    `ids_forwarder_page_candidates_total`, and the shadow counters are in the
-    node textfile collector. A short-lived non-root host process whose pid has
+    non-root exec lands in `exec_nonroot` with `delivery=silent`, increments
+    `ids_forwarder_page_candidates_total` and is never posted, and the shadow
+    counters are in the node textfile collector. A short-lived non-root host process whose pid has
     left `/proc` still falls back to `layer=unverified` and is counted as
     `container_other` rather than `exec_nonroot`, so that class undercounts on
     replay until every host emits the namespace snapshot; the per-verdict

@@ -30,7 +30,7 @@ func TestPostLoopDrainsSpool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.enqueue(newAlert(cfg, sourceTetragon, "warning", "host", "r", "spooled")); err != nil {
+	if err := f.enqueue(pagingAlert(cfg, "warning", "host", "r", "spooled")); err != nil {
 		t.Fatal(err)
 	}
 	f.wg.Add(1)
@@ -54,7 +54,7 @@ func TestEnqueueReportsSpoolFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.spool = s
-	if err := f.enqueue(newAlert(cfg, sourceTetragon, "warning", "host", "r", "s")); err == nil {
+	if err := f.enqueue(pagingAlert(cfg, "warning", "host", "r", "s")); err == nil {
 		t.Fatal("enqueue must fail after spool stop")
 	}
 	if f.stats.dropped.Load() != 1 {
@@ -74,7 +74,7 @@ func TestFailedAppendDoesNotPoisonDedup(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.spool = s
-	a := newAlert(cfg, sourceTetragon, "warning", "host", "r", "retry me")
+	a := pagingAlert(cfg, "warning", "host", "r", "retry me")
 	if err := f.enqueue(a); err == nil {
 		t.Fatal("expected a spool error")
 	}
@@ -92,7 +92,7 @@ func TestEnqueueDropsOversizedWithMetric(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.closeState()
-	huge := newAlert(cfg, sourceTetragon, "warning", "host", "huge", "bounded summary")
+	huge := pagingAlert(cfg, "warning", "host", "huge", "bounded summary")
 	huge.Labels["padding"] = strings.Repeat("x", spoolMaxEntryBytes+1)
 	if err := f.enqueue(huge); err != nil {
 		t.Fatalf("oversized alerts are dropped, not fatal: %v", err)
@@ -115,7 +115,7 @@ func TestHandleLineReturnsSpoolError(t *testing.T) {
 	}
 	defer f.closeState()
 	f.spool.stop()
-	if err := f.handleLine(tetragonLineAt(time.Now().UTC(), "boom")); err == nil {
+	if err := f.handleLine(pagingLineAt(time.Now().UTC(), "boom")); err == nil {
 		t.Fatal("handleLine must surface a spool failure")
 	}
 	if _, _, ok := f.cursor.boundary(); ok {
@@ -211,7 +211,7 @@ func TestPostLoopRetriesSpoolOnAlertmanagerFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.enqueue(newAlert(cfg, sourceTetragon, "warning", "host", "r", "retry")); err != nil {
+	if err := f.enqueue(pagingAlert(cfg, "warning", "host", "r", "retry")); err != nil {
 		t.Fatal(err)
 	}
 	f.wg.Add(1)
@@ -238,7 +238,7 @@ func TestPostLoopStopsDuringBacklog(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		summary := "backlog " + string(rune('a'+i))
-		if err := f.enqueue(newAlert(cfg, sourceTetragon, "warning", "host", "r", summary)); err != nil {
+		if err := f.enqueue(pagingAlert(cfg, "warning", "host", "r", summary)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -292,18 +292,23 @@ func TestCursorSaveFailureIsNonFatal(t *testing.T) {
 	c.flush()
 }
 
-func TestReceiverReturns503WhenSpoolStopped(t *testing.T) {
+func TestReceiverRecordsWithoutTheSpool(t *testing.T) {
+	dir := t.TempDir()
 	cfg := testConfig()
 	cfg.httpListen = "127.0.0.1:0"
-	cfg.spoolFile = filepath.Join(t.TempDir(), "spool.jsonl")
+	cfg.spoolFile = filepath.Join(dir, "spool.jsonl")
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
 	f, err := newForwarder(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.closeState()
 	if err := f.startReceiver(); err != nil {
 		t.Fatal(err)
 	}
 	f.spool.stop()
+	// A CrowdSec scenario is a silent class: it is recorded rather than
+	// spooled, so a broken spool does not cost the detection.
 	body := `[{"scenario":"bf","events":[{"message":"m"}]}]`
 	resp, err := http.Post("http://"+f.receiverAddr()+"/crowdsec", "application/json",
 		strings.NewReader(body))
@@ -311,11 +316,12 @@ func TestReceiverReturns503WhenSpoolStopped(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	waitFor(t, 2*time.Second, func() bool { return f.failure() != nil })
-	f.closeState()
+	if got := processCount(t, cfg.detectionsFile); got != 1 {
+		t.Fatalf("recorded %d detections, want 1", got)
+	}
 }
 
 func TestNewTailerFromFileRejectsClosedFileAndClampsOffset(t *testing.T) {
@@ -421,7 +427,7 @@ func TestPostSpoolAckFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.enqueue(newAlert(cfg, sourceTetragon, "warning", "host", "r", "ack")); err != nil {
+	if err := f.enqueue(pagingAlert(cfg, "warning", "host", "r", "ack")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o500); err != nil {
@@ -450,7 +456,7 @@ func TestPostSpoolDropsPermanentlyRejectedAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rule := range []string{"r1", "r2"} {
-		if err := f.enqueue(newAlert(cfg, sourceTetragon, "warning", "host", rule, rule)); err != nil {
+		if err := f.enqueue(pagingAlert(cfg, "warning", "host", rule, rule)); err != nil {
 			t.Fatal(err)
 		}
 	}

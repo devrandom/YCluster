@@ -14,20 +14,6 @@ var ruleRepeatWindows = map[string]time.Duration{
 	"container-api":  time.Hour,
 }
 
-// recordsEveryOccurrence marks alerts whose individual occurrences are
-// evidence even when delivery is coalesced: API usage and host shells. The
-// first one per window still pages; the rest are written to
-// detections.jsonl so the history is complete.
-// bypassesLocalRateLimit reports rules that must never be crowded out by the
-// optional per-host cap.
-func bypassesLocalRateLimit(a alert) bool {
-	switch a.Labels["rule_id"] {
-	case "container-api", "container-exec":
-		return true
-	}
-	return a.Labels["rule_id"] == "process_exec" && isShellBinary(a.Labels["binary"])
-}
-
 // enqueue makes one alert durable. It returns an error only when the
 // alert could not be stored; callers must then keep their source cursor
 // where it is so the event is retried.
@@ -38,10 +24,9 @@ func (f *forwarder) enqueue(a alert) error {
 	class, evidence := classifyAlert(a)
 	delivery := deliveryFor(a, class, evidence)
 	a.Labels["class"] = class
-	a.Labels["page"] = "no"
-	if delivery == deliveryPage {
-		a.Labels["page"] = "yes"
-	}
+	// No delivery label travels with the alert: whether it pages is decided
+	// here, and a finding that does not page is never posted at all, so the
+	// route table has nothing left to decide.
 	// The summary is the notification title and has to stay short; the
 	// description carries the context a reader needs to triage without
 	// opening detections.jsonl on the host.
@@ -61,7 +46,6 @@ func (f *forwarder) enqueue(a alert) error {
 		f.stats.bootSuppressed.Add(1)
 		return nil
 	}
-	auditOnly := bypassesLocalRateLimit(a)
 	key := a.dedupKey()
 	if f.dedup.seen(key) {
 		f.stats.deduped.Add(1)
@@ -75,19 +59,22 @@ func (f *forwarder) enqueue(a alert) error {
 		return nil
 	}
 	if delivery == deliverySilent {
-		// Delivered to Alertmanager but not paged. Counting here measures
-		// what enabling the class would actually page, dedup and coalescing
-		// included.
+		// Alertmanager only ever sees what may notify someone: a detection
+		// nobody can act on is the durable record, not an alert. Counting
+		// here measures what enabling the class would actually page, dedup
+		// and coalescing included, and the key is still marked so a repeat
+		// inside the window is deduplicated rather than counted twice.
 		f.stats.countPageCandidate(class)
+		f.dedup.mark(key)
+		return nil
 	}
-	// Optional per-host circuit breaker: deliver at most rate-limit alerts
-	// per severity per window, but keep recording everything so the history
-	// stays complete. The cluster-wide notification budget lives in
-	// ntfy-webhook, which is the only shared enforcement point; this local
-	// cap is disabled in the Ansible deployment. The audit rule already
-	// coalesces to one alert per hour and must not crowd out detections that
-	// need a human.
-	if !auditOnly && !f.rate.allow(a.Labels["severity"]) {
+	// Optional per-host circuit breaker: page at most rate-limit alerts per
+	// severity per window, but keep recording everything so the history stays
+	// complete. Only a paging class reaches this point, so neither the audit
+	// trail nor a suppressed class can spend a slot. The cluster-wide
+	// notification budget lives in ntfy-webhook, which is the only shared
+	// enforcement point; this local cap is disabled in the Ansible deployment.
+	if !f.rate.allow(a.Labels["severity"]) {
 		f.stats.rateLimited.Add(1)
 		return nil
 	}

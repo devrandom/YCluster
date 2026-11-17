@@ -978,21 +978,23 @@ network coverage.
   severity when a critical alert for the same host and rule is active.
 - **Coverage alerts.** `TetragonDown`, `CrowdsecDown`, `IdsForwarderDown`,
   `IdsForwarderDropping`, `IdsForwarderBacklog`, `IdsForwarderExpired`,
-  `IdsForwarderCursorFailing` and `IDSForwarderGap`. A
+  `IdsForwarderCursorFailing`, `IdsForwarderRecordFailing` and
+  `IDSForwarderGap`. A
   host that stops reporting is an alert. Component alerts read
   `ids_component_up` from the node_exporter textfile collector so they work
   on every node, not just where Prometheus runs. `IDSForwarderGap` is sent by
   the forwarder itself when Tetragon has already deleted events the cursor
   still needed.
-- **Tuning window.** Detection alerts (`alertname=IDSAlert`) route to a silent
-  receiver (`ids-silent`) and are additionally silenced in Alertmanager while
-  policies and scenarios are tuned against real traffic. They stay visible in
-  the Alertmanager API/UI. Remove that route only when the detections are known
-  to be low-noise. Coverage alerts keep their normal routing: a stopped sensor
-  is a blind spot, not tuning noise. Detection events are replayed after an
-  outage while they remain in the sensor log; only events older than
-  `-max-event-age` are dropped, and an exhausted replay window produces a
-  separate gap alert.
+- **What reaches Alertmanager.** Only findings whose class may page. Everything
+  else is written to `detections.jsonl` and counted, and never posted; the
+  delivery classes are in
+  [`ids-coverage-and-evidence.md`](ids-coverage-and-evidence.md). There is no
+  catch-all route for `alertname=IDSAlert`, so a finding that arrives without a
+  page verdict is a classification bug and notifies rather than disappearing.
+  Coverage alerts keep their own routing: a stopped sensor is a blind spot, not
+  noise. Detection events are replayed after an outage while they remain in the
+  sensor log; only events older than `-max-event-age` are dropped, and an
+  exhausted replay window produces a separate gap alert.
   Coverage alerts also do not restore coverage after host root. They tell an
   operator that a sensor died, which is the incident trigger; the response is
   manual (isolate, revoke, rotate), not a claim that detection continued.
@@ -1130,11 +1132,12 @@ cases they only need to use a protocol or namespace the sensor does not observe.
 
 ### Findings, highest impact first
 
-1. **Detections are currently not paged.** `IDSAlert` still routes to the
-   `ids-silent` receiver (verified in the live Alertmanager configuration). Every
-   hand-written and Sigma detection is visible only in the Alertmanager API and
-   `detections.jsonl`. Coverage alerts still page. This is the intended tuning
-   state, but it is the dominant practical bypass until the route is removed.
+1. **Detections were not paged at the time of this review.** `IDSAlert` routed
+   wholesale to a silent receiver (verified in the live Alertmanager
+   configuration), so every hand-written and Sigma detection was visible only
+   in the Alertmanager API and `detections.jsonl` while coverage alerts paged.
+   That was the tuning state and the dominant practical bypass until the
+   delivery classes replaced it; nothing is posted unless its class pages now.
 
 2. **The Sigma rule layer is not receiving events.** Fleet-wide,
    `ids_forwarder_sigma_sent_total` is zero while `ids_forwarder_recorded_total` is
@@ -1325,9 +1328,10 @@ concrete actions for the open items are in [Next steps](#next-steps).
    **Partly done** — matching is anchored to the program or interpreter operand
    and the package-path entries require their real paths and ports; egress
    allowlisting at the network layer and uid matching remain open.
-3. Page detections: remove the `ids-silent` route, or keep it only for a named
-   allowlist of known-noisy rules, not for the whole `IDSAlert` class. **Open**,
-   needs the paging decision.
+3. Page detections: the wholesale silent route is gone and paging follows the
+   delivery classes in
+   [`ids-coverage-and-evidence.md`](ids-coverage-and-evidence.md). **Done** —
+   which classes may page is still a measurement decision, not a routing one.
 4. Close the transport/namespace gaps in priority order: roll the VM bridge
    guard out to every bridge host (blocking and alerting are implemented, see
    *VM bridge visibility*), then flow records on the same bridge, then UDP/DNS,
@@ -1592,7 +1596,8 @@ Each one names the decision it needs, where there is one.
    The original set was `exec-root-user-path`, `kernel-modules`,
    `privilege-raises` and Sigma findings at medium or above (`sigma_level`
    carries the engine's own level, because low and medium both map to the
-   cluster's warning). Everything else in `IDSAlert` stayed on `ids-silent`.
+   cluster's warning). Everything else in `IDSAlert` stayed on a silent
+   receiver at that point; the delivery classes replaced both halves later.
 
    Two deviations from the earlier proposal, both driven by the overnight
    data: `container-api` is excluded because it is an audit stream — every

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,39 @@ func testConfig() config {
 	// Keep the destination-key helper from touching /var/lib during tests.
 	cfg.destKeyFile = ""
 	return cfg
+}
+
+// pagingAlert builds an alert of a class that may page, for tests that
+// exercise the delivery path; every other class stops at the record.
+func pagingAlert(cfg config, severity, layer, rule, summary string) alert {
+	a := newAlert(cfg, sourceTetragon, severity, layer, rule, summary)
+	a.Labels["escalation"] = "nonroot"
+	return a
+}
+
+// processCount returns how many detections the record holds.
+func processCount(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range splitLines(string(data)) {
+		if line != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// pageCandidates totals what enabling the silent classes would have paged.
+func pageCandidates(f *forwarder) int64 {
+	var n int64
+	for _, c := range f.stats.pageCandidateCounts() {
+		n += c
+	}
+	return n
 }
 
 func TestRedactIPs(t *testing.T) {

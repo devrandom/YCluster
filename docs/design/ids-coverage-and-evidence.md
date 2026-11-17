@@ -52,12 +52,12 @@ Three classes, assigned by the forwarder, not by Alertmanager:
 
 - **evidence** — recorded in `detections.jsonl`, never delivered. Post-root
   host activity. Useful for a later incident review, not a control.
-- **coverage** — the in-scope signals. Delivered and eligible to page, subject
-  to the paging set below.
+- **coverage** — the in-scope signals. A class that may page is delivered;
+  everything else is recorded and measured, and never leaves the host.
 - **audit** — an operational trail that is neither: Incus API usage, the
-  container runtime's fork helper, and network-guard blocks. Delivered silent
-  or counted per guest, and exempt from the evidence rule because the trail is
-  the point.
+  container runtime's fork helper, and network-guard blocks. Recorded and
+  counted per guest, never posted, and exempt from the evidence rule because
+  the trail is the point.
 
 ## Input contract
 
@@ -169,15 +169,18 @@ A private or loopback destination is a cluster path and keeps `sigma_nonroot`.
 
 The exemption for `container-api` and `container-exec` is deliberate: they are
 root-admin activity by definition, but they are the only record of who entered
-a container and when, so they stay in Alertmanager as an audit stream rather
-than disappearing into the evidence file.
+a container and when. They are recorded and never paged, which also keeps them
+out of Alertmanager — an operator view over that stream is open work, and it
+has to read `detections.jsonl` rather than the alert path.
 
 ## Delivery mechanism
 
-The forwarder sets `page=yes|no` on every `IDSAlert` and Alertmanager routes on
-that one label. Rule ids and Sigma levels leave the route table; severity still
-selects the receiver. The paging set is one function, so adding or removing a
-class is a single code change with no configuration change.
+The forwarder decides delivery itself and acts on it: a class that may page is
+posted, and every other class stops at `detections.jsonl`. Nothing about
+delivery travels with the alert, so the route table selects on severity alone,
+with no rule ids, no label selectors and no catch-all for `IDSAlert`. The
+paging set is one function, so adding or removing a class is a single code
+change and never a configuration change.
 
 The class is part of the dedup key. `dedupKey` deliberately drops `origin` and
 `actor`, so without this a root event would occupy the key that a later
@@ -186,12 +189,14 @@ into a dedup hit. Keying on the class also makes the shadow measurement below
 safe to run.
 
 Classification runs inside the enqueue path, in this order: record, evidence,
-boot grace, dedup, coalescing, rate limit, spool. The position matters in two
-ways. An evidence alert must not mark a dedup key, spend a rate slot, or be
-counted as boot suppression, because those would each change what a later
-coverage event does. And an alert that never reaches the spool must be dropped
-before the spool append, so the record and the delivery decision cannot
-disagree.
+boot grace, dedup, coalescing, silent return, rate limit, spool. The position
+matters in three ways. An evidence alert must not mark a dedup key, spend a
+rate slot, or be counted as boot suppression, because those would each change
+what a later coverage event does. A silent finding must leave before the rate
+limit and the spool append, because it is never delivered and must neither
+consume a slot nor leave a drop behind. And an alert that never reaches the
+spool must be dropped before the spool append, so the record and the delivery
+decision cannot disagree.
 
 ### Shadow measurement
 
@@ -201,16 +206,23 @@ been delivered: after dedup and coalescing, as
 That gives a true paged-equivalent rate without paging anyone, which is what
 the gate below reads.
 
-### Rollout order and the fail-closed signal
+### No schema guard, deliberately
 
-Deploy the forwarder to the fleet first, then the Alertmanager route. An old
-forwarder emits no `page` label, and `IDSAlert` without it routes to the silent
-receiver, so the failure mode of that order is silence rather than a storm. To
-make the silence visible, the forwarder exposes
-`ids_forwarder_build_info{page_schema="1"}`, and a Prometheus rule warns when a
-node reports `ids_component_up{component="ids-forwarder"} == 1` but no
-page-schema series for fifteen minutes. Without that check, a host left on the
-old binary would drop its escalations without a trace.
+An earlier revision tagged every alert with its delivery decision and used a
+build-info gauge plus a Prometheus rule to notice a forwarder too old to set
+it, because such a binary posted everything to a silent route. Both are gone
+with the silent route: a stale binary now posts findings that would otherwise
+have stayed on the host, so it fails loud and needs no separate detector.
+
+The rollout order carries the one check the guard used to make: load the rule
+set before the binary. The removed rule fired on a host whose forwarder
+reported `ids_component_up` without the build-info series, so a new binary
+under an old rule set would alert on every host at once, and those alerts are
+`ids_coverage=true` without the `IDSAlert` name, which puts them outside the
+notification budget. `install-prometheus.yml` before
+`install-ids-forwarder.yml` removes the rule before any host can run a binary
+that no longer feeds it. The other direction needs no ordering: nothing in the
+new rule set reads a label the old binary sets.
 
 ## Evidence record
 
@@ -241,6 +253,9 @@ are `level: low` and stay silent.
 | `tenant_egress` | a container Sigma hit whose event is the container's own connection to an internet address | silent, measure |
 | `crowdsec` | sshd and nginx scenarios | silent, measure |
 
+Silent means recorded in `detections.jsonl` and counted as a page candidate;
+nothing is posted to Alertmanager for it.
+
 A class is enabled when the shadow counter shows at most one page per day
 fleet-wide over seven days and every occurrence is explainable from the record.
 Seven days and not one, because the shapes that dominate the suppression table
@@ -257,10 +272,9 @@ in production with the notification budget as the brake.
 Two pipeline details travel with the class. `process_exec` is filtered by
 `ids_forwarder_exec_binaries`, which listed `sudo` and `su` only until this
 change added `doas` and `pkexec`; without that the class row for those tools is
-hollow. And both the shadow counter and the build-info series are in the
-textfile allowlist in `ids-metrics-collector.py`, which is the only path to
-Prometheus from a loopback endpoint; without that the gate and the stale-schema
-check have no series to read.
+hollow. And the shadow counter is in the textfile allowlist in
+`ids-metrics-collector.py`, which is the only path to Prometheus from a
+loopback endpoint; without it the gate has no series to read.
 
 ## Alerting
 
@@ -270,16 +284,18 @@ alerts are separate rules. "The paging set is one function" is therefore true
 of detections only; the coverage path is deliberately separate and must not be
 folded into it.
 
-- `IDSAlert` with `page=yes` routes by severity to the notification receivers.
-  Everything else in the class routes to `ids-silent` and stays visible in the
-  Alertmanager API and the alert UI.
+- An `IDSAlert` that reaches Alertmanager is by construction one somebody may
+  have to act on, and severity selects the receiver. A finding whose class
+  does not page is never posted: it is written to `detections.jsonl` and
+  counted in `ids_forwarder_page_candidates_total`.
 - Complete loss of a detection component is critical and carries
   `ids_coverage=true`: `TetragonDown`, `IdsForwarderDown`, `RsigmaDown` and
   `CrowdsecDown`. They are now the expected first signal of a host-root
   compromise, so they must not sit in a host-specific stream: the webhook sends
   `ids_coverage=true` to the IDS topic instead of the host topic.
 - Degradation stays warning, with the same label: backlog, drops, expiries,
-  rate limiting, cursor failures, Sigma tail failures and the gap alert.
+  rate limiting, cursor failures, Sigma tail failures, record write failures
+  and the gap alert.
 - The cluster-wide five-per-severity-per-hour brake is unchanged. It keys on
   `IDSAlert`, so the sensor alerts are outside it and cannot be crowded out by
   a detection storm.

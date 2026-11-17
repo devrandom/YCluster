@@ -18,6 +18,15 @@ func tetragonLineAt(t time.Time, rule string) string {
 		rule, t.UTC().Format(time.RFC3339Nano))
 }
 
+// pagingLineAt is a privilege raise on the host by a non-root identity: a
+// class that pages, for tests that need an alert to reach the delivery path.
+// The namespace snapshot is what makes the layer host rather than unverified.
+func pagingLineAt(t time.Time, rule string) string {
+	return fmt.Sprintf(
+		`{"process_kprobe":{"policy_name":"privilege-raises","function_name":"__sys_setuid","message":%q,"process":{"pid":900,"uid":1000,"binary":"/usr/bin/sudo","ns":{"pid":{"inum":4026531836,"is_host":true},"mnt":{"inum":4026531841,"is_host":true}}},"args":[{"int_arg":0}]},"time":%q}`,
+		rule, t.UTC().Format(time.RFC3339Nano))
+}
+
 func writeGzipLog(t *testing.T, path string, lines ...string) {
 	t.Helper()
 	f, err := os.Create(path)
@@ -44,10 +53,35 @@ func replayConfig(t *testing.T, logPath, cursorPath string) config {
 	cfg.tetragonLog = logPath
 	cfg.cursorFile = cursorPath
 	cfg.spoolFile = filepath.Join(filepath.Dir(cursorPath), "spool.jsonl")
+	cfg.detectionsFile = filepath.Join(filepath.Dir(cursorPath), "detections.jsonl")
 	cfg.spoolMaxBytes = 1 << 20
 	cfg.queueMax = 100
 	cfg.events = "process_kprobe"
 	return cfg
+}
+
+// processedRules returns the rule ids the forwarder handled, in order, from
+// the detection record. A detection that cannot page stops at the record by
+// design, so the record — not the spool — is the complete list; the spool
+// holds only what will be delivered.
+func processedRules(t *testing.T, f *forwarder) []string {
+	t.Helper()
+	data, err := os.ReadFile(f.cfg.detectionsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, line := range splitLines(string(data)) {
+		if line == "" {
+			continue
+		}
+		var rec detectionRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, rec.RuleID)
+	}
+	return out
 }
 
 func seedCursor(t *testing.T, path string, at time.Time, line string) {
@@ -56,6 +90,29 @@ func seedCursor(t *testing.T, path string, at time.Time, line string) {
 	c.saveInterval = 0
 	c.advance(at, lineHash(line))
 	c.flush()
+}
+
+// recordedCounter reports how many times a rule id is in the detection
+// record. A detection that cannot page never reaches Alertmanager, so the
+// record is what tells us the forwarder processed it.
+func recordedCounter(path string) func(string) int {
+	return func(rule string) int {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return 0
+		}
+		n := 0
+		for _, line := range splitLines(string(data)) {
+			if line == "" {
+				continue
+			}
+			var rec detectionRecord
+			if json.Unmarshal([]byte(line), &rec) == nil && rec.RuleID == rule {
+				n++
+			}
+		}
+		return n
+	}
 }
 
 func drainSpool(t *testing.T, f *forwarder) []alert {
@@ -103,9 +160,9 @@ func TestReplaySkipsCompressedBoundaryAndQueuesNewEvents(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	got := drainSpool(t, f)
-	if len(got) != 1 || got[0].Labels["rule_id"] != "new" {
-		t.Fatalf("expected only the event after the cursor, got %+v", got)
+	got := processedRules(t, f)
+	if len(got) != 1 || got[0] != "new" {
+		t.Fatalf("expected only the event after the cursor, got %v", got)
 	}
 }
 
@@ -133,11 +190,11 @@ func TestReplayEmitsGapWhenRetentionOvershootsCursor(t *testing.T) {
 		t.Fatalf("gap counter=%d", f.stats.gaps.Load())
 	}
 	var sawGap, sawEvent bool
-	for _, a := range drainSpool(t, f) {
-		if a.Labels["alertname"] == "IDSForwarderGap" {
+	for _, rule := range processedRules(t, f) {
+		if rule == "forwarder-gap" {
 			sawGap = true
 		}
-		if a.Labels["rule_id"] == "new" {
+		if rule == "new" {
 			sawEvent = true
 		}
 	}
@@ -168,9 +225,9 @@ func TestReplayKeepsSameTimestampAfterBoundary(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	got := drainSpool(t, f)
-	if len(got) != 1 || got[0].Labels["rule_id"] != "next" {
-		t.Fatalf("same-timestamp event after the boundary was lost: %+v", got)
+	got := processedRules(t, f)
+	if len(got) != 1 || got[0] != "next" {
+		t.Fatalf("same-timestamp event after the boundary was lost: %v", got)
 	}
 }
 
@@ -197,10 +254,7 @@ func TestReplayKeepsOutOfOrderTimestamps(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	var rules []string
-	for _, a := range drainSpool(t, f) {
-		rules = append(rules, a.Labels["rule_id"])
-	}
+	rules := processedRules(t, f)
 	if strings.Join(rules, ",") != "newest,late" {
 		t.Fatalf("out-of-order event lost: %v", rules)
 	}
@@ -231,12 +285,14 @@ func TestReplayGapReplaysEverythingRetained(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	var rules []string
-	for _, a := range drainSpool(t, f) {
-		rules = append(rules, a.Labels["rule_id"])
-	}
+	rules := processedRules(t, f)
 	if strings.Join(rules, ",") != "forwarder-gap,a,b" {
 		t.Fatalf("gap replay = %v", rules)
+	}
+	// The gap is a coverage alert, not a detection finding: it is still
+	// delivered, while the events around it are only recorded.
+	if delivered := drainSpool(t, f); len(delivered) != 1 || delivered[0].Labels["rule_id"] != "forwarder-gap" {
+		t.Fatalf("gap delivery = %+v", delivered)
 	}
 }
 
@@ -267,9 +323,9 @@ func TestReplayIgnoresMtimeFilter(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	got := drainSpool(t, f)
-	if len(got) != 1 || got[0].Labels["rule_id"] != "new" {
-		t.Fatalf("replay skipped a file by mtime: %+v", got)
+	got := processedRules(t, f)
+	if len(got) != 1 || got[0] != "new" {
+		t.Fatalf("replay skipped a file by mtime: %v", got)
 	}
 }
 
@@ -280,18 +336,11 @@ func TestForwarderStartupGraceRecoversRecentEvent(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte(line+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	got := 0
-	srv := httptestAlertmanager(t, func([]byte) {
-		mu.Lock()
-		got++
-		mu.Unlock()
-	})
 	cfg := testConfig()
 	cfg.tetragonLog = logPath
 	cfg.cursorFile = filepath.Join(dir, "cursor.json")
 	cfg.spoolFile = filepath.Join(dir, "spool.jsonl")
-	cfg.alertmanagerURL = srv
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
 	cfg.pollInterval = 5 * time.Millisecond
 	cfg.metricsListen = ""
 	cfg.httpListen = ""
@@ -303,11 +352,8 @@ func TestForwarderStartupGraceRecoversRecentEvent(t *testing.T) {
 	if err := f.start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 2*time.Second, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return got == 1
-	})
+	seen := recordedCounter(cfg.detectionsFile)
+	waitFor(t, 2*time.Second, func() bool { return seen("recent") == 1 })
 	f.shutdown()
 	f.wg.Wait()
 	f.closeState()
@@ -319,26 +365,12 @@ func TestForwarderRestartReplaysRotatedEvents(t *testing.T) {
 	cursorPath := filepath.Join(dir, "cursor.json")
 	spoolPath := filepath.Join(dir, "spool.jsonl")
 
-	var mu sync.Mutex
-	var rules []string
-	srv := httptestAlertmanager(t, func(body []byte) {
-		var alerts []alert
-		if err := json.Unmarshal(body, &alerts); err != nil {
-			return
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		for _, a := range alerts {
-			rules = append(rules, a.Labels["rule_id"])
-		}
-	})
-
 	cfg := testConfig()
 	cfg.tetragonLog = logPath
 	cfg.cursorFile = cursorPath
 	cfg.spoolFile = spoolPath
 	cfg.spoolMaxBytes = 1 << 20
-	cfg.alertmanagerURL = srv
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
 	cfg.pollInterval = 5 * time.Millisecond
 	cfg.metricsListen = ""
 	cfg.httpListen = ""
@@ -346,17 +378,7 @@ func TestForwarderRestartReplaysRotatedEvents(t *testing.T) {
 	cfg.startupGrace = 0
 	cfg.events = "process_kprobe"
 
-	countRule := func(rule string) int {
-		mu.Lock()
-		defer mu.Unlock()
-		n := 0
-		for _, r := range rules {
-			if r == rule {
-				n++
-			}
-		}
-		return n
-	}
+	countRule := recordedCounter(cfg.detectionsFile)
 
 	now := time.Now().UTC()
 	line1 := tetragonLineAt(now.Add(-3*time.Minute), "one")
@@ -574,25 +596,11 @@ func TestForwarderRestartSkipsReplayedPrefix(t *testing.T) {
 	}
 	seedCursor(t, cursorPath, now.Add(-2*time.Minute), boundary)
 
-	var mu sync.Mutex
-	var rules []string
-	srv := httptestAlertmanager(t, func(body []byte) {
-		var alerts []alert
-		if err := json.Unmarshal(body, &alerts); err != nil {
-			return
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		for _, a := range alerts {
-			rules = append(rules, a.Labels["rule_id"])
-		}
-	})
-
 	cfg := testConfig()
 	cfg.tetragonLog = logPath
 	cfg.cursorFile = cursorPath
 	cfg.spoolFile = filepath.Join(dir, "spool.jsonl")
-	cfg.alertmanagerURL = srv
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
 	cfg.pollInterval = 5 * time.Millisecond
 	cfg.metricsListen = ""
 	cfg.httpListen = ""
@@ -618,15 +626,10 @@ func TestForwarderRestartSkipsReplayedPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	af.Close()
-	waitFor(t, 2*time.Second, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(rules) == 1
-	})
-	mu.Lock()
-	defer mu.Unlock()
-	if rules[0] != "fresh" {
-		t.Fatalf("replayed prefix leaked through the gate: %v", rules)
+	seen := recordedCounter(cfg.detectionsFile)
+	waitFor(t, 2*time.Second, func() bool { return seen("fresh") == 1 })
+	if got := seen("old"); got != 0 {
+		t.Fatalf("replayed prefix leaked through the gate: %d old records", got)
 	}
 }
 
@@ -652,10 +655,7 @@ func TestReplayCorruptCursorReplaysAndReportsGap(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	var rules []string
-	for _, a := range drainSpool(t, f) {
-		rules = append(rules, a.Labels["rule_id"])
-	}
+	rules := processedRules(t, f)
 	if strings.Join(rules, ",") != "forwarder-gap,retained" {
 		t.Fatalf("corrupt cursor replay = %v", rules)
 	}
@@ -682,9 +682,9 @@ func TestReplayFirstRunFloorSkipsOldEvents(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	got := drainSpool(t, f)
-	if len(got) != 1 || got[0].Labels["rule_id"] != "recent" {
-		t.Fatalf("startup floor replay = %+v", got)
+	got := processedRules(t, f)
+	if len(got) != 1 || got[0] != "recent" {
+		t.Fatalf("startup floor replay = %v", got)
 	}
 	if f.stats.gaps.Load() != 0 {
 		t.Fatalf("first run must not report a gap, got %d", f.stats.gaps.Load())
@@ -739,10 +739,7 @@ func TestReplayHandoffScansHeldInodeAcrossRotation(t *testing.T) {
 	if offset != want {
 		t.Fatalf("handoff offset = %d, want %d", offset, want)
 	}
-	var rules []string
-	for _, a := range drainSpool(t, f) {
-		rules = append(rules, a.Labels["rule_id"])
-	}
+	rules := processedRules(t, f)
 	if strings.Join(rules, ",") != "one-b,two" {
 		t.Fatalf("rotation during replay lost or duplicated events: %v", rules)
 	}
@@ -782,13 +779,13 @@ func TestReplayReportsUnreadableFileAfterBoundary(t *testing.T) {
 	if _, err := f.replayTetragonLogs(nil); err != nil {
 		t.Fatal(err)
 	}
-	var rules []string
-	for _, a := range drainSpool(t, f) {
-		rules = append(rules, a.Labels["rule_id"])
-	}
+	rules := processedRules(t, f)
 	got := strings.Join(rules, ",")
 	if !strings.Contains(got, "forwarder-gap") || !strings.Contains(got, "current") {
 		t.Fatalf("unreadable file must produce a gap plus later events: %v", rules)
+	}
+	if delivered := drainSpool(t, f); len(delivered) != 1 || delivered[0].Labels["rule_id"] != "forwarder-gap" {
+		t.Fatalf("the coverage gap must still be delivered: %+v", delivered)
 	}
 }
 

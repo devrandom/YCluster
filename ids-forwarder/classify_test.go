@@ -264,8 +264,8 @@ func TestEvidenceDoesNotConsumeTheDedupKey(t *testing.T) {
 	}
 	user := classifyLabels(map[string]string{"rule_id": "process_exec", "layer": "host", "kind": "exec", "uid": "1000", "binary": "bash"})
 	f.enqueue(user)
-	if depth := f.queue.depth(); depth != 1 {
-		t.Fatalf("non-root exec must be delivered after an evidence event; depth=%d", depth)
+	if got := pageCandidates(f); got != 1 {
+		t.Fatalf("non-root exec must still be measured after an evidence event; candidates=%d", got)
 	}
 }
 
@@ -288,7 +288,7 @@ func TestShadowCounterMeasuresSilentClasses(t *testing.T) {
 	}
 }
 
-func TestPageLabelMatchesDelivery(t *testing.T) {
+func TestOnlyPagingClassesAreQueued(t *testing.T) {
 	cfg := testConfig()
 	f, err := newForwarder(cfg)
 	if err != nil {
@@ -308,21 +308,17 @@ func TestPageLabelMatchesDelivery(t *testing.T) {
 	if !ok {
 		t.Fatal("escalation must be delivered")
 	}
-	if a.Labels["page"] != "yes" {
-		t.Fatalf("page = %q, want yes", a.Labels["page"])
-	}
 	if a.Labels["class"] != "escalation_nonroot" {
 		t.Fatalf("class label = %q", a.Labels["class"])
 	}
 
 	silent := classifyLabels(map[string]string{"rule_id": "tcp-connect", "layer": "container", "kind": "connect", "uid": "1000000"})
 	f.enqueue(silent)
-	a, ok = f.queue.pop()
-	if !ok {
-		t.Fatal("silent coverage must still be delivered")
+	if _, ok := f.queue.pop(); ok {
+		t.Fatal("a silent class must not be queued at all")
 	}
-	if a.Labels["page"] != "no" {
-		t.Fatalf("page = %q, want no", a.Labels["page"])
+	if got := f.stats.pageCandidateCounts()["lateral_container"]; got != 1 {
+		t.Fatalf("the silent detection must still be measured; candidates = %d", got)
 	}
 }
 

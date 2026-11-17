@@ -31,6 +31,7 @@ func TestForwarderEndToEnd(t *testing.T) {
 	cfg := testConfig()
 	cfg.alertmanagerURL = srv
 	cfg.tetragonLog = logPath
+	cfg.events = "process_kprobe,process_exec"
 	cfg.metricsListen = "127.0.0.1:0"
 	cfg.pollInterval = 20 * time.Millisecond
 	f, err := newForwarder(cfg)
@@ -44,7 +45,9 @@ func TestForwarderEndToEnd(t *testing.T) {
 
 	// Append an event the forwarder is configured to relay.
 	f2, _ := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
-	f2.WriteString(`{"process_kprobe":{"policy_name":"p1","message":"kill"},"process":{"binary":"/bin/sh"}}` + "\n")
+	// A sudo exec from a non-root parent is escalation_nonroot, which is a
+	// class that pages; Alertmanager only ever sees those.
+	f2.WriteString(`{"process_exec":{"process":{"pid":4242,"uid":0,"binary":"/usr/bin/sudo","arguments":"-n id -u"},"parent":{"pid":4241,"uid":2000,"binary":"/bin/bash"}}}` + "\n")
 	f2.Close()
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -139,9 +142,16 @@ func TestReceiverOnlyAcceptsLoopback(t *testing.T) {
 }
 
 func TestReceiverEndToEnd(t *testing.T) {
+	dir := t.TempDir()
 	cfg := testConfig()
 	cfg.httpListen = "127.0.0.1:0"
-	f, _ := newForwarder(cfg)
+	cfg.spoolFile = filepath.Join(dir, "spool.jsonl")
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.closeState()
 	if err := f.startReceiver(); err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +168,12 @@ func TestReceiverEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("receiver status %d", resp.StatusCode)
 	}
-	if f.queue.depth() != 1 {
-		t.Fatalf("expected 1 queued alert, got %d", f.queue.depth())
+	// CrowdSec scenarios are a silent class: recorded, never delivered.
+	if got := processCount(t, cfg.detectionsFile); got != 1 {
+		t.Fatalf("recorded %d detections, want 1", got)
+	}
+	if got := f.spool.depth(); got != 0 {
+		t.Fatalf("a silent class must not reach the spool; depth=%d", got)
 	}
 }
 
@@ -218,16 +232,18 @@ func TestHandleLineDropsUnconfigured(t *testing.T) {
 	if f.queue.depth() != 0 {
 		t.Fatal("malformed line should not queue")
 	}
-	f.handleLine(`{"process_kprobe":{"policy_name":"p"}}`)
+	// A privilege raise is a class that pages, so it queues; a plain kprobe
+	// would only be recorded.
+	f.handleLine(`{"process_kprobe":{"policy_name":"privilege-raises","function_name":"__sys_setuid","process":{"pid":900,"uid":1000,"binary":"/usr/bin/sudo","ns":{"pid":{"inum":4026531836,"is_host":true},"mnt":{"inum":4026531841,"is_host":true}}},"args":[{"int_arg":0}]}}`)
 	if f.queue.depth() != 1 {
-		t.Fatal("configured event should queue")
+		t.Fatalf("configured paging event should queue; depth=%d", f.queue.depth())
 	}
 }
 
 func TestEnqueueDedupsRepeatedAlerts(t *testing.T) {
 	cfg := testConfig()
 	f, _ := newForwarder(cfg)
-	a := newAlert(cfg, sourceTetragon, "warning", "host", "r", "same")
+	a := pagingAlert(cfg, "warning", "host", "r", "same")
 	f.enqueue(a)
 	f.enqueue(a)
 	if f.queue.depth() != 1 {

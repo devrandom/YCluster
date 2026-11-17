@@ -112,6 +112,39 @@ func TestDetectionLogRotates(t *testing.T) {
 	}
 }
 
+// A detection nobody can act on is the durable record, not an alert: it is
+// written, counted as a page candidate, and never queued or spooled.
+func TestSilentDetectionIsRecordedAndNotDelivered(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.detectionsFile = filepath.Join(dir, "detections.jsonl")
+	cfg.spoolFile = filepath.Join(dir, "spool.jsonl")
+	f, err := newForwarder(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.closeState()
+
+	a := newAlert(cfg, sourceTetragon, "warning", "host", "tcp-connect", "tcp-connect: binary=/usr/bin/curl")
+	a.Labels["kind"] = "connect"
+	a.Labels["uid"] = "1000"
+	if err := f.enqueue(a); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.queue.pop(); ok {
+		t.Fatal("a silent class must not be queued")
+	}
+	if got := f.spool.depth(); got != 0 {
+		t.Fatalf("a silent class must not be spooled; depth=%d", got)
+	}
+	if got := processCount(t, cfg.detectionsFile); got != 1 {
+		t.Fatalf("recorded %d detections, want 1", got)
+	}
+	if got := f.stats.pageCandidateCounts()["lateral_nonroot"]; got != 1 {
+		t.Fatalf("page candidates = %d, want 1", got)
+	}
+}
+
 func TestDetectionRecordCarriesContainer(t *testing.T) {
 	a := alert{
 		Labels: map[string]string{

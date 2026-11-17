@@ -50,8 +50,8 @@ func sigmaContainerClass(a alert) string {
 }
 
 // pagingClasses are the coverage classes allowed to page today. Everything
-// else is delivered silent and counted as a page candidate until a shadow
-// measurement earns it a page.
+// else is recorded and counted as a page candidate, and never posted, until a
+// shadow measurement earns it a page.
 var pagingClasses = map[string]bool{
 	"escalation_nonroot": true,
 	"sigma_nonroot":      true,
@@ -132,8 +132,16 @@ func classifyAlert(a alert) (class string, evidence bool) {
 
 // deliveryFor reports how a classified detection is delivered. Evidence is
 // dropped after the record is written; coverage is either paged now or
-// delivered silent while its rate is measured.
+// recorded while its rate is measured.
 func deliveryFor(a alert, class string, evidence bool) string {
+	if name := a.Labels["alertname"]; name != "" && name != "IDSAlert" {
+		// The forwarder's own coverage alerts (a replay gap) are not detection
+		// findings: they are routed on severity by Alertmanager and nothing
+		// may decide they are routine. This test comes before the evidence
+		// one so a coverage alert cannot be classed out of paging by whatever
+		// identity labels its event happens to carry.
+		return deliveryPage
+	}
 	if evidence {
 		return deliveryEvidence
 	}

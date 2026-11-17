@@ -98,7 +98,6 @@ class IdsMetricsCollectorTests(unittest.TestCase):
             "ids_forwarder_provenance_total",
             "ids_forwarder_evidence_only_total",
             "ids_forwarder_page_candidates_total",
-            "ids_forwarder_build_info",
         ):
             self.assertIn(name, col.FORWARDER_GAUGES)
 

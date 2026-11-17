@@ -31,7 +31,11 @@ func (f *forwarder) startReceiver() error {
 				// The alert is not durable: tell CrowdSec to retry, then
 				// restart so the failure is not hidden behind a 503. The
 				// response is flushed first because shutdown closes the
-				// listener from another goroutine.
+				// listener from another goroutine. No class reachable from
+				// this receiver can page today, so enqueue does not fail and
+				// the path is dormant; it stays because the contract is worth
+				// keeping for a paging source and removing it would turn a
+				// future durable-storage failure into a silent 200.
 				f.cfg.logf("fatal: crowdsec enqueue: %v", err)
 				http.Error(w, "queue unavailable", http.StatusServiceUnavailable)
 				if fl, ok := w.(http.Flusher); ok {
@@ -172,9 +176,6 @@ func (f *forwarder) startMetrics() error {
 			}
 			fmt.Fprintf(w, "ids_forwarder_provenance_total{check=%q,source=%q} %d\n", check, source, prov[key])
 		}
-		fmt.Fprintf(w, "# HELP ids_forwarder_build_info Build metadata; page_schema is the delivery-class schema the binary emits.\n")
-		fmt.Fprintf(w, "# TYPE ids_forwarder_build_info gauge\n")
-		fmt.Fprintf(w, "ids_forwarder_build_info{page_schema=%q} 1\n", "1")
 	})
 	srv := &http.Server{Addr: f.cfg.metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ln, err := net.Listen("tcp", f.cfg.metricsListen)

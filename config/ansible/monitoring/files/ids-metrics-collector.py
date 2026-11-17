@@ -33,7 +33,6 @@ COMPONENTS = {
 FORWARDER_GAUGES = (
     "ids_forwarder_alertmanager_partial_total",
     "ids_forwarder_boot_suppressed_total",
-    "ids_forwarder_build_info",
     "ids_forwarder_cursor_errors_total",
     "ids_forwarder_deduped_total",
     "ids_forwarder_detections_total",

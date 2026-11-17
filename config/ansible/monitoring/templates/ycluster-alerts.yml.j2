@@ -1113,19 +1113,6 @@ groups:
           summary: "IDS forwarder down on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} has been unreachable for 5m; Tetragon and CrowdSec events are not being forwarded from that node."
 
-      # The forwarder labels every detection with the delivery class schema
-      # (`page`). A host still running an older binary sends alerts that route
-      # to ids-silent, so its escalations would vanish without this check.
-      - alert: IdsForwarderSchemaStale
-        expr: (ids_component_up{component="ids-forwarder"} == 1) unless on (node) ids_forwarder_build_info{page_schema="1"}
-        for: 15m
-        labels:
-          severity: warning
-          ids_coverage: "true"
-        annotations:
-          summary: "IDS forwarder on {{ $labels.node }} predates the delivery classes"
-          description: "ids-forwarder on {{ $labels.node }} is running but reports no page-schema build info, so its IDSAlert findings route to the silent receiver. Redeploy the forwarder on that node."
-
       - alert: TetragonDown
         expr: ids_component_up{component="tetragon"} == 0
         for: 5m
@@ -1215,6 +1202,18 @@ groups:
         annotations:
           summary: "IDS forwarder cannot save its replay cursor on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} failed to persist its Tetragon replay cursor; a restart resumes from an older boundary, so already-delivered alerts may be replayed."
+
+      # The detection record is the only destination for a class that does not
+      # page, so a write failure there silently loses coverage.
+      - alert: IdsForwarderRecordFailing
+        expr: increase(ids_forwarder_record_errors_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          ids_coverage: "true"
+        annotations:
+          summary: "IDS forwarder cannot write its detection record on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} failed to append to detections.jsonl {{ $value | printf \"%.0f\" }} times in the last 15m; findings that do not page exist nowhere else and are lost here, while paging findings in the same window still reached Alertmanager."
 
       - alert: IdsForwarderBacklog
         expr: (ids_forwarder_queue_depth > 1000) or (ids_forwarder_spool_bytes > 83886080)
