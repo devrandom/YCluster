@@ -11,7 +11,7 @@ After=network.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/local-ai-proxy --config /etc/local-ai-proxy/config.yaml
+ExecStart=/usr/local/bin/local-ai-proxy serve --config /etc/local-ai-proxy/config.yaml
 User=local-ai-proxy
 Restart=on-failure
 RestartSec=5

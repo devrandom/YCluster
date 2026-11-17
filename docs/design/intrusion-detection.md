@@ -1358,10 +1358,10 @@ concrete actions for the open items are in [Next steps](#next-steps).
 
 Fixed in the same pass:
 
-- **Sigma delivery (finding 2).** The unit passed `-exec-root-user-path True`.
+- **Sigma delivery (finding 2).** The unit passed `--exec-root-user-path True`.
   Go's flag parser stops at the first non-flag argument, so every flag after it
   — Sigma socket and detection sink, cursor, spool, CrowdSec receiver — was
-  ignored. The template now emits `-flag={{ value }}`. Sigma send counters move
+  ignored. The template now emits `--flag={{ value }}`. Sigma send counters move
   fleet-wide and the receiver is listening on `127.0.0.1:9201` again. A new
   `IdsSigmaStalled` alert fires when detections are recorded but nothing reaches
   RSigma. It is a stall check, not a coverage check: if the Sigma sink is
