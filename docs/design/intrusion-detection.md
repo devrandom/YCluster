@@ -581,7 +581,7 @@ gate is a two-week baseline against the hand-written rules.
 | Compute (`c*`) | yes | yes | yes | observe-only |
 | Nvidia (`nv*`) | yes | yes | yes | observe-only |
 | NAS (`nas*`) | yes | yes | yes | low traffic |
-| Frontend (`f*`) | yes | yes | yes | public ingress logs |
+| Frontend (`f*`) | not enrolled | not enrolled | not enrolled | treated as outside the cluster for now |
 | macOS compute (`m*`) | phase 2 | phase 2 | phase 2 | separate build |
 | Adhoc (`x*`) | phase 2 | phase 2 | phase 2 | dynamic inventory |
 | Admin laptops | no | no | no | out of scope |

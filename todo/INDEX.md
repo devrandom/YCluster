@@ -80,6 +80,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [Clock-skew alert](monitoring/clock-skew-alert.md)
 - [Ansible-run-success metric](monitoring/ansible-run-success-metric.md)
 - [Follow-on: failed-systemd-units](monitoring/follow-on-failed-systemd-units.md)
+- **[HIGH]** [Ship cluster logs off-host](monitoring/log-shipping.md) — the IDS detection record is the only copy of every finding that does not page; ship it (and later journald) to a central store.
 
 ## Operations
 - **[HIGH]** [Storage-leader election: renew lease during startup](operations/storage-leader-rbd-renewal.md) — startup blocks on `user-rbd` while holding leadership without renewing the 30s etcd lease; a slow RBD acquire produced two simultaneous leaders and teardown churn. Renew concurrently and re-check leadership before `rbd map --exclusive`.
