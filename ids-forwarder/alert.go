@@ -68,9 +68,14 @@ func (a alert) tooOld(now time.Time, maxAge time.Duration) bool {
 
 func (a alert) dedupKey() string {
 	shell := a.Labels["rule_id"] == "process_exec" && isShellBinary(a.Labels["binary"])
+	// A transition out of a non-root identity is one page per actor: the
+	// question an operator answers is "did this account escalate", so a
+	// second account running the same command is a second finding rather
+	// than a duplicate of the first.
+	keepActor := a.Labels["class"] == "escalation_nonroot"
 	keys := make([]string, 0, len(a.Labels))
 	for k := range a.Labels {
-		if k == "origin" || k == "actor" {
+		if k == "origin" || (k == "actor" && !keepActor) {
 			// Provenance describes the alert, it does not make it a
 			// different signal: one shell on one host stays one alert
 			// whichever session or unit ran it.

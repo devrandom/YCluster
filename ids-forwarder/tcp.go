@@ -76,22 +76,24 @@ var cephPorts = map[uint16]struct{}{
 // cluster address on purpose. The list stays explicit: a container reaching
 // another node is the lateral-movement signal the IDS exists to show, so a
 // broad "container traffic is fine" rule here would defeat it.
-func containerProbeReason(body *tetragonLog) string {
+func containerProbeReason(cfg config, body *tetragonLog) string {
 	if body == nil || body.FunctionName != "tcp_connect" {
 		return ""
 	}
 	binary := path.Clean(strings.TrimSuffix(body.Process.Binary, " (deleted)"))
-	_, port, ok := tcpDestination(body.Args)
+	addr, port, ok := tcpDestination(body.Args)
 	if !ok {
 		return ""
 	}
 	// Vikunja's image ships a healthcheck subcommand (the container is
 	// distroless) and it checks service.publicurl, which resolves to the
 	// storage VIP. Every probe is therefore a container -> VIP connect on
-	// the publicurl port; the exact image path and port keep a lookalike
-	// binary from inheriting this without the Vikunja image.
+	// the publicurl port. The address is part of the match: a compromised
+	// container probes whatever it likes, and only the service entry point
+	// is the routine case.
 	if binary == "/app/vikunja/vikunja" &&
-		strings.Contains(body.Process.Arguments, "healthcheck") && port == 443 {
+		strings.Contains(body.Process.Arguments, "healthcheck") &&
+		port == 443 && isServiceAddress(cfg, addr) {
 		return "expected_tcp"
 	}
 	return ""
@@ -131,14 +133,14 @@ func newTCPConn(body *tetragonLog) (tcpConn, bool) {
 // expectedTCPReason suppresses a known service connecting to its normal
 // service port on the private cluster network. The same binary talking to an
 // unexpected port, or to an external address, still produces an alert.
-func expectedTCPReason(body *tetragonLog) string {
+func expectedTCPReason(cfg config, body *tetragonLog) string {
 	conn, ok := newTCPConn(body)
 	if !ok {
 		return ""
 	}
 	// Fixed automation talks to fixed destinations, so these rules apply
 	// regardless of address family.
-	if automationDial(conn) || containerProbeReason(body) != "" {
+	if automationDial(conn) || containerProbeReason(cfg, body) != "" {
 		return "expected_tcp"
 	}
 	// Public-internet egress is routine for every host process, interactive
@@ -147,10 +149,24 @@ func expectedTCPReason(body *tetragonLog) string {
 	if !conn.addr.IsPrivate() && !conn.addr.IsLoopback() {
 		return "public_egress"
 	}
-	if clusterDial(conn) {
+	if clusterDial(cfg, conn) {
 		return "expected_tcp"
 	}
 	return ""
+}
+
+// isServiceAddress reports whether addr is one of the cluster's own service
+// entry points as configured: the gateway VIP that fronts the egress proxy
+// and the storage VIP that fronts the published services. A rule that
+// suppresses a routine dial matches one of these, never the port alone: the
+// port is a destination any host on the network can offer.
+func isServiceAddress(cfg config, addr netip.Addr) bool {
+	for _, known := range cfg.serviceAddresses {
+		if known == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // automationDial covers daemons and scripts whose dials are fixed: the
@@ -387,10 +403,12 @@ func moduleRun(args, module string) bool {
 
 // clusterDial covers dials to cluster-internal services. Callers guarantee
 // the destination is private.
-func clusterDial(c tcpConn) bool {
+func clusterDial(cfg config, c tcpConn) bool {
 	// Squid is the cluster's egress proxy: every client, including apt's
-	// HTTP method, reaches its one private address on this port.
-	if c.port == 3128 {
+	// HTTP method, reaches its one private address on this port. The address
+	// is part of the match, so a host running its own service on 3128 stays
+	// visible.
+	if c.port == 3128 && isServiceAddress(cfg, c.addr) {
 		return true
 	}
 	// Port forwarders for published container ports only ever dial the

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -209,6 +210,22 @@ func TestMetricsEndpointLoopback(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("metrics status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	// Every class gets a series even before it fires, so a quiet class is a
+	// zero rather than a gap the gate cannot read.
+	for _, class := range knownClasses {
+		line := fmt.Sprintf("ids_forwarder_page_candidates_total{class=%q}", class)
+		if !strings.Contains(text, line) {
+			t.Fatalf("missing %s in the metrics output", line)
+		}
+	}
+	if !strings.Contains(text, "ids_forwarder_record_rotations_total 0") {
+		t.Fatal("record rotation counter is not exposed")
 	}
 }
 

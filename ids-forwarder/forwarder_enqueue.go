@@ -64,7 +64,12 @@ func (f *forwarder) enqueue(a alert) error {
 		// here measures what enabling the class would actually page, dedup
 		// and coalescing included, and the key is still marked so a repeat
 		// inside the window is deduplicated rather than counted twice.
-		f.stats.countPageCandidate(class)
+		// The audit trail is exempt: it is counted per guest by its own
+		// metrics and is not a candidate for paging, so counting it here
+		// would inflate the measurement the gate reads.
+		if class != "audit" {
+			f.stats.countPageCandidate(class)
+		}
 		f.dedup.mark(key)
 		return nil
 	}

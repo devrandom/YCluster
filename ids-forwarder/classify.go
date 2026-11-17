@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/netip"
-	"strconv"
 	"strings"
 )
 
@@ -57,6 +56,32 @@ var pagingClasses = map[string]bool{
 	"sigma_nonroot":      true,
 }
 
+// knownClasses is every class classifyAlert can return. The metrics endpoint
+// emits a page-candidate and an evidence series for each at zero, so a quiet
+// class reads as zero rather than as absent: absent is also what a binary that
+// does not know the class looks like, and that difference is what the
+// measurement gate depends on.
+var knownClasses = []string{
+	"audit",
+	"container_other",
+	"crowdsec",
+	"escalation_nonroot",
+	"exec_nonroot",
+	"file_nonroot",
+	"host_nonroot",
+	"lateral_container",
+	"lateral_nonroot",
+	"root_connect",
+	"root_exec",
+	"root_file_write",
+	"root_module",
+	"root_other",
+	"root_privilege",
+	"root_sigma",
+	"sigma_nonroot",
+	"tenant_egress",
+}
+
 // classifyAlert returns the threat-model class of a detection and whether it
 // is evidence, meaning recorded and never delivered.
 func classifyAlert(a alert) (class string, evidence bool) {
@@ -88,13 +113,9 @@ func classifyAlert(a alert) (class string, evidence bool) {
 	kind := a.Labels["kind"]
 	switch a.Labels["layer"] {
 	case "container", "unverified":
-		// A container process whose host-visible uid is unprivileged is a
-		// guest account. Below the idmap base it is host root wearing a
-		// tenant name, so host-integration rules see it as root. Connects
-		// stay a tenant-boundary signal either way.
-		if isPrivilegedContainer(a) && kind != "connect" {
-			return "privileged_container", true
-		}
+		// Only connects reach the classifier from a container: the mapping
+		// drops every other container event as guest-internal, and the Sigma
+		// layer returns above. A connect is the tenant-boundary signal.
 		if kind == "connect" {
 			return "lateral_container", false
 		}
@@ -179,27 +200,6 @@ func sigmaLevelAtLeast(level, floor string) bool {
 func isRootIdentity(a alert) bool {
 	uid, ok := a.Labels["uid"]
 	return ok && uid == "0"
-}
-
-// isPrivilegedContainer reports a container process whose host-visible uid is
-// below the idmap base, which is Incus's or the kernel's root for a runtime
-// without user namespaces.
-func isPrivilegedContainer(a alert) bool {
-	if a.Labels["layer"] != "container" {
-		// An unverified process may be a rootless container's or a host
-		// account's; either way it is not host root, and a login uid is
-		// below the idmap base by accident.
-		return false
-	}
-	uid, ok := a.Labels["uid"]
-	if !ok {
-		return false
-	}
-	value, err := strconv.ParseUint(uid, 10, 32)
-	if err != nil {
-		return false
-	}
-	return value < incusIDMapBase
 }
 
 // privilegeTools are the binaries whose exec is the transition itself. The

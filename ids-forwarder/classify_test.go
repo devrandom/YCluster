@@ -64,11 +64,6 @@ func TestClassifyAlert(t *testing.T) {
 			class:  "lateral_container",
 		},
 		{
-			name:   "privileged container exec is host root",
-			labels: map[string]string{"rule_id": "process_exec", "layer": "container", "kind": "exec", "uid": "0"},
-			class:  "privileged_container", evidence: true,
-		},
-		{
 			name:   "unverified exec is not a privileged container",
 			labels: map[string]string{"rule_id": "process_exec", "layer": "unverified", "kind": "exec", "uid": "1000"},
 			class:  "container_other",
@@ -136,11 +131,21 @@ func TestClassifyAlert(t *testing.T) {
 			class:  "crowdsec",
 		},
 	}
+	known := make(map[string]bool, len(knownClasses))
+	for _, class := range knownClasses {
+		known[class] = true
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			class, evidence := classifyAlert(classifyLabels(tc.labels))
 			if class != tc.class || evidence != tc.evidence {
 				t.Fatalf("classifyAlert = %q evidence=%v, want %q evidence=%v", class, evidence, tc.class, tc.evidence)
+			}
+			if !known[class] {
+				// A class outside knownClasses has no zero-valued series, so
+				// the measurement gate cannot tell it apart from a class the
+				// binary does not know.
+				t.Fatalf("class %q is missing from knownClasses", class)
 			}
 		})
 	}

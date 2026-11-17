@@ -1215,6 +1215,32 @@ groups:
           summary: "IDS forwarder cannot write its detection record on {{ $labels.node }}"
           description: "ids-forwarder on {{ $labels.node }} failed to append to detections.jsonl {{ $value | printf \"%.0f\" }} times in the last 15m; findings that do not page exist nowhere else and are lost here, while paging findings in the same window still reached Alertmanager."
 
+      # That record is also the only copy, and it rotates by size. A rotation
+      # inside an hour means a busy host is shortening the retained window
+      # faster than the keep count assumes.
+      - alert: IdsForwarderRecordRotating
+        expr: increase(ids_forwarder_record_rotations_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          ids_coverage: "true"
+        annotations:
+          summary: "IDS detection record rotated on {{ $labels.node }}"
+          description: "ids-forwarder on {{ $labels.node }} rotated detections.jsonl {{ $value | printf \"%.0f\" }} times in the last hour, so the oldest findings are being dropped from the only copy of everything that does not page."
+
+      # The component alerts below read ids_component_up from the node_exporter
+      # textfile collector. If that collector stops writing, all of them go
+      # absent at once and the fleet looks healthy, so watch the file itself.
+      - alert: IdsMetricsStale
+        expr: time() - node_textfile_mtime_seconds{file=~".*ids.prom"} > 900
+        for: 5m
+        labels:
+          severity: warning
+          ids_coverage: "true"
+        annotations:
+          summary: "IDS component metrics stopped updating on {{ $labels.node }}"
+          description: "the IDS textfile collector has not written {{ $labels.file }} for {{ $value | printf \"%.0f\" }}s; ids_component_up and every coverage alert that reads it are stale on {{ $labels.node }}."
+
       - alert: IdsForwarderBacklog
         expr: (ids_forwarder_queue_depth > 1000) or (ids_forwarder_spool_bytes > 83886080)
         for: 15m

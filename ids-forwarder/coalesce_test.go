@@ -77,8 +77,10 @@ func TestRecurringContainerExecIsCoalesced(t *testing.T) {
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
-	if got := pageCandidates(f); got != 1 {
-		t.Fatalf("page candidates after first event = %d, want 1", got)
+	// The fork helper is audit, not a paging candidate: it must not enter the
+	// measurement the gate reads.
+	if got := pageCandidates(f); got != 0 {
+		t.Fatalf("page candidates after first event = %d, want 0 for the audit trail", got)
 	}
 
 	// Six minutes later: past the shared 5m dedup window, still inside the
@@ -96,8 +98,8 @@ func TestRecurringContainerExecIsCoalesced(t *testing.T) {
 	if err := f.handleLine(line); err != nil {
 		t.Fatal(err)
 	}
-	if got := pageCandidates(f); got != 1 {
-		t.Fatalf("page candidates after repeat = %d, want 1 (coalesced)", got)
+	if got := pageCandidates(f); got != 0 {
+		t.Fatalf("page candidates after repeat = %d, want 0 for the audit trail", got)
 	}
 	if got := f.stats.coalesced.Load(); got != 1 {
 		t.Fatalf("coalesced = %d, want 1", got)
@@ -191,8 +193,8 @@ func TestContainerAPIUsageIsAlwaysRecorded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := pageCandidates(f); got != 1 {
-		t.Fatalf("page candidates = %d, want 1 for the pair", got)
+	if got := pageCandidates(f); got != 0 {
+		t.Fatalf("page candidates = %d, want 0: the API trail never becomes a page", got)
 	}
 	if got := f.stats.deduped.Load(); got != 1 {
 		t.Fatalf("deduped = %d, want 1", got)

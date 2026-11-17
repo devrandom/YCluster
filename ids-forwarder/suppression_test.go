@@ -170,6 +170,7 @@ func TestForgedFileWritersAreForwarded(t *testing.T) {
 }
 
 func TestUnverifiedUserScopeCannotUseHostSuppressions(t *testing.T) {
+	cfg := testConfig()
 	root := t.TempDir()
 	pid := uint32(9101)
 	started := writeFakeProcess(t, root, pid,
@@ -195,7 +196,7 @@ func TestUnverifiedUserScopeCannotUseHostSuppressions(t *testing.T) {
 	if layer != "unverified" {
 		t.Fatalf("layer = %q, want unverified", layer)
 	}
-	if reason := tetragonSuppression("process_kprobe", body, layer); reason != "" {
+	if reason := tetragonSuppression("process_kprobe", body, layer, cfg); reason != "" {
 		t.Fatalf("private cluster connect was suppressed as %q", reason)
 	}
 
@@ -206,7 +207,7 @@ func TestUnverifiedUserScopeCannotUseHostSuppressions(t *testing.T) {
 		body.Args, _ = json.Marshal([]any{map[string]any{
 			"sock_arg": map[string]any{"daddr": dst.host, "dport": dst.port},
 		}})
-		if reason := tetragonSuppression("process_kprobe", body, layer); reason != "" {
+		if reason := tetragonSuppression("process_kprobe", body, layer, cfg); reason != "" {
 			t.Fatalf("unverified %s:%d was suppressed as %q", dst.host, dst.port, reason)
 		}
 	}
@@ -214,14 +215,14 @@ func TestUnverifiedUserScopeCannotUseHostSuppressions(t *testing.T) {
 	body.Args, _ = json.Marshal([]any{map[string]any{
 		"sock_arg": map[string]any{"daddr": "203.0.113.5", "dport": 443},
 	}})
-	if reason := tetragonSuppression("process_kprobe", body, layer); reason != "tenant_egress" {
+	if reason := tetragonSuppression("process_kprobe", body, layer, cfg); reason != "tenant_egress" {
 		t.Fatalf("public egress reason = %q, want tenant_egress", reason)
 	}
 
 	body.FunctionName = ""
 	body.Process.Binary = "/bin/bash"
 	body.Process.Arguments = `-c "id"`
-	if reason := tetragonSuppression("process_exec", body, layer); reason != "" {
+	if reason := tetragonSuppression("process_exec", body, layer, cfg); reason != "" {
 		t.Fatalf("unverified exec was suppressed as %q", reason)
 	}
 }
@@ -521,6 +522,7 @@ func TestCertbotPrivilegeDropIsSuppressed(t *testing.T) {
 }
 
 func TestPublicEgressIsRoutine(t *testing.T) {
+	cfg := testConfig()
 	proc := tetragonProcess{
 		Binary:    "/usr/bin/wget",
 		Arguments: "--no-config --connect-timeout=7 --tries=1 --dns-timeout=7 -q --header=Metadata-Flavor:Google -O - http://metadata.google.internal/computeMetadata/v1/instance/id",
@@ -575,13 +577,13 @@ func TestPublicEgressIsRoutine(t *testing.T) {
 	body.Args, _ = json.Marshal([]any{map[string]any{
 		"sock_arg": map[string]any{"daddr": "203.0.113.10", "dport": 443},
 	}})
-	if reason := expectedTCPReason(&body); reason != "public_egress" {
+	if reason := expectedTCPReason(cfg, &body); reason != "public_egress" {
 		t.Fatalf("public connect = %q, want public_egress", reason)
 	}
 	body.Args, _ = json.Marshal([]any{map[string]any{
 		"sock_arg": map[string]any{"daddr": "10.0.0.12", "dport": 2381},
 	}})
-	if reason := expectedTCPReason(&body); reason != "" {
+	if reason := expectedTCPReason(cfg, &body); reason != "" {
 		t.Fatalf("private connect was suppressed as %q", reason)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -61,6 +62,11 @@ type detectionLog struct {
 	mu   sync.Mutex
 	file *os.File
 	size int64
+
+	// rotations counts completed rotations. Under the delivery model this
+	// file is the only copy of a finding that does not page, so losing the
+	// oldest file is worth a counter and an alert.
+	rotations atomic.Int64
 }
 
 func openDetectionLog(path string, maxBytes int64, keep int) (*detectionLog, error) {
@@ -141,6 +147,7 @@ func (d *detectionLog) rotate() error {
 	if err := os.Rename(d.path, d.path+".1"); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("rotate detections file: %w", err)
 	}
+	d.rotations.Add(1)
 	return d.open()
 }
 

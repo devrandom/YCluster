@@ -104,6 +104,11 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "ids_forwarder_cursor_errors_total %d\n", f.stats.cursorErrors.Load())
 		fmt.Fprintf(w, "ids_forwarder_recorded_total %d\n", f.stats.recorded.Load())
 		fmt.Fprintf(w, "ids_forwarder_record_errors_total %d\n", f.stats.recordErrors.Load())
+		var rotations int64
+		if f.record != nil {
+			rotations = f.record.rotations.Load()
+		}
+		fmt.Fprintf(w, "ids_forwarder_record_rotations_total %d\n", rotations)
 		var sigmaSent, sigmaErrors, sigmaDropped, sigmaDepth int64
 		if f.sigma != nil {
 			sigmaSent = f.sigma.sent.Load()
@@ -142,6 +147,16 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "# HELP ids_forwarder_evidence_only_total Detections recorded as post-root evidence and not delivered, by class.\n")
 		fmt.Fprintf(w, "# TYPE ids_forwarder_evidence_only_total counter\n")
 		evidence := f.stats.evidenceCounts()
+		candidates := f.stats.pageCandidateCounts()
+		// Every known class gets a page-candidate series, at zero if it has
+		// not fired since start: an absent series is indistinguishable from
+		// a binary that does not know the class, and the gate reads this.
+		// The evidence counter stays incremental, since no one gates on it.
+		for _, class := range knownClasses {
+			if _, ok := candidates[class]; !ok {
+				candidates[class] = 0
+			}
+		}
 		classes := make([]string, 0, len(evidence))
 		for class := range evidence {
 			classes = append(classes, class)
@@ -152,7 +167,6 @@ func (f *forwarder) startMetrics() error {
 		}
 		fmt.Fprintf(w, "# HELP ids_forwarder_page_candidates_total Silent coverage detections after dedup and coalescing, by class; what enabling that class would have paged.\n")
 		fmt.Fprintf(w, "# TYPE ids_forwarder_page_candidates_total counter\n")
-		candidates := f.stats.pageCandidateCounts()
 		classNames := make([]string, 0, len(candidates))
 		for class := range candidates {
 			classNames = append(classNames, class)

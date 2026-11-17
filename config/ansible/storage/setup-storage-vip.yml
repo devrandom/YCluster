@@ -3,7 +3,6 @@
   hosts: core
   become: yes
   vars:
-    storage_vip: "10.0.0.100"
     gateway_interface: "{{ cluster_interface }}"
     
   tasks:

@@ -50,7 +50,7 @@ func TestExpectedTCPIsSuppressed(t *testing.T) {
 		{"ntfy notifier", "/usr/bin/python3.12", "/usr/local/bin/ntfy-webhook.py", "203.0.113.40", 443},
 		{"squid egress", "/usr/sbin/squid", "--kid squid-1", "203.0.113.50", 443},
 		{"networkmanager connectivity check", "/usr/sbin/NetworkManager", "--no-daemon", "203.0.113.60", 80},
-		{"vikunja healthcheck", "/app/vikunja/vikunja", "healthcheck", "203.0.113.70", 443},
+		{"vikunja healthcheck", "/app/vikunja/vikunja", "healthcheck", "10.0.0.100", 443},
 		{"vm idle zulip notify", "/usr/local/bin/ycluster", "/usr/local/bin/ycluster vm idle --notify", "203.0.113.71", 443},
 		{"cluster collector to etcd", "/usr/bin/python3", "/usr/local/bin/collect-model-stats", "10.0.0.11", 2381},
 		{"cluster collector to etcd with interpreter flag", "/usr/bin/python3", "-u /usr/local/lib/cluster/collect-model-stats", "10.0.0.11", 2381},
@@ -222,4 +222,45 @@ func tcpLine(t *testing.T, binary, args, daddr string, port int) string {
 		t.Fatal(err)
 	}
 	return string(line)
+}
+
+// A suppression that matches a port alone is a destination any host can
+// offer. Both of these dials are routine on the service address and must stay
+// visible anywhere else.
+func TestServiceDialsAnchorOnTheServiceAddress(t *testing.T) {
+	cfg := testConfig()
+	cases := []struct {
+		name   string
+		binary string
+		args   string
+		daddr  string
+		port   int
+	}{
+		{"proxied dial to a host that is not the proxy", "/usr/bin/python3", "/usr/local/bin/collect-model-stats", "10.0.0.11", 3128},
+		{"healthcheck to a host that is not the service VIP", "/app/vikunja/vikunja", "healthcheck", "10.0.0.11", 443},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := tcpLine(t, tc.binary, tc.args, tc.daddr, tc.port)
+			if _, _, ok, reason := tetragonAlertDecision(line, cfg); !ok {
+				t.Fatalf("suppressed as %q", reason)
+			}
+		})
+	}
+
+	// The control: the same dial on the service address is routine.
+	for _, dst := range []struct {
+		binary string
+		args   string
+		daddr  string
+		port   int
+	}{
+		{"/usr/bin/python3", "/usr/local/bin/collect-model-stats", "10.0.0.254", 3128},
+		{"/app/vikunja/vikunja", "healthcheck", "10.0.0.100", 443},
+	} {
+		line := tcpLine(t, dst.binary, dst.args, dst.daddr, dst.port)
+		if _, _, ok, reason := tetragonAlertDecision(line, cfg); ok || reason != "expected_tcp" {
+			t.Fatalf("%s:%d ok=%v reason=%q, want expected_tcp", dst.daddr, dst.port, ok, reason)
+		}
+	}
 }

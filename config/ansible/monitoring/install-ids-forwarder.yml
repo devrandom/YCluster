@@ -27,6 +27,11 @@
     ids_forwarder_exec_root_user_path: true
     # Loopback receiver for CrowdSec notification-http POSTs.
     ids_forwarder_http_listen: "127.0.0.1:9201"
+    # The cluster's own service entry points: the gateway VIP that fronts the
+    # egress proxy and the storage VIP behind the published services. A dial
+    # suppression may match these addresses, never a bare port: any host can
+    # offer the port, and only the VIP is the routine destination.
+    ids_forwarder_service_addresses: "{{ gateway_vip }},{{ storage_vip }}"
     ids_forwarder_metrics_listen: "127.0.0.1:2113"
     # Durable replay and outbound queue. The spool holds redacted alerts,
     # not raw events; Tetragon's retained event files remain the upstream

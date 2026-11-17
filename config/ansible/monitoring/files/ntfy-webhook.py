@@ -675,8 +675,6 @@ def _ids_budget_exhausted(alert):
         return False
     if labels.get("alertname") != "IDSAlert":
         return False
-    if labels.get("rule_id") == "container-api":
-        return False
     return not _ids_budget_claim(labels.get("severity", "info"))
 
 

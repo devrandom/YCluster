@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"net/netip"
+	"strings"
 	"time"
 )
 
@@ -39,6 +42,7 @@ type config struct {
 	sigmaDetections  string
 	sigmaCursorFile  string
 	namespaceMap     string
+	serviceAddresses []netip.Addr
 	postTimeout      time.Duration
 	pollInterval     time.Duration
 	logf             func(format string, args ...any)
@@ -69,4 +73,23 @@ func defaultConfig() config {
 		pollInterval:    500 * time.Millisecond,
 		logf:            log.Printf,
 	}
+}
+
+// parseServiceAddresses reads the comma-separated cluster service entry
+// points. A field that does not parse is an error: a typo would otherwise
+// re-open the dials the list exists to suppress, silently.
+func parseServiceAddresses(value string) ([]netip.Addr, error) {
+	var out []netip.Addr
+	for _, field := range strings.Split(value, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		addr, err := netip.ParseAddr(field)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", field, err)
+		}
+		out = append(out, addr)
+	}
+	return out, nil
 }

@@ -65,11 +65,19 @@ func main() {
 		cfg.sigmaCursorFile, "durable byte cursor for the RSigma detection sink (default: <detections>.cursor)")
 	flag.StringVar(&cfg.namespaceMap, "namespace-map",
 		cfg.namespaceMap, "pid-namespace inum to cgroup map published by the root-side enumerator (empty disables)")
+	serviceAddresses := flag.String("service-addresses", "",
+		"comma-separated cluster service entry points (the gateway and storage VIPs) whose ordinary ports may be suppressed; empty disables the proxy and published-service rules")
 	flag.DurationVar(&cfg.postTimeout, "post-timeout",
 		cfg.postTimeout, "per-POST timeout to Alertmanager")
 	flag.DurationVar(&cfg.pollInterval, "poll-interval",
 		cfg.pollInterval, "how often to poll the event file and the outbound queue")
 	flag.Parse()
+
+	parsed, err := parseServiceAddresses(*serviceAddresses)
+	if err != nil {
+		log.Fatalf("ids-forwarder: -service-addresses: %v", err)
+	}
+	cfg.serviceAddresses = parsed
 
 	if cfg.hostname == "" {
 		host, err := os.Hostname()

@@ -140,7 +140,7 @@ processes.
 | `tcp-connect`, private destination | host, uid 0 | evidence (`root_connect`) |
 | `tcp-connect`, private destination | host, uid != 0 | coverage (`lateral_nonroot`) |
 | `tcp-connect`, cluster destination | container, unverified | coverage (`lateral_container`) |
-| exec, write, module and privilege rules | container, host-visible uid below the idmap base | evidence (privileged container) |
+| exec, write, module and privilege rules | container | guest-internal: the mapping drops them before classification, so exec coverage is the Sigma path only |
 | `privilege-raises`, any other case | host, uid 0 | evidence (`root_privilege`) |
 | `privilege-raises` | container | coverage (`container_other`) |
 | `kernel-modules` | host | evidence (`root_module`) |
@@ -152,12 +152,12 @@ processes.
 | Sigma, any level | container | coverage (`sigma_nonroot`) |
 | Sigma, any level, public destination | container, unverified | coverage (`tenant_egress`), never pages |
 | Sigma, level low or informational | host, non-root `User` | coverage, never pages |
-| `container-api`, `container-exec` | host, root | audit (exempt) |
-| `vm-bridge-*` blocks | network | audit (exempt) |
+| `container-api`, `container-exec` | host, root | audit: recorded, never posted, not a page candidate |
+| `vm-bridge-*` blocks | network | audit: counted per guest, never posted |
 | CrowdSec scenarios | host, log-derived | coverage, silent until measured |
-
-The privileged-container row overrides the container rows for exec, write,
-module and privilege, and appears once rather than repeated against each rule.
+| any rule shape with no more specific kind | host, uid != 0 | coverage (`host_nonroot`) |
+| file writes | host, uid != 0 | coverage (`file_nonroot`) |
+| non-connect events on an unverified layer | unverified | coverage (`container_other`) |
 Connects stay `lateral_container` and Sigma stays `sigma_nonroot` whatever the
 guest uid: the network path is a tenant-boundary signal either way, and the
 curated Sigma set is the only thing that sees inside a container.
@@ -203,6 +203,11 @@ decision cannot disagree.
 A class that is coverage but not yet enabled is counted where it *would* have
 been delivered: after dedup and coalescing, as
 `ids_forwarder_page_candidates_total{class=...}`. Nothing is delivered for it.
+Every known class is exported at zero, so a quiet class reads as zero rather
+than as a series that does not exist: the second is also what a binary too old
+to know the class looks like, and the gate cannot tell them apart. The audit
+trail is the one silent class excluded from the count — it is counted per
+guest by its own metrics and can never be enabled.
 That gives a true paged-equivalent rate without paging anyone, which is what
 the gate below reads.
 
@@ -294,8 +299,8 @@ folded into it.
   compromise, so they must not sit in a host-specific stream: the webhook sends
   `ids_coverage=true` to the IDS topic instead of the host topic.
 - Degradation stays warning, with the same label: backlog, drops, expiries,
-  rate limiting, cursor failures, Sigma tail failures, record write failures
-  and the gap alert.
+  rate limiting, cursor failures, Sigma tail failures, record write failures,
+  record rotation, a stale component-metrics file and the gap alert.
 - The cluster-wide five-per-severity-per-hour brake is unchanged. It keys on
   `IDSAlert`, so the sensor alerts are outside it and cannot be crowded out by
   a detection storm.
@@ -334,9 +339,10 @@ folded into it.
 
 ## Review prompt addendum
 
-The suppression blind-spot review prompt in
-[`intrusion-detection.md`](intrusion-detection.md) carries this paragraph, so a
-review does not spend its findings on the excluded case:
+The threat-model paragraph of the [review
+prompt](intrusion-detection.md#review-prompt) in `intrusion-detection.md`
+carries this paragraph, so a review does not spend its findings on the excluded
+case:
 
 ```text
 Assume host root is out of scope: an attacker with root on a monitored host

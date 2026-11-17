@@ -46,6 +46,7 @@ FORWARDER_GAUGES = (
     "ids_forwarder_provenance_total",
     "ids_forwarder_queue_depth",
     "ids_forwarder_record_errors_total",
+    "ids_forwarder_record_rotations_total",
     "ids_forwarder_recorded_total",
     "ids_forwarder_rejected_total",
     "ids_forwarder_sigma_bad_total",

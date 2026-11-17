@@ -378,7 +378,10 @@ class WebhookHttp(unittest.TestCase):
         self.assertEqual(resp.get_json()["cap_reached"], 1)
         self.assertEqual(m.call_count, 3)
 
-    def test_ids_budget_skips_audit_rule(self):
+    def test_ids_budget_has_no_rule_id_exemption(self):
+        # The audit trail never reaches Alertmanager any more, so the old
+        # container-api exemption is gone: an IDSAlert carrying that rule id
+        # must be charged like any other.
         wh.IDS_RATE_LIMIT = 1
         wh.IDS_RATE_WINDOW_SECONDS = 3600
         wh._shared_client = FakeEtcd()
@@ -401,8 +404,11 @@ class WebhookHttp(unittest.TestCase):
         }
         with unittest.mock.patch.object(wh, "send_to_ntfy", return_value=True) as m:
             resp = post(payload)
+        # The first alert takes the only slot; the second is throttled and
+        # counted, and the cap notice is itself one of the two sends.
+        self.assertEqual(resp.get_json()["throttled"], 1)
+        self.assertEqual(resp.get_json()["cap_reached"], 1)
         self.assertEqual(resp.get_json()["sent"], 2)
-        self.assertEqual(resp.get_json()["throttled"], 0)
 
     def test_ids_budget_throttles_across_alerts(self):
         wh.IDS_RATE_LIMIT = 1

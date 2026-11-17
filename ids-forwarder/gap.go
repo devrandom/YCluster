@@ -13,10 +13,12 @@ func (f *forwarder) resolveGap() {
 	f.gapMu.Unlock()
 }
 
-// reportGap makes a coverage loss visible. It deliberately uses a
-// distinct alertname so the tuning-window silence for IDSAlert does not
-// hide it. The latch is only set once the alert is durable: if the spool
-// rejects it, the caller sees the error and the process restarts.
+// reportGap makes a coverage loss visible. It deliberately uses a distinct
+// alertname: deliveryFor pages anything that is not IDSAlert, so a gap cannot
+// fall into a detection class and be recorded instead of sent, and
+// Alertmanager routes it on severity like any other coverage alert. The latch
+// is only set once the alert is durable: if the spool rejects it, the caller
+// sees the error and the process restarts.
 func (f *forwarder) reportGap(last time.Time, sources []replaySource, why string) error {
 	f.gapMu.Lock()
 	already := f.gapPending

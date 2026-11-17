@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -16,6 +17,12 @@ func testConfig() config {
 	cfg.hostname = "test-host"
 	cfg.alertTTL = time.Minute
 	cfg.logf = func(string, ...any) {}
+	// The cluster service entry points the proxy and published-service dial
+	// suppressions anchor on: the gateway VIP and the storage VIP.
+	cfg.serviceAddresses = []netip.Addr{
+		netip.MustParseAddr("10.0.0.254"),
+		netip.MustParseAddr("10.0.0.100"),
+	}
 	// Only tests that exercise the record file point this at a temp dir.
 	cfg.detectionsFile = ""
 	// Keep the destination-key helper from touching /var/lib during tests.

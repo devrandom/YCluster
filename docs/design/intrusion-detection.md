@@ -990,7 +990,9 @@ network coverage.
   delivery classes are in
   [`ids-coverage-and-evidence.md`](ids-coverage-and-evidence.md). There is no
   catch-all route for `alertname=IDSAlert`, so a finding that arrives without a
-  page verdict is a classification bug and notifies rather than disappearing.
+  delivery decision behind it is a classification bug, and it notifies rather
+  than disappearing: an `IDSAlert` that arrives is by definition one the
+  forwarder chose to post.
   Coverage alerts keep their own routing: a stopped sensor is a blind spot, not
   noise. Detection events are replayed after an outage while they remain in the
   sensor log; only events older than `-max-event-age` are dropped, and an
@@ -1376,6 +1378,10 @@ Fixed in the same pass:
   (external 443, plus the leader's private etcd client port); the notifier only
   suppresses its pinned install path on 443 and the private etcd it uses for
   the shared budget; and the Vikunja healthcheck only the image path on 443.
+  Two of those still matched a port without an address. The proxy exemption
+  now requires the gateway VIP and the healthcheck the storage VIP
+  (`-service-addresses`, from inventory), so a dial to the same port on any
+  other host stays visible: a port is a destination any node can offer.
   Script exemptions are anchored to the program or the interpreter's script
   operand rather than a substring anywhere in argv, so a cluster-script path in
   a later argument no longer suppresses the connect. A payload named `squid`,
@@ -1486,7 +1492,8 @@ Fixed in the same pass:
   tenant-controlled Vikunja healthcheck path, the broad 8000-9999 service
   range, shell coalescing and the paging subset, kernel rate limiting, the
   bridge-guard guest attribution, rename/link/mmap hooks, and raw retention.
-  The review prompt and checklist live in
+  The review passes are below, and the running checklist of what each round
+  closed is in
   [`todo/security/intrusion-detection.md`](../../todo/security/intrusion-detection.md).
 
 Two items surfaced while verifying the fix. Neither is suppressed by name:
@@ -1508,7 +1515,7 @@ Two items surfaced while verifying the fix. Neither is suppressed by name:
   exited) the placeholder stays.
 
 Deferred to the discussion phase, because each needs a policy or volume
-decision: paging while the silent window runs (1); VM, UDP and unix-socket
+decision: enabling the classes still under measurement; VM, UDP and unix-socket
 visibility (5); rename/mmap/read hooks and the missing persistence paths (6);
 the 8000-9999 range for the admin service (8); alert-path
 authentication (9); the missing CrowdSec scenarios and thresholds (10);
@@ -1518,44 +1525,62 @@ also deferred: the access logs on the core nodes are empty and the frontend
 hosts are not managed, so the HTTP scenarios still have no input even with the
 parser fixed.
 
-### Suppression blind-spot review prompt
+### Review prompt
 
-Run this review whenever a suppression table, allowlist, kernel-policy filter,
-parser whitelist, rate limit, or alert route changes, and at least once before
-each release. Paste the block into a fresh agent with repository read access.
+One prompt, five passes. The passes share the threat model, the scope list and
+the output format, so a change to any of them is edited once instead of once
+per prompt. Run the passes whose trigger matches the change; run all five
+before a release. Paste the block into a fresh agent with repository read
+access.
+
+| Trigger | Passes |
+|---|---|
+| suppression table, allowlist, kernel-policy filter, parser whitelist, rate limit or alert route | A |
+| new or changed rule, new sensor or layer, threat-model change | B, D |
+| delivery class, budget or alert threshold | C |
+| a class starts paging | D, E |
+| release | A-E |
 
 ```text
-Review the YCluster IDS for suppression blind spots: places where a filter,
-allowlist, deduplication key, rate limit, or routing rule decides an event is
-routine based on a value an attacker can control. Assume the attacker has the
-full configuration (this document, the Tetragon policies, the forwarder source,
-the Sigma rewrite and rule set, and the CrowdSec parsers and scenarios). The
-question is not whether the rules are secret, but whether an attacker who knows
-them can make malicious activity match a routine path.
+Review the YCluster intrusion-detection system. Assume the attacker has the
+full configuration: this document, the Tetragon policies, the forwarder source,
+the Sigma rewrite and rule set, and the CrowdSec parsers and scenarios. The
+question is never whether the rules are secret, but whether an attacker who
+knows them reaches the goal anyway.
 
-Assume host root is out of scope: an attacker with root on a monitored host
-disables or rewrites the sensor, so post-root host activity is evidence, not
-coverage. Report only paths that reach the attacker's goal before host root.
+Threat model in force. Host root is out of scope: an attacker with root on a
+monitored host disables or rewrites the sensor, so post-root host activity is
+evidence, not coverage. Report only paths that reach the goal before host root.
 Root inside a tenant container or VM is a different identity and is in scope.
-Do not report a post-root host path as a blind spot; do report a rule or
-document that still claims coverage for one.
+Do not report a post-root host path as a gap; do report a rule or document that
+still claims coverage for one. Normal use of the cluster, tenant egress to the
+public internet included, is not an alert; a connection that crosses from a
+tenant or a neighbour into the cluster is.
 
-Scope (read all of these):
+Scope, for every pass (read all of these):
 - config/ansible/app/files/tetragon-policies/*.yaml: selectors, namespaces,
   matchBinaries, rateLimit, and any event dropped before userspace.
 - ids-forwarder/*.go: expectedTCPReason/automationDial, containerEgressReason,
   routineExecReason and the shell/incus/health helpers, root-exec and
   privilege-raise classification, container and layer attribution, coalescing
-  and dedup keys, per-host caps, the severity budget, and routing/delivery.
+  and dedup keys, delivery classes, per-host caps, the severity budget, and
+  routing.
 - config/ansible/monitoring/files/rsigma/rules/: local suppression rules and
   the fields they match; ids-forwarder/sigma/normalize.go for what values
   those fields actually contain.
 - config/ansible/app/files/crowdsec-* and
   config/ansible/monitoring/templates/crowdsec-*.j2: parsers, scenarios,
   whitelists, and notification paths.
-- The alerting route, silences, and caps in the monitoring templates.
+- config/ansible/monitoring/templates/: the alerting routes, silences and caps.
+- docs/design/intrusion-detection.md, docs/design/ids-coverage-and-evidence.md
+  and todo/security/intrusion-detection.md: every claim in them is a hypothesis
+  to verify against the code, the tests and the deployed configuration. Check
+  the tests for the intended scope, so a deliberate exclusion is not reported
+  as a bug.
 
-For every suppression or classification rule, answer:
+Pass A - suppression blind spots. Run when a suppression table, allowlist,
+policy filter, parser whitelist, rate limit or route changes.
+For every suppression or classification rule:
 1. Which input fields does it read, and can the attacker set them? Consider
    argv, binary path, cwd, executable basename, uid/gid, parent process,
    container name and image, destination address/port/hostname, source port,
@@ -1570,16 +1595,58 @@ For every suppression or classification rule, answer:
    or to a substring or name that can be forged? Prefer exact executable path,
    uid, parent, and destination. Note when only a policy decision can fix it.
 
-Treat this document's claims as hypotheses and verify them against the code,
-tests, and deployed configuration. Check the tests for the intended scope so a
-deliberate exclusion (for example tenant egress is suppressed by design) is
-not reported as a bug.
+Pass B - detection coverage. Run when a rule, sensor or layer is added or
+changed, and at a release.
+1. For each class in the paging and coverage tables, name the concrete action
+   it sees, the event type, the field it keys on and the layer it sees it on. A
+   class with no answer to this is a claim, not coverage.
+2. What action at the same layer produces no event at all: a hook that is not
+   instrumented, an event the policy drops, or anything inside a guest?
+3. Which rule cannot fire? Look for disabled-rule directories, fields the
+   normalizer never emits, CrowdSec parsers whose input log does not exist, and
+   policy selectors that match nothing.
+4. Which rule has drifted from the upstream counterpart it ports (Falco or
+   SigmaHQ), and does "name every detection after the rule it ports" still
+   hold?
+5. Where can an event be attributed to the wrong layer, and does that change
+   its class, tenant versus cluster?
 
-Deliver a table sorted by impact: finding, file:line, attacker-controlled
-input, bypass action, residual visibility, and recommended fix. Then list the
-smallest set of changes that removes attacker-controlled keys without
-reintroducing alert storms, and separately list items that need a policy or
-volume decision. Do not modify tracked files or deploy anything.
+Pass C - delivery and operations. Run when a delivery class, budget or alert
+threshold changes, and at a release.
+1. For each class, what is delivery today in the code, and does it match the
+   tables: recorded, paged, or evidence?
+2. Which finding is recorded but never posted when an operator would need it,
+   and which is posted when nobody could act on it?
+3. What is the measured rate per class per day against the cluster target of
+   one alert per day? Can the shadow counter measure it: emitted, allowlisted,
+   and reaching Prometheus?
+4. If a component dies, what fires, how fast, and through which path? Is a
+   coverage alert damped by a budget, or routed where nobody reads it?
+5. What is lost without a trace on restart, replay, record write failure or
+   rotation? Name the counter or alert that would have shown it.
+
+Pass D - threat-model consistency. Run on any model change and at a release.
+1. Which sentence, rule, comment or test still describes the previous model?
+   Grep for the retired concepts rather than trusting the last sweep.
+2. Which class exists only because of the retired model?
+3. Which test encodes the retired model and would keep passing while asserting
+   the wrong thing?
+4. Does the order of decisions in the enqueue path still match the order the
+   documents give?
+
+Pass E - response. Run when a class starts paging.
+1. For each paging class, what should the operator do, and where is that
+   written?
+2. For each recorded-only class, how does an incident review find it later, and
+   is that query documented?
+3. Can an operator get from a paging alert to the record on the right host?
+
+Output. One table per pass that ran, sorted by impact: finding, file:line, the
+input or mechanism, the concrete action, residual visibility, and recommended
+fix. Then the smallest set of changes that removes the problem without
+reintroducing alert storms, separated from items that need a policy or volume
+decision, with the pass that found each one. Do not modify tracked files and do
+not deploy anything.
 ```
 
 ### Next steps

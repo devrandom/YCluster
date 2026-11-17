@@ -107,7 +107,7 @@ func tetragonAlertDecision(line string, cfg config) (alert, eventMeta, bool, str
 	}
 	layer, containerName, layerSource := tetragonEventLayerInfo(body)
 	prov := eventProvenance{layer: layerSource}
-	if reason := tetragonSuppression(evType, body, layer); reason != "" {
+	if reason := tetragonSuppression(evType, body, layer, cfg); reason != "" {
 		// Suppressed events still made a layer decision. Hand it back so the
 		// caller can count it: the rollout question is whether the old /proc
 		// path still decides anything, and most decisions are on events that
@@ -262,12 +262,12 @@ func eventKind(evType string, body *tetragonLog) string {
 
 // tetragonSuppression returns the reason an event is not forwarded, or ""
 // when it should produce an alert.
-func tetragonSuppression(evType string, body *tetragonLog, layer string) string {
+func tetragonSuppression(evType string, body *tetragonLog, layer string, cfg config) string {
 	if evType == "process_exec" && layer == "container" {
 		return "container_internal"
 	}
 	if layer == "container" {
-		return containerSuppressionReason(body)
+		return containerSuppressionReason(cfg, body)
 	}
 	if layer == "unverified" {
 		return containerEgressReason(body, "unverified")
@@ -280,17 +280,17 @@ func tetragonSuppression(evType string, body *tetragonLog, layer string) string 
 	if reason := packageMaintenanceReason(body); reason != "" {
 		return reason
 	}
-	return hostSuppressionReason(body)
+	return hostSuppressionReason(cfg, body)
 }
 
 // containerSuppressionReason keeps only the container case that matters to
 // the cluster: a connection leaving for a cluster-private address. Public
 // egress and host-local bridge/loopback traffic are routine tenant traffic.
-func containerSuppressionReason(body *tetragonLog) string {
+func containerSuppressionReason(cfg config, body *tetragonLog) string {
 	if reason := containerEgressReason(body, "container"); reason != "" {
 		return reason
 	}
-	if reason := containerProbeReason(body); reason != "" {
+	if reason := containerProbeReason(cfg, body); reason != "" {
 		return reason
 	}
 	if body.FunctionName != "tcp_connect" {
@@ -299,8 +299,8 @@ func containerSuppressionReason(body *tetragonLog) string {
 	return ""
 }
 
-func hostSuppressionReason(body *tetragonLog) string {
-	if reason := expectedTCPReason(body); reason != "" {
+func hostSuppressionReason(cfg config, body *tetragonLog) string {
+	if reason := expectedTCPReason(cfg, body); reason != "" {
 		return reason
 	}
 	if reason := routineModuleReason(body); reason != "" {

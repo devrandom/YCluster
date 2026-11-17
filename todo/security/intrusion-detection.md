@@ -26,9 +26,9 @@ atomic slot claims in etcd; the forwarder is per-host, so a local cap there
 would multiply the budget by the fleet size. The forwarder keeps every
 classified detection in `detections.jsonl` regardless of the budget. The
 `-rate-limit` flag remains an optional per-host circuit breaker, disabled in
-the Ansible deployment. The Incus audit rule (`container-api`) is excluded
-from the budget — it is already coalesced to one alert per hour and must not
-consume a detection's slot. The first over-budget alert for a severity sends
+the Ansible deployment. There is no per-rule exemption: a class that must not
+spend the budget is a class the forwarder never posts. The first over-budget
+alert for a severity sends
 one additional notice explaining that the cap was reached; later over-budget
 alerts are recorded but not delivered until the next window. The budget sees
 only the findings the forwarder actually posts, since a class that does not
@@ -222,16 +222,17 @@ must not become a second, longer-lived access log.
     sequence, add a positive control proving a hostile unit still alerts, and
     decide whether one "boot activity" summary should be delivered. Build the
     boot unit/shape inventory from a clean reboot.
-  - Open: align delivery with the host-root-out-of-scope model. Root interactive
-    `process_exec`, root `privilege-raises`, and root-origin private
-    `tcp-connect` are still delivered. Move them to `detections.jsonl`-only,
-    or record why they remain as evidence. Guest root is unaffected by this:
+  - Done: align delivery with the host-root-out-of-scope model. Root
+    interactive `process_exec`, root `privilege-raises`, and root-origin
+    private `tcp-connect` are recorded as evidence and never delivered. Guest
+    root is unaffected by this:
     uid 0 inside a tenant container or VM is a host-unprivileged identity and
     must keep alerting, so any filter has to key on `Layer: host` plus a host
     login session or host unit, never on uid alone. Non-root sudo and
     escalation alerts stay regardless. File writes below `/etc` are root by
     construction, so they follow the same rule and were never in the paging
-    subset. The classification, the `page` label and the measurement gate are
+    subset. The classification, the delivery classes and the measurement gate
+    are
     specified in
     [`docs/design/ids-coverage-and-evidence.md`](../../docs/design/ids-coverage-and-evidence.md).
     Deployed and verified: root execs are recorded with
@@ -248,9 +249,9 @@ must not become a second, longer-lived access log.
   - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
     allowlist and maps to its own rule, `container-api`, so every `incus
     exec`, `incus file push/pull` and lifecycle call lands in
-    `detections.jsonl` with the subcommand and target instance. Delivery is
-    one alert per host per hour regardless of subcommand; the record keeps
-    every call that is not classified. Known periodic consumers are
+    `detections.jsonl` with the subcommand and target instance. It is an audit
+    class: it is never posted, and the record coalesces repeats per host. Known
+    periodic consumers are
     classified instead of recorded: `gpu_collector` for
     `vm-gpu-collector`'s list and guest `nvidia-smi` queries, and
     `nat_sync` for the frontend-NAT reads of instance metadata and the
@@ -282,10 +283,11 @@ must not become a second, longer-lived access log.
   space-separated bool flag stopped Go flag parsing, leaving the socket,
   cursor, spool and receiver unparsed) and `IdsSigmaStalled` added; inert
   hostname rules disabled; attacker-shaped egress suppressions partly
-  tightened; nginx/sshd parser defects fixed. Paging decided on 2026-11-08:
-  `exec-root-user-path`, `kernel-modules`, `privilege-raises` and Sigma at
-  medium or above page; `container-api` and the bridge-guard blocks stay
-  observe-only. The routine shapes behind `privilege-raises` (session spawns,
+  tightened; nginx/sshd parser defects fixed. Paging decided on 2026-11-08,
+  since superseded by the delivery classes: `exec-root-user-path`,
+  `kernel-modules`, `privilege-raises` and Sigma at medium or above paged
+  then and are evidence now; `container-api` and the bridge-guard blocks stay
+  recorded-only. The routine shapes behind `privilege-raises` (session spawns,
   unattended-upgrades, squid rotation) are classified first, so it is not a
   proxy for timers. Still deferred to the discussion phase:
   VM/UDP/unix-socket visibility, rename/mmap/read hooks,
@@ -408,6 +410,9 @@ Review assumption: the attacker knows the policies, forwarder source, Sigma
 rules and CrowdSec content. A suppression is unsafe when it matches a value
 the attacker can set (argv, basename, cgroup text, mutable container path) or
 when a later stage removes the event that would have shown the bypass.
+
+This is pass A of the [review prompt](../../docs/design/intrusion-detection.md#review-prompt);
+the checklist below is what each round closed.
 
 Actionable in this pass:
 
