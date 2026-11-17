@@ -33,7 +33,7 @@ func (f *forwarder) enqueue(a alert) error {
 	if a.Annotations == nil {
 		a.Annotations = map[string]string{}
 	}
-	a.Annotations["description"] = alertDescription(a, class, delivery)
+	a.Annotations["description"] = alertDescription(a, class, delivery, f.cfg.detectionsFile)
 	f.recordDetection(a, class, delivery)
 	if delivery == deliveryEvidence {
 		// Post-root host activity: recorded, never delivered. Dropping it

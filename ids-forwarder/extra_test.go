@@ -443,6 +443,10 @@ func TestPostSpoolAckFailureIsFatal(t *testing.T) {
 	if f.stats.forwarded.Load() != 1 {
 		t.Fatalf("forwarded=%d", f.stats.forwarded.Load())
 	}
+	// The posted counter is per class, so "pages per day" is answerable.
+	if got := f.stats.postedCounts()["escalation_nonroot"]; got != 1 {
+		t.Fatalf("posted by class = %v, want one escalation_nonroot", f.stats.postedCounts())
+	}
 }
 
 // A payload Alertmanager rejects with 4xx must not block the queue.

@@ -256,6 +256,7 @@ type metrics struct {
 	classMu  sync.Mutex
 	evidence map[string]int64
 	paged    map[string]int64
+	posted   map[string]int64
 
 	provMu sync.Mutex
 	prov   map[string]int64
@@ -296,6 +297,28 @@ func (m *metrics) countEvidence(class string) {
 		m.evidence = map[string]int64{}
 	}
 	m.evidence[class]++
+}
+
+// countPosted tallies a delivered alert by class. Without it the only measure
+// of what actually notified anyone is a bare total, which cannot answer the
+// one-per-day question per class.
+func (m *metrics) countPosted(class string) {
+	m.classMu.Lock()
+	defer m.classMu.Unlock()
+	if m.posted == nil {
+		m.posted = map[string]int64{}
+	}
+	m.posted[class]++
+}
+
+func (m *metrics) postedCounts() map[string]int64 {
+	m.classMu.Lock()
+	defer m.classMu.Unlock()
+	out := make(map[string]int64, len(m.posted))
+	for class, count := range m.posted {
+		out[class] = count
+	}
+	return out
 }
 
 func (m *metrics) evidenceCounts() map[string]int64 {
@@ -405,7 +428,7 @@ func newAlert(cfg config, source, severity, layer, rule, summary string) alert {
 // so it stays short; this says where the detection happened, which identity
 // produced it, and how the delivery model treated it, without sending a
 // reader to the host to find out.
-func alertDescription(a alert, class, delivery string) string {
+func alertDescription(a alert, class, delivery, recordPath string) string {
 	where := []string{"host=" + a.Labels["host"], "layer=" + a.Labels["layer"]}
 	for _, key := range []string{"container", "origin", "actor", "uid"} {
 		if value := a.Labels[key]; value != "" {
@@ -416,7 +439,13 @@ func alertDescription(a alert, class, delivery string) string {
 	if t := a.eventTimestamp(); !t.IsZero() {
 		what += " at " + t.UTC().Format(time.RFC3339)
 	}
-	return strings.Join(where, " ") + "\n" + what
+	out := strings.Join(where, " ") + "\n" + what
+	if delivery == deliveryPage && recordPath != "" {
+		// Triage continues in the record: it holds every detection on the
+		// host, while Alertmanager only holds this one for its TTL.
+		out += "\nrecord=" + recordPath
+	}
+	return out
 }
 
 // identityHash is a stable, non-reversible marker for the part of an event

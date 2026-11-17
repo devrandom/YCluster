@@ -234,6 +234,25 @@ new rule set reads a label the old binary sets.
 `detections.jsonl` gains `origin`, `actor`, `uid`, `class` and `delivery`.
 `class` names the threat-model class above, and `delivery` is `page`, `silent`
 or `evidence`, which is what the measurement and a later incident review read.
+`delivery` is the decision taken at classification time, before dedup,
+coalescing and the rate limit, so a finding recorded as `page` may still have
+been coalesced rather than posted; `ids_forwarder_forwarded_total{class}` is
+what counts actual posts.
+
+The record is queryable on the host, one file per retained rotation:
+
+```bash
+# every detection in the last hour, newest last
+sudo jq -c 'select(.time >= (now - 3600 | todate))' \
+  /var/lib/ids-forwarder/detections.jsonl{,.1}
+
+# one class for one container, the recorded-only case
+sudo jq -r 'select(.class == "lateral_container" and .container == "web") |
+  [.time, .rule_id, .summary] | @tsv' /var/lib/ids-forwarder/detections.jsonl*
+```
+
+Rotation writes plain files, `detections.jsonl.1` through `.10` with the
+default `keep`, so the query needs no decompression step.
 
 This file is the only durable copy. A host-root attacker can delete or rewrite
 it, exactly as they can stop the sensor; that is the assumption the model

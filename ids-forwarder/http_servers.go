@@ -89,7 +89,12 @@ func (f *forwarder) startMetrics() error {
 		fmt.Fprintf(w, "ids_forwarder_up 1\n")
 		fmt.Fprintf(w, "ids_forwarder_queue_depth %d\n", depth)
 		fmt.Fprintf(w, "ids_forwarder_spool_bytes %d\n", pending)
-		fmt.Fprintf(w, "ids_forwarder_forwarded_total %d\n", f.stats.forwarded.Load())
+		fmt.Fprintf(w, "# HELP ids_forwarder_forwarded_total Alerts posted to Alertmanager, by class; the class labels match the page-candidate counter.\n")
+		fmt.Fprintf(w, "# TYPE ids_forwarder_forwarded_total counter\n")
+		posted := f.stats.postedCounts()
+		for _, class := range knownClasses {
+			fmt.Fprintf(w, "ids_forwarder_forwarded_total{class=%q} %d\n", class, posted[class])
+		}
 		fmt.Fprintf(w, "ids_forwarder_dropped_total %d\n", f.stats.dropped.Load())
 		fmt.Fprintf(w, "ids_forwarder_deduped_total %d\n", f.stats.deduped.Load())
 		fmt.Fprintf(w, "ids_forwarder_coalesced_total %d\n", f.stats.coalesced.Load())

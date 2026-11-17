@@ -72,6 +72,7 @@ func (f *forwarder) postSpoolItem() bool {
 		return f.wait(f.retryInterval())
 	}
 	f.stats.forwarded.Add(1)
+	f.stats.countPosted(item.alert.Labels["class"])
 	return f.ackSpool(item.token)
 }
 
@@ -91,6 +92,7 @@ func (f *forwarder) postQueueItem() bool {
 		return f.wait(f.retryInterval())
 	}
 	f.stats.forwarded.Add(1)
+	f.stats.countPosted(a.Labels["class"])
 	return true
 }
 
