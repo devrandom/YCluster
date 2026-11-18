@@ -156,10 +156,15 @@ Hand the URL over out-of-band — there's no SMTP in the cluster.
 For an account that already exists but needs a password reset:
 
 ```
-ycluster user recovery alice@x
+ycluster user recovery alice@x                    # valid for 1 day (default)
+ycluster user recovery alice@x --days 7           # longer window
 ```
 
-The CLI never sees the password; the user sets it via the link.
+The CLI never sees the password; the user sets it via the link. The link is
+revoked as soon as a browser opens the flow, so the validity only bounds how
+long it can sit unopened. Issuing another link for the same account updates
+the outstanding token in place (same URL, new expiry); it does not create a
+second link.
 
 ## Invitations
 

@@ -331,12 +331,15 @@ def update_user(email, name=None, project_name=None, admin_notes=None):
     api.patch(f"/core/users/{user['pk']}/", json=payload)
     return f"updated {email}"
 
-def recovery_link(email):
+def recovery_link(email, days=1):
     """Generate a one-time password-set link for an existing account
-    (out-of-band delivery — no SMTP anywhere in the cluster)."""
+    (out-of-band delivery — no SMTP anywhere in the cluster). The link is
+    revoked as soon as a browser opens it; `days` bounds how long it can
+    sit unopened before it expires."""
     api = AuthentikAPI()
     user = _get_user(api, email)
-    result = api.post(f"/core/users/{user['pk']}/recovery/", json={})
+    result = api.post(f"/core/users/{user['pk']}/recovery/",
+                      json={'token_duration': f'days={days}'})
     # Re-root the link on the user-facing base — the API builds it from the
     # request host (cluster-internal).
     link = result['link']

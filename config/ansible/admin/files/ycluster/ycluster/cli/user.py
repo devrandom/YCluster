@@ -68,6 +68,9 @@ def register_user_commands(subparsers):
     recovery_parser = user_subparsers.add_parser(
         'recovery', help='Issue a one-time password (re)set link for an existing account')
     recovery_parser.add_argument('email', help='Account email')
+    recovery_parser.add_argument(
+        '--days', type=int, default=1,
+        help='Validity in days (default 1); the link is single-use regardless')
     recovery_parser.set_defaults(func=user_recovery)
 
     uninvite_parser = user_subparsers.add_parser(
@@ -163,8 +166,8 @@ def user_edit(args):
 
 def user_recovery(args):
     from ..utils import authentik_manager
-    url = authentik_manager.recovery_link(args.email)
-    print(f"Password (re)set link for {args.email} (one-time):")
+    url = authentik_manager.recovery_link(args.email, args.days)
+    print(f"Password (re)set link for {args.email} (one-time, expires in {args.days}d):")
     print(f"  {url}")
 
 
