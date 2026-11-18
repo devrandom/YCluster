@@ -19,6 +19,7 @@ Categories: [security](#security) ·
 
 ## Security
 - **[HIGH]** [etcd RBAC by client cert](security/etcd-rbac-by-cert.md) — one shared `etcd-client` cert today; an Incus-host compromise leaks every secret in etcd. Split identity into `etcd-storage` (all s*) and `etcd-compute` (c*/nv*/nas*), turn on RBAC, consolidate secret prefixes under `/cluster/config/`.
+- **[HIGH]** [Kernel CVEs are invisible to osv-feed](security/kernel-cve-tracking.md) — no host kernel is in the tracked package set, so a kernel CVE (e.g. CVE-2026-99288 "NoisyTCP", pre-auth remote panic, no fix shipped yet) yields no finding, metric or alert; track source package `linux` for every running kernel, not just the collector's, and use it to decide when the 98432 stopgap can go.
 - **[MEDIUM]** [Mitigate DoS on the authentik forward-auth / proxysession path](security/authentik-forward-auth-dos-mitigation.md) — every unauthenticated hit writes a `proxysession` row (SELECT+INSERT) with no rate limit at the outpost or the gated `location /` roots; add `limit_req`, stop Blackbox probing gated endpoints, and (longer term) avoid the DB write per unauthenticated hit.
 - **[MEDIUM]** [Sudo-user consistency](security/sudo-user-consistency.md) — paired with vendor cleanup; privileged set drifts node-to-node today.
 - [Eval: should `dev` be a macOS admin?](security/dev-macos-admin-eval.md) — `setup-macos.yml` gives `dev` the `admin` primary group, unlike Linux where dev is deliberately not a sudoer.
