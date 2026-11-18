@@ -62,6 +62,11 @@ Vhosts are rendered by **certbot-manager** from nginx templates:
 - The vhost listens on `127.0.0.2:443` (TLS) with the shared
   `/etc/nginx/ssl/cert.pem`. `name.<domain>` in the cert SAN lets the
   frontend/LB terminate correctly.
+- **HTTP/2 is deliberately off.** nginx 1.24 has no `http2 on;` directive, so
+  the only way to run without HTTP/2 (CVE-2026-123007 / CVE-2026-123633,
+  "nginx2root") is to omit the protocol option from `listen`. Don't add
+  `http2` back to a template until nginx is upgraded and restarted; see
+  `todo/security/nginx2root-http2-workaround.md`.
 
 See `config/ansible/app/install-comfyui.yml` end of file for a worked
 example (resolves a backend URL from host_vars, installs template, renders

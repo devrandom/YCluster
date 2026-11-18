@@ -51,3 +51,10 @@
 - import_playbook: macos/setup-exo.yml
 - import_playbook: macos/setup-tei.yml
 - import_playbook: macos/setup-mineru.yml
+
+# CVE-2026-123007 / CVE-2026-123633 (nginx2root) stopgap: HTTP/2 off and the
+# SCTP module blocked on the storage nodes, where the public vhosts live. Runs
+# after the app plays so the vhost templates are already on the hosts. Remove
+# it together with the nginx upgrade — see
+# todo/security/nginx2root-http2-workaround.md.
+- import_playbook: mitigate-nginx2root.yml

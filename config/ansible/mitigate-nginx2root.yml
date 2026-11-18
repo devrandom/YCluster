@@ -1,0 +1,102 @@
+---
+# nginx2root stopgap: no HTTP/2 and no SCTP on the storage nodes, where the
+# public vhosts live. Remove it once a patched nginx is installed — see
+# todo/security/nginx2root-http2-workaround.md.
+#
+# CVE-2026-123007 (heap overflow in HTTP/2 flow control, unauthenticated RCE,
+# present since 1.9.5) and CVE-2026-123633 (use-after-free on the HTTP/2 path
+# when a reverse proxy runs out of connection slots) both need HTTP/2 traffic.
+# Noble ships nginx 1.24, which has no `http2 on;` directive (that needs
+# >= 1.25.1), so the only way to switch HTTP/2 off is to drop the protocol
+# option from every `listen` line.
+#
+# The vhost templates in admin/files and app/files already carry that edit.
+# This playbook applies it to the templates deployed under
+# /etc/nginx/templates and re-renders the sites, so a node can be mitigated
+# without re-running the app playbooks (those restart containers). Nothing
+# uses gRPC through these vhosts, so clients fall back to HTTP/1.1.
+#
+# The kernel SCTP bug is the privilege-escalation half of the same chain
+# (nginx worker -> host root); `install sctp /bin/false` closes it. Nothing on
+# the storage nodes uses SCTP.
+- name: Disable HTTP/2 in the nginx vhosts
+  hosts: storage
+  become: true
+
+  tasks:
+    - name: Check for deployed nginx vhost templates
+      stat:
+        path: /etc/nginx/templates
+      register: nginx_templates_dir
+
+    - name: Find deployed nginx vhost templates
+      find:
+        paths: /etc/nginx/templates
+        patterns: '*.conf.j2'
+      register: nginx_vhost_templates
+      when: nginx_templates_dir.stat.isdir | default(false)
+
+    - name: Drop the http2 protocol option from every listen line
+      replace:
+        path: "{{ item.path }}"
+        regexp: '^(\s*listen\s+.*?)\s+http2(.*);$'
+        replace: '\1\2;'
+      loop: "{{ nginx_vhost_templates.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      notify: reload nginx
+
+    - name: Re-render the vhosts from the templates
+      command: /usr/local/bin/certbot-manager update-nginx
+      environment: "{{ etcd_client_env }}"
+      register: nginx_update
+      changed_when: "'configuration updated' in nginx_update.stdout"
+      failed_when: nginx_update.rc != 0
+      notify: reload nginx
+      when: nginx_templates_dir.stat.isdir | default(false)
+
+    - name: Look for any remaining HTTP/2 listener
+      command: grep -rnE "listen[^;]*http2" /etc/nginx/templates /etc/nginx/sites-available
+      register: http2_left
+      changed_when: false
+      failed_when: http2_left.rc not in [0, 1]
+      when: nginx_templates_dir.stat.isdir | default(false)
+
+    - name: Assert HTTP/2 is no longer offered
+      assert:
+        that: http2_left.stdout | length == 0
+        fail_msg: "HTTP/2 listeners still configured: {{ http2_left.stdout }}"
+        quiet: true
+      when: nginx_templates_dir.stat.isdir | default(false)
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+- name: Block the SCTP module
+  hosts: storage
+  become: true
+
+  tasks:
+    - name: List loaded kernel modules
+      command: lsmod
+      register: loaded_modules
+      changed_when: false
+
+    - name: Refuse further sctp loads
+      copy:
+        dest: /etc/modprobe.d/99-disable-sctp.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # SCTP is only needed by nginx2root's worker -> host root escalation.
+          # Remove with config/ansible/mitigate-nginx2root.yml once the kernel
+          # has the fix; see todo/security/nginx2root-http2-workaround.md.
+          install sctp /bin/false
+
+    - name: Unload sctp if something loaded it
+      command: modprobe -r sctp
+      when: loaded_modules.stdout_lines | select('match', '^sctp ') | list | length > 0

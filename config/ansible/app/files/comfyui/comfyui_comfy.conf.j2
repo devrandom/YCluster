@@ -22,8 +22,8 @@
 # render step — the same double-parenthesis convention as install-open-webui.yml.
 server {
     {% if use_tls %}
-    listen 443 ssl http2;
-    listen 127.0.0.2:17443 ssl http2 proxy_protocol;
+    listen 443 ssl;
+    listen 127.0.0.2:17443 ssl proxy_protocol;
     {% else %}
     listen 80;
     listen 127.0.0.2:17443 proxy_protocol;
