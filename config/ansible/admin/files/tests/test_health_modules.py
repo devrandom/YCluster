@@ -229,11 +229,14 @@ class HealthReportHelperTests(unittest.TestCase):
 
     def test_squid_probe(self):
         responses = {
-            'http://localhost:12723/api/ping': SimpleNamespace(status_code=503)}
+            'http://127.0.0.1:3128/squid-internal-mgr/info': SimpleNamespace(status_code=200)}
         probe = make_probe(
             services={'squid'}, ports={3128}, responses=responses)
         self.assertEqual(hr._squid_health(probe)['status'], 'healthy')
-        responses['http://localhost:12723/api/ping'] = SimpleNamespace(status_code=500)
+        # A policy refusal still proves the daemon is serving.
+        responses['http://127.0.0.1:3128/squid-internal-mgr/info'] = SimpleNamespace(status_code=403)
+        self.assertEqual(hr._squid_health(probe)['status'], 'healthy')
+        responses['http://127.0.0.1:3128/squid-internal-mgr/info'] = SimpleNamespace(status_code=500)
         self.assertEqual(hr._squid_health(probe)['status'], 'unhealthy')
 
     def test_squid_probe_error_paths(self):
@@ -242,9 +245,9 @@ class HealthReportHelperTests(unittest.TestCase):
                 raise exc
             return get
         for exc, expected_error in [
-                (hr.requests.exceptions.ProxyError('no'), 'Proxy error: no'),
-                (hr.requests.exceptions.Timeout(), 'Proxy timeout'),
-                (OSError('bad'), 'Proxy test failed: bad')]:
+                (hr.requests.exceptions.ConnectionError('no'), 'proxy probe failed: no'),
+                (hr.requests.exceptions.Timeout(), 'proxy probe failed: '),
+                (OSError('bad'), 'proxy probe failed: bad')]:
             probe = make_probe(
                 services={'squid'}, ports={3128}, http_get=raising_get(exc))
             result = hr._squid_health(probe)
@@ -295,6 +298,26 @@ class ComprehensiveHealthTests(unittest.TestCase):
         self.assertTrue(health['storage_leader'])
         self.assertFalse(health['dhcp_leader'])
         self.assertIn('gateway_vip', health['services'])
+
+    def test_default_probe_is_memoised_but_a_supplied_probe_is_not(self):
+        calls = []
+
+        def compute(probe=None):
+            calls.append(probe)
+            return {'overall': 'healthy', 'services': {}}
+
+        hr.reset_health_cache()
+        with mock.patch.object(hr, '_compute_comprehensive_health', side_effect=compute):
+            hr.get_comprehensive_health()
+            hr.get_comprehensive_health()
+            self.assertEqual(len(calls), 1)
+            hr.reset_health_cache()
+            hr.get_comprehensive_health()
+            self.assertEqual(len(calls), 2)
+            # The test seam never shares an answer with the production path.
+            hr.get_comprehensive_health(make_probe())
+            self.assertEqual(len(calls), 3)
+        hr.reset_health_cache()
 
 
 class HealthApiRoutesTests(unittest.TestCase):

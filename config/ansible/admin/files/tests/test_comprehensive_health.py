@@ -118,6 +118,11 @@ class HostHealthFanoutTests(unittest.TestCase):
 
 
 class ComprehensiveHealthTests(unittest.TestCase):
+    def setUp(self):
+        # The summary is memoised for the status page's refresh interval, so a
+        # test that changes the mocked state must start from a cold cache.
+        appmod.reset_health_cache()
+
     def test_all_healthy_storage_leader(self):
         vip = {
             'gateway_vip': {'active': True, 'ip': 'gateway'},
@@ -200,6 +205,45 @@ class ComprehensiveHealthTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(appmod, name, side_effect=value))
             health = appmod.get_comprehensive_health()
         self.assertEqual(health['overall'], 'unhealthy')
+
+
+class HealthCacheTests(unittest.TestCase):
+    def setUp(self):
+        appmod.reset_health_cache()
+
+    def test_repeat_calls_share_one_computation(self):
+        calls = []
+
+        def compute():
+            calls.append(1)
+            return {'overall': 'healthy', 'services': {}}
+
+        with mock.patch.object(appmod, '_compute_comprehensive_health', side_effect=compute):
+            appmod.get_comprehensive_health()
+            appmod.get_comprehensive_health()
+            appmod.get_comprehensive_health()
+        self.assertEqual(len(calls), 1)
+
+    def test_reset_forces_a_fresh_computation(self):
+        calls = []
+
+        def compute():
+            calls.append(1)
+            return {'overall': 'healthy', 'services': {}}
+
+        with mock.patch.object(appmod, '_compute_comprehensive_health', side_effect=compute):
+            appmod.get_comprehensive_health()
+            appmod.reset_health_cache()
+            appmod.get_comprehensive_health()
+        self.assertEqual(len(calls), 2)
+
+    def test_callers_do_not_share_the_cached_dict(self):
+        with mock.patch.object(appmod, '_compute_comprehensive_health',
+                               return_value={'overall': 'healthy', 'services': {}}):
+            first = appmod.get_comprehensive_health()
+            first['overall'] = 'mutated'
+            second = appmod.get_comprehensive_health()
+        self.assertEqual(second['overall'], 'healthy')
 
 
 class MacFromNeighborTableTests(unittest.TestCase):

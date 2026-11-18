@@ -37,6 +37,7 @@ MAC Address Formats:
 """
 
 import functools
+import copy
 import json
 import re
 import secrets
@@ -1378,21 +1379,25 @@ def _squid_health():
 
     if running and port:
         try:
+            # Ask squid for its own manager page instead of relaying a request
+            # through it. The probe used to fetch this app's ping endpoint via
+            # the proxy, so every /metrics scrape and every health check made
+            # the proxy relay to a cluster address -- the thing the proxy is
+            # no longer allowed to do -- and a slow proxy stalled the scrape
+            # behind a five-second timeout.
             response = requests.get(
-                'http://localhost:12723/api/ping',
-                proxies={'http': 'http://localhost:3128'},
-                timeout=5
+                'http://127.0.0.1:3128/squid-internal-mgr/info',
+                timeout=2,
+                proxies={'http': None, 'https': None},
             )
-            if response.status_code in [200, 503]:
+            # 200 is the manager page and 403 is the daemon refusing by
+            # policy; either one proves squid is listening and serving.
+            if response.status_code in (200, 403):
                 functional = True
             else:
                 error = f'HTTP {response.status_code}'
-        except requests.exceptions.ProxyError as e:
-            error = f'Proxy error: {str(e)}'
-        except requests.exceptions.Timeout:
-            error = 'Proxy timeout'
         except Exception as e:
-            error = f'Proxy test failed: {str(e)}'
+            error = f'proxy probe failed: {str(e)}'
 
     healthy = running and port and functional
     return {
@@ -1441,8 +1446,44 @@ def _keepalived_health():
     }
 
 
+_HEALTH_CACHE_SECONDS = 10.0
+_health_cache = {'at': 0.0, 'data': None}
+_health_cache_lock = threading.Lock()
+
+
 def get_comprehensive_health():
+    """Comprehensive health, computed at most once per _HEALTH_CACHE_SECONDS.
+
+    Every scrape of /metrics, every /api/health probe and every status-page
+    poll asks the same 19 questions, eleven of them `systemctl is-active`
+    subprocesses. Four Prometheus instances scrape every storage host's
+    /metrics every 15s and the status page polls every 10s, so the same
+    summary was recomputed about nineteen times a minute per host. The window
+    matches the status page's own refresh, so a caller never sees an answer
+    older than one page refresh.
+    """
+    with _health_cache_lock:
+        age = time.monotonic() - _health_cache['at']
+        if _health_cache['data'] is not None and age < _HEALTH_CACHE_SECONDS:
+            return copy.deepcopy(_health_cache['data'])
+        # Computed under the lock so that scrapes arriving together share one
+        # pass instead of each running its own subprocess fan-out.
+        health_status = _compute_comprehensive_health()
+        _health_cache['data'] = health_status
+        _health_cache['at'] = time.monotonic()
+        return copy.deepcopy(health_status)
+
+
+def reset_health_cache():
+    """Drop the memoised summary so the next caller recomputes it."""
+    with _health_cache_lock:
+        _health_cache['data'] = None
+        _health_cache['at'] = 0.0
+
+
+def _compute_comprehensive_health():
     """Get comprehensive health data (extracted from health() function)"""
+
     health_status = {
         'overall': 'healthy',
         'services': {}

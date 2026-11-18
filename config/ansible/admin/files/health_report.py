@@ -1,5 +1,8 @@
 """Aggregate health report for the lite health API."""
 
+import threading
+import time
+
 import requests
 
 from health_checks import (
@@ -86,19 +89,19 @@ def _squid_health(probe):
     error = None
     if running and port:
         try:
+            # squid's own manager page, not a relayed request: the probe used
+            # to fetch the app's ping endpoint through the proxy, which made
+            # every health check a proxied connect to a cluster address.
             response = probe.http_get(
-                'http://localhost:12723/api/ping',
-                proxies={'http': 'http://localhost:3128'}, timeout=5)
-            if response.status_code in [200, 503]:
+                'http://127.0.0.1:3128/squid-internal-mgr/info',
+                timeout=2, proxies={'http': None, 'https': None})
+            # 200 is the manager page, 403 the daemon refusing by policy.
+            if response.status_code in (200, 403):
                 functional = True
             else:
                 error = f'HTTP {response.status_code}'
-        except requests.exceptions.ProxyError as e:
-            error = f'Proxy error: {str(e)}'
-        except requests.exceptions.Timeout:
-            error = 'Proxy timeout'
         except Exception as e:
-            error = f'Proxy test failed: {str(e)}'
+            error = f'proxy probe failed: {str(e)}'
     healthy = running and port and functional
     return {'status': 'healthy' if healthy else 'unhealthy',
             'details': {'service_active': running, 'port_open': port,
@@ -131,7 +134,42 @@ def _storage_only_health(name, check_fn, is_storage_node):
     return check_fn()
 
 
+_HEALTH_CACHE_SECONDS = 10.0
+_health_cache = {'at': 0.0, 'data': None}
+_health_cache_lock = threading.Lock()
+
+
 def get_comprehensive_health(probe=None):
+    """Comprehensive health, computed at most once per _HEALTH_CACHE_SECONDS.
+
+    Every /metrics scrape and /api/health probe asks the same questions, most
+    of them subprocesses, and Prometheus scrapes each host every 15s from more
+    than one instance. The window matches the status page's refresh interval,
+    so nothing a caller sees is older than one page refresh.
+
+    A caller that brings its own probe bypasses the cache: that is the test
+    seam, and two different probes must never share an answer.
+    """
+    if probe is not None:
+        return _compute_comprehensive_health(probe)
+    with _health_cache_lock:
+        age = time.monotonic() - _health_cache['at']
+        if _health_cache['data'] is not None and age < _HEALTH_CACHE_SECONDS:
+            return _health_cache['data']
+        health = _compute_comprehensive_health(probe)
+        _health_cache['data'] = health
+        _health_cache['at'] = time.monotonic()
+        return health
+
+
+def reset_health_cache():
+    """Drop the memoised summary so the next caller recomputes it."""
+    with _health_cache_lock:
+        _health_cache['data'] = None
+        _health_cache['at'] = 0.0
+
+
+def _compute_comprehensive_health(probe=None):
     """Get comprehensive health data for the lite health API."""
     probe = probe or runtime_probe_context()
     health_status = {'overall': 'healthy', 'services': {}}
