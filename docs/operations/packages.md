@@ -240,6 +240,10 @@ What actually appears in Prometheus:
   pending kernel CVEs per running kernel version (counts, not one series per
   CVE; a current kernel carries around a thousand advisories). The label is
   `cve_severity` so alert rules can set their own `severity`.
+- `osv_feed_kernel_summary{state,versions}` — one series per collector run
+  when any running kernel has fixes available: value = number of behind
+  versions, `versions` = the `package version` pairs. `KernelCVEPatchAvailable`
+  uses this so the fleet pages once, not once per kernel line.
 - `osv_feed_mirror_present`, `osv_feed_mirror_age_seconds`,
   `osv_feed_collector_error`, `osv_feed_kernel_index_age_seconds` (feed health)
 
@@ -263,11 +267,13 @@ The SLA window constants live in `osv-feed/osv_feed/cli.py`
 available from the `osv_feed_cve_info`/`osv_feed_cve_first_seen_seconds`
 series and `osv-feed match --format table`.
 
-Kernel CVEs are separate: `KernelCVEPatchAvailable` fires when a running
-kernel version has `fix_available` CVEs (upgrade the kernel and reboot), and
-`OSVFeedKernelIndexStale` fires when the index has not been rebuilt in two
-days. Unfixed kernel CVEs are numerous and do not page; they stay visible in
-`osv_feed_kernel_cve_count` and in the `kernel-match` table.
+Kernel CVEs are separate: `KernelCVEPatchAvailable` fires once for the whole
+fleet when any running kernel version has `fix_available` CVEs (the
+`versions` label lists them; upgrade the kernel and reboot), repeats daily
+like the perimeter CVE alerts, and `OSVFeedKernelIndexStale` fires when the
+index has not been rebuilt in two days. Unfixed kernel CVEs are numerous and
+do not page; they stay visible in `osv_feed_kernel_cve_count` and in the
+`kernel-match` table.
 
 ### Acknowledging / deciding on a CVE
 

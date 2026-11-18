@@ -187,11 +187,16 @@ versions produce findings, so there is no `state="patched"` kernel series
 The collector emits one `osv_feed_kernel_cve_count` series per (package,
 version, `cve_severity`, state) rather than one `osv_feed_cve_info` series per
 CVE: a running kernel carries thousands of advisories, most already fixed.
-`KernelCVEPatchAvailable` fires when a running kernel has fixes available
-(upgrade and reboot); `OSVFeedKernelIndexStale` covers an index that stopped
-being rebuilt. Unfixed kernel CVEs stay visible in the count metric and in
-`osv-feed kernel-match --format table`, but do not page — a current kernel
-typically has around a thousand of them.
+It also emits one `osv_feed_kernel_summary` sample when any running version
+has fixes available, with the value equal to the number of behind versions
+and their `package version` pairs in the `versions` label. Coalescing here is
+what keeps `KernelCVEPatchAvailable` at one fleet-wide notification, the
+same shape as the perimeter CVE summaries, instead of one per kernel line.
+It fires after 6h, repeats daily (`slow_repeat`) until the upgrade and
+rolling reboot happen, and `OSVFeedKernelIndexStale` covers an index that
+stopped being rebuilt. Unfixed kernel CVEs stay visible in the count metric
+and in `osv-feed kernel-match --format table`, but do not page — a current
+kernel typically has around a thousand of them.
 
 ## Verification
 

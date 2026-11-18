@@ -232,6 +232,54 @@ class KernelCliTest(unittest.TestCase):
         self.assertIn('cve_severity="critical"', out)
         self.assertIn('state="fix_available"', out)
         self.assertIn("} 1", out)
+        self.assertIn(
+            'osv_feed_kernel_summary{state="fix_available",'
+            'versions="linux 6.8.0-142.142"} 1',
+            out,
+        )
+
+    def test_prometheus_coalesces_behind_versions_into_one_summary(self):
+        db = tempfile.mkdtemp(prefix="osv-kernel-")
+        self.addCleanup(shutil.rmtree, db, ignore_errors=True)
+        _write_record(
+            db,
+            "Ubuntu",
+            _kernel_record(
+                "UBUNTU-CVE-2",
+                [
+                    _linux_entry(
+                        ["6.8.0-124.124", "6.8.0-142.142"],
+                        [{"introduced": "0"}, {"fixed": "6.8.0-149.149"}],
+                    )
+                ],
+            ),
+        )
+        index = os.path.join(db, "kernel-index.json")
+        for argv in (
+            ["kernel-index", "--ecosystem", "Ubuntu", "--package", "linux", "--out", index],
+            [
+                "kernel-match",
+                "--index",
+                index,
+                "--pkg",
+                "linux=6.8.0-124.124",
+                "--pkg",
+                "linux=6.8.0-142.142",
+                "--format",
+                "prometheus",
+            ],
+        ):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db-dir", db, "--ack-db", self.acks] + argv)
+            self.assertEqual(0, code)
+        rendered = out.getvalue()
+        # One sample for the fleet, not one alert instance per kernel line.
+        self.assertEqual(1, rendered.count("osv_feed_kernel_summary{"))
+        self.assertIn(
+            'versions="linux 6.8.0-124.124,linux 6.8.0-142.142"} 2',
+            rendered,
+        )
 
     def test_index_sourced_category_is_not_matched_from_the_mirror(self):
         config = {

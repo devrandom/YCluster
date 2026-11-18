@@ -1022,19 +1022,24 @@ groups:
           description: "The compact kernel index has not been rebuilt in over 2 days (or is absent). Check the kernel-index step of osv-feed-mirror.service."
 
       # A running kernel with fixes available is actionable: upgrade the
-      # kernel package and reboot. The rule coalesces the per-severity counts
-      # into one alert per running kernel version; the collector deliberately
-      # does not emit one series per kernel CVE, because a running kernel
-      # carries thousands of them (most already fixed). `for: 6h` keeps a
-      # routine apt day from paging.
+      # kernel package and reboot. Like the perimeter CVE alerts, this is
+      # deliberately one coalesced alert for the whole fleet rather than one
+      # per running kernel version: the collector emits
+      # `osv_feed_kernel_summary` listing every behind version in a label, so
+      # the fleet's several kernel lines produce one notification, and
+      # `slow_repeat` keeps it to a daily reminder until the maintenance
+      # window (upgrade + rolling reboot) happens. The per-version
+      # `osv_feed_kernel_cve_count` series and `kernel-match --format table`
+      # still carry the detail. `for: 6h` keeps a routine apt day from paging.
       - alert: KernelCVEPatchAvailable
-        expr: sum by (package, version) (osv_feed_kernel_cve_count{state="fix_available"}) > 0
+        expr: osv_feed_kernel_summary{state="fix_available"} > 0
         for: 6h
         labels:
           severity: warning
+          slow_repeat: "true"
         annotations:
-          summary: "{{ $value }} kernel CVE(s) fixable on {{ $labels.package }} {{ $labels.version }}"
-          description: "{{ $labels.package }} {{ $labels.version }} is behind its series: {{ $value }} kernel CVEs it carries have a fixed kernel in the feed. Run `osv-feed kernel-match --format table` for the list, then schedule the kernel upgrade and reboot."
+          summary: "{{ $value }} running kernel version(s) behind their series"
+          description: "{{ $labels.versions }} are behind their series: the feed has a fixed kernel for them. Run `osv-feed kernel-match --format table` for the CVE list, then schedule the kernel upgrade and rolling reboot (storage leader last)."
 
       # Early warning for newly-detected critical CVEs. osv_feed_cve_info
       # emits a series per finding at detection time (acked="false", state is

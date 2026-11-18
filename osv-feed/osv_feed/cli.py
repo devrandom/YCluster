@@ -36,8 +36,9 @@ from .config import tracking_categories
 from .installed import PackageNotInstalledError
 from .installed import host_ecosystem
 from .installed import installed_package
-from .matching import UNINSTALLED
+from .matching import FIX_AVAILABLE
 from .matching import PENDING_STATES
+from .matching import UNINSTALLED
 from .matching import _finding_key
 from .matching import FirstSeenTracker
 from .matching import iter_candidate_records
@@ -682,7 +683,10 @@ def _write_kernel_prometheus(findings: Iterable[dict]) -> None:
     so per-CVE series would dominate the collector's metric set. The
     actionable signal is how many non-acked pending kernel CVEs a running
     version has, split by severity and state; the CVE list itself stays
-    available through `kernel-match --format table|json`.
+    available through `kernel-match --format table|json`. A second summary
+    series coalesces every version that has a fix available into one sample,
+    so the fleet's several kernel lines page as one alert instead of one per
+    version.
     """
     counts: dict[tuple[str, str, str, str, str], int] = {}
     for finding in findings:
@@ -716,6 +720,25 @@ def _write_kernel_prometheus(findings: Iterable[dict]) -> None:
             f'cve_severity="{_escape_prometheus(severity)}",'
             f'state="{_escape_prometheus(state)}"}} {counts[key]}\n'
         )
+
+    behind = sorted(
+        {
+            f"{package} {version}"
+            for (_, package, version, _, state) in counts
+            if state == FIX_AVAILABLE
+        }
+    )
+    if not behind:
+        return
+    out.write(
+        "# HELP osv_feed_kernel_summary Running kernel versions with fixes "
+        "available, and how many there are.\n"
+    )
+    out.write("# TYPE osv_feed_kernel_summary gauge\n")
+    out.write(
+        f'osv_feed_kernel_summary{{state="fix_available",'
+        f'versions="{_escape_prometheus(",".join(behind))}"}} {len(behind)}\n'
+    )
 
 
 def _write_kernel_findings(

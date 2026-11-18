@@ -13,6 +13,7 @@ import jinja2
 import json
 
 TEMPLATE = pathlib.Path(__file__).parent.parent / "templates" / "osv-feed-config.toml.j2"
+ALERTS = pathlib.Path(__file__).parent.parent / "templates" / "ycluster-alerts.yml.j2"
 
 
 class KernelCategoryTest(unittest.TestCase):
@@ -44,6 +45,21 @@ class KernelCategoryTest(unittest.TestCase):
         block = rendered.split("[tracking.kernel]", 1)[1].split("[tracking.", 1)[0]
         self.assertIn('source = "index"', block)
         self.assertIn('"linux=6.8.0-149.149"', block)
+
+
+class KernelAlertTest(unittest.TestCase):
+    def test_kernel_alert_is_coalesced_and_repeats_daily(self):
+        """One fleet-wide alert, not one per running kernel version.
+
+        A per-version expression makes the ntfy webhook push once for every
+        kernel line on every repeat. The collector's summary sample and the
+        slow_repeat route keep it to one daily reminder instead.
+        """
+        text = ALERTS.read_text()
+        block = text.split("- alert: KernelCVEPatchAvailable", 1)[1].split("- alert:", 1)[0]
+        self.assertIn('osv_feed_kernel_summary{state="fix_available"}', block)
+        self.assertNotIn("sum by (package, version)", block)
+        self.assertIn('slow_repeat: "true"', block)
 
 
 if __name__ == "__main__":
