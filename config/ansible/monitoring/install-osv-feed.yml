@@ -19,6 +19,23 @@
 #
 # See docs/design/osv-feed.md for the deployment plan and
 # docs/design/perimeter-software-tracking.md for the alert/SLA context.
+
+# The kernel is matched through a compact index instead of the full mirror:
+# ~19.5k kernel advisories totalling several GB of JSON would blow the
+# collector's match budget on every run. The index needs one entry per
+# distinct running kernel, so gather them across the fleet here and read the
+# registered results back through hostvars in the collector play.
+- name: Read the running kernel package on every tracked host
+  hosts: managed:frontend
+  gather_facts: false
+  tasks:
+    - name: Read the source package and version of the running kernel
+      ansible.builtin.shell: >-
+        dpkg-query -W -f '${Source:Package}=${Version}' "linux-image-$(uname -r)"
+      register: osv_feed_kernel_pkg
+      changed_when: false
+      failed_when: false
+
 - name: Install osv-feed mirror and textfile collector
   hosts: "{{ osv_feed_collector | default('core[0]') }}"
   become: yes
@@ -56,6 +73,13 @@
     # snapshot dir; the collector passes this to `match --container-dir`.
     osv_feed_container_dir: "{{ osv_feed_snapshot_dir }}/container"
     osv_feed_container_severity: high
+    # Kernel CVE matching reads a compact index built next to the snapshot
+    # (see `osv-feed kernel-index`); the version list comes from the gather
+    # play above so every node's running kernel is covered, not just this
+    # one's. `medium` keeps the category policy open to every severity.
+    osv_feed_kernel_index: "{{ osv_feed_snapshot_dir }}/kernel-index.json"
+    osv_feed_kernel_severity: medium
+    osv_feed_kernel_hosts: "{{ groups['managed'] | union(groups['frontend']) | unique }}"
 
   tasks:
     - name: Ensure local feed DB directory exists
@@ -137,6 +161,30 @@
         group: root
         mode: '0755'
 
+    - name: Assemble the running kernel specs from the fleet
+      set_fact:
+        osv_feed_kernel_specs: >-
+          {{ (osv_feed_kernel_specs | default([])) + [
+               hostvars[item]['osv_feed_kernel_pkg']['stdout'] | trim | replace('-signed', '')
+             ] }}
+      loop: "{{ osv_feed_kernel_hosts }}"
+      when:
+        - hostvars[item]['osv_feed_kernel_pkg'] is defined
+        - hostvars[item]['osv_feed_kernel_pkg']['stdout'] | default('') | trim | length > 0
+
+    - name: Derive kernel package names and version specs
+      set_fact:
+        osv_feed_kernel_versions: "{{ osv_feed_kernel_specs | default([]) | unique | sort }}"
+        osv_feed_kernel_packages: "{{ osv_feed_kernel_specs | default([]) | map('regex_replace', '=.*$', '') | unique | sort }}"
+
+    - name: Require at least one running kernel to track
+      assert:
+        that: osv_feed_kernel_packages | length > 0
+        fail_msg: >-
+          No running kernel was gathered. Run the playbook without limiting
+          the kernel-gather play (it reads every managed host and frontend);
+          an empty [tracking.kernel] would silently stop kernel CVE matching.
+
     - name: Install osv-feed config
       template:
         src: osv-feed-config.toml.j2
@@ -177,6 +225,12 @@
           # Publish the read-only snapshot to the shared dir only once the
           # local writable store is fully written and closed.
           ExecStartPost=/usr/bin/python3 {{ osv_feed_publish_path }}
+          {% if osv_feed_kernel_packages | default([]) | length > 0 %}
+          # Rebuild the compact kernel index from the freshly published
+          # snapshot. `-` keeps a broken index build from failing the mirror;
+          # the collector reports a stale index instead.
+          ExecStartPost=-/usr/bin/python3 -m osv_feed --db-dir {{ osv_feed_snapshot_dir }} --db-immutable kernel-index --ecosystem {{ osv_feed_ecosystem }}{% for package in osv_feed_kernel_packages %} --package {{ package }}{% endfor %} --out {{ osv_feed_kernel_index }}
+          {% endif %}
           User=root
           Environment=OSV_FEED_DB_DIR={{ osv_feed_db_dir }}
           Environment=OSV_FEED_SNAPSHOT_DIR={{ osv_feed_snapshot_dir }}
@@ -234,6 +288,7 @@
           Environment=OSV_FEED_DB_DIR={{ osv_feed_snapshot_dir }}
           Environment=OSV_FEED_STATE_DIR={{ osv_feed_db_dir }}
           Environment=OSV_FEED_CONTAINER_DIR={{ osv_feed_container_dir }}
+          Environment=OSV_FEED_KERNEL_INDEX={{ osv_feed_kernel_index }}
           ProtectSystem=full
           ProtectHome=true
           PrivateTmp=true
@@ -292,6 +347,7 @@
         OSV_FEED_DB_DIR: "{{ osv_feed_snapshot_dir }}"
         OSV_FEED_STATE_DIR: "{{ osv_feed_db_dir }}"
         OSV_FEED_CONTAINER_DIR: "{{ osv_feed_container_dir }}"
+        OSV_FEED_KERNEL_INDEX: "{{ osv_feed_kernel_index }}"
       changed_when: false
       failed_when: false
 

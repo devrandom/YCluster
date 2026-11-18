@@ -1,0 +1,50 @@
+"""Rendered osv-feed config guards.
+
+The kernel category is matched from the compact index, not the mirror. If
+`source = "index"` goes missing from the rendered table, the 15-minute
+collector silently starts scanning several GB of kernel advisories on every
+run — the exact failure this test exists to prevent.
+"""
+
+import pathlib
+import unittest
+
+import jinja2
+import json
+
+TEMPLATE = pathlib.Path(__file__).parent.parent / "templates" / "osv-feed-config.toml.j2"
+
+
+class KernelCategoryTest(unittest.TestCase):
+    def render(self) -> str:
+        environment = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(str(TEMPLATE.parent)),
+            undefined=jinja2.StrictUndefined,
+        )
+        # Ansible provides `to_json`; the template only needs the filter name.
+        environment.filters["to_json"] = lambda value: json.dumps(list(value))
+        return environment.get_template(TEMPLATE.name).render(
+            osv_feed_db_dir="/var/lib/osv-feed/db",
+            osv_feed_ack_db="/near1/osv-feed/acks.json",
+            osv_feed_ecosystem="Ubuntu",
+            osv_feed_perimeter_packages=["openssh"],
+            osv_feed_perimeter_severity="high",
+            osv_feed_network_packages=["wireguard"],
+            osv_feed_runtimes_packages=["podman"],
+            osv_feed_selfbuilt_ecosystem="Go",
+            osv_feed_selfbuilt_packages=["github.com/fatedier/frp=0.70.1"],
+            osv_feed_selfbuilt_severity="high",
+            osv_feed_container_severity="high",
+            osv_feed_kernel_versions=["linux=6.8.0-149.149"],
+            osv_feed_kernel_severity="medium",
+        )
+
+    def test_kernel_category_is_index_sourced(self):
+        rendered = self.render()
+        block = rendered.split("[tracking.kernel]", 1)[1].split("[tracking.", 1)[0]
+        self.assertIn('source = "index"', block)
+        self.assertIn('"linux=6.8.0-149.149"', block)
+
+
+if __name__ == "__main__":
+    unittest.main()

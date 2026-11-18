@@ -40,8 +40,13 @@ from .matching import UNINSTALLED
 from .matching import PENDING_STATES
 from .matching import _finding_key
 from .matching import FirstSeenTracker
+from .matching import iter_candidate_records
 from .matching import match_specs
 from .matching import match_container
+from .kernel import build_index
+from .kernel import dump_index
+from .kernel import load_index
+from .kernel import match_entries
 from .epss import mirror_epss
 from .mirror import feed_status
 from .mirror import mirror_ecosystem
@@ -79,15 +84,19 @@ def _image_label(finding: dict) -> str:
     return f',image="{_escape_prometheus(image)}"'
 
 
-def _cve_summary(findings: Iterable[dict], first_seen: dict[str, int]) -> dict[str, dict]:
+def _cve_summary(
+    findings: Iterable[dict], first_seen: dict[str, int]
+) -> dict[str, dict[str, dict]]:
     """Coalesce pending CVEs into one entry per alert severity.
 
     Collects non-acked ``no_fix_yet``/``fix_available`` findings whose
     first-seen is at least the severity's SLA old, keyed by finding (package +
     version + CVE, image-aware), and returns
-    ``{severity: {"count": int, "cves": [cve, ...]}}`` where ``cves`` holds at
-    most 5 distinct CVEs, oldest first_seen first. Only severities with a
-    configured SLA (critical / high) are emitted, matching the alert tiers.
+    ``{category: {severity: {"count": int, "cves": [cve, ...]}}}`` where
+    ``cves`` holds at most 5 distinct CVEs, oldest first_seen first. Only
+    severities with a configured SLA (critical / high) are emitted, matching
+    the alert tiers. Grouping by category keeps a category with its own alert
+    policy (the kernel) from landing in the perimeter SLA buckets.
     """
     now = int(time.time())
     buckets: dict[str, dict] = {}
@@ -103,13 +112,16 @@ def _cve_summary(findings: Iterable[dict], first_seen: dict[str, int]) -> dict[s
         first = first_seen.get(_finding_key(finding))
         if first is None or now - first < sla:
             continue
-        bucket = buckets.setdefault(severity, {"seen": set(), "cves": {}})
+        category = finding.get("category") or "default"
+        bucket = buckets.setdefault(
+            (category, severity), {"seen": set(), "cves": {}}
+        )
         bucket["seen"].add(_finding_key(finding))
         bucket["cves"][finding["cve"]] = first
-    result: dict[str, dict] = {}
-    for severity, bucket in buckets.items():
+    result: dict[str, dict[str, dict]] = {}
+    for (category, severity), bucket in buckets.items():
         ordered = sorted(bucket["cves"].items(), key=lambda kv: (kv[1], kv[0]))
-        result[severity] = {
+        result.setdefault(category, {})[severity] = {
             "count": len(bucket["seen"]),
             "cves": [cve for cve, _ in ordered][:5],
         }
@@ -169,16 +181,18 @@ def _prometheus_first_seen_line(key: str, value: int) -> str:
     return f"osv_feed_cve_first_seen_seconds{{{labels}}} {value}"
 
 
-def _prometheus_summary_lines(summary: dict[str, dict]) -> Iterable[str]:
-    for severity in ("critical", "high"):
-        entry = summary.get(severity)
-        if not entry:
-            continue
-        cves = ",".join(entry["cves"])
-        yield (
-            f'osv_feed_cve_summary{{severity="{severity}",acked="false",'
-            f'cves="{_escape_prometheus(cves)}"}} {entry["count"]}'
-        )
+def _prometheus_summary_lines(summary: dict[str, dict[str, dict]]) -> Iterable[str]:
+    for category, per_severity in sorted(summary.items()):
+        for severity in ("critical", "high"):
+            entry = per_severity.get(severity)
+            if not entry:
+                continue
+            cves = ",".join(entry["cves"])
+            yield (
+                f'osv_feed_cve_summary{{category="{_escape_prometheus(category)}",'
+                f'severity="{severity}",acked="false",'
+                f'cves="{_escape_prometheus(cves)}"}} {entry["count"]}'
+            )
 
 
 def _write_prometheus_stream(findings: Iterable[dict], state_dir: str) -> None:
@@ -497,6 +511,11 @@ def _all_category_specs(
     specs: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     for table in tracking_categories(config).values():
+        # A category with `source = "index"` is matched from a compact index
+        # (`kernel-match`), not from the mirror: its packages are large
+        # advisory sets that would dominate a bare `match` run.
+        if str(table.get("source") or "mirror").lower() != "mirror":
+            continue
         ecosystem = category_ecosystem(table, default_ecosystem)
         if ecosystem is None:
             raise SystemExit(
@@ -656,6 +675,60 @@ def _iter_filtered_findings(
                 yield tagged
 
 
+def _write_kernel_prometheus(findings: Iterable[dict]) -> None:
+    """Emit per-version kernel CVE counts instead of one series per CVE.
+
+    A running kernel carries thousands of advisories (most already patched),
+    so per-CVE series would dominate the collector's metric set. The
+    actionable signal is how many non-acked pending kernel CVEs a running
+    version has, split by severity and state; the CVE list itself stays
+    available through `kernel-match --format table|json`.
+    """
+    counts: dict[tuple[str, str, str, str, str], int] = {}
+    for finding in findings:
+        if finding.get("acked"):
+            continue
+        if finding.get("state") not in PENDING_STATES:
+            continue
+        key = (
+            finding["ecosystem"],
+            finding["requested_package"],
+            finding["version"],
+            finding.get("severity") or "",
+            finding["state"],
+        )
+        counts[key] = counts.get(key, 0) + 1
+    out = sys.stdout
+    out.write(
+        "# HELP osv_feed_kernel_cve_count Non-acked pending kernel CVEs per "
+        "running kernel version, by severity and state.\n"
+    )
+    out.write("# TYPE osv_feed_kernel_cve_count gauge\n")
+    for key in sorted(counts):
+        ecosystem, package, version, severity, state = key
+        out.write(
+            f'osv_feed_kernel_cve_count{{ecosystem="{_escape_prometheus(ecosystem)}",'
+            f'package="{_escape_prometheus(package)}",'
+            f'version="{_escape_prometheus(version)}",'
+            # `cve_severity`, not `severity`: an alert rule sets its own
+            # severity label, and a metric label of the same name would make
+            # every per-severity series collapse onto one alert labelset.
+            f'cve_severity="{_escape_prometheus(severity)}",'
+            f'state="{_escape_prometheus(state)}"}} {counts[key]}\n'
+        )
+
+
+def _write_kernel_findings(
+    findings: Iterable[dict], args: argparse.Namespace
+) -> None:
+    if args.format == "json":
+        _write_json_stream(findings, args.state_dir)
+    elif args.format == "prometheus":
+        _write_kernel_prometheus(findings)
+    else:
+        _write_table_stream(findings, args.state_dir, args.verbose)
+
+
 def _iter_cli_findings(
     args: argparse.Namespace,
     specs: list[dict],
@@ -683,6 +756,48 @@ def _iter_cli_findings(
                 config,
                 acks,
             )
+
+
+def _kernel_findings(
+    grouped: dict,
+    specs: list[dict],
+    args: argparse.Namespace,
+    config: dict,
+    acks: dict,
+):
+    """Findings for kernel versions matched against a compact index.
+
+    Only advisories that actually affect the version produce a finding: the
+    index drops the patched ones, so there is no ``state="patched"`` series
+    for the kernel (unlike the distro-package path, which reports every
+    advisory a package version has seen).
+    """
+    category = args.category or "kernel"
+    category_cfg = category_config(category, config)
+    for spec in specs:
+        for entry, state in match_entries(
+            grouped, spec["package"], spec["version"]
+        ):
+            finding = {
+                "ecosystem": spec["ecosystem"],
+                "package": spec["package"],
+                "requested_package": spec["package"],
+                "version": spec["version"],
+                "cve": entry.get("cve", ""),
+                "summary": entry.get("summary", ""),
+                "details": "",
+                "aliases": entry.get("aliases") or [],
+                "references": [],
+                "published": entry.get("published", ""),
+                "modified": "",
+                "severity": entry.get("severity") or "",
+                "state": state,
+                "epss_score": 0.0,
+                "epss_percentile": 0.0,
+            }
+            tagged = _tag_finding(finding, category, category_cfg, acks)
+            if tagged is not None:
+                yield tagged
 
 
 def _iter_filter_container_findings(
@@ -795,6 +910,58 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("table", "json", "prometheus"),
         default="table",
         help="output format (default table)",
+    )
+
+    kernel_index = subparsers.add_parser(
+        "kernel-index",
+        help="build a compact index of kernel advisories from the mirror",
+    )
+    kernel_index.add_argument(
+        "--package",
+        action="append",
+        required=True,
+        help=(
+            "kernel source package to index (repeatable, e.g. linux, "
+            "linux-hwe-7.0)"
+        ),
+    )
+    kernel_index.add_argument(
+        "--ecosystem",
+        default=None,
+        help="OSV ecosystem to read (defaults to the host OS)",
+    )
+    kernel_index.add_argument("--out", required=True, help="index file to write")
+
+    kernel_match = subparsers.add_parser(
+        "kernel-match",
+        help="match kernel versions against a compact index",
+    )
+    kernel_match.add_argument("--index", required=True, help="index file to read")
+    kernel_match.add_argument(
+        "--pkg", action="append", help="NAME[=VERSION] to match (repeatable)"
+    )
+    kernel_match.add_argument("--spec-file", help="JSON object or array of specs")
+    kernel_match.add_argument(
+        "--category",
+        default="kernel",
+        help="tracking category for policy and acks (default kernel)",
+    )
+    kernel_match.add_argument(
+        "--ecosystem",
+        default=None,
+        help="ecosystem for --pkg when the index does not name one",
+    )
+    kernel_match.add_argument(
+        "--format",
+        choices=("table", "json", "prometheus"),
+        default="table",
+        help="output format (default table)",
+    )
+    kernel_match.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="add CVE title and aliases under each table row",
     )
     match.add_argument(
         "-v",
@@ -914,6 +1081,40 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "ack":
         return _run_ack(args, config)
+    if args.command == "kernel-index":
+        ecosystem = args.ecosystem or host_ecosystem()
+        if ecosystem is None:
+            raise SystemExit(
+                "cannot determine the ecosystem: host is not Debian/Ubuntu; "
+                "pass --ecosystem"
+            )
+        entries = build_index(
+            iter_candidate_records(
+                args.db_dir,
+                ecosystem,
+                args.package,
+                immutable=args.immutable,
+            ),
+            args.package,
+        )
+        count = dump_index(args.out, ecosystem, args.package, entries)
+        packages = ",".join(sorted({package.lower() for package in args.package}))
+        print(f"{ecosystem}: packages={packages} entries={count} out={args.out}")
+        return 0
+    if args.command == "kernel-match":
+        ecosystem, grouped = load_index(args.index)
+        args.ecosystem = args.ecosystem or ecosystem or None
+        category = args.category
+        if args.pkg or args.spec_file:
+            # Explicit specs are the whole request; a category would add every
+            # configured kernel package on top of them.
+            args.category = None
+        specs = _parse_specs(args, config)
+        args.category = category
+        acks = load_acks(args.ack_db)
+        findings_iter = _kernel_findings(grouped, specs, args, config, acks)
+        _write_kernel_findings(findings_iter, args)
+        return 0
     specs = _parse_specs(args, config)
     if _warn_stale_feeds(args.db_dir, specs):
         return 1

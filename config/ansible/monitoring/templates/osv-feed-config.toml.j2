@@ -26,6 +26,19 @@ packages = {{ osv_feed_runtimes_packages | list | to_json }}
 severity = "high"
 states = ["no_fix_yet", "fix_available"]
 
+# Kernel advisories are matched from the compact index
+# (`osv-feed kernel-match`), not from the mirror: the distro files thousands
+# of kernel records whose full JSON would dominate the run. The package list
+# is `source-package=running-version` for every distinct running kernel in
+# the fleet, gathered by install-osv-feed.yml.
+[tracking.kernel]
+ecosystem = "{{ osv_feed_ecosystem }}"
+packages = {{ osv_feed_kernel_versions | default([]) | list | to_json }}
+severity = "{{ osv_feed_kernel_severity }}"
+states = ["no_fix_yet", "fix_available"]
+# Matched from the compact index by `kernel-match`, never from the mirror.
+source = "index"
+
 # Self-built Go binaries we ship from source pins are tracked against the OSV
 # Go ecosystem (not the distro), pinned to the exact version we build via the
 # `name=version` package form.

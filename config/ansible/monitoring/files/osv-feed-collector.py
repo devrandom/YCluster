@@ -20,6 +20,7 @@ Output:
   osv_feed_mirror_present    1 when any mirrored ecosystem/EPSS cursor exists
   osv_feed_mirror_age_seconds  age of the most-stale mirrored feed cursor
   osv_feed_collector_error   1 when the last match run failed
+  osv_feed_kernel_index_age_seconds  age of the compact kernel index (-1 absent)
 
 The `.prom` file is always rewritten (even on failure it carries the health
 gauges) so node_textfile_mtime_seconds advances and staleness alerts key
@@ -50,6 +51,10 @@ CURSOR_FILES = (
 # Directory of container/*.manifest files to match (see osv-feed's
 # `match --container-dir`); empty/absent disables container matching.
 CONTAINER_DIR = os.environ.get("OSV_FEED_CONTAINER_DIR", "")
+# Compact kernel advisory index (see osv-feed's `kernel-index`). The kernel
+# is matched through the index rather than the mirror: the distro's kernel
+# advisories are several GB of JSON, which would dominate every run.
+KERNEL_INDEX = os.environ.get("OSV_FEED_KERNEL_INDEX", "")
 MATCH_TIMEOUT = 600
 
 
@@ -99,7 +104,62 @@ def run_match() -> tuple[bool, str, list[str]]:
     return ok, (proc.stdout if ok else ""), errors
 
 
-def write_prom(present: bool, age: int, ok: bool, body: str, errors: list[str]) -> None:
+def kernel_index_age() -> int:
+    """Age of the kernel index in seconds, or -1 when it is not there yet."""
+    if not KERNEL_INDEX.strip():
+        return -1
+    try:
+        return int(time.time() - os.path.getmtime(KERNEL_INDEX))
+    except OSError:
+        return -1
+
+
+def run_kernel_match() -> tuple[bool, str, list[str]]:
+    """Match the tracked kernels against the compact index.
+
+    Absent index (first boot, or a build that has not run yet) is not an
+    error: the kernel index age metric reports it and an alert covers it.
+    """
+    if not KERNEL_INDEX.strip() or not os.path.exists(KERNEL_INDEX):
+        return True, "", []
+    argv = [
+        OSV_FEED,
+        "--db-immutable",
+        "kernel-match",
+        "--index",
+        KERNEL_INDEX,
+        "--format",
+        "prometheus",
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=MATCH_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, "", [f"kernel-match: {exc}"]
+    ok = proc.returncode == 0
+    errors = [
+        f"kernel-match: {line}"
+        for line in (proc.stderr or "").splitlines()
+        if line.strip()
+    ]
+    # Keep only samples: the HELP/TYPE lines duplicate the main run's.
+    body = "\n".join(
+        line
+        for line in (proc.stdout if ok else "").splitlines()
+        if line.strip() and not line.startswith("#")
+    )
+    return ok, body, errors
+
+
+def write_prom(
+    present: bool,
+    age: int,
+    ok: bool,
+    body: str,
+    errors: list[str],
+    kernel_age: int,
+) -> None:
     lines = []
     if body:
         lines.append(body.rstrip("\n"))
@@ -112,6 +172,9 @@ def write_prom(present: bool, age: int, ok: bool, body: str, errors: list[str]) 
     lines.append("# HELP osv_feed_collector_error 1 when the last osv-feed match run failed.")
     lines.append("# TYPE osv_feed_collector_error gauge")
     lines.append(f"osv_feed_collector_error {0 if ok else 1}")
+    lines.append("# HELP osv_feed_kernel_index_age_seconds Age of the compact kernel index, -1 when absent.")
+    lines.append("# TYPE osv_feed_kernel_index_age_seconds gauge")
+    lines.append(f"osv_feed_kernel_index_age_seconds {kernel_age}")
     if not ok and errors:
         lines.append("# osv-feed match failed: " + " | ".join(errors).replace("\n", " "))
 
@@ -133,7 +196,17 @@ def write_prom(present: bool, age: int, ok: bool, body: str, errors: list[str]) 
 def main() -> int:
     present, age = mirror_health(DB_DIR)
     ok, body, errors = run_match()
-    write_prom(present, age, ok, body, errors)
+    kernel_ok, kernel_body, kernel_errors = run_kernel_match()
+    if kernel_body:
+        body = (body.rstrip("\n") + "\n" + kernel_body).strip("\n")
+    write_prom(
+        present,
+        age,
+        ok and kernel_ok,
+        body,
+        errors + kernel_errors,
+        kernel_index_age(),
+    )
     return 0
 
 

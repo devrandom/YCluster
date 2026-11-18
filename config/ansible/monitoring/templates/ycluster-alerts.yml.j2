@@ -1006,6 +1006,36 @@ groups:
           summary: "OSV feed match failing on {{ $labels.node }}"
           description: "osv-feed match is failing on {{ $labels.node }}. CVE metrics are not being produced; check the collector service logs."
 
+      # Kernel CVEs are matched per running kernel version from a compact
+      # index (`osv-feed kernel-index` / `kernel-match`), not from the mirror:
+      # the distro's kernel advisories are several GB of JSON and would
+      # dominate every collector run. The index is rebuilt by the mirror
+      # unit, so a missing or two-day-old index means kernel detection is
+      # reporting stale state.
+      - alert: OSVFeedKernelIndexStale
+        expr: osv_feed_kernel_index_age_seconds < 0 or osv_feed_kernel_index_age_seconds > 2 * 24 * 3600
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kernel CVE index missing or stale on {{ $labels.node }}"
+          description: "The compact kernel index has not been rebuilt in over 2 days (or is absent). Check the kernel-index step of osv-feed-mirror.service."
+
+      # A running kernel with fixes available is actionable: upgrade the
+      # kernel package and reboot. The rule coalesces the per-severity counts
+      # into one alert per running kernel version; the collector deliberately
+      # does not emit one series per kernel CVE, because a running kernel
+      # carries thousands of them (most already fixed). `for: 6h` keeps a
+      # routine apt day from paging.
+      - alert: KernelCVEPatchAvailable
+        expr: sum by (package, version) (osv_feed_kernel_cve_count{state="fix_available"}) > 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} kernel CVE(s) fixable on {{ $labels.package }} {{ $labels.version }}"
+          description: "{{ $labels.package }} {{ $labels.version }} is behind its series: {{ $value }} kernel CVEs it carries have a fixed kernel in the feed. Run `osv-feed kernel-match --format table` for the list, then schedule the kernel upgrade and reboot."
+
       # Early warning for newly-detected critical CVEs. osv_feed_cve_info
       # emits a series per finding at detection time (acked="false", state is
       # no_fix_yet or fix_available), so this fires well before the 12h SLA

@@ -272,8 +272,10 @@ class CliMatchTest(unittest.TestCase):
             "Ubuntu|nginx|1.0|CVE-PT": now - 20 * 3600,
         }
         summary = cli._cve_summary(findings, first_seen)
-        self.assertEqual({"count": 2, "cves": ["CVE-C1", "CVE-C2"]}, summary["critical"])
-        self.assertEqual({"count": 1, "cves": ["CVE-H1"]}, summary["high"])
+        self.assertEqual(
+            {"count": 2, "cves": ["CVE-C1", "CVE-C2"]}, summary["default"]["critical"]
+        )
+        self.assertEqual({"count": 1, "cves": ["CVE-H1"]}, summary["default"]["high"])
 
     def test_cve_summary_lists_top_five_oldest_first(self):
         now = int(time.time())
@@ -288,11 +290,11 @@ class CliMatchTest(unittest.TestCase):
         findings = [{**base, "cve": f"CVE-H{i}"} for i in range(7)]
         first_seen = {f"Ubuntu|nginx|1.0|CVE-H{i}": now - (2 * 24 * 3600 + i) for i in range(7)}
         summary = cli._cve_summary(findings, first_seen)
-        self.assertEqual(7, summary["high"]["count"])
+        self.assertEqual(7, summary["default"]["high"]["count"])
         # Oldest first_seen first; larger i has a smaller (older) epoch.
         self.assertEqual(
             ["CVE-H6", "CVE-H5", "CVE-H4", "CVE-H3", "CVE-H2"],
-            summary["high"]["cves"],
+            summary["default"]["high"]["cves"],
         )
 
     def test_prometheus_render_emits_coalesced_summary(self):
@@ -328,9 +330,15 @@ class CliMatchTest(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             cli._write_prometheus_stream(iter(findings), state_dir)
         rendered = output.getvalue()
-        self.assertIn('osv_feed_cve_summary{severity="critical",acked="false",cves="CVE-C1"} 1', rendered)
         self.assertIn(
-            'osv_feed_cve_summary{severity="high",acked="false",cves="CVE-H\\"1"} 1', rendered
+            'osv_feed_cve_summary{category="default",severity="critical",'
+            'acked="false",cves="CVE-C1"} 1',
+            rendered,
+        )
+        self.assertIn(
+            'osv_feed_cve_summary{category="default",severity="high",'
+            'acked="false",cves="CVE-H\\"1"} 1',
+            rendered,
         )
         self.assertNotIn('severity="medium"', rendered)
 

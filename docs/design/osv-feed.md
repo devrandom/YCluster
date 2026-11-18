@@ -153,6 +153,46 @@ avoids split-brain on the daily mirror and on the `first-seen.json` gauge.
    keeping it visible; keep the apt `upgradable`/USN check as the
    zero-lag `fix_available` cross-check.
 
+## Kernel advisories
+
+The kernel does not go through `match`. Ubuntu files every kernel CVE
+against the `linux` source package and the per-series HWE packages, and each
+record lists every affected binary version across every series: ~19.5k
+records, ~5.7 GB of JSON, and minutes of parsing for a single full match.
+That is far outside the collector's 600 s budget and would dominate every
+run.
+
+Instead the mirror job builds a compact index and the collector matches
+against it:
+
+- `osv-feed kernel-index --package linux --package linux-hwe-7.0 ... --out
+  <snapshot>/kernel-index.json` reduces each record to one entry per
+  (package, series, CVE): first affected version, fixed version (or none),
+  and the advisory fields the reporter needs. Series is the prefix before
+  the first `-` (`6.8.0` in `6.8.0-149.149`), which is what separates the
+  per-series affected-version lists inside one record. Measured: 179k
+  entries, 36 MB, ~110 s to build from the full mirror.
+- `osv-feed kernel-match --index <snapshot>/kernel-index.json [--pkg
+  NAME=VERSION ...]` classifies the tracked kernels in milliseconds. The
+  package list is `source-package=running-version` for every distinct
+  running kernel in the fleet, gathered by `install-osv-feed.yml` from all
+  managed hosts plus the frontends — a bare package name would resolve the
+  collector's own (often stale) installed image instead.
+
+`[tracking.kernel]` carries `source = "index"`, which keeps those packages
+out of a bare `match` run: only `kernel-match` reads them. Only affected
+versions produce findings, so there is no `state="patched"` kernel series
+(the distro-package path does report every advisory a version has seen).
+
+The collector emits one `osv_feed_kernel_cve_count` series per (package,
+version, `cve_severity`, state) rather than one `osv_feed_cve_info` series per
+CVE: a running kernel carries thousands of advisories, most already fixed.
+`KernelCVEPatchAvailable` fires when a running kernel has fixes available
+(upgrade and reboot); `OSVFeedKernelIndexStale` covers an index that stopped
+being rebuilt. Unfixed kernel CVEs stay visible in the count metric and in
+`osv-feed kernel-match --format table`, but do not page — a current kernel
+typically has around a thousand of them.
+
 ## Verification
 
 - `osv-feed/test.sh` stays green.
