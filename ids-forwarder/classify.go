@@ -202,6 +202,55 @@ func isRootIdentity(a alert) bool {
 	return ok && uid == "0"
 }
 
+// routineRootHelper lists privileged helpers that unprivileged processes run
+// on a normal host and that give root to a fixed program rather than an
+// arbitrary one: rootless container id mapping, FUSE mounts, session bus
+// activation, host-based SSH auth, polkit prompting and the account tools.
+// Their exec is not a boundary crossing worth a page; the escalation class
+// covers everything else by exact binary path. A helper added to the host
+// without being added here pages the first time it runs, which is the
+// direction to err in.
+var routineRootHelper = map[string]bool{
+	"/usr/bin/chfn":        true,
+	"/usr/bin/chsh":        true,
+	"/usr/bin/fusermount3": true,
+	"/usr/bin/gpasswd":     true,
+	"/usr/bin/mount":       true,
+	"/usr/bin/newgidmap":   true,
+	"/usr/bin/newgrp":      true,
+	"/usr/bin/newuidmap":   true,
+	// CUDA setup on the GPU nodes: creates the device nodes a non-root
+	// process cannot. Setuid root there, and rare (two execs in the
+	// retained log on a GPU node).
+	"/usr/bin/nvidia-modprobe":                    true,
+	"/usr/bin/passwd":                             true,
+	"/usr/bin/umount":                             true,
+	"/usr/lib/dbus-1.0/dbus-daemon-launch-helper": true,
+	"/usr/lib/openssh/ssh-keysign":                true,
+	"/usr/lib/polkit-1/polkit-agent-helper-1":     true,
+	"/usr/sbin/mount.cifs":                        true,
+	"/usr/sbin/mount.nfs":                         true,
+	"/usr/sbin/unix_chkpwd":                       true,
+}
+
+// parentUID reports the uid of the process that started the event. The event
+// carries the parent block when Tetragon still had it, and every event names
+// the parent exec, so a parent that has since exited still answers from the
+// cache the forwarder built while reading the stream. Neither path reads
+// /proc, so the answer does not depend on the invoker still running.
+func parentUID(body *tetragonLog) (uint32, bool) {
+	if body == nil {
+		return 0, false
+	}
+	if p := body.Parent; p != nil && p.PID != 0 {
+		return p.UID, true
+	}
+	if e, ok := execLookup(body.Process.ParentExecID); ok {
+		return e.uid, true
+	}
+	return 0, false
+}
+
 // privilegeTools are the binaries whose exec is the transition itself. The
 // paths are exact because a copied binary must not inherit the class.
 var privilegeTools = map[string]bool{

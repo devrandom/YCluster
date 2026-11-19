@@ -102,15 +102,46 @@ container process that has already exited loses its container attribution and
 resolves to host with uid 0, which lands in the same class, so the answer does
 not depend on `/proc` timing.
 
-`escalationTransition` is narrow on purpose. It is true only for the events
-that *perform* the transition: a `process_exec` of `sudo`, `su`, `doas` or
-`pkexec`. The invoker is the *parent* process, because the tool itself is
-already root when the event is written; when the parent has left `/proc` the
-audit uid carried on the event is the next source, and the login session of the
-event process is the last. Only that last one needs a live `/proc`, and an
-unresolvable invoker leaves the event as evidence rather than paging on a
-guess. The source of each verdict is counted in
-`ids_forwarder_provenance_total{check="escalation",source=...}`.
+`escalationTransition` has two shapes, and both are the moment of crossing
+rather than what follows it.
+
+The first is a `process_exec` of `sudo`, `su`, `doas` or `pkexec` by exact
+path. The invoker is the *parent* process, because the tool itself is already
+root when the event is written. When the parent block is absent the parent
+exec from the exec-id cache answers next, then the audit uid carried on the
+event, and the login session of the event process is the last. Only that last
+one needs a live `/proc`, and an unresolvable invoker leaves the event as
+evidence rather than paging on a guess.
+
+The second is any other root exec whose parent is an unprivileged host
+identity, unless the binary is one of the routine privileged helpers listed in
+`routineRootHelper`. That covers the escalation that does not go through a known
+tool — a kernel bug, a privileged helper the fleet did not previously have, a
+misconfigured one — and it pages on the first root exec, while the attacker is
+still unable to stop the sensor. The parent uid comes from the event's parent
+block when Tetragon still had it and from the exec cache keyed on
+`parent_exec_id` when it did not, so this shape reads no `/proc` at all.
+
+The exemption is an allowlist of exact paths, deliberately not a property of
+the file on disk: creating a setuid binary is a one-liner for anyone who can
+write to a directory, so "is the target setuid" would be an
+attacker-controlled test. The allowlist holds the helpers an ordinary host
+runs from unprivileged processes and which hand root to a fixed program rather
+than an arbitrary one: rootless container id mapping, FUSE mounts, session bus
+activation, host-based SSH auth, the polkit helper, the account tools, and
+`nvidia-modprobe` on the GPU nodes. A helper that joins the fleet without
+joining the list pages the first time it runs, which is the direction to err
+in.
+
+The price of the list is its mirror image: a vulnerability inside an
+allowlisted helper does not page through this class, because the helper's own
+exec is exempt and anything it spawns has a root parent. Every addition is
+therefore a decision recorded here rather than a pattern the fleet can grow
+into.
+
+The source of each verdict is counted in
+`ids_forwarder_provenance_total{check="escalation",source=...}`; the second
+shape reports `parent`.
 
 The parent is the right identity, not the session: `su - someadmin -c sudo ...`
 run inside a root session elevates an unprivileged account, and an operator who
@@ -125,15 +156,25 @@ coverage — a duplicate page there is the cheaper mistake.
 
 This scoping is what keeps the model honest. A root shell spawned from an
 operator's session is evidence, exactly like any other post-root activity,
-because the attacker already has root at that point. What pages is the tool
-that crossed the boundary. Treating every root event in a non-root session as
-coverage was rejected: it depends on sudo creating a root-owned session through
-`pam_systemd`, and it makes paging depend on `/proc` timing for short-lived
-processes.
+because the attacker already has root at that point: its parent is root, so
+neither escalation shape matches. What pages is the exec that crossed the
+boundary, and only that exec.
+
+An earlier revision paged only for the four privilege tools and rejected
+anything broader, for two reasons: it would have depended on sudo creating a
+root-owned session through `pam_systemd`, and it would have made paging depend
+on `/proc` timing for short-lived processes. Neither applies to the second
+shape above. It reads the parent's uid from the event or the exec cache rather
+than from the session, and it needs no live process, so a shell spawned by a
+long-dead parent still resolves. What the broader rule still cannot see is an
+event whose parent block is absent *and* whose parent exec has aged out of the
+cache; that event stays evidence, which is the same hole the privilege-tool
+path has always had.
 
 | Rule | Layer and identity | Class |
 |---|---|---|
-| `process_exec` of `sudo`, `su`, `doas`, `pkexec` from a non-root login session | host, uid 0 | coverage (`escalation_nonroot`) |
+| `process_exec` of `sudo`, `su`, `doas`, `pkexec` from a non-root host identity | host, uid 0 | coverage (`escalation_nonroot`) |
+| any other root exec whose parent is a non-root host identity, unless the binary is a routine privileged helper | host, uid 0 | coverage (`escalation_nonroot`) |
 | the `privilege-raises` commit that follows that exec | host, uid 0 | evidence (`root_privilege`), not a second page |
 | `process_exec`, `exec-root-user-path`, any other root exec | host, uid 0 | evidence (`root_exec`) |
 | `process_exec` | host, uid != 0 | coverage (`exec_nonroot`) |
@@ -264,12 +305,12 @@ would change this, and it is an open item rather than part of this change.
 ## Paging set and the measurement gate
 
 Removing root pages leaves the paging set nearly empty. Sigma is the only
-in-scope class that pages today, at medium and above; two of the curated rules
-are `level: low` and stay silent.
+in-scope class that pages today apart from the escalation transition, at
+medium and above; two of the curated rules are `level: low` and stay silent.
 
 | Class | What it covers | At landing |
 |---|---|---|
-| `escalation_nonroot` | `sudo`/`su`/`doas`/`pkexec` execs and their root transitions from a non-root login | page |
+| `escalation_nonroot` | the exec that crosses from a non-root host identity to root: `sudo`/`su`/`doas`/`pkexec`, or any other binary that is not a routine privileged helper | page |
 | `sigma_nonroot` | curated Sigma hits, medium and above, on non-root host processes | page |
 | `exec_nonroot` | host shells and allowlisted execs by non-root identities | silent, measure |
 | `lateral_nonroot` | private cluster connects from a non-root host process | silent, measure |
@@ -329,10 +370,21 @@ folded into it.
 - **Off-host evidence.** Nothing ships classified detections off the host, so
   the record lives only on a machine the attacker may already control. Without
   it the evidence class is a decision not to page, not a forensic capability.
-- **Broader escalation shapes.** Setuid helpers other than the four named
-  tools, and a shell that sudo spawns in the caller's session, are evidence.
-  Extending the exception beyond the transition event needs a decision about
-  how much of a non-root session's root work stays in scope.
+- **Escalations the sensor cannot attribute.** An exec whose parent block is
+  absent and whose parent exec has aged out of the cache stays evidence: the
+  crossing is real but unattributable, so the class does not page on it. This
+  is the same hole the privilege-tool path has, and it now covers the broader
+  rule as well. Closing it means keeping parent execs longer, or reading
+  `/proc` for a live parent, which reintroduces the timing dependence the
+  narrower rule was built to avoid.
+- **A shell that sudo spawns in the caller's session** stays evidence, by
+  design: the crossing already paged on the sudo exec, and this shell's parent
+  is root.
+- **Allowlisted-helper compromise.** An exploited `mount`, `passwd`,
+  `nvidia-modprobe` or peer produces no page from this class: its exec is on
+  the routine list and its children have a root parent. Vendor advisories for
+  those binaries are the only signal the design has for that case, which is
+  why the CVE review covers them and why the list stays short.
 - **Sigma low-level rules.** `Bash Interactive Shell` and `Crontab Enumeration`
   are `level: low`; whether a curated low-level rule should page at all is
   open.

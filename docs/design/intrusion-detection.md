@@ -843,11 +843,15 @@ The target remains every Linux cluster node; the phase boundary is not an exclus
   The unit runs as root with `CapabilityBoundingSet=CAP_SYS_PTRACE` — the one
   capability the ptrace access check needs — and publishes into a root-owned
   directory the forwarder only reads, so the two sides share no writable path.
-- The escalation verdict reads the event too: the parent's uid, then the
-  parent exec from the exec-id cache, then the audit uid, then the login
-  session. Only the last needs `/proc`, and it is the last because an
-  unresolvable invoker leaves the event as evidence rather than paging on a
-  guess.
+- The escalation verdict reads the event too: the parent's uid from the
+  event's parent block, then the parent exec from the exec-id cache, then the
+  audit uid, then the login session. Only the last needs `/proc`, and it is
+  the last because an unresolvable invoker leaves the event as evidence rather
+  than paging on a guess. The rule covers more than the four privilege tools:
+  any root exec whose parent is a non-root host identity pages, unless the
+  binary is one of the routine helpers listed in
+  [`ids-coverage-and-evidence.md`](ids-coverage-and-evidence.md), so a setuid
+  helper the fleet did not previously have is loud on its first run.
 - The alert text is split into two annotations with different jobs. The
   summary is the notification title, so it stays short: the policy name
   (`privilege-raises`, `tcp-connect`) rather than `process_kprobe`, the
@@ -1475,8 +1479,12 @@ Fixed in the same pass:
   parent process is root. The anchored patterns are still a command line a
   user can type, and the escalation class is the one place a command line must
   not decide delivery, so a non-root invoker's `sudo -H -S -n -u root /bin/sh
-  -c "echo BECOME-SUCCESS-..."` stays visible. Root-driven playbooks are
-  unaffected, which is where the volume is.
+  -c "echo BECOME-SUCCESS-..."` stays visible. The escalation rule therefore
+  reads only the process uid, the parent's uid and the resolved binary path.
+  The routine-helper exemption is a list of exact files, not a pattern: a
+  non-root user cannot put a binary at one of those paths, so matching on them
+  narrows coverage instead of giving an attacker text to match.
+  Root-driven playbooks are unaffected, which is where the volume is.
 
   The curl/wget loopback exemption is now anchored to the only host-side
   producer, keepalived's storage-VIP script and its registry probe; a direct

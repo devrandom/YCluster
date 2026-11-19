@@ -229,12 +229,28 @@ func applyIdentity(a *alert, evType string, body *tetragonLog, layer string) {
 	if layer == "unverified" && tenantUnverified(a.prov.layer) {
 		return
 	}
-	if !privilegeTools[body.Process.Binary] {
+	if privilegeTools[body.Process.Binary] {
+		if source := escalationSource(body); source != "" {
+			a.Labels["escalation"] = "nonroot"
+			a.prov.escalation = source
+		}
 		return
 	}
-	if source := escalationSource(body); source != "" {
-		a.Labels["escalation"] = "nonroot"
-		a.prov.escalation = source
+	// The transition does not have to go through a privilege tool: a root exec
+	// whose parent is an unprivileged host identity crosses the same boundary,
+	// and that is the shape a setuid helper outside the known set produces.
+	// The parent's uid travels in the event, or resolves through the exec
+	// cache for a parent that has already exited, so this reads no /proc.
+	// The exemption is an allowlist of exact paths, not a property of the file
+	// on disk: creating a setuid binary is a one-liner for anyone who can
+	// write to a directory, so "is it setuid" would be an attacker-controlled
+	// test. Everything outside the allowlist pages, which makes an unknown
+	// helper loud on its first run.
+	if a.Labels["uid"] == "0" && !routineRootHelper[body.Process.Binary] {
+		if uid, ok := parentUID(body); ok && nonRootHostUID(uid) {
+			a.Labels["escalation"] = "nonroot"
+			a.prov.escalation = "parent"
+		}
 	}
 }
 

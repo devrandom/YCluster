@@ -245,7 +245,10 @@ must not become a second, longer-lived access log.
     replay until every host emits the namespace snapshot; the per-verdict
     source is counted in `ids_forwarder_provenance_total` so the transition is
     visible rather than assumed. `escalation_nonroot` pages from day one
-    without a shadow measurement, by decision.
+    without a shadow measurement, by decision. The class was later widened
+    from the four privilege tools to any root exec whose parent is a non-root
+    host identity, with an exact-path allowlist of routine helpers; the two
+    shapes and their sources are in the coverage doc.
   - Done: Incus API usage is recorded. `incus` is on the forwarder's exec
     allowlist and maps to its own rule, `container-api`, so every `incus
     exec`, `incus file push/pull` and lifecycle call lands in
@@ -673,10 +676,11 @@ different costs and privacy exposure.
   connection user, every task's become exec now pages instead of being
   suppressed. That is the intended trade, but it would show up as an
   `escalation_nonroot` burst, so it is the first thing to check if alerts jump.
-- The audit uid is the escalation fallback when the parent has left `/proc`,
-  and a daemon started from a login shell keeps its `auid`, so its `sudo`
-  would page. Accepted for now; the parent uid answers first in the common
-  case.
+- The audit uid is the escalation fallback when the event carries no parent
+  block and the parent exec is not in the cache, and a daemon started from a
+  login shell keeps its `auid`, so its `sudo` would page. Accepted for now;
+  the parent block answers first and the exec cache second, so the common case
+  does not reach it.
 - Provenance is now recorded per detection (`origin=interactive|unit|
   container`, `actor=<user|unit>`, counted in
   `ids_forwarder_detections_total`). The host-root-out-of-scope model changes

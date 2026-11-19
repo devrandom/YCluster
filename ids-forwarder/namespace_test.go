@@ -312,13 +312,26 @@ func TestApplyIdentitySkipsNonExecAndNonTools(t *testing.T) {
 		t.Fatal("the credential commit must not duplicate the exec's escalation")
 	}
 
-	notATool := &tetragonLog{
+	// A root exec from an unprivileged parent crosses the boundary whatever the
+	// binary is, so a copied or renamed tool still escalates. What the
+	// allowlist excludes is the routine helper, not an unknown program.
+	crossing := &tetragonLog{
 		Process: tetragonProcess{PID: 900, Binary: "/bin/bash"},
 		Parent:  &tetragonProc{PID: 901, UID: 2000},
 	}
 	b := newAlert(cfg, sourceTetragon, "warning", "host", "process_exec", "x")
-	applyIdentity(&b, "process_exec", notATool, "host")
-	if b.Labels["escalation"] != "" {
-		t.Fatal("a copied binary must not inherit the escalation class")
+	applyIdentity(&b, "process_exec", crossing, "host")
+	if b.Labels["escalation"] != "nonroot" {
+		t.Fatal("a root exec from a non-root parent must escalate")
+	}
+
+	helper := &tetragonLog{
+		Process: tetragonProcess{PID: 900, Binary: "/usr/bin/newuidmap"},
+		Parent:  &tetragonProc{PID: 901, UID: 2000},
+	}
+	c := newAlert(cfg, sourceTetragon, "warning", "host", "process_exec", "x")
+	applyIdentity(&c, "process_exec", helper, "host")
+	if c.Labels["escalation"] != "" {
+		t.Fatal("a routine privileged helper must not escalate")
 	}
 }
