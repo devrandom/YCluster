@@ -151,6 +151,17 @@ class ReconcileUnclosedStopsTests(unittest.TestCase):
         self.assertIn("interval '10 minutes'", sql)
         self.assertIn("1 microsecond", sql)
 
+    def test_ignores_a_sample_older_than_the_opener(self):
+        """The freshest sample can predate a start — the sampler runs on its
+        own minute, and a scheduler start lands whenever its window opens.
+        Closing on that sample recorded a zero-length stop (start at
+        10:50:45, sample-stop at 10:50:45.000001), and the VM then ran with
+        no open interval, unbilled, until something else touched it."""
+        conn = ScriptedConn([])
+        collect_vm_stats.reconcile_unclosed_stops(conn)
+        sql = conn.cursor_obj.executed[0][0]
+        self.assertIn("l.ts > o.ts", sql)
+
 
 if __name__ == '__main__':
     unittest.main()

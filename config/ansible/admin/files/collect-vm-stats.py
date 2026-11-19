@@ -146,6 +146,14 @@ def reconcile_unclosed_stops(conn):
     only for VMs with a fresh sample: a dead sampler means unknown, not
     stopped. Idempotent through the UNIQUE etcd_key column, which also
     ignores a real stop that the drain already recorded.
+
+    The newest sample must also be *newer than the opener*. A start and
+    the sampler are independent, so the freshest row can predate the
+    start: closing on it turned a fresh start into a zero-length stop (a
+    scheduler start at 10:50:45 followed by a sample-stop one microsecond
+    later), which left the VM running with no open interval and thus
+    unbilled until something else started or stopped it. If the start
+    really did fail, the next sample — a minute later — closes it.
     """
     with conn:
         with conn.cursor() as cur:
@@ -182,6 +190,7 @@ def reconcile_unclosed_stops(conn):
                 JOIN opener o ON o.vm = l.vm
                 LEFT JOIN last_run r ON r.vm = l.vm
                 WHERE l.state <> 'Running'
+                  AND l.ts > o.ts
             """)
             rows = [(stopped, vm, host, owner, gpus,
                      f'sample-stop:{vm}:{stopped.isoformat()}')
