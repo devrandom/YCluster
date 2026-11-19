@@ -1407,6 +1407,43 @@ class VMMemoryPreflightTests(unittest.TestCase):
         preflight.assert_not_called()
         incus.assert_called_once_with('start', 'ct1')
 
+    @mock.patch.object(vm, '_mount_data_in_guest')
+    @mock.patch.object(vm.vdb, 'data_migration_lock',
+                       return_value=contextlib.nullcontext())
+    @mock.patch.object(vm, 'vm_get',
+                       return_value={'gpus': 1, 'mem': '32GiB'})
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=True)
+    @mock.patch.object(vm, '_ensure_gpus_attached')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_record_event_from_record')
+    @mock.patch.object(vm, '_warn_desired_conflict')
+    def test_start_mounts_image_backed_data(self, warn, event, incus, attach,
+                                            share, preflight, vm_get,
+                                            data_lock, mount):
+        # An image-backed data device always gets the guest mount check,
+        # not only when the image was created by this start.
+        vm.vm_start('vm1')
+        mount.assert_called_once_with('vm1')
+
+    @mock.patch.object(vm, '_mount_data_in_guest')
+    @mock.patch.object(vm.vdb, 'data_migration_lock',
+                       return_value=contextlib.nullcontext())
+    @mock.patch.object(vm, 'vm_get',
+                       return_value={'gpus': 1, 'mem': '32GiB'})
+    @mock.patch.object(vm, '_preflight_vm_memory')
+    @mock.patch.object(vm, '_ensure_nas_share', return_value=False)
+    @mock.patch.object(vm, '_ensure_gpus_attached')
+    @mock.patch.object(vm, '_incus')
+    @mock.patch.object(vm, '_record_event_from_record')
+    @mock.patch.object(vm, '_warn_desired_conflict')
+    def test_start_skips_guest_mount_for_directory_share(
+            self, warn, event, incus, attach, share, preflight, vm_get,
+            data_lock, mount):
+        # Incus mounts a directory-backed share itself; no agent wait.
+        vm.vm_start('vm1')
+        mount.assert_not_called()
+
     @mock.patch.object(vm.vdb, 'data_migration_lock',
                        return_value=contextlib.nullcontext())
     @mock.patch.object(vm, 'vm_get',

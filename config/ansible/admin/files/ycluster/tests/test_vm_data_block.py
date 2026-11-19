@@ -128,7 +128,10 @@ class VMDataBlockTests(unittest.TestCase):
             mock.patch.object(vdb, "LOCK_DIR", tempfile.mkdtemp()),
             mock.patch.object(vdb, "replace_data_device") as replace,
         ):
-            vm._ensure_nas_share("vm1")
+            # An image that is already there still needs a guest mount: the
+            # attach happens before boot, so this is the only chance to
+            # finish configuring a VM whose earlier attempt failed.
+            self.assertTrue(vm._ensure_nas_share("vm1"))
 
         replace.assert_called_once_with(
             vm._incus, "vm1", f"{vdb.NAS_NFS_MOUNT}/vm1.img",
@@ -457,12 +460,12 @@ class VMDataBlockTests(unittest.TestCase):
         incus = mock.Mock()
         # Device source != image: no-op.
         incus.return_value = _proc(["incus"], returncode=1, stdout="")
-        vdb.ensure_guest_mount(incus, "vm1")
+        self.assertFalse(vdb.ensure_guest_mount(incus, "vm1"))
         self.assertEqual(incus.call_count, 1)
         # Device source == image: fstab + mount script runs in the guest.
         incus.reset_mock()
         incus.return_value = _proc(["incus"], stdout=f"{image}\n")
-        vdb.ensure_guest_mount(incus, "vm1")
+        self.assertTrue(vdb.ensure_guest_mount(incus, "vm1"))
         self.assertEqual(incus.call_args.args[:2], ("exec", "vm1"))
         script = incus.call_args.args[5]
         self.assertIn("set -e", script)
@@ -517,10 +520,14 @@ class VMDataBlockTests(unittest.TestCase):
             calls["mount"] += 1
             if calls["mount"] < 3:
                 raise RuntimeError("agent not ready")
+            return True
         with (
             mock.patch.object(vdb.time, "sleep") as sleep,
             mock.patch.object(vdb.time, "time",
                               side_effect=lambda: clock["now"]),
+            mock.patch.object(vdb, "guest_mount_recorded",
+                              return_value=False),
+            mock.patch.object(vdb, "record_guest_mount") as record,
             mock.patch.object(vdb, "ensure_guest_mount",
                               side_effect=fake_ensure),
         ):
@@ -533,6 +540,7 @@ class VMDataBlockTests(unittest.TestCase):
                 wait_agent=lambda name, timeout: None,
                 agent_timeout=10)
         self.assertEqual(calls["mount"], 3)
+        record.assert_called_once_with(None, "vm1")
 
     def test_guest_mount_after_boot_warns_after_deadline(self):
         clock = {"now": 0.0}
@@ -543,6 +551,9 @@ class VMDataBlockTests(unittest.TestCase):
             mock.patch.object(vdb.time, "sleep", side_effect=fake_sleep),
             mock.patch.object(vdb.time, "time",
                               side_effect=lambda: clock["now"]),
+            mock.patch.object(vdb, "guest_mount_recorded",
+                              return_value=False),
+            mock.patch.object(vdb, "record_guest_mount") as record,
             mock.patch.object(vdb, "ensure_guest_mount",
                               side_effect=RuntimeError("no agent")),
         ):
@@ -551,6 +562,34 @@ class VMDataBlockTests(unittest.TestCase):
                 None, "vm1",
                 wait_agent=lambda name, timeout: None,
                 agent_timeout=10)
+        record.assert_not_called()
+
+    def test_guest_mount_after_boot_skips_recorded_guest(self):
+        with (
+            mock.patch.object(vdb, "guest_mount_recorded",
+                              return_value=True),
+            mock.patch.object(vdb, "ensure_guest_mount") as ensure,
+        ):
+            vdb.guest_mount_after_boot(
+                mock.Mock(), "vm1",
+                wait_agent=mock.Mock(),
+                agent_timeout=10)
+        ensure.assert_not_called()
+
+    def test_guest_mount_marker_round_trip(self):
+        incus = mock.Mock()
+        incus.return_value = _proc(["incus"],
+                                   stdout=f"{vdb.VM_DATA_FSTAB_LINE}\n")
+        self.assertTrue(vdb.guest_mount_recorded(incus, "vm1"))
+        # A different (older) fstab line must not count as configured.
+        incus.return_value = _proc(["incus"], stdout="LABEL=oldline\n")
+        self.assertFalse(vdb.guest_mount_recorded(incus, "vm1"))
+        incus.return_value = _proc(["incus"])
+        vdb.record_guest_mount(incus, "vm1")
+        self.assertEqual(incus.call_args.args,
+                         ("config", "set", "vm1", vdb.VM_DATA_MARKER_KEY,
+                          vdb.VM_DATA_FSTAB_LINE))
+        self.assertFalse(incus.call_args.kwargs["check"])
 
 
 class LegacyShareProbeTests(unittest.TestCase):
@@ -695,7 +734,8 @@ class ResizeAndAttachTests(unittest.TestCase):
                     mock.patch.object(vdb, "create_data_image") as create, \
                     mock.patch.object(vdb, "replace_data_device"), \
                     mock.patch("builtins.print"):
-                self.assertFalse(vdb.ensure_nas_share(
+                # A fresh VM gets a block image, so the guest must mount it.
+                self.assertTrue(vdb.ensure_nas_share(
                     "vm1", incus, share_enabled=True,
                     instance_info=lambda name: {"type": "virtual-machine"},
                     instance_running=lambda name: False))

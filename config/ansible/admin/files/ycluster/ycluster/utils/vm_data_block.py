@@ -37,6 +37,12 @@ VM_DATA_GUEST_PATH = "/data"
 # The image's ext4 label is the stable handle for guest-side operations:
 # device indexes (/dev/vdb) shift when other disks are attached.
 VM_DATA_FSTAB_LINE = "LABEL=vmdata  /data  ext4  defaults  0  2"
+# Instance config key recording that this guest's fstab/mount already match
+# VM_DATA_FSTAB_LINE. Host-side state on purpose: deciding whether the guest
+# needs work must not require the agent, or every `vm start` would have to
+# wait for it. It lives and dies with the instance, and a change to the
+# fstab line invalidates it.
+VM_DATA_MARKER_KEY = "user.ycluster.vm_data_mount"
 
 LOCK_DIR = "/run/lock"
 
@@ -274,9 +280,10 @@ def ensure_guest_mount(incus, name):
     """fstab + mount `/data` in the guest for an image-backed data device.
 
     Incus VMs reject `path=` on non-directory disk sources, so the guest
-    mounts the image itself. Idempotent; no-op unless the data device is
-    the block image (directory-backed shares are mounted by Incus and
-    containers don't run an agent).
+    mounts the image itself. Idempotent; returns False without touching the
+    guest unless the data device is the block image (directory-backed shares
+    are mounted by Incus and containers don't run an agent), True once the
+    guest has been configured.
 
     The mount happens before the fstab append: a fstab entry for a device
     that failed to mount would risk boot hangs if the image is ever
@@ -286,7 +293,7 @@ def ensure_guest_mount(incus, name):
     r = incus("config", "device", "get", name, VM_DATA_DEVICE, "source",
               check=False)
     if r.returncode != 0 or r.stdout.strip() != data_image_path(name):
-        return
+        return False
     script = (
         f"set -e; mkdir -p {VM_DATA_GUEST_PATH}; "
         f"mountpoint -q {VM_DATA_GUEST_PATH} || "
@@ -294,6 +301,27 @@ def ensure_guest_mount(incus, name):
         f"grep -q '^LABEL=vmdata' /etc/fstab || "
         f"echo '{VM_DATA_FSTAB_LINE}' >> /etc/fstab")
     incus("exec", name, "--", "sh", "-c", script)
+    return True
+
+
+def guest_mount_recorded(incus, name):
+    """True when this instance's guest was already configured for the
+    current VM_DATA_FSTAB_LINE."""
+    r = incus("config", "get", name, VM_DATA_MARKER_KEY, check=False)
+    return r.returncode == 0 and r.stdout.strip() == VM_DATA_FSTAB_LINE
+
+
+def record_guest_mount(incus, name):
+    """Remember (host-side) that the guest needs no further /data work.
+
+    Best-effort: losing the marker only costs one more idempotent guest
+    check on the next start, so it must not fail an otherwise good start.
+    """
+    r = incus("config", "set", name, VM_DATA_MARKER_KEY,
+              VM_DATA_FSTAB_LINE, check=False)
+    if r.returncode != 0:
+        print(f"  Could not record the /data mount marker for '{name}'; "
+              f"the next start re-checks it.", file=sys.stderr)
 
 
 def migration_note(image_exists, legacy_dir_exists):
@@ -305,20 +333,25 @@ def migration_note(image_exists, legacy_dir_exists):
 
 def guest_mount_after_boot(incus, name, wait_agent, agent_timeout):
     """Wait for the agent, then fstab+mount /data; warn (don't raise) on
-    failure — the VM itself started fine, and `vm_resize_data` re-runs
-    `ensure_guest_mount` as a self-heal.
+    failure — the VM itself started fine, and the next start retries.
+
+    Callers run this on every start of an image-backed VM, so a guest that
+    already carries the mount and fstab line is skipped without waiting for
+    its agent; only an unconfigured guest pays that wait.
 
     The mount is retried with a short backoff: right after the agent comes
     up the guest can still reject execs while services initialize, and a
     single failure would leave /data unmounted until the next boot.
     """
+    if guest_mount_recorded(incus, name):
+        return
     try:
         print(f"  Waiting for '{name}' agent to configure /data...")
         wait_agent(name, agent_timeout)
         deadline = time.time() + 30
         while True:
             try:
-                ensure_guest_mount(incus, name)
+                configured = ensure_guest_mount(incus, name)
                 break
             except Exception as e:
                 if time.time() >= deadline:
@@ -326,7 +359,9 @@ def guest_mount_after_boot(incus, name, wait_agent, agent_timeout):
                 print(f"  /data mount failed ({e}); retrying...", 
                       file=sys.stderr)
                 time.sleep(5)
-        print(f"  /data in '{name}' now comes from the block image.")
+        if configured:
+            record_guest_mount(incus, name)
+            print(f"  /data in '{name}' now comes from the block image.")
     except Exception as e:
         print(f"  WARNING: /data mount setup failed for '{name}': {e}",
               file=sys.stderr)
@@ -428,9 +463,12 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
     directory share. The legacy directory is only created when it is the
     thing being attached or migrated — never for image-backed VMs.
 
-    Returns True when migration ran in this call — the caller should run
-    `ensure_guest_mount` after the first boot, since the guest needs a new
-    fstab entry for the image-backed device.
+    Returns True when the VM's data device is a block image, which the guest
+    has to mount itself — the caller should run `ensure_guest_mount` after
+    boot. That covers a freshly created or migrated image *and* an image
+    that was already there: a start must be able to finish a guest mount an
+    earlier attempt could not (it is best-effort, and the fresh-VM path used
+    to attach an image without ever configuring the guest).
     """
     if not share_enabled:
         return False
@@ -453,13 +491,12 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
         return False
 
     image = data_image_path(name)
-    migrated = False
     try:
         with data_migration_lock(name):
             if os.path.exists(image):
                 replace_data_device(incus, name, image, "io.cache=none",
                                     "io.bus=virtio-blk", "required=true")
-                return migrated
+                return True
 
             if _legacy_share_has_data(host_dir):
                 if not migrate:
@@ -474,7 +511,6 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
                 migrate_vm_data_to_image(
                     name, image,
                     is_running=lambda: instance_running(name))
-                migrated = True
                 print(f"  Data image for '{name}' is ready; attaching.")
             else:
                 # Fresh VM: no legacy data to preserve, so create the
@@ -499,4 +535,4 @@ def ensure_nas_share(name, incus, *, share_enabled, migrate=False,
             replace_data_device(incus, name, host_dir, "required=false",
                                 f"path={VM_DATA_GUEST_PATH}")
         return False
-    return migrated
+    return True
