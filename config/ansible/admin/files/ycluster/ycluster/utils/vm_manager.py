@@ -312,17 +312,35 @@ def _wait_agent(name, timeout=180):
     raise RuntimeError(f"'{name}' did not become reachable within {timeout}s")
 
 def _push_file(inst, path, content, owner, mode="0600"):
-    """Write `content` to `path` inside an instance, owned by `owner`."""
+    """Write `content` to `path` inside an instance, owned by `owner`.
+
+    The content is staged beside the target and renamed into place once the
+    guest reports the full length. `incus file push` opens the destination
+    with O_TRUNC before the bytes arrive, so an in-place push that runs out
+    of space leaves an empty (or short) file and still exits 0 — that is how
+    a full guest root disk wiped a VM owner's authorized_keys during a key
+    resync and locked them out.
+    """
     directory = os.path.dirname(path)
     _incus("exec", inst, "--", "mkdir", "-p", directory)
+    staged = f"{path}.new"
     r = subprocess.run(
-        ["incus", "file", "push", "-", f"{inst}{path}", "--mode", mode],
+        ["incus", "file", "push", "-", f"{inst}{staged}", "--mode", mode],
         input=content, text=True, capture_output=True,
     )
     if r.returncode != 0:
-        raise RuntimeError(f"incus file push to {inst}{path} failed: {r.stderr.strip()}")
+        raise RuntimeError(f"incus file push to {inst}{staged} failed: {r.stderr.strip()}")
     _incus("exec", inst, "--", "chown", "-R", f"{owner}:{owner}", directory)
     _incus("exec", inst, "--", "chmod", "700", directory)
+    want = len(content.encode())
+    got = _incus("exec", inst, "--", "stat", "-c", "%s", staged, check=False)
+    if got.returncode != 0 or got.stdout.strip() != str(want):
+        size = got.stdout.strip() or got.stderr.strip()
+        _incus("exec", inst, "--", "rm", "-f", staged, check=False)
+        raise RuntimeError(
+            f"incus file push to {inst}{staged} wrote {size!r} of {want} bytes; "
+            f"left {path} untouched")
+    _incus("exec", inst, "--", "mv", "-f", staged, path)
 
 def _read_file(inst, path):
     """Return the contents of `path` inside `inst`, or None if absent.
