@@ -7,6 +7,7 @@ import sys
 
 from ..common.etcd_utils import get_etcd_client
 from ..utils import check_cluster
+from ..utils.inventory import bmc_macs_from_record
 
 
 def register_cluster_commands(subparsers):
@@ -58,16 +59,20 @@ def register_cluster_commands(subparsers):
     undrain_parser.set_defaults(func=cluster_undrain_host)
 
     # BMC MAC management
-    bmc_parser = cluster_subparsers.add_parser('bmc', help='BMC MAC management')
+    bmc_parser = cluster_subparsers.add_parser('bmc', help='BMC MAC management (dedicated/shared)')
     bmc_subparsers = bmc_parser.add_subparsers(dest='bmc_command', help='BMC commands')
 
-    bmc_get_parser = bmc_subparsers.add_parser('get', help='Get BMC MAC for a host (or all hosts)')
+    bmc_get_parser = bmc_subparsers.add_parser('get', help='Get BMC MACs for a host (or all hosts)')
     bmc_get_parser.add_argument('hostname', nargs='?', help='Hostname (omit for all)')
+    bmc_get_parser.add_argument('--role', choices=('dedicated', 'shared'),
+                                help='Print only this MAC role')
     bmc_get_parser.set_defaults(func=cluster_bmc_get)
 
-    bmc_set_parser = bmc_subparsers.add_parser('set', help='Set BMC MAC for a host')
+    bmc_set_parser = bmc_subparsers.add_parser('set', help='Set one BMC MAC role for a host')
     bmc_set_parser.add_argument('hostname', help='Hostname (e.g., nv6)')
     bmc_set_parser.add_argument('mac', help='BMC MAC address')
+    bmc_set_parser.add_argument('--role', choices=('dedicated', 'shared'), default='dedicated',
+                                help='MAC role to set (default: dedicated)')
     bmc_set_parser.set_defaults(func=cluster_bmc_set)
 
 
@@ -158,38 +163,45 @@ def cluster_undrain_host(args):
 
 
 def cluster_bmc_get(args):
-    """Get BMC MAC for a host (or all hosts) from the hardware record in etcd."""
+    """Get BMC MACs for a host (or all hosts) from the hardware record in etcd."""
     client = get_etcd_client()
     if not args.hostname:
-        _print_all_bmc_macs(client)
+        _print_all_bmc_macs(client, args.role)
         return
-    _print_host_bmc_mac(client, args.hostname)
+    _print_host_bmc_mac(client, args.hostname, args.role)
 
 
-def _print_all_bmc_macs(client):
+def _format_bmc_macs(macs, role=None):
+    """Render {role: mac}; with a role, the bare MAC or None when absent."""
+    if role:
+        return macs.get(role)
+    return ' '.join(f'{name}={mac}' for name, mac in macs.items())
+
+
+def _print_all_bmc_macs(client, role=None):
     for value, meta in client.get_prefix('/cluster/nodes/hardware/'):
         hostname = meta.key.decode().rsplit('/', 1)[-1]
-        hw = json.loads(value.decode())
-        mac = hw.get('bmc_mac')
-        if mac:
-            print(f"{hostname}: {mac}")
+        line = _format_bmc_macs(bmc_macs_from_record(json.loads(value.decode())), role)
+        if line:
+            print(f"{hostname}: {line}")
 
 
-def _print_host_bmc_mac(client, hostname):
+def _print_host_bmc_mac(client, hostname, role=None):
     result = client.get(f'/cluster/nodes/hardware/{hostname}')
     if result[0] is None:
         print(f"No hardware record for {hostname}", file=sys.stderr)
         sys.exit(1)
-    hw = json.loads(result[0].decode())
-    mac = hw.get('bmc_mac')
-    if mac:
-        print(mac)
+    line = _format_bmc_macs(bmc_macs_from_record(json.loads(result[0].decode())), role)
+    if line:
+        print(line)
+    elif role:
+        print(f"No {role} BMC MAC recorded for {hostname}")
     else:
         print(f"No BMC MAC recorded for {hostname}")
 
 
 def cluster_bmc_set(args):
-    """Set BMC MAC for a host in the hardware record in etcd."""
+    """Set one BMC MAC role for a host in the hardware record in etcd."""
     client = get_etcd_client()
     key = f'/cluster/nodes/hardware/{args.hostname}'
     result = client.get(key)
@@ -197,6 +209,10 @@ def cluster_bmc_set(args):
         print(f"No hardware record for {args.hostname}", file=sys.stderr)
         sys.exit(1)
     hw = json.loads(result[0].decode())
-    hw['bmc_mac'] = args.mac
+    macs = bmc_macs_from_record(hw)
+    macs[args.role] = args.mac
+    hw['bmc_macs'] = macs
+    if args.role == 'dedicated':
+        hw['bmc_mac'] = args.mac
     client.put(key, json.dumps(hw))
-    print(f"Set BMC MAC for {args.hostname}: {args.mac}")
+    print(f"Set BMC {args.role} MAC for {args.hostname}: {args.mac}")

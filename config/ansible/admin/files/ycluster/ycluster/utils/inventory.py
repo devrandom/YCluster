@@ -7,7 +7,8 @@ etcd schema:
 
 Hardware JSON fields (collected by Ansible / ycluster inventory collect):
   cpu, ram_gb, disks, nics, gpus, serial, product, bios_version,
-  os, kernel, collected_at
+  os, kernel, collected_at, bmc_macs (role -> MAC; bmc_mac is kept as
+  the legacy alias for the dedicated-port MAC)
 
 Asset JSON fields (entered via UI or CLI):
   vendor, purchased_at, warranty_expires, cost, cost_currency, location, notes,
@@ -147,14 +148,36 @@ def _bmc_mac_from_channel(channel):
     return None
 
 
-def _collect_bmc_mac_linux():
-    """Best-effort read of the BMC MAC via ipmitool. Returns MAC or None."""
+BMC_MAC_CHANNELS = (('dedicated', 1), ('shared', 8))
+
+
+def _collect_bmc_macs_linux():
+    """Best-effort read of the BMC MACs via ipmitool, keyed by role.
+
+    Channel 1 is the dedicated management port; channel 8 is the NC-SI
+    bridge onto a host data port. Boards without a shared port simply
+    produce no 'shared' entry.
+    """
     _load_ipmi_modules()
-    for channel in (1, 8):
+    macs = {}
+    for role, channel in BMC_MAC_CHANNELS:
         mac = _bmc_mac_from_channel(channel)
         if mac:
-            return mac
-    return None
+            macs[role] = mac
+    return macs
+
+
+def bmc_macs_from_record(hw):
+    """Normalize a hardware record's BMC MACs into {role: mac}.
+
+    Records written before the role split only carry ``bmc_mac`` (the
+    dedicated port); treat it as the 'dedicated' role.
+    """
+    macs = {role: mac for role, mac in (hw.get('bmc_macs') or {}).items() if mac}
+    legacy = hw.get('bmc_mac')
+    if legacy and 'dedicated' not in macs:
+        macs['dedicated'] = legacy
+    return macs
 
 
 def collect_hardware():
@@ -312,6 +335,7 @@ def _init_hardware_facts():
         'os': None,
         'kernel': None,
         'bmc_mac': None,
+        'bmc_macs': {},
     }
 
 
@@ -504,5 +528,7 @@ def _collect_hardware_linux():
     _collect_disks(facts)
     _collect_nics(facts)
     _collect_gpus(facts)
-    facts['bmc_mac'] = _collect_bmc_mac_linux()
+    macs = _collect_bmc_macs_linux()
+    facts['bmc_macs'] = macs
+    facts['bmc_mac'] = macs.get('dedicated') or (next(iter(macs.values())) if macs else None)
     return facts

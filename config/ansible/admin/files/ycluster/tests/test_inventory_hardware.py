@@ -235,12 +235,41 @@ class CollectBMCMacTest(unittest.TestCase):
                  run_result("MAC Address  : aa:bb"),
                  run_result("MAC Address  : cc:dd"),
              ]):
-            self.assertEqual(inventory._collect_bmc_mac_linux(), "aa:bb")
+            self.assertEqual(inventory._collect_bmc_macs_linux()["dedicated"], "aa:bb")
 
     def test_failure_returns_none(self):
         with mock.patch.object(inventory, "_load_ipmi_modules"), \
              mock.patch.object(inventory, "_run", side_effect=RuntimeError("boom")):
-            self.assertIsNone(inventory._collect_bmc_mac_linux())
+            self.assertEqual(inventory._collect_bmc_macs_linux(), {})
+
+
+class CollectBMCMacsTest(unittest.TestCase):
+    def test_records_each_channel_role(self):
+        with mock.patch.object(inventory, "_load_ipmi_modules"), \
+             mock.patch.object(inventory, "_run", side_effect=[
+                 run_result("MAC Address  : aa:bb"),
+                 run_result("MAC Address  : cc:dd"),
+             ]):
+            self.assertEqual(inventory._collect_bmc_macs_linux(),
+                             {"dedicated": "aa:bb", "shared": "cc:dd"})
+
+    def test_skips_a_channel_that_fails(self):
+        with mock.patch.object(inventory, "_load_ipmi_modules"), \
+             mock.patch.object(inventory, "_run", side_effect=[
+                 RuntimeError("boom"),
+                 run_result("MAC Address  : cc:dd"),
+             ]):
+            self.assertEqual(inventory._collect_bmc_macs_linux(), {"shared": "cc:dd"})
+
+    def test_legacy_record_maps_to_dedicated(self):
+        self.assertEqual(inventory.bmc_macs_from_record({"bmc_mac": "aa"}),
+                         {"dedicated": "aa"})
+
+    def test_role_record_preferred_over_legacy(self):
+        record = {"bmc_mac": "aa", "bmc_macs": {"dedicated": "bb", "shared": "cc"}}
+        self.assertEqual(inventory.bmc_macs_from_record(record),
+                         {"dedicated": "bb", "shared": "cc"})
+
 
 class DarwinGpuEntryTest(unittest.TestCase):
     def test_normalizes_apple_gpu(self):

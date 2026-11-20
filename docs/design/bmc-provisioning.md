@@ -168,7 +168,10 @@ From the data NIC, `ping <amt_ip>` and `ipmitool -H <amt_ip> -U <user>
 The `amt_ip` field is already in the etcd allocation record (set by
 `/api/allocate` in step 1). Optionally extend the record with:
 
-- `bmc_mac`: normalized MAC of the BMC NIC
+- `bmc_macs`: normalized MAC per BMC NIC role — `dedicated` (channel 1)
+  and `shared` (the NC-SI bridge onto a host data port, channel 8).
+  `bmc_mac` is kept as the legacy single-value alias for the dedicated
+  port; the collector writes both.
 - `bmc_chassis_serial`: from `fru print`
 - `bmc_credentials_vault_ref`: pointer to the per-node BMC password in
   Ansible vault (not the password itself)
@@ -231,7 +234,7 @@ etcd changes via the existing handler chain.
    section. Verify it isn't already there; add the package and any
    `dmidecode` deps if missing.
 4. **Extend `/api/allocate` response** — add the optional
-   `bmc_mac` / `bmc_chassis_serial` / `bmc_credentials_vault_ref` fields
+   `bmc_macs` / `bmc_chassis_serial` / `bmc_credentials_vault_ref` fields
    (defaults: absent). Bootstrap fills them; existing callers ignore.
 5. **Vault layout** — `vault/bmc/<hostname>` per node, holds the BMC
    password. `setup-vault.yml` or equivalent creates the entry on
