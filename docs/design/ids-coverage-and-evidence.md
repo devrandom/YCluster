@@ -129,9 +129,9 @@ attacker-controlled test. The allowlist holds the helpers an ordinary host
 runs from unprivileged processes and which hand root to a fixed program rather
 than an arbitrary one: rootless container id mapping, FUSE mounts, session bus
 activation, host-based SSH auth, the polkit helper, the account tools, and
-`nvidia-modprobe` on the GPU nodes. A helper that joins the fleet without
-joining the list pages the first time it runs, which is the direction to err
-in.
+`nvidia-modprobe` where the CUDA toolkit is installed. A helper that appears
+on a host without joining the list pages the first time it runs, which is the
+direction to err in.
 
 The price of the list is its mirror image: a vulnerability inside an
 allowlisted helper does not page through this class, because the helper's own
@@ -407,6 +407,39 @@ folded into it.
   instrumenting at all is a decision, not a given.
 - **Guest internals.** Containers and VMs remain opaque to host sensors; the
   guest boundary is unchanged.
+
+## Next steps
+
+The open items above, ranked, after the escalation class widened from the four
+privilege tools to any root exec whose parent is a non-root host identity.
+
+1. **Read the widened class in production for a day.** Once the class is
+   deployed, the reading is
+   `ids_forwarder_provenance_total{check="escalation",source="parent"}`: the
+   series shows the second shape resolving a parent uid from the parent block
+   or the exec cache. The tripwire is an `escalation_nonroot` burst from a
+   playbook run over a non-root connection user, where every become task now
+   pages instead of being suppressed.
+2. **Ship the evidence off the host.** Log shipping (`detections.jsonl` and the
+   journal, not only IDS) turns "evidence" from a decision not to page into a
+   record an incident can still read after the attacker controlled the host.
+   It is the largest hole left and the only one that changes what the design
+   can promise.
+3. **Keep parent execs long enough to attribute a crossing.** An exec with no
+   parent block whose parent exec has aged out of the cache stays evidence.
+   A bounded increase in the cache is the cheap fix; it needs a size limit
+   chosen against the sensor's memory budget, not a design change.
+4. **Track the allowlisted helpers' own CVEs.** `ssh-keysign` is covered
+   because `openssh` is in the perimeter set, but the rest of the list comes
+   from util-linux (`mount`, `umount`, the id-map helpers), shadow (`passwd`
+   and the account tools), `fusermount3`, dbus, polkit, cifs-utils,
+   nfs-common and the CUDA toolkit, none of which osv-feed tracks. A category
+   for them restores a signal for the one case the escalation class cannot
+   page on.
+5. **Decide the low-level Sigma question.** Whether a curated `level: low`
+   rule (`Bash Interactive Shell`, `Crontab Enumeration`) should page at all
+   is a policy call, and it is the last item because the evidence class keeps
+   the hits either way.
 
 ## Review prompt addendum
 

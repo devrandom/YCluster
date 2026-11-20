@@ -1700,6 +1700,13 @@ Each one names the decision it needs, where there is one.
    The success criterion is one clean week without an expected-traffic page.
    Alert volume is capped cluster-wide at five notifications per severity per
    hour by the ntfy webhook, independent of this route.
+3. **The delivery work** in the order of the [next steps in
+   `ids-coverage-and-evidence.md`](ids-coverage-and-evidence.md#next-steps):
+   deploy and read the widened escalation class, then ship the evidence off
+   the host, then lengthen the parent-exec retention that attribution depends
+   on, then track the allowlisted helpers' own CVEs, then settle whether a
+   curated low-level Sigma rule pages. Only the last is a policy call; the
+   rest are work with a stated acceptance.
 
 ## VM bridge visibility
 

@@ -219,9 +219,8 @@ var routineRootHelper = map[string]bool{
 	"/usr/bin/newgidmap":   true,
 	"/usr/bin/newgrp":      true,
 	"/usr/bin/newuidmap":   true,
-	// CUDA setup on the GPU nodes: creates the device nodes a non-root
-	// process cannot. Setuid root there, and rare (two execs in the
-	// retained log on a GPU node).
+	// CUDA setup where the toolkit is installed: creates the device nodes
+	// a non-root process cannot. Setuid root, and rare.
 	"/usr/bin/nvidia-modprobe":                    true,
 	"/usr/bin/passwd":                             true,
 	"/usr/bin/umount":                             true,
