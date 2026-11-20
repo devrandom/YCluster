@@ -153,7 +153,10 @@ def reconcile_unclosed_stops(conn):
     scheduler start at 10:50:45 followed by a sample-stop one microsecond
     later), which left the VM running with no open interval and thus
     unbilled until something else started or stopped it. If the start
-    really did fail, the next sample — a minute later — closes it.
+    really did fail, the next sample — a minute later — closes it, and
+    that close still lands at `opener + 1µs` when no sample saw the VM
+    running: the zero-length interval stays explicit so the gap is not
+    inherited by the next start.
     """
     with conn:
         with conn.cursor() as cur:

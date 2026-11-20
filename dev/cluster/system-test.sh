@@ -613,6 +613,44 @@ sec_usage() {
   samples=$($SSH "$leader" "su - postgres -c \"psql -At usage_stats -c \\\"select count(*) from vm_samples where vm='smokevm'\\\"\"")
   [ "${samples:-0}" -ge 1 ] || die "no smokevm vm_samples rows"
   ok "vm_samples rows from /cluster/vm-state/ snapshots ($samples)"
+
+  # A start and the sampler run independently, so the freshest sample can
+  # predate a start that just landed. Closing an interval on that sample
+  # records a zero-length stop and leaves the run unbilled; the guard is
+  # that the sample must postdate the opener. Exercise both sides against
+  # postgres — the query text itself proves nothing.
+  # The opener is dated two minutes back so the post-opener sample below
+  # lands in the past as well.
+  local vm=reconv1 T closed
+  # Cleanup runs on the way out of this section's subshell (`section()`
+  # runs the function in one), and once up front: a run that died mid-
+  # fixture would otherwise leave rows that make the next run's counts
+  # wrong.
+  recon_cleanup() {
+    $SSH "$leader" "su - postgres -c \"psql -Atq usage_stats -c \\\"delete from vm_events where vm='$vm'; delete from vm_samples where vm='$vm'\\\"\"" >/dev/null 2>&1
+  }
+  trap recon_cleanup EXIT
+  recon_cleanup
+  # Both sides of the comparison must share a clock: postgres decides
+  # freshness with its own now().
+  T=$($SSH "$leader" "date -u -d '-2 minutes' +%Y-%m-%dT%H:%M:%S+00:00")
+  $SSH "$leader" "su - postgres -c \"psql -Atq usage_stats -c \\\"insert into vm_events (ts, vm, host, event, owner, gpus, initiator, billable, etcd_key) values ('$T', '$vm', 'c1', 'start', 'recon@example.com', 1, 'scheduler', true, 'test-recon-open-$$')\\\"\"" \
+    || die "insert synthetic opener for $vm"
+  $SSH "$leader" "su - postgres -c \"psql -Atq usage_stats -c \\\"insert into vm_samples (ts, vm, host, owner, gpus, state, interval_s) values ('$T'::timestamptz - interval '20 seconds', '$vm', 'c1', 'recon@example.com', 1, 'Stopped', 60) on conflict do nothing\\\"\"" \
+    || die "insert pre-opener sample for $vm"
+  # --wait: a bare start merges into an in-flight timer-triggered run and
+  # returns before it reads the rows inserted above.
+  $SSH "$leader" "systemctl start --wait collect-vm-stats.service" || die "collector run (pre-opener sample)"
+  closed=$($SSH "$leader" "su - postgres -c \"psql -At usage_stats -c \\\"select count(*) from vm_events where vm='$vm' and initiator='samples'\\\"\"")
+  [ "${closed:-1}" -eq 0 ] || die "interval closed on a sample older than its opener ($closed)"
+  ok "reconcile ignores a sample older than the interval's opener"
+
+  $SSH "$leader" "su - postgres -c \"psql -Atq usage_stats -c \\\"insert into vm_samples (ts, vm, host, owner, gpus, state, interval_s) values ('$T'::timestamptz + interval '60 seconds', '$vm', 'c1', 'recon@example.com', 1, 'Stopped', 60) on conflict do nothing\\\"\"" \
+    || die "insert post-opener sample for $vm"
+  $SSH "$leader" "systemctl start --wait collect-vm-stats.service" || die "collector run (post-opener sample)"
+  closed=$($SSH "$leader" "su - postgres -c \"psql -At usage_stats -c \\\"select count(*) from vm_events where vm='$vm' and initiator='samples' and ts = '$T'::timestamptz + interval '1 microsecond'\\\"\"")
+  [ "${closed:-0}" -eq 1 ] || die "post-opener sample did not close at the opener ($closed)"
+  ok "reconcile closes at the opener when no sample saw the run"
 }
 
 # --------------------------------------------------------------------------

@@ -47,14 +47,29 @@ groups:
       # after a successful etcd put, and a powered-off host stops scraping
       # node-exporter too, so this fires on live hosts with a broken
       # sampler rather than duplicating NodeDown.
+      #
+      # The second half covers the case that bit us: a sampler wedged in
+      # `activating` exported no heartbeat at all, and a missing series
+      # cannot be compared to now(), so the timeline alert stayed silent
+      # for eleven days. The unit now bounds a run with TimeoutStartSec,
+      # but a timeout cannot help a kill that never completes, a sampler
+      # that never ran, or a lost textfile. The gate is the sampler's own
+      # timer, not incus.service: install-incus.yml starts incus long
+      # before it installs the sampler units, so the broader gate would
+      # page for the image builds on a host being provisioned. A
+      # powered-off host exports neither series, so NodeDown owns that.
       - alert: VMSamplerStale
-        expr: time() - vm_sampler_last_success_timestamp_seconds > 300
+        expr: >-
+          (time() - vm_sampler_last_success_timestamp_seconds > 300)
+          or on(node)
+          (node_systemd_unit_state{name="vm-state-sampler.timer",state="active"} == 1
+           unless on(node) vm_sampler_last_success_timestamp_seconds)
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "VM state sampler stale on {{ $labels.node }}"
-          description: "No successful VM snapshot from {{ $labels.node }} in {{ $value | humanizeDuration }}; usage accounting treats the host as off until it recovers."
+          description: "No successful VM snapshot from {{ $labels.node }} in the last 5 minutes (heartbeat stale or never exported); usage accounting treats the host as off until it recovers."
 
       # Any systemd unit in failed state — silent unit failures otherwise
       # surface only on manual journalctl inspection. Known-benign

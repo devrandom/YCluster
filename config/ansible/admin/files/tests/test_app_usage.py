@@ -10,14 +10,18 @@ SINCE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 class FetchUsageStateTests(unittest.TestCase):
     def test_fetches_events_samples_and_states(self):
+        pre = (datetime(2025, 12, 31, 23, tzinfo=timezone.utc), 'vm',
+               'start', 'owner', 1, True, 'nv1')
+        live = (datetime(2026, 1, 2, tzinfo=timezone.utc), 'vm', 'stop',
+                'owner', 1, False, 'nv1')
         cur = mock.Mock()
         cur.fetchall.side_effect = [
-            [('pre',)], [('in',)], [('vm', 'owner', 2.0, 3)],
+            [pre], [live], [('vm', 'owner', 2.0, 3)],
             [('vm', 'Running', None, 'nv1')], [('vm', None)], [], [],
         ]
         events, sampled, states, host_down = app_usage.fetch_usage_state(
             cur, SINCE)
-        self.assertEqual(events, [('pre',), ('in',)])
+        self.assertEqual(events, [pre, live])
         self.assertEqual(sampled, {'vm': {'owner': 'owner', 'observed': 2.0, 'samples': 3}})
         self.assertEqual(states, {'vm': 'Running'})
         self.assertEqual(host_down, {})
@@ -50,6 +54,96 @@ class FetchUsageStateTests(unittest.TestCase):
         ]
         _, sampled, _, _ = app_usage.fetch_usage_state(cur, SINCE)
         self.assertNotIn('stopped_at', sampled['vm'])
+
+    def test_stopped_sample_older_than_the_opener_keeps_it_open(self):
+        """The sampler runs on its own minute, so the freshest sample can
+        predate a start that has just landed. That sample cannot describe
+        the interval it precedes: reading it as the end clipped the live
+        run to zero hours and flagged the VM `unclosed`."""
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=30)
+        opened = fresh + timedelta(seconds=2)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [],
+            [(opened, 'vm', 'start', 'owner', 1, True, 'nv1')],
+            [('vm', 'owner', 1.0, 3)],
+            [('vm', 'Stopped', fresh, 'nv1')],
+            [('vm', fresh - timedelta(hours=5))],
+            [], [],
+        ]
+        _, sampled, states, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertNotIn('stopped_at', sampled['vm'])
+        self.assertEqual(states, {'vm': 'Stopped'})
+
+    def test_stopped_sample_after_the_opener_still_closes_it(self):
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=30)
+        opened = fresh - timedelta(seconds=5)
+        last_run = fresh - timedelta(seconds=2)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [],
+            [(opened, 'vm', 'start', 'owner', 1, True, 'nv1')],
+            [('vm', 'owner', 1.0, 3)],
+            [('vm', 'Stopped', fresh, 'nv1')],
+            [('vm', last_run)],
+            [], [],
+        ]
+        _, sampled, _, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertEqual(sampled['vm']['stopped_at'], last_run)
+
+    def test_stop_never_predates_the_opener_it_closes(self):
+        """A start that was never seen running closes at the start itself,
+        not at the last Running sample of the previous run."""
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=30)
+        opened = fresh - timedelta(seconds=5)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [],
+            [(opened, 'vm', 'start', 'owner', 1, True, 'nv1')],
+            [('vm', 'owner', 1.0, 3)],
+            [('vm', 'Stopped', fresh, 'nv1')],
+            [('vm', opened - timedelta(hours=1))],
+            [], [],
+        ]
+        _, sampled, _, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertEqual(sampled['vm']['stopped_at'], opened)
+
+    def test_restart_after_the_last_sample_does_not_reopen_the_interval(self):
+        """A restart is continuity, not a new interval: the collector keeps
+        the first opener after the last stop. Taking the newest opener
+        instead would withhold the stop whenever a restart lands after the
+        freshest sample, showing a stopped VM as running."""
+        stopped = datetime.now(timezone.utc) - timedelta(seconds=30)
+        opened = stopped - timedelta(minutes=10)
+        restart = stopped + timedelta(seconds=10)
+        last_run = stopped - timedelta(minutes=8)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [],
+            [(opened, 'vm', 'start', 'owner', 1, True, 'nv1'),
+             (restart, 'vm', 'restart', 'owner', 1, True, 'nv1')],
+            [('vm', 'owner', 1.0, 3)],
+            [('vm', 'Stopped', stopped, 'nv1')],
+            [('vm', last_run)],
+            [], [],
+        ]
+        _, sampled, _, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertEqual(sampled['vm']['stopped_at'], last_run)
+
+    def test_close_uses_the_opener_when_no_running_sample_follows(self):
+        fresh = datetime.now(timezone.utc) - timedelta(seconds=30)
+        opened = fresh - timedelta(seconds=5)
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [
+            [],
+            [(opened, 'vm', 'start', 'owner', 1, True, 'nv1')],
+            [('vm', 'owner', 1.0, 3)],
+            [('vm', 'Stopped', fresh, 'nv1')],
+            [],
+            [], [],
+        ]
+        _, sampled, _, _ = app_usage.fetch_usage_state(cur, SINCE)
+        self.assertEqual(sampled['vm']['stopped_at'], opened)
 
     def test_host_down_windows_come_from_snapshot_gaps(self):
         start = datetime(2026, 2, 1, tzinfo=timezone.utc)

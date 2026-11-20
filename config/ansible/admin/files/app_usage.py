@@ -25,8 +25,10 @@ def fetch_usage_state(cur, since_dt, until_dt=None):
     None leaves it open-ended for day windows ending at "now".
 
     Each sampled VM also carries `stopped_at` when samples show it is no
-    longer running: the last moment it was seen Running. Callers use that
-    to stop an unclosed lifecycle interval from accruing forever."""
+    longer running: the last moment it was seen Running, never earlier
+    than the interval's opener (the opener itself when no sample saw the
+    run). Callers use that to stop an unclosed lifecycle interval from
+    accruing forever."""
     # The latest pre-window event decides whether an interval was open (and
     # with what gpus/billable) at the window start, bounding the scan.
     cur.execute('''SELECT DISTINCT ON (vm) ts, vm, event, owner, gpus, billable,
@@ -38,6 +40,19 @@ def fetch_usage_state(cur, since_dt, until_dt=None):
                    FROM vm_events WHERE ts >= %s
                    ORDER BY vm, ts''', [since_dt])
     events = pre_events + cur.fetchall()
+
+    # Each VM's currently open interval: the first launch/start/restart
+    # after its last stop, exactly the opener the collector reconciles
+    # against (`reconcile_unclosed_stops`). A restart continues an open
+    # interval rather than opening a new one. `stopped_at` is only
+    # evidence the interval ended when the sample behind it is newer
+    # than this.
+    last_open = {}
+    for ts, vm, event, *_ in events:
+        if event in ('stop', 'destroy'):
+            last_open.pop(vm, None)
+        elif event in ('launch', 'start', 'restart'):
+            last_open.setdefault(vm, ts)
 
     until_clause = '' if until_dt is None else 'AND ts < %s'
     sample_params = [since_dt - timedelta(seconds=SAMPLE_GAP_CAP_S),
@@ -73,7 +88,21 @@ def fetch_usage_state(cur, since_dt, until_dt=None):
         if state != 'Running' and ts is not None \
                 and (now - ts).total_seconds() <= SAMPLE_FRESH_S \
                 and vm in sampled:
-            sampled[vm]['stopped_at'] = last_running.get(vm) or ts
+            opened = last_open.get(vm)
+            # The sampler and the start path run independently, so the
+            # freshest sample can predate a start that has just landed.
+            # That sample says nothing about the interval it precedes:
+            # closing on it would clip a live run to zero hours and flag
+            # the VM `unclosed` — the same mistake the collector refuses
+            # to make when appending its own `samples` stop.
+            if opened is not None and ts <= opened:
+                continue
+            seen_running = last_running.get(vm)
+            if opened is None:
+                stop_at = seen_running or ts
+            else:
+                stop_at = max(seen_running, opened) if seen_running else opened
+            sampled[vm]['stopped_at'] = stop_at
 
     # Host uptime, inferred from snapshot cadence: a sampling host emits a
     # snapshot every ~2 minutes, so any longer silence means the machine is

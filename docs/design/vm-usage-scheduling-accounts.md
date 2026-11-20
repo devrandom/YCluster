@@ -310,6 +310,9 @@ idempotent). Two pull designs were tried and dropped: an admin-api
 incus socket access — S1 hardening — and `incus-admin` membership would
 mean full instance control) and leader→host root ssh (assumes an ssh
 trust topology that nothing else in the steady-state cluster relies on).
+The sampler unit bounds a run with `TimeoutStartSec`: the timer skips its
+triggers while the unit is still activating, so one hung etcd put would
+otherwise stop sampling for good.
 
 ### Reconciliation
 
@@ -326,6 +329,15 @@ the new run. The collector appends a `stop` (`initiator=samples`) at the last
 moment samples saw the VM running, for VMs whose newest sample is fresh — a
 dead sampler means unknown, not stopped. The dashboard clips an open interval
 at the same point while that stop is still pending.
+
+Only a sample newer than the interval's opener counts as evidence the
+interval ended. A start and the sampler run independently, so the newest
+sample can predate a start that has just landed; closing on it recorded a
+zero-length stop and left the VM running with nothing open, i.e. unbilled.
+When no sample saw the run at all, the close lands one microsecond after the
+opener, keeping the zero-length interval explicit so the gap is not inherited
+by the next start. The dashboard applies the same rule, so a VM is not shown
+as `unclosed` between its start and the next sample.
 
 Host liveness is inferred the same way: a host emits a snapshot every ~2
 minutes, so a longer silence means the machine is off, and nothing on it can

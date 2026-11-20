@@ -6,11 +6,14 @@ After=network.target
 Type=oneshot
 EnvironmentFile=/etc/ycluster/etcd-client.env
 ExecStart=/usr/local/bin/ycluster vm sample
-# A hung etcd put or incus query must not wedge the timer: OnUnitActiveSec
-# schedules the next run only once this one finishes, so an unbounded run
+# A hung etcd put or incus query must not wedge the timer: while this unit
+# is activating, the timer skips its 60s triggers, so an unbounded run
 # stops sampling for good (one container host went 11 days without a
-# sample that way). Two scrape intervals is the same bound the collector
-# uses to call a snapshot stale.
+# sample that way). 120s is two sampler periods, well inside the
+# collector's 600s staleness window, so a timed-out run costs one sample.
+# The timeout leaves the unit `failed`; SystemdUnitFailed only reports a
+# failure that is still there 15m later, so a single skipped run stays
+# quiet and a repeated one pages.
 TimeoutStartSec=120
 
 [Install]
