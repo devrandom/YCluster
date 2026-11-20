@@ -2,10 +2,22 @@
 
 ## Status
 
-Open question — not implemented. Inventories what `admin-api` does on
-each node type today and proposes splitting it so non-storage nodes
-serve a small surface (two routes) instead of the full ~3100-line Flask
-app.
+Implemented in `f820caa4` (2026-07-01). `health-api` (lite, :12724)
+runs on every `managed` node; `admin-api` and `nginx` are enabled and
+started on `'storage'` only and explicitly stopped and disabled
+elsewhere (`admin/setup-web-services.yml`). This document remains the
+rationale and the route inventory behind that split.
+
+Anything that starts `admin-api` outside `setup-web-services.yml`
+reopens the surface it was split off for — `install-ycluster-package.yml`
+used to do exactly that on every package deploy, restarting the full app
+on non-storage nodes until the next `setup-web-services.yml` run or
+reboot. Deploy-path tasks that touch `admin-api` need the
+`'storage' in group_names` gate.
+
+The original proposal, for reference: inventories what `admin-api` did
+on each node type and splits it so non-storage nodes serve a small
+surface (two routes) instead of the full ~3100-line Flask app.
 
 **Headline.** Of 42 routes, exactly **2** must serve on every
 `managed` node: `/api/health` (the cluster-status fan-out hits

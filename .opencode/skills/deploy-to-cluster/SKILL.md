@@ -13,11 +13,13 @@ description: Deploy admin-area code changes to the cluster (let the watcher sync
     the storage leader is the canonical public-facing admin-api node,
     but the leader can shift via ceph/mon election.
   - **`managed` (Ansible group)** — `storage` plus compute, NAS, and
-    Nvidia nodes. **All `managed` nodes run admin-api**, including
-    the non-storage ones — they serve only the status endpoint. This
-    is heavy and should change (admin-api should ideally run only on
-    storage), but is the current state. `macOS` and dev-cluster nodes
-    are excluded from `managed`.
+    Nvidia nodes. Every managed node runs **`health-api`** (lite,
+    `/api/health` + a stripped `/metrics`). **`admin-api` and nginx are
+    storage-only**: `admin/setup-web-services.yml` enables them on
+    `'storage'` and stops+disables them elsewhere. Don't start
+    `admin-api` off-storage from another playbook — that undoes the
+    split (`docs/design/admin-api-surface-split.md`). `macOS` and
+    dev-cluster nodes are excluded from `managed`.
   - **`all`** — everything, including macOS/dev. Not used for
     admin-area deploys.
 - Use Ansible groups as limits (`--limit storage`, `--limit managed`)
@@ -78,7 +80,7 @@ For the dev-cluster lifecycle (`dev-cluster.sh up`/`reset`/`purge`) and the `--a
 |---|---|---|---|
 | `config/ansible/admin/files/app.py` | `admin/setup-web-services.yml` | `managed` | Notifies `restart admin-api` handler when the file changes |
 | `config/ansible/admin/files/templates/*.html` | `admin/setup-web-services.yml` | `managed` | Same — copies templates |
-| `config/ansible/admin/files/ycluster/**/*.py` | `admin/install-ycluster-package.yml` | `managed` | Reinstalls the `ycluster` package via pip; restarts admin-api if the package changed |
+| `config/ansible/admin/files/ycluster/**/*.py` | `admin/install-ycluster-package.yml` | `managed` | Reinstalls the `ycluster` package via pip; restarts admin-api if the package changed (storage only) |
 | Both above (typical UI change) | Run both in sequence | `managed` | First `setup-web-services.yml`, then `install-ycluster-package.yml` |
 
 Use `--limit managed` for all admin-area changes. The playbooks

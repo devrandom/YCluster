@@ -178,11 +178,18 @@
       debug:
         msg: "YCluster installed successfully: {{ ycluster_version.stdout }}"
 
-    - name: Restart admin-api if package was updated
+    # admin-api is a storage-only service: setup-web-services.yml keeps it
+    # stopped and disabled on every other managed node, where health-api is
+    # the surface (/api/health + a stripped /metrics). `state: restarted`
+    # starts an inactive unit, so restarting it here without the storage
+    # gate silently undoes that split on every package deploy.
+    - name: Restart admin-api if package was updated (storage only)
       systemd:
         name: admin-api
         state: restarted
-      when: ycluster_sync.changed
+      when:
+        - ycluster_sync.changed
+        - "'storage' in group_names"
       failed_when: false
 
     - name: Check whether dhcp-server is active
