@@ -24,6 +24,10 @@ deployment-agnostic — no node names, IPs, or account specifics.
   TP=1 on a single 96 GB card, co-tenanted with MinerU on the same host/card by
   pinning MinerU to one host-visible GPU and running Nemotron at a lowered
   `--gpu-memory-utilization` so the two share one card without OOM.
+- [Qwen3.8-27B abliterated (NVFP4) on RTX PRO 6000 / SM120](qwen38-abliterated-vllm.md)
+  — refusal-abliterated Qwen3.8 variant, vendored vLLM 0.29 + FlashInfer image,
+  TP=1 with a 64K served window, qwen3_coder tool calling, and the GDN/Mamba
+  block limits that constrain `--max-num-seqs` and context length.
 - [Inkling 2 Mini 26B-A5.4B (looped NVFP4/MXFP8) on RTX PRO 6000 / SM120](inkling-2-mini-sm120.md)
   — Thinking Machines' looped multimodal MoE on the pinned
   `lmsysorg/sglang:inkling-2-mini` image, TP1/EP1 on one 96 GB card

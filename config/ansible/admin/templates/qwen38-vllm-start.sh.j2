@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# (Re)start the Qwen3.8-27B abliterated NVFP4 inference server via vLLM.
+# Run as the dev user (no sudo), e.g. after a reboot:
+#
+#   ~/bin/qwen38-vllm-start.sh
+#
+# Idempotent: replaces any existing container. Runs a single-GPU (TP=1)
+# deployment sized by qwen38_gpu_mem_util (cluster default 0.35; raised to
+# 0.45 where it co-tenants with one small backend on a 96 GiB RTX PRO 6000).
+#
+# Tunable knobs (env-var overrides):
+#   IMAGE / MODEL_HOST / CONTAINER / PORT / SERVED_NAME / GPUS / MEM / GPU_MEM_UTIL
+#   MAX_JOBS (FlashInfer JIT build parallelism; keep low on first launch so
+#   parallel nvcc jobs do not exhaust the container's MEM cgroup)
+#   MAX_NUM_SEQS (must not exceed the GDN/Mamba cache block count, which the
+#   engine reports at startup; vLLM's 1024 default is far above it)
+#
+# Managed by admin/install-qwen38-abliterated.yml — edit there.
+set -euo pipefail
+
+# Rootless podman needs the user's systemd session for cgroup limits.
+# See glm53-sglang-start.sh for the full explanation.
+_uid="$(id -u)"
+if [ -S "/run/user/$_uid/bus" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$_uid"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$_uid/bus"
+fi
+
+IMAGE="${IMAGE:-{{ qwen38_image }}}"
+MODEL_HOST="${MODEL_HOST:-{{ qwen38_model_dir }}}"
+CONTAINER="${CONTAINER:-qwen38-abliterated-vllm}"
+PORT="${PORT:-{{ qwen38_port | default(9221) }}}"
+GPUS="${GPUS:-{{ qwen38_gpus | default('') }}}"
+[ -n "$GPUS" ] || { echo "no GPUs configured for $CONTAINER - set qwen38_gpus in host_vars/<node>.yml (or override GPUS)" >&2; exit 1; }
+SERVED_NAME="${SERVED_NAME:-{{ qwen38_served_name | default('qwen3.8-27b-abliterated') }}}"
+MEM="${MEM:-80g}"
+# Fraction of total GPU VRAM vLLM claims for weights + KV + activations.
+# At 0.45 (~43 GiB on a 96 GiB card) a co-tenant at 0.40 still leaves ~14 GiB
+# headroom. Raise only after verifying the co-tenant doesn't OOM.
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-{{ qwen38_gpu_mem_util | default(0.35) }}}"
+MAX_JOBS="${MAX_JOBS:-2}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-64}"
+
+# Persistent FlashInfer JIT cache. First run compiles SM120 kernels (~minutes);
+# reusing the volume avoids the recompile on subsequent launches.
+CACHE_DIR="${CACHE_DIR:-/home/dev/.cache/qwen38-vllm}"
+
+# pre-flight
+podman image exists "$IMAGE" \
+  || { echo "image $IMAGE missing - run: ~/bin/qwen38-vllm-setup.sh" >&2; exit 1; }
+[ -f "$MODEL_HOST/config.json" ] \
+  || { echo "checkpoint missing at $MODEL_HOST - run: ~/bin/qwen38-vllm-setup.sh" >&2; exit 1; }
+
+mkdir -p "$CACHE_DIR"
+dev_args=()
+for g in $GPUS; do dev_args+=(--device "nvidia.com/gpu=$g"); done
+
+podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+podman run -d --name "$CONTAINER" \
+  "${dev_args[@]}" \
+  --network=host \
+  --shm-size 8g \
+  --init \
+  --group-add keep-groups \
+  --ulimit memlock=-1:-1 \
+  --ulimit nofile=1048576:1048576 \
+  --memory "$MEM" --memory-swap "$MEM" \
+  -e CUDA_VISIBLE_DEVICES=0 \
+  -e MAX_JOBS="$MAX_JOBS" \
+  -v "$MODEL_HOST":/model:ro \
+  -v "$CACHE_DIR":/root/.cache \
+  "$IMAGE" \
+    serve /model \
+    --served-model-name "$SERVED_NAME" \
+    --trust-remote-code \
+    --tensor-parallel-size 1 \
+    --max-model-len {{ qwen38_max_model_len | default(65536) }} \
+    --max-num-seqs "$MAX_NUM_SEQS" \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
+    --kv-cache-dtype fp8 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+    --host 0.0.0.0 \
+    --port "$PORT"
+
+echo "Started '$CONTAINER' on :$PORT (model: $SERVED_NAME), GPU [$GPUS], mem cap $MEM, gpu-mem-util $GPU_MEM_UTIL, max-num-seqs $MAX_NUM_SEQS"
+echo "  watch:  podman logs -f $CONTAINER"
+echo "  ready:  curl -fsS http://127.0.0.1:$PORT/health   # takes several minutes on first launch (FlashInfer JIT)"

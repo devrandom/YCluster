@@ -1,0 +1,47 @@
+# Qwen3.8-27B abliterated (NVFP4) vLLM runtime for SM120 (RTX PRO 6000 Blackwell).
+#
+# Built on the CUDA 13.0 devel image so the container ships nvcc, which
+# FlashInfer requires for runtime JIT kernel compilation. Without nvcc on
+# PATH, vLLM's has_flashinfer() check silently returns False and every
+# attention decode call aborts with "FlashInfer backend is not available".
+#
+# Torch 2.13.0+cu130 (pulled transitively by vLLM 0.29.0 from PyPI) bundles
+# its own CUDA runtime; the system CUDA toolkit is only used by nvcc for
+# FlashInfer's JIT. These coexist without conflict.
+#
+# The 20 GB checkpoint is bind-mounted read-only at /model — never baked in.
+#
+# Built once on the first target host, pushed to the cluster registry, and
+# pulled by future hosts (same pattern as comfyui / glm53-flash).
+
+FROM docker.io/nvidia/cuda:13.0.0-devel-ubuntu24.04
+
+LABEL org.opencontainers.image.title="Qwen3.8-27B abliterated NVFP4 vLLM runtime" \
+      org.opencontainers.image.description="vLLM 0.29.0 + FlashInfer 0.6.18 for SM120 Qwen3.8/GDN inference" \
+      org.opencontainers.image.model="sakamakismile/Huihui-Qwen3.8-27B-abliterated-NVFP4" \
+      org.opencontainers.image.recipe.model_id="qwen3.8-27b-abliterated"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3.12 \
+      python3.12-venv \
+      python3.12-dev \
+      ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.12 -m venv /opt/vllm
+
+ENV PATH="/opt/vllm/bin:/usr/local/cuda/bin:${PATH}"
+ENV TORCH_CUDA_ARCH_LIST=12.0a
+ENV FLASHINFER_CUDA_ARCH_LIST=12.0f
+
+# Pin both to the exact versions validated on the SM120 target. vLLM 0.29.0
+# pulls torch 2.13.0+cu130 from PyPI. FlashInfer 0.6.18 has the
+# flashinfer.decode.xqa_batch_decode_with_kv_cache entrypoint that vLLM's
+# Qwen3.8/GDN attention backend requires.
+RUN pip install --no-cache-dir \
+      vllm==0.29.0 \
+      flashinfer-python==0.6.18
+
+WORKDIR /
+
+ENTRYPOINT ["/opt/vllm/bin/vllm"]

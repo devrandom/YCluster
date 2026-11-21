@@ -1,0 +1,157 @@
+---
+# Deploy Qwen3.8-27B abliterated (NVFP4) inference via vLLM to Nvidia GPU
+# nodes. Companion to docs/inference/qwen38-abliterated-vllm.md.
+#
+# Two dev scripts (the dev user has no sudo, and needs none for these):
+#   ~dev/bin/qwen38-vllm-setup.sh - build the container image, CDI-smoke the
+#                                   GPU, verify the staged checkpoint.
+#   ~dev/bin/qwen38-vllm-start.sh - (re)launch the server, e.g. after reboot.
+#
+# Model: sakamakismile/Huihui-Qwen3.8-27B-abliterated-NVFP4 — an NVFP4 (W4A4,
+# group 16) quantization of huihui-ai/Huihui-Qwen3.8-27B-abliterated, itself
+# an abliterated derivative of Qwen/Qwen3.8-27B. 27.8B total params, ~20 GiB
+# NVFP4 weights, MTP draft head preserved in bf16. Built for SM120 / Blackwell
+# with vanilla vLLM — compressed-tensors NVFP4 is auto-detected.
+#
+# The checkpoint must be staged manually (ungated, ~20 GB):
+#   hf download sakamakismile/Huihui-Qwen3.8-27B-abliterated-NVFP4 \
+#       --local-dir /home/dev/models/qwen3.8-27b-abliterated-nvfp4
+#
+# Image: built locally from the vendored Containerfile (files/qwen38-vllm/).
+# Base is nvidia/cuda:13.0.0-devel-ubuntu24.04 (pinned tag; pin the digest on
+# first build). Contains vLLM 0.29.0 + FlashInfer 0.6.18 + nvcc (required for
+# FlashInfer JIT) + ninja.
+#
+# Gating:
+#   Per-host `qwen38_abliterated_enabled: true` in host_vars/<node>.yml opts
+#   into this play, same pattern as ds4_enabled / glm53_flash_enabled.
+#
+#   Per-host `qwen38_gpus: "<CDI index>"` selects the GPU (single card, TP=1).
+#   Required; the start script refuses to launch without it. Deployment-specific
+#   — pinned in private per-host vars.
+#
+#   Per-host `qwen38_port: <port>` (default 9221) overrides the port.
+#
+#   Per-host `qwen38_max_model_len: <tokens>` (default 65536) is the served
+#   context window. The model supports 262144, but the KV pool holds ~335k
+#   tokens, so 64K keeps roughly five concurrent full-context requests.
+#
+#   Per-host `qwen38_served_name: "<name>"` (default "qwen3.8-27b-abliterated")
+#   is the gateway routing key (what clients pass as `model:`).
+#
+# Run after setup-gpu-podman.yml (podman + CDI). To bring the server up:
+#   ssh <host>.yc
+#   ~/bin/qwen38-vllm-setup.sh          # build image + verify ckpt
+#   ~/bin/qwen38-vllm-start.sh          # launch (idempotent)
+
+- name: Deploy Qwen3.8-27B abliterated inference scripts to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    # ---- Cluster-wide (not per-host overridable) -----------------------
+    qwen38_image: "localhost/qwen38-27b-abliterated-vllm:sm120-20260917"
+    qwen38_repo: "sakamakismile/Huihui-Qwen3.8-27B-abliterated-NVFP4"
+    # Revision SHA — pin after first download. Get it from:
+    #   curl -sI https://huggingface.co/api/models/{{ qwen38_repo }}/revision/main | grep -i etag
+    # TODO: pin the exact SHA once the first staged download is confirmed.
+    qwen38_revision: "main"
+    qwen38_model_dir: "/home/dev/models/qwen3.8-27b-abliterated-nvfp4"
+    # Port / served name / GPU memory fraction are per-host (host_vars), with
+    # the defaults applied in the start script. Do not set them here: play
+    # vars outrank host vars and would silently ignore per-host overrides.
+    # Port map: 9212=b12x, 9216=DS4, 9217=DS4-infernal, 9218=GLM-5.3,
+    # 9219=DS4.1-MoET, 9220=Inkling-2-Mini, 9221=Qwen3.8.
+    # GPU fraction: 0.35 is the conservative shared-card default; raise to
+    # 0.45 (~43 GiB: weights ~19 GiB + KV ~21 GiB + activation headroom)
+    # alongside a single small co-tenant at 0.40 on a 96 GiB card.
+    # Where the build context is staged on the host.
+    qwen38_build_dir: "/home/dev/qwen38-vllm-build"
+  tasks:
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: End play for nodes that have not opted into Qwen3.8 abliterated
+      meta: end_host
+      when: not (qwen38_abliterated_enabled | default(false))
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Stage the Qwen3.8 vLLM build context on the host
+      copy:
+        src: files/qwen38-vllm/
+        dest: "{{ qwen38_build_dir }}/"
+        owner: dev
+        group: dev
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: Install Qwen3.8 dev inference scripts into ~dev/bin
+      template:
+        src: "{{ item }}.j2"
+        dest: "/home/dev/bin/{{ item }}"
+        owner: dev
+        group: dev
+        mode: '0755'
+      loop:
+        - qwen38-vllm-setup.sh
+        - qwen38-vllm-start.sh
+
+- name: Register the Qwen3.8 abliterated backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    qwen38_nvidia_host: ""
+    qwen38_backend_url: "http://{{ qwen38_nvidia_host }}.xc:{{ hostvars[qwen38_nvidia_host]['qwen38_port'] | default(9221) }}"
+    qwen38_gateway_served_name: "{{ hostvars[qwen38_nvidia_host]['qwen38_served_name'] | default('qwen3.8-27b-abliterated') }}"
+  tasks:
+    - name: Check if this host is the storage leader
+      shell: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Resolve the Qwen3.8-enabled nvidia host
+      set_fact:
+        qwen38_nvidia_host: >-
+          {{ (groups['nvidia']
+              | select('in', hostvars.keys())
+              | list)
+             | map('extract', hostvars, 'qwen38_abliterated_enabled')
+             | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+             | selectattr(0, 'defined')
+             | selectattr(0, 'equalto', true)
+             | map(attribute=1)
+             | first
+             | default('') }}
+      when: is_storage_leader
+
+    - name: Register the Qwen3.8 abliterated backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ qwen38_backend_url }} {{ qwen38_gateway_served_name }}
+      register: qwen38_proxy_register
+      changed_when: "'added' in qwen38_proxy_register.stdout or 'registered' in qwen38_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - qwen38_nvidia_host | length > 0
+        - not ansible_check_mode
+
+    - name: Report registration
+      debug:
+        msg: >-
+          Qwen3.8 abliterated backend registered at {{ qwen38_backend_url }}
+          (served: {{ qwen38_gateway_served_name }})
+      when:
+        - is_storage_leader
+        - qwen38_nvidia_host | length > 0
+        - not ansible_check_mode

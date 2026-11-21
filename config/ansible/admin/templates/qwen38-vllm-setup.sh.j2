@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Build the Qwen3.8-27B abliterated NVFP4 vLLM container image, CDI-smoke the
+# GPU, and verify the staged checkpoint. Run as the dev user (no sudo):
+#
+#   ~/bin/qwen38-vllm-setup.sh
+#
+# The image builds from the vendored Containerfile (staged by
+# admin/install-qwen38-abliterated.yml). The checkpoint (~20 GB NVFP4) is
+# bind-mounted read-only at runtime, never baked into the image.
+#
+# Managed by admin/install-qwen38-abliterated.yml — edit there.
+set -eu
+
+IMAGE="{{ qwen38_image }}"
+BUILD_DIR="{{ qwen38_build_dir }}"
+REPO="{{ qwen38_repo }}"
+REVISION="{{ qwen38_revision }}"
+MODEL_HOST="${MODEL_HOST:-{{ qwen38_model_dir }}}"
+
+command -v podman >/dev/null \
+  || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+echo "== build image: $IMAGE =="
+podman build -t "$IMAGE" "$BUILD_DIR"
+
+echo "== GPU passthrough smoke test (CDI) =="
+# Pick the first GPU with < 5% utilization for the smoke test; the CDI test
+# doesn't allocate memory, so a busy GPU still proves CDI works.
+smoke_gpu="$(nvidia-smi --query-gpu=index,utilization.gpu --format=csv,noheader,nounits \
+  | awk -F, '$2+0 < 5 {print $1; exit}')"
+[ -n "$smoke_gpu" ] || smoke_gpu="0"
+podman run --rm --entrypoint nvidia-smi \
+  --device "nvidia.com/gpu=$smoke_gpu" --group-add keep-groups "$IMAGE" -L > /dev/null \
+  || { echo "GPU passthrough failed (tried GPU $smoke_gpu) - check setup-gpu-podman.yml" >&2; exit 1; }
+echo "  (probed GPU $smoke_gpu)"
+echo
+
+echo "== verify checkpoint =="
+[ -f "$MODEL_HOST/config.json" ] \
+  || { echo "checkpoint missing at $MODEL_HOST - download it, then re-run:" >&2; \
+       echo "  hf download $REPO --revision $REVISION --local-dir $MODEL_HOST" >&2; exit 1; }
+
+config_sha="$(sha256sum "$MODEL_HOST/config.json" | awk '{print $1}')"
+echo "  config.json sha256: $config_sha"
+echo "  (pin this hash in the playbook once confirmed)"
+echo
+echo "Image ready: $IMAGE"
+echo "Start the server:  ~/bin/qwen38-vllm-start.sh"
