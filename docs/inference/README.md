@@ -24,6 +24,12 @@ deployment-agnostic — no node names, IPs, or account specifics.
   TP=1 on a single 96 GB card, co-tenanted with MinerU on the same host/card by
   pinning MinerU to one host-visible GPU and running Nemotron at a lowered
   `--gpu-memory-utilization` so the two share one card without OOM.
+- [Inkling 2 Mini 26B-A5.4B (looped NVFP4/MXFP8) on RTX PRO 6000 / SM120](inkling-2-mini-sm120.md)
+  — Thinking Machines' looped multimodal MoE on the pinned
+  `lmsysorg/sglang:inkling-2-mini` image, TP1/EP1 on one 96 GB card
+  (145.8 tok/s Balanced / 150.6 tok/s DSpark single-stream co-tenanted,
+  262K context, image + tool use, correct 130K-token needle). Includes the
+  KV-pool measurements, DSpark concurrency cap, and reasoning-effort caveat.
 
 ## Serving operations
 

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Pull the Inkling 2 Mini SGLang image, smoke-test the configured CDI card,
+# and stage / verify the checkpoint. Run as the dev user (no sudo):
+#
+#   ~/bin/inkling-2-mini-setup.sh                # image pull + CDI smoke + checkpoint check
+#   ~/bin/inkling-2-mini-setup.sh --download     # also pull the checkpoint (~20 GB)
+#   ~/bin/inkling-2-mini-setup.sh --verify-only  # just verify a staged checkpoint
+#
+# SGLang is the runtime that verifies RTX PRO 6000 (SM120) at TP1/EP1 for
+# this model; the tag is mutable, so the image is pulled by digest.
+# Managed by admin/install-inkling-2-mini.yml — edit there.
+# No `pipefail`: a pipeline's exit is the last command's exit, so closing
+# pipes can't kill the script via SIGPIPE. `set -eu` still catches real
+# errors.
+set -eu
+
+IMAGE="{{ inkling_image }}"
+REPO="{{ inkling_repo }}"
+REVISION="{{ inkling_revision }}"
+MODEL_HOST="${MODEL_HOST:-{{ inkling_model_dir }}}"
+GPU="{{ inkling_gpus.split()[0] }}"
+
+# ---- flags ----
+action="setup"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --download)     action="download"; shift ;;
+    --verify-only)  action="verify-only"; shift ;;
+    -h|--help)
+      sed -n '2,10p' "$0"
+      exit 0
+      ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v podman >/dev/null \
+  || { echo "podman missing - an operator must run admin/setup-gpu-podman.yml" >&2; exit 1; }
+
+# ---- image pull + CDI smoke test (skip for --verify-only) ----
+if [ "$action" != "verify-only" ]; then
+  echo "== pull $IMAGE =="
+  podman pull "$IMAGE"
+
+  echo "== GPU passthrough smoke test (CDI $GPU) =="
+  # CDI injects the configured host-visible GPU; nvidia-smi inside the image
+  # must see it. This allocates no memory, so a co-tenanted card is fine.
+  podman run --rm --entrypoint nvidia-smi \
+    --device "nvidia.com/gpu=$GPU" --group-add keep-groups "$IMAGE" -L > /dev/null \
+    || { echo "GPU passthrough failed (tried CDI GPU $GPU) - check setup-gpu-podman.yml + inkling_gpus host_vars" >&2; exit 1; }
+  echo "  (probed CDI GPU $GPU)"
+  echo
+  echo "Image ready."
+fi
+
+# ---- checkpoint download (--download only) ----
+if [ "$action" = "download" ]; then
+  echo "== download $REPO @ $REVISION -> $MODEL_HOST =="
+  # HF_HUB_DISABLE_XET=1: the GPU hosts' egress can't reach the Xet CAS
+  # endpoint (the Xet path stalls at 0 B/s); the classic CDN works.
+  # `uv tool run hf` because the dev user installed huggingface_hub as a
+  # uv tool, so the binary isn't on PATH.
+  HF_HUB_DISABLE_XET=1 uv tool run hf download "$REPO" \
+    --revision "$REVISION" \
+    --local-dir "$MODEL_HOST"
+  echo
+fi
+
+# ---- revision verification (after download, or on demand) ----
+if [ "$action" = "download" ] || [ "$action" = "verify-only" ]; then
+  echo "== verify checkpoint revision =="
+  trees_dir="$MODEL_HOST/.cache/huggingface/trees"
+  if [ ! -d "$trees_dir" ]; then
+    echo "no trees metadata at $trees_dir — run --download first" >&2
+    exit 1
+  fi
+  got="$(ls "$trees_dir"/*.json 2>/dev/null \
+        | xargs -n1 basename \
+        | sed 's/\.json$//' \
+        | sort -u \
+        | head -1)"
+  if [ -z "$got" ]; then
+    echo "no trees metadata files at $trees_dir" >&2
+    exit 1
+  fi
+  if [ "$got" != "$REVISION" ]; then
+    echo "revision mismatch: expected $REVISION, got '$got'" >&2
+    echo "  $MODEL_HOST contains a different HF revision" >&2
+    exit 1
+  fi
+  echo "  revision OK: $got"
+  echo
+fi
+
+# ---- checkpoint readiness (default setup path only) ----
+if [ "$action" = "setup" ]; then
+  if [ ! -f "$MODEL_HOST/config.json" ]; then
+    echo "Checkpoint not found at $MODEL_HOST (~20 GB) - download it, then re-run:"
+    echo "  ~/bin/inkling-2-mini-setup.sh --download"
+    exit 0
+  fi
+
+  for f in model.safetensors.index.json mtp.safetensors; do
+    [ -f "$MODEL_HOST/$f" ] \
+      || { echo "missing $MODEL_HOST/$f - re-run ~/bin/inkling-2-mini-setup.sh --download" >&2; exit 1; }
+  done
+
+  echo
+  echo "Start the server:  systemctl --user start {{ inkling_container }}"
+fi

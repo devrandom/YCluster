@@ -1,0 +1,253 @@
+---
+# Deploy Inkling 2 Mini (thinkingmachines/Inkling-2-Mini) to Nvidia GPU
+# nodes. The dev user owns the staging script and the quadlet (no sudo):
+#   ~dev/bin/inkling-2-mini-setup.sh
+#       pull the pinned image, CDI-smoke the chosen card, stage and verify
+#       the checkpoint. Flags: --download (~20 GB), --verify-only.
+#   ~dev/.config/containers/systemd/inkling-2-mini.container
+#       Quadlet rendered into a user unit:
+#         systemctl --user start|restart|status inkling-2-mini
+#       Linger makes it start at boot; podman run --replace --rm rebuilds
+#       the container from the spec on every start.
+#
+# Model: thinkingmachines/Inkling-2-Mini, Apache-2.0, revision pinned below.
+# 26B total / 5.4B active looped multimodal MoE (24 physical layers, the
+# middle 12 run three times), NVFP4 experts in layers 0-19 and MXFP8 in
+# 20-23, ~20 GB on disk, 1M-token native context with a bundled DSpark
+# draft head.
+#
+# Image: lmsysorg/sglang:inkling-2-mini, pinned by digest. SGLang is the
+# runtime that verifies RTX PRO 6000 (SM120) at TP1/EP1; the vLLM image is
+# the fallback if this one cannot initialize on SM120. Inkling 2 Mini
+# support is not in an SGLang release yet, so the tag is mutable — pin the
+# digest.
+#
+# Host prerequisites (podman + nvidia CDI) are generic and live in
+# setup-gpu-podman.yml.
+#
+# Gating:
+#   Per-host `inkling_enabled: true` in host_vars/<node>.yml opts into this
+#   play (same pattern as nemotron_enabled / glm53_flash_enabled).
+#
+#   Per-host `inkling_gpus: "<space-separated CDI indices>"` selects the
+#   card(s). This is a CDI index, not an nvidia-smi index — hosts whose CDI
+#   spec was regenerated with --device-name-strategy=index can differ. The
+#   deployment is TP1/EP1 on one card.
+#
+#   Per-host `inkling_mem_fraction` (default 0.65) is the fraction of the
+#   card SGLang claims for weights + KV + graphs. Use a lower value when
+#   co-tenanted with another backend on the same card.
+#
+#   Per-host `inkling_port` (default 9220) overrides the listening port.
+#   Per-host `inkling_served_name` (default "inkling-2-mini") is the
+#   gateway routing key.
+#
+#   Per-host `inkling_context_length` (default 262144). The model supports
+#   1M, but 1M KV does not obviously fit on a 96 GB card; raise only after
+#   reading the startup KV pool.
+#
+#   Per-host `inkling_dspark: true` enables the bundled DSpark draft head.
+#   DSpark caps --max-running-requests at 4; leave it off until A/B tested.
+
+- name: Deploy Inkling 2 Mini inference scripts to Nvidia GPU nodes
+  hosts: nvidia
+  become: yes
+  vars:
+    inkling_image: "docker.io/lmsysorg/sglang:inkling-2-mini@sha256:efac853b46811ccb760545b7b29e7119bdf907537ccf6e863fac3011fe8b98de"
+    inkling_repo: "thinkingmachines/Inkling-2-Mini"
+    inkling_revision: "ed40e7da625f594fc9c4990f5f66be24873c22d7"
+    inkling_model_dir: "/home/dev/models/Inkling-2-Mini"
+    inkling_served_name: "inkling-2-mini"
+    # Port convention: 9211-9219 are assigned; 9220 is the next free slot.
+    inkling_port: 9220
+    inkling_container: "inkling-2-mini"
+    inkling_memory: "64g"
+    inkling_cache_dir: "/home/dev/.cache/inkling-2-mini"
+    inkling_user: "dev"
+    inkling_quadlet_dir: "/home/dev/.config/containers/systemd"
+    inkling_quadlet_path: "{{ inkling_quadlet_dir }}/{{ inkling_container }}.container"
+  tasks:
+    - name: End play for nodes with no host-visible NVIDIA GPU
+      meta: end_host
+      when: (ansible_local.gpu.nvidia_host_gpu_count | default(0) | int) == 0
+
+    - name: End play for nodes that have not opted into Inkling
+      meta: end_host
+      when: not (inkling_enabled | default(false))
+
+    - name: Fail if an opted-in host has no explicit inkling_gpus
+      fail:
+        msg: >-
+          inkling_gpus must be set in host_vars/<node>.yml for an
+          inkling_enabled host. Use the CDI index of an idle card, not an
+          nvidia-smi index.
+      when: inkling_gpus is undefined
+
+    - name: Ensure ~dev/bin exists
+      file:
+        path: /home/dev/bin
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install Inkling setup script into ~dev/bin
+      template:
+        src: inkling-2-mini-setup.sh.j2
+        dest: /home/dev/bin/inkling-2-mini-setup.sh
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Read host dev UID
+      command: id -u dev
+      register: inkling_dev_uid
+      changed_when: false
+      check_mode: no
+
+    - name: Check whether the Inkling service user lingers
+      command: loginctl show-user {{ inkling_user }} --property=Linger --value
+      register: inkling_linger
+      changed_when: false
+      check_mode: false
+
+    - name: Enable lingering for the Inkling service user
+      command: loginctl enable-linger {{ inkling_user }}
+      when: inkling_linger.stdout | trim != 'yes'
+      changed_when: true
+
+    - name: Ensure the dev quadlet directory exists
+      file:
+        path: "{{ inkling_quadlet_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Ensure the Inkling cache directory exists
+      file:
+        path: "{{ inkling_cache_dir }}"
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0755'
+
+    - name: Install the Inkling quadlet
+      template:
+        src: inkling-2-mini.container.j2
+        dest: "{{ inkling_quadlet_path }}"
+        owner: dev
+        group: dev
+        mode: '0644'
+
+    - name: Reload the dev user manager so the quadlet generator runs
+      become_user: "{{ inkling_user }}"
+      command: systemctl --user daemon-reload
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ inkling_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ inkling_dev_uid.stdout }}/bus"
+      changed_when: false
+
+    - name: Check whether the Inkling checkpoint is staged
+      stat:
+        path: "{{ inkling_model_dir }}/config.json"
+      register: inkling_checkpoint
+
+    # `started`, not `restarted`: a deploy never bounces inference.
+    - name: Start the Inkling quadlet
+      become_user: "{{ inkling_user }}"
+      systemd:
+        name: "{{ inkling_container }}.service"
+        scope: user
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ inkling_dev_uid.stdout }}"
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ inkling_dev_uid.stdout }}/bus"
+      when: inkling_checkpoint.stat.exists
+
+    - name: Note that Inkling stays unmanaged until its checkpoint is staged
+      debug:
+        msg: >-
+          The {{ inkling_container }} quadlet is installed but not started:
+          no checkpoint at {{ inkling_model_dir }}/config.json. Run
+          ~/bin/inkling-2-mini-setup.sh --download as dev, then re-run this
+          play.
+      when: not inkling_checkpoint.stat.exists
+
+- name: Register the Inkling backend with local-ai-proxy
+  hosts: storage
+  become: yes
+  vars:
+    inkling_nvidia_host: ""
+    inkling_backend_url: ""
+    inkling_served_name: "inkling-2-mini"
+  tasks:
+    - name: Check if this host is the storage leader
+      command: mountpoint -q /rbd/user
+      register: rbd_user_mounted
+      failed_when: false
+      changed_when: false
+
+    - name: Set storage leader fact
+      set_fact:
+        is_storage_leader: "{{ rbd_user_mounted.rc == 0 }}"
+
+    - name: Resolve the Inkling-enabled nvidia host
+      set_fact:
+        inkling_nvidia_host: >-
+          {{ (groups['nvidia']
+              | select('in', hostvars.keys())
+              | list)
+             | map('extract', hostvars, 'inkling_enabled')
+             | zip(groups['nvidia'] | select('in', hostvars.keys()) | list)
+             | selectattr(0, 'defined')
+             | selectattr(0, 'equalto', true)
+             | map(attribute=1)
+             | first
+             | default('') }}
+      when: is_storage_leader
+
+    - name: Resolve the Inkling backend URL
+      set_fact:
+        inkling_backend_url: "http://{{ inkling_nvidia_host }}.xc:{{ hostvars[inkling_nvidia_host]['inkling_port'] | default(9220) }}"
+        inkling_served_name: "{{ hostvars[inkling_nvidia_host]['inkling_served_name'] | default('inkling-2-mini') }}"
+      when:
+        - is_storage_leader
+        - inkling_nvidia_host | length > 0
+
+    - name: Register the Inkling backend with local-ai-proxy
+      command: >-
+        ycluster inference add {{ inkling_backend_url }} {{ inkling_served_name }}
+      register: inkling_proxy_register
+      changed_when: "'added' in inkling_proxy_register.stdout or 'registered' in inkling_proxy_register.stdout"
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+        - inkling_nvidia_host | length > 0
+
+    - name: Smoke check the Inkling backend through local-ai-proxy
+      uri:
+        url: "http://127.0.0.1:4001/v1/models"
+        return_content: no
+        status_code: [200, 401, 404]
+      register: inkling_proxy_smoke
+      failed_when: false
+      retries: 5
+      delay: 1
+      until: inkling_proxy_smoke.status is defined
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+        - inkling_nvidia_host | length > 0
+
+    - name: Report smoke check
+      debug:
+        msg: >-
+          local-ai-proxy on {{ inventory_hostname }}:4001 replied
+          {{ inkling_proxy_smoke.status | default('unreachable') }};
+          Inkling backend registered at {{ inkling_backend_url }}
+          (served: {{ inkling_served_name }})
+      when:
+        - is_storage_leader
+        - not ansible_check_mode
+        - inkling_nvidia_host | length > 0

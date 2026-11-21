@@ -1,0 +1,65 @@
+[Unit]
+Description=Inkling 2 Mini inference API ({{ inkling_served_name }})
+Wants=network-online.target nvidia-persistenced.service
+After=network-online.target nvidia-persistenced.service
+# Bound a crash loop instead of restarting every 10s forever.
+StartLimitIntervalSec=3600
+StartLimitBurst=6
+
+[Container]
+Image={{ inkling_image }}
+ContainerName={{ inkling_container }}
+Network=host
+ShmSize=16g
+Memory={{ inkling_memory | default('64g') }}
+StopTimeout=60
+# No Quadlet keyword for these, so pass them through. --entrypoint sglang
+# selects the image's CLI; the launch arguments live in Exec.
+PodmanArgs=--memory-swap={{ inkling_memory | default('64g') }} --security-opt seccomp=unconfined --group-add keep-groups --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576 --ulimit stack=67108864:67108864 --entrypoint sglang
+Environment=HF_HUB_OFFLINE=1
+Environment=CUDA_VISIBLE_DEVICES=0
+{% if inkling_dspark | default(false) %}
+Environment=SGLANG_OPT_INKLING2_VERIFY_REL_BIAS_KERNEL=1
+Environment=SGLANG_OPT_DSV41_DSPARK_MID_FOLD=1
+Environment=SGLANG_OPT_DSV41_DSPARK_PREPARE_INPUTS_ONCE=1
+Environment=SGLANG_OPT_DSV41_DSPARK_SKIP_PREFILLED_INPUTS=1
+{% endif %}
+
+# Checkpoint read-only; the JIT/autotune/graph cache is a host directory
+# because the container is recreated on every start.
+Volume={{ inkling_model_dir }}:/model:ro
+Volume={{ inkling_cache_dir | default('/home/dev/.cache/inkling-2-mini') }}:/root/.cache:rw
+{% for gpu in inkling_gpus.split() %}AddDevice=nvidia.com/gpu={{ gpu }}
+{% endfor %}
+Exec=serve \
+    --model-path /model \
+    --served-model-name {{ inkling_served_name }} \
+    --tp 1 \
+    --ep 1 \
+    --attention-backend fa4 \
+    --dtype bfloat16 \
+    --page-size 128 \
+    --context-length {{ inkling_context_length | default(262144) }} \
+    --mem-fraction-static {{ inkling_mem_fraction | default(0.65) }} \
+    --grammar-backend xgrammar \
+    --enable-multimodal \
+    --enable-metrics \
+    --reasoning-parser inkling \
+    --tool-call-parser inkling2 \
+{% if inkling_dspark | default(false) %}
+    --speculative-algorithm DSPARK \
+    --speculative-num-draft-tokens 8 \
+    --max-running-requests 4 \
+{% endif %}
+    --host 0.0.0.0 \
+    --port {{ inkling_port | default(9220) }}
+
+[Service]
+Restart=always
+RestartSec=10
+# Cold start loads ~20 GB of weights and compiles SM120 kernels.
+TimeoutStartSec=20min
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
