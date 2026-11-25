@@ -5,8 +5,7 @@ nodes via [Incus](https://linuxcontainers.org/incus/). VMs get one or
 more whole GPUs by PCI passthrough, an isolated NAT network, and
 optional external SSH access. The `ycluster vm` CLI manages them.
 
-- **Hosts**: any node with `incus_vm_host: true` in its host_vars
-  (currently `nv2`, `nv3`).
+- **Hosts**: any node with `incus_vm_host: true` in its host_vars.
 - **Playbook**: `admin/install-incus.yml` — ends early on non-VM-hosts.
 - **Images**: `ubuntu-cuda` and the derived `ubuntu-cuda-vllm` — see
   [Images](#images).
@@ -52,12 +51,11 @@ external SSH to VMs on the new host). Work through them in order:
      [`bastion_public_port`](#port-derivation).
 
 5. **Update the frontend host firewall — easy to forget.** Re-run
-   `app/install-frp-server.yml` against the `frontend` group
-   (currently `dev1a`/`dev1b`) so `ufw` opens the new host's derived
-   bastion public port (frontends default-deny incoming). Without this
-   step, external SSH through the new host's bastion is silently dropped.
-   `frps` runs on the frontends, so it forwards the public bastion port to
-   the host's bastion tunnel.
+   `app/install-frp-server.yml` against the `frontend` group so `ufw`
+   opens the new host's derived bastion public port (frontends
+   default-deny incoming). Without this step, external SSH through the
+   new host's bastion is silently dropped. `frps` runs on the frontends,
+   so it forwards the public bastion port to the host's bastion tunnel.
 
 6. **Verify.**
    - The host appears in the inventory under `compute`/`nvidia`
@@ -78,8 +76,8 @@ derivation is duplicated in both `admin/install-vm-bastion.yml`
 
 | node | idx ≤ 3 | idx > 3 |
 |------|---------|---------|
-| nvidia (`nv<idx>`) | `2210+idx` (nv1→2211) | `2220+idx` |
-| compute (`c<idx>`)  | `2213+idx` (c1→2214) | `2240+idx` |
+| nvidia (`nv<idx>`) | `2210+idx` | `2220+idx` |
+| compute (`c<idx>`)  | `2213+idx` | `2240+idx` |
 
 Low-index ports are historical and stable (existing `ssh -J` invocations
 keep working); the disjoint `2220+idx` / `2240+idx` blocks for idx > 3
@@ -92,11 +90,10 @@ host (e.g. a local vLLM), the rest are bound to `vfio-pci` and handed to
 VMs. The passthrough set is declared per host:
 
 ```yaml
-# host_vars/nv3.yml
+# host_vars/<host>.yml
 incus_vm_host: true
-incus_passthrough_gpu_pci:
-  - "0000:c1:00.0"
-  - "0000:e1:00.0"
+incus_passthrough_gpu_pci:          # one entry per passthrough GPU
+  - "0000:<bus>:<slot>.0"
 ```
 
 A GPU passes through together with its HD-Audio function (`.1`): they
@@ -166,14 +163,84 @@ path is safe: `incus stop` (no `--force`) and then `incus delete`, or
 just use `ycluster vm destroy` which does this for you. Never `--force`
 a running GPU VM.
 
-If a shutdown hangs on a wedged process (and the BMC NIC is unwired, so
-there is no out-of-band console), reboot via sysrq from a live shell:
+If a shutdown hangs on a wedged process and there is no out-of-band
+console, reboot via sysrq from a live shell:
 
 ```bash
 echo s | sudo tee /proc/sysrq-trigger   # sync
 echo u | sudo tee /proc/sysrq-trigger   # remount read-only
 echo b | sudo tee /proc/sysrq-trigger   # reboot now
 ```
+
+### Recovering a passthrough GPU that lost its vfio binding
+
+The split is applied once at boot, per address, by
+`gpu-passthrough.service`. Nothing re-applies it at runtime — not Incus,
+not Ansible, not the `ycluster vm` CLI — so a card can silently fall out
+of the passthrough pool while the host keeps running.
+
+The usual cause is a **PCIe hotplug event on the card's root port**: the
+link drops, the slot reports the card absent and then present, and the
+kernel removes and re-enumerates the device. A freshly enumerated
+`pci_dev` starts with an empty `driver_override`, so the split is lost.
+The kernel log shows the sequence — `pciehp: Slot(N): Link Down`,
+`Card not present`/`Card present`, the device re-added under its PCI ID,
+and often `vfio-pci <addr>: Unable to change power state from
+D3hot/D3cold to D0, device inaccessible` plus a corrected
+`fru_text: PcieError` record on the root port.
+
+This is distinct from the harmless D3cold wake warnings described further
+down: there the card stays on `vfio-pci` and only the log is noisy. Here
+the slot reports the card absent and then present, the device is
+re-enumerated, and the binding is genuinely gone.
+
+After re-enumeration the two functions diverge:
+
+- the GPU function (`.0`) re-probes to **no driver** — `nvidia` is
+  blocked on the host by `nvidia-deferred.conf` and nouveau is
+  blacklisted, so nothing claims it;
+- the HD-Audio function (`.1`) re-probes to `snd_hda_intel`, its
+  normal host driver.
+
+The card is still healthy; only its binding is gone. Check with:
+
+```bash
+addr=0000:<bus>:<slot>.0        # from incus_passthrough_gpu_pci
+readlink -f /sys/bus/pci/devices/$addr/driver      # empty = driverless
+cat /sys/bus/pci/devices/$addr/driver_override     # should be vfio-pci
+```
+
+Recover by re-running the bind script; it is per-device idempotent and
+acts only on addresses not already on `vfio-pci`:
+
+```bash
+sudo systemctl restart gpu-passthrough.service
+```
+
+This is safe in this state because the `nvidia` -> `vfio-pci` wedge from
+the previous section does not apply: `.0` is driverless and `.1` is only
+on `snd_hda_intel`. The script also redoes the BAR1 shrink, which a
+re-enumerated card needs — it comes back with the 256 MiB default
+instead of the 1 GiB set at boot. If `.0` were on `nvidia` instead (only
+possible if `nvidia-deferred.conf` was removed), the script aborts; do
+**not** rebind by hand and do **not** force a stop of any running VM to
+"free" the card. Recover with a reboot.
+
+Verify afterwards: both functions resolve under
+`/sys/bus/pci/drivers/vfio-pci` with `driver_override` = `vfio-pci`,
+BAR1 reads 1 GiB, and `ycluster vm gpus` lists the card as `free`.
+
+Note that the CLI cannot see this failure on its own.
+`gpu_pool()` enumerates `/sys/bus/pci/drivers/vfio-pci`, so a card that
+lost vfio ownership is absent from the pool rather than reported as
+`WEDGED`; `vm_gpus()` and the sampler's `gpu_pool` both under-count, and
+`_gpu_healthy()` never probes it. The only signal is a count mismatch
+between `ycluster vm gpus` and `incus_passthrough_gpu_pci`, so compare
+the two before treating a host's free capacity as known.
+
+One flap is a link-level glitch. Repeated flaps on the same slot point at
+the riser, cable, or board and are worth a physical check rather than
+another rebind.
 
 ### vfio-pci D3cold wake noise from Ansible fact gathering
 
@@ -182,7 +249,7 @@ runtime-suspended, Ansible fact gathering (`setup` with
 `gather_subset=all`) can log repeated:
 
 ```
-vfio-pci 0000:c1:00.0: Unable to change power state from D3cold to D0, device inaccessible
+vfio-pci <addr>: Unable to change power state from D3cold to D0, device inaccessible
 ```
 
 Root cause: the custom fact `admin/files/scripts/gpu.fact` runs
@@ -345,10 +412,10 @@ image-build step:
 
 ```bash
 # build missing image(s) only
-ansible-playbook admin/install-incus.yml --limit nv3 --tags build-images
+ansible-playbook admin/install-incus.yml --limit <host> --tags build-images
 
 # force-rebuild even if the alias exists (e.g. after a version bump)
-ansible-playbook admin/install-incus.yml --limit nv3 \
+ansible-playbook admin/install-incus.yml --limit <host> \
     --tags build-images -e force_rebuild_images=true
 ```
 
@@ -358,7 +425,7 @@ compile) shows nothing until completion. For progress, run the helper
 by hand the first time:
 
 ```bash
-ssh nv3.yc sudo incus-build-vllm-image           # or --force to rebuild
+ssh <host> sudo incus-build-vllm-image           # or --force to rebuild
 ```
 
 ### virtiofs for host directory shares
@@ -433,8 +500,8 @@ ranges. The bridge resolver forwards DNS to the cluster gateway
 ## External SSH access
 
 A `bastion` container on `incusbr0` runs a jump-only sshd plus an frpc
-client. Each VM host gets its own public port on the frp frontend
-(nv2 → `2212`, nv3 → `2213`). Users reach their VM with:
+client. Each VM host gets its own public port on the frp frontend,
+derived from the node type and index. Users reach their VM with:
 
 ```bash
 ssh -J jump@<frontend>:<port> ubuntu@<vm-name>
@@ -445,12 +512,10 @@ Each host's service name is set via `vm_bastion_service` in
 index (see [Port derivation](#port-derivation)) and applied in
 `admin/install-vm-bastion.yml`. `app/install-frp-server.yml` (run against
 the `frontend` group) must have opened that port in the frontend `ufw` —
-without it, external SSH through the bastion is silently dropped. The
-original low-index hosts keep their historical ports (idx 1-3: nvidia
-`2210+idx`, compute `2213+idx`, i.e. 2211-2216), so deployed bastions are
-never renumbered. Every host with idx > 3 lands in a per-type disjoint
-block (nvidia `2220+idx`, compute `2240+idx`), so adding a node of one
-type never shifts another type's ports.
+without it, external SSH through the bastion is silently dropped.
+Low-index hosts (idx ≤ 3) keep the historical ranges so deployed bastions
+are never renumbered; every host with idx > 3 lands in a per-type disjoint
+block, so adding a node of one type never shifts another type's ports.
 
 The jump user's `authorized_keys` is generated by `vm bastion-sync`:
 each key line carries `permitopen` locked to exactly the VMs that user
