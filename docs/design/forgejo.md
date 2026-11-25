@@ -69,6 +69,9 @@ Implementation in the tree:
   cluster node resolves the internal name through the storage VIP. When a domain
   is configured it also adds `git.<domain>`, so external SSH clone URLs resolve
   to the storage leader internally instead of hairpinning through the frontend.
+  That mapping is for cluster nodes only: guests keep public resolution
+  (see `docs/operations/vm-hosting.md`), because the bridge ACL drops every
+  cluster address they would be pointed at.
 - `files/frpc.toml.j2` registers a raw TCP `forgejo-ssh` proxy on frontend
   port 2222. The proxy follows the leader-gated `frpc`; `install-frp-server.yml`
   opens the port in the frontend UFW by default, with

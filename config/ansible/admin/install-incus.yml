@@ -47,11 +47,20 @@
     incus_storage_pool: local
     # Bridge identity and the isolation ACL live in group_vars/compute.yml:
     # the VM-bastion and bridge-guard plays read the same values.
-    # Upstream DNS for the VM bridge resolver. nv2's /etc/resolv.conf lists a
-    # dead 127.0.0.1 first (no local resolver on non-core nodes), which stalls
-    # lookups, so the bridge dnsmasq is given explicit servers instead.
-    incus_vm_dns_servers:
-      - "10.0.0.254"         # cluster resolver
+    # Guest DNS. Guests are handed public answers only: the bridge ACL
+    # (gpu-vm-isolation) drops 10.0.0.0/16, so a cluster address is not just
+    # unreachable, it hangs (SYN dropped, no RST) and the client times out.
+    # That is how `git pull` in a guest against git.<domain> broke: /api/hosts
+    # maps the name to the storage VIP for cluster nodes, and the guests were
+    # forwarding to the cluster resolver that serves it. Point the bridge at
+    # the public upstreams instead (explicit entries, because a non-core
+    # host's /etc/resolv.conf can lead with a dead 127.0.0.1), so public
+    # service names resolve to the frontend and guests reach them by
+    # hairpinning, and answer the internal zone locally as NXDOMAIN rather
+    # than forwarding it upstream.
+    incus_vm_dns_servers: "{{ dnsmasq_upstreams }}"
+    incus_vm_dns_local_zones:
+      - "local=/xc/"
     # Source-built Incus 6.0.5 (admin/build-incus.yml) swapped in place of
     # noble's apt 6.0.0 binaries. Build output lives under /opt/src/incus/bin
     # on the buildhost; these tasks fetch it, dpkg-divert the distro binaries
@@ -420,11 +429,12 @@
     # raw.dnsmasq ownership is split by line type: resolver lines here,
     # host-record lines by `ycluster vm` (sync_dns_records gives pinned
     # instances lease-independent DNS) — preserve them when rewriting.
-    - name: Point the VM bridge resolver at explicit upstream DNS
+    - name: Point the VM bridge resolver at public upstream DNS
       shell: |
         current="$(incus network get {{ incus_bridge }} raw.dnsmasq)"
         records="$(printf '%s\n' "$current" | grep '^host-record=' || true)"
-        desired="$(printf '%s\n' no-resolv {{ incus_vm_dns_servers | map('regex_replace', '^', 'server=') | join(' ') }}; printf '%s' "$records")"
+        lines="no-resolv {{ incus_vm_dns_servers | map('regex_replace', '^', 'server=') | join(' ') }} {{ incus_vm_dns_local_zones | join(' ') }}"
+        desired="$(printf '%s\n' $lines; printf '%s' "$records")"
         if [ "$current" != "$desired" ]; then
           incus network set {{ incus_bridge }} raw.dnsmasq "$desired"
           echo CHANGED

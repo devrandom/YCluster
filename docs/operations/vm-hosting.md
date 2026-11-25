@@ -494,8 +494,17 @@ read-only mount.
 VMs sit on `incusbr0` (`10.100.0.0/24`, NAT). The `gpu-vm-isolation`
 ACL lets a VM reach the internet and the bridge subnet but **blocks all
 of `10.0.0.0/8`** — VMs cannot reach the cluster or other private
-ranges. The bridge resolver forwards DNS to the cluster gateway
-(`10.0.0.254`).
+ranges.
+
+Guests are therefore never given cluster-internal addresses. The bridge
+resolver uses the public upstreams (`dnsmasq_upstreams`), not the cluster
+gateway, and answers the internal `xc` zone locally as NXDOMAIN. This
+matters because the ACL *drops* cluster-bound traffic: a cluster answer does
+not fail fast, it hangs until the client times out. `git.<domain>` is the
+case that bit — `/api/hosts` maps it to the storage VIP for cluster nodes, so
+a guest that inherited that answer sat in `git pull` until it gave up. With
+public DNS the guest gets the frontend's public address and hairpins, which
+works (verified for 443 and 2222).
 
 ## External SSH access
 

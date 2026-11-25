@@ -93,6 +93,11 @@ backend `127.0.0.1:2222`). The frontend UFW opens 2222 by default; set
 `forgejo_external_ssh=false` to keep it closed. The frontend sshd stays on 22.
 Internal clients resolve `git.<domain>` to the storage VIP through `/api/hosts`,
 so they reach Forgejo directly instead of hairpinning through the frontend.
+Guests on `incusbr0` are not internal clients: their bridge resolver uses
+public DNS (see [vm-hosting.md](vm-hosting.md#networking)), so a VM gets the
+frontend's public address and hairpins. Never point a guest at the VIP — the
+isolation ACL drops `10.0.0.0/16`, and a dropped SYN turns a working name into
+a silent timeout.
 
 ## Adding a new public vhost — checklist
 
