@@ -37,7 +37,9 @@ election.
   branch/worktree and is published as an MR; merging to `main`, direct pushes
   to `main`, and prod deploys of unmerged changes each require the user's
   explicit sign-off, even when the individual task ("deploy this") sounds
-  like blanket approval for the whole chain.
+  like blanket approval for the whole chain. Once a `main` push is authorized,
+  push it to every remote that carries it — `origin` (Forgejo), `gitlab`, `gh`
+  — not just `origin`; see `docs/CONTRIBUTING.md` ("Remotes and publishing").
 - **Use `./tmp/`, never `/tmp/`, for scratch.** Never `rm -rf` paths that could
   contain user data — use `rmdir` or verify unmounted state first.
 - **Don't swallow errors or stderr output.**

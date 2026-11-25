@@ -27,6 +27,21 @@
   doesn't have what's needed, stop and tell the user — never commit untested
   code.
 
+## Remotes and publishing
+
+`main` is carried by every remote: `origin` (Forgejo, where PRs are opened),
+`gitlab`, and `gh` (GitHub). They must not drift, so a push of `main` goes to
+all of them — `git remote` lists the set, today those three:
+
+```bash
+git push origin main && git push gitlab main && git push gh main
+```
+
+A push that updates `origin` alone silently leaves `gitlab` and `gh` behind,
+and nothing on the cluster reads those mirrors, so the drift only shows up
+later. Feature branches that back a PR go to `origin` and `gitlab` only (see
+the `work-on-issue` skill); `gh` carries `main` but not PR branches.
+
 ## Local conventions
 
 - Use `./tmp/`, not `/tmp/`, for local scratch files (logs, system-test
