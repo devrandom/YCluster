@@ -1,0 +1,24 @@
+---
+# rasdaemon records machine-check, AER and EDAC events into a local SQLite
+# database (/var/lib/rasdaemon/ras-mc_event.db). That matters on a host that
+# resets on a fatal RAS event: the reset cuts the journal mid-write and often
+# leaves pstore and kdump empty, so nothing else survives to say why the box
+# went down. The packaged unit already runs `rasdaemon -f -r` and enables
+# every error source from ExecStartPost, so no extra configuration is needed.
+#
+# Passive monitoring only: no kernel state changes and no restarts. Hosts
+# whose firmware exposes no RAS sources simply record nothing.
+- name: Install the rasdaemon RAS event recorder
+  hosts: managed
+  become: yes
+  tasks:
+    - name: Install rasdaemon
+      apt:
+        name: rasdaemon
+        state: present
+
+    - name: Enable and start rasdaemon
+      systemd:
+        name: rasdaemon
+        enabled: yes
+        state: started
