@@ -67,6 +67,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - **[HIGH]** [Incus VM `data`: virtiofs → block image on NFS](incus/vm-data-virtiofs-to-block.md) — remove `virtiofsd` from the guest I/O path: attach a raw image from the existing NFSv4 VM-data mount as virtio-blk (`cache=none`), with an automated per-VM migration.
 - **[HIGH]** [Incus storage dir→zfs](incus/incus-storage-dir-to-zfs.md) — runaway-guest root-fs fill; caused the nv3 GPU/driver-loss cascade.
 - **[HIGH]** [`vm launch` memory preflight](incus/vm-launch-memory-preflight.md) — GPU VMs pin all guest RAM; launching without enough free host memory wedged a GPU host. Fail the launch when `MemAvailable` can't cover the requested RAM.
+- [A passthrough GPU can lose its vfio binding](incus/vfio-binding-drift.md) — the split is applied only at boot, so a PCIe re-enumeration drops `driver_override` and the card silently leaves the pool; because `gpu_pool()` is derived from the vfio driver, `vm gpus` and admission under-count instead of flagging it. Give the CLI the declared set and report drift.
 - [Build incus VM images once, copy between hosts](incus/incus-vm-images-build-once.md)
 - [Dev-cluster system tests — incus DNS](incus/dev-cluster-system-tests-dns.md)
 - [Dev cluster: browsable external/TLS path](incus/dev-cluster-browsable-tls.md)
