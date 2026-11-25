@@ -34,7 +34,7 @@ Categories: [security](#security) ·
 - [core group definition](security/core-group-definition.md)
 
 ## Networking
-- **[HIGH]** [Switch rathole → frp](networking/switch-rathole-to-frp.md) — rathole upstream dormant + TCP socket leak; real external HTTPS outage 2026-07-17.
+- **[HIGH]** [Switch rathole → frp](networking/switch-rathole-to-frp.md) — rathole upstream dormant + TCP socket leak; real external HTTPS outage.
 - **[HIGH]** [WG inbound ingress follows the active leader](networking/wg-inbound-follow-leader.md) — DNAT on a single uplink IP breaks remote access on gateway-VIP failover.
 - **[HIGH]** [Per-node uplink failover watchdog](networking/uplink-failover-watchdog.md) — dead uplink behind a live router blackholes egress (rathole breaks too) while the metric-100 DHCP route stays.
 - **[MEDIUM]** [ycluster wg delete: peer-only variant](networking/wg-delete-cascade.md) — `wg delete` silently drops live allocations; workaround documented (`wg revoke`) but not enforced.
@@ -109,7 +109,7 @@ DR, backups, node lifecycle, scaling/capacity.
 - [A3 RBD setup-time --exclusive](architecture/a3-rbd-exclusive-flag.md)
 
 ## Code quality
-- **[HIGH]** [cluster-heartbeat error conditions](code-quality/cluster-heartbeat-error-conditions.md) — observed 2026-07-09: heartbeat logged HEALTHY + Last Ping: Success while underneath Connection refused. Monitoring blind spot that masks outages.
+- **[HIGH]** [cluster-heartbeat error conditions](code-quality/cluster-heartbeat-error-conditions.md) — observed in production: heartbeat logged HEALTHY + Last Ping: Success while underneath Connection refused. Monitoring blind spot that masks outages.
 - **[MEDIUM]** [/api/allocate existing flag](code-quality/api-allocate-existing-flag.md) — masked allocation as read during canary testing; fired a false node-down alert.
 - [H1 storage-leader delegation](code-quality/h1-storage-leader-delegation.md) — breaks under `--limit`
 - [H2 ignore_errors destructive](code-quality/h2-ignore-errors-destructive.md)

@@ -9,8 +9,8 @@ with no further activity.
 connection floods overwhelm the client") describes exactly the bug we hit
 — CLOSE_WAIT / FIN_WAIT-2 socket accumulation — and has no merged fix.
 
-It caused a real external HTTPS outage 2026-07-17 (~8 h flap; detail in
-`../ycluster-private/incidents/dev1-rathole-flap-2026-07-17.md`).
+It caused a real external HTTPS outage (~8 h of flapping; the deployment
+incident log has the detail).
 
 **[frp](https://github.com/fatedier/frp)** is the replacement: actively
 maintained (v0.70.0 shipped 2026-07-11), Go-based, supports the same use
@@ -154,7 +154,7 @@ Step 6 lands after.
    rathole-PROXY-protocol item (folded in here).
 
 Refs:
-- `../ycluster-private/incidents/dev1-rathole-flap-2026-07-17.md`
+- the deployment incident log (external HTTPS outage from rathole)
 - `wg-inbound-follow-leader.md` (the rathole PROXY half is folded in)
 
 ## Follow-up (recorded, not started)

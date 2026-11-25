@@ -5,9 +5,8 @@ still ARP-reachable keeps its metric-100 DHCP default route and
 blackholes egress instead of falling back to the gateway VIP (`.254`,
 metric 500) — the kernel only drops a route on carrier/next-hop loss,
 not on dead-WAN-behind-a-live-router, so the leader can lose internet
-(and its rathole tunnel) while still looking up (incident:
-`../ycluster-private/incidents/2026-06-17 — cold-start uplink-failover
-blackhole`).
+(and its rathole tunnel) while still looking up (seen in production; the
+deployment incident log has the detail).
 
 ## Fix
 

@@ -23,9 +23,8 @@ Option 1 is probably the right call once s1's uplink is reconciled.
 The stronger goal is **redundant** inbound paths — multiple ingress IPs
 live at once (e.g. both core uplinks + the rathole endpoint), not just
 one address that moves on failover, so a single dead uplink/route doesn't
-strand remote peers (incident:
-`../ycluster-private/incidents/2026-07-02 — NodeDown flap from
-157.131.52.160 uplink loss`).
+strand remote peers (seen in production; the deployment incident log has
+the detail).
 
 WireGuard has **no native support** for this: a peer config carries a
 single `Endpoint`, with no endpoint list or failover (it's roaming-aware

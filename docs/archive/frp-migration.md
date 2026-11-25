@@ -11,9 +11,8 @@
 
 Replace rathole with [frp](https://github.com/fatedier/frp) v0.70.0 across the
 cluster. Rathole is dormant upstream ([discussion #416](https://github.com/rathole-org/rathole/discussions/416)),
-caused a real external HTTPS outage 2026-07-17 (incident in
-`ycluster-private/incidents/dev1-rathole-flap-2026-07-17.md`), and has no
-PROXY protocol support — frp gets us all three.
+caused a real external HTTPS outage (see the deployment incident log), and has
+no PROXY protocol support — frp gets us all three.
 
 Tracking item: `todo/networking/switch-rathole-to-frp.md`. The standalone
 rathole-PROXY-protocol item is folded in here.

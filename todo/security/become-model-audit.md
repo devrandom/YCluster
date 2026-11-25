@@ -1,8 +1,7 @@
 # Reconsider become usage in playbooks
 
-Prompted by two macOS findings (incident:
-`../ycluster-private/incidents/2026-06-13 — macOS become findings
-(provisioning m3, first wg-joined Mac)`).
+Prompted by two macOS findings during provisioning (details in the
+deployment incident log).
 
 ## Finding 1: `raw` + `become` cannot take a multiline command
 

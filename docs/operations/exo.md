@@ -443,7 +443,7 @@ Failure modes seen in practice and the order to try:
 
    If a `RunnerShuttingDown` from the delete itself then gets
    stuck, restart exo (see above) — that resets the runner state
-   machine cleanly. In the 2026-05-21 incident this was the step
+   machine cleanly. In the production incident this was the step
    that finally unblocked the load.
 
 ## OpenAI-compatible serving
@@ -572,7 +572,7 @@ of the below is needed:
     placement fails — see "Vision-capable models" above.
   - The TB controller was found wedged during bring-up; a reboot of
     m1 cleared it — see "Thunderbolt controller can wedge" above.
-- **TODO: harden K2.6 auto-recovery (2026-05-21 incident).** After
+- **TODO: harden K2.6 auto-recovery (after a Thunderbolt wedge).** After
   a TB wedge → reboot of m2, placement failed with `No cycles found
   with sufficient memory` because m1 had ~288 GiB of stale K2.6
   weights sitting in macOS "inactive" pages from prior loads. `sudo
@@ -594,9 +594,8 @@ of the below is needed:
     bandwidth) while a TB wedge is being chased.
   - Consider a TB-peer-ping watchdog that reboots the local node
     after N consecutive minutes of failure (with cooldown) — TB
-    wedges have now recurred at least 3 times (2026-05-16,
-    2026-05-21, 2026-06-17) and only reboots clear them. Each
-    incident also collapses K2.6 serving until both macs come back.
+    wedges have now recurred at least 3 times and only reboots clear them.
+    Each incident also collapses K2.6 serving until both macs come back.
     Worth investigating whether wedges correlate with JACCL traffic
     vs. idle, and whether enabling RDMA more aggressively (or any
     macOS update) changes the rate.

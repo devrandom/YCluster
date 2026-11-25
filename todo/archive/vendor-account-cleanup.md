@@ -1,7 +1,7 @@
 # Vendor account cleanup (done)
 
-Clean stale/vendor-created user accounts on managed nodes (incident:
-`../ycluster-private/incidents/2026-06-09 — exx vendor account on nv2`).
+Clean stale/vendor-created user accounts on managed nodes (found in
+production; the deployment incident log has the detail).
 Vendor factory-preinstall accounts can ship with full sudo, `lxd`
 membership (root-equivalent), lingering login sessions, a populated
 `authorized_keys` (potentially holding a cluster key), and a squatted

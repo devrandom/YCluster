@@ -3,7 +3,7 @@
 #
 # Mitigates the Samsung 990 EVO Plus 2TB (FW 2B2QKXG7) controller-hang
 # pattern (ext4 emergency_ro when the controller drops off the PCIe bus).
-# See incidents/INDEX.md#2026-06-20 and docs/comino-setup.md § "NVMe".
+# See the deployment incident log and docs/comino-setup.md § "NVMe".
 #
 # Layered mitigation:
 #   - nvme_core.default_ps_max_latency_us=0   disable APST at init (the

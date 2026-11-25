@@ -5,8 +5,7 @@ removes the wg peer *and* `/cluster/nodes/by-hostname/<h>` + `by-mac/<mac>`
 (symmetric with wg register, which created both), so once a node is
 re-bootstrapped onto the LAN, `wg delete` silently drops its live
 allocation — gone from the status page, loses its DHCP reservation
-(incident: `../ycluster-private/incidents/2026-06-10 — accidental c4
-allocation during canary testing`).
+(seen in production; the deployment incident log has the detail).
 
 ## Root cause underneath
 

@@ -3,8 +3,8 @@
 A host-side CIFS + netfslib folio-lock writeback deadlock wedged a GPU VM's
 `data` passthrough disk: its `virtiofsd` worker stuck D-state on
 `cifs_reopen_file(can_flush=true) -> filemap_write_and_wait -> netfs_writepages`,
-and only a host reboot clears a D-state thread. Full detail (private) lives in
-the matching incident report under `../ycluster-private/incidents/`.
+and only a host reboot clears a D-state thread. Full detail lives in the
+deployment incident log.
 
 The deadlock is CIFS-specific. Moving the VM-data file protocol to NFSv4 removes
 the buggy client path entirely and works on the current 7.0 HWE kernel — no

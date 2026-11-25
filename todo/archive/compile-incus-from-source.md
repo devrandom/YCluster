@@ -20,7 +20,7 @@ for the units/groups/man-pages). Verification on that host:
   overlays).
 
 Rolling 6.0.5 out to the remaining Incus hosts (after the nv1 soak) is a
-HIGH deployment-specific item in `ycluster-private/todos.md`.
+HIGH deployment-specific item in the deployment's own todo list.
 
 Why: noble's apt `incus` is 6.0.0, which hardcodes the VM publish
 convert as `qemu-img convert -f raw -O qcow2 -c` (single-threaded zlib)

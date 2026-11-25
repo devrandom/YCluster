@@ -2,9 +2,8 @@
 
 Dangling image layers from open-webui rebuilds accumulate in
 `/var/lib/docker/overlay2` and fill the root fs (the mon store lives on
-`/`, `/dev/mapper/vg0-root`), tripping `MON_DISK_LOW` (incident:
-`../ycluster-private/incidents/2026-06-04 — s2 MON_DISK_LOW from docker
-layers`).
+`/`, `/dev/mapper/vg0-root`), tripping `MON_DISK_LOW` (seen in production; the deployment incident log
+has the detail).
 
 Schedule a periodic `docker image prune -f` (dangling-only — never `-a`,
 which on a non-leader would delete the tagged-but-not-running open-webui
