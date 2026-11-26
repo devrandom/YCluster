@@ -90,9 +90,10 @@
     # build arg, captured below) and the unit bind-mounts /home/dev/* (and the
     # NAS) owned by dev. --userns=keep-id maps container UIDs 1:1 to host UIDs,
     # so the image's dev user must share the host dev's UID for reads/writes to
-    # work. The cluster convention is 1002 (nv2/mineru), but nv4's dev is 1000
-    # (its ds4 vLLM runs as dev) — so we read the actual UID and bake it into
-    # the image at build time instead of asserting a fixed value.
+    # work. The cluster convention is 1002 (the MinerU host), but some hosts
+    # run their GPU service as dev with UID 1000 — so we read the actual UID
+    # and bake it into the image at build time instead of asserting a fixed
+    # value.
     - name: Read host dev user UID for image build
       command: id -u dev
       register: comfyui_dev_uid

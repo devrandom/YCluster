@@ -176,4 +176,5 @@ Refs:
   pointing only at the current bastions. To avoid stale rathole-bastion
   state piling up, eventually run it against all of `compute` (e.g.
   `--limit compute`) so any new Incus host is picked up automatically.
-  2026-08-05 rollout covered: nv2, nv4, nv6, c1, c2, c3.
+  The first rollout covered the remaining NVIDIA nodes and every compute
+  node.

@@ -318,8 +318,8 @@ codebase. It falls short in three ways that matter here:
 - **No same-model replica fan-out.** `Models` is a
   `map[string]ModelConfig` (`proxy/config/config.go`); peer routing
   explicitly drops duplicate model mappings. Replicating one model
-  across nv1+nv2 and picking least-loaded would require reshaping the
-  core data model.
+  across the NVIDIA hosts and picking least-loaded would require reshaping
+  the core data model.
 - **Static-list auth only.** `apiKeys []string` with `==` comparison.
   No hook, no webhook, no gateway-delegation path.
 - **Client-disconnect cancellation is missing** — the original

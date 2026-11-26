@@ -119,8 +119,8 @@ routing, and NAT chains.
   range is separate from the transit data range, but the spoke's WG
   address reuses its transit third octet so the control plane is
   class-partitioned exactly like the data plane (nv\* base 110, c\* base
-  50). Two hosts of different classes that share a numeric index (e.g.
-  nv3 and c3) therefore get distinct WG addresses. This was previously
+  50). Two hosts of different classes that share a numeric index (e.g. a
+  GPU host and a compute node) therefore get distinct WG addresses. This was previously
   `100.101.0.(N+1)`, which collided across classes.
 - The hub peer's `AllowedIPs` are that spoke's WG address and exactly
   that spoke's transit /24. It cannot learn or route a spoke's `10.*`

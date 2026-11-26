@@ -1,8 +1,8 @@
 ---
 # Configures Incus on a compute node. Two host modes, both gated by a
 # host_var:
-#   incus_vm_host: true       — full VM host with GPU passthrough (nv2/nv3)
-#   incus_container_host: true — LXC container host with shared GPU (c1/c2)
+#   incus_vm_host: true       — full VM host with GPU passthrough
+#   incus_container_host: true — LXC container host with shared GPU
 # Nothing happens on hosts where neither is set.
 - name: Configure Incus on designated compute nodes
   hosts: compute
@@ -529,8 +529,8 @@
         mode: '0755'
 
     # ycluster's `vm launch` reads this to pick the default instance type
-    # for the current host (vm on nv2/nv3, container on c1/c2). Override
-    # at the CLI with `--type vm` or `--type container`.
+    # for the current host (vm on a GPU VM host, container on a container
+    # host). Override at the CLI with `--type vm` or `--type container`.
     - name: Write ycluster host config
       copy:
         dest: /etc/ycluster/host.yml

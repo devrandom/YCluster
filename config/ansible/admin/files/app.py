@@ -10,7 +10,7 @@ Node Allocations:
   * allocation JSON contains: hostname, type, ip, amt_ip, mac (normalized), allocated_at
 
 - /cluster/nodes/by-hostname/{normalized_mac} -> allocation JSON (same as above)
-  * hostname: node hostname like "s1", "c5", "m3"
+  * hostname: node hostname like "s1", "compute2", "mac1"
 
 DHCP Leases:
 - /cluster/dhcp/leases/{lease_key} -> lease JSON

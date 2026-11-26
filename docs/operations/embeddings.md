@@ -64,8 +64,8 @@ Two flags gate the deployment — neither of them on every macOS node
    ycluster inference add http://<host>.xc:8080 BAAI/bge-m3
    ```
 
-The first host is m2; m1/m3 stay unconfigured unless their host_vars
-flip.
+One macOS node is configured today; the others stay unconfigured unless
+their host_vars flip.
 
 ## Deploying / Updating
 

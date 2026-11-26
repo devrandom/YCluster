@@ -58,8 +58,9 @@ def determine_ip_from_hostname(hostname, via_wg=False):
     """Generate deterministic IP based on hostname.
 
     via_wg=True puts the IP in the wg peer subnet (10.0.1.0/24) while
-    preserving the per-type hostname numbering. A physical compute c3
-    lands at 10.0.0.53; a wg-bootstrapped compute c3 lands at 10.0.1.53.
+    preserving the per-type hostname numbering. A physical compute node
+    with index 3 lands at 10.0.0.53; the same node over wg lands at
+    10.0.1.53.
     """
     parsed = _parse_host_location(hostname) if hostname else None
     if parsed is None:

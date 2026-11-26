@@ -126,8 +126,8 @@ RUN cd /opt/comfyui && .venv/bin/python -c 'import comfy; print(comfy.__version_
 #
 # DEV_UID must equal the BUILD HOST's `dev` UID because keep-id maps 1:1 and
 # the image UID is baked at build time — install-comfyui.yml passes the
-# build host's `id -u dev`. The cluster convention is 1002 (nv2/mineru);
-# nv4 is an outlier at 1000 (its ds4 vLLM runs as dev). Because the registry
+# build host's `id -u dev`. The cluster convention is 1002 (the MinerU host);
+# some hosts run their GPU service as dev with UID 1000. Because the registry
 # image embeds the build host's dev UID, hosts with a different dev UID need
 # their own build+push (the image tag is shared, so only one dev UID is
 # current in the registry at a time).

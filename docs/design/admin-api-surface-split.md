@@ -101,8 +101,8 @@ are DHCP-leader-only as expected.
 - **Memory + deps:** ~50 MB of apt-installed Python (`python3-waitress`,
   `flask`, `etcd3`, `scapy`, `psycopg2`, `requests`). Same on every
   node whether it needs them or not.
-- **Cold start:** 100–200 ms. Noticeable on low-end compute (nv1/nv2
-  are Jetson Orin class).
+- **Cold start:** 100–200 ms. Noticeable on the low-end compute nodes
+  (Jetson Orin class).
 - **Ceph identity cruft:** read-only `client.admin-api` is
   provisioned on every node, but `/etc/ceph/ceph.client.admin-api.keyring`
   is only installed on storage (`setup-web-services.yml:298-314`).

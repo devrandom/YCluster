@@ -5,8 +5,8 @@ deployment incident log).
 
 ## Finding 1: `raw` + `become` cannot take a multiline command
 
-Isolated on m3: trivial+become works, `if/fi` on one physical line +
-become works, but a real-newline (YAML `|` block) fails with
+Isolated on a macOS node: trivial+become works, `if/fi` on one physical
+line + become works, but a real-newline (YAML `|` block) fails with
 `/bin/sh: -c: line 1: syntax error: unexpected end of file`. The `-i`
 login-shell flag in `group_vars/macos.yml`
 (`ansible_become_flags: "-H -i"`) is *not* the cause.

@@ -114,7 +114,7 @@ Defaults that we accept as-is:
 - **`bge-reranker-v2-m3`** — TEI's `--task rerank` mode. Adds ~2 GB
   VRAM; gives cross-encoder reranking on top of the bi-encoder retrieval.
   Worth it once we have a retrieval corpus worth reranking.
-- **NVIDIA node** (`nv1–nv5`, 16 GB VRAM plenty) — drop-in for higher
+- **NVIDIA node** (16 GB VRAM plenty) — drop-in for higher
   batch ingestion throughput. Same `ycluster inference add` pattern.
 - **Multimodal embeddings** — ColPali / ColQwen for image+text PDFs.
   TEI doesn't serve these; would need a separate `colpali-server` (or

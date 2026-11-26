@@ -132,7 +132,7 @@ Phase notes:
 
 Don't skip phases or advance a phase before the previous one is on all nodes —
 the ordering is what preserves quorum. Issue client certs for the real Incus
-hosts (nv2/nv3) before they need etcd at/after `connect`.
+hosts (the GPU VM hosts) before they need etcd at/after `connect`.
 
 ## Cluster Recovery
 

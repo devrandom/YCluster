@@ -50,5 +50,5 @@ after a large proxy.xc offset fix, they may need a one-shot step:
 sudo sntp -sS 10.0.0.254
 ```
 
-m3-style nodes (admin user, locked-down root SSH) need the `sudo`
-form; m1/m2 (root SSH allowed) can run it directly.
+macOS nodes with the admin user and locked-down root SSH need the `sudo`
+form; the others (root SSH allowed) can run it directly.

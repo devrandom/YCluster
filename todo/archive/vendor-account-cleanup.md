@@ -8,10 +8,11 @@ membership (root-equivalent), lingering login sessions, a populated
 UID 1000 (forcing `dev` to a non-standard UID) — and a fresh vendor
 image comes up unmitigated.
 
-## Manual cleanup (2026-07-25, private `todos.md`)
+## Manual cleanup (recorded in the deployment notes)
 
-- `exx` removed with home on nv2 and nv5 (`deluser --remove-home`).
-- `/home/exx/.ssh/authorized_keys.disabled` removed on nv2 — it held the
+- `exx` removed with home on the two GPU nodes it appeared on
+  (`deluser --remove-home`).
+- `/home/exx/.ssh/authorized_keys.disabled` removed there — it held the
   `ansible@pxe-server` cluster key.
 
 ## Automated sweep (bootstrap guard)
@@ -47,6 +48,6 @@ node re-imaged) before bootstrap will proceed.
 
 ## Remaining (not this item)
 
-Operator-manual `foresight` removal on c3/m3 (name kept out of code) and
-`ubuntu` on c1/c2 plus the nv3 re-survey are tracked under the paired
-`sudo-user-consistency` item.
+Operator-manual `foresight` removal on the desktop and macOS nodes (name
+kept out of code), the remaining `ubuntu` accounts, and the GPU-host
+re-survey are tracked under the paired `sudo-user-consistency` item.

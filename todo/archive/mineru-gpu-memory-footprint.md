@@ -28,7 +28,7 @@ and an explicit `gpu_memory_utilization` wins over the 0.5 default from
   `max_position_embeddings` is 8192, and vLLM rejects a larger value
   unless `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` (which we avoid).
 
-## Measured (nv2, VM on shared GPU 0 with Nemotron co-tenant)
+## Measured (GPU VM host, VM on shared GPU 0 with Nemotron co-tenant)
 
 - Idle MinerU footprint dropped from ~48-49 GB to ~20 GB.
 - vLLM start log: `Available KV cache memory: 15.35 GiB`,
@@ -40,13 +40,13 @@ and an explicit `gpu_memory_utilization` wins over the 0.5 default from
 
 ## Also fixed en route
 
-Verifying the redeploy surfaced a second, unrelated blocker: nv2 was
+Verifying the redeploy surfaced a second, unrelated blocker: the host was
 still on the distro podman 4.9.3, which cannot parse the CDI 0.8.0 spec
 (`additionalGids`) that nvidia-container-toolkit 1.19.1 writes, so every
 `podman run --device nvidia.com/gpu=N` failed with `unresolvable CDI
 devices`. The rest of the fleet already ran the self-compiled 5.8.0
-build; nv2 had been missed in that rollout. Running
-`admin/install-podman.yml --limit nv2` brought nv2 onto podman 5.8.0,
+build; this host had been missed in that rollout. Running
+`admin/install-podman.yml --limit <host>` brought it onto podman 5.8.0,
 which parses the spec. See `docs/operations/cdi-spec-regen.md`.
 
 ## Acceptance

@@ -70,7 +70,7 @@ VM_ISSUE_PREFIX = "/cluster/vm-issue/"
 # treats them as committed capacity, exactly as if a VM were holding them,
 # without provisioning anything. Purely accounting/admission — there is no
 # physical GPU to attach, so nothing converges them. Records look like:
-#   {"host": "nv2", "gpus": 2, "mode": "on"|"schedule",
+#   {"host": "<node>", "gpus": 2, "mode": "on"|"schedule",
 #    "windows": [{start, end}, ...],  # required+valid for 'schedule'
 #    "reason": ..., "created_by": ..., "created_at": ..., "updated_at": ...}
 # Block ids are server-generated and never collide with VM names.

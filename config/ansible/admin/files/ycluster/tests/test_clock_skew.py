@@ -34,7 +34,7 @@ class StorageBandTests(unittest.TestCase):
 
 class NonStorageBandTests(unittest.TestCase):
     def test_290ms_is_healthy(self):
-        # The m3 case that prompted the looser band.
+        # The macOS case that prompted the looser band.
         for node_type in ('compute', 'macos', 'nvidia', 'unknown'):
             self.assertEqual(cs.classify_clock_offset(290, node_type), 'healthy')
 

@@ -458,7 +458,7 @@ stays at import time (so any child process that starts a uvicorn
 for its own serving API still binds the UDS). The pre-flight only
 runs in the FastAPI server process where it actually matters
 (rejecting a duplicate-start). Verified by the live `/file_parse`
-POST against `nv2` after the rebuild returning `status=completed`
+POST against the host after the rebuild returning `status=completed`
 in ~2 s.
 
 ### 7. Layer separation so wrapper changes don't push 11 GB

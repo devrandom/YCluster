@@ -167,7 +167,7 @@ def check_network_connectivity():
     of the 3 services was unreachable (each timeout=2). With 3 workers in
     parallel the worst case is ~2s, which keeps the macOS /api/health
     response comfortably under the 5s per-host cluster-status budget
-    (the recent m3 flap root cause: network_connectivity alone spiked to
+    (the recent macOS flap root cause: network_connectivity alone spiked to
     1.6s, stacked on ntp's ~1s shell-outs to push the request past 3s).
     """
     from concurrent.futures import ThreadPoolExecutor

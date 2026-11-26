@@ -68,7 +68,7 @@ baked into the image (`DEV_UID`, see decision 4); the registry image therefore
 matches the build host's `dev` UID).
 Play is gated on a per-host `comfyui_enabled` opt-in and ends early when
 `nvidia_host_gpu_count` is 0 (same guard as MinerU). A GPU-passthrough Incus
-VM (nv2/nv3-style hosts) is the heavier isolation alternative if a workload later
+VM (on a full VM host) is the heavier isolation alternative if a workload later
 needs it; the container is the lighter, precedent-consistent default.
 
 ### 2. Weights referenced from a host dir (not baked, not fetched at runtime)

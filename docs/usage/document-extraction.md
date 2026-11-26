@@ -27,7 +27,7 @@ backends:
 - `mineru-parse` — the implementation-specific alias.
 
 Both names currently route to **MinerU on Linux/Nvidia Blackwell**
-(nv2) — the macOS backend (m2) is disabled while Blackwell is the
+(the GPU VM host) — the macOS backend is disabled while Blackwell is the
 primary. See [`document-extraction.md`](../operations/document-extraction.md)
 for the routing state and how to re-enable the macOS path.
 

@@ -21,7 +21,7 @@
     {
       "type": "timeseries",
       "title": "GPU compute utilization",
-      "description": "Combines host nvidia-smi (nv1, nv2 host-side cards) and VM-side nvidia-smi (VFIO passthrough into incus VMs).",
+      "description": "Combines host nvidia-smi (host-side cards) and VM-side nvidia-smi (VFIO passthrough into incus VMs).",
       "datasource": { "type": "prometheus", "uid": "prometheus-local" },
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
       "id": 1,
