@@ -1,0 +1,28 @@
+diff --git a/resources/inference_model_cards/mlx-community--GLM-4.7-8bit-gs32.toml b/resources/inference_model_cards/mlx-community--GLM-4.7-8bit-gs32.toml
+deleted file mode 100644
+index 705b7871..00000000
+--- a/resources/inference_model_cards/mlx-community--GLM-4.7-8bit-gs32.toml
++++ /dev/null
+@@ -1,22 +0,0 @@
+-model_id = "mlx-community/GLM-4.7-8bit-gs32"
+-n_layers = 91
+-hidden_size = 5120
+-num_key_value_heads = 8
+-supports_tensor = true
+-tasks = ["TextGeneration"]
+-family = "glm"
+-quantization = "8bit"
+-base_model = "GLM 4.7"
+-capabilities = ["text", "thinking", "thinking_toggle"]
+-
+-context_length = 202752
+-
+-[storage_size]
+-in_bytes = 396963397248
+-
+-# Source: https://huggingface.co/zai-org/GLM-4.7
+-# Source: https://unsloth.ai/docs/models/glm-4.7-flash
+-# Source: https://docs.z.ai/api-reference/llm/chat-completion
+-[sampling_defaults]
+-temperature = 1.0
+-top_p = 0.95
