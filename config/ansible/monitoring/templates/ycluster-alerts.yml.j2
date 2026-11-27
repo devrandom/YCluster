@@ -302,6 +302,26 @@ groups:
           summary: "High load average on {{ $labels.node }}"
           description: "Load average on {{ $labels.node }} is {{ $value }} (normalized by CPU count) for more than 10 minutes"
 
+      # Load with nothing running. `HighLoadAverage` above normalizes by CPU
+      # count, which is why it stayed silent through a real wedge: a host with
+      # 22 tasks stuck in uninterruptible sleep carried load 26 on 32 threads
+      # (0.8 per core) while the CPU sat 99% idle. Comparing load to the cores
+      # that are actually busy surfaces blocked work regardless of core count,
+      # and the `node_procs_blocked` guard keeps a burst of runnable work from
+      # tripping it (runnable work also shows up as busy CPUs).
+      - alert: NodeBlockedTasks
+        expr: |
+          sum by (node) (node_load15)
+            / ((1 - avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[5m])))
+               * count by (node) (node_cpu_seconds_total{mode="idle"}) + 1) > 5
+          and on (node) node_procs_blocked > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Blocked work on {{ $labels.node }}"
+          description: "{{ $labels.node }} has load {{ $value }}x its busy cores for 15 minutes with processes in uninterruptible sleep — check `ps -eo stat,args | awk '$2 ~ /^D/'` for a wedged device or mount"
+
       # High external network ingress bandwidth (200GB/hr = ~444.4 Mbps)
       - alert: HighNetworkIngress
         expr: rate(node_network_receive_bytes_total{device="enp87s0"}[5m]) * 8 > 444444444
