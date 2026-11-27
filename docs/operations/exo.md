@@ -233,6 +233,28 @@ end is enough if that end was the wedged one (the peer's port recovers
 once the link re-negotiates). After the reboot, re-apply the en5
 config (the LaunchDaemon above does this automatically).
 
+Two things worth knowing when diagnosing it:
+
+- **macOS logs nothing.** At default level there are no
+  `IOThunderboltFamily` entries around the disconnect — no "device
+  removed", no link-state change. The earliest evidence is the gateway
+  health check (`local_ai_proxy_backend_state` flipping to `down`) and,
+  on the macs, `en5` going `status: inactive` while `rdma_ctl status`
+  still says `enabled`.
+- **exo exposes the RDMA plane in `/state`.** Every peer with a live
+  RDMA link appears in `topology.connections` carrying
+  `{"sourceRdmaIface": "rdma_en5", "sinkRdmaIface": "rdma_en5"}`. When
+  that entry is missing, `topology.is_rdma_cycle()` is false for the
+  cycle and `MlxJaccl` placement fails with `Requested RDMA (MlxJaccl)
+  but no RDMA-connected cycles available` — that error is the wedge,
+  not a placement/config bug. `thunderboltBridgeCycles` is **not** a
+  health signal for this: it is the bridge0 broadcast-storm check and
+  stays empty either way.
+
+When the link is gone, `MlxRing` (plain TCP) still works over the
+cluster LAN, so a `MlxRing` re-place keeps K2.6 serving at reduced
+throughput while the TB recovery happens.
+
 ## Cluster operations
 
 All API calls go to `http://<mac>:52415`. Any node can answer; they
@@ -599,6 +621,28 @@ of the below is needed:
     Worth investigating whether wedges correlate with JACCL traffic
     vs. idle, and whether enabling RDMA more aggressively (or any
     macOS update) changes the rate.
+  - Supervisor should verify that the instance **appears** after
+    `place_instance` — a 200 `{"message":"Command received."}` means
+    only that the master accepted the command; a rejected placement
+    (no RDMA cycle, no memory cycle) fails later and leaves the
+    supervisor retrying every 30 s with nothing in its log. Detect
+    "accepted but no instance within ~60 s" and say so.
+  - `exo.log` is unbounded. exo polls download status for every
+    catalog card and `mlx-community/GLM-4.7-8bit-gs32` has no upstream
+    repo, so a rich-variable `Failed to fetch file list: 404`
+    traceback lands every ~63 s — even with `EXO_OFFLINE=1` (the
+    offline flag does not gate that poll). That grew the log to 33 GB
+    in ~17 days, and ~4.5 GB/h on the master node. The bad card is
+    dropped by carried patch `0002-drop-nonexistent-glm-catalog-card.patch`
+    (re-applied by the playbook on every exo re-pin); still add a
+    size-based truncate/rotate guard for the log next to the plist
+    templates, because any future noisy card has the same effect.
+  - A planned restart has to archive `~/.exo/event_log` or it costs
+    hours: the master's log reached 9.8M events in 17 days and a
+    restarted follower replays it at ~800 events/s (~3.4 h) before it
+    can take its shard. Stop both daemons, `mv` the log dir aside on
+    both macs, start them, and the cluster re-forms and re-places in
+    minutes.
 - Bench a bandwidth-bound model to validate the regime claim above.
   Candidates: Kimi-K2.5 at 3.6-4 bit (~450-500 GB, ~32 B active),
   MiniMax-M2.7-bf16, or DeepSeek-V3-class. These are models where
