@@ -16,6 +16,13 @@
 #
 # Run after setup-macos.yml and setup-thunderbolt-rdma.yml.
 # See docs/operations/exo.md.
+#
+# Gated on the per-host `exo_enabled` opt-in (host_vars/<node>.yml). It
+# defaults to true, so the macs that serve K2.6 need no var; a mac that
+# cannot build the pinned checkout (exo's mlx dependency builds from source
+# and needs Xcode's Metal toolchain, not just CommandLineTools) sets
+# `exo_enabled: false` and is skipped entirely. See setup-tei.yml for the
+# same pattern.
 - name: Setup exo on macOS inference nodes
   hosts: macos
   become: yes
@@ -29,6 +36,10 @@
     homebrew_bin: /opt/homebrew/bin
 
   tasks:
+    - name: End play for nodes that do not run exo
+      meta: end_host
+      when: not (exo_enabled | default(true))
+
     # --- dashboard build (control host, once) -----------------------------
     - name: Install podman on the control host
       apt:

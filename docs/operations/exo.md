@@ -52,9 +52,17 @@ peers only discover each other, not random nodes on the same network.
 
 Prerequisites per-mac (both root *and* dev user, per our macos.md):
 
-- Xcode + Metal Toolchain installed
+- Xcode + Metal Toolchain installed — not optional: the pinned exo pulls
+  an `mlx` fork that builds from source with cmake, and with only
+  CommandLineTools the build dies on `xcrun: error: unable to find
+  utility "metal"` while launchd's KeepAlive restarts it forever
 - `uv` (Homebrew) — exo uses `uv run exo` to manage its venv
 - Model weights present (see below)
+
+The play is gated on the per-host `exo_enabled` opt-in
+(`host_vars/<node>.yml`, default true), so a mac in the `macos` group
+that is not an exo node can be skipped instead of converged:
+`exo_enabled: false` makes `setup-exo.yml` end the play for that host.
 
 ## Models
 
